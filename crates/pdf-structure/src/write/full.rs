@@ -108,6 +108,8 @@ use crate::source::{Document, XrefKind};
 /// that the objects past them read back missing, but by a reading told to
 /// take as many.
 ///
+/// # Errors
+///
 /// Refused, with nothing written ([`Error`]): a number 0 or at or past
 /// [`NUMBERS`], a body's, the encryption dictionary's or the
 /// cross-reference stream's; one given twice; a body the renumbering gives
@@ -156,10 +158,14 @@ pub fn full<'a>(
 /// `encryptor`, if any. Written under another encryption than the one
 /// `doc`'s file was read with (none, or a new one), the objects its
 /// encryption dictionary refers to are left out too. What's left out is
-/// told by the numbers of `doc`. It gives every other object of `doc`, so
-/// a renumbering ([`Options::renumber`]) that puts two at one number is
-/// refused ([`Error::WrittenTwice`]): a caller whose renumbering shares a
-/// number gives one of them through [`full`].
+/// told by the numbers of `doc`.
+///
+/// # Errors
+///
+/// As [`full`] refuses, with nothing written. It gives every other object
+/// of `doc`, so a renumbering ([`Options::renumber`]) that puts two at one
+/// number is refused ([`Error::WrittenTwice`]): a caller whose renumbering
+/// shares a number gives one of them through [`full`].
 pub fn document(
     out: &mut Vec<u8>,
     doc: &Document,
@@ -177,6 +183,7 @@ pub fn document(
 /// members are written anew, on their own or in the write's object
 /// streams), a cross-reference stream or a linearization dictionary, as
 /// [`document`] leaves them, and a caller laying a file out itself does.
+#[must_use]
 pub fn left_out(obj: &Object) -> bool {
     match obj.value() {
         Value::Stream(s) => s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"),
@@ -192,6 +199,7 @@ pub fn left_out(obj: &Object) -> bool {
 /// values refer to, as the reader reads them before it has a key (not
 /// followed further). What [`document`] leaves out by number, and a caller
 /// laying a file out itself does.
+#[must_use]
 pub fn encryption_objects(doc: &Document, encryptor: Option<&Encryptor>) -> HashSet<ObjectId> {
     let Some(encrypt) = doc.trailer.dict().get(b"Encrypt") else {
         return HashSet::new();

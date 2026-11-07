@@ -132,11 +132,7 @@ impl Encryptor {
     /// at its number or in the trailer; its first `/ID` element, as the
     /// handler opened by it (empty where the trailer has none); and what it
     /// leaves in the clear, as the reading decrypts it. None for a file that
-    /// isn't encrypted. Refused for one no password opened
-    /// ([`Error::Locked`], whether its strings and streams are encrypted or
-    /// not, [`Encryption::Plain`]), and for one whose security handler the
-    /// reader can't open ([`Error::Unsupported`]): there's nothing to
-    /// encrypt what's written by.
+    /// isn't encrypted.
     ///
     /// Where any of its methods makes keys per object, from the object's
     /// number and generation (RC4 and AES-128: its strings', its streams',
@@ -148,6 +144,14 @@ impl Encryptor {
     /// file, or in the earlier file a whole save replaces; and a whole file
     /// lists each free at that generation, so that a tool that follows its
     /// free list doesn't take one at a deleted object's key.
+    ///
+    /// # Errors
+    ///
+    /// Refused for a file no password opened ([`Error::Locked`], whether its
+    /// strings and streams are encrypted or not, [`Encryption::Plain`]), and
+    /// for one whose security handler the reader can't open
+    /// ([`Error::Unsupported`]): there's nothing to encrypt what's written
+    /// by.
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Option<Encryptor>, Error> {
         match (reading.encryption(), reading.handler(), reading.stored()) {
             (Encryption::None, ..) => Ok(None),
@@ -183,10 +187,13 @@ impl Encryptor {
     /// `Handler::create` makes it from `rng`'s draws; its dictionary with
     /// its crypt filter's `/Length 32` (bytes, as qpdf writes it) and
     /// `/AuthEvent /DocOpen`. Its key isn't made from the file's `/ID`
-    /// ([`Encryptor::first_id`] is none). Refused, as `Handler::create`
-    /// refuses: for a password that isn't prepared, or is empty or too
-    /// long; for no password; and for permissions withheld where the
-    /// owner's password is the user's.
+    /// ([`Encryptor::first_id`] is none).
+    ///
+    /// # Errors
+    ///
+    /// Refused, as `Handler::create` refuses: for a password that isn't
+    /// prepared, or is empty or too long; for no password; and for
+    /// permissions withheld where the owner's password is the user's.
     pub fn create(
         protection: &Protection,
         rng: &mut (impl CryptoRng + ?Sized),
@@ -215,20 +222,23 @@ impl Encryptor {
     /// where streams are left in the clear (`/StmF /Identity`) and strings
     /// aren't, whose strings would then be in the clear; nor where either's
     /// method isn't one.
+    #[must_use]
     pub fn packs(&self) -> bool {
         crypt::packs(self.handler.streams(), self.handler.strings())
     }
 
     /// The encryption dictionary, as the file it was read from stores it,
     /// its strings as written; or a new file's.
-    pub fn dictionary(&self) -> &Dict {
+    #[must_use]
+    pub const fn dictionary(&self) -> &Dict {
         &self.dict
     }
 
     /// Where the file it was read from has the dictionary: its number.
     /// None where it's in that file's trailer, and for a new file's, which
     /// has no number yet.
-    pub fn at(&self) -> Option<ObjectId> {
+    #[must_use]
+    pub const fn at(&self) -> Option<ObjectId> {
         match self.place {
             Place::At(id) => Some(id),
             Place::Direct | Place::New => None,
@@ -238,6 +248,7 @@ impl Encryptor {
     /// Whether the file it was read from has the dictionary in its
     /// trailer, direct, as a whole file and an update written under it
     /// keep it, where one at a number is written as an object.
+    #[must_use]
     pub fn direct(&self) -> bool {
         self.place == Place::Direct
     }
@@ -245,6 +256,7 @@ impl Encryptor {
     /// The first `/ID` element the key is made from: the file's it was read
     /// from, as its handler opened by it, empty where that file's trailer
     /// has none. None for a new file's, whose key isn't made from it.
+    #[must_use]
     pub fn first_id(&self) -> Option<&[u8]> {
         self.first_id.as_deref()
     }
@@ -261,6 +273,7 @@ impl Encryptor {
     /// reader of the file written decrypts it, where it would otherwise be
     /// left as written; what the dictionary refers to is still left in the
     /// clear. A file written whole under it is encrypted through this.
+    #[must_use]
     pub fn whole(&self, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
         let list = &self.list;
         let named = |id: &ObjectId| list.sections.contains(id) && Some(*id) != at;
@@ -300,6 +313,7 @@ impl Encryptor {
     /// dictionary again, so it encrypts by the list as it is, in its file's
     /// numbers, which its renumbering moves nothing of
     /// ([`Error::Moved`]).
+    #[must_use]
     pub fn renumbered<N: Renumber + ?Sized>(&self, to: &N) -> Cow<'_, Encryptor> {
         let list = &self.list;
         let numbers = list.dictionaries.iter().chain(&list.sections);
@@ -365,6 +379,7 @@ impl Encryptor {
     /// ([`Error::Free`]), and a file written whole lists it free at that
     /// generation. None for any other number, and every number under keys
     /// that aren't made per object.
+    #[must_use]
     pub fn free(&self, n: u32) -> Option<u16> {
         self.free.get(&n).copied()
     }
@@ -382,6 +397,7 @@ impl Encryptor {
     /// key: left in the clear, and never put in an object stream, which is
     /// encrypted. [`packable`](super::packable) tells an encryption
     /// dictionary by its shape alone.
+    #[must_use]
     pub fn dictionary_object(&self, id: ObjectId) -> bool {
         self.list.dictionaries.contains(&id)
     }
@@ -468,10 +484,13 @@ impl Encryptor {
     /// crypt filter of its own. Both are in the numbers the objects are
     /// written at: a file whose objects are written at other numbers than
     /// they're held at is encrypted through
-    /// [`Encryptor::encrypting_renumbered`]. Refused where `/EncryptMetadata
-    /// false` leaves the document's metadata stream in the clear and
-    /// `resolve` doesn't give the catalog, which says which stream that is
-    /// ([`Error::Catalog`]), rather than encrypt it.
+    /// [`Encryptor::encrypting_renumbered`].
+    ///
+    /// # Errors
+    ///
+    /// Refused where `/EncryptMetadata false` leaves the document's metadata
+    /// stream in the clear and `resolve` doesn't give the catalog, which says
+    /// which stream that is ([`Error::Catalog`]), rather than encrypt it.
     pub fn encrypting<'a>(
         &'a self,
         trailer: &Dict,
@@ -491,8 +510,11 @@ impl Encryptor {
     /// through them. The document's metadata stream is found there, and
     /// kept as the number `to` writes it at, which pdf-objects' writer asks
     /// by: so `/EncryptMetadata false` leaves that one in the clear, and
-    /// not the object `to` writes at the number it's held at. Refused as
-    /// [`Encryptor::encrypting`] is.
+    /// not the object `to` writes at the number it's held at.
+    ///
+    /// # Errors
+    ///
+    /// Refused as [`Encryptor::encrypting`] is.
     pub fn encrypting_renumbered<'a, N: Renumber + ?Sized>(
         &'a self,
         trailer: &Dict,
@@ -575,7 +597,8 @@ impl fmt::Debug for Encrypting<'_> {
 /// Why a string or a stream's data of a file written encrypted isn't
 /// encrypted, which the writer refuses ([`Error::Encrypt`]), writing
 /// nothing in the clear.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Not exhaustive, as reasons are found as the writer learns.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unencryptable {
     /// pdf-crypt's fault: a crypt filter's method that isn't one, or one
@@ -749,6 +772,7 @@ fn context(
 /// `/Length` of `length` where that's given, and `/StmF` and `/StrF` naming
 /// it (ISO 32000-2, 7.6.2, 7.6.4.2 and 7.6.6). A value `values` hasn't is
 /// left out.
+#[must_use]
 pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
     let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
     let mut dict = pdf_objects::dict! {

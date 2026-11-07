@@ -10,6 +10,7 @@ use super::{BUDGET, SECTIONS, STREAM};
 /// can't make the reader read, or hold in memory, without end. A caller
 /// sets them on a copy of [`Limits::DEFAULT`] (`limits.stream = 1 << 20`,
 /// say), as it does [`Options`]'.
+/// Not exhaustive, as more caps may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -57,6 +58,7 @@ impl Default for Limits {
 ///
 /// Its `Debug` prints each password as pdf-crypt's `Password` does, without
 /// its text; and two are never compared, as passwords aren't.
+/// Not exhaustive, as more choices may come.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Options<'a> {

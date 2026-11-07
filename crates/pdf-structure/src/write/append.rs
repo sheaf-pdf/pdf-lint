@@ -27,6 +27,7 @@ use crate::source::XrefKind;
 /// of a reading ([`Base::of`]), or of what a caller read otherwise
 /// ([`Base::new`]), its fields set after; and given back by each write
 /// ([`Written::base`]), for an update after it.
+/// Not exhaustive, so that it can come to say more of the file.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Base {
@@ -90,6 +91,8 @@ impl Base {
     /// numbers start past its trailer's `/Size` (below 2³²), every number
     /// its sections list, in use or free, and its cross-reference streams'
     /// numbers.
+    ///
+    /// # Errors
     ///
     /// Refused: a file with bytes before its header ([`Error::Prefixed`]),
     /// whose positions this crate's reader counts from the file's start
@@ -164,6 +167,7 @@ impl Base {
     /// that's direct; its header at 0, its last line taken as not ended (an
     /// update then starts with a newline), and of no reading. Each is a
     /// field, to set after.
+    #[must_use]
     pub fn new(len: usize, prev: usize, size: u32, kind: XrefKind, trailer: Dict) -> Base {
         Base {
             len,
@@ -184,6 +188,11 @@ impl Base {
     /// long, its last `startxref` its last section's. What keeps another
     /// writer from changing the file between this and an append is the
     /// caller's.
+    ///
+    /// # Errors
+    ///
+    /// The source's, where it doesn't give the bytes its last `startxref`
+    /// is read from.
     pub fn holds<S: ByteSource + ?Sized>(&self, source: &S) -> io::Result<bool> {
         Ok(source.len() == self.len && startxref(source)? == Some(self.prev))
     }
@@ -282,6 +291,8 @@ impl Base {
 /// and stream has an IV of its own, derived from its data. A caller who
 /// doesn't want that writes the file whole under a new AES-256 encryption
 /// ([`Encryptor::create`]) instead.
+///
+/// # Errors
 ///
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
 /// object as read or a `from` after a file written under a renumbering; an

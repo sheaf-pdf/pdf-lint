@@ -334,7 +334,9 @@ pub const STREAM: usize = 256 << 20;
 pub const BUDGET: usize = 1 << 30;
 
 /// What a cross-reference section says of an object number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive: ISO 32000-2 leaves room for other kinds of entry (7.5.8.3),
+/// which a later reader may tell apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum XrefEntry {
     /// In use, written at `offset`.
@@ -351,14 +353,16 @@ pub enum XrefEntry {
         /// Which of the stream's objects it is, from 0.
         index: u32,
     },
-    /// Free: the number isn't in use.
+    /// Free: the number isn't in use. Not exhaustive, so that it can come
+    /// to say what the entry says of the number, as the others do.
     #[non_exhaustive]
     Free,
 }
 
 /// Why an object stream's data doesn't decode, for each object in it
 /// ([`Unread::Container`]).
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+/// Not exhaustive, as reasons are found as the reader learns.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Undecoded {
     /// The object its number names isn't a stream.
@@ -390,7 +394,8 @@ pub enum Undecoded {
 
 /// Why an object stream's header doesn't say where its objects are (ISO
 /// 32000-2, 7.5.7), for each object in it ([`Unread::ContainerHeader`]).
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+/// Not exhaustive, as reasons are found as the reader learns.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unindexed {
     /// The object its number names isn't a stream.
@@ -498,6 +503,7 @@ impl Decode for BTreeMap<ObjectId, Vec<u8>> {
 /// options.passwords = &given;
 /// assert_eq!(read::document(file, &options), doc);
 /// ```
+#[must_use]
 pub fn document(file: &[u8], options: &Options<'_>) -> Document {
     read_as(file, None, true, options)
 }
@@ -579,6 +585,7 @@ pub fn filters<'o>(
 /// assert_eq!(values.stm_f.as_deref(), Some(&b"StdCF"[..]));
 /// assert_eq!(asked, [ObjectId::new(9, 0)]);
 /// ```
+#[must_use]
 pub fn encryption<'o>(
     dict: &Dict,
     resolve: &mut dyn FnMut(ObjectId) -> Option<Cow<'o, Object>>,

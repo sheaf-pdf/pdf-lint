@@ -143,7 +143,8 @@ pub const NUMBERS: u32 = 8_388_607;
 /// pdf-filters' backends, and how hard. A caller sets them on a copy of
 /// [`Deflate::DEFAULT`], as it does a reading's
 /// [`Options`](crate::Options).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, as more choices may come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Deflate {
     /// The backend that deflates: by default pdf-filters'
@@ -166,8 +167,12 @@ impl Deflate {
 
     /// `data`, first predicted as `predictor` says, deflated at the end of
     /// `out`: as a cross-reference stream's and an object stream's are, for a
-    /// caller writing streams of its own. Refused where pdf-filters doesn't
-    /// encode it so ([`Error::Unencodable`]).
+    /// caller writing streams of its own.
+    ///
+    /// # Errors
+    ///
+    /// Refused where pdf-filters doesn't encode it so
+    /// ([`Error::Unencodable`]).
     pub fn encode(
         self,
         data: &[u8],
@@ -189,6 +194,7 @@ impl Default for Deflate {
 }
 
 /// What the writer writes of an object, at the number it's given with.
+/// Not exhaustive, as the writer may come to take an object another way.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Body<'a> {
@@ -285,6 +291,7 @@ pub enum Body<'a> {
 
 impl Body<'_> {
     /// The object it writes: as it was read, or as it's to be written anew.
+    #[must_use]
     pub fn object(&self) -> &Object {
         match self {
             Body::New(object) | Body::Read { object, .. } => object,
@@ -370,6 +377,7 @@ impl<'a> From<&'a Object> for Body<'a> {
 /// How a whole file or an update is written. A caller sets the fields on
 /// a copy of [`Options::DEFAULT`] (`options.kind = XrefKind::Stream`, say),
 /// as it does a reading's [`Options`](crate::Options).
+/// Not exhaustive, as more choices may come.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct Options<'a> {
@@ -550,6 +558,7 @@ pub type Groups<'a> = dyn Fn(&[u32]) -> Vec<Vec<u32>> + Sync + 'a;
 /// before it has a key. A caller sets the fields on a copy of
 /// [`Pack::DEFAULT`]. Under an encryption that leaves streams in the
 /// clear and strings not, nothing is packed ([`Encryptor::packs`]).
+/// Not exhaustive, as more choices may come.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct Pack<'a> {
@@ -593,6 +602,8 @@ impl fmt::Debug for Pack<'_> {
 
 /// What a write wrote: where each object landed, and the file it's now,
 /// which an update after it goes after without reading it again.
+/// Not exhaustive, so that a write can come to say more of what it wrote; made
+/// only by the writer.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Written {
@@ -749,6 +760,7 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
 }
 
 /// Why the writer wrote nothing.
+/// Not exhaustive, as more of what the writer refuses may be told apart.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -1067,6 +1079,7 @@ const SECTION_KEYS: [&[u8]; 15] = [
 /// reference as `to` names it, `null` where it names none, as a whole file's
 /// are ([`full`]). `&()` names each as it is. `/Root` isn't one of those keys:
 /// a caller whose section writes it takes it out.
+#[must_use]
 pub fn trailer_entries(trailer: &Dict, to: &(dyn Renumber + Sync)) -> Dict {
     let mut trailer = trailer.clone();
     for key in SECTION_KEYS {
@@ -1083,6 +1096,7 @@ pub fn trailer_entries(trailer: &Dict, to: &(dyn Renumber + Sync)) -> Dict {
 /// `trailer`'s first `/ID` element, which an RC4 or AES-128 key is made
 /// from: the array's first element, when that's a string, however many
 /// elements the array has.
+#[must_use]
 pub fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
     let id = trailer.get(b"ID")?.as_array()?.first()?;
     match id.value() {
@@ -1096,6 +1110,7 @@ pub fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
 /// the same `/ID`. A file with no first string gets the hash for both
 /// where it's `encrypted`, which needs an `/ID` (ISO 32000-2, 14.4, has a
 /// new file's two the same), and none otherwise.
+#[must_use]
 pub fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Vec<u8>; 2]> {
     if kept.is_none() && !encrypted {
         return None;
@@ -1108,6 +1123,7 @@ pub fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option
 }
 
 /// `id`, as a trailer's `/ID` value: its two strings, in hex.
+#[must_use]
 pub fn id_value([first, second]: &[Vec<u8>; 2]) -> Object {
     Object::from(vec![
         Object::hex(first.clone()),

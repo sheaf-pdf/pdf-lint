@@ -17,6 +17,13 @@
 //! - `faults`: the table's file with no object's `endobj` written, so that
 //!   each object is a fault of the parser's, read whole into a document,
 //!   its faults kept (`kept`) and none looked for (`off`).
+//! - `walk`: what's read walked and looked up from outside the crate: the
+//!   stream's file's every id listed (`ids`) and entry (`entries`) from a
+//!   reading that has read them all, and its document's every object
+//!   (`objects`) and record (`records`), and each object by number got from
+//!   it, its record and whether it holds it (`lookup`), so that a hint to
+//!   inline an iterator's steps or a lookup is judged where a caller pays
+//!   for it.
 //! - `write`: the objects, built in memory, written as a whole file with a
 //!   table (`full`); the table's file read whole written again, each object
 //!   copied as the bytes it was read from (`document`); and an update after
@@ -51,10 +58,10 @@ use pdf_objects::parse::Parser;
 /// for another version of the crate rewrites.
 mod api {
     use pdf_objects::object::{Dict, ObjectId};
-    use pdf_structure::Document;
     use pdf_structure::read::{Options, Reading};
     pub use pdf_structure::write::Body;
     use pdf_structure::write::{self, Base};
+    use pdf_structure::{Document, Source};
 
     /// A reading of a file in memory.
     pub type Read<'f> = Reading<&'f [u8]>;
@@ -95,6 +102,12 @@ mod api {
     /// How many faults `doc`'s reading told.
     pub fn faults(doc: &Document) -> usize {
         doc.faults().len()
+    }
+
+    /// Whether `doc` holds object `id`, which reads, with its record: each
+    /// looked up by number as a caller outside the crate looks it up.
+    pub fn lookup(doc: &Document, id: ObjectId) -> bool {
+        doc.contains(id) && Source::get(doc, id).is_ok() && doc.record(id).is_some()
     }
 
     /// Whether `reading` found its objects by scanning the file, its
@@ -519,6 +532,64 @@ fn whole_group(c: &mut Criterion, files: &Files) {
     group.finish();
 }
 
+fn walk_group(c: &mut Criterion, files: &Files) {
+    let ids = ids();
+    let reading = api::open(&files.stream);
+    got("stream", &reading, &ids);
+    let doc = api::document_of(&reading);
+    let listed = OBJECTS as usize + CONTAINERS + 1;
+    assert_eq!(
+        reading.ids().count(),
+        listed,
+        "walk/ids: the objects listed"
+    );
+    assert_eq!(
+        reading.entries().count(),
+        listed + 1,
+        "walk/entries: with 0"
+    );
+    assert_eq!(doc.objects().count(), listed, "walk/objects: the objects");
+    assert_eq!(doc.records().count(), listed, "walk/records: each read");
+    for &id in &ids {
+        assert!(api::lookup(&doc, id), "walk/lookup: {id} R");
+    }
+    let mut group = c.benchmark_group("walk");
+    group.throughput(Throughput::Elements(listed as u64));
+    group.bench_function("ids", |b| {
+        b.iter(|| black_box(&reading).ids().fold(0, |n, id| n ^ id.number))
+    });
+    group.bench_function("entries", |b| {
+        b.iter(|| {
+            black_box(&reading)
+                .entries()
+                .fold(0, |n, (number, ..)| n ^ number)
+        })
+    });
+    group.bench_function("objects", |b| {
+        b.iter(|| {
+            black_box(&doc)
+                .objects()
+                .fold(0, |n, (id, _)| n ^ id.number)
+        })
+    });
+    group.bench_function("records", |b| {
+        b.iter(|| {
+            black_box(&doc)
+                .records()
+                .fold(0, |n, (_, r)| n ^ r.at.start)
+        })
+    });
+    group.throughput(Throughput::Elements(ids.len() as u64));
+    group.bench_function("lookup", |b| {
+        b.iter(|| {
+            for &id in &ids {
+                black_box(api::lookup(black_box(&doc), id));
+            }
+        })
+    });
+    group.finish();
+}
+
 fn faults_group(c: &mut Criterion, files: &Files) {
     let file = &files.faulty;
     let cases: [(&str, bool); 2] = [("kept", true), ("off", false)];
@@ -663,6 +734,7 @@ fn main() {
     open_group(&mut criterion, &files);
     get_group(&mut criterion, &files);
     whole_group(&mut criterion, &files);
+    walk_group(&mut criterion, &files);
     faults_group(&mut criterion, &files);
     write_group(&mut criterion, &objects, &files);
     criterion.final_summary();

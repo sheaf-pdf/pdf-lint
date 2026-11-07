@@ -29,7 +29,8 @@ pub const MEMBERS: usize = 100;
 pub(super) const PLACES: usize = 1 << 16;
 
 /// Whether a container whose data is `len` bytes is one the reader takes.
-pub fn fits(len: usize) -> bool {
+#[must_use]
+pub const fn fits(len: usize) -> bool {
     len <= MAX_DATA
 }
 
@@ -37,7 +38,8 @@ pub fn fits(len: usize) -> bool {
 /// which the writer keeps out of those it packs ([`kept_out`]) and a
 /// reader finds in those it reads. Each says how either tells it. Its
 /// `Display` says what it is in a few words, as a finding names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, as a later edition of the standard may keep more out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum KeptOut {
     /// A stream. The writer tells it by its value ([`kept_out`]); a reader,
@@ -97,6 +99,7 @@ impl fmt::Display for KeptOut {
 /// (`/Linearized`). None for any other: what only the file tells, an
 /// object stream's `/Length`, or in a linearized file the catalog and its
 /// pages, is the caller's to keep out.
+#[must_use]
 pub fn kept_out(id: ObjectId, obj: &Object) -> Option<KeptOut> {
     match obj.value() {
         Value::Stream(_) => Some(KeptOut::Stream),
@@ -118,6 +121,7 @@ pub fn kept_out(id: ObjectId, obj: &Object) -> Option<KeptOut> {
 /// the file's `/Encrypt` names and what that refers to by number
 /// ([`Encryptor::dictionary_object`](super::Encryptor::dictionary_object)),
 /// as a whole file does.
+#[must_use]
 pub fn packable(id: ObjectId, obj: &Object) -> bool {
     if kept_out(id, obj).is_some() {
         return false;
@@ -154,9 +158,12 @@ fn signature(d: &Dict) -> bool {
 /// `deflate` says. Its `/Length` is direct, as the writer writes every
 /// stream's. None when its data wouldn't [`fit`](fits), or it has more
 /// than 65,536 members, more than a cross-reference stream's place in it
-/// says as the writer writes one. Refused: a member numbered 0 or at or
-/// past [`NUMBERS`](super::NUMBERS) ([`Error::Number`]), and a number given
-/// twice ([`Error::Twice`]).
+/// says as the writer writes one.
+///
+/// # Errors
+///
+/// Refused: a member numbered 0 or at or past [`NUMBERS`](super::NUMBERS)
+/// ([`Error::Number`]), and a number given twice ([`Error::Twice`]).
 pub fn container<B: AsRef<[u8]>>(
     members: &[(u32, B)],
     deflate: Deflate,

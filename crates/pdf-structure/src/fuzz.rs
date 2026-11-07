@@ -190,9 +190,9 @@ pub fn open<S: ByteSource>(
 /// the decoded data of the object stream it names, which the reading
 /// keeps. Read with no faults looked for ([`Options::faults`]), in memory
 /// and by position, it's the same read, every object, record and decoded
-/// stream, and keeps no fault. Read on demand, its objects asked for in an order the choice's
-/// next bits give, some read unkept first, each the object and record it's
-/// kept as, it's the whole read, when neither reading's decoding reached
+/// stream, and keeps no fault. Read on demand, its objects asked for in an
+/// order the choice's next bits give, some read unkept first, each the
+/// object and record it's kept as, it's the whole read, when neither reading's decoding reached
 /// the budget, and made a document with the reading kept, at a point the
 /// choice's bits from the eleventh give, it's the reading's whole read
 /// after. Read by position, through [`Counted`], its first window and

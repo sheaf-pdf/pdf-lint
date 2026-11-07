@@ -64,6 +64,9 @@ impl<S: ByteSource> WithReading<S> {
     /// The file `source` holds, opened under `options`, by the passwords
     /// they give where it's encrypted, as [`Reading::open`] opens it, and
     /// read whole beside its reading, as [`Reading::to_document`] reads it.
+    ///
+    /// # Errors
+    ///
     /// It fails only when the source doesn't give the bytes asked of it
     /// ([`Error::Io`]): in memory, never.
     pub fn new(source: S, options: &Options<'_>) -> Result<WithReading<S>, Error> {
@@ -74,16 +77,19 @@ impl<S: ByteSource> WithReading<S> {
 
     /// The reading kept beside the document, which hands out what the
     /// document doesn't hold: a stream's data, and the bytes at a span.
-    pub fn reading(&self) -> &Reading<S> {
+    #[must_use]
+    pub const fn reading(&self) -> &Reading<S> {
         &self.reading
     }
 
     /// The document read whole, which gives no stream's data.
-    pub fn document(&self) -> &Document {
+    #[must_use]
+    pub const fn document(&self) -> &Document {
         &self.document
     }
 
     /// The document, the reading dropped.
+    #[must_use]
     pub fn into_document(self) -> Document {
         self.document
     }

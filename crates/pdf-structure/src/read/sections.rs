@@ -17,7 +17,9 @@ use crate::read::window::{Bytes, InMemory, Window};
 use crate::source::{Trailer, Unread, XrefKind};
 
 /// One row of a cross-reference section, as written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, so that it can come to say more of a row; made only by the
+/// reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SectionRow {
     /// The number it's for.
@@ -33,6 +35,8 @@ pub struct SectionRow {
 
 /// One cross-reference section of a file, as written, none of it merged with
 /// another's.
+/// Not exhaustive, so that it can come to say more of a section; made only by
+/// the reader.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct SectionRows {
@@ -62,6 +66,8 @@ pub struct SectionRows {
 
 /// A file's sections along `/Prev`, the newest first: as many as read, and what
 /// stopped it short of the last, if anything did.
+/// Not exhaustive, so that it can come to say more of the sections; made only
+/// by the reader.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Sections {
@@ -73,6 +79,7 @@ pub struct Sections {
 
 /// Why a section doesn't read ([`Reading::sections`]), or why no more of them are
 /// read.
+/// Not exhaustive, as reasons are found as the reader learns.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SectionFault {
@@ -213,6 +220,8 @@ pub enum SectionFault {
 }
 
 /// The first object in a file, after its header, as written.
+/// Not exhaustive, so that it can come to say more of the object; made only by
+/// the reader.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct FirstObject {
@@ -237,7 +246,11 @@ impl<S: ByteSource> Reading<S> {
     /// can differ from [`Reading::entries`], which is what a reader made of them.
     /// Positions are from the file's first byte, as a reading reads them. A stream's
     /// rows are decoded from its own data, and that's never encrypted (ISO 32000-2,
-    /// 7.5.8.2). It fails only when the source doesn't give its bytes ([`Error::Io`]).
+    /// 7.5.8.2).
+    ///
+    /// # Errors
+    ///
+    /// It fails only when the source doesn't give its bytes ([`Error::Io`]).
     pub fn sections(&self) -> Result<Sections, Error> {
         match self.source().whole() {
             Some(file) => {
@@ -251,6 +264,9 @@ impl<S: ByteSource> Reading<S> {
     /// The file's first object, from its header on, as written: none with no header,
     /// or where what's first doesn't read as an object. It isn't kept. Its strings
     /// aren't decrypted, a linearization dictionary having none that a reader wants.
+    ///
+    /// # Errors
+    ///
     /// It fails only when the source doesn't give its bytes ([`Error::Io`]).
     pub fn first_object(&self) -> Result<Option<FirstObject>, Error> {
         match self.source().whole() {

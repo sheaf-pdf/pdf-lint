@@ -362,6 +362,7 @@ impl ParseKind {
 
 /// What's wrong with a cross-reference table's row that isn't written as
 /// ISO 32000-2 7.5.4 writes one, 20 bytes ([`Fault::Rows`]).
+/// Not exhaustive, as more ways a row is written otherwise may be told apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum RowShape {

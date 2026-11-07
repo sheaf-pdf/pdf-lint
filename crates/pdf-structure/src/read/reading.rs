@@ -39,9 +39,11 @@ use crate::write::as_written;
 /// file changed since ([`ByteSource::unchanged`]).
 pub trait ByteSource: Send + Sync {
     /// How many bytes it has.
+    #[must_use]
     fn len(&self) -> usize;
 
     /// Whether it has none.
+    #[must_use]
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -49,16 +51,23 @@ pub trait ByteSource: Send + Sync {
     /// Every byte, when it holds them in memory: then nothing is read by
     /// [`ByteSource::read_at`]. None, by default, for a source that reads
     /// them from elsewhere.
+    #[must_use]
     fn whole(&self) -> Option<&[u8]> {
         None
     }
 
     /// The bytes in `range`, within `0..len()`: all of them, or an error.
+    ///
+    /// # Errors
+    ///
+    /// The source's own, where it doesn't give them all, or `range` runs
+    /// past its bytes.
     fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>>;
 
     /// How many bytes a read at an offset reads first, when the source
     /// doesn't hold its bytes in memory: 4096, by default. It changes only
     /// what a read costs, never what it reads.
+    #[must_use]
     fn first_window(&self) -> usize {
         4096
     }
@@ -72,6 +81,10 @@ pub trait ByteSource: Send + Sync {
     /// ([`FileBytes::unchanged`](super::FileBytes::unchanged)). Whatever it
     /// says, an object the writer copies as the bytes it was read from is
     /// checked against a hash of them taken as it was read.
+    ///
+    /// # Errors
+    ///
+    /// The source's own, where it can't tell: by default it never fails.
     fn unchanged(&self) -> io::Result<bool> {
         Ok(true)
     }
@@ -154,22 +167,36 @@ forward!(&S, Box<S>, Arc<S>);
 /// [`Reading::prefix`] reads. They're read as the source reads them, in
 /// memory where it holds them, else by position, its first window and
 /// whether it's unchanged the source's; a read past them is an error, as
-/// one past a source's own bytes is.
-#[derive(Debug, Clone)]
+/// one past a source's own bytes is. Its `Debug` gives its length and its
+/// source's, not their bytes.
+#[derive(Clone)]
 pub struct Prefix<S> {
     source: S,
     len: usize,
 }
 
+impl<S: ByteSource> fmt::Debug for Prefix<S> {
+    /// Its length and its source's; not the bytes, which may be a whole
+    /// file.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Prefix")
+            .field("source", &format_args!("{} bytes", self.source.len()))
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
 impl<S: ByteSource> Prefix<S> {
     /// `source`'s first `len` bytes: all of them, where it has no more.
+    #[must_use]
     pub fn new(source: S, len: usize) -> Prefix<S> {
         let len = len.min(source.len());
         Prefix { source, len }
     }
 
     /// The source they're the first bytes of.
-    pub fn source(&self) -> &S {
+    #[must_use]
+    pub const fn source(&self) -> &S {
         &self.source
     }
 }
@@ -215,6 +242,7 @@ impl SourceId {
 }
 
 /// Why a [`Reading`]'s call gives nothing.
+/// Not exhaustive, as more reasons a call gives nothing may be told apart.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -411,7 +439,19 @@ impl<S> fmt::Debug for Reading<S> {
 }
 
 /// Every object a [`Reading`]'s cross-references list, by number: what
-/// [`Reading::ids`] gives.
+/// [`Reading::ids`] gives. It gives nothing until it's asked, so the
+/// compiler says one dropped unasked, as every iterator here:
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use pdf_structure::read::{Options, Reading};
+///
+/// let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
+///     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+///     trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n45\n%%EOF\n";
+/// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+/// reading.ids();
+/// ```
 #[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Debug, Clone)]
 pub struct Ids<'r> {
@@ -504,13 +544,16 @@ impl<S: ByteSource> Reading<S> {
     /// ([`Options::passwords`]), or the empty password, as most files' is,
     /// given none. One no password given opens is left locked, which
     /// [`Reading::unlock`] opens by the bytes a prompt gives once it's
-    /// open, without reading the file again. The passwords aren't kept. It
-    /// fails only when the source doesn't give its bytes ([`Error::Io`]).
+    /// open, without reading the file again. The passwords aren't kept.
     ///
     /// The one way in: [`document`](super::document) is a reading of a
     /// file in memory, opened so and read whole, and
     /// [`WithReading::new`](super::WithReading::new) one read whole beside
     /// its reading.
+    ///
+    /// # Errors
+    ///
+    /// It fails only when the source doesn't give its bytes ([`Error::Io`]).
     pub fn open(source: S, options: &Options<'_>) -> Result<Reading<S>, Error> {
         Reading::open_by(source, options, true)
     }
@@ -555,6 +598,8 @@ impl<S: ByteSource> Reading<S> {
     /// it, where faults are looked for; its budget is what opening the file
     /// left. [`Encryption::Opened`] says, as an open by the password does,
     /// what the file grants.
+    ///
+    /// # Errors
     ///
     /// Given back as it was, with why: where none of `passwords` opens it
     /// ([`Refused::Password`]), or its security handler is one the reader
@@ -612,6 +657,13 @@ impl<S: ByteSource> Reading<S> {
     /// object stream it's in, decoded. Its references are kept as
     /// references, and its strings decrypted in an encrypted file that
     /// opened.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unread`] where the file hasn't it or it doesn't read, which
+    /// is kept, so asked again it fails alike; [`Error::Io`] where the
+    /// source doesn't give the bytes asked of it, which isn't, so asked
+    /// again it may read.
     pub fn get(&self, id: ObjectId) -> Result<&Object, Error> {
         let got = match self.source.whole() {
             Some(file) => {
@@ -629,6 +681,12 @@ impl<S: ByteSource> Reading<S> {
     /// once, doesn't hold them all. The object stream it's in is decoded
     /// and kept, as it is for [`Reading::get`], with the objects the
     /// stream and its filters are, which are read and kept.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reading::get`] fails: [`Error::Unread`] where the file hasn't it
+    /// or it doesn't read, [`Error::Io`] where the source doesn't give the
+    /// bytes asked of it.
     pub fn object_unkept(&self, id: ObjectId) -> Result<(Object, Record), Error> {
         let Some(i) = self.reader.listed(id) else {
             return Err(Error::Unread(Unread::Missing { id }));
@@ -650,6 +708,7 @@ impl<S: ByteSource> Reading<S> {
 
     /// Where object `id` was read from, once a read of it is kept, and it
     /// read; none before.
+    #[must_use]
     pub fn record(&self, id: ObjectId) -> Option<&Record> {
         let i = self.reader.listed(id)?;
         let read = self.reader.slots[i].get()?;
@@ -668,22 +727,26 @@ impl<S: ByteSource> Reading<S> {
     /// `try_resolve` does, counted so, and its data as [`Reading::data`]
     /// does, not counted, both said to its caller ([`Why::Source`]). In
     /// memory, always 0.
+    #[must_use]
     pub fn failed_resolves(&self) -> u64 {
         self.failed_resolves.load(Ordering::Relaxed)
     }
 
     /// The trailer.
-    pub fn trailer(&self) -> &Trailer {
+    #[must_use]
+    pub const fn trailer(&self) -> &Trailer {
         &self.reader.trailer
     }
 
     /// The version in the header.
-    pub fn header_version(&self) -> Option<Version> {
+    #[must_use]
+    pub const fn header_version(&self) -> Option<Version> {
         self.reader.version
     }
 
     /// Whether the file is encrypted, and if it is, whether it opened.
-    pub fn encryption(&self) -> &Encryption {
+    #[must_use]
+    pub const fn encryption(&self) -> &Encryption {
         &self.reader.encryption
     }
 
@@ -714,13 +777,15 @@ impl<S: ByteSource> Reading<S> {
 
     /// The file's newest incremental update, when its cross-reference
     /// sections were read and the newest follows one written before it.
-    pub fn update(&self) -> Option<&Update> {
+    #[must_use]
+    pub const fn update(&self) -> Option<&Update> {
         self.reader.update.as_ref()
     }
 
     /// What the file's header and cross-reference sections say of it, as
     /// written.
-    pub fn facts(&self) -> &Facts {
+    #[must_use]
+    pub const fn facts(&self) -> &Facts {
         &self.reader.facts
     }
 
@@ -728,18 +793,21 @@ impl<S: ByteSource> Reading<S> {
     /// gives them: none where its sections didn't read, nor where its later
     /// revisions list more numbers in all than it reads entries
     /// ([`Limits::entries`](crate::Limits::entries)).
+    #[must_use]
     pub fn revisions(&self) -> &[Revision] {
         &self.reader.revisions
     }
 
     /// The file's length in bytes.
+    #[must_use]
     pub fn size(&self) -> usize {
         self.source.len()
     }
 
     /// The caps it reads under, as it was opened with them
     /// ([`Options::limits`]).
-    pub fn limits(&self) -> &Limits {
+    #[must_use]
+    pub const fn limits(&self) -> &Limits {
         &self.reader.limits
     }
 
@@ -756,8 +824,7 @@ impl<S: ByteSource> Reading<S> {
     /// kept: the key a password makes is made from those and the password
     /// (ISO 32000-2, 7.6.4.3). Otherwise it's opened as [`Reading::open`]
     /// opens a file, by the empty password, and [`Reading::unlock`] opens it
-    /// by another. It fails only where the source doesn't give the bytes
-    /// asked of it ([`Error::Io`]).
+    /// by another.
     ///
     /// ```
     /// use pdf_structure::RevisionEnd;
@@ -780,6 +847,11 @@ impl<S: ByteSource> Reading<S> {
     /// let catalog = before.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
     /// assert!(!catalog.has(b"Lang"));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// It fails only where the source doesn't give the bytes asked of it
+    /// ([`Error::Io`]).
     pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
         // Every option named, so that one more has its say here.
         // Opened by the empty password, its handler's key given it after;
@@ -815,6 +887,7 @@ impl<S: ByteSource> Reading<S> {
     /// too, is said there, and where it hasn't read the object, where it
     /// was told. What was read without keeping it isn't here; nor is any
     /// where faults aren't looked for ([`Options::faults`]).
+    #[must_use]
     pub fn faults(&self) -> Vec<(Place, Fault)> {
         self.reader.faults()
     }
@@ -823,6 +896,12 @@ impl<S: ByteSource> Reading<S> {
     /// written, when it's in plain view: unfiltered, and not encrypted, as
     /// [`Document::metadata`] has it. The objects on the way to it are read
     /// and kept.
+    ///
+    /// # Errors
+    ///
+    /// It fails only where the source doesn't give the bytes asked of it,
+    /// on the way to the stream or of its data ([`Error::Io`]); a stream
+    /// that isn't there, or isn't in plain view, is none.
     pub fn metadata(&self) -> Result<Option<Cow<'_, [u8]>>, Error> {
         match self.source.whole() {
             Some(file) => {
@@ -842,9 +921,16 @@ impl<S: ByteSource> Reading<S> {
 
     /// The bytes at `span`: in the file, or in the decoded data of the
     /// object stream it names, which is decoded and kept when it isn't yet.
+    ///
+    /// # Errors
+    ///
     /// An encrypted file's are refused ([`Error::Encrypted`]), as they may
     /// be ciphertext, but for an object stream's decoded data, which is
-    /// decrypted.
+    /// decrypted. A span past the file, or past the object stream's decoded
+    /// data, or naming a stream no object the reading lists is in, is
+    /// [`Error::Outside`]; one in an object stream whose header doesn't
+    /// read, why it doesn't ([`Error::Unread`]); and where the source doesn't
+    /// give the bytes asked of it, [`Error::Io`].
     pub fn bytes(&self, span: Span) -> Result<Cow<'_, [u8]>, Error> {
         match self.source.whole() {
             Some(file) => {
@@ -926,8 +1012,11 @@ impl<S: ByteSource> Reading<S> {
     /// stream's, which is never encrypted (7.5.8.2), and the catalog's
     /// metadata stream's under `/EncryptMetadata false`, whether the file
     /// opens or not, as [`Document::metadata`] has it, but where its own
-    /// crypt filter encrypts it, which then decrypts it (7.6.6). Refused,
-    /// where it may be ciphertext the reader doesn't decrypt: in a file no
+    /// crypt filter encrypts it, which then decrypts it (7.6.6).
+    ///
+    /// # Errors
+    ///
+    /// Refused, where it may be ciphertext the reader doesn't decrypt: in a file no
     /// password opened ([`Error::Locked`]), but one whose streams aren't
     /// encrypted ([`Encryption::Plain`]), whose data is as written but a
     /// stream's that its own crypt filter encrypts, or an embedded file's
@@ -937,7 +1026,11 @@ impl<S: ByteSource> Reading<S> {
     /// dictionary refers to, or an embedded file's without a crypt filter of
     /// its own where `/EFF` isn't a name ([`Error::Encrypted`]). Data that
     /// doesn't decrypt cleanly is an error holding what did
-    /// ([`Error::Decrypt`]).
+    /// ([`Error::Decrypt`]). And as [`Reading::get`] fails, where the stream
+    /// doesn't read ([`Error::Unread`]) or the source doesn't give the bytes
+    /// asked of it ([`Error::Io`]); an object that isn't a stream is
+    /// [`Error::NotAStream`], and data placed where no bytes the reading has
+    /// are, [`Error::Outside`].
     pub fn data(&self, id: ObjectId) -> Result<Cow<'_, [u8]>, Error> {
         let data = match self.source.whole() {
             Some(file) => {
@@ -985,6 +1078,14 @@ impl<S: ByteSource> Reading<S> {
     /// assert_eq!(cut.data, b"abcde");
     /// assert_eq!(cut.faults, [(0, Fault::Limit)]);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Reading::data`] fails; and through the filters, a `/Filter` or
+    /// `/DecodeParms` the reader doesn't take ([`Error::Filters`]), or data
+    /// that doesn't decode cleanly, past the limit among it, holding what
+    /// decoded ([`Error::Decode`]). An object the filters refer to that the
+    /// source doesn't give the bytes of is [`Error::Io`].
     pub fn decoded_within(&self, id: ObjectId, limit: usize) -> Result<Vec<u8>, Error> {
         self.decoded_within_as(id, None, limit)
     }
@@ -1130,30 +1231,37 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// Which reading this is, which each of its records holds.
-    pub fn id(&self) -> SourceId {
+    #[must_use]
+    pub const fn id(&self) -> SourceId {
         self.reader.id
     }
 
     /// The source it reads: to ask it, say, whether its file has changed
     /// ([`FileBytes::unchanged`](super::FileBytes::unchanged)).
-    pub fn source(&self) -> &S {
+    #[must_use]
+    pub const fn source(&self) -> &S {
         &self.source
     }
 
     /// The source it read, the reading dropped.
+    #[must_use]
     pub fn into_source(self) -> S {
         self.source
     }
 
     /// Every object its cross-references list read, those not read yet as
     /// the whole read reads them, into a [`Document`]: what it read, its
-    /// faults in the order [`Reading::faults`] says them. It fails
-    /// only when the source doesn't give the bytes asked of it
-    /// ([`Error::Io`]). The reading is gone after, and its records with it,
-    /// so the writer can't read the data of the document's streams, nor copy
-    /// an object as read: a document to write is made by
-    /// [`Reading::to_document`], the reading kept and given to the write, or
-    /// taken by a reading of the file opened again ([`Reading::adopt`]).
+    /// faults in the order [`Reading::faults`] says them. The reading is
+    /// gone after, and its records with it, so the writer can't read the
+    /// data of the document's streams, nor copy an object as read: a
+    /// document to write is made by [`Reading::to_document`], the reading
+    /// kept and given to the write, or taken by a reading of the file
+    /// opened again ([`Reading::adopt`]).
+    ///
+    /// # Errors
+    ///
+    /// It fails only when the source doesn't give the bytes asked of it
+    /// ([`Error::Io`]).
     pub fn into_document(self) -> Result<Document, Error> {
         let Reading {
             source,
@@ -1191,9 +1299,13 @@ impl<S: ByteSource> Reading<S> {
     /// ([`Data::At`](pdf_objects::object::Data::At)), through
     /// [`Reading::data`] and [`Reading::decoded_within`], and the bytes at a span
     /// ([`Reading::bytes`]); each record names the reading
-    /// ([`Record::source`]). It fails only when the source doesn't give the
-    /// bytes asked of it ([`Error::Io`]), keeping none of what it read
-    /// unkept, so asked again it reads them again.
+    /// ([`Record::source`]).
+    ///
+    /// # Errors
+    ///
+    /// It fails only when the source doesn't give the bytes asked of it
+    /// ([`Error::Io`]), keeping none of what it read unkept, so asked again
+    /// it reads them again.
     pub fn to_document(&self) -> Result<Document, Error> {
         match self.source.whole() {
             Some(file) => {
@@ -1251,6 +1363,8 @@ impl<S: ByteSource> Reading<S> {
     /// owner's password and the user's open a file with one key (ISO
     /// 32000-2, 7.6.4.3 and 7.6.4.4), so a reading by the owner's password
     /// takes a document read by the user's, and the other way.
+    ///
+    /// # Errors
     ///
     /// All or none: where an object isn't alike, `doc` is left as it was,
     /// and it's refused ([`Error::Unlike`]): another file, the file changed

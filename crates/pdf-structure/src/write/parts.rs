@@ -38,9 +38,12 @@ impl<'w> Parts<'w> {
     /// those: in the clear, what `from` holds in the clear; encrypted, only what's
     /// encrypted under the key it was read under, so an `encrypting` of an
     /// [`Encryptor::of`](super::Encryptor::of) `from`, renumbered and made whole or not. Under any other
-    /// key each object is written anew. Refused where `from`'s source says its
-    /// bytes aren't those it was read from ([`Error::Changed`]), or can't tell
-    /// ([`Error::Io`]).
+    /// key each object is written anew.
+    ///
+    /// # Errors
+    ///
+    /// Refused where `from`'s source says its bytes aren't those it was read
+    /// from ([`Error::Changed`]), or can't tell ([`Error::Io`]).
     pub fn new(
         encrypting: Option<&'w Encrypting<'w>>,
         from: Option<&'w dyn ReadFrom>,
@@ -74,8 +77,12 @@ impl<'w> Parts<'w> {
     /// Object `id`, `body`, written on its own at the end of `out` at `at`, `n g
     /// obj` to `endobj` and a line's end: where it starts in `out`. Copied where
     /// it's copied, else written anew, a stream's data where it was written read
-    /// from the reading. Refused as [`full`](super::full) refuses what's in a
-    /// body: a copy whose record is another reading's or another object's
+    /// from the reading.
+    ///
+    /// # Errors
+    ///
+    /// Refused as [`full`](super::full) refuses what's in a body: a copy
+    /// whose record is another reading's or another object's
     /// ([`Error::Elsewhere`]), or whose bytes aren't those it was read from
     /// ([`Error::Changed`]) or aren't there to read ([`Error::Gone`],
     /// [`Error::Uncontained`]), a stream's data no reading given holds
@@ -109,8 +116,12 @@ impl<'w> Parts<'w> {
     /// ([`MAX_DATA`](super::MAX_DATA)), or that has more members than a place in
     /// it can say. Built on up to `threads` threads, 0 for as many as the machine
     /// runs at once, up to 8, the same bytes on any number, `stop` checked before
-    /// each ([`Error::Stopped`]). Refused as [`Parts::body`] refuses, the first in
-    /// their order.
+    /// each.
+    ///
+    /// # Errors
+    ///
+    /// Refused as [`Parts::body`] refuses, the first in their order; and
+    /// stopped where `stop` says so ([`Error::Stopped`]).
     pub fn containers(
         &self,
         groups: &[(u32, Vec<Packed<'_>>)],

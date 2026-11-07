@@ -22,7 +22,7 @@ use super::{Deflate, Error, NUMBERS, usable};
 /// What a section says of an object number, in the words the reader's
 /// entries say it in ([`XrefEntry`](crate::read::XrefEntry)): ISO 32000-2
 /// leaves room for other kinds of entry (7.5.8.3), so there may be more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Entry {
     /// Written at `offset`, a position in the file.
@@ -51,7 +51,7 @@ pub enum Entry {
 }
 
 /// A cross-reference section's entries, by object number.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Section {
     entries: BTreeMap<u32, Entry>,
     /// The trailer's `/Size`: past every number listed.
@@ -85,7 +85,8 @@ impl Section {
     /// from 0, where a whole file's header is. Its one subsection lists
     /// every number below its `/Size`, which past [`NUMBERS`] refuses it
     /// when it's written ([`Error::Number`]).
-    pub fn full(size: u32) -> Section {
+    #[must_use]
+    pub const fn full(size: u32) -> Section {
         Section {
             entries: BTreeMap::new(),
             size,
@@ -96,7 +97,8 @@ impl Section {
 
     /// An append's, after a file whose `/Size` is `size` and whose header
     /// starts at `header`.
-    pub fn append(size: u32, header: usize) -> Section {
+    #[must_use]
+    pub const fn append(size: u32, header: usize) -> Section {
         Section {
             entries: BTreeMap::new(),
             size,
@@ -119,11 +121,13 @@ impl Section {
     }
 
     /// The trailer's `/Size`: past every number listed.
-    pub fn size(&self) -> u32 {
+    #[must_use]
+    pub const fn size(&self) -> u32 {
         self.size
     }
 
     /// Whether it lists object `num`.
+    #[must_use]
     pub fn lists(&self, num: u32) -> bool {
         self.entries.contains_key(&num)
     }
@@ -131,16 +135,21 @@ impl Section {
     /// What it lists object `num` as: where it was written, or where it's
     /// packed, or free. None for a number it doesn't list, which a full
     /// write's section writes as free, at generation 0.
+    #[must_use]
     pub fn get(&self, num: u32) -> Option<Entry> {
         self.entries.get(&num).copied()
     }
 
     /// The section as a table at file position `pos`, then `trailer` with
-    /// its `/Size`, and `startxref`. A table can't list an object stream's
-    /// member, so one is refused, as is an offset past its ten digits, a
-    /// position before the header, a number at or past [`NUMBERS`] (a whole
-    /// file's `/Size` past it among them), and a trailer pdf-objects'
-    /// writer refuses; then nothing is written.
+    /// its `/Size`, and `startxref`.
+    ///
+    /// # Errors
+    ///
+    /// A table can't list an object stream's member, so one is refused, as
+    /// is an offset past its ten digits, a position before the header, a
+    /// number at or past [`NUMBERS`] (a whole file's `/Size` past it among
+    /// them), and a trailer pdf-objects' writer refuses; then nothing is
+    /// written.
     pub fn table(&self, out: &mut Vec<u8>, mut trailer: Dict, pos: usize) -> Result<(), Error> {
         let start = out.len();
         let at = self.offset(pos)?;
@@ -183,11 +192,14 @@ impl Section {
     /// `/W` is as narrow as the widest field needs. A full write's rows are
     /// deflated under the PNG Up predictor, as `deflate` says, each less
     /// the row above it, which leaves mostly zeros where offsets climb
-    /// slowly; an append's are written as they are. A position before the
-    /// header is refused, as is a `num` of 0 or at or past [`NUMBERS`], a
-    /// number listed at or past it (a whole file's `/Size` past it among
-    /// them), and a dictionary pdf-objects' writer refuses; then nothing is
-    /// written, and it lists what it did.
+    /// slowly; an append's are written as they are.
+    ///
+    /// # Errors
+    ///
+    /// A position before the header is refused, as is a `num` of 0 or at or
+    /// past [`NUMBERS`], a number listed at or past it (a whole file's
+    /// `/Size` past it among them), and a dictionary pdf-objects' writer
+    /// refuses; then nothing is written, and it lists what it did.
     pub fn stream(
         &mut self,
         out: &mut Vec<u8>,

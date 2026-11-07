@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map};
+use std::fmt;
 use std::iter::FusedIterator;
 use std::ops::RangeBounds;
 
@@ -34,15 +35,22 @@ use crate::read::{Error, Fault, SourceId, Undecoded, Unfiltered, Unindexed, Unwr
 /// `&dyn Source`.
 pub trait Source: Streams {
     /// Every object its cross-references list.
+    #[must_use]
     fn ids(&self) -> Vec<ObjectId>;
     /// Object `id`, as written: references kept as references, strings
-    /// decoded and decrypted. The error says why there's none: the file
-    /// hasn't it, it doesn't read, or the source of the file's bytes didn't
-    /// give them ([`Unread::Source`]), which asked again may.
+    /// decoded and decrypted.
+    ///
+    /// # Errors
+    ///
+    /// [`Unread`], saying why there's none: the file hasn't it, it doesn't
+    /// read, or the source of the file's bytes didn't give them
+    /// ([`Unread::Source`]), which asked again may.
     fn get(&self, id: ObjectId) -> Result<&Object, Unread>;
     /// The trailer.
+    #[must_use]
     fn trailer(&self) -> &Trailer;
     /// The version in the header.
+    #[must_use]
     fn header_version(&self) -> Option<Version>;
     /// What the reader told of while reading it, each fault at its place:
     /// repairs, duplicate keys, and anything else it had to choose how to
@@ -51,6 +59,7 @@ pub trait Source: Streams {
     /// what it has read so far
     /// ([`Reading::faults`](crate::Reading::faults)); none where they
     /// weren't looked for ([`Options::faults`](crate::Options::faults)).
+    #[must_use]
     fn faults(&self) -> Cow<'_, [(Place, Fault)]>;
     /// Tells `sink` each of [`Source::faults`], in their order, none where
     /// it wants none: so that one sink takes the faults of several crates'
@@ -73,6 +82,7 @@ pub trait Source: Streams {
         }
     }
     /// The file's length in bytes, when the reader knows it.
+    #[must_use]
     fn size(&self) -> Option<usize> {
         None
     }
@@ -81,10 +91,12 @@ pub trait Source: Streams {
     /// holds it, as a document does, or read for the call, as a reading
     /// reads it ([`Reading::metadata`](crate::Reading::metadata)), none
     /// where the source of the file's bytes fails on the way to it.
+    #[must_use]
     fn metadata(&self) -> Option<Cow<'_, [u8]>> {
         None
     }
     /// Where object `id` was read from, when the reader recorded it.
+    #[must_use]
     fn record(&self, id: ObjectId) -> Option<&Record> {
         let _ = id;
         None
@@ -95,6 +107,7 @@ pub trait Source: Streams {
     /// reading, each it has decoded so far, as a read of an object in one
     /// decodes it, and none of one it hasn't. A stream's data decoded for
     /// the asking is [`Streams::decoded`]'s.
+    #[must_use]
     fn held(&self, stream: ObjectId) -> Option<&[u8]> {
         let _ = stream;
         None
@@ -106,6 +119,7 @@ pub trait Source: Streams {
     /// file as an earlier one was written from its bytes up to its
     /// [`Revision::end`]
     /// ([`Reading::prefix`](crate::read::Reading::prefix)).
+    #[must_use]
     fn revisions(&self) -> &[Revision] {
         &[]
     }
@@ -114,6 +128,7 @@ pub trait Source: Streams {
     /// the defaults where its reader recorded none, as in a document built:
     /// there, [`Facts::linearized`] false says only that it isn't known to
     /// be.
+    #[must_use]
     fn facts(&self) -> Option<&Facts> {
         None
     }
@@ -123,6 +138,7 @@ pub trait Source: Streams {
     /// that isn't encrypted (ISO 32000-2, 7.5.7, 7.6.2, 7.6.6). Where the
     /// reader knows: a reading, of one it has decoded so far, and false of
     /// one it hasn't, as [`Source::held`] gives none of it.
+    #[must_use]
     fn in_the_clear(&self, stream: ObjectId) -> bool {
         let _ = stream;
         false
@@ -142,6 +158,7 @@ pub trait Source: Streams {
     /// any stream, so that a caller asking for one learns it of all. A
     /// reading gives it, and so does a document read beside its reading
     /// ([`WithReading`](crate::read::WithReading)).
+    #[must_use]
     fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
         let _ = (id, limit);
         None
@@ -150,6 +167,7 @@ pub trait Source: Streams {
 
 /// A file's trailer. A reader outside the crate starts from
 /// [`Trailer::new`].
+/// Not exhaustive, so that it can come to say more of the trailer.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Trailer {
@@ -169,7 +187,8 @@ impl Trailer {
     /// section writes it, and not a cross-reference stream: a reader that
     /// read one, or read the file otherwise, sets [`Trailer::stream`] or
     /// [`Trailer::unwritten`] on what this gives.
-    pub fn new(object: Object) -> Trailer {
+    #[must_use]
+    pub const fn new(object: Object) -> Trailer {
         Trailer {
             stream: None,
             object,
@@ -178,6 +197,7 @@ impl Trailer {
     }
 
     /// Its dictionary: the trailer's, or the cross-reference stream's.
+    #[must_use]
     pub fn dict(&self) -> &Dict {
         static EMPTY: Dict = Dict::EMPTY;
         self.object.as_dict().unwrap_or(&EMPTY)
@@ -223,7 +243,12 @@ impl Trailer {
 /// the bytes reader keeps of its own reading, the object streams it
 /// decoded, those left in the clear and its facts, has none, as its
 /// meaning is what that reader read.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Its `Debug` gives its objects as pdf-objects' values print, and the
+/// object streams' decoded data and the metadata by their length, not their
+/// bytes, which may be decrypted: a test compares two by `==`, not by their
+/// `Debug`.
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Document {
     /// Each object its cross-references list, with where it was read while
@@ -288,6 +313,44 @@ pub struct Document {
     /// from them are in the clear (ISO 32000-2, 7.5.7, 7.6.6). The reader
     /// records each whose data it decoded, or a decoder did.
     pub(crate) in_the_clear: BTreeSet<ObjectId>,
+}
+
+impl fmt::Debug for Document {
+    /// What it holds, the object streams' decoded data and the metadata by
+    /// their length, not their bytes, which may be decrypted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let decoded: BTreeMap<_, _> = (self.decoded.iter())
+            .map(|(id, data)| (id, Len(data.len())))
+            .collect();
+        f.debug_struct("Document")
+            .field("objects", &self.objects)
+            .field("next", &self.next)
+            .field("trailer", &self.trailer)
+            .field("header", &self.header)
+            .field("faults", &self.faults)
+            .field("decoded", &decoded)
+            .field("whole", &self.whole)
+            .field("update", &self.update)
+            .field("size", &self.size)
+            .field(
+                "metadata",
+                &self.metadata.as_ref().map(|data| Len(data.len())),
+            )
+            .field("encryption", &self.encryption)
+            .field("facts", &self.facts)
+            .field("revisions", &self.revisions)
+            .field("in_the_clear", &self.in_the_clear)
+            .finish()
+    }
+}
+
+/// Data's length, as a `Debug` gives data it doesn't print.
+struct Len(usize);
+
+impl fmt::Debug for Len {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} bytes", self.0)
+    }
 }
 
 /// Where an object was read from, which the bytes reader records when it
@@ -363,7 +426,8 @@ impl PartialEq for Record {
 impl Eq for Record {}
 
 /// Where an object was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, as a reader may come to find an object another way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Origin {
     /// At the offset a cross-reference section gives.
@@ -382,7 +446,9 @@ pub enum Origin {
 }
 
 /// Which bytes a stream's data is, and how the reader chose them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, so that it can come to say more of how the data was found;
+/// made only by the reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct DataExtent {
     /// Where the data is, as the stream's
@@ -398,7 +464,9 @@ pub struct DataExtent {
 /// What a file's header and cross-reference sections say of it, as
 /// written. Whether its sections read is [`Trailer::unwritten`]'s being
 /// none.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Not exhaustive, so that it can come to say more of the file as written; a
+/// reader outside the crate starts from its `Default`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Facts {
     /// Where `%PDF-` starts, when the file has it within its first 1024
@@ -432,6 +500,7 @@ pub struct Facts {
 /// gives, later in the file, are one revision (Annex F). A reader outside
 /// the crate makes one by [`Revision::new`], and says where it ends by
 /// [`Revision::ending`].
+/// Not exhaustive, so that it can come to say more of a revision.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Revision {
@@ -474,25 +543,29 @@ pub struct RevisionEnd {
 impl RevisionEnd {
     /// The end of a revision whose `%%EOF` ends at `eof`, on a line that
     /// ends at `line`: none where `line` is before `eof`.
+    #[must_use]
     pub fn new(eof: usize, line: usize) -> Option<RevisionEnd> {
         (eof <= line).then_some(RevisionEnd { eof, line })
     }
 
     /// Where its `%%EOF` ends: past those five bytes.
-    pub fn eof(self) -> usize {
+    #[must_use]
+    pub const fn eof(self) -> usize {
         self.eof
     }
 
     /// Where the `%%EOF`'s line ends: past a CR LF, CR or LF right after
     /// it, or at it where none follows. The file as the revision was
     /// written is its bytes up to here.
-    pub fn line(self) -> usize {
+    #[must_use]
+    pub const fn line(self) -> usize {
         self.line
     }
 }
 
 /// How a cross-reference section is written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, so that a section written another way can be told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum XrefKind {
     /// A table, after `xref` (ISO 32000-2, 7.5.4).
@@ -503,7 +576,9 @@ pub enum XrefKind {
 
 /// Whether a file is encrypted (its trailer's `/Encrypt`), and if it is,
 /// whether the reader opened it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Not exhaustive, as the public-key handler's answers may join it, and
+/// `Opened` may come to say more of how the file opened.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Encryption {
     /// It isn't.
@@ -566,6 +641,7 @@ pub enum Unsupported {
 
 /// Why a trailer's `/Encrypt` isn't an encryption dictionary the reader
 /// reads ([`Unsupported::Encrypt`]).
+/// Not exhaustive, as reasons are found as the reader learns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Uncrypt {
@@ -583,7 +659,8 @@ pub enum Uncrypt {
 
 /// A file's newest incremental update. A reader outside the crate makes
 /// one by [`Update::new`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Not exhaustive, so that it can come to say more of the update.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Update {
     /// The objects its cross-reference section lists in use.
@@ -596,6 +673,7 @@ pub struct Update {
 /// Why an object doesn't read: what [`Source::get`] gives in its place,
 /// and [`Document::unread`] gives. Each is one of the bytes reader's
 /// reasons ([`crate::read`]), or another reader's words.
+/// Not exhaustive, as reasons are found as the reader learns.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unread {
@@ -725,6 +803,7 @@ impl Unread {
     /// password, or doesn't decrypt), or [`Why::Source`] where the source of
     /// the file's bytes didn't give them ([`Unread::Source`]), its message
     /// then the one a reading's own resolver gives.
+    #[must_use]
     pub fn unreadable(&self, id: ObjectId) -> Option<Unreadable> {
         if let Unread::Missing { .. } = self {
             return None;
@@ -766,7 +845,8 @@ impl Encryption {
     /// [`Encryption::by`] says which of those given; and granting none,
     /// until [`Encryption::permitting`] says what. Each field `Opened`
     /// gains has a setter of its own, so this stays as it is.
-    pub fn opened(owner: bool) -> Encryption {
+    #[must_use]
+    pub const fn opened(owner: bool) -> Encryption {
         Encryption::Opened {
             owner,
             by: None,
@@ -810,7 +890,8 @@ impl Encryption {
 impl Update {
     /// The update whose cross-reference section lists `objects` in use,
     /// after the section that starts at `previous`.
-    pub fn new(objects: BTreeSet<ObjectId>, previous: usize) -> Update {
+    #[must_use]
+    pub const fn new(objects: BTreeSet<ObjectId>, previous: usize) -> Update {
         Update { objects, previous }
     }
 }
@@ -820,7 +901,8 @@ impl Revision {
     /// under `trailer`, its sections listing `numbers` (none for the
     /// first), where it ends not known. Each field `Revision` gains has a
     /// setter of its own, so this stays as it is.
-    pub fn new(at: usize, trailer: Trailer, numbers: Option<Box<[u32]>>) -> Revision {
+    #[must_use]
+    pub const fn new(at: usize, trailer: Trailer, numbers: Option<Box<[u32]>>) -> Revision {
         Revision {
             at,
             trailer,
@@ -848,7 +930,8 @@ impl Unread {
     /// or numbers it another, it has no data, or the object runs to where a
     /// fault cut it off. None for the rest, an object in one that doesn't
     /// parse among them, which isn't placed.
-    pub fn container(&self) -> Option<u32> {
+    #[must_use]
+    pub const fn container(&self) -> Option<u32> {
         match *self {
             Unread::Container { stream, .. }
             | Unread::Undecodable { stream }
@@ -915,6 +998,7 @@ impl Document {
     /// assert!(doc.get(ObjectId::new(1, 0)).is_ok());
     /// assert_eq!(*doc.encryption(), Encryption::opened(false));
     /// ```
+    #[must_use]
     pub fn new(version: Version, trailer: Dict) -> Document {
         Document {
             objects: BTreeMap::new(),
@@ -975,6 +1059,8 @@ impl Document {
     }
 
     /// Whether it lists object `id`, whether it reads or not.
+    #[must_use]
+    #[inline]
     pub fn contains(&self, id: ObjectId) -> bool {
         self.objects.contains_key(&id)
     }
@@ -1008,6 +1094,8 @@ impl Document {
     /// object put in by [`Document::set`] or taken to edit by
     /// [`Document::get_mut`], one a reader other than the bytes reader
     /// read, or one that doesn't read.
+    #[must_use]
+    #[inline]
     pub fn record(&self, id: ObjectId) -> Option<&Record> {
         self.objects.get(&id)?.as_ref().ok()?.1.as_ref()
     }
@@ -1168,6 +1256,7 @@ impl Document {
     /// [`Document::new_id`] gives, which can be a number the file lists
     /// free, as the trailer's `/Size` less one often is; 4,294,967,295 once
     /// new ids have gone past it.
+    #[must_use]
     pub fn max_id(&self) -> u32 {
         u32::try_from(self.next - 1).unwrap_or(u32::MAX)
     }
@@ -1187,6 +1276,7 @@ impl Document {
     /// reference. None where one names an object it hasn't, or one that
     /// doesn't read, or the chain runs past 128 references, as a loop
     /// does.
+    #[must_use]
     pub fn dereference<'a>(&'a self, object: &'a Object) -> Option<(Option<ObjectId>, &'a Object)> {
         let (mut last, mut object) = (None, object);
         let mut followed = 0;
@@ -1203,6 +1293,7 @@ impl Document {
 
     /// Object `id`'s dictionary, or its stream's, through the references
     /// it is ([`Document::dereference`]), when it reads.
+    #[must_use]
     pub fn get_dict(&self, id: ObjectId) -> Option<&Dict> {
         self.dereference(self.object(id)?)?.1.as_dict()
     }
@@ -1219,6 +1310,7 @@ impl Document {
 
     /// The catalog: the dictionary the trailer's `/Root` refers to (ISO
     /// 32000-2, 7.7.2), as [`Document::get_dict`] gives it.
+    #[must_use]
     pub fn catalog(&self) -> Option<&Dict> {
         self.get_dict(self.trailer.dict().get(b"Root")?.as_reference()?)
     }
@@ -1234,6 +1326,7 @@ impl Document {
     /// ([`Object::references`]), every entry of a key written twice among
     /// them. An id of an object it hasn't, or of one that doesn't read, is
     /// found, and goes no further.
+    #[must_use]
     pub fn reachable(&self) -> Vec<ObjectId> {
         let mut found = Vec::new();
         let mut seen = HashSet::new();
@@ -1286,7 +1379,8 @@ impl Document {
 /// what a reader outside the crate knows and fills in.
 impl Document {
     /// The trailer.
-    pub fn trailer(&self) -> &Trailer {
+    #[must_use]
+    pub const fn trailer(&self) -> &Trailer {
         &self.trailer
     }
 
@@ -1294,17 +1388,18 @@ impl Document {
     /// cross-reference stream it is, or why it isn't the trailer the
     /// file's newest section writes, as a reader outside the crate fills
     /// them in.
-    pub fn trailer_mut(&mut self) -> &mut Trailer {
+    pub const fn trailer_mut(&mut self) -> &mut Trailer {
         &mut self.trailer
     }
 
     /// The version in the header, when it has one.
-    pub fn header_version(&self) -> Option<Version> {
+    #[must_use]
+    pub const fn header_version(&self) -> Option<Version> {
         self.header
     }
 
     /// Has the header's version be `version`.
-    pub fn set_header_version(&mut self, version: Option<Version>) {
+    pub const fn set_header_version(&mut self, version: Option<Version>) {
         self.header = version;
     }
 
@@ -1313,6 +1408,7 @@ impl Document {
     /// with none looked for ([`Options::faults`](crate::Options::faults)). A
     /// reader outside the crate keeps its own, as they're its own, not the
     /// bytes reader's.
+    #[must_use]
     pub fn faults(&self) -> &[(Place, Fault)] {
         &self.faults
     }
@@ -1323,6 +1419,7 @@ impl Document {
     /// name, whether or not the stream is lent as its data decoded
     /// ([`Streams::decoded`]), which it is while it's whole and its object
     /// as read.
+    #[must_use]
     pub fn held(&self, stream: ObjectId) -> Option<&[u8]> {
         self.decoded.get(&stream).map(Vec::as_slice)
     }
@@ -1331,6 +1428,7 @@ impl Document {
     /// read from it in the clear, in a file that encrypts its strings, by
     /// `/StmF` or its own `/Crypt` filter `/Identity` (ISO 32000-2, 7.5.7,
     /// 7.6.6): recorded by the reader of each it decoded, or a decoder did.
+    #[must_use]
     pub fn in_the_clear(&self, stream: ObjectId) -> bool {
         self.in_the_clear.contains(&stream)
     }
@@ -1338,7 +1436,8 @@ impl Document {
     /// The file's newest incremental update, when the reader read its
     /// cross-reference sections and the newest follows one written before
     /// it.
-    pub fn update(&self) -> Option<&Update> {
+    #[must_use]
+    pub const fn update(&self) -> Option<&Update> {
         self.update.as_ref()
     }
 
@@ -1348,17 +1447,19 @@ impl Document {
     }
 
     /// The file's length in bytes, when the reader knows it.
-    pub fn size(&self) -> Option<usize> {
+    #[must_use]
+    pub const fn size(&self) -> Option<usize> {
         self.size
     }
 
     /// Has the file's length in bytes be `size`.
-    pub fn set_size(&mut self, size: Option<usize>) {
+    pub const fn set_size(&mut self, size: Option<usize>) {
         self.size = size;
     }
 
     /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
     /// written, when it's in plain view: unfiltered, and not encrypted.
+    #[must_use]
     pub fn metadata(&self) -> Option<&[u8]> {
         self.metadata.as_deref()
     }
@@ -1369,7 +1470,8 @@ impl Document {
     }
 
     /// Whether the file is encrypted, and if it is, whether it opened.
-    pub fn encryption(&self) -> &Encryption {
+    #[must_use]
+    pub const fn encryption(&self) -> &Encryption {
         &self.encryption
     }
 
@@ -1382,7 +1484,8 @@ impl Document {
     /// written, by the bytes reader; the defaults where another read it,
     /// and in a document built, where [`Facts::linearized`] false says only
     /// that it isn't known to be.
-    pub fn facts(&self) -> &Facts {
+    #[must_use]
+    pub const fn facts(&self) -> &Facts {
         &self.facts
     }
 
@@ -1392,6 +1495,7 @@ impl Document {
     /// its later revisions list more numbers in all than the reader reads
     /// entries ([`Limits::entries`](crate::Limits::entries)), and in a
     /// document built.
+    #[must_use]
     pub fn revisions(&self) -> &[Revision] {
         &self.revisions
     }
@@ -1492,6 +1596,7 @@ impl Source for Document {
         self.objects.keys().copied().collect()
     }
 
+    #[inline]
     fn get(&self, id: ObjectId) -> Result<&Object, Unread> {
         match self.objects.get(&id) {
             Some(Ok((object, _))) => Ok(object),
@@ -1687,6 +1792,67 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::read::lazy::fixture;
+    use crate::read::{Options, Prefix};
+
+    /// What a reader outside the crate builds, and a writer's sections, can
+    /// be had in a constant, as each is made by a `const fn`.
+    #[test]
+    fn what_a_reader_builds_can_be_had_in_a_constant() {
+        use crate::write::{Section, fits};
+        const TRAILER: Trailer = Trailer::new(Object::null());
+        const OPENED: Encryption = Encryption::opened(true);
+        const REVISION: Revision = Revision::new(9, Trailer::new(Object::null()), None);
+        const UPDATE: Update = Update::new(BTreeSet::new(), 9);
+        const UNREAD: Option<u32> = Unread::Cut { stream: 4 }.container();
+        const FITS: [bool; 2] = [fits(10), fits(usize::MAX)];
+        const SECTIONS: [Section; 2] = [Section::full(3), Section::append(7, 0)];
+        assert_eq!(TRAILER, Trailer::new(Object::null()));
+        assert_eq!(OPENED, Encryption::opened(true));
+        assert_eq!((REVISION.at, REVISION.end), (9, None));
+        assert_eq!((UPDATE.objects.len(), UPDATE.previous), (0, 9));
+        assert_eq!(UNREAD, Some(4));
+        assert_eq!(FITS, [true, false]);
+        assert_eq!(SECTIONS.map(|section| section.size()), [3, 7]);
+    }
+
+    /// A document's `Debug` gives the object streams' decoded data and the
+    /// metadata by their length, never their bytes, which may be decrypted,
+    /// and the rest as its fields print, its objects among it, in either
+    /// form. A prefix's gives its length and its source's, never the
+    /// source's bytes.
+    #[test]
+    fn a_debug_gives_data_by_its_length() {
+        let (file, _) = crate::read::tests::compressed(false);
+        let mut doc = crate::read::document(&file, &Options::DEFAULT);
+        let metadata = b"<x:xmpmeta>plaintext</x:xmpmeta>".to_vec();
+        doc.set_metadata(Some(metadata.clone()));
+        let stream = ObjectId::new(4, 0);
+        let decoded = doc.held(stream).unwrap().to_vec();
+        // Bytes as a derived `Debug` writes them, a number each.
+        let numbers = |bytes: &[u8]| format!("{:?}", &bytes[..8]).replace(['[', ']'], "");
+        let shown = format!("{doc:?}");
+        for bytes in [&decoded, &metadata] {
+            assert!(!shown.contains(&numbers(bytes)), "{shown}");
+        }
+        let held = format!("decoded: {{{stream:?}: {} bytes}}", decoded.len());
+        assert!(shown.contains(&held), "{shown}");
+        let given = format!("metadata: Some({} bytes)", metadata.len());
+        assert!(shown.contains(&given), "{shown}");
+        assert!(shown.contains(&format!("{:?}", doc.trailer())), "{shown}");
+        let pages = doc.get(ObjectId::new(2, 0)).unwrap();
+        assert!(shown.contains(&format!("{pages:?}")), "{shown}");
+        let pretty = format!("{doc:#?}");
+        for len in [decoded.len(), metadata.len()] {
+            assert!(pretty.contains(&format!("{len} bytes")), "{pretty}");
+        }
+        let prefix = Prefix::new(file.clone(), 9);
+        let shown = format!("{prefix:?}");
+        assert_eq!(
+            shown,
+            format!("Prefix {{ source: {} bytes, len: 9 }}", file.len())
+        );
+        assert!(!shown.contains(&numbers(&file)));
+    }
 
     /// `got`, a named iterator, walked beside `old`, the adapter it was:
     /// from the front, from the back, and from both ends in turn, each

@@ -19,7 +19,9 @@ pub const FILTERS: usize = 25;
 
 /// Why the reader doesn't decode a stream by its `/Filter` and
 /// `/DecodeParms`: what it doesn't take of them.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+/// Not exhaustive, as what the reader doesn't take of a stream's filters is
+/// found as it learns more of what files hold.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unfiltered {
     /// Its `/Filter` is neither a name nor an array.
