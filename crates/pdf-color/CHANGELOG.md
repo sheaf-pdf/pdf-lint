@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0-alpha.1 (unreleased)
 
 - **Components as PDFium counts them.** `components`, over any resolver, as of chromium/8125, of the value a `/ColorSpace` dictionary holds under a name, as written, or an inline image's array: `Some(n)`, 3 where PDFium loads no space, or none for a reference to nothing, for which it has no space at all. `counted` gives the same as a `Counted`, with whether a cap ended a branch of it. A device name, its abbreviation or `Pattern` by name, and no other family; an array of one by what it holds; an array of more by the first four bytes of its family, a name's or a string's, each family as PDFium loads it; an alternate space by a path of its own, which also takes a stream, by the first of its values in the order of its keys that names a stock space, and doesn't go into an array of one. A Pattern space counts its underlying space's and the pattern's name, up to 16. References are followed as far as PDFium does, and a loop doesn't load.
 - **Ids are pdf-objects' struct.** `Place::object` and `Fault::Damaged { id }` hold pdf-objects' `ObjectId`, a struct of `number` and `generation`, where it was the pair `(u32, u16)`: `(1, 0)` is `ObjectId::new(1, 0)`, `id.0` is `id.number`.

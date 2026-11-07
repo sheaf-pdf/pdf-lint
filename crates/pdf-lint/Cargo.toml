@@ -27,7 +27,7 @@ clap = { version = "4.6", default-features = false, features = ["std", "derive",
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
 # Color spaces read as ISO 32000-2 has them: each the walk reaches, its
 # faults kept. pdf-content-streams depends on it too, for its own reading.
-pdf-color = { path = "../pdf-color", version = "0.1" }
+pdf-color.workspace = true
 # Content streams read as their checks read them: every page's, form's,
 # pattern's and Type 3 glyph's the walk reaches. With `image-ends`, so that an
 # inline image's DCT and CCITTFax data ends where PDFium's decoders end it,
