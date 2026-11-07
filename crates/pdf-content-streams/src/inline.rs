@@ -1143,10 +1143,10 @@ impl<'a> Entries<'a> {
     /// `value`'s first token read where a value is: the dictionary's, its
     /// key's.
     fn value(&mut self, value: &'a [u8]) {
-        if self.depth == 1 {
-            if let Some(key) = self.key.take() {
-                self.read.push((key, value));
-            }
+        if self.depth == 1
+            && let Some(key) = self.key.take()
+        {
+            self.read.push((key, value));
         }
     }
 }

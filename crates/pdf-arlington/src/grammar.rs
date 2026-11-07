@@ -847,12 +847,12 @@ fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str), TableError> {
         item = inner;
     }
     let name = item.strip_prefix("fn:").and_then(|f| f.split_once('('));
-    if let Some((name, _)) = name {
-        if WrapFn::ALL.into_iter().any(|f| f.name() == name) {
-            return Err(TableError::Wrap {
-                item: item.to_string(),
-            });
-        }
+    if let Some((name, _)) = name
+        && WrapFn::ALL.into_iter().any(|f| f.name() == name)
+    {
+        return Err(TableError::Wrap {
+            item: item.to_string(),
+        });
     }
     Ok((wraps, item))
 }

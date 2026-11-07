@@ -16,14 +16,6 @@ color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' 
 fonts_msrv := `grep -m1 '^rust-version' crates/pdf-fonts/Cargo.toml | cut -d'"' -f2`
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
-# pdf-content-streams' `image-ends` feature needs a newer one than the crate:
-# its fax decoder, hayro-ccitt, uses Rust 1.87's library.
-content_image_ends_msrv := "1.87"
-# pdf-fonts' `predefined-cmaps` feature needs a newer one than the crate: its
-# bundle of Adobe's CMaps, hayro-cmap, uses Rust 1.87's library.
-fonts_cmaps_msrv := "1.87"
-# pdf-linearize's `lopdf` feature needs a newer one than the crate: lopdf's own.
-linearize_lopdf_msrv := "1.88"
 
 # The nightly the fuzz targets build on: `nightly`, or the toolchain
 # FUZZ_TOOLCHAIN names, as CI's fuzzing pins one.
@@ -362,7 +354,7 @@ structure-msrv:
 # that feature's, each of which must be installed.
 content-msrv:
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams
-    cargo +{{ content_image_ends_msrv }} test --locked -p pdf-content-streams --features image-ends
+    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends
 
 # Test pdf-semantics on its oldest supported Rust, which must be installed.
 semantics-msrv:
@@ -381,14 +373,14 @@ fonts-msrv:
 # Test pdf-fonts with `predefined-cmaps` on that feature's oldest Rust, which must
 # be installed.
 fonts-cmaps-msrv:
-    cargo +{{ fonts_cmaps_msrv }} test --locked -p pdf-fonts --features predefined-cmaps
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features predefined-cmaps
 
 # Test pdf-linearize on its oldest supported Rust, with its adapter and without,
 # then with `lopdf` on that feature's, each of which must be installed.
 linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
-    cargo +{{ linearize_lopdf_msrv }} test --locked -p pdf-linearize --features lopdf
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features lopdf
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

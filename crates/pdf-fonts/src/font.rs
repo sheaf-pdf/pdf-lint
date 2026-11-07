@@ -1425,11 +1425,11 @@ where
     // rounded, then through the matrix, rounded on by a half and cut, as PDFium has it
     // (`CPDF_Type3Char`).
     for (width, proc) in widths.iter_mut().zip(&procs) {
-        if *width == 0.0 {
-            if let Some(Some(proc)) = proc {
-                let thousandths = (proc.wx * 1000.0).round() as i32;
-                *width = (thousandths as f32 * xunit + 0.5) as i32 as f32;
-            }
+        if *width == 0.0
+            && let Some(Some(proc)) = proc
+        {
+            let thousandths = (proc.wx * 1000.0).round() as i32;
+            *width = (thousandths as f32 * xunit + 0.5) as i32 as f32;
         }
     }
     // PDFium's ascent is `A`'s top and its descent `g`'s bottom
@@ -2334,10 +2334,10 @@ impl Decoder {
     /// The text `code` is: its `/ToUnicode` mapping, or its encoding's.
     fn code_text(&self, code: u32) -> Option<Cow<'_, str>> {
         // With no `/ToUnicode` read, its CMap is one of nothing, which maps no code.
-        if self.to_unicode {
-            if let Some(text) = self.cmap.get(code) {
-                return Some(text);
-            }
+        if self.to_unicode
+            && let Some(text) = self.cmap.get(code)
+        {
+            return Some(text);
         }
         Some(Cow::Borrowed(
             self.encoded.as_ref()?.get(code as usize)?.as_deref()?,

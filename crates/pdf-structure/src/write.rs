@@ -1238,24 +1238,23 @@ fn indirect(
     from: Option<&dyn ReadFrom>,
     to: Numbering<'_>,
 ) -> Result<usize, Error> {
-    if let Value::Stream(stream) = obj.value() {
-        if let Some(span) = stream.data.at() {
-            let data = from.ok_or(Error::Placed(id))?.data(id, span)?;
-            let dict = &stream.dict;
-            return match (encrypting, to.0) {
-                (Some(e), None) => Ok(serialize::indirect_stream_with(out, at, dict, &data, e)?),
-                (None, None) => {
-                    serialize::indirect_stream(out, at, dict, &data).map_err(Error::Serialize)
-                }
-                (Some(e), Some(to)) => Ok(serialize::indirect_stream_renumbered(
-                    out, at, dict, &data, e, to,
-                )?),
-                (None, Some(to)) => {
-                    serialize::indirect_stream_renumbered(out, at, dict, &data, &(), to)
-                        .map_err(plain)
-                }
-            };
-        }
+    if let Value::Stream(stream) = obj.value()
+        && let Some(span) = stream.data.at()
+    {
+        let data = from.ok_or(Error::Placed(id))?.data(id, span)?;
+        let dict = &stream.dict;
+        return match (encrypting, to.0) {
+            (Some(e), None) => Ok(serialize::indirect_stream_with(out, at, dict, &data, e)?),
+            (None, None) => {
+                serialize::indirect_stream(out, at, dict, &data).map_err(Error::Serialize)
+            }
+            (Some(e), Some(to)) => Ok(serialize::indirect_stream_renumbered(
+                out, at, dict, &data, e, to,
+            )?),
+            (None, Some(to)) => {
+                serialize::indirect_stream_renumbered(out, at, dict, &data, &(), to).map_err(plain)
+            }
+        };
     }
     match (encrypting, to.0) {
         (Some(e), None) => Ok(serialize::indirect_with(out, at, obj, e)?),

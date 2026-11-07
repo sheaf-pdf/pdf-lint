@@ -2,7 +2,7 @@
 name = "pdf-linearize"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 description = "PDF files laid out for reading over a network (ISO 32000-2, Annex F): an object graph, of any object model, planned into the order and numbers a linearized file has, the bytes around its bodies, hint tables among them, and whether a file that says it's one holds"
@@ -13,8 +13,7 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 bitstream-io = "4"
-# On lopdf's own Rust, 1.88, where the rest of the crate takes 1.85: an adapter's, off
-# by default, and without its clock, threads and the like.
+# An adapter's, off by default, and without its clock, threads and the like.
 lopdf = { version = "0.45", default-features = false, optional = true }
 pdf-objects.workspace = true
 # The page tree and name trees, and not the clock.

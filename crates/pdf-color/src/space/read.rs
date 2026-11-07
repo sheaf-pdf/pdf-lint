@@ -420,12 +420,11 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
     /// What's checked of a CIE-based dictionary and left in it.
     fn check_cie(&mut self, family: Family, dict: &'o Dict) -> Result<(), Unreadable> {
         let black = Fault::BlackPoint;
-        if let Some(point) = entry_of(dict, b"BlackPoint") {
-            if let Some(numbers) = self.numbers(point, 3, black, false)? {
-                if numbers.iter().any(|n| n.as_number() < Some(0.0)) {
-                    self.say(point.at, black);
-                }
-            }
+        if let Some(point) = entry_of(dict, b"BlackPoint")
+            && let Some(numbers) = self.numbers(point, 3, black, false)?
+            && numbers.iter().any(|n| n.as_number() < Some(0.0))
+        {
+            self.say(point.at, black);
         }
         match family {
             Family::CalGray => {
@@ -447,12 +446,12 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 }
             }
             Family::Lab => {
-                if let Some(range) = entry_of(dict, b"Range") {
-                    if let Some(numbers) = self.numbers(range, 4, Fault::LabRange, false)? {
-                        let number = |at: usize| numbers[at].as_number();
-                        if number(0) > number(1) || number(2) > number(3) {
-                            self.say(range.at, Fault::LabRange);
-                        }
+                if let Some(range) = entry_of(dict, b"Range")
+                    && let Some(numbers) = self.numbers(range, 4, Fault::LabRange, false)?
+                {
+                    let number = |at: usize| numbers[at].as_number();
+                    if number(0) > number(1) || number(2) > number(3) {
+                        self.say(range.at, Fault::LabRange);
                     }
                 }
             }

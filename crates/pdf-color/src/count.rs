@@ -500,10 +500,10 @@ impl<'l, 'o, R: Resolve<'o>> Walk<'l, R> {
         depth: usize,
     ) -> Result<Option<Loaded>, Unreadable> {
         let tint = Some(Loaded::new(1, Kind::Tint));
-        if let Some(name) = parts.get(1) {
-            if self.text(name)? == Some(b"None") {
-                return Ok(tint);
-            }
+        if let Some(name) = parts.get(1)
+            && self.text(name)? == Some(b"None")
+        {
+            return Ok(tint);
         }
         let Some(alternate) = self.part(parts, 2)? else {
             return Ok(None);

@@ -381,11 +381,11 @@ pub fn password(data: &[u8]) {
     use stringprep::tables::unassigned_code_point;
     use unicode_normalization::UnicodeNormalization;
     let lossy = String::from_utf8_lossy(data);
-    let wide: String = (data.chunks_exact(2))
-        .filter_map(|b| char::from_u32(u32::from(u16::from_le_bytes([b[0], b[1]]))))
+    let wide: String = (data.as_chunks::<2>().0.iter())
+        .filter_map(|&b| char::from_u32(u32::from(u16::from_le_bytes(b))))
         .collect();
-    let planes: String = (data.chunks_exact(3))
-        .filter_map(|b| char::from_u32(u32::from_le_bytes([b[0], b[1], b[2], 0]) % 0x11_0000))
+    let planes: String = (data.as_chunks::<3>().0.iter())
+        .filter_map(|&b| char::from_u32(u32::from_le_bytes([b[0], b[1], b[2], 0]) % 0x11_0000))
         .collect();
     // Text decomposed, its characters in order.
     let sorted = |text: &str| {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (unreleased)
+
+- **Rust 1.89.** The minimum Rust is 1.89, from 1.85: the family's, moved for the RustCrypto releases pdf-crypt wants (its CHANGELOG says which), nothing of this crate's own needing it. Under cargo's resolver that minds Rust versions (resolver 3, edition 2024's), a project on an older Rust keeps 0.2.0.
+
 ## 0.2.0 (2026-11-06)
 
 A breaking release. 0.1.1 was never published: what it held is under this release too, after the breaking changes.

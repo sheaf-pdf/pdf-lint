@@ -6421,7 +6421,7 @@ fn a_copy_under_a_renumbering_is_its_bytes_but_its_header_and_the_references_mov
     let doc = reading.to_document().unwrap();
     let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
     // 2, 4, 6 and 7 move ten on; 1, 3 and 5 stay; 9 is no object's.
-    let moves = |n: u32| n % 2 == 0 || n == 7;
+    let moves = |n: u32| n.is_multiple_of(2) || n == 7;
     let map: Map = (ids.iter())
         .map(|&id| {
             (

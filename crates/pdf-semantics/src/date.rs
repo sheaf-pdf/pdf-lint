@@ -187,7 +187,9 @@ fn in_range(value: u8, low: u8, high: u8, field: Field) -> Result<u8, Error> {
 fn days_in(year: u16, month: u8) -> u8 {
     match month {
         4 | 6 | 9 | 11 => 30,
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
         2 => 28,
         _ => 31,
     }
@@ -330,10 +332,10 @@ impl Date {
     /// `with_` asks only of the fields it sets, and reading what it writes back
     /// says so, so that it's the same date.
     fn said_of_its_day(&mut self) {
-        if let (Some(month), Some(day)) = (self.fields[MONTH], self.fields[DAY]) {
-            if day > days_in(self.year, month) {
-                self.quirks.push(Quirk::ImpossibleDay);
-            }
+        if let (Some(month), Some(day)) = (self.fields[MONTH], self.fields[DAY])
+            && day > days_in(self.year, month)
+        {
+            self.quirks.push(Quirk::ImpossibleDay);
         }
     }
 

@@ -2,7 +2,7 @@
 name = "pdf-content-streams"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 description = "PDF content streams read as PDFium reads them, written and spliced: tokens and operations, operators typed by Annex A, q/Q balance, marked content and resource names"
@@ -37,7 +37,7 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_12
 # which hold all its `unsafe`, so it builds with `unsafe_code` forbidden.
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
 # With `image-ends`: CCITTFax data in an inline image decoded to find where
-# it ends, as PDFium decodes it. It needs Rust 1.87.
+# it ends, as PDFium decodes it.
 hayro-ccitt = { version = "0.3", optional = true }
 
 # The decoders that find DCT's and CCITTFax's ends as PDFium finds them, for

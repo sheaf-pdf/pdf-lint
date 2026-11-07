@@ -1625,7 +1625,7 @@ fn the_readmes_licence_links_reach_the_files() {
 /// The crate doc's example is the README's first, line for line, so that
 /// it runs as a dependent builds the crate: the README's examples run as
 /// doctests only with the `writer` feature, which the second needs, while
-/// the crate doc's runs without it, on Rust 1.85 too.
+/// the crate doc's runs without it, on Rust 1.89 too.
 #[test]
 fn the_crate_docs_example_is_the_readmes_first() {
     let readme: Vec<&str> = (include_str!("../README.md").lines())
