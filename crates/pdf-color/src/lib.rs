@@ -14,7 +14,9 @@
 //!   [`counted`] meets no cap, but for a Pattern space over more than 16
 //!   components, which no clause refuses and PDFium does.
 //! - **What a resources dictionary names** ([`Spaces`], [`Named`]), reached as
-//!   PDFium reaches it, each key as it was read and where it was written. It's
+//!   PDFium reaches it, each key as it was read and where it was written, and
+//!   each name counted as [`counted`] counts its value
+//!   ([`Spaces::components`]), as a reader of content counts them. It's
 //!   PDFium's reading and tells nothing: an ISO check of a resources dictionary
 //!   reads the dictionary itself.
 //! - **Caps from one value** ([`Limits`]): how deep a space nests and how many
@@ -43,7 +45,7 @@ pub use pdf_objects;
 pub use count::{Counted, components, counted};
 pub use fault::Fault;
 pub use limits::Limits;
-pub use resources::{Named, Spaces};
+pub use resources::{Components, Iter, Named, Spaces};
 pub use space::{
     Attributes, Cie, Colorant, ColorantSpace, Colorants, DeviceN, Family, Icc, Indexed, Lookup,
     Process, Separation, Space, Subtype,

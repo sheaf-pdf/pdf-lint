@@ -19,10 +19,13 @@
 //!   nine in turn, found by `Spaces::read` and each name counted by
 //!   `counted`, kept as a reader of content keeps them (pdf-content-streams'
 //!   `ResCx::read`): each name's count, and the names a cap was met for.
+//! - `resources-components`: the same dictionaries, kept the same, each
+//!   name counted by `Spaces::components`, the dictionary's own iterator.
 //! - `colorants`: the 32 colorants of a DeviceN space, each by
 //!   `Colorant::of`, tallied.
 //!
-//! Throughput is in spaces, but for `resources`, in names, and
+//! Throughput is in spaces, but for `resources` and
+//! `resources-components`, in names, and
 //! `colorants`, in colorants. Each input is held to what it gives before
 //! it's timed: a count to PDFium's for that space, with no cap met; a
 //! typed space to its family, its components and how many faults it has,
@@ -342,6 +345,59 @@ fn resources_group(c: &mut Criterion) {
     group.finish();
 }
 
+/// The spaces `resources` names, kept as [`kept`] keeps them, each counted
+/// as `Spaces::components` gives it, as pdf-content-streams' `ResCx::read`
+/// counts them: the first name that fails is the `Err`.
+fn kept_by_components<'o>(
+    objects: impl Resolve<'o> + Copy,
+    resources: &'o Object,
+) -> Result<Kept, Unreadable> {
+    let Some(spaces) = Spaces::read(objects, Some(resources))? else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let named = spaces.components(objects, &Limits::DEFAULT);
+    let room = named.size_hint().1.unwrap_or_default();
+    let (mut counts, mut capped) = (Vec::with_capacity(room), Vec::new());
+    for (space, read) in named {
+        let read = read?;
+        if read.capped {
+            capped.push(space.key.to_vec());
+        }
+        if let Some(count) = read.count {
+            counts.push((space.key.to_vec(), count));
+        }
+    }
+    Ok((counts, capped))
+}
+
+fn resources_components_group(c: &mut Criterion) {
+    let objects = objects();
+    let all: Vec<Object> = NAMES.iter().map(|&names| resources(names)).collect();
+    let resolve = |id: ObjectId| objects.get(&id);
+    let mut group = c.benchmark_group("resources-components");
+    for (&names, resources) in NAMES.iter().zip(&all) {
+        let (counts, capped) = kept_by_components(resolve, resources)
+            .unwrap_or_else(|e| panic!("resources-components/{names}: {e}"));
+        let expected: Vec<(Vec<u8>, u32)> = (0..names)
+            .zip(SPACES.iter().cycle())
+            .map(|(at, case)| (format!("CS{at}").into_bytes(), case.count))
+            .collect();
+        assert!(
+            counts == expected,
+            "resources-components/{names}: each name's count, in order"
+        );
+        assert!(
+            capped.is_empty(),
+            "resources-components/{names}: no cap met"
+        );
+        group.throughput(Throughput::Elements(names as u64));
+        group.bench_function(names.to_string(), |b| {
+            b.iter(|| kept_by_components(resolve, black_box(resources)))
+        });
+    }
+    group.finish();
+}
+
 /// How many colorants the DeviceN space of `colorants` has.
 const COLORANTS: usize = 32;
 
@@ -424,6 +480,7 @@ fn main() {
     count_group(&mut criterion);
     read_group(&mut criterion);
     resources_group(&mut criterion);
+    resources_components_group(&mut criterion);
     colorants_group(&mut criterion);
     criterion.final_summary();
 }

@@ -74,7 +74,7 @@ pub fn components<'o, R: Resolve<'o>>(
 }
 
 /// What [`counted`] gives: a space's count, and whether it's sure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Counted {
     /// What [`components`] gives.

@@ -13,7 +13,7 @@ use pdf_objects::ObjectId;
 /// A place where a color space isn't what ISO 32000-2 says it is. Each names
 /// its clause, but for the caps, which are ours. What a space holds where it's
 /// at fault is on its field: none, unless it says otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// A value that's neither a name nor an array that begins with one
