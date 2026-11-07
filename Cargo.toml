@@ -5,7 +5,9 @@ resolver = "3"
 # [workspace.dependencies] below, and taken with `workspace = true`, so a
 # release moves every requirement on that crate in one edit. A crate joins
 # the table as its first release is made ready; until then, its dependents
-# name its path and version themselves. Nothing else is inherited from here.
+# name its path and version themselves, or its path alone where it's a
+# dev-dependency of a crate published before it, which that crate's package
+# then leaves out. Nothing else is inherited from here.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
