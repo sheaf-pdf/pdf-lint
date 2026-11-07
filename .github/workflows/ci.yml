@@ -83,6 +83,21 @@ jobs:
       - name: Lint for x86_64-pc-windows-gnu and wasm32-unknown-unknown
         run: just structure-cross
 
+  # pdf-structure's tests run on Windows, where a file is read by position
+  # and its identity held by code of its own (same-file's), which no other
+  # job runs. Its one step is cargo's, not a recipe's: `just ci` runs where
+  # this platform isn't.
+  structure-windows:
+    name: pdf-structure's tests on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --locked -p pdf-structure
+
   # The tokenizer's own promises: no std, no alloc, its oldest Rust, what
   # its package holds, and its API against the version published. None of
   # these jobs needs qpdf, and none ever will.

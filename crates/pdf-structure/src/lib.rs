@@ -41,6 +41,13 @@
 //!   to any of pdf-objects' `fault::Sink`s ([`Source::tell_faults`]); none
 //!   looked for, at no cost, where the caller wants none
 //!   ([`Options::faults`]).
+//! - **Its phases traced**, with the `tracing` feature: the open, its
+//!   sections and a scan, each object stream decoded, a whole read, an
+//!   earlier revision's open, and each write and the object streams it
+//!   builds, each a span of [`tracing`](https://docs.rs/tracing), at
+//!   `debug` (an object stream decoded at `trace`), its fields numbers
+//!   alone, never a value, a key, a password or plaintext. Off by default,
+//!   and then nothing of them is compiled.
 //! - **Object streams and cross-reference streams decoded** from their own
 //!   data, through pdf-filters, under limits on what a stream and a
 //!   reading decode to, which a caller sets ([`Limits`], in [`Options`]);
@@ -96,6 +103,7 @@ mod filter;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+mod phases;
 // qpdf, the tests' oracle: a decoder to set the reader's decoding beside,
 // and a second reader.
 #[cfg(test)]

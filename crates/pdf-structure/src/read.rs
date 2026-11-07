@@ -290,6 +290,7 @@ use pdf_objects::version::Version;
 use crate::crypt::{self, Eff, Get, List, Stream, follow, is_xref};
 use crate::filter;
 pub use crate::filter::Unfiltered;
+use crate::phases::phase;
 use crate::source::{
     DataExtent, Document, Encryption, Facts, Held, Origin, Record, Revision, RevisionEnd, Trailer,
     Uncrypt, Unread, Unsupported, Update, XrefKind,
@@ -1503,6 +1504,7 @@ impl Reader {
         native: bool,
         decoder: Option<&dyn Decode>,
     ) -> Result<Reader, F::Error> {
+        phase!(DEBUG, "open", len = file.len());
         let limits = options.limits;
         let mut reader = Reader {
             id: SourceId::next(),
@@ -1925,6 +1927,7 @@ impl Reader {
         given: Option<Result<Vec<u8>, Undecoded>>,
         decoder: Option<&dyn Decode>,
     ) -> Container {
+        phase!(TRACE, "object_stream", number = stream);
         let id = ObjectId::new(stream, 0);
         let mut cx = self.cx();
         let (mut cut, mut unclean) = (false, false);
@@ -2186,6 +2189,7 @@ impl Reader {
         file: F,
         decoder: Option<&dyn Decode>,
     ) -> Result<Whole, F::Error> {
+        phase!(DEBUG, "whole", objects = self.entries.len());
         self.read_all(file, decoder)?;
         let reached = self.reached.load(Ordering::Relaxed);
         let known = self.known();
@@ -2232,6 +2236,7 @@ impl Reader {
     /// [`Reader::faults`] says them. A read the file stops keeps none of
     /// the objects it read unkept.
     fn document<'f, F: Bytes<'f>>(&self, file: F) -> Result<Document, F::Error> {
+        phase!(DEBUG, "whole", objects = self.entries.len());
         let read = |i: usize| match self.slots[i].get() {
             Some(kept) => Ok(Read::clone(kept)),
             None => self.read(file, i),
@@ -2611,6 +2616,7 @@ impl Reader {
         offset: usize,
         decoder: Option<&dyn Decode>,
     ) -> Result<Result<Trailer, Unwritten>, F::Error> {
+        phase!(DEBUG, "sections", at = offset);
         let mut sections: Vec<Section> = Vec::new();
         let mut offsets = Vec::new();
         let mut seen = HashSet::new();
@@ -3266,6 +3272,7 @@ impl Reader {
         cx: &mut Cx,
         why: Unwritten,
     ) -> Result<Trailer, F::Error> {
+        phase!(DEBUG, "scan", len = file.len());
         let all = file.all()?;
         Ok(self.scan_in(&all, cx, why))
     }

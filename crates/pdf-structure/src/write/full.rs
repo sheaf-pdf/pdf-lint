@@ -25,6 +25,7 @@ use super::{
     container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped,
     trailer_entries, usable,
 };
+use crate::phases::phase;
 use crate::source::{Document, XrefKind};
 
 /// A whole file of `bodies`, at the end of `out`: the header, at
@@ -137,6 +138,7 @@ pub fn full<'a>(
 ) -> Result<Written, Error> {
     let start = out.len();
     let bodies: Vec<(ObjectId, Body<'a>)> = bodies.into_iter().collect();
+    phase!(DEBUG, "full", bodies = bodies.len());
     let written = file(out, start, &bodies, trailer, encryptor, from, options);
     if written.is_err() {
         out.truncate(start);
@@ -173,6 +175,7 @@ pub fn document(
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
 ) -> Result<Written, Error> {
+    phase!(DEBUG, "document");
     let trailer = doc.trailer.dict();
     let left = encryption_objects(doc, encryptor);
     let bodies = read(doc).filter(|(id, body)| !left_out(body.object()) && !left.contains(id));
@@ -592,6 +595,7 @@ pub(super) fn containers(
     threads: usize,
     stop: Option<&AtomicBool>,
 ) -> Result<Vec<Option<Vec<u8>>>, Error> {
+    phase!(DEBUG, "containers", groups = groups.len());
     let build = |part: &[(u32, Vec<(ObjectId, Member<'_>)>)]| -> Result<Vec<_>, Error> {
         (part.iter())
             .map(|(n, members)| {

@@ -57,7 +57,9 @@ says how the crates are held to PDFium. Its `tokenizer-package`,
 `objects-package`, `filters-package`, `crypt-package`, `color-package` and
 `structure-package` package the tokenizer, pdf-objects, the filters,
 pdf-crypt, pdf-color and pdf-structure as a publish would (`cargo publish
---dry-run`), which asks the registry over the network.
+--dry-run`), which asks the registry over the network. CI runs
+pdf-structure's tests on Windows too, which no recipe does, as `just ci`
+runs on the platform it's run on.
 `just tokenizer-semver`, `just objects-semver`, `just filters-semver`,
 `just crypt-semver` and `just color-semver`, which `ci` leaves out, check
 the tokenizer's, pdf-objects', the filters', pdf-crypt's and pdf-color's

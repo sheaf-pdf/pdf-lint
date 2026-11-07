@@ -21,6 +21,7 @@ use pdf_objects::{Resolve, Streams, Unreadable, Why};
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{Crypt, Decode, Fault, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
 use crate::crypt::{List, is_xref};
+use crate::phases::phase;
 use crate::source::{
     Document, Encryption, Facts, Record, Revision, Source, Trailer, Unread, Update,
 };
@@ -853,6 +854,7 @@ impl<S: ByteSource> Reading<S> {
     /// It fails only where the source doesn't give the bytes asked of it
     /// ([`Error::Io`]).
     pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
+        phase!(DEBUG, "prefix", len = len);
         // Every option named, so that one more has its say here.
         // Opened by the empty password, its handler's key given it after;
         // its faults looked for where this reading's are.

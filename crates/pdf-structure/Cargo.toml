@@ -24,6 +24,10 @@ thiserror = "2"
 # A written file's second `/ID` element, XXH3-128 of what it wrote; and
 # XXH3-64 of each object's bytes as it's read, which a copy of them checks.
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64", "xxhash3_128"] }
+# The spans of the reader's and the writer's phases, with the `tracing`
+# feature: without its default features, so without the proc macros of
+# `attributes` and the `log` bridge; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 # A file's identity, by a handle held open (`bytes::Identity`): its device
 # and inode on Unix, its volume serial number and file index on Windows.
@@ -41,11 +45,16 @@ libc = "0.2.155"
 # pdf-filters' zlib-rs, so that `Options::flate` and `write::Deflate` can
 # name it.
 zlib-rs = ["pdf-filters/zlib-rs"]
+# Spans over the reader's and the writer's phases, through `tracing`: the
+# open, its sections and a scan, each object stream decoded, a whole read,
+# an earlier revision's open, and each write and the object streams it
+# builds. Off by default; without it, none is compiled.
+tracing = ["dep:tracing"]
 
 # docs.rs documents both Flate backends, as `Options::flate` and
-# `write::Deflate` name either.
+# `write::Deflate` name either, and the spans.
 [package.metadata.docs.rs]
-features = ["zlib-rs"]
+features = ["zlib-rs", "tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
 # bench mode too, so criterion's options reach them as given.

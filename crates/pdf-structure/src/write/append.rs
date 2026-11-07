@@ -20,6 +20,7 @@ use super::{
     Body, Encryptor, Entry, Error, Given, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
     Section, Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
 };
+use crate::phases::phase;
 use crate::read::{ByteSource, Reading, SourceId};
 use crate::source::XrefKind;
 
@@ -323,6 +324,7 @@ pub fn update<'a>(
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
 ) -> Result<Option<Written>, Error> {
+    phase!(DEBUG, "update", at = base.len);
     let start = out.len();
     // After a file written under a renumbering, what was read is in
     // numbers the file doesn't have.
