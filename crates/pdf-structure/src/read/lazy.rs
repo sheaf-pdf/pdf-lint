@@ -821,10 +821,10 @@ fn object_0_in_use_is_said_as_the_file_opens() {
 }
 
 /// A stream's `/Length` by reference is read again with the stream, its
-/// faults said with the stream's, and again with its own object, as the
-/// whole read says them.
+/// faults said with the stream's until its own object is read, then once,
+/// with its own object's, as the whole read says them.
 #[test]
-fn a_length_by_references_faults_are_said_with_the_stream_and_its_own() {
+fn a_length_by_references_faults_are_said_with_the_stream_until_its_own_object_is_read() {
     let file = length_by_reference();
     let reading = open(&file, &[], &Options::DEFAULT);
     let stray = |w: &(Place, Fault)| {
@@ -837,12 +837,10 @@ fn a_length_by_references_faults_are_said_with_the_stream_and_its_own() {
     assert_eq!(&file[at.start..at.end], b"abc");
     let warnings = reading.faults();
     assert!(warnings.len() == 1 && stray(&warnings[0]), "{warnings:?}");
+    let told = warnings[0].clone();
     reading.get(ObjectId::new(4, 0)).unwrap();
     let warnings = reading.faults();
-    assert!(
-        warnings.len() == 2 && warnings.iter().all(stray),
-        "{warnings:?}"
-    );
+    assert_eq!(warnings, [told]);
     assert_eq!(warnings, document(&file, &Options::DEFAULT).faults());
 }
 

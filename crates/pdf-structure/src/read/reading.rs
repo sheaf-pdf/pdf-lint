@@ -808,12 +808,14 @@ impl<S: ByteSource> Reading<S> {
     /// object stream, by number; as it read each object in an object
     /// stream, by number; each of those read that starts inside the bytes
     /// of another read, by stream, then where it starts; and as it
-    /// decrypted each object's strings, by number. Each once: what it told
-    /// as it opened the file of the encryption dictionary, or an object its
-    /// entries refer to, which it reads to open the file, is said where that
-    /// object's own read says it too, there, and where it hasn't read the
-    /// object, as it opened the file. What was read without keeping it isn't
-    /// here; nor is any where faults aren't looked for ([`Options::faults`]).
+    /// decrypted each object's strings, by number. Each once: what a read
+    /// on the way to another object told of it (as the file is opened, of
+    /// the encryption dictionary and what its entries refer to, a
+    /// cross-reference stream and the objects a scan reads; as a stream is
+    /// read, of its indirect `/Length`), which that object's own read tells
+    /// too, is said there, and where it hasn't read the object, where it
+    /// was told. What was read without keeping it isn't here; nor is any
+    /// where faults aren't looked for ([`Options::faults`]).
     pub fn faults(&self) -> Vec<(Place, Fault)> {
         self.reader.faults()
     }

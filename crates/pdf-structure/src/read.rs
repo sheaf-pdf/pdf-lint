@@ -598,9 +598,6 @@ pub(crate) struct Whole {
 struct Known {
     /// What it told of as it opened the file, in order.
     opened: Vec<(Place, Fault)>,
-    /// The objects it read for the encryption dictionary as it opened the
-    /// file, which the whole read reads again ([`Once`]).
-    dictionaries: HashSet<ObjectId>,
     /// Whether faults are looked for ([`Options::faults`]).
     wants: bool,
     /// The trailer.
@@ -729,28 +726,35 @@ impl Assembly {
             whole,
             in_the_clear,
         } = self;
-        // The whole read's faults, told in its order, each once: which of
-        // the open's are said is settled over every read's, then they're
-        // moved.
-        let said: Vec<bool> = {
-            let mut once = Once::new(&known.dictionaries);
+        // The whole read's faults, told in its order, each once: which are
+        // said is settled over borrows of every read's, in that order, then
+        // they're moved.
+        let (opened, read_said, members_said) = {
+            let mut once = Once::default();
             for (id, faults) in read.iter().chain(&members) {
                 once.own(*id, faults);
             }
-            (known.opened.iter()).map(|told| once.says(told)).collect()
+            let opened = once.each(None, &known.opened);
+            let read: Vec<_> = (read.iter())
+                .map(|(id, f)| once.each(Some(*id), f))
+                .collect();
+            let members: Vec<_> = (members.iter())
+                .map(|(id, f)| once.each(Some(*id), f))
+                .collect();
+            (opened, read, members)
         };
-        let opened =
-            (known.opened.into_iter().zip(said)).filter_map(|(told, said)| said.then_some(told));
         let mut cx = Cx {
-            faults: opened.collect(),
+            faults: said_of(known.opened, opened).collect(),
             wants: known.wants,
             resolving: false,
         };
-        cx.faults
-            .extend(read.into_iter().flat_map(|(_, faults)| faults));
+        for ((_, faults), said) in read.into_iter().zip(read_said) {
+            cx.faults.extend(said_of(faults, said));
+        }
         cx.faults.extend(containers);
-        cx.faults
-            .extend(members.into_iter().flat_map(|(_, faults)| faults));
+        for ((_, faults), said) in members.into_iter().zip(members_said) {
+            cx.faults.extend(said_of(faults, said));
+        }
         let records = objects.values().filter_map(|o| o.as_ref().ok()?.1.as_ref());
         overlaps(records, &mut cx);
         cx.faults.extend(decrypted);
@@ -818,35 +822,29 @@ fn overlaps<'r>(records: impl Iterator<Item = &'r Record>, sink: &mut impl Sink<
     }
 }
 
-/// Which of the faults the open told a reading says, so that each is said
-/// once: the open reads the encryption dictionary, and what its entries
-/// refer to, to open the file, and the reading reads each of those again
-/// as an object, so a fault the open told on one of them is said where that
-/// object's own read says it, in its place in the whole read's order, and
-/// isn't said again as the open's. Where its own read hasn't told one equal
-/// to it (the reading hasn't read the object, or no entry lists it), it's
-/// said the first time it's told. Nothing told is lost: what's left out is
-/// equal to one that's said, its place and its words.
+/// Which of the faults a reading's reads told it says, so that each is
+/// said once. A read on the way to another object reads that object as
+/// its own read does, telling the same faults: the open reads the
+/// encryption dictionary and what its entries refer to, a cross-reference
+/// stream for its rows (which a section that lists itself lists as an
+/// object), and, where the sections don't read, the objects the scan finds
+/// from the file's end until a cross-reference stream; and a stream's read
+/// reads its indirect `/Length`. So a fault one read told on an object not
+/// its own is said where that object's own read says it, in its place in
+/// the whole read's order, and isn't said again where the other read told
+/// it. Where its own read hasn't told one equal to it (the reading hasn't
+/// read the object, or no entry lists it), it's said the first time it's
+/// told. Nothing told is lost: what's left out is equal to one that's said,
+/// its place and its words.
+#[derive(Default)]
 struct Once<'r> {
-    /// The objects the open read for the encryption dictionary.
-    dictionaries: &'r HashSet<ObjectId>,
     /// What each object's own read told of, by its id.
     own: BTreeMap<ObjectId, &'r [(Place, Fault)]>,
-    /// What the open told of on each object, as it's said.
+    /// What reads not each object's own told of on it, as it's said.
     said: BTreeMap<ObjectId, Vec<&'r (Place, Fault)>>,
 }
 
 impl<'r> Once<'r> {
-    /// Before any read is known, the open having read `dictionaries` for
-    /// the encryption dictionary.
-    fn new(dictionaries: &'r HashSet<ObjectId>) -> Once<'r> {
-        Once {
-            dictionaries,
-            own: BTreeMap::new(),
-            said: BTreeMap::new(),
-        }
-    }
-
     /// Object `id`'s own read told of `faults`.
     fn own(&mut self, id: ObjectId, faults: &'r [(Place, Fault)]) {
         if !faults.is_empty() {
@@ -854,9 +852,10 @@ impl<'r> Once<'r> {
         }
     }
 
-    /// Whether `told`, which the open told, is said.
-    fn says(&mut self, told: &'r (Place, Fault)) -> bool {
-        let Some(on) = told.0.object.filter(|on| self.dictionaries.contains(on)) else {
+    /// Whether `told`, which the read of object `by` told (none: the
+    /// open), is said.
+    fn says(&mut self, by: Option<ObjectId>, told: &'r (Place, Fault)) -> bool {
+        let Some(on) = told.0.object.filter(|&on| Some(on) != by) else {
             return true;
         };
         if self.own.get(&on).is_some_and(|own| own.contains(told)) {
@@ -869,6 +868,17 @@ impl<'r> Once<'r> {
         said.push(told);
         true
     }
+
+    /// Whether each of `faults`, which the read of object `by` told (none:
+    /// the open), is said, in turn.
+    fn each(&mut self, by: Option<ObjectId>, faults: &'r [(Place, Fault)]) -> Vec<bool> {
+        faults.iter().map(|told| self.says(by, told)).collect()
+    }
+}
+
+/// `faults` that are said, as `said` has it of each in turn ([`Once`]).
+fn said_of(faults: Vec<(Place, Fault)>, said: Vec<bool>) -> impl Iterator<Item = (Place, Fault)> {
+    (faults.into_iter().zip(said)).filter_map(|(told, said)| said.then_some(told))
 }
 
 /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
@@ -1986,20 +1996,22 @@ impl Reader {
         if !cx.wants {
             return cx.faults;
         }
-        let mut once = Once::new(&self.list.dictionaries);
+        let mut once = Once::default();
         for (id, read) in reads(false).chain(reads(true)) {
             once.own(id, &read.faults);
         }
-        let opened = self.opened.iter().filter(|told| once.says(told));
+        let opened = self.opened.iter().filter(|told| once.says(None, told));
         cx.faults.extend(opened.cloned());
-        for (_, read) in reads(false) {
-            cx.faults.extend(read.faults.iter().cloned());
+        for (id, read) in reads(false) {
+            let said = read.faults.iter().filter(|told| once.says(Some(id), told));
+            cx.faults.extend(said.cloned());
         }
         for container in self.containers.values().filter_map(OnceLock::get) {
             cx.faults.extend(container.faults.iter().cloned());
         }
-        for (_, read) in reads(true) {
-            cx.faults.extend(read.faults.iter().cloned());
+        for (id, read) in reads(true) {
+            let said = read.faults.iter().filter(|told| once.says(Some(id), told));
+            cx.faults.extend(said.cloned());
         }
         let records = reads(true).filter_map(|(_, read)| Some(&read.object.as_ref().ok()?.1));
         overlaps(records, &mut cx);
@@ -2014,7 +2026,6 @@ impl Reader {
     fn known(&self) -> Known {
         Known {
             opened: self.opened.clone(),
-            dictionaries: self.list.dictionaries.clone(),
             wants: self.wants,
             trailer: self.trailer.clone(),
             version: self.version,

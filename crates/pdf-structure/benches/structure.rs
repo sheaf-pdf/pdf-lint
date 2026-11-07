@@ -526,8 +526,10 @@ fn faults_group(c: &mut Criterion, files: &Files) {
         let doc = api::whole_as(file, kept);
         let listed = OBJECTS as usize;
         assert_eq!(doc.objects().count(), listed, "faults/{name}: the objects");
-        // Each object's own, and as many as one more for each content
-        // stream, its `/Length` object's said with the stream too.
+        // Each object's own: once, where a reader says a `/Length`
+        // object's fault once, at its own read; and as many as one more for
+        // each content stream where it says it with the stream too, as the
+        // base the benchmarks are set beside does.
         let said = api::faults(&doc);
         match kept || !api::QUIET {
             true => assert!(
