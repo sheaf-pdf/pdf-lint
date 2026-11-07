@@ -33,6 +33,7 @@ decrypts what's encrypted itself.
 | [pdf-fonts](crates/pdf-fonts) | PDF's fonts read: a font dictionary's codes, CIDs, widths, heights and text as PDFium reads them, what's guessed said, each read once and charged to a budget; simple fonts' encodings and the text of glyph names, the standard 14's names as PDFium takes them and their widths, boxes and heights from Adobe's metrics, how PDFium reads each predefined CMap, with Adobe's own behind a feature, and what a font's program says of its glyphs' boxes, its heights and its text, through skrifa |
 | [pdf-linearize](crates/pdf-linearize) | PDF files laid out for reading over a network, with no object model of its own: a graph of objects, of any model, planned into Annex F's order, numbers and object streams, and the bytes around a caller's bodies assembled, the padded dictionary, both cross-reference sections and the hint tables, which also read back from any bytes, under caps; a document of pdf-structure's written so, its inherited attributes pushed down, encrypted or in the clear, or one of lopdf's, in the clear; and the facts of any file that says it's one held against each other, each finding graded |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
+| [pdf-fixtures](crates/pdf-fixtures) | The tests' PDF files, written from pdf-objects' values, whole or by hand and encrypted, and qpdf run as a second reader and decoder: the workspace's own, which the crates' tests take by its path, never published |
 
 ## Development
 
@@ -94,7 +95,7 @@ twice a week, each run starting from the inputs the runs before it kept
 ## License
 
 pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
-pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts and pdf-linearize are licensed under
+pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts, pdf-linearize and pdf-fixtures are licensed under
 either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
 ([LICENSE-MIT](LICENSE-MIT)) at your option, pdf-fonts' data under the terms each
 of its files carries, and what it takes from FreeType under FreeType's,
