@@ -76,7 +76,8 @@
 # smaller caps where none was met and a failing resolver's reason kept, read as
 # a typed space, the same whatever the sink, a failing read included, counting as
 # it was counted where no fault was told and no cap met, and read as resources,
-# the same by name as in order, and `pdf_color::fuzz::over`, what a file's objects
+# the same by name as in order, its names counted as they're given as each is
+# counted alone, and `pdf_color::fuzz::over`, what a file's objects
 # count, say as typed spaces and name through a reading and the document it makes,
 # which three stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_bytes_keep_every_promise`,
