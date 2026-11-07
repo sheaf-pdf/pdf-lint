@@ -98,6 +98,7 @@ mod handler;
 mod hmac;
 mod md5;
 mod password;
+mod permissions;
 mod rc4;
 mod sha2;
 #[cfg(test)]
@@ -111,6 +112,7 @@ use std::fmt;
 
 pub use handler::{Handler, Method};
 pub use password::{Encoded, Encoding, Password, Unusable};
+pub use permissions::{Changes, Permissions, Printing};
 pub use rand_core;
 
 /// An encryption dictionary's values, as the standard security handler

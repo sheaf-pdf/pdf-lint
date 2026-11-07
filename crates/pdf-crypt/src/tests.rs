@@ -8,8 +8,8 @@ use rand_core::{CryptoRng, Rng, SeedableRng};
 use crate::aes::Aes;
 use crate::writer::{self, Kind, Settings};
 use crate::{
-    CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password, Refused,
-    Unusable,
+    Changes, CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password,
+    Permissions, Printing, Refused, Unusable,
 };
 
 /// A file qpdf 12.3 encrypted (`qpdf --encrypt`, the vector's name its
@@ -460,6 +460,9 @@ fn a_perms_that_doesnt_match_is_a_fault_and_the_file_opens() {
     let handler = Handler::open(&dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
     assert_eq!(handler.faults(), [Fault::Perms]);
     assert_eq!(hex(handler.key()), v.key);
+    // The permissions are /P's, not /Perms' copy.
+    let permissions = Permissions::ALL.without(Permissions::PRINT);
+    assert_eq!(handler.permissions(), permissions);
 }
 
 #[test]
@@ -1602,6 +1605,235 @@ fn a_password_not_prepared_or_not_1_to_127_bytes_makes_no_new_file() {
     let (_, dictionary) = created(&"\u{2168}".repeat(63), true, 1);
     let opened = Handler::open(&dictionary, b"", &Password(&"IX".repeat(63)).encodings());
     assert!(opened.unwrap().owner());
+}
+
+/// The eight permissions, in the order of their bits.
+const EACH: [Permissions; 8] = [
+    Permissions::PRINT,
+    Permissions::MODIFY,
+    Permissions::COPY,
+    Permissions::ANNOTATE,
+    Permissions::FILL_FORMS,
+    Permissions::ACCESSIBILITY,
+    Permissions::ASSEMBLE,
+    Permissions::PRINT_HIGH,
+];
+
+/// The set of the permissions whose places in [`EACH`] are `n`'s bits: each
+/// of the 256 sets, by one byte.
+fn permissions(n: u8) -> Permissions {
+    (0..8)
+        .filter(|i| n >> i & 1 == 1)
+        .fold(Permissions::NONE, |set, i| set | EACH[i])
+}
+
+/// `/P` is read by its low 32 bits, its eight permissions' bits alone: as
+/// written from revision 3, later ones too, and at revision 2, and below,
+/// with each of the four bits it hasn't following the bit that covers it
+/// there. A set written as revision 3 writes it reads back as itself;
+/// `/P`'s reserved bits are 7, 8 and 13 to 32 set, 1 and 2 clear, so it's
+/// negative.
+#[test]
+fn permissions_are_read_from_p_by_the_revisions_meaning_of_its_bits() {
+    // Every permission, however /P is written: as a 32-bit integer, its
+    // unsigned reading, with bits past 32, and with the reserved bits clear.
+    for p in [-4, 4_294_967_292, -4 + (1 << 40), 0xF3C] {
+        for r in [0, 2, 3, 4, 5, 6, 7] {
+            assert_eq!(Permissions::from_p(p, r), Permissions::ALL, "{p} at {r}");
+        }
+    }
+    // None: bits 1 and 2 and the reserved ones are ignored.
+    for p in [0, 3, -3904, i64::MIN, 1 << 32, i64::MAX & !0xF3C] {
+        for r in [0, 2, 3, 6] {
+            assert_eq!(Permissions::from_p(p, r), Permissions::NONE, "{p} at {r}");
+        }
+    }
+    let covers = [
+        (Permissions::ANNOTATE, Permissions::FILL_FORMS),
+        (Permissions::COPY, Permissions::ACCESSIBILITY),
+        (Permissions::MODIFY, Permissions::ASSEMBLE),
+        (Permissions::PRINT, Permissions::PRINT_HIGH),
+    ];
+    for n in 0..=255 {
+        let set = permissions(n);
+        let p = set.p();
+        assert!(p < 0, "{set:?}");
+        assert_eq!(
+            p as u32 & 0xFFFF_F0C3,
+            0xFFFF_F0C0,
+            "{set:?}: reserved bits"
+        );
+        for (permission, bit) in EACH.into_iter().zip([3, 4, 5, 6, 9, 10, 11, 12]) {
+            let written = p >> (bit - 1) & 1 == 1;
+            assert_eq!(written, set.contains(permission), "{set:?}: bit {bit}");
+        }
+        for r in 3..=7 {
+            assert_eq!(Permissions::from_p(p, r), set, "{set:?} at {r}");
+        }
+        assert_eq!(Permissions::from_p(p + (1 << 32), 6), set, "{set:?}");
+        // At revision 2, the four bits it has as written, each covering
+        // its later one.
+        let old = Permissions::from_p(p, 2);
+        assert_eq!(Permissions::from_p(p, 1), old, "{set:?} at 1");
+        for (by, covered) in covers {
+            assert_eq!(old.contains(by), set.contains(by), "{set:?}: {by:?}");
+            assert_eq!(
+                old.contains(covered),
+                set.contains(by),
+                "{set:?}: {covered:?}"
+            );
+        }
+    }
+    // qpdf's 40-bit file with printing alone: bits 9 to 12 set, but only
+    // printing's high quality read from them at revision 2.
+    assert_eq!(
+        Permissions::from_p(-60, 2),
+        Permissions::PRINT | Permissions::PRINT_HIGH
+    );
+    assert_eq!(
+        Permissions::from_p(-60, 3),
+        Permissions::ALL.without(Permissions::MODIFY | Permissions::COPY | Permissions::ANNOTATE)
+    );
+    assert_eq!(Permissions::ALL.p(), -4);
+    assert_eq!(Permissions::NONE.p(), -3904);
+}
+
+/// The levels of printing and of changes a security dialog offers, with
+/// copying and accessibility, are the bits qpdf 12.4.2 sets for its own
+/// (`--encrypt user owner 256` with `--print`, `--modify` and `--extract`),
+/// bit 10 set as a revision 6 file has it: every permission -4, none
+/// -3392, printing at a low quality alone -3388, assembling and copying
+/// -2352, filling in forms with printing at a low quality and copying
+/// -2092, commenting with printing at the highest quality -28. Each
+/// level of changes grants the one before it and more; each level of
+/// printing reads back from its bits.
+#[test]
+fn a_security_dialogs_levels_are_the_bits_qpdf_sets() {
+    let level = |printing: Printing, changes: Changes, copy: bool| {
+        let copy = if copy {
+            Permissions::COPY
+        } else {
+            Permissions::NONE
+        };
+        Permissions::from(printing) | Permissions::from(changes) | copy | Permissions::ACCESSIBILITY
+    };
+    let cases = [
+        ((Printing::High, Changes::Any, true), -4),
+        ((Printing::Denied, Changes::Denied, false), -3392),
+        ((Printing::Low, Changes::Denied, false), -3388),
+        ((Printing::Denied, Changes::Assemble, true), -2352),
+        ((Printing::Low, Changes::FillForms, true), -2092),
+        ((Printing::High, Changes::CommentAndFill, false), -28),
+    ];
+    for ((printing, changes, copy), p) in cases {
+        let set = level(printing, changes, copy);
+        assert_eq!(set.p(), p, "{printing:?}, {changes:?}, {copy}");
+        assert_eq!(set.printing(), printing, "{set:?}");
+    }
+    assert_eq!(level(Printing::High, Changes::Any, true), Permissions::ALL);
+    for (i, printing) in Printing::ALL.into_iter().enumerate() {
+        assert_eq!(printing as usize, i);
+        assert_eq!(Permissions::from(printing).printing(), printing);
+    }
+    // Bit 12 qualifies bit 3: alone, it doesn't print.
+    assert_eq!(Permissions::PRINT_HIGH.printing(), Printing::Denied);
+    for (i, changes) in Changes::ALL.into_iter().enumerate() {
+        assert_eq!(changes as usize, i);
+        let set = Permissions::from(changes);
+        assert_eq!(set.printing(), Printing::Denied, "{changes:?}");
+        assert!(!set.contains(Permissions::COPY), "{changes:?}");
+        if let Some(&before) = Changes::ALL.get(i.wrapping_sub(1)) {
+            let before = Permissions::from(before);
+            assert!(set.contains(before) && set != before, "{changes:?}");
+        }
+    }
+    assert_eq!(Permissions::from(Changes::Denied), Permissions::NONE);
+    let any = Permissions::from(Changes::Any);
+    let rest = Permissions::from(Printing::High) | Permissions::COPY | Permissions::ACCESSIBILITY;
+    assert_eq!(any | rest, Permissions::ALL);
+    assert_eq!(Permissions::ALL.without(rest), any);
+}
+
+/// A set's `Debug` names its bits by their constants, its `Display` in
+/// words, in the order of the bits whatever the order they were joined in;
+/// the empty set is `NONE` and `none`.
+#[test]
+fn permissions_debug_and_display_name_the_bits() {
+    let set = Permissions::COPY | Permissions::PRINT;
+    assert_eq!(format!("{set:?}"), "Permissions(PRINT | COPY)");
+    assert_eq!(set.to_string(), "print, copy");
+    assert_eq!(format!("{:?}", Permissions::NONE), "Permissions(NONE)");
+    assert_eq!(Permissions::NONE.to_string(), "none");
+    assert_eq!(
+        format!("{:?}", Permissions::ALL),
+        "Permissions(PRINT | MODIFY | COPY | ANNOTATE | FILL_FORMS | ACCESSIBILITY | ASSEMBLE | PRINT_HIGH)"
+    );
+    assert_eq!(
+        Permissions::ALL.to_string(),
+        "print, modify, copy, annotate, fill forms, accessibility, assemble, print high"
+    );
+    assert_eq!(
+        format!("{:?}", Permissions::FILL_FORMS),
+        "Permissions(FILL_FORMS)"
+    );
+    assert_eq!(
+        (Permissions::PRINT_HIGH | Permissions::ASSEMBLE).to_string(),
+        "assemble, print high"
+    );
+    for (i, permission) in EACH.into_iter().enumerate() {
+        assert_eq!(permission, permissions(1 << i));
+        assert!(Permissions::ALL.contains(permission));
+        assert!(!Permissions::NONE.contains(permission));
+        assert_eq!(
+            Permissions::ALL.without(permission).union(permission),
+            Permissions::ALL
+        );
+    }
+}
+
+/// A handler opened by either password says the permissions its `/P`
+/// grants by its revision's meaning of the bits, on every revision; the
+/// handler's `Debug` says them too.
+#[test]
+fn a_handler_says_the_permissions_its_p_grants() {
+    let id = b"0123456789abcdef";
+    let kinds = [
+        Kind::Rc4By40,
+        Kind::Rc4By128,
+        Kind::Aes128,
+        Kind::Aes256R5,
+        Kind::Aes256,
+    ];
+    for kind in kinds {
+        for p in [-4, -3904, -60, -3388, -28, 4_294_967_292, 0] {
+            let dictionary = writer::dictionary(&Settings {
+                kind,
+                user: b"user",
+                owner: b"owner",
+                p,
+                id,
+                encrypt_metadata: true,
+            });
+            let expected = Permissions::from_p(p, dictionary.r);
+            for (password, owner) in [("user", false), ("owner", true)] {
+                let what = format!("{kind:?}, {p}, {password}");
+                let opened = Handler::open(&dictionary, id, &Password(password).encodings());
+                let handler = opened.unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert_eq!(handler.owner(), owner, "{what}");
+                assert_eq!(handler.faults(), [], "{what}");
+                assert_eq!(handler.permissions(), expected, "{what}");
+                let shown = format!("{handler:?}");
+                assert!(
+                    shown.contains(&format!("permissions: {expected:?}")),
+                    "{shown}"
+                );
+            }
+        }
+    }
+    for v in vectors() {
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+        assert_eq!(handler.permissions(), Permissions::ALL, "{}", v.name);
+    }
 }
 
 /// The README is shown on crates.io and docs.rs, where a path beside the

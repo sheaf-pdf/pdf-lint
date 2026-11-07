@@ -17,7 +17,9 @@ use crate::md5::md5;
 use crate::password::is_prepared;
 use crate::rc4::rc4;
 use crate::sha2::{sha256, sha384, sha512};
-use crate::{CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Refused, Unusable};
+use crate::{
+    CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Permissions, Refused, Unusable,
+};
 
 /// The padding a password of revisions 2 to 4 is filled out with
 /// (Algorithm 2, step a).
@@ -97,6 +99,8 @@ pub struct Handler {
     streams: Method,
     filters: BTreeMap<Vec<u8>, Method>,
     encrypt_metadata: bool,
+    /// What `/P` grants, by the revision's meaning of its bits.
+    permissions: Permissions,
     faults: Vec<Fault>,
     /// Which of the passwords given opened it, and in which encoding.
     by: Option<(usize, Encoding)>,
@@ -111,6 +115,7 @@ impl fmt::Debug for Handler {
             .field("streams", &self.streams)
             .field("filters", &self.filters)
             .field("encrypt_metadata", &self.encrypt_metadata)
+            .field("permissions", &self.permissions)
             .field("faults", &self.faults)
             .field("opened_by", &self.by)
             .finish_non_exhaustive()
@@ -194,6 +199,7 @@ impl Handler {
             streams,
             filters,
             encrypt_metadata: file.encrypt_metadata,
+            permissions: Permissions::from_p(i64::from(file.p), file.r),
             faults: fault.into_iter().collect(),
             by: given.then(|| (i, passwords[i].encoding())),
         })
@@ -282,6 +288,7 @@ impl Handler {
             streams,
             filters,
             encrypt_metadata,
+            permissions: Permissions::ALL,
             faults: Vec::new(),
             by: None,
         };
@@ -327,6 +334,20 @@ impl Handler {
     #[must_use]
     pub const fn encrypts_metadata(&self) -> bool {
         self.encrypt_metadata
+    }
+
+    /// The permissions the file grants one who opens it with the user's
+    /// password: its `/P`, by the revision's meaning of the bits
+    /// ([`Permissions::from_p`]); or a new file's, as
+    /// [`Handler::create`] wrote them. `/P`'s, not `/Perms`' copy, where
+    /// the two disagree, as qpdf reads them: [`Fault::Perms`] says they do.
+    /// A handler opened by the owner's password says them too, though the
+    /// owner isn't held to them ([`Handler::owner`]); a reader honours them
+    /// or not, as pdf-crypt decrypts all of a file it opens whatever they
+    /// withhold.
+    #[must_use]
+    pub const fn permissions(&self) -> Permissions {
+        self.permissions
     }
 
     /// What was wrong with the dictionary though it opened: `/Perms` that
