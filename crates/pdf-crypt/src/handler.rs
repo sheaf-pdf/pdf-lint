@@ -205,11 +205,13 @@ impl Handler {
     /// filter `/StdCF`, `/CFM /AESV3`), the document's metadata as
     /// `encrypt_metadata` says, every permission granted (`/P -4`, bits 1
     /// and 2 clear as Table 22 has them), and the owner's password the
-    /// user's, so that it opens by the one password, as the owner's. `/U`
-    /// and `/UE`, `/O` and `/OE`, and `/Perms` are made by Algorithms 8, 9
-    /// and 10, from what's drawn from `rng` in this order: the file's key
-    /// (32 bytes), the user's validation and key salts, the owner's (8 bytes
-    /// each), and `/Perms`' 4 random bytes. pdf-crypt draws on no
+    /// user's, so that it opens by the one password, as the owner's: an
+    /// owner's password of its own and permissions short of every one
+    /// aren't made here, and would come by a constructor beside this one.
+    /// `/U` and `/UE`, `/O` and `/OE`, and `/Perms` are made by Algorithms
+    /// 8, 9 and 10, from what's drawn from `rng` in this order: the file's
+    /// key (32 bytes), the user's validation and key salts, the owner's (8
+    /// bytes each), and `/Perms`' 4 random bytes. pdf-crypt draws on no
     /// randomness of its own: a program passes the operating system's, and
     /// a test a seeded generator, the same draws giving the same dictionary.
     /// The dictionary is whole as it's given: its crypt filter's

@@ -8,7 +8,7 @@ repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-crypt"
 description = "PDF's standard security handler: decrypting, with every fault said, and encrypting for a writer"
 keywords = ["pdf", "decryption", "encryption", "rc4", "aes"]
-categories = ["cryptography", "parser-implementations"]
+categories = ["cryptography", "encoding"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 

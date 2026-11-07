@@ -56,6 +56,39 @@
 //! every revision and encrypts under IVs given, its salts and keys given
 //! too: for test files, not for protecting a document. docs.rs documents
 //! the crate without it.
+//!
+//! A new file's encryption, from a seeded generator (RustCrypto's
+//! `chacha20`, with its `rng` feature) where a program would pass the
+//! operating system's, and the file opened by its password:
+//!
+//! ```
+//! use chacha20::ChaCha20Rng;
+//! use pdf_crypt::rand_core::SeedableRng;
+//! use pdf_crypt::{Encoding, Handler, Password, Refused};
+//!
+//! // The password prepared: Ⅸ's SASLprep form is `IX`.
+//! let password = Password("\u{2168}").prepared().unwrap();
+//! assert_eq!(password.as_bytes(), b"IX");
+//! let mut rng = ChaCha20Rng::seed_from_u64(7);
+//! let (writer, dictionary) = Handler::create(&password, true, &mut rng).unwrap();
+//! assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-4)));
+//!
+//! // A writer encrypts a string of object 5 under it, AES's IV derived from
+//! // what it names the object by and the string: the same each time.
+//! let title = writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap();
+//! assert_eq!(writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap(), title);
+//!
+//! // A reader opens it by the password as typed, in its SASLprep form, as the
+//! // owner's (revision 6 takes no /ID), and decrypts.
+//! let reader = Handler::open(&dictionary, b"", &Password("\u{2168}").encodings()).unwrap();
+//! assert!(reader.owner());
+//! assert_eq!(reader.opened_by(), Some((0, Encoding::Saslprep)));
+//! assert_eq!(reader.decrypt_string((5, 0), &title).unwrap(), b"A title");
+//!
+//! // Another password doesn't open it.
+//! let wrong = Password("IV").encodings();
+//! assert_eq!(Handler::open(&dictionary, b"", &wrong).unwrap_err(), Refused::Password);
+//! ```
 
 mod aes;
 #[cfg(any(test, fuzzing))]

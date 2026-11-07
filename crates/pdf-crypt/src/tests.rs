@@ -1,5 +1,6 @@
 //! The handler on files qpdf wrote, each way it encrypts, and on what the
-//! writer writes; its faults and refusals; and the README's links.
+//! writer writes; its faults and refusals; and the README's links and
+//! first example.
 
 use chacha20::ChaCha20Rng;
 use rand_core::{CryptoRng, Rng, SeedableRng};
@@ -1619,4 +1620,26 @@ fn the_readmes_licence_links_reach_the_files() {
         );
     }
     assert!(!readme.contains("](../"), "a link climbs out of the crate");
+}
+
+/// The crate doc's example is the README's first, line for line, so that
+/// it runs as a dependent builds the crate: the README's examples run as
+/// doctests only with the `writer` feature, which the second needs, while
+/// the crate doc's runs without it, on Rust 1.85 too.
+#[test]
+fn the_crate_docs_example_is_the_readmes_first() {
+    let readme: Vec<&str> = (include_str!("../README.md").lines())
+        .skip_while(|line| *line != "```rust")
+        .skip(1)
+        .take_while(|line| *line != "```")
+        .collect();
+    let doc: Vec<&str> = (include_str!("lib.rs").lines())
+        .map_while(|line| line.strip_prefix("//!"))
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .skip_while(|line| *line != "```")
+        .skip(1)
+        .take_while(|line| *line != "```")
+        .collect();
+    assert!(readme.len() > 10, "the README's first example: {readme:?}");
+    assert_eq!(doc, readme);
 }
