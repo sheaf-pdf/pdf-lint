@@ -275,6 +275,42 @@ jobs:
       - name: Package, and check what the package holds
         run: just color-package
 
+  # pdf-objects' and the filters' public API against their version on
+  # crates.io, as the tokenizer's job holds its own, with the same pinned
+  # tool on the same pinned Rust. Each is an alpha, which the tool takes to
+  # allow anything, so the recipe holds it another way: while the manifest
+  # names a published version, no change of the API passes; a version not
+  # published yet is the next alpha, held by nothing here.
+  objects-semver:
+    name: Objects against their published API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - uses: extractions/setup-just@v4
+      - name: Check the API against the version published
+        run: just objects-semver
+
+  filters-semver:
+    name: Filters against their published API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - uses: extractions/setup-just@v4
+      - name: Check the API against the version published
+        run: just filters-semver
+
   structure-msrv:
     name: Structure on its minimum Rust
     runs-on: ubuntu-latest

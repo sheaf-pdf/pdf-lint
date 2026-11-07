@@ -58,8 +58,11 @@ says how the crates are held to PDFium. Its `tokenizer-package`,
 package the tokenizer, pdf-objects, the filters, pdf-crypt and pdf-color as
 a publish would (`cargo publish --dry-run`), which asks the registry over
 the network.
-`just tokenizer-semver`, which `ci` leaves out, checks the tokenizer's
-public API against the version published on crates.io and needs
+`just tokenizer-semver`, `just objects-semver` and `just filters-semver`,
+which `ci` leaves out, check the tokenizer's, pdf-objects' and the filters'
+public API against the version published on crates.io (an alpha, while its
+manifest names a published version, is held to that version's API: a change
+needs the next alpha) and need
 [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks)
 installed (CI installs 0.51.0 on a Rust pinned beside it).
 
