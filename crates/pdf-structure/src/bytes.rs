@@ -570,16 +570,21 @@ pub(crate) fn read_opened_by(file: &[u8], passwords: &[Password]) -> (Document, 
     (whole.document, whole.handler)
 }
 
-/// A stream's data decoded, or why not as text, for the tests and fuzz
-/// bodies that set two side by side, as an I/O error can't be compared: a
-/// decode error with what decoded, byte by byte, and its faults, as its
-/// derived `Debug` wrote them, pdf-filters' `Debug` giving the data's
-/// length alone; any other by its `Debug`.
+/// A stream's data decoded, or as written or decrypted, or why not as
+/// text, for the tests and fuzz bodies that set two side by side, as an
+/// I/O error can't be compared: a decode error with what decoded, byte by
+/// byte, and its faults, and a decrypt error with what decrypted, byte by
+/// byte, and its fault, as their derived `Debug` wrote them, pdf-filters'
+/// and pdf-crypt's `Debug` giving the data's length alone; any other by
+/// its `Debug`.
 #[cfg(any(test, fuzzing))]
 pub(crate) fn shown(decoded: Result<Vec<u8>, Error>) -> Result<Vec<u8>, String> {
     decoded.map_err(|error| match error {
         Error::Decode(pdf_filters::Error { data, faults }) => {
             format!("Decode(Error {{ data: {data:?}, faults: {faults:?} }})")
+        }
+        Error::Decrypt(pdf_crypt::Error { data, fault }) => {
+            format!("Decrypt(Error {{ data: {data:?}, fault: {fault:?} }})")
         }
         error => format!("{error:?}"),
     })
@@ -1359,7 +1364,7 @@ impl Reader {
                 Encryption::Unsupported(why) => why.clone(),
                 _ => String::new(),
             };
-            return Err(Refused::Unsupported(why));
+            return Err(Refused::Malformed(why));
         };
         let handler = Handler::open(&lock.values, &lock.id, passwords)?;
         let lock = self.lock.take().expect("kept");
@@ -3291,7 +3296,9 @@ impl Reader {
             .flat_map(|(i, password)| password.encodings().into_iter().map(move |e| (e, i)))
             .unzip();
         let opened = Handler::open(&values, &id, &encoded);
-        if no_id && !matches!(opened, Err(Refused::Unsupported(_))) {
+        // Where a key is made, or would be by a password: the handler
+        // takes the dictionary.
+        if no_id && matches!(opened, Ok(_) | Err(Refused::Password)) {
             let at = trailer.dict().get(b"ID").and_then(|o| o.at);
             let message = "its trailer's /ID has no string first, so its key is made without one";
             cx.warn(None, at, message.to_string());
@@ -3364,7 +3371,9 @@ impl Reader {
             // matter (but a stream's own crypt filter).
             Err(_) if !self.list.strings && !self.list.streams => Encryption::Plain,
             Err(Refused::Password) => Encryption::Locked,
-            Err(Refused::Unsupported(why)) => Encryption::Unsupported(why),
+            Err(Refused::Malformed(why)) => Encryption::Unsupported(why),
+            // Another handler, or a version the standard one isn't: in
+            // its words.
             Err(refused) => Encryption::Unsupported(refused.to_string()),
         }
     }
@@ -6628,6 +6637,61 @@ mod tests {
         );
     }
 
+    /// A file without an `/ID` is said to make its key without one only
+    /// where the standard security handler takes its dictionary, so a key
+    /// is made, or would be by a password: not where it's another
+    /// handler's, or of a `/V` and `/R` the standard one isn't, which the
+    /// reader can't open, as `unlock` says.
+    #[test]
+    fn a_trailer_without_an_id_is_said_only_where_a_key_would_be_made() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let settings = pdf_crypt::writer::Settings {
+            id: b"",
+            ..settings(kind, b"user")
+        };
+        let mut file = fixture::encrypted(&settings, &to_encrypt(&[]), root);
+        let at = find(&file, b"/ID [() ()]").unwrap();
+        file[at..at + 11].fill(b' ');
+        let message = "its trailer's /ID has no string first, so its key is made without one";
+        let said = |file: &[u8]| {
+            let doc = read(file);
+            let warned = doc.warnings.iter().any(|w| w.message == message);
+            (doc.encryption, warned)
+        };
+        let refused = |file: &[u8]| {
+            let locked = Reading::open(file, &Options::DEFAULT).unwrap();
+            let Err((_, why)) = locked.unlock(&Password("user's").encodings()) else {
+                panic!("unlocked");
+            };
+            why
+        };
+        // No password given opens it: a password would make its key.
+        assert_eq!(said(&file), (Encryption::Locked, true));
+        assert_eq!(refused(&file), pdf_crypt::Refused::Password);
+
+        let spliced = |file: &[u8], from: &[u8], to: &[u8]| {
+            let at = find(file, from).unwrap();
+            [&file[..at], to, &file[at + from.len()..]].concat()
+        };
+        let other = spliced(&file, b"/Standard", b"/Standarx");
+        let why = "its security handler is /Standarx, not /Standard".to_string();
+        assert_eq!(said(&other), (Encryption::Unsupported(why), false));
+        let refusal = refused(&other);
+        assert!(
+            matches!(&refusal, pdf_crypt::Refused::OtherHandler { name, .. } if name == b"Standarx"),
+            "{refusal:?}"
+        );
+        let later = spliced(&spliced(&file, b"/V 4", b"/V 6"), b"/R 4", b"/R 7");
+        let why = "it's /V 6 /R 7, which the standard security handler isn't".to_string();
+        assert_eq!(said(&later), (Encryption::Unsupported(why), false));
+        let refusal = refused(&later);
+        assert!(
+            matches!(refusal, pdf_crypt::Refused::Version { v: 6, r: 7, .. }),
+            "{refusal:?}"
+        );
+    }
+
     #[test]
     fn the_trailers_id_is_read_as_written_in_a_file_that_opens() {
         let id = &b"0123456789abcdef"[..];
@@ -7470,8 +7534,9 @@ mod tests {
     /// Two decode errors whose data is a byte apart, which pdf-filters'
     /// `Debug` writes alike, by its length, are told apart as the tests
     /// show them, the data written byte by byte as the derived `Debug`
-    /// wrote it; any other error is its `Debug`, and data that decoded is
-    /// itself.
+    /// wrote it, and two decrypt errors so, which pdf-crypt's `Debug`
+    /// writes alike; any other error is its `Debug`, and data that decoded
+    /// is itself.
     #[test]
     fn tests_show_a_decode_error_with_what_decoded() {
         let decode = |data: &[u8]| {
@@ -7487,6 +7552,25 @@ mod tests {
         assert_ne!(shown(decode(b"ab")), shown(decode(b"ac")));
         let said = "Decode(Error { data: [97, 98], faults: [(0, Checksum)] })";
         assert_eq!(shown(decode(b"ab")), Err(said.to_string()));
+        let decrypt = |data: &[u8]| {
+            Err(Error::Decrypt(pdf_crypt::Error {
+                data: Some(data.to_vec()),
+                fault: pdf_crypt::Fault::Padding,
+            }))
+        };
+        assert_eq!(
+            format!("{:?}", decrypt(b"ab")),
+            format!("{:?}", decrypt(b"ac"))
+        );
+        assert_ne!(shown(decrypt(b"ab")), shown(decrypt(b"ac")));
+        let said = "Decrypt(Error { data: Some([97, 98]), fault: Padding })";
+        assert_eq!(shown(decrypt(b"ab")), Err(said.to_string()));
+        let none = Err(Error::Decrypt(pdf_crypt::Error {
+            data: None,
+            fault: pdf_crypt::Fault::Short { len: 3 },
+        }));
+        let said = "Decrypt(Error { data: None, fault: Short { len: 3 } })";
+        assert_eq!(shown(none), Err(said.to_string()));
         let other = Error::NotAStream {
             id: ObjectId::new(1, 0),
         };

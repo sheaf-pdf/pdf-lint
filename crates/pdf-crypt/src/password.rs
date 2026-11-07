@@ -27,6 +27,10 @@ use zeroize::Zeroizing;
 /// each encoding it may have been set in ([`Password::encodings`]); a new
 /// file takes it in one, strictly ([`Password::prepared`]). Its `Debug`
 /// leaves the text out.
+///
+/// Exhaustive on purpose: a password is its text, built by a literal,
+/// `Password(text)`, and taken apart by it, so a field more would be a
+/// breaking release.
 #[derive(Clone, Copy)]
 pub struct Password<'a>(pub &'a str);
 
@@ -73,12 +77,11 @@ impl Encoding {
     /// SASLprep's forms from 5 to 6, whose passwords are text; the
     /// single-byte encodings from 2 to 4, whose passwords are bytes; UTF-8,
     /// and bytes as given, in any.
-    pub fn fits(self, revision: i64) -> bool {
+    #[must_use]
+    pub const fn fits(self, revision: i64) -> bool {
         match self {
-            Encoding::Saslprep | Encoding::SaslprepCurrentUnicode => (5..=6).contains(&revision),
-            Encoding::PdfDoc | Encoding::WinAnsi | Encoding::MacRoman => {
-                (2..=4).contains(&revision)
-            }
+            Encoding::Saslprep | Encoding::SaslprepCurrentUnicode => matches!(revision, 5..=6),
+            Encoding::PdfDoc | Encoding::WinAnsi | Encoding::MacRoman => matches!(revision, 2..=4),
             Encoding::Utf8 | Encoding::Verbatim => true,
         }
     }
@@ -113,16 +116,19 @@ impl Encoded {
 
     /// `bytes` as they are, in no encoding ([`Encoding::Verbatim`]): a
     /// password that's bytes, not text, or one the caller encoded.
+    #[must_use]
     pub fn verbatim(bytes: &[u8]) -> Encoded {
         Encoded::new(Encoding::Verbatim, bytes)
     }
 
     /// The encoding its bytes are in.
-    pub fn encoding(&self) -> Encoding {
+    #[must_use]
+    pub const fn encoding(&self) -> Encoding {
         self.encoding
     }
 
     /// Its bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -149,6 +155,7 @@ impl Password<'_> {
     /// a single-byte form is left out where UTF-8's or one before it has its
     /// bytes, but not for SASLprep's, which no revision takes beside it.
     /// [`Handler::open`](crate::Handler::open) tries no bytes twice.
+    #[must_use]
     pub fn encodings(&self) -> Vec<Encoded> {
         let text = self.0;
         let typed = text.as_bytes();
@@ -195,13 +202,17 @@ impl Password<'_> {
     /// The bytes a new file's password is set as, strictly, which
     /// [`Handler::create`](crate::Handler::create) takes: its SASLprep form
     /// (RFC 4013) in UTF-8, as revisions 5 and 6 take it (ISO 32000-2,
-    /// 7.6.4.3.3), tagged [`Encoding::Saslprep`]; or why it can't be. Not a
-    /// password SASLprep refuses, the character named where one is why
-    /// ([`Unusable::Prohibited`], [`Unusable::Bidi`]); nor the empty one,
-    /// one that prepares to nothing, or one that prepares to over 127
-    /// bytes, which a reader would cut; nor one whose form by Unicode 3.2
-    /// and by a later Unicode differ ([`Unusable::Ambiguous`]), which
-    /// readers would prepare apart.
+    /// 7.6.4.3.3), tagged [`Encoding::Saslprep`]; or why it can't be.
+    ///
+    /// # Errors
+    ///
+    /// [`Unusable`], saying why. Not a password SASLprep refuses, the
+    /// character named where one is why ([`Unusable::Prohibited`],
+    /// [`Unusable::Bidi`]); nor the empty one ([`Unusable::Empty`]), one
+    /// that prepares to nothing ([`Unusable::Vanished`]), or one that
+    /// prepares to over 127 bytes ([`Unusable::TooLong`]), which a reader
+    /// would cut; nor one whose form by Unicode 3.2 and by a later Unicode
+    /// differ ([`Unusable::Ambiguous`]), which readers would prepare apart.
     pub fn prepared(&self) -> Result<Encoded, Unusable> {
         let text = self.0;
         if text.is_empty() {
@@ -241,13 +252,18 @@ pub(crate) fn is_prepared(bytes: &[u8]) -> bool {
 
 /// Why a password can't be a new file's ([`Password::prepared`],
 /// [`Handler::create`](crate::Handler::create)).
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unusable {
     /// A character SASLprep doesn't allow (RFC 4013, 2.3 and 2.5): a
     /// control or private-use character, say, or one unassigned in the
     /// Unicode it's of, 3.2, as an emoji is. The first of the password's
     /// that it refuses whatever is around it.
+    ///
+    /// It's a character of the password, which `Display` writes as its code
+    /// point and `Debug` as itself: a caller that logs the error logs that
+    /// much of the password. A program that prepares its user's new
+    /// password names it to them, which is what it's for.
     #[error("the password has U+{:04X}, a character SASLprep doesn't allow", u32::from(*.0))]
     Prohibited(char),
     /// Right-to-left text SASLprep doesn't allow (RFC 4013, 2.4): mixed
@@ -283,6 +299,10 @@ pub enum Unusable {
     /// Corrigendum #4 remapped (U+2F874, say), or a sequence Corrigendum #5
     /// composes otherwise (a vowel jamo after a consonant and an accent).
     /// The character where the two forms part.
+    ///
+    /// It's a character of the password, which `Display` writes as its code
+    /// point and `Debug` as itself: a caller that logs the error logs that
+    /// much of the password, as [`Unusable::Prohibited`]'s does.
     #[error(
         "the password has U+{:04X}, where SASLprep by Unicode 3.2 and by a later Unicode differ",
         u32::from(*.0)
@@ -550,18 +570,45 @@ mod tests {
     }
 
     /// SASLprep's forms fit revisions 5 and 6 alone; the single-byte
-    /// encodings, 2 to 4 alone; UTF-8 and bytes as given, any.
+    /// encodings, 2 to 4 alone; UTF-8 and bytes as given, any: each
+    /// encoding's answers for revisions 0 to 8, written out, and for
+    /// revisions far from them.
     #[test]
     fn each_encoding_fits_the_revisions_it_can_have_been_set_for() {
-        for r in 2..=6 {
-            let old = r <= 4;
-            assert!(Encoding::Utf8.fits(r) && Encoding::Verbatim.fits(r), "{r}");
-            assert_eq!(Encoding::Saslprep.fits(r), !old, "{r}");
-            assert_eq!(Encoding::SaslprepCurrentUnicode.fits(r), !old, "{r}");
-            for e in [Encoding::PdfDoc, Encoding::WinAnsi, Encoding::MacRoman] {
-                assert_eq!(e.fits(r), old, "{e:?} {r}");
+        let (no, yes) = (false, true);
+        // Each for revisions 0 to 8.
+        let text = [no, no, no, no, no, yes, yes, no, no];
+        let bytes = [no, no, yes, yes, yes, no, no, no, no];
+        let any = [yes; 9];
+        let answers = [
+            (Encoding::Saslprep, text),
+            (Encoding::SaslprepCurrentUnicode, text),
+            (Encoding::Utf8, any),
+            (Encoding::PdfDoc, bytes),
+            (Encoding::WinAnsi, bytes),
+            (Encoding::MacRoman, bytes),
+            (Encoding::Verbatim, any),
+        ];
+        for (encoding, fits) in answers {
+            for (r, fits) in (0..).zip(fits) {
+                assert_eq!(encoding.fits(r), fits, "{encoding:?} {r}");
+            }
+            let far = encoding == Encoding::Utf8 || encoding == Encoding::Verbatim;
+            for r in [i64::MIN, -1, 9, 127, i64::MAX] {
+                assert_eq!(encoding.fits(r), far, "{encoding:?} {r}");
             }
         }
+    }
+
+    /// Whether an encoding fits a revision can be had in a constant.
+    #[test]
+    fn whether_an_encoding_fits_can_be_had_in_a_constant() {
+        const FITS: [bool; 3] = [
+            Encoding::Saslprep.fits(6),
+            Encoding::PdfDoc.fits(6),
+            Encoding::Verbatim.fits(7),
+        ];
+        assert_eq!(FITS, [true, false, true]);
     }
 
     /// RFC 4013's examples (section 3), prepared as the RFC has them, each

@@ -2174,7 +2174,7 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
         &encrypting,
     );
     let fault = Fault::Method {
-        name: "Nonesuch".to_string(),
+        name: b"Nonesuch".to_vec(),
     };
     let why = Unencryptable::Fault(fault);
     assert_eq!(
@@ -4798,7 +4798,7 @@ fn every_refusal_writes_nothing() {
             Error::Encrypt {
                 id: ObjectId::new(2, 0),
                 why: Unencryptable::Fault(Fault::Method {
-                    name: "Nonesuch".to_string(),
+                    name: b"Nonesuch".to_vec(),
                 }),
             },
         ),

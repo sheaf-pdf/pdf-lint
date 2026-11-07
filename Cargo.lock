@@ -698,11 +698,12 @@ dependencies = [
 
 [[package]]
 name = "pdf-crypt"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "aes",
  "cbc",
  "chacha20",
+ "criterion",
  "hmac",
  "md-5",
  "rand_core",

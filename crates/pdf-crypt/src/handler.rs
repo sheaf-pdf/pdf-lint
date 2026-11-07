@@ -27,13 +27,23 @@ pub(crate) const PADDING: [u8; 32] = [
 ];
 
 /// How a string or a stream is encrypted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `#[non_exhaustive]`, as a method may join it in a minor release:
+/// ISO/TS 32003's AES-GCM, say (`/CFM /AESV4`, of a dictionary of `/V 6
+/// /R 7`), which the handler doesn't read yet: such a dictionary is
+/// refused ([`Refused::Version`]), and a crypt
+/// filter's `/AESV4` in a file it opens is read as a method that isn't
+/// one ([`Method::Unknown`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Method {
     /// Not at all: `/Identity`, or a crypt filter without `/CFM`.
     Identity,
     /// `/CFM /None`: by something not the standard security handler,
-    /// which leaves it as it is.
+    /// which leaves it as it is. A method, named as the file names it, not
+    /// [`Option::None`]: a stream's `crypt` of `Some(&Method::None)` leaves
+    /// its data as it is, where `None` takes the method streams are
+    /// encrypted by ([`Handler::decrypt_stream`]).
     None,
     /// RC4 (`/CFM /V2`, and everything in a file of `/V` 1 or 2).
     ///
@@ -118,6 +128,15 @@ impl Handler {
     /// the empty password. Of revision 5 or 6, the first whose key `/Perms`
     /// confirms, else the first whose key it doesn't
     /// ([`Fault::Unconfirmed`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Refused`], for the first reason the dictionary has: no `/Filter`
+    /// ([`Refused::Malformed`]); another security handler's
+    /// ([`Refused::OtherHandler`]); a `/V` and `/R` the standard handler
+    /// isn't ([`Refused::Version`]); a value it can't take
+    /// ([`Refused::Malformed`]); then none of the passwords, or the empty
+    /// one where none is given, opening it ([`Refused::Password`]).
     pub fn open(
         dictionary: &Dictionary,
         id: &[u8],
@@ -186,11 +205,13 @@ impl Handler {
     /// filter `/StdCF`, `/CFM /AESV3`), the document's metadata as
     /// `encrypt_metadata` says, every permission granted (`/P -4`, bits 1
     /// and 2 clear as Table 22 has them), and the owner's password the
-    /// user's, so that it opens by the one password, as the owner's. `/U`
-    /// and `/UE`, `/O` and `/OE`, and `/Perms` are made by Algorithms 8, 9
-    /// and 10, from what's drawn from `rng` in this order: the file's key
-    /// (32 bytes), the user's validation and key salts, the owner's (8 bytes
-    /// each), and `/Perms`' 4 random bytes. pdf-crypt draws on no
+    /// user's, so that it opens by the one password, as the owner's: an
+    /// owner's password of its own and permissions short of every one
+    /// aren't made here, and would come by a constructor beside this one.
+    /// `/U` and `/UE`, `/O` and `/OE`, and `/Perms` are made by Algorithms
+    /// 8, 9 and 10, from what's drawn from `rng` in this order: the file's
+    /// key (32 bytes), the user's validation and key salts, the owner's (8
+    /// bytes each), and `/Perms`' 4 random bytes. pdf-crypt draws on no
     /// randomness of its own: a program passes the operating system's, and
     /// a test a seeded generator, the same draws giving the same dictionary.
     /// The dictionary is whole as it's given: its crypt filter's
@@ -201,8 +222,11 @@ impl Handler {
     /// /DocOpen` and `/Length 32`, as qpdf writes them.
     ///
     /// The handler is the owner's, as one opened by the password is, but
-    /// [`Handler::opened_by`] is none: no password opened it. Refused, the
-    /// password unused and nothing drawn: one not tagged
+    /// [`Handler::opened_by`] is none: no password opened it.
+    ///
+    /// # Errors
+    ///
+    /// [`Unusable`], the password unused and nothing drawn: one not tagged
     /// [`Encoding::Saslprep`] ([`Unusable::Unprepared`]); and one so tagged
     /// that's empty ([`Unusable::Empty`]) or over 127 bytes
     /// ([`Unusable::TooLong`]), which a reader would cut, or that isn't
@@ -268,12 +292,14 @@ impl Handler {
     /// index among them, and its encoding. None when it was given none, and
     /// opened by the empty password; and for a handler
     /// [created](Handler::create), which no password opened.
-    pub fn opened_by(&self) -> Option<(usize, Encoding)> {
+    #[must_use]
+    pub const fn opened_by(&self) -> Option<(usize, Encoding)> {
         self.by
     }
 
     /// Whether it was opened by the owner's password, not the user's.
-    pub fn owner(&self) -> bool {
+    #[must_use]
+    pub const fn owner(&self) -> bool {
         self.owner
     }
 
@@ -285,24 +311,28 @@ impl Handler {
     }
 
     /// How strings are encrypted (`/StrF`).
-    pub fn strings(&self) -> &Method {
+    #[must_use]
+    pub const fn strings(&self) -> &Method {
         &self.strings
     }
 
     /// How streams are encrypted (`/StmF`).
-    pub fn streams(&self) -> &Method {
+    #[must_use]
+    pub const fn streams(&self) -> &Method {
         &self.streams
     }
 
     /// Whether the document's metadata stream is encrypted
     /// (`/EncryptMetadata`, of a dictionary of `/V` 4 or later).
-    pub fn encrypts_metadata(&self) -> bool {
+    #[must_use]
+    pub const fn encrypts_metadata(&self) -> bool {
         self.encrypt_metadata
     }
 
     /// What was wrong with the dictionary though it opened: `/Perms` that
     /// doesn't match or doesn't confirm the key, as a file of revision 5 or
     /// 6 can have.
+    #[must_use]
     pub fn faults(&self) -> &[Fault] {
         &self.faults
     }
@@ -311,6 +341,7 @@ impl Handler {
     /// encrypted: `/Identity` by name, else the dictionary's crypt filter
     /// of that name. Below `/V` 4, which has no crypt filters, as streams
     /// are, whatever the name.
+    #[must_use]
     pub fn named(&self, name: &[u8]) -> Method {
         match name {
             _ if self.v < 4 => self.streams.clone(),
@@ -321,6 +352,16 @@ impl Handler {
     }
 
     /// The string `data` of object `id`, decrypted.
+    ///
+    /// # Errors
+    ///
+    /// An [`Error`] where it doesn't decrypt cleanly: what decrypted, if
+    /// anything, and its [`Fault`]. AES ciphertext with no whole block past
+    /// its IV ([`Fault::Short`]), a part block past its whole ones
+    /// ([`Fault::PartBlock`]), or plaintext that isn't padded
+    /// ([`Fault::Padding`]); nothing decrypted where the method isn't one
+    /// ([`Fault::Method`]), or is AES that the file's key isn't for
+    /// ([`Fault::Key`]).
     pub fn decrypt_string(&self, id: (u32, u16), data: &[u8]) -> Result<Vec<u8>, Error> {
         self.decrypt(&self.strings, id, data, false)
     }
@@ -328,6 +369,12 @@ impl Handler {
     /// The data of stream `id`, decrypted: by its own `/Crypt` filter's
     /// method when it has one (`crypt`, see [`Handler::named`]), else as
     /// streams are.
+    ///
+    /// # Errors
+    ///
+    /// An [`Error`], as [`Handler::decrypt_string`] gives one, by the
+    /// stream's method; white-space past a stream's whole blocks, as one
+    /// whose `/Length` was recovered has, is left off, not a part block.
     pub fn decrypt_stream(
         &self,
         id: (u32, u16),
@@ -337,9 +384,7 @@ impl Handler {
         self.decrypt(crypt.unwrap_or(&self.streams), id, data, true)
     }
 
-    /// The string `data` of object `id`, encrypted as strings are; or
-    /// [`Fault::Method`] when that's a method that isn't one, and
-    /// [`Fault::Key`] when it's AES that the file's key isn't for.
+    /// The string `data` of object `id`, encrypted as strings are.
     ///
     /// AES's IV is the first 16 bytes of HMAC-SHA256, under the file's key,
     /// of `context`'s length (8 bytes, big-endian), `context` and `data`.
@@ -348,6 +393,12 @@ impl Handler {
     /// same bytes on every save, under any number (AES-256's key is the
     /// file's), and no IV serves two plaintexts. RC4 takes no IV, and
     /// `/Identity` and `/None` leave `data` as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Fault::Method`] when strings are encrypted by a method that isn't
+    /// one, and [`Fault::Key`] when by AES that the file's key isn't for:
+    /// nothing is encrypted, and nothing is given as plaintext.
     pub fn encrypt_string(
         &self,
         id: (u32, u16),
@@ -360,7 +411,12 @@ impl Handler {
     /// The data of stream `id`, encrypted: by its own `/Crypt` filter's
     /// method when it has one (`crypt`, see [`Handler::named`]), else as
     /// streams are; AES's IV from `context` and `data` as
-    /// [`Handler::encrypt_string`]'s is. Faults as it has them.
+    /// [`Handler::encrypt_string`]'s is.
+    ///
+    /// # Errors
+    ///
+    /// [`Fault::Method`] and [`Fault::Key`], as
+    /// [`Handler::encrypt_string`] gives them, by the stream's method.
     pub fn encrypt_stream(
         &self,
         id: (u32, u16),
@@ -406,9 +462,7 @@ impl Handler {
         };
         match method {
             Method::Identity | Method::None => Ok(data.to_vec()),
-            Method::Unknown(name) => Err(Fault::Method {
-                name: String::from_utf8_lossy(name).into_owned(),
-            }),
+            Method::Unknown(name) => Err(Fault::Method { name: name.clone() }),
             Method::Rc4 => Ok(rc4(&self.object_key(id, false), data)),
             Method::Aes128 | Method::Aes256 => aes(),
         }
@@ -427,9 +481,7 @@ impl Handler {
             Method::Identity | Method::None => Ok(data.to_vec()),
             Method::Unknown(name) => Err(Error {
                 data: None,
-                fault: Fault::Method {
-                    name: String::from_utf8_lossy(name).into_owned(),
-                },
+                fault: Fault::Method { name: name.clone() },
             }),
             Method::Rc4 => Ok(rc4(&self.object_key(id, false), data)),
             Method::Aes128 | Method::Aes256 => aes(|| self.cipher(method, id), data, stream),
@@ -550,26 +602,30 @@ pub(crate) struct File<'a> {
 
 impl<'a> File<'a> {
     /// `dictionary`'s values, unless they're not ones the standard
-    /// security handler takes: `/O`, `/U` and `/P` it must have, and of
-    /// `/V` 5 `/OE`, `/UE` and `/Perms`, of their types, as qpdf must. Short ones are
+    /// security handler takes, refused for the first of these: no
+    /// `/Filter` ([`Refused::Malformed`]); another handler's
+    /// ([`Refused::OtherHandler`]); a `/V` and `/R` it isn't
+    /// ([`Refused::Version`]); values it can't take
+    /// ([`Refused::Malformed`]): `/O`, `/U` and `/P` it must have, and of
+    /// `/V` 5 `/OE`, `/UE` and `/Perms`, of their types, as qpdf must, and
+    /// `/O` and `/U` of 32 bytes at most below `/V` 5. Short ones are
     /// filled out with zeros, as qpdf does, and `/V` 5's long ones cut
     /// short.
     pub(crate) fn of(dictionary: &Dictionary, id: &'a [u8]) -> Result<File<'a>, Refused> {
-        let refuse = |why: &str| Err(Refused::Unsupported(why.to_string()));
+        let refuse = |why: &str| Err(Refused::Malformed(why.to_string()));
+        if dictionary.filter.is_empty() {
+            // None, or not a name, where the caller leaves it empty: a
+            // dictionary that's wrong (Table 20), not another handler's.
+            return refuse("its security handler is /, not /Standard");
+        }
         if dictionary.filter != b"Standard" {
-            let filter = String::from_utf8_lossy(&dictionary.filter).into_owned();
-            return Err(Refused::Unsupported(format!(
-                "its security handler is /{filter}, not /Standard"
-            )));
+            let name = dictionary.filter.clone();
+            return Err(Refused::OtherHandler { name });
         }
         let (v, r) = (dictionary.v, dictionary.r);
         match (v, r) {
             (1 | 2 | 4, 2..=4) | (5, 5 | 6) => {}
-            _ => {
-                return Err(Refused::Unsupported(format!(
-                    "it's /V {v} /R {r}, which the standard security handler isn't"
-                )));
-            }
+            _ => return Err(Refused::Version { v, r }),
         }
         let mut values = vec![
             ("/O isn't a string", dictionary.o.is_some()),
@@ -585,7 +641,7 @@ impl<'a> File<'a> {
             .filter_map(|(wrong, has)| (!has).then_some(wrong))
             .collect();
         if !wrong.is_empty() {
-            return Err(Refused::Unsupported(format!("its {}", wrong.join(", "))));
+            return Err(Refused::Malformed(format!("its {}", wrong.join(", "))));
         }
         let fill = |value: &Option<Vec<u8>>, len: usize| {
             let value = value.as_deref().unwrap_or_default();

@@ -243,6 +243,22 @@ jobs:
       - name: Package, and check what the package holds
         run: just filters-package
 
+  # pdf-crypt packaged as a publish would, as the tokenizer, pdf-objects and
+  # the filters are: in a fresh target directory, and what the package holds
+  # checked, its sources, README, CHANGELOG, manifest and lock, nothing
+  # else, no benchmark among them.
+  crypt-package:
+    name: Crypt packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just crypt-package
+
   # pdf-objects' and the filters' public API against their version on
   # crates.io, as the tokenizer's job holds its own, with the same pinned
   # tool on the same pinned Rust. Each is an alpha, which the tool takes to
