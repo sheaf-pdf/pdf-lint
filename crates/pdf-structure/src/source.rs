@@ -20,7 +20,8 @@ use crate::read::{Error, Fault, SourceId, Undecoded, Unfiltered, Unindexed, Unwr
 
 /// A file, as a reader read it: its objects, and its streams' data as a
 /// viewer takes it ([`Streams`]), which a reader without the file's bytes,
-/// as a document alone is, doesn't give ([`Why::Detached`]). A [`Document`]
+/// as a document alone is, gives only of what it holds ([`Why::Detached`]
+/// of the rest). A [`Document`]
 /// is one, and so are a [`Reading`](crate::Reading), which answers of what
 /// it has read so far, and a document read beside its reading
 /// ([`WithReading`](crate::read::WithReading)).
@@ -1544,7 +1545,19 @@ impl Source for Document {
 /// holds: an object stream's decoded data ([`Document::held`]), lent,
 /// within the limit, else [`Why::Limit`], where the reader decoded it
 /// whole and its object is as read (not put, edited, set unread or
-/// removed since: [`Document::set`]). A document alone decodes no stream: any other stream's data is
+/// removed since: [`Document::set`]); and the data of a stream it holds as
+/// bytes, built or edited in memory and so in plain view
+/// ([`Data::Bytes`](pdf_objects::object::Data::Bytes)), decoded as a
+/// reading decodes a stream, owned: through the filters its `/Filter` and
+/// `/DecodeParms` name ([`read::filters`](crate::read::filters)), their
+/// references followed through the document, Flate on the default
+/// backend, up to the less of the limit and the reader's own cap,
+/// [`read::STREAM`](crate::read::STREAM), and given as a reading's
+/// [`Streams`] gives it ([`read::viewed`](crate::read::viewed)): past the
+/// limit [`Why::Limit`], past the cap [`Why::Capped`], through filters it
+/// doesn't take [`Why::Filter`], and so through a `/Crypt` filter other
+/// than `/Identity`, as a document alone decrypts nothing. Any other
+/// stream's data, a span of a file the document doesn't hold, is
 /// [`Why::Detached`], which a document read beside its reading
 /// ([`WithReading`](crate::read::WithReading)) gives, and so is an object
 /// stream's that the reader cut off as it decoded it, at a fault, the
@@ -1559,21 +1572,74 @@ impl Streams for Document {
             Ok(None) => return Err(crate::read::missing(id)),
             Err(unreadable) => return Err(unreadable),
         };
-        if object.as_stream().is_none() {
+        let Some(stream) = object.as_stream() else {
             let message = format!("{id} R doesn't read: {}", Error::NotAStream { id });
             return Err(Unreadable::new(id, Why::Damaged, message));
+        };
+        if let Some(data) = (self.decoded.get(&id)).filter(|_| self.whole.contains(&id)) {
+            return lent(id, data, limit);
         }
-        match (self.decoded.get(&id)).filter(|_| self.whole.contains(&id)) {
-            Some(data) => lent(id, data, limit),
+        match stream.data.bytes() {
+            Some(data) => self
+                .decoded_bytes(id, &stream.dict, data, limit)
+                .map(Cow::Owned),
             None => Err(Unreadable::new(
                 id,
                 Why::Detached,
                 format!(
-                    "{id} R's data isn't held decoded: a document alone decodes no stream, \
-                     and holds only the object streams its reader decoded whole"
+                    "{id} R's data isn't held decoded: a document alone decodes only what it \
+                     holds as bytes, and holds only the object streams its reader decoded whole"
                 ),
             )),
         }
+    }
+}
+
+impl Document {
+    /// Stream `id`'s data, `data`, which the document holds as bytes,
+    /// decoded through the filters its dictionary `dict` names, as a
+    /// reading decodes a stream ([`Streams`] for a document).
+    fn decoded_bytes(
+        &self,
+        id: ObjectId,
+        dict: &Dict,
+        data: &[u8],
+        limit: usize,
+    ) -> Result<Vec<u8>, Unreadable> {
+        let resolve = |id| self.object(id);
+        let within = limit.min(crate::read::STREAM);
+        let capped = crate::read::STREAM < limit;
+        // Its own crypt filter, where it isn't /Identity, says the data is
+        // encrypted, which a document alone doesn't decrypt.
+        if let Some(own) = crate::filter::crypt_filter(dict, Some(&resolve))
+            && own != b"Identity"
+        {
+            let name = String::from_utf8_lossy(&own);
+            let message = format!(
+                "{id} R's data is encrypted by its own crypt filter /{name}, which a document \
+                 alone doesn't decrypt"
+            );
+            return Err(Unreadable::new(id, Why::Filter, message));
+        }
+        let decoded = match crate::read::filters(dict, Some(&resolve)) {
+            Err(why) => Err(Error::Filters(why)),
+            Ok(filters) => {
+                let flate = crate::read::Options::DEFAULT.flate;
+                match pdf_filters::decode(data, &filters, within, flate) {
+                    // Only a stream with no filters comes back longer than
+                    // its limit: cut there, as a reading cuts one.
+                    Ok(mut data) if data.len() > within => {
+                        data.truncate(within);
+                        Err(Error::Decode(pdf_filters::Error {
+                            data,
+                            faults: vec![(0, pdf_filters::Fault::Limit)],
+                        }))
+                    }
+                    decoded => decoded.map_err(Error::Decode),
+                }
+            }
+        };
+        crate::read::viewed(id, decoded, capped)
     }
 }
 

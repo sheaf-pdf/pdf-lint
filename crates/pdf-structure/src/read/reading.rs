@@ -21,7 +21,6 @@ use pdf_objects::{Resolve, Streams, Unreadable, Why};
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{Crypt, Decode, Fault, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
 use crate::crypt::{List, is_xref};
-use crate::filter;
 use crate::source::{
     Document, Encryption, Facts, Record, Revision, Source, Trailer, Unread, Update,
 };
@@ -1116,8 +1115,8 @@ impl<S: ByteSource> Reading<S> {
         // A cross-reference stream's values are direct (ISO 32000-2,
         // 7.5.8.2), so its references aren't followed, as the file is read.
         let filters = match is_xref(&stream.dict) {
-            true => filter::filters(&stream.dict, None),
-            false => filter::filters(&stream.dict, Some(&resolve)),
+            true => super::filters(&stream.dict, None),
+            false => super::filters(&stream.dict, Some(&resolve)),
         };
         if let Some(error) = failed.into_inner() {
             return Err(error);
@@ -1430,7 +1429,7 @@ impl<S: ByteSource> Streams for Reading<S> {
             Ok(None) => return Err(missing(id)),
             Err(unreadable) => return Err(unreadable),
         }
-        lenient(id, self.decoded_within(id, limit), self.capped_at(limit)).map(Cow::Owned)
+        viewed(id, self.decoded_within(id, limit), self.capped_at(limit)).map(Cow::Owned)
     }
 }
 
@@ -1529,9 +1528,32 @@ pub(crate) fn missing(id: ObjectId) -> Unreadable {
 /// decodes in part, unless what stopped it is the limit; or why there's
 /// none, as `Streams` for a [`Reading`] says, an object that doesn't read
 /// as [`Unread::unreadable`] says. A decode the limit stopped is past the
-/// caller's limit, or past the reader's own cap where `capped` says that
-/// was the bound ([`Reading::capped_at`]).
-pub(crate) fn lenient(
+/// caller's limit ([`Why::Limit`]), or past the reader's own cap
+/// ([`Why::Capped`]) where `capped` says that was the bound: where the
+/// limit asked for is past [`Limits::stream`](super::Limits::stream), as a
+/// reading's `capped` is. So a [`Source`](crate::Source) of one's own whose
+/// `decoded_within` is a reading's, or reads as one does, gives a viewer
+/// what a reading's [`Streams`] gives, through this.
+///
+/// ```
+/// use pdf_structure::pdf_objects::{ObjectId, Why};
+/// use pdf_structure::read::{self, Error};
+///
+/// let id = ObjectId::new(4, 0);
+/// assert_eq!(read::viewed(id, Ok(b"BT".to_vec()), false), Ok(b"BT".to_vec()));
+/// let locked = read::viewed(id, Err(Error::Locked), false).unwrap_err();
+/// assert_eq!((locked.id, locked.why), (id, Why::Locked));
+/// ```
+///
+/// # Errors
+///
+/// [`Unreadable`], by kind: [`Why::Limit`] or [`Why::Capped`] past a
+/// limit, [`Why::Damaged`] where nothing decoded or the object isn't a
+/// stream, [`Why::Filter`] for filters the reader doesn't take,
+/// [`Why::Capped`] for more of them than it takes, [`Why::Locked`] for
+/// data it can't decrypt, [`Why::Source`] where the source didn't give it;
+/// an object that doesn't read as [`Unread::unreadable`] says.
+pub fn viewed(
     id: ObjectId,
     decoded: Result<Vec<u8>, Error>,
     capped: bool,

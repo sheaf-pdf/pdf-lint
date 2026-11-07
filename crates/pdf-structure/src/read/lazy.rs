@@ -820,6 +820,51 @@ fn object_0_in_use_is_said_as_the_file_opens() {
     assert_eq!(reading.ids().collect::<Vec<_>>(), [ObjectId::new(1, 0)]);
 }
 
+/// Every object's record hashes the bytes it names, as the file has them
+/// (an object stream's member, as its stream's decoded data has them):
+/// read whole in memory, and by position from first windows of 1 and 64
+/// bytes, so that the window a read was made in always holds them and a
+/// copy is never refused for want of them.
+#[test]
+fn a_records_hash_is_of_the_bytes_it_names_however_the_file_is_read() {
+    let (mut at_offsets, mut members) = (0, 0);
+    for (name, file, passwords) in files() {
+        let options = Options {
+            passwords: &passwords,
+            ..Options::DEFAULT
+        };
+        let mut docs = vec![("whole".to_string(), document(&file, &options))];
+        for first in [1, 64] {
+            let source = crate::fuzz::Counted::new(&file, first);
+            let read = Reading::open(&source, &options).and_then(Reading::into_document);
+            docs.push((format!("from {first}"), read.unwrap()));
+        }
+        for (how, doc) in &docs {
+            for (id, record) in doc.records() {
+                let at = record.at;
+                let bytes = match record.origin {
+                    Origin::Stream { stream, .. } => {
+                        members += 1;
+                        let held = doc
+                            .held(ObjectId::new(stream, 0))
+                            .expect("its stream's data");
+                        &held[at.start..at.end]
+                    }
+                    _ => {
+                        at_offsets += 1;
+                        &file[at.start..at.end]
+                    }
+                };
+                assert_eq!(record.hash, Record::hash_of(bytes), "{name}, {how}: {id}");
+            }
+        }
+    }
+    assert!(
+        at_offsets >= 300 && members >= 20,
+        "{at_offsets} and {members}"
+    );
+}
+
 /// A stream's `/Length` by reference is read again with the stream, its
 /// faults said with the stream's until its own object is read, then once,
 /// with its own object's, as the whole read says them.

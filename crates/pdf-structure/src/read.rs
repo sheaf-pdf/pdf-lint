@@ -281,6 +281,7 @@ use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
 use pdf_crypt::{Encoded, Handler, Method, Password, Refused};
 use pdf_filters::{Backend, Filter, Layout, Predictor};
+use pdf_objects::Resolve;
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use pdf_objects::parse::{self, Body, Parser};
@@ -308,7 +309,7 @@ pub use file::FileBytes;
 pub use file::Identity;
 pub use limits::{Limits, Options};
 pub(crate) use reading::missing;
-pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId};
+pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
 pub use with_reading::WithReading;
@@ -499,6 +500,136 @@ impl Decode for BTreeMap<ObjectId, Vec<u8>> {
 /// ```
 pub fn document(file: &[u8], options: &Options<'_>) -> Document {
     read_as(file, None, true, options)
+}
+
+/// The filters a stream's dictionary `dict` names by its `/Filter` and
+/// `/DecodeParms`, in order, as the reader reads them to decode a stream
+/// ([`Reading::decoded_within`]), so that a reader of its own decodes one
+/// through [`pdf_filters`] as a reading does: by qpdf's reading (this
+/// module's [`Unfiltered`] says each way it departs from what ISO 32000-2,
+/// 7.4, leaves open), `/Crypt` no filter, as the streams it decodes are
+/// decrypted first. None for no `/Filter`, a null or an empty array. A
+/// reference among them is followed by `resolve`, which gives the object
+/// it refers to, none for no object, which is null (7.3.10); with no
+/// `resolve`, a reference is refused, as a cross-reference stream's
+/// dictionary, whose values are direct (7.5.8.2), is read.
+///
+/// ```
+/// use pdf_structure::pdf_filters::Filter;
+/// use pdf_structure::pdf_objects::{Dict, Object, ObjectId, Resolve};
+/// use pdf_structure::read::{self, Unfiltered};
+///
+/// let mut dict = Dict::new();
+/// dict.set("Filter", vec![Object::from("AHx"), Object::reference(7)]);
+/// let flate = Object::from("FlateDecode");
+/// let resolve = |id: ObjectId| (id == ObjectId::new(7, 0)).then_some(&flate);
+/// let filters = read::filters(&dict, Some(&resolve)).unwrap();
+/// assert!(matches!(filters[..], [Filter::AsciiHex, Filter::Flate { .. }]));
+/// assert_eq!(read::filters(&dict, None), Err(Unfiltered::Reference));
+/// ```
+///
+/// # Errors
+///
+/// What the reader doesn't take of them ([`Unfiltered`]): a `/Filter`
+/// that isn't a name or an array of names, more than 25 of them,
+/// a filter it doesn't decode, `/DecodeParms` it can't take, or a
+/// reference where no `resolve` follows one.
+pub fn filters<'o>(
+    dict: &'o Dict,
+    resolve: Option<&dyn Resolve<'o>>,
+) -> Result<Vec<Filter>, Unfiltered> {
+    match resolve {
+        None => filter::filters(dict, None),
+        Some(resolve) => filter::filters(dict, Some(&|id| resolve.resolve(id))),
+    }
+}
+
+/// The values of encryption dictionary `dict` that pdf-crypt's security
+/// handler opens a file by ([`pdf_crypt::Dictionary`]), as the reader
+/// reads them to open the file, so that a reader of its own opens one as
+/// a reading does: each value followed where it's a reference, once, by
+/// `resolve`, which gives the object it refers to, none for no object,
+/// which is null (ISO 32000-2, 7.3.10); a value of another type than its
+/// field's is none. `resolve` is asked of each reference in turn, in the
+/// order the reader reads them (`/CF`, each of its crypt filters and its
+/// `/CFM`; then `/Filter`, `/V`, `/R`, `/Length`, `/O`, `/U`, `/OE`, `/UE`,
+/// `/Perms`, `/P`, `/EncryptMetadata`, `/StmF` and `/StrF`), so it learns
+/// every object the dictionary refers to, which are the dictionary's own,
+/// and never encrypted (7.6.2); and it gives each owned or lent, as a
+/// reader that reads them for the dictionary alone holds none of them.
+/// `/EFF`, which counts from `/V` 4, isn't among them: pdf-crypt's handler
+/// doesn't open by it.
+///
+/// ```
+/// use std::borrow::Cow;
+///
+/// use pdf_structure::pdf_objects::{Dict, Object, ObjectId};
+/// use pdf_structure::read;
+///
+/// let mut dict = Dict::new();
+/// dict.set("Filter", Object::from("Standard"));
+/// dict.set("V", 4);
+/// dict.set("StmF", Object::reference(9));
+/// let mut asked = Vec::new();
+/// let values = read::encryption(&dict, &mut |id: ObjectId| {
+///     asked.push(id);
+///     Some(Cow::Owned(Object::from("StdCF")))
+/// });
+/// assert_eq!((values.filter, values.v, values.r), (b"Standard".to_vec(), 4, 0));
+/// assert_eq!(values.stm_f.as_deref(), Some(&b"StdCF"[..]));
+/// assert_eq!(asked, [ObjectId::new(9, 0)]);
+/// ```
+pub fn encryption<'o>(
+    dict: &Dict,
+    resolve: &mut dyn FnMut(ObjectId) -> Option<Cow<'o, Object>>,
+) -> pdf_crypt::Dictionary {
+    let mut get = |o: Option<&Object>| -> Option<Object> {
+        let o = o?;
+        match o.value() {
+            Value::Ref(id) => resolve(*id).map(Cow::into_owned),
+            _ => Some(o.clone()),
+        }
+    };
+    let bytes = |o: Option<Object>| match o.map(Object::into_value) {
+        Some(Value::String(s, _)) => Some(s.as_bytes().map(<[u8]>::to_vec).unwrap_or_default()),
+        _ => None,
+    };
+    let name = |o: Option<Object>| o.and_then(|o| o.as_name().map(<[u8]>::to_vec));
+    let integer = |o: Option<Object>| o.and_then(|o| o.as_integer());
+    let mut crypt_filters = Vec::new();
+    if let Some(Value::Dict(filters)) = get(dict.get(b"CF")).map(Object::into_value) {
+        for (name, filter) in filters.iter() {
+            let mut crypt_filter = pdf_crypt::CryptFilter::default();
+            crypt_filter.name = name.to_vec();
+            crypt_filter.method = match get(Some(filter)).map(Object::into_value) {
+                Some(Value::Dict(filter)) => (get(filter.get(b"CFM")).as_ref())
+                    .and_then(Object::as_name)
+                    .map(<[u8]>::to_vec),
+                _ => None,
+            };
+            crypt_filters.push(crypt_filter);
+        }
+    }
+    // Each value in turn, as what each refers to is read, in this order.
+    let mut values = pdf_crypt::Dictionary::default();
+    values.filter = name(get(dict.get(b"Filter"))).unwrap_or_default();
+    values.v = integer(get(dict.get(b"V"))).unwrap_or(0);
+    values.r = integer(get(dict.get(b"R"))).unwrap_or(0);
+    values.length = integer(get(dict.get(b"Length")));
+    values.o = bytes(get(dict.get(b"O")));
+    values.u = bytes(get(dict.get(b"U")));
+    values.oe = bytes(get(dict.get(b"OE")));
+    values.ue = bytes(get(dict.get(b"UE")));
+    values.perms = bytes(get(dict.get(b"Perms")));
+    values.p = integer(get(dict.get(b"P")));
+    values.encrypt_metadata = match get(dict.get(b"EncryptMetadata")).map(Object::into_value) {
+        Some(Value::Bool(b)) => Some(b),
+        _ => None,
+    };
+    values.crypt_filters = crypt_filters;
+    values.stm_f = name(get(dict.get(b"StmF")));
+    values.str_f = name(get(dict.get(b"StrF")));
+    values
 }
 
 /// The file `file` is, with `decoder` decoding what isn't in plain view.
@@ -1340,7 +1471,7 @@ fn filter_name(filter: &Filter) -> &'static str {
 }
 
 /// A stream's filters, as written, when it has any.
-fn filters(o: &Object) -> Option<String> {
+fn written_filters(o: &Object) -> Option<String> {
     let filter = o.as_dict()?.get(b"Filter")?;
     Some(match filter.value() {
         Value::Name(name) => format!("/{}", String::from_utf8_lossy(name)),
@@ -1761,7 +1892,7 @@ impl Reader {
                     None
                 }
             };
-            let _ = filter::filters(&s.dict, Some(&resolve));
+            let _ = filters(&s.dict, Some(&resolve));
             let _ = filter::crypt_filter(&s.dict, Some(&resolve));
             if let Some(error) = failed.into_inner() {
                 return Err(error);
@@ -1894,7 +2025,7 @@ impl Reader {
             let Some(data) = file.get(at.start..at.end)? else {
                 continue;
             };
-            if filters(object).is_none() {
+            if written_filters(object).is_none() {
                 plain.insert(n, data.into_owned());
             }
         }
@@ -2221,7 +2352,7 @@ impl Reader {
         // What its filters' values refer to is read and kept before its
         // decode, which reads nothing.
         let resolve = |id| self.kept(id)?.ok();
-        let filters = filter::filters(&stream.dict, Some(&resolve)).map_err(Undecoded::Filters)?;
+        let filters = filters(&stream.dict, Some(&resolve)).map_err(Undecoded::Filters)?;
         // In an encrypted file, decrypted first: by its own crypt filter
         // when it names one, else as the file's streams are. In one no
         // password opened whose streams aren't encrypted, its own crypt
@@ -2518,7 +2649,7 @@ impl Reader {
         let compressed: Vec<ObjectId> = (sections.iter())
             .filter(|_| !self.native)
             .filter_map(|s| s.stream.as_ref())
-            .filter(|(_, _, stream)| filters(stream).is_some())
+            .filter(|(_, _, stream)| written_filters(stream).is_some())
             .map(|(_, id, _)| *id)
             .collect();
         let decoded = decode(decoder, &compressed);
@@ -2952,7 +3083,7 @@ impl Reader {
             // 32000-2, 7.5.8.2). What runs past its rows, which aren't
             // read, isn't decoded.
             true => {
-                let filters = filter::filters(dict, None).map_err(Unwritten::Filters)?;
+                let filters = filters(dict, None).map_err(Unwritten::Filters)?;
                 match filters.is_empty() {
                     true => written,
                     false => {
@@ -2987,7 +3118,7 @@ impl Reader {
                 }
             }
             false => {
-                let decoded = match (filters(object), decoded) {
+                let decoded = match (written_filters(object), decoded) {
                     (None, _) => Ok(written),
                     (Some(_), Some(Ok(data))) => Ok(&data[..]),
                     (Some(filter), Some(Err(why))) => Err(Unwritten::Decoder {
@@ -3000,7 +3131,7 @@ impl Reader {
                 // update can give another object; then the data it gives
                 // isn't the size this stream's rows are, and it's decoded
                 // from its bytes instead.
-                let decoded = decoded.and_then(|data| match filters(object) {
+                let decoded = decoded.and_then(|data| match written_filters(object) {
                     Some(_) if rows_size != Some(data.len()) => Err(Unwritten::Decoded {
                         len: data.len(),
                         size: rows_size,
@@ -3332,75 +3463,51 @@ impl Reader {
         own: Option<ObjectId>,
         passwords: &[Password],
     ) -> Result<Encryption, F::Error> {
-        let mut get = |o: Option<&Object>| -> Result<Option<Object>, F::Error> {
-            let Some(o) = o else {
-                return Ok(None);
-            };
-            Ok(match o.value() {
-                Value::Ref(id) => match self.listed_entry(*id) {
-                    Some(&(_, XrefEntry::InUse { offset, .. })) => {
-                        self.list.dictionaries.insert(*id);
-                        (self.indirect(file, cx, offset, Some(*id))?.ok()).map(|(_, o, _)| o)
-                    }
-                    _ => None,
-                },
-                _ => Some(o.clone()),
-            })
-        };
-        let bytes = |o: Option<Object>| match o.map(|o| o.into_value()) {
-            Some(Value::String(s, _)) => Some(s.as_bytes().map(<[u8]>::to_vec).unwrap_or_default()),
-            _ => None,
-        };
-        let name = |o: Option<Object>| o.and_then(|o| o.as_name().map(<[u8]>::to_vec));
-        let integer = |o: Option<Object>| o.and_then(|o| o.as_integer());
-        let mut crypt_filters = Vec::new();
-        if let Some(Value::Dict(filters)) = get(dict.get(b"CF"))?.map(|o| o.into_value()) {
-            for (name, filter) in filters.iter() {
-                let mut crypt_filter = pdf_crypt::CryptFilter::default();
-                crypt_filter.name = name.to_vec();
-                crypt_filter.method = match get(Some(filter))?.map(|o| o.into_value()) {
-                    Some(Value::Dict(filter)) => (get(filter.get(b"CFM"))?.as_ref())
-                        .and_then(Object::as_name)
-                        .map(<[u8]>::to_vec),
-                    _ => None,
-                };
-                crypt_filters.push(crypt_filter);
+        // What a reference refers to, read again for the dictionary, its
+        // faults told as the open's, and kept as one of the dictionary's
+        // objects; once a read the file stops fails, none is read more, and
+        // the open fails by it.
+        let mut failed = None;
+        let mut follow = |id: ObjectId| -> Option<Object> {
+            if failed.is_some() {
+                return None;
             }
-        }
+            let &(_, XrefEntry::InUse { offset, .. }) = self.listed_entry(id)? else {
+                return None;
+            };
+            self.list.dictionaries.insert(id);
+            match self.indirect(file, cx, offset, Some(id)) {
+                Ok(read) => read.ok().map(|(_, o, _)| o),
+                Err(error) => {
+                    failed = Some(error);
+                    None
+                }
+            }
+        };
         // Each value in turn, as what each refers to is read, and its
         // faults told, in this order.
-        let mut values = pdf_crypt::Dictionary::default();
-        values.filter = name(get(dict.get(b"Filter"))?).unwrap_or_default();
-        values.v = integer(get(dict.get(b"V"))?).unwrap_or(0);
-        values.r = integer(get(dict.get(b"R"))?).unwrap_or(0);
-        values.length = integer(get(dict.get(b"Length"))?);
-        values.o = bytes(get(dict.get(b"O"))?);
-        values.u = bytes(get(dict.get(b"U"))?);
-        values.oe = bytes(get(dict.get(b"OE"))?);
-        values.ue = bytes(get(dict.get(b"UE"))?);
-        values.perms = bytes(get(dict.get(b"Perms"))?);
-        values.p = integer(get(dict.get(b"P"))?);
-        values.encrypt_metadata = match get(dict.get(b"EncryptMetadata"))?.map(|o| o.into_value()) {
-            Some(Value::Bool(b)) => Some(b),
-            _ => None,
+        let values = encryption(dict, &mut |id| follow(id).map(Cow::Owned));
+        let mut get = |o: Option<&Object>| match o.map(Object::value) {
+            Some(Value::Ref(id)) => follow(*id),
+            _ => o.cloned(),
         };
-        values.crypt_filters = crypt_filters;
-        values.stm_f = name(get(dict.get(b"StmF"))?);
-        values.str_f = name(get(dict.get(b"StrF"))?);
         // /EFF counts from /V 4, which has crypt filters (ISO 32000-2,
         // Table 20): below, it isn't read, so what it refers to is no more
         // the dictionary's own than any object.
         let eff = dict.get(b"EFF").filter(|_| values.v >= 4);
-        let eff_followed = get(eff)?;
+        let eff_followed = get(eff);
         // The file's first /ID element, as qpdf takes it: empty, said once
         // the standard handler takes the dictionary, when it isn't a string.
-        let id = match get(trailer.dict().get(b"ID"))?.map(|o| o.into_value()) {
+        let id = match get(trailer.dict().get(b"ID")).map(|o| o.into_value()) {
             Some(Value::Array(id)) => match id.first().map(|o| o.value()) {
                 Some(Value::String(s, _)) => s.as_bytes().map(<[u8]>::to_vec),
                 _ => None,
             },
             _ => None,
         };
+        if let Some(error) = failed {
+            return Err(error);
+        }
         let no_id = id.is_none();
         let id = id.unwrap_or_default();
         self.stored = Some(Box::new(Stored {
@@ -3545,8 +3652,15 @@ impl Reader {
         if cut {
             return Err(Unread::Cut { stream });
         }
-        // Every value the parser reads is placed.
+        // Every value the parser reads is placed, in the data it read.
         let at = (object.at).unwrap_or(Span::new(Some(ObjectId::new(stream, 0)), offset, offset));
+        let bytes = data.get(at.start..at.end);
+        debug_assert!(
+            bytes.is_some(),
+            "{id}'s bytes {}..{} past its stream's data",
+            at.start,
+            at.end
+        );
         let record = Record {
             source: self.id,
             id,
@@ -3554,7 +3668,7 @@ impl Reader {
             at,
             endobj: false,
             data: None,
-            hash: Record::hash_of(data.get(at.start..at.end).unwrap_or_default()),
+            hash: Record::hash_of(bytes.unwrap_or_default()),
         };
         Ok((object, record))
     }
@@ -3646,10 +3760,18 @@ impl Reader {
             .filter(|token| is_keyword(Some(token), b"endobj"));
         let start = (w.significant(&mut w.tokenizer(offset))).map_or(offset, |n| w.place(n.start));
         let end = endobj.as_ref().map_or(end, |token| w.place(token.end()));
-        // Its bytes are in the window, which reaches past what was read.
+        // Its bytes are in the window, always: where it starts and ends are
+        // a token's or the parser's in it, and a read that runs to the
+        // window's end touches it and is read again in a larger one. So
+        // the hash is never the empty slice's for want of them, which a
+        // copy would refuse as changed.
         let bytes = (start.checked_sub(w.base))
             .zip(end.checked_sub(w.base))
             .and_then(|(from, to)| w.bytes.get(from..to));
+        debug_assert!(
+            bytes.is_some(),
+            "{id}'s bytes {start}..{end} past its window"
+        );
         let record = Record {
             source: self.id,
             id,
@@ -4015,6 +4137,8 @@ fn holds_linearization<'f, F: Bytes<'f>>(
 #[cfg(test)]
 mod faults;
 #[cfg(test)]
+mod glue;
+#[cfg(test)]
 pub(crate) mod lazy;
 #[cfg(test)]
 mod once;
@@ -4026,7 +4150,7 @@ pub(crate) mod streams;
 mod words;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use pdf_fixtures::fixture::{self, Body, Xref};
@@ -5454,7 +5578,7 @@ mod tests {
     /// cross-reference stream is 5. With `encrypted`, the trailer says the
     /// file is, and the object stream's data is junk a decoder replaces,
     /// as given.
-    pub(super) fn compressed(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
+    pub(crate) fn compressed(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
         let (file, mut decoded) = streams(encrypted, true, b"", None);
         decoded.remove(&ObjectId::new(5, 0));
         if !encrypted {
@@ -5547,7 +5671,7 @@ mod tests {
 
     /// [`unfiltered`]'s file, its object stream's dictionary given
     /// `filter`'s entries, and its data `data`.
-    pub(super) fn filtered(encrypted: bool, filter: &str, data: &[u8]) -> Vec<u8> {
+    pub(crate) fn filtered(encrypted: bool, filter: &str, data: &[u8]) -> Vec<u8> {
         let (_, first) = objects_2_and_3();
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
@@ -7128,6 +7252,30 @@ mod tests {
     /// `/Identity` is as the streams are. A file no password opens has its
     /// object streams read only through a decoder, which records it by the
     /// encryption dictionary.
+    /// A reading answers of an object stream at its number and generation
+    /// 0 alone, as an object stream is of generation 0 (ISO 32000-2,
+    /// 7.5.8.3) and its document holds it so: at any other, `held` none
+    /// and `in_the_clear` false, though at 0 it's held and in the clear.
+    #[test]
+    fn a_readings_object_stream_is_at_generation_0_alone() {
+        use pdf_crypt::writer::Kind;
+        let (objects, _) = objects_2_and_3();
+        let plain = fixture::zlib(&objects);
+        let (entries, _) = encrypt_entries(Kind::Aes128, b"", "/Identity", "/StdCF");
+        let file = encrypted_filtered(&entries, " /Filter /FlateDecode", &plain);
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        reading.get(ObjectId::new(3, 0)).unwrap();
+        let doc = reading.to_document().unwrap();
+        let (stream, other) = (ObjectId::new(4, 0), ObjectId::new(4, 1));
+        let sources: [(&str, &dyn Source); 2] = [("reading", &reading), ("document", &doc)];
+        for (what, source) in sources {
+            assert!(source.held(stream).is_some(), "{what}");
+            assert!(source.in_the_clear(stream), "{what}");
+            assert_eq!(source.held(other), None, "{what}");
+            assert!(!source.in_the_clear(other), "{what}");
+        }
+    }
+
     #[test]
     fn an_object_stream_left_in_the_clear_where_strings_arent_is_recorded() {
         use pdf_crypt::writer::Kind;

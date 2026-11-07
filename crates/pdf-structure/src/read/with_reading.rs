@@ -9,7 +9,7 @@ use pdf_objects::object::{Object, ObjectId};
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable};
 
-use super::reading::{lenient, missing};
+use super::reading::{missing, viewed};
 use super::{ByteSource, Error, Options, Reading};
 use crate::read::Fault;
 use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread};
@@ -124,7 +124,7 @@ impl<S: ByteSource> Streams for WithReading<S> {
         let object = Source::get(&self.document, id);
         let object = Some(object.as_ref().map(|o| *o));
         let decoded = self.reading.decoded_within_as(id, object, limit);
-        lenient(id, decoded, self.reading.capped_at(limit)).map(Cow::Owned)
+        viewed(id, decoded, self.reading.capped_at(limit)).map(Cow::Owned)
     }
 }
 

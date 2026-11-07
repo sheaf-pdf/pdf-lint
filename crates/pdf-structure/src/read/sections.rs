@@ -14,7 +14,6 @@ use super::{
     Cx, Reader, Reading, Unfiltered, XrefEntry, is_keyword, offset_of, predictor_row, rfind,
 };
 use crate::crypt::is_xref;
-use crate::filter;
 use crate::read::reading::{ByteSource, Error};
 use crate::read::window::{Bytes, InMemory, Window};
 use crate::source::{Trailer, Unread, XrefKind};
@@ -577,7 +576,7 @@ impl Reader {
         });
         let size = count.and_then(|count| count.checked_mul(row));
         let filters =
-            filter::filters(dict, None).map_err(|why| SectionFault::Filters { at, why })?;
+            super::filters(dict, None).map_err(|why| SectionFault::Filters { at, why })?;
         let decoded;
         let data = match filters.is_empty() {
             true => written,
