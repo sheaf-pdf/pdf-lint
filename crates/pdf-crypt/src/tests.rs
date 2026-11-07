@@ -6,6 +6,7 @@ use chacha20::ChaCha20Rng;
 use rand_core::{CryptoRng, Rng, SeedableRng};
 
 use crate::aes::Aes;
+use crate::fuzz::permissions;
 use crate::writer::{self, Kind, Settings};
 use crate::{
     Changes, CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password,
@@ -1436,8 +1437,7 @@ fn a_new_files_dictionary_opens_by_its_password_as_the_owners_and_the_users() {
                 "{what}"
             );
             // /Perms: /P and /EncryptMetadata, then `adb`.
-            let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
-            Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+            let perms = perms(&handler, &dictionary);
             let metadata = if encrypt_metadata { b'T' } else { b'F' };
             assert_eq!(
                 perms[..12],
@@ -1507,8 +1507,7 @@ fn a_new_files_dictionary_is_drawn_from_its_generator_in_order() {
     assert_eq!(drawn(8), u[40..48], "the user's key salt");
     assert_eq!(drawn(8), o[32..40], "the owner's validation salt");
     assert_eq!(drawn(8), o[40..48], "the owner's key salt");
-    let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
-    Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+    let perms = perms(&handler, &dictionary);
     assert_eq!(drawn(4), perms[12..], "/Perms' random bytes");
     // Nothing more: the generator's next draw is what follows them.
     let mut rng = ChaCha20Rng::seed_from_u64(1);
@@ -1887,7 +1886,10 @@ fn a_new_files_dictionary_with_an_owners_password_is_drawn_as_the_one_passwords(
     }
 }
 
-/// The eight permissions, in the order of their bits.
+/// The eight permissions, in the order of their bits, written out here
+/// apart from the fuzz body's [`permissions`], which makes each of the 256
+/// sets from a byte, and from the type's own names: a test holds each of
+/// the three to the others, and this one to the bits' numbers.
 const EACH: [Permissions; 8] = [
     Permissions::PRINT,
     Permissions::MODIFY,
@@ -1898,14 +1900,6 @@ const EACH: [Permissions; 8] = [
     Permissions::ASSEMBLE,
     Permissions::PRINT_HIGH,
 ];
-
-/// The set of the permissions whose places in [`EACH`] are `n`'s bits: each
-/// of the 256 sets, by one byte.
-fn permissions(n: u8) -> Permissions {
-    (0..8)
-        .filter(|i| n >> i & 1 == 1)
-        .fold(Permissions::NONE, |set, i| set | EACH[i])
-}
 
 /// `/P` is read by its low 32 bits, its eight permissions' bits alone: as
 /// written from revision 3, later ones too, and at revision 2, and below,

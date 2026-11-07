@@ -306,17 +306,16 @@ fn created(data: &[u8], encrypt_metadata: bool) {
     let owner_ok = owner_prepared.as_ref().and_then(|p| p.as_ref().ok());
     // Each form of each text, the other's prepared form beside it.
     let forms = |typed: Option<Password>| typed.map(|t| t.encodings()).unwrap_or_default();
-    let users = forms(user).into_iter().map(|form| (Some(form), true));
-    let owners = forms(owner).into_iter().map(|form| (Some(form), false));
+    let users = forms(user).into_iter().map(|form| (form, true));
+    let owners = forms(owner).into_iter().map(|form| (form, false));
     for (form, is_user) in users.chain(owners) {
         let protection = match is_user {
-            true => protected(form.as_ref(), owner_ok, how),
-            false => protected(user_ok, form.as_ref(), how),
+            true => protected(Some(&form), owner_ok, how),
+            false => protected(user_ok, Some(&form), how),
         };
         let created = Handler::create(&protection, &mut Drawn::over(draws));
         let created = created.map(|_| ());
         assert_eq!(created, expected(&protection), "refused for the first why");
-        let form = form.expect("a form");
         if created.is_ok() {
             let prepared = [&user_prepared, &owner_prepared][usize::from(!is_user)];
             if let Some(Ok(prepared)) = prepared {
@@ -330,11 +329,10 @@ fn created(data: &[u8], encrypt_metadata: bool) {
     }
     let neither = Handler::create(&protected(None, None, how), &mut Drawn::over(draws));
     assert_eq!(neither.map(|_| ()), Err(Unusable::NoPassword), "neither");
-    let given = |prepared: &Option<Result<Encoded, Unusable>>| match prepared {
-        Some(Ok(_)) | None => Ok(()),
-        Some(Err(_)) => Err(()),
-    };
-    if given(&user_prepared).is_err() || given(&owner_prepared).is_err() {
+    // A text given that doesn't prepare makes no file.
+    let unprepared =
+        |prepared: &Option<Result<Encoded, Unusable>>| matches!(prepared, Some(Err(_)));
+    if unprepared(&user_prepared) || unprepared(&owner_prepared) {
         return;
     }
     let protection = protected(user_ok, owner_ok, how);
@@ -418,9 +416,10 @@ fn text(data: &[u8]) -> (Option<String>, &[u8]) {
 
 /// The permissions whose bits are set in `bits`, the lowest the first
 /// in the order of `/P`'s bits: printing, modifying, copying, annotating,
-/// filling in forms, accessibility, assembling, printing at the highest
-/// quality.
-fn permissions(bits: u8) -> crate::Permissions {
+/// filling in forms, accessibility, assembling, printing at high
+/// resolution. Each of the 256 sets, by one byte; the tests take them so
+/// too.
+pub(crate) fn permissions(bits: u8) -> crate::Permissions {
     use crate::Permissions;
     let each = [
         Permissions::PRINT,
