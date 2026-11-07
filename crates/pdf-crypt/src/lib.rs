@@ -21,12 +21,19 @@
 //!   [`prepared`](Password::prepared), strictly: SASLprep's form, the same
 //!   by both Unicodes, or why it can't be one ([`Unusable`]).
 //! - **A new file's encryption:** [`Handler::create`] makes a revision 6
-//!   dictionary (AES-256) for a prepared password, every permission
-//!   granted and the owner's password the user's, and the handler to
-//!   encrypt under it. Its key and salts are drawn from a random number
-//!   generator the caller passes ([`rand_core`]'s `CryptoRng`, re-exported
-//!   so that a caller names the version it takes): pdf-crypt has no
-//!   randomness of its own.
+//!   dictionary (AES-256), and the handler to encrypt under it, protected
+//!   as a [`Protection`] says: an open password (the user's), a
+//!   permissions password (the owner's) or both, each prepared, and what
+//!   one who opens it by the open password may do. Its key and salts are
+//!   drawn from a random number generator the caller passes
+//!   ([`rand_core`]'s `CryptoRng`, re-exported so that a caller names the
+//!   version it takes): pdf-crypt has no randomness of its own.
+//! - **Permissions, said:** a [`Permissions`] set of the eight `/P` has a
+//!   bit for, a security dialog's levels of printing and of changes
+//!   reachable from it ([`Printing`], [`Changes`]), written as a new
+//!   file's `/P` and read from a file's by its revision's meaning of the
+//!   bits ([`Handler::permissions`]). Honouring them is a reader's: one
+//!   who can open a file can decrypt all of it.
 //! - **Every fault said, what decrypted kept,** as a checker wants it: AES
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, AES that the file's key
@@ -57,37 +64,57 @@
 //! too: for test files, not for protecting a document. docs.rs documents
 //! the crate without it.
 //!
-//! A new file's encryption, from a seeded generator (RustCrypto's
-//! `chacha20`, with its `rng` feature) where a program would pass the
-//! operating system's, and the file opened by its password:
+//! A new file's encryption under an open password and a permissions
+//! password, from a seeded generator (RustCrypto's `chacha20`, with its
+//! `rng` feature) where a program would pass the operating system's, and
+//! the file opened by each:
 //!
 //! ```
 //! use chacha20::ChaCha20Rng;
 //! use pdf_crypt::rand_core::SeedableRng;
-//! use pdf_crypt::{Encoding, Handler, Password, Refused};
+//! use pdf_crypt::{Changes, Encoding, Handler, Password, Permissions, Printing, Protection, Refused};
 //!
-//! // The password prepared: Ⅸ's SASLprep form is `IX`.
-//! let password = Password("\u{2168}").prepared().unwrap();
-//! assert_eq!(password.as_bytes(), b"IX");
+//! // The two passwords prepared: the open password, and the permissions
+//! // password, Ⅸ, whose SASLprep form is `IX`.
+//! let user = Password("sesame").prepared().unwrap();
+//! let owner = Password("\u{2168}").prepared().unwrap();
+//! assert_eq!(owner.as_bytes(), b"IX");
+//!
+//! // One who opens the file by the open password may print it at low
+//! // resolution and fill in its forms (and assemble it, as that level has it),
+//! // but not copy from it.
+//! let mut protection = Protection::new(&user);
+//! protection.owner = Some(&owner);
+//! protection.permissions = Permissions::from(Printing::Low) | Permissions::from(Changes::FillForms);
 //! let mut rng = ChaCha20Rng::seed_from_u64(7);
-//! let (writer, dictionary) = Handler::create(&password, true, &mut rng).unwrap();
-//! assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-4)));
+//! let (writer, dictionary) = Handler::create(&protection, &mut rng).unwrap();
+//! assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-2108)));
 //!
 //! // A writer encrypts a string of object 5 under it, AES's IV derived from
 //! // what it names the object by and the string: the same each time.
 //! let title = writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap();
 //! assert_eq!(writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap(), title);
 //!
-//! // A reader opens it by the password as typed, in its SASLprep form, as the
-//! // owner's (revision 6 takes no /ID), and decrypts.
-//! let reader = Handler::open(&dictionary, b"", &Password("\u{2168}").encodings()).unwrap();
-//! assert!(reader.owner());
-//! assert_eq!(reader.opened_by(), Some((0, Encoding::Saslprep)));
-//! assert_eq!(reader.decrypt_string((5, 0), &title).unwrap(), b"A title");
+//! // A reader opens it by the open password as the user's (revision 6 takes
+//! // no /ID), with those permissions and bit 10, which revision 6 always
+//! // sets, and decrypts.
+//! let by_user = Handler::open(&dictionary, b"", &Password("sesame").encodings()).unwrap();
+//! assert!(!by_user.owner());
+//! assert_eq!(by_user.permissions().printing(), Printing::Low);
+//! assert!(!by_user.permissions().contains(Permissions::COPY));
+//! assert_eq!(by_user.permissions().to_string(), "print, fill forms, accessibility, assemble");
+//! assert_eq!(by_user.decrypt_string((5, 0), &title).unwrap(), b"A title");
 //!
-//! // Another password doesn't open it.
+//! // The permissions password, as typed, in its SASLprep form, opens it as
+//! // the owner's, whom the permissions don't bind.
+//! let by_owner = Handler::open(&dictionary, b"", &Password("\u{2168}").encodings()).unwrap();
+//! assert!(by_owner.owner());
+//! assert_eq!(by_owner.opened_by(), Some((0, Encoding::Saslprep)));
+//!
+//! // Another password doesn't open it, nor none.
 //! let wrong = Password("IV").encodings();
 //! assert_eq!(Handler::open(&dictionary, b"", &wrong).unwrap_err(), Refused::Password);
+//! assert_eq!(Handler::open(&dictionary, b"", &[]).unwrap_err(), Refused::Password);
 //! ```
 
 mod aes;
@@ -98,6 +125,7 @@ mod handler;
 mod hmac;
 mod md5;
 mod password;
+mod permissions;
 mod rc4;
 mod sha2;
 #[cfg(test)]
@@ -109,8 +137,9 @@ pub mod writer;
 
 use std::fmt;
 
-pub use handler::{Handler, Method};
+pub use handler::{Handler, Method, Protection};
 pub use password::{Encoded, Encoding, Password, Unusable};
+pub use permissions::{Changes, Permissions, Printing};
 pub use rand_core;
 
 /// An encryption dictionary's values, as the standard security handler

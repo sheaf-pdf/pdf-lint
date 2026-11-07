@@ -12,6 +12,7 @@ use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::parse::Parser;
 use pdf_objects::serialize;
 use pdf_structure::bytes::{self, Reading, XrefEntry};
+use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::pdf_crypt::rand_core::SeedableRng;
 use pdf_structure::write::{self, Deflate, Encryptor};
 use pdf_structure::{Document, Encryption, Password, Source as _, XrefKind};
@@ -49,8 +50,10 @@ fn built(objects: &[String]) -> Vec<u8> {
 /// A new encryption for `password`, the same each time.
 fn created(password: &str, encrypt_metadata: bool) -> Encryptor {
     let prepared = Password(password).prepared().unwrap();
+    let mut protection = Protection::new(&prepared);
+    protection.encrypt_metadata = encrypt_metadata;
     let mut rng = ChaCha20Rng::seed_from_u64(14);
-    Encryptor::create(&prepared, encrypt_metadata, &mut rng).unwrap()
+    Encryptor::create(&protection, &mut rng).unwrap()
 }
 
 /// `bytes`, read by `password`, written under `encryptor` as `options` says.

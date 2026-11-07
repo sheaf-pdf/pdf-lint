@@ -1032,7 +1032,8 @@ mod tests {
             assert_eq!(password.as_bytes(), prepared.as_bytes(), "{typed}");
             let mut rng = ChaCha20Rng::seed_from_u64(6);
             let trailer = dict! { "Root" => Object::reference(1), "Info" => Object::reference(6) };
-            let file = fixture::created(&password, true, &objects, trailer, &mut rng);
+            let protection = pdf_crypt::Protection::new(&password);
+            let file = fixture::created(&protection, &objects, trailer, &mut rng);
             let path = dir.path().join(format!("{i}.pdf"));
             std::fs::write(&path, &file).unwrap();
             let qpdf = qpdf(&path).password(prepared);
@@ -1108,6 +1109,286 @@ mod tests {
         match typed == prepared {
             true => pdf_crypt::Encoding::Utf8,
             false => pdf_crypt::Encoding::Saslprep,
+        }
+    }
+
+    /// qpdf 12.4.2's nine permission lines, as `--show-encryption` writes
+    /// them, for a file whose handler says `set`, by qpdf's own reading of
+    /// the bits: printing at high resolution where bits 3 and 12 are both
+    /// set; forms where bit 9 is, though bit 6 grants filling them in too
+    /// (pdf-crypt's `Permissions::ANNOTATE`); anything where the four
+    /// changes' bits are. A revision 2 file's are by the bits that cover
+    /// them there, as pdf-crypt's `Permissions::from_p` reads them.
+    fn permission_lines(set: pdf_crypt::Permissions) -> Vec<String> {
+        use pdf_crypt::{Permissions, Printing};
+
+        let changes = Permissions::MODIFY
+            | Permissions::ANNOTATE
+            | Permissions::FILL_FORMS
+            | Permissions::ASSEMBLE;
+        [
+            (
+                "extract for accessibility",
+                set.contains(Permissions::ACCESSIBILITY),
+            ),
+            ("extract for any purpose", set.contains(Permissions::COPY)),
+            ("print low resolution", set.contains(Permissions::PRINT)),
+            ("print high resolution", set.printing() == Printing::High),
+            (
+                "modify document assembly",
+                set.contains(Permissions::ASSEMBLE),
+            ),
+            ("modify forms", set.contains(Permissions::FILL_FORMS)),
+            ("modify annotations", set.contains(Permissions::ANNOTATE)),
+            ("modify other", set.contains(Permissions::MODIFY)),
+            ("modify anything", set.contains(changes)),
+        ]
+        .map(|(what, allowed)| match allowed {
+            true => format!("{what}: allowed"),
+            false => format!("{what}: not allowed"),
+        })
+        .to_vec()
+    }
+
+    /// The permission lines of what qpdf's `--show-encryption` wrote.
+    fn shown_permissions(shown: &str) -> Vec<String> {
+        (shown.lines())
+            .filter(|l| l.ends_with(": allowed") || l.ends_with(": not allowed"))
+            .map(String::from)
+            .collect()
+    }
+
+    /// A new file protected by each combination of passwords (both apart,
+    /// the user's alone, the owner's alone), under every permission, none,
+    /// and a security dialog's levels of printing and of changes with
+    /// copying withheld, as pdf-crypt creates it and the test writer
+    /// writes it, opens in qpdf by each password as its protection says:
+    /// `--check` finds nothing wrong, and `--show-encryption` says revision
+    /// 6, `/P` the permissions with bit 10, the key drawn first, "Supplied
+    /// password is owner password" for the owner's, "user password" for the
+    /// user's, and both where the one password is both, and for no password
+    /// where the user's is empty; and each of its nine permission lines as
+    /// the handler the reader opens it with says the permissions, which are
+    /// those written. A wrong password is "Incorrect password supplied",
+    /// whatever the file.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn new_files_open_in_qpdf_by_each_password_with_the_permissions_they_say() {
+        use chacha20::ChaCha20Rng;
+        use pdf_crypt::rand_core::{Rng, SeedableRng};
+        use pdf_crypt::{Changes, Permissions, Printing, Protection};
+
+        let dir = scratch("protected");
+        let user = Password("user").prepared().unwrap();
+        let owner = Password("owner").prepared().unwrap();
+        let level = |p: Printing, c: Changes| Permissions::from(p) | Permissions::from(c);
+        let sets = [
+            Permissions::ALL,
+            Permissions::NONE,
+            level(Printing::Low, Changes::Denied),
+            level(Printing::High, Changes::Assemble),
+            level(Printing::Denied, Changes::FillForms),
+            level(Printing::Low, Changes::CommentAndFill),
+            level(Printing::High, Changes::Any),
+        ];
+        let mut cases = vec![(Some(&user), None, Permissions::ALL)];
+        for set in sets {
+            cases.push((Some(&user), Some(&owner), set));
+            cases.push((None, Some(&owner), set));
+        }
+        let owners = "Supplied password is owner password";
+        let users = "Supplied password is user password";
+        for (i, (u, o, permissions)) in cases.into_iter().enumerate() {
+            let mut protection = Protection::DEFAULT;
+            protection.user = u;
+            protection.owner = o;
+            protection.permissions = permissions;
+            let what = format!("{protection:?}");
+            let seed = i as u64;
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            let trailer = dict! { "Root" => Object::reference(1) };
+            let file = fixture::created(&protection, &clean(), trailer, &mut rng);
+            let path = dir.path().join(format!("{i}.pdf"));
+            std::fs::write(&path, &file).unwrap();
+            let mut key = [0; 32];
+            ChaCha20Rng::seed_from_u64(seed).fill_bytes(&mut key);
+            let key: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            let written = permissions | Permissions::ACCESSIBILITY;
+            // Each password, and what qpdf says of it.
+            let mut opens: Vec<(&str, Vec<&str>)> = Vec::new();
+            if o.is_some() {
+                opens.push(("owner", vec![owners]));
+            }
+            match (u, o) {
+                (Some(_), Some(_)) => opens.push(("user", vec![users])),
+                (Some(_), None) => opens.push(("user", vec![owners, users])),
+                (None, _) => opens.push(("", vec![users])),
+            }
+            let qpdf = qpdf(&path);
+            let run = |password: &str, args: &[&str]| {
+                let mut all = vec![format!("--password={password}")];
+                all.extend(args.iter().map(|a| a.to_string()));
+                all.push(path.display().to_string());
+                qpdf.exec(&all).unwrap()
+            };
+            for (password, said) in opens {
+                let what = format!("{what}: {password:?}");
+                let check = run(password, &["--check"]);
+                let err = String::from_utf8_lossy(&check.stderr).into_owned();
+                assert_eq!((check.code, err.as_str()), (Some(0), ""), "{what}");
+                let shown = run(password, &["--show-encryption", "--show-encryption-key"]);
+                let shown = String::from_utf8_lossy(&shown.stdout).into_owned();
+                // What qpdf said, for a run with --nocapture to read.
+                println!("{what}\n{shown}");
+                let p = format!("P = {}", written.p());
+                let key = format!("Encryption key = {key}");
+                for line in ["R = 6", &p, &key, "file encryption method: AESv3"] {
+                    assert!(shown.lines().any(|l| l == line), "{what}: {line}\n{shown}");
+                }
+                let supplied: Vec<&str> = (shown.lines())
+                    .filter(|l| l.starts_with("Supplied password is"))
+                    .collect();
+                assert_eq!(supplied, said, "{what}\n{shown}");
+                let typed: &[Password] = match password {
+                    "" => &[],
+                    _ => &[Password(password)],
+                };
+                let (_, handler) = bytes::read_opened_by(&file, typed);
+                let ours = handler.unwrap().permissions();
+                assert_eq!(ours, written, "{what}");
+                let lines = shown_permissions(&shown);
+                assert_eq!(lines, permission_lines(ours), "{what}\n{shown}");
+            }
+            let wrong = run("wrong", &["--show-encryption"]);
+            let wrong = String::from_utf8_lossy(&wrong.stdout).into_owned();
+            let first = wrong.lines().next();
+            assert_eq!(first, Some("Incorrect password supplied"), "{what}");
+        }
+    }
+
+    /// The `/P` of the encryption dictionary `doc`'s trailer refers to.
+    fn p_of(doc: &Document) -> Option<i64> {
+        let at = doc.trailer.dict().get(b"Encrypt")?.as_reference()?;
+        doc.get(at).ok()?.as_dict()?.get(b"P")?.as_integer()
+    }
+
+    /// The files qpdf 12.4.2 encrypts at each of its levels of printing,
+    /// changes and copying (`--encrypt user owner 256` with `--print`,
+    /// `--modify` and `--extract`) read back as the levels of a security
+    /// dialog say: `/P` their permissions with bit 10, as pdf-crypt's
+    /// `Permissions::p` writes them, and the handler opened by the user's
+    /// password, as the user's, and by the owner's, as the owner's, saying
+    /// those permissions.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn qpdfs_levels_read_back_as_a_security_dialogs() {
+        use pdf_crypt::{Changes, Encoding, Permissions, Printing};
+
+        let printing = [
+            (Printing::Denied, "none"),
+            (Printing::Low, "low"),
+            (Printing::High, "full"),
+        ];
+        let changes = [
+            (Changes::Denied, "none"),
+            (Changes::Assemble, "assembly"),
+            (Changes::FillForms, "form"),
+            (Changes::CommentAndFill, "annotate"),
+            (Changes::Any, "all"),
+        ];
+        for (printing, print) in printing {
+            for (changes, modify) in changes {
+                for (copy, extract) in [(Permissions::COPY, "y"), (Permissions::NONE, "n")] {
+                    let print = format!("--print={print}");
+                    let modify = format!("--modify={modify}");
+                    let extract = format!("--extract={extract}");
+                    let args = [
+                        "--encrypt",
+                        "user",
+                        "owner",
+                        "256",
+                        &print,
+                        &modify,
+                        &extract,
+                        "--",
+                    ];
+                    let (_dir, path) = rewritten("levels", &args);
+                    let data = std::fs::read(&path).unwrap();
+                    let set = Permissions::from(printing)
+                        | Permissions::from(changes)
+                        | copy
+                        | Permissions::ACCESSIBILITY;
+                    for (password, owner) in [("user", false), ("owner", true)] {
+                        let what = format!("{args:?}: {password}");
+                        let (doc, handler) = bytes::read_opened_by(&data, &[Password(password)]);
+                        let by = Some((0, Encoding::Utf8));
+                        let opened = crate::Encryption::Opened { owner, by };
+                        assert_eq!(doc.encryption, opened, "{what}");
+                        assert_eq!(p_of(&doc), Some(set.p()), "{what}");
+                        assert_eq!(handler.unwrap().permissions(), set, "{what}");
+                        println!("{what}: /P {}, {set}", set.p());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The test writer's dictionaries of each revision, 2 to 6, under a
+    /// grid of `/P`s, read in qpdf as the handler reads them: each of
+    /// qpdf's nine permission lines, opened by the user's password, as the
+    /// handler's permissions say, which are `/P`'s by the revision's
+    /// meaning of its bits (pdf-crypt's `Permissions::from_p`).
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn the_writers_p_reads_in_qpdf_as_the_handler_reads_it() {
+        use pdf_crypt::Permissions;
+        use pdf_crypt::writer::{Kind, Settings};
+
+        let dir = scratch("p");
+        let kinds = [
+            Kind::Rc4By40,
+            Kind::Rc4By128,
+            Kind::Aes128,
+            Kind::Aes256R5,
+            Kind::Aes256,
+        ];
+        let grid = [-4, -1, -3904, -60, -3388, -28, -2092, -260, -516, -2052];
+        for (k, kind) in kinds.into_iter().enumerate() {
+            for (i, p) in grid.into_iter().enumerate() {
+                let what = format!("{kind:?}, /P {p}");
+                let settings = Settings {
+                    kind,
+                    user: b"user",
+                    owner: b"owner",
+                    p,
+                    id: b"0123456789abcdef",
+                    encrypt_metadata: true,
+                };
+                let trailer = dict! { "Root" => Object::reference(1) };
+                let data = fixture::encrypted(&settings, &clean(), trailer);
+                let path = dir.path().join(format!("{k}-{i}.pdf"));
+                std::fs::write(&path, &data).unwrap();
+                let (doc, handler) = bytes::read_opened_by(&data, &[Password("user")]);
+                let ours = handler.unwrap().permissions();
+                let r = match kind {
+                    Kind::Rc4By40 => 2,
+                    Kind::Rc4By128 => 3,
+                    Kind::Aes128 => 4,
+                    Kind::Aes256R5 => 5,
+                    _ => 6,
+                };
+                assert_eq!(ours, Permissions::from_p(p, r), "{what}");
+                assert_eq!(p_of(&doc), Some(p), "{what}");
+                let args = ["--password=user", "--show-encryption"].map(String::from);
+                let mut args = args.to_vec();
+                args.push(path.display().to_string());
+                let shown = qpdf(&path).exec(&args).unwrap();
+                let shown = String::from_utf8_lossy(&shown.stdout).into_owned();
+                assert!(shown.contains(&format!("R = {r}\n")), "{what}\n{shown}");
+                let lines = shown_permissions(&shown);
+                println!("{what}: {ours}\n{}", lines.join("\n"));
+                assert_eq!(lines, permission_lines(ours), "{what}\n{shown}");
+            }
         }
     }
 

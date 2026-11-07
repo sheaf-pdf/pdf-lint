@@ -10,16 +10,19 @@ use std::convert::Infallible;
 /// as they are, and when it opens, strings and streams from it decrypted
 /// by each method, one that isn't among them, and encrypted under a
 /// context from it; and now and then, as revision 6 is, a new file's
-/// dictionary created for text from it (`created`). Panics on a broken
-/// promise: none should; a dictionary of another handler is refused as
-/// that, by its name, and none other is; a version refused is the
-/// dictionary's; the handler says which password opened it, which opens it
-/// alike alone; decrypting gives no more than it's given, and an error's
+/// dictionary created for passwords and permissions from it (`created`).
+/// Panics on a broken promise: none should; a dictionary of another handler
+/// is refused as that, by its name, and none other is; a version refused
+/// is the dictionary's; the handler says which password opened it, which
+/// opens it alike alone, and the permissions its `/P` grants by its
+/// revision; decrypting gives no more than it's given, and an error's
 /// `Debug` gives what decrypted by its length; and what's encrypted
 /// decrypts to what it was, the same bytes each time, or is refused alike
 /// both ways.
 pub fn handler(data: &[u8]) {
-    use crate::{CryptFilter, Dictionary, Encoded, Fault, Handler, Method, Password, Refused};
+    use crate::{
+        CryptFilter, Dictionary, Encoded, Fault, Handler, Method, Password, Permissions, Refused,
+    };
     let mut bytes = data.iter().copied();
     let mut next = || bytes.next().unwrap_or(0);
     let mut take = |n: usize| -> Vec<u8> { (0..n).map(|_| next()).collect() };
@@ -85,7 +88,7 @@ pub fn handler(data: &[u8]) {
                 kind,
                 user: &password,
                 owner: b"owner",
-                p: -4,
+                p: i64::from(i32::from_le_bytes([head[2], head[3], head[4], head[5]])),
                 id: &id,
                 encrypt_metadata: head[6] & 1 == 0,
             })
@@ -138,6 +141,9 @@ pub fn handler(data: &[u8]) {
         (handler.owner(), handler.faults()),
         "opened alike alone"
     );
+    let p = dictionary.p.expect("/P, as it opened");
+    let permissions = Permissions::from_p(p, dictionary.r);
+    assert_eq!(handler.permissions(), permissions, "/P's permissions");
     let id = (u32::from(head[2]), u16::from(head[3]));
     let methods = [
         None,
@@ -215,63 +221,129 @@ fn by_length(error: &crate::Error) {
 }
 
 /// A new file's handler and dictionary ([`Handler::create`](crate::Handler::create)),
-/// for text from `data`: its first byte the text's length, then the text
-/// (UTF-8, lossily), then what's drawn ([`Drawn`]). Panics on a broken
-/// promise: none should; each of the text's encodings is taken exactly
-/// when it's tagged SASLprep's and its bytes are a password prepared (the
-/// text's, where it prepares, or 3.2's form of it that prepares to
-/// itself), else refused for its tag, its length or its form; and
-/// prepared, the same draws
-/// give the same dictionary, of revision 6 with every permission, which
-/// opens by the text's encodings as the owner's, `/Perms` and
-/// `/EncryptMetadata` as asked, its handler and the one opened
-/// encrypting alike and each decrypting the other's.
+/// protected as `data` says: a user's text, then an owner's, each by its
+/// length's byte and the text (UTF-8, lossily), none where the byte is 255
+/// or there's none; then a byte whose bits choose the permissions
+/// ([`permissions`]), every one where there's none; then what's drawn
+/// ([`Drawn`]). Panics on a broken promise: none should; each of each
+/// text's encodings, beside the other's prepared form, is taken exactly
+/// when each password given is tagged SASLprep's and its bytes are a
+/// password prepared (the text's, where it prepares, or 3.2's form of it
+/// that prepares to itself), and the protection is one a file is made for,
+/// else refused for the first password's tag, length or form, the user's
+/// before the owner's; then, neither given, as no password; then, permissions
+/// withheld, bit 10 put back, with no owner's password apart from the
+/// user's, as shared. Made, the same draws give the same dictionary, of
+/// revision 6, `/P` the permissions with bit 10, which opens by the owner's
+/// text as the owner's, by the user's as the user's where the owner's is
+/// apart and as the owner's where it isn't, and with no password, or the
+/// empty one, as the user's where there's no user's password; and by no
+/// other. `/Perms` confirms the key and matches `/P` and
+/// `/EncryptMetadata` as asked, each handler says the permissions written,
+/// and the handler made and each opened encrypt alike and each decrypts
+/// the other's.
 fn created(data: &[u8], encrypt_metadata: bool) {
-    use crate::{Encoding, Handler, Password, Unusable};
-    let (len, rest) = data.split_first().unwrap_or((&0, &[]));
-    let (text, draws) = rest.split_at(usize::from(*len).min(rest.len()));
-    let text = String::from_utf8_lossy(text);
-    let typed = Password(&text);
-    let prepared = typed.prepared();
-    for form in typed.encodings() {
-        let created = Handler::create(&form, encrypt_metadata, &mut Drawn::over(draws));
-        let bytes = form.as_bytes();
-        // Its bytes, as text, a password that prepares to them.
-        let itself = std::str::from_utf8(bytes).is_ok_and(|text| {
+    use crate::{Encoded, Encoding, Handler, Password, Permissions, Protection, Refused, Unusable};
+    let (user, rest) = text(data);
+    let (owner, rest) = text(rest);
+    let (&bits, draws) = rest.split_first().unwrap_or((&0xff, &[]));
+    let permissions = permissions(bits);
+    let user = user.as_deref().map(Password);
+    let owner = owner.as_deref().map(Password);
+    // Its bytes, as text, a password that prepares to them.
+    let itself = |bytes: &[u8]| {
+        std::str::from_utf8(bytes).is_ok_and(|text| {
             Password(text)
                 .prepared()
                 .is_ok_and(|p| p.as_bytes() == bytes)
-        });
-        match created {
-            Ok(_) => {
-                assert!(
-                    form.encoding() == Encoding::Saslprep && itself,
-                    "taken: a password prepared"
+        })
+    };
+    // Why a password given can't be a new file's, if it can't.
+    let unusable = |form: &Encoded| match (form.encoding(), form.as_bytes()) {
+        (Encoding::Saslprep, []) => Some(Unusable::Empty),
+        (Encoding::Saslprep, bytes) if bytes.len() > 127 => {
+            Some(Unusable::TooLong { len: bytes.len() })
+        }
+        (Encoding::Saslprep, bytes) if itself(bytes) => None,
+        (encoding, _) => Some(Unusable::Unprepared(encoding)),
+    };
+    // Whether the owner's password is apart from the user's.
+    let apart = |user: Option<&Encoded>, owner: Option<&Encoded>| match (user, owner) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(user), Some(owner)) => user.as_bytes() != owner.as_bytes(),
+    };
+    let written = permissions | Permissions::ACCESSIBILITY;
+    let expected = |protection: &Protection| {
+        let passwords = [protection.user, protection.owner];
+        if let Some(why) = passwords.into_iter().flatten().find_map(unusable) {
+            return Err(why);
+        }
+        if passwords.iter().all(Option::is_none) {
+            return Err(Unusable::NoPassword);
+        }
+        match written == Permissions::ALL || apart(protection.user, protection.owner) {
+            true => Ok(()),
+            false => Err(Unusable::Shared),
+        }
+    };
+    fn protected<'a>(
+        user: Option<&'a Encoded>,
+        owner: Option<&'a Encoded>,
+        (permissions, encrypt_metadata): (Permissions, bool),
+    ) -> Protection<'a> {
+        let mut protection = Protection::DEFAULT;
+        protection.user = user;
+        protection.owner = owner;
+        protection.permissions = permissions;
+        protection.encrypt_metadata = encrypt_metadata;
+        protection
+    }
+    let how = (permissions, encrypt_metadata);
+    let user_prepared = user.map(|typed| typed.prepared());
+    let owner_prepared = owner.map(|typed| typed.prepared());
+    let user_ok = user_prepared.as_ref().and_then(|p| p.as_ref().ok());
+    let owner_ok = owner_prepared.as_ref().and_then(|p| p.as_ref().ok());
+    // Each form of each text, the other's prepared form beside it.
+    let forms = |typed: Option<Password>| typed.map(|t| t.encodings()).unwrap_or_default();
+    let users = forms(user).into_iter().map(|form| (form, true));
+    let owners = forms(owner).into_iter().map(|form| (form, false));
+    for (form, is_user) in users.chain(owners) {
+        let protection = match is_user {
+            true => protected(Some(&form), owner_ok, how),
+            false => protected(user_ok, Some(&form), how),
+        };
+        let created = Handler::create(&protection, &mut Drawn::over(draws));
+        let created = created.map(|_| ());
+        assert_eq!(created, expected(&protection), "refused for the first why");
+        if created.is_ok() {
+            let prepared = [&user_prepared, &owner_prepared][usize::from(!is_user)];
+            if let Some(Ok(prepared)) = prepared {
+                assert_eq!(
+                    prepared.as_bytes(),
+                    form.as_bytes(),
+                    "the text's, where it prepares"
                 );
-                if let Ok(prepared) = &prepared {
-                    assert_eq!(prepared.as_bytes(), bytes, "the text's, where it prepares");
-                }
-            }
-            Err(why) => {
-                let expected = match (form.encoding(), bytes.len()) {
-                    (Encoding::Saslprep, 0) => Unusable::Empty,
-                    (Encoding::Saslprep, len @ 128..) => Unusable::TooLong { len },
-                    (Encoding::Saslprep, _) => {
-                        assert!(!itself, "a password prepared refused");
-                        Unusable::Unprepared(Encoding::Saslprep)
-                    }
-                    (encoding, _) => Unusable::Unprepared(encoding),
-                };
-                assert_eq!(why, expected, "refused for its tag, its length or its form");
             }
         }
     }
-    let Ok(password) = prepared else {
+    let neither = Handler::create(&protected(None, None, how), &mut Drawn::over(draws));
+    assert_eq!(neither.map(|_| ()), Err(Unusable::NoPassword), "neither");
+    // A text given that doesn't prepare makes no file.
+    let unprepared =
+        |prepared: &Option<Result<Encoded, Unusable>>| matches!(prepared, Some(Err(_)));
+    if unprepared(&user_prepared) || unprepared(&owner_prepared) {
+        return;
+    }
+    let protection = protected(user_ok, owner_ok, how);
+    let created = Handler::create(&protection, &mut Drawn::over(draws));
+    let expected = expected(&protection);
+    let Ok((handler, dictionary)) = created else {
+        assert_eq!(created.map(|_| ()), expected, "refused, prepared");
         return;
     };
-    let created = Handler::create(&password, encrypt_metadata, &mut Drawn::over(draws));
-    let (handler, dictionary) = created.expect("a password prepared");
-    let again = Handler::create(&password, encrypt_metadata, &mut Drawn::over(draws));
+    assert_eq!(expected, Ok(()), "made, prepared");
+    let again = Handler::create(&protection, &mut Drawn::over(draws));
     assert_eq!(
         again.map(|(_, d)| d).as_ref(),
         Ok(&dictionary),
@@ -279,35 +351,89 @@ fn created(data: &[u8], encrypt_metadata: bool) {
     );
     assert_eq!(
         (dictionary.v, dictionary.r, dictionary.p),
-        (5, 6, Some(-4)),
-        "revision 6, every permission"
+        (5, 6, Some(written.p())),
+        "revision 6, the permissions with bit 10"
     );
     assert!(handler.owner() && handler.opened_by().is_none() && handler.faults().is_empty());
-    let opened = Handler::open(&dictionary, b"", &typed.encodings()).expect("it opens");
-    assert!(
-        opened.owner() && opened.faults().is_empty(),
-        "as the owner's"
-    );
-    assert_eq!(
-        opened.encrypts_metadata(),
-        encrypt_metadata,
-        "/EncryptMetadata"
-    );
-    let id = (1, 0);
-    for data in [draws, &draws[..draws.len().min(17)]] {
-        let string = handler.encrypt_string(id, b"a context", data);
-        assert_eq!(
-            opened.encrypt_string(id, b"a context", data),
-            string,
-            "alike"
-        );
-        let string = string.expect("AES-256");
-        assert_eq!(opened.decrypt_string(id, &string), Ok(data.to_vec()));
-        let stream = opened
-            .encrypt_stream(id, b"a context", data, None)
-            .expect("AES-256");
-        assert_eq!(handler.decrypt_stream(id, &stream, None), Ok(data.to_vec()));
+    assert_eq!(handler.permissions(), written, "the permissions written");
+    // Who opens it, and as whose.
+    let mut opens = Vec::new();
+    if let Some(owner) = owner {
+        opens.push((owner.encodings(), true));
     }
+    match user {
+        Some(user) => opens.push((user.encodings(), !apart(user_ok, owner_ok))),
+        None => {
+            opens.push((Vec::new(), false));
+            opens.push((vec![Encoded::verbatim(b"")], false));
+        }
+    }
+    let id = (1, 0);
+    for (passwords, owner) in opens {
+        let opened = Handler::open(&dictionary, b"", &passwords).expect("it opens");
+        assert_eq!(opened.owner(), owner, "as the owner's or the user's");
+        assert!(opened.faults().is_empty(), "/Perms confirms and matches");
+        assert_eq!(opened.permissions(), written, "the permissions written");
+        assert_eq!(
+            opened.encrypts_metadata(),
+            encrypt_metadata,
+            "/EncryptMetadata"
+        );
+        for data in [draws, &draws[..draws.len().min(17)]] {
+            let string = handler.encrypt_string(id, b"a context", data);
+            assert_eq!(
+                opened.encrypt_string(id, b"a context", data),
+                string,
+                "alike"
+            );
+            let string = string.expect("AES-256");
+            assert_eq!(opened.decrypt_string(id, &string), Ok(data.to_vec()));
+            let stream = opened
+                .encrypt_stream(id, b"a context", data, None)
+                .expect("AES-256");
+            assert_eq!(handler.decrypt_stream(id, &stream, None), Ok(data.to_vec()));
+        }
+    }
+    // No other: bytes no prepared password is, which a file with no user's
+    // password doesn't take for the empty one.
+    let wrong = Handler::open(&dictionary, b"", &[Encoded::verbatim(b"\xff")]);
+    assert_eq!(wrong.unwrap_err(), Refused::Password, "a wrong password");
+}
+
+/// A text from `data`: its first byte its length, then the text (UTF-8,
+/// lossily), none where the byte is 255 or there's none; and what's after
+/// it.
+fn text(data: &[u8]) -> (Option<String>, &[u8]) {
+    match data.split_first() {
+        None => (None, data),
+        Some((255, rest)) => (None, rest),
+        Some((&len, rest)) => {
+            let (text, rest) = rest.split_at(usize::from(len).min(rest.len()));
+            (Some(String::from_utf8_lossy(text).into_owned()), rest)
+        }
+    }
+}
+
+/// The permissions whose bits are set in `bits`, the lowest the first
+/// in the order of `/P`'s bits: printing, modifying, copying, annotating,
+/// filling in forms, accessibility, assembling, printing at high
+/// resolution. Each of the 256 sets, by one byte; the tests take them so
+/// too.
+pub(crate) fn permissions(bits: u8) -> crate::Permissions {
+    use crate::Permissions;
+    let each = [
+        Permissions::PRINT,
+        Permissions::MODIFY,
+        Permissions::COPY,
+        Permissions::ANNOTATE,
+        Permissions::FILL_FORMS,
+        Permissions::ACCESSIBILITY,
+        Permissions::ASSEMBLE,
+        Permissions::PRINT_HIGH,
+    ];
+    (0..8)
+        .filter(|i| bits >> i & 1 == 1)
+        .fold(Permissions::NONE, |set, i| set | each[i])
 }
 
 /// A random number generator for the fuzz body alone: the input's bytes,
@@ -525,9 +651,13 @@ mod tests {
     /// for text whose SASLprep form is itself, isn't, is empty, is over 127
     /// bytes, or that SASLprep refuses; whose forms by Unicode 3.2 and by a
     /// later Unicode differ, Corrigendum #4's way and #5's; and for random
-    /// text; each with
-    /// draws, and with none but the counter's, each way of
-    /// `/EncryptMetadata`.
+    /// text. Each as the user's password alone with every permission, with
+    /// draws and with none but the counter's, each way of
+    /// `/EncryptMetadata`; and with draws, each way of it by turns, as the
+    /// user's alone with permissions withheld (none, all but bit 10, which
+    /// is put back, and some), beside the next text as the owner's and
+    /// beside itself, and as the owner's alone with every permission and
+    /// none; and neither.
     #[test]
     fn new_files_dictionaries_keep_every_promise() {
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
@@ -552,19 +682,45 @@ mod tests {
             "\u{1100}\u{300}\u{1161}\u{323}".as_bytes(),
             &random,
         ];
+        // A text's length and the text, or none.
+        let text = |data: &mut Vec<u8>, text: Option<&[u8]>| match text {
+            Some(text) => {
+                data.push(text.len() as u8);
+                data.extend_from_slice(text);
+            }
+            None => data.push(255),
+        };
+        let run = |user: Option<&[u8]>, owner: Option<&[u8]>, bits: u8, draws: &[u8], metadata| {
+            let mut data = vec![0; 8 + 5 * 64 + 28];
+            data[1] = 254;
+            data[6] = metadata;
+            text(&mut data, user);
+            text(&mut data, owner);
+            data.push(bits);
+            data.extend_from_slice(draws);
+            handler(&data);
+        };
         for text in texts {
             for draws in [&[][..], &[7; 60]] {
                 for metadata in [0, 1] {
-                    let mut data = vec![0; 8 + 5 * 64 + 28];
-                    data[1] = 254;
-                    data[6] = metadata;
-                    data.push(text.len() as u8);
-                    data.extend_from_slice(text);
-                    data.extend_from_slice(draws);
-                    handler(&data);
+                    run(Some(text), None, 0xff, draws, metadata);
                 }
             }
         }
+        let draws = [7; 60];
+        for (i, text) in texts.into_iter().enumerate() {
+            let metadata = (i % 2) as u8;
+            let next = texts[(i + 1) % texts.len()];
+            for bits in [0, 0xdf, 0x5a] {
+                run(Some(text), None, bits, &draws, metadata);
+            }
+            run(Some(text), Some(next), 0x5a, &draws, metadata);
+            run(Some(text), Some(text), 0x0f, &draws, metadata);
+            for bits in [0xff, 0] {
+                run(None, Some(text), bits, &draws, metadata);
+            }
+        }
+        run(None, None, 0xff, &draws, 0);
     }
 
     #[test]
