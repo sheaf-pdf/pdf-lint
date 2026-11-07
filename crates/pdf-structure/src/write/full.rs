@@ -120,6 +120,7 @@ use crate::source::{Document, XrefKind};
 /// its number, or with no `from`; a group naming a number that isn't
 /// packed, or one twice; a `from` whose source says it changed, and a copy
 /// whose bytes aren't those it was read from ([`Error::Changed`]), or
+/// aren't there to read ([`Error::Gone`], [`Error::Uncontained`]), or
 /// whose record is another reading's or another object's, or under a
 /// renumbering whose references aren't where its bytes have them
 /// ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the

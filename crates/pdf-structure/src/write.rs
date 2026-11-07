@@ -116,7 +116,7 @@ use pdf_objects::version::Version;
 
 use crate::crypt::Get;
 use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
-use crate::source::{Document, Held, Record, Unsupported, XrefKind};
+use crate::source::{Document, Held, Record, Unread, Unsupported, XrefKind};
 
 pub use append::{Base, update};
 pub use crypt::{Encrypting, Encryptor, FreeNumbers, Unencryptable, encryption};
@@ -262,7 +262,8 @@ pub enum Body<'a> {
     ///    otherwise be in the clear in an encrypted file;
     /// 8. where its bytes, read again, hash as they did when it was read:
     ///    else the write is refused ([`Error::Changed`]), as the file
-    ///    changed under the reading;
+    ///    changed under the reading, and so is one whose bytes aren't there
+    ///    to read again ([`Error::Gone`], [`Error::Uncontained`]);
     /// 9. under a renumbering, where its references are where its bytes
     ///    have them: each, as [`Object::references`] walks them, placed
     ///    ([`Object::at`]) among the bytes `record` names, past its header
@@ -452,6 +453,7 @@ pub struct Options<'a> {
     ///   An object given past [`NUMBERS`] and written below it is written.
     /// - **Errors name** an object by the number it's given at
     ///   ([`Error::Unnumbered`], [`Error::Elsewhere`], [`Error::Changed`],
+    ///   [`Error::Gone`], [`Error::Uncontained`],
     ///   [`Error::Placed`], [`Error::Data`], [`Error::Group`],
     ///   [`Error::Twice`], and [`Error::Moved`] the encryption's object); a
     ///   number the file uses by the number written ([`Error::Number`],
@@ -672,7 +674,9 @@ mod sealed {
 
         /// The bytes at `span`, object `id`'s, as written, an encrypted
         /// file's as they are: refused where they aren't there to read any
-        /// more ([`Error::Changed`]), or don't read ([`Error::Io`]).
+        /// more ([`Error::Gone`]), where the object stream they're in
+        /// doesn't read ([`Error::Uncontained`]), or where they don't read
+        /// ([`Error::Io`]).
         fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error>;
 
         /// The newest entry its sections give number `n`.
@@ -721,7 +725,10 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
     fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error> {
         Reading::written(self, span).map_err(|why| match why {
             crate::read::Error::Io(e) => Error::io(&e),
-            _ => Error::Changed(Some(id)),
+            crate::read::Error::Unread(why) => Error::Uncontained { id, why },
+            // Outside the file, or the object stream's data: none other is
+            // given.
+            _ => Error::Gone { id, at: span },
         })
     }
 
@@ -793,10 +800,10 @@ pub enum Error {
     /// a whole file's section would list every number up to.
     #[error("{}", number(*.0))]
     Number(u32),
-    /// An object number given twice, at any generation: under a
-    /// renumbering ([`Options::renumber`]), an update's among them where one
-    /// of the two is an object as read it passes over, which is in its file
-    /// at that number already ([`Body::Read`]).
+    /// An object number given twice, at any generation: an update's among
+    /// them where one of the two is an object as read it passes over, which
+    /// is in its file at that number already ([`Body::Read`]), so that the
+    /// other would replace it, renumbered ([`Options::renumber`]) or not.
     #[error("object {0} is given twice")]
     Twice(u32),
     /// Under a renumbering ([`Options::renumber`]), the number written that
@@ -902,9 +909,32 @@ pub enum Error {
     /// The file the reading given reads isn't as it was when it was read:
     /// its source says so ([`ByteSource::unchanged`]), before anything's
     /// written; or the bytes object `id` was read from, read again to copy
-    /// them, aren't those it was read from ([`Body::Read`]).
+    /// them, aren't those it was read from, by their hash ([`Body::Read`]).
     #[error("{}", changed(*.0))]
     Changed(Option<ObjectId>),
+    /// The bytes object `id` was read from, `at`, read again to copy them
+    /// ([`Body::Read`]), aren't there to read: past the end of the file
+    /// the reading given reads, or of the decoded data of the object
+    /// stream they're in, or in an object stream the reading has none of
+    /// at that number. So the file isn't as it was when the object was
+    /// read, or the object's record isn't of where the reading read it.
+    #[error("{}", gone(*.id, *.at))]
+    Gone {
+        /// The object.
+        id: ObjectId,
+        /// Where its record says its bytes are.
+        at: Span,
+    },
+    /// The object stream object `id` was read from, decoded again to copy
+    /// its bytes ([`Body::Read`]), doesn't read or decode as it did when
+    /// the object was read, and why: so the file isn't as it was then.
+    #[error("object {} {}'s object stream doesn't read: {why}", id.number, id.generation)]
+    Uncontained {
+        /// The object.
+        id: ObjectId,
+        /// Why its object stream doesn't read.
+        why: Unread,
+    },
     /// An object as read ([`Body::Read`]) given with a record of another
     /// reading than the one given, or of another object: read as another
     /// number or generation ([`Record::id`]), or not the object given, nor,
@@ -969,6 +999,19 @@ fn changed(id: Option<ObjectId>) -> String {
             "object {n} {g}'s bytes aren't those it was read from: the file has changed since it was read"
         ),
     }
+}
+
+/// What [`Error::Gone`] says of object `id`'s bytes at `at`.
+fn gone(id: ObjectId, at: Span) -> String {
+    let (n, g) = (id.number, id.generation);
+    let (start, end) = (at.start, at.end);
+    let place = match at.stream {
+        None => "the file".to_string(),
+        Some(stream) => format!("object stream {}'s decoded data", stream.number),
+    };
+    format!(
+        "object {n} {g}'s bytes, {start}..{end} of {place}, aren't there to read: the file has changed since it was read"
+    )
 }
 
 /// What [`Error::Number`] says of number `n`.
@@ -1115,9 +1158,8 @@ impl<'a> Numbering<'a> {
 /// use, given once and written once, not `encrypt_at`, the encryption
 /// dictionary's, and not one `encryptor`'s file lists free under keys made
 /// per object: the first that isn't, refused. `held` are the numbers of
-/// objects an update under a renumbering passes over, ascending, given and
-/// in its file at those numbers already, which no body is given or written
-/// at again.
+/// objects an update passes over, ascending, given and in its file at
+/// those numbers already, which no body is given or written at again.
 fn checked(
     bodies: &[(ObjectId, Body<'_>)],
     to: Numbering<'_>,

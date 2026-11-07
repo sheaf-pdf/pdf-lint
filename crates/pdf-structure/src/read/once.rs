@@ -50,13 +50,13 @@ fn said(faults: &[(Place, Fault)]) -> Vec<(Option<u32>, String)> {
 
 /// What a file of broken objects says, read whole and on demand: `first`
 /// and `last` each without its `endobj`, `first` numbered below `last`,
-/// and `last` read on the way to another, as the file is opened (`by`
-/// none) or as object `by`, numbered below `first`, is read. Read whole,
-/// each is said once, at its own read's place: `first`'s, then `last`'s.
-/// On demand, `last` is said once where the read on the way told it, until
-/// it's read itself: so with `first` read, before it; with both read, as
-/// the whole read says them. Each fault said is the one its object's own
-/// read tells.
+/// and `last` read on the way to another, once or more, as the file is
+/// opened (`by` none) or as object `by`, numbered below `first`, is read.
+/// Read whole, each is said once, at its own read's place: `first`'s, then
+/// `last`'s. On demand, `last` is said once where the first read on the
+/// way told it, until it's read itself: so with `first` read, before it;
+/// with both read, as the whole read says them. Each fault said is the one
+/// its object's own read tells.
 fn said_once_at_its_own_place(file: &[u8], first: u32, last: u32, by: Option<u32>, what: &str) {
     let fault = |n: u32| (Some(n), unended_fault(n).to_string());
     let doc = document(file, &Options::DEFAULT);
@@ -164,6 +164,35 @@ fn a_fault_in_what_eff_refers_to_is_said_once_at_its_own_place() {
             }
         }
     }
+}
+
+/// `/StmF` and `/EFF` both by reference to one object without its
+/// `endobj`, from `/V` 4: the open reads it for each entry's value, so two
+/// reads on the way tell its fault, and it's said once, the first time,
+/// until its own read says it.
+#[test]
+fn a_fault_in_what_two_entries_refer_to_is_said_once_at_its_own_place() {
+    let mut tried = 0;
+    for kind in KINDS {
+        let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+        let own = &file[find(&file, b"6 0 obj").unwrap()..];
+        let own = &own[..find(own, b"endobj").unwrap()];
+        if find(own, b"/StmF /StdCF").is_none() {
+            continue;
+        }
+        let to = "/StmF 9 0 R /EFF 9 0 R";
+        let file = encryption_updated(&file, "/StmF /StdCF", to, &[(9, "/StdCF")]);
+        let file = unended(&unended(&file, 5), 9);
+        let doc = document(&file, &Options::DEFAULT);
+        assert!(
+            matches!(doc.encryption(), Encryption::Opened { .. }),
+            "{kind:?}"
+        );
+        said_once_at_its_own_place(&file, 5, 9, None, &format!("{kind:?}"));
+        tried += 1;
+    }
+    // The three kinds from /V 4, which have crypt filters.
+    assert_eq!(tried, 3);
 }
 
 /// The objects of a small file: a catalog, its page tree, and an object

@@ -77,7 +77,8 @@ impl<'w> Parts<'w> {
     /// from the reading. Refused as [`full`](super::full) refuses what's in a
     /// body: a copy whose record is another reading's or another object's
     /// ([`Error::Elsewhere`]), or whose bytes aren't those it was read from
-    /// ([`Error::Changed`]), a stream's data no reading given holds
+    /// ([`Error::Changed`]) or aren't there to read ([`Error::Gone`],
+    /// [`Error::Uncontained`]), a stream's data no reading given holds
     /// ([`Error::Placed`]), and what pdf-objects' writer or the encryptor
     /// refuses.
     pub fn body(

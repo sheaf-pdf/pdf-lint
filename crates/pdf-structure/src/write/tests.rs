@@ -23,7 +23,7 @@ use pdf_objects::serialize::{self, Encrypt, Refused};
 use super::{Deflate, Encryptor, Entry, Error, Section, Unencryptable};
 use crate::fuzz::Flipped;
 use crate::read::{self, ByteSource, Limits, Options, Reading, XrefEntry};
-use crate::{Encryption, Record, Source, XrefKind, write};
+use crate::{Encryption, Record, Source, Unread, XrefKind, write};
 
 fn open(bytes: &[u8]) -> Reading<Arc<[u8]>> {
     Reading::open(Arc::<[u8]>::from(bytes), &Options::DEFAULT).unwrap()
@@ -5999,6 +5999,153 @@ fn a_copy_whose_bytes_changed_since_they_were_read_is_refused() {
     for (id, _) in doc.objects() {
         assert_eq!(handed(&back, id), handed(&was, id), "{id:?}");
     }
+}
+
+/// A copy's bytes that aren't there to read again are refused by what
+/// keeps them from the write, each in its words: a span past the end of
+/// the file, or of an object stream's decoded data, or in an object stream
+/// the reading has none of at that number ([`Error::Gone`]); an object
+/// stream that doesn't read ([`Error::Uncontained`]), saying why, as the
+/// reading says it of the stream's members; and bytes that hash otherwise
+/// than they did ([`Error::Changed`]), as before. A whole write given a
+/// record past the file's end is refused so, nothing written.
+#[test]
+fn a_copys_bytes_not_there_to_read_are_refused_each_in_its_words() {
+    use super::sealed::Reads;
+
+    let file = spelled();
+    let reading = open(&file);
+    let id = ObjectId::new(3, 0);
+    let len = file.len();
+    let past = Span::new(None, len - 4, len + 6);
+    assert_eq!(
+        Reads::written(&reading, id, past),
+        Err(Error::Gone { id, at: past })
+    );
+    // In an object stream's decoded data: past it, in a stream that isn't
+    // one of the reading's, or of another generation.
+    let (compressed, _) = crate::read::tests::compressed(false);
+    let reading = open(&compressed);
+    let member = ObjectId::new(3, 0);
+    reading.get(member).unwrap();
+    let held = Source::held(&reading, ObjectId::new(4, 0)).unwrap().len();
+    for at in [
+        Span::new(Some(ObjectId::new(4, 0)), held - 2, held + 1),
+        Span::new(Some(ObjectId::new(9, 0)), 0, 2),
+        Span::new(Some(ObjectId::new(4, 1)), 0, 2),
+    ] {
+        assert_eq!(
+            Reads::written(&reading, member, at),
+            Err(Error::Gone { id: member, at })
+        );
+    }
+    let inside = Span::new(Some(ObjectId::new(4, 0)), 0, 2);
+    assert!(Reads::written(&reading, member, inside).is_ok());
+    // An object stream that doesn't decode, its filter one the reader
+    // doesn't take.
+    let junk = crate::read::tests::filtered(false, " /Filter /JBIG2Decode", b"junk");
+    let reading = open(&junk);
+    let Err(read::Error::Unread(why)) = reading.get(member) else {
+        panic!("its member doesn't read");
+    };
+    assert_eq!(
+        Reads::written(&reading, member, inside),
+        Err(Error::Uncontained { id: member, why })
+    );
+    // Each in its words.
+    let gone = Error::Gone {
+        id,
+        at: Span::new(Some(ObjectId::new(4, 0)), 7, 12),
+    };
+    assert_eq!(
+        gone.to_string(),
+        "object 3 0's bytes, 7..12 of object stream 4's decoded data, aren't there to read: the file has changed since it was read"
+    );
+    assert_eq!(
+        Error::Gone { id, at: past }.to_string(),
+        format!(
+            "object 3 0's bytes, {}..{} of the file, aren't there to read: the file has changed since it was read",
+            len - 4,
+            len + 6
+        )
+    );
+    let why = Unread::Missing {
+        id: ObjectId::new(4, 0),
+    };
+    assert_eq!(
+        Error::Uncontained { id, why }.to_string(),
+        "object 3 0's object stream doesn't read: 4 0 R isn't in the file"
+    );
+    // Through a whole write: the page given with a record past the end.
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let mut record = doc.record(id).unwrap().clone();
+    record.at = Span::new(None, record.at.start, len + 10);
+    let object = doc.get(id).unwrap().clone();
+    let bodies = (write::bodies(&doc)).map(|(at, body)| match at == id {
+        true => (
+            at,
+            write::Body::Read {
+                object: Cow::Borrowed(&object),
+                record: Cow::Borrowed(&record),
+            },
+        ),
+        false => (at, body),
+    });
+    let options = options(XrefKind::Table, None);
+    let mut out = b"held".to_vec();
+    let refused = write::full(
+        &mut out,
+        bodies,
+        doc.trailer().dict(),
+        None,
+        Some(&reading),
+        &options,
+    );
+    assert_eq!(refused, Err(Error::Gone { id, at: record.at }));
+    assert_eq!(out, b"held");
+}
+
+/// An update refuses another object given at the number of one it passes
+/// over, an object as read that the file holds there already, at any
+/// generation, which it would replace without a word: renumbered or not
+/// ([`Error::Twice`]), nothing written. One given there alone is written.
+#[test]
+fn an_update_refuses_an_object_given_where_one_it_passes_over_is() {
+    let file = spelled();
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let base = write::Base::of(&reading).unwrap();
+    let id = ObjectId::new(3, 0);
+    let mut changed = doc.get(id).unwrap().clone();
+    changed.as_dict_mut().unwrap().set("Changed", true);
+    let options = options(XrefKind::Table, None);
+    for at in [id, ObjectId::new(3, 1)] {
+        let given = write::bodies(&doc).chain([(at, write::Body::from(&changed))]);
+        let mut out = file.clone();
+        let refused = write::update(&mut out, &base, given, None, Some(&reading), &options);
+        assert_eq!(refused, Err(Error::Twice(3)), "{at}");
+        assert_eq!(out, file, "{at}");
+    }
+    // In place of the one as read, it's written.
+    let given = write::bodies(&doc).map(|(at, body)| match at == id {
+        true => (at, write::Body::from(&changed)),
+        false => (at, body),
+    });
+    let mut out = file.clone();
+    write::update(&mut out, &base, given, None, Some(&reading), &options)
+        .unwrap()
+        .unwrap();
+    let back = open(&out);
+    assert_eq!(
+        back.get(id)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Changed")
+            .and_then(Object::as_bool),
+        Some(true)
+    );
 }
 
 /// A file read by position that changed since it was read, as another

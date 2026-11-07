@@ -1168,7 +1168,9 @@ fn flipped(
 /// `encryptor`, its own, and under the renumbering the input's third byte
 /// gives ([`Renumbering::of_update`]): it writes that one, and what the
 /// renumbering moves or names otherwise, passing over the rest, which the
-/// file holds. When the reading was `sound` and the update wrote, the file
+/// file holds. Each number is given once, the changed one in place of the
+/// one as read, so none is refused as given where one passed over is
+/// ([`write::Error::Twice`]). When the reading was `sound` and the update wrote, the file
 /// read again by `password` is sound, and the same objects, each at the
 /// number the renumbering gives it, but that one with its key: whether it
 /// was.

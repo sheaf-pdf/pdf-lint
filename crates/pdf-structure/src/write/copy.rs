@@ -150,7 +150,8 @@ impl<'w> Copying<'w> {
     /// where it's written anew. Refused where its record is another
     /// reading's or another object's, or under a renumbering its references
     /// aren't where its bytes have them ([`Error::Elsewhere`]), or its
-    /// bytes aren't those it was read from ([`Error::Changed`]).
+    /// bytes aren't those it was read from ([`Error::Changed`]) or aren't
+    /// there to read ([`Error::Gone`], [`Error::Uncontained`]).
     pub(super) fn at_offset(
         &self,
         id: ObjectId,
@@ -256,7 +257,8 @@ impl<'w> Copying<'w> {
     }
 
     /// The bytes `record` names, object `id`'s, read again: refused where
-    /// they don't hash as they did when it was read ([`Error::Changed`]).
+    /// they don't hash as they did when it was read ([`Error::Changed`]),
+    /// or aren't there to read ([`Error::Gone`], [`Error::Uncontained`]).
     fn checked(&self, id: ObjectId, record: &Record) -> Result<Cow<'w, [u8]>, Error> {
         let bytes = self.from.written(id, record.at)?;
         match Record::hash_of(&bytes) == record.hash {

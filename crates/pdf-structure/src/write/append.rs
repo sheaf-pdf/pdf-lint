@@ -195,7 +195,9 @@ impl Base {
 /// file already and is passed over, so that a document's
 /// [`bodies`](super::bodies) write what was built or changed since; one
 /// of that reading's given at another number is refused
-/// ([`Error::Elsewhere`]), not passed over. After a newline, where `base`'s last
+/// ([`Error::Elsewhere`]), not passed over; and so is another object given
+/// at the number of one passed over, at any generation, which would
+/// replace it ([`Error::Twice`]). After a newline, where `base`'s last
 /// line isn't ended, each body at its number, in the order given, then a
 /// section of `base`'s kind listing only those, in runs, positions counted
 /// from `base`'s header, a stream's not deflated, numbered at
@@ -285,8 +287,9 @@ impl Base {
 /// object as read or a `from` after a file written under a renumbering; an
 /// encryptor that isn't `base`'s file's (another file's, though its
 /// `/Encrypt` is at the same number), or none for an encrypted file; a
-/// number 0 or at or past [`NUMBERS`], or given twice, or under a
-/// renumbering written at twice, one passed over among them; a body the
+/// number 0 or at or past [`NUMBERS`], or given twice, one passed over
+/// among them ([`Error::Twice`]), or under a renumbering written at twice,
+/// one passed over among them ([`Error::WrittenTwice`]); a body the
 /// renumbering gives no number; a body at the encryption dictionary's
 /// number; one at a number the file lists free where its keys are made
 /// per object ([`Encryptor::of`]); a renumbering that moves an encryption
@@ -296,7 +299,8 @@ impl Base {
 /// cross-reference stream with no number left below [`NUMBERS`]; a stream's data where it was written that isn't
 /// the reading's own for its number, or with no `from`; a `from` whose
 /// source says it changed, and a copy whose bytes aren't those it was read
-/// from ([`Error::Changed`]), or whose record is another reading's or
+/// from ([`Error::Changed`]), or aren't there to read ([`Error::Gone`],
+/// [`Error::Uncontained`]), or whose record is another reading's or
 /// another object's, or under a renumbering whose references aren't where
 /// its bytes have them ([`Error::Elsewhere`]); what pdf-objects' writer
 /// refuses, or the encryptor; and a write stopped.
@@ -330,14 +334,16 @@ pub fn update<'a>(
         to.at(id) == Some(id) && object.references().all(|r| to.at(r) == Some(r))
     };
     let mut kept: Vec<(ObjectId, Body<'a>)> = Vec::new();
-    // Under a renumbering, the numbers of what's passed over, at which no
-    // other object is given or written.
+    // The numbers of what's passed over, at which no other object is given
+    // or written: renumbered or not, as one given there would replace it
+    // silently.
     let mut passed = Vec::new();
     match to.0 {
         None => {
             for (id, body) in bodies {
-                if !held(id, &body)? {
-                    kept.push((id, body));
+                match held(id, &body)? {
+                    true => passed.push(id.number),
+                    false => kept.push((id, body)),
                 }
             }
         }
