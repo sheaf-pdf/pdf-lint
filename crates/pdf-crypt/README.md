@@ -18,12 +18,48 @@ It's made for a reader that checks files as much as for one that shows them. Cip
 - **Keys kept in, and wiped:** the handler decrypts and encrypts with the file's key and each object's, and gives out neither, its `Debug` included. Each is wiped when it's dropped (RustCrypto's `zeroize`), as is every buffer a password's or a key's bytes pass through on the way: the padded password, the hashes' and ciphers' inputs built from it, the intermediate keys, RC4's round keys. RustCrypto's crates are built with their own `zeroize`, which wipes their key schedules and hashing state; AES keeps a key's schedule in place of the key, keyed once for a file whose strings and streams are under the file's key.
 - **RustCrypto's primitives,** not its own: MD5 (`md-5`), SHA-256, SHA-384 and SHA-512 (`sha2`), HMAC-SHA256 (`hmac`), RC4 (`rc4`), and AES-128 and AES-256 (`aes`, in CBC by `cbc`).
 
-```rust
-use pdf_crypt::{Encoding, Handler, Password, Refused};
-use pdf_crypt::writer::{self, Kind, Settings};
+## An example
 
-// A dictionary for a user's and an owner's password, as the `writer`
-// feature writes them for tests.
+A new file's encryption, from a seeded generator (RustCrypto's `chacha20`, with its `rng` feature) where a program would pass the operating system's, and the file opened by its password:
+
+```rust
+use chacha20::ChaCha20Rng;
+use pdf_crypt::rand_core::SeedableRng;
+use pdf_crypt::{Encoding, Handler, Password, Refused};
+
+// The password prepared: Ⅸ's SASLprep form is `IX`.
+let password = Password("\u{2168}").prepared().unwrap();
+assert_eq!(password.as_bytes(), b"IX");
+let mut rng = ChaCha20Rng::seed_from_u64(7);
+let (writer, dictionary) = Handler::create(&password, true, &mut rng).unwrap();
+assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-4)));
+
+// A writer encrypts a string of object 5 under it, AES's IV derived from
+// what it names the object by and the string: the same each time.
+let title = writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap();
+assert_eq!(writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap(), title);
+
+// A reader opens it by the password as typed, in its SASLprep form, as the
+// owner's (revision 6 takes no /ID), and decrypts.
+let reader = Handler::open(&dictionary, b"", &Password("\u{2168}").encodings()).unwrap();
+assert!(reader.owner());
+assert_eq!(reader.opened_by(), Some((0, Encoding::Saslprep)));
+assert_eq!(reader.decrypt_string((5, 0), &title).unwrap(), b"A title");
+
+// Another password doesn't open it.
+let wrong = Password("IV").encodings();
+assert_eq!(Handler::open(&dictionary, b"", &wrong).unwrap_err(), Refused::Password);
+```
+
+## Test files, by the `writer` feature
+
+The `writer` feature, off by default, writes an encryption dictionary of each kind the handler reads, for a user's password and an owner's, and encrypts strings and streams under IVs given, the salts and keys given too, not drawn: for writing files to test a reader with, not for protecting a document, which `create` is for. docs.rs documents the crate without it, as a program builds it; `cargo doc --features writer` documents it with.
+
+```rust
+use pdf_crypt::writer::{self, Kind, Settings};
+use pdf_crypt::{Encoding, Handler, Password};
+
+// An AES-128 dictionary (`/V 4 /R 4`) for a user's and an owner's password.
 let settings = Settings {
     kind: Kind::Aes128,
     user: b"user",
@@ -34,54 +70,35 @@ let settings = Settings {
 };
 let dictionary = writer::dictionary(&settings);
 
-// A writer encrypts a string of object 12 under it, AES's IV derived from
-// what it names the object by and the string: the same each time.
-let user = Password("user").encodings();
-let writer = Handler::open(&dictionary, settings.id, &user).unwrap();
-let encrypted = writer.encrypt_string((12, 0), b"the Info dictionary", b"Hello").unwrap();
-assert_eq!(writer.encrypt_string((12, 0), b"the Info dictionary", b"Hello").unwrap(), encrypted);
+// The user's password opens it, not as the owner's, and a string of object
+// 12 is encrypted under an IV given, the ciphertext's first block, as a
+// test file pins one.
+let user = Handler::open(&dictionary, settings.id, &Password("user").encodings()).unwrap();
+assert!(!user.owner());
+let encrypted = writer::encrypt_string(&user, (12, 0), b"Hello", [7; 16]).unwrap();
+assert_eq!(encrypted[..16], [7; 16]);
 
-// A reader opens it with the password it's given, in each encoding, and
-// decrypts.
-let handler = Handler::open(&dictionary, settings.id, &Password("owner").encodings()).unwrap();
-assert!(handler.owner());
-assert_eq!(handler.opened_by(), Some((0, Encoding::Utf8)));
-assert_eq!(handler.decrypt_string((12, 0), &encrypted).unwrap(), b"Hello");
-let wrong = Password("wrong").encodings();
-assert_eq!(Handler::open(&dictionary, settings.id, &wrong).unwrap_err(), Refused::Password);
+// The owner's password opens it as the owner's, and decrypts the string.
+let owner = Handler::open(&dictionary, settings.id, &Password("owner").encodings()).unwrap();
+assert!(owner.owner());
+assert_eq!(owner.opened_by(), Some((0, Encoding::Utf8)));
+assert_eq!(owner.decrypt_string((12, 0), &encrypted).unwrap(), b"Hello");
 ```
 
-A new file's encryption, from a seeded generator (RustCrypto's `chacha20`, with its `rng` feature) where a program would pass the operating system's:
+## Exhaustive on purpose, or not
 
-```rust
-use chacha20::ChaCha20Rng;
-use pdf_crypt::rand_core::SeedableRng;
-use pdf_crypt::{Encoding, Handler, Password};
-
-// The password prepared: Ⅸ's SASLprep form is `IX`.
-let password = Password("\u{2168}").prepared().unwrap();
-assert_eq!(password.as_bytes(), b"IX");
-let mut rng = ChaCha20Rng::seed_from_u64(7);
-let (writer, dictionary) = Handler::create(&password, true, &mut rng).unwrap();
-assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-4)));
-let title = writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap();
-
-// A reader opens it by the password as typed, in its SASLprep form, as the
-// owner's (revision 6 takes no /ID).
-let reader = Handler::open(&dictionary, b"", &Password("\u{2168}").encodings()).unwrap();
-assert!(reader.owner());
-assert_eq!(reader.opened_by(), Some((0, Encoding::Saslprep)));
-assert_eq!(reader.decrypt_string((5, 0), &title).unwrap(), b"A title");
-```
+`Error`, `Password` and `writer::Settings` are exhaustive on purpose: each is built by a literal and taken apart by its public fields (an error is what decrypted and why, a password its text, the writer's settings what a test writes a file with), so a field more would be a breaking release. What may say more is `#[non_exhaustive]`, so it can grow in a minor release, a match on it needing a wildcard and a struct being made from its `default()`: `Dictionary` and `CryptFilter`, as a field can come, another handler's or a crypt filter's; `Method`, as a method can, ISO/TS 32003's AES-GCM for one; `Refused`, `Fault` and `Unusable`, as refusals, faults and reasons are found in files and passwords rather than designed, `Refused::OtherHandler` and `Refused::Version` each so too, matched with `..`, so a field can join one; `Encoding`, as writers are found setting passwords in more; and `writer::Kind`, as a kind may join it. `Handler` and `Encoded` keep their fields to themselves.
 
 ## What isn't here
 
-- **Other security handlers:** the public-key handler (`/Adobe.PubSec`) and those of other names are refused, saying so.
+- **Other security handlers:** the public-key handler (`/Adobe.PubSec`) and those of other names are refused, by name (`Refused::OtherHandler`).
+- **ISO/TS 32003's AES-GCM:** a dictionary of `/V 6 /R 7` is refused by the pair (`Refused::Version`), and a crypt filter's `/AESV4` in a file the handler opens is a method that isn't one (`Method::Unknown`), refused where a string or a stream is decrypted or encrypted by it.
+- **ISO/TS 32004's integrity protection:** a MAC over the file's bytes, in the trailer's `/AuthCode`, under a key wrapped by one derived from the file's key and the encryption dictionary's `/KDFSalt`. Neither `/AuthCode` nor `/KDFSalt` is read here (a `Dictionary` has no field for the salt), so a file that has them opens as one without, its MAC unchecked, and `create` writes neither.
 - **Knowing what isn't encrypted:** the encryption dictionary's own strings, a cross-reference stream, a signature's `/Contents`, metadata under `/EncryptMetadata false`. That takes the file, and is the caller's: pdf-structure's reader decrypts by one list of it, and its writer encrypts by the same list.
-- **New files of revisions 2 to 5.** `create` makes revision 6 alone; a file of an older revision is read, and a writer encrypts under the handler it opened. The `writer` feature makes dictionaries of every revision, and encrypts under IVs given, but with the salts and keys given, not random: for writing test files, not for protecting a document.
+- **New files of revisions 2 to 5.** `create` makes revision 6 alone; a file of an older revision is read, and a writer encrypts under the handler it opened. The `writer` feature makes dictionaries of every revision, its salts and keys given: for test files (above), not for protecting a document.
 - **Randomness of its own.** A new file's key and salts are what the caller's generator draws: one that isn't a cryptographic generator, or one seeded outside a test, makes a key that can be guessed.
 - **Wiping what it can't reach:** copies the allocator made of a buffer before it was sized, values in registers and spilled to the stack, the buffers `stringprep` and `unicode-normalization` prepare and compose a password in, the caller's own copies of a password (a `Password` borrows the caller's text) or of plaintext, and the state of the generator a new file's key is drawn from, which is the caller's. Decrypted strings and streams are the document's, not key material, and aren't wiped.
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)) or MIT license ([LICENSE-MIT](../../LICENSE-MIT)) at your option.
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)) or MIT license ([LICENSE-MIT](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-MIT)) at your option.

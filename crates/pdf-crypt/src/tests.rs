@@ -1,5 +1,5 @@
 //! The handler on files qpdf wrote, each way it encrypts, and on what the
-//! writer writes; and its faults and refusals.
+//! writer writes; its faults and refusals; and the README's links.
 
 use chacha20::ChaCha20Rng;
 use rand_core::{CryptoRng, Rng, SeedableRng};
@@ -1589,4 +1589,22 @@ fn a_password_not_prepared_or_not_1_to_127_bytes_makes_no_new_file() {
     let (_, dictionary) = created(&"\u{2168}".repeat(63), true, 1);
     let opened = Handler::open(&dictionary, b"", &Password(&"IX".repeat(63)).encodings());
     assert!(opened.unwrap().owner());
+}
+
+/// The README is shown on crates.io and docs.rs, where a path beside the
+/// crate reaches nothing: its licence links are the repository's URLs, the
+/// manifest's `repository` and the file, and no link of it climbs out of
+/// the crate.
+#[test]
+fn the_readmes_licence_links_reach_the_files() {
+    let readme = include_str!("../README.md");
+    let repository = env!("CARGO_PKG_REPOSITORY");
+    for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+        let link = format!("[{file}]({repository}/blob/main/{file})");
+        assert!(
+            readme.contains(&link),
+            "{file}'s link isn't the repository's URL"
+        );
+    }
+    assert!(!readme.contains("](../"), "a link climbs out of the crate");
 }

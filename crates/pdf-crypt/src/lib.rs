@@ -5,7 +5,9 @@
 //!
 //! - **Values, not dictionaries.** A [`Dictionary`] is the encryption
 //!   dictionary's values, typed; reading them from the file is the
-//!   caller's, so it works with any object model.
+//!   caller's, so it works with any object model. One the standard handler
+//!   doesn't take is refused saying why ([`Refused`]): another security
+//!   handler's by its name, a version it isn't by its `/V` and `/R`.
 //! - **Every revision of the standard handler:** 2 to 4 (RC4, and AES-128
 //!   in version 4), 5 (Adobe's Extension Level 3, AES-256) and 6 (ISO
 //!   32000-2, AES-256), the owner's password or the user's.
@@ -27,8 +29,8 @@
 //!   randomness of its own.
 //! - **Every fault said, what decrypted kept,** as a checker wants it: AES
 //!   ciphertext too short, a part block past the whole ones, padding that
-//!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
-//!   match or doesn't confirm the key.
+//!   isn't, a crypt filter's method that isn't one, AES that the file's key
+//!   isn't for, `/Perms` that doesn't match or doesn't confirm the key.
 //! - **Encrypting for a writer:** [`Handler::encrypt_string`] and
 //!   [`Handler::encrypt_stream`] encrypt as the handler decrypts, AES's IV
 //!   derived from the data and what the caller names its object by, so
@@ -49,6 +51,11 @@
 //! it, and its writer encrypts by the same. Under RC4 a changed object
 //! written again at its number and generation leaks what changed
 //! ([`Method::Rc4`]).
+//!
+//! The `writer` feature, off by default, writes an encryption dictionary of
+//! every revision and encrypts under IVs given, its salts and keys given
+//! too: for test files, not for protecting a document. docs.rs documents
+//! the crate without it.
 
 mod aes;
 #[cfg(any(test, fuzzing))]
