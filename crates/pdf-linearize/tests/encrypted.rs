@@ -137,7 +137,7 @@ fn reads_back(out: &[u8], done: &family::Linearized, password: &str, name: &str)
         "{name}"
     );
     let doc = reading.to_document().unwrap();
-    assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+    assert!(doc.faults().is_empty(), "{name}: {:?}", doc.faults());
     for text in [1, 3, 4, 5, 6, 7, 8, 9].map(|n| format!("secret 0{n}")) {
         marked(&doc, &text);
     }

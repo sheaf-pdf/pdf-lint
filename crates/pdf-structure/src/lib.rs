@@ -35,8 +35,12 @@
 //!   whether it's changed. Where each object was read from is a
 //!   [`Record`], and what the file's header and sections say of it, as
 //!   written, its [`Facts`].
-//! - **Every choice said:** what the reader had to choose how to read is a
-//!   [`Warning`], with its object and where.
+//! - **Every choice said:** what the reader had to choose how to read, or
+//!   read past, is a [`Fault`], kept at its place, the object it's in and
+//!   where it was written, as pdf-objects' `fault::Place` says it, and told
+//!   to any of pdf-objects' `fault::Sink`s ([`Source::tell_faults`]); none
+//!   looked for, at no cost, where the caller wants none
+//!   ([`Options::faults`]).
 //! - **Object streams and cross-reference streams decoded** from their own
 //!   data, through pdf-filters, under limits on what a stream and a
 //!   reading decode to, which a caller sets ([`Limits`], in [`Options`]);
@@ -106,11 +110,11 @@ pub use pdf_objects;
 #[cfg(any(unix, windows))]
 pub use read::FileBytes;
 pub use read::{
-    ByteSource, Error, Identity, Limits, Options, Prefix, Reading, SourceId, WithReading,
+    ByteSource, Error, Fault, Identity, Limits, Options, Prefix, Reading, SourceId, WithReading,
 };
 pub use source::{
     DataExtent, Document, Encryption, Facts, Origin, Record, Revision, RevisionEnd, Source,
-    Trailer, Unread, Update, Warning, XrefKind,
+    Trailer, Unread, Update, XrefKind,
 };
 
 /// The README's examples, run as doctests.

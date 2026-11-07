@@ -225,11 +225,12 @@ use pdf_objects::{Resolve, Unreadable};
 use pdf_semantics::date::Date;
 use pdf_structure::write::KeptOut;
 
+use crate::bytes::Fault;
 use crate::bytes::{ByteSource, WithReading};
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
-use crate::source::{Origin, Revision, RevisionEnd, Source, Trailer, Warning};
+use crate::source::{Origin, Revision, RevisionEnd, Source, Trailer};
 use crate::text;
 use crate::version::Version;
 
@@ -686,7 +687,7 @@ pub enum Rule {
     /// object without `endobj`, a name's stray `#` or `#00`, a
     /// cross-reference table's rows not 20 bytes, a file whose last line
     /// isn't `%%EOF` alone, an object an object stream's header starts
-    /// inside another's bytes, and the like ([`Warning`]).
+    /// inside another's bytes, and the like ([`Fault`]), in its words.
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
@@ -1399,7 +1400,7 @@ fn check_in(
         walk.graphics(font_budget);
         walk.linearized();
         walk.unreached();
-        walk.read_as(&source.warnings());
+        walk.read_as(&source.faults());
         std::mem::take(&mut walk.report)
     })
 }
@@ -1425,7 +1426,7 @@ fn walking<R>(
             table: "FileTrailer".to_string(),
             key: "-".to_string(),
             rule: Rule::Unresolved,
-            value: why.clone(),
+            value: why.to_string(),
             at: None,
             revision: None,
         });
@@ -4363,22 +4364,23 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The reader's warnings in held objects, and those of the file as a
-    /// whole as the trailer's, each a [`Rule::Reader`] finding.
-    fn read_as(&mut self, warnings: &[Warning]) {
-        for warning in warnings {
-            let Some(made) = self.made(warning.object) else {
+    /// The reader's faults in held objects, and those of the file as a
+    /// whole as the trailer's, each a [`Rule::Reader`] finding in its
+    /// words.
+    fn read_as(&mut self, faults: &[(pdf_objects::fault::Place, Fault)]) {
+        for (place, fault) in faults {
+            let Some(made) = self.made(place.object) else {
                 continue;
             };
             self.report.findings.push(Finding {
-                object: warning.object,
+                object: place.object,
                 made,
                 path: "-".to_string(),
                 table: "-".to_string(),
                 key: "-".to_string(),
                 rule: Rule::Reader,
-                value: warning.message.clone(),
-                at: warning.at,
+                value: fault.to_string(),
+                at: place.at,
                 revision: None,
             });
         }
@@ -7563,7 +7565,7 @@ mod tests {
         let doc = (bytes::Reading::open(&file.out[..], &options))
             .and_then(bytes::Reading::into_document)
             .unwrap();
-        assert!(doc.revisions().is_empty() && doc.warnings.is_empty());
+        assert!(doc.revisions().is_empty() && doc.faults().is_empty());
         let report = check(&doc, &all, &Options::default());
         assert_eq!(missing(&report), Vec::<String>::new(), "{report}");
         assert_eq!(trailers(&report), [(not_checked("-", UNKEPT), 1)]);
@@ -7791,7 +7793,7 @@ mod tests {
         let second = file.table(&[2], &format!("/Size 5 /Root 1 0 R /Prev {first}"));
         file.end(second);
         let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.revisions().len(), 2);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(walked(&report), [NO_PAGES], "{report}");
@@ -8107,7 +8109,7 @@ mod tests {
         let at = file.stream(11, &[0, 1, 2, 3, 4, 5, 10], "/Root 1 0 R");
         file.end(at);
         let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),

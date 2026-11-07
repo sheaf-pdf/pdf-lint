@@ -340,7 +340,7 @@ fn each_kind_reads_back_linearized_with_the_same_pages_and_objects() {
         assert_eq!(out.len() as u64, done.layout.len());
         let (reading, doc) = read(&out);
         assert!(reading.facts().linearized, "{options:?}");
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let ids = page_ids(&doc);
         assert_eq!(ids.len(), 2);
         let content = |page: ObjectId| {

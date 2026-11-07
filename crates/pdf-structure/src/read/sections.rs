@@ -7,14 +7,17 @@
 
 use pdf_filters::Fault;
 use pdf_objects::object::{Object, ObjectId, Value};
+use pdf_objects::parse;
 use pdf_tokenizer::{Kind, Tokenizer, is_white_space};
 
-use super::{Cx, Reader, Reading, XrefEntry, is_keyword, offset_of, predictor_row, rfind};
+use super::{
+    Cx, Reader, Reading, Unfiltered, XrefEntry, is_keyword, offset_of, predictor_row, rfind,
+};
 use crate::crypt::is_xref;
 use crate::filter;
 use crate::read::reading::{ByteSource, Error};
 use crate::read::window::{Bytes, InMemory, Window};
-use crate::source::{Trailer, XrefKind};
+use crate::source::{Trailer, Unread, XrefKind};
 
 /// One row of a cross-reference section, as written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,8 +141,8 @@ pub enum SectionFault {
     Trailer {
         /// Where.
         at: usize,
-        /// What the parser says.
-        why: String,
+        /// pdf-objects' parser's error.
+        why: parse::Error,
     },
     /// What follows `trailer` isn't a dictionary.
     #[error("the trailer at byte {at} isn't a dictionary")]
@@ -152,8 +155,8 @@ pub enum SectionFault {
     Unread {
         /// Where.
         at: usize,
-        /// What the reader says.
-        why: String,
+        /// Why it doesn't read.
+        why: Box<Unread>,
     },
     /// The object isn't a stream.
     #[error("the object at byte {at} isn't a stream")]
@@ -185,13 +188,24 @@ pub enum SectionFault {
         /// Where.
         at: usize,
     },
-    /// A stream's data doesn't decode as far as its rows.
+    /// A stream's `/Filter` or `/DecodeParms` are ones the reader doesn't
+    /// take.
     #[error("the stream at byte {at} doesn't decode: {why}")]
+    Filters {
+        /// Where.
+        at: usize,
+        /// What it doesn't take of them.
+        why: Unfiltered,
+    },
+    /// A stream's data doesn't decode as far as its rows, and pdf-filters'
+    /// first fault: [`Fault::Limit`] where none stopped it short of its
+    /// limit.
+    #[error("the stream at byte {at} doesn't decode: {fault}")]
     Decode {
         /// Where.
         at: usize,
-        /// What's wrong.
-        why: String,
+        /// The fault.
+        fault: Fault,
     },
     /// A stream's data ends before its `/Index` does.
     #[error("the stream at byte {at} has data that ends before its /Index does")]
@@ -266,7 +280,7 @@ impl Reader {
         let Some(header) = self.facts.header_offset else {
             return Ok(None);
         };
-        let mut cx = Cx::default();
+        let mut cx = Cx::new(false);
         Ok(self
             .indirect(file, &mut cx, header, None)?
             .ok()
@@ -329,7 +343,7 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::default();
+        let mut cx = Cx::new(false);
         let what = file.read_from(&mut cx, at, 0, |w, cx| {
             let mut t = w.tokenizer(at);
             Ok(match w.significant(&mut t) {
@@ -437,11 +451,8 @@ impl Reader {
         }
         let at = w.place(t.offset());
         let mut parser = w.parser(at).limits(self.limits.parser);
-        let trailer = w.parsed(parser.value(&mut cx.warned(None)));
-        let trailer = trailer.map_err(|why| SectionFault::Trailer {
-            at,
-            why: why.to_string(),
-        })?;
+        let trailer = w.parsed(parser.value(&mut cx.parsed(None)));
+        let trailer = trailer.map_err(|why| SectionFault::Trailer { at, why })?;
         let Some(dict) = trailer.as_dict() else {
             return Err(SectionFault::TrailerNotADictionary { at });
         };
@@ -468,11 +479,11 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::default();
+        let mut cx = Cx::new(false);
         let (id, object, record) = match self.indirect(file, &mut cx, at, None)? {
             Ok(read) => read,
             Err(why) => {
-                let why = why.to_string();
+                let why = Box::new(why);
                 return Ok(Err(SectionFault::Unread { at, why }));
             }
         };
@@ -565,10 +576,8 @@ impl Reader {
             all.checked_add(usize::try_from(count).ok()?)
         });
         let size = count.and_then(|count| count.checked_mul(row));
-        let filters = filter::filters(dict, None).map_err(|why| SectionFault::Decode {
-            at,
-            why: why.to_string(),
-        })?;
+        let filters =
+            filter::filters(dict, None).map_err(|why| SectionFault::Filters { at, why })?;
         let decoded;
         let data = match filters.is_empty() {
             true => written,
@@ -582,9 +591,11 @@ impl Reader {
                     // What's past its rows, and a cut there, aren't its rows' fault.
                     Err(error) if size.is_some_and(|size| error.data.len() >= size) => error.data,
                     Err(error) => {
-                        let fault = error.faults.first().map(|(_, fault)| fault);
-                        let why = fault.map_or_else(|| Fault::Limit.to_string(), Fault::to_string);
-                        return Err(SectionFault::Decode { at, why });
+                        let fault = error
+                            .faults
+                            .first()
+                            .map_or(Fault::Limit, |&(_, fault)| fault);
+                        return Err(SectionFault::Decode { at, fault });
                     }
                 };
                 &decoded[..]
@@ -1034,10 +1045,13 @@ mod tests {
     fn a_filter_that_isnt_one_is_said() {
         let dict = format!("{XREF} /Filter /NoSuchFilter");
         let file = stream_file(&dict, &three_rows(45));
-        assert!(
-            matches!(stopped(&file), SectionFault::Decode { at: 45, .. }),
-            "{:?}",
-            stopped(&file)
+        let why = Unfiltered::Unsupported {
+            filter: b"NoSuchFilter".to_vec(),
+        };
+        assert_eq!(stopped(&file), SectionFault::Filters { at: 45, why });
+        assert_eq!(
+            stopped(&file).to_string(),
+            "the stream at byte 45 doesn't decode: its filter /NoSuchFilter isn't one the reader decodes"
         );
     }
 

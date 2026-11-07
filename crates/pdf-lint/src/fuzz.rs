@@ -1239,8 +1239,8 @@ mod tests {
                 "locked-plain-metadata" => &[None],
                 _ => &[],
             };
-            let on: Vec<_> = doc.warnings.iter().map(|w| w.object).collect();
-            assert_eq!(on, inside, "{name}: {:?}", doc.warnings);
+            let on: Vec<_> = doc.faults().iter().map(|(place, _)| place.object).collect();
+            assert_eq!(on, inside, "{name}: {:?}", doc.faults());
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             assert!(report.objects() > 3, "{name}: {report}");
             // The common structures' seeds find what they're made to, and

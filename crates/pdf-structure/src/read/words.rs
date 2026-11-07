@@ -1,6 +1,6 @@
 //! The reader's messages that no other test holds whole, each word for
 //! word, from a file made to give it: why an object doesn't read, why a
-//! file's sections don't, and what it warns of.
+//! file's sections don't, and what it tells of.
 
 use pdf_fixtures::fixture;
 
@@ -12,9 +12,9 @@ fn why(doc: &Document, id: ObjectId) -> String {
     doc.get(id).unwrap_err().to_string()
 }
 
-/// Each warning's message.
-fn said(doc: &Document) -> Vec<&str> {
-    doc.warnings.iter().map(|w| w.message.as_str()).collect()
+/// Each fault's words.
+fn said(doc: &Document) -> Vec<String> {
+    doc.faults().iter().map(|w| w.1.to_string()).collect()
 }
 
 /// Objects 2 and 3 as an object stream holds them, from `/First` 8.
@@ -167,7 +167,7 @@ fn an_object_stream_whose_data_doesnt_decrypt_says_so_and_why() {
         said(&doc),
         ["its data doesn't decrypt cleanly: its AES ciphertext has no whole block past its IV"]
     );
-    assert_eq!(doc.warnings[0].object, Some(ObjectId::new(4, 0)));
+    assert_eq!(doc.faults()[0].0.object, Some(ObjectId::new(4, 0)));
     assert_eq!(
         why(&doc, ObjectId::new(2, 0)),
         "its object stream 4 0 R doesn't decode: its data doesn't decrypt: its AES ciphertext has no whole block past its IV"
@@ -185,7 +185,10 @@ fn startxref_inside_another_word_says_where() {
     let file = [&file[..at], b"startxrefs", &file[at + 9..]].concat();
     let doc = document(&file, &Options::DEFAULT);
     let why = format!("startxref at byte {at} is inside another word");
-    assert_eq!(doc.trailer.unwritten, Some(why));
+    assert_eq!(
+        doc.trailer.unwritten.as_ref().map(ToString::to_string),
+        Some(why)
+    );
     assert!(doc.get(ObjectId::new(1, 0)).is_ok());
 }
 
@@ -230,7 +233,15 @@ fn a_cross_reference_streams_w_index_and_size_say_whats_wrong() {
     ];
     for (dict, why) in cases {
         let doc = document(&xref_stream(dict, &rows), &Options::DEFAULT);
-        assert_eq!(doc.trailer.unwritten.as_deref(), Some(why), "{dict}");
+        assert_eq!(
+            doc.trailer
+                .unwritten
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(why),
+            "{dict}"
+        );
     }
 }
 
@@ -245,15 +256,31 @@ fn a_cross_reference_stream_a_decoder_doesnt_decode_says_its_filters() {
         let file = xref_stream(&format!("/Size 3 /W [1 2 1] /Filter {filter}"), &zlib);
         let doc = read_through(&file, &BTreeMap::new());
         let why = format!("its cross-reference stream ({shown}) doesn't decode: no data for 2 0 R");
-        assert_eq!(doc.trailer.unwritten, Some(why), "{filter}");
+        assert_eq!(
+            doc.trailer.unwritten.as_ref().map(ToString::to_string),
+            Some(why),
+            "{filter}"
+        );
         let doc = read_through(&file, &Nothing);
         let why =
             format!("its cross-reference stream is compressed ({shown}), and nothing decodes it");
-        assert_eq!(doc.trailer.unwritten, Some(why), "{filter}");
+        assert_eq!(
+            doc.trailer.unwritten.as_ref().map(ToString::to_string),
+            Some(why),
+            "{filter}"
+        );
         // Decoded by a decoder to data not its rows' length.
         let doc = read_through(&file, &BTreeMap::from([(ObjectId::new(2, 0), vec![0; 3])]));
         let why = "decoded, it's 3 bytes, not the 12 its /W and /Index make: the decoder may have decoded another object 2 0 R";
-        assert_eq!(doc.trailer.unwritten.as_deref(), Some(why), "{filter}");
+        assert_eq!(
+            doc.trailer
+                .unwritten
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(why),
+            "{filter}"
+        );
     }
 }
 

@@ -49,8 +49,9 @@ impl Default for Limits {
 }
 
 /// How a file is opened: under which [`Limits`], as of which
-/// cross-reference section, by which passwords where it's encrypted, and
-/// which Flate backend its streams inflate on. A caller sets them on a copy
+/// cross-reference section, by which passwords where it's encrypted, which
+/// Flate backend its streams inflate on, and whether its faults are looked
+/// for. A caller sets them on a copy
 /// of [`Options::DEFAULT`] (`options.section = Some(previous)`, or
 /// `options.passwords = &given`, say).
 ///
@@ -91,17 +92,30 @@ pub struct Options<'a> {
     /// [`Encryption::Opened`](crate::Encryption::Opened)'s `by`, its index
     /// here. They're borrowed for the open alone: a reading keeps none.
     pub passwords: &'a [Password<'a>],
+    /// Whether faults are looked for and kept, as they are by default
+    /// ([`Source::faults`](crate::Source::faults)). False for a caller that
+    /// wants none: then none is looked for, pdf-objects' parser asked for
+    /// none, no fault made, and none kept, and a check the reader makes
+    /// only to say a fault, such as reading the file's end back for its
+    /// `%%EOF` or sorting an object stream's members for those that overlap,
+    /// isn't made. What's read is the same either way: every object,
+    /// record, trailer, section and decoded stream, what's decrypted and
+    /// what's refused. But nothing says what's wrong with it: that the
+    /// encryption dictionary isn't right (`/Perms`), or that a string
+    /// didn't decrypt cleanly, among the rest.
+    pub faults: bool,
 }
 
 impl Options<'static> {
     /// The options a file is opened with unless it's given others: the
     /// default limits, the file as its `startxref` gives it, miniz_oxide's
-    /// Flate, and no password but the empty one.
+    /// Flate, no password but the empty one, and faults looked for.
     pub const DEFAULT: Options<'static> = Options {
         limits: Limits::DEFAULT,
         section: None,
         flate: Backend::MinizOxide,
         passwords: &[],
+        faults: true,
     };
 }
 

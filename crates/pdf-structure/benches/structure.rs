@@ -14,6 +14,9 @@
 //!   keeps them (`table/kept`, `stream/kept`).
 //! - `whole`: each file read whole into a document: the table's
 //!   (`table`) and the stream's (`stream`).
+//! - `faults`: the table's file with no object's `endobj` written, so that
+//!   each object is a fault of the parser's, read whole into a document,
+//!   its faults kept (`kept`) and none looked for (`off`).
 //! - `write`: the objects, built in memory, written as a whole file with a
 //!   table (`full`); the table's file read whole written again, each object
 //!   copied as the bytes it was read from (`document`); and an update after
@@ -26,7 +29,8 @@
 //! `get`'s, in objects. Each input is held to what it gives before it's
 //! timed: a file opened to the objects it lists, its trailer's root, and
 //! scanned or not as its group says, with no fault but where it's scanned;
-//! each object got to its kind; a document to its objects and no fault; a
+//! each object got to its kind; a document to its objects and no fault, or
+//! a fault an object, or none where none is looked for; a
 //! write read back to the objects it was given, an update's changed. The
 //! files are written here from text, the object streams' and the
 //! cross-reference stream's data deflated through pdf-filters; nothing is
@@ -65,6 +69,18 @@ mod api {
         pdf_structure::read::document(file, &Options::DEFAULT)
     }
 
+    /// Whether a reading can be made to look for no faults: a version of
+    /// the crate that can't reads with them always.
+    pub const QUIET: bool = true;
+
+    /// `file` read whole, as a document, its faults looked for or not, as
+    /// `faults` says, where it can be made to look for none ([`QUIET`]).
+    pub fn whole_as(file: &[u8], faults: bool) -> Document {
+        let mut options = Options::DEFAULT;
+        options.faults = faults;
+        pdf_structure::read::document(file, &options)
+    }
+
     /// `reading` read whole, as a document whose objects are its own, which
     /// a write given it copies.
     pub fn document_of(reading: &Read) -> Document {
@@ -73,12 +89,12 @@ mod api {
 
     /// How many faults `reading` has told of what it has read.
     pub fn reading_faults(reading: &Read) -> usize {
-        reading.warnings().len()
+        reading.faults().len()
     }
 
     /// How many faults `doc`'s reading told.
     pub fn faults(doc: &Document) -> usize {
-        doc.warnings.len()
+        doc.faults().len()
     }
 
     /// Whether `reading` found its objects by scanning the file, its
@@ -206,6 +222,11 @@ fn objects() -> Vec<(u32, Text)> {
 
 /// The bytes of `n 0 obj`, the object, and `endobj`.
 fn indirect(out: &mut Vec<u8>, n: u32, text: &Text) {
+    indirect_as(out, n, text, true);
+}
+
+/// [`indirect`], `endobj` left out unless `endobj`.
+fn indirect_as(out: &mut Vec<u8>, n: u32, text: &Text, endobj: bool) {
     out.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
     match text {
         Text::Value(value) => out.extend_from_slice(value.as_bytes()),
@@ -216,7 +237,10 @@ fn indirect(out: &mut Vec<u8>, n: u32, text: &Text) {
             out.extend_from_slice(b"\nendstream");
         }
     }
-    out.extend_from_slice(b"\nendobj\n");
+    match endobj {
+        true => out.extend_from_slice(b"\nendobj\n"),
+        false => out.push(b'\n'),
+    }
 }
 
 /// The file's header, and the comment of four bytes past ASCII that marks
@@ -229,11 +253,16 @@ fn header() -> Vec<u8> {
 /// catalog; its `startxref` the table's, or, where `scanned`, one past the
 /// file, which is no section.
 fn table_file(objects: &[(u32, Text)], scanned: bool) -> Vec<u8> {
+    table_file_as(objects, scanned, true)
+}
+
+/// [`table_file`], each object's `endobj` left out unless `endobj`.
+fn table_file_as(objects: &[(u32, Text)], scanned: bool, endobj: bool) -> Vec<u8> {
     let mut out = header();
     let mut offsets = vec![0; objects.len() + 1];
     for (n, text) in objects {
         offsets[*n as usize] = out.len();
-        indirect(&mut out, *n, text);
+        indirect_as(&mut out, *n, text, endobj);
     }
     let xref = out.len();
     let size = objects.len() + 1;
@@ -347,11 +376,13 @@ fn built(objects: &[(u32, Text)]) -> Vec<(ObjectId, Object)> {
 }
 
 /// The files the benchmarks read, by the name their benchmarks carry:
-/// with a table, with a stream, and scanned.
+/// with a table, with a stream, and scanned; and the table's with a fault
+/// an object.
 struct Files {
     table: Vec<u8>,
     stream: Vec<u8>,
     scanned: Vec<u8>,
+    faulty: Vec<u8>,
 }
 
 impl Files {
@@ -360,6 +391,7 @@ impl Files {
             table: table_file(objects, false),
             stream: stream_file(objects),
             scanned: table_file(objects, true),
+            faulty: table_file_as(objects, false, false),
         }
     }
 }
@@ -487,6 +519,32 @@ fn whole_group(c: &mut Criterion, files: &Files) {
     group.finish();
 }
 
+fn faults_group(c: &mut Criterion, files: &Files) {
+    let file = &files.faulty;
+    let cases: [(&str, bool); 2] = [("kept", true), ("off", false)];
+    for &(name, kept) in &cases {
+        let doc = api::whole_as(file, kept);
+        let listed = OBJECTS as usize;
+        assert_eq!(doc.objects().count(), listed, "faults/{name}: the objects");
+        // Each object's own, and as many as one more for each content
+        // stream, its `/Length` object's said with the stream too.
+        let said = api::faults(&doc);
+        match kept || !api::QUIET {
+            true => assert!(
+                (listed..=listed + PAGES as usize).contains(&said),
+                "faults/{name}: the faults, {said}"
+            ),
+            false => assert_eq!(said, 0, "faults/{name}: no fault"),
+        }
+    }
+    let mut group = c.benchmark_group("faults");
+    group.throughput(Throughput::Bytes(file.len() as u64));
+    for (name, kept) in cases {
+        group.bench_function(name, |b| b.iter(|| api::whole_as(black_box(file), kept)));
+    }
+    group.finish();
+}
+
 /// `written`, read whole, held to `built`: each object the same value,
 /// unplaced, a stream's dictionary but its `/Length` and its data, with no
 /// fault.
@@ -603,6 +661,7 @@ fn main() {
     open_group(&mut criterion, &files);
     get_group(&mut criterion, &files);
     whole_group(&mut criterion, &files);
+    faults_group(&mut criterion, &files);
     write_group(&mut criterion, &objects, &files);
     criterion.final_summary();
 }

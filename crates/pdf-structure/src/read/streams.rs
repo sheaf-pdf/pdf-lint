@@ -243,7 +243,7 @@ fn each_kind_of_encryption_hands_out_each_streams_data_decrypted() {
                     "{what}"
                 );
             }
-            assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
+            assert!(reading.faults().is_empty(), "{:?}", reading.faults());
         }
     }
 }
@@ -438,9 +438,9 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
             );
             assert_eq!(reading.metadata().unwrap(), None, "{what}");
             assert!(
-                reading.warnings().is_empty(),
+                reading.faults().is_empty(),
                 "{what}: {:?}",
-                reading.warnings()
+                reading.faults()
             );
         }
         let reading = open(&file, &[], &Options::DEFAULT);
@@ -621,9 +621,9 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
                 "{what}: as /StmF says"
             );
             assert!(
-                reading.warnings().is_empty(),
+                reading.faults().is_empty(),
                 "{what}: {:?}",
-                reading.warnings()
+                reading.faults()
             );
         }
     };

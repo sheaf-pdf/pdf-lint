@@ -59,7 +59,7 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         };
         assert!(opened, "{name}: {:?}", doc.encryption());
         assert_eq!(doc.trailer().unwritten, None, "{name}");
-        assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{name}: {:?}", doc.faults());
         assert_eq!(doc.unread().next(), None, "{name}");
         let annotation = annotation(&doc);
         assert_eq!(

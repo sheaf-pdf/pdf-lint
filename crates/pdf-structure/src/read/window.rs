@@ -12,7 +12,7 @@ use std::ops::Range;
 use pdf_objects::parse::{self, Parser};
 use pdf_tokenizer::{Token, Tokenizer};
 
-use super::{ByteSource, Cx, row_shape, significant};
+use super::{ByteSource, Cx, RowShape, row_shape, significant};
 
 /// The file a reading reads, as each read is given it: in memory
 /// ([`InMemory`]), which can't fail; or read by position, a window at a
@@ -43,7 +43,7 @@ pub(super) trait Bytes<'a>: Copy {
     /// file; by position, a window from `start` of at least `min` bytes and
     /// the source's first window, doubled while `read` touches its end
     /// ([`Window::touch`]), until it reaches the file's end. What `read`
-    /// warned of in `cx` in a window it touched the end of is dropped.
+    /// told `cx` in a window it touched the end of is dropped.
     fn read_from<T>(
         self,
         cx: &mut Cx,
@@ -180,12 +180,12 @@ impl<'a> Bytes<'a> for ByPosition<'a> {
             let last = end == len;
             let bytes = self.read(start..end)?;
             let window = Window::new(&bytes, start, last);
-            let said = cx.warnings.len();
+            let said = cx.faults.len();
             let read = read(&window, cx)?;
             if last || !window.touched.get() {
                 return Ok(read);
             }
-            cx.warnings.truncate(said);
+            cx.faults.truncate(said);
             size = size.saturating_mul(2);
         }
     }
@@ -272,7 +272,7 @@ impl<'w> Window<'w> {
     /// Whether the cross-reference table's row at byte `row` of the file is
     /// written as ISO 32000-2 7.5.4 writes one ([`row_shape`]), the window
     /// touched when the row's 20 bytes run past its end.
-    pub(super) fn row_shape(&self, row: usize) -> Result<(), &'static str> {
+    pub(super) fn row_shape(&self, row: usize) -> Result<(), RowShape> {
         let row = row - self.base;
         if row.saturating_add(20) > self.bytes.len() {
             self.touch();
@@ -521,7 +521,7 @@ mod tests {
 
     /// Each read a document made with its reading kept makes by position,
     /// failed, fails it, keeping none of what it read unkept: what the
-    /// reading keeps, and what it warns of past the opening's warnings, are
+    /// reading keeps, and what it tells of past the opening's faults, are
     /// of the object streams and the objects on the way to them, which a
     /// read of an object in one keeps, or of nothing; asked again, it's the
     /// whole read, and so is the reading made a document after. Each test
@@ -562,7 +562,7 @@ mod tests {
                 starts.dedup();
                 for at in starts {
                     let reading = open(&source, &passwords, &Options::DEFAULT, bound).unwrap();
-                    let opened = reading.warnings();
+                    let opened = reading.faults();
                     source.fail_at(at);
                     let error = reading.to_document().unwrap_err();
                     assert!(source.failed(), "{name}: no read at {at}");
@@ -572,12 +572,12 @@ mod tests {
                         .collect();
                     let unkept: Vec<_> = kept.iter().filter(|id| !ways.contains(id)).collect();
                     assert!(unkept.is_empty(), "{name}, at {at}: {unkept:?} kept");
-                    let warnings = reading.warnings();
+                    let warnings = reading.faults();
                     assert_eq!(warnings[..opened.len()], opened, "{name}, at {at}");
                     let said = &warnings[opened.len()..];
                     assert!(
                         said.iter()
-                            .all(|w| w.object.is_some_and(|id| ways.contains(&id))),
+                            .all(|w| w.0.object.is_some_and(|id| ways.contains(&id))),
                         "{name}, at {at}: {said:?}"
                     );
                     if kept.is_empty() {
@@ -594,7 +594,7 @@ mod tests {
 
     /// A document made with its reading kept, whose read of an object in
     /// use fails, the last of them, keeps nothing at all: not the objects
-    /// read before it, nor a warning, and no object stream decoded, though
+    /// read before it, nor a fault, and no object stream decoded, though
     /// the file has one; asked again it's the whole read.
     #[test]
     fn a_document_whose_read_of_an_object_fails_keeps_nothing() {
@@ -603,12 +603,12 @@ mod tests {
         for bound in [true, false] {
             let source = Failing::new(&file, 1);
             let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
-            let warnings = reading.warnings();
+            let warnings = reading.faults();
             assert!(!reading.reader.containers.is_empty(), "an object stream");
             source.fail_at(at);
             assert!(failed_at(reading.to_document().unwrap_err(), at), "{bound}");
             assert!(source.failed(), "{bound}: no read at {at}");
-            assert_eq!(reading.warnings(), warnings, "{bound}");
+            assert_eq!(reading.faults(), warnings, "{bound}");
             assert!(
                 reading.ids().all(|id| reading.record(id).is_none()),
                 "{bound}"
@@ -624,15 +624,15 @@ mod tests {
 
     /// `file` opened by position through `source` and read on demand: the
     /// read of object `id` fails when the read at `at` does, keeps nothing
-    /// of it (no warning, no record of it, no object stream decoded), and
+    /// of it (no fault, no record of it, no object stream decoded), and
     /// asked again it reads; and the reading is the whole read. What it
-    /// read whole on the way is kept, which in these files warns of
+    /// read whole on the way is kept, which in these files tells of
     /// nothing.
     fn fails_and_reads_again(file: &[u8], id: ObjectId, at: usize) {
         for bound in [true, false] {
             let source = Failing::new(file, 1);
             let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
-            let warnings = reading.warnings();
+            let warnings = reading.faults();
             let containers = |reading: &Reading<&Failing>| {
                 (reading.reader.containers.values())
                     .filter(|c| c.get().is_some())
@@ -642,7 +642,7 @@ mod tests {
             let error = reading.get(id).unwrap_err();
             assert!(source.failed(), "{id:?}: no read at {at}");
             assert!(failed_at(error, at), "{id:?}, at {at}");
-            assert_eq!(reading.warnings(), warnings, "{id:?}, at {at}");
+            assert_eq!(reading.faults(), warnings, "{id:?}, at {at}");
             assert!(reading.record(id).is_none(), "{id:?}, at {at}");
             assert_eq!(containers(&reading), 0, "{id:?}, at {at}");
             let doc = document(file, &Options::DEFAULT);
@@ -847,7 +847,7 @@ mod tests {
 
     /// An object in an object stream whose data fails to read: the object
     /// stream's own object, read whole on the way, is kept, with what the
-    /// reader warned of as it read it, as a read of it would keep it; the
+    /// reader told of as it read it, as a read of it would keep it; the
     /// object isn't, and the object stream isn't decoded. Asked again, it
     /// reads, and the reading is the whole read.
     #[test]
@@ -857,7 +857,7 @@ mod tests {
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
         let four = file.len();
-        // Without its `endobj`, which the reader warns of.
+        // Without its `endobj`, which the reader tells of.
         let dict = format!(
             "<< /Type /ObjStm /N 2 /First {first} /Length {} >>",
             objects.len()
@@ -889,19 +889,19 @@ mod tests {
         for bound in [true, false] {
             let source = Failing::new(&file, 1);
             let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
-            assert!(reading.warnings().is_empty(), "{bound}");
+            assert!(reading.faults().is_empty(), "{bound}");
             source.fail_at(at);
             assert!(
                 failed_at(reading.get(ObjectId::new(3, 0)).unwrap_err(), at),
                 "{bound}"
             );
             assert!(source.failed(), "{bound}");
-            let warnings = reading.warnings();
+            let warnings = reading.faults();
             let [warning] = &warnings[..] else {
                 panic!("{bound}: {warnings:?}");
             };
-            assert_eq!(warning.object, Some(ObjectId::new(4, 0)), "{bound}");
-            assert_eq!(warning.message, "4 0 obj has no endobj", "{bound}");
+            assert_eq!(warning.0.object, Some(ObjectId::new(4, 0)), "{bound}");
+            assert_eq!(warning.1.to_string(), "4 0 obj has no endobj", "{bound}");
             assert!(reading.record(ObjectId::new(4, 0)).is_some(), "{bound}");
             assert!(reading.record(ObjectId::new(3, 0)).is_none(), "{bound}");
             assert!((reading.reader.containers.values()).all(|c| c.get().is_none()));

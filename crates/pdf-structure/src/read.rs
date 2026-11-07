@@ -1,7 +1,8 @@
 //! A reader of a file's bytes, on [`pdf_tokenizer`] and pdf-objects'
 //! [`Parser`]: every value, key and stream's data with where it was
 //! written ([`Span`]), dictionaries as written with any key written twice,
-//! and every choice it had to make a [`Warning`]. It reads the header,
+//! and every choice it had to make a [`Fault`], kept at its place. It reads
+//! the header,
 //! `startxref`, the cross-reference tables and streams along their `/Prev`
 //! chain, each revision they make kept with its trailer and where its
 //! bytes end, past the `%%EOF` after its last-written section's
@@ -60,7 +61,7 @@
 //! - **Every string of an object read at its offset** is decrypted with
 //!   the object's key, made from its number and generation, and stays
 //!   where it was written; a stream's dictionary's strings too (7.6.2,
-//!   7.6.3). A string that doesn't decrypt cleanly is a warning, and what
+//!   7.6.3). A string that doesn't decrypt cleanly is a fault, and what
 //!   decrypted is kept. Held by
 //!   `each_kind_of_encryption_decrypts_its_strings_where_they_are`,
 //!   `a_streams_dictionary_strings_decrypt_but_its_data_is_left_as_written`
@@ -279,9 +280,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
 use pdf_crypt::{Encoded, Handler, Method, Password, Refused};
-use pdf_filters::{Backend, Fault, Filter, Layout, Predictor};
+use pdf_filters::{Backend, Filter, Layout, Predictor};
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
-use pdf_objects::parse::{self, Body, Parser, Sink};
+use pdf_objects::parse::{self, Body, Parser};
 use pdf_objects::version::Version;
 
 use crate::crypt::{self, Eff, Get, List, Stream, follow, is_xref};
@@ -289,9 +291,10 @@ use crate::filter;
 pub use crate::filter::Unfiltered;
 use crate::source::{
     DataExtent, Document, Encryption, Facts, Held, Origin, Record, Revision, RevisionEnd, Trailer,
-    Unread, Update, Warning, XrefKind,
+    Uncrypt, Unread, Unsupported, Update, XrefKind,
 };
 
+mod fault;
 mod file;
 mod limits;
 mod reading;
@@ -299,6 +302,7 @@ mod sections;
 mod window;
 mod with_reading;
 
+pub use fault::{Fault, ParseKind, RowShape, Unwritten};
 #[cfg(any(unix, windows))]
 pub use file::FileBytes;
 pub use file::Identity;
@@ -592,8 +596,10 @@ pub(crate) struct Whole {
 /// What a reader knows of the file beside its objects, which a document
 /// made of it holds ([`Reader::known`]).
 struct Known {
-    /// What it warned of as it opened the file, in order.
-    opened: Vec<Warning>,
+    /// What it told of as it opened the file, in order.
+    opened: Vec<(Place, Fault)>,
+    /// Whether faults are looked for ([`Options::faults`]).
+    wants: bool,
     /// The trailer.
     trailer: Trailer,
     /// The version in the header.
@@ -618,21 +624,21 @@ struct Known {
 }
 
 /// A document being made of a reader's reads, as the whole read makes it:
-/// each object by number, with its record, and what the reader warned of
-/// as it read each, by kind, each kind by number, so that the warnings are
-/// said in the whole read's order ([`Reader::warnings`]).
+/// each object by number, with its record, and what the reader told of as
+/// it read each, by kind, each kind by number, so that the faults are said
+/// in the whole read's order ([`Reader::faults`]).
 #[derive(Default)]
 struct Assembly {
     /// Each object read, with its record, or why it doesn't read.
     objects: BTreeMap<ObjectId, Held>,
-    /// What the reader warned of as it read each object in use.
-    read: Vec<Warning>,
+    /// What the reader told of as it read each object in use.
+    read: Vec<(Place, Fault)>,
     /// As it decoded each object stream.
-    containers: Vec<Warning>,
+    containers: Vec<(Place, Fault)>,
     /// As it read each object in an object stream.
-    members: Vec<Warning>,
+    members: Vec<(Place, Fault)>,
     /// As it decrypted each object in use's strings.
-    decrypted: Vec<Warning>,
+    decrypted: Vec<(Place, Fault)>,
     /// Each object stream's decoded data, where its header read.
     decoded: BTreeMap<ObjectId, Vec<u8>>,
     /// The object streams whose decoded data is whole ([`Container`]).
@@ -648,17 +654,17 @@ impl Assembly {
     fn object(&mut self, (n, (generation, entry)): (u32, (u16, XrefEntry)), read: Read) {
         let Read {
             object,
-            warnings,
+            faults,
             decrypt,
         } = read;
         let id = match entry {
             XrefEntry::InUse { .. } => {
-                self.read.extend(warnings);
+                self.read.extend(faults);
                 self.decrypted.extend(decrypt);
                 ObjectId::new(n, generation)
             }
             _ => {
-                self.members.extend(warnings);
+                self.members.extend(faults);
                 ObjectId::new(n, 0)
             }
         };
@@ -666,19 +672,19 @@ impl Assembly {
         self.objects.insert(id, held);
     }
 
-    /// Object stream `stream`, decoded: what the reader warned of as it
+    /// Object stream `stream`, decoded: what the reader told of as it
     /// decoded it, and its decoded data, when its header read, and whether
     /// that's whole (`whole`, [`Container`]); and whether its objects'
     /// strings are in the clear, where the file's aren't (`clear`).
     fn container(
         &mut self,
         stream: u32,
-        warnings: Vec<Warning>,
+        faults: Vec<(Place, Fault)>,
         data: Option<Vec<u8>>,
         whole: bool,
         clear: bool,
     ) {
-        self.containers.extend(warnings);
+        self.containers.extend(faults);
         if let Some(data) = data {
             self.decoded.insert(ObjectId::new(stream, 0), data);
             if whole {
@@ -691,11 +697,12 @@ impl Assembly {
     }
 
     /// What it holds made a [`Document`], beside what the reader knows of
-    /// the file, `known`: the warnings in the whole read's order, each
-    /// object in an object stream that starts inside another's bytes said
-    /// after what it warned of as it read them ([`overlaps`]); the strings
-    /// the reader didn't decrypt itself decrypted by `decoder`, when there's
-    /// one; and the catalog's metadata read from `file`.
+    /// the file, `known`: the faults in the whole read's order, each object
+    /// in an object stream that starts inside another's bytes said after
+    /// what it told of as it read them ([`overlaps`]), where faults are
+    /// looked for; the strings the reader didn't decrypt itself decrypted by
+    /// `decoder`, when there's one; and the catalog's metadata read from
+    /// `file`.
     fn document<'f, F: Bytes<'f>>(
         self,
         file: F,
@@ -712,15 +719,20 @@ impl Assembly {
             whole,
             in_the_clear,
         } = self;
-        let mut warnings = known.opened;
-        warnings.extend(read);
-        warnings.extend(containers);
-        warnings.extend(members);
+        // The whole read's faults, told in its order.
+        let mut cx = Cx {
+            faults: known.opened,
+            wants: known.wants,
+            resolving: false,
+        };
+        cx.faults.extend(read);
+        cx.faults.extend(containers);
+        cx.faults.extend(members);
         let records = objects.values().filter_map(|o| o.as_ref().ok()?.1.as_ref());
-        warnings.extend(overlaps(records));
-        warnings.extend(decrypted);
+        overlaps(records, &mut cx);
+        cx.faults.extend(decrypted);
         if !known.natively {
-            decrypt(decoder, known.encrypted, &mut objects, &mut warnings);
+            decrypt(decoder, known.encrypted, &mut objects, &mut cx);
         }
         let get = |id| Ok(objects.get(&id).and_then(|o| Some(&o.as_ref().ok()?.0)));
         let trailer = known.trailer;
@@ -728,7 +740,7 @@ impl Assembly {
         let metadata = metadata.map(Cow::into_owned);
         let mut document = Document::read(objects, trailer, known.listed);
         document.header = known.version;
-        document.warnings = warnings;
+        document.faults = cx.faults;
         document.decoded = decoded;
         document.whole = whole;
         document.update = known.update;
@@ -742,15 +754,20 @@ impl Assembly {
     }
 }
 
-/// A warning on each object read from an object stream, of those
+/// A fault told `sink` on each object read from an object stream, of those
 /// `records` places, that starts inside the bytes of one read before it
 /// from the stream's decoded data, where the stream's header gives it a
 /// place another's value runs over (ISO 32000-2, 7.5.7): at its own bytes,
 /// naming the one it's inside, the one reaching furthest of those starting
-/// before it, or at the same byte at a lower index. By stream, then where
-/// each starts. Both are objects the cross-reference sections list and the
-/// reader read: one no entry lists isn't read, so isn't said.
-fn overlaps<'r>(records: impl Iterator<Item = &'r Record>) -> Vec<Warning> {
+/// before it, or at the same byte at a lower index ([`Fault::Inside`]). By
+/// stream, then where each starts. Both are objects the cross-reference
+/// sections list and the reader read: one no entry lists isn't read, so
+/// isn't said. Nothing is sorted where the sink wants no faults, as it's
+/// done only to say them.
+fn overlaps<'r>(records: impl Iterator<Item = &'r Record>, sink: &mut impl Sink<Fault>) {
+    if !sink.wants() {
+        return;
+    }
     let mut members: Vec<(u32, usize, u32, &Record)> = records
         .filter_map(|record| match record.origin {
             Origin::Stream { stream, index } => Some((stream, record.at.start, index, record)),
@@ -758,27 +775,24 @@ fn overlaps<'r>(records: impl Iterator<Item = &'r Record>) -> Vec<Warning> {
         })
         .collect();
     members.sort_unstable_by_key(|&(stream, start, index, _)| (stream, start, index));
-    let mut warnings = Vec::new();
     // The one reaching furthest so far, in the stream gone through.
     let mut furthest: Option<(u32, &Record)> = None;
     for (stream, start, _, record) in members {
         if let Some((_, outer)) = furthest.filter(|&(s, outer)| s == stream && start < outer.at.end)
         {
-            let id = outer.id;
-            let (from, to) = (outer.at.start, outer.at.end);
-            warnings.push(Warning {
-                object: Some(record.id),
-                at: Some(record.at),
-                message: format!(
-                    "it starts at byte {start} of object stream {stream} 0 R's data, inside {id} R, which runs from byte {from} to {to}"
-                ),
-            });
+            let fault = Fault::Inside {
+                start,
+                stream,
+                id: outer.id,
+                from: outer.at.start,
+                to: outer.at.end,
+            };
+            sink.fault(Place::new(Some(record.id), Some(record.at)), fault);
         }
         if furthest.is_none_or(|(s, outer)| s != stream || record.at.end > outer.at.end) {
             furthest = Some((stream, record));
         }
     }
-    warnings
 }
 
 /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
@@ -819,7 +833,7 @@ fn metadata<'f, 'o, F: Bytes<'f>>(
 /// What a reading knows once it's open, which each read of it shares. Its
 /// functions take the file's bytes, and all but the open's take `&self`,
 /// so that a reading can be read on any thread: each object it reads is
-/// kept in its slot, with its warnings, and each object stream it decodes
+/// kept in its slot, with its faults, and each object stream it decodes
 /// under its own lock.
 struct Reader {
     /// Which reading it is, which each record it makes holds.
@@ -837,8 +851,10 @@ struct Reader {
     version: Option<Version>,
     /// The trailer.
     trailer: Trailer,
-    /// What it warned of as it opened the file, in order.
-    opened: Vec<Warning>,
+    /// Whether it looks for faults and keeps them ([`Options::faults`]).
+    wants: bool,
+    /// What it told of as it opened the file, in order.
+    opened: Vec<(Place, Fault)>,
     /// The newest section, when it updates one written before it.
     update: Option<Update>,
     /// What the header and sections say of the file.
@@ -917,10 +933,10 @@ struct Lock {
     /// The file's first `/ID` element, empty where it hasn't one.
     id: Vec<u8>,
     /// The encryption dictionary, when it's indirect: what `/Perms`'
-    /// warnings are on.
+    /// faults are on.
     own: Option<ObjectId>,
-    /// Where among what the reader warned of as it opened the file
-    /// `/Perms`' warnings go.
+    /// Where among what the reader told of as it opened the file `/Perms`'
+    /// faults go.
     perms: usize,
     /// What was left of the budget once the file was opened, and whether a
     /// decode had reached it.
@@ -933,12 +949,12 @@ struct Lock {
 struct Read {
     /// The object and where it was read from, or why it doesn't read.
     object: Result<(Object, Record), Unread>,
-    /// What the reader warned of as it read it, the parser's faults among
+    /// What the reader told of as it read it, the parser's faults among
     /// them.
-    warnings: Vec<Warning>,
-    /// What it warned of as it decrypted the object's strings, which a
+    faults: Vec<(Place, Fault)>,
+    /// What it told of as it decrypted the object's strings, which a
     /// reading says after every object's read.
-    decrypt: Vec<Warning>,
+    decrypt: Vec<(Place, Fault)>,
 }
 
 /// An object stream, which objects the cross-references list are in,
@@ -962,51 +978,76 @@ struct Container {
     /// aren't ([`Reader::bares_strings`]): none are, but where its header
     /// read.
     clear: bool,
-    /// What the reader warned of as it decoded it.
-    warnings: Vec<Warning>,
+    /// What the reader told of as it decoded it.
+    faults: Vec<(Place, Fault)>,
 }
 
-/// One read's: its warnings, in order, and whether it's reading a stream's
-/// indirect `/Length`, which reads no other.
-#[derive(Default)]
+/// One read's sink: the faults it told, in order, where they're wanted
+/// (`wants`, [`Options::faults`]), and none told where they aren't; and
+/// whether it's reading a stream's indirect `/Length`, which reads no
+/// other. A check made only to say a fault is made only where it
+/// [`wants`](Sink::wants) them; what the reading needs is read either way,
+/// and only the telling left out.
 struct Cx {
-    warnings: Vec<Warning>,
+    faults: Vec<(Place, Fault)>,
+    wants: bool,
     resolving: bool,
 }
 
 impl Cx {
-    fn warn(&mut self, object: Option<ObjectId>, at: Option<Span>, message: String) {
-        self.warnings.push(Warning {
-            object,
-            at,
-            message,
-        });
+    /// A read's, which keeps what it's told where it `wants` faults.
+    fn new(wants: bool) -> Cx {
+        Cx {
+            faults: Vec::new(),
+            wants,
+            resolving: false,
+        }
+    }
+
+    /// Tells `fault`, on object `object` (none, the file's) at `at`, where
+    /// faults are wanted.
+    fn tell(&mut self, object: Option<ObjectId>, at: Option<Span>, fault: Fault) {
+        self.fault(Place::new(object, at), fault);
     }
 
     /// Where the parser's faults go, when it reads object `object` (none, a
-    /// trailer).
-    fn warned(&mut self, object: Option<ObjectId>) -> Warned<'_> {
-        Warned {
-            warnings: &mut self.warnings,
-            object,
-        }
+    /// trailer): told as the read's, and asked for only where it wants them.
+    fn parsed(&mut self, object: Option<ObjectId>) -> Warned<'_> {
+        Warned { cx: self, object }
     }
 }
 
-/// The reader's warnings, on object `object` (none, a trailer): where the
-/// parser's faults go.
+impl Sink<Fault> for Cx {
+    fn fault(&mut self, at: Place, fault: Fault) {
+        if self.wants {
+            self.faults.push((at, fault));
+        }
+    }
+
+    fn wants(&self) -> bool {
+        self.wants
+    }
+}
+
+/// A read's sink, on object `object` (none, a trailer): where pdf-objects'
+/// parser's faults go, each its kind and its words ([`Fault::Parse`]),
+/// which it looks for only where the read wants them.
 struct Warned<'r> {
-    warnings: &'r mut Vec<Warning>,
+    cx: &'r mut Cx,
     object: Option<ObjectId>,
 }
 
-impl Sink<'_> for Warned<'_> {
+impl parse::Sink<'_> for Warned<'_> {
     fn fault(&mut self, at: Span, fault: parse::Fault<'_>) {
-        self.warnings.push(Warning {
-            object: self.object,
-            at: Some(at),
-            message: fault.to_string(),
-        });
+        let fault = Fault::Parse {
+            kind: ParseKind::of(&fault),
+            text: fault.to_string().into_boxed_str(),
+        };
+        self.cx.tell(self.object, Some(at), fault);
+    }
+
+    fn wants(&self) -> bool {
+        self.cx.wants
     }
 }
 
@@ -1020,7 +1061,7 @@ type Indirect = Result<(ObjectId, Object, Record), Unread>;
 
 /// A cross-reference stream read at an offset: its number, it, and where
 /// its bytes end; or why it isn't one.
-type XrefStream = Result<(ObjectId, Object, usize), String>;
+type XrefStream = Result<(ObjectId, Object, usize), Unwritten>;
 
 /// What reading an object in use gave, when an entry in use lists it.
 type InUse<'r> = Option<Result<&'r Object, &'r Unread>>;
@@ -1039,7 +1080,7 @@ enum Crypt<'h> {
 enum At {
     /// A table, read but for its `/XRefStm`, and where that is; or why it
     /// doesn't read.
-    Table(Result<(Box<Section>, Option<usize>), String>),
+    Table(Result<(Box<Section>, Option<usize>), Unwritten>),
     /// An object, which may be a cross-reference stream.
     Stream,
     /// Neither.
@@ -1150,7 +1191,8 @@ fn in_order(mut numbers: Vec<u32>) -> Box<[u32]> {
 }
 
 /// Whether `fault` stopped its filter, cutting the data off.
-fn stops(fault: &Fault) -> bool {
+fn stops(fault: &pdf_filters::Fault) -> bool {
+    use pdf_filters::Fault;
     matches!(
         fault,
         Fault::Byte { .. }
@@ -1185,7 +1227,8 @@ fn predictor_row(filters: &[Filter]) -> usize {
 }
 
 /// Where `fault` is in its filter's input, when it says.
-fn place(fault: &Fault) -> Option<usize> {
+fn place(fault: &pdf_filters::Fault) -> Option<usize> {
+    use pdf_filters::Fault;
     match *fault {
         Fault::Byte { at, .. }
         | Fault::BrokenEnd { at }
@@ -1254,6 +1297,7 @@ impl Reader {
             listable: limits.entries.unwrap_or_else(|| listable(file.len())),
             version: None,
             trailer: Trailer::new(Object::new(Value::Dict(Dict::new()))),
+            wants: options.faults,
             opened: Vec::new(),
             update: None,
             facts: Facts::default(),
@@ -1272,7 +1316,7 @@ impl Reader {
             containers: BTreeMap::new(),
             lock: None,
         };
-        let mut cx = Cx::default();
+        let mut cx = reader.cx();
         reader.version = reader.header(file, &mut cx)?;
         let sections = match options.section {
             Some(section) => reader.sections_from(file, &mut cx, section, decoder)?,
@@ -1282,7 +1326,8 @@ impl Reader {
             Ok(trailer) => trailer,
             Err(why) => reader.scan(file, &mut cx, why)?,
         };
-        if options.section.is_none() {
+        // The file's end is read back only to say what's wrong with it.
+        if options.section.is_none() && cx.wants {
             reader.end(file, &mut cx)?;
         }
         // Read by position, an object's first window reaches the next offset
@@ -1302,9 +1347,7 @@ impl Reader {
         if let Some((0, (_, entry))) = reader.entries.first()
             && *entry != XrefEntry::Free
         {
-            let message =
-                "the cross-references list object 0, which is always free (ISO 32000-2, 7.5.4)";
-            cx.warn(None, None, message.to_string());
+            cx.tell(None, None, Fault::ObjectZero);
         }
         reader.facts.linearized = match reader.facts.header_offset {
             Some(at) => holds_linearization(file, at, limits.parser)?,
@@ -1316,8 +1359,13 @@ impl Reader {
             lock.reached = reader.reached.load(Ordering::Relaxed);
         }
         reader.trailer = trailer;
-        reader.opened = cx.warnings;
+        reader.opened = cx.faults;
         Ok(reader)
+    }
+
+    /// A read's sink, wanting faults where the reading does.
+    fn cx(&self) -> Cx {
+        Cx::new(self.wants)
     }
 
     /// An empty slot for each entry, and a lock for each object stream the
@@ -1343,9 +1391,9 @@ impl Reader {
             return Ok(());
         }
         let Some(lock) = &self.lock else {
-            // Its /Encrypt isn't a dictionary.
+            // Its /Encrypt isn't a dictionary, in the words that say so.
             let why = match &self.encryption {
-                Encryption::Unsupported(why) => why.clone(),
+                Encryption::Unsupported(why) => why.to_string(),
                 _ => String::new(),
             };
             return Err(Refused::Malformed(why));
@@ -1385,12 +1433,12 @@ impl Reader {
     /// The file opened by `handler`, which opens what `lock` kept of it:
     /// what it read and decoded dropped, to be read again decrypted, its
     /// budget what opening the file left, and what's wrong with `/Perms`
-    /// among what it warned of opening the file; how it's encrypted.
+    /// among what it told of opening the file; how it's encrypted.
     fn unlocked(&mut self, lock: &Lock, handler: Handler) -> Encryption {
-        let mut warnings = std::mem::take(&mut self.opened);
+        let mut faults = std::mem::take(&mut self.opened);
         let at = lock.perms;
-        let encryption = self.settle(&lock.values, Ok(handler), &[], lock.own, &mut warnings, at);
-        self.opened = warnings;
+        let encryption = self.settle(&lock.values, Ok(handler), &[], lock.own, &mut faults, at);
+        self.opened = faults;
         self.empty_slots();
         self.budget.store(lock.budget, Ordering::Relaxed);
         self.reached.store(lock.reached, Ordering::Relaxed);
@@ -1465,7 +1513,7 @@ impl Reader {
                 object: Err(Unread::Missing {
                     id: ObjectId::new(n, generation),
                 }),
-                warnings: Vec::new(),
+                faults: Vec::new(),
                 decrypt: Vec::new(),
             },
         })
@@ -1479,7 +1527,7 @@ impl Reader {
         id: ObjectId,
         offset: usize,
     ) -> Result<Read, F::Error> {
-        let mut cx = Cx::default();
+        let mut cx = self.cx();
         let mut object =
             self.indirect(file, &mut cx, offset, Some(id))?
                 .map(|(_, mut o, mut record)| {
@@ -1494,12 +1542,14 @@ impl Reader {
                     (o, record)
                 });
         let decrypt = match (&self.handler, &mut object) {
-            (Some(handler), Ok((o, _))) if self.native => decrypt_strings(handler, id, o),
+            (Some(handler), Ok((o, _))) if self.native => {
+                decrypt_strings(handler, id, o, self.wants)
+            }
             _ => Vec::new(),
         };
         Ok(Read {
             object,
-            warnings: cx.warnings,
+            faults: cx.faults,
             decrypt,
         })
     }
@@ -1514,7 +1564,7 @@ impl Reader {
         stream: u32,
         index: u32,
     ) -> Result<Read, F::Error> {
-        let mut cx = Cx::default();
+        let mut cx = self.cx();
         let object = match self.container(file, stream)? {
             None => Err(Unread::ContainerMissing { stream }),
             Some(container) => match &container.header {
@@ -1524,7 +1574,7 @@ impl Reader {
         };
         Ok(Read {
             object,
-            warnings: cx.warnings,
+            faults: cx.faults,
             decrypt: Vec::new(),
         })
     }
@@ -1661,7 +1711,7 @@ impl Reader {
         decoder: Option<&dyn Decode>,
     ) -> Container {
         let id = ObjectId::new(stream, 0);
-        let mut cx = Cx::default();
+        let mut cx = self.cx();
         let (mut cut, mut unclean) = (false, false);
         let native = self.native_containers();
         let header = match object {
@@ -1711,7 +1761,7 @@ impl Reader {
             cut,
             whole,
             clear,
-            warnings: cx.warnings,
+            faults: cx.faults,
         }
     }
 
@@ -1835,14 +1885,14 @@ impl Reader {
         Ok(())
     }
 
-    /// What it warned of in the objects it has read, as a whole read says
-    /// it: what it warned of as it opened the file; then as it read each
+    /// What it told of in the objects it has read, as a whole read says
+    /// it: what it told of as it opened the file; then as it read each
     /// object in use, by number; as it decoded each object stream, by
     /// number; as it read each object in an object stream, by number; each
     /// of those that starts inside another's bytes, by stream, then where
     /// it starts ([`overlaps`]); and as it decrypted each object's strings,
-    /// by number.
-    fn warnings(&self) -> Vec<Warning> {
+    /// by number. None where it looks for none.
+    fn faults(&self) -> Vec<(Place, Fault)> {
         let reads = |member: bool| {
             (self.entries.iter().zip(&self.slots))
                 .filter(move |&(&(n, (_, entry)), _)| {
@@ -1850,22 +1900,26 @@ impl Reader {
                 })
                 .filter_map(|(_, slot)| slot.get())
         };
-        let mut warnings = self.opened.clone();
+        let mut cx = self.cx();
+        if !cx.wants {
+            return cx.faults;
+        }
+        cx.faults.extend(self.opened.iter().cloned());
         for read in reads(false) {
-            warnings.extend(read.warnings.iter().cloned());
+            cx.faults.extend(read.faults.iter().cloned());
         }
         for container in self.containers.values().filter_map(OnceLock::get) {
-            warnings.extend(container.warnings.iter().cloned());
+            cx.faults.extend(container.faults.iter().cloned());
         }
         for read in reads(true) {
-            warnings.extend(read.warnings.iter().cloned());
+            cx.faults.extend(read.faults.iter().cloned());
         }
         let records = reads(true).filter_map(|read| Some(&read.object.as_ref().ok()?.1));
-        warnings.extend(overlaps(records));
+        overlaps(records, &mut cx);
         for read in reads(false) {
-            warnings.extend(read.decrypt.iter().cloned());
+            cx.faults.extend(read.decrypt.iter().cloned());
         }
-        warnings
+        cx.faults
     }
 
     /// What it knows of the file beside its objects, which a document made
@@ -1873,6 +1927,7 @@ impl Reader {
     fn known(&self) -> Known {
         Known {
             opened: self.opened.clone(),
+            wants: self.wants,
             trailer: self.trailer.clone(),
             version: self.version,
             update: self.update.clone(),
@@ -1896,8 +1951,8 @@ impl Reader {
     /// The file read whole, every object the entries list read as
     /// [`Reader::read_all`] reads them, with `decoder` asked for what the
     /// reader doesn't decode or decrypt itself, into a [`Document`]: each
-    /// object moved out of its slot, and the warnings as
-    /// [`Reader::warnings`] says them.
+    /// object moved out of its slot, and the faults as
+    /// [`Reader::faults`] says them.
     fn whole<'f, F: Bytes<'f>>(
         self,
         file: F,
@@ -1926,11 +1981,11 @@ impl Reader {
                     data,
                     whole,
                     clear,
-                    warnings,
+                    faults,
                     ..
                 } = *container;
                 let data = header.is_ok().then_some(data);
-                assembly.container(stream, warnings, data, whole, clear);
+                assembly.container(stream, faults, data, whole, clear);
             }
         }
         let document = assembly.document(file, decoder, known)?;
@@ -1945,8 +2000,8 @@ impl Reader {
     /// them, into a [`Document`], the reader kept: each object it has kept
     /// cloned, and each it hasn't read without keeping it
     /// ([`Reader::read`]); each object stream decoded and kept, as a read
-    /// of an object in it keeps it; and the warnings as
-    /// [`Reader::warnings`] says them. A read the file stops keeps none of
+    /// of an object in it keeps it; and the faults as
+    /// [`Reader::faults`] says them. A read the file stops keeps none of
     /// the objects it read unkept.
     fn document<'f, F: Bytes<'f>>(&self, file: F) -> Result<Document, F::Error> {
         let read = |i: usize| match self.slots[i].get() {
@@ -1961,8 +2016,8 @@ impl Reader {
         for (&stream, lock) in &self.containers {
             if let Some(container) = lock.get() {
                 let data = (container.header.is_ok()).then(|| container.data.clone());
-                let warnings = container.warnings.clone();
-                assembly.container(stream, warnings, data, container.whole, container.clear);
+                let faults = container.faults.clone();
+                assembly.container(stream, faults, data, container.whole, container.clear);
             }
         }
         for i in self.listing(true) {
@@ -1980,7 +2035,7 @@ impl Reader {
         data: &[u8],
         filters: &[Filter],
         limit: usize,
-    ) -> (Vec<u8>, Vec<(usize, Fault)>) {
+    ) -> (Vec<u8>, Vec<(usize, pdf_filters::Fault)>) {
         let own = limit.min(self.limits.stream);
         let left = self.budget.load(Ordering::Relaxed);
         if left < own {
@@ -2011,9 +2066,9 @@ impl Reader {
         (decoded, faults)
     }
 
-    /// A warning on stream `id` for each of `faults` in its `filters`: at
-    /// the fault's bytes, when it has a place in the data as written
-    /// (`data`, in the file), else at the data.
+    /// A fault told on stream `id` for each of `faults` in its `filters`
+    /// ([`Fault::Decode`]): at the fault's bytes, when it has a place in the
+    /// data as written (`data`, in the file), else at the data.
     fn faulted(
         &self,
         cx: &mut Cx,
@@ -2021,8 +2076,11 @@ impl Reader {
         data: Option<Span>,
         written: Option<Span>,
         filters: &[Filter],
-        faults: Vec<(usize, Fault)>,
+        faults: Vec<(usize, pdf_filters::Fault)>,
     ) {
+        if !cx.wants {
+            return;
+        }
         for (i, fault) in faults {
             let at = match (i, place(&fault), written) {
                 (0, Some(at), Some(written)) => {
@@ -2030,17 +2088,12 @@ impl Reader {
                 }
                 _ => data,
             };
-            let name = filter_name(&filters[i]);
-            let message = format!("its data doesn't decode cleanly through /{name}: {fault}");
-            let warning = Warning {
-                object: Some(id),
-                at,
-                message,
-            };
+            let filter = filter_name(&filters[i]);
+            let told = (Place::new(Some(id), at), Fault::Decode { filter, fault });
             // A stream two sections name, as a hybrid file's `/XRefStm`
             // can be, is decoded for each, and said once.
-            if !cx.warnings.contains(&warning) {
-                cx.warnings.push(warning);
+            if !cx.faults.contains(&told) {
+                cx.faults.push(told);
             }
         }
     }
@@ -2092,8 +2145,12 @@ impl Reader {
             Some(Ok(plain)) => (plain, false),
             Some(Err(error)) => {
                 let fault = error.fault;
-                let message = format!("its data doesn't decrypt cleanly: {fault}");
-                cx.warn(Some(id), stream.data.at(), message);
+                if cx.wants {
+                    let told = Fault::Decrypt {
+                        fault: fault.clone(),
+                    };
+                    cx.tell(Some(id), stream.data.at(), told);
+                }
                 *unclean = true;
                 match error.data {
                     Some(plain) => (plain, false),
@@ -2188,7 +2245,8 @@ impl Reader {
 
     /// Whether the file ends as ISO 32000-2 7.5.5 has it, its last line
     /// `%%EOF` alone; and, failing that, whether a `%%EOF` is within its last
-    /// 1024 bytes, where readers look for one.
+    /// 1024 bytes, where readers look for one: what's wrong told to `cx`.
+    /// Made only to say a fault, so only where faults are looked for.
     ///
     /// Read by position, its last bytes are read back from the end, as
     /// far as its last `%%EOF` and the byte before it, and its last 1024.
@@ -2216,37 +2274,27 @@ impl Reader {
             }
             let body = from + body.len();
             let said = match rfind(&bytes[tail - from..], b"%%EOF").map(|i| tail + i) {
-                Some(at) if at + 5 == body => (
-                    span(at, at + 5),
-                    "the file's last %%EOF isn't on a line of its own".to_string(),
-                ),
+                Some(at) if at + 5 == body => (span(at, at + 5), Fault::EofNotAlone),
                 Some(at) => (
                     span(at + 5, len),
-                    format!(
-                        "the file goes on for {} bytes after its last %%EOF",
-                        len - at - 5
-                    ),
+                    Fault::AfterEof {
+                        bytes: len - at - 5,
+                    },
                 ),
                 None => match rfind(bytes, b"%%EOF").map(|i| from + i) {
-                    Some(at) => (
-                        span(at, at + 5),
-                        format!(
-                            "the file's last %%EOF is {} bytes from its end, past the 1024 readers look in",
-                            len - at
-                        ),
-                    ),
+                    Some(at) => (span(at, at + 5), Fault::EofFar { bytes: len - at }),
                     // Before the window, a %%EOF may yet be.
                     None if from > 0 => {
                         w.touch();
                         return None;
                     }
-                    None => (span(len, len), "the file has no %%EOF".to_string()),
+                    None => (span(len, len), Fault::NoEof),
                 },
             };
             Some(said)
         })?;
-        if let Some((at, message)) = said {
-            cx.warn(None, Some(at), message);
+        if let Some((at, fault)) = said {
+            cx.tell(None, Some(at), fault);
         }
         Ok(())
     }
@@ -2266,12 +2314,11 @@ impl Reader {
                 if head.len() < 1024 {
                     w.touch();
                 }
-                cx.warn(None, None, "no %PDF- header".to_string());
+                cx.tell(None, None, Fault::NoHeader);
                 return Ok(None);
             };
             if at > 0 {
-                let message = format!("%PDF- is at byte {at}, not the file's first");
-                cx.warn(None, Some(span(at, at + 5)), message);
+                cx.tell(None, Some(span(at, at + 5)), Fault::HeaderAt { at });
             }
             let rest = &file[at + 5..];
             let end = (rest.iter()).position(|&b| is_white_space(b) || is_delimiter(b));
@@ -2281,8 +2328,7 @@ impl Reader {
             });
             let version = Version::parse(&rest[..end]);
             if version.is_none() {
-                let message = "the header's version doesn't read".to_string();
-                cx.warn(None, Some(span(at, at + 5 + end)), message);
+                cx.tell(None, Some(span(at, at + 5 + end)), Fault::Version);
             }
             Ok(Some((at, version)))
         })?;
@@ -2303,22 +2349,22 @@ impl Reader {
         file: F,
         cx: &mut Cx,
         decoder: Option<&dyn Decode>,
-    ) -> Result<Result<Trailer, String>, F::Error> {
+    ) -> Result<Result<Trailer, Unwritten>, F::Error> {
         let offset = file.read_back(|w| {
             // The window's bytes are the file's from `w.base` to its end.
             let Some(i) = rfind(w.bytes, b"startxref") else {
                 w.touch();
-                return Err("no startxref".to_string());
+                return Err(Unwritten::NoStartxref);
             };
             let at = w.place(i);
             let mut t = Tokenizer::at(w.bytes, i);
             if !is_keyword(t.next().as_ref(), b"startxref") {
-                return Err(format!("startxref at byte {at} is inside another word"));
+                return Err(Unwritten::StartxrefInWord { at });
             }
             (significant(&mut t))
                 .filter(|token| token.kind == Kind::Integer)
                 .and_then(|token| usize::try_from(token.integer().ok()?).ok())
-                .ok_or_else(|| "startxref gives no offset".to_string())
+                .ok_or(Unwritten::StartxrefNoOffset)
         })?;
         match offset {
             Ok(offset) => self.sections_from(file, cx, offset, decoder),
@@ -2336,31 +2382,27 @@ impl Reader {
         cx: &mut Cx,
         offset: usize,
         decoder: Option<&dyn Decode>,
-    ) -> Result<Result<Trailer, String>, F::Error> {
+    ) -> Result<Result<Trailer, Unwritten>, F::Error> {
         let mut sections: Vec<Section> = Vec::new();
         let mut offsets = Vec::new();
         let mut seen = HashSet::new();
         let mut next = Some(offset);
         while let Some(offset) = next {
             if !seen.insert(offset) {
-                let message = format!("the /Prev chain comes back to byte {offset}");
-                cx.warn(None, None, message);
+                cx.tell(None, None, Fault::Loop { at: offset });
                 break;
             }
             if seen.len() > self.limits.sections {
-                let message = format!(
-                    "more than {} cross-reference sections",
-                    self.limits.sections
-                );
-                cx.warn(None, None, message);
+                let limit = self.limits.sections;
+                cx.tell(None, None, Fault::Sections { limit });
                 break;
             }
             let section = match self.section(file, cx, offset)? {
                 Ok(section) => section,
                 Err(why) if sections.is_empty() => return Ok(Err(why)),
                 Err(why) => {
-                    let message = format!("the section at byte {offset} doesn't read: {why}");
-                    cx.warn(None, None, message);
+                    let why = Box::new(why);
+                    cx.tell(None, None, Fault::Section { at: offset, why });
                     break;
                 }
             };
@@ -2448,13 +2490,12 @@ impl Reader {
                     }
                     Err(why) if i == 0 && !hybrid => return Ok(Err(why)),
                     Err(why) => {
-                        let what = if hybrid {
-                            "its /XRefStm"
-                        } else {
-                            "the section"
+                        let (at, why) = (*offset, Box::new(why));
+                        let fault = match hybrid {
+                            true => Fault::XrefStm { at, why },
+                            false => Fault::StreamRows { at, why },
                         };
-                        let message = format!("{what}, at byte {offset}, doesn't read: {why}");
-                        cx.warn(None, None, message);
+                        cx.tell(None, None, fault);
                     }
                 }
             }
@@ -2500,11 +2541,8 @@ impl Reader {
                 }
             }
             if past > 0 {
-                let message = format!(
-                    "the cross-reference sections list {past} objects past the first {most}, as many as the reader reads of a file of {} bytes, which aren't read",
-                    file.len()
-                );
-                cx.warn(None, None, message);
+                let len = file.len();
+                cx.tell(None, None, Fault::Entries { past, most, len });
             }
             if i == 0 {
                 trailer = Some(section.trailer.clone());
@@ -2521,7 +2559,7 @@ impl Reader {
             }
         }
         let Some(trailer) = trailer else {
-            return Ok(Err("no section".to_string()));
+            return Ok(Err(Unwritten::NoSection));
         };
         // The first first; none where the numbers don't fit.
         revisions.reverse();
@@ -2544,7 +2582,7 @@ impl Reader {
         file: F,
         cx: &mut Cx,
         offset: usize,
-    ) -> Result<Result<Section, String>, F::Error> {
+    ) -> Result<Result<Section, Unwritten>, F::Error> {
         // What's at the offset, read in its window: a table, its trailer
         // and where its /XRefStm is, read whole.
         let at = file.read_from(cx, offset, 0, |w, cx| {
@@ -2563,9 +2601,8 @@ impl Reader {
                     section.stream = match self.xref_stream(file, cx, at)? {
                         Ok((id, object, _)) => Some((at, id, object)),
                         Err(why) => {
-                            let message =
-                                format!("its /XRefStm, at byte {at}, doesn't read: {why}");
-                            cx.warn(None, None, message);
+                            let why = Box::new(why);
+                            cx.tell(None, None, Fault::XrefStm { at, why });
                             None
                         }
                     };
@@ -2596,9 +2633,7 @@ impl Reader {
                     end,
                 }))
             }
-            At::Neither => Ok(Err(format!(
-                "byte {offset}, which startxref or /Prev gives, is at neither `xref` nor an object"
-            ))),
+            At::Neither => Ok(Err(Unwritten::Neither { at: offset })),
         }
     }
 
@@ -2609,16 +2644,17 @@ impl Reader {
         w: &Window<'w>,
         cx: &mut Cx,
         t: &mut Tokenizer<'w>,
-    ) -> Result<(Section, Option<usize>), String> {
+    ) -> Result<(Section, Option<usize>), Unwritten> {
         let integer = |t: &mut Tokenizer<'w>| {
             (w.significant(t))
                 .filter(|token| token.kind == Kind::Integer)
                 .and_then(|token| token.integer().ok())
         };
         let mut entries = BTreeMap::new();
-        // The rows not as ISO 32000-2 7.5.4 writes them, and the first.
+        // The rows not as ISO 32000-2 7.5.4 writes them, and the first:
+        // looked at only to say so.
         let (mut rows, mut misshapen) = (0, 0);
-        let mut first: Option<(u32, Span, &str)> = None;
+        let mut first: Option<(u32, Span, RowShape)> = None;
         loop {
             let at = w.place(t.offset());
             match w.significant(&mut t.clone()) {
@@ -2630,7 +2666,7 @@ impl Reader {
                     let start = integer(t).and_then(|n| u32::try_from(n).ok());
                     let count = integer(t).and_then(|n| u32::try_from(n).ok());
                     let (Some(start), Some(count)) = (start, count) else {
-                        return Err(format!("a subsection's header at byte {at} doesn't read"));
+                        return Err(Unwritten::Subsection { at });
                     };
                     for i in 0..count {
                         let row = w
@@ -2638,10 +2674,12 @@ impl Reader {
                             .map_or(t.offset(), |t| t.start);
                         let row = w.place(row);
                         let Some(n) = start.checked_add(i) else {
-                            return Err(format!("the table's row at byte {row} numbers no object"));
+                            return Err(Unwritten::RowNumber { at: row });
                         };
                         rows += 1;
-                        if let Err(why) = w.row_shape(row) {
+                        if cx.wants
+                            && let Err(why) = w.row_shape(row)
+                        {
                             misshapen += 1;
                             let end = (row + 20).min(w.place(w.bytes.len()));
                             first.get_or_insert((n, span(row, end), why));
@@ -2652,7 +2690,7 @@ impl Reader {
                         let (Some(offset), Some(generation), Some(kind @ (b"n" | b"f"))) =
                             (offset, generation, kind.as_ref().map(|k| k.bytes))
                         else {
-                            return Err(format!("the table's row at byte {row} doesn't read"));
+                            return Err(Unwritten::Row { at: row });
                         };
                         let entry = match (usize::try_from(offset), u16::try_from(generation)) {
                             (Ok(offset), Ok(generation)) if kind == b"n" => {
@@ -2662,30 +2700,31 @@ impl Reader {
                             // A row in its place, but a number out of range:
                             // the rest of the table still reads.
                             _ => {
-                                let message = format!(
-                                    "the table's row for object {n} gives a number out of range, and is read as free"
-                                );
-                                cx.warn(None, Some(span(row, w.place(t.offset()))), message);
+                                let at = Some(span(row, w.place(t.offset())));
+                                cx.tell(None, at, Fault::FreeRow { number: n });
                                 (u16::MAX, XrefEntry::Free)
                             }
                         };
                         entries.entry(n).or_insert(entry);
                     }
                 }
-                _ => return Err(format!("the table at byte {at} has no trailer")),
+                _ => return Err(Unwritten::NoTrailer { at }),
             }
         }
-        if let Some((n, at, why)) = first {
-            let message = format!(
-                "{misshapen} of the table's {rows} rows aren't 20 bytes as ISO 32000-2 7.5.4 writes them, the first object {n}'s: {why}"
-            );
-            cx.warn(None, Some(at), message);
+        if let Some((number, at, why)) = first {
+            let fault = Fault::Rows {
+                misshapen,
+                rows,
+                number,
+                why,
+            };
+            cx.tell(None, Some(at), fault);
         }
         let mut parser = w.parser(w.place(t.offset())).limits(self.limits.parser);
-        let trailer = parser.value(&mut cx.warned(None));
-        let trailer = w.parsed(trailer).map_err(|e| e.to_string())?;
+        let trailer = parser.value(&mut cx.parsed(None));
+        let trailer = w.parsed(trailer).map_err(Unwritten::Trailer)?;
         let Some(dict) = trailer.as_dict() else {
-            return Err("the trailer isn't a dictionary".to_string());
+            return Err(Unwritten::TrailerNotADictionary);
         };
         let prev = dict.get(b"Prev").and_then(offset_of);
         let xref_stm = dict.get(b"XRefStm").and_then(offset_of);
@@ -2714,13 +2753,13 @@ impl Reader {
     ) -> Result<XrefStream, F::Error> {
         let (id, object, record) = match self.indirect(file, cx, offset, None)? {
             Ok(read) => read,
-            Err(why) => return Ok(Err(why.to_string())),
+            Err(why) => return Ok(Err(Unwritten::Unread(why))),
         };
         let Value::Stream(stream) = object.value() else {
-            return Ok(Err(format!("{id} R, at byte {offset}, isn't a stream")));
+            return Ok(Err(Unwritten::NotAStream { id, at: offset }));
         };
         if stream.dict.get(b"Type").and_then(Object::as_name) != Some(b"XRef") {
-            return Ok(Err(format!("{id} R, at byte {offset}, isn't /Type /XRef")));
+            return Ok(Err(Unwritten::NotXref { id, at: offset }));
         }
         Ok(Ok((id, object, record.at.end)))
     }
@@ -2741,7 +2780,7 @@ impl Reader {
         decoded: Option<&Result<Vec<u8>, String>>,
         own: bool,
         decoder: Option<&dyn Decode>,
-    ) -> Result<Result<Rows, String>, F::Error> {
+    ) -> Result<Result<Rows, Unwritten>, F::Error> {
         let at = match object.value() {
             Value::Stream(stream) => stream.data.at(),
             _ => None,
@@ -2767,9 +2806,9 @@ impl Reader {
         decoded: Option<&Result<Vec<u8>, String>>,
         own: bool,
         decoder: Option<&dyn Decode>,
-    ) -> Result<Rows, String> {
+    ) -> Result<Rows, Unwritten> {
         let Value::Stream(stream) = object.value() else {
-            return Err(format!("{id} R isn't a stream"));
+            return Err(Unwritten::Streamless { id });
         };
         let dict = &stream.dict;
         let widths: Option<Vec<usize>> = match dict.get(b"W").map(|w| w.value()) {
@@ -2782,7 +2821,7 @@ impl Reader {
                 .collect(),
             _ => None,
         };
-        let widths = widths.ok_or("its /W isn't three widths of 8 bytes or fewer")?;
+        let widths = widths.ok_or(Unwritten::Widths)?;
         let size = dict.get(b"Size").and_then(Object::as_integer);
         let index: Vec<(u32, u32)> = match dict.get(b"Index").map(|i| i.value()) {
             Some(Value::Array(index)) => (index.chunks(2))
@@ -2794,11 +2833,11 @@ impl Reader {
                     _ => None,
                 })
                 .collect::<Option<_>>()
-                .ok_or("its /Index isn't pairs of numbers")?,
+                .ok_or(Unwritten::Index)?,
             _ => vec![(
                 0,
                 size.and_then(|s| u32::try_from(s).ok())
-                    .ok_or("it has no /Size")?,
+                    .ok_or(Unwritten::NoSize)?,
             )],
         };
         let row = widths.iter().sum::<usize>();
@@ -2814,8 +2853,7 @@ impl Reader {
             // 32000-2, 7.5.8.2). What runs past its rows, which aren't
             // read, isn't decoded.
             true => {
-                let filters = filter::filters(dict, None)
-                    .map_err(|why| format!("its cross-reference stream doesn't decode: {why}"))?;
+                let filters = filter::filters(dict, None).map_err(Unwritten::Filters)?;
                 match filters.is_empty() {
                     true => written,
                     false => {
@@ -2833,9 +2871,11 @@ impl Reader {
                         if let Some(size) = rows_size.filter(|&size| decoded.len() >= size) {
                             let row = predictor_row(&filters);
                             faults.retain(|(_, fault)| match *fault {
-                                Fault::Limit => false,
-                                Fault::RowTag { row: i, .. } => i.saturating_mul(row) < size,
-                                Fault::PartialRow { .. } => {
+                                pdf_filters::Fault::Limit => false,
+                                pdf_filters::Fault::RowTag { row: i, .. } => {
+                                    i.saturating_mul(row) < size
+                                }
+                                pdf_filters::Fault::PartialRow { .. } => {
                                     decoded.len().saturating_sub(row) < size
                                 }
                                 _ => true,
@@ -2851,23 +2891,22 @@ impl Reader {
                 let decoded = match (filters(object), decoded) {
                     (None, _) => Ok(written),
                     (Some(_), Some(Ok(data))) => Ok(&data[..]),
-                    (Some(filter), Some(Err(why))) => Err(format!(
-                        "its cross-reference stream ({filter}) doesn't decode: {why}"
-                    )),
-                    (Some(filter), None) => Err(format!(
-                        "its cross-reference stream is compressed ({filter}), and nothing decodes it"
-                    )),
+                    (Some(filter), Some(Err(why))) => Err(Unwritten::Decoder {
+                        filter,
+                        why: why.clone(),
+                    }),
+                    (Some(filter), None) => Err(Unwritten::Compressed { filter }),
                 };
                 // A decoder finds a stream by its number, which a later
                 // update can give another object; then the data it gives
                 // isn't the size this stream's rows are, and it's decoded
                 // from its bytes instead.
                 let decoded = decoded.and_then(|data| match filters(object) {
-                    Some(_) if rows_size != Some(data.len()) => Err(format!(
-                        "decoded, it's {} bytes, not the {} its /W and /Index make: the decoder may have decoded another object {id} R",
-                        data.len(),
-                        rows_size.map_or("many".to_string(), |size| size.to_string()),
-                    )),
+                    Some(_) if rows_size != Some(data.len()) => Err(Unwritten::Decoded {
+                        len: data.len(),
+                        size: rows_size,
+                        id,
+                    }),
                     _ => Ok(data),
                 });
                 match decoded {
@@ -2902,14 +2941,14 @@ impl Reader {
             for i in 0..count {
                 if i == fit {
                     if rows.len() < skip {
-                        return Err("its data ends before its /Index does".to_string());
+                        return Err(Unwritten::DataShort);
                     }
                     if skip > 0 {
                         rows.nth(skip - 1);
                     }
                     break;
                 }
-                let bytes = rows.next().ok_or("its data ends before its /Index does")?;
+                let bytes = rows.next().ok_or(Unwritten::DataShort)?;
                 let (one, rest) = bytes.split_at(widths[0]);
                 let (two, three) = rest.split_at(widths[1]);
                 let kind = if widths[0] == 0 { 1 } else { field(one) };
@@ -2931,26 +2970,29 @@ impl Reader {
                     _ => continue,
                 };
                 let Some(n) = start.checked_add(i) else {
-                    return Err("its /Index numbers no object".to_string());
+                    return Err(Unwritten::IndexNumber);
                 };
                 entries.entry(n).or_insert(entry);
             }
         }
         if past > 0 {
-            let message = format!(
-                "its rows list {past} entries past the first {most}, as many as the reader reads of a file of {} bytes, which aren't read",
-                file.len()
+            let len = file.len();
+            cx.tell(
+                Some(id),
+                object.at,
+                Fault::StreamEntries { past, most, len },
             );
-            cx.warn(Some(id), object.at, message);
         }
-        // It lists itself, at the offset it's at (ISO 32000-2, 7.5.8.2).
-        let listed = matches!(
-            entries.get(&id.number),
-            Some(&(g, XrefEntry::InUse { offset: at, .. })) if g == id.generation && at == offset
-        );
-        if own && !listed {
-            let message = format!("cross-reference stream {id} R doesn't list itself");
-            cx.warn(Some(id), object.at, message);
+        // It lists itself, at the offset it's at (ISO 32000-2, 7.5.8.2):
+        // looked at only to say so.
+        let listed = || {
+            matches!(
+                entries.get(&id.number),
+                Some(&(g, XrefEntry::InUse { offset: at, .. })) if g == id.generation && at == offset
+            )
+        };
+        if own && cx.wants && !listed() {
+            cx.tell(Some(id), object.at, Fault::Unlisted { id });
         }
         Ok(entries)
     }
@@ -2994,14 +3036,14 @@ impl Reader {
         &mut self,
         file: F,
         cx: &mut Cx,
-        why: String,
+        why: Unwritten,
     ) -> Result<Trailer, F::Error> {
         let all = file.all()?;
         Ok(self.scan_in(&all, cx, why))
     }
 
     /// [`Reader::scan`] of `file`, every byte.
-    fn scan_in(&mut self, file: &[u8], cx: &mut Cx, why: String) -> Trailer {
+    fn scan_in(&mut self, file: &[u8], cx: &mut Cx, why: Unwritten) -> Trailer {
         let mut entries = BTreeMap::new();
         let mut t = Tokenizer::new(file);
         let mut before: [Option<Token>; 2] = [None, None];
@@ -3044,7 +3086,7 @@ impl Reader {
         for at in trailers.into_iter().rev() {
             let read = Parser::at(file, at)
                 .limits(self.limits.parser)
-                .value(&mut cx.warned(None));
+                .value(&mut cx.parsed(None));
             let Ok(object) = read else {
                 continue;
             };
@@ -3060,22 +3102,20 @@ impl Reader {
                 for key in [&b"Root"[..], b"Encrypt", b"ID", b"Info"] {
                     if let (false, Some(entry)) = (last.has(key), earlier.entry(key)) {
                         last.push_entry(entry.clone());
-                        taken.push(format!("/{}", String::from_utf8_lossy(key)));
+                        if cx.wants {
+                            taken.push(key.to_vec());
+                        }
                     }
                 }
             }
             // An edit, which drops its span; but the trailer this makes
-            // stands where the last was written, which its warning, and
+            // stands where the last was written, which its fault, and
             // what's reported of it, point at.
             trailer.at = at;
         }
         if let Some(object) = found {
             if !taken.is_empty() {
-                let message = format!(
-                    "the last trailer lacks {}, which it's given from an earlier one",
-                    taken.join(", ")
-                );
-                cx.warn(None, object.at, message);
+                cx.tell(None, object.at, Fault::Taken { keys: taken });
             }
             return Trailer {
                 stream: None,
@@ -3133,27 +3173,24 @@ impl Reader {
             Value::Ref(id) => match self.listed_entry(*id) {
                 Some(&(_, XrefEntry::InUse { offset, .. })) => {
                     match self.indirect(file, cx, offset, Some(*id))? {
-                        Ok((_, object, _)) => {
-                            (object.as_dict().cloned(), Some(*id), "isn't a dictionary")
-                        }
-                        Err(_) => (None, Some(*id), "doesn't read"),
+                        Ok((_, object, _)) => (
+                            object.as_dict().cloned(),
+                            Some(*id),
+                            Uncrypt::NotADictionary,
+                        ),
+                        Err(_) => (None, Some(*id), Uncrypt::Unread),
                     }
                 }
-                Some((_, XrefEntry::Compressed { .. })) => (
-                    None,
-                    Some(*id),
-                    "is in an object stream, which it can't be (ISO 32000-2, 7.5.7)",
-                ),
+                Some((_, XrefEntry::Compressed { .. })) => {
+                    (None, Some(*id), Uncrypt::InObjectStream)
+                }
                 None | Some((_, XrefEntry::Free)) => {
-                    let message = format!(
-                        "the trailer's /Encrypt is {id} R, which is no object, so the file is read as not encrypted"
-                    );
-                    cx.warn(None, encrypt.at, message);
+                    cx.tell(None, encrypt.at, Fault::NoEncrypt { id: *id });
                     return Ok(());
                 }
             },
-            Value::Dict(dict) => (Some(dict.clone()), None, ""),
-            _ => (None, None, "isn't a dictionary"),
+            Value::Dict(dict) => (Some(dict.clone()), None, Uncrypt::NotADictionary),
+            _ => (None, None, Uncrypt::NotADictionary),
         };
         self.list.encrypts = true;
         self.list.dictionaries.extend(own);
@@ -3161,20 +3198,19 @@ impl Reader {
         self.encryption = match &dict {
             None => {
                 self.list.undescribed();
-                Encryption::Unsupported(format!("its /Encrypt {why}"))
+                Encryption::Unsupported(Unsupported::Encrypt(why))
             }
             Some(dict) => self.open(file, cx, dict, trailer, own, passwords)?,
         };
         // On the trailer, whose /Encrypt it's about.
-        if let Encryption::Unsupported(why) = &self.encryption {
-            let strings = match self.list.strings {
-                false => "",
-                true => "its strings stay ciphertext, and ",
+        if let Encryption::Unsupported(why) = &self.encryption
+            && cx.wants
+        {
+            let fault = Fault::Unopened {
+                why: why.clone(),
+                strings: self.list.strings,
             };
-            let message = format!(
-                "its security handler doesn't open: {why}; {strings}its object streams aren't read"
-            );
-            cx.warn(None, encrypt.at, message);
+            cx.tell(None, encrypt.at, fault);
         }
         Ok(())
     }
@@ -3232,8 +3268,8 @@ impl Reader {
                 crypt_filters.push(crypt_filter);
             }
         }
-        // Each value in turn, as what each refers to is read, and warned
-        // of, in this order.
+        // Each value in turn, as what each refers to is read, and its
+        // faults told, in this order.
         let mut values = pdf_crypt::Dictionary::default();
         values.filter = name(get(dict.get(b"Filter"))?).unwrap_or_default();
         values.v = integer(get(dict.get(b"V"))?).unwrap_or(0);
@@ -3284,8 +3320,7 @@ impl Reader {
         // takes the dictionary.
         if no_id && matches!(opened, Ok(_) | Err(Refused::Password)) {
             let at = trailer.dict().get(b"ID").and_then(|o| o.at);
-            let message = "its trailer's /ID has no string first, so its key is made without one";
-            cx.warn(None, at, message.to_string());
+            cx.tell(None, at, Fault::NoId);
         }
         // Followed as /StmF is: a null is no entry (7.3.9), and so is a
         // reference to no object (7.3.10); anything else that isn't a name,
@@ -3303,8 +3338,8 @@ impl Reader {
                 _ => Eff::AsStreams,
             },
         };
-        let perms = cx.warnings.len();
-        let encryption = self.settle(&values, opened, &of, own, &mut cx.warnings, perms);
+        let perms = cx.faults.len();
+        let encryption = self.settle(&values, opened, &of, own, &mut cx.faults, perms);
         if self.handler.is_none() {
             self.lock = Some(Box::new(Lock {
                 values,
@@ -3323,42 +3358,50 @@ impl Reader {
     /// streams and metadata are plain, which objects' strings aren't
     /// encrypted, its handler, and how it's encrypted, by the password
     /// whose index `of` gives for the one the handler says opened it (each
-    /// its own where `of` is empty); `/Perms`' faults put in `warnings` at
-    /// `at`, on `own`, the encryption dictionary. Opening a file and
-    /// unlocking one ([`Reader::unlock`]) both make it so.
+    /// its own where `of` is empty), and what the file grants; `/Perms`'
+    /// faults put in `faults` at `at`, on `own`, the encryption dictionary,
+    /// where faults are looked for. Opening a file and unlocking one
+    /// ([`Reader::unlock`]) both make it so.
     fn settle(
         &mut self,
         values: &pdf_crypt::Dictionary,
         opened: Result<Handler, Refused>,
         of: &[usize],
         own: Option<ObjectId>,
-        warnings: &mut Vec<Warning>,
+        faults: &mut Vec<(Place, Fault)>,
         at: usize,
     ) -> Encryption {
         self.list.settle(values, opened.as_ref());
         match opened {
             Ok(handler) => {
-                let faults = (handler.faults().iter()).map(|fault| Warning {
-                    object: own,
-                    at: None,
-                    message: format!("its encryption dictionary isn't right: {fault}"),
-                });
-                warnings.splice(at..at, faults);
+                if self.wants {
+                    let told = (handler.faults().iter()).map(|fault| {
+                        let fault = Fault::Dictionary {
+                            fault: fault.clone(),
+                        };
+                        (Place::new(own, None), fault)
+                    });
+                    faults.splice(at..at, told);
+                }
                 let owner = handler.owner();
                 let by = (handler.opened_by())
                     .map(|(i, encoding)| (of.get(i).copied().unwrap_or(i), encoding));
+                let permissions = handler.permissions();
                 self.handler = Some(handler);
-                Encryption::Opened { owner, by }
+                Encryption::Opened {
+                    owner,
+                    by,
+                    permissions,
+                }
             }
             // Its strings and streams aren't encrypted, as when only its
             // embedded files are: what handler it is, or the password, no
             // matter (but a stream's own crypt filter).
             Err(_) if !self.list.strings && !self.list.streams => Encryption::Plain,
             Err(Refused::Password) => Encryption::Locked,
-            Err(Refused::Malformed(why)) => Encryption::Unsupported(why),
-            // Another handler, or a version the standard one isn't: in
-            // its words.
-            Err(refused) => Encryption::Unsupported(refused.to_string()),
+            // Another handler, a version the standard one isn't, or a
+            // dictionary that's wrong: in its words.
+            Err(refused) => Encryption::Unsupported(Unsupported::Refused(refused)),
         }
     }
 
@@ -3388,7 +3431,7 @@ impl Reader {
         let data = &container.data;
         let object = (Parser::at(data, offset).in_stream(ObjectId::new(stream, 0)))
             .limits(self.limits.parser)
-            .value(&mut cx.warned(Some(id)))
+            .value(&mut cx.parsed(Some(id)))
             .map_err(Unread::Parse)?;
         // One that runs to where a fault cut the data off may be cut short,
         // when it's a value nothing closes: a number, a name, a keyword.
@@ -3466,7 +3509,7 @@ impl Reader {
             }));
         }
         let mut parser = parser.ciphertext(self.list.encrypted(id));
-        let body = w.parsed(parser.body(id, &mut cx.warned(Some(id))));
+        let body = w.parsed(parser.body(id, &mut cx.parsed(Some(id))));
         let body = match body {
             Ok(body) => body,
             Err(error) => return Ok(Err(Unread::Parse(error))),
@@ -3479,14 +3522,10 @@ impl Reader {
                 let data = match declared {
                     Some(data) => data,
                     None => {
-                        let message = match length {
-                            Some(len) => format!("its /Length, {len}, doesn't end at endstream"),
-                            None => "it has no /Length that reads".to_string(),
-                        };
                         let at = (head.dict().get(b"Length"))
                             .and_then(|l| l.at)
                             .unwrap_or(head.keyword());
-                        cx.warn(Some(id), Some(at), message);
+                        cx.tell(Some(id), Some(at), Fault::Length { length });
                         head.scanned()
                     }
                 };
@@ -3496,7 +3535,7 @@ impl Reader {
                     indirect_length: (head.dict().get(b"Length"))
                         .is_some_and(|l| matches!(l.value(), Value::Ref(_))),
                 };
-                let object = w.parsed(parser.stream(head, data, &mut cx.warned(Some(id))));
+                let object = w.parsed(parser.stream(head, data, &mut cx.parsed(Some(id))));
                 match object {
                     Ok(object) => (object, Some(extent)),
                     Err(error) => return Ok(Err(Unread::Parse(error))),
@@ -3607,39 +3646,39 @@ fn is_xref_stream(o: &Object) -> bool {
 
 /// In an encrypted file it opened, object `id`'s strings in plain view
 /// decrypted by `handler`, each where it is, but a signature's `/Contents`,
-/// which isn't encrypted; one that doesn't decrypt cleanly said, once an
-/// object and a fault.
-fn decrypt_strings(handler: &Handler, id: ObjectId, object: &mut Object) -> Vec<Warning> {
+/// which isn't encrypted; where faults are wanted (`wants`), one that
+/// doesn't decrypt cleanly said, once an object and a fault, in the order
+/// of the faults' words ([`Fault::Strings`]).
+fn decrypt_strings(
+    handler: &Handler,
+    id: ObjectId,
+    object: &mut Object,
+    wants: bool,
+) -> Vec<(Place, Fault)> {
     if ciphertexts(object.value()) == 0 {
         return Vec::new();
     }
-    let mut faults: BTreeMap<String, (usize, Option<Span>)> = BTreeMap::new();
+    let mut faults: Option<Unclean> = wants.then(BTreeMap::new);
     plaintext(object, id, handler, &mut faults);
-    (faults.into_iter())
-        .map(|(fault, (count, at))| {
-            let message = match count {
-                1 => format!("a string of it doesn't decrypt cleanly: {fault}"),
-                n => format!("{n} of its strings don't decrypt cleanly: {fault}"),
-            };
-            Warning {
-                object: Some(id),
-                at,
-                message,
-            }
-        })
+    (faults.unwrap_or_default().into_values())
+        .map(|(fault, count, at)| (Place::new(Some(id), at), Fault::Strings { count, fault }))
         .collect()
 }
+
+/// The faults of strings that didn't decrypt cleanly, by their words: each
+/// with how many, and where the first was.
+type Unclean = BTreeMap<String, (pdf_crypt::Fault, usize, Option<Span>)>;
 
 /// In an `encrypted` file, the strings in plain view decrypted by
 /// `decoder`: the objects holding ciphertext asked of it, and each string
 /// replaced by the one where it is in the decoder's object. A string it
 /// can't place stays ciphertext, and so does one the decoder can't
-/// decrypt, and the reader says so, in `warnings`.
+/// decrypt, and the reader tells `sink` so.
 fn decrypt(
     decoder: Option<&dyn Decode>,
     encrypted: bool,
     objects: &mut BTreeMap<ObjectId, Held>,
-    warnings: &mut Vec<Warning>,
+    sink: &mut impl Sink<Fault>,
 ) {
     let Some(decoder) = decoder.filter(|_| encrypted) else {
         return;
@@ -3660,22 +3699,15 @@ fn decrypt(
             Ok(plain) => {
                 let left = decrypted(object, &plain);
                 if left > 0 {
-                    let message = format!(
-                        "{left} of {id} R's strings stay ciphertext: the decoder reads the object otherwise"
-                    );
-                    warnings.push(Warning::new(Some(id), object.at, message));
+                    let place = Place::new(Some(id), object.at);
+                    sink.fault(place, Fault::Ciphertext { left, id });
                 }
             }
             Err(why) => *why_not.entry(why).or_default() += 1,
         }
     }
     for (why, objects) in why_not {
-        let objects = match objects {
-            1 => "one object's".to_string(),
-            n => format!("{n} objects'"),
-        };
-        let message = format!("{objects} strings stay ciphertext: {why}");
-        warnings.push(Warning::new(None, None, message));
+        sink.fault(Place::new(None, None), Fault::Undecrypted { objects, why });
     }
 }
 
@@ -3683,13 +3715,8 @@ fn decrypt(
 /// where it is; a signature's `/Contents` (a dictionary with `/ByteRange`
 /// and a string `/Contents`, of `/Type /Sig`, `/DocTimeStamp` or none)
 /// taken as plain, as it isn't encrypted (ISO 32000-2, 7.6.2). Each fault
-/// counted in `faults`, with where it was first.
-fn plaintext(
-    o: &mut Object,
-    id: ObjectId,
-    handler: &Handler,
-    faults: &mut BTreeMap<String, (usize, Option<Span>)>,
-) {
+/// counted in `faults`, with where it was first, where they're counted.
+fn plaintext(o: &mut Object, id: ObjectId, handler: &Handler, faults: &mut Option<Unclean>) {
     let at = o.at;
     // A dictionary's values, or a stream's dictionary's.
     let mut entries = |d: &mut Dict| {
@@ -3707,7 +3734,11 @@ fn plaintext(
                 match handler.decrypt_string(id.into(), bytes) {
                     Ok(plain) => *s = Str::Bytes(plain),
                     Err(error) => {
-                        faults.entry(error.fault.to_string()).or_insert((0, at)).0 += 1;
+                        if let Some(faults) = faults {
+                            let words = error.fault.to_string();
+                            let fault = error.fault;
+                            faults.entry(words).or_insert((fault, 0, at)).1 += 1;
+                        }
                         if let Some(plain) = error.data {
                             *s = Str::Bytes(plain);
                         }
@@ -3799,7 +3830,7 @@ fn decrypted(object: &mut Object, plain: &Object) -> usize {
 /// 32000-2 7.5.4 writes one, 20 bytes: a 10-digit offset, a space, a
 /// 5-digit generation, a space, `n` or `f`, and a two-byte end of line
 /// (a space and CR or LF, or CR LF); else what's wrong.
-fn row_shape(file: &[u8], row: usize) -> Result<(), &'static str> {
+fn row_shape(file: &[u8], row: usize) -> Result<(), RowShape> {
     let b = file.get(row..).unwrap_or_default();
     let digits =
         |r: std::ops::Range<usize>| b.get(r).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
@@ -3809,11 +3840,11 @@ fn row_shape(file: &[u8], row: usize) -> Result<(), &'static str> {
         && b.get(16) == Some(&b' ')
         && matches!(b.get(17), Some(b'n' | b'f'));
     if !fields {
-        return Err("it isn't ten digits, a space, five digits, a space and n or f");
+        return Err(RowShape::Fields);
     }
     match b.get(18..20) {
         Some(b" \r" | b" \n" | b"\r\n") => Ok(()),
-        _ => Err("its end of line isn't a space and CR or LF, or CR LF"),
+        _ => Err(RowShape::Eol),
     }
 }
 
@@ -3872,12 +3903,14 @@ fn holds_linearization<'f, F: Bytes<'f>>(
     }
     // A stream's dictionary when `stream` follows it.
     let after = parser.offset();
-    file.read_from(&mut Cx::default(), after, 0, |w, _| {
+    file.read_from(&mut Cx::new(false), after, 0, |w, _| {
         let next = w.significant(&mut w.tokenizer(after));
         Ok(!is_keyword(next.as_ref(), b"stream"))
     })
 }
 
+#[cfg(test)]
+mod faults;
 #[cfg(test)]
 pub(crate) mod lazy;
 #[cfg(test)]
@@ -4273,7 +4306,7 @@ mod tests {
         for kind in [Xref::Table, Xref::Stream] {
             let file = fixture::file("1.7", &clean(), root(), kind);
             let doc = document(&file, &Options::DEFAULT);
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             assert_eq!(doc.header, Some(Version::new(1, 7)));
             assert_eq!(doc.trailer.unwritten, None);
             assert_eq!(doc.trailer.stream.is_some(), kind == Xref::Stream);
@@ -4310,7 +4343,7 @@ mod tests {
             "<< /Size 4 /Root 1 0 R >>",
         );
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let Value::Stream(s) = doc.get(ObjectId::new(2, 0)).unwrap().value() else {
             panic!("not a stream");
         };
@@ -4336,7 +4369,8 @@ mod tests {
             "<< /Size 5 /Root 1 0 R >>",
         );
         let doc = document(&file, &Options::DEFAULT);
-        let messages: Vec<&str> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
+        let messages: Vec<String> = doc.faults().iter().map(|w| w.1.to_string()).collect();
+        let messages: Vec<&str> = messages.iter().map(String::as_str).collect();
         assert!(
             messages.contains(&"its /Length, 99, doesn't end at endstream"),
             "{messages:?}"
@@ -4360,9 +4394,9 @@ mod tests {
         assert_eq!(data(3), b"xy\n");
         assert_eq!(data(4), b"xy");
         assert!(
-            doc.warnings
+            doc.faults()
                 .iter()
-                .all(|w| w.object.is_some() && w.at.is_some())
+                .all(|w| w.0.object.is_some() && w.0.at.is_some())
         );
     }
 
@@ -4397,7 +4431,7 @@ mod tests {
             .as_bytes(),
         );
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let a = doc
             .get(ObjectId::new(2, 0))
             .unwrap()
@@ -4426,7 +4460,7 @@ mod tests {
                 ..Options::DEFAULT
             },
         );
-        assert!(before.warnings.is_empty(), "{:?}", before.warnings);
+        assert!(before.faults().is_empty(), "{:?}", before.faults());
         assert_eq!(
             before.ids(),
             [
@@ -4467,7 +4501,7 @@ mod tests {
         file.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 2 >>\n");
         file.extend_from_slice(format!("startxref\n{first}\n%%EOF\n").as_bytes());
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert!(doc.get(ObjectId::new(1, 0)).is_ok());
         assert_eq!(doc.update, None);
     }
@@ -4547,7 +4581,7 @@ mod tests {
         );
         let (file, third) = updated(file, 5, second);
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let ats: Vec<usize> = doc.revisions.iter().map(|r| r.at).collect();
         assert_eq!(ats, [first, second, third]);
         let numbers: Vec<Option<&[u32]>> = (doc.revisions.iter())
@@ -4601,7 +4635,7 @@ mod tests {
         // first section's, read first; updated, two.
         let (file, first) = linearized();
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.facts.sections, 2);
         assert_eq!(doc.revisions.len(), 1);
         let only = &doc.revisions[0];
@@ -4610,7 +4644,7 @@ mod tests {
         assert!(only.trailer.dict().has(b"Root"));
         let (file, update) = updated(file, 2, first);
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.facts.sections, 3);
         let ats: Vec<usize> = doc.revisions.iter().map(|r| r.at).collect();
         assert_eq!(ats, [first, update]);
@@ -4640,8 +4674,8 @@ mod tests {
         file[row..row + 18].copy_from_slice(b"0000000009 00000 n");
         let doc = document(&file, &Options::DEFAULT);
         assert_eq!(doc.ids(), [ObjectId::new(1, 0)]);
-        assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
-        assert!(doc.warnings[0].message.contains("object 0"));
+        assert_eq!(doc.faults().len(), 1, "{:?}", doc.faults());
+        assert_eq!(doc.faults()[0].1, Fault::ObjectZero);
     }
 
     #[test]
@@ -4664,10 +4698,10 @@ mod tests {
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.get(ObjectId::new(1, 0)).is_ok() && doc.get(ObjectId::new(3, 0)).is_ok());
         assert!(doc.get(ObjectId::new(2, 0)).is_err(), "read as free");
-        assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
-        let warning = &doc.warnings[0];
-        assert!(warning.message.contains("object 2"), "{warning:?}");
-        let at = warning.at.unwrap();
+        assert_eq!(doc.faults().len(), 1, "{:?}", doc.faults());
+        let warning = &doc.faults()[0];
+        assert!(warning.1.to_string().contains("object 2"), "{warning:?}");
+        let at = warning.0.at.unwrap();
         let written = &file[at.start..at.end];
         assert_eq!(at.start, row, "the row");
         assert!(
@@ -4677,10 +4711,16 @@ mod tests {
         );
     }
 
-    /// The warnings reading `file` gives, and where each is.
+    /// The faults reading `file` gives, each in its words, and where each is.
     fn warned(file: &[u8]) -> Vec<(String, Option<ObjectId>, Option<std::ops::Range<usize>>)> {
-        (document(file, &Options::DEFAULT).warnings.into_iter())
-            .map(|w| (w.message, w.object, w.at.map(|at| at.start..at.end)))
+        (document(file, &Options::DEFAULT).faults().iter())
+            .map(|w| {
+                (
+                    w.1.to_string(),
+                    w.0.object,
+                    w.0.at.map(|at| at.start..at.end),
+                )
+            })
             .collect()
     }
 
@@ -4808,9 +4848,9 @@ mod tests {
                     ..Options::DEFAULT
                 }
             )
-            .warnings
+            .faults()
             .iter()
-            .all(|w| !w.message.contains("%%EOF"))
+            .all(|w| !w.1.to_string().contains("%%EOF"))
         );
     }
 
@@ -4875,7 +4915,7 @@ mod tests {
             ]
         );
         // They read as before: the stray # as itself, #00 as NUL; and a
-        // name's well-formed escapes are no warning.
+        // name's well-formed escapes are no fault.
         assert!(
             doc.get(ObjectId::new(1, 0))
                 .unwrap()
@@ -4896,10 +4936,7 @@ mod tests {
         file.extend_from_slice(b"startxref\n999999\n%%EOF\n");
         let doc = document(&file, &Options::DEFAULT);
         assert!(
-            doc.trailer
-                .unwritten
-                .as_deref()
-                .is_some_and(|why| why.contains("999999"))
+            (doc.trailer.unwritten.as_ref()).is_some_and(|why| why.to_string().contains("999999"))
         );
         assert!(doc.trailer.dict().has(b"Root"));
         for n in 1..=5 {
@@ -4911,7 +4948,14 @@ mod tests {
         let at = rfind(&file, b"startxref").unwrap();
         file.truncate(at);
         let doc = document(&file, &Options::DEFAULT);
-        assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
+        assert_eq!(
+            doc.trailer
+                .unwritten
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("no startxref")
+        );
         assert_eq!(doc.trailer.stream, Some(ObjectId::new(6, 0)));
     }
 
@@ -4933,16 +4977,16 @@ mod tests {
         assert_eq!(root, Some(ObjectId::new(9, 0)));
         let message = "the last trailer lacks /Root, which it's given from an earlier one";
         assert!(
-            doc.warnings.iter().any(|w| w.message == message),
+            doc.faults().iter().any(|w| w.1.to_string() == message),
             "{:?}",
-            doc.warnings
+            doc.faults()
         );
         // Given what it lacks, it's still placed where the last trailer
-        // was written, and so is the warning.
+        // was written, and so is the fault.
         let at = doc.trailer.object.at.expect("placed");
         assert_eq!(&file[at.start..at.end], b"<< /Size 6 >>");
-        let warning = doc.warnings.iter().find(|w| w.message == message);
-        assert_eq!(warning.map(|w| w.at), Some(Some(at)));
+        let warning = doc.faults().iter().find(|w| w.1.to_string() == message);
+        assert_eq!(warning.map(|w| w.0.at), Some(Some(at)));
     }
 
     #[test]
@@ -5016,10 +5060,10 @@ mod tests {
                 "{encrypt}"
             );
             assert_eq!(
-                doc.warnings.len(),
+                doc.faults().len(),
                 usize::from(warned),
                 "{:?}",
-                doc.warnings
+                doc.faults()
             );
         }
 
@@ -5098,9 +5142,9 @@ mod tests {
         assert!(why(4).contains("`endobj`"), "{}", why(4));
         assert!(doc.get(ObjectId::new(5, 0)).is_ok());
         assert!(
-            doc.warnings
+            doc.faults()
                 .iter()
-                .any(|w| w.message == "5 0 obj has no endobj")
+                .any(|w| w.1.to_string() == "5 0 obj has no endobj")
         );
         assert!(why(6).contains("nested deeper"), "{}", why(6));
         assert!(why(7).contains("doesn't end"), "{}", why(7));
@@ -5187,7 +5231,7 @@ mod tests {
             seconds += start.elapsed().as_secs_f64();
             match &doc.trailer.unwritten {
                 None => written += 1,
-                Some(why) => *unwritten.entry(class(why)).or_insert(0) += 1,
+                Some(why) => *unwritten.entry(class(&why.to_string())).or_insert(0) += 1,
             }
             for (_, object) in doc.objects() {
                 ok += 1;
@@ -5204,9 +5248,8 @@ mod tests {
             for (_, why) in doc.unread() {
                 *bad.entry(class(&why.to_string())).or_insert(0usize) += 1;
             }
-            for w in &doc.warnings {
-                let cut: String = w
-                    .message
+            for w in doc.faults() {
+                let cut: String = (w.1.to_string())
                     .chars()
                     .filter(|c| !c.is_ascii_digit())
                     .take(60)
@@ -5394,7 +5437,7 @@ mod tests {
         // No decoder: what it holds is read as written, and placed in it.
         let file = unfiltered(false);
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.trailer.unwritten, None);
         let pages = doc.get(ObjectId::new(2, 0)).unwrap();
         let at = pages.at.unwrap();
@@ -5461,7 +5504,7 @@ mod tests {
         }
         for (filter, data) in cases {
             let doc = read_with(&filtered(false, filter, &data), &Unasked);
-            assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{filter}: {:?}", doc.faults());
             assert_eq!(doc.decoded[&ObjectId::new(4, 0)], objects, "{filter}");
             assert!(
                 doc.get(ObjectId::new(2, 0)).is_ok() && doc.get(ObjectId::new(3, 0)).is_ok(),
@@ -5483,12 +5526,12 @@ mod tests {
                 doc.get(ObjectId::new(2, 0)).is_ok() && doc.get(ObjectId::new(3, 0)).is_ok(),
                 "{filter}: what decoded reads"
             );
-            let [warning] = &doc.warnings[..] else {
-                panic!("{filter}: {:?}", doc.warnings);
+            let [warning] = doc.faults() else {
+                panic!("{filter}: {:?}", doc.faults());
             };
-            assert_eq!(warning.object, Some(ObjectId::new(4, 0)), "{filter}");
-            let at = warning.at.unwrap();
-            (warning.message.clone(), file[at.start..at.end].to_vec())
+            assert_eq!(warning.0.object, Some(ObjectId::new(4, 0)), "{filter}");
+            let at = warning.0.at.unwrap();
+            (warning.1.to_string(), file[at.start..at.end].to_vec())
         };
         // A fault with a place in the data as written: its byte.
         let (message, at) = warned(" /Filter /AHx", &[&hex[..], b"zz>"].concat());
@@ -5525,7 +5568,7 @@ mod tests {
         for png in [None, Some(4)] {
             let (file, _) = streams(false, true, &[0; 40], png);
             let doc = document(&file, &Options::DEFAULT);
-            assert!(doc.warnings.is_empty(), "{png:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{png:?}: {:?}", doc.faults());
             assert!(doc.get(ObjectId::new(3, 0)).is_ok());
         }
     }
@@ -5537,7 +5580,7 @@ mod tests {
         for past in [&[][..], &[0; 40]] {
             let (file, _) = streams(false, true, past, Some(7));
             let doc = document(&file, &Options::DEFAULT);
-            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{:?}", doc.faults());
             assert_eq!(doc.trailer.unwritten, None);
             assert!(doc.get(ObjectId::new(3, 0)).is_ok());
         }
@@ -5555,8 +5598,9 @@ mod tests {
         );
         assert!(doc.get(ObjectId::new(2, 0)).is_ok());
         assert!(doc.get(ObjectId::new(3, 0)).is_err());
-        let truncated = (doc.warnings.iter()).any(|w| w.message.ends_with("the data ends early"));
-        assert!(truncated, "{:?}", doc.warnings);
+        let truncated =
+            (doc.faults().iter()).any(|w| w.1.to_string().ends_with("the data ends early"));
+        assert!(truncated, "{:?}", doc.faults());
     }
 
     #[test]
@@ -5608,7 +5652,7 @@ mod tests {
     /// unfiltered, its `/N` `n` and its `/First` `first`, listed by
     /// cross-reference stream 5 with each of `members`, a number and its
     /// index in 4, and every other number free.
-    fn holding(data: &[u8], n: usize, first: usize, members: &[(u32, u8)]) -> Vec<u8> {
+    pub(super) fn holding(data: &[u8], n: usize, first: usize, members: &[(u32, u8)]) -> Vec<u8> {
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -5647,38 +5691,43 @@ mod tests {
         file
     }
 
-    /// The warning that object `n`, at `start` to `end` in object stream
+    /// The fault that object `n`, at `start` to `end` in object stream
     /// 4's data, starts inside `outer`, at `from` to `to`.
     fn inside(
         n: u32,
         (start, end): (usize, usize),
         outer: u32,
         (from, to): (usize, usize),
-    ) -> Warning {
-        Warning {
-            object: Some(ObjectId::new(n, 0)),
-            at: Some(Span::new(Some(ObjectId::new(4, 0)), start, end)),
-            message: format!(
-                "it starts at byte {start} of object stream 4 0 R's data, inside {outer} 0 R, which runs from byte {from} to {to}"
-            ),
-        }
+    ) -> (Place, Fault) {
+        let place = Place::new(
+            Some(ObjectId::new(n, 0)),
+            Some(Span::new(Some(ObjectId::new(4, 0)), start, end)),
+        );
+        let fault = Fault::Inside {
+            start,
+            stream: 4,
+            id: ObjectId::new(outer, 0),
+            from,
+            to,
+        };
+        (place, fault)
     }
 
     #[test]
     fn an_object_starting_inside_anothers_bytes_in_an_object_stream_is_said() {
         // Two at one offset: the second said, at its bytes, the first
-        // named; each read all the same, after what each warned of.
+        // named; each read all the same, after what each told of.
         let file = holding(b"2 0 3 0 << /A#zz 1 >>", 2, 8, &[(2, 0), (3, 1)]);
         let doc = document(&file, &Options::DEFAULT);
         assert_eq!(doc.get(ObjectId::new(2, 0)), doc.get(ObjectId::new(3, 0)));
-        let (overlap, before) = doc.warnings.split_last().unwrap();
+        let (overlap, before) = doc.faults().split_last().unwrap();
         assert_eq!(*overlap, inside(3, (8, 21), 2, (8, 21)));
-        let of: Vec<_> = before.iter().map(|w| w.object).collect();
+        let of: Vec<_> = before.iter().map(|w| w.0.object).collect();
         assert_eq!(
             of,
             [Some(ObjectId::new(2, 0)), Some(ObjectId::new(3, 0))],
             "{:?}",
-            doc.warnings
+            doc.faults()
         );
         // One inside a member two before it, past the one between: each
         // inside the one reaching furthest.
@@ -5688,19 +5737,19 @@ mod tests {
             inside(3, (14, 17), 2, (12, 23)),
             inside(6, (18, 21), 2, (12, 23)),
         ];
-        assert_eq!(doc.warnings, said);
+        assert_eq!(doc.faults(), said);
         // One that starts where the one before ends isn't inside it; nor
         // is either of two apart whose header gives them out of order.
         for data in [&b"2 0 3 3 [1][2]"[..], b"2 4 3 0 [1] [2]"] {
             let doc = document(&holding(data, 2, 8, &[(2, 0), (3, 1)]), &Options::DEFAULT);
             assert!(doc.get(ObjectId::new(2, 0)).is_ok() && doc.get(ObjectId::new(3, 0)).is_ok());
-            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         }
         // A neighbour no entry lists isn't read, so isn't said; listed, it
         // is.
         let data = b"9 0 2 2 3 6 [ (x) (y) ]";
         let doc = document(&holding(data, 3, 12, &[(2, 1), (3, 2)]), &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let doc = document(
             &holding(data, 3, 12, &[(9, 0), (2, 1), (3, 2)]),
             &Options::DEFAULT,
@@ -5709,7 +5758,7 @@ mod tests {
             inside(2, (14, 17), 9, (12, 23)),
             inside(3, (18, 21), 9, (12, 23)),
         ];
-        assert_eq!(doc.warnings, said);
+        assert_eq!(doc.faults(), said);
     }
 
     /// A reading that reads two objects at one offset of an object stream,
@@ -5719,7 +5768,7 @@ mod tests {
     fn a_reading_says_an_overlap_once_it_has_read_both_as_the_whole_read() {
         let file = holding(b"2 0 3 0 << /A 1 >>", 2, 8, &[(2, 0), (3, 1)]);
         let whole = document(&file, &Options::DEFAULT);
-        assert_eq!(whole.warnings, [inside(3, (8, 18), 2, (8, 18))]);
+        assert_eq!(whole.faults(), [inside(3, (8, 18), 2, (8, 18))]);
         for (first, second) in [
             (ObjectId::new(2, 0), ObjectId::new(3, 0)),
             (ObjectId::new(3, 0), ObjectId::new(2, 0)),
@@ -5734,9 +5783,9 @@ mod tests {
                 });
             };
             get(first);
-            assert!(reading.warnings().is_empty(), "{first:?}");
+            assert!(reading.faults().is_empty(), "{first:?}");
             get(second);
-            assert_eq!(reading.warnings(), whole.warnings, "{first:?}");
+            assert_eq!(reading.faults(), whole.faults(), "{first:?}");
             assert_eq!(reading.to_document().unwrap(), whole, "{first:?}");
             assert_eq!(reading.into_document().unwrap(), whole, "{first:?}");
         }
@@ -5755,9 +5804,9 @@ mod tests {
                 objects[..40],
                 "{stream} {budget}"
             );
-            let over =
-                (doc.warnings.iter()).any(|w| w.message.ends_with("its output is over the limit"));
-            assert!(over, "{:?}", doc.warnings);
+            let over = (doc.faults().iter())
+                .any(|w| w.1.to_string().ends_with("its output is over the limit"));
+            assert!(over, "{:?}", doc.faults());
             assert!(doc.get(ObjectId::new(3, 0)).is_err());
         }
     }
@@ -5772,7 +5821,7 @@ mod tests {
         let at = find(&file, from).unwrap();
         let file = [&file[..at], &to[..], &file[at + from.len()..]].concat();
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert!(doc.get(ObjectId::new(3, 0)).is_ok());
         assert!(
             doc.ids().contains(&ObjectId::new(900_000, 0))
@@ -5785,9 +5834,9 @@ mod tests {
             file.len()
         );
         assert!(
-            doc.warnings.iter().any(|w| w.message == message),
+            doc.faults().iter().any(|w| w.1.to_string() == message),
             "{:?}",
-            doc.warnings
+            doc.faults()
         );
         assert!(doc.get(ObjectId::new(3, 0)).is_ok());
         assert!(!doc.ids().contains(&ObjectId::new(900_000, 0)));
@@ -5819,7 +5868,7 @@ mod tests {
                 ..Options::DEFAULT
             },
         );
-        assert!(before.warnings.is_empty(), "{:?}", before.warnings);
+        assert!(before.faults().is_empty(), "{:?}", before.faults());
         assert!(before.get(ObjectId::new(2, 0)).is_ok() && before.get(ObjectId::new(3, 0)).is_ok());
     }
 
@@ -5889,8 +5938,16 @@ mod tests {
                     },
                 );
                 let by = Some((0, pdf_crypt::Encoding::Utf8));
-                assert_eq!(doc.encryption, Encryption::Opened { owner, by }, "{kind:?}");
-                assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+                assert_eq!(
+                    doc.encryption,
+                    Encryption::Opened {
+                        owner,
+                        by,
+                        permissions: pdf_crypt::Permissions::ALL
+                    },
+                    "{kind:?}"
+                );
+                assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
                 let get = |n: u32, key: &[u8]| {
                     doc.get(ObjectId::new(n, 0))
                         .unwrap()
@@ -5971,9 +6028,10 @@ mod tests {
             let opened = Encryption::Opened {
                 owner: true,
                 by: Some((0, by)),
+                permissions: pdf_crypt::Permissions::ALL,
             };
             assert_eq!(doc.encryption, opened, "{typed}");
-            assert!(doc.warnings.is_empty(), "{typed}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{typed}: {:?}", doc.faults());
             let get = |n: u32, key: &[u8]| {
                 let object = doc.get(ObjectId::new(n, 0)).unwrap();
                 object.as_dict().unwrap().get(key).unwrap().clone()
@@ -6019,7 +6077,14 @@ mod tests {
             },
         );
         let by = Some((0, Encoding::Utf8));
-        assert_eq!(doc.encryption, Encryption::Opened { owner: true, by });
+        assert_eq!(
+            doc.encryption,
+            Encryption::Opened {
+                owner: true,
+                by,
+                permissions: pdf_crypt::Permissions::ALL
+            }
+        );
         let locked = Reading::open(&ix[..], &Options::DEFAULT).unwrap();
         let utf8 = [Encoded::verbatim("\u{2168}".as_bytes())];
         let Err((_, why)) = locked.unlock(&utf8) else {
@@ -6105,14 +6170,21 @@ mod tests {
                     },
                 );
                 let by = if typed.is_empty() { None } else { by };
-                assert_eq!(doc.encryption, Encryption::Opened { owner, by }, "{what}");
-                assert!(doc.warnings.is_empty(), "{what}: {:?}", doc.warnings);
+                // What it grants a user, whoever opened it: as written,
+                // which grants accessibility always.
+                let written = permissions | Permissions::ACCESSIBILITY;
+                let opened = Encryption::Opened {
+                    owner,
+                    by,
+                    permissions: written,
+                };
+                assert_eq!(doc.encryption, opened, "{what}");
+                assert!(doc.faults().is_empty(), "{what}: {:?}", doc.faults());
                 let object = doc.get(ObjectId::new(4, 0)).unwrap();
                 let note = object.as_dict().unwrap().get(b"Contents").unwrap();
                 let plain = Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal));
                 assert_eq!(*note.value(), plain, "{what}");
                 let (_, handler) = read_opened_by(&file, passwords);
-                let written = permissions | Permissions::ACCESSIBILITY;
                 assert_eq!(handler.unwrap().permissions(), written, "{what}");
             }
             let mut locked: Vec<&[Password]> = vec![&[Password("wrong")]];
@@ -6172,9 +6244,10 @@ mod tests {
             let opened = Encryption::Opened {
                 owner: false,
                 by: Some(by),
+                permissions: pdf_crypt::Permissions::ALL,
             };
             assert_eq!(doc.encryption, opened, "{typed:?} {set:?}");
-            assert!(doc.warnings.is_empty(), "{typed:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{typed:?}: {:?}", doc.faults());
         }
         // The two forms of U+2F874 each open only the file set with it.
         let set = "Password\u{5F53}!";
@@ -6234,6 +6307,7 @@ mod tests {
             let opened = Encryption::Opened {
                 owner,
                 by: Some(by),
+                permissions: pdf_crypt::Permissions::ALL,
             };
             assert_eq!(doc.encryption, opened, "{given}");
             let reading = Reading::open(
@@ -6252,6 +6326,7 @@ mod tests {
             let Encryption::Opened {
                 owner: by_owner,
                 by: Some((i, encoding)),
+                permissions: pdf_crypt::Permissions::ALL,
             } = *unlocked.encryption()
             else {
                 panic!("{:?}", unlocked.encryption())
@@ -6285,7 +6360,8 @@ mod tests {
             doc.encryption,
             Encryption::Opened {
                 owner: false,
-                by: None
+                by: None,
+                permissions: pdf_crypt::Permissions::ALL,
             }
         );
         let decoder = Plain(BTreeMap::new(), std::cell::Cell::new(0));
@@ -6329,14 +6405,21 @@ mod tests {
         let file = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
         let doc = document(&file, &Options::DEFAULT);
         let why = "its security handler is /Standarx, not /Standard";
-        assert_eq!(doc.encryption, Encryption::Unsupported(why.to_string()));
+        let Encryption::Unsupported(said) = &doc.encryption else {
+            panic!("{:?}", doc.encryption);
+        };
+        assert!(matches!(
+            said,
+            Unsupported::Refused(pdf_crypt::Refused::OtherHandler { .. })
+        ));
+        assert_eq!(said.to_string(), why);
         let message = format!(
             "its security handler doesn't open: {why}; its strings stay ciphertext, and its object streams aren't read"
         );
         assert!(
-            doc.warnings.iter().any(|w| w.message == message),
+            doc.faults().iter().any(|w| w.1.to_string() == message),
             "{:?}",
-            doc.warnings
+            doc.faults()
         );
         let lang = doc
             .get(ObjectId::new(1, 0))
@@ -6382,7 +6465,7 @@ mod tests {
                 },
             );
             assert_eq!(doc.encryption, Encryption::Plain);
-            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{:?}", doc.faults());
             assert_eq!(
                 doc.get(ObjectId::new(2, 0)).unwrap().at.unwrap().stream,
                 Some(ObjectId::new(4, 0))
@@ -6410,7 +6493,8 @@ mod tests {
             doc.encryption,
             Encryption::Opened {
                 owner: false,
-                by: Some((0, pdf_crypt::Encoding::Utf8))
+                by: Some((0, pdf_crypt::Encoding::Utf8)),
+                permissions: pdf_crypt::Permissions::ALL,
             }
         );
         // But an object stream whose own crypt filter encrypts it doesn't
@@ -6437,7 +6521,7 @@ mod tests {
         let file = [&file[..at], other.as_bytes(), &file[at + 11..]].concat();
         let doc = document(&file, &Options::DEFAULT);
         assert_eq!(doc.encryption, Encryption::Plain);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert!(doc.get(ObjectId::new(2, 0)).is_ok());
     }
 
@@ -6495,11 +6579,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{to}"
             );
-            assert!(doc.warnings.is_empty(), "{to}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{to}: {:?}", doc.faults());
             let lang = doc
                 .get(ObjectId::new(1, 0))
                 .unwrap()
@@ -6537,11 +6622,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             assert_eq!(
                 plain(doc.get(ObjectId::new(8, 0)).unwrap()),
                 Object::bytes(o),
@@ -6576,11 +6662,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             let note = doc.get(ObjectId::new(4, 0)).unwrap().as_dict().unwrap();
             let contents = note.get(b"Contents").unwrap().value();
             let read = Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal));
@@ -6661,11 +6748,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             assert_eq!(doc.metadata.as_deref(), Some(&xmp[..]), "{kind:?}");
             let mine = doc
                 .get(ObjectId::new(3, 0))
@@ -6724,10 +6812,11 @@ mod tests {
             doc.encryption,
             Encryption::Opened {
                 owner: false,
-                by: Some((0, pdf_crypt::Encoding::Utf8))
+                by: Some((0, pdf_crypt::Encoding::Utf8)),
+                permissions: pdf_crypt::Permissions::ALL,
             }
         );
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.decoded[&ObjectId::new(4, 0)], objects);
         assert_eq!(
             doc.get(ObjectId::new(2, 0)).unwrap().at.unwrap().stream,
@@ -6799,11 +6888,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: Some((0, pdf_crypt::Encoding::Utf8))
+                    by: Some((0, pdf_crypt::Encoding::Utf8)),
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{filter}"
             );
-            assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{filter}: {:?}", doc.faults());
             assert_eq!(doc.decoded[&ObjectId::new(4, 0)], objects, "{filter}");
             // Its objects are read from its decrypted data, their strings
             // as they are there, not decrypted again.
@@ -6904,7 +6994,7 @@ mod tests {
                 matches!(doc.encryption, Encryption::Opened { .. }),
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             let pages = doc.get(ObjectId::new(2, 0)).unwrap().as_dict().unwrap();
             assert_eq!(
                 *pages.get(b"Mine").unwrap().value(),
@@ -6929,7 +7019,7 @@ mod tests {
             ] {
                 let file = encrypted_filtered(&entries, &filter, &plain);
                 let doc = document(&file, &Options::DEFAULT);
-                assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+                assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
                 assert!(doc.get(ObjectId::new(2, 0)).is_ok());
                 assert_eq!(doc.in_the_clear, four, "{kind:?} {filter}");
                 assert_eq!(read_through(&file, &decoder).in_the_clear, four);
@@ -6941,7 +7031,7 @@ mod tests {
             for filter in [" /Filter /FlateDecode".to_string(), own("StdCF")] {
                 let file = encrypted_filtered(&entries, &filter, &encrypted);
                 let doc = document(&file, &Options::DEFAULT);
-                assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+                assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
                 assert!(doc.get(ObjectId::new(2, 0)).is_ok());
                 assert_eq!(doc.in_the_clear, none, "{kind:?} {filter}");
                 assert_eq!(read_through(&file, &decoder).in_the_clear, none);
@@ -6983,7 +7073,7 @@ mod tests {
         for filter in [" /Filter /FlateDecode".to_string(), own("Identity")] {
             let file = encrypted_filtered(&entries, &filter, &encrypted);
             let doc = document(&file, &Options::DEFAULT);
-            assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{filter}: {:?}", doc.faults());
             assert!(doc.get(ObjectId::new(2, 0)).is_ok());
             assert_eq!(doc.in_the_clear, none, "{filter}");
         }
@@ -7007,11 +7097,12 @@ mod tests {
             doc.encryption,
             Encryption::Opened {
                 owner: false,
-                by: None
+                by: None,
+                permissions: pdf_crypt::Permissions::ALL,
             }
         );
         let message = "its trailer's /ID has no string first, so its key is made without one";
-        let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
+        let warnings: Vec<_> = doc.faults().iter().map(|w| w.1.to_string()).collect();
         assert_eq!(warnings, [message]);
         let lang = doc
             .get(ObjectId::new(1, 0))
@@ -7044,7 +7135,7 @@ mod tests {
         let message = "its trailer's /ID has no string first, so its key is made without one";
         let said = |file: &[u8]| {
             let doc = document(file, &Options::DEFAULT);
-            let warned = doc.warnings.iter().any(|w| w.message == message);
+            let warned = doc.faults().iter().any(|w| w.1.to_string() == message);
             (doc.encryption, warned)
         };
         let refused = |file: &[u8]| {
@@ -7063,17 +7154,21 @@ mod tests {
             [&file[..at], to, &file[at + from.len()..]].concat()
         };
         let other = spliced(&file, b"/Standard", b"/Standarx");
-        let why = "its security handler is /Standarx, not /Standard".to_string();
-        assert_eq!(said(&other), (Encryption::Unsupported(why), false));
+        let why = "its security handler is /Standarx, not /Standard";
         let refusal = refused(&other);
+        let unsupported = Encryption::Unsupported(Unsupported::Refused(refusal.clone()));
+        assert_eq!(said(&other), (unsupported, false));
+        assert_eq!(refusal.to_string(), why);
         assert!(
             matches!(&refusal, pdf_crypt::Refused::OtherHandler { name, .. } if name == b"Standarx"),
             "{refusal:?}"
         );
         let later = spliced(&spliced(&file, b"/V 4", b"/V 6"), b"/R 4", b"/R 7");
-        let why = "it's /V 6 /R 7, which the standard security handler isn't".to_string();
-        assert_eq!(said(&later), (Encryption::Unsupported(why), false));
+        let why = "it's /V 6 /R 7, which the standard security handler isn't";
         let refusal = refused(&later);
+        let unsupported = Encryption::Unsupported(Unsupported::Refused(refusal.clone()));
+        assert_eq!(said(&later), (unsupported, false));
+        assert_eq!(refusal.to_string(), why);
         assert!(
             matches!(refusal, pdf_crypt::Refused::Version { v: 6, r: 7, .. }),
             "{refusal:?}"
@@ -7102,11 +7197,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             assert_eq!(lang(&doc), en, "{kind:?}");
             let trailer_id = doc.trailer.dict().get(b"ID").unwrap();
             assert_eq!(plain(trailer_id), written, "{kind:?}");
@@ -7138,11 +7234,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             assert_eq!(lang(&doc), en, "{kind:?}");
             assert_eq!(
                 plain(doc.get(ObjectId::new(7, 0)).unwrap()),
@@ -7225,10 +7322,11 @@ mod tests {
             doc.encryption,
             Encryption::Opened {
                 owner: false,
-                by: None
+                by: None,
+                permissions: pdf_crypt::Permissions::ALL,
             }
         );
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let written = pdf_crypt::writer::dictionary(&settings(kind, b"")).o;
         for n in [6, 7] {
             let dict = doc
@@ -7294,11 +7392,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             assert_eq!(doc.trailer.stream, Some(ObjectId::new(7, 0)), "{kind:?}");
             // The file's strings are decrypted, but the cross-reference
             // stream's are read as written, as the trailer and as an
@@ -7351,11 +7450,12 @@ mod tests {
                 doc.encryption,
                 Encryption::Opened {
                     owner: false,
-                    by: None
+                    by: None,
+                    permissions: pdf_crypt::Permissions::ALL,
                 },
                 "{kind:?}"
             );
-            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
             let Value::Stream(stream) = doc.get(ObjectId::new(4, 0)).unwrap().value() else {
                 panic!("{kind:?}: not a stream");
             };
@@ -7390,15 +7490,15 @@ mod tests {
         );
         let doc = document(&file, &Options::DEFAULT);
         let messages: Vec<_> = doc
-            .warnings
+            .faults()
             .iter()
-            .map(|w| (w.object, w.message.as_str()))
+            .map(|w| (w.0.object, w.1.to_string()))
             .collect();
         assert_eq!(
             messages,
             [(
                 Some(ObjectId::new(4, 0)),
-                "2 of its strings don't decrypt cleanly: its AES ciphertext has no whole block past its IV"
+                "2 of its strings don't decrypt cleanly: its AES ciphertext has no whole block past its IV".to_string()
             )]
         );
         let note = doc
@@ -7421,7 +7521,7 @@ mod tests {
     fn objects_in_an_object_stream_read_from_its_decoded_data() {
         let (file, _) = compressed(false);
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.trailer.unwritten, None);
         assert_eq!(doc.trailer.stream, Some(ObjectId::new(5, 0)));
         let pages = doc.get(ObjectId::new(2, 0)).unwrap();
@@ -7469,7 +7569,7 @@ mod tests {
             &image(&file, find(&file, b"5 0 obj").unwrap()),
             &Options::DEFAULT,
         );
-        let why = doc.trailer.unwritten.as_deref().unwrap();
+        let why = doc.trailer.unwritten.as_ref().unwrap().to_string();
         assert!(
             why.contains("its cross-reference stream doesn't decode: its filter /JBIG2Decode"),
             "{why}"
@@ -7535,7 +7635,7 @@ mod tests {
             .as_bytes(),
         );
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.trailer.stream, None, "the table's trailer");
         assert!(
             doc.get(ObjectId::new(1, 0)).is_ok(),
@@ -7644,17 +7744,17 @@ mod tests {
         let (file, decoded) = junk(false);
         let rows = decoded[&ObjectId::new(5, 0)].clone();
         let doc = read_through(&file, &Renumbered(decoded.clone(), rows.clone()));
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.get(ObjectId::new(3, 0)).is_ok());
         // What it decodes from the bytes may run on past the rows, but not
         // end before them; then the reader says why it decoded it so.
         let longer = [&rows[..], b"more"].concat();
         let doc = read_through(&file, &Renumbered(decoded.clone(), longer));
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert!(doc.get(ObjectId::new(3, 0)).is_ok());
         let short = read_through(&file, &Renumbered(decoded.clone(), rows[..20].to_vec()));
-        let why = short.trailer.unwritten.unwrap();
+        let why = short.trailer.unwritten.unwrap().to_string();
         assert!(why.contains("32 bytes, not the 24"), "{why}");
 
         // A decoder that can't decode from bytes leaves it unread, and
@@ -7666,7 +7766,7 @@ mod tests {
             }
         }
         let doc = read_through(&file, &ByNumber(Renumbered(decoded, rows)));
-        let why = doc.trailer.unwritten.unwrap();
+        let why = doc.trailer.unwritten.unwrap().to_string();
         assert!(
             why.contains("32 bytes, not the 24") && why.contains("another object 5 0 R"),
             "{why}"
@@ -7698,7 +7798,7 @@ mod tests {
         // As the reader asks a decoder for every stream when it's made to.
         let (file, decoded) = junk(false);
         let doc = read_through(&file, &Refused(decoded));
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.get(ObjectId::new(2, 0)).is_ok() && doc.get(ObjectId::new(3, 0)).is_ok());
 
@@ -7814,7 +7914,7 @@ mod tests {
             *t.unwrap().value(),
             Value::String(Str::Encrypted(b"tt".to_vec()), Some(Form::Literal))
         );
-        let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
+        let warnings: Vec<_> = doc.faults().iter().map(|w| w.1.to_string()).collect();
         assert_eq!(
             warnings,
             [
@@ -7834,9 +7934,9 @@ mod tests {
             *catalog.get(b"Lang").unwrap().value(),
             Value::String(Str::Encrypted(b"xx".to_vec()), Some(Form::Literal))
         );
-        let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
+        let warnings: Vec<_> = doc.faults().iter().map(|w| w.1.to_string()).collect();
         assert!(
-            matches!(warnings[..], [w] if w.starts_with("its security handler doesn't open")),
+            matches!(&warnings[..], [w] if w.starts_with("its security handler doesn't open")),
             "{warnings:?}"
         );
         // Nor is a file that isn't encrypted asked about.
@@ -7936,7 +8036,7 @@ mod tests {
         let decode = |data: &[u8]| {
             Err(Error::Decode(pdf_filters::Error {
                 data: data.to_vec(),
-                faults: vec![(0, Fault::Checksum)],
+                faults: vec![(0, pdf_filters::Fault::Checksum)],
             }))
         };
         assert_eq!(

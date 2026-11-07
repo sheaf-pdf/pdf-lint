@@ -1857,10 +1857,12 @@ mod tests {
 
     use super::super::{CONTENT_BUDGET, Options, Report, Unchecked, check};
     use super::*;
+    use crate::bytes::Fault;
     use crate::bytes::WithReading;
     use crate::check::{Hold, Made};
-    use crate::source::{Facts, Record, Revision, Source, Trailer, Unread, Warning};
+    use crate::source::{Facts, Record, Revision, Source, Trailer, Unread};
     use crate::version::Version;
+    use pdf_objects::fault::Place;
 
     /// A source that answers as the one it wraps, and keeps each stream it's
     /// asked the data of, either way, and within how much; but gives none of
@@ -1898,8 +1900,8 @@ mod tests {
             self.source.header_version()
         }
 
-        fn warnings(&self) -> Cow<'_, [Warning]> {
-            self.source.warnings()
+        fn faults(&self) -> Cow<'_, [(Place, Fault)]> {
+            self.source.faults()
         }
 
         fn size(&self) -> Option<usize> {

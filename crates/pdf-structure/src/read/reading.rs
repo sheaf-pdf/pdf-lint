@@ -13,16 +13,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pdf_crypt::{Encoded, Handler, Refused};
+use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
-use super::{Crypt, Decode, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
+use super::{Crypt, Decode, Fault, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
 use crate::crypt::{List, is_xref};
 use crate::filter;
 use crate::source::{
-    Document, Encryption, Facts, Record, Revision, Source, Trailer, Unread, Update, Warning,
+    Document, Encryption, Facts, Record, Revision, Source, Trailer, Unread, Update,
 };
 use crate::write::as_written;
 
@@ -278,7 +279,12 @@ pub enum Error {
     /// pdf-filters' error, which holds what decoded, however far that went,
     /// and each fault. A stream that decodes past
     /// [`Limits::stream`](super::Limits::stream) is cut off there, with
-    /// [`Fault::Limit`](pdf_filters::Fault::Limit) among them.
+    /// [`Fault::Limit`](pdf_filters::Fault::Limit) among them; and so is
+    /// a stream with no filters past the limit it's read to
+    /// ([`Reading::decoded_within`]), its fault the first filter's, the one
+    /// fault of pdf-filters' the reader makes itself, so that past a limit
+    /// is one answer, filtered or not. Its `Debug` gives the data's length,
+    /// not its bytes, as pdf-filters' does.
     #[error("its data doesn't decode cleanly: {0}")]
     Decode(pdf_filters::Error),
     /// A document isn't taken as the reading's ([`Reading::adopt`]), and
@@ -329,7 +335,7 @@ fn outside(span: &Span) -> String {
 /// passwords its [`Options`] give, or the empty password; no object yet.
 /// A reading no password opened is opened by another with
 /// [`Reading::unlock`]. [`Reading::get`] reads an object
-/// the first time it's asked for and keeps it, with what the reader warned
+/// the first time it's asked for and keeps it, with what the reader told
 /// of as it read it, decrypting its strings in an encrypted file it opened;
 /// [`Reading::object_unkept`] reads one without keeping it. An object in an
 /// object stream is read from the stream's decoded data, the stream decoded
@@ -339,7 +345,7 @@ fn outside(span: &Span) -> String {
 /// filters, each read when it's asked for, and not kept.
 ///
 /// Read in any order, on any threads, then made a [`Document`], a reading
-/// is the whole read, the same objects, warnings in the same order and the
+/// is the whole read, the same objects, faults in the same order and the
 /// same decoded data, so long as no stream it decodes reaches its
 /// [`budget`](super::Limits::budget): that's spent in the order streams
 /// are decoded, so which stream it cuts depends on the order objects are
@@ -362,7 +368,7 @@ fn outside(span: &Span) -> String {
 /// traits' names say more than the traits' shapes do, and a call on a
 /// `Reading` names them first, each giving the same answer in a plainer or
 /// a richer form: [`Reading::ids`] is an iterator, [`Reading::get`] and
-/// [`Reading::decoded_within`] give an [`Error`], [`Reading::warnings`] a
+/// [`Reading::decoded_within`] give an [`Error`], [`Reading::faults`] a
 /// `Vec`, [`Reading::metadata`] a `Result`, and [`Reading::size`] and
 /// [`Reading::facts`] no `Option`. The traits' answers are reached through
 /// a `&dyn Source`, or by the trait's name: `Source::get(&reading, id)`,
@@ -380,7 +386,7 @@ fn outside(span: &Span) -> String {
 /// assert_eq!(reading.ids().collect::<Vec<_>>(), [ObjectId::new(1, 0)]);
 /// let catalog = reading.get(ObjectId::new(1, 0)).unwrap();
 /// assert!(catalog.as_dict().is_some_and(|d| d.has(b"Type")));
-/// assert!(reading.warnings().is_empty());
+/// assert!(reading.faults().is_empty());
 /// ```
 pub struct Reading<S> {
     source: S,
@@ -545,9 +551,11 @@ impl<S: ByteSource> Reading<S> {
     /// `passwords` of the one that opened it. Nothing of the file is read again: the
     /// reading kept its encryption dictionary's values and its first `/ID`
     /// element while no password had opened it. What it read and decoded
-    /// is dropped, to be read again decrypted, and what it warned of is
-    /// what it warned of opening the file, with what's wrong with `/Perms`
-    /// among it; its budget is what opening the file left.
+    /// is dropped, to be read again decrypted, and what it told of is what
+    /// it told of opening the file, with what's wrong with `/Perms` among
+    /// it, where faults are looked for; its budget is what opening the file
+    /// left. [`Encryption::Opened`] says, as an open by the password does,
+    /// what the file grants.
     ///
     /// Given back as it was, with why: where none of `passwords` opens it
     /// ([`Refused::Password`]), or its security handler is one the reader
@@ -617,7 +625,7 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// Object `id`, as [`Reading::get`] gives it, and where it was read
-    /// from: read without keeping it, its warnings or a failure to read it,
+    /// from: read without keeping it, its faults or a failure to read it,
     /// when it isn't kept already, so that a pass over many objects, each
     /// once, doesn't hold them all. The object stream it's in is decoded
     /// and kept, as it is for [`Reading::get`], with the objects the
@@ -775,12 +783,14 @@ impl<S: ByteSource> Reading<S> {
     /// ```
     pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
         // Every option named, so that one more has its say here.
-        // Opened by the empty password, its handler's key given it after.
+        // Opened by the empty password, its handler's key given it after;
+        // its faults looked for where this reading's are.
         let options = Options {
             limits: *limits,
             section: None,
             flate: self.reader.flate,
             passwords: &[],
+            faults: self.reader.wants,
         };
         let source = Prefix::new(&self.source, len);
         let mut prefix = Reading::open_by(source, &options, self.bound)?;
@@ -792,15 +802,17 @@ impl<S: ByteSource> Reading<S> {
         Ok(prefix)
     }
 
-    /// What the reader warned of in what it has read so far, in the order
-    /// the whole read says it: as it opened the file; as it read each
-    /// object in use, by number; as it decoded each object stream, by
-    /// number; as it read each object in an object stream, by number; each
-    /// of those read that starts inside the bytes of another read, by
-    /// stream, then where it starts; and as it decrypted each object's
-    /// strings, by number. What was read without keeping it isn't here.
-    pub fn warnings(&self) -> Vec<Warning> {
-        self.reader.warnings()
+    /// What the reader told of in what it has read so far, each fault at
+    /// its place, in the order the whole read says it: as it opened the
+    /// file; as it read each object in use, by number; as it decoded each
+    /// object stream, by number; as it read each object in an object
+    /// stream, by number; each of those read that starts inside the bytes
+    /// of another read, by stream, then where it starts; and as it
+    /// decrypted each object's strings, by number. What was read without
+    /// keeping it isn't here; nor is any where faults aren't looked for
+    /// ([`Options::faults`]).
+    pub fn faults(&self) -> Vec<(Place, Fault)> {
+        self.reader.faults()
     }
 
     /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
@@ -1131,7 +1143,7 @@ impl<S: ByteSource> Reading<S> {
 
     /// Every object its cross-references list read, those not read yet as
     /// the whole read reads them, into a [`Document`]: what it read, its
-    /// warnings in the order [`Reading::warnings`] says them. It fails
+    /// faults in the order [`Reading::faults`] says them. It fails
     /// only when the source doesn't give the bytes asked of it
     /// ([`Error::Io`]). The reading is gone after, and its records with it,
     /// so the writer can't read the data of the document's streams, nor copy
@@ -1164,8 +1176,8 @@ impl<S: ByteSource> Reading<S> {
     /// without keeping it, as [`Reading::object_unkept`] reads it, so that
     /// the document holds the one copy of it. Each object stream is
     /// decoded and kept, as a read of an object in it keeps it, with the
-    /// objects the stream and its filters are. Its warnings are in the order
-    /// [`Reading::warnings`] says them, and made after it,
+    /// objects the stream and its filters are. Its faults are in the order
+    /// [`Reading::faults`] says them, and made after it,
     /// [`Reading::into_document`]'s document is the same; whatever the
     /// reading read before, it's the whole read, so long as no stream the
     /// reading decodes, before it or in it, reaches its budget.
@@ -1419,7 +1431,7 @@ impl<S: ByteSource> Streams for Reading<S> {
 
 /// A file as it's read so far ([`Source`]): each answer its own method's
 /// ([`Reading::ids`], [`Reading::get`] and the rest), in the trait's shape,
-/// of what it has read when it's asked. So its warnings are those of what
+/// of what it has read when it's asked. So its faults are those of what
 /// it has read, in the whole read's order, made for the call; an object
 /// stream's decoded data, and whether it leaves its objects' strings in
 /// the clear, are given of one it has decoded, whose header read, and of
@@ -1451,8 +1463,8 @@ impl<S: ByteSource> Source for Reading<S> {
         Reading::header_version(self)
     }
 
-    fn warnings(&self) -> Cow<'_, [Warning]> {
-        Cow::Owned(Reading::warnings(self))
+    fn faults(&self) -> Cow<'_, [(Place, Fault)]> {
+        Cow::Owned(Reading::faults(self))
     }
 
     fn size(&self) -> Option<usize> {

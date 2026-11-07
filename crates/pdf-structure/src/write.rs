@@ -116,7 +116,7 @@ use pdf_objects::version::Version;
 
 use crate::crypt::Get;
 use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
-use crate::source::{Document, Held, Record, XrefKind};
+use crate::source::{Document, Held, Record, Unsupported, XrefKind};
 
 pub use append::{Base, update};
 pub use crypt::{Encrypting, Encryptor, FreeNumbers, Unencryptable, encryption};
@@ -784,9 +784,10 @@ pub enum Error {
     #[error("it's encrypted, and no password opened it, so there's no key to encrypt by")]
     Locked,
     /// An encrypted file whose security handler the reader can't open, and
-    /// why ([`Encryptor::of`]).
+    /// why ([`Encryptor::of`]), as its reading says it
+    /// ([`Encryption::Unsupported`](crate::Encryption::Unsupported)).
     #[error("it's encrypted by a security handler the reader can't open: {0}")]
-    Unsupported(String),
+    Unsupported(Unsupported),
     /// An object number a written file may not use: 0, which heads the
     /// free list (ISO 32000-2, 7.5.4), or one at or past [`NUMBERS`], which
     /// a whole file's section would list every number up to.

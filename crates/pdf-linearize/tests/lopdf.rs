@@ -243,7 +243,7 @@ fn a_file_reads_back_with_its_pages_and_objects_and_holds() {
     assert_eq!(out.len() as u64, layout.len());
     holds(&out);
     let (reading, doc) = read_back(&out);
-    assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+    assert!(doc.faults().is_empty(), "{:?}", doc.faults());
     let lopdf = loaded(&out);
     let pages: Vec<_> = lopdf.page_iter().collect();
     assert_eq!(pages.len(), 2);

@@ -202,7 +202,7 @@ fn each_kind_of_section_ends_its_revision_at_the_eof_after_it() {
     ];
     for file in files {
         let doc = document(&file, &Options::DEFAULT);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(ends(&file), [Some((file.len() - 1, file.len()))]);
     }
     let doc = document(&hybrid(), &Options::DEFAULT);
@@ -218,12 +218,12 @@ fn each_kind_of_section_ends_its_revision_at_the_eof_after_it() {
 fn a_linearized_revision_ends_where_its_main_section_does() {
     let (file, first) = linearized();
     let doc = document(&file, &Options::DEFAULT);
-    assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+    assert!(doc.faults().is_empty(), "{:?}", doc.faults());
     assert_eq!(doc.facts.sections, 2);
     assert_eq!(ends(&file), [Some((file.len() - 1, file.len()))]);
     let (with, eof) = linearized_with_a_first_eof();
     let doc = document(&with, &Options::DEFAULT);
-    assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+    assert!(doc.faults().is_empty(), "{:?}", doc.faults());
     assert_eq!(doc.facts.sections, 2);
     assert_ne!(eof, with.len());
     assert_eq!(ends(&with), [Some((with.len() - 1, with.len()))]);
@@ -246,7 +246,7 @@ fn a_linearized_revision_ends_where_its_main_section_does() {
 fn each_revision_ends_at_its_own_eof_however_its_read() {
     let (file, [one, two, three]) = three_revisions();
     let doc = document(&file, &Options::DEFAULT);
-    assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+    assert!(doc.faults().is_empty(), "{:?}", doc.faults());
     let expected = [
         Some((one - 1, one)),
         Some((two - 2, two)),
@@ -327,7 +327,7 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
         let (eof, line) = (end.eof(), end.line());
         let prefix = reading.prefix(line, reading.limits()).unwrap();
         assert_eq!(prefix.size(), line, "{k}");
-        assert!(prefix.warnings().is_empty(), "{k}: {:?}", prefix.warnings());
+        assert!(prefix.faults().is_empty(), "{k}: {:?}", prefix.faults());
         assert_eq!(prefix.trailer(), &revision.trailer, "{k}");
         assert_eq!(prefix.revisions(), &revisions[..=k], "{k}");
         assert_eq!(prefix.update().is_some(), k > 0, "{k}");
@@ -345,7 +345,7 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
         }
         // At the `%%EOF` alone.
         let cut = reading.prefix(eof, reading.limits()).unwrap();
-        assert!(cut.warnings().is_empty(), "{k}: {:?}", cut.warnings());
+        assert!(cut.faults().is_empty(), "{k}: {:?}", cut.faults());
         assert_eq!(cut.revisions()[..k], revisions[..k], "{k}");
         let newest = cut.revisions().last().unwrap();
         assert_eq!(newest.end, RevisionEnd::new(eof, eof), "{k}");
@@ -360,10 +360,10 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
     let second = revisions[1].end.unwrap().line();
     let prefix = reading.prefix(second + 7, reading.limits()).unwrap();
     assert_eq!(prefix.revisions(), &revisions[..2]);
-    let said = prefix.warnings();
+    let said = prefix.faults();
     assert!(
         said.iter()
-            .any(|w| w.message == "the file goes on for 9 bytes after its last %%EOF"),
+            .any(|w| w.1.to_string() == "the file goes on for 9 bytes after its last %%EOF"),
         "{said:?}"
     );
     // Short of the first's `%%EOF`: its section read, its end not known.
@@ -476,13 +476,17 @@ fn an_encrypted_files_prefix_is_opened_by_its_readings_handler() {
             )
             .unwrap();
             let by = Some((1, Encoding::Utf8));
-            let opened = Encryption::Opened { owner, by };
+            let opened = Encryption::Opened {
+                owner,
+                by,
+                permissions: pdf_crypt::Permissions::ALL,
+            };
             assert_eq!(reading.encryption(), &opened, "{kind:?}");
             let end = reading.revisions()[0].end.unwrap().line();
             assert_eq!(end, base.len());
             let prefix = reading.prefix(end, reading.limits()).unwrap();
             assert_eq!(prefix.encryption(), &opened, "{kind:?} {password}");
-            assert!(prefix.warnings().is_empty(), "{:?}", prefix.warnings());
+            assert!(prefix.faults().is_empty(), "{:?}", prefix.faults());
             let note = prefix.get(ObjectId::new(4, 0)).unwrap().as_dict().unwrap();
             let contents = note.get(b"Contents").unwrap().value();
             assert!(
@@ -513,6 +517,7 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     let opened = Encryption::Opened {
         owner: false,
         by: Some((0, Encoding::Utf8)),
+        permissions: pdf_crypt::Permissions::ALL,
     };
     // Another first /ID element.
     let file = encrypted_updated(&base, "fedcba9876543210");
@@ -570,7 +575,12 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     let encoded = [pdf_crypt::Encoded::verbatim(b"user")];
     let unlocked = prefix.unlock(&encoded).unwrap();
     let by = Some((0, Encoding::Verbatim));
-    assert_eq!(unlocked.encryption(), &Encryption::opened(false).by(by));
+    assert_eq!(
+        unlocked.encryption(),
+        &Encryption::opened(false)
+            .by(by)
+            .permitting(pdf_crypt::Permissions::ALL)
+    );
     // A file the empty password opens: its prefix too, as the empty
     // password opens it, whichever opened the reading.
     let base = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
@@ -587,8 +597,13 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     .unwrap();
     assert_eq!(
         reading.encryption(),
-        &Encryption::opened(true).by(Some((0, Encoding::Utf8)))
+        &Encryption::opened(true)
+            .by(Some((0, Encoding::Utf8)))
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     let prefix = reading.prefix(end, reading.limits()).unwrap();
-    assert_eq!(prefix.encryption(), &Encryption::opened(false));
+    assert_eq!(
+        prefix.encryption(),
+        &Encryption::opened(false).permitting(pdf_crypt::Permissions::ALL)
+    );
 }

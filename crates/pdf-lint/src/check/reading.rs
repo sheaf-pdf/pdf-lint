@@ -727,9 +727,9 @@ mod tests {
         options.passwords = &user;
         let read = WithReading::new(&file[..], &options).unwrap();
         assert!(
-            read.document().warnings.is_empty(),
+            read.document().faults().is_empty(),
             "{:?}",
-            read.document().warnings
+            read.document().faults()
         );
         assert_eq!(read.document().revisions().len(), 2);
         let readings = Readings::new(&read);

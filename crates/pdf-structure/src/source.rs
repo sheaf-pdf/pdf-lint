@@ -9,13 +9,14 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map};
 use std::iter::FusedIterator;
 use std::ops::RangeBounds;
 
-use pdf_crypt::Encoding;
+use pdf_crypt::{Encoding, Permissions, Refused};
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::parse;
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
-use crate::read::{Error, SourceId, Undecoded, Unfiltered, Unindexed};
+use crate::read::{Error, Fault, SourceId, Undecoded, Unfiltered, Unindexed, Unwritten};
 
 /// A file, as a reader read it: its objects, and its streams' data as a
 /// viewer takes it ([`Streams`]), which a reader without the file's bytes,
@@ -42,12 +43,34 @@ pub trait Source: Streams {
     fn trailer(&self) -> &Trailer;
     /// The version in the header.
     fn header_version(&self) -> Option<Version>;
-    /// What the reader warned of while reading it: repairs, duplicate
-    /// keys, and anything else it had to choose how to read. Lent where the
-    /// reader holds them, as a document does, or made for the call, as a
-    /// reading makes them of what it has read so far
-    /// ([`Reading::warnings`](crate::Reading::warnings)).
-    fn warnings(&self) -> Cow<'_, [Warning]>;
+    /// What the reader told of while reading it, each fault at its place:
+    /// repairs, duplicate keys, and anything else it had to choose how to
+    /// read, in the whole read's order. Lent where the reader holds them, as
+    /// a document does, or made for the call, as a reading makes them of
+    /// what it has read so far
+    /// ([`Reading::faults`](crate::Reading::faults)); none where they
+    /// weren't looked for ([`Options::faults`](crate::Options::faults)).
+    fn faults(&self) -> Cow<'_, [(Place, Fault)]>;
+    /// Tells `sink` each of [`Source::faults`], in their order, none where
+    /// it wants none: so that one sink takes the faults of several crates'
+    /// readers, each its own type.
+    fn tell_faults(&self, sink: &mut dyn Sink<Fault>) {
+        if !sink.wants() {
+            return;
+        }
+        match self.faults() {
+            Cow::Borrowed(faults) => {
+                for (place, fault) in faults {
+                    sink.fault(*place, fault.clone());
+                }
+            }
+            Cow::Owned(faults) => {
+                for (place, fault) in faults {
+                    sink.fault(place, fault);
+                }
+            }
+        }
+    }
     /// The file's length in bytes, when the reader knows it.
     fn size(&self) -> Option<usize> {
         None
@@ -135,31 +158,9 @@ pub struct Trailer {
     pub object: Object,
     /// Why it isn't the trailer as the file's newest cross-reference
     /// section writes it, when it isn't: then it's what the reader made of
-    /// the file instead.
-    pub unwritten: Option<String>,
-}
-
-/// Something a reader had to choose how to read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Warning {
-    /// The object it's in, when it's in one.
-    pub object: Option<ObjectId>,
-    /// Where, when the reader knows.
-    pub at: Option<Span>,
-    /// What it says.
-    pub message: String,
-}
-
-impl Warning {
-    /// `message`, of object `object` at `at`.
-    pub fn new(object: Option<ObjectId>, at: Option<Span>, message: String) -> Warning {
-        Warning {
-            object,
-            at,
-            message,
-        }
-    }
+    /// the file instead, as another reader says it in its words
+    /// ([`Unwritten::Other`]).
+    pub unwritten: Option<Unwritten>,
 }
 
 impl Trailer {
@@ -198,7 +199,7 @@ impl Trailer {
     }
 }
 
-/// A file read whole: its objects, trailer, header version and warnings.
+/// A file read whole: its objects, trailer, header version and faults.
 /// A reader outside the crate starts from [`Document::new`], and so does a
 /// document built in memory.
 ///
@@ -240,8 +241,10 @@ pub struct Document {
     pub(crate) trailer: Trailer,
     /// The version in the header.
     pub(crate) header: Option<Version>,
-    /// What the reader had to choose how to read, in the order it chose.
-    pub warnings: Vec<Warning>,
+    /// What the bytes reader told of as it read, each fault at its place,
+    /// in the whole read's order; none in a document built, or read with
+    /// none looked for. No caller edits it.
+    pub(crate) faults: Vec<(Place, Fault)>,
     /// The object streams' decoded data, by stream, which the objects
     /// read from them are placed in ([`Span::stream`]). The record of an
     /// object read from one names its bytes here, so it says where the
@@ -508,9 +511,8 @@ pub enum Encryption {
     /// It is, and a password it was given opened it, the owner's or the
     /// user's: its strings and object streams are decrypted. A reader
     /// outside the crate makes it by [`Encryption::opened`], and says which
-    /// password by [`Encryption::by`]. What the file's `/P` grants isn't
-    /// said: a caller reads `/P` and `/R` from the trailer's `/Encrypt`,
-    /// and [`pdf_crypt::Permissions::from_p`] reads them.
+    /// password by [`Encryption::by`], and what the file grants by
+    /// [`Encryption::permitting`].
     #[non_exhaustive]
     Opened {
         /// Whether by the owner's password.
@@ -519,6 +521,13 @@ pub enum Encryption {
         /// among them, and the encoding it opened in. None when it was
         /// given none, and the empty password opened it.
         by: Option<(usize, Encoding)>,
+        /// What the file's `/P` grants one who opens it by the user's
+        /// password, by its revision's meaning of the bits (pdf-crypt's
+        /// `Handler::permissions`). Opened by the owner's, every permission
+        /// is the owner's whatever `/P` says, as `owner` tells: these are
+        /// still what `/P` grants a user. The reader enforces none of
+        /// them, as it decrypts all of a file it opens.
+        permissions: Permissions,
     },
     /// It is, and no password it was given opens it.
     Locked,
@@ -530,7 +539,45 @@ pub enum Encryption {
     Plain,
     /// It is, by a security handler the reader can't open, and why: its
     /// strings stay ciphertext, and its object streams aren't read.
-    Unsupported(String),
+    Unsupported(Unsupported),
+}
+
+/// Why the reader can't open an encrypted file's security handler
+/// ([`Encryption::Unsupported`]): its trailer's `/Encrypt` isn't an
+/// encryption dictionary it reads, or the handler refuses the dictionary.
+/// Each in its words. Not exhaustive, as the public-key handler's answers
+/// may join it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum Unsupported {
+    /// The trailer's `/Encrypt` is no dictionary the reader reads.
+    #[error("{0}")]
+    Encrypt(Uncrypt),
+    /// pdf-crypt's standard security handler refuses the dictionary:
+    /// another handler's ([`Refused::OtherHandler`]), a `/V` and `/R` it
+    /// isn't ([`Refused::Version`]), or a dictionary that's wrong
+    /// ([`Refused::Malformed`]). Never a password that doesn't open it
+    /// ([`Refused::Password`]): that file is
+    /// [`Encryption::Locked`].
+    #[error("{0}")]
+    Refused(Refused),
+}
+
+/// Why a trailer's `/Encrypt` isn't an encryption dictionary the reader
+/// reads ([`Unsupported::Encrypt`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum Uncrypt {
+    /// It isn't a dictionary, nor a reference to one.
+    #[error("its /Encrypt isn't a dictionary")]
+    NotADictionary,
+    /// It's a reference to an object that doesn't read.
+    #[error("its /Encrypt doesn't read")]
+    Unread,
+    /// It's a reference to an object in an object stream, which an
+    /// encryption dictionary can't be (ISO 32000-2, 7.5.7).
+    #[error("its /Encrypt is in an object stream, which it can't be (ISO 32000-2, 7.5.7)")]
+    InObjectStream,
 }
 
 /// A file's newest incremental update. A reader outside the crate makes
@@ -715,10 +762,15 @@ impl Unread {
 impl Encryption {
     /// [`Encryption::Opened`]: by the owner's password when `owner`, else
     /// by the user's; by the empty password, given none, until
-    /// [`Encryption::by`] says which of those given. Each field `Opened`
+    /// [`Encryption::by`] says which of those given; and granting none,
+    /// until [`Encryption::permitting`] says what. Each field `Opened`
     /// gains has a setter of its own, so this stays as it is.
     pub fn opened(owner: bool) -> Encryption {
-        Encryption::Opened { owner, by: None }
+        Encryption::Opened {
+            owner,
+            by: None,
+            permissions: Permissions::NONE,
+        }
     }
 
     /// It, opened by the password given at index `by`'s, in its encoding,
@@ -727,7 +779,28 @@ impl Encryption {
     #[must_use = "it gives the Encryption back, with which password opened it"]
     pub fn by(self, by: Option<(usize, Encoding)>) -> Encryption {
         match self {
-            Encryption::Opened { owner, .. } => Encryption::Opened { owner, by },
+            Encryption::Opened {
+                owner, permissions, ..
+            } => Encryption::Opened {
+                owner,
+                by,
+                permissions,
+            },
+            other => other,
+        }
+    }
+
+    /// It, opened, granting `permissions` to one who opens it by the
+    /// user's password: `Opened`'s `permissions`. Any other is given back
+    /// as it is.
+    #[must_use = "it gives the Encryption back, with what it grants"]
+    pub fn permitting(self, permissions: Permissions) -> Encryption {
+        match self {
+            Encryption::Opened { owner, by, .. } => Encryption::Opened {
+                owner,
+                by,
+                permissions,
+            },
             other => other,
         }
     }
@@ -851,7 +924,7 @@ impl Document {
                 unwritten: None,
             },
             header: Some(version),
-            warnings: Vec::new(),
+            faults: Vec::new(),
             decoded: BTreeMap::new(),
             whole: BTreeSet::new(),
             update: None,
@@ -881,7 +954,7 @@ impl Document {
             objects,
             trailer,
             header: None,
-            warnings: Vec::new(),
+            faults: Vec::new(),
             decoded: BTreeMap::new(),
             whole: BTreeSet::new(),
             update: None,
@@ -1187,7 +1260,7 @@ impl Document {
     /// ([`Document::reachable`]), whether it reads or not, its record with
     /// it, and gives their ids by number. Nothing refers to an object
     /// stream or a cross-reference stream, so they go, and
-    /// [`Trailer::stream`], [`Document::update`]'s objects and a warning's
+    /// [`Trailer::stream`], [`Document::update`]'s objects and a fault's
     /// object may then name one it no longer holds; the trailer refers to
     /// the encryption dictionary, so it stays.
     /// What it holds of the object streams it decoded ([`Document::held`])
@@ -1232,6 +1305,15 @@ impl Document {
     /// Has the header's version be `version`.
     pub fn set_header_version(&mut self, version: Option<Version>) {
         self.header = version;
+    }
+
+    /// What the bytes reader told of as it read the file, each fault at its
+    /// place, in the whole read's order: none in a document built, or read
+    /// with none looked for ([`Options::faults`](crate::Options::faults)). A
+    /// reader outside the crate keeps its own, as they're its own, not the
+    /// bytes reader's.
+    pub fn faults(&self) -> &[(Place, Fault)] {
+        &self.faults
     }
 
     /// Object stream `stream`'s decoded data, which the objects read from
@@ -1425,8 +1507,8 @@ impl Source for Document {
         self.header
     }
 
-    fn warnings(&self) -> Cow<'_, [Warning]> {
-        Cow::Borrowed(&self.warnings)
+    fn faults(&self) -> Cow<'_, [(Place, Fault)]> {
+        Cow::Borrowed(&self.faults)
     }
 
     fn size(&self) -> Option<usize> {
@@ -1946,7 +2028,10 @@ pub(crate) mod tests {
         assert_eq!(doc.header, Some(Version::new(1, 7)));
         assert_eq!(doc.facts.newest, Some((startxref(&file), XrefKind::Stream)));
         assert_ne!(doc.encryption, Encryption::None);
-        assert_eq!(doc.encryption, Encryption::opened(false));
+        assert_eq!(
+            doc.encryption,
+            Encryption::opened(false).permitting(pdf_crypt::Permissions::ALL)
+        );
     }
 
     /// Each reason an object doesn't read says it as the reader's text
@@ -2261,7 +2346,7 @@ pub(crate) mod tests {
             fn header_version(&self) -> Option<Version> {
                 None
             }
-            fn warnings(&self) -> Cow<'_, [Warning]> {
+            fn faults(&self) -> Cow<'_, [(Place, Fault)]> {
                 Cow::Borrowed(&[])
             }
         }
@@ -2294,7 +2379,7 @@ pub(crate) mod tests {
         assert!(source.record(id).is_some());
         assert_eq!(source.held(stream), Some(&doc.decoded[&stream][..]));
         assert_eq!(source.held(ObjectId::new(1_000_000, 0)), None);
-        assert!(matches!(source.warnings(), Cow::Borrowed(w) if w == &doc.warnings[..]));
+        assert!(matches!(source.faults(), Cow::Borrowed(w) if w == doc.faults()));
         assert_eq!(source.revisions(), &doc.revisions[..]);
         assert_eq!(source.revisions().len(), 1);
         assert_eq!(source.facts(), Some(&doc.facts));
@@ -2871,7 +2956,13 @@ pub(crate) mod tests {
                         ..crate::read::Options::DEFAULT
                     },
                 );
-                assert_eq!(doc.encryption, Encryption::opened(owner).by(by), "{name}");
+                assert_eq!(
+                    doc.encryption,
+                    Encryption::opened(owner)
+                        .by(by)
+                        .permitting(pdf_crypt::Permissions::ALL),
+                    "{name}"
+                );
                 let before = doc.clone();
                 let reached: BTreeSet<ObjectId> = before.reachable().into_iter().collect();
                 let pruned = doc.prune();
@@ -2928,11 +3019,11 @@ pub(crate) mod tests {
                 assert!(strings(&doc) > 0, "{name}");
                 assert_eq!(doc.records().count(), doc.objects().count(), "{name}");
                 assert_eq!(
-                    (&doc.trailer, &doc.decoded, &doc.warnings, doc.max_id()),
+                    (&doc.trailer, &doc.decoded, &doc.faults(), doc.max_id()),
                     (
                         &before.trailer,
                         &before.decoded,
-                        &before.warnings,
+                        &before.faults(),
                         before.max_id()
                     )
                 );
@@ -2947,7 +3038,9 @@ pub(crate) mod tests {
         fn shared<T: Send + Sync>() {}
         shared::<Document>();
         shared::<Trailer>();
-        shared::<Warning>();
+        shared::<Fault>();
+        shared::<Place>();
+        shared::<Unsupported>();
         shared::<Update>();
         shared::<Encryption>();
         shared::<Unread>();

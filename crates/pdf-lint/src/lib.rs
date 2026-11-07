@@ -83,7 +83,7 @@ pub use pdf_structure::{pdf_crypt, pdf_filters, source};
 // pdf-tokenizer's.
 pub use pdf_tokenizer::Rules;
 pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
-pub use source::{Document, Encryption, Revision, Source, Trailer, Update, Warning};
+pub use source::{Document, Encryption, Revision, Source, Trailer, Update};
 pub use version::Version;
 
 /// The model's tables, pdf-arlington's [`grammar`](pdf_arlington::grammar)

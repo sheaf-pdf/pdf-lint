@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 use pdf_objects::version::Version;
-use pdf_structure::source::{Document, Trailer, Unread, Warning};
+use pdf_structure::read::Unwritten;
+use pdf_structure::source::{Document, Trailer, Unread};
 
 use crate::json::{self, Json};
 
@@ -212,16 +213,18 @@ impl Qpdf {
     /// for what qpdf doesn't keep, which is where anything was written, the
     /// order of a dictionary's keys and any key written twice, a name's
     /// escapes, and which encoding a text string had ([`Str::Text`]); its
-    /// strings decrypted; and its warnings. Where qpdf reconstructed the
-    /// cross-references, the trailer says so. The error is why qpdf read
-    /// nothing. Built as a reader outside pdf-structure builds a document
-    /// ([`Document::new`]), from [`Qpdf::listing`].
+    /// strings decrypted. Where qpdf reconstructed the cross-references, the
+    /// trailer says so, in qpdf's words ([`Unwritten::Other`]). The error is
+    /// why qpdf read nothing. Built as a reader outside pdf-structure builds
+    /// a document ([`Document::new`]), from [`Qpdf::listing`]. qpdf's
+    /// warnings are the listing's ([`Listing::warnings`]), beside it: a
+    /// document's faults are pdf-structure's reader's, so this one has none.
     pub fn read(&self) -> Result<Document, String> {
         let listing = self.listing()?;
         let version = listing.version.unwrap_or(Version::new(1, 7));
         let mut trailer = Trailer::new(listing.trailer);
         trailer.stream = listing.stream;
-        trailer.unwritten = listing.unwritten;
+        trailer.unwritten = listing.unwritten.map(Unwritten::Other);
         let mut doc = Document::new(version, trailer.dict().clone());
         *doc.trailer_mut() = trailer;
         for (id, object) in listing.objects {
@@ -231,9 +234,6 @@ impl Qpdf {
             };
         }
         doc.set_header_version(listing.version);
-        doc.warnings = (listing.warnings.into_iter())
-            .map(|(object, message)| Warning::new(object, None, message))
-            .collect();
         doc.set_size(listing.size);
         Ok(doc)
     }

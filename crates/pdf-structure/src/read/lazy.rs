@@ -126,8 +126,8 @@ pub(super) fn length_by_reference() -> Vec<u8> {
 /// [`filtered`]'s file, the page tree in its object stream with a key the
 /// parser reads past (`/Mi#z`, an escape of one digit), and the object
 /// stream's zlib data without its last byte, which decodes whole but for
-/// its checksum: so that the object stream's decode warns, and so does an
-/// object in it.
+/// its checksum: so that the object stream's decode says a fault, and so
+/// does an object in it.
 fn warning_twice() -> Vec<u8> {
     let (objects, _) = objects_2_and_3();
     let at = find(&objects, b"/Mine").unwrap();
@@ -297,7 +297,7 @@ pub(super) fn files() -> Vec<Named> {
 
 /// `file`, under `options`, opened by `passwords`, read on demand by
 /// number, from the last back, and on eight threads, each taking every
-/// eighth from the last back: each time, what it warned of, each object's
+/// eighth from the last back: each time, what it told of, each object's
 /// record and the metadata are the whole read's, and made a document it's
 /// the whole read, but where either's decoding reached the budget. How
 /// many of the three were compared.
@@ -323,7 +323,7 @@ fn on_demand(name: &str, file: &[u8], passwords: &[Password], options: &Options)
                 }
             }),
         }
-        let warnings = reading.warnings();
+        let warnings = reading.faults();
         let records: BTreeMap<ObjectId, Record> = (ids.iter())
             .filter_map(|&id| Some((id, reading.record(id)?.clone())))
             .collect();
@@ -333,7 +333,7 @@ fn on_demand(name: &str, file: &[u8], passwords: &[Password], options: &Options)
             continue;
         }
         assert_eq!(lazily.document, *doc, "{name}, {order}");
-        assert_eq!(warnings, doc.warnings, "{name}, {order}");
+        assert_eq!(warnings, doc.faults(), "{name}, {order}");
         let held: BTreeMap<ObjectId, Record> = (doc.records())
             .map(|(id, record)| (id, record.clone()))
             .collect();
@@ -432,12 +432,12 @@ fn every_test_file_reads_the_same_on_either_flate_backend() {
 }
 
 /// What `reading` keeps: each object's record, by number, and its
-/// warnings.
-fn kept<S: ByteSource>(reading: &Reading<S>) -> (BTreeMap<ObjectId, Record>, Vec<Warning>) {
+/// faults.
+fn kept<S: ByteSource>(reading: &Reading<S>) -> (BTreeMap<ObjectId, Record>, Vec<(Place, Fault)>) {
     let records = (reading.ids())
         .filter_map(|id| Some((id, reading.record(id)?.clone())))
         .collect();
-    (records, reading.warnings())
+    (records, reading.faults())
 }
 
 /// `file`, under `options`, opened by `passwords`, made a document with its
@@ -800,14 +800,14 @@ fn a_record_s_hash_is_of_the_bytes_it_names_however_it_was_read() {
 }
 
 /// What the cross-references list as object 0, always free, is said as the
-/// open's last warning, before any object is read.
+/// open's last fault, before any object is read.
 #[test]
 fn object_0_in_use_is_said_as_the_file_opens() {
     let file = object_0_in_use();
     let reading = open(&file, &[], &Options::DEFAULT);
-    let warnings = reading.warnings();
+    let warnings = reading.faults();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].message.contains("object 0"));
+    assert_eq!(warnings[0].1, Fault::ObjectZero);
     assert!(matches!(
         reading.get(ObjectId::new(0, 0)),
         Err(Error::Unread(Unread::Missing {
@@ -827,22 +827,23 @@ fn object_0_in_use_is_said_as_the_file_opens() {
 fn a_length_by_references_faults_are_said_with_the_stream_and_its_own() {
     let file = length_by_reference();
     let reading = open(&file, &[], &Options::DEFAULT);
-    let stray =
-        |w: &Warning| w.object == Some(ObjectId::new(4, 0)) && w.message == "4 0 obj has no endobj";
+    let stray = |w: &(Place, Fault)| {
+        w.0.object == Some(ObjectId::new(4, 0)) && w.1.to_string() == "4 0 obj has no endobj"
+    };
     let Value::Stream(stream) = reading.get(ObjectId::new(3, 0)).unwrap().value() else {
         panic!("not a stream");
     };
     let at = stream.data.at().unwrap();
     assert_eq!(&file[at.start..at.end], b"abc");
-    let warnings = reading.warnings();
+    let warnings = reading.faults();
     assert!(warnings.len() == 1 && stray(&warnings[0]), "{warnings:?}");
     reading.get(ObjectId::new(4, 0)).unwrap();
-    let warnings = reading.warnings();
+    let warnings = reading.faults();
     assert!(
         warnings.len() == 2 && warnings.iter().all(stray),
         "{warnings:?}"
     );
-    assert_eq!(warnings, document(&file, &Options::DEFAULT).warnings);
+    assert_eq!(warnings, document(&file, &Options::DEFAULT).faults());
 }
 
 /// An object in an object stream is read on its own: its object stream is
@@ -880,7 +881,7 @@ fn an_object_in_an_object_stream_is_read_before_the_others_in_it() {
 }
 
 /// Read unkept, an object is given with the record a kept read would keep,
-/// and nothing of it is kept: not it, its warnings, a failure to read it,
+/// and nothing of it is kept: not it, its faults, a failure to read it,
 /// nor its record; but for the object stream it's in, decoded and kept.
 #[test]
 fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
@@ -903,12 +904,12 @@ fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
     );
     assert_eq!(&stream, reading.get(ObjectId::new(3, 0)).unwrap());
     assert_eq!(Some(&record), reading.record(ObjectId::new(3, 0)));
-    // Its warnings aren't kept, nor its failure.
+    // Its faults aren't kept, nor its failure.
     let (_, record) = reading.object_unkept(ObjectId::new(5, 0)).unwrap();
     assert!(!record.endobj);
-    assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
+    assert!(reading.faults().is_empty(), "{:?}", reading.faults());
     assert!(reading.object_unkept(ObjectId::new(6, 0)).is_err());
-    assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
+    assert!(reading.faults().is_empty(), "{:?}", reading.faults());
     assert!(reading.record(ObjectId::new(6, 0)).is_none());
     assert!(matches!(
         reading.object_unkept(ObjectId::new(9, 0)),
@@ -922,7 +923,7 @@ fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
     // Kept, it's given as it's kept.
     let kept = reading.get(ObjectId::new(5, 0)).unwrap().clone();
     assert_eq!(reading.object_unkept(ObjectId::new(5, 0)).unwrap().0, kept);
-    assert_eq!(reading.warnings().len(), 1);
+    assert_eq!(reading.faults().len(), 1);
 
     // An object in an object stream: the stream is decoded and kept, with
     // the object stream's own object, and nothing of it.
@@ -1152,10 +1153,13 @@ fn an_object_stream_bomb_is_cut_at_its_cap_quickly() {
         let why = reading.get(ObjectId::new(2, 0)).unwrap_err().to_string();
         assert_eq!(why, "its header has 0 of its 1000000000 pairs");
     }
-    let warnings = reading.warnings();
+    let warnings = reading.faults();
     let limit =
         "its data doesn't decode cleanly through /FlateDecode: its output is over the limit";
-    assert!(warnings.iter().any(|w| w.message == limit), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.1.to_string() == limit),
+        "{warnings:?}"
+    );
     assert_eq!(
         reading.into_document().unwrap(),
         whole(&file, &[], &options).document
@@ -1190,7 +1194,7 @@ fn a_cross_reference_stream_bomb_is_decoded_no_further_than_its_rows() {
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(reading.trailer().unwritten, None);
     assert!(reading.get(ObjectId::new(1, 0)).is_ok());
-    assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
+    assert!(reading.faults().is_empty(), "{:?}", reading.faults());
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
 }
 
@@ -1223,7 +1227,14 @@ fn an_undefined_crypt_filter_reads_on_demand_as_whole() {
         },
     );
     let by = Some((0, pdf_crypt::Encoding::Utf8));
-    assert_eq!(doc.encryption, Encryption::Opened { owner: false, by });
+    assert_eq!(
+        doc.encryption,
+        Encryption::Opened {
+            owner: false,
+            by,
+            permissions: pdf_crypt::Permissions::ALL
+        }
+    );
     assert_eq!(
         on_demand("undefined", &file, &[Password("user")], &Options::DEFAULT),
         3
@@ -1260,12 +1271,12 @@ fn an_encrypted_readings_bytes_are_refused_but_its_object_streams() {
 }
 
 /// What `reading` reads, asked for each of `ids` in turn: each object and
-/// its record, or why it doesn't read; then what it warned of, and how
+/// its record, or why it doesn't read; then what it told of, and how
 /// the file is encrypted, `by` given as the index of the password the
 /// encoding it names is of, by `of`.
 type Read = (
     Vec<Result<(Object, Option<Record>), String>>,
-    Vec<Warning>,
+    Vec<(Place, Fault)>,
     Encryption,
 );
 
@@ -1284,7 +1295,7 @@ fn read_by(reading: &Reading<&[u8]>, ids: &[ObjectId], of: &[usize]) -> Read {
     {
         *i = of[*i];
     }
-    (objects, reading.warnings(), encryption)
+    (objects, reading.faults(), encryption)
 }
 
 /// Each of `passwords` in each of its encodings, and which password each
@@ -1298,7 +1309,7 @@ fn encodings(passwords: &[Password]) -> (Vec<Encoded>, Vec<usize>) {
 /// A reading [`Reading::open`] left locked, unlocked by the encodings of
 /// the passwords a test file is read by, reads what one opened by them
 /// does ([`Options::passwords`]): each object and its record, what it
-/// warns of, in order, and its encryption, `by` the password's index;
+/// tells of, in order, and its encryption, `by` the password's index;
 /// and read whole, the same document, its decoded object streams among
 /// it. Whether it had read nothing, every object, or every third, by
 /// number or from the last, before it was unlocked. Every test file and
@@ -1361,8 +1372,8 @@ fn a_reading_unlocked_reads_as_one_opened_by_the_password() {
 /// A reading unlocked decodes as one opened by the password does, from
 /// what was left of the budget when it opened, whatever it decoded
 /// locked; and what `/Perms` says is wrong with the encryption dictionary
-/// is said where opening the file says it: after what it warned of before
-/// it read the dictionary, and before what it warned of after.
+/// is said where opening the file says it: after what it told of before
+/// it read the dictionary, and before what it told of after.
 #[test]
 fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() {
     // Its object stream decrypts as written (/StmF /Identity), and decodes
@@ -1416,7 +1427,7 @@ fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() 
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Locked);
     let said = |r: &Reading<&[u8]>| -> Vec<String> {
-        r.warnings().into_iter().map(|w| w.message).collect()
+        r.faults().into_iter().map(|w| w.1.to_string()).collect()
     };
     let locked = said(&reading);
     assert_eq!(locked.len(), 2, "{locked:?}");
@@ -1455,7 +1466,11 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     let by = Some((0, pdf_crypt::Encoding::Utf8));
     assert_eq!(
         *reading.encryption(),
-        Encryption::Opened { owner: true, by }
+        Encryption::Opened {
+            owner: true,
+            by,
+            permissions: pdf_crypt::Permissions::ALL
+        }
     );
     assert_eq!(reading.id(), id, "the same reading");
 
@@ -1472,18 +1487,18 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         let Encryption::Unsupported(said) = reading.encryption().clone() else {
             panic!("{:?}", reading.encryption());
         };
-        let warnings = reading.warnings();
+        let warnings = reading.faults();
         let Err((reading, why)) = reading.unlock(&Password("user").encodings()) else {
             panic!("unlocked");
         };
         match (&why, handler) {
             (Refused::OtherHandler { name, .. }, Some(handler)) => assert_eq!(name, handler),
-            (Refused::Malformed(why), None) => assert_eq!(*why, said),
+            (Refused::Malformed(why), None) => assert_eq!(*why, said.to_string()),
             _ => panic!("{why:?}"),
         }
-        assert_eq!(why.to_string(), said);
+        assert_eq!(why.to_string(), said.to_string());
         assert_eq!(*reading.encryption(), Encryption::Unsupported(said));
-        assert_eq!(reading.warnings(), warnings);
+        assert_eq!(reading.faults(), warnings);
     }
 
     // Another handler's, and a /V and /R the standard handler isn't, with
@@ -1501,7 +1516,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         );
         let reading = open(&file, &[], &Options::DEFAULT);
         assert_eq!(*reading.encryption(), Encryption::Plain, "{encrypt}");
-        let warnings = reading.warnings();
+        let warnings = reading.faults();
         let Err((reading, why)) = reading.unlock(&Password("user").encodings()) else {
             panic!("unlocked");
         };
@@ -1511,7 +1526,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
             _ => panic!("{encrypt}: {why:?}"),
         }
         assert_eq!(*reading.encryption(), Encryption::Plain, "{encrypt}");
-        assert_eq!(reading.warnings(), warnings);
+        assert_eq!(reading.faults(), warnings);
     }
 
     // Not encrypted, and opened by the empty password: as they are.
@@ -1524,6 +1539,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
             Encryption::Opened {
                 owner: false,
                 by: None,
+                permissions: pdf_crypt::Permissions::ALL,
             },
         ),
     ] {
@@ -1563,14 +1579,16 @@ fn the_passwords_options_give_are_tried_in_the_empty_ones_place() {
         by(&[Password("wrong"), Password("owner")]),
         Encryption::Opened {
             owner: true,
-            by: Some((1, utf8))
+            by: Some((1, utf8)),
+            permissions: pdf_crypt::Permissions::ALL,
         }
     );
     assert_eq!(
         by(&[]),
         Encryption::Opened {
             owner: false,
-            by: None
+            by: None,
+            permissions: pdf_crypt::Permissions::ALL,
         }
     );
     assert_eq!(
@@ -1597,7 +1615,11 @@ fn the_passwords_options_give_are_tried_in_the_empty_ones_place() {
     let by = Some((0, pdf_crypt::Encoding::PdfDoc));
     assert_eq!(
         *reading.encryption(),
-        Encryption::Opened { owner: false, by }
+        Encryption::Opened {
+            owner: false,
+            by,
+            permissions: pdf_crypt::Permissions::ALL
+        }
     );
 }
 

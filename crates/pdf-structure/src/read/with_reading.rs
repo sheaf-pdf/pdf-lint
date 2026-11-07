@@ -4,13 +4,15 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId};
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable};
 
 use super::reading::{lenient, missing};
 use super::{ByteSource, Error, Options, Reading};
-use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, Warning};
+use crate::read::Fault;
+use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread};
 
 /// A file read whole, with its reading kept beside it: a [`Document`]
 /// ([`WithReading::document`]) that hands out what a document doesn't hold.
@@ -144,8 +146,8 @@ impl<S: ByteSource> Source for WithReading<S> {
         Source::header_version(&self.document)
     }
 
-    fn warnings(&self) -> Cow<'_, [Warning]> {
-        Source::warnings(&self.document)
+    fn faults(&self) -> Cow<'_, [(Place, Fault)]> {
+        Source::faults(&self.document)
     }
 
     fn size(&self) -> Option<usize> {
@@ -202,7 +204,7 @@ mod tests {
         objects: Vec<Result<&'s Object, Unread>>,
         trailer: &'s Trailer,
         header: Option<Version>,
-        warnings: Cow<'s, [Warning]>,
+        faults: Cow<'s, [(Place, Fault)]>,
         size: Option<usize>,
         metadata: Option<Cow<'s, [u8]>>,
         records: Vec<Option<&'s Record>>,
@@ -223,7 +225,7 @@ mod tests {
             objects: asked.iter().map(|&id| source.get(id)).collect(),
             trailer: source.trailer(),
             header: source.header_version(),
-            warnings: source.warnings(),
+            faults: source.faults(),
             size: source.size(),
             metadata: source.metadata(),
             records: asked.iter().map(|&id| source.record(id)).collect(),
@@ -253,7 +255,7 @@ mod tests {
     /// object stream it holds decoded whole, and of what isn't a stream; of
     /// any other stream, the document alone gives none, detached. A
     /// reading of the file, as a source, answers as the file opened, once
-    /// it has read every object, its warnings in the same order; before, it
+    /// it has read every object, its faults in the same order; before, it
     /// holds no object stream's data, and has none in the clear, until it
     /// reads an object in it.
     #[test]
