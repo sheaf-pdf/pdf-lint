@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.2 (unreleased)
+## 0.1.0-alpha.2 (2026-11-07)
 
 - **Rust 1.89.** The minimum Rust is 1.89, from 1.85: the family's, moved for the RustCrypto releases pdf-crypt wants (its CHANGELOG says which), nothing of this crate's own needing it. A dependent names an alpha exactly, so it takes this one by naming it.
 
