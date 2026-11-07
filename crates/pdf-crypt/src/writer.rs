@@ -13,6 +13,9 @@ use crate::sha2::sha256;
 use crate::{CryptFilter, Dictionary, Fault};
 
 /// The kind of encryption to write.
+///
+/// `#[non_exhaustive]`, as a kind may join it in a minor release: RC4 at
+/// another key length, or by a crypt filter of `/V` 4, say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Kind {
@@ -31,6 +34,10 @@ pub enum Kind {
 }
 
 /// What to encrypt with. Its `Debug` leaves the passwords out.
+///
+/// Exhaustive on purpose: settings are built by a literal, each field
+/// public, where a test writes a file, so a field more would be a breaking
+/// release.
 #[derive(Clone, Copy)]
 pub struct Settings<'a> {
     /// The kind.
@@ -61,6 +68,7 @@ impl fmt::Debug for Settings<'_> {
 }
 
 /// The encryption dictionary `settings` describe.
+#[must_use]
 pub fn dictionary(settings: &Settings) -> Dictionary {
     let Settings {
         kind,
@@ -129,9 +137,13 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
 }
 
 /// String `data` of object `id` encrypted by `handler`, AES's from `iv`,
-/// in place of the IV [`Handler::encrypt_string`] derives; or
-/// [`Fault::Method`], when it's a method that isn't one, and
-/// [`Fault::Key`], when it's AES that the file's key isn't for.
+/// in place of the IV [`Handler::encrypt_string`] derives.
+///
+/// # Errors
+///
+/// [`Fault::Method`], when strings are encrypted by a method that isn't
+/// one, and [`Fault::Key`], when by AES that the file's key isn't for, as
+/// [`Handler::encrypt_string`] gives them.
 pub fn encrypt_string(
     handler: &Handler,
     id: (u32, u16),
@@ -143,9 +155,13 @@ pub fn encrypt_string(
 
 /// Stream `id`'s `data` encrypted by `handler`, by `crypt` when it names
 /// the stream's own crypt filter's method, AES's from `iv`, in place of the
-/// IV [`Handler::encrypt_stream`] derives; or [`Fault::Method`], when it's
-/// a method that isn't one, and [`Fault::Key`], when it's AES that the
-/// file's key isn't for.
+/// IV [`Handler::encrypt_stream`] derives.
+///
+/// # Errors
+///
+/// [`Fault::Method`], when the stream's method isn't one, and
+/// [`Fault::Key`], when it's AES that the file's key isn't for, as
+/// [`Handler::encrypt_stream`] gives them.
 pub fn encrypt_stream(
     handler: &Handler,
     id: (u32, u16),

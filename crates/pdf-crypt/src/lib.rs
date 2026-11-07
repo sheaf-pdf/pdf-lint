@@ -224,6 +224,11 @@ pub enum Fault {
 /// data are the same length have the same `Debug`, whatever their bytes:
 /// a test compares errors by `==`, never by their `Debug` text, and takes
 /// `data` itself where it wants the bytes.
+///
+/// Exhaustive on purpose: what decrypted and why, the two things a decrypt
+/// that isn't clean gives, each field public, so an error is built by a
+/// literal and taken apart by its fields; a field more would be a breaking
+/// release.
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{fault}")]
 pub struct Error {
