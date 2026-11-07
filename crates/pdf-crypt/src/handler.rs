@@ -150,9 +150,13 @@ impl fmt::Debug for Handler {
 /// - **The owner's alone** (`user` none): the user's is the empty
 ///   password, so anyone opens the file, under the permissions, and the
 ///   owner's password lifts them: a file that restricts what's done with
-///   it, not who reads it. With every permission, the owner's password
-///   lifts nothing, and anyone opens the file with every one; that's
-///   taken all the same, as a password was given.
+///   it, not who reads it. [`Handler::open`] opens it given no password,
+///   or the empty one; given others alone, none of them the owner's, it
+///   refuses it, as it tries only what it's given (a reader tries the
+///   empty password first, ISO 32000-2, 7.6.4.1, before it asks for one).
+///   With every permission, the owner's password lifts nothing, and
+///   anyone opens the file with every one; that's taken all the same, as a
+///   password was given.
 /// - **Neither:** refused ([`Unusable::NoPassword`]): no password was
 ///   given, as in [`Protection::DEFAULT`] before one is set, a protection
 ///   left unset, whose file anyone would open as its owner.

@@ -485,7 +485,9 @@ pub enum Encryption {
     /// It is, and a password it was given opened it, the owner's or the
     /// user's: its strings and object streams are decrypted. A reader
     /// outside the crate makes it by [`Encryption::opened`], and says which
-    /// password by [`Encryption::by`].
+    /// password by [`Encryption::by`]. What the file's `/P` grants isn't
+    /// said: a caller reads `/P` and `/R` from the trailer's `/Encrypt`,
+    /// and [`pdf_crypt::Permissions::from_p`] reads them.
     #[non_exhaustive]
     Opened {
         /// Whether by the owner's password.

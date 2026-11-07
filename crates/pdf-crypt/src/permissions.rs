@@ -34,8 +34,8 @@ impl Permissions {
     /// fields too.
     pub const MODIFY: Permissions = Permissions(1 << 3);
     /// Copying text and graphics out of the document, or taking them out
-    /// any other way (bit 5). A PDF 2.0 reader gives them to assistive
-    /// technology whatever this says.
+    /// any other way (bit 5). PDF 2.0 asks a reader, without binding it, to
+    /// treat this as granted where it hands them to assistive technology.
     pub const COPY: Permissions = Permissions(1 << 4);
     /// Adding and changing text annotations (bit 6), and filling in form
     /// fields, which it grants too, whatever
@@ -47,8 +47,9 @@ impl Permissions {
     /// isn't granted, which grants it too.
     pub const FILL_FORMS: Permissions = Permissions(1 << 8);
     /// Taking content out for assistive technology (bit 10). Unused from
-    /// PDF 2.0, where a reader passes over it, serving assistive technology
-    /// as though [`Permissions::COPY`] were granted, and a writer sets it
+    /// PDF 2.0, where a reader is to pass over it (and is asked, though not
+    /// bound, to serve assistive technology as though
+    /// [`Permissions::COPY`] were granted), and a writer to set it
     /// whatever's meant: a new file's `/P` has it
     /// ([`Handler::create`](crate::Handler::create)).
     pub const ACCESSIBILITY: Permissions = Permissions(1 << 9);
@@ -121,7 +122,10 @@ impl Permissions {
     /// `/P` for these permissions, as a dictionary of revision 3 or later
     /// writes it (ISO 32000-2, 7.6.4.2, Table 22): bits 1 and 2 clear, 7, 8
     /// and 13 to 32 set, and the rest as the set has them; as a 32-bit
-    /// integer, so negative. Every permission is -4.
+    /// integer, so negative. Every permission is -4. Bit 10 is written as
+    /// the set has it too, though a PDF 2.0 writer is to set it whatever's
+    /// meant ([`Permissions::ACCESSIBILITY`]), as
+    /// [`Handler::create`](crate::Handler::create) puts it back.
     #[must_use]
     pub const fn p(self) -> i64 {
         (self.0 | Permissions::RESERVED) as i32 as i64
@@ -212,8 +216,9 @@ impl fmt::Display for Permissions {
 }
 
 /// How a file lets a user print, at three levels, as a security dialog
-/// offers them; the permissions it's ([`Permissions::from`]) and a set's
-/// ([`Permissions::printing`]).
+/// offers them. A level is made a set of [`Permissions`] by
+/// `Permissions::from(level)`, and a set's level read back by
+/// [`Permissions::printing`].
 ///
 /// Exhaustive on purpose: the levels are designed, the two bits' three
 /// meanings, and a dialog lists every one ([`Printing::ALL`]), so a level
@@ -248,9 +253,10 @@ impl From<Printing> for Permissions {
 
 /// How a file lets a user change it, at five levels, as a security dialog
 /// offers them, each granting what the one before it does and more, as
-/// qpdf's `--modify` levels do: the permissions it's
-/// ([`Permissions::from`]). A file's bits needn't be one of the five, so
-/// none is read back from a set: [`Permissions::contains`] says each.
+/// qpdf's `--modify` levels do. A level is made a set of [`Permissions`]
+/// by `Permissions::from(level)`; a file's bits needn't be one of the
+/// five, so none is read back from a set: [`Permissions::contains`] says
+/// each.
 ///
 /// Exhaustive on purpose: the levels are designed, and a dialog lists
 /// every one ([`Changes::ALL`]), so a level more would be a breaking
