@@ -262,13 +262,19 @@ tokenizer-core-only:
 # packaged manifest with a warning, which is expected, as is one for each
 # test outside it; the check reads that manifest. The dry run asks the
 # registry, so it needs the network.
-_package crate:
+_package crate *beside:
     #!/usr/bin/env bash
     set -euo pipefail
     crate={{ crate }}
     dir=$PWD/target/${crate#pdf-}-package
     rm -rf "$dir"
-    CARGO_TARGET_DIR="$dir" cargo publish --dry-run --locked -p "$crate"
+    # A crate of the family the package depends on at a version not yet on
+    # crates.io (an alpha, named exactly) is packaged beside it, as a publish
+    # in order would: cargo verifies the package against that one, through a
+    # registry of its own, instead of asking crates.io for it.
+    packages=(-p "$crate")
+    for b in {{ beside }}; do packages+=(-p "$b"); done
+    CARGO_TARGET_DIR="$dir" cargo publish --dry-run --locked "${packages[@]}"
     CARGO_TARGET_DIR="$dir" cargo package --list --locked -p "$crate" > "$dir/files.txt"
     if grep -v -E '^(src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json)$' "$dir/files.txt"; then
         echo "the package holds more than its sources, README, CHANGELOG, manifest and lock (above)" >&2
@@ -296,8 +302,9 @@ filters-package: (_package "pdf-filters")
 # Package pdf-crypt as a publish would; `_package` says what's checked.
 crypt-package: (_package "pdf-crypt")
 
-# Package pdf-color as a publish would; `_package` says what's checked.
-color-package: (_package "pdf-color")
+# Package pdf-color as a publish would, pdf-objects beside it while the
+# version it names isn't published; `_package` says what's checked.
+color-package: (_package "pdf-color" "pdf-objects")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
