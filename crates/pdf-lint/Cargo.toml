@@ -79,7 +79,7 @@ required-features = ["cli"]
 
 [dev-dependencies]
 # The tests' encrypted files.
-pdf-crypt = { path = "../pdf-crypt", features = ["writer"] }
+pdf-crypt = { workspace = true, features = ["writer"] }
 # The tests' file writer, and qpdf as a second reader.
 pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
 # The tests' folders of their own, removed after.
