@@ -339,6 +339,14 @@ objects-semver: (_semver "pdf-objects")
 # says how an alpha is held.
 filters-semver: (_semver "pdf-filters")
 
+# Check pdf-crypt's public API against its version on crates.io; `_semver`
+# says how an alpha is held.
+crypt-semver: (_semver "pdf-crypt")
+
+# Check pdf-color's public API against its version on crates.io; `_semver`
+# says how an alpha is held.
+color-semver: (_semver "pdf-color")
+
 # Test the tokenizer on its oldest supported Rust, which must be installed.
 tokenizer-msrv:
     cargo +{{ tokenizer_msrv }} test --locked -p pdf-tokenizer
