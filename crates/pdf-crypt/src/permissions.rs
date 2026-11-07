@@ -75,7 +75,11 @@ impl Permissions {
         (Permissions::FILL_FORMS, "FILL_FORMS", "fill forms"),
         (Permissions::ACCESSIBILITY, "ACCESSIBILITY", "accessibility"),
         (Permissions::ASSEMBLE, "ASSEMBLE", "assemble"),
-        (Permissions::PRINT_HIGH, "PRINT_HIGH", "print high"),
+        (
+            Permissions::PRINT_HIGH,
+            "PRINT_HIGH",
+            "print at high resolution",
+        ),
     ];
 
     /// The bits `/P` has set past the eight: 7 and 8, and 13 to 32.

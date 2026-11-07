@@ -2050,7 +2050,7 @@ fn permissions_debug_and_display_name_the_bits() {
     );
     assert_eq!(
         Permissions::ALL.to_string(),
-        "print, modify, copy, annotate, fill forms, accessibility, assemble, print high"
+        "print, modify, copy, annotate, fill forms, accessibility, assemble, print at high resolution"
     );
     assert_eq!(
         format!("{:?}", Permissions::FILL_FORMS),
@@ -2058,7 +2058,7 @@ fn permissions_debug_and_display_name_the_bits() {
     );
     assert_eq!(
         (Permissions::PRINT_HIGH | Permissions::ASSEMBLE).to_string(),
-        "assemble, print high"
+        "assemble, print at high resolution"
     );
     for (i, permission) in EACH.into_iter().enumerate() {
         assert_eq!(permission, permissions(1 << i));
