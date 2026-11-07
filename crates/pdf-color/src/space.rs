@@ -56,8 +56,11 @@ pub enum Family {
 }
 
 impl Family {
-    /// The family of this name, whole: an abbreviation is an inline image's
-    /// (8.9.7), and the first four bytes are PDFium's.
+    /// The family this name writes in full, or none: an inline image's
+    /// abbreviations (`G`, `RGB`, `CMYK` and `I`; 8.9.7), a name that only
+    /// begins as a family's (PDFium tells a family by its first four bytes) and
+    /// any other name are none. [`Space::read`] takes an abbreviation as its
+    /// family, telling [`Fault::Abbreviated`].
     #[must_use]
     pub const fn of(name: &[u8]) -> Option<Family> {
         Some(match name {
@@ -173,14 +176,15 @@ pub struct Cie<'o> {
 }
 
 /// An ICCBased space's parameters (8.6.5.5). Its profile isn't opened.
+///
 /// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Icc<'o> {
-    /// The number of its stream, the object a reference to it ended in, which is
-    /// what a reader asks for a stream's data by, and what an encrypted stream's
-    /// key depends on (`Reading::data`, `Reading::decoded`). None for a stream that
-    /// isn't numbered, as only a value built in memory can be.
+    /// The number of its stream, the object a reference to it ended in: what its
+    /// data is asked for by ([`Streams::decoded`](pdf_objects::Streams::decoded)),
+    /// and what an encrypted stream's key depends on. None for a stream that isn't
+    /// numbered, as only a value built in memory can be.
     pub id: Option<ObjectId>,
     /// Its stream.
     pub stream: Option<&'o Stream>,
@@ -190,8 +194,9 @@ pub struct Icc<'o> {
     pub alternate: Option<Box<Space<'o>>>,
 }
 
-/// An Indexed space's parameters (8.6.6.3). `#[non_exhaustive]`, as [`Cie`]
-/// is.
+/// An Indexed space's parameters (8.6.6.3).
+///
+/// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Indexed<'o> {
@@ -219,16 +224,17 @@ pub enum Lookup<'o> {
     Stream {
         /// The stream.
         stream: &'o Stream,
-        /// Its number, the object a reference to it ended in, which is what a
-        /// reader asks for a stream's data by, and what an encrypted stream's key
-        /// depends on (`Reading::data`, `Reading::decoded`). None for a stream that
-        /// isn't numbered, as only a value built in memory can be.
+        /// Its number, the object a reference to it ended in: what its data is
+        /// asked for by ([`Streams::decoded`](pdf_objects::Streams::decoded)), and
+        /// what an encrypted stream's key depends on. None for a stream that isn't
+        /// numbered, as only a value built in memory can be.
         id: Option<ObjectId>,
     },
 }
 
-/// A Separation space's parameters (8.6.6.4). `#[non_exhaustive]`, as
-/// [`Cie`] is.
+/// A Separation space's parameters (8.6.6.4).
+///
+/// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Separation<'o> {
@@ -241,8 +247,9 @@ pub struct Separation<'o> {
     pub tint: Option<&'o Object>,
 }
 
-/// A DeviceN space's parameters (8.6.6.5). `#[non_exhaustive]`, as [`Cie`]
-/// is.
+/// A DeviceN space's parameters (8.6.6.5).
+///
+/// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct DeviceN<'o> {
@@ -264,6 +271,7 @@ pub struct DeviceN<'o> {
 }
 
 /// A DeviceN space's attributes dictionary (8.6.6.5, Table 70).
+///
 /// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -282,7 +290,9 @@ pub struct Attributes<'o> {
 }
 
 /// An entry of a `/Colorants` dictionary, read
-/// ([`Attributes::separations`]). `#[non_exhaustive]`, as [`Cie`] is.
+/// ([`Attributes::separations`]).
+///
+/// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ColorantSpace<'o> {
@@ -305,7 +315,9 @@ pub enum Subtype {
     NChannel,
 }
 
-/// A process dictionary (Table 71). `#[non_exhaustive]`, as [`Cie`] is.
+/// A process dictionary (Table 71).
+///
+/// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Process<'o> {

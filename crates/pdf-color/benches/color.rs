@@ -24,15 +24,14 @@
 //! - `colorants`: the 32 colorants of a DeviceN space, each by
 //!   `Colorant::of`, tallied.
 //!
-//! Throughput is in spaces, but for `resources` and
-//! `resources-components`, in names, and
-//! `colorants`, in colorants. Each input is held to what it gives before
-//! it's timed: a count to PDFium's for that space, with no cap met; a
-//! typed space to its family, its components and how many faults it has,
-//! none; a dictionary to each name's count, in order; the colorants to
+//! Throughput is in spaces, but for `resources` and `resources-components`,
+//! in names, and `colorants`, in colorants. Each input is held to what it
+//! gives before it's timed: a count to PDFium's for that space, with no cap
+//! met; a typed space to its family, its components and how many faults it
+//! has, none; a dictionary to each name's count, in order; the colorants to
 //! their tally. The objects a space refers to are read by pdf-objects'
-//! parser from text written here into a map, which is the resolver;
-//! nothing is read from disk, and the inputs are the same on every run.
+//! parser from text written here into a map, which is the resolver; nothing
+//! is read from disk, and the inputs are the same on every run.
 
 use std::collections::BTreeMap;
 use std::hint::black_box;
