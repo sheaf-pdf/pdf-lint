@@ -14,10 +14,12 @@
 //! incremental update. It reads under small limits ([`options`], and 4 MiB
 //! of content and 4 MiB of fonts' streams in [`setting`]), so that a run
 //! tries more inputs. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`, with [`seeds`], files for the fuzzer to begin from.
+//! `--cfg fuzzing`; the files for the fuzzer to begin from, [`seeds`], only
+//! for the tests, which write them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
 use pdf_structure::write;
 
 use crate::bytes::{self, WithReading};
@@ -25,8 +27,12 @@ use crate::check::{
     Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn, WRITTEN_OVER, check,
     check_with_reading,
 };
-use crate::object::{Object, ObjectId, Span};
+#[cfg(test)]
+use crate::object::Object;
+use crate::object::{ObjectId, Span};
+#[cfg(test)]
 use crate::pdf_crypt;
+#[cfg(test)]
 use crate::pdf_crypt::writer::{Kind, Settings};
 use crate::source::{Document, RevisionEnd, Source, Update};
 use crate::version::Version;
@@ -436,6 +442,7 @@ fn metadata_stream(doc: &WithReading<&[u8]>) -> Option<ObjectId> {
 /// objects' strings are in the clear. Each begins with the two bytes that
 /// choose how it's checked, all clear, as the `check` and `structure`
 /// targets take them; the `write` target's take a third ([`write_seeds`]).
+#[cfg(test)]
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -629,6 +636,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
 /// set, whether its document is read whole and taken by the reading. Each
 /// seed once with each, named for it, so each way is fuzzed from the
 /// start.
+#[cfg(test)]
 pub fn write_seeds() -> Vec<(String, Vec<u8>)> {
     let mut written = Vec::new();
     for (name, seed) in seeds() {
@@ -643,6 +651,7 @@ pub fn write_seeds() -> Vec<(String, Vec<u8>)> {
 
 /// A stream's object: its dictionary's `entries` and its `data`, with the
 /// `/Length` it has.
+#[cfg(test)]
 fn stream(entries: &str, data: &str) -> String {
     format!(
         "<< {entries} /Length {} >>\nstream\n{data}\nendstream",
@@ -652,6 +661,7 @@ fn stream(entries: &str, data: &str) -> String {
 
 /// A file of these objects' bodies, numbered from 1, with a table, and
 /// `trailer`'s entries in the trailer too; and where its table is.
+#[cfg(test)]
 fn file(objects: &[impl AsRef<[u8]>], trailer: &str) -> (Vec<u8>, usize) {
     let mut out = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
     let offsets = body(&mut out, objects, 1);
@@ -666,6 +676,7 @@ fn file(objects: &[impl AsRef<[u8]>], trailer: &str) -> (Vec<u8>, usize) {
 }
 
 /// Writes `objects`, numbered from `first`, and gives where each began.
+#[cfg(test)]
 fn body(out: &mut Vec<u8>, objects: &[impl AsRef<[u8]>], first: usize) -> Vec<usize> {
     let mut offsets = Vec::new();
     for (i, object) in objects.iter().enumerate() {
@@ -679,6 +690,7 @@ fn body(out: &mut Vec<u8>, objects: &[impl AsRef<[u8]>], first: usize) -> Vec<us
 
 /// Writes a cross-reference table of `offsets`, the first object's number
 /// `first`, and before them object 0's free entry when `first` is 1.
+#[cfg(test)]
 fn table(out: &mut Vec<u8>, first: usize, offsets: &[usize]) {
     let free = first == 1;
     let start = if free { 0 } else { first };
@@ -695,6 +707,7 @@ fn table(out: &mut Vec<u8>, first: usize, offsets: &[usize]) {
 /// A file whose cross-reference section is a stream, unfiltered, and whose
 /// catalog declares Adobe's extension level and, in its XMP metadata,
 /// PDF/A-3.
+#[cfg(test)]
 fn xref_stream() -> Vec<u8> {
     let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="3" pdfaid:conformance="B"/></rdf:RDF></x:xmpmeta>"#;
     let objects = [
@@ -731,6 +744,7 @@ fn xref_stream() -> Vec<u8> {
 /// `flate`, both compressed (the object stream with dynamic Huffman
 /// codes), else the object stream through LZW and hex, the
 /// cross-reference stream as it is.
+#[cfg(test)]
 fn object_streams(flate: bool) -> Vec<u8> {
     // The object stream's data, its header and five objects, as Python's
     // zlib.compress gives it at level 9.
@@ -738,8 +752,8 @@ fn object_streams(flate: bool) -> Vec<u8> {
     let (data, filter) = match flate {
         true => (DEFLATED.to_vec(), "/FlateDecode"),
         false => {
-            let objects = pdf_structure::fixture::inflated(DEFLATED);
-            let hex: String = pdf_structure::fixture::lzw(&objects)
+            let objects = pdf_fixtures::fixture::inflated(DEFLATED);
+            let hex: String = pdf_fixtures::fixture::lzw(&objects)
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect();
@@ -786,7 +800,7 @@ fn object_streams(flate: bool) -> Vec<u8> {
     }
     let (rows, filter) = match flate {
         true => (
-            pdf_structure::fixture::zlib(&predicted),
+            pdf_fixtures::fixture::zlib(&predicted),
             " /Filter /FlateDecode",
         ),
         false => (rows.concat(), ""),
@@ -808,6 +822,7 @@ fn object_streams(flate: bool) -> Vec<u8> {
 /// A file whose page tree and pages are in an object stream, unfiltered,
 /// whose header starts the second page where the first starts, and the
 /// page tree's resources inside the first page, at its own resources.
+#[cfg(test)]
 fn overlapping() -> Vec<u8> {
     let pages = "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /Resources 5 0 R >>";
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
@@ -855,6 +870,7 @@ fn overlapping() -> Vec<u8> {
 }
 
 /// What encrypts the object stream of [`opens`]'s file.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Packing {
     /// The file's crypt filter for streams.
@@ -871,6 +887,7 @@ enum Packing {
 /// opens: its catalog's /Lang encrypted, its page tree and page in an
 /// object stream compressed, and encrypted as `packing` says (by a crypt
 /// filter only where `kind` has them).
+#[cfg(test)]
 fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
     let id = ID;
     let (values, handler) = encryption(kind);
@@ -879,7 +896,7 @@ fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
     let objects = "2 0 3 42 << /Type /Pages /Kids [3 0 R] /Count 1 >>\n\
                    << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Type /Annot /Subtype /Text /Rect [0 0 9 9] /Contents (In plain view) >>] >>";
     let first = objects.find("<<").unwrap_or(0);
-    let deflated = pdf_structure::fixture::zlib(objects.as_bytes());
+    let deflated = pdf_fixtures::fixture::zlib(objects.as_bytes());
     let crypt = (packing == Packing::Own).then(|| handler.named(b"StdCF"));
     let data = match packing {
         Packing::Clear => deflated,
@@ -940,10 +957,12 @@ fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
 }
 
 /// The file identifier the encrypted seeds are written with.
+#[cfg(test)]
 const ID: &[u8; 16] = b"0123456789abcdef";
 
 /// The encryption dictionary's values for `kind` with the empty user
 /// password, and the handler that opens it, under [`ID`].
+#[cfg(test)]
 fn encryption(kind: Kind) -> (pdf_crypt::Dictionary, pdf_crypt::Handler) {
     let settings = Settings {
         kind,
@@ -959,12 +978,14 @@ fn encryption(kind: Kind) -> (pdf_crypt::Dictionary, pdf_crypt::Handler) {
 }
 
 /// Bytes in hex.
+#[cfg(test)]
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// An encryption dictionary's entries for `values`, its crypt filter, where
 /// it has one, `/StdCF` for strings and `streams` for streams.
+#[cfg(test)]
 fn entries(values: &pdf_crypt::Dictionary, streams: &str) -> String {
     let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
     if let Some(length) = values.length {
@@ -999,6 +1020,7 @@ fn entries(values: &pdf_crypt::Dictionary, streams: &str) -> String {
 /// name its resources lack and a `q` left open, in the pattern an `EMC`
 /// ending none, in a glyph a `d0` of one operand and an `EX` with no `BX`
 /// open, and a byte 0x80 that reads as white-space.
+#[cfg(test)]
 fn content() -> Vec<u8> {
     let stream = |entries: &str, data: &[u8]| -> Vec<u8> {
         let mut out = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
@@ -1049,10 +1071,11 @@ fn content() -> Vec<u8> {
 /// A file encrypted as AES-128 with the empty user password, so that it
 /// opens, whose page's content is compressed and encrypted, a `Q` with
 /// nothing saved among it.
+#[cfg(test)]
 fn encrypted_content() -> Vec<u8> {
     let (values, handler) = encryption(Kind::Aes128);
     let content = b"q 0 0 1 rg 0 0 9 9 re f BT /F1 9 Tf (In secret) Tj ET Q Q";
-    let deflated = pdf_structure::fixture::zlib(content);
+    let deflated = pdf_fixtures::fixture::zlib(content);
     let data = pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, None, [4; 16])
         .unwrap_or_default();
     let mut stream = format!(
@@ -1078,6 +1101,7 @@ fn encrypted_content() -> Vec<u8> {
 
 /// A file and an incremental update of it, which rewrites its page and
 /// adds an annotation.
+#[cfg(test)]
 fn update() -> Vec<u8> {
     let original = [
         "<< /Type /Catalog /Pages 2 0 R >>",
@@ -1104,6 +1128,7 @@ fn update() -> Vec<u8> {
 /// A file whose first revision's trailer names an information dictionary,
 /// and an incremental update that writes that dictionary again: so that the
 /// earlier trailer's `/Info` is read as its revision had it.
+#[cfg(test)]
 fn info_written_again() -> Vec<u8> {
     let original = [
         "<< /Type /Catalog /Pages 2 0 R >>",
@@ -1128,6 +1153,7 @@ fn info_written_again() -> Vec<u8> {
 /// holding; and that file with an incremental update after it, by
 /// pdf-structure's writer, its catalog written again with a `/PageLayout`,
 /// which voids the linearization as first written.
+#[cfg(test)]
 fn linearized(objects: &[impl AsRef<[u8]>]) -> (Vec<u8>, Vec<u8>) {
     let (plain, _) = file(objects, "");
     let options = pdf_linearize::family::Options::DEFAULT;
@@ -1421,7 +1447,7 @@ mod tests {
     /// ways: what [`reading_alone`] sets aside, and nothing else moves.
     #[test]
     fn a_font_s_text_read_beside_its_reading_and_alone() {
-        use pdf_structure::fixture::{self, Body, Xref};
+        use pdf_fixtures::fixture::{self, Body, Xref};
 
         use crate::dict;
         use crate::object::Object;

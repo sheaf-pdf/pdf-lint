@@ -2,8 +2,9 @@
 //! word, from a file made to give it: why an object doesn't read, why a
 //! file's sections don't, and what it warns of.
 
+use pdf_fixtures::fixture;
+
 use super::*;
-use crate::fixture;
 use crate::source::Source;
 
 /// Why object `id` of `doc` doesn't read, as it says.

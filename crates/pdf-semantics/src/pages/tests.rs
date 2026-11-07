@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use pdf_fixtures::fixture;
 use pdf_objects::parse::Parser;
 use pdf_structure::bytes::{self, Options, Reading};
-use pdf_structure::fixture;
 
 use super::*;
 use crate::catalog;

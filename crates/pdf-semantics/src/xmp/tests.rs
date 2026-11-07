@@ -1,6 +1,6 @@
+use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::dict;
 use pdf_structure::bytes::{Options, Reading};
-use pdf_structure::fixture::{self, Body, Xref};
 use pdf_structure::source::Document;
 
 use super::*;

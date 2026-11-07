@@ -297,13 +297,13 @@ mod tests {
     use std::ops::Range;
     use std::sync::Mutex;
 
+    use pdf_fixtures::fixture::{self, Xref};
     use pdf_objects::object::ObjectId;
     use pdf_objects::{Resolve, Why};
 
     use super::super::lazy::{files, fixtures, length_by_reference};
     use super::super::tests::{clean, compressed, objects_2_and_3, root, xref_row};
     use super::super::*;
-    use crate::fixture::{self, Xref};
     use crate::fuzz::{Counted, open};
     use crate::source::Source;
 

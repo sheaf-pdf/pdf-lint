@@ -4528,9 +4528,9 @@ mod reading {
     use std::ops::Range;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_structure::Password;
     use pdf_structure::bytes::{ByteSource, Options, Reading, WithReading};
-    use pdf_structure::fixture::{self, Body, Xref};
     use pdf_structure::pdf_crypt::writer::{Kind, Settings};
 
     use super::*;

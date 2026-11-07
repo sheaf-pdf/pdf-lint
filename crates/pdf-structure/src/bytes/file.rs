@@ -220,12 +220,12 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
+    use pdf_fixtures::fixture::{self, Xref};
     use tempfile::TempDir;
 
     use super::super::tests::{clean, root, startxref};
     use super::super::{ByteSource, Options, Reading, read};
     use super::*;
-    use crate::fixture::{self, Xref};
     use crate::source::RevisionEnd;
 
     /// A file of the test's own, in a folder of its own in the temp

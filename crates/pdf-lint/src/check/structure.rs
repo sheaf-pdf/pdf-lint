@@ -1040,7 +1040,7 @@ mod tests {
 
     use std::collections::BTreeSet;
 
-    use pdf_structure::fixture;
+    use pdf_fixtures::fixture;
 
     use super::super::{Hold, Made, Options, Report, check};
     use super::*;

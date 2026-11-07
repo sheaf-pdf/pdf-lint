@@ -1848,8 +1848,8 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
+    use pdf_fixtures::fixture;
     use pdf_objects::Streams;
-    use pdf_structure::fixture;
 
     use crate::{Unreadable, Why};
 

@@ -1272,12 +1272,12 @@ impl TryCryptoRng for Drawn<'_> {}
 #[cfg(test)]
 mod tests {
     use pdf_crypt::writer::{Kind, Settings};
+    use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_objects::dict;
     use pdf_objects::object::{Dict, Object};
 
     use super::*;
     use crate::bytes;
-    use crate::fixture::{self, Body, Xref};
 
     /// A small, fast generator of bytes, the same each run.
     struct Random(u64);

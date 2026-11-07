@@ -107,11 +107,13 @@ _qpdf:
         unzip -q "$work/$zip" -d "$dir"
     fi
 
-# The tests that set the reader, and what the writer writes, beside qpdf,
-# pdf-structure's, then the checker's in pdf-lint, then what pdf-linearize lays
-# out, which `just test` leaves out as ignored, against the pinned qpdf (the
-# corpus tests aside).
+# The tests of qpdf as the tests run it, pdf-fixtures'; then the tests that
+# set the reader, and what the writer writes, beside qpdf, pdf-structure's,
+# then the checker's in pdf-lint, then what pdf-linearize lays out, which
+# `just test` leaves out as ignored, against the pinned qpdf (the corpus
+# tests aside).
 test-qpdf: _qpdf
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fixtures -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
@@ -186,13 +188,13 @@ fixtures: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests::the_fixtures_are_written -- --ignored --exact
 
 # Build the fuzz targets as cargo-fuzz does (`--cfg fuzzing`), on stable,
-# so that what only they compile, the fuzz module and the test writer,
-# can't break unseen; and lint the libraries so with no feature, as a crate
-# that depends on one and fuzzes itself builds them. pdf-lint's fuzz body
-# needs the test writers the fuzz crate turns on, so only that build has it.
+# so that what only they compile, the fuzz modules, can't break unseen; and
+# lint the libraries so with no feature, as a crate that depends on one and
+# fuzzes itself builds them, pdf-lint's among them: the seeds that use the
+# tests' file writer are compiled for the tests alone.
 fuzzing:
     RUSTFLAGS="--cfg fuzzing" cargo check --locked --manifest-path fuzz/Cargo.toml --target-dir target/fuzzing
-    RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --exclude pdf-lint --lib --target-dir target/fuzzing -- -D warnings
+    RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --lib --target-dir target/fuzzing -- -D warnings
 
 # Build the API docs, failing on warnings: with every feature on, then
 # as they're published, then pdf-content-streams without `image-ends`,

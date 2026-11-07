@@ -762,7 +762,7 @@ pub fn fixtures() -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_fixtures::fixture::{self, Body, Xref};
 
     use super::*;
 

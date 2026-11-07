@@ -28,9 +28,14 @@ bench = false
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # The tests' resolvers: a reading in memory, a reading by position, a
 # document. By its path alone, which the package's manifest leaves out, as
-# pdf-structure isn't published: so the crate packages and publishes on
-# pdf-objects alone, and its unit tests don't build from the package.
-pdf-structure = { path = "../pdf-structure", features = ["fixtures"] }
+# pdf-structure is published after this crate: so the crate packages and
+# publishes on pdf-objects alone, and its unit tests don't build from the
+# package.
+pdf-structure = { path = "../pdf-structure" }
+# The tests' file writer. By its path alone, as it's never published, which
+# the package's manifest leaves out: so the crate's unit tests don't build
+# from its package.
+pdf-fixtures = { path = "../pdf-fixtures" }
 
 # The benchmarks: `cargo bench -p pdf-color`. `benches/` is outside
 # `include`, so the package carries neither them nor this target.

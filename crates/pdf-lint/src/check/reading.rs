@@ -291,7 +291,7 @@ mod tests {
     //! what it refers to that a later revision wrote over or freed, read as
     //! that revision had it, within the caps, and counted where it isn't.
 
-    use pdf_structure::fixture;
+    use pdf_fixtures::fixture;
 
     use super::*;
     use crate::bytes;

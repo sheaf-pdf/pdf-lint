@@ -6,12 +6,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pdf_fixtures::fixture::{self, Xref};
+
 use super::tests::{
     KINDS, clean, compressed, filtered, junk, objects_2_and_3, root, settings, small, to_encrypt,
     unfiltered, updated_with_padding, xref_row,
 };
 use super::*;
-use crate::fixture::{self, Xref};
 use crate::source::Source;
 
 /// What a test that reads a bomb takes at most.

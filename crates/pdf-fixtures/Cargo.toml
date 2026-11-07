@@ -1,0 +1,35 @@
+[package]
+name = "pdf-fixtures"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "The workspace's tests' PDF files, written from objects, and qpdf run as a second reader: never published"
+# The workspace's own: every crate whose tests use it takes it by its path
+# alone, a dev-dependency, which a published package leaves out.
+publish = false
+
+[dependencies]
+# The encrypted files, by pdf-crypt's writer, given its salts and IVs.
+pdf-crypt = { workspace = true, features = ["writer"] }
+# Stored zlib data checked, and a seed's compressed data inflated.
+pdf-filters = { workspace = true, features = ["miniz_oxide"] }
+pdf-objects.workspace = true
+# The encryption dictionary as the writer writes one, and qpdf's reading
+# made a document.
+pdf-structure.workspace = true
+# Which bytes a name may hold as they are.
+pdf-tokenizer.workspace = true
+# The file qpdf is handed a stream in, made in the temp folder and removed
+# after.
+tempfile = "3"
+
+[dev-dependencies]
+# zlib-rs beside miniz_oxide, so that stored zlib data is checked on each
+# Flate backend.
+pdf-filters = { workspace = true, features = ["zlib-rs"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

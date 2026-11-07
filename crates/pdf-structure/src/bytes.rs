@@ -376,8 +376,8 @@ pub enum Undecoded {
     #[error("its data doesn't decrypt: {0}")]
     Decrypt(pdf_crypt::Fault),
     /// Another decoder's words, where one decodes for the reader: only the
-    /// tests' qpdf, behind the hidden `fixtures` feature, does. A reading
-    /// never gives it.
+    /// crate's own tests give one, qpdf, to set beside the reader's
+    /// decoding. A reading never gives it.
     #[error("{0}")]
     Other(String),
 }
@@ -500,7 +500,7 @@ pub fn read_from_opened(file: &[u8], passwords: &[Password], section: usize) -> 
 }
 
 /// The file `file` is, with `decoder` decoding what isn't in plain view.
-#[cfg(any(test, feature = "fixtures"))]
+#[cfg(test)]
 pub(crate) fn read_with(file: &[u8], decoder: &dyn Decode) -> Document {
     read_as(file, Some(decoder), true, &Options::DEFAULT, &[])
 }
@@ -3907,11 +3907,11 @@ mod words;
 mod tests {
     use std::collections::BTreeSet;
 
+    use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_objects::dict;
     use pdf_objects::object::Form;
 
     use super::*;
-    use crate::fixture::{self, Body, Xref};
     use crate::source::Source;
 
     /// `significant` passes white-space and comments, and nothing else: a

@@ -711,10 +711,17 @@ fn context(
     context
 }
 
-/// The encryption dictionary of `values`, each crypt filter's `/Length`
-/// `length` where it's given, `/AuthEvent /DocOpen`, and `/StmF` and
-/// `/StrF` its first crypt filter; a value `values` hasn't left out.
-pub(crate) fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
+/// The encryption dictionary of `values`, pdf-crypt's form of a standard
+/// security handler's, as the writer writes a new file's
+/// ([`Encryptor::create`], `length` `Some(32)`): `/Filter /Standard`, `/V`
+/// and `/R`, then each value `values` holds of `/O`, `/U`, `/P` and
+/// `/Length`, from `/V` 5 of `/OE`, `/UE` and `/Perms`, and
+/// `/EncryptMetadata`; where it names a crypt filter, its first written as
+/// `/CF`'s `/StdCF`, its method its `/CFM`, with `/AuthEvent /DocOpen` and a
+/// `/Length` of `length` where that's given, and `/StmF` and `/StrF` naming
+/// it (ISO 32000-2, 7.6.2, 7.6.4.2 and 7.6.6). A value `values` hasn't is
+/// left out.
+pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
     let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
     let mut dict = pdf_objects::dict! {
         "Filter" => "Standard",

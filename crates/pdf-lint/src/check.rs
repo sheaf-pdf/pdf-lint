@@ -5137,7 +5137,7 @@ mod tests {
     //! TestGrammar chooses them; only held objects found in; and every walk
     //! bounded, on cycles and on deep nesting.
 
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_fixtures::fixture::{self, Body, Xref};
 
     use super::*;
     use crate::bytes;

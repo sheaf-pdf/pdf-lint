@@ -19,8 +19,6 @@ pdf-crypt.workspace = true
 pdf-filters = { workspace = true, features = ["miniz_oxide"] }
 pdf-objects.workspace = true
 pdf-tokenizer.workspace = true
-# The file `fixtures` hands qpdf a stream in.
-tempfile = { version = "3", optional = true }
 thiserror = "2"
 # A written file's second `/ID` element, XXH3-128 of what it wrote; and
 # XXH3-64 of each object's bytes as it's read, which a copy of them checks.
@@ -37,17 +35,12 @@ same-file = "1"
 libc = "0.2"
 
 [features]
-# Files built in code, and qpdf as a second reader, for other crates' tests
-# and fuzz targets: hidden, not for a user. Its encrypted files need
-# pdf-crypt's writer; the file it hands qpdf a stream in, tempfile, which
-# makes it in the temp folder and removes it after.
-fixtures = ["pdf-crypt/writer", "dep:tempfile"]
 # pdf-filters' zlib-rs, so that `Options::flate` and `write::Deflate` can
 # name it.
 zlib-rs = ["pdf-filters/zlib-rs"]
 
 # docs.rs documents both Flate backends, as `Options::flate` and
-# `write::Deflate` name either; not `fixtures`, which is hidden.
+# `write::Deflate` name either.
 [package.metadata.docs.rs]
 features = ["zlib-rs"]
 
@@ -57,6 +50,13 @@ features = ["zlib-rs"]
 pdf-filters = { workspace = true, features = ["zlib-rs"] }
 # The tests' encrypted files.
 pdf-crypt = { workspace = true, features = ["writer"] }
+# The tests' file writer, and qpdf as a second reader and a decoder to set
+# the reader's decoding beside. By its path alone, as it's never published,
+# which the package's manifest leaves out: so this crate's unit tests don't
+# build from its package. It depends on this crate, so a test build links a
+# second copy of it, whose types the tests never take: what they take of it
+# is bytes, and pdf-objects' values and text.
+pdf-fixtures = { path = "../pdf-fixtures" }
 # The tests' folders of their own, removed after.
 tempfile = "3"
 # A seeded generator for the tests' new encrypted files.

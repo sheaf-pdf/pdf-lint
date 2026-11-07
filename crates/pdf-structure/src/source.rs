@@ -1443,7 +1443,7 @@ mod tests {
     /// where its object was written; a clone keeps them all.
     #[test]
     fn each_write_keeps_the_records_true() {
-        let file = crate::fixture::assembled(
+        let file = pdf_fixtures::fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog >>"[..]),
@@ -1575,7 +1575,7 @@ mod tests {
                 .collect();
             String::from_utf8(digits).unwrap().parse().unwrap()
         };
-        let file = crate::fixture::assembled(
+        let file = pdf_fixtures::fixture::assembled(
             "1.6",
             &[(1, &b"<< /Type /Catalog >>"[..])],
             "<< /Size 2 /Root 1 0 R >>",
@@ -2048,7 +2048,7 @@ mod tests {
 
         // Read: past the trailer's /Size less one, which is past what the
         // table lists.
-        let file = crate::fixture::assembled(
+        let file = pdf_fixtures::fixture::assembled(
             "1.7",
             &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2")],
             "<< /Size 20 /Root 1 0 R >>",
@@ -2059,7 +2059,7 @@ mod tests {
 
         // Past every number the table lists, though /Size says less: one
         // in use, and one free that nothing holds.
-        let mut file = crate::fixture::assembled(
+        let mut file = pdf_fixtures::fixture::assembled(
             "1.7",
             &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2"), (7, b"7")],
             "<< /Size 3 /Root 1 0 R >>",
@@ -2081,7 +2081,8 @@ mod tests {
             (2, Object::from(2).into()),
         ];
         let root = dict! { "Root" => Object::reference(1) };
-        let mut file = crate::fixture::file("1.7", &objects, root, crate::fixture::Xref::Stream);
+        let mut file =
+            pdf_fixtures::fixture::file("1.7", &objects, root, pdf_fixtures::fixture::Xref::Stream);
         let at = find(&file, b"3 0 obj");
         file.splice(at..at + 1, *b"90");
         let mut doc = crate::bytes::read(&file);
@@ -2143,7 +2144,7 @@ mod tests {
             assert_eq!(name, Some(&b"Font"[..]), "{unread}");
             assert_eq!(doc.new_id(), ObjectId::new(3, 0), "{unread}");
         }
-        let mut file = crate::fixture::assembled(
+        let mut file = pdf_fixtures::fixture::assembled(
             "1.7",
             &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2"), (3, b"3")],
             "<< /Size 4 /Root 1 0 R >>",
@@ -2168,7 +2169,7 @@ mod tests {
             (doc.new_id(), doc.new_id()),
             (ObjectId::new(1, 0), ObjectId::new(2, 0))
         );
-        file = crate::fixture::assembled(
+        file = pdf_fixtures::fixture::assembled(
             "1.7",
             &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2"), (3, b"3")],
             "<< /Size 4294967296 /Root 1 0 R >>",
@@ -2225,7 +2226,7 @@ mod tests {
     /// a stream's too, to read and to change; and the catalog.
     #[test]
     fn references_are_followed_to_the_object_a_chain_ends_at() {
-        let file = crate::fixture::assembled(
+        let file = pdf_fixtures::fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog /Pages 2 0 R >>"[..]),
@@ -2367,8 +2368,11 @@ mod tests {
     fn a_trailers_dictionary_is_changed_where_it_is() {
         let objects = [(1, dict! { "Type" => "Catalog" }.into())];
         let root = || dict! { "Root" => Object::reference(1) };
-        for kind in [crate::fixture::Xref::Table, crate::fixture::Xref::Stream] {
-            let file = crate::fixture::file("1.7", &objects, root(), kind);
+        for kind in [
+            pdf_fixtures::fixture::Xref::Table,
+            pdf_fixtures::fixture::Xref::Stream,
+        ] {
+            let file = pdf_fixtures::fixture::file("1.7", &objects, root(), kind);
             let mut doc = crate::bytes::read(&file);
             assert!(doc.trailer.object.at.is_some());
             let stream = doc.trailer.stream;
@@ -2376,7 +2380,7 @@ mod tests {
             assert_eq!(doc.trailer.object.at, None, "{kind:?}: an edit");
             assert!(doc.trailer.dict().has(b"Info") && doc.trailer.dict().has(b"Root"));
             let streamed = doc.trailer.object.as_stream().is_some();
-            assert_eq!(streamed, kind == crate::fixture::Xref::Stream);
+            assert_eq!(streamed, kind == pdf_fixtures::fixture::Xref::Stream);
             assert_eq!(doc.trailer.stream, stream);
         }
         let mut trailer = Trailer::new(Object::null());

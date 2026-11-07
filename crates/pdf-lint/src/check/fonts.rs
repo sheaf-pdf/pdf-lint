@@ -750,7 +750,7 @@ mod tests {
     use std::ops::Range;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_fixtures::fixture::{self, Body, Xref};
 
     use super::*;
     use crate::bytes::{self, ByteSource, Options, WithReading};

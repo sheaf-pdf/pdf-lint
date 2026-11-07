@@ -1,6 +1,6 @@
 //! Files read from their bytes and through qpdf alone, a second reader,
 //! checked by pdf-lint: the findings alike but for where, and where they
-//! aren't, why. qpdf is pdf-structure's, as its tests run it.
+//! aren't, why. qpdf is pdf-fixtures', as pdf-structure's tests run it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
 
+use pdf_fixtures::qpdf::Qpdf;
 use pdf_lint::bytes::{self, WithReading};
 use pdf_lint::{
     Document, Finding, Hold, Linearized, Made, Options, Rule, check, check_with_reading,
 };
-use pdf_structure::qpdf::Qpdf;
 use pdf_structure::write;
 
 /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
@@ -78,7 +78,7 @@ fn a_file_checks_through_qpdf_alone_as_through_its_bytes() {
         let path = fixture(test);
         let data = std::fs::read(&path).unwrap();
         let qpdf = qpdf(&path);
-        let bytes = qpdf.decoding(&data);
+        let bytes = bytes::read(&data);
         let alone = qpdf.read().unwrap();
         // Checked, the two read alike, but for where.
         assert_eq!(findings(&bytes), findings(&alone), "{test}");
@@ -173,12 +173,15 @@ fn what_qpdf_linearizes_then_updated_is_found_so() {
     }
 }
 
-/// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf decoding,
-/// and through qpdf alone, and the findings one reading gives and the
-/// other doesn't counted by rule and side, with examples: but for where
-/// and for what only the bytes can show (`duplicate` and `reader`; what's
-/// in an earlier revision's trailer, as qpdf reads the newest alone; and
-/// `packed`, which needs where each object was read).
+/// Every PDF under `PDF_LINT_CORPUS` read from its bytes and through qpdf
+/// alone, and the findings one reading gives and the other doesn't counted
+/// by rule and side, with examples: but for where and for what only the
+/// bytes can show (`duplicate` and `reader`; what's in an earlier
+/// revision's trailer, as qpdf reads the newest alone; and `packed`, which
+/// needs where each object was read). A file encrypted so that the
+/// reader doesn't open it by the empty password, which qpdf may, differs
+/// by its object streams' objects and its strings, which only qpdf then
+/// reads.
 #[test]
 #[ignore = "needs PDF_LINT_CORPUS, a folder of PDF files, and qpdf"]
 fn a_corpus_checks_alike_through_qpdf_alone() {
@@ -221,7 +224,7 @@ fn a_corpus_checks_alike_through_qpdf_alone() {
                     let name = path.file_name().unwrap().to_string_lossy().into_owned();
                     let data = std::fs::read(path).unwrap();
                     let qpdf = Qpdf::new(path);
-                    let bytes = qpdf.decoding(&data);
+                    let bytes = bytes::read(&data);
                     let alone = qpdf.read();
                     // The findings one reading gives and the other doesn't,
                     // as many times as it gives them: by object, table, key

@@ -86,6 +86,8 @@
 //!   `Method::Rc4`), and so is an object a renumbering writes at a number
 //!   another object had, which leaks the XOR of the two; a file written
 //!   whole under a new AES-256 encryption ([`Encryptor::create`]) doesn't.
+//!   The encryption dictionary of pdf-crypt's values, as a new file's is
+//!   written, is [`encryption`].
 //!
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
@@ -116,7 +118,7 @@ use crate::crypt::Get;
 use crate::source::{Document, Record, XrefKind};
 
 pub use append::{Base, update};
-pub use crypt::{Encrypting, Encryptor, Unencryptable};
+pub use crypt::{Encrypting, Encryptor, Unencryptable, encryption};
 pub use full::{document, encryption_objects, full, left_out};
 pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
 pub use parts::{Packed, Parts};
@@ -125,10 +127,6 @@ pub use xref::{Entry, Section};
 // A reading compares a document's encryption dictionary as written too
 // (`Reading::adopt`).
 pub(crate) use append::as_written;
-
-// The tests' file writer writes its encrypted files' dictionaries so too.
-#[cfg(any(test, feature = "fixtures"))]
-pub(crate) use crypt::encryption;
 
 /// The object numbers a written file may use are below it: the
 /// 8,388,607 indirect objects a file may hold (ISO 32000-1, Annex C), so

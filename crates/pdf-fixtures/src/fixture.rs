@@ -1,7 +1,6 @@
-//! Writing objects as PDF syntax, for tests (this crate's, and, behind the
-//! `fixtures` feature, other crates'): whole files with a cross-reference
-//! table or an uncompressed cross-reference stream, and files assembled
-//! from objects' bytes as written by hand.
+//! Writing objects as PDF syntax, for tests: whole files with a
+//! cross-reference table or an uncompressed cross-reference stream, and
+//! files assembled from objects' bytes as written by hand.
 
 use std::fmt::Write as _;
 
@@ -10,7 +9,9 @@ use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 /// The kind of cross-reference section a file is written with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Xref {
+    /// A cross-reference table.
     Table,
+    /// A cross-reference stream, its rows uncompressed.
     Stream,
 }
 
@@ -18,11 +19,15 @@ pub enum Xref {
 /// data.
 #[derive(Debug, Clone)]
 pub enum Body {
+    /// A value.
     Object(Object),
+    /// A stream: its dictionary, given its `/Length` as it's written, and
+    /// its data.
     Stream(Dict, Vec<u8>),
 }
 
 impl Body {
+    /// A stream of `dict` and `data`.
     pub fn stream(dict: Dict, data: &[u8]) -> Body {
         Body::Stream(dict, data.to_vec())
     }
@@ -184,7 +189,7 @@ pub fn inflated(zlib: &[u8]) -> Vec<u8> {
     pdf_filters::decode(zlib, &[flate], usize::MAX, miniz).unwrap_or_else(|e| e.data)
 }
 
-/// A file of these objects, as [`file`] writes it with a table, encrypted
+/// A file of these objects, as [`file()`] writes it with a table, encrypted
 /// as `settings` say, by pdf-crypt's writer: each string, and each
 /// stream's data, of each object but a signature's `/Contents`, under an
 /// encryption dictionary that's the next object, with the trailer's `/ID`
@@ -207,11 +212,11 @@ pub fn encrypted(
         }
         .expect("the writer's own method")
     };
-    let dict = crate::write::encryption(&values, None);
+    let dict = pdf_structure::write::encryption(&values, None);
     under(&handler, objects, dict, trailer, settings.id, encrypt)
 }
 
-/// A new file of these objects, as [`file`] writes it with a table,
+/// A new file of these objects, as [`file()`] writes it with a table,
 /// encrypted under the handler and dictionary pdf-crypt creates for
 /// `protection` (`Handler::create`: revision 6, AES-256), from `rng`'s
 /// draws: each string, and each stream's data, of each object but
@@ -239,14 +244,14 @@ pub fn created(
         }
         .expect("the handler's own method")
     };
-    let dict = crate::write::encryption(&values, Some(32));
+    let dict = pdf_structure::write::encryption(&values, Some(32));
     under(&handler, objects, dict, trailer, &id, encrypt)
 }
 
 /// `objects` encrypted by `encrypt` (an object's id, the data, and whether
 /// it's a stream's), each string, and each stream's data, but a
 /// signature's `/Contents` and, where `handler` doesn't encrypt metadata, a
-/// metadata stream's data; written as [`file`] writes them with a table,
+/// metadata stream's data; written as [`file()`] writes them with a table,
 /// under `dict`, the encryption dictionary, the next object, with the
 /// trailer's `/ID` `file_id` twice and `trailer`'s entries.
 fn under(

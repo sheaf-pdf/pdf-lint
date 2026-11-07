@@ -353,7 +353,7 @@ mod tests {
         let stream = ObjectId::new(4, 0);
         let (mut objects, _) = super::super::tests::objects_2_and_3();
         objects.resize(200, b' ');
-        let zlib = crate::fixture::zlib(&objects);
+        let zlib = pdf_fixtures::fixture::zlib(&objects);
         let flate = " /Filter /FlateDecode";
         let plain = super::super::tests::filtered(false, flate, &zlib);
         let corrupt = super::super::tests::filtered(false, flate, &zlib[..zlib.len() - 20]);

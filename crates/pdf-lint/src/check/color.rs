@@ -348,7 +348,7 @@ pub(super) mod tests {
     //! DeviceN space's and a halftone's, as a check of a file evaluates
     //! them.
 
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_fixtures::fixture::{self, Body, Xref};
 
     use super::*;
     use crate::bytes::{Options, WithReading};

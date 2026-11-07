@@ -5,10 +5,10 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::parse::Parser;
 use pdf_objects::{Str, dict, serialize};
 use pdf_structure::bytes::{self, ByteSource, Options, Reading};
-use pdf_structure::fixture::{self, Body, Xref};
 use pdf_structure::source::Document;
 
 use super::*;

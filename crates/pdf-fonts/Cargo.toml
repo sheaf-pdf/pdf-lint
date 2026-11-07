@@ -34,8 +34,12 @@ predefined-cmaps = ["dep:hayro-cmap"]
 programs = ["dep:skrifa"]
 
 [dev-dependencies]
-# The tests' files, and a reading of them, which is pdf-objects' `Streams` itself.
-pdf-structure = { workspace = true, features = ["fixtures"] }
+# A reading of the tests' files, which is pdf-objects' `Streams` itself.
+pdf-structure.workspace = true
+# The tests' file writer. By its path alone, as it's never published, which
+# the package's manifest leaves out: so the crate's unit tests don't build
+# from its package.
+pdf-fixtures = { path = "../pdf-fixtures" }
 
 # docs.rs documents what `predefined-cmaps` adds, beside the default.
 [package.metadata.docs.rs]

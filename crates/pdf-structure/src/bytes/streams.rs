@@ -4,12 +4,12 @@
 
 use pdf_crypt::writer::Kind;
 use pdf_filters::Fault;
+use pdf_fixtures::fixture::{self, Body};
 use pdf_objects::dict;
 
 use super::lazy::{attachments_only, encrypted_objects, hex, only_attachments_encrypted, open};
 use super::tests::{KINDS, encryption_updated, filtered, objects_2_and_3, root, settings};
 use super::*;
-use crate::fixture::{self, Body};
 use crate::fuzz::{self, Counted};
 
 /// The plaintext of [`content`]'s stream 4.
@@ -1016,10 +1016,10 @@ mod through_streams {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pdf_crypt::Password;
+    use pdf_fixtures::fixture::Xref;
     use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
     use super::*;
-    use crate::fixture::Xref;
 
     /// What `Streams` gives of stream `id` of `reading`, within `limit`: its
     /// data, or why there's none, of `id`.

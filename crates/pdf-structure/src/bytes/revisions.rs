@@ -5,13 +5,13 @@
 //! is.
 
 use pdf_crypt::Encoding;
+use pdf_fixtures::fixture::{self, Xref};
 
 use super::tests::{
     KINDS, clean, compressed, encryption_updated, linearized, root, settings, startxref,
     to_encrypt, updated, xref_row,
 };
 use super::*;
-use crate::fixture::{self, Xref};
 use crate::fuzz::{Counted, open};
 
 /// Where each of `file`'s revisions ends, the first first, as read whole.

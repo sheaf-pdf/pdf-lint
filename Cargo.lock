@@ -676,6 +676,7 @@ name = "pdf-color"
 version = "0.1.0-alpha.1"
 dependencies = [
  "criterion",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-structure",
  "thiserror",
@@ -727,11 +728,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-fixtures"
+version = "0.0.0"
+dependencies = [
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-objects",
+ "pdf-structure",
+ "pdf-tokenizer",
+ "tempfile",
+]
+
+[[package]]
 name = "pdf-fonts"
 version = "0.1.0"
 dependencies = [
  "hayro-cmap",
  "pdf-content-streams",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-structure",
  "skrifa",
@@ -761,6 +775,7 @@ dependencies = [
  "pdf-color",
  "pdf-content-streams",
  "pdf-crypt",
+ "pdf-fixtures",
  "pdf-fonts",
  "pdf-linearize",
  "pdf-objects",
@@ -790,6 +805,7 @@ name = "pdf-semantics"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-structure",
  "quick-xml",
@@ -804,6 +820,7 @@ dependencies = [
  "libc",
  "pdf-crypt",
  "pdf-filters",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-tokenizer",
  "same-file",

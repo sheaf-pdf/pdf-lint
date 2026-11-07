@@ -15,13 +15,13 @@ use pdf_crypt::rand_core::SeedableRng;
 use pdf_crypt::writer::{self, Kind, Settings};
 use pdf_crypt::{Fault, Protection};
 use pdf_filters::{Backend, Filter, Level, Predictor};
+use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::dict;
 use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use pdf_objects::serialize::{self, Encrypt, Refused};
 
 use super::{Deflate, Encryptor, Entry, Error, Section, Unencryptable};
 use crate::bytes::{self, ByteSource, Limits, Options, Reading, XrefEntry};
-use crate::fixture::{self, Body, Xref};
 use crate::fuzz::Flipped;
 use crate::{Encryption, Password, Record, Source, XrefKind, write};
 

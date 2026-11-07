@@ -88,21 +88,13 @@
 pub mod bytes;
 mod crypt;
 mod filter;
-// The tests' file writer; for other crates' tests and fuzz bodies too,
-// with `fixtures`, the feature it's named for.
-#[cfg(any(test, feature = "fixtures"))]
-#[doc(hidden)]
-pub mod fixture;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
-#[cfg(any(test, feature = "fixtures"))]
-mod json;
-// qpdf, the tests' oracle: a second reader, and a decoder to set the
-// reader's decoding beside; for other crates' tests too, with `fixtures`.
-#[cfg(any(test, feature = "fixtures"))]
-#[doc(hidden)]
-pub mod qpdf;
+// qpdf, the tests' oracle: a decoder to set the reader's decoding beside,
+// and a second reader.
+#[cfg(test)]
+mod qpdf;
 pub mod source;
 pub mod write;
 

@@ -599,10 +599,10 @@ mod tests {
     //! so that a change keeps its length; and those files updated after, by
     //! pdf-structure's writer.
 
+    use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_linearize::family::{self, linearize_bytes};
     use pdf_linearize::hint::{PageOffsets, SharedObjects};
     use pdf_structure::XrefKind;
-    use pdf_structure::fixture::{self, Body, Xref};
     use pdf_structure::write::{self, Base, Deflate};
 
     use super::*;
