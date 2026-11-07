@@ -1347,8 +1347,9 @@ fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() 
 /// with why: by passwords none of which opens it, keeping what it read and
 /// said, and opened by the right one after; by a security handler the
 /// reader can't open, or an `/Encrypt` that isn't a dictionary, saying so
-/// as its encryption does. One not encrypted, or that a password opened,
-/// is given back as it is.
+/// as its encryption does, and alike where its strings and streams aren't
+/// encrypted, which stays plain. One not encrypted, or that a password
+/// opened, is given back as it is.
 #[test]
 fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     let kind = pdf_crypt::writer::Kind::Aes256;
@@ -1397,6 +1398,34 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         }
         assert_eq!(why.to_string(), said);
         assert_eq!(*reading.encryption(), Encryption::Unsupported(said));
+        assert_eq!(reading.warnings(), warnings);
+    }
+
+    // Another handler's, and a /V and /R the standard handler isn't, with
+    // no /StmF or /StrF, from /V 4: its strings and streams aren't
+    // encrypted, so it reads plain, and is refused by the same variant,
+    // plain as it was.
+    let values = format!("/O <{}> /U <{}> /P -4", "11".repeat(32), "22".repeat(32));
+    for (encrypt, other) in [
+        ("/Filter /Adobe.PubSec /V 4 /R 4", true),
+        ("/Filter /Standard /V 6 /R 7", false),
+    ] {
+        let file = with_trailer(
+            &fixture::file("1.7", &clean(), root(), Xref::Table),
+            &format!(" /Encrypt << {encrypt} {values} >>"),
+        );
+        let reading = open(&file, &[], &Options::DEFAULT);
+        assert_eq!(*reading.encryption(), Encryption::Plain, "{encrypt}");
+        let warnings = reading.warnings();
+        let Err((reading, why)) = reading.unlock(&Password("user").encodings()) else {
+            panic!("unlocked");
+        };
+        match (&why, other) {
+            (Refused::OtherHandler { name, .. }, true) => assert_eq!(name, b"Adobe.PubSec"),
+            (Refused::Version { v: 6, r: 7, .. }, false) => {}
+            _ => panic!("{encrypt}: {why:?}"),
+        }
+        assert_eq!(*reading.encryption(), Encryption::Plain, "{encrypt}");
         assert_eq!(reading.warnings(), warnings);
     }
 

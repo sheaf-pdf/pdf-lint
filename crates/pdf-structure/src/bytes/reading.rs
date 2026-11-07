@@ -507,8 +507,12 @@ impl<S: ByteSource> Reading<S> {
     /// `/R` the standard handler isn't ([`Refused::Version`]), or a
     /// dictionary it can't take, or an `/Encrypt` that isn't one
     /// ([`Refused::Malformed`]), each in the words
-    /// [`Encryption::Unsupported`] says. A file that isn't encrypted, or
-    /// that a password opened, is given back as it is.
+    /// [`Encryption::Unsupported`] says where its strings or streams are
+    /// encrypted. One whose strings and streams aren't
+    /// ([`Encryption::Plain`]: `/StmF` and `/StrF` `/Identity`, or absent,
+    /// from `/V` 4) is refused alike, by the same variant, and stays plain.
+    /// A file that isn't encrypted, or that a password opened, is given
+    /// back as it is.
     // The refusal holds the reading, as the reading opened is one: a box
     // would make neither side smaller.
     #[allow(clippy::result_large_err)]
