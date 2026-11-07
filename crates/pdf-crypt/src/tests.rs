@@ -814,7 +814,7 @@ fn crypt_filters_by_name_and_method() {
         Error {
             data: None,
             fault: Fault::Method {
-                name: "X".to_string()
+                name: b"X".to_vec()
             }
         }
     );
@@ -898,7 +898,7 @@ fn a_dictionary_the_standard_handler_doesnt_take_is_refused() {
         Handler::open(&dictionary, b"id", &[]).unwrap_err()
     };
     let refused = |change: fn(&mut Dictionary)| match refusal(change) {
-        Refused::Unsupported(why) => why,
+        Refused::Malformed(why) => why,
         other => panic!("{other:?}"),
     };
     // Another handler, by its name as written, and said lossily.
@@ -945,7 +945,7 @@ fn a_dictionary_the_standard_handler_doesnt_take_is_refused() {
     let mut aes = vectors()[6].dictionary.clone();
     aes.perms = None;
     match Handler::open(&aes, b"id", &[]) {
-        Err(Refused::Unsupported(why)) => assert_eq!(why, "its /Perms isn't a string"),
+        Err(Refused::Malformed(why)) => assert_eq!(why, "its /Perms isn't a string"),
         other => panic!("{other:?}"),
     }
     // Short ones, empty ones too, are filled out, as qpdf fills them.
@@ -972,7 +972,7 @@ fn each_refusal_and_fault_says_why() {
             "it's /V 6 /R 7, which the standard security handler isn't",
         ),
         (
-            Refused::Unsupported("its /O isn't a string".to_string()),
+            Refused::Malformed("its /O isn't a string".to_string()),
             "its /O isn't a string",
         ),
         (Refused::Password, "the password doesn't open it"),
@@ -992,9 +992,15 @@ fn each_refusal_and_fault_says_why() {
         (Fault::Padding, "its AES plaintext isn't padded"),
         (
             Fault::Method {
-                name: "ROT13".to_string(),
+                name: b"ROT13".to_vec(),
             },
             "its crypt filter's method or name, /ROT13, isn't one",
+        ),
+        (
+            Fault::Method {
+                name: b"Odd\xff".to_vec(),
+            },
+            "its crypt filter's method or name, /Odd\u{fffd}, isn't one",
         ),
         (
             Fault::Key { len: 5 },
@@ -1287,15 +1293,15 @@ fn rc4_takes_no_iv() {
 fn a_method_that_isnt_one_is_refused_not_written_as_plaintext() {
     let (handler, _) = aes();
     let odd = Method::Unknown(b"ROT13".to_vec());
-    let refused = |name: &str| {
+    let refused = |name: &[u8]| {
         Err(Fault::Method {
-            name: name.to_string(),
+            name: name.to_vec(),
         })
     };
     let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", Some(&odd));
-    assert_eq!(encrypted, refused("ROT13"));
+    assert_eq!(encrypted, refused(b"ROT13"));
     let encrypted = writer::encrypt_stream(&handler, (5, 0), b"x", Some(&odd), [0; 16]);
-    assert_eq!(encrypted, refused("ROT13"));
+    assert_eq!(encrypted, refused(b"ROT13"));
     for method in [Method::Identity, Method::None] {
         let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", Some(&method));
         assert_eq!(encrypted, Ok(b"x".to_vec()), "{method:?}");
@@ -1320,14 +1326,20 @@ fn a_method_that_isnt_one_is_refused_not_written_as_plaintext() {
     let handler = Handler::open(&dictionary, b"id", &[]).unwrap();
     assert_eq!(
         handler.encrypt_string((5, 0), b"c", b"x"),
-        refused("Missing")
+        refused(b"Missing")
     );
     assert_eq!(
         writer::encrypt_string(&handler, (5, 0), b"x", [0; 16]),
-        refused("Missing")
+        refused(b"Missing")
     );
     let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", None);
-    assert_eq!(encrypted, refused("ROT13"));
+    assert_eq!(encrypted, refused(b"ROT13"));
+    // A name that isn't UTF-8 is kept as written, decrypting too.
+    let odd = Method::Unknown(b"Odd\xff".to_vec());
+    let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", Some(&odd));
+    assert_eq!(encrypted, refused(b"Odd\xff"));
+    let decrypted = handler.decrypt_stream((5, 0), b"x", Some(&odd));
+    assert_eq!(decrypted.map_err(|error| error.fault), refused(b"Odd\xff"));
 }
 
 /// A handler can be cloned and shared across threads, and its clone and

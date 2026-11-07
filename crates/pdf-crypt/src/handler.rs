@@ -31,7 +31,7 @@ pub(crate) const PADDING: [u8; 32] = [
 /// `#[non_exhaustive]`, as a method may join it in a minor release:
 /// ISO/TS 32003's AES-GCM, say (`/CFM /AESV4`, of a dictionary of `/V 6
 /// /R 7`), which the handler doesn't read yet: such a dictionary is
-/// refused ([`Refused::Version`](crate::Refused::Version)), and a crypt
+/// refused ([`Refused::Version`]), and a crypt
 /// filter's `/AESV4` in a file it opens is read as a method that isn't
 /// one ([`Method::Unknown`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -40,7 +40,10 @@ pub enum Method {
     /// Not at all: `/Identity`, or a crypt filter without `/CFM`.
     Identity,
     /// `/CFM /None`: by something not the standard security handler,
-    /// which leaves it as it is.
+    /// which leaves it as it is. A method, named as the file names it, not
+    /// [`Option::None`]: a stream's `crypt` of `Some(&Method::None)` leaves
+    /// its data as it is, where `None` takes the method streams are
+    /// encrypted by ([`Handler::decrypt_stream`]).
     None,
     /// RC4 (`/CFM /V2`, and everything in a file of `/V` 1 or 2).
     ///
@@ -129,10 +132,10 @@ impl Handler {
     /// # Errors
     ///
     /// [`Refused`], for the first reason the dictionary has: no `/Filter`
-    /// ([`Refused::Unsupported`]); another security handler's
+    /// ([`Refused::Malformed`]); another security handler's
     /// ([`Refused::OtherHandler`]); a `/V` and `/R` the standard handler
     /// isn't ([`Refused::Version`]); a value it can't take
-    /// ([`Refused::Unsupported`]); then none of the passwords, or the empty
+    /// ([`Refused::Malformed`]); then none of the passwords, or the empty
     /// one where none is given, opening it ([`Refused::Password`]).
     pub fn open(
         dictionary: &Dictionary,
@@ -457,9 +460,7 @@ impl Handler {
         };
         match method {
             Method::Identity | Method::None => Ok(data.to_vec()),
-            Method::Unknown(name) => Err(Fault::Method {
-                name: String::from_utf8_lossy(name).into_owned(),
-            }),
+            Method::Unknown(name) => Err(Fault::Method { name: name.clone() }),
             Method::Rc4 => Ok(rc4(&self.object_key(id, false), data)),
             Method::Aes128 | Method::Aes256 => aes(),
         }
@@ -478,9 +479,7 @@ impl Handler {
             Method::Identity | Method::None => Ok(data.to_vec()),
             Method::Unknown(name) => Err(Error {
                 data: None,
-                fault: Fault::Method {
-                    name: String::from_utf8_lossy(name).into_owned(),
-                },
+                fault: Fault::Method { name: name.clone() },
             }),
             Method::Rc4 => Ok(rc4(&self.object_key(id, false), data)),
             Method::Aes128 | Method::Aes256 => aes(|| self.cipher(method, id), data, stream),
@@ -602,16 +601,16 @@ pub(crate) struct File<'a> {
 impl<'a> File<'a> {
     /// `dictionary`'s values, unless they're not ones the standard
     /// security handler takes, refused for the first of these: no
-    /// `/Filter` ([`Refused::Unsupported`]); another handler's
+    /// `/Filter` ([`Refused::Malformed`]); another handler's
     /// ([`Refused::OtherHandler`]); a `/V` and `/R` it isn't
     /// ([`Refused::Version`]); values it can't take
-    /// ([`Refused::Unsupported`]): `/O`, `/U` and `/P` it must have, and of
+    /// ([`Refused::Malformed`]): `/O`, `/U` and `/P` it must have, and of
     /// `/V` 5 `/OE`, `/UE` and `/Perms`, of their types, as qpdf must, and
     /// `/O` and `/U` of 32 bytes at most below `/V` 5. Short ones are
     /// filled out with zeros, as qpdf does, and `/V` 5's long ones cut
     /// short.
     pub(crate) fn of(dictionary: &Dictionary, id: &'a [u8]) -> Result<File<'a>, Refused> {
-        let refuse = |why: &str| Err(Refused::Unsupported(why.to_string()));
+        let refuse = |why: &str| Err(Refused::Malformed(why.to_string()));
         if dictionary.filter.is_empty() {
             // None, or not a name, where the caller leaves it empty: a
             // dictionary that's wrong (Table 20), not another handler's.
@@ -640,7 +639,7 @@ impl<'a> File<'a> {
             .filter_map(|(wrong, has)| (!has).then_some(wrong))
             .collect();
         if !wrong.is_empty() {
-            return Err(Refused::Unsupported(format!("its {}", wrong.join(", "))));
+            return Err(Refused::Malformed(format!("its {}", wrong.join(", "))));
         }
         let fill = |value: &Option<Vec<u8>>, len: usize| {
             let value = value.as_deref().unwrap_or_default();

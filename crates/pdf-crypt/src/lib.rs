@@ -87,11 +87,13 @@ pub use rand_core;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Dictionary {
-    /// `/Filter`: the security handler's name, `Standard` for this one.
+    /// `/Filter`: the security handler's name, `Standard` for this one;
+    /// empty when it's absent or not a name, which is refused as a
+    /// dictionary that's wrong ([`Refused::Malformed`]).
     pub filter: Vec<u8>,
     /// `/V`, 0 when absent.
     pub v: i64,
-    /// `/R`.
+    /// `/R`, 0 when absent.
     pub r: i64,
     /// `/Length`, in bits, of a dictionary of `/V` 2.
     pub length: Option<i64>,
@@ -142,7 +144,7 @@ pub enum Refused {
     #[non_exhaustive]
     OtherHandler {
         /// Its `/Filter`, as written: never empty, as a dictionary with
-        /// none is one that's wrong ([`Refused::Unsupported`]).
+        /// none is one that's wrong ([`Refused::Malformed`]).
         name: Vec<u8>,
     },
     /// The dictionary's `/V` and `/R` are a pair the standard security
@@ -155,14 +157,15 @@ pub enum Refused {
     Version {
         /// `/V`, 0 when absent.
         v: i64,
-        /// `/R`.
+        /// `/R`, 0 when absent.
         r: i64,
     },
-    /// The dictionary isn't one the standard security handler takes, and
-    /// why: no `/Filter`; `/O`, `/U` or `/P` (`/OE`, `/UE` or `/Perms` of
-    /// `/V` 5) missing or not of its type; `/O` or `/U` too long.
+    /// The dictionary is wrong, and why: no `/Filter`; `/O`, `/U` or `/P`
+    /// (`/OE`, `/UE` or `/Perms` of `/V` 5) missing or not of its type;
+    /// `/O` or `/U` too long. A reader gives it too, in its own words, for
+    /// an `/Encrypt` that isn't a dictionary.
     #[error("{0}")]
-    Unsupported(String),
+    Malformed(String),
     /// None of the passwords opens it.
     #[error("the password doesn't open it")]
     Password,
@@ -170,6 +173,11 @@ pub enum Refused {
 
 /// What's wrong with a string's or stream's ciphertext, or the
 /// dictionary.
+///
+/// Each variant's fields are the whole of what it says (a length, a count,
+/// a name), so outside the crate one is built by a literal, as a test
+/// compares with it, and matched without `..`; a fault found that says
+/// more joins as a variant of its own.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
@@ -196,10 +204,11 @@ pub enum Fault {
     Padding,
     /// A crypt filter's method that isn't one, or a crypt filter the
     /// dictionary hasn't, named `name`. Nothing decrypted.
-    #[error("its crypt filter's method or name, /{name}, isn't one")]
+    #[error("its crypt filter's method or name, /{}, isn't one", String::from_utf8_lossy(.name))]
     Method {
-        /// The name.
-        name: String,
+        /// The name, as written, as [`Method::Unknown`] holds it; what the
+        /// fault says writes it lossily as UTF-8.
+        name: Vec<u8>,
     },
     /// A crypt filter's AES that the file's key of `len` bytes isn't for:
     /// `/AESV3` below `/V` 5, `/AESV2` in a file whose key is RC4's of

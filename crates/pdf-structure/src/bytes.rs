@@ -1364,7 +1364,7 @@ impl Reader {
                 Encryption::Unsupported(why) => why.clone(),
                 _ => String::new(),
             };
-            return Err(Refused::Unsupported(why));
+            return Err(Refused::Malformed(why));
         };
         let handler = Handler::open(&lock.values, &lock.id, passwords)?;
         let lock = self.lock.take().expect("kept");
@@ -3371,7 +3371,7 @@ impl Reader {
             // matter (but a stream's own crypt filter).
             Err(_) if !self.list.strings && !self.list.streams => Encryption::Plain,
             Err(Refused::Password) => Encryption::Locked,
-            Err(Refused::Unsupported(why)) => Encryption::Unsupported(why),
+            Err(Refused::Malformed(why)) => Encryption::Unsupported(why),
             // Another handler, or a version the standard one isn't: in
             // its words.
             Err(refused) => Encryption::Unsupported(refused.to_string()),

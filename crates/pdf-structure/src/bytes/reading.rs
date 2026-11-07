@@ -506,7 +506,7 @@ impl<S: ByteSource> Reading<S> {
     /// can't open: another handler ([`Refused::OtherHandler`]), a `/V` and
     /// `/R` the standard handler isn't ([`Refused::Version`]), or a
     /// dictionary it can't take, or an `/Encrypt` that isn't one
-    /// ([`Refused::Unsupported`]), each in the words
+    /// ([`Refused::Malformed`]), each in the words
     /// [`Encryption::Unsupported`] says. A file that isn't encrypted, or
     /// that a password opened, is given back as it is.
     // The refusal holds the reading, as the reading opened is one: a box

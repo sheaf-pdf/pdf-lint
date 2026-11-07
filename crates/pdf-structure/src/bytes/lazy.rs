@@ -1392,7 +1392,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         };
         match (&why, handler) {
             (Refused::OtherHandler { name, .. }, Some(handler)) => assert_eq!(name, handler),
-            (Refused::Unsupported(why), None) => assert_eq!(*why, said),
+            (Refused::Malformed(why), None) => assert_eq!(*why, said),
             _ => panic!("{why:?}"),
         }
         assert_eq!(why.to_string(), said);
