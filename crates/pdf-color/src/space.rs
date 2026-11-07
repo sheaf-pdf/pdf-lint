@@ -10,6 +10,8 @@
 //! a reference to a reference is a fault, a tint transform that doesn't load, and a
 //! white point that PDFium's 32-bit reading makes 0.
 
+use std::iter::FusedIterator;
+
 use pdf_objects::fault::Sink;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Stream, Unreadable};
 
@@ -23,6 +25,9 @@ mod read;
 mod tests;
 
 /// A color space's family (ISO 32000-2, 8.6.3, Table 61).
+///
+/// `#[non_exhaustive]`, as a later edition of the standard can name a
+/// family more, so a match on it has a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Family {
@@ -53,7 +58,8 @@ pub enum Family {
 impl Family {
     /// The family of this name, whole: an abbreviation is an inline image's
     /// (8.9.7), and the first four bytes are PDFium's.
-    pub fn of(name: &[u8]) -> Option<Family> {
+    #[must_use]
+    pub const fn of(name: &[u8]) -> Option<Family> {
         Some(match name {
             b"DeviceGray" => Family::DeviceGray,
             b"DeviceRGB" => Family::DeviceRGB,
@@ -71,7 +77,8 @@ impl Family {
     }
 
     /// Its name, as a file writes it.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Family::DeviceGray => "DeviceGray",
             Family::DeviceRGB => "DeviceRGB",
@@ -88,7 +95,8 @@ impl Family {
     }
 
     /// Whether it's a device family.
-    pub fn is_device(self) -> bool {
+    #[must_use]
+    pub const fn is_device(self) -> bool {
         matches!(
             self,
             Family::DeviceGray | Family::DeviceRGB | Family::DeviceCMYK
@@ -96,7 +104,8 @@ impl Family {
     }
 
     /// Whether it's a CIE-based family, ICCBased among them.
-    pub fn is_cie(self) -> bool {
+    #[must_use]
+    pub const fn is_cie(self) -> bool {
         matches!(
             self,
             Family::CalGray | Family::CalRGB | Family::Lab | Family::ICCBased
@@ -104,7 +113,8 @@ impl Family {
     }
 
     /// Whether it's a special family.
-    pub fn is_special(self) -> bool {
+    #[must_use]
+    pub const fn is_special(self) -> bool {
         matches!(
             self,
             Family::Indexed | Family::Pattern | Family::Separation | Family::DeviceN
@@ -115,6 +125,9 @@ impl Family {
 /// A color space, as ISO 32000-2 says it (8.6), read by [`Space::read`]. All it
 /// holds borrows from the file, a nested space boxed, and each parameter is an
 /// `Option`, as reading goes on past what's wrong.
+///
+/// `#[non_exhaustive]` for the reason [`Family`] is, so a match on it has a
+/// wildcard.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Space<'o> {
@@ -146,6 +159,10 @@ pub enum Space<'o> {
 /// white point is read to be held: `/BlackPoint`, `/Gamma`, `/Matrix` and
 /// `/Range` are checked for a sink that wants faults, and left in the dictionary,
 /// as nothing here converts.
+///
+/// `#[non_exhaustive]`, as each struct of a space's parameters is: read by
+/// its fields and made only by this crate, so a parameter more can be held
+/// in a minor release.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Cie<'o> {
@@ -156,6 +173,7 @@ pub struct Cie<'o> {
 }
 
 /// An ICCBased space's parameters (8.6.5.5). Its profile isn't opened.
+/// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Icc<'o> {
@@ -172,7 +190,8 @@ pub struct Icc<'o> {
     pub alternate: Option<Box<Space<'o>>>,
 }
 
-/// An Indexed space's parameters (8.6.6.3).
+/// An Indexed space's parameters (8.6.6.3). `#[non_exhaustive]`, as [`Cie`]
+/// is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Indexed<'o> {
@@ -185,6 +204,11 @@ pub struct Indexed<'o> {
 }
 
 /// An Indexed space's table (8.6.6.3).
+///
+/// `#[non_exhaustive]`, though these are the two forms 8.6.6.3 gives a
+/// table: making it exhaustive later is a minor release, where the other
+/// way round would be a breaking one. `Stream` is too, so a field can join
+/// it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Lookup<'o> {
@@ -203,7 +227,8 @@ pub enum Lookup<'o> {
     },
 }
 
-/// A Separation space's parameters (8.6.6.4).
+/// A Separation space's parameters (8.6.6.4). `#[non_exhaustive]`, as
+/// [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Separation<'o> {
@@ -216,7 +241,8 @@ pub struct Separation<'o> {
     pub tint: Option<&'o Object>,
 }
 
-/// A DeviceN space's parameters (8.6.6.5).
+/// A DeviceN space's parameters (8.6.6.5). `#[non_exhaustive]`, as [`Cie`]
+/// is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct DeviceN<'o> {
@@ -238,6 +264,7 @@ pub struct DeviceN<'o> {
 }
 
 /// A DeviceN space's attributes dictionary (8.6.6.5, Table 70).
+/// `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Attributes<'o> {
@@ -255,7 +282,7 @@ pub struct Attributes<'o> {
 }
 
 /// An entry of a `/Colorants` dictionary, read
-/// ([`Attributes::separations`]).
+/// ([`Attributes::separations`]). `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ColorantSpace<'o> {
@@ -266,6 +293,9 @@ pub struct ColorantSpace<'o> {
 }
 
 /// What a DeviceN space's attributes say it's for (Table 70).
+///
+/// `#[non_exhaustive]`, as a later edition of the standard can name a
+/// subtype more, so a match on it has a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Subtype {
@@ -275,7 +305,7 @@ pub enum Subtype {
     NChannel,
 }
 
-/// A process dictionary (Table 71).
+/// A process dictionary (Table 71). `#[non_exhaustive]`, as [`Cie`] is.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Process<'o> {
@@ -290,6 +320,10 @@ pub struct Process<'o> {
 /// What a colorant's name says of it (8.6.6.4, 8.6.6.5). A name alone can't say
 /// more: that's what a caller reads a space's colorants through, each by
 /// [`Colorant::of`].
+///
+/// `#[non_exhaustive]`, as a name may come to say more, by a later edition
+/// of the standard or by what a space holds beside it, so a match on it has
+/// a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Colorant {
@@ -310,8 +344,9 @@ pub enum Colorant {
 }
 
 impl Colorant {
-    /// What `name` is.
-    pub fn of(name: &[u8]) -> Colorant {
+    /// What `name` is, whole: `cyan` is a spot.
+    #[must_use]
+    pub const fn of(name: &[u8]) -> Colorant {
         match name {
             b"Cyan" => Colorant::Cyan,
             b"Magenta" => Colorant::Magenta,
@@ -324,7 +359,8 @@ impl Colorant {
     }
 
     /// Whether it's one of the four that name a CMYK device's process colorants.
-    pub fn is_process(self) -> bool {
+    #[must_use]
+    pub const fn is_process(self) -> bool {
         matches!(
             self,
             Colorant::Cyan | Colorant::Magenta | Colorant::Yellow | Colorant::Black
@@ -334,6 +370,7 @@ impl Colorant {
 
 /// A space's colorants, each a name's bytes: a Separation space's one, a DeviceN
 /// space's names, none of any other ([`Space::colorants`]).
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Debug, Clone)]
 pub struct Colorants<'a, 'o> {
     names: std::slice::Iter<'a, Option<&'o [u8]>>,
@@ -342,14 +379,20 @@ pub struct Colorants<'a, 'o> {
 impl<'o> Iterator for Colorants<'_, 'o> {
     type Item = &'o [u8];
 
+    #[inline]
     fn next(&mut self) -> Option<&'o [u8]> {
         self.names.by_ref().find_map(|name| *name)
     }
 
+    /// At most one an element left, as an element that's no name is passed
+    /// over.
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, self.names.size_hint().1)
     }
 }
+
+impl FusedIterator for Colorants<'_, '_> {}
 
 impl<'o> Space<'o> {
     /// The color space `value` says, a name, an array or a reference to one, as
@@ -364,13 +407,8 @@ impl<'o> Space<'o> {
     /// content stream a space isn't named: [`Spaces`](crate::Spaces) looks a name
     /// up, and a reader of `cs` applies `DefaultGray` and the like (8.6.5.6).
     ///
-    /// What's read is the same whatever the sink, an `Err` included. An object
-    /// that's [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and it's
-    /// told as [`Fault::Damaged`](crate::Fault::Damaged); any other failure to
-    /// read what a space holds is the `Err`, whole. What only a check reads
-    /// gives no `Err`: a check whose read fails is left unsaid, so a sink that
-    /// needs certainty reads the object itself. Checks have a
-    /// [`Limits::space_visits`] of their own.
+    /// What's read is the same whatever the sink, an `Err` included. Checks
+    /// have a [`Limits::space_visits`] of their own.
     ///
     /// ```
     /// use pdf_color::pdf_objects::{Object, ObjectId};
@@ -389,6 +427,16 @@ impl<'o> Space<'o> {
     /// Space::read(nothing, &short, &Limits::DEFAULT, &mut faults).unwrap();
     /// assert_eq!(faults[0].1, Fault::LookupLength);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`], whole, for any failure to read what a space holds but
+    /// one that's [`Why::Damaged`](pdf_objects::Why::Damaged): an object past
+    /// a reader's cap, locked, or a source that didn't give its bytes. An
+    /// object that's damaged isn't there, and it's told as
+    /// [`Fault::Damaged`](crate::Fault::Damaged). What only a check reads
+    /// gives no `Err`: a check whose read fails is left unsaid, so a sink that
+    /// needs certainty reads the object itself.
     pub fn read<R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         objects: R,
         value: &'o Object,
@@ -399,7 +447,8 @@ impl<'o> Space<'o> {
     }
 
     /// Its family.
-    pub fn family(&self) -> Family {
+    #[must_use]
+    pub const fn family(&self) -> Family {
         match self {
             Space::DeviceGray => Family::DeviceGray,
             Space::DeviceRGB => Family::DeviceRGB,
@@ -425,6 +474,7 @@ impl<'o> Space<'o> {
     /// It's a count of what was read. Read with `()`, which has no fault looked
     /// for, it says nothing of whether the space loads: `/CalGray` alone counts 1
     /// here, and PDFium's 3 by [`components`](crate::components).
+    #[must_use]
     pub fn components(&self) -> Option<u32> {
         match self {
             Space::DeviceGray | Space::CalGray(_) => Some(1),
@@ -439,6 +489,7 @@ impl<'o> Space<'o> {
     }
 
     /// An Indexed space's base, or a Pattern space's underlying space.
+    #[must_use]
     pub fn base(&self) -> Option<&Space<'o>> {
         match self {
             Space::Indexed(indexed) => indexed.base.as_deref(),
@@ -448,6 +499,7 @@ impl<'o> Space<'o> {
     }
 
     /// An ICCBased, Separation or DeviceN space's alternate space.
+    #[must_use]
     pub fn alternate(&self) -> Option<&Space<'o>> {
         match self {
             Space::ICCBased(icc) => icc.alternate.as_deref(),
@@ -480,11 +532,15 @@ impl<'o> Attributes<'o> {
     ///
     /// Read on asking, as [`Space::read`] holds only the dictionary: under one
     /// [`Limits::space_visits`] for the whole of it, past which the rest aren't
-    /// given. Any failure to read but
-    /// [`Why::Damaged`](pdf_objects::Why::Damaged) is the `Err`. A fault's
-    /// [`Place::object`](pdf_objects::fault::Place::object) is the object
-    /// `/Colorants` is written in, or what an entry leads to, as
+    /// given. A fault's [`Place::object`](pdf_objects::fault::Place::object)
+    /// is the object `/Colorants` is written in, or what an entry leads to, as
     /// [`Space::read`] tells it.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`], whole, for any failure to read but
+    /// [`Why::Damaged`](pdf_objects::Why::Damaged): an object past a reader's
+    /// cap, locked, or a source that didn't give its bytes.
     pub fn separations<R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         &self,
         objects: R,

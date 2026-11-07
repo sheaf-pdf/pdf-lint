@@ -19,6 +19,9 @@ pub struct Spaces<'o> {
 }
 
 /// A name in a [`Spaces`]: a dictionary's entry, each part as it was read.
+///
+/// `#[non_exhaustive]`, so a part more can join it in a minor release: it's
+/// read by its fields, and made only by this crate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct Named<'o> {
@@ -84,9 +87,7 @@ impl<'o> Spaces<'o> {
     ///
     /// `resources` and its `/ColorSpace` may each be a dictionary or a stream,
     /// each through at most two references: through three, or in a loop, as
-    /// of chromium/8125 there's no dictionary, and that's no error. An object
-    /// that's [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and any
-    /// other failure to read one is the `Err`, whole.
+    /// of chromium/8125 there's no dictionary, and that's no error.
     ///
     /// ```
     /// use pdf_color::pdf_objects::{Object, ObjectId, dict};
@@ -99,6 +100,14 @@ impl<'o> Spaces<'o> {
     /// assert_eq!(components(nothing, named.value, &Limits::DEFAULT), Ok(Some(4)));
     /// assert_eq!(Spaces::read(nothing, None), Ok(None));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`], whole, for any failure to read `resources`, its
+    /// `/ColorSpace` or a reference on the way to either, but one that's
+    /// [`Why::Damaged`](pdf_objects::Why::Damaged): an object past a reader's
+    /// cap, locked, or a source that didn't give its bytes. An object that's
+    /// damaged isn't there.
     pub fn read<R: Resolve<'o>>(
         objects: R,
         resources: Option<&'o Object>,
@@ -138,14 +147,6 @@ impl<'o> Spaces<'o> {
     /// to). Its upper bound is the dictionary's entries, for a caller that
     /// makes room for every name at once.
     ///
-    /// A name whose space can't be read, an object past a reader's cap,
-    /// locked, or whose source failed, has that `Err` for its count, and the
-    /// names after it are counted all the same: a caller that wants the whole
-    /// as one `Err` stops at the first by `?`, and one that passes it over
-    /// counts the rest without it. An object that's
-    /// [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and is no
-    /// error.
-    ///
     /// ```
     /// use pdf_color::pdf_objects::{Object, ObjectId, dict};
     /// use pdf_color::{Limits, Spaces};
@@ -160,6 +161,17 @@ impl<'o> Spaces<'o> {
     /// // A reference to nothing is no space at all.
     /// assert_eq!(counts, [(&b"A"[..], Some(4)), (&b"B"[..], None), (&b"C"[..], Some(1))]);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Each name's own, as [`counted`](crate::counted) fails for its value. A
+    /// name whose space can't be read, an object past a reader's cap, locked,
+    /// or whose source failed, has that `Err` for its count, and the names
+    /// after it are counted all the same: a caller that wants the whole as one
+    /// `Err` stops at the first by `?`, and one that passes it over counts the
+    /// rest without it. An object that's
+    /// [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and is no
+    /// error.
     pub fn components<R: Resolve<'o> + Copy>(
         &self,
         objects: R,
@@ -174,6 +186,7 @@ impl<'o> Spaces<'o> {
 
     /// The name `key`, its last entry if it's written twice: a color space a
     /// reader of content looks up, or `DefaultGray` and the like (8.6.5.6).
+    #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<Named<'o>> {
         if key.is_empty() {
             return None;
@@ -231,8 +244,13 @@ impl FusedIterator for Iter<'_> {}
 
 /// A [`Spaces`]' names, each with its count as [`counted`](crate::counted)
 /// gives it for the name's value, or the `Err` that name's space met, in
-/// [`Spaces::iter`]'s order: what [`Spaces::components`] gives. A name that
-/// fails ends nothing: the names after it are counted all the same.
+/// [`Spaces::iter`]'s order: what [`Spaces::components`] gives.
+///
+/// # Errors
+///
+/// A name's count is the `Err` its space met, as [`Spaces::components`]
+/// says. A name that fails ends nothing: the names after it are counted all
+/// the same.
 #[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Clone)]
 pub struct Components<'o, R> {
