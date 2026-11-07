@@ -231,7 +231,7 @@ fn by_length(error: &crate::Error) {
 /// password prepared (the text's, where it prepares, or 3.2's form of it
 /// that prepares to itself), and the protection is one a file is made for,
 /// else refused for the first password's tag, length or form, the user's
-/// before the owner's; then, neither given, as empty; then, permissions
+/// before the owner's; then, neither given, as no password; then, permissions
 /// withheld, bit 10 put back, with no owner's password apart from the
 /// user's, as shared. Made, the same draws give the same dictionary, of
 /// revision 6, `/P` the permissions with bit 10, which opens by the owner's
@@ -280,7 +280,7 @@ fn created(data: &[u8], encrypt_metadata: bool) {
             return Err(why);
         }
         if passwords.iter().all(Option::is_none) {
-            return Err(Unusable::Empty);
+            return Err(Unusable::NoPassword);
         }
         match written == Permissions::ALL || apart(protection.user, protection.owner) {
             true => Ok(()),
@@ -329,7 +329,7 @@ fn created(data: &[u8], encrypt_metadata: bool) {
         }
     }
     let neither = Handler::create(&protected(None, None, how), &mut Drawn::over(draws));
-    assert_eq!(neither.map(|_| ()), Err(Unusable::Empty), "neither");
+    assert_eq!(neither.map(|_| ()), Err(Unusable::NoPassword), "neither");
     let given = |prepared: &Option<Result<Encoded, Unusable>>| match prepared {
         Some(Ok(_)) | None => Ok(()),
         Some(Err(_)) => Err(()),

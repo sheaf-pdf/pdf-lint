@@ -2239,7 +2239,7 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     let unprepared = pdf_crypt::Unusable::Unprepared(pdf_crypt::Encoding::Verbatim);
     assert_eq!(refused.err(), Some(unprepared));
     let refused = Encryptor::create(&Protection::DEFAULT, &mut rng);
-    assert_eq!(refused.err(), Some(pdf_crypt::Unusable::Empty));
+    assert_eq!(refused.err(), Some(pdf_crypt::Unusable::NoPassword));
     let prepared = Password("user").prepared().unwrap();
     let mut one = Protection::new(&prepared);
     one.permissions = pdf_crypt::Permissions::NONE;

@@ -252,7 +252,7 @@ pub(crate) fn is_prepared(bytes: &[u8]) -> bool {
 
 /// Why a password can't be a new file's ([`Password::prepared`],
 /// [`Handler::create`](crate::Handler::create)), or a new file's passwords
-/// can't protect it as asked ([`Unusable::Empty`] for neither,
+/// can't protect it as asked ([`Unusable::NoPassword`],
 /// [`Unusable::Shared`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
@@ -285,8 +285,7 @@ pub enum Unusable {
     /// SASLprep maps to nothing (a soft hyphen, a zero-width joiner).
     #[error("the password is nothing prepared: SASLprep maps each of its characters to nothing")]
     Vanished,
-    /// The empty password; or, for a new file, neither the user's
-    /// password nor the owner's, which is the empty one for both.
+    /// The empty password.
     #[error("the password is empty")]
     Empty,
     /// Bytes in this encoding, not as [`Password::prepared`] gives them,
@@ -311,6 +310,12 @@ pub enum Unusable {
         u32::from(*.0)
     )]
     Ambiguous(char),
+    /// Neither the user's password nor the owner's, for a new file, as in
+    /// [`Protection::DEFAULT`](crate::Protection::DEFAULT) before one is
+    /// set: a protection left unset, whose file anyone would open as its
+    /// owner, the empty password being both.
+    #[error("no password is given for the new file, neither the user's nor the owner's")]
+    NoPassword,
     /// Permissions withheld for a new file whose owner's password is its
     /// user's, none given apart from it or the same bytes: whoever opens
     /// the file opens it as its owner, whom the permissions don't bind
@@ -792,7 +797,13 @@ mod tests {
                 Unusable::Unprepared(Encoding::Utf8),
                 "the password is in Utf8, not prepared for a new file",
             ),
-            // A new file's permissions under one password (`create`).
+            // A new file with neither password, and its permissions
+            // under one (`create`).
+            (
+                Unusable::NoPassword,
+                Unusable::NoPassword,
+                "no password is given for the new file, neither the user's nor the owner's",
+            ),
             (
                 Unusable::Shared,
                 Unusable::Shared,

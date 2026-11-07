@@ -151,9 +151,11 @@ impl fmt::Debug for Handler {
 ///   password, so anyone opens the file, under the permissions, and the
 ///   owner's password lifts them: a file that restricts what's done with
 ///   it, not who reads it. With every permission, the owner's password
-///   lifts nothing; that's taken all the same.
-/// - **Neither:** refused ([`Unusable::Empty`]), as a file anyone opens
-///   with every permission isn't protected.
+///   lifts nothing, and anyone opens the file with every one; that's
+///   taken all the same, as a password was given.
+/// - **Neither:** refused ([`Unusable::NoPassword`]): no password was
+///   given, as in [`Protection::DEFAULT`] before one is set, a protection
+///   left unset, whose file anyone would open as its owner.
 ///
 /// The permissions are said, not enforced: honouring them is a reader's,
 /// and one who can open the file, by the user's password or by none where
@@ -183,7 +185,7 @@ pub struct Protection<'a> {
 impl Protection<'static> {
     /// No password, every permission, and the metadata encrypted: what a
     /// protection's fields are set from. As it is, it's refused
-    /// ([`Unusable::Empty`]), having no password.
+    /// ([`Unusable::NoPassword`]), having no password.
     pub const DEFAULT: Protection<'static> = Protection {
         user: None,
         owner: None,
@@ -331,7 +333,7 @@ impl Handler {
     /// prepared form ([`Unusable::Unprepared`]), as SASLprep's form
     /// [`Password::encodings`](crate::Password::encodings) tries can be:
     /// by Unicode 3.2, of a password whose form by a later Unicode is
-    /// another. Then neither password given ([`Unusable::Empty`]). Then
+    /// another. Then neither password given ([`Unusable::NoPassword`]). Then
     /// permissions withheld, of those `/P` would grant, with no owner's
     /// password apart from the user's, none given or the same bytes
     /// ([`Unusable::Shared`]): the one password would open the file as its
@@ -343,7 +345,7 @@ impl Handler {
         let user = protection.user.map(prepared).transpose()?;
         let owner = protection.owner.map(prepared).transpose()?;
         let (user, owner) = match (user, owner) {
-            (None, None) => return Err(Unusable::Empty),
+            (None, None) => return Err(Unusable::NoPassword),
             (Some(user), None) => (user, user),
             (user, Some(owner)) => (user.unwrap_or_default(), owner),
         };

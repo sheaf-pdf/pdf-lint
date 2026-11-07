@@ -1730,8 +1730,8 @@ fn a_new_file_needs_a_password_and_permissions_its_one_password_doesnt_lift() {
         .unwrap();
     let withheld = Permissions::ALL.without(Permissions::COPY);
     let refusals = [
-        (None, None, Permissions::ALL, Unusable::Empty),
-        (None, None, Permissions::NONE, Unusable::Empty),
+        (None, None, Permissions::ALL, Unusable::NoPassword),
+        (None, None, Permissions::NONE, Unusable::NoPassword),
         (Some(&user), None, withheld, Unusable::Shared),
         (Some(&user), None, Permissions::NONE, Unusable::Shared),
         (Some(&user), Some(&again), withheld, Unusable::Shared),
