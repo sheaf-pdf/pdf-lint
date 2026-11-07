@@ -14,7 +14,9 @@
 //!   [`counted`] meets no cap, but for a Pattern space over more than 16
 //!   components, which no clause refuses and PDFium does.
 //! - **What a resources dictionary names** ([`Spaces`], [`Named`]), reached as
-//!   PDFium reaches it, each key as it was read and where it was written. It's
+//!   PDFium reaches it, each key as it was read and where it was written, and
+//!   each name counted as [`counted`] counts its value
+//!   ([`Spaces::components`]), as a reader of content counts them. It's
 //!   PDFium's reading and tells nothing: an ISO check of a resources dictionary
 //!   reads the dictionary itself.
 //! - **Caps from one value** ([`Limits`]): how deep a space nests and how many
@@ -26,20 +28,24 @@
 //! writes a space: a space is pdf-objects' values, written as they are.
 //!
 //! A resolver is given by value, so `&reading`, `&document` or a closure, and a
-//! `&dyn Resolve` too. [`Dict`], [`Object`], [`ObjectId`], [`Resolve`], [`Span`],
-//! [`Str`], [`Stream`], [`Unreadable`], [`Value`], [`Why`] and [`dict!`] are
-//! pdf-objects', re-exported, and so is pdf-objects whole, so a sink of one's
-//! own names [`Sink`](pdf_objects::fault::Sink) at the version this crate takes.
+//! `&dyn Resolve` too. What's read and what reads it are pdf-objects': its
+//! [`Object`](pdf_objects::Object)s, a [`Resolve`](pdf_objects::Resolve), an
+//! [`Unreadable`](pdf_objects::Unreadable) for a failed read and a
+//! [`Span`](pdf_objects::Span) for where something was written. pdf-objects is
+//! re-exported whole, and none of its items by name, so a caller names them,
+//! [`dict!`](pdf_objects::dict) and a sink of its own
+//! ([`Sink`](pdf_objects::fault::Sink)) through `pdf_color::pdf_objects`, at
+//! the version this crate takes, with no dependency of its own.
 
+/// pdf-objects, whose values this crate reads, through whose resolvers, and
+/// to whose sinks it tells faults: named through it, they're the version
+/// this crate is built with.
 pub use pdf_objects;
-pub use pdf_objects::{
-    Dict, Object, ObjectId, Resolve, Span, Str, Stream, Unreadable, Value, Why, dict,
-};
 
 pub use count::{Counted, components, counted};
 pub use fault::Fault;
 pub use limits::Limits;
-pub use resources::{Named, Spaces};
+pub use resources::{Components, Iter, Named, Spaces};
 pub use space::{
     Attributes, Cie, Colorant, ColorantSpace, Colorants, DeviceN, Family, Icc, Indexed, Lookup,
     Process, Separation, Space, Subtype,
@@ -54,6 +60,27 @@ pub mod fuzz;
 mod limits;
 mod resources;
 mod space;
+
+#[cfg(test)]
+mod tests {
+    /// The README is shown on crates.io and docs.rs, where a path beside
+    /// the crate reaches nothing: its licence links are the repository's
+    /// URLs, the manifest's `repository` and the file, and no link of it
+    /// climbs out of the crate.
+    #[test]
+    fn the_readmes_licence_links_reach_the_files() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            let link = format!("[{file}]({repository}/blob/main/{file})");
+            assert!(
+                readme.contains(&link),
+                "{file}'s link isn't the repository's URL"
+            );
+        }
+        assert!(!readme.contains("](../"), "a link climbs out of the crate");
+    }
+}
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]

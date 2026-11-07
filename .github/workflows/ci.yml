@@ -259,6 +259,24 @@ jobs:
       - name: Package, and check what the package holds
         run: just crypt-package
 
+  # pdf-color packaged as a publish would, as the tokenizer, pdf-objects,
+  # the filters and pdf-crypt are: in a fresh target directory, and what the
+  # package holds checked, its sources, README, CHANGELOG, manifest and
+  # lock, nothing else, no benchmark among them. pdf-objects is packaged
+  # beside it, since pdf-color names a version of it that may not be on
+  # crates.io yet, and cargo verifies the package against that one.
+  color-package:
+    name: Color packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just color-package
+
   # pdf-objects' and the filters' public API against their version on
   # crates.io, as the tokenizer's job holds its own, with the same pinned
   # tool on the same pinned Rust. Each is an alpha, which the tool takes to

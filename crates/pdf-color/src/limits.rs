@@ -2,8 +2,8 @@
 
 /// The caps on reading a color space: past one, what's left of it doesn't
 /// load, as what doesn't load in the file wouldn't. A caller sets them on a
-/// copy of [`Limits::DEFAULT`] (`limits.space_depth = 16`, say), as more may
-/// come.
+/// copy of [`Limits::DEFAULT`] (`limits.space_depth = 16`, say): it's
+/// `#[non_exhaustive]`, as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {

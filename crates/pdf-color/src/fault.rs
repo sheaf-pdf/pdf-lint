@@ -13,7 +13,13 @@ use pdf_objects::ObjectId;
 /// A place where a color space isn't what ISO 32000-2 says it is. Each names
 /// its clause, but for the caps, which are ours. What a space holds where it's
 /// at fault is on its field: none, unless it says otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+///
+/// `#[non_exhaustive]`, as faults are found in files rather than designed,
+/// so one can join it in a minor release, a match on it needing a wildcard.
+/// Its variants aren't, each field the whole of what it says (a position, an
+/// object), so one is built by a literal, as a test compares with it, and a
+/// fault that says more joins as a variant of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// A value that's neither a name nor an array that begins with one

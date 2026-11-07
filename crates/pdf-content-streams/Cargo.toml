@@ -18,7 +18,7 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 memchr = { version = "2.8", default-features = false }
 # The components of a color space, by which an unfiltered inline image is
 # sized: an image's own array, and what a resources dictionary names.
-pdf-color = { path = "../pdf-color", version = "0.1" }
+pdf-color.workspace = true
 # Flate and LZW data in an inline image decoded to find where it ends, as
 # PDFium decodes it: Flate on zlib-rs, zlib's inflate in Rust, as PDFium's
 # end is what zlib read; miniz_oxide not compiled for it.

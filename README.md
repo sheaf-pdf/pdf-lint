@@ -54,9 +54,10 @@ crate, 1.89, with and without each one's features. Its `test-pdfium` needs
 Python 3, and fetches the pinned PDFium build from GitHub unless
 `PDF_LINT_PDFIUM` names a library: [oracle/README.md](oracle/README.md)
 says how the crates are held to PDFium. Its `tokenizer-package`,
-`objects-package`, `filters-package` and `crypt-package` package the
-tokenizer, pdf-objects, the filters and pdf-crypt as a publish would
-(`cargo publish --dry-run`), which asks the registry over the network.
+`objects-package`, `filters-package`, `crypt-package` and `color-package`
+package the tokenizer, pdf-objects, the filters, pdf-crypt and pdf-color as
+a publish would (`cargo publish --dry-run`), which asks the registry over
+the network.
 `just tokenizer-semver`, `just objects-semver` and `just filters-semver`,
 which `ci` leaves out, check the tokenizer's, pdf-objects' and the filters'
 public API against the version published on crates.io (an alpha, while its

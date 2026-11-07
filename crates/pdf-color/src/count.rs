@@ -39,14 +39,12 @@ const MOST_UNDERLYING: u32 = 16;
 /// PostScript function that doesn't parse count as loading, where PDFium's
 /// don't. Past a cap of [`Limits`], a branch doesn't load.
 ///
-/// An object that's [`Why::Damaged`] isn't there, as it isn't for PDFium; any
-/// other failure to read one is the `Err`, whole.
-///
 /// A count where a cap was met can't be told from one of a space that doesn't
 /// load: [`counted`] says which it is.
 ///
 /// ```
-/// use pdf_color::{Limits, Object, ObjectId, components};
+/// use pdf_color::pdf_objects::{Object, ObjectId};
+/// use pdf_color::{Limits, components};
 ///
 /// let file: Vec<Object> = vec![
 ///     Object::from("DeviceCMYK"),
@@ -64,6 +62,13 @@ const MOST_UNDERLYING: u32 = 16;
 /// // A reference to nothing.
 /// assert_eq!(count(3), Ok(None));
 /// ```
+///
+/// # Errors
+///
+/// [`Unreadable`], whole, for any failure to read an object but one that's
+/// [`Why::Damaged`]: an object past a reader's cap, locked, or a source that
+/// didn't give its bytes. An object that's damaged isn't there, as it isn't
+/// for PDFium.
 pub fn components<'o, R: Resolve<'o>>(
     objects: R,
     value: &'o Object,
@@ -73,7 +78,10 @@ pub fn components<'o, R: Resolve<'o>>(
 }
 
 /// What [`counted`] gives: a space's count, and whether it's sure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `#[non_exhaustive]`, so it can say more of a count in a minor release: it's
+/// read by its fields, and made only by this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Counted {
     /// What [`components`] gives.
@@ -88,7 +96,8 @@ pub struct Counted {
 /// be sure of, or read it again under larger caps.
 ///
 /// ```
-/// use pdf_color::{Limits, Object, ObjectId, counted};
+/// use pdf_color::pdf_objects::{Object, ObjectId};
+/// use pdf_color::{Limits, counted};
 ///
 /// let nested = Object::from(vec![Object::from(vec![Object::from("DeviceGray")])]);
 /// let nothing = |_: ObjectId| None;
@@ -100,6 +109,10 @@ pub struct Counted {
 /// let cut = counted(nothing, &nested, &limits).unwrap();
 /// assert_eq!((cut.count, cut.capped), (Some(3), true));
 /// ```
+///
+/// # Errors
+///
+/// As [`components`] fails.
 pub fn counted<'o, R: Resolve<'o>>(
     objects: R,
     value: &'o Object,

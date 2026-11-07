@@ -313,7 +313,10 @@ pub type Names<'o> = Result<Option<Vec<(&'o [u8], Result<Option<u32>, Why>)>>, W
 
 /// `resources` read for what it names: the same by [`Spaces::iter`] as by
 /// [`Spaces::get`], each once and none with an empty key, and at most four
-/// objects looked up to find them.
+/// objects looked up to find them; and the first of them counted by
+/// [`Spaces::components`], the same names in the same order, each with what
+/// [`counted`] gives for its value, or a failure for the same reason, its
+/// upper bound [`Spaces::iter`]'s.
 fn a_resources<'o, R: Resolve<'o> + Copy>(objects: R, resources: Option<&'o Object>) -> Names<'o> {
     let asked = Cell::new(0);
     let counting = Counting {
@@ -325,24 +328,33 @@ fn a_resources<'o, R: Resolve<'o> + Copy>(objects: R, resources: Option<&'o Obje
     let Some(spaces) = spaces? else {
         return Ok(None);
     };
-    let mut counted = Vec::new();
     for (at, named) in spaces.iter().enumerate() {
         assert_eq!(spaces.get(named.key), Some(named), "{:?}", named.key);
         assert!(!named.key.is_empty());
         let first = spaces.iter().position(|other| other.key == named.key);
         assert_eq!(first, Some(at));
-        if at < VALUES {
-            let count = components(objects, named.value, &Limits::DEFAULT);
-            counted.push((named.key, count.map_err(|unreadable| unreadable.why)));
-        }
     }
     assert_eq!(spaces.get(b""), None);
-    Ok(Some(counted))
+
+    let each = spaces.components(objects, &Limits::DEFAULT);
+    assert_eq!(each.size_hint().1, spaces.iter().size_hint().1);
+    let mut names = spaces.iter().take(VALUES);
+    let mut counts = Vec::new();
+    for (named, read) in each.take(VALUES) {
+        assert_eq!(Some(named), names.next(), "{:?}", named.key);
+        let read = read.map_err(|unreadable| unreadable.why);
+        let alone = counted(objects, named.value, &Limits::DEFAULT);
+        let alone = alone.map_err(|unreadable| unreadable.why);
+        assert_eq!(read, alone, "{:?}", named.key);
+        counts.push((named.key, read.map(|read| read.count)));
+    }
+    assert_eq!(names.next(), None, "a name not counted");
+    Ok(Some(counts))
 }
 
 /// The fuzz target's body for what's held in memory: `data` as objects
 /// ([`values`]), the first of them each counted, each read as a typed space, and
-/// each read as resources.
+/// each read as resources, its names counted as they're given.
 pub fn counts(data: &[u8]) {
     let objects = values(data);
     let resolve = |id: ObjectId| objects.get(&id);

@@ -823,27 +823,101 @@ fn a_name_says_what_colorant_it_is() {
 #[test]
 fn a_family_says_what_it_is() {
     let all = [
-        (Family::DeviceGray, (true, false, false)),
-        (Family::DeviceRGB, (true, false, false)),
-        (Family::DeviceCMYK, (true, false, false)),
-        (Family::CalGray, (false, true, false)),
-        (Family::CalRGB, (false, true, false)),
-        (Family::Lab, (false, true, false)),
-        (Family::ICCBased, (false, true, false)),
-        (Family::Indexed, (false, false, true)),
-        (Family::Pattern, (false, false, true)),
-        (Family::Separation, (false, false, true)),
-        (Family::DeviceN, (false, false, true)),
+        (Family::DeviceGray, "DeviceGray", (true, false, false)),
+        (Family::DeviceRGB, "DeviceRGB", (true, false, false)),
+        (Family::DeviceCMYK, "DeviceCMYK", (true, false, false)),
+        (Family::CalGray, "CalGray", (false, true, false)),
+        (Family::CalRGB, "CalRGB", (false, true, false)),
+        (Family::Lab, "Lab", (false, true, false)),
+        (Family::ICCBased, "ICCBased", (false, true, false)),
+        (Family::Indexed, "Indexed", (false, false, true)),
+        (Family::Pattern, "Pattern", (false, false, true)),
+        (Family::Separation, "Separation", (false, false, true)),
+        (Family::DeviceN, "DeviceN", (false, false, true)),
     ];
-    for (family, (device, cie, special)) in all {
-        assert_eq!(Family::of(family.name().as_bytes()), Some(family));
+    for (family, written, (device, cie, special)) in all {
+        assert_eq!(family.name(), written);
+        assert_eq!(Family::of(written.as_bytes()), Some(family), "{written}");
         assert_eq!(family.is_device(), device);
         assert_eq!(family.is_cie(), cie);
         assert_eq!(family.is_special(), special);
     }
-    for name in ["I", "G", "RGB", "CMYK", "CalCMYK", "Devi", ""] {
+    // A name is read whole: an inline image's abbreviation, the first four
+    // bytes PDFium tells a family by, and a name longer than a family's are
+    // none.
+    let abbreviated = ["I", "G", "RGB", "CMYK"];
+    let otherwise = ["CalCMYK", "Devi", "DeviceGrayX", "devicegray", ""];
+    for name in abbreviated.into_iter().chain(otherwise) {
         assert_eq!(Family::of(name.as_bytes()), None, "{name}");
     }
+}
+
+#[test]
+fn what_a_name_says_can_be_had_in_a_constant() {
+    const FAMILIES: [Option<Family>; 14] = [
+        Family::of(b"DeviceGray"),
+        Family::of(b"DeviceRGB"),
+        Family::of(b"DeviceCMYK"),
+        Family::of(b"CalGray"),
+        Family::of(b"CalRGB"),
+        Family::of(b"Lab"),
+        Family::of(b"ICCBased"),
+        Family::of(b"Indexed"),
+        Family::of(b"Pattern"),
+        Family::of(b"Separation"),
+        Family::of(b"DeviceN"),
+        Family::of(b"G"),
+        Family::of(b"Devi"),
+        Family::of(b"DeviceGrayX"),
+    ];
+    const NAME: &str = Family::CalGray.name();
+    const KINDS: [bool; 3] = [
+        Family::Lab.is_device(),
+        Family::Lab.is_cie(),
+        Family::Lab.is_special(),
+    ];
+    const FAMILY: Family = Space::DeviceCMYK.family();
+    const COLORANTS: [Colorant; 7] = [
+        Colorant::of(b"Cyan"),
+        Colorant::of(b"Magenta"),
+        Colorant::of(b"Yellow"),
+        Colorant::of(b"Black"),
+        Colorant::of(b"All"),
+        Colorant::of(b"None"),
+        Colorant::of(b"Gold"),
+    ];
+    const PROCESS: [bool; 2] = [Colorant::Black.is_process(), Colorant::All.is_process()];
+
+    let families = [
+        Family::DeviceGray,
+        Family::DeviceRGB,
+        Family::DeviceCMYK,
+        Family::CalGray,
+        Family::CalRGB,
+        Family::Lab,
+        Family::ICCBased,
+        Family::Indexed,
+        Family::Pattern,
+        Family::Separation,
+        Family::DeviceN,
+    ];
+    let mut expected: Vec<Option<Family>> = families.into_iter().map(Some).collect();
+    expected.extend([None, None, None]);
+    assert_eq!(FAMILIES[..], expected[..]);
+    assert_eq!(NAME, "CalGray");
+    assert_eq!(KINDS, [false, true, false]);
+    assert_eq!(FAMILY, Family::DeviceCMYK);
+    let colorants = [
+        Colorant::Cyan,
+        Colorant::Magenta,
+        Colorant::Yellow,
+        Colorant::Black,
+        Colorant::All,
+        Colorant::None,
+        Colorant::Spot,
+    ];
+    assert_eq!(COLORANTS, colorants);
+    assert_eq!(PROCESS, [true, false]);
 }
 
 #[test]
