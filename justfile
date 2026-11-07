@@ -34,7 +34,7 @@ default:
 
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -307,6 +307,11 @@ crypt-package: (_package "pdf-crypt")
 # Package pdf-color as a publish would, pdf-objects beside it while the
 # version it names isn't published; `_package` says what's checked.
 color-package: (_package "pdf-color" "pdf-objects")
+
+# Package pdf-structure as a publish would; `_package` says what's checked.
+# Every crate of the family it depends on is on crates.io at the version it
+# names, so the package is verified against those.
+structure-package: (_package "pdf-structure")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
