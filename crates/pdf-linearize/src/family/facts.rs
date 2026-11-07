@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_semantics::pages::pages;
 use pdf_semantics::{Limits as TreeLimits, Rules, catalog};
-use pdf_structure::bytes::{
+use pdf_structure::read::{
     self, ByteSource, Reading, SectionRow, SectionRows, WithReading, XrefEntry,
 };
 use pdf_structure::{Document, Encryption, XrefKind};
@@ -40,7 +40,7 @@ fn raw(value: Option<&Object>) -> Raw {
 }
 
 /// The dictionary's keys, `/H` being an array whatever's in it.
-fn first_object(read: bytes::FirstObject) -> FirstObject {
+fn first_object(read: read::FirstObject) -> FirstObject {
     let (at, end) = (read.at as u64, read.end as u64);
     let mut first = FirstObject::new(at, end, read.id.number, read.id.generation);
     first.stream = matches!(read.object.value(), Value::Stream(_));
@@ -113,7 +113,7 @@ fn listed_at(sections: &[SectionRows], at: u64) -> Option<ObjectId> {
 fn end_of<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<Option<u64>, Error> {
     match reading.get(id) {
         Ok(_) => Ok(reading.record(id).map(|record| record.at.end as u64)),
-        Err(bytes::Error::Io(why)) => Err(Error::Read(bytes::Error::Io(why))),
+        Err(read::Error::Io(why)) => Err(Error::Read(read::Error::Io(why))),
         Err(_) => Ok(None),
     }
 }
@@ -176,14 +176,14 @@ fn hint<S: ByteSource>(
 
 /// Stream `id`'s data, as far as it decodes, as any reader would take it.
 fn decoded<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<HintData, Error> {
-    Ok(match reading.decoded(id) {
+    Ok(match reading.decoded_within(id, reading.limits().stream) {
         Ok(data) => HintData::Decoded(data),
-        Err(bytes::Error::Io(why)) => return Err(Error::Read(bytes::Error::Io(why))),
-        Err(bytes::Error::NotAStream { .. }) => HintData::NotAStream,
-        Err(bytes::Error::Locked | bytes::Error::Encrypted | bytes::Error::Unsupported) => {
+        Err(read::Error::Io(why)) => return Err(Error::Read(read::Error::Io(why))),
+        Err(read::Error::NotAStream { .. }) => HintData::NotAStream,
+        Err(read::Error::Locked | read::Error::Encrypted | read::Error::Unsupported) => {
             HintData::Locked
         }
-        Err(bytes::Error::Decode(error)) if !error.data.is_empty() => HintData::Decoded(error.data),
+        Err(read::Error::Decode(error)) if !error.data.is_empty() => HintData::Decoded(error.data),
         Err(_) => HintData::Undecodable,
     })
 }
@@ -378,7 +378,7 @@ mod tests {
     use std::ops::Range;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use pdf_structure::bytes::Options as Open;
+    use pdf_structure::read::Options as Open;
 
     use super::*;
 
@@ -521,7 +521,7 @@ mod tests {
         source.1.store(true, Ordering::Relaxed);
         assert!(matches!(
             decoded(&reading, ObjectId::new(2, 0)),
-            Err(Error::Read(bytes::Error::Io(_)))
+            Err(Error::Read(read::Error::Io(_)))
         ));
     }
 

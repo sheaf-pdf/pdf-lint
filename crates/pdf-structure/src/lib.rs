@@ -11,7 +11,7 @@
 //! encrypted file's objects encrypted as they're written.
 //!
 //! - **What it read, in one value:** a [`Document`], a [`Source`] read
-//!   whole: each object its cross-references list, kept with where it was
+//!   whole ([`read::document`]): each object its cross-references list, kept with where it was
 //!   read while it's as read, or why it doesn't read ([`Unread`]); the
 //!   [`Trailer`], and why it isn't the newest section's when it isn't;
 //!   the header's version; the file's newest incremental [`Update`], and
@@ -21,7 +21,8 @@
 //!   added to, its new objects numbered past every number the file lists;
 //!   its references followed, and what its trailer reaches walked, the
 //!   rest pruned.
-//! - **Or read on demand:** a [`Reading`], opened, then each object read
+//! - **Or read on demand:** a [`Reading`], opened under [`Options`]
+//!   ([`Reading::open`], the one way in), then each object read
 //!   when it's first asked for, kept or not, from any thread, each object
 //!   stream decoded once, a [`Source`] of what it has read so far; read
 //!   whole, it's the [`Document`], by the same code, the reading taken or
@@ -42,15 +43,16 @@
 //!   the objects read from an object stream placed in its decoded data,
 //!   which the [`Document`] keeps.
 //! - **Encrypted files opened** with the passwords given, each a
-//!   [`Password`] as typed, tried in each of its encodings
-//!   ([`Reading::open_with`], [`bytes::read_opened`]); or opened, then
-//!   unlocked with the bytes to try ([`Reading::unlock`], [`Encoded`]),
-//!   through pdf-crypt's standard security handler: object streams
-//!   decrypted before they're decoded, strings decrypted where they are;
-//!   [`Encryption`] says whether the file opened, and by which password.
-//!   What's decrypted and what's left as written is listed in [`bytes`].
+//!   [`Password`](pdf_crypt::Password) as typed, tried in each of its
+//!   encodings ([`Options::passwords`]); or opened, then unlocked with the
+//!   bytes to try ([`Reading::unlock`],
+//!   [`Encoded`](pdf_crypt::Encoded)), through pdf-crypt's standard
+//!   security handler: object streams decrypted before they're decoded,
+//!   strings decrypted where they are; [`Encryption`] says whether the file
+//!   opened, and by which password. What's decrypted and what's left as
+//!   written is listed in [`read`].
 //! - **A revision before an update** read as the file was then
-//!   ([`bytes::read_from`]), or the file as a revision was written, its
+//!   ([`Options::section`]), or the file as a revision was written, its
 //!   bytes up to the revision's end ([`Revision::end`]) read as a file of
 //!   their own ([`Reading::prefix`], [`Prefix`]).
 //! - **Whole files and updates written** ([`write::full`],
@@ -85,7 +87,6 @@
 //! handler, its passwords and its refusals are pdf-crypt's, re-exported as
 //! [`pdf_crypt`].
 
-pub mod bytes;
 mod crypt;
 mod filter;
 #[cfg(any(test, fuzzing))]
@@ -95,18 +96,18 @@ pub mod fuzz;
 // and a second reader.
 #[cfg(test)]
 mod qpdf;
+pub mod read;
 pub mod source;
 pub mod write;
 
-#[cfg(any(unix, windows))]
-pub use bytes::FileBytes;
-pub use bytes::{
-    ByteSource, Error, Identity, Limits, Options, Prefix, Reading, SourceId, WithReading,
-};
 pub use pdf_crypt;
-pub use pdf_crypt::{Encoded, Encoding, Password};
 pub use pdf_filters;
 pub use pdf_objects;
+#[cfg(any(unix, windows))]
+pub use read::FileBytes;
+pub use read::{
+    ByteSource, Error, Identity, Limits, Options, Prefix, Reading, SourceId, WithReading,
+};
 pub use source::{
     DataExtent, Document, Encryption, Facts, Origin, Record, Revision, RevisionEnd, Source,
     Trailer, Unread, Update, Warning, XrefKind,

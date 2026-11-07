@@ -17,10 +17,10 @@ use pdf_objects::serialize;
 use super::copy::{Copying, as_read, written};
 use super::crypt::Place;
 use super::{
-    Bodies, Body, Encryptor, Entry, Error, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
+    Body, Encryptor, Entry, Error, Given, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
     Section, Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
 };
-use crate::bytes::{ByteSource, Reading, SourceId};
+use crate::read::{ByteSource, Reading, SourceId};
 use crate::source::XrefKind;
 
 /// The file an update goes after, as its last section describes it. Made
@@ -398,7 +398,7 @@ fn appended(
     // bodies and the reading, by the numbers they're given at, the
     // document's metadata stream found there and kept as its number
     // written.
-    let resolve = encryptor.map(|_| Bodies::new(bodies, from));
+    let resolve = encryptor.map(|_| Given::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
         (Some(e), Some(resolve)) => Some(e.encrypting_at(&base.trailer, resolve, to)?),
         _ => None,

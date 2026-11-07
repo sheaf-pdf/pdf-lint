@@ -20,7 +20,7 @@ use pdf_objects::serialize;
 use super::{Deflate, Error, NUMBERS, usable};
 
 /// What a section says of an object number, in the words the reader's
-/// entries say it in ([`XrefEntry`](crate::bytes::XrefEntry)): ISO 32000-2
+/// entries say it in ([`XrefEntry`](crate::read::XrefEntry)): ISO 32000-2
 /// leaves room for other kinds of entry (7.5.8.3), so there may be more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

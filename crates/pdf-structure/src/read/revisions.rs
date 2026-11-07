@@ -17,7 +17,7 @@ use crate::fuzz::{Counted, open};
 /// Where each of `file`'s revisions ends, the first first, as read whole.
 fn ends(file: &[u8]) -> Vec<Option<(usize, usize)>> {
     let pair = |end: RevisionEnd| (end.eof(), end.line());
-    read(file)
+    document(file, &Options::DEFAULT)
         .revisions
         .iter()
         .map(|r| r.end.map(pair))
@@ -163,7 +163,7 @@ fn a_revision_whose_startxref_isnt_followed_by_eof_alone_has_no_end() {
     for after in afters {
         let (file, _) = after_offset(after);
         let what = String::from_utf8_lossy(after);
-        let doc = read(&file);
+        let doc = document(&file, &Options::DEFAULT);
         assert!(doc.trailer.unwritten.is_none(), "{what:?}");
         assert_eq!(ends(&file), [None], "{what:?}");
     }
@@ -175,7 +175,13 @@ fn a_revision_whose_startxref_isnt_followed_by_eof_alone_has_no_end() {
     for tail in tails {
         let file = from_startxref(tail);
         let what = String::from_utf8_lossy(&file[file.len() - 20..]).into_owned();
-        assert!(read(&file).trailer.unwritten.is_none(), "{what:?}");
+        assert!(
+            document(&file, &Options::DEFAULT)
+                .trailer
+                .unwritten
+                .is_none(),
+            "{what:?}"
+        );
         assert_eq!(ends(&file), [None], "{what:?}");
     }
     // White-space alone between them, on lines of any end, ends it.
@@ -195,11 +201,11 @@ fn each_kind_of_section_ends_its_revision_at_the_eof_after_it() {
         hybrid(),
     ];
     for file in files {
-        let doc = read(&file);
+        let doc = document(&file, &Options::DEFAULT);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(ends(&file), [Some((file.len() - 1, file.len()))]);
     }
-    let doc = read(&hybrid());
+    let doc = document(&hybrid(), &Options::DEFAULT);
     assert!(doc.facts.hybrid);
 }
 
@@ -211,12 +217,12 @@ fn each_kind_of_section_ends_its_revision_at_the_eof_after_it() {
 #[test]
 fn a_linearized_revision_ends_where_its_main_section_does() {
     let (file, first) = linearized();
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
     assert_eq!(doc.facts.sections, 2);
     assert_eq!(ends(&file), [Some((file.len() - 1, file.len()))]);
     let (with, eof) = linearized_with_a_first_eof();
-    let doc = read(&with);
+    let doc = document(&with, &Options::DEFAULT);
     assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
     assert_eq!(doc.facts.sections, 2);
     assert_ne!(eof, with.len());
@@ -239,7 +245,7 @@ fn a_linearized_revision_ends_where_its_main_section_does() {
 #[test]
 fn each_revision_ends_at_its_own_eof_however_its_read() {
     let (file, [one, two, three]) = three_revisions();
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
     let expected = [
         Some((one - 1, one)),
@@ -248,7 +254,13 @@ fn each_revision_ends_at_its_own_eof_however_its_read() {
     ];
     assert_eq!(ends(&file), expected);
     for k in 0..3 {
-        let as_of = read_from(&file, doc.revisions[k].at);
+        let as_of = document(
+            &file,
+            &Options {
+                section: Some(doc.revisions[k].at),
+                ..Options::DEFAULT
+            },
+        );
         assert_eq!(as_of.revisions, doc.revisions[..=k], "{k}");
         let mut options = Options::DEFAULT;
         options.section = Some(doc.revisions[k].at);
@@ -266,7 +278,7 @@ fn each_revision_ends_at_its_own_eof_however_its_read() {
     let file = fixture::file("1.7", &clean(), root(), Xref::Table);
     let at = rfind(&file, b"startxref").unwrap();
     let scanned = [&file[..at], b"startxreF", &file[at + 9..]].concat();
-    let doc = read(&scanned);
+    let doc = document(&scanned, &Options::DEFAULT);
     assert!(doc.trailer.unwritten.is_some());
     assert!(doc.revisions.is_empty());
 }
@@ -455,7 +467,14 @@ fn an_encrypted_files_prefix_is_opened_by_its_readings_handler() {
         let file = encrypted_updated(&base, "0123456789abcdef");
         for (password, owner) in [("user", false), ("owner", true)] {
             let passwords = [NAIVE, Password(password)];
-            let reading = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
+            let reading = Reading::open(
+                &file[..],
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
             let by = Some((1, Encoding::Utf8));
             let opened = Encryption::Opened { owner, by };
             assert_eq!(reading.encryption(), &opened, "{kind:?}");
@@ -497,26 +516,54 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     };
     // Another first /ID element.
     let file = encrypted_updated(&base, "fedcba9876543210");
-    let reading = Reading::open_with(&file[..], &user, &Options::DEFAULT).unwrap();
+    let reading = Reading::open(
+        &file[..],
+        &Options {
+            passwords: &user,
+            ..Options::DEFAULT
+        },
+    )
+    .unwrap();
     assert_eq!(reading.encryption(), &opened);
     assert_eq!(reading.revisions()[0].end, RevisionEnd::new(end - 1, end));
     let prefix = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(prefix.encryption(), &Encryption::Locked);
     // Another encryption dictionary: its permissions another.
     let file = encryption_updated(&base, "/P -4", "/P -8", &[]);
-    let reading = Reading::open_with(&file[..], &user, &Options::DEFAULT).unwrap();
+    let reading = Reading::open(
+        &file[..],
+        &Options {
+            passwords: &user,
+            ..Options::DEFAULT
+        },
+    )
+    .unwrap();
     assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
     let prefix = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(prefix.encryption(), &Encryption::Locked);
     // The same dictionary written again: keyed.
     let file = encryption_updated(&base, "/P -4", "/P -4", &[]);
-    let reading = Reading::open_with(&file[..], &user, &Options::DEFAULT).unwrap();
+    let reading = Reading::open(
+        &file[..],
+        &Options {
+            passwords: &user,
+            ..Options::DEFAULT
+        },
+    )
+    .unwrap();
     let prefix = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(prefix.encryption(), &opened);
     // A locked reading's: locked, and unlocked by the password as any is.
     let file = encrypted_updated(&base, "0123456789abcdef");
     let wrong = [Password("wrong")];
-    let reading = Reading::open_with(&file[..], &wrong, &Options::DEFAULT).unwrap();
+    let reading = Reading::open(
+        &file[..],
+        &Options {
+            passwords: &wrong,
+            ..Options::DEFAULT
+        },
+    )
+    .unwrap();
     assert_eq!(reading.encryption(), &Encryption::Locked);
     let prefix = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(prefix.encryption(), &Encryption::Locked);
@@ -530,7 +577,14 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     let file = encrypted_updated(&base, "0123456789abcdef");
     let end = base.len();
     let owner = [Password("owner")];
-    let reading = Reading::open_with(&file[..], &owner, &Options::DEFAULT).unwrap();
+    let reading = Reading::open(
+        &file[..],
+        &Options {
+            passwords: &owner,
+            ..Options::DEFAULT
+        },
+    )
+    .unwrap();
     assert_eq!(
         reading.encryption(),
         &Encryption::opened(true).by(Some((0, Encoding::Utf8)))

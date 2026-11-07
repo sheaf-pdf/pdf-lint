@@ -4529,9 +4529,9 @@ mod reading {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pdf_fixtures::fixture::{self, Body, Xref};
-    use pdf_structure::Password;
-    use pdf_structure::bytes::{ByteSource, Options, Reading, WithReading};
+    use pdf_structure::pdf_crypt::Password;
     use pdf_structure::pdf_crypt::writer::{Kind, Settings};
+    use pdf_structure::read::{ByteSource, Options, Reading, WithReading};
 
     use super::*;
 
@@ -4585,7 +4585,7 @@ mod reading {
         assert_eq!(font.err(), Some(Error::TooLarge));
         assert_eq!(budget, PLAIN.len() - 1);
 
-        let with = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let with = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         let dict = (&with).resolve(ObjectId::new(1, 0)).unwrap();
         let dict = dict.as_dict().unwrap();
         let read =
@@ -4652,7 +4652,9 @@ mod reading {
         );
         assert_eq!(budget, 100);
 
-        let opened = Reading::open_with(&file[..], &[Password("user")], &Options::DEFAULT).unwrap();
+        let mut options = Options::DEFAULT;
+        options.passwords = &[Password("user")];
+        let opened = Reading::open(&file[..], &options).unwrap();
         let mut budget = 100;
         let font = font_of_reading(&opened, &mut budget, &mut Vec::new()).unwrap();
         assert_eq!(font.code_text(0x41).as_deref(), Some("A"));

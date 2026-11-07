@@ -48,7 +48,7 @@ use pdf_objects::parse::Parser;
 mod api {
     use pdf_objects::object::{Dict, ObjectId};
     use pdf_structure::Document;
-    use pdf_structure::bytes::{Options, Reading};
+    use pdf_structure::read::{Options, Reading};
     pub use pdf_structure::write::Body;
     use pdf_structure::write::{self, Base};
 
@@ -62,7 +62,7 @@ mod api {
 
     /// `file` read whole, as a document, by default.
     pub fn whole(file: &[u8]) -> Document {
-        pdf_structure::bytes::read(file)
+        pdf_structure::read::document(file, &Options::DEFAULT)
     }
 
     /// `reading` read whole, as a document whose objects are its own, which

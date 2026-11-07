@@ -79,7 +79,7 @@
 //!   ([`Encrypting`]): with the object's key, AES's IV derived from `n g
 //!   obj` and the data, so the same object encrypts to the same bytes on
 //!   every save. What it leaves in the clear is the list the reader
-//!   decrypts by, one list both ways (see [`bytes`](crate::bytes), "What's
+//!   decrypts by, one list both ways (see [`read`](crate::read), "What's
 //!   encrypted"). Under RC4 a changed object written again at its number
 //!   and generation is encrypted with the keystream its earlier version
 //!   was, which leaks what changed to one who holds both (pdf-crypt's
@@ -103,8 +103,9 @@ pub(crate) mod tests;
 mod xref;
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, btree_map};
 use std::fmt;
+use std::iter::FusedIterator;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pdf_filters::{Backend, Encoder, Level, Prediction, Unencodable};
@@ -113,12 +114,12 @@ use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::serialize::{self, Refused, Renumber};
 use pdf_objects::version::Version;
 
-use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::crypt::Get;
-use crate::source::{Document, Record, XrefKind};
+use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
+use crate::source::{Document, Held, Record, XrefKind};
 
 pub use append::{Base, update};
-pub use crypt::{Encrypting, Encryptor, Unencryptable, encryption};
+pub use crypt::{Encrypting, Encryptor, FreeNumbers, Unencryptable, encryption};
 pub use full::{document, encryption_objects, full, left_out};
 pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
 pub use parts::{Packed, Parts};
@@ -230,7 +231,7 @@ pub enum Body<'a> {
     ///    reading's file is, by an encryptor of that reading
     ///    ([`Encryptor::of`]), and the list of what's left in the clear
     ///    says the same of the object in both (see
-    ///    [`bytes`](crate::bytes), "What's encrypted"), or where neither is
+    ///    [`read`](crate::read), "What's encrypted"), or where neither is
     ///    encrypted: its strings and data are encrypted with its key. Under
     ///    a renumbering, at another number than it was read as only where
     ///    neither is encrypted, or no method of that encryptor makes a key
@@ -295,25 +296,63 @@ impl Body<'_> {
 /// reading it was read in copies, and an update after that reading's file
 /// passes over; the rest, built or changed, written anew ([`Body::New`]).
 /// The reading is the one `doc` was made of by [`Reading::to_document`]: a
-/// document read whole ([`bytes::read`](crate::bytes::read),
+/// document read whole ([`read::document`](crate::read::document),
 /// [`Reading::into_document`]) has records of a reading that's gone, which
 /// a write given another reading refuses ([`Error::Elsewhere`]), and a
 /// stream whose data no reading given holds refuses one given none
 /// ([`Error::Placed`]), until a reading of its file opened again takes them
 /// as its own ([`Reading::adopt`]).
-pub fn bodies(doc: &Document) -> impl DoubleEndedIterator<Item = (ObjectId, Body<'_>)> {
-    doc.objects_read().map(|(id, object, record)| {
-        let object = Cow::Borrowed(object);
-        let body = match record {
-            Some(record) => Body::Read {
-                object,
-                record: Cow::Borrowed(record),
-            },
-            None => Body::New(object),
-        };
-        (id, body)
-    })
+pub fn bodies(doc: &Document) -> Bodies<'_> {
+    Bodies {
+        held: doc.held_objects(),
+    }
 }
+
+/// A document's objects as a write's bodies, by number: what [`bodies`]
+/// gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct Bodies<'d> {
+    held: btree_map::Iter<'d, ObjectId, Held>,
+}
+
+/// The body of an object that reads, of what a document holds of `id`.
+fn body_of<'d>((&id, held): (&ObjectId, &'d Held)) -> Option<(ObjectId, Body<'d>)> {
+    let (object, record) = held.as_ref().ok()?;
+    let object = Cow::Borrowed(object);
+    let body = match record {
+        Some(record) => Body::Read {
+            object,
+            record: Cow::Borrowed(record),
+        },
+        None => Body::New(object),
+    };
+    Some((id, body))
+}
+
+impl<'d> Iterator for Bodies<'d> {
+    type Item = (ObjectId, Body<'d>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.held.find_map(body_of)
+    }
+
+    /// At most one an object left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.held.size_hint().1)
+    }
+}
+
+impl DoubleEndedIterator for Bodies<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.held.by_ref().rev().find_map(body_of)
+    }
+}
+
+impl FusedIterator for Bodies<'_> {}
 
 impl From<Object> for Body<'_> {
     fn from(object: Object) -> Self {
@@ -610,7 +649,7 @@ mod sealed {
     use pdf_objects::object::{Object, ObjectId, Span};
 
     use super::Error;
-    use crate::bytes::{SourceId, XrefEntry};
+    use crate::read::{SourceId, XrefEntry};
 
     /// What the writer reads of the reading its objects were read in.
     pub trait Reads {
@@ -681,7 +720,7 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
 
     fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error> {
         Reading::written(self, span).map_err(|why| match why {
-            crate::bytes::Error::Io(e) => Error::io(&e),
+            crate::read::Error::Io(e) => Error::io(&e),
             _ => Error::Changed(Some(id)),
         })
     }
@@ -819,7 +858,7 @@ pub enum Error {
     /// the reading the write was given read that number's stream's data,
     /// or with no reading given: its data is given as bytes instead, or the
     /// reading it was read in given, which a document read whole
-    /// ([`bytes::read`](crate::bytes::read)) has dropped
+    /// ([`read::document`](crate::read::document)) has dropped
     /// ([`Reading::to_document`] keeps it), or a reading of its file opened
     /// again that took the document ([`Reading::adopt`]).
     #[error("stream {0}'s data is where no stream of the reading given read it at that number")]
@@ -1187,16 +1226,16 @@ fn fresh(from: u32, passed: impl Fn(u32) -> bool) -> u32 {
 
 /// What resolves a reference in what a write writes: the objects it's
 /// given, then the reading they were read in.
-struct Bodies<'b> {
+struct Given<'b> {
     bodies: &'b [(ObjectId, Body<'b>)],
     index: HashMap<ObjectId, usize>,
     from: Option<&'b dyn ReadFrom>,
 }
 
-impl<'b> Bodies<'b> {
-    fn new(bodies: &'b [(ObjectId, Body<'b>)], from: Option<&'b dyn ReadFrom>) -> Bodies<'b> {
+impl<'b> Given<'b> {
+    fn new(bodies: &'b [(ObjectId, Body<'b>)], from: Option<&'b dyn ReadFrom>) -> Given<'b> {
         let index = (bodies.iter().enumerate()).map(|(i, (id, _))| (*id, i));
-        Bodies {
+        Given {
             bodies,
             index: index.collect(),
             from,
@@ -1204,7 +1243,7 @@ impl<'b> Bodies<'b> {
     }
 }
 
-impl<'b> Resolve<'b> for Bodies<'b> {
+impl<'b> Resolve<'b> for Given<'b> {
     fn resolve(&self, id: ObjectId) -> Option<&'b Object> {
         match self.index.get(&id) {
             Some(&i) => Some(self.bodies[i].1.object()),

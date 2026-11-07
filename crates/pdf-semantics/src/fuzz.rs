@@ -863,7 +863,7 @@ pub fn fixtures() -> Vec<Vec<u8>> {
 mod tests {
     use pdf_fixtures::fixture::{self, Xref};
     use pdf_objects::dict;
-    use pdf_structure::bytes::{Options, Reading};
+    use pdf_structure::read::{Options, Reading};
 
     use super::*;
 
@@ -979,7 +979,7 @@ mod tests {
         let document = reading
             .to_document()
             .expect("bytes in memory make a document");
-        assert_eq!(over(&document, document.trailer.dict()), read);
+        assert_eq!(over(&document, document.trailer().dict()), read);
         let entries: usize = read.trees.iter().map(|walk| walk.entries.len()).sum();
         let pages = read.pages.iter().flatten().flatten().map(Pages::len);
         entries + pages.sum::<usize>()

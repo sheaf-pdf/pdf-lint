@@ -4,9 +4,10 @@
 //! of what's left in the clear that the reader decrypts by.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, btree_map};
 use std::convert::Infallible;
 use std::fmt;
+use std::iter::FusedIterator;
 
 use pdf_crypt::rand_core::CryptoRng;
 use pdf_crypt::{Fault, Handler, Method, Protection, Unusable};
@@ -15,16 +16,16 @@ use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 use pdf_objects::serialize::{self, Encrypt, Renumber};
 
 use super::{Error, Numbering};
-use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::crypt::{self, List, Stream};
 use crate::filter;
+use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::source::Encryption;
 
 /// How a written file is encrypted: a security handler and its key, a
 /// reading's or a new file's; its encryption dictionary as it's written,
 /// and where the file it was read from had it; the `/ID[0]` the key is
 /// made from; and what it leaves in the clear, the list the reader
-/// decrypts by (see [`bytes`](crate::bytes), "What's encrypted"); and,
+/// decrypts by (see [`read`](crate::read), "What's encrypted"); and,
 /// where its keys are made per object, the numbers the file lists free,
 /// at which nothing new is written under it ([`Encryptor::free`]). It
 /// gives out nothing of the key, its `Debug` neither; a clone clones the
@@ -98,6 +99,31 @@ impl fmt::Debug for Encryptor {
             .finish_non_exhaustive()
     }
 }
+
+/// Each number an [`Encryptor`] says the file it was read from lists free,
+/// under keys made per object, with the generation its entry gives,
+/// ascending: what [`Encryptor::free_numbers`] gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct FreeNumbers<'e> {
+    free: btree_map::Iter<'e, u32, u16>,
+}
+
+impl Iterator for FreeNumbers<'_> {
+    type Item = (u32, u16);
+
+    #[inline]
+    fn next(&mut self) -> Option<(u32, u16)> {
+        self.free.next().map(|(&n, &generation)| (n, generation))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.free.size_hint()
+    }
+}
+
+impl FusedIterator for FreeNumbers<'_> {}
 
 impl Encryptor {
     /// How `reading`'s file is encrypted, to write it encrypted as it is:
@@ -345,8 +371,10 @@ impl Encryptor {
 
     /// Each number [`Encryptor::free`] gives a generation for, with it,
     /// ascending.
-    pub fn free_numbers(&self) -> impl Iterator<Item = (u32, u16)> + '_ {
-        self.free.iter().map(|(&n, &generation)| (n, generation))
+    pub fn free_numbers(&self) -> FreeNumbers<'_> {
+        FreeNumbers {
+            free: self.free.iter(),
+        }
     }
 
     /// Whether object `id` is an encryption dictionary, or what one's
@@ -521,7 +549,7 @@ impl Encryptor {
 /// the data, as pdf-crypt's `Handler::encrypt_string` and `encrypt_stream`
 /// derive it, so the same object encrypts to the same bytes on every save
 /// and no IV serves two plaintexts. What it leaves in the clear is the list
-/// the reader decrypts by (see [`bytes`](crate::bytes), "What's
+/// the reader decrypts by (see [`read`](crate::read), "What's
 /// encrypted"): an encryption dictionary and what its entries refer to, a
 /// cross-reference stream, a signature's `/Contents`, a stream whose crypt
 /// filter is `/Identity`, and the document's metadata stream's data under

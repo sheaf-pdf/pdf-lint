@@ -91,10 +91,11 @@ use pdf_objects::object::{Object, ObjectId};
 use pdf_objects::serialize::{self, Encrypt as _};
 use pdf_objects::version::Version;
 use pdf_semantics::pages;
-use pdf_structure::bytes::{self, ByteSource, Reading};
+use pdf_structure::pdf_crypt::Password;
 use pdf_structure::pdf_filters::{self, Prediction};
+use pdf_structure::read::{self, ByteSource, Reading};
 use pdf_structure::write::{self, Deflate, Encrypting, Encryptor, Parts, ReadFrom};
-use pdf_structure::{Encryption, Password, XrefKind};
+use pdf_structure::{Encryption, XrefKind};
 
 use crate::Limits;
 use crate::layout::{self, Encoded, Layout, Piece, Stream, StreamKind, assemble};
@@ -136,7 +137,9 @@ pub struct Options<'a> {
     /// How [`linearize_bytes`] opens the file it's given: the caps it reads
     /// under and the backend it inflates with. A caller given a file it doesn't
     /// trust lowers them here; [`linearize`] takes a document already read.
-    pub read: bytes::Options,
+    /// Their passwords aren't read: [`linearize_bytes`] opens a file by those
+    /// it's given.
+    pub read: read::Options<'a>,
     /// A flag that, set while it runs, stops it: it's checked before each
     /// object and object stream, and nothing's written
     /// ([`write::Error::Stopped`]).
@@ -147,7 +150,7 @@ impl Options<'static> {
     /// A file with tables, nothing in object streams, deflated as
     /// [`Deflate::DEFAULT`] deflates, on as many threads as the machine runs,
     /// its header the document's, opening where `/OpenAction` says, under
-    /// [`Limits::DEFAULT`], read under [`bytes::Options::DEFAULT`], nothing to
+    /// [`Limits::DEFAULT`], read under [`read::Options::DEFAULT`], nothing to
     /// stop it.
     pub const DEFAULT: Options<'static> = Options {
         kind: XrefKind::Table,
@@ -157,7 +160,7 @@ impl Options<'static> {
         version: None,
         first_page: FirstPage::OpenAction,
         limits: Limits::DEFAULT,
-        read: bytes::Options::DEFAULT,
+        read: read::Options::DEFAULT,
         stop: None,
     };
 }
@@ -270,7 +273,7 @@ pub enum Error {
     Write(write::Error),
     /// The file didn't read ([`linearize_bytes`]).
     #[error("{0}")]
-    Read(bytes::Error),
+    Read(read::Error),
 }
 
 /// `doc`, as a linearized file, at the end of `out`: every object it reaches
@@ -332,7 +335,8 @@ fn lapped(
 }
 
 /// `bytes`, read and written again as a linearized file: `passwords` as
-/// [`Reading::open_with`] tries them, on any reading that needs one, and an
+/// [`Reading::open`] tries them ([`read::Options::passwords`]), in the
+/// place of any `options.read` gives, on any reading that needs one, and an
 /// encrypted file written encrypted as it was ([`Encryptor::of`]), so every
 /// number reused under its keys where they're made per object (the module's
 /// "Encrypted"). Refused as [`linearize`] refuses, and where it doesn't read
@@ -343,7 +347,9 @@ pub fn linearize_bytes(
     passwords: &[Password],
     options: &Options<'_>,
 ) -> Result<Vec<u8>, Error> {
-    let reading = Reading::open_with(bytes, passwords, &options.read).map_err(Error::Read)?;
+    let mut read = options.read;
+    read.passwords = passwords;
+    let reading = Reading::open(bytes, &read).map_err(Error::Read)?;
     let doc = reading.to_document().map_err(Error::Read)?;
     let encryptor = Encryptor::of(&reading).map_err(|why| match why {
         write::Error::Locked => Error::Locked,
@@ -377,7 +383,7 @@ fn file(
         (XrefKind::Stream, _) => Kind::Stream,
         _ => Kind::Table,
     };
-    match &doc.encryption {
+    match &doc.encryption() {
         Encryption::Locked | Encryption::Plain => return Err(Error::Locked),
         Encryption::Unsupported(why) => {
             return Err(Error::Write(write::Error::Unsupported(why.clone())));
@@ -421,7 +427,7 @@ fn file(
         let lengths = bodies(out, &prepared, &plan, containers, parts, now, options)?;
         lap("bodies");
 
-        let given = doc.trailer.dict();
+        let given = doc.trailer().dict();
         let kept = now.and_then(Encryptor::first_id).map(<[u8]>::to_vec);
         let kept = kept.or_else(|| write::first_id(given));
         let id = write::file_id(kept, now.is_some(), &out[start..]);
@@ -439,7 +445,7 @@ fn file(
         }
         let trailer = written_entries(&trailer)?;
         let version = options.version.unwrap_or_else(|| {
-            let header = doc.header.unwrap_or(Version::new(1, 7));
+            let header = doc.header_version().unwrap_or(Version::new(1, 7));
             match kind {
                 Kind::Stream => header.max(Version::new(1, 5)),
                 Kind::Table => header,
@@ -484,7 +490,7 @@ impl Writing<'_, '_> {
         let now = whole.as_deref();
         // In the numbers objects are held at, as they're asked of it.
         let doc = self.doc;
-        let trailer = doc.trailer.dict();
+        let trailer = doc.trailer().dict();
         let encrypting = now
             .map(|encryptor| encryptor.encrypting_renumbered(trailer, &doc, &to))
             .transpose()
@@ -672,7 +678,7 @@ mod tests {
         }
         let tail = format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{at}\n%%EOF\n");
         file.extend_from_slice(tail.as_bytes());
-        let reading = Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
         let doc = reading.to_document().unwrap();
         let mut told = Vec::new();
         let mut out = Vec::new();

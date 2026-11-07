@@ -15,7 +15,7 @@ use std::time::Instant;
 use pdf_fixtures::qpdf::Qpdf;
 use pdf_objects::object::{Dict, Object, ObjectId};
 
-use crate::bytes::{Decode, Written};
+use crate::read::{Decode, Written};
 use crate::source::{Document, Trailer, Unread, Warning};
 
 /// qpdf decodes for the reader as pdf-fixtures' runner decodes: each
@@ -90,6 +90,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use pdf_crypt::Password;
     use pdf_filters::Backend;
     use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_objects::dict;
@@ -98,8 +99,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::Password;
-    use crate::bytes;
+    use crate::read;
     use crate::source::Source;
 
     /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
@@ -297,7 +297,7 @@ mod tests {
     fn a_compressed_file_reads_without_qpdf_as_through_it() {
         let path = fixture("qpdf-compressed");
         let data = std::fs::read(&path).unwrap();
-        let doc = bytes::read_with(&data, &Unasked);
+        let doc = read::read_with(&data, &Unasked);
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.trailer.stream.is_some(), "a cross-reference stream");
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
@@ -321,7 +321,7 @@ mod tests {
 
         // Through qpdf, asked for every stream, alike: the same streams'
         // data, and the same objects read from them.
-        let through = bytes::read_through(&data, &qpdf(&path));
+        let through = read::read_through(&data, &qpdf(&path));
         assert!(through.warnings.is_empty(), "{:?}", through.warnings);
         assert_eq!(through.decoded, doc.decoded);
         assert!(through.objects().eq(doc.objects()));
@@ -357,7 +357,7 @@ mod tests {
             let data = std::fs::read(&path).unwrap();
             // The reader alone, by the empty user password and by the
             // owner's.
-            let doc = bytes::read_with(&data, &Unaskable);
+            let doc = read::read_with(&data, &Unaskable);
             assert_eq!(
                 doc.encryption,
                 crate::Encryption::Opened {
@@ -385,7 +385,13 @@ mod tests {
                 Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
                 "{kind}"
             );
-            let owned = bytes::read_opened(&data, &[Password("owner")]);
+            let owned = read::document(
+                &data,
+                &read::Options {
+                    passwords: &[Password("owner")],
+                    ..read::Options::DEFAULT
+                },
+            );
             let by = Some((0, pdf_crypt::Encoding::Utf8));
             assert_eq!(
                 owned.encryption,
@@ -394,7 +400,7 @@ mod tests {
             );
             assert_eq!(owned.decoded, doc.decoded, "{kind}");
             // Through qpdf, the object streams' data the same, byte for byte.
-            let through = bytes::read_through(&data, &qpdf(&path));
+            let through = read::read_through(&data, &qpdf(&path));
             assert!(!through.decoded.is_empty(), "{kind}");
             assert_eq!(through.decoded, doc.decoded, "{kind}");
         }
@@ -415,7 +421,7 @@ mod tests {
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn a_metadata_stream_and_an_embedded_file_decrypt_as_through_qpdf_but_where_it_ignores_eff() {
-        use crate::bytes::streams::{ATTACHED, Attached, CONTENT, XMP, aes_128_and_rc4, attached};
+        use crate::read::streams::{ATTACHED, Attached, CONTENT, XMP, aes_128_and_rc4, attached};
         use pdf_crypt::writer::Kind;
 
         let own = |name: &str| {
@@ -475,8 +481,14 @@ mod tests {
             std::fs::write(&path, &file).unwrap();
             for password in ["user", "owner"] {
                 let what = format!("{i}, {password}");
-                let options = bytes::Options::DEFAULT;
-                let reading = bytes::Reading::open_with(&file[..], &[Password(password)], &options);
+                let options = read::Options::DEFAULT;
+                let reading = read::Reading::open(
+                    &file[..],
+                    &read::Options {
+                        passwords: &[Password(password)],
+                        ..options
+                    },
+                );
                 let reading = reading.unwrap();
                 let theirs = qpdf(&path).undecoding().password(password).decode(&ids);
                 for (id, plain) in ids.into_iter().zip([XMP, ATTACHED, CONTENT]) {
@@ -499,8 +511,8 @@ mod tests {
     /// string's form aside, and a stream's data decoded, its `/Length`
     /// aside. Else where they differ.
     fn alike(
-        (a, x): (&bytes::Reading<Vec<u8>>, &Object),
-        (b, y): (&bytes::Reading<Vec<u8>>, &Object),
+        (a, x): (&read::Reading<Vec<u8>>, &Object),
+        (b, y): (&read::Reading<Vec<u8>>, &Object),
         followed: &mut BTreeMap<ObjectId, ObjectId>,
     ) -> Result<(), String> {
         let differ = || Err(format!("{:?} and {:?}", x.value(), y.value()));
@@ -533,7 +545,10 @@ mod tests {
                     match (x.value(), y.value()) {
                         (Value::Stream(s), Value::Stream(t)) => {
                             dicts(&s.dict, &t.dict, followed)?;
-                            let (s, t) = (a.decoded(*i).unwrap(), b.decoded(*j).unwrap());
+                            let (s, t) = (
+                                a.decoded_within(*i, usize::MAX).unwrap(),
+                                b.decoded_within(*j, usize::MAX).unwrap(),
+                            );
                             (s == t).then_some(()).ok_or(format!("{i:?}'s data"))
                         }
                         _ => alike((a, x), (b, y), followed),
@@ -623,15 +638,22 @@ mod tests {
                 &decrypted,
             ]);
             assert_eq!(wrote.code, Some(0), "{typed}");
-            let options = bytes::Options::DEFAULT;
-            let ours = bytes::Reading::open_with(file, &[Password(typed)], &options).unwrap();
+            let options = read::Options::DEFAULT;
+            let ours = read::Reading::open(
+                file,
+                &read::Options {
+                    passwords: &[Password(typed)],
+                    ..options
+                },
+            )
+            .unwrap();
             let opened = crate::Encryption::Opened {
                 owner: true,
                 by: Some((0, password_by(typed, prepared))),
             };
             assert_eq!(*ours.encryption(), opened, "{typed}");
             let theirs = std::fs::read(&decrypted).unwrap();
-            let theirs = bytes::Reading::open(theirs, &options).unwrap();
+            let theirs = read::Reading::open(theirs, &options).unwrap();
             assert_eq!(*theirs.encryption(), crate::Encryption::None, "{typed}");
             let mut followed = BTreeMap::new();
             for key in [&b"Root"[..], b"Info"] {
@@ -794,7 +816,7 @@ mod tests {
                     "" => &[],
                     _ => &[Password(password)],
                 };
-                let (_, handler) = bytes::read_opened_by(&file, typed);
+                let (_, handler) = read::read_opened_by(&file, typed);
                 let ours = handler.unwrap().permissions();
                 assert_eq!(ours, written, "{what}");
                 let lines = shown_permissions(&shown);
@@ -861,7 +883,7 @@ mod tests {
                         | Permissions::ACCESSIBILITY;
                     for (password, owner) in [("user", false), ("owner", true)] {
                         let what = format!("{args:?}: {password}");
-                        let (doc, handler) = bytes::read_opened_by(&data, &[Password(password)]);
+                        let (doc, handler) = read::read_opened_by(&data, &[Password(password)]);
                         let by = Some((0, Encoding::Utf8));
                         let opened = crate::Encryption::Opened { owner, by };
                         assert_eq!(doc.encryption, opened, "{what}");
@@ -909,7 +931,7 @@ mod tests {
                 let data = fixture::encrypted(&settings, &clean(), trailer);
                 let path = dir.path().join(format!("{k}-{i}.pdf"));
                 std::fs::write(&path, &data).unwrap();
-                let (doc, handler) = bytes::read_opened_by(&data, &[Password("user")]);
+                let (doc, handler) = read::read_opened_by(&data, &[Password("user")]);
                 let ours = handler.unwrap().permissions();
                 let r = match kind {
                     Kind::Rc4By40 => 2,
@@ -1110,7 +1132,7 @@ mod tests {
             let path = fixture(test);
             let data = std::fs::read(&path).unwrap();
             let qpdf = qpdf(&path);
-            let bytes = bytes::read_with(&data, &qpdf);
+            let bytes = read::read_with(&data, &qpdf);
             let alone = qpdf.alone().unwrap();
             assert_eq!(differences(&bytes, &alone), [], "{test}");
             assert!(alone.warnings.is_empty(), "{test}: {:?}", alone.warnings);
@@ -1155,7 +1177,7 @@ mod tests {
             "{:?}",
             alone.warnings
         );
-        let bytes = bytes::read(&file);
+        let bytes = read::document(&file, &read::Options::DEFAULT);
         assert_eq!(differences(&bytes, &alone), []);
 
         // A file qpdf can't read at all says why.
@@ -1186,7 +1208,7 @@ mod tests {
     fn a_cross_reference_stream_whose_number_an_update_reuses_decodes_from_its_bytes() {
         let path = fixture("qpdf-compressed");
         let mut data = std::fs::read(&path).unwrap();
-        let old = bytes::read(&data);
+        let old = read::document(&data, &read::Options::DEFAULT);
         let ObjectId { number: x, .. } = old.trailer.stream.expect("a cross-reference stream");
         let root = old
             .trailer
@@ -1231,7 +1253,7 @@ mod tests {
             Ok(b"12345".to_vec()),
             "by its number, qpdf decodes the other stream"
         );
-        let doc = bytes::read_with(&data, &qpdf);
+        let doc = read::read_with(&data, &qpdf);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.unwritten, None);
         assert_eq!(differences(&doc, &qpdf.alone().unwrap()), []);
@@ -1254,13 +1276,13 @@ mod tests {
         };
         // Decrypted by the reader, its bytes; through qpdf, as qpdf's JSON
         // gives it, text, its encoding unsaid.
-        let through = bytes::read_through(&data, &qpdf(&path));
+        let through = read::read_through(&data, &qpdf(&path));
         assert!(through.warnings.is_empty(), "{:?}", through.warnings);
         assert_eq!(
             *contents(&through).value(),
             Value::String(Str::Text("A note".to_string()), Some(Form::Hex))
         );
-        let doc = bytes::read_opened(&data, &[]);
+        let doc = read::document(&data, &read::Options::DEFAULT);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         let opened = crate::Encryption::Opened {
             owner: false,
@@ -1282,7 +1304,13 @@ mod tests {
         // A password that doesn't open it, though its user password is
         // empty, is all that's tried: it's locked, and the string stays
         // ciphertext, where it is.
-        let doc = bytes::read_opened(&data, &[Password("wrong")]);
+        let doc = read::document(
+            &data,
+            &read::Options {
+                passwords: &[Password("wrong")],
+                ..read::Options::DEFAULT
+            },
+        );
         assert_eq!(doc.encryption, crate::Encryption::Locked);
         let annot = (doc.objects().map(|(_, o)| o))
             .find(|o| {
@@ -1419,7 +1447,7 @@ mod tests {
             let alone = qpdf(&path).alone().unwrap();
             assert_eq!(alone.trailer.unwritten, None, "{test}");
             assert!(alone.warnings.is_empty(), "{test}: {:?}", alone.warnings);
-            let doc = bytes::read(&data[header..]);
+            let doc = read::document(&data[header..], &read::Options::DEFAULT);
             assert_eq!(doc.trailer.unwritten, None, "{test}");
             assert!(doc.warnings.is_empty(), "{test}: {:?}", doc.warnings);
             assert_eq!(differences(&doc, &alone), [], "{test}");
@@ -1459,7 +1487,13 @@ mod tests {
                 );
                 let alone = qpdf.alone().unwrap();
                 assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
-                let doc = bytes::read_opened(&data, &[Password("user")]);
+                let doc = read::document(
+                    &data,
+                    &read::Options {
+                        passwords: &[Password("user")],
+                        ..read::Options::DEFAULT
+                    },
+                );
                 assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
                 // The untyped signature's /Contents, where strings are
                 // encrypted: qpdf decrypts it.
@@ -1489,7 +1523,7 @@ mod tests {
     #[ignore = "needs qpdf: just test-qpdf"]
     fn written_whole_files_and_updates_read_through_qpdf_as_through_the_reader() {
         use crate::XrefKind;
-        use crate::bytes::{Options, Reading};
+        use crate::read::{Options, Reading};
         use crate::write::tests::{encrypted_by, listed, methods};
         use crate::write::{self, Base, Body, Encryptor, Pack};
 
@@ -1526,8 +1560,14 @@ mod tests {
                     out
                 }
             };
-            let reading =
-                Reading::open_with(&source[..], &[Password("user")], &Options::DEFAULT).unwrap();
+            let reading = Reading::open(
+                &source[..],
+                &Options {
+                    passwords: &[Password("user")],
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
             let base = Base::of(&reading).unwrap();
             let own = Encryptor::of(&reading).unwrap();
             let mut updated = source.clone();
@@ -1551,7 +1591,13 @@ mod tests {
                 let alone = qpdf.alone().unwrap();
                 assert_eq!(alone.trailer.unwritten, None, "{name}");
                 assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
-                let doc = bytes::read_opened(&data, &[Password("user")]);
+                let doc = read::document(
+                    &data,
+                    &read::Options {
+                        passwords: &[Password("user")],
+                        ..read::Options::DEFAULT
+                    },
+                );
                 assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
                 let found = differences(&doc, &alone);
                 let strings = method.is_some_and(|m| m.strings);
@@ -1591,7 +1637,7 @@ mod tests {
         let alone = qpdf(&path).alone().unwrap();
         assert_eq!(alone.trailer.unwritten, None);
         assert!(alone.warnings.is_empty(), "{:?}", alone.warnings);
-        let doc = bytes::read(&appended);
+        let doc = read::document(&appended, &read::Options::DEFAULT);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(differences(&doc, &alone), []);
     }
@@ -1608,7 +1654,7 @@ mod tests {
     #[ignore = "needs qpdf: just test-qpdf"]
     fn written_copies_read_through_qpdf_as_through_the_reader() {
         use crate::XrefKind;
-        use crate::bytes::{Options, Reading};
+        use crate::read::{Options, Reading};
         use crate::write::tests::{KINDS_ENCRYPTED, members_spelled, spelled, written_otherwise};
         use crate::write::{self, Encryptor, Pack};
 
@@ -1622,7 +1668,14 @@ mod tests {
         let dir = scratch("copies");
         for (name, source, strings) in sources {
             let passwords = [Password("user")];
-            let reading = Reading::open_with(&source[..], &passwords, &Options::DEFAULT).unwrap();
+            let reading = Reading::open(
+                &source[..],
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
             let doc = reading.to_document().unwrap();
             let own = Encryptor::of(&reading).unwrap();
             for (way, kind, pack) in [
@@ -1649,7 +1702,13 @@ mod tests {
                 let alone = qpdf.alone().expect(&name);
                 assert_eq!(alone.trailer.unwritten, None, "{name}");
                 assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
-                let doc = bytes::read_opened(&data, &passwords);
+                let doc = read::document(
+                    &data,
+                    &read::Options {
+                        passwords: &passwords,
+                        ..read::Options::DEFAULT
+                    },
+                );
                 assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
                 let found = differences(&doc, &alone);
                 assert_eq!(found.len(), usize::from(strings), "{name}: {found:?}");
@@ -1713,13 +1772,20 @@ mod tests {
     #[ignore = "needs qpdf: just test-qpdf"]
     fn renumbered_files_read_through_qpdf_as_through_the_reader() {
         use crate::XrefKind;
-        use crate::bytes::{Options, Reading};
+        use crate::read::{Options, Reading};
         use crate::write::{self, Encryptor, Pack};
 
         let dir = scratch("renumbered");
         for (name, source, strings) in renumbered_sources() {
             let passwords = [Password("user")];
-            let reading = Reading::open_with(&source[..], &passwords, &Options::DEFAULT).unwrap();
+            let reading = Reading::open(
+                &source[..],
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
             let doc = reading.to_document().unwrap();
             let own = Encryptor::of(&reading).unwrap();
             let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
@@ -1780,7 +1846,13 @@ mod tests {
                 let alone = qpdf.alone().expect(&name);
                 assert_eq!(alone.trailer.unwritten, None, "{name}");
                 assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
-                let back = bytes::read_opened(&data, &passwords);
+                let back = read::document(
+                    &data,
+                    &read::Options {
+                        passwords: &passwords,
+                        ..read::Options::DEFAULT
+                    },
+                );
                 assert!(back.warnings.is_empty(), "{name}: {:?}", back.warnings);
                 let found = differences(&back, &alone);
                 assert_eq!(found.len(), usize::from(strings), "{name}: {found:?}");
@@ -1805,13 +1877,20 @@ mod tests {
     fn renumbered_updates_read_through_qpdf_as_through_the_reader() {
         use std::collections::BTreeSet;
 
-        use crate::bytes::{Options, Reading};
+        use crate::read::{Options, Reading};
         use crate::write::{self, Encryptor};
 
         let dir = scratch("renumbered-updates");
         for (name, source, strings) in renumbered_sources() {
             let passwords = [Password("user")];
-            let reading = Reading::open_with(&source[..], &passwords, &Options::DEFAULT).unwrap();
+            let reading = Reading::open(
+                &source[..],
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
             let doc = reading.to_document().unwrap();
             let own = Encryptor::of(&reading).unwrap();
             let base = write::Base::of(&reading).unwrap();
@@ -1861,7 +1940,13 @@ mod tests {
                 let alone = qpdf.alone().expect(&name);
                 assert_eq!(alone.trailer.unwritten, None, "{name}");
                 assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
-                let back = bytes::read_opened(&data, &passwords);
+                let back = read::document(
+                    &data,
+                    &read::Options {
+                        passwords: &passwords,
+                        ..read::Options::DEFAULT
+                    },
+                );
                 assert!(back.warnings.is_empty(), "{name}: {:?}", back.warnings);
                 let found = differences(&back, &alone);
                 // The untyped signature, where it was and where it went.
@@ -1915,7 +2000,7 @@ mod tests {
                         let name = path.file_name().unwrap().to_string_lossy().into_owned();
                         let data = std::fs::read(path).unwrap();
                         let qpdf = Qpdf::new(path);
-                        let bytes = bytes::read_with(&data, &qpdf);
+                        let bytes = read::read_with(&data, &qpdf);
                         let alone = qpdf.alone();
                         let mut found = match &alone {
                             Ok(alone) => differences(&bytes, alone),
@@ -2109,7 +2194,7 @@ mod tests {
         let root = dict! { "Root" => Object::reference(1) };
         std::fs::write(&path, fixture::file("1.7", &objects, root, Xref::Table)).unwrap();
         let data = std::fs::read(&path).unwrap();
-        let doc = bytes::read(&data);
+        let doc = read::document(&data, &read::Options::DEFAULT);
         let ids: Vec<ObjectId> = (0..cases.len())
             .map(|i| ObjectId::new(first + i as u32, 0))
             .collect();
@@ -2132,7 +2217,7 @@ mod tests {
                     let (mine, faults) = match pdf_filters::decode(
                         written,
                         &filters,
-                        bytes::STREAM,
+                        read::STREAM,
                         Backend::MinizOxide,
                     ) {
                         Ok(data) => (data, Vec::new()),
@@ -2289,7 +2374,7 @@ mod tests {
                     while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
                         let name = path.file_name().unwrap().to_string_lossy().into_owned();
                         let data = std::fs::read(path).unwrap();
-                        let ours = bytes::read(&data);
+                        let ours = read::document(&data, &read::Options::DEFAULT);
                         let encrypted = (ours.trailer.dict().get(b"Encrypt")).is_some_and(|e| !e.is_null());
                         if encrypted {
                             let mut tally = tally.lock().unwrap();
@@ -2301,7 +2386,7 @@ mod tests {
                         let mut found: Vec<(String, String)> = Vec::new();
                         // The reader's own streams, and their objects, read
                         // asking qpdf.
-                        let through = bytes::read_through(&data, &qpdf);
+                        let through = read::read_through(&data, &qpdf);
                         let ids: std::collections::BTreeSet<&ObjectId> = ours.decoded.keys().chain(through.decoded.keys()).collect();
                         for id in ids {
                             let kind = match (ours.decoded.get(id), through.decoded.get(id)) {
@@ -2342,7 +2427,7 @@ mod tests {
                         // after, of those.
                         let mut differing: Vec<(ObjectId, String, bool)> = Vec::new();
                         for (id, filters, written) in &streams {
-                            let (mine, mine_faults) = match pdf_filters::decode(written, filters, bytes::STREAM, Backend::MinizOxide) {
+                            let (mine, mine_faults) = match pdf_filters::decode(written, filters, read::STREAM, Backend::MinizOxide) {
                                 Ok(data) => (data, Vec::new()),
                                 Err(e) => (e.data, e.faults),
                             };
@@ -2549,7 +2634,7 @@ mod tests {
                     while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
                         let name = path.file_name().unwrap().to_string_lossy().into_owned();
                         let data = std::fs::read(path).unwrap();
-                        let (ours, handler) = bytes::read_opened_by(&data, &[]);
+                        let (ours, handler) = read::read_opened_by(&data, &[]);
                         if ours.encryption == crate::Encryption::None {
                             tally.lock().unwrap().files += 1;
                             continue;
@@ -2563,7 +2648,7 @@ mod tests {
                             .flatten();
                         let (ours, handler) = match password {
                             Some(password) => {
-                                bytes::read_opened_by(&data, &[Password(password)])
+                                read::read_opened_by(&data, &[Password(password)])
                             }
                             None => (ours, handler),
                         };
@@ -2725,7 +2810,7 @@ mod tests {
                                 }
                                 decoded += 1;
                                 let Some(plain) = plain else { continue };
-                                let (mine, mine_faults) = match pdf_filters::decode(&plain, &filters, bytes::STREAM, Backend::MinizOxide) {
+                                let (mine, mine_faults) = match pdf_filters::decode(&plain, &filters, read::STREAM, Backend::MinizOxide) {
                                     Ok(data) => (data, Vec::new()),
                                     Err(e) => (e.data, e.faults),
                                 };

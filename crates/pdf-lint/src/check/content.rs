@@ -1982,7 +1982,7 @@ mod tests {
     /// Each stream `file`'s check asks its source for, with how much it may
     /// decode to, holding what `hold` holds, within `budget`.
     fn asked(file: &[u8], hold: &Hold, budget: Option<usize>) -> Vec<(ObjectId, usize)> {
-        let opened = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
         let counting = Counting {
             source: &opened,
             asked: RefCell::new(Vec::new()),
@@ -2154,7 +2154,7 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         let faulty = three_pages(stream("/Filter /ASCIIHexDecode", &hex));
-        let opened = WithReading::new(&faulty[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(&faulty[..], &bytes::Options::DEFAULT).unwrap();
         let Some(Err(bytes::Error::Decode(error))) =
             opened.decoded_within(ObjectId::new(11, 0), 100)
         else {
@@ -2168,7 +2168,7 @@ mod tests {
     /// asked for the first stream, gives none, and is asked for no more.
     #[test]
     fn a_document_alone_is_asked_for_one_stream() {
-        let doc = bytes::read(&three_pages(stream("", "q Q")));
+        let doc = bytes::document(&three_pages(stream("", "q Q")), &bytes::Options::DEFAULT);
         let counting = Counting {
             source: &doc,
             asked: RefCell::new(Vec::new()),
@@ -2183,7 +2183,7 @@ mod tests {
     /// holds, finds of content: each finding's rule, made, object, path and
     /// value, and its bytes in its stream's data, as the reading decodes it.
     fn found_held(file: &[u8], hold: &Hold) -> Vec<(Rule, Made, u32, String, String, String)> {
-        let opened = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
         let report = check(&opened, hold, &Options::default());
         (report.findings.iter())
             .filter(|f| counted(f.rule, &f.key))
@@ -2293,7 +2293,7 @@ mod tests {
         );
         // Where each is: the open `q` is the third, after `Q Q `.
         let file = page_of(&["Q Q q q Q"], &[]);
-        let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
         let spans: Vec<_> = report.findings.iter().map(|f| f.at.unwrap()).collect();
         let (start, end) = (spans[1].start, spans[1].end);
@@ -2351,7 +2351,7 @@ mod tests {
             (31, stream("", "9 0 d0 q 0 0 9 9 re f")),
         ]);
         let file = file(&objects);
-        let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
         let found: Vec<_> = (report.findings.iter())
             .map(|f| {
@@ -3098,7 +3098,7 @@ mod tests {
         // was isn't.
         let report = |content: &str| {
             let file = page_of(&[content], &[]);
-            let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
             check(&opened, &Hold::All(Made::Merged), &Options::default())
         };
         let values = |found: Vec<&Finding>| -> Vec<String> {
@@ -3164,7 +3164,7 @@ mod tests {
         // its own, the first's carried.
         let report = |streams: &[&str]| {
             let file = page_of(streams, &[]);
-            let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
             check(&opened, &Hold::All(Made::Merged), &Options::default())
         };
         let before = report(&["Q 0 0 m S", "0 0 m S"]);
@@ -3190,7 +3190,7 @@ mod tests {
                 (50, FONT.to_string()),
             ]);
             let file = file(&objects);
-            let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
             let hold = match held {
                 Some(n) => Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into()),
                 None => Hold::All(Made::Merged),
@@ -3244,7 +3244,7 @@ mod tests {
             let found: Vec<_> = (found_held(&file, &hold).into_iter())
                 .map(|(rule, made, n, path, value, _)| (rule, made, n, path, value))
                 .collect();
-            let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
             (found, check(&opened, &hold, &Options::default()).content)
         };
         let first = "Root/Pages/Kids[0]/Contents".to_string();
@@ -3276,7 +3276,7 @@ mod tests {
     fn content_findings_are_carried_whatever_their_counts() {
         let report = |content: &str| {
             let file = page_of(&[content], &[]);
-            let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
             let options = Options {
                 paths: true,
                 ..Options::default()
@@ -3312,7 +3312,7 @@ mod tests {
             (11, stream("", "q q q q q q")),
         ]);
         let file = file(&objects);
-        let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let not_checked = |hold: &Hold, budget| {
             let options = Options {
                 content_budget: budget,
@@ -3408,7 +3408,7 @@ mod tests {
         assert!(!file.windows(content.len()).any(|w| w == content));
         let open = "1 q left open at the end";
         assert_eq!(found(&file), [at(Rule::Balance, 10, None, open, "q")]);
-        let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let all = Hold::All(Made::Merged);
         let alone = check(opened.document(), &all, &Options::default());
         let content = alone.findings.iter().any(|f| counted(f.rule, &f.key));
@@ -3435,7 +3435,7 @@ mod tests {
     /// report.
     #[allow(clippy::type_complexity)]
     fn found_by(rule: Rule, file: &[u8]) -> (Vec<(u32, String, String, String, String)>, Report) {
-        let opened = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
         let options = Options {
             unused: true,
             ..Options::default()
@@ -3777,7 +3777,7 @@ mod tests {
             (report.to_string()).contains("\n  unused: Resource/XObject: 1\n"),
             "{report}"
         );
-        let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
         assert!(!report.findings.iter().any(|f| f.rule == Rule::Unused));
         assert_eq!(report.unused, counted);
@@ -3873,7 +3873,7 @@ mod tests {
             &[(40, resources), (50, FONT)],
         );
         let found = |file: &[u8], held: &[(u32, Made)]| {
-            let opened = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
             let options = Options {
                 unused: true,
                 ..Options::default()
@@ -3958,7 +3958,7 @@ mod tests {
         let report = |content: &str, spare: &str| {
             let resources = format!("/Resources << /Font << /F1 50 0 R /{spare} 50 0 R >> >>");
             let file = resourced(&resources, stream("", content), &[(50, FONT)]);
-            let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
             let options = Options {
                 unused: true,
                 paths: true,
@@ -4017,7 +4017,7 @@ mod tests {
                 (50, FONT.to_string()),
             ]);
             let file = file(&objects);
-            let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
             let options = Options {
                 unused: true,
                 ..Options::default()
@@ -4052,7 +4052,7 @@ mod tests {
             (50, FONT.to_string()),
         ]);
         let file = file(&objects);
-        let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let check_without = |n| {
             let without = Counting {
                 source: &opened,

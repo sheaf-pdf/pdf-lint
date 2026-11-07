@@ -2632,8 +2632,8 @@ fn linearized_wrongly() -> (Vec<u8>, u32, usize) {
 /// is, that number listed there, so that `--last-update` holds it.
 fn linearized_updated(file: &[u8], listed: Option<(u32, usize)>) -> Vec<u8> {
     use pdf_lint::Source;
-    let doc = pdf_lint::bytes::read(file);
-    let trailer = doc.trailer.dict();
+    let doc = pdf_lint::bytes::document(file, &pdf_lint::bytes::Options::DEFAULT);
+    let trailer = doc.trailer().dict();
     let root = trailer.get(b"Root").and_then(|r| r.as_reference()).unwrap();
     let pages = (doc.get(root).unwrap().as_dict().unwrap().get(b"Pages"))
         .and_then(|p| p.as_reference())

@@ -5,12 +5,14 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt;
 use std::io;
+use std::iter::FusedIterator;
 use std::mem::discriminant;
 use std::ops::Range;
+use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pdf_crypt::{Encoded, Handler, Password, Refused};
+use pdf_crypt::{Encoded, Handler, Refused};
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable, Why};
@@ -317,15 +319,15 @@ fn outside(span: &Span) -> String {
 
 /// A file being read: opened, then each object read when it's first asked
 /// for, kept or not, on any thread; or read whole, into a [`Document`], as
-/// [`read`](super::read) reads it, the reading taken
+/// [`document`](super::document) reads it, the reading taken
 /// ([`Reading::into_document`]) or kept beside it
 /// ([`Reading::to_document`]).
 ///
 /// [`Reading::open`] reads the header, the cross-reference sections and
 /// the trailer (or, where they don't read, finds the objects by scanning
-/// the file), and opens an encrypted file's security handler by the empty
-/// password, [`Reading::open_with`] by the passwords it's given; no object
-/// yet. A reading no password opened is opened by another with
+/// the file), and opens an encrypted file's security handler by the
+/// passwords its [`Options`] give, or the empty password; no object yet.
+/// A reading no password opened is opened by another with
 /// [`Reading::unlock`]. [`Reading::get`] reads an object
 /// the first time it's asked for and keeps it, with what the reader warned
 /// of as it read it, decrypting its strings in an encrypted file it opened;
@@ -333,8 +335,8 @@ fn outside(span: &Span) -> String {
 /// object stream is read from the stream's decoded data, the stream decoded
 /// and kept the first time an object in it is read, once, whichever thread
 /// asks. [`Reading::data`] gives a stream's data, decrypted in an encrypted
-/// file it opened, and [`Reading::decoded`] that through its filters, each
-/// read when it's asked for, and not kept.
+/// file it opened, and [`Reading::decoded_within`] that through its
+/// filters, each read when it's asked for, and not kept.
 ///
 /// Read in any order, on any threads, then made a [`Document`], a reading
 /// is the whole read, the same objects, warnings in the same order and the
@@ -358,16 +360,17 @@ fn outside(span: &Span) -> String {
 /// A reading is a [`Source`], as a document is, answering of what it has
 /// read so far, and pdf-objects' [`Streams`]. Its own methods of the
 /// traits' names say more than the traits' shapes do, and a call on a
-/// `Reading` names them first: [`Reading::ids`] is an iterator,
-/// [`Reading::get`] and [`Reading::decoded_within`] give an [`Error`],
-/// [`Reading::warnings`] a `Vec`, [`Reading::metadata`] a `Result`,
-/// [`Reading::size`] and [`Reading::facts`] no `Option`, and
-/// [`Reading::decoded`] takes no limit. The traits' answers are reached
-/// through a `&dyn Source`, or by the trait's name: `Source::get(&reading,
-/// id)`, `Streams::decoded(&reading, id, limit)`.
+/// `Reading` names them first, each giving the same answer in a plainer or
+/// a richer form: [`Reading::ids`] is an iterator, [`Reading::get`] and
+/// [`Reading::decoded_within`] give an [`Error`], [`Reading::warnings`] a
+/// `Vec`, [`Reading::metadata`] a `Result`, and [`Reading::size`] and
+/// [`Reading::facts`] no `Option`. The traits' answers are reached through
+/// a `&dyn Source`, or by the trait's name: `Source::get(&reading, id)`,
+/// and a viewer's account of a decode, `Streams::decoded(&reading, id,
+/// limit)`, which no method of a reading's own shadows.
 ///
 /// ```
-/// use pdf_structure::bytes::{Options, Reading};
+/// use pdf_structure::read::{Options, Reading};
 /// use pdf_structure::pdf_objects::ObjectId;
 ///
 /// let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
@@ -402,18 +405,77 @@ impl<S> fmt::Debug for Reading<S> {
     }
 }
 
+/// Every object a [`Reading`]'s cross-references list, by number: what
+/// [`Reading::ids`] gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct Ids<'r> {
+    entries: slice::Iter<'r, (u32, (u16, XrefEntry))>,
+}
+
+/// The object an entry lists: one in use, of its generation, and one in an
+/// object stream, of generation 0; none for a free one, nor for number 0.
+fn listed(&(n, (generation, entry)): &(u32, (u16, XrefEntry))) -> Option<ObjectId> {
+    match entry {
+        _ if n == 0 => None,
+        XrefEntry::InUse { .. } => Some(ObjectId::new(n, generation)),
+        XrefEntry::Compressed { .. } => Some(ObjectId::new(n, 0)),
+        _ => None,
+    }
+}
+
+impl Iterator for Ids<'_> {
+    type Item = ObjectId;
+
+    #[inline]
+    fn next(&mut self) -> Option<ObjectId> {
+        self.entries.find_map(listed)
+    }
+
+    /// At most one an entry left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.entries.size_hint().1)
+    }
+}
+
+impl FusedIterator for Ids<'_> {}
+
+/// The newest entry a [`Reading`]'s cross-reference sections give each
+/// object number, by number: what [`Reading::entries`] gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct Entries<'r> {
+    entries: slice::Iter<'r, (u32, (u16, XrefEntry))>,
+}
+
+impl Iterator for Entries<'_> {
+    type Item = (u32, u16, XrefEntry);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        (self.entries.next()).map(|&(n, (generation, entry))| (n, generation, entry))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.entries.size_hint()
+    }
+}
+
+impl FusedIterator for Entries<'_> {}
+
 impl<'a> Reading<&'a [u8]> {
     /// The file `file` is, opened as [`Reading::open`] opens it, which
     /// can't fail in memory; `native` but in the tests that make it ask
     /// `decoder` for every stream.
     pub(crate) fn in_memory(
         file: &'a [u8],
-        passwords: &[Password],
-        options: &Options,
+        options: &Options<'_>,
         native: bool,
         decoder: Option<&dyn Decode>,
     ) -> Reading<&'a [u8]> {
-        let Ok(reader) = Reader::new(InMemory(file), passwords, options, native, decoder);
+        let Ok(reader) = Reader::new(InMemory(file), options, native, decoder);
         Reading {
             reader,
             source: file,
@@ -431,54 +493,38 @@ impl<'a> Reading<&'a [u8]> {
 }
 
 impl<S: ByteSource> Reading<S> {
-    /// The file `source` holds, opened: its header, its cross-reference
-    /// sections and trailer, and, when it's encrypted, its security
-    /// handler, opened by the empty password, as most files' is, which
-    /// [`Reading::unlock`] opens by another when it doesn't. It fails only
-    /// when the source doesn't give its bytes ([`Error::Io`]).
-    pub fn open(source: S, options: &Options) -> Result<Reading<S>, Error> {
-        Reading::open_by(source, &[], options, true)
+    /// The file `source` holds, opened under `options`: its header, its
+    /// cross-reference sections and trailer, and, when it's encrypted, its
+    /// security handler, opened by the passwords they give
+    /// ([`Options::passwords`]), or the empty password, as most files' is,
+    /// given none. One no password given opens is left locked, which
+    /// [`Reading::unlock`] opens by the bytes a prompt gives once it's
+    /// open, without reading the file again. The passwords aren't kept. It
+    /// fails only when the source doesn't give its bytes ([`Error::Io`]).
+    ///
+    /// The one way in: [`document`](super::document) is a reading of a
+    /// file in memory, opened so and read whole, and
+    /// [`WithReading::new`](super::WithReading::new) one read whole beside
+    /// its reading.
+    pub fn open(source: S, options: &Options<'_>) -> Result<Reading<S>, Error> {
+        Reading::open_by(source, options, true)
     }
 
-    /// The file `source` holds, opened as [`Reading::open`] opens it, but
-    /// its security handler by `passwords`, in the empty password's place:
-    /// each in each of its encodings ([`Password::encodings`]), tried as the
-    /// owner's and then the user's, every password's that fit the file's
-    /// revision first, in the order given, then every password's others
-    /// (pdf-crypt's `Handler::open`, given them all), as
-    /// [`read_opened`](super::read_opened) tries them. So a later password
-    /// can open it before an earlier one that would open it only in an
-    /// encoding that doesn't fit. Given none, the empty password. A wrong one leaves it
-    /// [`Encryption::Locked`], or [`Encryption::Plain`] where its strings
-    /// and streams aren't encrypted, as no password would: the empty one
-    /// isn't tried after it. Which opened it is
-    /// [`Encryption::Opened`]'s `by`, its index among `passwords`. The
-    /// passwords aren't kept. It fails only when the source doesn't give
-    /// its bytes ([`Error::Io`]).
-    pub fn open_with(
-        source: S,
-        passwords: &[Password],
-        options: &Options,
-    ) -> Result<Reading<S>, Error> {
-        Reading::open_by(source, passwords, options, true)
-    }
-
-    /// [`Reading::open_with`], an object read by position first given a
+    /// [`Reading::open`], an object read by position first given a
     /// window to a byte past the next listed offset when `bound`.
     pub(crate) fn open_by(
         source: S,
-        passwords: &[Password],
-        options: &Options,
+        options: &Options<'_>,
         bound: bool,
     ) -> Result<Reading<S>, Error> {
         let reader = match source.whole() {
             Some(file) => {
-                let Ok(reader) = Reader::new(InMemory(file), passwords, options, true, None);
+                let Ok(reader) = Reader::new(InMemory(file), options, true, None);
                 reader
             }
             None => {
                 let file = ByPosition::new(&source, bound);
-                Reader::new(file, passwords, options, true, None).map_err(Error::Io)?
+                Reader::new(file, options, true, None).map_err(Error::Io)?
             }
         };
         Ok(Reading {
@@ -490,7 +536,9 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// The reading, an encrypted file no password opened, opened by
-    /// `passwords`, as [`Reading::open_with`] would have opened it: those
+    /// `passwords`, each a password's bytes in an encoding, as a prompt
+    /// gives them (pdf-crypt's `Encoded`), as [`Reading::open`] would have
+    /// opened it by passwords as typed ([`Options::passwords`]): those
     /// that fit the file's revision first, in the order given, then the
     /// rest, each as the owner's and then the user's (see pdf-crypt's
     /// `Handler::open`), and [`Encryption::Opened`]'s `by` the index among
@@ -530,20 +578,19 @@ impl<S: ByteSource> Reading<S> {
 
     /// Every object its cross-references list, by number: each in use, of
     /// its generation, and each in an object stream, of generation 0.
-    pub fn ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
-        (self.reader.entries.iter()).filter_map(|&(n, (generation, entry))| match entry {
-            _ if n == 0 => None,
-            XrefEntry::InUse { .. } => Some(ObjectId::new(n, generation)),
-            XrefEntry::Compressed { .. } => Some(ObjectId::new(n, 0)),
-            _ => None,
-        })
+    pub fn ids(&self) -> Ids<'_> {
+        Ids {
+            entries: self.reader.entries.iter(),
+        }
     }
 
     /// The newest entry its cross-reference sections give each object
     /// number (or, when the file was scanned, the scan), by number: the
     /// number, its generation and what the entry says.
-    pub fn entries(&self) -> impl Iterator<Item = (u32, u16, XrefEntry)> + '_ {
-        (self.reader.entries.iter()).map(|&(n, (generation, entry))| (n, generation, entry))
+    pub fn entries(&self) -> Entries<'_> {
+        Entries {
+            entries: self.reader.entries.iter(),
+        }
     }
 
     /// The newest entry its sections give number `n`, as
@@ -707,7 +754,7 @@ impl<S: ByteSource> Reading<S> {
     ///
     /// ```
     /// use pdf_structure::RevisionEnd;
-    /// use pdf_structure::bytes::{Options, Reading};
+    /// use pdf_structure::read::{Options, Reading};
     /// use pdf_structure::pdf_objects::ObjectId;
     ///
     /// let first = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
@@ -728,13 +775,15 @@ impl<S: ByteSource> Reading<S> {
     /// ```
     pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
         // Every option named, so that one more has its say here.
+        // Opened by the empty password, its handler's key given it after.
         let options = Options {
             limits: *limits,
             section: None,
             flate: self.reader.flate,
+            passwords: &[],
         };
         let source = Prefix::new(&self.source, len);
-        let mut prefix = Reading::open_by(source, &[], &options, self.bound)?;
+        let mut prefix = Reading::open_by(source, &options, self.bound)?;
         let reader = &self.reader;
         if let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) {
             let (values, id) = (&stored.values, &stored.id);
@@ -888,26 +937,25 @@ impl<S: ByteSource> Reading<S> {
     /// stream's filters, by pdf-filters, its `/Filter` and `/DecodeParms`
     /// read as the reader reads an object stream's (references followed
     /// through what's read and kept, but in a cross-reference stream's,
-    /// whose values are direct), up to [`Limits::stream`](super::Limits::stream)
-    /// bytes; a stream without filters is its data. What's decoded isn't
-    /// kept, nor counted against the reading's budget, which is for what
-    /// the reading keeps. Data that doesn't decode cleanly is an error
-    /// holding what did, a stream cut off at the limit among them
-    /// ([`Error::Decode`]).
-    pub fn decoded(&self, id: ObjectId) -> Result<Vec<u8>, Error> {
-        self.decoded_up_to(id, self.reader.limits.stream)
-    }
-
-    /// The data of stream `id` decoded as [`Reading::decoded`] decodes it, up
-    /// to `limit` bytes or [`Limits::stream`](super::Limits::stream), whichever
-    /// is less, for a caller with a budget of its own: a stream isn't decoded
-    /// far past what it could take. The limit holds for a stream without
-    /// filters too, which [`Reading::decoded`] gives whole: its data past the
-    /// limit is cut off there, an error as a stream decoded past it is
-    /// ([`Error::Decode`], with [`Fault::Limit`](pdf_filters::Fault::Limit)).
+    /// whose values are direct), up to `limit` bytes or
+    /// [`Limits::stream`](super::Limits::stream), whichever is less, so a
+    /// caller with a budget of its own has a stream decoded no further than
+    /// it could take; `usize::MAX` for the reading's own cap alone. What's
+    /// decoded isn't kept, nor counted against the reading's budget, which
+    /// is for what the reading keeps. Data that doesn't decode cleanly is
+    /// an error holding what did, a stream cut off at the limit among them
+    /// ([`Error::Decode`]). A stream without filters is its data, held to
+    /// the limit too: past it, its data is cut off there, an error as a
+    /// stream decoded past it is ([`Error::Decode`], with
+    /// [`Fault::Limit`](pdf_filters::Fault::Limit) at filter 0, the one
+    /// fault of pdf-filters' the reader makes itself).
+    ///
+    /// This is the reader's own account of the decode, every fault of it,
+    /// for a checker; what a viewer takes of it is [`Streams::decoded`]'s,
+    /// which the reading answers by this.
     ///
     /// ```
-    /// use pdf_structure::bytes::{Error, Options, Reading};
+    /// use pdf_structure::read::{Error, Options, Reading};
     /// use pdf_structure::pdf_filters::Fault;
     /// use pdf_structure::pdf_objects::ObjectId;
     ///
@@ -935,15 +983,10 @@ impl<S: ByteSource> Reading<S> {
         self.reader.limits.stream < limit
     }
 
-    /// [`Reading::decoded`], each filter's output up to `limit` bytes.
-    fn decoded_up_to(&self, id: ObjectId, limit: usize) -> Result<Vec<u8>, Error> {
-        self.decoded_as(id, None, limit)
-    }
-
     /// [`Reading::decoded_within`], the stream `object` where it's given:
     /// what [`Reading::get`] gives of `id`, as a document read whole from
     /// this reading holds it; where it isn't, the stream as
-    /// [`Reading::decoded`] reads it.
+    /// [`Reading::get`] reads it.
     pub(super) fn decoded_within_as<'f>(
         &'f self,
         id: ObjectId,
@@ -965,7 +1008,9 @@ impl<S: ByteSource> Reading<S> {
         }
     }
 
-    /// [`Reading::decoded_up_to`], the stream `object` where it's given.
+    /// The data of stream `id` decoded, each filter's output up to `limit`
+    /// bytes and a stream without filters whole, the stream `object` where
+    /// it's given.
     fn decoded_as<'f>(
         &'f self,
         id: ObjectId,
@@ -1128,7 +1173,7 @@ impl<S: ByteSource> Reading<S> {
     /// Kept beside the document, the reading hands out what the document
     /// doesn't hold: a stream's data, which stays where it was written
     /// ([`Data::At`](pdf_objects::object::Data::At)), through
-    /// [`Reading::data`] and [`Reading::decoded`], and the bytes at a span
+    /// [`Reading::data`] and [`Reading::decoded_within`], and the bytes at a span
     /// ([`Reading::bytes`]); each record names the reading
     /// ([`Record::source`]). It fails only when the source doesn't give the
     /// bytes asked of it ([`Error::Io`]), keeping none of what it read
@@ -1146,7 +1191,7 @@ impl<S: ByteSource> Reading<S> {
     /// `doc`'s objects as read taken as this reading's, where it reads each
     /// alike and `doc` is encrypted, and opened, as its file is: each record
     /// then names it ([`Record::source`]). So a document read whole
-    /// ([`read`](super::read), [`Reading::into_document`]), whose reading is
+    /// ([`document`](super::document), [`Reading::into_document`]), whose reading is
     /// gone, is written from a reading of its file opened again as one made
     /// by [`Reading::to_document`] is: its streams' data, where it was
     /// written ([`Data::At`](pdf_objects::object::Data::At)), read from it,
@@ -1358,9 +1403,9 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
 /// whose decode fails before it gives a byte, [`Why::Damaged`]. A stream
 /// that decodes cleanly to nothing is given, empty.
 ///
-/// On a `Reading` its own [`Reading::decoded`], which takes no limit, is
-/// what `decoded` names: this one is `Streams::decoded(&reading, id,
-/// limit)`, or the method through a reference or a `dyn`.
+/// A reading has no method of its own of this name: `reading.decoded(id,
+/// limit)` is this one, where the trait is in scope, and so is
+/// `Streams::decoded(&reading, id, limit)`.
 impl<S: ByteSource> Streams for Reading<S> {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         match Resolve::try_resolve(&self, id) {

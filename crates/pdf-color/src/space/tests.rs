@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use pdf_objects::fault::Place;
 use pdf_objects::parse::Parser;
 use pdf_objects::{ObjectId, Unreadable, Why};
-use pdf_structure::bytes::{Options, Reading};
+use pdf_structure::read::{Options, Reading};
 
 use super::*;
 use crate::fault::Fault;
@@ -1440,13 +1440,19 @@ fn a_stream_held_can_have_its_data_asked_for() {
         panic!("no stream");
     };
     assert_eq!(id, Some(ObjectId::new(9, 0)), "the object a chain ended in");
-    assert_eq!(reading.decoded(id.unwrap()).unwrap(), b"q");
+    assert_eq!(
+        reading.decoded_within(id.unwrap(), usize::MAX).unwrap(),
+        b"q"
+    );
     assert!(stream.dict.has(b"Length"));
     let Some(Space::ICCBased(icc)) = indexed.base.as_deref() else {
         panic!("no ICCBased");
     };
     assert_eq!(icc.id, Some(ObjectId::new(8, 0)));
-    assert_eq!(reading.decoded(icc.id.unwrap()).unwrap(), b"p");
+    assert_eq!(
+        reading.decoded_within(icc.id.unwrap(), usize::MAX).unwrap(),
+        b"p"
+    );
 
     // A stream that has no number has none to say.
     let file = file("[/ICCBased 5 0 R]", &["<< /Length 0 /N 1 >>"]);

@@ -223,18 +223,18 @@ impl Qpdf {
         trailer.stream = listing.stream;
         trailer.unwritten = listing.unwritten;
         let mut doc = Document::new(version, trailer.dict().clone());
-        doc.trailer = trailer;
+        *doc.trailer_mut() = trailer;
         for (id, object) in listing.objects {
             match object {
                 Ok(object) => doc.set(id, object),
                 Err(why) => doc.set_unread(id, Unread::Other(why)),
             };
         }
-        doc.header = listing.version;
+        doc.set_header_version(listing.version);
         doc.warnings = (listing.warnings.into_iter())
             .map(|(object, message)| Warning::new(object, None, message))
             .collect();
-        doc.size = listing.size;
+        doc.set_size(listing.size);
         Ok(doc)
     }
 

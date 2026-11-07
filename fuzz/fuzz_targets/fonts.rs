@@ -9,7 +9,7 @@
 #![no_main]
 
 use pdf_fonts::fuzz::{fonts, names, over, type1};
-use pdf_structure::bytes::Reading;
+use pdf_structure::read::Reading;
 use pdf_structure::fuzz::options;
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {

@@ -12,11 +12,12 @@ use pdf_linearize::lopdf::{self as adapter, Error, PageTree};
 use pdf_linearize::plan::{self, plan};
 use pdf_linearize::{Limits, Verdict};
 use pdf_objects::object::{Object, ObjectId, Value};
-use pdf_structure::bytes::{self, Reading};
+use pdf_structure::Source as _;
+use pdf_structure::pdf_crypt::Password;
 use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::pdf_crypt::rand_core::SeedableRng;
+use pdf_structure::read::{self, Reading};
 use pdf_structure::write::{self, Encryptor};
-use pdf_structure::{Password, Source as _};
 
 mod written;
 use written::{KEYS, ROOT, built, encrypted_as, file, stream, two_pages};
@@ -34,7 +35,7 @@ fn laid_out(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 
 /// What `written` holds by the check, whatever a sink wants.
 fn checked(written: &[u8]) -> (Verdict, Vec<String>) {
-    let reading = Reading::open(written, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(written, &read::Options::DEFAULT).unwrap();
     let mut findings = Vec::new();
     let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
     let quiet = family::check(&reading, &Limits::DEFAULT, &mut ()).unwrap();
@@ -50,7 +51,7 @@ fn holds(written: &[u8]) {
     assert!(verdict.holds, "{findings:?}");
     assert!(verdict.hints_read, "{findings:?}");
     assert_eq!(findings, [] as [String; 0]);
-    let reading = Reading::open(written, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(written, &read::Options::DEFAULT).unwrap();
     assert!(reading.facts().linearized);
 }
 
@@ -88,7 +89,7 @@ fn dicts_alike(a: &pdf_objects::object::Dict, b: &pdf_objects::object::Dict) -> 
 
 /// What's in `file`, read back.
 fn read_back(file: &[u8]) -> (Reading<&[u8]>, pdf_structure::Document) {
-    let reading = Reading::open(file, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(file, &read::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
     (reading, doc)
 }
@@ -592,7 +593,7 @@ fn values_and_stream_data_read_back_as_they_were() {
     same_numbers_as_the_family(&bytes);
     assert!(out.starts_with(b"%PDF-1.4\n"));
     let (reading, doc) = read_back(&out);
-    let trailer = doc.trailer.dict();
+    let trailer = doc.trailer().dict();
     assert_eq!(text(trailer.get(b"Own").unwrap()), b"kept");
     let catalog = doc.get_dict(trailer.get(b"Root").unwrap().as_reference().unwrap());
     let mine = catalog
@@ -629,7 +630,7 @@ fn a_file_of_object_streams_loses_them_and_a_cross_reference_stream_s_entries() 
     same_numbers_as_the_family(&source);
     assert!(!out.windows(6).any(|w| w == b"ObjStm"));
     let (_, doc) = read_back(&out);
-    let trailer = doc.trailer.dict();
+    let trailer = doc.trailer().dict();
     for key in [
         &b"W"[..],
         b"Index",
@@ -655,7 +656,7 @@ fn the_id_is_as_the_document_holds_it() {
     let out = laid_out(&bytes).unwrap();
     holds(&out);
     let (_, doc) = read_back(&out);
-    let id = doc.trailer.dict().get(b"ID").unwrap().as_array().unwrap();
+    let id = doc.trailer().dict().get(b"ID").unwrap().as_array().unwrap();
     assert_eq!(text(&id[0]), [0xAA, 0xBB]);
     assert_eq!(text(&id[1]), [0xCC, 0xDD]);
 }
@@ -1147,7 +1148,7 @@ fn a_file_lopdf_opened_with_the_empty_password_is_refused() {
 #[test]
 fn a_file_lopdf_didn_t_open_is_refused() {
     let plain = built(&two_pages(""));
-    let reading = Reading::open(&plain[..], &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(&plain[..], &read::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
     let prepared = Password("user").prepared().unwrap();
     let new = Encryptor::create(

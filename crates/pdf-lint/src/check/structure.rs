@@ -1082,7 +1082,11 @@ mod tests {
 
     /// `file` read and checked, holding what `hold` does.
     fn checked(file: &[u8], hold: &Hold, options: &Options) -> Report {
-        check(&bytes::read(file), hold, options)
+        check(
+            &bytes::document(file, &bytes::Options::DEFAULT),
+            hold,
+            options,
+        )
     }
 
     /// A tree finding, as [`found`] gives it.
@@ -2909,7 +2913,7 @@ mod tests {
                 true,
             ),
         ] {
-            doc.metadata = Some(packet);
+            doc.set_metadata(Some(packet));
             let report = check(&doc, &ALL, &Options::default());
             let xmp = (report.findings.iter()).filter(|f| f.rule == Rule::Xmp);
             assert_eq!(xmp.count(), 0, "{report}");

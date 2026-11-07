@@ -39,7 +39,7 @@ use crate::version::Version;
 
 /// The limits the fuzz target reads under: a stream decodes to at most
 /// 1 MiB, and a reading's streams to 4 MiB.
-pub fn options() -> bytes::Options {
+pub fn options() -> bytes::Options<'static> {
     let mut options = bytes::Options::DEFAULT;
     options.limits.stream = 1 << 20;
     options.limits.budget = 4 << 20;
@@ -51,7 +51,7 @@ pub fn options() -> bytes::Options {
 fn read(file: &[u8], section: Option<usize>) -> WithReading<&[u8]> {
     let mut options = options();
     options.section = section;
-    WithReading::new(file, &[], &options).expect("a file in memory reads")
+    WithReading::new(file, &options).expect("a file in memory reads")
 }
 
 /// The revision `update` of `doc`, `file` read, follows, read as
@@ -59,7 +59,7 @@ fn read(file: &[u8], section: Option<usize>) -> WithReading<&[u8]> {
 /// where that isn't known, the file as of the section the update follows,
 /// as the command line's `--last-update` reads it.
 fn previous<'f>(file: &'f [u8], doc: &Document, update: &Update) -> WithReading<&'f [u8]> {
-    let revision = doc.revisions.iter().find(|r| r.at == update.previous);
+    let revision = doc.revisions().iter().find(|r| r.at == update.previous);
     match revision.and_then(|r| r.end).map(RevisionEnd::line) {
         Some(end) => read(&file[..end], None),
         None => read(file, Some(update.previous)),
@@ -95,7 +95,7 @@ pub fn check_file(data: &[u8]) {
     }
     let _ = report.to_string();
     let _ = report.objects();
-    if let Some(update) = &doc.document().update {
+    if let Some(update) = &doc.document().update() {
         let previous = previous(file, doc.document(), update);
         let options = Options {
             paths: true,
@@ -392,7 +392,7 @@ fn within(
     let len = match at.stream {
         None => Some(file.len()),
         Some(stream) => {
-            let held = doc.document().decoded.get(&stream).map(Vec::len);
+            let held = doc.document().held(stream).map(<[u8]>::len);
             let plain = (metadata == Some(stream))
                 .then(|| Source::metadata(doc).map(|data| data.len()))
                 .flatten();
@@ -1212,7 +1212,8 @@ mod tests {
     /// that, as one of a file whose prefix isn't bound doesn't.
     #[test]
     fn the_xref_stream_seed_declares_its_extensions() {
-        let declared = crate::extension::declared(&bytes::read(&xref_stream()));
+        let declared =
+            crate::extension::declared(&bytes::document(&xref_stream(), &bytes::Options::DEFAULT));
         assert_eq!(
             declared.into_iter().collect::<Vec<_>>(),
             ["ADBE_Extn3", "ISO_19005_3"]
@@ -1222,7 +1223,7 @@ mod tests {
     #[test]
     fn the_seeds_read_and_check_as_written() {
         for (name, seed) in seeds() {
-            let doc = bytes::read(&seed[2..]);
+            let doc = bytes::document(&seed[2..], &bytes::Options::DEFAULT);
             assert!(
                 doc.trailer().unwritten.is_none(),
                 "{name}: {:?}",
@@ -1312,12 +1313,12 @@ mod tests {
             .into_iter()
             .filter(|(n, _)| n.starts_with("encrypted-"))
         {
-            let doc = bytes::read(&seed[2..]);
+            let doc = bytes::document(&seed[2..], &bytes::Options::DEFAULT);
             let opened = matches!(
-                doc.encryption,
+                doc.encryption(),
                 crate::source::Encryption::Opened { owner: false, .. }
             );
-            assert!(opened, "{name}: {:?}", doc.encryption);
+            assert!(opened, "{name}: {:?}", doc.encryption());
             assert_eq!(
                 doc.get(ObjectId::new(3, 0))
                     .map(|o| o.at.and_then(|at| at.stream)),
@@ -1337,7 +1338,10 @@ mod tests {
             // the clear is recorded so, and found.
             let clear = name == "encrypted-in-the-clear";
             let left: BTreeSet<_> = clear.then_some(ObjectId::new(4, 0)).into_iter().collect();
-            assert_eq!(doc.in_the_clear, left, "{name}");
+            let held: BTreeSet<_> = (doc.ids().into_iter())
+                .filter(|&id| doc.in_the_clear(id))
+                .collect();
+            assert_eq!(held, left, "{name}");
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             let packed: Vec<_> = (report.findings.iter())
                 .filter(|f| f.rule == crate::check::Rule::Packed)
@@ -1353,13 +1357,15 @@ mod tests {
         }
         let update = &seeds().into_iter().find(|(n, _)| *n == "update").unwrap().1;
         assert!(
-            bytes::read(&update[2..]).update.is_some(),
+            bytes::document(&update[2..], &bytes::Options::DEFAULT)
+                .update()
+                .is_some(),
             "the update is one"
         );
     }
 
     /// Each seed read beside its reading is the whole read, as
-    /// `bytes::read_opened` reads it, and under the fuzz target's limits as a
+    /// `bytes::document` reads it, and under the fuzz target's limits as a
     /// reading taken whole reads it; and checked beside its reading
     /// ([`check_with_reading`]), its streams' data read, a check finds what
     /// one of its document alone finds and content's own and what its
@@ -1373,8 +1379,12 @@ mod tests {
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
             let file = &seed[2..];
-            let opened = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
-            assert_eq!(*opened.document(), bytes::read_opened(file, &[]), "{name}");
+            let opened = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
+            assert_eq!(
+                *opened.document(),
+                bytes::document(file, &bytes::Options::DEFAULT),
+                "{name}"
+            );
             let whole = bytes::Reading::open(file, &options())
                 .and_then(bytes::Reading::into_document)
                 .unwrap();
@@ -1524,7 +1534,7 @@ mod tests {
         objects.extend(type0(4, true));
         objects.extend(type0(8, false));
         let file = fixture::file("1.7", &objects, dict! { "Root" => r(1) }, Xref::Table);
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let (hold, options) = (Hold::All(Made::Merged), Options::default());
         let (beside, alone) = (
             check_with_reading(&read, &hold, &options),
@@ -1565,7 +1575,7 @@ mod tests {
             &glyph,
         ];
         let (file, _) = file(&objects, "");
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let (hold, options) = (Hold::All(Made::Merged), Options::default());
         let (beside, alone) = (
             check_with_reading(&read, &hold, &options),
@@ -1610,7 +1620,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let (hold, options) = (Hold::All(Made::Merged), Options::default());
         let (beside, alone) = (
             check_with_reading(&read, &hold, &options),
@@ -1661,7 +1671,7 @@ mod tests {
             .count();
         linearized[e] = b'1';
         linearized[e + 1..e + digits].fill(b'0');
-        let read = WithReading::new(&linearized[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&linearized[..], &bytes::Options::DEFAULT).unwrap();
         let (hold, options) = (Hold::All(Made::Merged), Options::default());
         let (beside, alone) = (
             check_with_reading(&read, &hold, &options),

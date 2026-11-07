@@ -224,7 +224,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::tests::{clean, root, startxref};
-    use super::super::{ByteSource, Options, Reading, read};
+    use super::super::{ByteSource, Options, Reading, document};
     use super::*;
     use crate::source::RevisionEnd;
 
@@ -268,7 +268,10 @@ mod tests {
         ids.iter()
             .rev()
             .for_each(|&id| assert!(reading.get(id).is_ok()));
-        assert_eq!(reading.into_document().unwrap(), read(&bytes));
+        assert_eq!(
+            reading.into_document().unwrap(),
+            document(&bytes, &Options::DEFAULT)
+        );
     }
 
     /// A file opened from its path and read by position, made a document
@@ -283,7 +286,7 @@ mod tests {
         let file = FileBytes::new(File::open(&temp.0).unwrap()).unwrap();
         let reading = Reading::open(file, &Options::DEFAULT).unwrap();
         let doc = reading.to_document().unwrap();
-        assert_eq!(doc, read(&bytes));
+        assert_eq!(doc, document(&bytes, &Options::DEFAULT));
         let mut streams = 0;
         for (id, object) in doc.objects() {
             let Some(at) = object.as_stream().and_then(|s| s.data.at()) else {
@@ -319,7 +322,10 @@ mod tests {
             let (read, expected) = (prefix.into_document(), expected.into_document());
             assert_eq!(read.unwrap(), expected.unwrap(), "{end}");
         }
-        assert_eq!(read(&base), read(&bytes[..length]));
+        assert_eq!(
+            document(&base, &Options::DEFAULT),
+            document(&bytes[..length], &Options::DEFAULT)
+        );
     }
 
     /// A file changed in place after it's opened isn't unchanged, by a

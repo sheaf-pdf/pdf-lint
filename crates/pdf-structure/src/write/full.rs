@@ -20,7 +20,7 @@ use pdf_objects::serialize;
 use super::copy::{Copying, Member};
 use super::crypt::Place;
 use super::{
-    Base, Bodies, Body, Deflate, Encrypting, Encryptor, Entry, Error, MEMBERS, NUMBERS, Numbering,
+    Base, Body, Deflate, Encrypting, Encryptor, Entry, Error, Given, MEMBERS, NUMBERS, Numbering,
     Options, Pack, Packed, Parts, ReadFrom, Section, Written, bodies as read, checked,
     container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped,
     trailer_entries, usable,
@@ -290,7 +290,7 @@ fn file(
     }
     // What the encryptor resolves references by, where there's one: the
     // bodies and the reading, by the numbers they're given at.
-    let resolve = encryptor.map(|_| Bodies::new(bodies, from));
+    let resolve = encryptor.map(|_| Given::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
         (Some(e), Some(resolve)) => Some(e.encrypting_at(trailer, resolve, to)?),
         _ => None,

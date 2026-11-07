@@ -12,7 +12,7 @@ use pdf_objects::object::{Dict, Object, ObjectId, Stream, Value};
 use pdf_objects::serialize;
 
 use super::{Deflate, Error, usable};
-use crate::bytes::Limits;
+use crate::read::Limits;
 
 /// The most a container's data may hold, as the reader decodes a stream:
 /// [`Limits::stream`]'s default, 256 MiB, so a container the writer makes

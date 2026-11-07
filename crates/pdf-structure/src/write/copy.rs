@@ -16,7 +16,7 @@ use pdf_objects::serialize;
 use pdf_tokenizer::{Kind, Tokenizer, is_regular};
 
 use super::{Body, Encrypting, Encryptor, Error, Numbering, ReadFrom};
-use crate::bytes::{SourceId, XrefEntry};
+use crate::read::{SourceId, XrefEntry};
 use crate::source::{Origin, Record};
 
 /// What a write copies by: the reading its objects were read in, and

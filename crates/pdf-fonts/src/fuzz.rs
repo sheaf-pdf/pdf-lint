@@ -875,7 +875,7 @@ mod tests {
     /// map; and the same bytes after a mutation keep every promise.
     #[test]
     fn files_read_alike_through_a_reading_and_a_map() {
-        use pdf_structure::bytes::{Options, Reading};
+        use pdf_structure::read::{Options, Reading};
 
         let mut random = generator(0xF11E5);
         let limits = Limits::DEFAULT;

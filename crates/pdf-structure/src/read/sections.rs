@@ -10,10 +10,10 @@ use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_tokenizer::{Kind, Tokenizer, is_white_space};
 
 use super::{Cx, Reader, Reading, XrefEntry, is_keyword, offset_of, predictor_row, rfind};
-use crate::bytes::reading::{ByteSource, Error};
-use crate::bytes::window::{Bytes, InMemory, Window};
 use crate::crypt::is_xref;
 use crate::filter;
+use crate::read::reading::{ByteSource, Error};
+use crate::read::window::{Bytes, InMemory, Window};
 use crate::source::{Trailer, XrefKind};
 
 /// One row of a cross-reference section, as written.
@@ -666,7 +666,7 @@ fn startxref_at(w: &Window<'_>, at: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytes::{Limits, Options};
+    use crate::read::{Limits, Options};
 
     /// A file of a catalog, its table at the end as `table` writes it, its trailer
     /// `trailer`, and its `startxref` at the table unless the file gives its own.

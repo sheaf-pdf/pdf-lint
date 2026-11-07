@@ -78,7 +78,7 @@ fn a_file_checks_through_qpdf_alone_as_through_its_bytes() {
         let path = fixture(test);
         let data = std::fs::read(&path).unwrap();
         let qpdf = qpdf(&path);
-        let bytes = bytes::read(&data);
+        let bytes = bytes::document(&data, &bytes::Options::DEFAULT);
         let alone = qpdf.read().unwrap();
         // Checked, the two read alike, but for where.
         assert_eq!(findings(&bytes), findings(&alone), "{test}");
@@ -106,7 +106,7 @@ fn what_qpdf_linearizes_holds() {
                 .unwrap();
             assert!(status.success(), "{test}, {streams}: qpdf {status}");
             let data = std::fs::read(&out).unwrap();
-            let read = WithReading::new(&data[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let read = WithReading::new(&data[..], &bytes::Options::DEFAULT).unwrap();
             let report = check_with_reading(&read, &Hold::All(Made::Merged), &Options::default());
             let found: Vec<_> = (report.findings.iter())
                 .filter(|f| f.rule == Rule::Linearization)
@@ -157,7 +157,7 @@ fn what_qpdf_linearizes_then_updated_is_found_so() {
             let options = write::Options::DEFAULT;
             let mut updated = data.clone();
             write::update(&mut updated, &base, bodies, None, None, &options).unwrap();
-            let read = WithReading::new(&updated[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let read = WithReading::new(&updated[..], &bytes::Options::DEFAULT).unwrap();
             let report = check_with_reading(&read, &Hold::All(Made::Merged), &Options::default());
             let found: Vec<_> = (report.findings.iter())
                 .filter(|f| matches!(f.rule, Rule::Linearization | Rule::Updated))
@@ -224,7 +224,7 @@ fn a_corpus_checks_alike_through_qpdf_alone() {
                     let name = path.file_name().unwrap().to_string_lossy().into_owned();
                     let data = std::fs::read(path).unwrap();
                     let qpdf = Qpdf::new(path);
-                    let bytes = bytes::read(&data);
+                    let bytes = bytes::document(&data, &bytes::Options::DEFAULT);
                     let alone = qpdf.read();
                     // The findings one reading gives and the other doesn't,
                     // as many times as it gives them: by object, table, key

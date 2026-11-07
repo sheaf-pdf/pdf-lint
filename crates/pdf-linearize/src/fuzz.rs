@@ -1498,12 +1498,12 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
 #[cfg(feature = "family")]
 pub fn over(data: &[u8]) {
     use pdf_structure::XrefKind;
-    use pdf_structure::bytes::{self, Reading};
+    use pdf_structure::read::{self, Reading};
     use pdf_structure::write::Encryptor;
 
     use crate::family;
 
-    let Ok(reading) = Reading::open(data, &bytes::Options::DEFAULT) else {
+    let Ok(reading) = Reading::open(data, &read::Options::DEFAULT) else {
         return;
     };
     let Ok(doc) = reading.to_document() else {
@@ -1511,7 +1511,7 @@ pub fn over(data: &[u8]) {
     };
     let own = Encryptor::of(&reading).ok().flatten();
     let new = data.len().is_multiple_of(8).then(|| {
-        let password = pdf_structure::Password(NEW).prepared().ok()?;
+        let password = pdf_structure::pdf_crypt::Password(NEW).prepared().ok()?;
         let mut protection = pdf_structure::pdf_crypt::Protection::new(&password);
         protection.encrypt_metadata = data.len().is_multiple_of(16);
         Encryptor::create(&protection, &mut Drawn::over(data)).ok()
@@ -1555,7 +1555,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     use pdf_semantics::Rules;
     use pdf_semantics::pages::{Inheritable, Origin, pages};
     use pdf_structure::Encryption;
-    use pdf_structure::bytes::{self, Reading, WithReading};
+    use pdf_structure::read::{self, Reading, WithReading};
     use pdf_structure::write::Encryptor;
 
     use crate::family::{self, graph::Prepared};
@@ -1568,9 +1568,10 @@ fn written_back<S: pdf_structure::ByteSource>(
     };
     assert_eq!(out.len() as u64 - 6, done.layout.len());
     let file = &out[6..];
-    let passwords = [pdf_structure::Password(password)];
-    let passwords: &[_] = if password.is_empty() { &[] } else { &passwords };
-    let again = Reading::open_with(file, passwords, &bytes::Options::DEFAULT).expect("it reads");
+    let passwords = [pdf_structure::pdf_crypt::Password(password)];
+    let mut opened = read::Options::DEFAULT;
+    opened.passwords = if password.is_empty() { &[] } else { &passwords };
+    let again = Reading::open(file, &opened).expect("it reads");
     assert!(again.facts().linearized);
     assert_eq!(
         matches!(again.encryption(), Encryption::Opened { .. }),
@@ -1589,7 +1590,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     let planned = planned.expect("it was planned");
     let limits = pdf_semantics::Limits::DEFAULT;
     let root = back
-        .trailer
+        .trailer()
         .dict()
         .get(b"Root")
         .and_then(|root| root.as_reference());
@@ -1601,7 +1602,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     // What's written holds, nothing that says otherwise of what a page reaches.
     let read = family::facts(&again, &Limits::DEFAULT).expect("it's in memory");
     // The same facts of it read whole beside its reading.
-    let whole = WithReading::new(file, passwords, &bytes::Options::DEFAULT).expect("it reads");
+    let whole = WithReading::new(file, &opened).expect("it reads");
     let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
     assert_eq!(format!("{beside:?}"), format!("{read:?}"));
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
@@ -1826,7 +1827,7 @@ fn lopdf_start() -> ::lopdf::Document {
 #[cfg(all(feature = "family", feature = "lopdf"))]
 pub fn lopdf_document(data: &[u8]) -> bool {
     use ::lopdf::{Dictionary, Object};
-    use pdf_structure::bytes::{self, Reading, WithReading};
+    use pdf_structure::read::{self, Reading, WithReading};
 
     use crate::family;
 
@@ -1905,11 +1906,11 @@ pub fn lopdf_document(data: &[u8]) -> bool {
     };
     assert_eq!(out.len() as u64 - 6, layout.len());
     let file = &out[6..];
-    let reading = Reading::open(file, &bytes::Options::DEFAULT).expect("it reads");
+    let reading = Reading::open(file, &read::Options::DEFAULT).expect("it reads");
     assert!(reading.facts().linearized);
     let read = family::facts(&reading, &Limits::DEFAULT).expect("it's in memory");
     // The same facts of it read whole beside its reading.
-    let whole = WithReading::new(file, &[], &bytes::Options::DEFAULT).expect("it reads");
+    let whole = WithReading::new(file, &read::Options::DEFAULT).expect("it reads");
     let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
     assert_eq!(format!("{beside:?}"), format!("{read:?}"));
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
@@ -2104,10 +2105,10 @@ mod tests {
     /// dictionary at a number past them.
     #[cfg(feature = "family")]
     fn encrypted_as(key: &[u8], plain: &[u8]) -> Vec<u8> {
-        use pdf_structure::bytes::{self, Reading};
+        use pdf_structure::read::{self, Reading};
         use pdf_structure::write::{self, Encryptor};
 
-        let options = &bytes::Options::DEFAULT;
+        let options = &read::Options::DEFAULT;
         let key = Reading::open(key, options).unwrap();
         let encryptor = Encryptor::of(&key).unwrap().unwrap();
         let reading = Reading::open(plain, options).unwrap();

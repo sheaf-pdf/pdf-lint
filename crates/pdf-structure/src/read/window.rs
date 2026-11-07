@@ -321,16 +321,30 @@ mod tests {
         let mut compared = 0;
         for (name, file, passwords) in files() {
             let mut sections = vec![None];
-            if let Some(update) = read_opened(&file, &passwords).update {
+            if let Some(update) = document(
+                &file,
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            )
+            .update
+            {
                 sections.push(Some(update.previous));
             }
             for section in sections {
                 let mut options = Options::DEFAULT;
                 options.section = section;
-                let whole = Reading::open_with(&file[..], &passwords, &options)
-                    .unwrap()
-                    .into_document()
-                    .unwrap();
+                let whole = Reading::open(
+                    &file[..],
+                    &Options {
+                        passwords: &passwords,
+                        ..options
+                    },
+                )
+                .unwrap()
+                .into_document()
+                .unwrap();
                 for first in windows() {
                     for bound in [true, false] {
                         let source = Counted::new(&file, first);
@@ -388,7 +402,10 @@ mod tests {
         );
         assert!(reading.get(ObjectId::new(3, 0)).is_ok());
         assert!(source.read() > 8 << 20);
-        assert_eq!(reading.into_document().unwrap(), read_opened(&file, &[]));
+        assert_eq!(
+            reading.into_document().unwrap(),
+            document(&file, &Options::DEFAULT)
+        );
     }
 
     /// A file whose first object is an array of a million values: opened
@@ -476,7 +493,13 @@ mod tests {
     fn a_read_at_open_that_fails_fails_the_opening_and_keeps_nothing() {
         let mut failed = 0;
         for (name, file, passwords) in files() {
-            let whole = read_opened(&file, &passwords);
+            let whole = document(
+                &file,
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            );
             for first in [1, 7, 4096] {
                 let source = Failing::new(&file, first);
                 drop(open(&source, &passwords, &Options::DEFAULT, false).unwrap());
@@ -508,7 +531,13 @@ mod tests {
     fn a_document_whose_read_fails_keeps_nothing_it_read_unkept_and_reads_again() {
         let mut failed = 0;
         for (name, file, passwords) in files() {
-            let whole = read_opened(&file, &passwords);
+            let whole = document(
+                &file,
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            );
             for (first, bound) in [(1, false), (4096, true)] {
                 let source = Failing::new(&file, first);
                 let reading = open(&source, &passwords, &Options::DEFAULT, bound).unwrap();
@@ -516,7 +545,14 @@ mod tests {
                 assert_eq!(reading.to_document().unwrap(), whole, "{name}");
                 // What reading every object unkept keeps: the object
                 // streams, and the objects on the way to them.
-                let twin = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
+                let twin = Reading::open(
+                    &file[..],
+                    &Options {
+                        passwords: &passwords,
+                        ..Options::DEFAULT
+                    },
+                )
+                .unwrap();
                 twin.ids().for_each(|id| drop(twin.object_unkept(id)));
                 let ways: Vec<ObjectId> = (twin.ids())
                     .filter(|&id| twin.record(id).is_some())
@@ -578,7 +614,11 @@ mod tests {
                 "{bound}"
             );
             assert!((reading.reader.containers.values()).all(|c| c.get().is_none()));
-            assert_eq!(reading.to_document().unwrap(), read(&file), "{bound}");
+            assert_eq!(
+                reading.to_document().unwrap(),
+                document(&file, &Options::DEFAULT),
+                "{bound}"
+            );
         }
     }
 
@@ -605,7 +645,7 @@ mod tests {
             assert_eq!(reading.warnings(), warnings, "{id:?}, at {at}");
             assert!(reading.record(id).is_none(), "{id:?}, at {at}");
             assert_eq!(containers(&reading), 0, "{id:?}, at {at}");
-            let doc = read(file);
+            let doc = document(file, &Options::DEFAULT);
             assert_eq!(reading.get(id).unwrap(), doc.get(id).unwrap());
             assert_eq!(reading.into_document().unwrap(), doc);
         }
@@ -626,7 +666,7 @@ mod tests {
             ],
             "<< /Size 4 /Root 1 0 R >>",
         );
-        let doc = read(&file);
+        let doc = document(&file, &Options::DEFAULT);
         assert!(doc.get(ObjectId::new(3, 0)).is_err());
         let in_memory = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         let resolve = &in_memory;
@@ -683,7 +723,7 @@ mod tests {
             ],
             "<< /Size 4 /Root 1 0 R >>",
         );
-        let doc = read(&file);
+        let doc = document(&file, &Options::DEFAULT);
         let in_memory = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         let resolve = &in_memory;
         let two = resolve.try_resolve(ObjectId::new(2, 0)).unwrap();
@@ -845,7 +885,7 @@ mod tests {
         file.extend_from_slice(
             format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes(),
         );
-        let whole = read(&file);
+        let whole = document(&file, &Options::DEFAULT);
         for bound in [true, false] {
             let source = Failing::new(&file, 1);
             let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
@@ -946,7 +986,7 @@ mod tests {
         assert_eq!(reading.bytes(span(at, at + 5)).unwrap(), &b"hello"[..]);
         let doc = reading.into_document().unwrap();
         assert_eq!(doc.metadata.as_deref(), Some(&b"hello"[..]));
-        assert_eq!(doc, read(&file));
+        assert_eq!(doc, document(&file, &Options::DEFAULT));
     }
 
     /// A stream's data, and its filters' values by reference, read by
@@ -983,17 +1023,29 @@ mod tests {
             assert_eq!(reading.data(ObjectId::new(2, 0)).unwrap(), data);
             source.fail_at(at);
             assert!(failed_at(
-                reading.decoded(ObjectId::new(2, 0)).unwrap_err(),
+                reading
+                    .decoded_within(ObjectId::new(2, 0), usize::MAX)
+                    .unwrap_err(),
                 at
             ));
             source.fail_at(filter);
             assert!(failed_at(
-                reading.decoded(ObjectId::new(2, 0)).unwrap_err(),
+                reading
+                    .decoded_within(ObjectId::new(2, 0), usize::MAX)
+                    .unwrap_err(),
                 filter
             ));
             assert!(source.failed());
-            assert_eq!(reading.decoded(ObjectId::new(2, 0)).unwrap(), b"hello");
-            assert_eq!(reading.into_document().unwrap(), read(&file));
+            assert_eq!(
+                reading
+                    .decoded_within(ObjectId::new(2, 0), usize::MAX)
+                    .unwrap(),
+                b"hello"
+            );
+            assert_eq!(
+                reading.into_document().unwrap(),
+                document(&file, &Options::DEFAULT)
+            );
         }
     }
 }
