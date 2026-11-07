@@ -5,16 +5,21 @@ use std::convert::Infallible;
 
 /// The fuzz target `crypt`'s body: a dictionary of any version, revision
 /// and fields of any length that `data` chooses, or one the writer makes
-/// that opens, opened with passwords from it, each encoding of its text and
-/// its bytes as they are, and when it opens, strings and streams from it
-/// decrypted by each method, and encrypted under a context from it; and now
-/// and then, as revision 6 is, a new file's dictionary created for text
-/// from it (`created`). Panics on a broken promise: none should, the
-/// handler says which password opened it, which opens it alike alone,
-/// decrypting gives no more than it's given, and what's encrypted decrypts
-/// to what it was, the same bytes each time, or is refused alike both ways.
+/// that opens, now and then another handler's or one without a `/Filter`,
+/// opened with passwords from it, each encoding of its text and its bytes
+/// as they are, and when it opens, strings and streams from it decrypted
+/// by each method, one that isn't among them, and encrypted under a
+/// context from it; and now and then, as revision 6 is, a new file's
+/// dictionary created for text from it (`created`). Panics on a broken
+/// promise: none should; a dictionary of another handler is refused as
+/// that, by its name, and none other is; a version refused is the
+/// dictionary's; the handler says which password opened it, which opens it
+/// alike alone; decrypting gives no more than it's given, and an error's
+/// `Debug` gives what decrypted by its length; and what's encrypted
+/// decrypts to what it was, the same bytes each time, or is refused alike
+/// both ways.
 pub fn handler(data: &[u8]) {
-    use crate::{CryptFilter, Dictionary, Encoded, Fault, Handler, Method, Password};
+    use crate::{CryptFilter, Dictionary, Encoded, Fault, Handler, Method, Password, Refused};
     let mut bytes = data.iter().copied();
     let mut next = || bytes.next().unwrap_or(0);
     let mut take = |n: usize| -> Vec<u8> { (0..n).map(|_| next()).collect() };
@@ -54,6 +59,16 @@ pub fn handler(data: &[u8]) {
     };
     let id = take(usize::from(head[0] % 20));
     let password = take(usize::from(head[1] % 8));
+    // A byte of the 28 left for the `/ID` and the password, which take 26
+    // at most, so `rest` starts where it did: now and then, another
+    // handler's name, or none, as a reader leaves `/Filter` empty where
+    // it's missing or not a name.
+    let filter = match take(1)[0] % 32 {
+        1 => Some(Vec::new()),
+        2 => Some(b"Adobe.PubSec".to_vec()),
+        3 => Some(id.clone()),
+        _ => None,
+    };
     // Half the time, a dictionary the writer makes for the password, which
     // opens, so that decrypting is fuzzed too.
     #[cfg(any(test, feature = "writer"))]
@@ -76,6 +91,15 @@ pub fn handler(data: &[u8]) {
             })
         }
     };
+    // Whichever made it, the writer's among them, so that one which would
+    // open is refused for its handler alone.
+    let dictionary = match filter {
+        Some(filter) => Dictionary {
+            filter,
+            ..dictionary
+        },
+        None => dictionary,
+    };
     let rest: Vec<u8> = data.iter().copied().skip(8 + 5 * 64 + 28).collect();
     // A new file's dictionary runs revision 6's hash a dozen times: rare.
     if head[1] == 254 {
@@ -84,7 +108,25 @@ pub fn handler(data: &[u8]) {
     let text = String::from_utf8_lossy(&password);
     let mut passwords = Password(&text).encodings();
     passwords.extend([Encoded::verbatim(&password), Encoded::verbatim(b"")]);
-    let Ok(handler) = Handler::open(&dictionary, &id, &passwords) else {
+    let opened = Handler::open(&dictionary, &id, &passwords);
+    let other = !dictionary.filter.is_empty() && dictionary.filter != b"Standard";
+    match &opened {
+        Err(Refused::OtherHandler { name }) => {
+            assert!(
+                other && *name == dictionary.filter,
+                "another handler's, by its name"
+            );
+        }
+        _ => assert!(!other, "another handler's refused as that"),
+    }
+    if let Err(Refused::Version { v, r }) = &opened {
+        assert_eq!(
+            (*v, *r),
+            (dictionary.v, dictionary.r),
+            "the version refused"
+        );
+    }
+    let Ok(handler) = opened else {
         return;
     };
     let (i, encoding) = handler.opened_by().expect("a password given opened it");
@@ -104,6 +146,7 @@ pub fn handler(data: &[u8]) {
         Some(Method::Rc4),
         Some(Method::Aes128),
         Some(Method::Aes256),
+        Some(Method::Unknown(password.clone())),
     ];
     for method in &methods {
         for data in [
@@ -114,7 +157,10 @@ pub fn handler(data: &[u8]) {
             let check = |result: Result<Vec<u8>, crate::Error>| {
                 let len = match result {
                     Ok(out) => out.len(),
-                    Err(e) => e.data.map_or(0, |d| d.len()),
+                    Err(e) => {
+                        by_length(&e);
+                        e.data.map_or(0, |d| d.len())
+                    }
                 };
                 assert!(len <= data.len(), "no more out than in");
             };
@@ -146,12 +192,26 @@ pub fn handler(data: &[u8]) {
                             true => handler.decrypt_stream(id, &[1; 32], method.as_ref()),
                             false => handler.decrypt_string(id, &[1; 32]),
                         };
+                        if let Err(e) = &refused {
+                            by_length(e);
+                        }
                         assert_eq!(refused.map_err(|e| e.fault), Err(fault), "refused alike");
                     }
                 }
             }
         }
     }
+}
+
+/// Panics unless `error`'s `Debug` gives what decrypted by its length,
+/// never its bytes, beside its fault.
+fn by_length(error: &crate::Error) {
+    let data = match &error.data {
+        Some(data) => format!("Some({} bytes)", data.len()),
+        None => "None".to_string(),
+    };
+    let said = format!("Error {{ data: {data}, fault: {:?} }}", error.fault);
+    assert_eq!(format!("{error:?}"), said, "an error's Debug");
 }
 
 /// A new file's handler and dictionary ([`Handler::create`](crate::Handler::create)),

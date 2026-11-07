@@ -128,12 +128,12 @@ impl Handler {
     ///
     /// # Errors
     ///
-    /// [`Refused`], for the first reason the dictionary has: another
-    /// security handler's ([`Refused::OtherHandler`]); a `/V` and `/R` the
-    /// standard handler isn't ([`Refused::Version`]); no `/Filter`, or a
-    /// value it can't take ([`Refused::Unsupported`]); then none of the
-    /// passwords, or the empty one where none is given, opening it
-    /// ([`Refused::Password`]).
+    /// [`Refused`], for the first reason the dictionary has: no `/Filter`
+    /// ([`Refused::Unsupported`]); another security handler's
+    /// ([`Refused::OtherHandler`]); a `/V` and `/R` the standard handler
+    /// isn't ([`Refused::Version`]); a value it can't take
+    /// ([`Refused::Unsupported`]); then none of the passwords, or the empty
+    /// one where none is given, opening it ([`Refused::Password`]).
     pub fn open(
         dictionary: &Dictionary,
         id: &[u8],
