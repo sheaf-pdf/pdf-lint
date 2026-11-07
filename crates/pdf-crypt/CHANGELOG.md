@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.1 (unreleased)
+## 0.1.0-alpha.1 (2026-11-07)
 
 The first release, and an alpha: until a release says it's stable, any alpha may change the API, each saying here what changed and how code follows. A crate that depends on an alpha names it exactly, `=0.1.0-alpha.1`: cargo's default, `0.1.0-alpha.1`, takes any later alpha of 0.1.0 too.
 
