@@ -64,13 +64,13 @@
 //! ```
 //! use chacha20::ChaCha20Rng;
 //! use pdf_crypt::rand_core::SeedableRng;
-//! use pdf_crypt::{Encoding, Handler, Password, Refused};
+//! use pdf_crypt::{Encoding, Handler, Password, Protection, Refused};
 //!
 //! // The password prepared: Ⅸ's SASLprep form is `IX`.
 //! let password = Password("\u{2168}").prepared().unwrap();
 //! assert_eq!(password.as_bytes(), b"IX");
 //! let mut rng = ChaCha20Rng::seed_from_u64(7);
-//! let (writer, dictionary) = Handler::create(&password, true, &mut rng).unwrap();
+//! let (writer, dictionary) = Handler::create(&Protection::new(&password), &mut rng).unwrap();
 //! assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-4)));
 //!
 //! // A writer encrypts a string of object 5 under it, AES's IV derived from
@@ -110,7 +110,7 @@ pub mod writer;
 
 use std::fmt;
 
-pub use handler::{Handler, Method};
+pub use handler::{Handler, Method, Protection};
 pub use password::{Encoded, Encoding, Password, Unusable};
 pub use permissions::{Changes, Permissions, Printing};
 pub use rand_core;

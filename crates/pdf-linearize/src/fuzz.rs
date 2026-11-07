@@ -1512,12 +1512,9 @@ pub fn over(data: &[u8]) {
     let own = Encryptor::of(&reading).ok().flatten();
     let new = data.len().is_multiple_of(8).then(|| {
         let password = pdf_structure::Password(NEW).prepared().ok()?;
-        Encryptor::create(
-            &password,
-            data.len().is_multiple_of(16),
-            &mut Drawn::over(data),
-        )
-        .ok()
+        let mut protection = pdf_structure::pdf_crypt::Protection::new(&password);
+        protection.encrypt_metadata = data.len().is_multiple_of(16);
+        Encryptor::create(&protection, &mut Drawn::over(data)).ok()
     });
     for (kind, stream, pack) in [
         (Kind::Table, XrefKind::Table, false),

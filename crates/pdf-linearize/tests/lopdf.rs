@@ -13,6 +13,7 @@ use pdf_linearize::plan::{self, plan};
 use pdf_linearize::{Limits, Verdict};
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_structure::bytes::{self, Reading};
+use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::pdf_crypt::rand_core::SeedableRng;
 use pdf_structure::write::{self, Encryptor};
 use pdf_structure::{Password, Source as _};
@@ -1149,7 +1150,11 @@ fn a_file_lopdf_didn_t_open_is_refused() {
     let reading = Reading::open(&plain[..], &bytes::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
     let prepared = Password("user").prepared().unwrap();
-    let new = Encryptor::create(&prepared, true, &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
+    let new = Encryptor::create(
+        &Protection::new(&prepared),
+        &mut ChaCha20Rng::seed_from_u64(1),
+    )
+    .unwrap();
     let mut encrypted = Vec::new();
     let options = write::Options::DEFAULT;
     write::document(&mut encrypted, &doc, Some(&new), Some(&reading), &options).unwrap();

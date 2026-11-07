@@ -122,6 +122,93 @@ impl fmt::Debug for Handler {
     }
 }
 
+/// How a new file is protected ([`Handler::create`]): the user's password,
+/// which opens it under its permissions, and the owner's, which opens it
+/// with every one (ISO 32000-2, 7.6.4.1); the permissions; and whether the
+/// document's metadata is encrypted. Outside the crate, one is made by
+/// [`Protection::new`], for one password, or from [`Protection::DEFAULT`],
+/// its fields set after, so that a field it gains breaks no caller:
+///
+/// ```
+/// use pdf_crypt::{Changes, Password, Permissions, Printing, Protection};
+///
+/// let user = Password("open").prepared().unwrap();
+/// let owner = Password("permissions").prepared().unwrap();
+/// let mut protection = Protection::new(&user);
+/// protection.owner = Some(&owner);
+/// protection.permissions = Permissions::from(Printing::Low) | Permissions::from(Changes::FillForms);
+/// ```
+///
+/// - **Both passwords:** each opens the file, the user's under the
+///   permissions, the owner's with every one.
+/// - **The user's alone** (`owner` none): the owner's is the user's, so the
+///   one password opens the file as its owner's. The permissions are then
+///   every one, or it's refused ([`Unusable::Shared`]), as they'd bind no
+///   one who can open it.
+/// - **The owner's alone** (`user` none): the user's is the empty
+///   password, so anyone opens the file, under the permissions, and the
+///   owner's password lifts them: a file that restricts what's done with
+///   it, not who reads it. With every permission, the owner's password
+///   lifts nothing; that's taken all the same.
+/// - **Neither:** refused ([`Unusable::Empty`]), as a file anyone opens
+///   with every permission isn't protected.
+///
+/// The permissions are said, not enforced: honouring them is a reader's,
+/// and one who can open the file, by the user's password or by none where
+/// that's empty, can decrypt all of it, whatever they withhold. Revision 6
+/// has bit 10 ([`Permissions::ACCESSIBILITY`]) set whatever's asked, so a
+/// set without it has it put back, and it doesn't count as withheld.
+///
+/// Its `Debug` gives each password's encoding, not its bytes, as
+/// [`Encoded`]'s does; it has no `PartialEq` or `Hash`, as it holds
+/// passwords.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Protection<'a> {
+    /// The user's password, [prepared](crate::Password::prepared); none
+    /// for the empty one, which only an owner's password beside it makes a
+    /// file of.
+    pub user: Option<&'a Encoded>,
+    /// The owner's password, prepared; none for the user's.
+    pub owner: Option<&'a Encoded>,
+    /// What one who opens the file with the user's password may do.
+    pub permissions: Permissions,
+    /// Whether the document's metadata stream is encrypted
+    /// (`/EncryptMetadata`).
+    pub encrypt_metadata: bool,
+}
+
+impl Protection<'static> {
+    /// No password, every permission, and the metadata encrypted: what a
+    /// protection's fields are set from. As it is, it's refused
+    /// ([`Unusable::Empty`]), having no password.
+    pub const DEFAULT: Protection<'static> = Protection {
+        user: None,
+        owner: None,
+        permissions: Permissions::ALL,
+        encrypt_metadata: true,
+    };
+}
+
+impl Default for Protection<'_> {
+    fn default() -> Self {
+        Protection::DEFAULT
+    }
+}
+
+impl<'a> Protection<'a> {
+    /// `password` alone, the user's and so the owner's, every permission
+    /// granted and the metadata encrypted: a file the one password opens,
+    /// as its owner's.
+    #[must_use]
+    pub const fn new(password: &'a Encoded) -> Protection<'a> {
+        Protection {
+            user: Some(password),
+            ..Protection::DEFAULT
+        }
+    }
+}
+
 impl Handler {
     /// The handler `dictionary` describes, for the file whose first `/ID`
     /// element is `id`, opened by the first of `passwords` that opens it,
@@ -206,18 +293,19 @@ impl Handler {
     }
 
     /// A new file's handler and encryption dictionary, of revision 6 (ISO
-    /// 32000-2, 7.6.4), for `password`, [prepared](crate::Password::prepared):
-    /// `/V 5 /R 6`, strings and streams encrypted by AES-256 (the crypt
-    /// filter `/StdCF`, `/CFM /AESV3`), the document's metadata as
-    /// `encrypt_metadata` says, every permission granted (`/P -4`, bits 1
-    /// and 2 clear as Table 22 has them), and the owner's password the
-    /// user's, so that it opens by the one password, as the owner's: an
-    /// owner's password of its own and permissions short of every one
-    /// aren't made here, and would come by a constructor beside this one.
-    /// `/U` and `/UE`, `/O` and `/OE`, and `/Perms` are made by Algorithms
-    /// 8, 9 and 10, from what's drawn from `rng` in this order: the file's
-    /// key (32 bytes), the user's validation and key salts, the owner's (8
-    /// bytes each), and `/Perms`' 4 random bytes. pdf-crypt draws on no
+    /// 32000-2, 7.6.4), protected as `protection` says: `/V 5 /R 6`,
+    /// strings and streams encrypted by AES-256 (the crypt filter `/StdCF`,
+    /// `/CFM /AESV3`), the document's metadata as its `encrypt_metadata` says,
+    /// `/P` the permissions as [`Permissions::p`] writes them, bit 10
+    /// ([`Permissions::ACCESSIBILITY`]) set whatever's asked, as PDF 2.0
+    /// has a writer set it (Table 22); every permission is `/P -4`. `/U`
+    /// and `/UE` are made from the user's password, the empty one where
+    /// there's none, and `/O` and `/OE` from the owner's, the user's where
+    /// there's none (Algorithms 8 and 9), and `/Perms` from `/P` and
+    /// `/EncryptMetadata` (Algorithm 10), from what's drawn from `rng` in
+    /// this order: the file's key (32 bytes), the user's validation and key
+    /// salts, the owner's (8 bytes each), and `/Perms`' 4 random bytes, the
+    /// same draws whichever passwords are given. pdf-crypt draws on no
     /// randomness of its own: a program passes the operating system's, and
     /// a test a seeded generator, the same draws giving the same dictionary.
     /// The dictionary is whole as it's given: its crypt filter's
@@ -227,32 +315,43 @@ impl Handler {
     /// qpdf, pdf.js and PDFium read it, or written as `/AuthEvent
     /// /DocOpen` and `/Length 32`, as qpdf writes them.
     ///
-    /// The handler is the owner's, as one opened by the password is, but
-    /// [`Handler::opened_by`] is none: no password opened it.
+    /// The handler is the owner's, as one opened by the owner's password
+    /// is, but [`Handler::opened_by`] is none: no password opened it. Its
+    /// [`Handler::permissions`] are those `/P` grants, bit 10 among them.
     ///
     /// # Errors
     ///
-    /// [`Unusable`], the password unused and nothing drawn: one not tagged
-    /// [`Encoding::Saslprep`] ([`Unusable::Unprepared`]); and one so tagged
-    /// that's empty ([`Unusable::Empty`]) or over 127 bytes
-    /// ([`Unusable::TooLong`]), which a reader would cut, or that isn't
-    /// its own prepared form ([`Unusable::Unprepared`]), as SASLprep's form
+    /// [`Unusable`], nothing drawn, for the first of these: the user's
+    /// password, then the owner's, where given, not tagged
+    /// [`Encoding::Saslprep`] ([`Unusable::Unprepared`]); or so tagged and
+    /// empty ([`Unusable::Empty`]) or over 127 bytes
+    /// ([`Unusable::TooLong`]), which a reader would cut, or not its own
+    /// prepared form ([`Unusable::Unprepared`]), as SASLprep's form
     /// [`Password::encodings`](crate::Password::encodings) tries can be:
     /// by Unicode 3.2, of a password whose form by a later Unicode is
-    /// another.
+    /// another. Then neither password given ([`Unusable::Empty`]). Then
+    /// permissions withheld, of those `/P` would grant, with no owner's
+    /// password apart from the user's, none given or the same bytes
+    /// ([`Unusable::Shared`]): the one password would open the file as its
+    /// owner's, whom they don't bind.
     pub fn create(
-        password: &Encoded,
-        encrypt_metadata: bool,
+        protection: &Protection,
         rng: &mut (impl CryptoRng + ?Sized),
     ) -> Result<(Handler, Dictionary), Unusable> {
-        let password = match (password.encoding(), password.as_bytes()) {
-            (Encoding::Saslprep, []) => return Err(Unusable::Empty),
-            (Encoding::Saslprep, bytes) if bytes.len() > 127 => {
-                return Err(Unusable::TooLong { len: bytes.len() });
-            }
-            (Encoding::Saslprep, bytes) if is_prepared(bytes) => bytes,
-            (encoding, _) => return Err(Unusable::Unprepared(encoding)),
+        let user = protection.user.map(prepared).transpose()?;
+        let owner = protection.owner.map(prepared).transpose()?;
+        let (user, owner) = match (user, owner) {
+            (None, None) => return Err(Unusable::Empty),
+            (Some(user), None) => (user, user),
+            (user, Some(owner)) => (user.unwrap_or_default(), owner),
         };
+        let permissions = protection.permissions | Permissions::ACCESSIBILITY;
+        // Compared as they are, not in constant time: both are the
+        // caller's, and compared once.
+        if user == owner && permissions != Permissions::ALL {
+            return Err(Unusable::Shared);
+        }
+        let encrypt_metadata = protection.encrypt_metadata;
         let mut key = Zeroizing::new(vec![0; 32]);
         rng.fill_bytes(&mut key);
         let mut salts = [[0; 8]; 4];
@@ -266,7 +365,7 @@ impl Handler {
             v: 5,
             r: 6,
             length: Some(256),
-            p: Some(-4),
+            p: Some(permissions.p()),
             encrypt_metadata: Some(encrypt_metadata),
             crypt_filters: vec![CryptFilter {
                 name: b"StdCF".to_vec(),
@@ -276,7 +375,7 @@ impl Handler {
             str_f: Some(b"StdCF".to_vec()),
             ..Dictionary::default()
         };
-        seal(&mut dictionary, &key, (password, password), &salts, rand);
+        seal(&mut dictionary, &key, (user, owner), &salts, rand);
         let (strings, streams, filters) = methods(&dictionary, dictionary.v);
         let handler = Handler {
             aes: Aes::new(&key),
@@ -288,7 +387,7 @@ impl Handler {
             streams,
             filters,
             encrypt_metadata,
-            permissions: Permissions::ALL,
+            permissions,
             faults: Vec::new(),
             by: None,
         };
@@ -539,6 +638,21 @@ impl Handler {
         }
         let digest = Zeroizing::new(md5(&input));
         Zeroizing::new(digest[..(self.key.len() + 5).min(16)].to_vec())
+    }
+}
+
+/// `password`'s bytes, where they're a new file's password as
+/// [`Password::prepared`](crate::Password::prepared) gives it: tagged
+/// [`Encoding::Saslprep`], 1 to 127 bytes, and its own prepared form; else
+/// why not.
+fn prepared(password: &Encoded) -> Result<&[u8], Unusable> {
+    match (password.encoding(), password.as_bytes()) {
+        (Encoding::Saslprep, []) => Err(Unusable::Empty),
+        (Encoding::Saslprep, bytes) if bytes.len() > 127 => {
+            Err(Unusable::TooLong { len: bytes.len() })
+        }
+        (Encoding::Saslprep, bytes) if is_prepared(bytes) => Ok(bytes),
+        (encoding, _) => Err(Unusable::Unprepared(encoding)),
     }
 }
 

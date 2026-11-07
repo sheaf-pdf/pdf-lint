@@ -36,7 +36,7 @@ use chacha20::ChaCha20Rng;
 use criterion::{BatchSize, Criterion, Throughput};
 use pdf_crypt::rand_core::SeedableRng;
 use pdf_crypt::writer::{self, Kind, Settings};
-use pdf_crypt::{Encoded, Encoding, Handler, Password, Refused};
+use pdf_crypt::{Encoded, Encoding, Handler, Password, Protection, Refused};
 
 /// The file's first `/ID` element.
 const ID: &[u8] = b"0123456789abcdef";
@@ -235,8 +235,9 @@ const SEED: u64 = 7;
 fn create_group(c: &mut Criterion) {
     let password = Password(ASCII).prepared();
     let password = password.expect("create/aes-256-r6: a password SASLprep takes");
+    let protection = Protection::new(&password);
     let rng = &mut ChaCha20Rng::seed_from_u64(SEED);
-    let created = Handler::create(&password, true, rng);
+    let created = Handler::create(&protection, rng);
     let (_, dictionary) = created.expect("create/aes-256-r6: made");
     let r = (dictionary.v, dictionary.r);
     assert_eq!(r, (5, 6), "create/aes-256-r6: revision 6's");
@@ -248,7 +249,7 @@ fn create_group(c: &mut Criterion) {
     group.bench_function("aes-256-r6", |b| {
         b.iter_batched(
             || ChaCha20Rng::seed_from_u64(SEED),
-            |mut rng| Handler::create(black_box(&password), true, &mut rng),
+            |mut rng| Handler::create(black_box(&protection), &mut rng),
             BatchSize::SmallInput,
         )
     });

@@ -5731,8 +5731,10 @@ mod tests {
         let root = || dict! { "Root" => Object::reference(1) };
         let created = |typed: &str, encrypt_metadata: bool, objects: &[(u32, Body)]| {
             let password = Password(typed).prepared().unwrap();
+            let mut protection = pdf_crypt::Protection::new(&password);
+            protection.encrypt_metadata = encrypt_metadata;
             let mut rng = ChaCha20Rng::seed_from_u64(6);
-            fixture::created(&password, encrypt_metadata, objects, root(), &mut rng)
+            fixture::created(&protection, objects, root(), &mut rng)
         };
         let cases = [
             ("user", Encoding::Utf8),
@@ -5801,6 +5803,78 @@ mod tests {
             let doc = read_opened(&file, passwords);
             let encryption = &doc.encryption;
             assert_eq!(doc.metadata.as_deref(), Some(&xmp[..]), "{encryption:?}");
+        }
+    }
+
+    /// A new file protected by each combination of passwords opens in the
+    /// reader by each as its protection says, its strings decrypted: both
+    /// apart, the owner's as the owner's and the user's as the user's; the
+    /// user's alone, or both the same, as the owner's; the owner's alone,
+    /// by the owner's as the owner's, and by none as the user's, no
+    /// password given (`by` none). A wrong password leaves it locked, and
+    /// no password does too where there's a user's.
+    #[test]
+    fn a_new_files_encryption_opens_by_each_password_as_its_protection_says() {
+        use chacha20::ChaCha20Rng;
+        use pdf_crypt::rand_core::SeedableRng;
+        use pdf_crypt::{Encoding, Permissions, Printing, Protection};
+
+        let user = Password("user").prepared().unwrap();
+        let owner = Password("owner").prepared().unwrap();
+        let low = Permissions::from(Printing::Low) | Permissions::COPY;
+        let by = Some((0, Encoding::Utf8));
+        // The user's password and the owner's, given or not, the
+        // permissions, and what opens it as whose.
+        let cases = [
+            (
+                Some(&user),
+                Some(&owner),
+                low,
+                vec![("owner", true), ("user", false)],
+            ),
+            (Some(&user), None, Permissions::ALL, vec![("user", true)]),
+            (
+                Some(&user),
+                Some(&user),
+                Permissions::ALL,
+                vec![("user", true)],
+            ),
+            (None, Some(&owner), low, vec![("owner", true), ("", false)]),
+        ];
+        for (u, o, permissions, opens) in cases {
+            let mut protection = Protection::DEFAULT;
+            protection.user = u;
+            protection.owner = o;
+            protection.permissions = permissions;
+            let mut rng = ChaCha20Rng::seed_from_u64(6);
+            let root = dict! { "Root" => Object::reference(1) };
+            let file = fixture::created(&protection, &to_encrypt(&[]), root, &mut rng);
+            for (typed, owner) in opens {
+                let what = format!("{protection:?}: {typed:?}");
+                let passwords: &[Password] = match typed {
+                    "" => &[],
+                    _ => &[Password(typed)],
+                };
+                let doc = read_opened(&file, passwords);
+                let by = if typed.is_empty() { None } else { by };
+                assert_eq!(doc.encryption, Encryption::Opened { owner, by }, "{what}");
+                assert!(doc.warnings.is_empty(), "{what}: {:?}", doc.warnings);
+                let object = doc.get(ObjectId::new(4, 0)).unwrap();
+                let note = object.as_dict().unwrap().get(b"Contents").unwrap();
+                let plain = Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal));
+                assert_eq!(*note.value(), plain, "{what}");
+                let (_, handler) = read_opened_by(&file, passwords);
+                let written = permissions | Permissions::ACCESSIBILITY;
+                assert_eq!(handler.unwrap().permissions(), written, "{what}");
+            }
+            let mut locked: Vec<&[Password]> = vec![&[Password("wrong")]];
+            if u.is_some() {
+                locked.push(&[]);
+            }
+            for passwords in locked {
+                let doc = read_opened(&file, passwords);
+                assert_eq!(doc.encryption, Encryption::Locked, "{protection:?}");
+            }
         }
     }
 

@@ -966,7 +966,9 @@ struct Way {
 impl Way {
     fn of(file: &[u8], choice: u16) -> Way {
         let new = NEW.prepared().ok().and_then(|password| {
-            Encryptor::create(&password, choice & 64 == 0, &mut Drawn::over(file)).ok()
+            let mut protection = pdf_crypt::Protection::new(&password);
+            protection.encrypt_metadata = choice & 64 == 0;
+            Encryptor::create(&protection, &mut Drawn::over(file)).ok()
         });
         Way {
             choice: (choice >> 3) & 3,

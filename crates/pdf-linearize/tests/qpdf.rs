@@ -216,6 +216,7 @@ mod family {
 
     use chacha20::ChaCha20Rng;
     use pdf_linearize::family::{Options, linearize, linearize_bytes};
+    use pdf_structure::pdf_crypt::Protection;
     use pdf_structure::pdf_crypt::rand_core::SeedableRng;
     use pdf_structure::write::Encryptor;
     use pdf_structure::{Password, XrefKind};
@@ -313,7 +314,11 @@ mod family {
         }
         // A new encryption, by its password: over a plain reading, and an RC4 one.
         let prepared = Password("user").prepared().unwrap();
-        let new = Encryptor::create(&prepared, true, &mut ChaCha20Rng::seed_from_u64(15)).unwrap();
+        let new = Encryptor::create(
+            &Protection::new(&prepared),
+            &mut ChaCha20Rng::seed_from_u64(15),
+        )
+        .unwrap();
         let sources = [plain.clone(), encrypted_as(KEYS[1].1, &plain)];
         for (at, source) in sources.iter().enumerate() {
             let written = |options: &Options<'_>| {
