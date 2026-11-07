@@ -3663,7 +3663,11 @@ impl Reader {
     }
 
     /// A stream's `/Length`: an integer, or a reference to one written in
-    /// plain view, read again for it, its faults the stream's.
+    /// plain view, read again for it, its faults the stream's. The
+    /// reference is followed as any is, to the object listed at its number
+    /// and generation: one to a number listed at another generation is to
+    /// no object (ISO 32000-2, 7.3.10), so the stream has no `/Length`
+    /// that reads.
     fn length<'f, F: Bytes<'f>>(
         &self,
         file: F,
@@ -3677,7 +3681,7 @@ impl Reader {
         let n = match *length.value() {
             Value::Integer(n) => n,
             Value::Ref(to) if to != id && !cx.resolving => {
-                let Some(&(_, XrefEntry::InUse { offset, .. })) = self.entry(to.number) else {
+                let Some(&(_, XrefEntry::InUse { offset, .. })) = self.listed_entry(to) else {
                     return Ok(None);
                 };
                 cx.resolving = true;
@@ -4455,6 +4459,55 @@ mod tests {
             Value::Ref(ObjectId::new(3, 0)),
             "as written"
         );
+    }
+
+    /// A `/Length` reference to a number listed at another generation is to
+    /// no object (ISO 32000-2, 7.3.10), whatever is written at the entry's
+    /// offset, here the very object the reference names: the stream has no
+    /// `/Length` that reads, its data found by `endstream`, and said.
+    #[test]
+    fn a_length_by_reference_to_another_generation_is_none() {
+        let file = fixture::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Type /Catalog >>"),
+                (2, b"<< /Length 3 1 R >>\nstream\r\nabcdef\nendstream"),
+                (3, b"6"),
+            ],
+            "<< /Size 4 /Root 1 0 R >>",
+        );
+        // Written as 3 1 obj, which the table lists at generation 0.
+        let at = find(&file, b"3 0 obj").unwrap();
+        let file = [&file[..at], b"3 1 obj", &file[at + 7..]].concat();
+        let reading = Reading::open(file.clone(), &Options::DEFAULT).unwrap();
+        assert!(reading.entries().any(|(n, g, _)| (n, g) == (3, 0)));
+        for doc in [
+            document(&file, &Options::DEFAULT),
+            Reading::open(file.clone(), &Options::DEFAULT)
+                .unwrap()
+                .into_document()
+                .unwrap(),
+        ] {
+            let Value::Stream(s) = doc.get(ObjectId::new(2, 0)).unwrap().value() else {
+                panic!("not a stream");
+            };
+            let at = s.data.at().unwrap();
+            assert_eq!(&file[at.start..at.end], b"abcdef\n");
+            let length = s.dict.get(b"Length").unwrap();
+            assert_eq!(
+                *length.value(),
+                Value::Ref(ObjectId::new(3, 1)),
+                "as written"
+            );
+            let fault = (
+                Place::new(Some(ObjectId::new(2, 0)), length.at),
+                Fault::Length { length: None },
+            );
+            assert_eq!(doc.faults(), [fault]);
+            let record = doc.record(ObjectId::new(2, 0)).unwrap();
+            let extent = record.data.unwrap();
+            assert!(!extent.declared && extent.indirect_length, "{extent:?}");
+        }
     }
 
     #[test]
