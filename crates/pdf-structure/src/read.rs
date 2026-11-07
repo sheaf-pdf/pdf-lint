@@ -598,6 +598,9 @@ pub(crate) struct Whole {
 struct Known {
     /// What it told of as it opened the file, in order.
     opened: Vec<(Place, Fault)>,
+    /// The objects it read for the encryption dictionary as it opened the
+    /// file, which the whole read reads again ([`Once`]).
+    dictionaries: HashSet<ObjectId>,
     /// Whether faults are looked for ([`Options::faults`]).
     wants: bool,
     /// The trailer.
@@ -626,17 +629,18 @@ struct Known {
 /// A document being made of a reader's reads, as the whole read makes it:
 /// each object by number, with its record, and what the reader told of as
 /// it read each, by kind, each kind by number, so that the faults are said
-/// in the whole read's order ([`Reader::faults`]).
+/// in the whole read's order, each once ([`Reader::faults`]).
 #[derive(Default)]
 struct Assembly {
     /// Each object read, with its record, or why it doesn't read.
     objects: BTreeMap<ObjectId, Held>,
-    /// What the reader told of as it read each object in use.
-    read: Vec<(Place, Fault)>,
+    /// What the reader told of as it read each object in use, by the
+    /// object's id, where it told of any.
+    read: Vec<(ObjectId, Vec<(Place, Fault)>)>,
     /// As it decoded each object stream.
     containers: Vec<(Place, Fault)>,
-    /// As it read each object in an object stream.
-    members: Vec<(Place, Fault)>,
+    /// As it read each object in an object stream, by its id.
+    members: Vec<(ObjectId, Vec<(Place, Fault)>)>,
     /// As it decrypted each object in use's strings.
     decrypted: Vec<(Place, Fault)>,
     /// Each object stream's decoded data, where its header read.
@@ -659,13 +663,19 @@ impl Assembly {
         } = read;
         let id = match entry {
             XrefEntry::InUse { .. } => {
-                self.read.extend(faults);
+                let id = ObjectId::new(n, generation);
+                if !faults.is_empty() {
+                    self.read.push((id, faults));
+                }
                 self.decrypted.extend(decrypt);
-                ObjectId::new(n, generation)
+                id
             }
             _ => {
-                self.members.extend(faults);
-                ObjectId::new(n, 0)
+                let id = ObjectId::new(n, 0);
+                if !faults.is_empty() {
+                    self.members.push((id, faults));
+                }
+                id
             }
         };
         let held = object.map(|(object, record)| (object, Some(record)));
@@ -697,12 +707,12 @@ impl Assembly {
     }
 
     /// What it holds made a [`Document`], beside what the reader knows of
-    /// the file, `known`: the faults in the whole read's order, each object
-    /// in an object stream that starts inside another's bytes said after
-    /// what it told of as it read them ([`overlaps`]), where faults are
-    /// looked for; the strings the reader didn't decrypt itself decrypted by
-    /// `decoder`, when there's one; and the catalog's metadata read from
-    /// `file`.
+    /// the file, `known`: the faults in the whole read's order, each said
+    /// once ([`Once`]), each object in an object stream that starts inside
+    /// another's bytes said after what it told of as it read them
+    /// ([`overlaps`]), where faults are looked for; the strings the reader
+    /// didn't decrypt itself decrypted by `decoder`, when there's one; and
+    /// the catalog's metadata read from `file`.
     fn document<'f, F: Bytes<'f>>(
         self,
         file: F,
@@ -719,15 +729,28 @@ impl Assembly {
             whole,
             in_the_clear,
         } = self;
-        // The whole read's faults, told in its order.
+        // The whole read's faults, told in its order, each once: which of
+        // the open's are said is settled over every read's, then they're
+        // moved.
+        let said: Vec<bool> = {
+            let mut once = Once::new(&known.dictionaries);
+            for (id, faults) in read.iter().chain(&members) {
+                once.own(*id, faults);
+            }
+            (known.opened.iter()).map(|told| once.says(told)).collect()
+        };
+        let opened =
+            (known.opened.into_iter().zip(said)).filter_map(|(told, said)| said.then_some(told));
         let mut cx = Cx {
-            faults: known.opened,
+            faults: opened.collect(),
             wants: known.wants,
             resolving: false,
         };
-        cx.faults.extend(read);
+        cx.faults
+            .extend(read.into_iter().flat_map(|(_, faults)| faults));
         cx.faults.extend(containers);
-        cx.faults.extend(members);
+        cx.faults
+            .extend(members.into_iter().flat_map(|(_, faults)| faults));
         let records = objects.values().filter_map(|o| o.as_ref().ok()?.1.as_ref());
         overlaps(records, &mut cx);
         cx.faults.extend(decrypted);
@@ -792,6 +815,59 @@ fn overlaps<'r>(records: impl Iterator<Item = &'r Record>, sink: &mut impl Sink<
         if furthest.is_none_or(|(s, outer)| s != stream || record.at.end > outer.at.end) {
             furthest = Some((stream, record));
         }
+    }
+}
+
+/// Which of the faults the open told a reading says, so that each is said
+/// once: the open reads the encryption dictionary, and what its entries
+/// refer to, to open the file, and the reading reads each of those again
+/// as an object, so a fault the open told on one of them is said where that
+/// object's own read says it, in its place in the whole read's order, and
+/// isn't said again as the open's. Where its own read hasn't told one equal
+/// to it (the reading hasn't read the object, or no entry lists it), it's
+/// said the first time it's told. Nothing told is lost: what's left out is
+/// equal to one that's said, its place and its words.
+struct Once<'r> {
+    /// The objects the open read for the encryption dictionary.
+    dictionaries: &'r HashSet<ObjectId>,
+    /// What each object's own read told of, by its id.
+    own: BTreeMap<ObjectId, &'r [(Place, Fault)]>,
+    /// What the open told of on each object, as it's said.
+    said: BTreeMap<ObjectId, Vec<&'r (Place, Fault)>>,
+}
+
+impl<'r> Once<'r> {
+    /// Before any read is known, the open having read `dictionaries` for
+    /// the encryption dictionary.
+    fn new(dictionaries: &'r HashSet<ObjectId>) -> Once<'r> {
+        Once {
+            dictionaries,
+            own: BTreeMap::new(),
+            said: BTreeMap::new(),
+        }
+    }
+
+    /// Object `id`'s own read told of `faults`.
+    fn own(&mut self, id: ObjectId, faults: &'r [(Place, Fault)]) {
+        if !faults.is_empty() {
+            self.own.insert(id, faults);
+        }
+    }
+
+    /// Whether `told`, which the open told, is said.
+    fn says(&mut self, told: &'r (Place, Fault)) -> bool {
+        let Some(on) = told.0.object.filter(|on| self.dictionaries.contains(on)) else {
+            return true;
+        };
+        if self.own.get(&on).is_some_and(|own| own.contains(told)) {
+            return false;
+        }
+        let said = self.said.entry(on).or_default();
+        if said.contains(&told) {
+            return false;
+        }
+        said.push(told);
+        true
     }
 }
 
@@ -1891,32 +1967,43 @@ impl Reader {
     /// number; as it read each object in an object stream, by number; each
     /// of those that starts inside another's bytes, by stream, then where
     /// it starts ([`overlaps`]); and as it decrypted each object's strings,
-    /// by number. None where it looks for none.
+    /// by number. Each once ([`Once`]). None where it looks for none.
     fn faults(&self) -> Vec<(Place, Fault)> {
         let reads = |member: bool| {
             (self.entries.iter().zip(&self.slots))
                 .filter(move |&(&(n, (_, entry)), _)| {
                     n != 0 && matches!(entry, XrefEntry::Compressed { .. }) == member
                 })
-                .filter_map(|(_, slot)| slot.get())
+                .filter_map(|(&(n, (generation, entry)), slot)| {
+                    let id = match entry {
+                        XrefEntry::Compressed { .. } => ObjectId::new(n, 0),
+                        _ => ObjectId::new(n, generation),
+                    };
+                    Some((id, slot.get()?))
+                })
         };
         let mut cx = self.cx();
         if !cx.wants {
             return cx.faults;
         }
-        cx.faults.extend(self.opened.iter().cloned());
-        for read in reads(false) {
+        let mut once = Once::new(&self.list.dictionaries);
+        for (id, read) in reads(false).chain(reads(true)) {
+            once.own(id, &read.faults);
+        }
+        let opened = self.opened.iter().filter(|told| once.says(told));
+        cx.faults.extend(opened.cloned());
+        for (_, read) in reads(false) {
             cx.faults.extend(read.faults.iter().cloned());
         }
         for container in self.containers.values().filter_map(OnceLock::get) {
             cx.faults.extend(container.faults.iter().cloned());
         }
-        for read in reads(true) {
+        for (_, read) in reads(true) {
             cx.faults.extend(read.faults.iter().cloned());
         }
-        let records = reads(true).filter_map(|read| Some(&read.object.as_ref().ok()?.1));
+        let records = reads(true).filter_map(|(_, read)| Some(&read.object.as_ref().ok()?.1));
         overlaps(records, &mut cx);
-        for read in reads(false) {
+        for (_, read) in reads(false) {
             cx.faults.extend(read.decrypt.iter().cloned());
         }
         cx.faults
@@ -1927,6 +2014,7 @@ impl Reader {
     fn known(&self) -> Known {
         Known {
             opened: self.opened.clone(),
+            dictionaries: self.list.dictionaries.clone(),
             wants: self.wants,
             trailer: self.trailer.clone(),
             version: self.version,
@@ -3913,6 +4001,8 @@ fn holds_linearization<'f, F: Bytes<'f>>(
 mod faults;
 #[cfg(test)]
 pub(crate) mod lazy;
+#[cfg(test)]
+mod once;
 #[cfg(test)]
 mod revisions;
 #[cfg(test)]
