@@ -31,9 +31,11 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64
 same-file = "1"
 
 # On Unix, `Identity::of` opens a file without waiting (`O_NONBLOCK`), as a
-# FIFO put at its path would have it wait for a writer.
+# FIFO put at its path would have it wait for a writer. At least the
+# release the rest of the crate's dependencies take, pdf-crypt's SHA-2's
+# among them, so that its least is one a build can resolve.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.155"
 
 [features]
 # pdf-filters' zlib-rs, so that `Options::flate` and `write::Deflate` can
