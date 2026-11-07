@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-crypt"
 description = "PDF's standard security handler: decrypting, with every fault said, and encrypting for a writer"
 keywords = ["pdf", "decryption", "encryption", "rc4", "aes"]
 categories = ["cryptography", "parser-implementations"]
@@ -36,16 +37,34 @@ rand_core = "0.10"
 
 thiserror = "2"
 
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
+
 [dev-dependencies]
 # A seeded generator for the tests' new files: RustCrypto's ChaCha20 as a
 # rand_core generator, without its cipher.
 chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
 [features]
 # An encryption dictionary, and strings and streams encrypted, with salts,
 # keys and IVs given, not random or derived: for writing test files, not
 # for a writer to protect a document with.
 writer = []
+
+# The benchmarks: `cargo bench -p pdf-crypt --features writer`, as they
+# open the writer's dictionaries; without the feature, cargo skips them.
+# `benches/` is outside `include`, so the package carries neither them nor
+# this target.
+[[bench]]
+name = "crypt"
+harness = false
+required-features = ["writer"]
 
 [lints.rust]
 unsafe_code = "forbid"
