@@ -277,11 +277,13 @@ impl<'o, R: Resolve<'o> + Copy> Iterator for Components<'o, R> {
 
 impl<'o, R: Resolve<'o> + Copy> FusedIterator for Components<'o, R> {}
 
-/// Its caps, and neither its resolver, which a closure can't print, nor the
-/// names it has left, which are the file's.
+/// The names it has left, as [`Iter`] prints them, and its caps, but not its
+/// resolver, which a closure can't print: as `core`'s adapters print what
+/// they walk and not their closures.
 impl<R> fmt::Debug for Components<'_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (f.debug_struct("Components"))
+            .field("names", &self.names)
             .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
@@ -566,10 +568,11 @@ mod tests {
         let components: Components<'_, LockedFive<'_>> =
             spaces.components(locked, &Limits::DEFAULT);
         assert_eq!(components.size_hint(), (0, Some(3)));
-        // Its caps, and not its resolver or the file's names.
+        // Its names left and its caps, and not its resolver.
         let debug = format!("{components:?}");
-        let limits = format!("{:?}", Limits::DEFAULT);
-        assert_eq!(debug, format!("Components {{ limits: {limits}, .. }}"));
+        let (names, limits) = (spaces.iter(), Limits::DEFAULT);
+        let names_and_caps = format!("names: {names:?}, limits: {limits:?}");
+        assert_eq!(debug, format!("Components {{ {names_and_caps}, .. }}"));
         let read: Vec<(&[u8], Result<Counted, Unreadable>)> = (components.clone())
             .map(|(named, counted)| (named.key, counted))
             .collect();
