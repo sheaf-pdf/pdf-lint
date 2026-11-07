@@ -1324,15 +1324,6 @@ fn span(start: usize, end: usize) -> Span {
     Span::new(None, start, end)
 }
 
-/// The next token that isn't white-space or a comment.
-fn significant<'t>(t: &mut Tokenizer<'t>) -> Option<Token<'t>> {
-    t.next_significant()
-}
-
-fn is_keyword(token: Option<&Token>, word: &[u8]) -> bool {
-    token.is_some_and(|t| t.is_keyword(word))
-}
-
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -1353,7 +1344,7 @@ fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// The window is touched where what's looked at runs to its end.
 fn eof_after(w: &Window<'_>, at: usize) -> Option<RevisionEnd> {
     let mut t = w.tokenizer(at);
-    if !is_keyword(w.significant(&mut t).as_ref(), b"startxref") {
+    if !(w.significant(&mut t)).is_some_and(|token| token.is_keyword(b"startxref")) {
         return None;
     }
     let bytes = w.bytes;
@@ -2588,10 +2579,10 @@ impl Reader {
             };
             let at = w.place(i);
             let mut t = Tokenizer::at(w.bytes, i);
-            if !is_keyword(t.next().as_ref(), b"startxref") {
+            if !t.next().is_some_and(|token| token.is_keyword(b"startxref")) {
                 return Err(Unwritten::StartxrefInWord { at });
             }
-            (significant(&mut t))
+            t.next_significant()
                 .filter(|token| token.kind == Kind::Integer)
                 .and_then(|token| usize::try_from(token.integer().ok()?).ok())
                 .ok_or(Unwritten::StartxrefNoOffset)
@@ -2818,7 +2809,7 @@ impl Reader {
         let at = file.read_from(cx, offset, 0, |w, cx| {
             let mut t = w.tokenizer(offset);
             Ok(match w.significant(&mut t) {
-                Some(token) if is_keyword(Some(&token), b"xref") => {
+                Some(token) if token.is_keyword(b"xref") => {
                     At::Table(self.table(w, cx, &mut t).map(|(s, at)| (Box::new(s), at)))
                 }
                 Some(token) if token.kind == Kind::Integer => At::Stream,
@@ -2888,7 +2879,7 @@ impl Reader {
         loop {
             let at = w.place(t.offset());
             match w.significant(&mut t.clone()) {
-                Some(token) if is_keyword(Some(&token), b"trailer") => {
+                Some(token) if token.is_keyword(b"trailer") => {
                     w.significant(t);
                     break;
                 }
@@ -3756,8 +3747,8 @@ impl Reader {
             }
         };
         let end = parser.offset();
-        let endobj = (w.significant(&mut w.tokenizer(end)))
-            .filter(|token| is_keyword(Some(token), b"endobj"));
+        let endobj =
+            (w.significant(&mut w.tokenizer(end))).filter(|token| token.is_keyword(b"endobj"));
         let start = (w.significant(&mut w.tokenizer(offset))).map_or(offset, |n| w.place(n.start));
         let end = endobj.as_ref().map_or(end, |token| w.place(token.end()));
         // Its bytes are in the window, always: where it starts and ends are
@@ -3844,7 +3835,7 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
     let mut header = Vec::new();
     while header.len() < count {
         let integer = |t: &mut Tokenizer| {
-            (significant(t))
+            t.next_significant()
                 .filter(|token| token.kind == Kind::Integer)
                 .and_then(|token| token.integer().ok())
         };
@@ -4130,7 +4121,7 @@ fn holds_linearization<'f, F: Bytes<'f>>(
     let after = parser.offset();
     file.read_from(&mut Cx::new(false), after, 0, |w, _| {
         let next = w.significant(&mut w.tokenizer(after));
-        Ok(!is_keyword(next.as_ref(), b"stream"))
+        Ok(!next.is_some_and(|token| token.is_keyword(b"stream")))
     })
 }
 
@@ -4160,18 +4151,21 @@ pub(crate) mod tests {
     use super::*;
     use crate::source::Source;
 
-    /// `significant` passes white-space and comments, and nothing else: a
-    /// `)` that closes no string is a token it gives, like any other kind;
-    /// and `is_keyword` tells the keyword from a name of the same bytes.
+    /// pdf-tokenizer's `next_significant`, which the reader takes each
+    /// token by, passes white-space and comments, and nothing else: a `)`
+    /// that closes no string is a token it gives, like any other kind; and
+    /// `Token::is_keyword` tells the keyword from a name of the same bytes.
     #[test]
     fn a_significant_token_may_be_junk() {
         let mut t = Tokenizer::new(b" % a comment\n ) startxref /startxref");
-        let junk = significant(&mut t).unwrap();
+        let junk = t.next_significant().unwrap();
         assert_eq!((junk.kind, junk.bytes), (Kind::Junk, &b")"[..]));
-        assert!(is_keyword(significant(&mut t).as_ref(), b"startxref"));
-        assert!(!is_keyword(significant(&mut t).as_ref(), b"startxref"));
-        assert!(!is_keyword(significant(&mut t).as_ref(), b"startxref"));
-        assert_eq!(significant(&mut t), None);
+        let startxref =
+            |token: Option<Token>| token.is_some_and(|token| token.is_keyword(b"startxref"));
+        assert!(startxref(t.next_significant()));
+        assert!(!startxref(t.next_significant()));
+        assert!(!startxref(t.next_significant()));
+        assert_eq!(t.next_significant(), None);
     }
 
     /// Options given passwords print each as pdf-crypt's `Password` does,

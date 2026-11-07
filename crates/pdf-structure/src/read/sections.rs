@@ -10,9 +10,7 @@ use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_objects::parse;
 use pdf_tokenizer::{Kind, Tokenizer, is_white_space};
 
-use super::{
-    Cx, Reader, Reading, Unfiltered, XrefEntry, is_keyword, offset_of, predictor_row, rfind,
-};
+use super::{Cx, Reader, Reading, Unfiltered, XrefEntry, offset_of, predictor_row, rfind};
 use crate::crypt::is_xref;
 use crate::read::reading::{ByteSource, Error};
 use crate::read::window::{Bytes, InMemory, Window};
@@ -346,7 +344,7 @@ impl Reader {
         let what = file.read_from(&mut cx, at, 0, |w, cx| {
             let mut t = w.tokenizer(at);
             Ok(match w.significant(&mut t) {
-                Some(token) if is_keyword(Some(&token), b"xref") => {
+                Some(token) if token.is_keyword(b"xref") => {
                     let left = *left;
                     Some(self.table_again(w, cx, &mut t, at, left))
                 }
@@ -390,7 +388,7 @@ impl Reader {
         loop {
             let at = w.place(t.offset());
             match w.significant(&mut t.clone()) {
-                Some(token) if is_keyword(Some(&token), b"trailer") => {
+                Some(token) if token.is_keyword(b"trailer") => {
                     w.significant(t);
                     break;
                 }
@@ -651,10 +649,10 @@ fn last_startxref<'f, F: Bytes<'f>>(file: F) -> Result<Result<usize, SectionFaul
         };
         let at = w.place(i);
         let mut t = Tokenizer::at(w.bytes, i);
-        if !is_keyword(t.next().as_ref(), b"startxref") {
+        if !t.next().is_some_and(|token| token.is_keyword(b"startxref")) {
             return Err(SectionFault::StartxrefInWord { at });
         }
-        (super::significant(&mut t))
+        t.next_significant()
             .filter(|token| token.kind == Kind::Integer)
             .and_then(|token| usize::try_from(token.integer().ok()?).ok())
             .ok_or(SectionFault::StartxrefNoOffset { at })
@@ -665,7 +663,7 @@ fn last_startxref<'f, F: Bytes<'f>>(file: F) -> Result<Result<usize, SectionFaul
 fn startxref_at(w: &Window<'_>, at: usize) -> Option<usize> {
     let mut t = w.tokenizer(at);
     let keyword = w.significant(&mut t);
-    if !is_keyword(keyword.as_ref(), b"startxref") {
+    if !keyword.is_some_and(|token| token.is_keyword(b"startxref")) {
         return None;
     }
     (w.significant(&mut t))

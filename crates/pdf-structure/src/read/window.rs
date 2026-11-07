@@ -12,7 +12,7 @@ use std::ops::Range;
 use pdf_objects::parse::{self, Parser};
 use pdf_tokenizer::{Token, Tokenizer};
 
-use super::{ByteSource, Cx, RowShape, row_shape, significant};
+use super::{ByteSource, Cx, RowShape, row_shape};
 
 /// The file a reading reads, as each read is given it: in memory
 /// ([`InMemory`]), which can't fail; or read by position, a window at a
@@ -261,7 +261,7 @@ impl<'w> Window<'w> {
     /// The next token of `t` that isn't white-space or a comment, the window
     /// touched when it runs to the window's end or there's none.
     pub(super) fn significant(&self, t: &mut Tokenizer<'w>) -> Option<Token<'w>> {
-        let token = significant(t);
+        let token = t.next_significant();
         let end = token.as_ref().map(Token::end);
         if end.is_none_or(|end| end == self.bytes.len()) {
             self.touch();
