@@ -125,9 +125,11 @@ impl fmt::Debug for Handler {
 /// How a new file is protected ([`Handler::create`]): the user's password,
 /// which opens it under its permissions, and the owner's, which opens it
 /// with every one (ISO 32000-2, 7.6.4.1); the permissions; and whether the
-/// document's metadata is encrypted. Outside the crate, one is made by
-/// [`Protection::new`], for one password, or from [`Protection::DEFAULT`],
-/// its fields set after, so that a field it gains breaks no caller:
+/// document's metadata is encrypted. A security dialog's open password is
+/// the user's, and its permissions password the owner's. Outside the crate,
+/// one is made by [`Protection::new`], for one password, or from
+/// [`Protection::DEFAULT`], its fields set after, so that a field it gains
+/// breaks no caller:
 ///
 /// ```
 /// use pdf_crypt::{Changes, Password, Permissions, Printing, Protection};

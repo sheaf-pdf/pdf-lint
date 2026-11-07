@@ -10,6 +10,11 @@ use std::ops::BitOr;
 /// 22). The owner's password opens a file with every one, whatever the set
 /// says (7.6.4.1).
 ///
+/// A set is made from the constants, joined by `|`
+/// ([`Permissions::union`]), or from a security dialog's levels
+/// ([`Printing`] and [`Changes`], by `From`); it's read from a file's `/P`
+/// by [`Permissions::from_p`], and written as one by [`Permissions::p`].
+///
 /// The handler says them; honouring them is a reader's. One who can open a
 /// file, by the user's password or by none where that's empty, can decrypt
 /// all of it, whatever the set withholds.
@@ -21,37 +26,40 @@ use std::ops::BitOr;
 pub struct Permissions(u32);
 
 impl Permissions {
-    /// Printing (bit 3): at the highest quality only beside
-    /// [`Permissions::PRINT_HIGH`] (from revision 3).
+    /// Printing (bit 3), at low resolution unless
+    /// [`Permissions::PRINT_HIGH`] is granted too (from revision 3).
     pub const PRINT: Permissions = Permissions(1 << 2);
     /// Changing the document's content by what the other bits don't cover
     /// (bit 4); beside [`Permissions::ANNOTATE`], creating and changing form
     /// fields too.
     pub const MODIFY: Permissions = Permissions(1 << 3);
-    /// Copying or otherwise extracting text and graphics (bit 5). A PDF 2.0
-    /// reader serves assistive technology as if it were granted.
+    /// Copying text and graphics out of the document, or taking them out
+    /// any other way (bit 5). A PDF 2.0 reader gives them to assistive
+    /// technology whatever this says.
     pub const COPY: Permissions = Permissions(1 << 4);
     /// Adding and changing text annotations (bit 6), and filling in form
     /// fields, which it grants too, whatever
     /// [`Permissions::FILL_FORMS`] says: a reader asking whether a form may
     /// be filled in reads either.
     pub const ANNOTATE: Permissions = Permissions(1 << 5);
-    /// Filling in existing form fields, signature fields among them (bit 9,
-    /// from revision 3), though [`Permissions::ANNOTATE`] isn't granted;
-    /// that grants filling them in too.
+    /// Filling in the form fields a document has, signature fields among
+    /// them (bit 9, from revision 3), where [`Permissions::ANNOTATE`]
+    /// isn't granted, which grants it too.
     pub const FILL_FORMS: Permissions = Permissions(1 << 8);
-    /// Extracting content for accessibility (bit 10). PDF 2.0 has a reader
-    /// ignore it, serving assistive technology as if
-    /// [`Permissions::COPY`] were granted, and a writer always set it: a
-    /// new file's `/P` has it ([`Handler::create`](crate::Handler::create)).
+    /// Taking content out for assistive technology (bit 10). Unused from
+    /// PDF 2.0, where a reader passes over it, serving assistive technology
+    /// as though [`Permissions::COPY`] were granted, and a writer sets it
+    /// whatever's meant: a new file's `/P` has it
+    /// ([`Handler::create`](crate::Handler::create)).
     pub const ACCESSIBILITY: Permissions = Permissions(1 << 9);
-    /// Assembling the document: inserting, rotating and deleting pages,
-    /// and making outline items and thumbnails (bit 11, from revision 3),
-    /// though [`Permissions::MODIFY`] isn't granted.
+    /// Assembling the document (bit 11, from revision 3): adding, removing
+    /// and turning its pages, and making its bookmarks (outline items) and
+    /// page thumbnails, where [`Permissions::MODIFY`] isn't granted.
     pub const ASSEMBLE: Permissions = Permissions(1 << 10);
-    /// Printing at the highest quality, to a form a faithful digital copy
-    /// could be made from (bit 12, from revision 3); without it, beside
-    /// [`Permissions::PRINT`], printing is at a low quality.
+    /// Printing at high resolution (bit 12, from revision 3): output a true
+    /// copy of the content could be made from. Without it, beside
+    /// [`Permissions::PRINT`], printing is at low resolution, the pages'
+    /// look perhaps coarser.
     pub const PRINT_HIGH: Permissions = Permissions(1 << 11);
     /// None of them.
     pub const NONE: Permissions = Permissions(0);
@@ -80,7 +88,7 @@ impl Permissions {
     /// below, which no handler opens) has four of them alone, each covering
     /// what a later revision has a bit of its own for: there filling in
     /// forms follows annotating, accessibility copying, assembling
-    /// modifying, and printing at the highest quality printing. Every other
+    /// modifying, and printing at high resolution printing. Every other
     /// bit is ignored, as a reader ignores it.
     #[must_use]
     pub const fn from_p(p: i64, r: i64) -> Permissions {
@@ -133,9 +141,9 @@ impl Permissions {
         Permissions(self.0 & !other.0)
     }
 
-    /// How it lets a user print: at the highest quality with
-    /// [`Permissions::PRINT`] and [`Permissions::PRINT_HIGH`], at a low
-    /// quality with the first alone, and not at all without it, as the
+    /// How it lets a user print: at high resolution with
+    /// [`Permissions::PRINT`] and [`Permissions::PRINT_HIGH`], at low
+    /// resolution with the first alone, and not at all without it, as the
     /// second qualifies the first.
     #[must_use]
     pub const fn printing(self) -> Printing {
@@ -211,9 +219,9 @@ pub enum Printing {
     /// Not at all: neither [`Permissions::PRINT`] nor
     /// [`Permissions::PRINT_HIGH`].
     Denied,
-    /// At a low quality: [`Permissions::PRINT`].
+    /// At low resolution: [`Permissions::PRINT`].
     Low,
-    /// At the highest quality: [`Permissions::PRINT`] and
+    /// At high resolution: [`Permissions::PRINT`] and
     /// [`Permissions::PRINT_HIGH`].
     High,
 }

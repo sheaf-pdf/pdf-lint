@@ -1965,7 +1965,7 @@ fn permissions_are_read_from_p_by_the_revisions_meaning_of_its_bits() {
         }
     }
     // qpdf's 40-bit file with printing alone: bits 9 to 12 set, but only
-    // printing's high quality read from them at revision 2.
+    // printing at high resolution read from them at revision 2.
     assert_eq!(
         Permissions::from_p(-60, 2),
         Permissions::PRINT | Permissions::PRINT_HIGH
@@ -1982,9 +1982,9 @@ fn permissions_are_read_from_p_by_the_revisions_meaning_of_its_bits() {
 /// copying and accessibility, are the bits qpdf 12.4.2 sets for its own
 /// (`--encrypt user owner 256` with `--print`, `--modify` and `--extract`),
 /// bit 10 set as a revision 6 file has it: every permission -4, none
-/// -3392, printing at a low quality alone -3388, assembling and copying
-/// -2352, filling in forms with printing at a low quality and copying
-/// -2092, commenting with printing at the highest quality -28. Each
+/// -3392, printing at low resolution alone -3388, assembling and copying
+/// -2352, filling in forms with printing at low resolution and copying
+/// -2092, commenting with printing at high resolution -28. Each
 /// level of changes grants the one before it and more; each level of
 /// printing reads back from its bits.
 #[test]
