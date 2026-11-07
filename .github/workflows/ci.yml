@@ -125,7 +125,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-tokenizer/Cargo.toml,
       # which `just tokenizer-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just tokenizer-msrv
@@ -178,7 +178,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-filters/Cargo.toml,
       # which `just filters-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just filters-msrv
@@ -192,7 +192,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-crypt/Cargo.toml,
       # which `just crypt-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just crypt-msrv
@@ -206,7 +206,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-objects/Cargo.toml,
       # which `just objects-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just objects-msrv
@@ -268,7 +268,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-structure/Cargo.toml,
       # which `just structure-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just structure-msrv
@@ -282,10 +282,8 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in
       # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
-      # reads, and with `content_image_ends_msrv` in the justfile, the
-      # `image-ends` feature's, which it tests on the second.
-      - uses: dtolnay/rust-toolchain@1.85
-      - uses: dtolnay/rust-toolchain@1.87
+      # reads, with and without the `image-ends` feature.
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just content-msrv
@@ -299,7 +297,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-semantics/Cargo.toml,
       # which `just semantics-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just semantics-msrv
@@ -313,7 +311,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-color/Cargo.toml,
       # which `just color-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just color-msrv
@@ -326,10 +324,9 @@ jobs:
         with:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-fonts/Cargo.toml, which
-      # `just fonts-msrv` reads, and with `fonts_cmaps_msrv` in the justfile, the
-      # `predefined-cmaps` feature's, which `just fonts-cmaps-msrv` tests on.
-      - uses: dtolnay/rust-toolchain@1.85
-      - uses: dtolnay/rust-toolchain@1.87
+      # `just fonts-msrv` and `just fonts-cmaps-msrv` (the `predefined-cmaps`
+      # feature's) read.
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just fonts-msrv fonts-cmaps-msrv
@@ -342,10 +339,8 @@ jobs:
         with:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-linearize/Cargo.toml,
-      # which `just linearize-msrv` reads, and with `linearize_lopdf_msrv` in the
-      # justfile, the `lopdf` feature's, which it tests on the second.
-      - uses: dtolnay/rust-toolchain@1.85
-      - uses: dtolnay/rust-toolchain@1.88
+      # which `just linearize-msrv` reads, with and without the `lopdf` feature.
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just linearize-msrv
@@ -359,7 +354,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-arlington/Cargo.toml,
       # which `just arlington-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
         run: just arlington-msrv

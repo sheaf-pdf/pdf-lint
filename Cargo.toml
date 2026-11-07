@@ -27,14 +27,14 @@ exclude = ["fuzz"]
 # published: pdf-tokenizer's by caret; pdf-objects', pdf-filters' and
 # pdf-crypt's exactly, as an alpha promises nothing of the next, and a
 # requirement matches a pre-release only where it names one. A crate some
-# member takes without its default features has them off here, as Rust
-# 1.85's cargo refuses a member's `default-features = false` over an entry
+# member takes without its default features has them off here, as an older
+# cargo (1.85's) refused a member's `default-features = false` over an entry
 # that leaves them on, and every member that takes it names the features it
 # takes: pdf-filters', its Flate backend.
 [workspace.dependencies]
 pdf-tokenizer = { path = "crates/pdf-tokenizer", version = "0.2" }
-pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.1" }
-pdf-filters = { path = "crates/pdf-filters", version = "=0.1.0-alpha.1", default-features = false }
+pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.2" }
+pdf-filters = { path = "crates/pdf-filters", version = "=0.1.0-alpha.2", default-features = false }
 pdf-crypt = { path = "crates/pdf-crypt", version = "=0.1.0-alpha.1" }
 
 # pdf-crypt's revision 6 hash runs thousands of AES blocks and SHA-2

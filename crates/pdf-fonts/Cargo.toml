@@ -2,7 +2,7 @@
 name = "pdf-fonts"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "(MIT OR Apache-2.0) AND FTL"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 description = "PDF fonts read: codes, CIDs, widths, heights and text as PDFium reads them, encodings and glyph names, the standard 14's metrics, predefined CMaps, programs' glyph boxes"
@@ -18,7 +18,7 @@ pdf-content-streams = { path = "../pdf-content-streams", version = "0.1" }
 pdf-objects.workspace = true
 thiserror = "2"
 # With `predefined-cmaps`: Adobe's predefined CMaps, from its bundle alone,
-# never a file's bytes. It needs Rust 1.87.
+# never a file's bytes.
 hayro-cmap = { version = "0.1", optional = true }
 # With `programs`: a font's program read, TrueType's by skrifa, CFF's and Type 1's by
 # what it has of read-fonts.
