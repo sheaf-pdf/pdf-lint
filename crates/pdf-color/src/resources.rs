@@ -69,11 +69,12 @@ impl<'o> Spaces<'o> {
     /// `resources` and its `/ColorSpace` may each be a dictionary or a stream,
     /// each through at most two references: through three, or in a loop, as
     /// of chromium/8125 there's no dictionary, and that's no error. An object
-    /// that's [`Why::Damaged`](crate::Why::Damaged) isn't there, and any other
-    /// failure to read one is the `Err`, whole.
+    /// that's [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and any
+    /// other failure to read one is the `Err`, whole.
     ///
     /// ```
-    /// use pdf_color::{Limits, Object, ObjectId, Spaces, components, dict};
+    /// use pdf_color::pdf_objects::{Object, ObjectId, dict};
+    /// use pdf_color::{Limits, Spaces, components};
     ///
     /// let resources = Object::from(dict! { "ColorSpace" => dict! { "A" => "DeviceCMYK" } });
     /// let nothing = |_: ObjectId| None;

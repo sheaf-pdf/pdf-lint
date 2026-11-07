@@ -46,7 +46,8 @@ const MOST_UNDERLYING: u32 = 16;
 /// load: [`counted`] says which it is.
 ///
 /// ```
-/// use pdf_color::{Limits, Object, ObjectId, components};
+/// use pdf_color::pdf_objects::{Object, ObjectId};
+/// use pdf_color::{Limits, components};
 ///
 /// let file: Vec<Object> = vec![
 ///     Object::from("DeviceCMYK"),
@@ -88,7 +89,8 @@ pub struct Counted {
 /// be sure of, or read it again under larger caps.
 ///
 /// ```
-/// use pdf_color::{Limits, Object, ObjectId, counted};
+/// use pdf_color::pdf_objects::{Object, ObjectId};
+/// use pdf_color::{Limits, counted};
 ///
 /// let nested = Object::from(vec![Object::from(vec![Object::from("DeviceGray")])]);
 /// let nothing = |_: ObjectId| None;

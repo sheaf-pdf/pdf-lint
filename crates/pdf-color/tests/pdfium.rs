@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_color::{Limits, Object, Resolve, Space, Spaces, components, counted};
-use pdf_objects::ObjectId;
+use pdf_color::{Limits, Space, Spaces, components, counted};
 use pdf_objects::parse::Parser;
+use pdf_objects::{Object, ObjectId, Resolve};
 use pdf_structure::bytes::{Options, Reading};
 
 /// How a case's image begins, up to the name of its color space.

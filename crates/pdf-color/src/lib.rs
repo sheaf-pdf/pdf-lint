@@ -26,15 +26,19 @@
 //! writes a space: a space is pdf-objects' values, written as they are.
 //!
 //! A resolver is given by value, so `&reading`, `&document` or a closure, and a
-//! `&dyn Resolve` too. [`Dict`], [`Object`], [`ObjectId`], [`Resolve`], [`Span`],
-//! [`Str`], [`Stream`], [`Unreadable`], [`Value`], [`Why`] and [`dict!`] are
-//! pdf-objects', re-exported, and so is pdf-objects whole, so a sink of one's
-//! own names [`Sink`](pdf_objects::fault::Sink) at the version this crate takes.
+//! `&dyn Resolve` too. What's read and what reads it are pdf-objects': its
+//! [`Object`](pdf_objects::Object)s, a [`Resolve`](pdf_objects::Resolve), an
+//! [`Unreadable`](pdf_objects::Unreadable) for a failed read and a
+//! [`Span`](pdf_objects::Span) for where something was written. pdf-objects is
+//! re-exported whole, and none of its items by name, so a caller names them,
+//! [`dict!`](pdf_objects::dict) and a sink of its own
+//! ([`Sink`](pdf_objects::fault::Sink)) through `pdf_color::pdf_objects`, at
+//! the version this crate takes, with no dependency of its own.
 
+/// pdf-objects, whose values this crate reads, through whose resolvers, and
+/// to whose sinks it tells faults: named through it, they're the version
+/// this crate is built with.
 pub use pdf_objects;
-pub use pdf_objects::{
-    Dict, Object, ObjectId, Resolve, Span, Str, Stream, Unreadable, Value, Why, dict,
-};
 
 pub use count::{Counted, components, counted};
 pub use fault::Fault;

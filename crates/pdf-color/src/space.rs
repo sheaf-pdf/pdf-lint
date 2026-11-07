@@ -365,14 +365,16 @@ impl<'o> Space<'o> {
     /// up, and a reader of `cs` applies `DefaultGray` and the like (8.6.5.6).
     ///
     /// What's read is the same whatever the sink, an `Err` included. An object
-    /// that's [`Why::Damaged`](crate::Why::Damaged) isn't there, and it's told as
-    /// [`Fault::Damaged`](crate::Fault::Damaged); any other failure to read what a
-    /// space holds is the `Err`, whole. What only a check reads gives no `Err`: a
-    /// check whose read fails is left unsaid, so a sink that needs certainty reads
-    /// the object itself. Checks have a [`Limits::space_visits`] of their own.
+    /// that's [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and it's
+    /// told as [`Fault::Damaged`](crate::Fault::Damaged); any other failure to
+    /// read what a space holds is the `Err`, whole. What only a check reads
+    /// gives no `Err`: a check whose read fails is left unsaid, so a sink that
+    /// needs certainty reads the object itself. Checks have a
+    /// [`Limits::space_visits`] of their own.
     ///
     /// ```
-    /// use pdf_color::{Fault, Family, Limits, Object, ObjectId, Space};
+    /// use pdf_color::pdf_objects::{Object, ObjectId};
+    /// use pdf_color::{Fault, Family, Limits, Space};
     ///
     /// let gray = Object::from(vec![Object::from("Indexed"), Object::from("DeviceGray"), Object::from(1), Object::bytes(*b"\x00\xFF")]);
     /// let nothing = |_: ObjectId| None;
@@ -478,9 +480,10 @@ impl<'o> Attributes<'o> {
     ///
     /// Read on asking, as [`Space::read`] holds only the dictionary: under one
     /// [`Limits::space_visits`] for the whole of it, past which the rest aren't
-    /// given. Any failure to read but [`Why::Damaged`](crate::Why::Damaged) is the
-    /// `Err`. A fault's [`Place::object`](pdf_objects::fault::Place::object) is
-    /// the object `/Colorants` is written in, or what an entry leads to, as
+    /// given. Any failure to read but
+    /// [`Why::Damaged`](pdf_objects::Why::Damaged) is the `Err`. A fault's
+    /// [`Place::object`](pdf_objects::fault::Place::object) is the object
+    /// `/Colorants` is written in, or what an entry leads to, as
     /// [`Space::read`] tells it.
     pub fn separations<R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         &self,

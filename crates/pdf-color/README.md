@@ -17,7 +17,8 @@ It's made for what reads content, which needs to know how many components a spac
 - **What fails.** An object that's damaged isn't there, as for PDFium, and any other failure to read one, past a reader's cap, locked, or a source that didn't give its bytes, is the `Err`, whole: a typed `pdf_objects::Unreadable`.
 
 ```rust
-use pdf_color::{Limits, Object, ObjectId, Spaces, components, dict};
+use pdf_color::pdf_objects::{Object, ObjectId, dict};
+use pdf_color::{Limits, Spaces, components};
 
 let resources = Object::from(dict! {
     "ColorSpace" => dict! {
@@ -36,7 +37,8 @@ assert_eq!(names, [&b"Spot"[..], &b"Plain"[..]]);
 The same value, typed, with what's wrong with it told:
 
 ```rust
-use pdf_color::{Colorant, Fault, Family, Limits, Object, ObjectId, Space};
+use pdf_color::pdf_objects::{Object, ObjectId};
+use pdf_color::{Colorant, Fault, Family, Limits, Space};
 
 let spot = Object::from(vec![Object::from("Separation"), Object::from("Gold"), Object::from("DeviceCMYK")]);
 let nothing = |_: ObjectId| None;
