@@ -35,7 +35,7 @@ programs = ["dep:skrifa"]
 
 [dev-dependencies]
 # The tests' files, and a reading of them, which is pdf-objects' `Streams` itself.
-pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
+pdf-structure = { workspace = true, features = ["fixtures"] }
 
 # docs.rs documents what `predefined-cmaps` adds, beside the default.
 [package.metadata.docs.rs]

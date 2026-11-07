@@ -28,7 +28,7 @@ clock = ["dep:chrono"]
 
 [dev-dependencies]
 # The tests' resolvers: a reading in memory, a reading by position, a document.
-pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
+pdf-structure = { workspace = true, features = ["fixtures"] }
 
 [lints.rust]
 unsafe_code = "forbid"
