@@ -40,7 +40,7 @@ pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfiu
 default:
     @just --list --unsorted
 
-# Everything CI runs, but `tokenizer-semver`, which needs cargo-semver-checks
+# Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed.
 ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
@@ -306,6 +306,33 @@ filters-package: (_package "pdf-filters")
 # a pinned build): a break the version doesn't allow fails.
 tokenizer-semver:
     cargo semver-checks check-release -p pdf-tokenizer
+
+# An alpha's public API against the version crates.io has, with
+# cargo-semver-checks (installed as `tokenizer-semver` needs it). While the
+# manifest's version is a published one, nothing of its API may move: a
+# change that would need a new version fails, as `--release-type patch` holds
+# it (by itself the tool takes a pre-release to allow anything, and checks
+# nothing of one). A version not on crates.io yet is the next alpha, which
+# may change anything, its CHANGELOG saying what: nothing holds it here.
+_semver crate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    crate={{ crate }}
+    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "crates/$crate/Cargo.toml" | head -n 1)
+    index=$(curl -fs "https://index.crates.io/${crate:0:2}/${crate:2:2}/$crate")
+    if grep -qF "\"vers\":\"$version\"" <<< "$index"; then
+        cargo semver-checks check-release -p "$crate" --baseline-version "$version" --release-type patch
+    else
+        echo "$crate $version isn't on crates.io yet: the next alpha, whose CHANGELOG says what changed"
+    fi
+
+# Check pdf-objects' public API against its version on crates.io; `_semver`
+# says how an alpha is held.
+objects-semver: (_semver "pdf-objects")
+
+# Check the filters' public API against their version on crates.io; `_semver`
+# says how an alpha is held.
+filters-semver: (_semver "pdf-filters")
 
 # Test the tokenizer on its oldest supported Rust, which must be installed.
 tokenizer-msrv:
