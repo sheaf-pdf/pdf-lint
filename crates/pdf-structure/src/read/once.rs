@@ -14,6 +14,7 @@ use super::lengths::{
     a_cross_reference_streams_length_by_reference,
     a_cross_reference_streams_length_in_an_object_stream, alike,
     an_encryption_dictionarys_stream_with_its_length_in_an_object_stream, data, no_length, scanned,
+    unfollowed,
 };
 use super::tests::{KINDS, encryption_updated, root, settings, to_encrypt};
 use super::*;
@@ -330,9 +331,10 @@ fn an_object_of_many_faults_read_on_the_way_is_said_once_each() {
 /// among it, is read alike by the object's own read: a cross-reference
 /// stream's rows, its `/Length` in an object stream or at an offset, and
 /// what an encryption dictionary refers to, its `/Length` in an object
-/// stream. So the fault that its `/Length` doesn't read is said once,
-/// where its own read says it: told as the file opens, and by the object's
-/// read alike, its data found by `endstream` either way.
+/// stream. So the fault that its `/Length` doesn't read, or in a
+/// cross-reference stream that it's a reference, which isn't followed, is
+/// said once, where its own read says it: told as the file opens, and by
+/// the object's read alike, its data found by `endstream` either way.
 #[test]
 fn what_the_open_reads_of_a_length_in_an_object_stream_its_own_read_reads_alike() {
     let cases = [
@@ -355,12 +357,11 @@ fn what_the_open_reads_of_a_length_in_an_object_stream_its_own_read_reads_alike(
     for (what, file, n) in cases {
         let doc = alike(&file, &[]);
         let id = ObjectId::new(n, 0);
-        let fault = no_length(&doc, n);
-        // The cross-reference streams' data holds no `endstream`; the
-        // other's is [`CONTENT`].
-        let expected = match n {
-            6 | 7 => vec![fault.clone()],
-            _ => scanned(&doc, n).to_vec(),
+        // A cross-reference stream's reference is followed by no read, and
+        // its data holds no `endstream`; the other's data is [`CONTENT`].
+        let (fault, expected) = match n {
+            6 | 7 => (unfollowed(&doc, n), vec![unfollowed(&doc, n)]),
+            _ => (no_length(&doc, n), scanned(&doc, n).to_vec()),
         };
         let told: Vec<_> = (doc.faults().iter())
             .filter(|(place, _)| place.object == Some(id))

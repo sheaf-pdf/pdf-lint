@@ -122,15 +122,16 @@ pub enum Recovery {
     /// than its header, or at the nearest `xref` or cross-reference stream
     /// within 64 bytes of it, exactly there, where one reads
     /// ([`Fault::Moved`](super::Fault::Moved)). A section's entries are
-    /// read at one shift, the section's own move, or its first object's,
-    /// found exactly at its `n g obj` within 64 bytes, or the header's
-    /// offset taken back: each entry where it's written, else exactly at
-    /// its own `n g obj` at that shift, else where a scan of the file finds
-    /// its `n g obj`, of its number and generation, exactly
+    /// read at one shift, the section's own move, or one its first object
+    /// in use or the one furthest into the file proves, the header's offset
+    /// taken back or its `n g obj` found exactly within 64 bytes: each
+    /// entry where it's written, else exactly at its own `n g obj` at that
+    /// shift, else where a scan of the file finds its `n g obj`, of its
+    /// number and generation, exactly
     /// ([`Origin::Recovered`](crate::Origin::Recovered)), else where it's
-    /// written ([`Fault::Shifted`](super::Fault::Shifted)). A file whose newest
-    /// section doesn't read is scanned for its objects, as one whose later
-    /// section doesn't keeps those it read before it.
+    /// written ([`Fault::Shifted`](super::Fault::Shifted)). A file whose
+    /// newest section doesn't read is scanned for its objects, as one whose
+    /// later section doesn't keeps those it read before it.
     #[default]
     Verified,
     /// As PDFium reads a file, as of chromium/8125: its sections where
@@ -149,9 +150,23 @@ pub enum Recovery {
     /// encrypted; its trailer is each `trailer` dictionary and
     /// cross-reference stream's, a later one's keys over an earlier's; and
     /// it's merged over what the sections had given, each object the scan
-    /// doesn't find kept where they put it. A file whose
-    /// sections read and give a page reads as under
-    /// [`Recovery::Verified`] where that takes no recovery.
+    /// doesn't find kept where they put it. A file it doesn't scan reads
+    /// as under [`Recovery::Verified`] where that takes no recovery.
+    ///
+    /// It parts from PDFium in what it parses: each object is read by this
+    /// crate's reader, by ISO 32000-2's rules, so a damaged dictionary
+    /// PDFium's parser reads past doesn't read here. And a file PDFium
+    /// doesn't open, one without `%PDF-` or an encrypted one no password
+    /// given opens, is read all the same, as far as it reads. A few edges
+    /// of how PDFium finds and lists sections are read by this crate's
+    /// rules instead, among them: a `startxref` more than 4,096 bytes from
+    /// the file's end, where PDFium doesn't look, one under 9, and a
+    /// cross-reference stream's negative `/Prev`, or a `/Size` negative or
+    /// past PDFium's cap, each a file PDFium scans; a `/Prev` written as a
+    /// real, which PDFium takes as a number; the first-written section's
+    /// `/XRefStm`, which PDFium never reads; which section's entry is taken
+    /// where two that read list one object; and an object stream written
+    /// twice under one number, of which PDFium decodes both.
     Pdfium,
 }
 

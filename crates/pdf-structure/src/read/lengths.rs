@@ -336,6 +336,13 @@ pub(super) fn no_length(doc: &Document, n: u32) -> (Place, Fault) {
     (Place::new(Some(id), at), Fault::Length { length: None })
 }
 
+/// The fault that cross-reference stream `n`'s `/Length` is a reference,
+/// which isn't followed, at its value, as `doc` holds the stream.
+pub(super) fn unfollowed(doc: &Document, n: u32) -> (Place, Fault) {
+    let (place, _) = no_length(doc, n);
+    (place, Fault::XrefLength)
+}
+
 /// The faults on stream `n`, its data [`CONTENT`] found by the first
 /// `endstream` in it: its `/Length` doesn't read, and past that
 /// `endstream` is no `endobj`.

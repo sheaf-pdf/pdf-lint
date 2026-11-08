@@ -296,12 +296,22 @@ pub enum Fault {
     },
     /// A stream's `/Length`, when one reads (`length`), doesn't end its
     /// data at `endstream`, or none reads: its data is read up to
-    /// `endstream`, found by scanning.
+    /// `endstream`, found by scanning. A cross-reference stream's that's a
+    /// reference is [`Fault::XrefLength`].
     #[error("{}", length_words(*.length))]
     Length {
         /// What its `/Length` says, when it reads.
         length: Option<usize>,
     },
+    /// A cross-reference stream's `/Length` is a reference, which no read
+    /// follows: its data is read up to `endstream`, found by scanning. Its
+    /// section is read before any object is listed, so the reference
+    /// can't be followed there, and every other read of the stream reads
+    /// it as that one did. ISO 32000-2 has it direct (7.5.8.2, as
+    /// corrected); before PDF 2.0, only `/Filter` and `/DecodeParms` had
+    /// to be, of the entries every stream has.
+    #[error("its /Length is a reference, which isn't followed in a cross-reference stream")]
+    XrefLength,
     /// A stream's data doesn't decode cleanly through its filter `filter`,
     /// and pdf-filters' fault: what decoded is kept, as far as it went.
     #[error("its data doesn't decode cleanly through /{filter}: {fault}")]
@@ -856,11 +866,12 @@ mod tests {
             Fault::Moved { .. } => 31,
             Fault::Shifted { .. } => 32,
             Fault::Members { .. } => 33,
+            Fault::XrefLength => 34,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 34;
+    const ARMS: usize = 35;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -1000,6 +1011,10 @@ mod tests {
             (
                 Fault::Length { length: None },
                 "it has no /Length that reads",
+            ),
+            (
+                Fault::XrefLength,
+                "its /Length is a reference, which isn't followed in a cross-reference stream",
             ),
             (
                 Fault::Decode {

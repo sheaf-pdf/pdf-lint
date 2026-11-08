@@ -2,8 +2,9 @@
 //! 32000-2, 7.5): a file's header, its cross-reference tables and streams
 //! along their `/Prev` chain, and each object at the offset they give,
 //! through pdf-objects' parser, every value, key and stream's data with
-//! where it was written. Where the sections don't read, it finds the
-//! objects by scanning the file, and says so. What it reads is a
+//! where it was written. Where a file's sections or objects aren't where
+//! it says, it reads them where the file proves they are, or scans the
+//! file for them, and says so. What it reads is a
 //! document, which a caller can build in memory too, to number new
 //! objects in, edit, walk and prune. And it writes a file of numbered
 //! objects, whole or as an incremental update, and what a file's structure
@@ -41,6 +42,13 @@
 //!   to any of pdf-objects' `fault::Sink`s ([`Source::tell_faults`]); none
 //!   looked for, at no cost, where the caller wants none
 //!   ([`Options::faults`], [`read::Faults::Off`]).
+//! - **A damaged file read where it proves it is:** a section or an object
+//!   a few bytes off is read where the file shows it is
+//!   ([`read::Recovery::Verified`], the default), each recovery a
+//!   [`Fault`] and each object read elsewhere its [`Origin`]. Or the file
+//!   is read as PDFium reads it ([`read::Recovery::Pdfium`]), for a caller
+//!   that shows it as a viewer would. The choice is
+//!   [`Options::recovery`].
 //! - **Its phases traced**, with the `tracing` feature: the open, its
 //!   sections and a scan, each object stream decoded, a whole read, an
 //!   earlier revision's open, and each write and the object streams it

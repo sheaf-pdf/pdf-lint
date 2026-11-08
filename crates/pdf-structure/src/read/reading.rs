@@ -679,12 +679,13 @@ impl<S: ByteSource> Reading<S> {
         self.reader.said_members(fault);
     }
 
-    /// Under [`Recovery::Pdfium`], the reading opened again and scanned
-    /// after its sections are read, where a password has opened it since it
-    /// was opened and now its trailer gives no page, as PDFium, opened by
-    /// that password, scans it; opened by this reading's key, so the same
-    /// way, and its object streams' members listed. Where the source
-    /// doesn't give its bytes again, it's left as it is.
+    /// Under [`Recovery::Pdfium`](super::Recovery::Pdfium), the reading
+    /// opened again and scanned after its sections are read, where a
+    /// password has opened it since it was opened and now its trailer gives
+    /// no page, as PDFium, opened by that password, scans it; opened by this
+    /// reading's key, so the same way, and its object streams' members
+    /// listed. Where the source doesn't give its bytes again, it's left as
+    /// it is.
     fn pages_again(&mut self) {
         let reader = &self.reader;
         let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) else {

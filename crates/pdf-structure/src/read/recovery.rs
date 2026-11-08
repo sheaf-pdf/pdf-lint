@@ -154,6 +154,12 @@ impl Reader {
     /// `n g obj` that starts exactly within [`NEAR`] bytes of it, the
     /// nearer first, the earlier of two as near. Each with whether it's the
     /// first.
+    ///
+    /// The search near is lopdf's lenient reader's technique, which takes
+    /// the nearest `xref` within 64 bytes of an offset that isn't at a
+    /// section, never the one in `startxref`. Here a cross-reference
+    /// stream's `n g obj` is looked for too, and either only where it starts
+    /// exactly.
     pub(super) fn near<'f, F: Bytes<'f>>(
         &self,
         file: F,
@@ -395,14 +401,14 @@ impl Reader {
     /// ([`Reader::scan`]), listed as their headers give them: by the last
     /// such stream in the file that has it, as an update appends, unless
     /// the scan found its number at an offset, which stands; at generation
-    /// 0, read from the stream ([`Origin::Stream`](crate::Origin::Stream)).
+    /// 0, read from the stream ([`Origin::Stream`]).
     /// Each stream it decodes is kept as the container a member's read
     /// decodes, so it's decoded once, its faults told once and the budget
     /// spent once. Where the reader can't decode them, in an encrypted file
     /// no password opened, none is listed, and a password that opens it
     /// later lists them as one given at the open would; what it listed
     /// before is listed anew. What it found, said
-    /// ([`Fault::Members`](super::Fault::Members)): none where the scan
+    /// ([`Fault::Members`]): none where the scan
     /// found no object stream, or listed none and read every one's header.
     /// In a file whose sections read, a member no section lists isn't
     /// listed: a reference to it is to no object (ISO 32000-2, 7.3.10).

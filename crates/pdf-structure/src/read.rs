@@ -2,33 +2,32 @@
 //! [`Parser`]: every value, key and stream's data with where it was
 //! written ([`Span`]), dictionaries as written with any key written twice,
 //! and every choice it had to make a [`Fault`], kept at its place. It reads
-//! the header,
-//! `startxref`, the cross-reference tables and streams along their `/Prev`
-//! chain, each revision they make kept with its trailer and where its
-//! bytes end, past the `%%EOF` after its last-written section's
+//! the header, `startxref`, the cross-reference tables and streams along
+//! their `/Prev` chain, each revision they make kept with its trailer and
+//! where its bytes end, past the `%%EOF` after its last-written section's
 //! `startxref` ([`Revision`]), and each object at the offset they give, a
 //! stream's data by its `/Length` when that ends at `endstream`. Offsets
 //! count from the header (ISO 32000-2, 7.5.2), past any bytes a writer put
-//! before it, and every position a reading gives is in the file's bytes,
-//! the header's offset added ([`Facts::header_offset`]). A section or an
-//! object away from where the file says is read where the file proves it
-//! is, and said ([`Recovery`]); or the file is read as PDFium reads it
-//! ([`Recovery::Pdfium`]). Where the sections don't read, it finds
-//! the objects by scanning the file, and says so. An object that doesn't read says why ([`Unread`]): it doesn't
-//! parse, its offset holds another, or the object stream it's in doesn't
-//! decode ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where
-//! it is ([`Unindexed`]). One read from an object stream that starts
-//! inside the bytes of another read from it, where the stream's header
-//! puts it, is read all the same, and said.
+//! before it, and every position a reading gives is a place in the file's
+//! bytes, the header's offset added ([`Facts::header_offset`]). A section
+//! or an object away from where the file says is read where the file
+//! proves it is, and said ([`Recovery`]); or the file is read as PDFium
+//! reads it ([`Recovery::Pdfium`]). Where the sections don't read, it finds
+//! the objects by scanning the file, and says so. An object that doesn't
+//! read says why ([`Unread`]): it doesn't parse, its offset holds another,
+//! or the object stream it's in doesn't decode ([`Undecoded`], its filters
+//! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
+//! from an object stream that starts inside the bytes of another read from
+//! it, where the stream's header puts it, is read all the same, and said.
 //!
 //! A file is read one way, by a [`Reading`], opened under [`Options`]
 //! ([`Reading::open`], the one way in): its header, cross-reference
 //! sections and trailer read and its security handler opened, then each
 //! object read when it's first asked for, and each object stream decoded
 //! when an object in it is (but in a file found by scanning, whose object
-//! streams the open decodes to list their objects). Read whole, every object is read so, in order,
-//! into a [`Document`] ([`document`], [`Reading::into_document`]), or into
-//! one beside the reading, which hands
+//! streams the open decodes to list their objects). Read whole, every
+//! object is read so, in order, into a [`Document`] ([`document`],
+//! [`Reading::into_document`]), or into one beside the reading, which hands
 //! out what the document doesn't hold, a stream's data among it
 //! ([`Reading::to_document`], and [`WithReading`], the two together); read
 //! on demand, on any thread, only what's asked for is. Each object read
@@ -4131,10 +4130,13 @@ impl Reader {
                 let data = match declared {
                     Some(data) => data,
                     None => {
-                        let at = (head.dict().get(b"Length"))
-                            .and_then(|l| l.at)
-                            .unwrap_or(head.keyword());
-                        cx.tell(Some(id), Some(at), Fault::Length { length });
+                        let written = head.dict().get(b"Length");
+                        let at = (written.and_then(|l| l.at)).unwrap_or(head.keyword());
+                        let fault = match written.map(Object::value) {
+                            Some(Value::Ref(_)) if is_xref(head.dict()) => Fault::XrefLength,
+                            _ => Fault::Length { length },
+                        };
+                        cx.tell(Some(id), Some(at), fault);
                         head.scanned()
                     }
                 };
@@ -4193,7 +4195,8 @@ impl Reader {
     /// (7.3.1), so the stream has no `/Length` that reads. Nor is a
     /// cross-reference stream's reference followed at all, its entries
     /// being direct (7.5.8.2): the open reads its rows before it lists any
-    /// object, and every other read of it reads it as the open did.
+    /// object, and every other read of it reads it as the open did, which
+    /// [`Fault::XrefLength`] says.
     fn length<'f, F: Bytes<'f>>(
         &self,
         file: F,
