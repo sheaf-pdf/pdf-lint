@@ -1992,8 +1992,8 @@ pub(crate) mod tests {
     /// A document's `Debug` gives its objects' strings and a stream's data
     /// held in memory by their length, never their bytes, which may be
     /// decrypted: each string an encrypted file's reading decrypted, and
-    /// each stream's bytes put in, in either form. The trailer's, which a
-    /// file never encrypts (ISO 32000-2, 7.6.2), print as they are.
+    /// each stream's bytes put in, in either form. The trailer's, of which
+    /// the reader decrypts none, print as written.
     #[test]
     fn a_debug_gives_no_string_or_data_of_an_object() {
         for name in ["qpdf-aes-256", "qpdf-rc4-128"] {
