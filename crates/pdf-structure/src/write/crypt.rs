@@ -121,6 +121,15 @@ impl Iterator for FreeNumbers<'_> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.free.size_hint()
     }
+
+    /// By the map's own, as `map`'s is.
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, (u32, u16)) -> B,
+    {
+        (self.free).fold(init, |acc, (&n, &generation)| f(acc, (n, generation)))
+    }
 }
 
 impl FusedIterator for FreeNumbers<'_> {}

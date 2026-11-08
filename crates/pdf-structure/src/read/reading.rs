@@ -485,6 +485,18 @@ impl Iterator for Ids<'_> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, self.entries.size_hint().1)
     }
+
+    /// By the slice's own, as `filter_map`'s is.
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, ObjectId) -> B,
+    {
+        (self.entries).fold(init, |acc, entry| match listed(entry) {
+            Some(id) => f(acc, id),
+            None => acc,
+        })
+    }
 }
 
 impl FusedIterator for Ids<'_> {}
@@ -508,6 +520,17 @@ impl Iterator for Entries<'_> {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.entries.size_hint()
+    }
+
+    /// By the slice's own, as `map`'s is.
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        (self.entries).fold(init, |acc, &(n, (generation, entry))| {
+            f(acc, (n, generation, entry))
+        })
     }
 }
 

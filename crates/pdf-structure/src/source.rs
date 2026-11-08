@@ -1675,7 +1675,9 @@ fn record_of<'d>((&id, held): (&ObjectId, &'d Held)) -> Option<(ObjectId, &'d Re
 }
 
 /// An iterator over what a document holds of each object: the objects
-/// held that give one, by number, as `filter_map` walks them, both ways.
+/// held that give one, by number, as `filter_map` walks them, both ways,
+/// a walk to the end (`fold`, and so `count` and `for_each`) by the map's
+/// own, as `filter_map`'s is.
 macro_rules! held_iterator {
     ($name:ident, $item:ty, $of:ident) => {
         impl<'d> Iterator for $name<'d> {
@@ -1691,12 +1693,34 @@ macro_rules! held_iterator {
             fn size_hint(&self) -> (usize, Option<usize>) {
                 (0, self.held.size_hint().1)
             }
+
+            #[inline]
+            fn fold<B, F>(self, init: B, mut f: F) -> B
+            where
+                F: FnMut(B, Self::Item) -> B,
+            {
+                (self.held).fold(init, |acc, held| match $of(held) {
+                    Some(item) => f(acc, item),
+                    None => acc,
+                })
+            }
         }
 
         impl DoubleEndedIterator for $name<'_> {
             #[inline]
             fn next_back(&mut self) -> Option<Self::Item> {
                 self.held.by_ref().rev().find_map($of)
+            }
+
+            #[inline]
+            fn rfold<B, F>(self, init: B, mut f: F) -> B
+            where
+                F: FnMut(B, Self::Item) -> B,
+            {
+                (self.held).rfold(init, |acc, held| match $of(held) {
+                    Some(item) => f(acc, item),
+                    None => acc,
+                })
             }
         }
 
@@ -2048,16 +2072,43 @@ pub(crate) mod tests {
         assert!(!shown.contains(&numbers(&file)));
     }
 
+    /// Each of `items`, in turn, by `fold`: what a walk to the end gives.
+    fn folded<T>(items: impl Iterator<Item = T>) -> Vec<T> {
+        items.fold(Vec::new(), |mut all, item| {
+            all.push(item);
+            all
+        })
+    }
+
+    /// Each of `items`, from the back, by `rfold`.
+    fn rfolded<T>(items: impl DoubleEndedIterator<Item = T>) -> Vec<T> {
+        items.rfold(Vec::new(), |mut all, item| {
+            all.push(item);
+            all
+        })
+    }
+
     /// `got`, a named iterator, walked beside `old`, the adapter it was:
     /// from the front, from the back, and from both ends in turn, each
-    /// step's item and `size_hint` the same; done, it stays done; and a
-    /// clone taken part-way walks on as the rest of the adapter does.
+    /// step's item and `size_hint` the same; done, it stays done; a clone
+    /// taken part-way walks on as the rest of the adapter does; and walked
+    /// to the end at once (`fold`, `rfold`), whole and part-way, it gives
+    /// what the adapter gives.
     pub(crate) fn walked_alike<T, G, O>(got: G, old: O)
     where
         T: PartialEq + fmt::Debug,
         G: DoubleEndedIterator<Item = T> + FusedIterator + Clone,
         O: DoubleEndedIterator<Item = T> + Clone,
     {
+        assert_eq!(folded(got.clone()), folded(old.clone()), "fold");
+        assert_eq!(rfolded(got.clone()), rfolded(old.clone()), "rfold");
+        let (mut part, mut was) = (got.clone(), old.clone());
+        assert_eq!(
+            (part.next(), part.next_back()),
+            (was.next(), was.next_back())
+        );
+        assert_eq!(folded(part.clone()), folded(was.clone()), "fold, part-way");
+        assert_eq!(rfolded(part), rfolded(was), "rfold, part-way");
         for turns in [&[false][..], &[true], &[false, true]] {
             let (mut got, mut old) = (got.clone(), old.clone());
             for step in 0.. {
@@ -2086,6 +2137,10 @@ pub(crate) mod tests {
         G: Iterator<Item = T> + FusedIterator + Clone,
         O: Iterator<Item = T> + Clone,
     {
+        assert_eq!(folded(got.clone()), folded(old.clone()), "fold");
+        let (mut part, mut was) = (got.clone(), old.clone());
+        assert_eq!(part.next(), was.next());
+        assert_eq!(folded(part), folded(was), "fold, part-way");
         let (mut got, mut old) = (got, old);
         for step in 0.. {
             assert_eq!(got.size_hint(), old.size_hint(), "{step}");

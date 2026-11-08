@@ -351,12 +351,35 @@ impl<'d> Iterator for Bodies<'d> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, self.held.size_hint().1)
     }
+
+    /// By the map's own, as `filter_map`'s is.
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        (self.held).fold(init, |acc, held| match body_of(held) {
+            Some(body) => f(acc, body),
+            None => acc,
+        })
+    }
 }
 
 impl DoubleEndedIterator for Bodies<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         self.held.by_ref().rev().find_map(body_of)
+    }
+
+    #[inline]
+    fn rfold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        (self.held).rfold(init, |acc, held| match body_of(held) {
+            Some(body) => f(acc, body),
+            None => acc,
+        })
     }
 }
 
