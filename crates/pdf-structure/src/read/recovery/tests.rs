@@ -263,11 +263,11 @@ fn a_file_whose_offsets_count_from_its_first_byte_is_read_so() {
 /// but whose `startxref`, or whose every row, gives the line's end before
 /// what it puts there, as a reader that reads past white-space at an
 /// offset reads it: its section read where its `startxref` puts it so
-/// counted, read there as written, before the window and past it, and each
-/// object read where its row puts it so counted, as written; one fault, and
-/// every object read where it is.
+/// counted, past the line's end, before the window and past it, and each
+/// object read where its row puts it so counted, past the line's end; one
+/// fault, and every object read where it is.
 #[test]
-fn a_file_counted_from_its_first_byte_is_read_as_written_there() {
+fn a_file_counted_from_its_first_byte_is_read_past_the_line_end() {
     for h in [10, 100] {
         let prefix = vec![b'~'; h];
         for rows_at_ends in [false, true] {
@@ -301,6 +301,47 @@ fn a_file_counted_from_its_first_byte_is_read_as_written_there() {
             );
         }
     }
+}
+
+/// A file with two bytes before its header whose offsets are each four
+/// bytes short of where they put what's there, counted from the header,
+/// and whose table follows an earlier `%%EOF`, so that counted from the
+/// file's first byte its `startxref` puts the table in that comment: not
+/// taken there, as what's past a comment proves nothing of where the
+/// offsets count from, but at the `xref` four bytes after, and each object
+/// as far; one fault.
+#[test]
+fn a_place_from_the_first_byte_inside_a_comment_isnt_taken() {
+    let mut file = b"  %PDF-1.7\n".to_vec();
+    let mut places = Vec::new();
+    for &(n, body) in &OBJECTS {
+        places.push((n, file.len()));
+        file.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    file.extend_from_slice(b"%%EOF\r\n");
+    let table = file.len();
+    file.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+    for &(_, at) in &places {
+        file.extend_from_slice(format!("{:010} 00000 n \n", at - 6).as_bytes());
+    }
+    let tail = format!(
+        "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+        table - 6
+    );
+    file.extend_from_slice(tail.as_bytes());
+    let doc = read(&file);
+    let moved = Fault::Moved {
+        at: table - 4,
+        found: table,
+        from_start: false,
+        moved: 4,
+        scanned: 0,
+        neither: 0,
+    };
+    let told: Vec<Fault> = doc.faults().iter().map(|(_, f)| f.clone()).collect();
+    assert_eq!(told, [Fault::HeaderAt { at: 2 }, moved]);
+    each_object_at(&doc, &places, &|_| Origin::Shifted { by: 4 });
+    reaches_its_page(&doc);
 }
 
 /// A file of [`OBJECTS`] after `prefix` and its header, and a

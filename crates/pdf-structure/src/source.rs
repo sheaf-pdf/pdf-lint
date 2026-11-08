@@ -592,9 +592,9 @@ pub enum Origin {
     /// `by` bytes from the offset its cross-reference section gives, at its
     /// own `n g obj`, where the section's entries are shifted
     /// ([`Fault::Shifted`], [`Fault::Moved`]): exactly there, or, where `by`
-    /// takes the header's offset back, read there as written, as a file whose
-    /// offsets count from its first byte is; before it where `by` is less
-    /// than 0.
+    /// takes the header's offset back, past white-space alone there, as a
+    /// writer that counts from the file's first byte and gives the line's
+    /// end before an object puts it; before it where `by` is less than 0.
     Shifted {
         /// How far.
         by: i64,

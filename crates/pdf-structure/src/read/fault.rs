@@ -108,11 +108,12 @@ pub enum Fault {
     /// at byte `at` doesn't read there, and is read at byte `found`
     /// ([`Recovery::Verified`](super::Recovery::Verified)): where that offset
     /// puts it counted from the file's first byte rather than its header
-    /// (`from_start`, against ISO 32000-2, 7.5.2), read there as written, or
-    /// the nearest `xref` or cross-reference stream within 64 bytes that
-    /// reads, exactly there. Of the entries it lists in use that aren't where
-    /// it puts them, `moved` are read as far off, each at its own `n g obj`
-    /// (exactly, or, the header's offset taken back, as written); `scanned`
+    /// (`from_start`, against ISO 32000-2, 7.5.2), exactly there or past
+    /// white-space alone, or the nearest `xref` or cross-reference stream
+    /// within 64 bytes that reads, exactly there. Of the entries it lists in
+    /// use that aren't where it puts them, `moved` are read as far off, each
+    /// at its own `n g obj` (exactly, or, the header's offset taken back,
+    /// past white-space alone); `scanned`
     /// aren't there either, and are read where a scan of the file finds their
     /// `n g obj`, of their number and generation, exactly
     /// ([`Origin::Recovered`](crate::Origin::Recovered)); and `neither` are at
@@ -139,10 +140,10 @@ pub enum Fault {
     /// each at its own `n g obj`
     /// ([`Recovery::Verified`](super::Recovery::Verified)): the header's
     /// offset taken back (`from_start`, the offsets counting from the file's
-    /// first byte, against ISO 32000-2, 7.5.2), each read there as written,
-    /// or, each exactly there, as far as its first object in use, or the one
-    /// furthest into the file, is, or another section's are. `scanned` aren't
-    /// there either, and are read where a scan of the file finds their
+    /// first byte, against ISO 32000-2, 7.5.2), each there or past white-space
+    /// alone, or, each exactly there, as far as its first object in use, or
+    /// the one furthest into the file, is, or another section's are. `scanned`
+    /// aren't there either, and are read where a scan of the file finds their
     /// `n g obj`, of their number and generation, exactly
     /// ([`Origin::Recovered`](crate::Origin::Recovered)); and `neither` are at
     /// none of those places, and are read where it puts them. Said where it

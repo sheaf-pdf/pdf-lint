@@ -139,6 +139,15 @@ fn xref_exactly(bytes: &[u8], base: usize, p: usize) -> bool {
     bytes[i..].starts_with(b"xref") && bytes.get(i + 4).is_some_and(|&b| stops(b))
 }
 
+/// The first byte at or past `p` in `bytes`, the file's from `base`, that
+/// isn't white-space: where what's at `p` starts for a reader that reads
+/// past the line's end there. None where the bytes end first.
+fn past_white_space(bytes: &[u8], base: usize, p: usize) -> Option<usize> {
+    let i = p.checked_sub(base)?;
+    let skip = bytes.get(i..)?.iter().position(|&b| !is_white_space(b))?;
+    Some(p + skip)
+}
+
 /// Where a scan of `file`, every byte, finds each object's `n g obj`
 /// ([`scan_of`]), exactly ([`header_exactly`]), by its id: the last in the
 /// file, as an update appends, of those before byte `within` where that's
@@ -158,11 +167,12 @@ impl Reader {
     /// The places a section said to be at `at`, which doesn't read there,
     /// may be at, in the order they're tried: where the offset puts it
     /// counted from the file's first byte, where the header isn't there
-    /// (ISO 32000-2, 7.5.2, counts from the header), read there as the
-    /// reader reads a section at its offset, past white-space and comments,
-    /// as a file written so is read; then each `xref` or `n g obj` that
-    /// starts exactly within [`NEAR`] bytes of it, the nearer first, the
-    /// earlier of two as near. Each with whether it's the first.
+    /// (ISO 32000-2, 7.5.2, counts from the header), where an `xref` or an
+    /// `n g obj` starts exactly there or past white-space alone, as a
+    /// writer counting so that gives the line's end before a section puts
+    /// it; then each `xref` or `n g obj` that starts exactly within
+    /// [`NEAR`] bytes of it, the nearer first, the earlier of two as near.
+    /// Each with whether it's the first.
     ///
     /// The search near is lopdf's lenient reader's technique, which takes
     /// the nearest `xref` within 64 bytes of an offset that isn't at a
@@ -181,7 +191,14 @@ impl Reader {
         let len = file.len();
         let header = self.facts.header_offset.unwrap_or(0);
         if let Some(p) = at.checked_sub(header).filter(|&p| header > 0 && p < len) {
-            places.push((p, true));
+            let (lo, hi) = (p.saturating_sub(1), p.saturating_add(HEAD).min(len));
+            if let Some(bytes) = file.get(lo..hi)?
+                && let Some(q) = past_white_space(&bytes, lo, p)
+                && (xref_exactly(&bytes, lo, q)
+                    || header_exactly(&bytes, lo, q, hi == len).is_some())
+            {
+                places.push((p, true));
+            }
         }
         let (lo, hi) = (
             at.saturating_sub(NEAR + 1),
@@ -227,11 +244,11 @@ impl Reader {
         })
     }
 
-    /// The `n g obj` `by` bytes from `offset`: where `by` takes the
-    /// header's offset back, as a file whose offsets count from its first
-    /// byte puts it, read there as written ([`Reader::header_at`]), as such
-    /// a file is read; else only where it starts exactly there
-    /// ([`Reader::exactly`]).
+    /// The `n g obj` `by` bytes from `offset`: where it starts exactly
+    /// there ([`Reader::exactly`]), or, where `by` takes the header's
+    /// offset back, as a file whose offsets count from its first byte puts
+    /// it, past white-space alone there, as such a writer that gives the
+    /// line's end before an object puts it.
     fn at_shift<'f, F: Bytes<'f>>(
         &self,
         file: F,
@@ -240,10 +257,16 @@ impl Reader {
     ) -> Result<Option<ObjectId>, F::Error> {
         let header = self.facts.header_offset.unwrap_or(0);
         if header > 0 && i64::try_from(header).map(|h| -h) == Ok(by) {
-            return match offset.checked_sub(header) {
-                Some(p) => self.header_at(file, p),
-                None => Ok(None),
+            let len = file.len();
+            let Some(p) = offset.checked_sub(header).filter(|&p| p < len) else {
+                return Ok(None);
             };
+            let (lo, hi) = (p.saturating_sub(1), p.saturating_add(HEAD).min(len));
+            let bytes = file.get(lo..hi)?;
+            return Ok(bytes.and_then(|bytes| {
+                let q = past_white_space(&bytes, lo, p)?;
+                header_exactly(&bytes, lo, q, hi == len)
+            }));
         }
         self.exactly(file, offset, by)
     }
@@ -303,9 +326,9 @@ impl Reader {
     /// its own move, where it was read elsewhere (`found`); else, where its
     /// first entry in use, by number, or the one furthest into the file,
     /// which a cut is likeliest to have moved, isn't read where it's
-    /// written, the header's offset taken back, where its `n g obj` is read
-    /// there as written ([`Reader::at_shift`]), or how far from it its
-    /// `n g obj` starts exactly within [`NEAR`] bytes. None where the
+    /// written, the header's offset taken back, where its `n g obj` starts
+    /// there, past white-space alone ([`Reader::at_shift`]), or how far from
+    /// it its `n g obj` starts exactly within [`NEAR`] bytes. None where the
     /// section was read where
     /// it's said and those objects are where they're written, or found
     /// nowhere: two probes a section, each a window read at an object's

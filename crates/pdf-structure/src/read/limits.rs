@@ -125,17 +125,17 @@ pub enum Recovery {
     /// Only where the file proves it, the default. A section that doesn't
     /// read where `startxref`, a `/Prev` or a `/XRefStm` puts it is read
     /// where that offset puts it counted from the file's first byte rather
-    /// than its header, as written there, or at the nearest `xref` or
-    /// cross-reference stream within 64 bytes of it, exactly there, where
-    /// one reads ([`Fault::Moved`](super::Fault::Moved)). A section's
-    /// entries are read at one shift: the section's own move; else one its
-    /// first object in use or the one furthest into the file proves, the
-    /// header's offset taken back or its `n g obj` found exactly within 64
-    /// bytes; else the shift another section has, as a cut moves everything
-    /// after it. Each entry is read where it's written, else at its own
-    /// `n g obj` at that shift (exactly, or, the header's offset taken back,
-    /// as written), else where a scan of the file finds its `n g obj`, of
-    /// its number and generation, exactly
+    /// than its header, exactly there or past white-space alone, or at the
+    /// nearest `xref` or cross-reference stream within 64 bytes of it,
+    /// exactly there, where one reads ([`Fault::Moved`](super::Fault::Moved)).
+    /// A section's entries are read at one shift: the section's own move;
+    /// else one its first object in use or the one furthest into the file
+    /// proves, the header's offset taken back or its `n g obj` found exactly
+    /// within 64 bytes; else the shift another section has, as a cut moves
+    /// everything after it. Each entry is read where it's written, else at
+    /// its own `n g obj` at that shift (exactly, or, the header's offset
+    /// taken back, past white-space alone), else where a scan of the file
+    /// finds its `n g obj`, of its number and generation, exactly
     /// ([`Origin::Recovered`](crate::Origin::Recovered)), else where it's
     /// written ([`Fault::Shifted`](super::Fault::Shifted)). A file whose
     /// newest section doesn't read is scanned for its objects. A later
