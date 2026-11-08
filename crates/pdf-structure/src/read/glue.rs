@@ -227,9 +227,9 @@ fn given(doc: &Document, limit: usize) -> Result<Vec<u8>, Why> {
 /// A stream a document holds as bytes, built in memory, is decoded as a
 /// reading decodes one: through its filters, a reference among them
 /// followed through the document, up to the limit asked for and the
-/// reader's own cap; a filter it doesn't take, and an own `/Crypt` filter
-/// other than `/Identity`, which a document alone doesn't decrypt, give
-/// none. Written into a file and read, a reading gives the same.
+/// reader's own cap, its own `/Crypt` filter no filter, whatever it names,
+/// as the bytes are plaintext; a filter it doesn't take gives none.
+/// Written into a file and read, a reading gives the same.
 #[test]
 fn a_documents_stream_held_as_bytes_is_decoded_as_a_reading_decodes_it() {
     let text = b"BT /F1 12 Tf (held as bytes) Tj ET".repeat(4);
@@ -282,7 +282,7 @@ fn a_documents_stream_held_as_bytes_is_decoded_as_a_reading_decodes_it() {
             crypt(Some("StdCF")),
             &zlib,
             usize::MAX,
-            Err(Why::Filter),
+            Ok(text.clone()),
         ),
         (
             "Flate past the limit",
@@ -303,12 +303,9 @@ fn a_documents_stream_held_as_bytes_is_decoded_as_a_reading_decodes_it() {
     for (what, dict, data, limit, want) in cases {
         let doc = held(dict, data);
         assert_eq!(given(&doc, limit), want, "{what}");
-        // A reading of the document written gives the same, but where its
-        // own crypt filter names one: a file that isn't encrypted reads
-        // its streams as in the clear.
-        if what == "/Crypt /StdCF" {
-            continue;
-        }
+        // A reading of the document written gives the same: a file that
+        // isn't encrypted reads its streams as in the clear, whatever crypt
+        // filter they name.
         let mut out = Vec::new();
         crate::write::document(&mut out, &doc, None, None, &crate::write::Options::DEFAULT)
             .unwrap();

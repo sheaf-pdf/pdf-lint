@@ -2,6 +2,7 @@
 //! through ([`full`](super::full)), for a caller that lays a file out itself and
 //! so has numbers of its own to write them at.
 
+use std::fmt;
 use std::sync::atomic::AtomicBool;
 
 use pdf_objects::object::ObjectId;
@@ -29,6 +30,19 @@ pub struct Parts<'w> {
     from: Option<&'w dyn ReadFrom>,
     copying: Option<Copying<'w>>,
     to: Numbering<'w>,
+}
+
+impl fmt::Debug for Parts<'_> {
+    /// What encrypts, and whether a reading is copied from and a caller's
+    /// renumbering names the numbers, as [`Options`](super::Options)' says
+    /// a caller's.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Parts")
+            .field("encrypting", &self.encrypting)
+            .field("from", &self.from.map(|_| "a caller's"))
+            .field("to", &self.to.0.map(|_| "a caller's"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'w> Parts<'w> {

@@ -12,7 +12,7 @@ use std::ops::RangeBounds;
 
 use pdf_crypt::{Encoding, Permissions, Refused};
 use pdf_objects::fault::{Place, Sink};
-use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
+use pdf_objects::object::{Data, Dict, Entry, Object, ObjectId, Span, Str, Value};
 use pdf_objects::parse;
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable, Why};
@@ -153,9 +153,11 @@ pub trait Source: Streams {
     /// among its faults, never the data cut short as if it were whole; a
     /// stream the reader can't give the data of, as it has a filter the
     /// reader doesn't take, is an error saying why ([`Error::Filters`]).
-    /// None where the reader doesn't give streams' data, as a document alone
-    /// doesn't, its streams' data being where it was written: then none of
-    /// any stream, so that a caller asking for one learns it of all. A
+    /// None where the reader doesn't give this account of streams' data, as
+    /// a document alone doesn't, its streams' data being where it was
+    /// written: then none of any stream, so that a caller asking for one
+    /// learns it of all; so none of a stream a document holds as bytes
+    /// either, whose data it gives a viewer ([`Streams::decoded`]). A
     /// reading gives it, and so does a document read beside its reading
     /// ([`WithReading`](crate::read::WithReading)).
     #[must_use]
@@ -233,21 +235,24 @@ impl Trailer {
 /// ([`Document::reachable`]), and what it doesn't removed
 /// ([`Document::prune`]).
 ///
-/// What else it holds is read by its accessors ([`Document::trailer`],
-/// [`Document::header_version`], [`Document::encryption`] and the rest),
-/// each of [`Source`]'s names, giving the same answer as the trait in a
-/// plainer form where it always knows: no `Option` of its [`Facts`], and
-/// a borrow of its metadata where the trait's is a `Cow`. What a reader
+/// What else it holds is read by its accessors: [`Document::trailer`],
+/// [`Document::header_version`] and the rest, each of a name of
+/// [`Source`]'s, giving the same answer as the trait in a plainer form
+/// where it always knows (no `Option` of its [`Facts`], and a borrow of its
+/// faults and its metadata where the trait's are a `Cow`); and the
+/// document's own beside, which the trait hasn't ([`Document::update`],
+/// [`Document::encryption`]). What a reader
 /// outside the crate knows and fills in has a setter
 /// ([`Document::trailer_mut`], [`Document::set_update`] and the rest); what
 /// the bytes reader keeps of its own reading, the object streams it
 /// decoded, those left in the clear and its facts, has none, as its
 /// meaning is what that reader read.
 ///
-/// Its `Debug` gives its objects as pdf-objects' values print, and the
-/// object streams' decoded data and the metadata by their length, not their
-/// bytes, which may be decrypted: a test compares two by `==`, not by their
-/// `Debug`.
+/// Its `Debug` gives its objects as pdf-objects' values print, but each
+/// string and each stream's data held in memory by its length, and the
+/// object streams' decoded data and the metadata by their length too, not
+/// their bytes, which may be decrypted: a test compares two by `==`, not
+/// by their `Debug`.
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Document {
@@ -295,6 +300,11 @@ pub struct Document {
     /// The data of the catalog's metadata stream, as written, when it's in
     /// plain view: unfiltered, and not encrypted ([`Source::metadata`]).
     pub(crate) metadata: Option<Vec<u8>>,
+    /// The metadata stream the reader read `metadata` from, whose data it
+    /// is while that's the catalog's metadata stream and as read
+    /// ([`Document::metadata`]); none where it was set
+    /// ([`Document::set_metadata`]).
+    pub(crate) metadata_of: Option<ObjectId>,
     /// Whether the file is encrypted, and if it is, whether it opened.
     pub(crate) encryption: Encryption,
     /// What the file's cross-reference sections and header say of it, as
@@ -316,14 +326,21 @@ pub struct Document {
 }
 
 impl fmt::Debug for Document {
-    /// What it holds, the object streams' decoded data and the metadata by
-    /// their length, not their bytes, which may be decrypted.
+    /// What it holds, its objects' strings and data in memory, the object
+    /// streams' decoded data and the metadata by their length, not their
+    /// bytes, which may be decrypted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let objects: BTreeMap<_, _> = (self.objects.iter())
+            .map(|(id, held)| {
+                let held = (held.as_ref()).map(|(object, record)| (Unprinted(object), record));
+                (id, held)
+            })
+            .collect();
         let decoded: BTreeMap<_, _> = (self.decoded.iter())
             .map(|(id, data)| (id, Len(data.len())))
             .collect();
         f.debug_struct("Document")
-            .field("objects", &self.objects)
+            .field("objects", &objects)
             .field("next", &self.next)
             .field("trailer", &self.trailer)
             .field("header", &self.header)
@@ -336,6 +353,7 @@ impl fmt::Debug for Document {
                 "metadata",
                 &self.metadata.as_ref().map(|data| Len(data.len())),
             )
+            .field("metadata_of", &self.metadata_of)
             .field("encryption", &self.encryption)
             .field("facts", &self.facts)
             .field("revisions", &self.revisions)
@@ -350,6 +368,93 @@ struct Len(usize);
 impl fmt::Debug for Len {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} bytes", self.0)
+    }
+}
+
+/// A value as a document's `Debug` gives it: as pdf-objects' `Debug`
+/// writes it, but each string and a stream's data held in memory by its
+/// length ([`Len`]), as they may be decrypted.
+struct Unprinted<'v, T: ?Sized>(&'v T);
+
+impl fmt::Debug for Unprinted<'_, Object> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Object")
+            .field("value", &Unprinted(self.0.value()))
+            .field("at", &self.0.at)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Unprinted<'_, Value> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Value::String(text, form) => {
+                let (kind, len) = match text {
+                    Str::Bytes(bytes) => ("Bytes", bytes.len()),
+                    Str::Text(text) => ("Text", text.len()),
+                    Str::Encrypted(bytes) => ("Encrypted", bytes.len()),
+                };
+                let text = DebugTuple(kind, Len(len));
+                f.debug_tuple("String").field(&text).field(form).finish()
+            }
+            Value::Array(items) => {
+                let items: Vec<_> = items.iter().map(Unprinted).collect();
+                f.debug_tuple("Array").field(&items).finish()
+            }
+            Value::Dict(dict) => f.debug_tuple("Dict").field(&Unprinted(dict)).finish(),
+            Value::Stream(stream) => {
+                let data: &dyn fmt::Debug = match &stream.data {
+                    Data::Bytes(bytes) => &DebugTuple("Bytes", Len(bytes.len())),
+                    data => data,
+                };
+                let shown = DebugStream(Unprinted(&stream.dict), data);
+                f.debug_tuple("Stream").field(&shown).finish()
+            }
+            value => fmt::Debug::fmt(value, f),
+        }
+    }
+}
+
+impl fmt::Debug for Unprinted<'_, Dict> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let entries: Vec<_> = (self.0.entries().iter())
+            .map(|entry| DebugEntry(entry, Unprinted(&entry.value)))
+            .collect();
+        f.debug_struct("Dict").field("entries", &entries).finish()
+    }
+}
+
+/// A tuple variant of one field, `kind(field)`.
+struct DebugTuple<T>(&'static str, T);
+
+impl<T: fmt::Debug> fmt::Debug for DebugTuple<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple(self.0).field(&self.1).finish()
+    }
+}
+
+/// A stream, its dictionary and its data as given.
+struct DebugStream<'v>(Unprinted<'v, Dict>, &'v dyn fmt::Debug);
+
+impl fmt::Debug for DebugStream<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stream")
+            .field("dict", &self.0)
+            .field("data", self.1)
+            .finish()
+    }
+}
+
+/// A dictionary's entry, its value as given.
+struct DebugEntry<'v>(&'v Entry, Unprinted<'v, Object>);
+
+impl fmt::Debug for DebugEntry<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry")
+            .field("key", &self.0.key)
+            .field("key_at", &self.0.key_at)
+            .field("value", &self.1)
+            .finish()
     }
 }
 
@@ -451,8 +556,7 @@ pub enum Origin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct DataExtent {
-    /// Where the data is, as the stream's
-    /// [`Data::At`](pdf_objects::object::Data::At) has it.
+    /// Where the data is, as the stream's [`Data::At`] has it.
     pub at: Span,
     /// Whether it's as long as the stream's `/Length` says, which ended at
     /// `endstream`; else it runs up to `endstream`, found by scanning.
@@ -1015,6 +1119,7 @@ impl Document {
             update: None,
             size: None,
             metadata: None,
+            metadata_of: None,
             encryption: Encryption::None,
             facts: Facts::default(),
             revisions: Vec::new(),
@@ -1045,6 +1150,7 @@ impl Document {
             update: None,
             size: None,
             metadata: None,
+            metadata_of: None,
             encryption: Encryption::None,
             facts: Facts::default(),
             revisions: Vec::new(),
@@ -1138,10 +1244,11 @@ impl Document {
     /// An object stream the reader decoded, at `id`, is no longer lent
     /// decoded ([`Streams::decoded`]), as the object there isn't the one
     /// decoded; the objects read from it keep their places in its data
-    /// ([`Document::held`]), as their records do.
+    /// ([`Document::held`]), as their records do. Nor is the metadata read
+    /// from a stream at `id` the document's ([`Document::metadata`]).
     pub fn set(&mut self, id: ObjectId, object: impl Into<Object>) -> Option<Object> {
         self.past(id.number);
-        self.whole.remove(&id);
+        self.edited(id);
         let was = self.objects.insert(id, Ok((object.into(), None)));
         was?.ok().map(|(object, _)| object)
     }
@@ -1150,10 +1257,11 @@ impl Document {
     /// crate does for an object it lists that doesn't read: gives the
     /// object it replaces, when one that read was there. New ids start
     /// past `id`'s number, if they didn't. An object stream there is no
-    /// longer lent decoded, as [`Document::set`] says.
+    /// longer lent decoded, nor metadata read from it the document's, as
+    /// [`Document::set`] says.
     pub fn set_unread(&mut self, id: ObjectId, why: Unread) -> Option<Object> {
         self.past(id.number);
-        self.whole.remove(&id);
+        self.edited(id);
         let was = self.objects.insert(id, Err(why));
         was?.ok().map(|(object, _)| object)
     }
@@ -1171,10 +1279,21 @@ impl Document {
 
     /// Removes object `id`, whether it reads or not, its record with it:
     /// gives the object, when it read. An object stream there is no longer
-    /// lent decoded, as [`Document::set`] says.
+    /// lent decoded, nor metadata read from it the document's, as
+    /// [`Document::set`] says.
     pub fn remove(&mut self, id: ObjectId) -> Option<Object> {
-        self.whole.remove(&id);
+        self.edited(id);
         self.objects.remove(&id)?.ok().map(|(object, _)| object)
+    }
+
+    /// Object `id` is no longer as read: an object stream there no longer
+    /// lent decoded, and metadata read from a stream there no longer the
+    /// document's.
+    fn edited(&mut self, id: ObjectId) {
+        self.whole.remove(&id);
+        if self.metadata_of == Some(id) {
+            (self.metadata, self.metadata_of) = (None, None);
+        }
     }
 
     /// Object `id`, to edit, when it reads. Its record is dropped, as what
@@ -1183,12 +1302,13 @@ impl Document {
     /// drops its span. It's the object at `id` itself, a reference as it
     /// is, not followed: [`Document::dereference`] gives the id a chain of
     /// them ends at, and [`Document::get_dict_mut`] follows one to a
-    /// dictionary. An object stream taken so is no longer lent decoded, as
-    /// [`Document::set`] says.
+    /// dictionary. An object stream taken so is no longer lent decoded,
+    /// nor metadata read from it the document's, as [`Document::set`] says.
     pub fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
+        self.objects.get(&id)?.as_ref().ok()?;
+        self.edited(id);
         let (object, record) = self.objects.get_mut(&id)?.as_mut().ok()?;
         *record = None;
-        self.whole.remove(&id);
         Some(object)
     }
 
@@ -1459,14 +1579,32 @@ impl Document {
 
     /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
     /// written, when it's in plain view: unfiltered, and not encrypted.
+    /// What the reader read of it is given while the catalog's metadata
+    /// stream is the one it was read from and that's as read: none once
+    /// that stream is put, edited, set unread or removed
+    /// ([`Document::set`]), or the catalog or the trailer's `/Root` leads
+    /// to another. What's set ([`Document::set_metadata`]) is given as set.
     #[must_use]
     pub fn metadata(&self) -> Option<&[u8]> {
-        self.metadata.as_deref()
+        let data = self.metadata.as_deref()?;
+        match self.metadata_of {
+            None => Some(data),
+            Some(of) => (self.metadata_stream() == Some(of)).then_some(data),
+        }
     }
 
-    /// Has the catalog's metadata stream's data in plain view be `data`.
+    /// Has the catalog's metadata stream's data in plain view be `data`,
+    /// given as set whatever's edited after.
     pub fn set_metadata(&mut self, data: Option<Vec<u8>>) {
-        self.metadata = data;
+        (self.metadata, self.metadata_of) = (data, None);
+    }
+
+    /// Which object the catalog's metadata stream is, through the objects
+    /// it holds.
+    fn metadata_stream(&self) -> Option<ObjectId> {
+        let get: crate::crypt::Get<'_, '_, std::convert::Infallible> = &|id| Ok(self.object(id));
+        let Ok(stream) = crate::crypt::metadata_stream(self.trailer.dict(), get);
+        stream
     }
 
     /// Whether the file is encrypted, and if it is, whether it opened.
@@ -1622,7 +1760,7 @@ impl Source for Document {
     }
 
     fn metadata(&self) -> Option<Cow<'_, [u8]>> {
-        self.metadata.as_deref().map(Cow::Borrowed)
+        Document::metadata(self).map(Cow::Borrowed)
     }
 
     fn record(&self, id: ObjectId) -> Option<&Record> {
@@ -1652,17 +1790,19 @@ impl Source for Document {
 /// whole and its object is as read (not put, edited, set unread or
 /// removed since: [`Document::set`]); and the data of a stream it holds as
 /// bytes, built or edited in memory and so in plain view
-/// ([`Data::Bytes`](pdf_objects::object::Data::Bytes)), decoded as a
-/// reading decodes a stream, owned: through the filters its `/Filter` and
-/// `/DecodeParms` name ([`read::filters`](crate::read::filters)), their
-/// references followed through the document, Flate on the default
-/// backend, up to the less of the limit and the reader's own cap,
+/// ([`Data::Bytes`]), decoded as a reading decodes a stream, owned: through
+/// the filters its `/Filter` and `/DecodeParms` name
+/// ([`read::filters`](crate::read::filters)), their references followed
+/// through the document, Flate on the default backend, up to the less of
+/// the limit and the reader's own cap,
 /// [`read::STREAM`](crate::read::STREAM), and given as a reading's
 /// [`Streams`] gives it ([`read::viewed`](crate::read::viewed)): past the
 /// limit [`Why::Limit`], past the cap [`Why::Capped`], through filters it
-/// doesn't take [`Why::Filter`], and so through a `/Crypt` filter other
-/// than `/Identity`, as a document alone decrypts nothing. Any other
-/// stream's data, a span of a file the document doesn't hold, is
+/// doesn't take [`Why::Filter`]. Its `/Crypt` filter, whatever it names,
+/// is no filter, as `read::filters` reads one: bytes held in memory are
+/// plaintext, which a writer encrypts as it writes them, by the filter
+/// named ([`write`](crate::write)), so a document decrypts nothing. Any
+/// other stream's data, a span of a file the document doesn't hold, is
 /// [`Why::Detached`], which a document read beside its reading
 /// ([`WithReading`](crate::read::WithReading)) gives, and so is an object
 /// stream's that the reader cut off as it decoded it, at a fault, the
@@ -1714,18 +1854,6 @@ impl Document {
         let resolve = |id| self.object(id);
         let within = limit.min(crate::read::STREAM);
         let capped = crate::read::STREAM < limit;
-        // Its own crypt filter, where it isn't /Identity, says the data is
-        // encrypted, which a document alone doesn't decrypt.
-        if let Some(own) = crate::filter::crypt_filter(dict, Some(&resolve))
-            && own != b"Identity"
-        {
-            let name = String::from_utf8_lossy(&own);
-            let message = format!(
-                "{id} R's data is encrypted by its own crypt filter /{name}, which a document \
-                 alone doesn't decrypt"
-            );
-            return Err(Unreadable::new(id, Why::Filter, message));
-        }
         let decoded = match crate::read::filters(dict, Some(&resolve)) {
             Err(why) => Err(Error::Filters(why)),
             Ok(filters) => {
@@ -1815,11 +1943,64 @@ pub(crate) mod tests {
         assert_eq!(SECTIONS.map(|section| section.size()), [3, 7]);
     }
 
+    /// The strings in `value`, at any depth, a stream's dictionary's among
+    /// them.
+    fn strings(value: &Value, out: &mut Vec<Vec<u8>>) {
+        let entries = |dict: &Dict, out: &mut Vec<Vec<u8>>| {
+            (dict.entries().iter()).for_each(|entry| strings(entry.value.value(), out));
+        };
+        match value {
+            Value::String(Str::Bytes(bytes), _) => out.push(bytes.clone()),
+            Value::Array(items) => items.iter().for_each(|item| strings(item.value(), out)),
+            Value::Dict(dict) => entries(dict, out),
+            Value::Stream(stream) => entries(&stream.dict, out),
+            _ => {}
+        }
+    }
+
+    /// A document's `Debug` gives its objects' strings and a stream's data
+    /// held in memory by their length, never their bytes, which may be
+    /// decrypted: each string an encrypted file's reading decrypted, and
+    /// each stream's bytes put in, in either form. The trailer's, which a
+    /// file never encrypts (ISO 32000-2, 7.6.2), print as they are.
+    #[test]
+    fn a_debug_gives_no_string_or_data_of_an_object() {
+        for name in ["qpdf-aes-256", "qpdf-rc4-128"] {
+            let mut doc = crate::read::document(&fixture(name), &Options::DEFAULT);
+            assert!(
+                matches!(doc.encryption(), Encryption::Opened { .. }),
+                "{name}"
+            );
+            let data = b"plaintext of a stream held as bytes".to_vec();
+            let stream = doc.add(Stream::new(dict! { "Type" => "XObject" }, data.clone()));
+            let mut trailer = Vec::new();
+            strings(&Value::Dict(doc.trailer().dict().clone()), &mut trailer);
+            let mut decrypted = Vec::new();
+            for object in doc.objects().map(|(_, object)| object) {
+                strings(object.value(), &mut decrypted);
+            }
+            decrypted.retain(|bytes| !trailer.contains(bytes));
+            assert!(!decrypted.is_empty(), "{name}");
+            for shown in [format!("{doc:?}"), format!("{doc:#?}")] {
+                for bytes in decrypted.iter().chain([&data]) {
+                    assert!(!shown.contains(&format!("{bytes:?}")), "{name}: {shown}");
+                }
+                assert!(shown.contains(" bytes"), "{name}: {shown}");
+            }
+            let shown = format!("{doc:?}");
+            let held = format!("data: Bytes({} bytes)", data.len());
+            assert!(shown.contains(&held), "{name}: {shown}");
+            let text = format!("String(Bytes({} bytes), Some(", decrypted[0].len());
+            assert!(shown.contains(&text), "{name}: {shown}");
+            assert!(doc.contains(stream));
+        }
+    }
+
     /// A document's `Debug` gives the object streams' decoded data and the
     /// metadata by their length, never their bytes, which may be decrypted,
-    /// and the rest as its fields print, its objects among it, in either
-    /// form. A prefix's gives its length and its source's, never the
-    /// source's bytes.
+    /// and the rest as its fields print, its objects among it, an object
+    /// without strings as pdf-objects' `Debug` gives it. A prefix's gives
+    /// its length and its source's, never the source's bytes.
     #[test]
     fn a_debug_gives_data_by_its_length() {
         let (file, _) = crate::read::tests::compressed(false);
@@ -1839,8 +2020,14 @@ pub(crate) mod tests {
         let given = format!("metadata: Some({} bytes)", metadata.len());
         assert!(shown.contains(&given), "{shown}");
         assert!(shown.contains(&format!("{:?}", doc.trailer())), "{shown}");
-        let pages = doc.get(ObjectId::new(2, 0)).unwrap();
-        assert!(shown.contains(&format!("{pages:?}")), "{shown}");
+        let plain = (doc.objects().map(|(_, object)| object))
+            .find(|object| {
+                let mut found = Vec::new();
+                strings(object.value(), &mut found);
+                found.is_empty()
+            })
+            .unwrap();
+        assert!(shown.contains(&format!("{plain:?}")), "{shown}");
         let pretty = format!("{doc:#?}");
         for len in [decoded.len(), metadata.len()] {
             assert!(pretty.contains(&format!("{len} bytes")), "{pretty}");
@@ -1992,6 +2179,70 @@ pub(crate) mod tests {
         );
         assert!(doc.trailer().dict().has(b"Root"));
         assert_eq!(doc.header_version(), Some(Version::new(1, 7)));
+    }
+
+    /// The metadata a document read is the catalog's metadata stream's
+    /// while that stream is the one it was read from and as read: an edit
+    /// of the catalog that leaves `/Metadata` where it was keeps it; the
+    /// stream put, taken to edit, set unread or removed, the catalog's
+    /// `/Metadata` removed or the trailer's `/Root` another drops it, for
+    /// the document and through [`Source`] alike. What's set is given as
+    /// set, whatever's edited after.
+    #[test]
+    fn a_documents_metadata_is_the_catalogs_while_its_stream_is_as_read() {
+        let xmp = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">as read</x:xmpmeta>";
+        let stream = format!(
+            "<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{}\nendstream",
+            xmp.len(),
+            String::from_utf8_lossy(xmp)
+        );
+        let file = pdf_fixtures::fixture::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Type /Catalog /Pages 3 0 R /Metadata 2 0 R >>"),
+                (2, stream.as_bytes()),
+                (3, b"<< /Type /Pages /Kids [] /Count 0 >>"),
+                (4, b"<< /Type /Catalog /Pages 3 0 R >>"),
+            ],
+            "<< /Size 5 /Root 1 0 R >>",
+        );
+        let read = crate::read::document(&file, &Options::DEFAULT);
+        assert_eq!(read.metadata(), Some(&xmp[..]));
+        let given = |doc: &Document| {
+            let source = Source::metadata(doc).map(Cow::into_owned);
+            assert_eq!(source.as_deref(), doc.metadata());
+            source
+        };
+        let mut doc = read.clone();
+        doc.catalog_mut().unwrap().set("Lang", Object::from("en"));
+        assert_eq!(given(&doc).as_deref(), Some(&xmp[..]), "the catalog edited");
+        let metadata = ObjectId::new(2, 0);
+        let new = Stream::new(dict! { "Type" => "Metadata" }, b"new".to_vec());
+        let edits: [(&str, &dyn Fn(&mut Document)); 6] = [
+            ("put", &|doc| drop(doc.set(metadata, new.clone()))),
+            ("taken to edit", &|doc| drop(doc.get_mut(metadata))),
+            ("set unread", &|doc| {
+                drop(doc.set_unread(metadata, Unread::Other("gone".into())));
+            }),
+            ("removed", &|doc| drop(doc.remove(metadata))),
+            ("its /Metadata removed", &|doc| {
+                doc.catalog_mut().unwrap().remove(b"Metadata");
+            }),
+            ("another /Root", &|doc| {
+                doc.trailer_mut()
+                    .dict_mut()
+                    .set("Root", Object::reference(4));
+            }),
+        ];
+        for (what, edit) in edits {
+            let mut doc = read.clone();
+            edit(&mut doc);
+            assert_eq!(given(&doc), None, "{what}");
+            let mut doc = read.clone();
+            doc.set_metadata(Some(b"set".to_vec()));
+            edit(&mut doc);
+            assert_eq!(given(&doc).as_deref(), Some(&b"set"[..]), "{what}, set");
+        }
     }
 
     /// A reference resolves to an object that reads; to none where the

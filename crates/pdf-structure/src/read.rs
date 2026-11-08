@@ -904,6 +904,10 @@ impl Assembly {
         let trailer = known.trailer;
         let metadata = metadata(file, &trailer, &get, !known.plain_metadata)?;
         let metadata = metadata.map(Cow::into_owned);
+        let metadata_of = match metadata {
+            Some(_) => crypt::metadata_stream(trailer.dict(), &get)?,
+            None => None,
+        };
         let mut document = Document::read(objects, trailer, known.listed);
         document.header = known.version;
         document.faults = cx.faults;
@@ -912,6 +916,7 @@ impl Assembly {
         document.update = known.update;
         document.size = Some(file.len());
         document.metadata = metadata;
+        document.metadata_of = metadata_of;
         document.encryption = known.encryption;
         document.facts = known.facts;
         document.revisions = known.revisions;
