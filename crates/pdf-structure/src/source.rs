@@ -7,8 +7,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map};
 use std::fmt;
+use std::hash::{BuildHasher, RandomState};
 use std::iter::FusedIterator;
 use std::ops::RangeBounds;
+use std::sync::LazyLock;
 
 use pdf_crypt::{Encoding, Permissions, Refused};
 use pdf_objects::fault::{Place, Sink};
@@ -474,13 +476,21 @@ impl fmt::Debug for DebugEntry<'_> {
 /// tells the readings apart.
 ///
 /// It holds a hash of the bytes it names, as they were when the object was
-/// read, which the writer checks a copy of them by
-/// ([`write::Body::Read`](crate::write::Body::Read)): a fast hash, not a
-/// cryptographic one, which tells bytes changed by accident or by another
-/// program, not by one who means them to hash alike. It isn't public, so
-/// that how it's made can change; two records of the same bytes have the
-/// same one, and it's in their equality.
-#[derive(Debug, Clone)]
+/// read. The writer checks a copy of them by it
+/// ([`write::Body::Read`](crate::write::Body::Read)), and refuses bytes
+/// that hash otherwise. The hash is keyed by one random key for the
+/// process, std's [`RandomState`]'s, which is never shown, so bytes can't
+/// be written to hash alike without it. Two records of the same bytes in
+/// one process have the same hash, and it's in their equality; in another
+/// process it's another. It isn't public, so that how it's made can
+/// change, and the record's `Debug` leaves it out.
+///
+/// Where std has no randomness from the operating system
+/// (`wasm32-unknown-unknown`), it makes the key from where memory was
+/// allocated, which can be guessed. There the hash tells bytes changed by
+/// accident or by another program, not by one who means them to hash
+/// alike.
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Record {
     /// The reading it was read in, whose file its places are in.
@@ -500,15 +510,35 @@ pub struct Record {
     /// A stream's data, as it was read: none for an object that isn't a
     /// stream.
     pub data: Option<DataExtent>,
-    /// XXH3-64 of its bytes, those [`Record::at`] names, as they were read
+    /// The hash of its bytes, those [`Record::at`] names, as they were read
     /// ([`Record::hash_of`]).
     pub(crate) hash: u64,
 }
 
+/// The key every record's hash is made under: one for the process, made
+/// the first time a hash is, from the randomness std keys a `HashMap` by.
+static RECORD_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
 impl Record {
-    /// What a record's hash is of `bytes`: XXH3-64 (twox-hash's).
+    /// What a record's hash is of `bytes`: std's keyed hash under the
+    /// process's one key ([`RECORD_KEY`]), so that two readings in one
+    /// process hash the same bytes alike.
     pub(crate) fn hash_of(bytes: &[u8]) -> u64 {
-        twox_hash::XxHash3_64::oneshot(bytes)
+        RECORD_KEY.hash_one(bytes)
+    }
+}
+
+impl fmt::Debug for Record {
+    /// Its fields but the hash, which is another in each process.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Record")
+            .field("source", &self.source)
+            .field("id", &self.id)
+            .field("origin", &self.origin)
+            .field("at", &self.at)
+            .field("endobj", &self.endobj)
+            .field("data", &self.data)
+            .finish_non_exhaustive()
     }
 }
 
@@ -2070,6 +2100,47 @@ pub(crate) mod tests {
             format!("Prefix {{ source: {} bytes, len: 9 }}", file.len())
         );
         assert!(!shown.contains(&numbers(&file)));
+    }
+
+    /// A record's `Debug` gives where its object was read, each of its
+    /// public fields, and not the hash of its bytes, which is another in
+    /// each process: of an object at an offset and of one in an object
+    /// stream alike.
+    #[test]
+    fn a_records_debug_gives_no_hash() {
+        let (file, _) = crate::read::tests::compressed(false);
+        let doc = crate::read::document(&file, &Options::DEFAULT);
+        let (mut at_offsets, mut members) = (0, 0);
+        for (id, record) in doc.records() {
+            match record.origin {
+                Origin::Stream { .. } => members += 1,
+                _ => at_offsets += 1,
+            }
+            let shown = format!("{record:?}");
+            let Record {
+                source,
+                id: read_as,
+                origin,
+                at,
+                endobj,
+                data,
+                hash,
+            } = record;
+            assert_eq!(
+                shown,
+                format!(
+                    "Record {{ source: {source:?}, id: {read_as:?}, origin: {origin:?}, \
+                     at: {at:?}, endobj: {endobj:?}, data: {data:?}, .. }}"
+                ),
+                "{id}"
+            );
+            let pretty = format!("{record:#?}");
+            for shown in [shown, pretty] {
+                assert!(!shown.contains("hash"), "{id}: {shown}");
+                assert!(!shown.contains(&hash.to_string()), "{id}: {shown}");
+            }
+        }
+        assert!(at_offsets > 0 && members > 0, "{at_offsets} and {members}");
     }
 
     /// Each of `items`, in turn, by `fold`: what a walk to the end gives.
