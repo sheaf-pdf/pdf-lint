@@ -1,6 +1,6 @@
 //! pdf-crypt timed on inputs made here, so that a change to the handler, a
 //! password's forms or the primitives under them can be judged before and
-//! after it, by `cargo bench -p pdf-crypt --features writer`, as the
+//! after it, by `cargo bench -p pdf-crypt --features insecure-test-writer`, as the
 //! dictionaries of revisions 2 to 5 are the writer's:
 //!
 //! - `open`: `Handler::open` of the writer's dictionary of each kind, by

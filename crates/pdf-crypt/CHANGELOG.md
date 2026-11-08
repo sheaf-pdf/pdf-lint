@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-alpha.2 (unreleased)
+
+The test writer's feature says what it is. Depend on this alpha exactly, `=0.1.0-alpha.2`.
+
+### Changed
+
+- The `writer` feature is now `insecure-test-writer`, and its items (`writer::Kind`, `Settings`, `dictionary`, `encrypt_string`, `encrypt_stream`) are hidden from the docs. It writes test files, never a document's protection. **Migrating:** turn on `insecure-test-writer` where a test turned on `writer`.
+
 ## 0.1.0-alpha.1 (2026-11-07)
 
 The first release, and an alpha: until a release says it's stable, any alpha may change the API, each saying here what changed and how code follows. A crate that depends on an alpha names it exactly, `=0.1.0-alpha.1`: cargo's default, `0.1.0-alpha.1`, takes any later alpha of 0.1.0 too.

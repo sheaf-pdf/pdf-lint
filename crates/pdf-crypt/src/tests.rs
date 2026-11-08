@@ -2129,9 +2129,8 @@ fn the_readmes_licence_links_reach_the_files() {
 }
 
 /// The crate doc's example is the README's first, line for line, so that
-/// it runs as a dependent builds the crate: the README's examples run as
-/// doctests only with the `writer` feature, which the second needs, while
-/// the crate doc's runs without it, on Rust 1.89 too.
+/// what docs.rs shows and what crates.io shows are one example, and each
+/// runs as a doctest, on Rust 1.89 too.
 #[test]
 fn the_crate_docs_example_is_the_readmes_first() {
     let readme: Vec<&str> = (include_str!("../README.md").lines())
@@ -2148,4 +2147,31 @@ fn the_crate_docs_example_is_the_readmes_first() {
         .collect();
     assert!(readme.len() > 10, "the README's first example: {readme:?}");
     assert_eq!(doc, readme);
+}
+
+/// The test writer writes a file each password opens: an AES-128
+/// dictionary (`/V 4 /R 4`) for a user's and an owner's password, the user's
+/// opening it, not as the owner's, a string of object 12 encrypted under an
+/// IV given, the ciphertext's first block, as a test file pins one; and the
+/// owner's opening it as the owner's and decrypting the string. The
+/// README's example of the writer until its items were hidden.
+#[test]
+fn the_test_writer_writes_a_file_each_password_opens() {
+    let settings = Settings {
+        kind: Kind::Aes128,
+        user: b"user",
+        owner: b"owner",
+        p: -4,
+        id: b"0123456789abcdef",
+        encrypt_metadata: true,
+    };
+    let dictionary = writer::dictionary(&settings);
+    let user = Handler::open(&dictionary, settings.id, &Password("user").encodings()).unwrap();
+    assert!(!user.owner());
+    let encrypted = writer::encrypt_string(&user, (12, 0), b"Hello", [7; 16]).unwrap();
+    assert_eq!(encrypted[..16], [7; 16]);
+    let owner = Handler::open(&dictionary, settings.id, &Password("owner").encodings()).unwrap();
+    assert!(owner.owner());
+    assert_eq!(owner.opened_by(), Some((0, Encoding::Utf8)));
+    assert_eq!(owner.decrypt_string((12, 0), &encrypted).unwrap(), b"Hello");
 }

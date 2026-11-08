@@ -314,10 +314,9 @@ crypt-package: (_package "pdf-crypt")
 # version it names isn't published; `_package` says what's checked.
 color-package: (_package "pdf-color" "pdf-objects")
 
-# Package pdf-structure as a publish would; `_package` says what's checked.
-# Every crate of the family it depends on is on crates.io at the version it
-# names, so the package is verified against those.
-structure-package: (_package "pdf-structure")
+# Package pdf-structure as a publish would, pdf-crypt beside it while the
+# version it names isn't published; `_package` says what's checked.
+structure-package: (_package "pdf-structure" "pdf-crypt")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs

@@ -79,7 +79,7 @@ required-features = ["cli"]
 
 [dev-dependencies]
 # The tests' encrypted files.
-pdf-crypt = { workspace = true, features = ["writer"] }
+pdf-crypt = { workspace = true, features = ["insecure-test-writer"] }
 # The tests' file writer, and qpdf as a second reader. By its path alone,
 # as it's never published, which the package's manifest leaves out: so the
 # crate's unit tests don't build from its package.

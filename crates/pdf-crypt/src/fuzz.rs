@@ -74,7 +74,7 @@ pub fn handler(data: &[u8]) {
     };
     // Half the time, a dictionary the writer makes for the password, which
     // opens, so that decrypting is fuzzed too.
-    #[cfg(any(test, feature = "writer"))]
+    #[cfg(any(test, feature = "insecure-test-writer"))]
     let dictionary = match head[0] & 0x80 {
         0 => dictionary,
         _ => {

@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 # The encrypted files, by pdf-crypt's writer, given its salts and IVs.
-pdf-crypt = { workspace = true, features = ["writer"] }
+pdf-crypt = { workspace = true, features = ["insecure-test-writer"] }
 # Stored zlib data checked, and a seed's compressed data inflated.
 pdf-filters = { workspace = true, features = ["miniz_oxide"] }
 pdf-objects.workspace = true

@@ -71,7 +71,7 @@ criterion = { version = "0.7", default-features = false, features = ["cargo_benc
 # tests read each file on each Flate backend.
 pdf-filters = { workspace = true, features = ["zlib-rs"] }
 # The tests' encrypted files.
-pdf-crypt = { workspace = true, features = ["writer"] }
+pdf-crypt = { workspace = true, features = ["insecure-test-writer"] }
 # The tests' file writer, and qpdf as a second reader and a decoder to set
 # the reader's decoding beside. By its path alone, as it's never published,
 # which the package's manifest leaves out: so this crate's unit tests don't

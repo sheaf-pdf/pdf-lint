@@ -125,7 +125,7 @@ libfuzzer-sys = "0.4"
 # data decoded to find where an inline image's ends, as it asks to.
 pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
 pdf-color = { path = "../crates/pdf-color" }
-pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
+pdf-crypt = { path = "../crates/pdf-crypt", features = ["insecure-test-writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # With `predefined-cmaps`, so a name that's a predefined CMap's reaches its bundle.

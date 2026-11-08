@@ -1,6 +1,6 @@
 [package]
 name = "pdf-crypt"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -53,18 +53,19 @@ criterion = { version = "0.7", default-features = false, features = ["cargo_benc
 
 [features]
 # An encryption dictionary, and strings and streams encrypted, with salts,
-# keys and IVs given, not random or derived: for writing test files, not
-# for a writer to protect a document with.
-writer = []
+# keys and IVs given, not random: for writing test files, never for a
+# writer to protect a document with. Its items are hidden from the docs.
+insecure-test-writer = []
 
-# The benchmarks: `cargo bench -p pdf-crypt --features writer`, as they
-# open the writer's dictionaries; without the feature, cargo skips them.
+# The benchmarks: `cargo bench -p pdf-crypt --features insecure-test-writer`,
+# as they open the writer's dictionaries; without the feature, cargo skips
+# them.
 # `benches/` is outside `include`, so the package carries neither them nor
 # this target.
 [[bench]]
 name = "crypt"
 harness = false
-required-features = ["writer"]
+required-features = ["insecure-test-writer"]
 
 [lints.rust]
 unsafe_code = "forbid"

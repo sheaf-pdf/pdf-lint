@@ -59,10 +59,10 @@
 //! written again at its number and generation leaks what changed
 //! ([`Method::Rc4`]).
 //!
-//! The `writer` feature, off by default, writes an encryption dictionary of
-//! every revision and encrypts under IVs given, its salts and keys given
-//! too: for test files, not for protecting a document. docs.rs documents
-//! the crate without it.
+//! The `insecure-test-writer` feature, off by default, is for writing test
+//! files: an encryption dictionary of every revision, its salts and keys
+//! given, and strings and streams encrypted under IVs given. It's never for
+//! protecting a document, and its items are hidden from these docs.
 //!
 //! A new file's encryption under an open password and a permissions
 //! password, from a seeded generator (RustCrypto's `chacha20`, with its
@@ -132,7 +132,8 @@ mod sha2;
 mod tests;
 #[cfg(test)]
 mod vectors;
-#[cfg(any(test, feature = "writer"))]
+#[cfg(any(test, feature = "insecure-test-writer"))]
+#[doc(hidden)]
 pub mod writer;
 
 use std::fmt;
@@ -336,7 +337,7 @@ impl fmt::Debug for Length {
     }
 }
 
-/// The README's examples, run as doctests.
-#[cfg(all(doctest, feature = "writer"))]
+/// The README's example, run as a doctest.
+#[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
