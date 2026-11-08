@@ -37,10 +37,8 @@ pub struct Base {
     /// Whether its last line is ended; if not, the update ends it.
     pub ends_line: bool,
     /// Where its header, `%PDF-`, starts: the update's positions count from
-    /// there, as PDFium, pdf.js and qpdf read them. This crate's reader
-    /// counts them from the file's start (ISO 32000-2, 7.5.4), so it reads
-    /// an update after a file with bytes before its header only by
-    /// scanning.
+    /// there (ISO 32000-2, 7.5.2), as this crate's reader, PDFium, pdf.js
+    /// and qpdf read them.
     pub header: usize,
     /// Where its last section starts, from the header: what its last
     /// `startxref` says, which the update's `/Prev` gives.
@@ -84,47 +82,50 @@ pub struct Base {
 
 impl Base {
     /// `reading`'s file, as its last section describes it: its length, its
-    /// last byte, its newest section's start and kind, its trailer, its
-    /// `/ID[0]` (an encrypted file's as its handler opened by it, empty
-    /// where the trailer has none) and its encryption dictionary as stored,
-    /// its header at 0, as the reader counts positions from the file's
-    /// start (ISO 32000-2, 7.5.4), and the reading's [`SourceId`]. New
-    /// numbers start past its trailer's `/Size` (below 2³²), every number
-    /// its sections list, in use or free, and its cross-reference streams'
-    /// numbers.
+    /// last byte, where its header starts ([`Facts::header_offset`], 0
+    /// without one), its newest section's start, counted from the header as
+    /// its `startxref` writes it, and its kind, its trailer, its `/ID[0]` (an
+    /// encrypted file's as its handler opened by it, empty where the
+    /// trailer has none) and its encryption dictionary as stored, and the
+    /// reading's [`SourceId`]. New numbers start past its trailer's `/Size`
+    /// (below 2³²), every number its sections list, in use or free, and its
+    /// cross-reference streams' numbers.
     ///
     /// # Errors
     ///
-    /// Refused: a file with bytes before its header ([`Error::Prefixed`]),
-    /// whose positions this crate's reader counts from the file's start
-    /// (ISO 32000-2, 7.5.4) and PDFium, pdf.js and qpdf from the header, so
-    /// that an update's would be misread by one or the other; a file whose
-    /// sections didn't read, read by scanning ([`Error::Unsound`]); a
-    /// trailer without `/Root`
+    /// Refused: a file whose sections didn't read, read by scanning
+    /// ([`Error::Unsound`]); a trailer without `/Root`
     /// ([`Error::Rootless`]); a reading as of an earlier revision
     /// ([`Options::section`](crate::Options::section)), whose last section
     /// isn't the file's ([`Error::Earlier`]), as an update after it would
     /// leave every later revision unreachable; and a source whose bytes
-    /// don't read ([`Error::Io`]). A caller that means any of those, or
-    /// counts positions from the header, describes the file by
-    /// [`Base::new`].
+    /// don't read ([`Error::Io`]). A caller that means any of those
+    /// describes the file by [`Base::new`].
+    ///
+    /// [`Facts::header_offset`]: crate::Facts::header_offset
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Base, Error> {
-        if let Some(header @ 1..) = reading.facts().header_offset {
-            return Err(Error::Prefixed(header));
-        }
+        let header = reading.facts().header_offset.unwrap_or(0);
         let trailer = reading.trailer();
         let newest = reading.facts().newest;
-        let Some((prev, kind)) = newest.filter(|_| trailer.unwritten.is_none()) else {
+        let Some((newest, kind)) = newest.filter(|_| trailer.unwritten.is_none()) else {
             return Err(Error::Unsound);
         };
+        // The reading's positions are the file's bytes'; a section's
+        // offsets count from the header.
+        let prev = newest.saturating_sub(header);
         let dict = trailer.dict();
         if !dict.has(b"Root") {
             return Err(Error::Rootless);
         }
         let source = reading.source();
         let io = |e: io::Error| Error::io(&e);
+        // A section the reading was opened as of is at its byte; the last
+        // startxref's value counts from the header.
         if let Some(section) = reading.as_of()
-            && startxref(source).map_err(io)? != Some(section)
+            && startxref(source)
+                .map_err(io)?
+                .map(|at| at.saturating_add(header))
+                != Some(section)
         {
             return Err(Error::Earlier(section));
         }
@@ -147,7 +148,7 @@ impl Base {
         Ok(Base {
             len,
             ends_line,
-            header: 0,
+            header,
             prev,
             size,
             kind,

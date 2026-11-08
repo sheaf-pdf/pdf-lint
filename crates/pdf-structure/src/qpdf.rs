@@ -1343,9 +1343,10 @@ mod tests {
     /// cross-reference stream deflated under Up; a table linking its free
     /// entries, and an update after it freeing an object; a stream listing
     /// objects in an object stream, and an update after it with 100 bytes
-    /// before the header, which qpdf counts positions from, where the
-    /// reader counts them from the file's start, so it reads the file from
-    /// the header.
+    /// before the header, which qpdf and the reader count positions from
+    /// (ISO 32000-2, 7.5.2), the reader saying where the header is and
+    /// nothing else; and an update after that file as a reading of it
+    /// describes it (`Base::of`), read so.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn written_sections_and_containers_read_through_qpdf_as_through_the_reader() {
@@ -1435,6 +1436,19 @@ mod tests {
             .stream(&mut packs, 8, root(), prev, deflate)
             .unwrap();
         let mut file = [vec![b'~'; 100], packs.clone()].concat();
+        // The same file updated after a reading of it, as `Base::of`
+        // describes it: its header past the bytes before it.
+        let mut by_base = file.clone();
+        let reading = read::Reading::open(&by_base[..], &read::Options::DEFAULT).unwrap();
+        let base = write::Base::of(&reading).unwrap();
+        assert_eq!(base.header, 100);
+        let marked = Object::from(
+            dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0), "Marked" => true },
+        );
+        let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
+        let options = write::Options::DEFAULT;
+        write::update(&mut by_base, &base, given, None, None, &options).unwrap();
+        files.push(("prefixed, by its base", by_base, 100));
         files.push(("packed", packs, 0));
         let mut section = Section::append(9, 100);
         let sixty = packed(&[(6, Object::from(dict! { "Six" => 60 }))]);
@@ -1460,9 +1474,16 @@ mod tests {
             let (alone, heard) = qpdf(&path).heard().unwrap();
             assert_eq!(alone.trailer.unwritten, None, "{test}");
             assert!(heard.is_empty(), "{test}: {heard:?}");
-            let doc = read::document(&data[header..], &read::Options::DEFAULT);
+            let doc = read::document(&data, &read::Options::DEFAULT);
             assert_eq!(doc.trailer.unwritten, None, "{test}");
-            assert!(doc.faults().is_empty(), "{test}: {:?}", doc.faults());
+            let said: Vec<crate::Fault> = (doc.faults().iter())
+                .map(|(_, fault)| fault.clone())
+                .collect();
+            let want = match header {
+                0 => vec![],
+                at => vec![crate::Fault::HeaderAt { at }],
+            };
+            assert_eq!(said, want, "{test}");
             assert_eq!(differences(&doc, &alone), [], "{test}");
         }
     }
@@ -1529,9 +1550,10 @@ mod tests {
     /// syntax or stream encoding errors found") and read through qpdf alone,
     /// without reconstructing, as the reader reads them, but a signature's
     /// `/Contents` with no `/Type`, as above. And an update of a file with
-    /// 100 bytes before its header, its positions counted from there: read
-    /// by qpdf as its sections say, as the reader reads the file without
-    /// them.
+    /// 100 bytes before its header after a reading of it (`Base::of`), its
+    /// positions counted from there: read by qpdf as its sections say, as
+    /// the reader reads it, saying where the header is and nothing else;
+    /// past them, the update of the file without them.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn written_whole_files_and_updates_read_through_qpdf_as_through_the_reader() {
@@ -1636,22 +1658,21 @@ mod tests {
         let mut appended = file.clone();
         write::update(&mut appended, &base, given(), None, None, &options).unwrap();
         let mut prefixed = [&[b'~'; 100][..], &file].concat();
-        let mut after = Base::new(
-            prefixed.len(),
-            base.prev,
-            base.size,
-            base.kind,
-            base.trailer,
-        );
-        (after.header, after.ends_line) = (100, true);
+        let after = {
+            let reading = Reading::open(&prefixed[..], &Options::DEFAULT).unwrap();
+            Base::of(&reading).unwrap()
+        };
+        assert_eq!((after.header, after.prev), (100, base.prev));
         write::update(&mut prefixed, &after, given(), None, None, &options).unwrap();
+        assert!(prefixed[100..] == appended[..]);
         let path = dir.path().join("prefixed.pdf");
         std::fs::write(&path, &prefixed).unwrap();
         let (alone, heard) = qpdf(&path).heard().unwrap();
         assert_eq!(alone.trailer.unwritten, None);
         assert!(heard.is_empty(), "{heard:?}");
-        let doc = read::document(&appended, &read::Options::DEFAULT);
-        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
+        let doc = read::document(&prefixed, &read::Options::DEFAULT);
+        let said: Vec<&crate::Fault> = doc.faults().iter().map(|(_, fault)| fault).collect();
+        assert_eq!(said, [&crate::Fault::HeaderAt { at: 100 }]);
         assert_eq!(differences(&doc, &alone), []);
     }
 
@@ -2575,9 +2596,6 @@ mod tests {
             ),
             _ if kind.starts_with("verdicts differ: the reader: opens; qpdf: can't open (root of pages tree has no /Kids array)") => Some(
                 "qpdf refuses the whole file for its page tree; the reader opens it",
-            ),
-            "verdicts differ: the reader: can't open (its /Encrypt doesn't read); qpdf: opens" => Some(
-                "junk before %PDF, which qpdf shifts every offset for and the reader doesn't yet: no object reads, the encryption dictionary first",
             ),
             _ if kind.starts_with("decrypted, ") && kind.contains("by a /Crypt filter that names none") => Some(
                 "qpdf decrypts what isn't encrypted (see below), and what it gives doesn't decode",

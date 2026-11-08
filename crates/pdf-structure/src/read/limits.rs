@@ -68,8 +68,9 @@ pub struct Options<'a> {
     /// there along its `/Prev` chain, as if it were the newest, so that
     /// what later updates wrote isn't in it. For an update's
     /// [`Update::previous`](crate::Update::previous), that's the revision it
-    /// updates. None, the default, for the file as its `startxref` gives
-    /// it. A reading so is of the whole file's bytes, its length the whole
+    /// updates. A position in the file's bytes, as every position a reading
+    /// gives is, taken exactly: no header's offset is added to it. None, the
+    /// default, for the file as its `startxref` gives it. A reading so is of the whole file's bytes, its length the whole
     /// file's: the file as a revision was written, its bytes up to its end
     /// alone, is [`Reading::prefix`](super::Reading::prefix)'s.
     pub section: Option<usize>,

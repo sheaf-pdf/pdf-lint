@@ -360,15 +360,26 @@ fn with_no_key_it_says_what_it_can_and_doesnt_say_it_read_the_tables() {
     );
 }
 
+/// Every offset a file writes counts from its header (ISO 32000-2, 7.5.2), the
+/// reader's rows and the linearization's values alike: bytes before the header
+/// move nothing the check holds, in each layout, a table, a stream and one
+/// packed, whatever comes before it.
 #[test]
 fn a_length_from_the_header_is_as_any_reader_has_it() {
-    // Positions a reader counts from the file's first byte don't read past the junk:
-    // that's said, but the first object and /L are from the header.
-    let file = laid_out(&plain(), XrefKind::Table, false);
-    let mut junk = b"junk\n".to_vec();
-    junk.extend_from_slice(&file);
-    let (verdict, _) = checked(&junk);
-    assert!(verdict.linearized && !verdict.holds);
+    for (kind, pack) in kinds() {
+        let file = laid_out(&plain(), kind, pack);
+        let (verdict, findings) = checked(&file);
+        assert!(verdict.linearized && verdict.holds, "{kind:?} {pack}");
+        for junk in [&b"junk\n"[..], b" ", &[b'~'; 100]] {
+            let prefixed = [junk, &file].concat();
+            let reading = Reading::open(&prefixed[..], &read::Options::DEFAULT).unwrap();
+            assert_eq!(reading.facts().header_offset, Some(junk.len()));
+            let (got, said) = checked(&prefixed);
+            let name = format!("{kind:?} {pack}, {} before", junk.len());
+            assert_eq!(got, verdict, "{name}: {said:?}");
+            assert_eq!(said, findings, "{name}");
+        }
+    }
 }
 
 #[test]

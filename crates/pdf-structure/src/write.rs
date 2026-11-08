@@ -59,12 +59,10 @@
 //!   stream is deflated under PNG's Up predictor, each row less the row
 //!   above it, as qpdf writes its own; an update's is written as it is.
 //! - **Positions counted from the header,** where `%PDF-` starts, which a
-//!   whole file's section has at its start: PDFium, pdf.js and qpdf count
-//!   them so, past any bytes a writer put before the header, where ISO
-//!   32000-2 counts them from the file's start (7.5.4), as this crate's
-//!   reader does. The two differ only for an update of a file with bytes
-//!   before its header ([`Section::append`]), whose sections this crate's
-//!   reader reads only by scanning.
+//!   whole file's section has at its start (ISO 32000-2, 7.5.2): past any
+//!   bytes a writer put before the header, as this crate's reader, PDFium,
+//!   pdf.js and qpdf count them. An update of a file with bytes before its
+//!   header counts from there ([`Section::append`], [`Base::header`]).
 //! - **Object streams** (7.5.7): which objects may go in one
 //!   ([`packable`]), by the clause's list of what mustn't ([`KeptOut`]),
 //!   what of it an object alone tells ([`kept_out`]); and a container of
@@ -861,14 +859,6 @@ pub enum Error {
     /// [`NUMBERS`], past every number its file and it use: its number.
     #[error("no object number left for an update's cross-reference stream: it would be {0}")]
     NoNumber(u32),
-    /// A file with this many bytes before its header ([`Base::of`]): this
-    /// crate's reader counts its positions from the file's start, and
-    /// PDFium, pdf.js and qpdf from the header, so an update's would be
-    /// misread by one or the other; [`Base::new`] says which.
-    #[error(
-        "it has {0} bytes before its header, so an update's positions would count from where one reader or another doesn't"
-    )]
-    Prefixed(usize),
     /// A file whose cross-reference sections didn't read, which was read
     /// by scanning: there's no section for an update's `/Prev` to give
     /// ([`Base::of`]).

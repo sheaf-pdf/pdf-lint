@@ -263,6 +263,28 @@ pub(super) fn files() -> Vec<Named> {
     let at = rfind(&scanned, b"startxref").unwrap();
     scanned.truncate(at);
     files.push(("scanned".to_string(), scanned, none.clone()));
+    // Bytes before the header, which the offsets count from (ISO 32000-2,
+    // 7.5.2): a hundred, a line, and one before an encrypted file's.
+    let table = fixture::file("1.7", &clean(), root(), Xref::Table);
+    let before = [
+        (
+            "a table, 100 bytes before its header",
+            [&[b'~'; 100][..], &table].concat(),
+        ),
+        (
+            "compressed, a line before its header",
+            [&b"junk\r\n"[..], &compressed(false).0].concat(),
+        ),
+    ];
+    for (name, file) in before {
+        files.push((name.to_string(), file, none.clone()));
+    }
+    let aes = fixture::encrypted(&settings(KINDS[4], b"user"), &to_encrypt(&[]), root());
+    files.push((
+        "AES-256, a byte before its header".to_string(),
+        [&b" "[..], &aes].concat(),
+        both.clone(),
+    ));
     for kind in KINDS {
         let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
         files.push((

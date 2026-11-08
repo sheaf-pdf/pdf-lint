@@ -17,6 +17,7 @@ use pdf_crypt::{Fault, Password, Protection};
 use pdf_filters::{Backend, Filter, Level, Predictor};
 use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::dict;
+use pdf_objects::fault::Place;
 use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use pdf_objects::serialize::{self, Encrypt, Refused};
 use sha2::{Digest, Sha256};
@@ -34,6 +35,15 @@ fn open(bytes: &[u8]) -> Reading<Arc<[u8]>> {
 /// tell of.
 fn sound(pdf: &Reading<Arc<[u8]>>) -> bool {
     pdf.trailer().unwritten.is_none() && pdf.faults().is_empty()
+}
+
+/// Whether `pdf`, of a file with `before` bytes before its header, was read
+/// by its cross-reference sections, with nothing to tell of but where the
+/// header is.
+fn sound_past(pdf: &Reading<Arc<[u8]>>, before: usize) -> bool {
+    let header = Place::new(None, Some(Span::new(None, before, before + 5)));
+    let said = [(header, crate::Fault::HeaderAt { at: before })];
+    pdf.trailer().unwritten.is_none() && pdf.faults() == said
 }
 
 /// `pdf`'s trailer's `/Size`.
@@ -254,9 +264,10 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
     assert_eq!(value(&pdf, ObjectId::new(5, 0)), Object::from(5));
 }
 
-/// Read from its header, as PDFium, pdf.js and qpdf read positions: the
-/// reader counts them from the file's start (ISO 32000-2, 7.5.4), and
-/// finds the objects of a file with bytes before its header by scanning.
+/// Read from its header, as the reader, PDFium, pdf.js and qpdf read
+/// positions (ISO 32000-2, 7.5.2): an update to a file with bytes before
+/// its header reads by its sections, with or without them, nothing told
+/// but where the header is.
 #[test]
 fn positions_count_from_the_header() {
     let mut out = vec![b'~'; 100];
@@ -279,9 +290,17 @@ fn positions_count_from_the_header() {
     let pdf = open(&out[100..]);
     assert!(sound(&pdf));
     assert_eq!(value(&pdf, ObjectId::new(2, 0)), Object::from(22));
-    let scanned = open(&out);
-    assert!(scanned.trailer().unwritten.is_some());
-    assert_eq!(value(&scanned, ObjectId::new(2, 0)), Object::from(22));
+    let prefixed = open(&out);
+    assert!(sound_past(&prefixed, 100), "{:?}", prefixed.faults());
+    assert_eq!(prefixed.facts().sections, 2);
+    assert_eq!(value(&prefixed, ObjectId::new(2, 0)), Object::from(22));
+    let record = prefixed.record(ObjectId::new(2, 0)).unwrap();
+    assert_eq!(record.at.start, pos_of_two(&out));
+}
+
+/// Where the last `2 0 obj` in `file` starts.
+fn pos_of_two(file: &[u8]) -> usize {
+    file.windows(7).rposition(|w| w == b"2 0 obj").unwrap()
 }
 
 #[test]
@@ -906,6 +925,12 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
     assert_eq!(got[0], [2, 10, 0]);
     assert_eq!(value(&pdf, ObjectId::new(5, 0)), five);
     assert_eq!(value(&pdf, ObjectId::new(6, 0)), sixty);
+    // Read with them, the same.
+    let prefixed = open(&out);
+    assert!(sound_past(&prefixed, 100), "{:?}", prefixed.faults());
+    assert_eq!(prefixed.facts().sections, 2);
+    assert_eq!(value(&prefixed, ObjectId::new(5, 0)), five);
+    assert_eq!(value(&prefixed, ObjectId::new(6, 0)), sixty);
 }
 
 /// A table can't list an object stream's member: it's refused, and
@@ -3251,11 +3276,11 @@ const PREFIX: [u8; 100] = [b'~'; 100];
 
 /// The update of a file with 100 bytes before its header counts its
 /// positions from there, so past them it's the same update as the file's
-/// without: described by `Base::new`, with its header there, as a caller
-/// that reads offsets from the header does. Read back, the reader finds
-/// its objects by scanning, as it counts positions from the file's start,
-/// and reads the same values; the file without them reads by its
-/// sections.
+/// without: described by `Base::of` of a reading of the file, as by
+/// `Base::new` with its header there, and holding the file. Read back, the
+/// reader reads it by its sections, as it reads the file without them,
+/// nothing told but where the header is, and the same values; and the
+/// update's own base holds what it wrote.
 #[test]
 fn a_file_with_a_100_byte_prefix_appends() {
     let (plain, trailer) = plaintext();
@@ -3286,17 +3311,24 @@ fn a_file_with_a_100_byte_prefix_appends() {
         );
         after.header = PREFIX.len();
         after.ends_line = true;
+        // A reading of the file describes it so.
+        let of = write::Base::of(&open(&prefixed)).unwrap();
+        assert!(of.holds(&prefixed[..]).unwrap(), "{kind:?}");
+        after.source = of.source;
+        // The same trailer, its places in the bytes past the prefix.
+        let trailer = |base: &write::Base| unplaced(&Object::from(base.trailer.clone()));
+        assert_eq!(trailer(&of), trailer(&after), "{kind:?}");
+        after.trailer = of.trailer.clone();
+        assert_eq!(of, after, "{kind:?}");
+        let mut after_new = prefixed.clone();
+        let options = write::Options::DEFAULT;
+        write::update(&mut after_new, &after, turned.clone(), None, None, &options).unwrap();
         let mut after_prefix = prefixed.clone();
-        let written = write::update(
-            &mut after_prefix,
-            &after,
-            turned,
-            None,
-            None,
-            &write::Options::DEFAULT,
-        )
-        .unwrap()
-        .unwrap();
+        let written = write::update(&mut after_prefix, &of, turned, None, None, &options)
+            .unwrap()
+            .unwrap();
+        assert!(after_prefix == after_new, "{kind:?}");
+        assert!(written.base.holds(&after_prefix[..]).unwrap(), "{kind:?}");
         // Positions count from the header, so past the prefix it's the same
         // update.
         assert!(after_prefix[PREFIX.len()..] == appended[..], "{kind:?}");
@@ -3313,7 +3345,14 @@ fn a_file_with_a_100_byte_prefix_appends() {
         assert_eq!(rewritten(&unprefixed), as_turned(), "{kind:?}");
         let pdf = open(&after_prefix);
         assert_eq!(pdf.facts().header_offset, Some(PREFIX.len()), "{kind:?}");
-        assert!(pdf.trailer().unwritten.is_some(), "scanned: {kind:?}");
+        assert!(
+            sound_past(&pdf, PREFIX.len()),
+            "{kind:?}: {:?}",
+            pdf.faults()
+        );
+        assert_eq!(pdf.facts().sections, 2, "{kind:?}");
+        let newest = newest(&pdf).0;
+        assert_eq!(newest, written.start + PREFIX.len(), "{kind:?}");
         for (n, _) in &plain {
             let id = ObjectId::new(*n, 0);
             assert_eq!(
@@ -4414,11 +4453,13 @@ fn and_updated() -> (Vec<u8>, Vec<u8>, usize) {
 }
 
 /// `Base::of` gives a reading's file as its last section describes it:
-/// its length, whether its last line is ended, its header at 0, its last
-/// section and kind, its numbers past `/Size`, every number listed and its
-/// cross-reference streams', its `/ID[0]`, its trailer and its reading.
-/// It refuses a file read by scanning, a trailer without `/Root`, and a
-/// reading as of an earlier revision, but not one as of its last.
+/// its length, whether its last line is ended, where its header is, its
+/// last section, counted from the header, and its kind, its numbers past
+/// `/Size`, every number listed and its cross-reference streams', its
+/// `/ID[0]`, its trailer and its reading. It refuses a file read by
+/// scanning, a trailer without `/Root`, and a reading as of an earlier
+/// revision, but not one as of its last; with bytes before its header
+/// alike, each section as of which it's read at its place in the bytes.
 #[test]
 fn a_base_is_a_reading_s_file_as_its_last_section_says() {
     let (file, updated, first) = and_updated();
@@ -4466,12 +4507,35 @@ fn a_base_is_a_reading_s_file_as_its_last_section_says() {
     assert_eq!(whole, base);
     assert_eq!(write::Base::of(&as_of(first)), Err(Error::Earlier(first)));
 
-    // Bytes before its header, a space or a hundred: refused, whether the
-    // reader reads its sections or scans.
+    // Bytes before its header, a space or a hundred: the same file, its
+    // header past them, its last section where its startxref says, from
+    // the header, and so holding it; as of the last section, at its place
+    // in the bytes, the same, and as of the first, refused.
     for before in [&b" "[..], &PREFIX[..]] {
+        let by = before.len();
         let prefixed = [before, &updated[..]].concat();
-        let refused = write::Base::of(&open(&prefixed));
-        assert_eq!(refused, Err(Error::Prefixed(before.len())));
+        let reading = open(&prefixed);
+        let of = write::Base::of(&reading).unwrap();
+        assert_eq!((of.header, of.prev, of.len), (by, base.prev, base.len + by));
+        assert_eq!(of.source, Some(reading.id()));
+        assert!(of.holds(&prefixed[..]).unwrap());
+        // The same trailer, its places in the bytes past the prefix.
+        let trailer = |base: &write::Base| unplaced(&Object::from(base.trailer.clone()));
+        assert_eq!(trailer(&of), trailer(&base));
+        let mut moved = of.clone();
+        (moved.header, moved.len, moved.source) = (0, base.len, base.source);
+        moved.trailer = base.trailer.clone();
+        assert_eq!(moved, base);
+        let as_of_prefixed = |section| {
+            let mut options = Options::DEFAULT;
+            options.section = Some(section);
+            Reading::open(Arc::<[u8]>::from(&prefixed[..]), &options).unwrap()
+        };
+        let mut whole = write::Base::of(&as_of_prefixed(last + by)).unwrap();
+        whole.source = of.source;
+        assert_eq!(whole, of);
+        let earlier = write::Base::of(&as_of_prefixed(first + by));
+        assert_eq!(earlier, Err(Error::Earlier(first + by)));
     }
     // Scanned, or with no catalog.
     let scanned =

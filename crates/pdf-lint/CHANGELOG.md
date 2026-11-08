@@ -81,6 +81,7 @@
 ### Fixed
 
 - **A stream's `/Length` in an object stream is read.** A stream whose `/Length` refers to an object in an object stream is read by it. Its `reader` finding "it has no /Length that reads" is gone, and its content, font or image is checked from the data its `/Length` gives.
+- **A file with bytes before `%PDF-` is read from its header.** Its offsets count from the header (ISO 32000-2, 7.5.2), so each object is read where its sections put it, and checked. The `reader` findings that its objects aren't at their offsets are gone. The bytes before the header are still reported. A linearized one is judged as the file without them, and its hint stream is found where `/H` puts it, past the header, so it's no longer reported unreached.
 
 ## 0.2.0 (unreleased)
 

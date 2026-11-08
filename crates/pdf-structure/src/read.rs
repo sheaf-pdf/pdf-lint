@@ -7,7 +7,10 @@
 //! chain, each revision they make kept with its trailer and where its
 //! bytes end, past the `%%EOF` after its last-written section's
 //! `startxref` ([`Revision`]), and each object at the offset they give, a
-//! stream's data by its `/Length` when that ends at `endstream`. Where the
+//! stream's data by its `/Length` when that ends at `endstream`. Offsets
+//! count from the header (ISO 32000-2, 7.5.2), past any bytes a writer put
+//! before it, and every position a reading gives is in the file's bytes,
+//! the header's offset added ([`Facts::header_offset`]). Where the
 //! sections don't read, it finds the objects by scanning the file, and
 //! says so. An object that doesn't read says why ([`Unread`]): it doesn't
 //! parse, its offset holds another, or the object stream it's in doesn't
@@ -343,7 +346,8 @@ pub const BUDGET: usize = 1 << 30;
 pub enum XrefEntry {
     /// In use, written at `offset`.
     InUse {
-        /// Where its `n g obj` starts.
+        /// Where its `n g obj` starts, in the file's bytes: what the section
+        /// writes, past the header ([`Facts::header_offset`](crate::Facts::header_offset)).
         offset: usize,
         /// Its generation number.
         generation: u16,
@@ -2648,15 +2652,24 @@ impl Reader {
                 .ok_or(Unwritten::StartxrefNoOffset)
         })?;
         match offset {
-            Ok(offset) => self.sections_from(file, cx, offset, decoder),
+            Ok(offset) => self.sections_from(file, cx, self.in_bytes(offset), decoder),
             Err(why) => Ok(Err(why)),
         }
+    }
+
+    /// Where `offset`, a position the file writes, is in its bytes: past
+    /// the header's offset, as positions count from `%PDF-` (ISO 32000-2,
+    /// 7.5.2), and as they are in a file without one.
+    fn in_bytes(&self, offset: usize) -> usize {
+        offset.saturating_add(self.facts.header_offset.unwrap_or(0))
     }
 
     /// The sections from the one at `offset` along their `/Prev` chain, as
     /// [`Reader::sections`] reads them from `startxref`'s; and the
     /// revisions they make, each ending where its last-written section's
-    /// `%%EOF` does ([`eof_after`]).
+    /// `%%EOF` does ([`eof_after`]). `offset` is a position in the file's
+    /// bytes, taken as it is ([`Options::section`]'s among them); each
+    /// `/Prev` and `/XRefStm`, and each row, counts from the header.
     fn sections_from<'f, F: Bytes<'f>>(
         &mut self,
         file: F,
@@ -2900,7 +2913,8 @@ impl Reader {
                 let prev = object
                     .as_dict()
                     .and_then(|d| d.get(b"Prev"))
-                    .and_then(offset_of);
+                    .and_then(offset_of)
+                    .map(|prev| self.in_bytes(prev));
                 let end = file.read_from(cx, after, 0, |w, _| Ok(eof_after(w, after)))?;
                 Ok(Ok(Section {
                     trailer: Trailer {
@@ -2976,6 +2990,7 @@ impl Reader {
                         };
                         let entry = match (usize::try_from(offset), u16::try_from(generation)) {
                             (Ok(offset), Ok(generation)) if kind == b"n" => {
+                                let offset = self.in_bytes(offset);
                                 (generation, XrefEntry::InUse { offset, generation })
                             }
                             (_, Ok(generation)) if kind == b"f" => (generation, XrefEntry::Free),
@@ -3008,8 +3023,8 @@ impl Reader {
         let Some(dict) = trailer.as_dict() else {
             return Err(Unwritten::TrailerNotADictionary);
         };
-        let prev = dict.get(b"Prev").and_then(offset_of);
-        let xref_stm = dict.get(b"XRefStm").and_then(offset_of);
+        let at = |key: &[u8]| dict.get(key).and_then(offset_of).map(|o| self.in_bytes(o));
+        let (prev, xref_stm) = (at(b"Prev"), at(b"XRefStm"));
         let section = Section {
             trailer: Trailer {
                 stream: None,
@@ -3240,6 +3255,7 @@ impl Reader {
                     1 => {
                         let generation = u16::try_from(three).unwrap_or(u16::MAX);
                         let offset = usize::try_from(two).unwrap_or(usize::MAX);
+                        let offset = self.in_bytes(offset);
                         (generation, XrefEntry::InUse { offset, generation })
                     }
                     2 => {
@@ -4274,6 +4290,8 @@ fn holds_linearization<'f, F: Bytes<'f>>(
 mod faults;
 #[cfg(test)]
 mod glue;
+#[cfg(test)]
+mod header;
 #[cfg(test)]
 pub(crate) mod lazy;
 #[cfg(test)]

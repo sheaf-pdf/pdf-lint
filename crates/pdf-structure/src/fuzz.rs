@@ -24,7 +24,9 @@
 //! soundly, written and read again it's the same objects, each at the
 //! number the renumbering gives it, those copied as the bytes they were
 //! read from among them, their headers and the references that move
-//! written anew in place; as the input picks, the document written is the
+//! written anew in place, and an update after one whose one fault is the
+//! bytes before its header read back with that fault again; as the input
+//! picks, the document written is the
 //! file read whole and taken by the reading, which takes it where it read
 //! soundly, and leaves it as it was where it doesn't; and where a byte of
 //! it changed after it was read, a copy of an object whose bytes hold it is
@@ -791,8 +793,10 @@ const LISTED: u32 = 1 << 16;
 /// object read at an offset flipped after, the one those bits pick among
 /// their bytes but their streams' data, written whole as before. Neither
 /// panics. Where the reading read soundly, with no fault told, and a
-/// write wrote, its file read again under the same limits, by its
-/// password, is sound and holds every object the document did, at the
+/// write wrote (an update, too, where the one fault told is the bytes
+/// before the file's header, which it keeps and tells again), its file
+/// read again under the same limits, by its password, is sound and holds
+/// every object the document did, at the
 /// number the renumbering gives it, its references as it names them, as
 /// pdf-objects' writer writes each (reals as written and strings' forms
 /// aside), a stream's data as handed out, but the encryption dictionary
@@ -953,6 +957,10 @@ fn compared(data: &[u8]) -> [bool; 3] {
         return [false; 3];
     };
     let sound = reading.trailer().unwritten.is_none() && reading.faults().is_empty();
+    // A file whose one fault is the bytes before its header reads as the
+    // file without them (ISO 32000-2, 7.5.2): an update, which keeps them,
+    // reads back so, that fault again.
+    let header = header_alone(&reading);
     if byte & 0x80 != 0 {
         doc = adopted(file, password, &reading, doc, sound);
     }
@@ -985,7 +993,7 @@ fn compared(data: &[u8]) -> [bool; 3] {
         let written = write::document(&mut out, &doc, encryptor, Some(&reading), &options);
         if let (true, Ok(written)) = (sound, written) {
             assert_eq!(written.base.renumbered, renumbering.0.is_some());
-            let back = read_back(&out, opens);
+            let back = read_back(&out, opens, &[]);
             same_objects(&doc, &reading, &back, None, &to);
             compared[0] = true;
         }
@@ -993,7 +1001,12 @@ fn compared(data: &[u8]) -> [bool; 3] {
     if choice & 32 != 0 {
         let own = own.ok().flatten();
         let how = (choice, byte);
-        compared[1] = updated(file, &doc, &reading, own.as_ref(), password, sound, how);
+        let told = match (sound, &header) {
+            (true, _) => Some(&[][..]),
+            (false, Some(told)) => Some(&told[..]),
+            (false, None) => None,
+        };
+        compared[1] = updated(file, &doc, &reading, own.as_ref(), password, told, how);
     } else if listed && sound {
         compared[2] = flipped(file, password, &options, &way, choice >> 7, &to);
     }
@@ -1149,7 +1162,7 @@ fn flipped(
     let mut out = Vec::new();
     match write::document(&mut out, &doc, encryptor, Some(&reading), options) {
         Ok(_) => {
-            let back = read_back(&out, opens);
+            let back = read_back(&out, opens, &[]);
             same_objects(&doc, &reading, &back, None, to);
         }
         Err(write::Error::Changed(Some(id))) => {
@@ -1170,8 +1183,9 @@ fn flipped(
 /// renumbering moves or names otherwise, passing over the rest, which the
 /// file holds. Each number is given once, the changed one in place of the
 /// one as read, so none is refused as given where one passed over is
-/// ([`write::Error::Twice`]). When the reading was `sound` and the update
-/// wrote, the file read again by `password` is sound, and the same
+/// ([`write::Error::Twice`]). When the reading was sound but for what it
+/// `told`, none or the bytes before the header, and the update wrote, the
+/// file read again by `password` is sound but for the same, and the same
 /// objects, each at the number the renumbering gives it, but that one with
 /// its key: whether it was.
 fn updated(
@@ -1180,7 +1194,7 @@ fn updated(
     reading: &Reading<&[u8]>,
     encryptor: Option<&Encryptor>,
     password: Password,
-    sound: bool,
+    told: Option<&[(Place, Fault)]>,
     (choice, byte): (u16, u8),
 ) -> bool {
     let Ok(base) = Base::of(reading) else {
@@ -1207,7 +1221,7 @@ fn updated(
         false => (at, body),
     });
     let written = write::update(&mut out, &base, given, encryptor, Some(reading), &options);
-    if let (true, Ok(Some(written))) = (sound, written) {
+    if let (Some(told), Ok(Some(written))) = (told, written) {
         assert!(
             written.base.holds(&out[..]).expect("in memory"),
             "the update's base holds"
@@ -1222,7 +1236,7 @@ fn updated(
                 "{at:?} written alone of what's read"
             );
         }
-        let back = read_back(&out, password);
+        let back = read_back(&out, password, told);
         same_objects(doc, reading, &back, Some(id), &to);
         let at = to(id).expect("numbered");
         let got = back.get(at).expect("the changed object reads");
@@ -1233,8 +1247,22 @@ fn updated(
     false
 }
 
-/// `file`, written, read again under [`options`] by `password`: sound.
-fn read_back<'f>(file: &'f [u8], password: Password<'_>) -> Reading<&'f [u8]> {
+/// The faults `reading` told where the one it told is the bytes before the
+/// file's header and its sections read: none otherwise.
+fn header_alone(reading: &Reading<&[u8]>) -> Option<Vec<(Place, Fault)>> {
+    let told = reading.faults();
+    let header = |(_, fault): &(Place, Fault)| matches!(fault, Fault::HeaderAt { .. });
+    let alone = reading.trailer().unwritten.is_none() && told.len() == 1 && told.iter().all(header);
+    alone.then(|| told.to_vec())
+}
+
+/// `file`, written, read again under [`options`] by `password`: sound, but
+/// for what it was to tell, `told`.
+fn read_back<'f>(
+    file: &'f [u8],
+    password: Password<'_>,
+    told: &[(Place, Fault)],
+) -> Reading<&'f [u8]> {
     let back = Reading::open(
         file,
         &Options {
@@ -1247,7 +1275,7 @@ fn read_back<'f>(file: &'f [u8], password: Password<'_>) -> Reading<&'f [u8]> {
         let _ = back.to_document();
     }
     assert!(
-        back.trailer().unwritten.is_none() && back.faults().is_empty(),
+        back.trailer().unwritten.is_none() && back.faults() == told,
         "a written file reads soundly: {:?} {:?}",
         back.trailer().unwritten,
         back.faults()
@@ -1644,6 +1672,29 @@ mod tests {
                 }
             }
             write_file(&file);
+        }
+    }
+
+    /// The `write` target's update after a file with bytes before its
+    /// header, whose one fault is that, read back alike, that fault again:
+    /// each of the same files so, by either password, under each
+    /// renumbering, its document made beside its reading or taken by it.
+    /// It writes no whole file to compare, as the reading told a fault.
+    #[test]
+    fn an_update_after_bytes_before_the_header_reads_back_alike() {
+        for file in &files() {
+            let prefixed = [&b"junk\r\n"[..], file].concat();
+            for choice in 0..32u16 {
+                let taken = |turn: u16| u8::try_from(turn / 5 % 2).unwrap_or(0) << 7;
+                let renumbered = [u8::try_from(choice % 5).unwrap_or(0) | taken(choice)];
+                let updated = choice | 32 | (choice & 1) << 7;
+                let data = [&updated.to_le_bytes()[..], &renumbered, &prefixed].concat();
+                assert_eq!(
+                    compared(&data),
+                    [false, true, false],
+                    "{updated}, {renumbered:?}"
+                );
+            }
         }
     }
 

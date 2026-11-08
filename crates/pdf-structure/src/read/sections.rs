@@ -33,7 +33,9 @@ pub struct SectionRow {
 }
 
 /// One cross-reference section of a file, as written, none of it merged with
-/// another's.
+/// another's. Its places are positions in the file's bytes, as a reading's are:
+/// what's written, which counts from the header (ISO 32000-2, 7.5.2), past the
+/// header's offset.
 /// Not exhaustive, so that it can come to say more of a section; made only by
 /// the reader.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,13 +55,15 @@ pub struct SectionRows {
     pub first_row: Option<(usize, usize)>,
     /// Its trailer: the dictionary after `trailer`, or the stream's.
     pub trailer: Trailer,
-    /// Its `/Prev`, as the reader reads it: none where it isn't an offset.
+    /// Where its `/Prev` says the section before it is: none where it isn't
+    /// an offset.
     pub prev: Option<usize>,
     /// The number and generation of the stream it's written as.
     pub stream: Option<ObjectId>,
     /// What a hybrid table's `/XRefStm` lists (7.5.8.4), as a section of its own.
     pub hybrid: Option<Box<SectionRows>>,
-    /// The offset the `startxref` after it gives, where one follows it.
+    /// Where the `startxref` after it says the newest section is, where one
+    /// follows it.
     pub startxref: Option<usize>,
 }
 
@@ -164,7 +168,9 @@ impl<S: ByteSource> Reading<S> {
     /// list, and [`Sections::stopped`] says why; a file with no section that reads
     /// has none, though its reading found its objects by scanning. So what's here
     /// can differ from [`Reading::entries`], which is what a reader made of them.
-    /// Positions are from the file's first byte, as a reading reads them. A stream's
+    /// Positions are in the file's bytes, as a reading's are: each offset written,
+    /// which counts from the header (ISO 32000-2, 7.5.2), past the header's offset;
+    /// a section the reading was opened as of at its byte. A stream's
     /// rows are decoded from its own data, and that's never encrypted (ISO 32000-2,
     /// 7.5.8.2). Its data is found as the reading found it, so the rows are the
     /// reading's whatever it has read: a `/Length` that's a reference isn't followed,
@@ -233,9 +239,11 @@ impl Reader {
     /// [`Reading::sections`], of `file`.
     fn sections_again<'f, F: Bytes<'f>>(&self, file: F) -> Result<Sections, F::Error> {
         let mut sections = Vec::new();
+        // A section the reading was opened as of is at its byte; startxref's
+        // value counts from the header.
         let start = match self.as_of {
             Some(at) => Ok(at),
-            None => last_startxref(file)?,
+            None => last_startxref(file)?.map(|at| self.in_bytes(at)),
         };
         let mut next = match start {
             Ok(at) => Some(at),
@@ -300,6 +308,7 @@ impl Reader {
         };
         *left -= section.rows.len();
         let stream = section.trailer.dict().get(b"XRefStm").and_then(offset_of);
+        let stream = stream.map(|at| self.in_bytes(at));
         if let Some(stream) = stream {
             match self.stream_again(file, stream, left)? {
                 Ok(rows) => section.hybrid = Some(Box::new(rows)),
@@ -372,7 +381,10 @@ impl Reader {
                             (Some((offset, generation)), b"n") => SectionRow {
                                 number,
                                 generation,
-                                entry: Some(XrefEntry::InUse { offset, generation }),
+                                entry: Some(XrefEntry::InUse {
+                                    offset: self.in_bytes(offset),
+                                    generation,
+                                }),
                             },
                             (_, b"n" | b"f") => SectionRow {
                                 number,
@@ -399,7 +411,8 @@ impl Reader {
             return Err(fault(Unwritten::TrailerNotADictionary));
         };
         let prev = dict.get(b"Prev").and_then(offset_of);
-        let startxref = startxref_at(w, parser.offset());
+        let prev = prev.map(|at| self.in_bytes(at));
+        let startxref = startxref_at(w, parser.offset()).map(|at| self.in_bytes(at));
         Ok(SectionRows {
             at: section,
             kind: XrefKind::Table,
@@ -437,6 +450,7 @@ impl Reader {
         let written = written.transpose()?.flatten().unwrap_or_default();
         let end = record.at.end;
         let startxref = file.read_from(&mut cx, end, 0, |w, _| Ok(startxref_at(w, end)))?;
+        let startxref = startxref.map(|at| self.in_bytes(at));
         // As many bytes before it as a writer has ever been seen to put there.
         let before = file.get(at.saturating_sub(SPACE)..at)?.unwrap_or_default();
         let space = (before.iter().rev())
@@ -450,6 +464,7 @@ impl Reader {
         *left -= rows.len();
         let dict = object.as_dict().expect("it's a stream");
         let prev = dict.get(b"Prev").and_then(offset_of);
+        let prev = prev.map(|at| self.in_bytes(at));
         let trailer = Trailer {
             stream: Some(id),
             object: object.clone(),
@@ -559,6 +574,7 @@ impl Reader {
                     0 => (generation, Some(XrefEntry::Free)),
                     1 => {
                         let offset = usize::try_from(two).unwrap_or(usize::MAX);
+                        let offset = self.in_bytes(offset);
                         let entry = XrefEntry::InUse { offset, generation };
                         (generation, Some(entry))
                     }

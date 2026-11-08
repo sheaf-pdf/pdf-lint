@@ -5,8 +5,10 @@
 //! - `open`: a file of 2,000 objects opened by `Reading::open`, its header
 //!   and cross-reference section read: with a table (`table`); with a
 //!   cross-reference stream, the objects but the streams in object streams
-//!   (`stream`); and the table's file with its `startxref` pointing at no
-//!   section, so that the reader finds the objects by scanning (`scanned`).
+//!   (`stream`); the table's file with its `startxref` pointing at no
+//!   section, so that the reader finds the objects by scanning (`scanned`);
+//!   and the table's file with 100 bytes before its header, which its
+//!   offsets count from (`prefixed`).
 //! - `get`: each of the 2,000 objects of the table's file and the stream's
 //!   read by number from a reading just opened, each as it's first asked
 //!   for, an object stream decoded once for its members (`table/cold`,
@@ -43,7 +45,8 @@
 //! annotations. Throughput is in bytes of the file read or written, but
 //! `get`'s, in objects. Each input is held to what it gives before it's
 //! timed: a file opened to the objects it lists, its trailer's root, and
-//! scanned or not as its group says, with no fault but where it's scanned;
+//! scanned or not as its group says, with no fault but where it's scanned
+//! or has bytes before its header, which is one;
 //! each object got to its kind, and each of `compressed-lengths`' streams
 //! to its data found by its `/Length` where the crate reads one from an
 //! object stream, by `endstream` and a fault where it doesn't; a document
@@ -131,6 +134,11 @@ mod api {
     /// is read from it: a version of the crate that doesn't finds such a
     /// stream's data by `endstream`, and says so.
     pub const MEMBER_LENGTHS: bool = true;
+
+    /// Whether a file's offsets are read from its header (ISO 32000-2,
+    /// 7.5.2): a version of the crate that reads them from its first byte
+    /// finds the objects of a file with bytes before its header by scanning.
+    pub const FROM_HEADER: bool = true;
 
     /// Whether `reading` found stream `id`'s data by its `/Length`, as it
     /// read the stream.
@@ -483,6 +491,7 @@ struct Files {
     table: Vec<u8>,
     stream: Vec<u8>,
     scanned: Vec<u8>,
+    prefixed: Vec<u8>,
     faulty: Vec<u8>,
     twice: Vec<u8>,
     lengths: Vec<u8>,
@@ -494,6 +503,7 @@ impl Files {
             table: table_file(objects, false),
             stream: stream_file(objects),
             scanned: table_file(objects, true),
+            prefixed: [&[b'~'; 100][..], &table_file(objects, false)].concat(),
             faulty: table_file_as(objects, false, false),
             twice: twice_file(),
             lengths: lengths_file(),
@@ -508,8 +518,9 @@ fn ids() -> Vec<ObjectId> {
 }
 
 /// `reading`, held to what its file lists: `listed` objects, the trailer's
-/// root the catalog, scanned or not, and with no fault but where scanned.
-fn opened(name: &str, reading: &Read, listed: usize, scanned: bool) {
+/// root the catalog, scanned or not, and with `faults` faults but where
+/// scanned.
+fn opened(name: &str, reading: &Read, listed: usize, scanned: bool, faults: usize) {
     assert_eq!(
         reading.ids().count(),
         listed,
@@ -523,24 +534,33 @@ fn opened(name: &str, reading: &Read, listed: usize, scanned: bool) {
     assert_eq!(root, Some(ObjectId::new(1, 0)), "open/{name}: the root");
     assert_eq!(api::scanned(reading), scanned, "open/{name}: scanned");
     if !scanned {
-        assert_eq!(api::reading_faults(reading), 0, "open/{name}: no fault");
+        assert_eq!(api::reading_faults(reading), faults, "open/{name}: faults");
     }
 }
 
 fn open_group(c: &mut Criterion, files: &Files) {
-    // Each object; the stream's file lists its object streams and itself.
-    let cases: [(&str, &[u8], usize, bool); 3] = [
-        ("table", &files.table, OBJECTS as usize, false),
+    // Each object; the stream's file lists its object streams and itself;
+    // the prefixed file says its header is past its first byte.
+    let cases: [(&str, &[u8], usize, bool, usize); 4] = [
+        ("table", &files.table, OBJECTS as usize, false, 0),
         (
             "stream",
             &files.stream,
             OBJECTS as usize + CONTAINERS + 1,
             false,
+            0,
         ),
-        ("scanned", &files.scanned, OBJECTS as usize, true),
+        ("scanned", &files.scanned, OBJECTS as usize, true, 0),
+        (
+            "prefixed",
+            &files.prefixed,
+            OBJECTS as usize,
+            !api::FROM_HEADER,
+            1,
+        ),
     ];
-    for &(name, file, listed, scanned) in &cases {
-        opened(name, &api::open(file), listed, scanned);
+    for &(name, file, listed, scanned, faults) in &cases {
+        opened(name, &api::open(file), listed, scanned, faults);
     }
     let mut group = c.benchmark_group("open");
     for (name, file, ..) in cases {

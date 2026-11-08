@@ -611,7 +611,9 @@ pub struct DataExtent {
 #[non_exhaustive]
 pub struct Facts {
     /// Where `%PDF-` starts, when the file has it within its first 1024
-    /// bytes: what's before it is junk some writers put first.
+    /// bytes: what's before it is junk some writers put first. The offsets
+    /// the file writes count from there (ISO 32000-2, 7.5.2), so every
+    /// position a reading gives is this many bytes past what's written.
     pub header_offset: Option<usize>,
     /// The newest cross-reference section read: where it starts, and how
     /// it's written; none when the file was scanned.
@@ -646,7 +648,7 @@ pub struct Facts {
 #[non_exhaustive]
 pub struct Revision {
     /// Where its newest cross-reference section starts: what its
-    /// `startxref` gave.
+    /// `startxref` gave, past the header ([`Facts::header_offset`]).
     pub at: usize,
     /// Its trailer: its newest section's, the dictionary after `trailer`
     /// or the cross-reference stream ([`Trailer::stream`]).
