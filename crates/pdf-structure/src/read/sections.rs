@@ -529,7 +529,9 @@ impl Reader {
                 .collect(),
             _ => None,
         };
-        let widths = widths.ok_or(fault(Unwritten::Widths))?;
+        // Each reason built only where it's given back, as one made unused
+        // costs its box, at each row below among them.
+        let widths = widths.ok_or_else(|| fault(Unwritten::Widths))?;
         let size = dict.get(b"Size").and_then(Object::as_integer);
         let subsections: Vec<(u32, u32)> = match dict.get(b"Index").map(Object::value) {
             Some(Value::Array(index)) => (index.chunks(2))
@@ -541,10 +543,10 @@ impl Reader {
                     _ => None,
                 })
                 .collect::<Option<_>>()
-                .ok_or(fault(Unwritten::Index))?,
+                .ok_or_else(|| fault(Unwritten::Index))?,
             _ => {
                 let size = size.and_then(|s| u32::try_from(s).ok());
-                vec![(0, size.ok_or(fault(Unwritten::NoSize))?)]
+                vec![(0, size.ok_or_else(|| fault(Unwritten::NoSize))?)]
             }
         };
         let row = widths.iter().sum::<usize>();
@@ -582,12 +584,14 @@ impl Reader {
                         limit: self.listable,
                     });
                 }
-                let bytes = rows_read.next().ok_or(fault(Unwritten::DataShort))?;
+                let bytes = rows_read
+                    .next()
+                    .ok_or_else(|| fault(Unwritten::DataShort))?;
                 let (one, rest) = bytes.split_at(widths[0]);
                 let (two, three) = rest.split_at(widths[1]);
                 let kind = if widths[0] == 0 { 1 } else { field(one) };
                 let (two, three) = (field(two), field(three));
-                let number = start.checked_add(i).ok_or(fault(Unwritten::IndexNumber))?;
+                let number = (start.checked_add(i)).ok_or_else(|| fault(Unwritten::IndexNumber))?;
                 let generation = u16::try_from(three).unwrap_or(u16::MAX);
                 let (generation, entry) = match kind {
                     0 => (generation, Some(XrefEntry::Free)),

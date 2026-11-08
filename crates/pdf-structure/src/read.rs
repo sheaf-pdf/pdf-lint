@@ -2744,10 +2744,16 @@ impl Reader {
             if !t.next().is_some_and(|token| token.is_keyword(b"startxref")) {
                 return Err(Unwritten::StartxrefInWord { at });
             }
-            t.next_significant()
+            // Each reason built only where it's given back, as one dropped
+            // unused costs its drop's call.
+            let offset = t
+                .next_significant()
                 .filter(|token| token.kind == Kind::Integer)
-                .and_then(|token| usize::try_from(token.integer().ok()?).ok())
-                .ok_or(Unwritten::StartxrefNoOffset)
+                .and_then(|token| usize::try_from(token.integer().ok()?).ok());
+            let Some(offset) = offset else {
+                return Err(Unwritten::StartxrefNoOffset);
+            };
+            Ok(offset)
         })?;
         match offset {
             Ok(offset) => {
@@ -3479,24 +3485,34 @@ impl Reader {
                 .collect(),
             _ => None,
         };
-        let widths = widths.ok_or(Unwritten::Widths)?;
+        // Each reason built only where it's given back, as one dropped
+        // unused costs its drop's call, at each row below among them.
+        let Some(widths) = widths else {
+            return Err(Unwritten::Widths);
+        };
         let size = dict.get(b"Size").and_then(Object::as_integer);
         let index: Vec<(u32, u32)> = match dict.get(b"Index").map(|i| i.value()) {
-            Some(Value::Array(index)) => (index.chunks(2))
-                .map(|pair| match pair {
-                    [start, count] => Some((
-                        u32::try_from(start.as_integer()?).ok()?,
-                        u32::try_from(count.as_integer()?).ok()?,
-                    )),
-                    _ => None,
-                })
-                .collect::<Option<_>>()
-                .ok_or(Unwritten::Index)?,
-            _ => vec![(
-                0,
-                size.and_then(|s| u32::try_from(s).ok())
-                    .ok_or(Unwritten::NoSize)?,
-            )],
+            Some(Value::Array(index)) => {
+                let pairs = (index.chunks(2))
+                    .map(|pair| match pair {
+                        [start, count] => Some((
+                            u32::try_from(start.as_integer()?).ok()?,
+                            u32::try_from(count.as_integer()?).ok()?,
+                        )),
+                        _ => None,
+                    })
+                    .collect::<Option<_>>();
+                let Some(pairs) = pairs else {
+                    return Err(Unwritten::Index);
+                };
+                pairs
+            }
+            _ => {
+                let Some(size) = size.and_then(|s| u32::try_from(s).ok()) else {
+                    return Err(Unwritten::NoSize);
+                };
+                vec![(0, size)]
+            }
         };
         let row = widths.iter().sum::<usize>();
         let rows_size = (index.iter())
@@ -3606,7 +3622,9 @@ impl Reader {
                     }
                     break;
                 }
-                let bytes = rows.next().ok_or(Unwritten::DataShort)?;
+                let Some(bytes) = rows.next() else {
+                    return Err(Unwritten::DataShort);
+                };
                 let (one, rest) = bytes.split_at(widths[0]);
                 let (two, three) = rest.split_at(widths[1]);
                 let kind = if widths[0] == 0 { 1 } else { field(one) };
