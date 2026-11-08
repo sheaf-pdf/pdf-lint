@@ -17,8 +17,8 @@
 //! memory; and opened by a wrong password, then unlocked by the owner's,
 //! it's the file opened by the owner's; each under the verified recovery,
 //! or as PDFium reads a file, as the input chooses. It reads under small
-//! limits, so that a run tries more inputs. It's compiled only for tests and under
-//! cargo-fuzz's `--cfg fuzzing`.
+//! limits, so that a run tries more inputs. It's compiled only for tests
+//! and under cargo-fuzz's `--cfg fuzzing`.
 //!
 //! And what the `write` target checks ([`write_file`]): a file read is
 //! written whole and as an update, under a renumbering the input picks or
@@ -29,12 +29,11 @@
 //! written anew in place, and an update after one whose one fault is the
 //! bytes before its header read back with that fault again, and after one
 //! whose faults are that and where its sections or objects were found
-//! read back with those alone, but what the update moves of them; as the input
-//! picks, the document written is the
-//! file read whole and taken by the reading, which takes it where it read
-//! soundly, and leaves it as it was where it doesn't; and where a byte of
-//! it changed after it was read, a copy of an object whose bytes hold it is
-//! refused.
+//! read back with those alone, but what the update's `/Prev` moves of
+//! them; as the input picks, the document written is the file read whole
+//! and taken by the reading, which takes it where it read soundly, and
+//! leaves it as it was where it doesn't; and where a byte of it changed
+//! after it was read, a copy of an object whose bytes hold it is refused.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -217,29 +216,29 @@ pub fn open<S: ByteSource>(
 /// the decoded data of the object stream it names, which the reading
 /// keeps; and each object read at a shift ([`Origin::Shifted`]), or found
 /// by a scan in a file whose sections read ([`Origin::Recovered`]), starts
-/// exactly at its own `n g obj`. Read with no faults looked for ([`Options::faults`]), in memory
-/// and by position, it's the same read, every object, record and decoded
-/// stream, and keeps no fault. Read on demand, its objects asked for in an
-/// order the choice's next bits give, some read unkept first, each the
-/// object and record it's kept as, it's the whole read, when neither
-/// reading's decoding reached the budget, and made a document with the
-/// reading kept, at a point the choice's bits from the eleventh give, it's
-/// the reading's whole read after. Read by position, through [`Counted`],
-/// its first window and whether an object's reaches the next listed offset
-/// as the choice's bits from the fourth give, it's the whole read, and each
-/// stream's data and decoded data are as in memory. Pruned, what its
-/// trailer reaches is the same, and every object it keeps is among it, and
-/// an object added is at a number no entry held (`pruned`). When the file
-/// has an incremental update, so is the revision before it
-/// ([`Options::section`]). Each revision ends past a `%%EOF` and its line's
-/// end, and its bytes up to there read as a file of their own the same
-/// twice and by position as in memory (`revisions`). And with the choice's
-/// lowest bit set, so is the file opened by the owner's password `owner`,
-/// and its revision before an update, and so are its revisions, and the
-/// file opened by a wrong password, then unlocked by the owner's
-/// (`unlocked`). All of it under the recovery the choice's thirteenth bit
-/// gives ([`recovery_of`]): as PDFium reads a file where it's set, else the
-/// verified default. Panics on a broken promise.
+/// exactly at its own `n g obj`. Read with no faults looked for
+/// ([`Options::faults`]), in memory and by position, it's the same read,
+/// every object, record and decoded stream, and keeps no fault. Read on
+/// demand, its objects asked for in an order the choice's next bits give,
+/// some read unkept first, each the object and record it's kept as, it's
+/// the whole read, when neither reading's decoding reached the budget, and
+/// made a document with the reading kept, at a point the choice's bits
+/// from the eleventh give, it's the reading's whole read after. Read by
+/// position, through [`Counted`], its first window and whether an object's
+/// reaches the next listed offset as the choice's bits from the fourth
+/// give, it's the whole read, and each stream's data and decoded data are
+/// as in memory. Pruned, what its trailer reaches is the same, and every
+/// object it keeps is among it, and an object added is at a number no
+/// entry held (`pruned`). When the file has an incremental update, so is the
+/// revision before it ([`Options::section`]). Each revision ends past a
+/// `%%EOF` and its line's end, and its bytes up to there read as a file of
+/// their own the same twice and by position as in memory (`revisions`). And
+/// with the choice's lowest bit set, so is the file opened by the owner's
+/// password `owner`, and its revision before an update, and so are its
+/// revisions, and the file opened by a wrong password, then unlocked by the
+/// owner's (`unlocked`). All of it under the recovery the choice's thirteenth
+/// bit gives ([`recovery_of`]): as PDFium reads a file where it's set, else
+/// the verified default. Panics on a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
@@ -853,17 +852,19 @@ const LISTED: u32 = 1 << 16;
 /// object read at an offset flipped after, the one those bits pick among
 /// their bytes but their streams' data, written whole as before. Neither
 /// panics. Where the reading read soundly, with no fault told, and a
-/// write wrote (an update, too, where the one fault told is the bytes
-/// before the file's header, which it keeps and tells again), its file
-/// read again under the same limits, by its password, is sound and holds
-/// every object the document did, at the
-/// number the renumbering gives it, its references as it names them, as
-/// pdf-objects' writer writes each (reals as written and strings' forms
-/// aside), a stream's data as handed out, but the encryption dictionary
-/// and what it refers to, which the writer writes as its encryption is;
-/// and the update's changed object with its key, at its number; and the
-/// write after the byte flipped is refused as changed, of an object whose
-/// bytes hold it, or it wrote what was read. Panics on a broken promise.
+/// write wrote (an update, too, where the faults told are the bytes
+/// before the file's header, which it keeps and tells again, and where its
+/// sections or objects were found, which it tells again but as the
+/// update's `/Prev` moves them), its file read again under the same
+/// limits, by its password, is sound and holds every object the document
+/// did, at the number the renumbering gives it, its references as it
+/// names them, as pdf-objects' writer writes each (reals as written and
+/// strings' forms aside), a stream's data as handed out, but the
+/// encryption dictionary and what it refers to, which the writer writes as
+/// its encryption is; and the update's changed object with its key, at its
+/// number; and the write after the byte flipped is refused as changed, of
+/// an object whose bytes hold it, or it wrote what was read. Panics on a
+/// broken promise.
 pub fn write_file(data: &[u8]) {
     compared(data);
 }
@@ -1020,7 +1021,7 @@ fn compared(data: &[u8]) -> [bool; 3] {
     // A file whose one fault is the bytes before its header reads as the
     // file without them (ISO 32000-2, 7.5.2): an update, which keeps them,
     // reads back so, that fault again.
-    let header = header_alone(&reading);
+    let header = header_or_found(&reading);
     if byte & 0x80 != 0 {
         doc = adopted(file, password, &reading, doc, sound);
     }
@@ -1316,7 +1317,7 @@ fn updated(
 /// the bytes before the file's header, once at most, and where it found
 /// sections or objects that weren't where the file says
 /// ([`Fault::Moved`], [`Fault::Shifted`]): none otherwise.
-fn header_alone(reading: &Reading<&[u8]>) -> Option<Vec<(Place, Fault)>> {
+fn header_or_found(reading: &Reading<&[u8]>) -> Option<Vec<(Place, Fault)>> {
     let told = reading.faults();
     let header = |(_, fault): &(Place, Fault)| matches!(fault, Fault::HeaderAt { .. });
     let alone = reading.trailer().unwritten.is_none()
@@ -1334,10 +1335,13 @@ fn recovery((_, fault): &(Place, Fault)) -> bool {
 
 /// `file`, written, read again under [`options`] by `password`: sound, but
 /// for what it was to tell, `told`. Where that says sections or objects
-/// were found away from where the file says, what it tells but those is
-/// `told`'s, and of those it tells no more kinds: an update after such a
-/// file writes its `/Prev` where its newest section was found, so that
-/// section may be read where it's said, its entries at its move.
+/// were found away from where the file says, what it tells but those, and
+/// but a cross-reference stream's saying it doesn't list itself, is
+/// `told`'s: an update after such a file writes its `/Prev` where its
+/// newest section was found, so that section is read where it's said, its
+/// entries at the shift its objects prove, which may not be the one its
+/// move did (a [`Fault::Moved`] read back as a [`Fault::Shifted`]), and
+/// its stream's own row is judged at that shift.
 fn read_back<'f>(
     file: &'f [u8],
     password: Password<'_>,
@@ -1358,8 +1362,12 @@ fn read_back<'f>(
     let alike = match told.iter().any(recovery) {
         false => faults == told,
         true => {
+            let framed = |(_, fault): &&(Place, Fault)| matches!(fault, Fault::Unlisted { .. });
             let other = |faults: &[(Place, Fault)]| -> Vec<(Place, Fault)> {
-                faults.iter().filter(|f| !recovery(f)).cloned().collect()
+                (faults.iter())
+                    .filter(|f| !recovery(f) && !framed(f))
+                    .cloned()
+                    .collect()
             };
             other(&faults) == other(told)
         }

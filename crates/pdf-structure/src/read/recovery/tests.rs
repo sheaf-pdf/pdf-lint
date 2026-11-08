@@ -1,11 +1,12 @@
 //! Files whose sections or objects aren't where they say, read where the
-//! file proves they are ([`Recovery::Verified`]), every way a reading
-//! reads: each recovery one fault a section, each object read at a shift
-//! [`Origin::Shifted`], and nothing taken that the file doesn't prove.
+//! file proves they are ([`Recovery::Verified`](super::Recovery::Verified)),
+//! every way a reading reads: each recovery one fault a section, each
+//! object read at a shift [`Origin::Shifted`], and nothing taken that the
+//! file doesn't prove.
 
-use pdf_objects::fault::Place;
 use std::borrow::Cow;
 
+use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Value};
 
 use super::super::lengths::every_way;
@@ -130,7 +131,7 @@ fn reaches_its_page(doc: &Document) {
     );
 }
 
-/// A file cut as hayro's issue53 is: a first section at the start, listing
+/// A file cut after it was written: a first section at the start, listing
 /// object 5, whose `/Prev` gives the main section, which lists the rest;
 /// the file written whole and then three bytes cut out before object 4,
 /// so that the main section's `/Prev`, its row for object 4 and the main
@@ -174,7 +175,7 @@ pub(crate) fn cut() -> (Vec<u8>, Vec<(u32, usize)>, usize) {
     (file, places, main - 3)
 }
 
-/// hayro's issue53's shape: the main section, said three bytes past its
+/// [`cut`]'s file: the main section, said three bytes past its
 /// `xref`, is read there, and of its entries the one past the cut is read
 /// three bytes before where it's written, the rest where they are; one
 /// fault for the section, and its page reached, every way.
@@ -255,6 +256,131 @@ fn a_file_whose_offsets_count_from_its_first_byte_is_read_so() {
         assert_eq!(sections.sections[0].at, table, "{h}");
         assert_eq!(sections.sections[0].said, Some(table + h), "{h}");
     }
+}
+
+/// A file with bytes before its header whose offsets count from its first
+/// byte, as [`a_file_whose_offsets_count_from_its_first_byte_is_read_so`]'s,
+/// but whose `startxref`, or whose every row, gives the line's end before
+/// what it puts there, as a reader that reads past white-space at an
+/// offset reads it: its section read where its `startxref` puts it so
+/// counted, read there as written, before the window and past it, and each
+/// object read where its row puts it so counted, as written; one fault, and
+/// every object read where it is.
+#[test]
+fn a_file_counted_from_its_first_byte_is_read_as_written_there() {
+    for h in [10, 100] {
+        let prefix = vec![b'~'; h];
+        for rows_at_ends in [false, true] {
+            let way = match rows_at_ends {
+                false => "startxref at the line's end",
+                true => "rows at the line's end",
+            };
+            let row = |_, at: usize| if rows_at_ends { at - 1 } else { at };
+            let start = |at: usize| if rows_at_ends { at } else { at - 1 };
+            let (file, places, table) = laid_out(&prefix, &OBJECTS, &row, &start);
+            let doc = read(&file);
+            let moved = Fault::Moved {
+                at: start(table) + h,
+                found: start(table),
+                from_start: true,
+                moved: 4,
+                scanned: 0,
+                neither: 0,
+            };
+            let header = Fault::HeaderAt { at: h };
+            let told: Vec<Fault> = doc.faults().iter().map(|(_, f)| f.clone()).collect();
+            assert_eq!(told, [header, moved], "{h}, {way}");
+            let by = -i64::try_from(h).unwrap();
+            each_object_at(&doc, &places, &|_| Origin::Shifted { by });
+            reaches_its_page(&doc);
+            assert_eq!(doc.trailer.unwritten, None, "{h}, {way}");
+            assert_eq!(
+                doc.facts.newest.map(|(at, _)| at),
+                Some(start(table)),
+                "{h}, {way}"
+            );
+        }
+    }
+}
+
+/// A file of [`OBJECTS`] after `prefix` and its header, and a
+/// cross-reference stream after them, object 5, listing each and itself at
+/// what `row` writes of its place (its number and where its `n` is in the
+/// file's bytes), uncompressed, and `startxref` at what `start` writes of
+/// the stream's. Also each object's place and the stream's.
+fn stream_laid_out(
+    prefix: &[u8],
+    row: &dyn Fn(u32, usize) -> usize,
+    start: &dyn Fn(usize) -> usize,
+) -> (Vec<u8>, Vec<(u32, usize)>, usize) {
+    let mut file = prefix.to_vec();
+    file.extend_from_slice(b"%PDF-1.7\n");
+    let mut places = Vec::new();
+    for &(n, body) in &OBJECTS {
+        places.push((n, file.len()));
+        file.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    let stream = file.len();
+    let mut rows = vec![0, 0, 0, 0, 0, 0xff, 0xff];
+    for (n, at) in places.iter().copied().chain([(5, stream)]) {
+        let at = u32::try_from(row(n, at)).unwrap();
+        rows.push(1);
+        rows.extend_from_slice(&at.to_be_bytes());
+        rows.extend_from_slice(&[0, 0]);
+    }
+    let head = format!(
+        "5 0 obj\n<< /Type /XRef /Size 6 /W [1 4 2] /Root 1 0 R /Length {} >>\nstream\n",
+        rows.len()
+    );
+    file.extend_from_slice(head.as_bytes());
+    file.extend_from_slice(&rows);
+    file.extend_from_slice(b"\nendstream\nendobj\n");
+    let tail = format!("startxref\n{}\n%%EOF\n", start(stream));
+    file.extend_from_slice(tail.as_bytes());
+    places.push((5, stream));
+    (file, places, stream)
+}
+
+/// A file with bytes before its header whose offsets count from its first
+/// byte, its section a cross-reference stream: the stream read where its
+/// `startxref` puts it so counted, and its own row, which at that shift
+/// is where the stream is, lists it; one fault, the stream's own row
+/// among the entries it says.
+#[test]
+fn a_cross_reference_stream_read_at_a_shift_lists_itself_there() {
+    let prefix = vec![b'~'; 10];
+    let (file, places, stream) = stream_laid_out(&prefix, &|_, at| at, &|at| at);
+    let doc = read(&file);
+    let moved = Fault::Moved {
+        at: stream + 10,
+        found: stream,
+        from_start: true,
+        moved: 5,
+        scanned: 0,
+        neither: 0,
+    };
+    let told: Vec<Fault> = doc.faults().iter().map(|(_, f)| f.clone()).collect();
+    assert_eq!(told, [Fault::HeaderAt { at: 10 }, moved]);
+    let record = doc.record(ObjectId::new(5, 0)).unwrap();
+    assert_eq!(record.origin, Origin::Shifted { by: -10 });
+    each_object_at(&doc, &places[..4], &|_| Origin::Shifted { by: -10 });
+    // As written from the header, it lists itself where it is, and says so
+    // of a stream that doesn't.
+    let (file, _, _) = stream_laid_out(&prefix, &|_, at| at - 10, &|at| at - 10);
+    assert_eq!(read(&file).faults().len(), 1);
+    let row = |n, at| if n == 5 { 9 } else { at - 10 };
+    let (file, _, _) = stream_laid_out(&prefix, &row, &|at| at - 10);
+    let told: Vec<Fault> = read(&file)
+        .faults()
+        .iter()
+        .map(|(_, f)| f.clone())
+        .collect();
+    assert!(
+        told.contains(&Fault::Unlisted {
+            id: ObjectId::new(5, 0)
+        }),
+        "{told:?}"
+    );
 }
 
 /// A table whose rows are each two bytes past their objects, with nothing
@@ -547,6 +673,63 @@ fn a_first_object_that_doesnt_read_and_has_no_shift_is_as_written() {
     }
 }
 
+/// A file with three bytes cut out of object 3's `n g obj`, so that its
+/// section and object 4 are three bytes before where it says, and then an
+/// update that writes object 3 again: read whole, object 3 the update's;
+/// read as of the section the update follows, where the whole reading
+/// read it, nothing the update wrote, object 3 at neither place, as no
+/// scan of that revision's bytes finds it, and object 4 at the shift, every
+/// way.
+#[test]
+fn a_reading_as_of_a_section_finds_nothing_a_later_update_wrote() {
+    let (mut file, _, table) = plain(b"");
+    let three = file.windows(7).position(|w| w == b"3 0 obj").unwrap();
+    file.drain(three..three + 3);
+    let end = file.len();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 792] /Resources << >> >>";
+    file.extend_from_slice(format!("3 0 obj\n{page}\nendobj\n").as_bytes());
+    let update = file.len();
+    file.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n3 1\n{end:010} 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Prev {table} >>\nstartxref\n{update}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let whole = read(&file);
+    let id = ObjectId::new(3, 0);
+    let record = whole.record(id).map(|r| (r.at.start, r.origin));
+    assert_eq!(record, Some((end, Origin::File)));
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let previous = reading.update().unwrap().previous;
+    assert_eq!(previous, table - 3);
+    let mut options = Options::DEFAULT;
+    options.section = Some(previous);
+    let shifted = Fault::Shifted {
+        section: previous,
+        by: -3,
+        from_start: false,
+        moved: 1,
+        scanned: 0,
+        neither: 1,
+    };
+    let mut docs = vec![("whole".to_string(), document(&file, &options))];
+    for first in [1, 7, 64] {
+        let source = crate::fuzz::Counted::new(&file, first);
+        let reading = crate::fuzz::open(&source, &[], &options, true).unwrap();
+        docs.push((
+            format!("by position, {first}"),
+            reading.into_document().unwrap(),
+        ));
+    }
+    for (way, doc) in docs {
+        assert_eq!(recoveries(&doc), std::slice::from_ref(&shifted), "{way}");
+        assert!(doc.get(id).is_err(), "{way}");
+        let four = doc.record(ObjectId::new(4, 0)).unwrap();
+        assert_eq!(four.origin, Origin::Shifted { by: -3 }, "{way}");
+        assert!(doc.facts.recovered, "{way}");
+    }
+}
+
 /// A reading opened as of a place a few bytes from a section: taken as
 /// it's given, not looked for near, so the file is scanned.
 #[test]
@@ -655,6 +838,8 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
         assert!(written.base.holds(&out[..]).unwrap(), "{name}");
         let back = read(&out);
         assert_eq!(recoveries(&back), said, "{name}");
+        // What the faults say of the file before it, faults off too.
+        assert_eq!(back.facts.recovered, !said.is_empty(), "{name}");
         assert_eq!(back.trailer.unwritten, None, "{name}");
         for (id, object) in before.objects() {
             let mut got = back.get(id).unwrap().clone();

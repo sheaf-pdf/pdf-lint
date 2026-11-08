@@ -2959,8 +2959,17 @@ impl Reader {
             self.loaded = Some(Box::new(loaded));
         }
         // Where the file proves its entries aren't where its sections put
-        // them: each section's read at one shift.
-        let shifts = self.shifted(file, &mut lists, &said)?;
+        // them: each section's read at one shift. Read as of a section, a
+        // scan finds them only in the bytes its sections were read from, to
+        // the furthest's `%%EOF` where it has one: what's past is what
+        // later updates wrote.
+        let within = self.as_of.map(|_| {
+            (sections.iter().zip(&offsets))
+                .map(|(section, &at)| section.end.map_or(at.saturating_add(1), RevisionEnd::line))
+                .max()
+                .unwrap_or(0)
+        });
+        let shifts = self.shifted(file, &mut lists, &said, within)?;
         let mut moved_entries = BTreeMap::new();
         let mut entries = BTreeMap::new();
         let mut trailer = None;
@@ -2986,11 +2995,26 @@ impl Reader {
         let mut numbers: Vec<u32> = Vec::new();
         let mut kept = 0usize;
         let mut fits = true;
+        // Whether any section's entries were read elsewhere, those a newer
+        // section lists anew among them.
+        let mut entries_away = false;
         let each = sections
             .into_iter()
             .zip(lists)
             .zip(shifts.into_iter().zip(&said));
         for (i, ((section, (mut listed, mut told)), (shift, found))) in each.enumerate() {
+            // A section's own stream, read where a recovery puts it, lists
+            // itself where its row is read at the section's shift.
+            if shift.is_some()
+                && section.trailer.stream.is_some()
+                && let Some((at, id, _)) = &section.stream
+                && matches!(
+                    listed.get(&id.number),
+                    Some(&(g, XrefEntry::InUse { offset, .. })) if g == id.generation && offset == *at
+                )
+            {
+                told.retain(|(_, fault)| !matches!(fault, Fault::Unlisted { id: unlisted } if unlisted == id));
+            }
             cx.faults.append(&mut told);
             // What was found elsewhere, said once a section: counts of
             // object numbers, each held by a u32.
@@ -3011,6 +3035,7 @@ impl Reader {
                     cx.tell(None, None, fault);
                 }
                 (None, Some(shift)) if moved > 0 || scanned > 0 => {
+                    entries_away = true;
                     let back = i64::try_from(header).map(|h| -h);
                     let fault = Fault::Shifted {
                         section: offsets[i],
@@ -3102,7 +3127,7 @@ impl Reader {
         }
         moves.sort_unstable();
         moves.dedup_by_key(|&mut (at, _)| at);
-        facts.recovered = !moves.is_empty() || !moved_entries.is_empty();
+        facts.recovered = !moves.is_empty() || entries_away || !moved_entries.is_empty();
         self.revisions = revisions;
         self.entries = entries.into_iter().collect();
         self.offsets = starts.into();

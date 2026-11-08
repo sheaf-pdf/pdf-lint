@@ -4,9 +4,9 @@
 //! where that offset puts it counted from the file's first byte rather
 //! than its header, else at the nearest `xref` or cross-reference stream
 //! within [`NEAR`] bytes, exactly there, that reads; and a section's
-//! entries read at one shift, each exactly at its own `n g obj` there,
-//! else, once the file is shown not to be as written, where a scan of the
-//! file finds its `n g obj`, else where it's written. A section read where
+//! entries read at one shift, each at its own `n g obj` there, else, once
+//! the file is shown not to be as written, where a scan of the file finds
+//! its `n g obj`, else where it's written. A section read where
 //! it's said pays two probes, its first object's header and its
 //! furthest's, each where it's written. What's looked at to tell where
 //! they are tells nothing of its own: only what's found is said, one fault
@@ -135,11 +135,13 @@ fn xref_exactly(bytes: &[u8], base: usize, p: usize) -> bool {
 
 /// Where a scan of `file`, every byte, finds each object's `n g obj`
 /// ([`scan_of`]), exactly ([`header_exactly`]), by its id: the last in the
-/// file, as an update appends.
-fn scanned(file: &[u8]) -> BTreeMap<ObjectId, usize> {
+/// file, as an update appends, of those before byte `within` where that's
+/// given.
+fn scanned(file: &[u8], within: Option<usize>) -> BTreeMap<ObjectId, usize> {
     let mut found = BTreeMap::new();
     for (id, at) in scan_of(file).objects {
-        if header_exactly(file, 0, at, true) == Some(id) {
+        if within.is_none_or(|within| at < within) && header_exactly(file, 0, at, true) == Some(id)
+        {
             found.insert(id, at);
         }
     }
@@ -150,10 +152,11 @@ impl Reader {
     /// The places a section said to be at `at`, which doesn't read there,
     /// may be at, in the order they're tried: where the offset puts it
     /// counted from the file's first byte, where the header isn't there
-    /// (ISO 32000-2, 7.5.2, counts from the header); then each `xref` or
-    /// `n g obj` that starts exactly within [`NEAR`] bytes of it, the
-    /// nearer first, the earlier of two as near. Each with whether it's the
-    /// first.
+    /// (ISO 32000-2, 7.5.2, counts from the header), read there as the
+    /// reader reads a section at its offset, past white-space and comments,
+    /// as a file written so is read; then each `xref` or `n g obj` that
+    /// starts exactly within [`NEAR`] bytes of it, the nearer first, the
+    /// earlier of two as near. Each with whether it's the first.
     ///
     /// The search near is lopdf's lenient reader's technique, which takes
     /// the nearest `xref` within 64 bytes of an offset that isn't at a
@@ -171,14 +174,8 @@ impl Reader {
         }
         let len = file.len();
         let header = self.facts.header_offset.unwrap_or(0);
-        if let Some(p) = at.checked_sub(header).filter(|_| header > 0) {
-            let (lo, hi) = (p.saturating_sub(1), p.saturating_add(HEAD).min(len));
-            if let Some(bytes) = file.get(lo..hi)?
-                && (xref_exactly(&bytes, lo, p)
-                    || header_exactly(&bytes, lo, p, hi == len).is_some())
-            {
-                places.push((p, true));
-            }
+        if let Some(p) = at.checked_sub(header).filter(|&p| header > 0 && p < len) {
+            places.push((p, true));
         }
         let (lo, hi) = (
             at.saturating_sub(NEAR + 1),
@@ -222,6 +219,27 @@ impl Reader {
             let mut parser = w.parser(offset).limits(self.limits.parser);
             Ok(w.parsed(parser.header()).ok())
         })
+    }
+
+    /// The `n g obj` `by` bytes from `offset`: where `by` takes the
+    /// header's offset back, as a file whose offsets count from its first
+    /// byte puts it, read there as written ([`Reader::header_at`]), as such
+    /// a file is read; else only where it starts exactly there
+    /// ([`Reader::exactly`]).
+    fn at_shift<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        offset: usize,
+        by: i64,
+    ) -> Result<Option<ObjectId>, F::Error> {
+        let header = self.facts.header_offset.unwrap_or(0);
+        if header > 0 && i64::try_from(header).map(|h| -h) == Ok(by) {
+            return match offset.checked_sub(header) {
+                Some(p) => self.header_at(file, p),
+                None => Ok(None),
+            };
+        }
+        self.exactly(file, offset, by)
     }
 
     /// The `n g obj` that starts exactly `by` bytes from `offset`
@@ -279,9 +297,10 @@ impl Reader {
     /// its own move, where it was read elsewhere (`found`); else, where its
     /// first entry in use, by number, or the one furthest into the file,
     /// which a cut is likeliest to have moved, isn't read where it's
-    /// written, the header's offset taken back, where that's where its
-    /// `n g obj` starts exactly, or how far from it its `n g obj` starts
-    /// exactly within [`NEAR`] bytes. None where the section was read where
+    /// written, the header's offset taken back, where its `n g obj` is read
+    /// there as written ([`Reader::at_shift`]), or how far from it its
+    /// `n g obj` starts exactly within [`NEAR`] bytes. None where the
+    /// section was read where
     /// it's said and those objects are where they're written, or found
     /// nowhere: two probes a section, each a window read at an object's
     /// offset.
@@ -311,7 +330,7 @@ impl Reader {
             }
             if header > 0 {
                 let by = -i64::try_from(header).unwrap_or(i64::MAX);
-                if self.exactly(file, offset, by)? == Some(id) {
+                if self.at_shift(file, offset, by)? == Some(id) {
                     return Ok(Some(by));
                 }
             }
@@ -328,19 +347,21 @@ impl Reader {
     /// first another section has, as a cut in a file moves everything
     /// after it, and an earlier section may list objects past it. Each
     /// entry in use is read where it's written, where its `n g obj` is,
-    /// else exactly at its own `n g obj` at the shift, its offset moved
-    /// there; else, as the file is then shown not to be as written, where
-    /// a scan of its every byte finds its `n g obj`, its number and
-    /// generation, exactly, the last in the file ([`scan_of`], as a file
-    /// whose sections don't read is scanned), its offset moved there; else
-    /// where it's written. None for any section where no section has a
-    /// shift, the file read as written; each section `said` to be
-    /// elsewhere has its move.
+    /// else at its own `n g obj` at the shift ([`Reader::at_shift`]), its
+    /// offset moved there; else, as the file is then shown not to be as
+    /// written, where a scan of its every byte finds its `n g obj`, its
+    /// number and generation, exactly, the last in the file ([`scan_of`],
+    /// as a file whose sections don't read is scanned) before byte
+    /// `within` where that's given, as a reading as of a section takes
+    /// nothing later updates wrote; its offset moved there; else where it's
+    /// written. None for any section where no section has a shift, the file
+    /// read as written; each section `said` to be elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
         &self,
         file: F,
         lists: &mut [(Rows, T)],
         said: &[Option<Found>],
+        within: Option<usize>,
     ) -> Result<Vec<Option<Shift>>, F::Error> {
         let mut own = Vec::with_capacity(lists.len());
         if self.recovery == Recovery::Verified {
@@ -376,13 +397,14 @@ impl Reader {
                 let moved = isize::try_from(by)
                     .ok()
                     .and_then(|by| offset.checked_add_signed(by));
-                if let (true, Some(moved)) = (self.exactly(file, *offset, by)? == Some(id), moved) {
+                if let (true, Some(moved)) = (self.at_shift(file, *offset, by)? == Some(id), moved)
+                {
                     *offset = moved;
                     shift.moved.push(n);
                     continue;
                 }
                 if scan.is_none() {
-                    scan = Some(scanned(&file.all()?));
+                    scan = Some(scanned(&file.all()?, within));
                 }
                 match scan.as_ref().and_then(|found| found.get(&id)) {
                     Some(&at) if at != *offset => {
