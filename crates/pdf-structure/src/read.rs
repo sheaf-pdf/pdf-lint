@@ -975,13 +975,24 @@ fn overlaps<'r>(records: impl Iterator<Item = &'r Record>, sink: &mut impl Sink<
 /// read the object, or no entry lists it), it's said the first time it's
 /// told. Nothing told is lost: what's left out is equal to one that's said,
 /// its place and its words.
+///
+/// Each is looked up by its object and where it was written, so that an
+/// object of many faults read on the way costs no more than reading it
+/// twice: a fault's place, written once, is shared by few others.
 #[derive(Default)]
 struct Once<'r> {
     /// What each object's own read told of, by its id.
     own: BTreeMap<ObjectId, &'r [(Place, Fault)]>,
-    /// What reads not each object's own told of on it, as it's said.
-    said: BTreeMap<ObjectId, Vec<&'r (Place, Fault)>>,
+    /// What each object's own read told of on it, by where it was written:
+    /// made of `own` the first time another read tells of the object.
+    own_at: BTreeMap<ObjectId, Told<'r>>,
+    /// What reads not each object's own told of on it, as it's said, by
+    /// where it was written.
+    said: BTreeMap<ObjectId, Told<'r>>,
 }
+
+/// Faults told on one object, by where each was written.
+type Told<'r> = BTreeMap<Option<Span>, Vec<&'r Fault>>;
 
 impl<'r> Once<'r> {
     /// Object `id`'s own read told of `faults`.
@@ -994,17 +1005,31 @@ impl<'r> Once<'r> {
     /// Whether `told`, which the read of object `by` told (none: the
     /// open), is said.
     fn says(&mut self, by: Option<ObjectId>, told: &'r (Place, Fault)) -> bool {
-        let Some(on) = told.0.object.filter(|&on| Some(on) != by) else {
+        let (place, fault) = told;
+        let Some(on) = place.object.filter(|&on| Some(on) != by) else {
             return true;
         };
-        if self.own.get(&on).is_some_and(|own| own.contains(told)) {
+        let own = self.own.get(&on).copied().unwrap_or_default();
+        let own = self.own_at.entry(on).or_insert_with(|| {
+            let mut at = Told::new();
+            for (place, fault) in own.iter().filter(|(place, _)| place.object == Some(on)) {
+                at.entry(place.at).or_default().push(fault);
+            }
+            at
+        });
+        if own.get(&place.at).is_some_and(|own| own.contains(&fault)) {
             return false;
         }
-        let said = self.said.entry(on).or_default();
-        if said.contains(&told) {
+        let said = self
+            .said
+            .entry(on)
+            .or_default()
+            .entry(place.at)
+            .or_default();
+        if said.contains(&fault) {
             return false;
         }
-        said.push(told);
+        said.push(fault);
         true
     }
 

@@ -281,3 +281,40 @@ fn a_fault_in_a_streams_indirect_length_is_said_once_at_its_own_place() {
     assert_eq!(stream.data.at().map(|at| at.end - at.start), Some(4));
     said_once_at_its_own_place(&file, 3, 4, Some(2), "/Length");
 }
+
+/// An encryption dictionary of many faults, each a name with an escape of
+/// no hexadecimal digits, at a place of its own: the open reads it to open
+/// the file, and the whole read reads it again as an object. Each is said
+/// once, at its own read's place, and the one said is the one the open
+/// told; each told on the way is looked up, not found by a scan of what
+/// the object's own read told (`faults/twice`, the benchmarks', times it).
+#[test]
+fn an_object_of_many_faults_read_on_the_way_is_said_once_each() {
+    const NAMES: usize = 5_000;
+    let dict = format!(
+        "<< /Filter /Unknown /V 1 /R 2{} >>",
+        " /A#zz 1".repeat(NAMES)
+    );
+    let file = fixture::assembled(
+        "1.7",
+        &[
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, b"<< /Type /Pages /Kids [] /Count 0 >>"),
+            (3, dict.as_bytes()),
+        ],
+        "<< /Size 4 /Root 1 0 R /Encrypt 3 0 R /ID [<00> <00>] >>",
+    );
+    let reading = Reading::open(file.clone(), &Options::DEFAULT).unwrap();
+    assert!(matches!(reading.encryption(), Encryption::Unsupported(_)));
+    // The open's own fault, the file's, then the dictionary's, each at its
+    // own read's place.
+    let on = Some(ObjectId::new(3, 0));
+    let (told, open): (Vec<_>, Vec<_>) =
+        (reading.faults().into_iter()).partition(|(place, _)| place.object == on);
+    assert!(told.len() >= NAMES, "{}", told.len());
+    let whole: Vec<_> = open.into_iter().chain(told).collect();
+    let doc = document(&file, &Options::DEFAULT);
+    assert_eq!(doc.faults(), whole, "read whole");
+    reading.get(ObjectId::new(3, 0)).unwrap();
+    assert_eq!(reading.faults(), whole, "read on demand");
+}

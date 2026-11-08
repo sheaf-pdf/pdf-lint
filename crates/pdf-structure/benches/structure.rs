@@ -16,7 +16,12 @@
 //!   (`table`) and the stream's (`stream`).
 //! - `faults`: the table's file with no object's `endobj` written, so that
 //!   each object is a fault of the parser's, read whole into a document,
-//!   its faults kept (`kept`) and none looked for (`off`).
+//!   its faults kept (`kept`) and none looked for (`off`); and a file whose
+//!   encryption dictionary, of a handler the reader doesn't know, has
+//!   20,000 names each a fault of the parser's, which the open tells as it
+//!   reads the dictionary and the whole read tells again as it reads the
+//!   object, read whole, its faults kept (`twice`), so that a fault said
+//!   once costs a lookup.
 //! - `walk`: what's read walked and looked up from outside the crate: the
 //!   stream's file's every id listed (`ids`) and entry (`entries`) from a
 //!   reading that has read them all, and its document's every object
@@ -301,6 +306,40 @@ fn deflated(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// How many names the `faults/twice` file's encryption dictionary has.
+const NAMES: usize = 20_000;
+
+/// A catalog, an empty page tree and an encryption dictionary at offsets,
+/// with a table and a trailer naming them: the dictionary's handler is one
+/// the reader doesn't know, and each of its [`NAMES`] names has a `#` with
+/// no hexadecimal digits after it, a fault of the parser's.
+fn twice_file() -> Vec<u8> {
+    let names = " /A#zz 1".repeat(NAMES);
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [] /Count 0 >>".to_owned(),
+        format!("<< /Filter /Unknown /V 1 /R 2{names} >>"),
+    ];
+    let mut out = header();
+    let mut offsets = Vec::new();
+    for (n, value) in (1..).zip(&objects) {
+        offsets.push(out.len());
+        indirect(&mut out, n, &Text::Value(value.clone()));
+    }
+    let xref = out.len();
+    let size = objects.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    let trailer = format!(
+        "trailer\n<< /Size {size} /Root 1 0 R /Encrypt 3 0 R /ID [<00> <00>] >>\n\
+         startxref\n{xref}\n%%EOF\n"
+    );
+    out.extend_from_slice(trailer.as_bytes());
+    out
+}
+
 /// The objects in object streams of [`MEMBERS`] each, by number, numbered
 /// past them, but the streams and their lengths, at offsets, as the reader
 /// reads a stream's `/Length` only from an object at one; and a
@@ -396,6 +435,7 @@ struct Files {
     stream: Vec<u8>,
     scanned: Vec<u8>,
     faulty: Vec<u8>,
+    twice: Vec<u8>,
 }
 
 impl Files {
@@ -405,6 +445,7 @@ impl Files {
             stream: stream_file(objects),
             scanned: table_file(objects, true),
             faulty: table_file_as(objects, false, false),
+            twice: twice_file(),
         }
     }
 }
@@ -610,11 +651,25 @@ fn faults_group(c: &mut Criterion, files: &Files) {
             false => assert_eq!(said, 0, "faults/{name}: no fault"),
         }
     }
+    // The dictionary's faults, as the open tells them, and the file's own
+    // that it doesn't open: each once, where a reader says a fault on an
+    // object once, at its own read; and as many as twice, as the base the
+    // benchmarks are set beside does.
+    let twice = &files.twice;
+    let opened = api::reading_faults(&api::open(twice));
+    assert!(opened > NAMES, "faults/twice: the open's faults, {opened}");
+    let said = api::faults(&api::whole(twice));
+    assert!(
+        (opened..=2 * opened).contains(&said),
+        "faults/twice: the faults, {said}"
+    );
     let mut group = c.benchmark_group("faults");
     group.throughput(Throughput::Bytes(file.len() as u64));
     for (name, kept) in cases {
         group.bench_function(name, |b| b.iter(|| api::whole_as(black_box(file), kept)));
     }
+    group.throughput(Throughput::Bytes(twice.len() as u64));
+    group.bench_function("twice", |b| b.iter(|| api::whole(black_box(twice))));
     group.finish();
 }
 
