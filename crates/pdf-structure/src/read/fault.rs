@@ -381,14 +381,13 @@ pub enum RowShape {
 
 /// Why a file's cross-reference sections don't read, from `startxref` along
 /// `/Prev`, as far as the newest: what a trailer the reader made of the file
-/// instead says ([`Trailer::unwritten`](crate::Trailer::unwritten)), and
-/// what a fault on a section further along does ([`Fault::Section`]). Each
-/// in the reader's words, its fields the whole of what they say; or
-/// another reader's words ([`Unwritten::Other`]). Each section's own view,
-/// for a checker of the sections one by one, is
-/// [`SectionFault`](super::SectionFault)'s, which names the same reasons
-/// with the byte each was found at. Not exhaustive, as reasons are found as
-/// the reader learns.
+/// instead says ([`Trailer::unwritten`](crate::Trailer::unwritten)), what
+/// a fault on a section further along does ([`Fault::Section`]), and what
+/// stops the sections read one by one at a section that doesn't read
+/// ([`SectionFault::Section`](super::SectionFault::Section)). Each in the
+/// reader's words, its fields the whole of what they say; or another
+/// reader's words ([`Unwritten::Other`]). Not exhaustive, as reasons are
+/// found as the reader learns.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unwritten {
@@ -492,6 +491,17 @@ pub enum Unwritten {
     /// A cross-reference stream's data ends before its `/Index` does.
     #[error("its data ends before its /Index does")]
     DataShort,
+    /// A cross-reference stream's data doesn't decode as far as its rows,
+    /// and pdf-filters' first fault: [`Limit`](pdf_filters::Fault::Limit)
+    /// where none stopped it short of its limit. Only the sections read one
+    /// by one give it ([`Reading::sections`](super::Reading::sections)): a
+    /// reading tells the decode's faults on the stream and reads its rows
+    /// as far as they decode ([`Unwritten::DataShort`]).
+    #[error("its data doesn't decode as far as its rows: {fault}")]
+    Decode {
+        /// The fault.
+        fault: pdf_filters::Fault,
+    },
     /// A cross-reference stream's `/Index` numbers no object: past
     /// 4,294,967,295.
     #[error("its /Index numbers no object")]
@@ -870,11 +880,12 @@ mod tests {
             Unwritten::Compressed { .. } => 22,
             Unwritten::Decoded { .. } => 23,
             Unwritten::Other(_) => 24,
+            Unwritten::Decode { .. } => 25,
         }
     }
 
     /// How many variants [`reason`] names.
-    const REASONS: usize = 25;
+    const REASONS: usize = 26;
 
     /// Each reason the sections don't read, built by a literal, says its
     /// words, every variant and each way its words go.
@@ -941,6 +952,12 @@ mod tests {
             ),
             (Unwritten::DataShort, "its data ends before its /Index does"),
             (Unwritten::IndexNumber, "its /Index numbers no object"),
+            (
+                Unwritten::Decode {
+                    fault: pdf_filters::Fault::NoEnd,
+                },
+                "its data doesn't decode as far as its rows: no end-of-data marker",
+            ),
             (
                 Unwritten::Decoder {
                     filter: "/FlateDecode".to_string(),
