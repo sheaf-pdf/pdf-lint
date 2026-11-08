@@ -252,7 +252,10 @@ impl<S: ByteSource> Reading<S> {
     /// can differ from [`Reading::entries`], which is what a reader made of them.
     /// Positions are from the file's first byte, as a reading reads them. A stream's
     /// rows are decoded from its own data, and that's never encrypted (ISO 32000-2,
-    /// 7.5.8.2).
+    /// 7.5.8.2). Its data is found as the reading found it, so the rows are the
+    /// reading's whatever it has read: a `/Length` that's a reference isn't followed,
+    /// as a cross-reference stream's entries are direct (7.5.8.2), and the open reads
+    /// them before it lists any object.
     ///
     /// # Errors
     ///
@@ -270,6 +273,8 @@ impl<S: ByteSource> Reading<S> {
     /// The file's first object, from its header on, as written: none with no header,
     /// or where what's first doesn't read as an object. It isn't kept. Its strings
     /// aren't decrypted, a linearization dictionary having none that a reader wants.
+    /// A stream's `/Length` in an object stream isn't read from it, as the open reads
+    /// none: such a stream's data is found by `endstream`, whatever was read before.
     ///
     /// # Errors
     ///
@@ -299,7 +304,7 @@ impl Reader {
         let Some(header) = self.facts.header_offset else {
             return Ok(None);
         };
-        let mut cx = Cx::new(false);
+        let mut cx = Cx::opening(false);
         Ok(self
             .indirect(file, &mut cx, header, None)?
             .ok()
@@ -362,7 +367,7 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::new(false);
+        let mut cx = Cx::opening(false);
         let what = file.read_from(&mut cx, at, 0, |w, cx| {
             let mut t = w.tokenizer(at);
             Ok(match w.significant(&mut t) {
@@ -498,7 +503,7 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::new(false);
+        let mut cx = Cx::opening(false);
         let (id, object, record) = match self.indirect(file, &mut cx, at, None)? {
             Ok(read) => read,
             Err(why) => {

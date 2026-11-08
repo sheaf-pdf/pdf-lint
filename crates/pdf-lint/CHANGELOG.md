@@ -78,6 +78,10 @@
 - **Every `reader` finding given once.** As the encryption dictionary's are, so is every fault in an object that a read on the way to another reads too: a cross-reference stream that lists itself, an object the scan of a file whose sections don't read finds from its end, and a stream's indirect `/Length`. A broken cross-reference stream, or a scanned file's broken objects, gave each such `reader` finding twice, and give it once, where the object's own read says it.
 - **The library: the reader's glue.** `bytes::filters`, `bytes::encryption` and `bytes::viewed` are pdf-structure's, through the re-export: a stream's filters, an encryption dictionary's values and what a viewer takes of a decode, as the reader reads them. A `Document`'s `Streams` decodes a stream it holds as bytes, where it said `Why::Detached`; the checks read every file through its reading, whose documents hold no such stream, so every report is unchanged.
 
+### Fixed
+
+- **A stream's `/Length` in an object stream is read.** A stream whose `/Length` refers to an object in an object stream is read by it. Its `reader` finding "it has no /Length that reads" is gone, and its content, font or image is checked from the data its `/Length` gives.
+
 ## 0.2.0 (unreleased)
 
 - **Breaking, the library: qpdf is gone from it.** `Qpdf`, the `Decode` trait, `Written`, `read_with` and `qpdf::OLDEST` are no longer public (the tests keep them, to set the reader beside qpdf), and nothing shipped reads `PDF_LINT_QPDF`. `bytes::read_from(file, section)` takes no decoder; `read` and `read_from` open an encrypted file with the empty password, `read_opened` and `read_from_opened` with the passwords given. `Encryption` is `#[non_exhaustive]`. `Str::Text` stays, for a `Source` that reads through another tool.

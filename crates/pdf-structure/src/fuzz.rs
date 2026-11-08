@@ -1548,7 +1548,8 @@ mod tests {
     /// Files to mutate: [`objects`] written with a table and with a
     /// cross-reference stream, and encrypted by each kind of pdf-crypt's
     /// writer, the user's password empty and the owner's `owner`; the
-    /// update; and the object stream.
+    /// update; the object stream; and a content stream whose `/Length` is in
+    /// an object stream.
     fn files() -> Vec<Vec<u8>> {
         let mut files = vec![
             fixture::file("1.7", &objects(), root(), Xref::Table),
@@ -1574,6 +1575,7 @@ mod tests {
         }
         files.push(updated());
         files.push(in_an_object_stream());
+        files.push(read::lengths::a_length_in_an_object_stream());
         files
     }
 

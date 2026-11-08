@@ -11,7 +11,10 @@
 //!   read by number from a reading just opened, each as it's first asked
 //!   for, an object stream decoded once for its members (`table/cold`,
 //!   `stream/cold`), and again from a reading that has read them all and
-//!   keeps them (`table/kept`, `stream/kept`).
+//!   keeps them (`table/kept`, `stream/kept`); and each of 2,000 streams
+//!   whose `/Length` objects are in one object stream, read by number from
+//!   a reading just opened, the object stream decoded once for their
+//!   lengths (`compressed-lengths`).
 //! - `whole`: each file read whole into a document: the table's
 //!   (`table`) and the stream's (`stream`).
 //! - `faults`: the table's file with no object's `endobj` written, so that
@@ -41,7 +44,10 @@
 //! `get`'s, in objects. Each input is held to what it gives before it's
 //! timed: a file opened to the objects it lists, its trailer's root, and
 //! scanned or not as its group says, with no fault but where it's scanned;
-//! each object got to its kind; a document to its objects and no fault, or
+//! each object got to its kind, and each of `compressed-lengths`' streams
+//! to its data found by its `/Length` where the crate reads one from an
+//! object stream, by `endstream` and a fault where it doesn't; a document
+//! to its objects and no fault, or
 //! a fault an object, or none where none is looked for; a
 //! write read back to the objects it was given, an update's changed. The
 //! files are written here from text, the object streams' and the
@@ -119,6 +125,17 @@ mod api {
     /// sections unread.
     pub fn scanned(reading: &Read) -> bool {
         reading.trailer().unwritten.is_some()
+    }
+
+    /// Whether a stream's `/Length` that's an object in an object stream
+    /// is read from it: a version of the crate that doesn't finds such a
+    /// stream's data by `endstream`, and says so.
+    pub const MEMBER_LENGTHS: bool = true;
+
+    /// Whether `reading` found stream `id`'s data by its `/Length`, as it
+    /// read the stream.
+    pub fn declared(reading: &Read, id: ObjectId) -> bool {
+        (reading.record(id).and_then(|record| record.data)).is_some_and(|data| data.declared)
     }
 
     /// `bodies` written as a whole file with a table under `trailer`.
@@ -341,12 +358,24 @@ fn twice_file() -> Vec<u8> {
 }
 
 /// The objects in object streams of [`MEMBERS`] each, by number, numbered
-/// past them, but the streams and their lengths, at offsets, as the reader
-/// reads a stream's `/Length` only from an object at one; and a
+/// past them, but the streams and their lengths, at offsets, as many
+/// writers put them (`get/compressed-lengths` times lengths in an object
+/// stream); and a cross-reference stream (`/W [1 4 2]`) after them,
+/// numbered last, naming the catalog. The object streams' data and the
+/// cross-reference stream's are deflated.
+fn stream_file(objects: &[(u32, Text)]) -> Vec<u8> {
+    packed_file(objects, |n, text| match text {
+        Text::Value(_) => !length(n),
+        Text::Stream(..) => false,
+    })
+}
+
+/// The objects, those `packed` says in object streams of [`MEMBERS`] each,
+/// by number, numbered past them, and the rest at offsets; and a
 /// cross-reference stream (`/W [1 4 2]`) after them, numbered last, naming
 /// the catalog. The object streams' data and the cross-reference stream's
 /// are deflated.
-fn stream_file(objects: &[(u32, Text)]) -> Vec<u8> {
+fn packed_file(objects: &[(u32, Text)], packed: impl Fn(u32, &Text) -> bool) -> Vec<u8> {
     let mut out = header();
     // Each number's row: its type, and its two fields.
     let mut rows: Vec<(u8, u32, u16)> = vec![(0, 0, 65535)];
@@ -354,7 +383,7 @@ fn stream_file(objects: &[(u32, Text)]) -> Vec<u8> {
     let mut members = Vec::new();
     for (n, text) in objects {
         match text {
-            Text::Value(value) if !length(*n) => members.push((*n, value.as_str())),
+            Text::Value(value) if packed(*n, text) => members.push((*n, value.as_str())),
             _ => {
                 rows[*n as usize] = (1, out.len() as u32, 0);
                 indirect(&mut out, *n, text);
@@ -401,6 +430,26 @@ fn stream_file(objects: &[(u32, Text)]) -> Vec<u8> {
     out
 }
 
+/// How many streams `get/compressed-lengths`' file holds.
+const LENGTHS: u32 = 2_000;
+
+/// A catalog, 1, and [`LENGTHS`] streams at offsets, 2 on, each a page's
+/// content, its `/Length` an object of its own numbered past the streams;
+/// the lengths in one object stream, which ISO 32000-2, 7.5.7 lets hold
+/// them.
+fn lengths_file() -> Vec<u8> {
+    let mut objects = vec![(1, Text::Value("<< /Type /Catalog >>".into()))];
+    let mut lengths = Vec::new();
+    for k in 0..LENGTHS {
+        let content = format!("BT /F1 12 Tf 72 720 Td (Stream {k}.) Tj ET\n");
+        let dict = format!("<< /Length {} 0 R >>", 2 + LENGTHS + k);
+        lengths.push((2 + LENGTHS + k, Text::Value(content.len().to_string())));
+        objects.push((2 + k, Text::Stream(dict, content.into_bytes())));
+    }
+    objects.extend(lengths);
+    packed_file(&objects, |n, _| n >= 2 + LENGTHS)
+}
+
 /// `text` as one value, read by pdf-objects' parser.
 fn value(text: &str) -> Object {
     let mut parser = Parser::at(text.as_bytes(), 0);
@@ -436,6 +485,7 @@ struct Files {
     scanned: Vec<u8>,
     faulty: Vec<u8>,
     twice: Vec<u8>,
+    lengths: Vec<u8>,
 }
 
 impl Files {
@@ -446,6 +496,7 @@ impl Files {
             scanned: table_file(objects, true),
             faulty: table_file_as(objects, false, false),
             twice: twice_file(),
+            lengths: lengths_file(),
         }
     }
 }
@@ -519,6 +570,35 @@ fn got(name: &str, reading: &Read, ids: &[ObjectId]) {
     }
 }
 
+/// Each of `compressed-lengths`' streams got from `reading`, a stream, its
+/// data found by its `/Length` where the crate reads one from an object
+/// stream ([`api::MEMBER_LENGTHS`]), else by `endstream`, a fault each.
+fn got_lengths(reading: &Read, streams: &[ObjectId]) {
+    for &id in streams {
+        let object =
+            (reading.get(id)).unwrap_or_else(|e| panic!("get/compressed-lengths: {id} R: {e}"));
+        assert!(
+            object.as_stream().is_some(),
+            "get/compressed-lengths: {id} R"
+        );
+        assert_eq!(
+            api::declared(reading, id),
+            api::MEMBER_LENGTHS,
+            "get/compressed-lengths: {id} R, by its /Length"
+        );
+    }
+    let faults = if api::MEMBER_LENGTHS {
+        0
+    } else {
+        streams.len()
+    };
+    assert_eq!(
+        api::reading_faults(reading),
+        faults,
+        "get/compressed-lengths: the faults"
+    );
+}
+
 fn get_group(c: &mut Criterion, files: &Files) {
     let ids = ids();
     let cases: [(&str, &[u8]); 2] = [("table", &files.table), ("stream", &files.stream)];
@@ -529,6 +609,8 @@ fn get_group(c: &mut Criterion, files: &Files) {
             reading
         })
         .collect();
+    let streams: Vec<ObjectId> = (2..2 + LENGTHS).map(|n| ObjectId::new(n, 0)).collect();
+    got_lengths(&api::open(&files.lengths), &streams);
     let mut group = c.benchmark_group("get");
     group.throughput(Throughput::Elements(ids.len() as u64));
     for (&(name, file), reading) in cases.iter().zip(&kept) {
@@ -552,6 +634,20 @@ fn get_group(c: &mut Criterion, files: &Files) {
             })
         });
     }
+    group.throughput(Throughput::Elements(streams.len() as u64));
+    let file = &files.lengths;
+    group.bench_function("compressed-lengths", |b| {
+        b.iter_batched(
+            || api::open(file),
+            |reading| {
+                for &id in &streams {
+                    let _ = black_box(reading.get(id));
+                }
+                reading
+            },
+            BatchSize::SmallInput,
+        )
+    });
     group.finish();
 }
 

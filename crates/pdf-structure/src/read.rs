@@ -887,8 +887,7 @@ impl Assembly {
         };
         let mut cx = Cx {
             faults: said_of(known.opened, opened).collect(),
-            wants: known.wants,
-            resolving: false,
+            ..Cx::new(known.wants)
         };
         for ((_, faults), said) in read.into_iter().zip(read_said) {
             cx.faults.extend(said_of(faults, said));
@@ -1241,15 +1240,18 @@ struct Container {
 }
 
 /// One read's sink: the faults it told, in order, where they're wanted
-/// (`wants`, [`Options::faults`]), and none told where they aren't; and
+/// (`wants`, [`Options::faults`]), and none told where they aren't;
 /// whether it's reading a stream's indirect `/Length`, which reads no
-/// other. A check made only to say a fault is made only where it
-/// [`wants`](Sink::wants) them; what the reading needs is read either way,
-/// and only the telling left out.
+/// other; and whether a stream's `/Length` may be read from an object
+/// stream (`members`), which a read as the open's doesn't
+/// ([`Cx::opening`]). A check made only to say a fault is made only where
+/// it [`wants`](Sink::wants) them; what the reading needs is read either
+/// way, and only the telling left out.
 struct Cx {
     faults: Vec<(Place, Fault)>,
     wants: bool,
     resolving: bool,
+    members: bool,
 }
 
 impl Cx {
@@ -1259,6 +1261,19 @@ impl Cx {
             faults: Vec::new(),
             wants,
             resolving: false,
+            members: true,
+        }
+    }
+
+    /// A read's that reads as the open does, no stream's `/Length` read
+    /// from an object stream, as the open reads before it has listed one:
+    /// the open's own, and those that read again what it read
+    /// ([`Reading::sections`], [`Reading::first_object`]), so that they
+    /// read what it read, whichever comes first.
+    fn opening(wants: bool) -> Cx {
+        Cx {
+            members: false,
+            ..Cx::new(wants)
         }
     }
 
@@ -1566,7 +1581,7 @@ impl Reader {
             containers: BTreeMap::new(),
             lock: None,
         };
-        let mut cx = reader.cx();
+        let mut cx = Cx::opening(reader.wants);
         reader.version = reader.header(file, &mut cx)?;
         let sections = match options.section {
             Some(section) => reader.sections_from(file, &mut cx, section, decoder)?,
@@ -3822,12 +3837,20 @@ impl Reader {
         Ok(Ok((id, object, record)))
     }
 
-    /// A stream's `/Length`: an integer, or a reference to one written in
-    /// plain view, read again for it, its faults the stream's. The
-    /// reference is followed as any is, to the object listed at its number
-    /// and generation: one to a number listed at another generation is to
-    /// no object (ISO 32000-2, 7.3.10), so the stream has no `/Length`
-    /// that reads.
+    /// A stream's `/Length`: an integer, or a reference to one, read again
+    /// for it, its faults the stream's. The reference is followed as any
+    /// is, to the object listed at its number and generation: one to a
+    /// number listed at another generation is to no object (ISO 32000-2,
+    /// 7.3.10), so the stream has no `/Length` that reads. An object
+    /// written in plain view is read where it's written; one in an object
+    /// stream, from the object stream's decoded data, as an object in it
+    /// is read ([`Reader::length_member`]), where stream `id` may take its
+    /// length from one ([`Reader::follows_into_members`]). An object that's
+    /// itself a reference isn't followed further: it isn't an integer
+    /// (7.3.1), so the stream has no `/Length` that reads. Nor is a
+    /// cross-reference stream's reference followed at all, its entries
+    /// being direct (7.5.8.2): the open reads its rows before it lists any
+    /// object, and every other read of it reads it as the open did.
     fn length<'f, F: Bytes<'f>>(
         &self,
         file: F,
@@ -3840,14 +3863,22 @@ impl Reader {
         };
         let n = match *length.value() {
             Value::Integer(n) => n,
-            Value::Ref(to) if to != id && !cx.resolving => {
-                let Some(&(_, XrefEntry::InUse { offset, .. })) = self.listed_entry(to) else {
-                    return Ok(None);
+            Value::Ref(to) if to != id && !cx.resolving && !is_xref(dict) => {
+                let found = match self.listed_entry(to) {
+                    Some(&(_, XrefEntry::InUse { offset, .. })) => {
+                        cx.resolving = true;
+                        let found = self.indirect(file, cx, offset, Some(to));
+                        cx.resolving = false;
+                        found?.ok().map(|(_, o, _)| o)
+                    }
+                    Some(&(_, XrefEntry::Compressed { stream, index }))
+                        if self.follows_into_members(cx, dict, id) =>
+                    {
+                        self.length_member(file, cx, to, stream, index)?
+                    }
+                    _ => None,
                 };
-                cx.resolving = true;
-                let found = self.indirect(file, cx, offset, Some(to));
-                cx.resolving = false;
-                match found?.ok().and_then(|(_, o, _)| o.as_integer()) {
+                match found.as_ref().and_then(Object::as_integer) {
                     Some(n) => n,
                     None => return Ok(None),
                 }
@@ -3855,6 +3886,73 @@ impl Reader {
             _ => return Ok(None),
         };
         Ok(usize::try_from(n).ok())
+    }
+
+    /// Whether stream `id`, of dictionary `dict`, read by `cx`, may take its
+    /// `/Length` from an object in an object stream. Not in a read as the
+    /// open's ([`Cx::opening`]), nor where the reader doesn't decode object
+    /// streams itself: the decoder decodes them all at once, after the
+    /// objects at offsets ([`Reader::read_all`]). And not for a stream read
+    /// alike whatever read comes first: an object stream, by its `/Type` or
+    /// as the entries put objects in it, whose `/Length` mustn't be in one
+    /// (ISO 32000-2, 7.5.7), and which may be read on the way to another's
+    /// decode, so no object stream's decode waits on its own or another's;
+    /// and an encryption dictionary, or what one refers to, which the open
+    /// reads before it has the handler an object stream's data is
+    /// decrypted by.
+    fn follows_into_members(&self, cx: &Cx, dict: &Dict, id: ObjectId) -> bool {
+        cx.members
+            && self.native_containers()
+            && !self.containers.contains_key(&id.number)
+            && dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm")
+            && !self.list.dictionaries.contains(&id)
+    }
+
+    /// Object `id`, the `index`th of object stream `stream`, read for a
+    /// stream's `/Length` from the object stream's decoded data, which is
+    /// decoded the first time it's asked for, as when an object in it is
+    /// read: what the object stream's decode tells is its own
+    /// ([`Reader::container`]), what reading the object tells the stream's.
+    /// None where it doesn't read, and where the object stream's decode
+    /// would read another object, its `/Filter` or `/DecodeParms` referring
+    /// to one, which might be the stream that asks: so no read waits on
+    /// itself.
+    fn length_member<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        cx: &mut Cx,
+        id: ObjectId,
+        stream: u32,
+        index: u32,
+    ) -> Result<Option<Object>, F::Error> {
+        if !self.containers.contains_key(&stream) {
+            return Ok(None);
+        }
+        let refers = |key: &[u8], dict: &Dict| dict.get(key).is_some_and(holds_reference);
+        if let Some(Ok(object)) = self.in_use(file, ObjectId::new(stream, 0))?
+            && let Value::Stream(s) = object.value()
+            && (refers(b"Filter", &s.dict) || refers(b"DecodeParms", &s.dict))
+        {
+            return Ok(None);
+        }
+        let Some(container) = self.container(file, stream)? else {
+            return Ok(None);
+        };
+        let Ok(header) = &container.header else {
+            return Ok(None);
+        };
+        let read = self.in_stream(cx, id, stream, header, index, container);
+        Ok(read.ok().map(|(object, _)| object))
+    }
+}
+
+/// Whether `o` is a reference, or holds one, at any depth.
+fn holds_reference(o: &Object) -> bool {
+    match o.value() {
+        Value::Ref(_) => true,
+        Value::Array(array) => array.iter().any(holds_reference),
+        Value::Dict(dict) => dict.iter().any(|(_, value)| holds_reference(value)),
+        _ => false,
     }
 }
 
@@ -4178,6 +4276,8 @@ mod faults;
 mod glue;
 #[cfg(test)]
 pub(crate) mod lazy;
+#[cfg(test)]
+pub(crate) mod lengths;
 #[cfg(test)]
 mod once;
 #[cfg(test)]

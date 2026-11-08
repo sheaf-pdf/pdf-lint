@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use pdf_fixtures::fixture::{self, Xref};
 
+use super::lengths;
 use super::tests::{
     KINDS, clean, compressed, filtered, junk, objects_2_and_3, root, settings, small, to_encrypt,
     unfiltered, updated_with_padding, xref_row,
@@ -210,6 +211,36 @@ pub(super) fn files() -> Vec<Named> {
             both.clone(),
         ),
     ];
+    // A stream's /Length in an object stream, and those not read from one.
+    let lengths = [
+        (
+            "a /Length in an object stream",
+            lengths::a_length_in_an_object_stream(),
+        ),
+        (
+            "object streams whose /Lengths are in each other",
+            lengths::object_streams_whose_lengths_are_in_each_other(),
+        ),
+        (
+            "a /Length in an object stream that refers",
+            lengths::a_length_in_an_object_stream_that_refers(),
+        ),
+        (
+            "a cross-reference stream's /Length in an object stream",
+            lengths::a_cross_reference_streams_length_in_an_object_stream(),
+        ),
+        (
+            "a cross-reference stream's /Length by reference",
+            lengths::a_cross_reference_streams_length_by_reference(),
+        ),
+        (
+            "an encryption dictionary's stream, its /Length in an object stream",
+            lengths::an_encryption_dictionarys_stream_with_its_length_in_an_object_stream(),
+        ),
+    ];
+    for (name, file) in lengths {
+        files.push((name.to_string(), file, none.clone()));
+    }
     let (objects, _) = objects_2_and_3();
     let zlib = fixture::zlib(&objects);
     let filters = [
