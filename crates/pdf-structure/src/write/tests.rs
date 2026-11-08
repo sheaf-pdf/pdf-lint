@@ -3763,21 +3763,18 @@ fn assert_rewrites(file: &[u8], password: &str, name: &str) {
     }
 }
 
-/// The files qpdf wrote, committed, where they are, each by the empty
-/// password, and [`plaintext`] under each method, each kind of section,
-/// packed or not, by the user's: read, written whole and as an update, and
-/// read again, the same objects.
+/// The files qpdf wrote, committed, each by the empty password, and
+/// [`plaintext`] under each method, each kind of section, packed or not,
+/// by the user's: read, written whole and as an update, and read again,
+/// the same objects.
 #[test]
 fn written_files_read_back_alike_whole_and_updated() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
-    let mut fixtures: Vec<_> = match read::lazy::fixtures() {
-        true => (std::fs::read_dir(dir).unwrap())
-            .map(|entry| entry.unwrap().path())
-            .collect(),
-        false => Vec::new(),
-    };
+    let mut fixtures: Vec<_> = (std::fs::read_dir(dir).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .collect();
     fixtures.sort();
-    assert_eq!(fixtures.len(), if read::lazy::fixtures() { 8 } else { 0 });
+    assert_eq!(fixtures.len(), 8);
     for path in fixtures {
         let file = std::fs::read(&path).unwrap();
         assert_rewrites(&file, "", &path.display().to_string());
@@ -6387,9 +6384,9 @@ fn shared() -> Vec<u8> {
     spelled_as(&objects)
 }
 
-/// Every test file (qpdf's committed ones where they are, by the empty
-/// password, [`spelled`], [`members_spelled`] and [`shared`]) written whole
-/// by its document and reading, under its own encryption, a table and a
+/// Every test file (qpdf's committed ones, by the empty password,
+/// [`spelled`], [`members_spelled`] and [`shared`]) written whole by its
+/// document and reading, under its own encryption, a table and a
 /// stream packed, under each renumbering, and read back. Under the
 /// identity, given, it's the bytes written without one, copies and all.
 /// Reversed, shifted past every number, and dense (from 1, a stream alike
@@ -6401,14 +6398,11 @@ fn shared() -> Vec<u8> {
 #[test]
 fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
-    let mut paths: Vec<_> = match read::lazy::fixtures() {
-        true => (std::fs::read_dir(dir).unwrap())
-            .map(|entry| entry.unwrap().path())
-            .collect(),
-        false => Vec::new(),
-    };
+    let mut paths: Vec<_> = (std::fs::read_dir(dir).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .collect();
     paths.sort();
-    assert_eq!(paths.len(), if read::lazy::fixtures() { 8 } else { 0 });
+    assert_eq!(paths.len(), 8);
     let mut files: Vec<(String, Vec<u8>)> = (paths.iter())
         .map(|p| (p.display().to_string(), std::fs::read(p).unwrap()))
         .collect();
@@ -8684,11 +8678,11 @@ fn taken_through<S: ByteSource>(
     written_through(&taken, reading, file, map)
 }
 
-/// Every test file (qpdf's committed ones where they are, [`spelled`],
-/// [`members_spelled`], and the test writer's under each of its methods,
-/// the document's metadata encrypted and not) read whole by the user's
-/// password and by the owner's (`read::document`; a reading made a
-/// document, `Reading::into_document`), its catalog given a key. Written
+/// Every test file (qpdf's committed ones, [`spelled`], [`members_spelled`],
+/// and the test writer's under each of its methods, the document's
+/// metadata encrypted and not) read whole by the user's password and by
+/// the owner's (`read::document`; a reading made a document,
+/// `Reading::into_document`), its catalog given a key. Written
 /// through a reading of its file opened again by the other password, it's
 /// refused, its records another reading's ([`Error::Elsewhere`]). Taken by
 /// that reading, in memory and by position (`FileBytes`), each record but
@@ -8714,9 +8708,9 @@ fn a_document_read_whole_is_written_through_a_reading_that_takes_it() {
         "qpdf-aes-256-unpacked",
     ];
     let mut files: Vec<(String, Vec<u8>, [&str; 2])> = (qpdf.iter())
-        .filter_map(|name| Some((name.to_string(), read::lazy::fixture(name)?, ["", "owner"])))
+        .map(|name| (name.to_string(), read::lazy::fixture(name), ["", "owner"]))
         .collect();
-    assert_eq!(files.len(), if read::lazy::fixtures() { 8 } else { 0 });
+    assert_eq!(files.len(), 8);
     files.push(("spelled".into(), spelled(), ["", ""]));
     files.push(("members spelled".into(), members_spelled(), ["", ""]));
     for kind in KINDS_ENCRYPTED {

@@ -29,7 +29,7 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64
 # `attributes` and the `log` bridge; `std`, for its spans' guards.
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
-# A file's identity, by a handle held open (`bytes::Identity`): its device
+# A file's identity, by a handle held open (`read::Identity`): its device
 # and inode on Unix, its volume serial number and file index on Windows.
 [target.'cfg(any(unix, windows))'.dependencies]
 same-file = "1"

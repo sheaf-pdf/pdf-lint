@@ -14,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
 
 # Each step runs a recipe from the justfile, so `just ci` locally checks the
-# same things.
+# same things, but `structure-windows`'s, which is cargo's on Windows.
 jobs:
   check:
     name: Rust checks
@@ -66,8 +66,9 @@ jobs:
       - name: Build and check the archive
         run: just dist
 
-  # pdf-structure for Windows and a 32-bit target without files, whose
-  # code of their own nothing else here builds.
+  # pdf-structure linted for Windows, the code of its own that
+  # `structure-windows` runs there, and for a 32-bit target without files,
+  # which nothing else here builds.
   structure-cross:
     name: pdf-structure for Windows and wasm32
     runs-on: ubuntu-latest

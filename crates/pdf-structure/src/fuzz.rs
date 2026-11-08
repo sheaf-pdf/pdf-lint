@@ -163,9 +163,9 @@ impl ByteSource for Flipped<'_> {
 }
 
 /// `source` opened by `passwords` under `options` as [`Reading::open`]
-/// opens it, but that an object read by position is first given a window to a byte past the next offset
-/// the cross-references list only when `bound`: without, a small first
-/// window reaches every read's windows.
+/// opens it, but that an object read by position is first given a window
+/// to a byte past the next offset the cross-references list only when
+/// `bound`: without, a small first window reaches every read's windows.
 pub fn open<S: ByteSource>(
     source: S,
     passwords: &[Password],
@@ -192,23 +192,23 @@ pub fn open<S: ByteSource>(
 /// and by position, it's the same read, every object, record and decoded
 /// stream, and keeps no fault. Read on demand, its objects asked for in an
 /// order the choice's next bits give, some read unkept first, each the
-/// object and record it's kept as, it's the whole read, when neither reading's decoding reached
-/// the budget, and made a document with the reading kept, at a point the
-/// choice's bits from the eleventh give, it's the reading's whole read
-/// after. Read by position, through [`Counted`], its first window and
-/// whether an object's reaches the next listed offset as the choice's
-/// bits from the fourth give, it's the whole read, and each stream's data
-/// and decoded data are as in memory. Pruned, what its trailer reaches is
-/// the same, and every object it keeps is among it, and an object added
-/// is at a number no entry held (`pruned`). When the file has an
-/// incremental update, so is the revision before it ([`Options::section`]).
-/// Each revision ends past a `%%EOF` and its line's end, and its bytes up
-/// to there read as a file of their own the same twice and by position as
-/// in memory (`revisions`). And with the choice's lowest bit set, so is the
-/// file opened by the owner's password `owner`, and its revision before an
-/// update, and so are its revisions, and the file opened by a wrong
-/// password, then unlocked by the owner's (`unlocked`). Panics on a broken
-/// promise.
+/// object and record it's kept as, it's the whole read, when neither
+/// reading's decoding reached the budget, and made a document with the
+/// reading kept, at a point the choice's bits from the eleventh give, it's
+/// the reading's whole read after. Read by position, through [`Counted`],
+/// its first window and whether an object's reaches the next listed offset
+/// as the choice's bits from the fourth give, it's the whole read, and each
+/// stream's data and decoded data are as in memory. Pruned, what its
+/// trailer reaches is the same, and every object it keeps is among it, and
+/// an object added is at a number no entry held (`pruned`). When the file
+/// has an incremental update, so is the revision before it
+/// ([`Options::section`]). Each revision ends past a `%%EOF` and its line's
+/// end, and its bytes up to there read as a file of their own the same
+/// twice and by position as in memory (`revisions`). And with the choice's
+/// lowest bit set, so is the file opened by the owner's password `owner`,
+/// and its revision before an update, and so are its revisions, and the
+/// file opened by a wrong password, then unlocked by the owner's
+/// (`unlocked`). Panics on a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
@@ -1170,10 +1170,10 @@ fn flipped(
 /// renumbering moves or names otherwise, passing over the rest, which the
 /// file holds. Each number is given once, the changed one in place of the
 /// one as read, so none is refused as given where one passed over is
-/// ([`write::Error::Twice`]). When the reading was `sound` and the update wrote, the file
-/// read again by `password` is sound, and the same objects, each at the
-/// number the renumbering gives it, but that one with its key: whether it
-/// was.
+/// ([`write::Error::Twice`]). When the reading was `sound` and the update
+/// wrote, the file read again by `password` is sound, and the same
+/// objects, each at the number the renumbering gives it, but that one with
+/// its key: whether it was.
 fn updated(
     file: &[u8],
     doc: &Document,

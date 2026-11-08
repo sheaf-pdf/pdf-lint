@@ -148,28 +148,19 @@ fn object_0_in_use() -> Vec<u8> {
     file
 }
 
-/// Whether the crate has the fixtures qpdf wrote: not where it's without
-/// them, as its package is, which holds no `tests/files`, so a test of
-/// them is skipped there, and one that counts what it read counts fewer.
-pub(crate) fn fixtures() -> bool {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/files")
-        .exists()
-}
-
-/// The fixture qpdf wrote, by name: none where the crate is without them
-/// ([`fixtures`]).
-pub(crate) fn fixture(name: &str) -> Option<Vec<u8>> {
+/// The fixture qpdf wrote, by name, from the checkout's `tests/files`:
+/// the unit tests build from the checkout alone, as the package's manifest
+/// drops the crate the tests' writer is in.
+pub(crate) fn fixture(name: &str) -> Vec<u8> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
-    fixtures().then(|| std::fs::read(dir.join(format!("{name}.pdf"))).unwrap())
+    std::fs::read(dir.join(format!("{name}.pdf"))).unwrap()
 }
 
 /// A test file: its name, its bytes, and the passwords it's read by.
 pub(super) type Named = (String, Vec<u8>, Vec<Password<'static>>);
 
-/// The files the tests' writer makes, each kind bytes.rs's tests read, and
-/// the fixtures qpdf wrote, where they are: each named, with the passwords
-/// it's read by.
+/// The files the tests' writer makes, each kind read.rs's tests read, and
+/// the fixtures qpdf wrote: each named, with the passwords it's read by.
 pub(super) fn files() -> Vec<Named> {
     let none: Vec<Password> = Vec::new();
     let both = vec![Password("user"), Password("owner")];
@@ -283,14 +274,13 @@ pub(super) fn files() -> Vec<Named> {
         "qpdf-aes-256",
         "qpdf-aes-256-unpacked",
     ] {
-        if let Some(file) = fixture(name) {
-            files.push((name.to_string(), file.clone(), none.clone()));
-            files.push((
-                format!("{name}, by the owner's"),
-                file,
-                vec![Password("owner")],
-            ));
-        }
+        let file = fixture(name);
+        files.push((name.to_string(), file.clone(), none.clone()));
+        files.push((
+            format!("{name}, by the owner's"),
+            file,
+            vec![Password("owner")],
+        ));
     }
     files
 }
@@ -427,7 +417,7 @@ fn every_test_file_reads_the_same_on_either_flate_backend() {
             );
         }
     }
-    let floor = if fixtures() { 50 } else { 20 };
+    let floor = 50;
     assert!(decoded > floor, "{decoded}");
 }
 
@@ -548,8 +538,8 @@ fn a_document_made_with_its_reading_kept_is_the_whole_read_whatever_was_read() {
             compared += beside(&format!("{name}, before"), &file, &passwords, &options);
         }
     }
-    // The writer's files, and qpdf's where they are.
-    let floor = if fixtures() { 150 } else { 100 };
+    // The writer's files, and qpdf's.
+    let floor = 150;
     assert!(compared > floor, "{compared}");
 }
 
@@ -587,8 +577,8 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
         }
         assert_eq!(reading.into_document().unwrap(), doc, "{name}");
     }
-    // The writer's files, and qpdf's where they are.
-    let floor = if fixtures() { 50 } else { 30 };
+    // The writer's files, and qpdf's.
+    let floor = 50;
     assert!(streams > floor, "{streams}");
 }
 

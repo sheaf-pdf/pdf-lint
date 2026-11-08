@@ -1018,12 +1018,12 @@ impl<S: ByteSource> Reading<S> {
     ///
     /// # Errors
     ///
-    /// Refused, where it may be ciphertext the reader doesn't decrypt: in a file no
-    /// password opened ([`Error::Locked`]), but one whose streams aren't
-    /// encrypted ([`Encryption::Plain`]), whose data is as written but a
-    /// stream's that its own crypt filter encrypts, or an embedded file's
-    /// without one of its own under an `/EFF` that isn't `/Identity`; in a
-    /// file whose security handler the reader can't open
+    /// Refused, where it may be ciphertext the reader doesn't decrypt: in a
+    /// file no password opened ([`Error::Locked`]), but one whose streams
+    /// aren't encrypted ([`Encryption::Plain`]), whose data is as written
+    /// but a stream's that its own crypt filter encrypts, or an embedded
+    /// file's without one of its own under an `/EFF` that isn't
+    /// `/Identity`; in a file whose security handler the reader can't open
     /// ([`Error::Unsupported`]); and a stream's that the encryption
     /// dictionary refers to, or an embedded file's without a crypt filter of
     /// its own where `/EFF` isn't a name ([`Error::Encrypted`]). Data that
@@ -1299,8 +1299,8 @@ impl<S: ByteSource> Reading<S> {
     /// Kept beside the document, the reading hands out what the document
     /// doesn't hold: a stream's data, which stays where it was written
     /// ([`Data::At`](pdf_objects::object::Data::At)), through
-    /// [`Reading::data`] and [`Reading::decoded_within`], and the bytes at a span
-    /// ([`Reading::bytes`]); each record names the reading
+    /// [`Reading::data`] and [`Reading::decoded_within`], and the bytes at
+    /// a span ([`Reading::bytes`]); each record names the reading
     /// ([`Record::source`]).
     ///
     /// # Errors
@@ -1319,15 +1319,16 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// `doc`'s objects as read taken as this reading's, where it reads each
-    /// alike and `doc` is encrypted, and opened, as its file is: each record
-    /// then names it ([`Record::source`]). So a document read whole
-    /// ([`document`](super::document), [`Reading::into_document`]), whose reading is
-    /// gone, is written from a reading of its file opened again as one made
-    /// by [`Reading::to_document`] is: its streams' data, where it was
-    /// written ([`Data::At`](pdf_objects::object::Data::At)), read from it,
-    /// and its objects copied as the bytes they were read from where the
-    /// rules for a copy hold ([`write::Body::Read`](crate::write::Body::Read)),
-    /// or passed over by an update after the file
+    /// alike and `doc` is encrypted, and opened, as its file is: each
+    /// record then names it ([`Record::source`]). So a document read whole
+    /// ([`document`](super::document), [`Reading::into_document`]), whose
+    /// reading is gone, is written from a reading of its file opened again
+    /// as one made by [`Reading::to_document`] is: its streams' data, where
+    /// it was written ([`Data::At`](pdf_objects::object::Data::At)), read
+    /// from it, and its objects copied as the bytes they were read from
+    /// where the rules for a copy hold
+    /// ([`write::Body::Read`](crate::write::Body::Read)), or passed over by
+    /// an update after the file
     /// ([`write::Base::of`](crate::write::Base::of)).
     ///
     /// Each object `doc` holds with a record ([`Document::record`]) is
@@ -1338,13 +1339,13 @@ impl<S: ByteSource> Reading<S> {
     /// them, as [`Reading::object_unkept`] reads them, a parse each, the
     /// object streams they're in decoded and kept: about what reading the
     /// file whole takes again. Each object `doc` holds unread
-    /// ([`Document::unread`]) is one the reading doesn't read either: one it
-    /// reads, as under larger [`Limits`](super::Limits), would be left out
-    /// of what `doc` writes and not out of what the reading's own document
-    /// writes. One `doc` doesn't list at all, removed or never listed (an
-    /// object stream's members past where its data was cut off), isn't
-    /// asked of, and is left out of what it writes. An object without a
-    /// record, built or edited, is left as it is, to be written anew.
+    /// ([`Document::unread`]) is one the reading doesn't read either: one
+    /// it reads, as under larger [`Limits`], would be left out of what
+    /// `doc` writes and not out of what the reading's own document writes.
+    /// One `doc` doesn't list at all, removed or never listed (an object
+    /// stream's members past where its data was cut off), isn't asked of,
+    /// and is left out of what it writes. An object without a record, built
+    /// or edited, is left as it is, to be written anew.
     ///
     /// `doc` was opened as the reading was ([`Document::encryption`] and
     /// [`Reading::encryption`] alike: neither encrypted, both opened by a
@@ -1647,7 +1648,7 @@ pub(crate) fn missing(id: ObjectId) -> Unreadable {
 /// caller's limit ([`Why::Limit`]), or past the reader's own cap
 /// ([`Why::Capped`]) where `capped` says that was the bound: where the
 /// limit asked for is past [`Limits::stream`](super::Limits::stream), as a
-/// reading's `capped` is. So a [`Source`](crate::Source) of one's own whose
+/// reading's `capped` is. So a [`Source`] of one's own whose
 /// `decoded_within` is a reading's, or reads as one does, gives a viewer
 /// what a reading's [`Streams`] gives, through this.
 ///

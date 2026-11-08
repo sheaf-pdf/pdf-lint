@@ -301,7 +301,7 @@ mod tests {
     use pdf_objects::object::ObjectId;
     use pdf_objects::{Resolve, Why};
 
-    use super::super::lazy::{files, fixtures, length_by_reference};
+    use super::super::lazy::{files, length_by_reference};
     use super::super::tests::{clean, compressed, objects_2_and_3, root, xref_row};
     use super::super::*;
     use crate::fuzz::{Counted, open};
@@ -361,8 +361,8 @@ mod tests {
                 }
             }
         }
-        // The writer's files, and qpdf's where they are.
-        let floor = if fixtures() { 5000 } else { 4000 };
+        // The writer's files, and qpdf's.
+        let floor = 5000;
         assert!(compared > floor, "{compared}");
     }
 

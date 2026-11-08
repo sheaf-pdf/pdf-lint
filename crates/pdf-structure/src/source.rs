@@ -665,8 +665,8 @@ pub enum Uncrypt {
 pub struct Update {
     /// The objects its cross-reference section lists in use.
     pub objects: BTreeSet<ObjectId>,
-    /// Where the section it follows starts: the file as of that section
-    /// is its previous revision ([`Options::section`](crate::Options::section)).
+    /// Where the section it follows starts: the file as of that section is
+    /// its previous revision ([`Options::section`](crate::Options::section)).
     pub previous: usize,
 }
 
@@ -2251,11 +2251,8 @@ pub(crate) mod tests {
         assert_eq!(doc.encryption, Encryption::None);
 
         // qpdf's file, its dictionaries in object streams, encrypted with
-        // AES-256 and opened by its empty user password, where the crate
-        // has it.
-        let Some(file) = fixture("qpdf-aes-256") else {
-            return;
-        };
+        // AES-256 and opened by its empty user password.
+        let file = fixture("qpdf-aes-256");
         let doc = crate::read::document(&file, &crate::read::Options::DEFAULT);
         assert_eq!(doc.header, Some(Version::new(1, 7)));
         assert_eq!(doc.facts.newest, Some((startxref(&file), XrefKind::Stream)));
@@ -2597,10 +2594,8 @@ pub(crate) mod tests {
         assert_eq!(own.facts(), None);
         assert!(!own.in_the_clear(ObjectId::new(4, 0)));
 
-        // qpdf's file of object streams, read whole, where the crate has it.
-        let Some(file) = fixture("qpdf-compressed") else {
-            return;
-        };
+        // qpdf's file of object streams, read whole.
+        let file = fixture("qpdf-compressed");
         let mut doc = crate::read::document(&file, &crate::read::Options::DEFAULT);
         let source: &dyn Source = &doc;
         let member = (doc.objects())
@@ -3175,9 +3170,7 @@ pub(crate) mod tests {
             "aes-256-unpacked",
         ];
         for name in names {
-            let Some(file) = fixture(&format!("qpdf-{name}")) else {
-                return;
-            };
+            let file = fixture(&format!("qpdf-{name}"));
             let owner = [Password("owner")];
             for (passwords, by) in [(&[][..], None), (&owner, Some((0, Encoding::Utf8)))] {
                 let owner = by.is_some();

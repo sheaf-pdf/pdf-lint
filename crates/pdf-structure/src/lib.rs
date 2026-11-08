@@ -11,22 +11,22 @@
 //! encrypted file's objects encrypted as they're written.
 //!
 //! - **What it read, in one value:** a [`Document`], a [`Source`] read
-//!   whole ([`read::document`]): each object its cross-references list, kept with where it was
-//!   read while it's as read, or why it doesn't read ([`Unread`]); the
-//!   [`Trailer`], and why it isn't the newest section's when it isn't;
-//!   the header's version; the file's newest incremental [`Update`], and
-//!   each of its revisions, the first first, with its trailer
-//!   ([`Revision`]).
+//!   whole ([`read::document`]): each object its cross-references list,
+//!   kept with where it was read while it's as read, or why it doesn't
+//!   read ([`Unread`]); the [`Trailer`], and why it isn't the newest
+//!   section's when it isn't; the header's version; the file's newest
+//!   incremental [`Update`], and each of its revisions, the first first,
+//!   with its trailer ([`Revision`]).
 //! - **A document in memory:** a [`Document`] built, or read whole, then
 //!   added to, its new objects numbered past every number the file lists;
 //!   its references followed, and what its trailer reaches walked, the
 //!   rest pruned.
 //! - **Or read on demand:** a [`Reading`], opened under [`Options`]
-//!   ([`Reading::open`], the one way in), then each object read
-//!   when it's first asked for, kept or not, from any thread, each object
-//!   stream decoded once, a [`Source`] of what it has read so far; read
-//!   whole, it's the [`Document`], by the same code, the reading taken or
-//!   kept beside it, to hand out what the document doesn't hold
+//!   ([`Reading::open`], the one way in), then each object read when it's
+//!   first asked for, kept or not, from any thread, each object stream
+//!   decoded once, a [`Source`] of what it has read so far; read whole,
+//!   it's the [`Document`], by the same code, the reading taken or kept
+//!   beside it, to hand out what the document doesn't hold
 //!   ([`WithReading`], the two together, a [`Source`] that gives a
 //!   stream's data decoded). Any stream's data is handed out when it's
 //!   asked for, decrypted in an encrypted file, and decoded. Its bytes are

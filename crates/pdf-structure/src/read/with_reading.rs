@@ -196,7 +196,7 @@ mod tests {
     use pdf_crypt::Password;
     use pdf_objects::Why;
 
-    use super::super::lazy::{files, fixtures};
+    use super::super::lazy::files;
     use super::super::{STREAM, document, shown};
     use super::*;
 
@@ -355,8 +355,8 @@ mod tests {
             }
             assert_eq!(opened.into_document(), whole, "{name}");
         }
-        // The writer's files, and qpdf's where they are.
-        let floor = if fixtures() { 50 } else { 30 };
+        // The writer's files, and qpdf's.
+        let floor = 50;
         assert!(streams > floor, "{streams}");
         assert!(held > 0, "{held}");
         assert!(lent > 0, "{lent}");

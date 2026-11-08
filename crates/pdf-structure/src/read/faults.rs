@@ -288,7 +288,8 @@ fn faults_are_told_opened_then_objects_then_members_then_overlaps() {
     assert_eq!(reading.faults(), doc.faults());
 }
 
-/// What a fault is, for [`faults_are_told_opened_then_objects_then_members_then_overlaps`].
+/// What a fault is, for
+/// [`faults_are_told_opened_then_objects_then_members_then_overlaps`].
 fn arm(fault: &Fault) -> &'static str {
     match fault {
         Fault::AfterEof { .. } => "the end",

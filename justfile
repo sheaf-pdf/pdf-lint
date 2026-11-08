@@ -1,5 +1,6 @@
 # Development tasks. CI runs these same recipes, so a local `just ci` checks
-# what CI checks.
+# what CI checks, but pdf-structure's tests on Windows (CI's
+# `structure-windows` job), which no recipe runs.
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
 # pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts,
@@ -33,7 +34,8 @@ default:
     @just --list --unsorted
 
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
-# installed.
+# installed, and pdf-structure's tests on Windows, which CI's
+# `structure-windows` job runs.
 ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
