@@ -258,7 +258,7 @@ pub enum Body<'a> {
     ///    which dropped its place ([`Object::at`]), is written anew;
     /// 4. where it was read where the file's sections put it: not found by
     ///    scanning ([`Origin::Recovered`](crate::Origin::Recovered)), as
-    ///    the file's sections didn't read or its entry is at neither its
+    ///    the file was read by scanning or its entry is at neither its
     ///    place nor its section's shift, nor read away from where its
     ///    section puts it ([`Origin::Shifted`](crate::Origin::Shifted));
     /// 5. for an object at an offset, where `endobj` follows it;
@@ -862,10 +862,15 @@ pub enum Error {
     /// [`NUMBERS`], past every number its file and it use: its number.
     #[error("no object number left for an update's cross-reference stream: it would be {0}")]
     NoNumber(u32),
-    /// A file whose cross-reference sections didn't read, which was read
-    /// by scanning: there's no section for an update's `/Prev` to give
-    /// ([`Base::of`]).
-    #[error("its cross-reference sections didn't read, so an update has no /Prev to give")]
+    /// A file read by scanning
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), as its
+    /// cross-reference sections didn't read or, under
+    /// [`Recovery::Pdfium`](crate::read::Recovery::Pdfium), weren't taken:
+    /// there's no section the reading read by for an update's `/Prev` to
+    /// give ([`Base::of`]).
+    #[error(
+        "it was read by scanning, not by its cross-reference sections, so an update has no /Prev to give"
+    )]
     Unsound,
     /// A trailer that names no catalog: no `/Root`.
     #[error("its trailer names no catalog (/Root)")]

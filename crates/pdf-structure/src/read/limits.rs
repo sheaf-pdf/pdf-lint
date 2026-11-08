@@ -67,15 +67,18 @@ pub struct Options<'a> {
     pub limits: Limits,
     /// The file as of the cross-reference section at this byte: read from
     /// there along its `/Prev` chain, as if it were the newest, so that
-    /// what later updates wrote isn't in it. For an update's
-    /// [`Update::previous`](crate::Update::previous), that's the revision it
-    /// updates. A position in the file's bytes, as every position a reading
-    /// gives is, taken exactly: no header's offset is added to it, nor is
-    /// it looked for near, as a section `startxref` or a `/Prev` gives is
-    /// ([`Recovery::Verified`]). None, the
-    /// default, for the file as its `startxref` gives it. A reading so is of the whole file's bytes, its length the whole
-    /// file's: the file as a revision was written, its bytes up to its end
-    /// alone, is [`Reading::prefix`](super::Reading::prefix)'s.
+    /// what later updates wrote isn't in it, nor found by a scan for an
+    /// object its sections put elsewhere ([`Recovery::Verified`]). For an
+    /// update's [`Update::previous`](crate::Update::previous), that's the
+    /// revision it updates. A position in the file's bytes, as every
+    /// position a reading gives is, taken exactly: no header's offset is
+    /// added to it, nor is a section looked for near it, as one that
+    /// `startxref` or a `/Prev` gives is. How [`Recovery::Pdfium`] reads a
+    /// file so, its doc says. None, the default, for the file as its
+    /// `startxref` gives it. A reading so is of the whole file's bytes, its
+    /// length the whole file's: the file as a revision was written, its
+    /// bytes up to its end alone, is
+    /// [`Reading::prefix`](super::Reading::prefix)'s.
     pub section: Option<usize>,
     /// The backend that inflates the Flate streams it decodes: by default
     /// pdf-filters' `Backend::MinizOxide`, which every build of this crate
@@ -109,9 +112,12 @@ pub struct Options<'a> {
 
 /// How a reading reads a file whose cross-reference sections or objects
 /// aren't where it says ([`Options::recovery`]). Whatever it takes, each
-/// recovery is a fault ([`Fault`](super::Fault)), and an object read
-/// elsewhere says so ([`Origin`](crate::Origin)); a reading with faults off
-/// still says whether it took one ([`Facts::recovered`](crate::Facts::recovered)).
+/// recovery is said: by a fault ([`Fault`](super::Fault)), or, where the
+/// file is read by scanning, by why its trailer is the scan's
+/// ([`Trailer::unwritten`](crate::Trailer::unwritten)); and an object read
+/// elsewhere says so ([`Origin`](crate::Origin)). A reading with faults off
+/// still says whether it took one
+/// ([`Facts::recovered`](crate::Facts::recovered)).
 /// Not exhaustive, as other readers' ways may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
@@ -119,19 +125,22 @@ pub enum Recovery {
     /// Only where the file proves it, the default. A section that doesn't
     /// read where `startxref`, a `/Prev` or a `/XRefStm` puts it is read
     /// where that offset puts it counted from the file's first byte rather
-    /// than its header, or at the nearest `xref` or cross-reference stream
-    /// within 64 bytes of it, exactly there, where one reads
-    /// ([`Fault::Moved`](super::Fault::Moved)). A section's entries are
-    /// read at one shift, the section's own move, or one its first object
-    /// in use or the one furthest into the file proves, the header's offset
-    /// taken back or its `n g obj` found exactly within 64 bytes: each
-    /// entry where it's written, else exactly at its own `n g obj` at that
-    /// shift, else where a scan of the file finds its `n g obj`, of its
-    /// number and generation, exactly
+    /// than its header, as written there, or at the nearest `xref` or
+    /// cross-reference stream within 64 bytes of it, exactly there, where
+    /// one reads ([`Fault::Moved`](super::Fault::Moved)). A section's
+    /// entries are read at one shift: the section's own move; else one its
+    /// first object in use or the one furthest into the file proves, the
+    /// header's offset taken back or its `n g obj` found exactly within 64
+    /// bytes; else the shift another section has, as a cut moves everything
+    /// after it. Each entry is read where it's written, else at its own
+    /// `n g obj` at that shift (exactly, or, the header's offset taken back,
+    /// as written), else where a scan of the file finds its `n g obj`, of
+    /// its number and generation, exactly
     /// ([`Origin::Recovered`](crate::Origin::Recovered)), else where it's
     /// written ([`Fault::Shifted`](super::Fault::Shifted)). A file whose
-    /// newest section doesn't read is scanned for its objects, as one whose
-    /// later section doesn't keeps those it read before it.
+    /// newest section doesn't read is scanned for its objects. A later
+    /// section that doesn't read is said, and what the sections before it
+    /// gave is kept.
     #[default]
     Verified,
     /// As PDFium reads a file, as of chromium/8125: its sections where
@@ -151,7 +160,16 @@ pub enum Recovery {
     /// cross-reference stream's, a later one's keys over an earlier's; and
     /// it's merged over what the sections had given, each object the scan
     /// doesn't find kept where they put it. A file it doesn't scan reads
-    /// as under [`Recovery::Verified`] where that takes no recovery.
+    /// as under [`Recovery::Verified`] where that takes no recovery. A file
+    /// it scans is read as one whose sections don't read, whatever they
+    /// gave: it has no revisions and no update
+    /// ([`Reading::revisions`](super::Reading::revisions),
+    /// [`Reading::update`](super::Reading::update)), and no base for an
+    /// update after it ([`write::Base::of`](crate::write::Base::of)). Read as
+    /// of a section ([`Options::section`]), it's read by the sections from
+    /// there: where one given doesn't read, the file is scanned, but none is
+    /// verified, a later one that doesn't read is said and what the newer gave
+    /// kept, and no page is looked for.
     ///
     /// It parts from PDFium in what it parses: each object is read by this
     /// crate's reader, by ISO 32000-2's rules, so a damaged dictionary

@@ -1498,12 +1498,11 @@ mod tests {
     /// that move and two four bytes before their objects. The update
     /// writes its `/Prev` where the newest section was read and lists each
     /// object read at a shift, or where a scan found it, where it is: read
-    /// through qpdf alone as the
-    /// reader reads it, qpdf saying nothing where it says nothing of the
-    /// file before the update, and reconstructing only where it does that
-    /// of the file too (the cut's first section still gives the main
-    /// section three bytes off); the reader telling only what it finds of
-    /// the file before the update.
+    /// through qpdf alone as the reader reads it, qpdf saying nothing where it
+    /// says nothing of the file before the update, and reconstructing only
+    /// where it does that of the file too (the cut's first section still gives
+    /// the main section three bytes off); the reader telling only what it
+    /// finds of the file before the update.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn an_update_after_a_recovered_reading_reads_through_qpdf_as_through_the_reader() {

@@ -574,11 +574,12 @@ impl Eq for Record {}
 pub enum Origin {
     /// At the offset a cross-reference section gives.
     File,
-    /// At an offset found by scanning the file: as its sections don't read
-    /// ([`Trailer::unwritten`]), or as its entry is neither where its
-    /// cross-reference section puts it nor at the shift the section's
-    /// entries are read at ([`Fault::Moved`], [`Fault::Shifted`]), exactly
-    /// at its own `n g obj`.
+    /// At an offset found by scanning the file: as the file was read by
+    /// scanning ([`Trailer::unwritten`]), its sections not read or, under
+    /// [`Recovery::Pdfium`](crate::read::Recovery::Pdfium), not taken, or as
+    /// its entry is neither where its cross-reference section puts it nor at
+    /// the shift the section's entries are read at ([`Fault::Moved`],
+    /// [`Fault::Shifted`]), exactly at its own `n g obj`.
     Recovered,
     /// In object stream `stream`'s decoded data, the `index`th of its
     /// objects (ISO 32000-2, 7.5.7).
@@ -588,10 +589,12 @@ pub enum Origin {
         /// Which of the stream's objects it is, from 0.
         index: u32,
     },
-    /// `by` bytes from the offset its cross-reference section gives, exactly
-    /// at its own `n g obj`, where the section's entries are shifted
-    /// ([`Fault::Shifted`], [`Fault::Moved`]): before it where `by` is
-    /// less than 0.
+    /// `by` bytes from the offset its cross-reference section gives, at its
+    /// own `n g obj`, where the section's entries are shifted
+    /// ([`Fault::Shifted`], [`Fault::Moved`]): exactly there, or, where `by`
+    /// takes the header's offset back, read there as written, as a file whose
+    /// offsets count from its first byte is; before it where `by` is less
+    /// than 0.
     Shifted {
         /// How far.
         by: i64,
@@ -646,9 +649,11 @@ pub struct Facts {
     /// the file's length counted from there. An update appended after it,
     /// which changes the length, voids it. Its hint tables aren't read.
     pub linearized: bool,
-    /// Whether the reader read a section or an object away from where the
-    /// file's sections put it, or found the objects by scanning: what its
-    /// faults say ([`Options::recovery`](crate::Options::recovery)), told
+    /// Whether the reader read a section away from where it's said, or a
+    /// section's entries away from where it puts them, those a newer section
+    /// lists anew among them ([`Fault::Moved`], [`Fault::Shifted`]), or found
+    /// the objects by scanning ([`Trailer::unwritten`]): what its faults and
+    /// its trailer say ([`Options::recovery`](crate::Options::recovery)), told
     /// with faults off too.
     pub recovered: bool,
 }
@@ -663,8 +668,11 @@ pub struct Facts {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Revision {
-    /// Where its newest cross-reference section starts: what its
-    /// `startxref` gave, past the header ([`Facts::header_offset`]).
+    /// Where the reading read its newest cross-reference section: what its
+    /// `startxref`, or the `/Prev` of the revision after it, gave, past the
+    /// header ([`Facts::header_offset`]), or where that section was found
+    /// instead ([`SectionRows::said`](crate::read::SectionRows::said),
+    /// [`Fault::Moved`]).
     pub at: usize,
     /// Its trailer: its newest section's, the dictionary after `trailer`
     /// or the cross-reference stream ([`Trailer::stream`]).

@@ -49,12 +49,11 @@
 //! `get`'s, in objects. Each input is held to what it gives before it's
 //! timed: a file opened to the objects it lists, its trailer's root, and
 //! scanned or not as its group says, with no fault but where it's scanned
-//! or has bytes before its header, which is one;
-//! each object got to its kind, and each of `compressed-lengths`' streams
-//! to its data found by its `/Length` where the crate reads one from an
-//! object stream, by `endstream` and a fault where it doesn't; a document
-//! to its objects and no fault, or
-//! a fault an object, or none where none is looked for; a
+//! or has bytes before its header, which is one; each object got to its
+//! kind, and each of `compressed-lengths`' streams to its data found by its
+//! `/Length` where the crate reads one from an object stream, by
+//! `endstream` and a fault where it doesn't; a document to its objects and
+//! no fault, or a fault an object, or none where none is looked for; a
 //! write read back to the objects it was given, an update's changed. The
 //! files are written here from text, the object streams' and the
 //! cross-reference stream's data deflated through pdf-filters; nothing is

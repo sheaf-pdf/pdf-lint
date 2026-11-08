@@ -8,7 +8,10 @@
 //! where it is, or the file read again with a byte flipped after it was
 //! read and written whole, refused as changed or the same objects. Under
 //! small limits: no panic, and where it read soundly, written and read
-//! again the same objects, each at the number it was written at.
+//! again the same objects, each at the number it was written at; and an
+//! update after a reading whose faults are the bytes before its header, or
+//! where its sections or objects were found, read back with those faults,
+//! but what the update's `/Prev` moves of them.
 
 #![no_main]
 

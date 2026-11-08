@@ -92,7 +92,16 @@ pub struct Sections {
 /// chain's own reasons, each with the byte it was found at where there's one,
 /// or a section that doesn't read ([`SectionFault::Section`]), why in
 /// [`Unwritten`]'s words, as a reading's trailer and its faults say it. So one
-/// match over [`Unwritten`] reads a section's reason wherever it's given.
+/// match over [`Unwritten`] reads a section's reason wherever it's given. The
+/// chain's own are kept apart, as the faults of a reading keep theirs
+/// ([`Fault::Loop`](super::Fault::Loop),
+/// [`Fault::Sections`](super::Fault::Sections)): where the trailer a reading
+/// made says the same, it's in [`Unwritten`]'s variant of the same name
+/// ([`Unwritten::NoStartxref`], [`Unwritten::StartxrefInWord`],
+/// [`Unwritten::StartxrefNoOffset`], which gives no byte, and
+/// [`Unwritten::Loop`], which only
+/// [`Recovery::Pdfium`](super::Recovery::Pdfium) gives), so a caller holding
+/// one beside the other matches the two by name.
 /// Not exhaustive, as reasons are found as the reader learns.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -178,14 +187,14 @@ impl<S: ByteSource> Reading<S> {
     /// can differ from [`Reading::entries`], which is what a reader made of them.
     /// Positions are in the file's bytes, as a reading's are: each offset written,
     /// which counts from the header (ISO 32000-2, 7.5.2), past the header's offset;
-    /// a section the reading was opened as of at its byte. Each section is read
-    /// where the reading read it, away from where it's said to be where it didn't
-    /// read there ([`SectionRows::said`]), so the list goes as far as the reading's. A stream's
-    /// rows are decoded from its own data, and that's never encrypted (ISO 32000-2,
-    /// 7.5.8.2). Its data is found as the reading found it, so the rows are the
-    /// reading's whatever it has read: a `/Length` that's a reference isn't followed,
-    /// as a cross-reference stream's entries are direct (7.5.8.2), and the open reads
-    /// them before it lists any object.
+    /// a section the reading was opened as of at its byte. Each section is read where
+    /// the reading read it, away from where it's said to be where it didn't read
+    /// there ([`SectionRows::said`]), so the list goes as far as the reading's. A
+    /// stream's rows are decoded from its own data, and that's never encrypted
+    /// (ISO 32000-2, 7.5.8.2). Its data is found as the reading found it, so the rows
+    /// are the reading's whatever it has read: a `/Length` that's a reference isn't
+    /// followed, as a cross-reference stream's entries are direct (7.5.8.2), and the
+    /// open reads them before it lists any object.
     ///
     /// # Errors
     ///

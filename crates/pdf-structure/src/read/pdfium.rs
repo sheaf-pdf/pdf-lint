@@ -1,9 +1,10 @@
 //! A file read as PDFium reads it where its sections don't give it
 //! ([`Recovery::Pdfium`]), as `cpdf_parser.cpp` has it as of chromium/8125:
 //! what sends a file whose sections read to a scan of its every byte, what
-//! that scan lists, and what of the sections it keeps. Read for what it
-//! does and written here in this crate's terms: the scan is this crate's
-//! ([`scan_of`](super::scan_of)), each object it finds read by this crate's reader.
+//! that scan lists, and what of the sections it keeps. Read for what it does
+//! and written here in this crate's terms: the scan is this crate's
+//! ([`scan_of`](super::scan_of)), each object it finds read by this crate's
+//! reader.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;

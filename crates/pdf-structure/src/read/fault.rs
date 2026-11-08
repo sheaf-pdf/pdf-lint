@@ -51,7 +51,8 @@ pub enum Fault {
     #[error("no %PDF- header")]
     NoHeader,
     /// `%PDF-` starts at byte `at`, not the file's first: what's before it
-    /// is junk some writers put first.
+    /// is junk some writers put first, and the file's offsets count from the
+    /// header, past it (ISO 32000-2, 7.5.2).
     #[error("%PDF- is at byte {at}, not the file's first")]
     HeaderAt {
         /// Where it starts.
@@ -595,7 +596,10 @@ pub enum Unwritten {
     IndexNumber,
     /// The `/Prev` chain comes back to the section at byte `at`, read
     /// before: under [`Recovery::Pdfium`](super::Recovery::Pdfium), which
-    /// scans a file for that, as it does one whose sections don't read.
+    /// scans a file for that, as it does one whose sections don't read. The
+    /// fault the other policy says is [`Fault::Loop`], and where
+    /// [`Reading::sections`](super::Reading::sections) stops, the chain's
+    /// own [`SectionFault::Loop`](super::SectionFault::Loop).
     #[error("the /Prev chain comes back to byte {at}")]
     Loop {
         /// Where it comes back to.

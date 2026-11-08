@@ -27,7 +27,14 @@ use crate::source::XrefKind;
 /// The file an update goes after, as its last section describes it. Made
 /// of a reading ([`Base::of`]), or of what a caller read otherwise
 /// ([`Base::new`]), its fields set after; and given back by each write
-/// ([`Written::base`]), for an update after it.
+/// ([`Written::base`]), for an update after it. Made of a reading that
+/// found its newest section away from where its last `startxref` says, or
+/// read objects at a shift or where a scan found them, it also keeps,
+/// privately, what that `startxref` said, which [`Base::holds`] reads
+/// again in place of `prev`, and where each such object is, which an
+/// update after it lists: neither is a field, so one made by
+/// [`Base::new`] and its fields set as another's has neither, and a caller
+/// that keeps a base for later keeps the `Base` itself.
 /// Not exhaustive, so that it can come to say more of the file.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -109,14 +116,19 @@ impl Base {
     ///
     /// # Errors
     ///
-    /// Refused: a file whose sections didn't read, read by scanning
+    /// Refused: a file read by scanning, not by its sections
     /// ([`Error::Unsound`]); a trailer without `/Root`
     /// ([`Error::Rootless`]); a reading as of an earlier revision
     /// ([`Options::section`](crate::Options::section)), whose last section
     /// isn't the file's ([`Error::Earlier`]), as an update after it would
     /// leave every later revision unreachable; and a source whose bytes
-    /// don't read ([`Error::Io`]). A caller that means any of those
-    /// describes the file by [`Base::new`].
+    /// don't read ([`Error::Io`]). A reading as of a section is taken only
+    /// where that's the place the last `startxref` gives, exactly: one
+    /// opened as of the newest section where a reading of the whole file
+    /// found it elsewhere is refused as earlier too, as nothing in it says
+    /// that's where `startxref`'s section is; [`Base::of`] the whole
+    /// reading takes it. A caller that means any of those describes the
+    /// file by [`Base::new`].
     ///
     /// [`Facts::header_offset`]: crate::Facts::header_offset
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Base, Error> {
@@ -210,8 +222,9 @@ impl Base {
     }
 
     /// Whether `source` is still the file it describes, read again: as
-    /// long, its last `startxref` its last section's, or what it said where
-    /// the reading [`Base::of`] was made of read that section elsewhere.
+    /// long, its last `startxref` its last section's, `prev`, or what it
+    /// said where the reading [`Base::of`] was made of read that section
+    /// elsewhere, which the base keeps, `prev` aside ([`Base`]).
     /// What keeps another writer from changing the file between this and an
     /// append is the caller's.
     ///

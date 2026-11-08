@@ -83,7 +83,9 @@ outside its package, so they move with it:
   CCITTFax data's end by a stand-in or, with its `image-ends` feature, by
   decoding it, a column between the two says in which it's read otherwise
   (`all`; `default`, the stand-in; or `image-ends`, the decoders), and the
-  test holds it to agree in the others.
+  test holds it to agree in the others. pdf-structure's column names the
+  recovery it reads a case otherwise under (`verified`, the crate's
+  default; or `pdfium`, as PDFium reads a file).
 - `chromium-N.differs`, at a bump only: cases whose answer at chromium/N
   is PDFium's regression, kept at their recorded answer (below).
 

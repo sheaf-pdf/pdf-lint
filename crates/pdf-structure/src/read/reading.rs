@@ -617,14 +617,24 @@ impl<S: ByteSource> Reading<S> {
     /// that fit the file's revision first, in the order given, then the
     /// rest, each as the owner's and then the user's (see pdf-crypt's
     /// `Handler::open`), and [`Encryption::Opened`]'s `by` the index among
-    /// `passwords` of the one that opened it. Nothing of the file is read again: the
-    /// reading kept its encryption dictionary's values and its first `/ID`
-    /// element while no password had opened it. What it read and decoded
-    /// is dropped, to be read again decrypted, and what it told of is what
-    /// it told of opening the file, with what's wrong with `/Perms` among
-    /// it, where faults are looked for; its budget is what opening the file
-    /// left. [`Encryption::Opened`] says, as an open by the password does,
-    /// what the file grants.
+    /// `passwords` of the one that opened it. The handler is opened from
+    /// what the reading kept while no password had opened it, its
+    /// encryption dictionary's values and its first `/ID` element. What it
+    /// read and decoded is dropped, to be read again decrypted, and what it
+    /// told of is what it told of opening the file, with what's wrong with
+    /// `/Perms` among it, where faults are looked for; its budget is what
+    /// opening the file left. [`Encryption::Opened`] says, as an open by the
+    /// password does, what the file grants. A file read by scanning has
+    /// its object streams decoded from the source again, now decrypted, for
+    /// their members, as an open by the password lists them. And under
+    /// [`Recovery::Pdfium`](super::Recovery::Pdfium), as PDFium opened by
+    /// the password would, its catalog and page tree are read from the
+    /// source, and where they give no page, the file is opened again and
+    /// scanned under this reading's key: a reading of its own then, with
+    /// a [`Reading::id`] of its own, so that a base or a document taken of
+    /// it before isn't taken for what it reads now. Where the source
+    /// doesn't give those bytes again, its members aren't listed, said by
+    /// [`Fault::Members`], and it isn't scanned.
     ///
     /// # Errors
     ///
@@ -910,8 +920,10 @@ impl<S: ByteSource> Reading<S> {
             .collect()
     }
 
-    /// The file's newest incremental update, when its cross-reference
-    /// sections were read and the newest follows one written before it.
+    /// The file's newest incremental update, when it was read by its
+    /// cross-reference sections, not scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), and the newest
+    /// follows one written before it.
     #[must_use]
     pub const fn update(&self) -> Option<&Update> {
         self.reader.update.as_ref()
@@ -925,9 +937,10 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// The file's revisions, the first first, as [`Document::revisions`]
-    /// gives them: none where its sections didn't read, nor where its later
-    /// revisions list more numbers in all than it reads entries
-    /// ([`Limits::entries`](crate::Limits::entries)).
+    /// gives them: none where it was read by scanning
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), whatever its
+    /// sections gave, nor where its later revisions list more numbers in all
+    /// than it reads entries ([`Limits::entries`](crate::Limits::entries)).
     #[must_use]
     pub fn revisions(&self) -> &[Revision] {
         &self.reader.revisions
@@ -1375,7 +1388,9 @@ impl<S: ByteSource> Reading<S> {
         })
     }
 
-    /// Which reading this is, which each of its records holds.
+    /// Which reading this is, which each of its records holds: the same
+    /// for as long as it reads the file as it opened it, and another where
+    /// [`Reading::unlock`] reads it again otherwise.
     #[must_use]
     pub const fn id(&self) -> SourceId {
         self.reader.id

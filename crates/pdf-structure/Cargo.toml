@@ -80,8 +80,9 @@ pdf-crypt = { workspace = true, features = ["writer"] }
 # is bytes, and pdf-objects' values and text.
 pdf-fixtures = { path = "../pdf-fixtures" }
 # The PDFium cases' page trees, walked by PDFium's rules (`tests/pdfium.rs`).
-# By its path alone, as it's never published, which the package's manifest
-# leaves out; its own dependencies are pdf-objects' and others', not this
+# By its path alone, which the package's manifest leaves out, as
+# pdf-semantics is published after this crate (and `tests/pdfium` is outside
+# the package); its own dependencies are pdf-objects' and others', not this
 # crate's.
 pdf-semantics = { path = "../pdf-semantics" }
 # The tests' folders of their own, removed after.
