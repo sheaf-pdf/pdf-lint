@@ -90,6 +90,7 @@ pub struct Handler {
     /// and stream is (Algorithm 1.A).
     aes: Option<Aes>,
     v: i64,
+    r: i64,
     owner: bool,
     strings: Method,
     streams: Method,
@@ -106,6 +107,7 @@ impl fmt::Debug for Handler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Handler")
             .field("v", &self.v)
+            .field("r", &self.r)
             .field("owner", &self.owner)
             .field("strings", &self.strings)
             .field("streams", &self.streams)
@@ -284,6 +286,7 @@ impl Handler {
             aes: (file.v >= 5).then(|| Aes::new(&key)).flatten(),
             key,
             v: file.v,
+            r: file.r,
             owner,
             strings,
             streams,
@@ -391,6 +394,7 @@ impl Handler {
             aes: Aes::new(&key),
             key,
             v: dictionary.v,
+            r: dictionary.r,
             owner: true,
             strings,
             streams,
@@ -423,6 +427,15 @@ impl Handler {
     #[cfg(any(test, feature = "insecure-test-writer"))]
     pub(crate) fn key(&self) -> &[u8] {
         &self.key
+    }
+
+    /// The revision of the standard security handler it opened by, its
+    /// dictionary's `/R`: 2 to 4 (RC4, and AES-128 from 4), 5 or 6
+    /// (AES-256); 6 for a handler [created](Handler::create). ISO 32000-2
+    /// deprecates every revision below 6 (7.6.4.2, Table 21).
+    #[must_use]
+    pub const fn revision(&self) -> i64 {
+        self.r
     }
 
     /// How strings are encrypted (`/StrF`).

@@ -143,7 +143,7 @@ use std::hash::{Hash, Hasher};
 
 pub use handler::{Handler, Method, Protection};
 pub use ivs::Ivs;
-pub use password::{Encoded, Encoding, Password, Unusable};
+pub use password::{Encoded, Encoding, Password, Prohibition, Unusable};
 pub use permissions::{Changes, Permissions, Printing};
 /// rand_core, the version the test writer's generator form of
 /// [`Handler::create`] takes, with `insecure-test-writer` alone.

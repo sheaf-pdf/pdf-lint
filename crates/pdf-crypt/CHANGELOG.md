@@ -2,12 +2,15 @@
 
 ## 0.1.0-alpha.2 (unreleased)
 
-AES's IVs and a new file's key and salts come from the operating system, and the test writer's feature says what it is. Depend on this alpha exactly, `=0.1.0-alpha.2`.
+AES's IVs and a new file's key and salts come from the operating system, the test writer's feature says what it is, and a new file's password is refused without a character of it said. Depend on this alpha exactly, `=0.1.0-alpha.2`.
 
 ### Added
 
 - `Ivs`: one write's AES IVs, each 16 bytes from the operating system's random number generator (getrandom's), drawn 4 KiB at a time and shared by the write's threads. It isn't `Clone`, so no IV is given out twice.
 - `Random`, `Fault::Random` and `Unusable::Random`: the operating system's generator failing. Nothing is encrypted or made then, and nothing is given in the clear in its place.
+- `Password::LONGEST` and `Unusable::TypedTooLong`: `Password::prepared` refuses a text over 1,024 bytes as typed before any of it's prepared. Finding where a text's two SASLprep forms part costs the square of its length, so a text of 40,000 bytes took seconds; one of 1,024 takes about 2 ms. `Password::encodings`, a reader's, takes a text of any length.
+- `Prohibition`, which of RFC 4013's tables refuses a character (`Control`, `PrivateUse`, `NonCharacter`, `NotText`, `NotCanonical`, `Display`, `Tagging`, `Unassigned`), each by stringprep's own table, and its words.
+- `Handler::revision`, the revision the handler opened by, its dictionary's `/R`: 6 for a new file's.
 
 ### Changed
 
@@ -15,12 +18,19 @@ AES's IVs and a new file's key and salts come from the operating system, and the
 - `Handler::create(&protection)` draws the new file's key and salts from the operating system. **Migrating:** drop the generator argument.
 - `pdf_crypt::rand_core`, and the rand_core dependency, are there with `insecure-test-writer` alone, hidden. **Migrating:** nothing names a generator for `create` now.
 - A build for wasm32-unknown-unknown picks getrandom's backend (its `wasm_js` feature, or a custom one), as getrandom's docs say.
+- `Unusable::Prohibited { at, why }` and `Unusable::Ambiguous { at }` say where the character is among the password's characters as typed, from 0, and `Prohibited` the table that refuses it, never the character, whose code point their `Display` wrote: "the password's character 3 is a control character, which SASLprep doesn't allow". **Migrating:** match `Prohibited { at, why }` and `Ambiguous { at }` in place of `Prohibited(c)` and `Ambiguous(c)`; `text.chars().nth(at)` is the character, where a program shows its user which.
 - The `writer` feature is now `insecure-test-writer`, and its items (`writer::Kind`, `Settings`, `dictionary`, `encrypt_string`, `encrypt_stream`) are hidden from the docs. It writes test files, never a document's protection. **Migrating:** turn on `insecure-test-writer` where a test turned on `writer`.
+
+### Fixed
+
+- `Password::encodings` costs a text's length where combining marks of two classes alternate in a long run, as composing it by Unicode 3.2's rule asked each mark of every one before it; 40,000 bytes took 264 ms, now 5 ms. Its forms are the same.
 
 ### Security
 
 - AES's IVs are random, as ISO 32000-2 asks (7.6.3.2, 7.6.3.3). They were derived by HMAC-SHA256 under the file's key from the object and the data, so equal strings encrypted alike, an object unchanged across saves showed as unchanged, and AES-256's key keyed the HMAC too.
 - A new file's key and salts come from the operating system. A caller's generator, seeded, made a key as guessable as its seed.
+- A refused password's character isn't in the error, so logging it no longer logs part of the password.
+- A typed password's length is capped before it's prepared, so a long text can't take seconds of a program that prepares what it's given.
 
 ## 0.1.0-alpha.1 (2026-11-07)
 

@@ -540,7 +540,10 @@ impl rand_core::TryCryptoRng for Drawn<'_> {}
 /// to their 3.2 decompositions and 3.2 assigned each of its characters,
 /// and has that form's characters, decomposed, in another order at most;
 /// prepared, the text is SASLprep's form by both, of 1 to 127 bytes and
-/// its own SASLprep by both, or it's refused for what the text is.
+/// its own SASLprep by both, or it's refused for what the text is: over
+/// `Password::LONGEST` bytes as typed, whatever else it is; a character by
+/// its place and the first table it's in; forms that part
+/// at a place no shorter beginning of the text parts at.
 pub fn password(data: &[u8]) {
     use crate::password::{CORRIGENDUM_4, saslprep_32};
     use crate::{Encoding, Password, Unusable};
@@ -614,8 +617,10 @@ pub fn password(data: &[u8]) {
                 assert!(!fit[i + 1..].contains(a), "twice for revision {revision}");
             }
         }
+        let capped = text.len() <= Password::LONGEST;
         match typed.prepared() {
             Ok(encoded) => {
+                assert!(capped, "prepared within the cap");
                 assert_eq!(encoded.encoding(), Encoding::Saslprep);
                 let bytes = encoded.as_bytes();
                 assert!((1..=127).contains(&bytes.len()), "1 to 127 bytes");
@@ -646,15 +651,22 @@ pub fn password(data: &[u8]) {
                 assert!(len > 127, "too long");
                 assert_eq!(prepared.map(|p| p.len()).ok(), Some(len), "its length");
             }
-            Err(Unusable::Prohibited(c)) => {
-                assert!(text.contains(c), "prohibited");
+            Err(Unusable::TypedTooLong { len }) => {
+                assert_eq!(len, text.len(), "its length as typed");
+                assert!(len > Password::LONGEST, "too long as typed");
+            }
+            Err(Unusable::Prohibited { at, why }) => {
+                let c = text.chars().nth(at).expect("a character of the text");
                 // Unassigned in 3.2, or refused, alone too.
                 let alone = saslprep(c.encode_utf8(&mut [0; 4])).is_err();
                 assert!(unassigned_code_point(c) || (prepared.is_err() && alone));
+                // The first of its tables.
+                let of = crate::password::Prohibition::of(c);
+                assert_eq!(of, Some(why), "its table");
             }
             Err(Unusable::Bidi) => assert!(prepared.is_err(), "bidi"),
-            Err(Unusable::Ambiguous(c)) => {
-                assert!(text.contains(c), "ambiguous");
+            Err(Unusable::Ambiguous { at }) => {
+                assert!(at < text.chars().count(), "ambiguous at a character");
                 let new = prepared.as_deref().map(str::as_bytes).ok();
                 assert!(new.is_some_and(|new| (1..=127).contains(&new.len())));
                 assert_ne!(
@@ -662,6 +674,14 @@ pub fn password(data: &[u8]) {
                     new,
                     "the forms differ"
                 );
+                // No beginning of it before the place has forms that differ.
+                let end = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(i, _)| i);
+                for n in 1..=at {
+                    let begun = &text[..end(n)];
+                    let begun_new = saslprep(begun).ok().map(|f| f.into_owned().into_bytes());
+                    let begun_old = saslprep_32(begun).map(|f| f.to_vec());
+                    assert_eq!(begun_old, begun_new, "parted before its place");
+                }
             }
             Err(other) => panic!("{other:?}"),
         }

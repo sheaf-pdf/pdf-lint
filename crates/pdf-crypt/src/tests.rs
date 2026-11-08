@@ -725,6 +725,38 @@ fn what_the_writer_writes_opens_and_decrypts() {
     }
 }
 
+/// A handler says the revision it opened by, its dictionary's `/R`, by
+/// either password; a new file's is 6.
+#[test]
+fn a_handler_says_its_revision() {
+    let kinds = [
+        (Kind::Rc4By40, 2),
+        (Kind::Rc4By128, 3),
+        (Kind::Aes128, 4),
+        (Kind::Aes256R5, 5),
+        (Kind::Aes256, 6),
+    ];
+    for (kind, r) in kinds {
+        let settings = Settings {
+            kind,
+            user: b"user",
+            owner: b"owner",
+            p: -3904,
+            id: b"0123456789abcdef",
+            encrypt_metadata: true,
+        };
+        let dictionary = writer::dictionary(&settings);
+        assert_eq!(dictionary.r, r, "{kind:?}");
+        for password in [&b"user"[..], b"owner"] {
+            let opened = Handler::open(&dictionary, settings.id, &[Encoded::verbatim(password)]);
+            assert_eq!(opened.unwrap().revision(), r, "{kind:?}");
+        }
+    }
+    let password = Password("user").prepared().unwrap();
+    let (created, _) = Handler::create(&Protection::new(&password)).unwrap();
+    assert_eq!(created.revision(), 6);
+}
+
 /// An AES-128 handler, and a string encrypted by it.
 fn aes() -> (Handler, Vec<u8>) {
     let settings = Settings {
