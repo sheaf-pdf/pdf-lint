@@ -113,6 +113,7 @@ use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::serialize::{self, Refused, Renumber};
 use pdf_objects::version::Version;
+use sha2::{Digest, Sha256};
 
 use crate::crypt::Get;
 use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
@@ -1129,18 +1130,17 @@ pub fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
 }
 
 /// A trailer's `/ID`: `kept`, the first string a file has already, and
-/// XXH3-128 of `written`, 16 bytes, big-endian, so that the same bytes get
-/// the same `/ID`. A file with no first string gets the hash for both
-/// where it's `encrypted`, which needs an `/ID` (ISO 32000-2, 14.4, has a
-/// new file's two the same), and none otherwise.
+/// the first 16 bytes of SHA-256 of `written`. The same bytes get the same
+/// `/ID`, and its second string says nothing but what's written. A file
+/// with no first string gets the hash for both where it's `encrypted`,
+/// which needs an `/ID` (ISO 32000-2, 14.4, has a new file's two the
+/// same), and none otherwise.
 #[must_use]
 pub fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Vec<u8>; 2]> {
     if kept.is_none() && !encrypted {
         return None;
     }
-    let hash = twox_hash::XxHash3_128::oneshot(written)
-        .to_be_bytes()
-        .to_vec();
+    let hash = Sha256::digest(written)[..16].to_vec();
     let first = kept.unwrap_or_else(|| hash.clone());
     Some([first, hash])
 }

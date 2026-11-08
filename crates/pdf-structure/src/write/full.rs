@@ -44,10 +44,10 @@ use crate::source::{Document, XrefKind};
 ///   them as written: a direct `/Info` dictionary's strings are in the
 ///   clear in an encrypted file.
 /// - **The `/ID`** keeps its first string, the encryptor's, else
-///   `trailer`'s; the second is XXH3-128 of the bytes written before the
-///   section, so the same bodies write the same bytes. A file that isn't
-///   encrypted and has no first string has none; an encrypted one with
-///   none gets the hash for both.
+///   `trailer`'s; the second is the first 16 bytes of SHA-256 of the bytes
+///   written before the section, so the same bodies write the same bytes.
+///   A file that isn't encrypted and has no first string has none; an
+///   encrypted one with none gets the hash for both.
 /// - **Encrypted** by `encryptor`, every string and stream's data is
 ///   encrypted as [`Encrypting`] says, but a stream's whose data is where
 ///   it was written, which is read from `from` as the reading hands it out,

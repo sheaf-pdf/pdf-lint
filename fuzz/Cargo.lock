@@ -492,8 +492,8 @@ dependencies = [
  "pdf-objects",
  "pdf-tokenizer",
  "same-file",
+ "sha2",
  "thiserror",
- "twox-hash",
 ]
 
 [[package]]

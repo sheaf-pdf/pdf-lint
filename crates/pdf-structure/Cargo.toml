@@ -20,9 +20,11 @@ pdf-crypt.workspace = true
 pdf-filters = { workspace = true, features = ["miniz_oxide"] }
 pdf-objects.workspace = true
 pdf-tokenizer.workspace = true
+# A written file's second `/ID` string, the first 16 bytes of SHA-256 of
+# what it wrote: RustCrypto's, as pdf-crypt takes it, without the default
+# features (`alloc`, `oid`), which a digest of bytes doesn't use.
+sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
-# A written file's second `/ID` element, XXH3-128 of what it wrote.
-twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
 # The spans of the reader's and the writer's phases, with the `tracing`
 # feature: without its default features, so without the proc macros of
 # `attributes` and the `log` bridge; `std`, for its spans' guards.

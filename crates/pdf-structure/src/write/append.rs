@@ -240,9 +240,9 @@ impl Base {
 ///   reference as the renumbering names it, never encrypted, as a trailer
 ///   isn't an object (7.6.2).
 /// - **The `/ID`** keeps its first string, the encryptor's, else `base`'s;
-///   the second is XXH3-128 of what the update wrote before its section,
-///   so the same update writes the same bytes. A file that isn't
-///   encrypted and has no first string gets none.
+///   the second is the first 16 bytes of SHA-256 of what the update wrote
+///   before its section, so the same update writes the same bytes. A file
+///   that isn't encrypted and has no first string gets none.
 /// - **Encrypted** as `base`'s file is, by `encryptor`, which is that
 ///   file's ([`Encryptor::of`] of a reading of its bytes): its dictionary
 ///   where the file's trailer has it, the one the file stores where `base`

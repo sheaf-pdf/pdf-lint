@@ -825,10 +825,10 @@ dependencies = [
  "pdf-objects",
  "pdf-tokenizer",
  "same-file",
+ "sha2",
  "tempfile",
  "thiserror",
  "tracing",
- "twox-hash",
 ]
 
 [[package]]

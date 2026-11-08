@@ -176,10 +176,10 @@ impl Default for Options<'_> {
 #[non_exhaustive]
 pub struct Linearized {
     /// The trailer's `/ID`, when it has one: the first string the encryptor's,
-    /// else the document's, the second XXH3-128 of the bodies in file order, so
-    /// the same document writes the same bytes. A document with no first string
-    /// has none, but written under a new encryption: that has the hash for
-    /// both.
+    /// else the document's, the second the first 16 bytes of SHA-256 of the
+    /// bodies in file order, so the same document writes the same bytes. A
+    /// document with no first string has none, but written under a new
+    /// encryption: that has the hash for both.
     pub id: Option<[Vec<u8>; 2]>,
     /// What's around the bodies, and where everything is, counted from the
     /// file's first byte.

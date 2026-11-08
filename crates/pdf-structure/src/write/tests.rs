@@ -19,6 +19,7 @@ use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::dict;
 use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use pdf_objects::serialize::{self, Encrypt, Refused};
+use sha2::{Digest, Sha256};
 
 use super::{Deflate, Encryptor, Entry, Error, Section, Unencryptable};
 use crate::fuzz::Flipped;
@@ -3073,14 +3074,53 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
             trailer.get(b"Custom").and_then(Object::as_name),
             Some(&b"Kept"[..])
         );
-        // /ID[0] kept, and /ID[1] the hash of what comes before the section.
+        // /ID[0] kept, and /ID[1] the first 16 bytes of SHA-256 of what
+        // comes before the section.
         let (start, _) = newest(&pdf);
-        let written = twox_hash::XxHash3_128::oneshot(&bytes[..start]).to_be_bytes();
-        let id = [ID, &written].map(|id| Object::hex(id.to_vec()));
+        let written = Sha256::digest(&bytes[..start]);
+        let id = [ID, &written[..16]].map(|id| Object::hex(id.to_vec()));
         assert_eq!(
             trailer.get(b"ID").map(unplaced),
             Some(Object::from(id.to_vec()))
         );
+    }
+}
+
+/// A file's `/ID` is its first string, kept, and the first 16 bytes of
+/// SHA-256 of what's written, here of `abc` and of nothing, their digests
+/// computed apart (FIPS 180-4's example for `abc`, and Python's hashlib):
+/// the hash twice where an encrypted file has no first string, and none
+/// where a file in the clear has none.
+#[test]
+fn a_files_second_id_string_is_sha_256s_first_16_bytes_of_whats_written() {
+    // SHA-256 of `abc`:
+    // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.
+    let abc = [
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23,
+    ];
+    // SHA-256 of no bytes:
+    // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.
+    let none = [
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9,
+        0x24,
+    ];
+    for (written, hash) in [(&b"abc"[..], abc), (&b""[..], none)] {
+        let kept = b"kept".to_vec();
+        for encrypted in [false, true] {
+            assert_eq!(
+                write::file_id(Some(kept.clone()), encrypted, written),
+                Some([kept.clone(), hash.to_vec()]),
+                "{written:?}, {encrypted}"
+            );
+        }
+        let hash = hash.to_vec();
+        assert_eq!(
+            write::file_id(None, true, written),
+            Some([hash.clone(), hash]),
+            "{written:?}"
+        );
+        assert_eq!(write::file_id(None, false, written), None, "{written:?}");
     }
 }
 
