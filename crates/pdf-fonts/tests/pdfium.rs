@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use pdf_fonts::pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
 use pdf_fonts::{Fault, Font, FontKind, Limits, Rect, Resolve};
 use pdf_objects::ObjectId;
-use pdf_structure::bytes::{Options, Reading};
+use pdf_structure::read::{Options, Reading};
 
 /// The most characters back a text page looks for the same code at the same place
 /// (`CPDF_TextPage::ProcessTextObjectItems`).
@@ -199,7 +199,7 @@ fn ours(bytes: &[u8], kind: &str) -> String {
         return "no font".to_string();
     };
     let content = reading
-        .decoded(ObjectId::new(4, 0))
+        .decoded_within(ObjectId::new(4, 0), usize::MAX)
         .expect("a case has its content");
     let mut shown = Vec::new();
     let mut tw = 0.0;

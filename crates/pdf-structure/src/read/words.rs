@@ -1,9 +1,10 @@
 //! The reader's messages that no other test holds whole, each word for
 //! word, from a file made to give it: why an object doesn't read, why a
-//! file's sections don't, and what it warns of.
+//! file's sections don't, and what it tells of.
+
+use pdf_fixtures::fixture;
 
 use super::*;
-use crate::fixture;
 use crate::source::Source;
 
 /// Why object `id` of `doc` doesn't read, as it says.
@@ -11,9 +12,9 @@ fn why(doc: &Document, id: ObjectId) -> String {
     doc.get(id).unwrap_err().to_string()
 }
 
-/// Each warning's message.
-fn said(doc: &Document) -> Vec<&str> {
-    doc.warnings.iter().map(|w| w.message.as_str()).collect()
+/// Each fault's words.
+fn said(doc: &Document) -> Vec<String> {
+    doc.faults().iter().map(|w| w.1.to_string()).collect()
 }
 
 /// Objects 2 and 3 as an object stream holds them, from `/First` 8.
@@ -125,7 +126,7 @@ impl Decode for Nothing {
 fn an_object_stream_that_isnt_a_stream_says_so() {
     let file = packed(b"<< /Type /ObjStm /N 2 /First 8 >>", "");
     assert_eq!(
-        why(&read(&file), ObjectId::new(2, 0)),
+        why(&document(&file, &Options::DEFAULT), ObjectId::new(2, 0)),
         "its object stream 4 0 R doesn't decode: it isn't a stream"
     );
 }
@@ -139,7 +140,10 @@ fn an_object_streams_own_crypt_filter_in_a_file_no_password_opens_says_so() {
         "/Type /ObjStm /N 2 /First 8 /Filter /Crypt /DecodeParms << /Name /StdCF >>",
         MEMBERS,
     );
-    let doc = read(&packed(&body, &encrypt(kind, "Identity", "Identity")));
+    let doc = document(
+        &packed(&body, &encrypt(kind, "Identity", "Identity")),
+        &Options::DEFAULT,
+    );
     assert_eq!(doc.encryption, Encryption::Plain);
     assert_eq!(
         why(&doc, ObjectId::new(2, 0)),
@@ -152,15 +156,18 @@ fn an_object_stream_whose_data_doesnt_decrypt_says_so_and_why() {
     // AES ciphertext shorter than its IV: nothing decrypts.
     let kind = pdf_crypt::writer::Kind::Aes256;
     let body = container("/Type /ObjStm /N 2 /First 8", b"ABCDEFGH");
-    let doc = read_opened(
+    let doc = document(
         &packed(&body, &encrypt(kind, "StdCF", "Identity")),
-        &[Password("user")],
+        &Options {
+            passwords: &[Password("user")],
+            ..Options::DEFAULT
+        },
     );
     assert_eq!(
         said(&doc),
         ["its data doesn't decrypt cleanly: its AES ciphertext has no whole block past its IV"]
     );
-    assert_eq!(doc.warnings[0].object, Some(ObjectId::new(4, 0)));
+    assert_eq!(doc.faults()[0].0.object, Some(ObjectId::new(4, 0)));
     assert_eq!(
         why(&doc, ObjectId::new(2, 0)),
         "its object stream 4 0 R doesn't decode: its data doesn't decrypt: its AES ciphertext has no whole block past its IV"
@@ -176,9 +183,12 @@ fn startxref_inside_another_word_says_where() {
     );
     let at = rfind(&file, b"startxref").unwrap();
     let file = [&file[..at], b"startxrefs", &file[at + 9..]].concat();
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     let why = format!("startxref at byte {at} is inside another word");
-    assert_eq!(doc.trailer.unwritten, Some(why));
+    assert_eq!(
+        doc.trailer.unwritten.as_ref().map(ToString::to_string),
+        Some(why)
+    );
     assert!(doc.get(ObjectId::new(1, 0)).is_ok());
 }
 
@@ -198,7 +208,7 @@ fn more_sections_than_the_reader_reads_along_prev_says_how_many() {
         prev = format!(" /Prev {xref}");
     }
     file.extend_from_slice(format!("startxref\n{xref}\n%%EOF\n").as_bytes());
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     assert_eq!(said(&doc), ["more than 1024 cross-reference sections"]);
     assert_eq!(doc.trailer.unwritten, None);
 }
@@ -222,8 +232,16 @@ fn a_cross_reference_streams_w_index_and_size_say_whats_wrong() {
         ),
     ];
     for (dict, why) in cases {
-        let doc = read(&xref_stream(dict, &rows));
-        assert_eq!(doc.trailer.unwritten.as_deref(), Some(why), "{dict}");
+        let doc = document(&xref_stream(dict, &rows), &Options::DEFAULT);
+        assert_eq!(
+            doc.trailer
+                .unwritten
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(why),
+            "{dict}"
+        );
     }
 }
 
@@ -238,15 +256,31 @@ fn a_cross_reference_stream_a_decoder_doesnt_decode_says_its_filters() {
         let file = xref_stream(&format!("/Size 3 /W [1 2 1] /Filter {filter}"), &zlib);
         let doc = read_through(&file, &BTreeMap::new());
         let why = format!("its cross-reference stream ({shown}) doesn't decode: no data for 2 0 R");
-        assert_eq!(doc.trailer.unwritten, Some(why), "{filter}");
+        assert_eq!(
+            doc.trailer.unwritten.as_ref().map(ToString::to_string),
+            Some(why),
+            "{filter}"
+        );
         let doc = read_through(&file, &Nothing);
         let why =
             format!("its cross-reference stream is compressed ({shown}), and nothing decodes it");
-        assert_eq!(doc.trailer.unwritten, Some(why), "{filter}");
+        assert_eq!(
+            doc.trailer.unwritten.as_ref().map(ToString::to_string),
+            Some(why),
+            "{filter}"
+        );
         // Decoded by a decoder to data not its rows' length.
         let doc = read_through(&file, &BTreeMap::from([(ObjectId::new(2, 0), vec![0; 3])]));
         let why = "decoded, it's 3 bytes, not the 12 its /W and /Index make: the decoder may have decoded another object 2 0 R";
-        assert_eq!(doc.trailer.unwritten.as_deref(), Some(why), "{filter}");
+        assert_eq!(
+            doc.trailer
+                .unwritten
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(why),
+            "{filter}"
+        );
     }
 }
 
@@ -257,7 +291,7 @@ fn an_encrypt_that_refers_to_no_object_is_read_as_not_encrypted_and_said() {
         &[(1, b"<< /Type /Catalog >>")],
         "<< /Size 2 /Root 1 0 R /Encrypt 9 0 R >>",
     );
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     assert_eq!(
         said(&doc),
         [
@@ -284,11 +318,11 @@ fn an_encrypt_that_refers_to_a_generation_not_listed_is_read_as_not_encrypted_an
     let row = at(&file);
     file[row..row + 5].copy_from_slice(b"00030");
     assert_ne!(
-        read(&ok).encryption,
+        document(&ok, &Options::DEFAULT).encryption,
         Encryption::None,
         "encrypted where 2 0 is listed"
     );
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     assert_eq!(
         said(&doc),
         [
@@ -310,7 +344,10 @@ fn an_encrypt_that_refers_to_a_generation_not_listed_is_read_as_not_encrypted_an
 #[test]
 fn an_object_stream_of_a_file_nothing_opens_says_nothing_decodes_it() {
     let body = container("/Type /ObjStm /N 2 /First 8", MEMBERS);
-    let doc = read(&packed(&body, " /Encrypt << /Filter /Standard /V 2 >>"));
+    let doc = document(
+        &packed(&body, " /Encrypt << /Filter /Standard /V 2 >>"),
+        &Options::DEFAULT,
+    );
     assert_eq!(
         why(&doc, ObjectId::new(2, 0)),
         "it's in object stream 4 0 R, and nothing decodes that"
@@ -323,7 +360,7 @@ fn an_object_that_runs_to_where_a_fault_cut_its_object_stream_off_says_so() {
     let zlib = fixture::zlib(b"2 0 3 6 << >>\n12345");
     let cut = &zlib[..zlib.len() - 6];
     let body = container("/Type /ObjStm /N 2 /First 8 /Filter /FlateDecode", cut);
-    let doc = read(&packed(&body, ""));
+    let doc = document(&packed(&body, ""), &Options::DEFAULT);
     assert_eq!(
         why(&doc, ObjectId::new(3, 0)),
         "it runs to where a fault cut object stream 4 0 R's data off, so it may be cut short"
@@ -347,7 +384,7 @@ fn an_object_streams_header_that_doesnt_read_says_why_for_its_objects() {
     ];
     for (dict, data, said) in cases {
         let body = container(&format!("/Type /ObjStm {dict}"), data);
-        let doc = read(&packed(&body, ""));
+        let doc = document(&packed(&body, ""), &Options::DEFAULT);
         assert_eq!(why(&doc, ObjectId::new(2, 0)), said);
         assert_eq!(why(&doc, ObjectId::new(3, 0)), said);
     }
@@ -368,7 +405,7 @@ fn an_object_streams_filters_the_reader_doesnt_take_say_why() {
     ];
     for (filter, said) in cases {
         let body = container(&format!("/Type /ObjStm /N 2 /First 8 {filter}"), MEMBERS);
-        let doc = read(&packed(&body, ""));
+        let doc = document(&packed(&body, ""), &Options::DEFAULT);
         let said = format!("its object stream 4 0 R doesn't decode: {said}");
         assert_eq!(why(&doc, ObjectId::new(2, 0)), said, "{filter}");
     }

@@ -44,7 +44,7 @@ pdf-linearize = { path = "../pdf-linearize", version = "0.1" }
 pdf-objects.workspace = true
 # Dates and XMP claims, read without its clock, so without chrono.
 pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false }
-pdf-structure = { path = "../pdf-structure", version = "0.1" }
+pdf-structure.workspace = true
 pdf-tokenizer.workspace = true
 # The command line's too: its JSON reports.
 serde = { version = "1", features = ["derive"], optional = true }
@@ -80,8 +80,10 @@ required-features = ["cli"]
 [dev-dependencies]
 # The tests' encrypted files.
 pdf-crypt = { workspace = true, features = ["writer"] }
-# The tests' file writer, and qpdf as a second reader.
-pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
+# The tests' file writer, and qpdf as a second reader. By its path alone,
+# as it's never published, which the package's manifest leaves out: so the
+# crate's unit tests don't build from its package.
+pdf-fixtures = { path = "../pdf-fixtures" }
 # The tests' folders of their own, removed after.
 tempfile = "3"
 

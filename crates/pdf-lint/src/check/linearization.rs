@@ -599,10 +599,10 @@ mod tests {
     //! so that a change keeps its length; and those files updated after, by
     //! pdf-structure's writer.
 
+    use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_linearize::family::{self, linearize_bytes};
     use pdf_linearize::hint::{PageOffsets, SharedObjects};
     use pdf_structure::XrefKind;
-    use pdf_structure::fixture::{self, Body, Xref};
     use pdf_structure::write::{self, Base, Deflate};
 
     use super::*;
@@ -684,7 +684,7 @@ mod tests {
     /// `file` checked beside its reading under `options`, every object held
     /// as merged.
     fn checked_with(file: &[u8], options: &Options) -> Report {
-        let read = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
         check_with_reading(&read, &Hold::All(Made::Merged), options)
     }
 
@@ -829,7 +829,7 @@ mod tests {
             full.contains("  content read: 4\n  linearized: holds\n"),
             "{full}"
         );
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let alone = check(
             read.document(),
             &Hold::All(Made::Merged),
@@ -996,7 +996,7 @@ mod tests {
             ..Options::default()
         };
         let report = checked_with(&bare, &asked);
-        let read = WithReading::new(&bare[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&bare[..], &bytes::Options::DEFAULT).unwrap();
         let record = read.document().record(ObjectId::new(page, 0)).map(|r| r.at);
         assert_eq!(record.map(|at| at.start), Some(object));
         let value = "page 1 doesn't say its MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
@@ -1157,7 +1157,7 @@ mod tests {
             "/E 923",
             "/E 123",
         );
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let only = |id: ObjectId| {
             let hold = Hold::Only([(id, Made::Built)].into());
             check_with_reading(&read, &hold, &Options::default())
@@ -1200,12 +1200,14 @@ mod tests {
         let encrypted = fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) });
         let user = [crate::pdf_crypt::Password("user")];
         let file = linearized(&encrypted, &user);
-        let read = WithReading::new(&file[..], &user, &bytes::Options::DEFAULT).unwrap();
+        let mut options = bytes::Options::DEFAULT;
+        options.passwords = &user;
+        let read = WithReading::new(&file[..], &options).unwrap();
         let report = check_with_reading(&read, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(told(&report), [], "{report}");
         assert_eq!(report.linearized, Some(Linearized::Holds));
         assert!(!report.unchecked.keys().any(|u| u.why == LOCKED));
-        let locked = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let locked = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let report = check_with_reading(&locked, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(told(&report), [], "{report}");
         let row = Unchecked {
@@ -1300,7 +1302,9 @@ mod tests {
         let once = updated(&file);
         let report = checked(&once);
         let value = updated_value(&once, file.len());
-        let trailer = bytes::read(&once).trailer;
+        let trailer = bytes::document(&once, &bytes::Options::DEFAULT)
+            .trailer()
+            .clone();
         let table = match trailer.object.value() {
             Value::Stream(_) => "XRefStream",
             _ => "FileTrailer",
@@ -1328,7 +1332,7 @@ mod tests {
         assert_eq!(voided(&again)[0].5, updated_value(&once, file.len()));
         assert_eq!(told(&again), [], "{again}");
         assert_eq!(again.linearized, Some(Linearized::Updated { held: true }));
-        let read = WithReading::new(&once[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&once[..], &bytes::Options::DEFAULT).unwrap();
         let alone = check(
             read.document(),
             &Hold::All(Made::Merged),
@@ -1442,8 +1446,11 @@ mod tests {
         );
         // Held by the number alone, as built, or the update's objects: none
         // of the linearization's, which neither wrote; the verdict stands.
-        let read = WithReading::new(&over[..], &[], &bytes::Options::DEFAULT).unwrap();
-        let update = bytes::read(&over).update.unwrap();
+        let read = WithReading::new(&over[..], &bytes::Options::DEFAULT).unwrap();
+        let update = bytes::document(&over, &bytes::Options::DEFAULT)
+            .update()
+            .cloned()
+            .unwrap();
         let theirs = update.objects.iter().map(|&id| (id, Made::Built)).collect();
         for hold in [
             Hold::Only([(ObjectId::new(dict, 0), Made::Built)].into()),
@@ -1571,9 +1578,12 @@ mod tests {
     fn a_hold_of_an_update_holds_that_it_voids_the_linearization() {
         let file = written_as(&linearized(&three_pages(), &[]), "/E 923", "/E 123");
         let once = updated(&file);
-        let update = bytes::read(&once).update.unwrap();
+        let update = bytes::document(&once, &bytes::Options::DEFAULT)
+            .update()
+            .cloned()
+            .unwrap();
         let hold = Hold::Only(update.objects.iter().map(|&id| (id, Made::Built)).collect());
-        let read = WithReading::new(&once[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&once[..], &bytes::Options::DEFAULT).unwrap();
         let report = check_with_reading(&read, &hold, &Options::default());
         assert_eq!(voided(&report).len(), 1, "{report}");
         assert_eq!(voided(&report)[0].4, Made::Merged);

@@ -216,10 +216,11 @@ mod family {
 
     use chacha20::ChaCha20Rng;
     use pdf_linearize::family::{Options, linearize, linearize_bytes};
+    use pdf_structure::XrefKind;
+    use pdf_structure::pdf_crypt::Password;
     use pdf_structure::pdf_crypt::Protection;
     use pdf_structure::pdf_crypt::rand_core::SeedableRng;
     use pdf_structure::write::Encryptor;
-    use pdf_structure::{Password, XrefKind};
 
     use super::written::{KEYS, built, encrypted_as, kinds, opened, stream, two_pages};
     use super::{HINT_LAST, asked_by};

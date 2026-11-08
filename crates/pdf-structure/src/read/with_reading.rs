@@ -4,22 +4,23 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use pdf_crypt::Password;
+use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId};
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable};
 
-use super::reading::{lenient, missing};
+use super::reading::{missing, viewed};
 use super::{ByteSource, Error, Options, Reading};
-use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, Warning};
+use crate::read::Fault;
+use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread};
 
 /// A file read whole, with its reading kept beside it: a [`Document`]
 /// ([`WithReading::document`]) that hands out what a document doesn't hold.
-/// Made by [`WithReading::new`], which opens the file as
-/// [`Reading::open_with`] opens it and makes its document at once
-/// ([`Reading::to_document`]), so that the document is the whole read,
-/// [`read_opened`](super::read_opened)'s of the same bytes, whatever is
-/// asked of the reading after.
+/// Made by [`WithReading::new`], which opens the file as [`Reading::open`]
+/// opens it and makes its document at once ([`Reading::to_document`]), so
+/// that the document is the whole read, [`document`](super::document)'s of
+/// the same bytes under the same options, whatever is asked of the reading
+/// after.
 ///
 /// As a [`Source`] it answers as its document does, in every answer but
 /// one, which a document alone doesn't give: a stream's data decoded
@@ -35,13 +36,13 @@ use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, 
 ///
 /// ```
 /// use pdf_structure::Source;
-/// use pdf_structure::bytes::{Options, WithReading, read_opened};
 /// use pdf_structure::pdf_objects::ObjectId;
+/// use pdf_structure::read::{self, Options, WithReading};
 ///
 /// let file = b"%PDF-1.7\n1 0 obj\n<< /Length 6 >>\nstream\nabcdef\nendstream\nendobj\n\
 ///     trailer\n<< /Size 2 >>\n%%EOF\n";
-/// let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
-/// assert_eq!(*read.document(), read_opened(file, &[]));
+/// let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
+/// assert_eq!(*read.document(), read::document(file, &Options::DEFAULT));
 /// assert_eq!(read.decoded_within(ObjectId::new(1, 0), 6).unwrap().unwrap(), b"abcdef");
 /// // Its document alone gives none.
 /// assert!(read.document().decoded_within(ObjectId::new(1, 0), 6).is_none());
@@ -60,32 +61,35 @@ impl<S> fmt::Debug for WithReading<S> {
 }
 
 impl<S: ByteSource> WithReading<S> {
-    /// The file `source` holds, opened by `passwords` under `options`, as
-    /// [`Reading::open_with`] opens it, and read whole beside its reading, as
-    /// [`Reading::to_document`] reads it. It fails only when the source
-    /// doesn't give the bytes asked of it ([`Error::Io`]): in memory, never.
-    pub fn new(
-        source: S,
-        passwords: &[Password],
-        options: &Options,
-    ) -> Result<WithReading<S>, Error> {
-        let reading = Reading::open_with(source, passwords, options)?;
+    /// The file `source` holds, opened under `options`, by the passwords
+    /// they give where it's encrypted, as [`Reading::open`] opens it, and
+    /// read whole beside its reading, as [`Reading::to_document`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// It fails only when the source doesn't give the bytes asked of it
+    /// ([`Error::Io`]): in memory, never.
+    pub fn new(source: S, options: &Options<'_>) -> Result<WithReading<S>, Error> {
+        let reading = Reading::open(source, options)?;
         let document = reading.to_document()?;
         Ok(WithReading { reading, document })
     }
 
     /// The reading kept beside the document, which hands out what the
     /// document doesn't hold: a stream's data, and the bytes at a span.
-    pub fn reading(&self) -> &Reading<S> {
+    #[must_use]
+    pub const fn reading(&self) -> &Reading<S> {
         &self.reading
     }
 
     /// The document read whole, which gives no stream's data.
-    pub fn document(&self) -> &Document {
+    #[must_use]
+    pub const fn document(&self) -> &Document {
         &self.document
     }
 
     /// The document, the reading dropped.
+    #[must_use]
     pub fn into_document(self) -> Document {
         self.document
     }
@@ -111,7 +115,7 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o WithReading<S> {
 /// doesn't read it again: within the limit asked for or
 /// [`Limits::stream`](super::Limits::stream), whichever is less, owned. An
 /// object stream's too, decoded anew: what the document holds of one
-/// ([`Document::decoded`]) is what the whole read decoded, under the
+/// ([`Document::held`]) is what the whole read decoded, under the
 /// reading's budget and with what didn't decrypt cleanly kept, which the
 /// objects in it are read from, not the stream's data as a reading gives it
 /// at the limit asked. Where it gives none, it says why as a reading does,
@@ -126,7 +130,7 @@ impl<S: ByteSource> Streams for WithReading<S> {
         let object = Source::get(&self.document, id);
         let object = Some(object.as_ref().map(|o| *o));
         let decoded = self.reading.decoded_within_as(id, object, limit);
-        lenient(id, decoded, self.reading.capped_at(limit)).map(Cow::Owned)
+        viewed(id, decoded, self.reading.capped_at(limit)).map(Cow::Owned)
     }
 }
 
@@ -148,8 +152,8 @@ impl<S: ByteSource> Source for WithReading<S> {
         Source::header_version(&self.document)
     }
 
-    fn warnings(&self) -> Cow<'_, [Warning]> {
-        Source::warnings(&self.document)
+    fn faults(&self) -> Cow<'_, [(Place, Fault)]> {
+        Source::faults(&self.document)
     }
 
     fn size(&self) -> Option<usize> {
@@ -189,10 +193,11 @@ impl<S: ByteSource> Source for WithReading<S> {
 
 #[cfg(test)]
 mod tests {
+    use pdf_crypt::Password;
     use pdf_objects::Why;
 
-    use super::super::lazy::{files, fixtures};
-    use super::super::{STREAM, read_opened, shown};
+    use super::super::lazy::files;
+    use super::super::{STREAM, document, shown};
     use super::*;
 
     /// What a source answers of each object it lists, and of one it
@@ -205,7 +210,7 @@ mod tests {
         objects: Vec<Result<&'s Object, Unread>>,
         trailer: &'s Trailer,
         header: Option<Version>,
-        warnings: Cow<'s, [Warning]>,
+        faults: Cow<'s, [(Place, Fault)]>,
         size: Option<usize>,
         metadata: Option<Cow<'s, [u8]>>,
         records: Vec<Option<&'s Record>>,
@@ -226,7 +231,7 @@ mod tests {
             objects: asked.iter().map(|&id| source.get(id)).collect(),
             trailer: source.trailer(),
             header: source.header_version(),
-            warnings: source.warnings(),
+            faults: source.faults(),
             size: source.size(),
             metadata: source.metadata(),
             records: asked.iter().map(|&id| source.record(id)).collect(),
@@ -247,7 +252,7 @@ mod tests {
     }
 
     /// Each test file, the fixtures qpdf wrote among them, opened: its
-    /// document is the whole read, as [`read_opened`] reads it, and taken,
+    /// document is the whole read, as [`document`] reads it, and taken,
     /// it's the same; as a source, every answer is its document's; and each
     /// object's data decoded, at the stream's limit and cut short of it, is
     /// what a reading of the file gives, where the document gives none. As
@@ -256,19 +261,39 @@ mod tests {
     /// object stream it holds decoded whole, and of what isn't a stream; of
     /// any other stream, the document alone gives none, detached. A
     /// reading of the file, as a source, answers as the file opened, once
-    /// it has read every object, its warnings in the same order; before, it
+    /// it has read every object, its faults in the same order; before, it
     /// holds no object stream's data, and has none in the clear, until it
     /// reads an object in it.
     #[test]
     fn an_opened_file_answers_as_its_document_and_decodes_as_its_reading() {
         let (mut streams, mut held, mut lent, mut decoded) = (0, 0, 0, 0);
         for (name, file, passwords) in files() {
-            let opened = WithReading::new(&file[..], &passwords, &Options::DEFAULT).unwrap();
-            let whole = read_opened(&file, &passwords);
+            let opened = WithReading::new(
+                &file[..],
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
+            let whole = document(
+                &file,
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            );
             assert_eq!(*opened.document(), whole, "{name}");
             assert_eq!(answers(&opened), answers(opened.document()), "{name}");
             let alone = opened.document();
-            let reading = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
+            let reading = Reading::open(
+                &file[..],
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
             let containers: Vec<ObjectId> = (alone.decoded.keys())
                 .chain(&alone.in_the_clear)
                 .copied()
@@ -330,8 +355,8 @@ mod tests {
             }
             assert_eq!(opened.into_document(), whole, "{name}");
         }
-        // The writer's files, and qpdf's where they are.
-        let floor = if fixtures() { 50 } else { 30 };
+        // The writer's files, and qpdf's.
+        let floor = 50;
         assert!(streams > floor, "{streams}");
         assert!(held > 0, "{held}");
         assert!(lent > 0, "{lent}");
@@ -353,7 +378,7 @@ mod tests {
         let stream = ObjectId::new(4, 0);
         let (mut objects, _) = super::super::tests::objects_2_and_3();
         objects.resize(200, b' ');
-        let zlib = crate::fixture::zlib(&objects);
+        let zlib = pdf_fixtures::fixture::zlib(&objects);
         let flate = " /Filter /FlateDecode";
         let plain = super::super::tests::filtered(false, flate, &zlib);
         let corrupt = super::super::tests::filtered(false, flate, &zlib[..zlib.len() - 20]);
@@ -401,8 +426,22 @@ mod tests {
             ),
         ];
         for (what, file, passwords, options, whole) in cases {
-            let opened = WithReading::new(file, passwords, &options).unwrap();
-            let reading = Reading::open_with(file, passwords, &options).unwrap();
+            let opened = WithReading::new(
+                file,
+                &Options {
+                    passwords,
+                    ..options
+                },
+            )
+            .unwrap();
+            let reading = Reading::open(
+                file,
+                &Options {
+                    passwords,
+                    ..options
+                },
+            )
+            .unwrap();
             let alone = opened.document();
             assert!(alone.decoded.contains_key(&stream), "{what}: held");
             assert!(alone.get(ObjectId::new(2, 0)).is_ok(), "{what}: 2 0 R read");
@@ -433,7 +472,14 @@ mod tests {
         // budget not its, what decoded of the corrupt one, and none of what
         // didn't decrypt cleanly.
         let given = |file: &[u8], passwords: &[Password], options: &Options| {
-            let opened = WithReading::new(file, passwords, options).unwrap();
+            let opened = WithReading::new(
+                file,
+                &Options {
+                    passwords,
+                    ..*options
+                },
+            )
+            .unwrap();
             viewed(Streams::decoded(&opened, stream, 1000)).map(|data| data.len())
         };
         assert_eq!(given(&plain, &[], &Options::DEFAULT), Ok(200));

@@ -11,7 +11,7 @@
 #![no_main]
 
 use pdf_color::fuzz::{counts, over};
-use pdf_structure::bytes::Reading;
+use pdf_structure::read::Reading;
 use pdf_structure::fuzz::options;
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
@@ -20,6 +20,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         let read = over(&reading, reading.trailer().dict());
         let document = reading.to_document();
         let document = document.expect("bytes in memory make a document");
-        assert_eq!(over(&document, document.trailer.dict()), read);
+        assert_eq!(over(&document, document.trailer().dict()), read);
     }
 });

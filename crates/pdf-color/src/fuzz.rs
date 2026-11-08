@@ -536,9 +536,9 @@ pub fn fixtures() -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_objects::dict;
-    use pdf_structure::bytes::{Options, Reading};
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_structure::read::{Options, Reading};
 
     use super::*;
 
@@ -651,7 +651,7 @@ mod tests {
         let document = reading
             .to_document()
             .expect("bytes in memory make a document");
-        assert_eq!(over(&document, document.trailer.dict()), read);
+        assert_eq!(over(&document, document.trailer().dict()), read);
         let named = read
             .iter()
             .filter_map(|counted| counted.named.as_ref().ok()?.as_ref());

@@ -291,7 +291,7 @@ mod tests {
     //! what it refers to that a later revision wrote over or freed, read as
     //! that revision had it, within the caps, and counted where it isn't.
 
-    use pdf_structure::fixture;
+    use pdf_fixtures::fixture;
 
     use super::*;
     use crate::bytes;
@@ -307,7 +307,7 @@ mod tests {
     /// `file` read beside its reading under `options`, and checked so and
     /// as its document alone, every object held as merged.
     fn both(file: &[u8], options: &bytes::Options) -> (Report, Report) {
-        let read = WithReading::new(file, &[], options).unwrap();
+        let read = WithReading::new(file, options).unwrap();
         let hold = Hold::All(Made::Merged);
         let beside = check_with_reading(&read, &hold, &Options::default());
         (beside, check(read.document(), &hold, &Options::default()))
@@ -466,9 +466,9 @@ mod tests {
         let trailer = format!("/Size 6 /Root 1 0 R /Info 5 0 R /Prev {first}");
         let second = file.table(&[5], &trailer);
         file.end(second);
-        let read = WithReading::new(&file.out[..], &[], &bytes::Options::DEFAULT).unwrap();
-        assert_eq!(read.document().revisions.len(), 2);
-        assert_eq!(read.document().revisions[0].end, None);
+        let read = WithReading::new(&file.out[..], &bytes::Options::DEFAULT).unwrap();
+        assert_eq!(read.document().revisions().len(), 2);
+        assert_eq!(read.document().revisions()[0].end, None);
         let (beside, alone) = both(&file.out, &bytes::Options::DEFAULT);
         let counted = ("Type", WRITTEN_OVER, "FileTrailer", "Info", 1);
         assert_eq!(not_made(&beside), [counted], "{beside}");
@@ -505,8 +505,8 @@ mod tests {
     #[test]
     fn at_most_256_earlier_revisions_are_read() {
         let file = many(257);
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
-        assert_eq!(read.document().revisions.len(), 258);
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        assert_eq!(read.document().revisions().len(), 258);
         let readings = Readings::new(&read);
         for revision in (2..=257).rev() {
             assert!(
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn a_revisions_reading_is_dropped_once_its_walk_is_over_and_never_opened_again() {
         let file = many(257);
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let readings = Readings::new(&read);
         let info = readings.earlier(257, ObjectId::new(5, 0)).unwrap();
         assert!(matches!(*readings.each[256].borrow(), Opened::Open(_)));
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn a_check_drops_each_earlier_revisions_reading_after_its_walk() {
         let file = info_again("[1 2]", "<< /Title (New) >>");
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let readings = Readings::new(&read);
         let hold = Hold::All(Made::Merged);
         let report = check::check_in(&read, Some(&readings), &hold, &Options::default());
@@ -611,9 +611,9 @@ mod tests {
         let file = many(5);
         let mut options = bytes::Options::DEFAULT;
         options.limits.entries = Some(9);
-        let read = WithReading::new(&file[..], &[], &options).unwrap();
+        let read = WithReading::new(&file[..], &options).unwrap();
         assert_eq!(read.reading().entries().count(), 9);
-        assert_eq!(read.document().revisions.len(), 6);
+        assert_eq!(read.document().revisions().len(), 6);
         let readings = Readings::new(&read);
         assert_eq!(readings.most, 36);
         for revision in (2..=5).rev() {
@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(not_made(&beside), counted(1), "{beside}");
         assert_eq!(not_made(&alone), counted(5), "{alone}");
         // The file's reading's default: as many as it has bytes, or 2^20.
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         assert_eq!(Readings::new(&read).most, 4 << 20);
     }
 
@@ -655,7 +655,7 @@ mod tests {
         let mut options = bytes::Options::DEFAULT;
         // A share of the rows and 8 bytes more, short of the data.
         options.limits.budget = SHARE * (rows + 8);
-        let read = WithReading::new(&file.out[..], &[], &options).unwrap();
+        let read = WithReading::new(&file.out[..], &options).unwrap();
         let readings = Readings::new(&read);
         assert_eq!(readings.limits.budget, rows + 8);
         assert!(readings.earlier(1, ObjectId::new(5, 0)).is_none());
@@ -723,13 +723,15 @@ mod tests {
             .as_bytes(),
         );
         let user = [Password("user")];
-        let read = WithReading::new(&file[..], &user, &bytes::Options::DEFAULT).unwrap();
+        let mut options = bytes::Options::DEFAULT;
+        options.passwords = &user;
+        let read = WithReading::new(&file[..], &options).unwrap();
         assert!(
-            read.document().warnings.is_empty(),
+            read.document().faults().is_empty(),
             "{:?}",
-            read.document().warnings
+            read.document().faults()
         );
-        assert_eq!(read.document().revisions.len(), 2);
+        assert_eq!(read.document().revisions().len(), 2);
         let readings = Readings::new(&read);
         let info = readings
             .earlier(1, ObjectId::new(5, 0))
@@ -800,9 +802,9 @@ mod tests {
         let (file, again) = written(prev);
         assert_eq!(again, end);
         assert!(prev < file.len());
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         assert_eq!(
-            read.document().revisions[0].end,
+            read.document().revisions()[0].end,
             RevisionEnd::new(end - 1, end)
         );
         let value = format!("{prev} (not one of fn:Eval((@Prev>=0) && (@Prev<=fn:FileSize())))");

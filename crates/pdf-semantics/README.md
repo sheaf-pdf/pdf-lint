@@ -84,7 +84,7 @@ Over a file, a walk takes the reading or the document by reference, which says w
 ```rust
 use pdf_semantics::pages::pages;
 use pdf_semantics::{Limits, ObjectId, Rules, catalog, xmp};
-use pdf_structure::bytes::{Options, Reading};
+use pdf_structure::read::{Options, Reading};
 
 let file = b"%PDF-1.7\n\
     1 0 obj\n<< /Pages 2 0 R >>\nendobj\n\

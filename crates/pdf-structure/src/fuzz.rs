@@ -6,7 +6,8 @@
 //! point the input chooses, it's the reading's whole read after; read by
 //! position, a window at a time from a first window the input chooses, it's
 //! the whole read, and each stream's data and decoded data are as in
-//! memory; pruned, it reaches what it did, and an object added to it is at
+//! memory; read with no faults looked for, it's the same read, and keeps
+//! none; pruned, it reaches what it did, and an object added to it is at
 //! a number none held; and so are its revision before an incremental
 //! update, and the file opened by an owner's password; a resolver says of
 //! each object what `get` says, in memory and by position; each revision
@@ -39,10 +40,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use pdf_crypt::Password;
 use pdf_crypt::rand_core::{TryCryptoRng, TryRng};
 use pdf_objects::Resolve;
+use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 use pdf_objects::serialize;
 
-use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry, shown};
+use crate::read::{ByteSource, Error, Fault, Faults, Options, Reading, Whole, XrefEntry, shown};
 use crate::source::{Document, Encryption, Origin, Source, Unread, XrefKind};
 use crate::write::{self, Base, Body, Encryptor, Pack};
 
@@ -56,7 +58,7 @@ const WRONG: [Password<'static>; 2] = [Password("wrong"), Password("also wrong")
 /// The limits the fuzz target reads under: a stream decodes to at most
 /// 1 MiB, and a reading's streams to 4 MiB, so that a run tries more
 /// inputs.
-pub fn options() -> Options {
+pub fn options() -> Options<'static> {
     let mut options = Options::DEFAULT;
     options.limits.stream = 1 << 20;
     options.limits.budget = 4 << 20;
@@ -160,44 +162,53 @@ impl ByteSource for Flipped<'_> {
     }
 }
 
-/// `source` opened as [`Reading::open_with`] opens it, but that an object
-/// read by position is first given a window to a byte past the next offset
-/// the cross-references list only when `bound`: without, a small first
-/// window reaches every read's windows.
+/// `source` opened by `passwords` under `options` as [`Reading::open`]
+/// opens it, but that an object read by position is first given a window
+/// to a byte past the next offset the cross-references list only when
+/// `bound`: without, a small first window reaches every read's windows.
 pub fn open<S: ByteSource>(
     source: S,
     passwords: &[Password],
     options: &Options,
     bound: bool,
 ) -> Result<Reading<S>, Error> {
-    Reading::open_by(source, passwords, options, bound)
+    Reading::open_by(
+        source,
+        &Options {
+            passwords,
+            ..*options
+        },
+        bound,
+    )
 }
 
 /// The fuzz target's body: `data`'s first two bytes choose how the file
 /// after them is read, and the rest is the file. Read whole under
 /// [`options`], it's the same twice, and every place the reading gives is
 /// inside what was read: each object's, each value's and key's in it, each
-/// stream's data's, the trailer's and each warning's, in the file or in
+/// stream's data's, the trailer's and each fault's, in the file or in
 /// the decoded data of the object stream it names, which the reading
-/// keeps. Read on demand, its objects asked for in an order the choice's
-/// next bits give, some read unkept first, each the object and record it's
-/// kept as, it's the whole read, when neither reading's decoding reached
-/// the budget, and made a document with the reading kept, at a point the
-/// choice's bits from the eleventh give, it's the reading's whole read
-/// after. Read by position, through [`Counted`], its first window and
-/// whether an object's reaches the next listed offset as the choice's
-/// bits from the fourth give, it's the whole read, and each stream's data
-/// and decoded data are as in memory. Pruned, what its trailer reaches is
-/// the same, and every object it keeps is among it, and an object added
-/// is at a number no entry held (`pruned`). When the file has an
-/// incremental update, so is the revision before it ([`Options::section`]).
-/// Each revision ends past a `%%EOF` and its line's end, and its bytes up
-/// to there read as a file of their own the same twice and by position as
-/// in memory (`revisions`). And with the choice's lowest bit set, so is the
-/// file opened by the owner's password `owner`, and its revision before an
-/// update, and so are its revisions, and the file opened by a wrong
-/// password, then unlocked by the owner's (`unlocked`). Panics on a broken
-/// promise.
+/// keeps. Read with no faults looked for ([`Options::faults`]), in memory
+/// and by position, it's the same read, every object, record and decoded
+/// stream, and keeps no fault. Read on demand, its objects asked for in an
+/// order the choice's next bits give, some read unkept first, each the
+/// object and record it's kept as, it's the whole read, when neither
+/// reading's decoding reached the budget, and made a document with the
+/// reading kept, at a point the choice's bits from the eleventh give, it's
+/// the reading's whole read after. Read by position, through [`Counted`],
+/// its first window and whether an object's reaches the next listed offset
+/// as the choice's bits from the fourth give, it's the whole read, and each
+/// stream's data and decoded data are as in memory. Pruned, what its
+/// trailer reaches is the same, and every object it keeps is among it, and
+/// an object added is at a number no entry held (`pruned`). When the file
+/// has an incremental update, so is the revision before it
+/// ([`Options::section`]). Each revision ends past a `%%EOF` and its line's
+/// end, and its bytes up to there read as a file of their own the same
+/// twice and by position as in memory (`revisions`). And with the choice's
+/// lowest bit set, so is the file opened by the owner's password `owner`,
+/// and its revision before an update, and so are its revisions, and the
+/// file opened by a wrong password, then unlocked by the owner's
+/// (`unlocked`). Panics on a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
@@ -223,7 +234,15 @@ pub fn read_file(data: &[u8]) {
 /// makes, and a prefix can read another chain, as a `startxref` that gives
 /// another section's offset makes.
 fn revisions(file: &[u8], passwords: &[Password]) {
-    let reading = Reading::in_memory(file, passwords, &options(), true, None);
+    let reading = Reading::in_memory(
+        file,
+        &Options {
+            passwords,
+            ..options()
+        },
+        true,
+        None,
+    );
     let source = Counted::new(file, 1 + file.len() / 3);
     let by_position = open(&source, passwords, &options(), true).expect("it's in memory");
     let whole = |len: usize| {
@@ -257,12 +276,12 @@ fn revisions(file: &[u8], passwords: &[Password]) {
 /// in it, and what's in use at a number of the sections the reader's when it read them
 /// and nothing's newer.
 fn sections(file: &[u8]) {
-    let reading = Reading::in_memory(file, &[], &options(), true, None);
+    let reading = Reading::in_memory(file, &options(), true, None);
     let read = reading.sections().expect("it's in memory");
     assert_eq!(reading.sections().expect("it's in memory"), read);
     let first = reading.first_object().expect("it's in memory");
     let source = Counted::new(file, 1 + file.len() / 3);
-    let by_position = Reading::open_by(&source, &[], &options(), true).expect("it's in memory");
+    let by_position = Reading::open_by(&source, &options(), true).expect("it's in memory");
     assert_eq!(by_position.sections().expect("it's in memory"), read);
     assert_eq!(by_position.first_object().expect("it's in memory"), first);
     let mut limits = options().limits;
@@ -270,7 +289,7 @@ fn sections(file: &[u8]) {
     limits.entries = Some(4);
     let mut small = options();
     small.limits = limits;
-    let reading = Reading::in_memory(file, &[], &small, true, None);
+    let reading = Reading::in_memory(file, &small, true, None);
     let capped = reading.sections().expect("it's in memory");
     assert!(capped.sections.len() <= 1);
     assert!(
@@ -290,15 +309,31 @@ fn sections(file: &[u8]) {
 /// `file` read whole under [`options`], opened by `passwords`, as of the
 /// section at `section` when there's one.
 fn whole(file: &[u8], passwords: &[Password], section: Option<usize>) -> Whole {
+    whole_as(file, passwords, section, true)
+}
+
+/// [`whole`], with faults looked for or not, as `faults` says.
+fn whole_as(file: &[u8], passwords: &[Password], section: Option<usize>, faults: bool) -> Whole {
     let mut options = options();
     options.section = section;
-    Reading::in_memory(file, passwords, &options, true, None).whole(None)
+    options.faults = if faults { Faults::Kept } else { Faults::Off };
+    Reading::in_memory(
+        file,
+        &Options {
+            passwords,
+            ..options
+        },
+        true,
+        None,
+    )
+    .whole(None)
 }
 
 /// The file read whole twice, the same each time, every place it gives
 /// inside `file`'s bytes or what it decoded, its newest revision's trailer
-/// the trailer, and read on demand in the order `choice` gives, the same;
-/// and when the file has an update, the same of the revision before it.
+/// the trailer, read with no faults looked for the same but that it keeps
+/// none, and read on demand in the order `choice` gives, the same; and when
+/// the file has an update, the same of the revision before it.
 fn alike(file: &[u8], passwords: &[Password], choice: u16) {
     let read = whole(file, passwords, None);
     let doc = &read.document;
@@ -307,6 +342,7 @@ fn alike(file: &[u8], passwords: &[Password], choice: u16) {
         whole(file, passwords, None).document,
         "a reading is the same twice"
     );
+    quiet(whole_as(file, passwords, None, false).document, doc);
     within(file, doc);
     if let Some(newest) = doc.revisions.last() {
         assert_eq!(
@@ -333,6 +369,22 @@ fn alike(file: &[u8], passwords: &[Password], choice: u16) {
     }
 }
 
+/// `read`, a reading with no faults looked for, is `doc`, the same file's
+/// with them, but that it keeps none: every object, record, trailer,
+/// revision, decoded object stream and the rest the same.
+fn quiet(mut read: Document, doc: &Document) {
+    assert_eq!(
+        read.faults(),
+        [],
+        "a reading looking for no faults keeps none"
+    );
+    read.faults.clone_from(&doc.faults);
+    assert_eq!(
+        read, *doc,
+        "a reading is the same whether faults are looked for or not"
+    );
+}
+
 /// The file, as of `section`, opened by `passwords`, read by position
 /// through [`Counted`], its first window 1 to 64 bytes as `choice`'s bits
 /// from the fifth give, and an object's first window to the next listed
@@ -356,6 +408,15 @@ fn by_position(
     assert_eq!(read, *doc, "a reading by position is the whole read");
     let reading = open(&source, passwords, &options, choice & 8 != 0);
     said_as_got(&reading.expect("it opened"));
+    // And with no faults looked for, which leaves out the reads made only
+    // to say one, the file's end read back among them.
+    options.faults = Faults::Off;
+    let read = open(&source, passwords, &options, choice & 8 != 0)
+        .and_then(|reading| reading.into_document());
+    quiet(
+        read.expect("bytes in memory are read by position without fail"),
+        doc,
+    );
 }
 
 /// What a reading's resolver says of each object is what [`Reading::get`]
@@ -403,7 +464,15 @@ fn said_of_document(doc: &Document) {
 /// it's borrowed, a borrow of the file's bytes.
 fn streams(file: &[u8], passwords: &[Password], choice: u16) {
     let options = options();
-    let reading = Reading::in_memory(file, passwords, &options, true, None);
+    let reading = Reading::in_memory(
+        file,
+        &Options {
+            passwords,
+            ..options
+        },
+        true,
+        None,
+    );
     let first = 1 + usize::from((choice >> 4) & 63);
     let source = Counted::new(file, first);
     let by_position = open(&source, passwords, &options, choice & 8 != 0)
@@ -423,8 +492,8 @@ fn streams(file: &[u8], passwords: &[Password], choice: u16) {
             shown(read.map(Cow::into_owned)),
             "{id:?}'s data by position"
         );
-        let decoded = shown(reading.decoded(id));
-        let read = shown(by_position.decoded(id));
+        let decoded = shown(reading.decoded_within(id, usize::MAX));
+        let read = shown(by_position.decoded_within(id, usize::MAX));
         assert_eq!(decoded, read, "{id:?} decoded by position");
     }
 }
@@ -446,7 +515,15 @@ fn on_demand(
 ) {
     let mut options = options();
     options.section = section;
-    let reading = Reading::in_memory(file, passwords, &options, true, None);
+    let reading = Reading::in_memory(
+        file,
+        &Options {
+            passwords,
+            ..options
+        },
+        true,
+        None,
+    );
     let ids = ordered(&reading, choice);
     let made = ids.len() * usize::from((choice >> 10) & 3) / 3;
     let mut document = None;
@@ -516,13 +593,20 @@ fn ordered<S: ByteSource>(reading: &Reading<S>, choice: u16) -> Vec<ObjectId> {
 /// wrong password, which gives it back as it was, keeping what it had read
 /// and said; then by the owner's password `owner`. Read on demand in that
 /// order, it's then the file opened by the owner's password
-/// ([`Reading::open_with`]): each object, its record and the failure to
-/// read one, what it warned of, and made a document, the whole read; but
+/// ([`Options::passwords`]): each object, its record and the failure to
+/// read one, what it told of, and made a document, the whole read; but
 /// where the wrong password opened it, which unlocking leaves as it was.
 fn unlocked(file: &[u8], choice: u16) {
     let options = options();
     let in_memory = "bytes in memory are read without fail";
-    let locked = Reading::open_with(file, &WRONG[..1], &options).expect(in_memory);
+    let locked = Reading::open(
+        file,
+        &Options {
+            passwords: &WRONG[..1],
+            ..options
+        },
+    )
+    .expect(in_memory);
     let ids = ordered(&locked, choice);
     let asked = ids.len() * usize::from((choice >> 10) & 3) / 3;
     for &id in &ids[..asked] {
@@ -548,7 +632,14 @@ fn unlocked(file: &[u8], choice: u16) {
     }
     // The owner's password has one encoding, so its index is the
     // password's.
-    let by_owner = Reading::open_with(file, &[OWNER], &options).expect(in_memory);
+    let by_owner = Reading::open(
+        file,
+        &Options {
+            passwords: &[OWNER],
+            ..options
+        },
+    )
+    .expect(in_memory);
     for &id in &ids {
         let got = |reading: &Reading<&[u8]>| match reading.get(id) {
             Ok(object) => Ok((object.clone(), reading.record(id).cloned())),
@@ -557,27 +648,20 @@ fn unlocked(file: &[u8], choice: u16) {
         assert_eq!(got(&unlocked), got(&by_owner), "{id:?} unlocked");
     }
     assert_eq!(unlocked.encryption(), by_owner.encryption(), "unlocked");
-    assert_eq!(
-        unlocked.warnings(),
-        by_owner.warnings(),
-        "what's said unlocked"
-    );
+    assert_eq!(unlocked.faults(), by_owner.faults(), "what's said unlocked");
     let documents = [unlocked, by_owner].map(|reading| reading.into_document().expect(in_memory));
     assert_eq!(documents[0], documents[1], "a reading unlocked, read whole");
 }
 
-/// What `reading` keeps: each object's record, by number, and its
-/// warnings.
-fn kept<S: ByteSource>(
-    reading: &Reading<S>,
-) -> (
-    Vec<(ObjectId, crate::source::Record)>,
-    Vec<crate::source::Warning>,
-) {
+/// What a reading keeps: each object's record, by number, and its faults.
+type Kept = (Vec<(ObjectId, crate::source::Record)>, Vec<(Place, Fault)>);
+
+/// What `reading` keeps.
+fn kept<S: ByteSource>(reading: &Reading<S>) -> Kept {
     let records = (reading.ids())
         .filter_map(|id| Some((id, reading.record(id)?.clone())))
         .collect();
-    (records, reading.warnings())
+    (records, reading.faults())
 }
 
 /// Checks that `doc`, pruned, reaches what it reached from its trailer, in
@@ -624,7 +708,7 @@ fn pruned(doc: &Document) {
 /// Checks that every place `doc` gives is inside what was read, the file
 /// or the decoded data of the object stream it names: each object's, and
 /// each value's and key's in it, each stream's data's, the trailer's, each
-/// revision's trailer's, and each warning's.
+/// revision's trailer's, and each fault's.
 fn within(file: &[u8], doc: &Document) {
     let inside = |at: Span, of: Option<ObjectId>| {
         let len = match at.stream {
@@ -667,9 +751,9 @@ fn within(file: &[u8], doc: &Document) {
             }
         }
     }
-    for warning in &doc.warnings {
-        if let Some(at) = warning.at {
-            inside(at, warning.object);
+    for (place, _) in doc.faults() {
+        if let Some(at) = place.at {
+            inside(at, place.object);
         }
     }
 }
@@ -706,7 +790,7 @@ const LISTED: u32 = 1 << 16;
 /// the file by position ([`Flipped`]), made a document, a byte of an
 /// object read at an offset flipped after, the one those bits pick among
 /// their bytes but their streams' data, written whole as before. Neither
-/// panics. Where the reading read soundly, with nothing to warn of, and a
+/// panics. Where the reading read soundly, with no fault told, and a
 /// write wrote, its file read again under the same limits, by its
 /// password, is sound and holds every object the document did, at the
 /// number the renumbering gives it, its references as it names them, as
@@ -856,13 +940,19 @@ fn compared(data: &[u8]) -> [bool; 3] {
         0 => Password(""),
         _ => OWNER,
     };
-    let Ok(reading) = Reading::open_with(file, &[password], &options()) else {
+    let Ok(reading) = Reading::open(
+        file,
+        &Options {
+            passwords: &[password],
+            ..options()
+        },
+    ) else {
         return [false; 3];
     };
     let Ok(mut doc) = reading.to_document() else {
         return [false; 3];
     };
-    let sound = reading.trailer().unwritten.is_none() && reading.warnings().is_empty();
+    let sound = reading.trailer().unwritten.is_none() && reading.faults().is_empty();
     if byte & 0x80 != 0 {
         doc = adopted(file, password, &reading, doc, sound);
     }
@@ -924,7 +1014,14 @@ fn adopted(
     doc: Document,
     sound: bool,
 ) -> Document {
-    let whole = Reading::open_with(file, &[password], &options()).and_then(Reading::into_document);
+    let whole = Reading::open(
+        file,
+        &Options {
+            passwords: &[password],
+            ..options()
+        },
+    )
+    .and_then(Reading::into_document);
     let Ok(mut whole) = whole else {
         return doc;
     };
@@ -1008,13 +1105,19 @@ fn flipped(
     to: &dyn Fn(ObjectId) -> Option<ObjectId>,
 ) -> bool {
     let source = Flipped::new(file, 64);
-    let Ok(reading) = Reading::open_with(&source, &[password], &self::options()) else {
+    let Ok(reading) = Reading::open(
+        &source,
+        &Options {
+            passwords: &[password],
+            ..self::options()
+        },
+    ) else {
         return false;
     };
     let Ok(doc) = reading.to_document() else {
         return false;
     };
-    if reading.trailer().unwritten.is_some() || !reading.warnings().is_empty() {
+    if reading.trailer().unwritten.is_some() || !reading.faults().is_empty() {
         return false;
     }
     // Each object's bytes read at an offset, but its stream's data.
@@ -1065,10 +1168,12 @@ fn flipped(
 /// `encryptor`, its own, and under the renumbering the input's third byte
 /// gives ([`Renumbering::of_update`]): it writes that one, and what the
 /// renumbering moves or names otherwise, passing over the rest, which the
-/// file holds. When the reading was `sound` and the update wrote, the file
-/// read again by `password` is sound, and the same objects, each at the
-/// number the renumbering gives it, but that one with its key: whether it
-/// was.
+/// file holds. Each number is given once, the changed one in place of the
+/// one as read, so none is refused as given where one passed over is
+/// ([`write::Error::Twice`]). When the reading was `sound` and the update
+/// wrote, the file read again by `password` is sound, and the same
+/// objects, each at the number the renumbering gives it, but that one with
+/// its key: whether it was.
 fn updated(
     file: &[u8],
     doc: &Document,
@@ -1130,15 +1235,22 @@ fn updated(
 
 /// `file`, written, read again under [`options`] by `password`: sound.
 fn read_back<'f>(file: &'f [u8], password: Password<'_>) -> Reading<&'f [u8]> {
-    let back = Reading::open_with(file, &[password], &options()).expect("in memory");
+    let back = Reading::open(
+        file,
+        &Options {
+            passwords: &[password],
+            ..options()
+        },
+    )
+    .expect("in memory");
     if back.trailer().unwritten.is_none() {
         let _ = back.to_document();
     }
     assert!(
-        back.trailer().unwritten.is_none() && back.warnings().is_empty(),
+        back.trailer().unwritten.is_none() && back.faults().is_empty(),
         "a written file reads soundly: {:?} {:?}",
         back.trailer().unwritten,
-        back.warnings()
+        back.faults()
     );
     back
 }
@@ -1272,12 +1384,12 @@ impl TryCryptoRng for Drawn<'_> {}
 #[cfg(test)]
 mod tests {
     use pdf_crypt::writer::{Kind, Settings};
+    use pdf_fixtures::fixture::{self, Body, Xref};
     use pdf_objects::dict;
     use pdf_objects::object::{Dict, Object};
 
     use super::*;
-    use crate::bytes;
-    use crate::fixture::{self, Body, Xref};
+    use crate::read;
 
     /// A small, fast generator of bytes, the same each run.
     struct Random(u64);
@@ -1540,31 +1652,53 @@ mod tests {
     /// point chosen at random.
     #[test]
     fn mutated_files_read_within_their_bytes_the_same_twice() {
-        // As written, each reads without a warning, an encrypted one opens
+        // As written, each reads without a fault, an encrypted one opens
         // by either password, and the update and the object stream are
         // read as one.
         let files = files();
         let mut encrypted = 0;
         for file in &files {
-            let doc = bytes::read(file);
+            let doc = read::document(file, &read::Options::DEFAULT);
             assert!(doc.trailer.unwritten.is_none(), "{:?}", doc.trailer);
-            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert!(doc.faults().is_empty(), "{:?}", doc.faults());
             if doc.encryption != Encryption::None {
                 encrypted += 1;
-                assert_eq!(doc.encryption, Encryption::opened(false));
-                let opened = bytes::read_opened(file, &[OWNER]).encryption;
+                assert_eq!(
+                    doc.encryption,
+                    Encryption::opened(false).permitting(pdf_crypt::Permissions::ALL)
+                );
+                let opened = read::document(
+                    file,
+                    &read::Options {
+                        passwords: &[OWNER],
+                        ..read::Options::DEFAULT
+                    },
+                )
+                .encryption;
                 let by = Some((0, pdf_crypt::Encoding::Utf8));
-                assert_eq!(opened, Encryption::opened(true).by(by));
+                assert_eq!(
+                    opened,
+                    Encryption::opened(true)
+                        .by(by)
+                        .permitting(pdf_crypt::Permissions::ALL)
+                );
                 // A wrong password leaves it locked.
-                let locked = bytes::read_opened(file, &WRONG[..1]).encryption;
+                let locked = read::document(
+                    file,
+                    &read::Options {
+                        passwords: &WRONG[..1],
+                        ..read::Options::DEFAULT
+                    },
+                )
+                .encryption;
                 assert_eq!(locked, Encryption::Locked);
             }
             read_file(&[&[1, 0][..], file].concat());
         }
         assert_eq!(encrypted, 5, "a file of each kind");
-        let doc = bytes::read(&updated());
+        let doc = read::document(&updated(), &read::Options::DEFAULT);
         assert!(doc.update.is_some(), "the update is one");
-        let doc = bytes::read(&in_an_object_stream());
+        let doc = read::document(&in_an_object_stream(), &read::Options::DEFAULT);
         let at = doc
             .get(ObjectId::new(3, 0))
             .map(|o| o.at.and_then(|at| at.stream));

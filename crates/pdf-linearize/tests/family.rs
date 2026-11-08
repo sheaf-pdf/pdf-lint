@@ -12,7 +12,7 @@ use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_objects::version::Version;
 use pdf_semantics::Rules;
 use pdf_semantics::pages::{Inheritable, Origin, pages};
-use pdf_structure::bytes::{self, Reading};
+use pdf_structure::read::{self, Reading};
 use pdf_structure::{Document, Source as _, XrefKind, write};
 
 mod written;
@@ -24,7 +24,7 @@ fn table() -> Options<'static> {
 
 /// `bytes` linearized under `options`, and what's said of it.
 fn linearized(bytes: &[u8], options: &Options<'_>) -> Result<(Vec<u8>, Linearized), Error> {
-    let reading = Reading::open(bytes, &bytes::Options::DEFAULT).map_err(Error::Read)?;
+    let reading = Reading::open(bytes, &read::Options::DEFAULT).map_err(Error::Read)?;
     let doc = reading.to_document().map_err(Error::Read)?;
     let mut out = Vec::new();
     let done = family::linearize(&mut out, &doc, None, Some(&reading), options)?;
@@ -52,7 +52,7 @@ fn at(bytes: &[u8], text: &str) -> u64 {
 
 /// A reading of `bytes`, and its document, to read back.
 fn read(bytes: &[u8]) -> (Reading<&[u8]>, Document) {
-    let reading = Reading::open(bytes, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(bytes, &read::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
     (reading, doc)
 }
@@ -81,7 +81,7 @@ fn marked(doc: &Document, text: &str) -> ObjectId {
 
 /// Each of the file's page objects, in order.
 fn page_ids(doc: &Document) -> Vec<ObjectId> {
-    let trailer = doc.trailer.dict();
+    let trailer = doc.trailer().dict();
     let catalog = dict_at(doc, trailer.get(b"Root").unwrap().as_reference().unwrap());
     let limits = pdf_semantics::Limits::DEFAULT;
     let table = pages(doc, catalog, Rules::Iso, &limits, &mut ()).unwrap();
@@ -101,7 +101,7 @@ fn a_node_above_the_root_only_a_parent_names_loses_what_it_held_too() {
     );
     for options in kinds() {
         let out = written(&bytes, &options);
-        let reading = Reading::open(&out[..], &bytes::Options::DEFAULT).unwrap();
+        let reading = Reading::open(&out[..], &read::Options::DEFAULT).unwrap();
         let mut findings = Vec::new();
         let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
         assert!(verdict.holds);
@@ -197,7 +197,7 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused() {
 
 /// `out` holds, and nothing's to be said of it.
 fn holds_clean(out: &[u8]) {
-    let reading = Reading::open(out, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(out, &read::Options::DEFAULT).unwrap();
     let mut findings = Vec::new();
     let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
     assert!(verdict.linearized && verdict.holds, "{findings:?}");
@@ -340,7 +340,7 @@ fn each_kind_reads_back_linearized_with_the_same_pages_and_objects() {
         assert_eq!(out.len() as u64, done.layout.len());
         let (reading, doc) = read(&out);
         assert!(reading.facts().linearized, "{options:?}");
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let ids = page_ids(&doc);
         assert_eq!(ids.len(), 2);
         let content = |page: ObjectId| {
@@ -369,7 +369,7 @@ fn an_inherited_attribute_is_on_each_page_and_on_no_node() {
     for options in kinds() {
         let out = written(&bytes, &options);
         let (_, doc) = read(&out);
-        let trailer = doc.trailer.dict();
+        let trailer = doc.trailer().dict();
         let catalog = dict_at(&doc, trailer.get(b"Root").unwrap().as_reference().unwrap());
         let limits = pdf_semantics::Limits::DEFAULT;
         let table = pages(&doc, catalog, Rules::Iso, &limits, &mut ()).unwrap();
@@ -929,7 +929,7 @@ fn a_root_through_a_reference_names_the_catalog_itself() {
     assert!(at(&out, "/Type /Catalog") > 0);
     let (_, doc) = read(&out);
     let root = doc
-        .trailer
+        .trailer()
         .dict()
         .get(b"Root")
         .unwrap()
@@ -946,7 +946,7 @@ fn a_length_something_else_names_is_no_part_of_its_stream_s_page() {
     let (out, done) = linearized(&built(&objects), &table()).unwrap();
     let (_, doc) = read(&out);
     let catalog = doc
-        .trailer
+        .trailer()
         .dict()
         .get(b"Root")
         .unwrap()
@@ -986,7 +986,7 @@ fn a_table_is_not_packed() {
 #[test]
 fn out_is_as_it_was_given_on_any_error_and_positions_count_from_where_it_starts() {
     let bytes = built(&two_pages(""));
-    let reading = Reading::open(&bytes[..], &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(&bytes[..], &read::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
     let mut out = b"before".to_vec();
     let done = family::linearize(&mut out, &doc, None, Some(&reading), &table()).unwrap();
@@ -1101,7 +1101,7 @@ fn the_id_keeps_its_first_string_and_hashes_the_bodies() {
         assert_eq!(first, [0xAA, 0xBB]);
         assert_eq!(second.len(), 16);
         let (_, doc) = read(&out);
-        let id = doc.trailer.dict().get(b"ID").unwrap().as_array().unwrap();
+        let id = doc.trailer().dict().get(b"ID").unwrap().as_array().unwrap();
         let string = |object: &Object| match object.value() {
             Value::String(string, _) => string.as_bytes().unwrap().to_vec(),
             _ => panic!("not a string"),
@@ -1136,15 +1136,15 @@ fn a_reference_to_no_object_is_written_null_and_the_trailer_too() {
     let out = written(&bytes, &table());
     let (_, doc) = read(&out);
     let catalog = doc
-        .trailer
+        .trailer()
         .dict()
         .get(b"Root")
         .unwrap()
         .as_reference()
         .unwrap();
     assert!(dict_at(&doc, catalog).get(b"Foo").unwrap().is_null());
-    assert!(doc.trailer.dict().get(b"Info").unwrap().is_null());
-    let font = doc.trailer.dict().get(b"Mine").unwrap().as_reference();
+    assert!(doc.trailer().dict().get(b"Info").unwrap().is_null());
+    let font = doc.trailer().dict().get(b"Mine").unwrap().as_reference();
     assert_eq!(font, Some(marked(&doc, "font")));
 }
 

@@ -20,11 +20,12 @@ use pdf_objects::serialize;
 use super::copy::{Copying, Member};
 use super::crypt::Place;
 use super::{
-    Base, Bodies, Body, Deflate, Encrypting, Encryptor, Entry, Error, MEMBERS, NUMBERS, Numbering,
+    Base, Body, Deflate, Encrypting, Encryptor, Entry, Error, Given, MEMBERS, NUMBERS, Numbering,
     Options, Pack, Packed, Parts, ReadFrom, Section, Written, bodies as read, checked,
     container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped,
     trailer_entries, usable,
 };
+use crate::phases::phase;
 use crate::source::{Document, XrefKind};
 
 /// A whole file of `bodies`, at the end of `out`: the header, at
@@ -108,6 +109,8 @@ use crate::source::{Document, XrefKind};
 /// that the objects past them read back missing, but by a reading told to
 /// take as many.
 ///
+/// # Errors
+///
 /// Refused, with nothing written ([`Error`]): a number 0 or at or past
 /// [`NUMBERS`], a body's, the encryption dictionary's or the
 /// cross-reference stream's; one given twice; a body the renumbering gives
@@ -120,6 +123,7 @@ use crate::source::{Document, XrefKind};
 /// its number, or with no `from`; a group naming a number that isn't
 /// packed, or one twice; a `from` whose source says it changed, and a copy
 /// whose bytes aren't those it was read from ([`Error::Changed`]), or
+/// aren't there to read ([`Error::Gone`], [`Error::Uncontained`]), or
 /// whose record is another reading's or another object's, or under a
 /// renumbering whose references aren't where its bytes have them
 /// ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the
@@ -134,6 +138,7 @@ pub fn full<'a>(
 ) -> Result<Written, Error> {
     let start = out.len();
     let bodies: Vec<(ObjectId, Body<'a>)> = bodies.into_iter().collect();
+    phase!(DEBUG, "full", bodies = bodies.len());
     let written = file(out, start, &bodies, trailer, encryptor, from, options);
     if written.is_err() {
         out.truncate(start);
@@ -155,10 +160,14 @@ pub fn full<'a>(
 /// `encryptor`, if any. Written under another encryption than the one
 /// `doc`'s file was read with (none, or a new one), the objects its
 /// encryption dictionary refers to are left out too. What's left out is
-/// told by the numbers of `doc`. It gives every other object of `doc`, so
-/// a renumbering ([`Options::renumber`]) that puts two at one number is
-/// refused ([`Error::WrittenTwice`]): a caller whose renumbering shares a
-/// number gives one of them through [`full`].
+/// told by the numbers of `doc`.
+///
+/// # Errors
+///
+/// As [`full`] refuses, with nothing written. It gives every other object
+/// of `doc`, so a renumbering ([`Options::renumber`]) that puts two at one
+/// number is refused ([`Error::WrittenTwice`]): a caller whose renumbering
+/// shares a number gives one of them through [`full`].
 pub fn document(
     out: &mut Vec<u8>,
     doc: &Document,
@@ -166,6 +175,7 @@ pub fn document(
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
 ) -> Result<Written, Error> {
+    phase!(DEBUG, "document");
     let trailer = doc.trailer.dict();
     let left = encryption_objects(doc, encryptor);
     let bodies = read(doc).filter(|(id, body)| !left_out(body.object()) && !left.contains(id));
@@ -176,6 +186,7 @@ pub fn document(
 /// members are written anew, on their own or in the write's object
 /// streams), a cross-reference stream or a linearization dictionary, as
 /// [`document`] leaves them, and a caller laying a file out itself does.
+#[must_use]
 pub fn left_out(obj: &Object) -> bool {
     match obj.value() {
         Value::Stream(s) => s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"),
@@ -191,6 +202,7 @@ pub fn left_out(obj: &Object) -> bool {
 /// values refer to, as the reader reads them before it has a key (not
 /// followed further). What [`document`] leaves out by number, and a caller
 /// laying a file out itself does.
+#[must_use]
 pub fn encryption_objects(doc: &Document, encryptor: Option<&Encryptor>) -> HashSet<ObjectId> {
     let Some(encrypt) = doc.trailer.dict().get(b"Encrypt") else {
         return HashSet::new();
@@ -290,7 +302,7 @@ fn file(
     }
     // What the encryptor resolves references by, where there's one: the
     // bodies and the reading, by the numbers they're given at.
-    let resolve = encryptor.map(|_| Bodies::new(bodies, from));
+    let resolve = encryptor.map(|_| Given::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
         (Some(e), Some(resolve)) => Some(e.encrypting_at(trailer, resolve, to)?),
         _ => None,
@@ -583,6 +595,7 @@ pub(super) fn containers(
     threads: usize,
     stop: Option<&AtomicBool>,
 ) -> Result<Vec<Option<Vec<u8>>>, Error> {
+    phase!(DEBUG, "containers", groups = groups.len());
     let build = |part: &[(u32, Vec<(ObjectId, Member<'_>)>)]| -> Result<Vec<_>, Error> {
         (part.iter())
             .map(|(n, members)| {

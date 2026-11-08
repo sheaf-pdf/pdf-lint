@@ -6,12 +6,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pdf_fixtures::fixture::{self, Xref};
+
 use super::tests::{
     KINDS, clean, compressed, filtered, junk, objects_2_and_3, root, settings, small, to_encrypt,
     unfiltered, updated_with_padding, xref_row,
 };
 use super::*;
-use crate::fixture::{self, Xref};
 use crate::source::Source;
 
 /// What a test that reads a bomb takes at most.
@@ -23,12 +24,23 @@ pub(super) fn open<'f>(
     passwords: &[Password],
     options: &Options,
 ) -> Reading<&'f [u8]> {
-    Reading::open_with(file, passwords, options).unwrap()
+    Reading::open(
+        file,
+        &Options {
+            passwords,
+            ..*options
+        },
+    )
+    .unwrap()
 }
 
 /// `file` read whole under `options`, by `passwords`.
 fn whole(file: &[u8], passwords: &[Password], options: &Options) -> Whole {
-    Reading::in_memory(file, passwords, options, true, None).whole(None)
+    let options = Options {
+        passwords,
+        ..*options
+    };
+    Reading::in_memory(file, &options, true, None).whole(None)
 }
 
 /// `bytes` as hex digits.
@@ -114,8 +126,8 @@ pub(super) fn length_by_reference() -> Vec<u8> {
 /// [`filtered`]'s file, the page tree in its object stream with a key the
 /// parser reads past (`/Mi#z`, an escape of one digit), and the object
 /// stream's zlib data without its last byte, which decodes whole but for
-/// its checksum: so that the object stream's decode warns, and so does an
-/// object in it.
+/// its checksum: so that the object stream's decode says a fault, and so
+/// does an object in it.
 fn warning_twice() -> Vec<u8> {
     let (objects, _) = objects_2_and_3();
     let at = find(&objects, b"/Mine").unwrap();
@@ -136,28 +148,19 @@ fn object_0_in_use() -> Vec<u8> {
     file
 }
 
-/// Whether the crate has the fixtures qpdf wrote: not where it's without
-/// them, as its package is, which holds no `tests/files`, so a test of
-/// them is skipped there, and one that counts what it read counts fewer.
-pub(crate) fn fixtures() -> bool {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/files")
-        .exists()
-}
-
-/// The fixture qpdf wrote, by name: none where the crate is without them
-/// ([`fixtures`]).
-pub(crate) fn fixture(name: &str) -> Option<Vec<u8>> {
+/// The fixture qpdf wrote, by name, from the checkout's `tests/files`:
+/// the unit tests build from the checkout alone, as the package's manifest
+/// drops the crate the tests' writer is in.
+pub(crate) fn fixture(name: &str) -> Vec<u8> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
-    fixtures().then(|| std::fs::read(dir.join(format!("{name}.pdf"))).unwrap())
+    std::fs::read(dir.join(format!("{name}.pdf"))).unwrap()
 }
 
 /// A test file: its name, its bytes, and the passwords it's read by.
 pub(super) type Named = (String, Vec<u8>, Vec<Password<'static>>);
 
-/// The files the tests' writer makes, each kind bytes.rs's tests read, and
-/// the fixtures qpdf wrote, where they are: each named, with the passwords
-/// it's read by.
+/// The files the tests' writer makes, each kind read.rs's tests read, and
+/// the fixtures qpdf wrote: each named, with the passwords it's read by.
 pub(super) fn files() -> Vec<Named> {
     let none: Vec<Password> = Vec::new();
     let both = vec![Password("user"), Password("owner")];
@@ -271,21 +274,20 @@ pub(super) fn files() -> Vec<Named> {
         "qpdf-aes-256",
         "qpdf-aes-256-unpacked",
     ] {
-        if let Some(file) = fixture(name) {
-            files.push((name.to_string(), file.clone(), none.clone()));
-            files.push((
-                format!("{name}, by the owner's"),
-                file,
-                vec![Password("owner")],
-            ));
-        }
+        let file = fixture(name);
+        files.push((name.to_string(), file.clone(), none.clone()));
+        files.push((
+            format!("{name}, by the owner's"),
+            file,
+            vec![Password("owner")],
+        ));
     }
     files
 }
 
 /// `file`, under `options`, opened by `passwords`, read on demand by
 /// number, from the last back, and on eight threads, each taking every
-/// eighth from the last back: each time, what it warned of, each object's
+/// eighth from the last back: each time, what it told of, each object's
 /// record and the metadata are the whole read's, and made a document it's
 /// the whole read, but where either's decoding reached the budget. How
 /// many of the three were compared.
@@ -311,7 +313,7 @@ fn on_demand(name: &str, file: &[u8], passwords: &[Password], options: &Options)
                 }
             }),
         }
-        let warnings = reading.warnings();
+        let warnings = reading.faults();
         let records: BTreeMap<ObjectId, Record> = (ids.iter())
             .filter_map(|&id| Some((id, reading.record(id)?.clone())))
             .collect();
@@ -321,7 +323,7 @@ fn on_demand(name: &str, file: &[u8], passwords: &[Password], options: &Options)
             continue;
         }
         assert_eq!(lazily.document, *doc, "{name}, {order}");
-        assert_eq!(warnings, doc.warnings, "{name}, {order}");
+        assert_eq!(warnings, doc.faults(), "{name}, {order}");
         let held: BTreeMap<ObjectId, Record> = (doc.records())
             .map(|(id, record)| (id, record.clone()))
             .collect();
@@ -333,7 +335,7 @@ fn on_demand(name: &str, file: &[u8], passwords: &[Password], options: &Options)
 }
 
 /// Every test file, and the revision before an update, read on demand in
-/// three orders, is the whole read, which is `bytes::read_opened`'s.
+/// three orders, is the whole read, which is `read::document`'s.
 #[test]
 fn a_reading_on_demand_is_the_whole_read_in_any_order_on_any_thread() {
     let mut compared = 0;
@@ -341,16 +343,37 @@ fn a_reading_on_demand_is_the_whole_read_in_any_order_on_any_thread() {
         let options = Options::DEFAULT;
         assert_eq!(
             whole(&file, &passwords, &options).document,
-            read_opened(&file, &passwords),
+            document(
+                &file,
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                }
+            ),
             "{name}"
         );
         compared += on_demand(&name, &file, &passwords, &options);
-        if let Some(update) = read_opened(&file, &passwords).update {
+        if let Some(update) = document(
+            &file,
+            &Options {
+                passwords: &passwords,
+                ..Options::DEFAULT
+            },
+        )
+        .update
+        {
             let mut options = Options::DEFAULT;
             options.section = Some(update.previous);
             assert_eq!(
                 whole(&file, &passwords, &options).document,
-                read_from_opened(&file, &passwords, update.previous),
+                document(
+                    &file,
+                    &Options {
+                        passwords: &passwords,
+                        section: Some(update.previous),
+                        ..Options::DEFAULT
+                    }
+                ),
                 "{name}"
             );
             compared += on_demand(&format!("{name}, before"), &file, &passwords, &options);
@@ -377,9 +400,9 @@ fn every_test_file_reads_the_same_on_either_flate_backend() {
             open(&file, &passwords, &zlib),
         );
         for id in miniz.ids().collect::<Vec<_>>() {
-            let data = |r: &Reading<&[u8]>| shown(r.decoded(id));
+            let data = |r: &Reading<&[u8]>| shown(r.decoded_within(id, usize::MAX));
             assert_eq!(data(&other), data(&miniz), "{name}, {id:?}");
-            decoded += usize::from(miniz.decoded(id).is_ok());
+            decoded += usize::from(miniz.decoded_within(id, usize::MAX).is_ok());
         }
         if let Some(update) = by_miniz.document.update {
             let mut before = Options::DEFAULT;
@@ -394,17 +417,17 @@ fn every_test_file_reads_the_same_on_either_flate_backend() {
             );
         }
     }
-    let floor = if fixtures() { 50 } else { 20 };
+    let floor = 50;
     assert!(decoded > floor, "{decoded}");
 }
 
 /// What `reading` keeps: each object's record, by number, and its
-/// warnings.
-fn kept<S: ByteSource>(reading: &Reading<S>) -> (BTreeMap<ObjectId, Record>, Vec<Warning>) {
+/// faults.
+fn kept<S: ByteSource>(reading: &Reading<S>) -> (BTreeMap<ObjectId, Record>, Vec<(Place, Fault)>) {
     let records = (reading.ids())
         .filter_map(|id| Some((id, reading.record(id)?.clone())))
         .collect();
-    (records, reading.warnings())
+    (records, reading.faults())
 }
 
 /// `file`, under `options`, opened by `passwords`, made a document with its
@@ -501,14 +524,22 @@ fn a_document_made_with_its_reading_kept_is_the_whole_read_whatever_was_read() {
     let mut compared = 0;
     for (name, file, passwords) in files() {
         compared += beside(&name, &file, &passwords, &Options::DEFAULT);
-        if let Some(update) = read_opened(&file, &passwords).update {
+        if let Some(update) = document(
+            &file,
+            &Options {
+                passwords: &passwords,
+                ..Options::DEFAULT
+            },
+        )
+        .update
+        {
             let mut options = Options::DEFAULT;
             options.section = Some(update.previous);
             compared += beside(&format!("{name}, before"), &file, &passwords, &options);
         }
     }
-    // The writer's files, and qpdf's where they are.
-    let floor = if fixtures() { 150 } else { 100 };
+    // The writer's files, and qpdf's.
+    let floor = 150;
     assert!(compared > floor, "{compared}");
 }
 
@@ -532,8 +563,12 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
             let data = shown(reading.data(id).map(Cow::into_owned));
             let given = shown(own.data(id).map(Cow::into_owned));
             assert_eq!(data, given, "{name}: {id:?}'s data");
-            let decoded = shown(reading.decoded(id));
-            assert_eq!(decoded, shown(own.decoded(id)), "{name}: {id:?}");
+            let decoded = shown(reading.decoded_within(id, usize::MAX));
+            assert_eq!(
+                decoded,
+                shown(own.decoded_within(id, usize::MAX)),
+                "{name}: {id:?}"
+            );
             if doc.encryption == Encryption::None {
                 let at = at.unwrap();
                 assert_eq!(data.unwrap(), &file[at.start..at.end], "{name}: {id:?}");
@@ -542,30 +577,45 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
         }
         assert_eq!(reading.into_document().unwrap(), doc, "{name}");
     }
-    // The writer's files, and qpdf's where they are.
-    let floor = if fixtures() { 50 } else { 30 };
+    // The writer's files, and qpdf's.
+    let floor = 50;
     assert!(streams > floor, "{streams}");
 }
 
 /// A document loaded from bytes as they are, under options (as of an
 /// earlier section, and under limits a stream reaches) and by a password,
 /// each a reading made a document, with the reading kept or not, which is
-/// `bytes::read`, `read_from`, `read_limited` or `read_opened`'s.
+/// `read::document`'s under the same options, or `read_limited`'s.
 #[test]
 fn a_document_is_loaded_from_bytes_under_options_and_by_a_password() {
     let file = fixture::file("1.7", &clean(), root(), Xref::Stream);
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-    assert_eq!(reading.to_document().unwrap(), read(&file));
-    assert_eq!(reading.into_document().unwrap(), read(&file));
+    assert_eq!(
+        reading.to_document().unwrap(),
+        document(&file, &Options::DEFAULT)
+    );
+    assert_eq!(
+        reading.into_document().unwrap(),
+        document(&file, &Options::DEFAULT)
+    );
 
     let (file, _) = updated_with_padding();
-    let previous = read(&file).update.unwrap().previous;
+    let previous = document(&file, &Options::DEFAULT).update.unwrap().previous;
     let mut options = Options::DEFAULT;
     options.section = Some(previous);
     let reading = Reading::open(&file[..], &options).unwrap();
     let doc = reading.to_document().unwrap();
-    assert_eq!(doc, read_from(&file, previous));
-    assert_ne!(doc, read(&file));
+    assert_eq!(
+        doc,
+        document(
+            &file,
+            &Options {
+                section: Some(previous),
+                ..Options::DEFAULT
+            }
+        )
+    );
+    assert_ne!(doc, document(&file, &Options::DEFAULT));
     assert_eq!(reading.into_document().unwrap(), doc);
 
     let size = 64 << 10;
@@ -581,14 +631,26 @@ fn a_document_is_loaded_from_bytes_under_options_and_by_a_password() {
 
     for kind in KINDS {
         let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
-        let doc = read_opened(&file, &[Password("user")]);
+        let doc = document(
+            &file,
+            &Options {
+                passwords: &[Password("user")],
+                ..Options::DEFAULT
+            },
+        );
         assert!(
             matches!(doc.encryption, Encryption::Opened { owner: false, .. }),
             "{kind:?}: {:?}",
             doc.encryption
         );
-        let reading =
-            Reading::open_with(&file[..], &[Password("user")], &Options::DEFAULT).unwrap();
+        let reading = Reading::open(
+            &file[..],
+            &Options {
+                passwords: &[Password("user")],
+                ..Options::DEFAULT
+            },
+        )
+        .unwrap();
         assert_eq!(reading.to_document().unwrap(), doc, "{kind:?}");
         assert_eq!(reading.into_document().unwrap(), doc, "{kind:?}");
     }
@@ -620,7 +682,7 @@ fn a_reading_is_send_and_sync_over_each_source() {
 #[test]
 fn a_source_behind_a_box_or_shared_reads_as_it_does() {
     let file = fixture::file("1.7", &clean(), root(), Xref::Stream);
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     let shared: Arc<dyn ByteSource> = Arc::new(file.clone());
     let reading = Reading::open(Arc::clone(&shared), &Options::DEFAULT).unwrap();
     assert!(reading.source().whole().is_some());
@@ -644,7 +706,7 @@ fn a_source_behind_a_box_or_shared_reads_as_it_does() {
 #[test]
 fn each_source_in_memory_reads_alike() {
     let file = fixture::file("1.7", &clean(), root(), Xref::Stream);
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     let shared: Arc<[u8]> = Arc::from(&file[..]);
     let readings = [
         Reading::open(file.clone(), &Options::DEFAULT)
@@ -728,14 +790,14 @@ fn a_record_s_hash_is_of_the_bytes_it_names_however_it_was_read() {
 }
 
 /// What the cross-references list as object 0, always free, is said as the
-/// open's last warning, before any object is read.
+/// open's last fault, before any object is read.
 #[test]
 fn object_0_in_use_is_said_as_the_file_opens() {
     let file = object_0_in_use();
     let reading = open(&file, &[], &Options::DEFAULT);
-    let warnings = reading.warnings();
+    let warnings = reading.faults();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].message.contains("object 0"));
+    assert_eq!(warnings[0].1, Fault::ObjectZero);
     assert!(matches!(
         reading.get(ObjectId::new(0, 0)),
         Err(Error::Unread(Unread::Missing {
@@ -748,29 +810,73 @@ fn object_0_in_use_is_said_as_the_file_opens() {
     assert_eq!(reading.ids().collect::<Vec<_>>(), [ObjectId::new(1, 0)]);
 }
 
-/// A stream's `/Length` by reference is read again with the stream, its
-/// faults said with the stream's, and again with its own object, as the
-/// whole read says them.
+/// Every object's record hashes the bytes it names, as the file has them
+/// (an object stream's member, as its stream's decoded data has them):
+/// read whole in memory, and by position from first windows of 1 and 64
+/// bytes, so that the window a read was made in always holds them and a
+/// copy is never refused for want of them.
 #[test]
-fn a_length_by_references_faults_are_said_with_the_stream_and_its_own() {
+fn a_records_hash_is_of_the_bytes_it_names_however_the_file_is_read() {
+    let (mut at_offsets, mut members) = (0, 0);
+    for (name, file, passwords) in files() {
+        let options = Options {
+            passwords: &passwords,
+            ..Options::DEFAULT
+        };
+        let mut docs = vec![("whole".to_string(), document(&file, &options))];
+        for first in [1, 64] {
+            let source = crate::fuzz::Counted::new(&file, first);
+            let read = Reading::open(&source, &options).and_then(Reading::into_document);
+            docs.push((format!("from {first}"), read.unwrap()));
+        }
+        for (how, doc) in &docs {
+            for (id, record) in doc.records() {
+                let at = record.at;
+                let bytes = match record.origin {
+                    Origin::Stream { stream, .. } => {
+                        members += 1;
+                        let held = doc
+                            .held(ObjectId::new(stream, 0))
+                            .expect("its stream's data");
+                        &held[at.start..at.end]
+                    }
+                    _ => {
+                        at_offsets += 1;
+                        &file[at.start..at.end]
+                    }
+                };
+                assert_eq!(record.hash, Record::hash_of(bytes), "{name}, {how}: {id}");
+            }
+        }
+    }
+    assert!(
+        at_offsets >= 300 && members >= 20,
+        "{at_offsets} and {members}"
+    );
+}
+
+/// A stream's `/Length` by reference is read again with the stream, its
+/// faults said with the stream's until its own object is read, then once,
+/// with its own object's, as the whole read says them.
+#[test]
+fn a_length_by_references_faults_are_said_with_the_stream_until_its_own_object_is_read() {
     let file = length_by_reference();
     let reading = open(&file, &[], &Options::DEFAULT);
-    let stray =
-        |w: &Warning| w.object == Some(ObjectId::new(4, 0)) && w.message == "4 0 obj has no endobj";
+    let stray = |w: &(Place, Fault)| {
+        w.0.object == Some(ObjectId::new(4, 0)) && w.1.to_string() == "4 0 obj has no endobj"
+    };
     let Value::Stream(stream) = reading.get(ObjectId::new(3, 0)).unwrap().value() else {
         panic!("not a stream");
     };
     let at = stream.data.at().unwrap();
     assert_eq!(&file[at.start..at.end], b"abc");
-    let warnings = reading.warnings();
+    let warnings = reading.faults();
     assert!(warnings.len() == 1 && stray(&warnings[0]), "{warnings:?}");
+    let told = warnings[0].clone();
     reading.get(ObjectId::new(4, 0)).unwrap();
-    let warnings = reading.warnings();
-    assert!(
-        warnings.len() == 2 && warnings.iter().all(stray),
-        "{warnings:?}"
-    );
-    assert_eq!(warnings, read(&file).warnings);
+    let warnings = reading.faults();
+    assert_eq!(warnings, [told]);
+    assert_eq!(warnings, document(&file, &Options::DEFAULT).faults());
 }
 
 /// An object in an object stream is read on its own: its object stream is
@@ -801,14 +907,14 @@ fn an_object_in_an_object_stream_is_read_before_the_others_in_it() {
         reading.record(ObjectId::new(1, 0)).is_none(),
         "nor the catalog"
     );
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     let pages = reading.get(ObjectId::new(2, 0)).unwrap();
     assert_eq!(pages, doc.get(ObjectId::new(2, 0)).unwrap());
     assert_eq!(reading.into_document().unwrap(), doc);
 }
 
 /// Read unkept, an object is given with the record a kept read would keep,
-/// and nothing of it is kept: not it, its warnings, a failure to read it,
+/// and nothing of it is kept: not it, its faults, a failure to read it,
 /// nor its record; but for the object stream it's in, decoded and kept.
 #[test]
 fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
@@ -831,12 +937,12 @@ fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
     );
     assert_eq!(&stream, reading.get(ObjectId::new(3, 0)).unwrap());
     assert_eq!(Some(&record), reading.record(ObjectId::new(3, 0)));
-    // Its warnings aren't kept, nor its failure.
+    // Its faults aren't kept, nor its failure.
     let (_, record) = reading.object_unkept(ObjectId::new(5, 0)).unwrap();
     assert!(!record.endobj);
-    assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
+    assert!(reading.faults().is_empty(), "{:?}", reading.faults());
     assert!(reading.object_unkept(ObjectId::new(6, 0)).is_err());
-    assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
+    assert!(reading.faults().is_empty(), "{:?}", reading.faults());
     assert!(reading.record(ObjectId::new(6, 0)).is_none());
     assert!(matches!(
         reading.object_unkept(ObjectId::new(9, 0)),
@@ -850,7 +956,7 @@ fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
     // Kept, it's given as it's kept.
     let kept = reading.get(ObjectId::new(5, 0)).unwrap().clone();
     assert_eq!(reading.object_unkept(ObjectId::new(5, 0)).unwrap().0, kept);
-    assert_eq!(reading.warnings().len(), 1);
+    assert_eq!(reading.faults().len(), 1);
 
     // An object in an object stream: the stream is decoded and kept, with
     // the object stream's own object, and nothing of it.
@@ -883,7 +989,7 @@ fn an_objects_record_says_whether_endobj_follows_it() {
         ],
         "<< /Size 6 /Root 1 0 R >>",
     );
-    let doc = read(&file);
+    let doc = document(&file, &Options::DEFAULT);
     let extent = |n: u32| {
         let at = doc.record(ObjectId::new(n, 0)).unwrap().at;
         &file[at.start..at.end]
@@ -907,7 +1013,7 @@ fn an_objects_record_says_whether_endobj_follows_it() {
     // Scanned, each is recovered.
     let mut scanned = file.clone();
     scanned.truncate(rfind(&file, b"startxref").unwrap());
-    let doc = read(&scanned);
+    let doc = document(&scanned, &Options::DEFAULT);
     assert!(doc.trailer.unwritten.is_some());
     assert!(doc.records().all(|(_, r)| r.origin == Origin::Recovered));
 }
@@ -1080,10 +1186,13 @@ fn an_object_stream_bomb_is_cut_at_its_cap_quickly() {
         let why = reading.get(ObjectId::new(2, 0)).unwrap_err().to_string();
         assert_eq!(why, "its header has 0 of its 1000000000 pairs");
     }
-    let warnings = reading.warnings();
+    let warnings = reading.faults();
     let limit =
         "its data doesn't decode cleanly through /FlateDecode: its output is over the limit";
-    assert!(warnings.iter().any(|w| w.message == limit), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.1.to_string() == limit),
+        "{warnings:?}"
+    );
     assert_eq!(
         reading.into_document().unwrap(),
         whole(&file, &[], &options).document
@@ -1118,7 +1227,7 @@ fn a_cross_reference_stream_bomb_is_decoded_no_further_than_its_rows() {
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(reading.trailer().unwritten, None);
     assert!(reading.get(ObjectId::new(1, 0)).is_ok());
-    assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
+    assert!(reading.faults().is_empty(), "{:?}", reading.faults());
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
 }
 
@@ -1143,9 +1252,22 @@ fn a_file_encrypting_only_its_attachments_reads_on_demand_as_whole() {
 fn an_undefined_crypt_filter_reads_on_demand_as_whole() {
     let filter = " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Undefined >> null]";
     let file = encrypted_objects(filter, None);
-    let doc = read_opened(&file, &[Password("user")]);
+    let doc = document(
+        &file,
+        &Options {
+            passwords: &[Password("user")],
+            ..Options::DEFAULT
+        },
+    );
     let by = Some((0, pdf_crypt::Encoding::Utf8));
-    assert_eq!(doc.encryption, Encryption::Opened { owner: false, by });
+    assert_eq!(
+        doc.encryption,
+        Encryption::Opened {
+            owner: false,
+            by,
+            permissions: pdf_crypt::Permissions::ALL
+        }
+    );
     assert_eq!(
         on_demand("undefined", &file, &[Password("user")], &Options::DEFAULT),
         3
@@ -1182,12 +1304,12 @@ fn an_encrypted_readings_bytes_are_refused_but_its_object_streams() {
 }
 
 /// What `reading` reads, asked for each of `ids` in turn: each object and
-/// its record, or why it doesn't read; then what it warned of, and how
+/// its record, or why it doesn't read; then what it told of, and how
 /// the file is encrypted, `by` given as the index of the password the
 /// encoding it names is of, by `of`.
 type Read = (
     Vec<Result<(Object, Option<Record>), String>>,
-    Vec<Warning>,
+    Vec<(Place, Fault)>,
     Encryption,
 );
 
@@ -1206,7 +1328,7 @@ fn read_by(reading: &Reading<&[u8]>, ids: &[ObjectId], of: &[usize]) -> Read {
     {
         *i = of[*i];
     }
-    (objects, reading.warnings(), encryption)
+    (objects, reading.faults(), encryption)
 }
 
 /// Each of `passwords` in each of its encodings, and which password each
@@ -1219,8 +1341,8 @@ fn encodings(passwords: &[Password]) -> (Vec<Encoded>, Vec<usize>) {
 
 /// A reading [`Reading::open`] left locked, unlocked by the encodings of
 /// the passwords a test file is read by, reads what one opened by them
-/// does ([`Reading::open_with`]): each object and its record, what it
-/// warns of, in order, and its encryption, `by` the password's index;
+/// does ([`Options::passwords`]): each object and its record, what it
+/// tells of, in order, and its encryption, `by` the password's index;
 /// and read whole, the same document, its decoded object streams among
 /// it. Whether it had read nothing, every object, or every third, by
 /// number or from the last, before it was unlocked. Every test file and
@@ -1283,8 +1405,8 @@ fn a_reading_unlocked_reads_as_one_opened_by_the_password() {
 /// A reading unlocked decodes as one opened by the password does, from
 /// what was left of the budget when it opened, whatever it decoded
 /// locked; and what `/Perms` says is wrong with the encryption dictionary
-/// is said where opening the file says it: after what it warned of before
-/// it read the dictionary, and before what it warned of after.
+/// is said where opening the file says it: after what it told of before
+/// it read the dictionary, and before what it told of after.
 #[test]
 fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() {
     // Its object stream decrypts as written (/StmF /Identity), and decodes
@@ -1311,7 +1433,14 @@ fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() 
     assert!(reading.get(ObjectId::new(2, 0)).is_ok());
     assert_eq!(reading.reader.budget.load(Ordering::Relaxed), 0, "spent");
     let reading = reading.unlock(&user[0].encodings()).unwrap();
-    let opened = Reading::open_with(&file[..], &user, &options).unwrap();
+    let opened = Reading::open(
+        &file[..],
+        &Options {
+            passwords: &user,
+            ..options
+        },
+    )
+    .unwrap();
     assert_eq!(
         read_by(&reading, &[ObjectId::new(2, 0)], &[0]),
         read_by(&opened, &[ObjectId::new(2, 0)], &[0])
@@ -1331,7 +1460,7 @@ fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() 
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Locked);
     let said = |r: &Reading<&[u8]>| -> Vec<String> {
-        r.warnings().into_iter().map(|w| w.message).collect()
+        r.faults().into_iter().map(|w| w.1.to_string()).collect()
     };
     let locked = said(&reading);
     assert_eq!(locked.len(), 2, "{locked:?}");
@@ -1370,7 +1499,11 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     let by = Some((0, pdf_crypt::Encoding::Utf8));
     assert_eq!(
         *reading.encryption(),
-        Encryption::Opened { owner: true, by }
+        Encryption::Opened {
+            owner: true,
+            by,
+            permissions: pdf_crypt::Permissions::ALL
+        }
     );
     assert_eq!(reading.id(), id, "the same reading");
 
@@ -1387,18 +1520,18 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         let Encryption::Unsupported(said) = reading.encryption().clone() else {
             panic!("{:?}", reading.encryption());
         };
-        let warnings = reading.warnings();
+        let warnings = reading.faults();
         let Err((reading, why)) = reading.unlock(&Password("user").encodings()) else {
             panic!("unlocked");
         };
         match (&why, handler) {
             (Refused::OtherHandler { name, .. }, Some(handler)) => assert_eq!(name, handler),
-            (Refused::Malformed(why), None) => assert_eq!(*why, said),
+            (Refused::Malformed(why), None) => assert_eq!(*why, said.to_string()),
             _ => panic!("{why:?}"),
         }
-        assert_eq!(why.to_string(), said);
+        assert_eq!(why.to_string(), said.to_string());
         assert_eq!(*reading.encryption(), Encryption::Unsupported(said));
-        assert_eq!(reading.warnings(), warnings);
+        assert_eq!(reading.faults(), warnings);
     }
 
     // Another handler's, and a /V and /R the standard handler isn't, with
@@ -1416,7 +1549,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         );
         let reading = open(&file, &[], &Options::DEFAULT);
         assert_eq!(*reading.encryption(), Encryption::Plain, "{encrypt}");
-        let warnings = reading.warnings();
+        let warnings = reading.faults();
         let Err((reading, why)) = reading.unlock(&Password("user").encodings()) else {
             panic!("unlocked");
         };
@@ -1426,7 +1559,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
             _ => panic!("{encrypt}: {why:?}"),
         }
         assert_eq!(*reading.encryption(), Encryption::Plain, "{encrypt}");
-        assert_eq!(reading.warnings(), warnings);
+        assert_eq!(reading.faults(), warnings);
     }
 
     // Not encrypted, and opened by the empty password: as they are.
@@ -1439,6 +1572,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
             Encryption::Opened {
                 owner: false,
                 by: None,
+                permissions: pdf_crypt::Permissions::ALL,
             },
         ),
     ] {
@@ -1451,19 +1585,26 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     }
 }
 
-/// [`Reading::open_with`] tries the passwords given in the empty one's
-/// place: on a file whose user password is empty, a wrong one leaves it
-/// locked, and the owner's opens it as the owner's, `by` saying which and
-/// in which encoding; the empty password, given none.
+/// [`Reading::open`] tries the passwords its options give
+/// ([`Options::passwords`]) in the empty one's place: on a file whose user
+/// password is empty, a wrong one leaves it locked, and the owner's opens it
+/// as the owner's, `by` saying which and in which encoding; the empty
+/// password, given none.
 #[test]
-fn open_with_tries_the_passwords_given_in_the_empty_ones_place() {
+fn the_passwords_options_give_are_tried_in_the_empty_ones_place() {
     let kind = pdf_crypt::writer::Kind::Aes256;
     let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
     let by = |passwords: &[Password]| {
-        Reading::open_with(&file[..], passwords, &Options::DEFAULT)
-            .unwrap()
-            .encryption()
-            .clone()
+        Reading::open(
+            &file[..],
+            &Options {
+                passwords,
+                ..Options::DEFAULT
+            },
+        )
+        .unwrap()
+        .encryption()
+        .clone()
     };
     assert_eq!(by(&[Password("wrong")]), Encryption::Locked);
     let utf8 = pdf_crypt::Encoding::Utf8;
@@ -1471,14 +1612,16 @@ fn open_with_tries_the_passwords_given_in_the_empty_ones_place() {
         by(&[Password("wrong"), Password("owner")]),
         Encryption::Opened {
             owner: true,
-            by: Some((1, utf8))
+            by: Some((1, utf8)),
+            permissions: pdf_crypt::Permissions::ALL,
         }
     );
     assert_eq!(
         by(&[]),
         Encryption::Opened {
             owner: false,
-            by: None
+            by: None,
+            permissions: pdf_crypt::Permissions::ALL,
         }
     );
     assert_eq!(
@@ -1494,11 +1637,22 @@ fn open_with_tries_the_passwords_given_in_the_empty_ones_place() {
         ..settings(pdf_crypt::writer::Kind::Aes128, b"")
     };
     let file = fixture::encrypted(&pdf_doc, &to_encrypt(&[]), root());
-    let reading = Reading::open_with(&file[..], &[Password("café")], &Options::DEFAULT).unwrap();
+    let reading = Reading::open(
+        &file[..],
+        &Options {
+            passwords: &[Password("café")],
+            ..Options::DEFAULT
+        },
+    )
+    .unwrap();
     let by = Some((0, pdf_crypt::Encoding::PdfDoc));
     assert_eq!(
         *reading.encryption(),
-        Encryption::Opened { owner: false, by }
+        Encryption::Opened {
+            owner: false,
+            by,
+            permissions: pdf_crypt::Permissions::ALL
+        }
     );
 }
 
@@ -1597,7 +1751,11 @@ fn a_linearization_holds_while_its_length_is_the_files() {
     for (name, bytes, holds) in cases {
         let reading = open(&bytes, &[], &Options::DEFAULT);
         assert_eq!(reading.facts().linearized, holds, "{name}");
-        assert_eq!(read(&bytes).facts.linearized, holds, "{name}");
+        assert_eq!(
+            document(&bytes, &Options::DEFAULT).facts.linearized,
+            holds,
+            "{name}"
+        );
     }
 }
 
@@ -1710,7 +1868,7 @@ fn a_corpus_reads_alike_whole_and_lazily() {
     for path in &files {
         let data = std::fs::read(path).unwrap();
         let mut sections = vec![None];
-        if let Some(update) = read(&data).update {
+        if let Some(update) = document(&data, &Options::DEFAULT).update {
             sections.push(Some(update.previous));
             previous += 1;
         }

@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use pdf_fixtures::fixture;
 use pdf_objects::parse::Parser;
-use pdf_structure::bytes::{self, Options, Reading};
-use pdf_structure::fixture;
+use pdf_structure::read::{self, Options, Reading};
 
 use super::*;
 use crate::catalog;
@@ -109,13 +109,13 @@ fn table<'o, R: Resolve<'o> + Copy>(
 /// by position, which all say the same, as `rules` have it under `limits`.
 fn open_with(objects: &[(u32, String)], rules: Rules, limits: &Limits) -> Table {
     let bytes = file(objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
     let source = ByPosition::new(&bytes);
     let positioned = Reading::open(&source, &Options::DEFAULT).unwrap();
     let in_memory = table(&reading, reading.trailer().dict(), rules, limits);
     let by_position = table(&positioned, positioned.trailer().dict(), rules, limits);
-    let whole = table(&document, document.trailer.dict(), rules, limits);
+    let whole = table(&document, document.trailer().dict(), rules, limits);
     assert_eq!(in_memory, by_position, "in memory and by position");
     assert_eq!(in_memory, whole, "a reading and a document");
     in_memory
@@ -512,7 +512,7 @@ fn too_many_pages_or_none_are_typed_errors() {
     assert!(started.elapsed() < QUICK);
     // And under the default caps, each of a million visits a node's own /Kids.
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let started = Instant::now();
@@ -737,7 +737,7 @@ fn pages_under_one_node_share_its_chain() {
         object(5, "<< /Type /Page /Parent 3 0 R >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let table = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
@@ -840,7 +840,7 @@ fn the_root_s_count_ends_the_table_as_it_ends_pdfium_s() {
         object(3, "<< /Type /Page >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let table = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
@@ -1019,7 +1019,7 @@ fn an_attribute_says_where_it_s_from_and_what_it_s_written_as() {
         object(6, "<< /B 2 >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let table = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
@@ -2287,7 +2287,7 @@ fn a_fault_says_where_it_is() {
         object(3, "<< /Type /Pages /Parent 2 0 R /Kids [null] /Count 0 >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
@@ -2312,7 +2312,7 @@ fn a_fault_says_where_it_is() {
         object(4, "<< /Type /Page /Parent 3 0 R >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
@@ -2342,7 +2342,7 @@ fn a_fault_says_where_it_is() {
         ),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
@@ -2384,7 +2384,7 @@ fn a_fault_says_where_it_is() {
         object(6, "<< /Type /Page /Parent 4 0 R >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
@@ -2415,7 +2415,7 @@ fn a_fault_says_where_it_is() {
         object(4, "<< /Type /Pages /Parent << /Type /Pages >> >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
@@ -2548,7 +2548,7 @@ fn kids_that_give_nothing_are_charged_to_the_walk() {
         object(4, "<< /Type /Page /Parent 2 0 R >>"),
     ];
     let bytes = file(&objects);
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let started = Instant::now();

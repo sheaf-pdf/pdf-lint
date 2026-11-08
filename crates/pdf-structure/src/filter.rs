@@ -14,12 +14,16 @@ use std::borrow::Cow;
 use pdf_filters::{Filter, Layout, Predictor};
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 
-/// The most filters a stream may list, as qpdf allows.
+/// The most filters a stream may list, as qpdf allows: more is
+/// [`Unfiltered::Filters`]. A cap of the reader's own, not one of
+/// [`Limits`](crate::Limits)', so it's the same in every reading.
 pub const FILTERS: usize = 25;
 
 /// Why the reader doesn't decode a stream by its `/Filter` and
 /// `/DecodeParms`: what it doesn't take of them.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+/// Not exhaustive, as what the reader doesn't take of a stream's filters is
+/// found as it learns more of what files hold.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unfiltered {
     /// Its `/Filter` is neither a name nor an array.
@@ -28,7 +32,8 @@ pub enum Unfiltered {
     /// Its `/Filter` is an array of more than names.
     #[error("its /Filter's array isn't names")]
     Names,
-    /// Its `/Filter` lists more filters than the reader takes, 25.
+    /// Its `/Filter` lists more filters than the reader takes, 25
+    /// ([`FILTERS`]).
     #[error("its /Filter lists {count} filters, more than {max}", max = FILTERS)]
     Filters {
         /// How many it lists.

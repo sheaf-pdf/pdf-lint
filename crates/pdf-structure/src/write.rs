@@ -79,13 +79,15 @@
 //!   ([`Encrypting`]): with the object's key, AES's IV derived from `n g
 //!   obj` and the data, so the same object encrypts to the same bytes on
 //!   every save. What it leaves in the clear is the list the reader
-//!   decrypts by, one list both ways (see [`bytes`](crate::bytes), "What's
+//!   decrypts by, one list both ways (see [`read`](crate::read), "What's
 //!   encrypted"). Under RC4 a changed object written again at its number
 //!   and generation is encrypted with the keystream its earlier version
 //!   was, which leaks what changed to one who holds both (pdf-crypt's
 //!   `Method::Rc4`), and so is an object a renumbering writes at a number
 //!   another object had, which leaks the XOR of the two; a file written
 //!   whole under a new AES-256 encryption ([`Encryptor::create`]) doesn't.
+//!   The encryption dictionary of pdf-crypt's values, as a new file's is
+//!   written, is [`encryption`].
 //!
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
@@ -101,8 +103,9 @@ pub(crate) mod tests;
 mod xref;
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, btree_map};
 use std::fmt;
+use std::iter::FusedIterator;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pdf_filters::{Backend, Encoder, Level, Prediction, Unencodable};
@@ -111,12 +114,12 @@ use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::serialize::{self, Refused, Renumber};
 use pdf_objects::version::Version;
 
-use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::crypt::Get;
-use crate::source::{Document, Record, XrefKind};
+use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
+use crate::source::{Document, Held, Record, Unread, Unsupported, XrefKind};
 
 pub use append::{Base, update};
-pub use crypt::{Encrypting, Encryptor, Unencryptable};
+pub use crypt::{Encrypting, Encryptor, FreeNumbers, Unencryptable, encryption};
 pub use full::{document, encryption_objects, full, left_out};
 pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
 pub use parts::{Packed, Parts};
@@ -125,10 +128,6 @@ pub use xref::{Entry, Section};
 // A reading compares a document's encryption dictionary as written too
 // (`Reading::adopt`).
 pub(crate) use append::as_written;
-
-// The tests' file writer writes its encrypted files' dictionaries so too.
-#[cfg(any(test, feature = "fixtures"))]
-pub(crate) use crypt::encryption;
 
 /// The object numbers a written file may use are below it: the
 /// 8,388,607 indirect objects a file may hold (ISO 32000-1, Annex C), so
@@ -144,7 +143,8 @@ pub const NUMBERS: u32 = 8_388_607;
 /// pdf-filters' backends, and how hard. A caller sets them on a copy of
 /// [`Deflate::DEFAULT`], as it does a reading's
 /// [`Options`](crate::Options).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, as more choices may come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Deflate {
     /// The backend that deflates: by default pdf-filters'
@@ -167,8 +167,12 @@ impl Deflate {
 
     /// `data`, first predicted as `predictor` says, deflated at the end of
     /// `out`: as a cross-reference stream's and an object stream's are, for a
-    /// caller writing streams of its own. Refused where pdf-filters doesn't
-    /// encode it so ([`Error::Unencodable`]).
+    /// caller writing streams of its own.
+    ///
+    /// # Errors
+    ///
+    /// Refused where pdf-filters doesn't encode it so
+    /// ([`Error::Unencodable`]).
     pub fn encode(
         self,
         data: &[u8],
@@ -190,6 +194,7 @@ impl Default for Deflate {
 }
 
 /// What the writer writes of an object, at the number it's given with.
+/// Not exhaustive, as the writer may come to take an object another way.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Body<'a> {
@@ -232,7 +237,7 @@ pub enum Body<'a> {
     ///    reading's file is, by an encryptor of that reading
     ///    ([`Encryptor::of`]), and the list of what's left in the clear
     ///    says the same of the object in both (see
-    ///    [`bytes`](crate::bytes), "What's encrypted"), or where neither is
+    ///    [`read`](crate::read), "What's encrypted"), or where neither is
     ///    encrypted: its strings and data are encrypted with its key. Under
     ///    a renumbering, at another number than it was read as only where
     ///    neither is encrypted, or no method of that encryptor makes a key
@@ -263,7 +268,8 @@ pub enum Body<'a> {
     ///    otherwise be in the clear in an encrypted file;
     /// 8. where its bytes, read again, hash as they did when it was read:
     ///    else the write is refused ([`Error::Changed`]), as the file
-    ///    changed under the reading;
+    ///    changed under the reading, and so is one whose bytes aren't there
+    ///    to read again ([`Error::Gone`], [`Error::Uncontained`]);
     /// 9. under a renumbering, where its references are where its bytes
     ///    have them: each, as [`Object::references`] walks them, placed
     ///    ([`Object::at`]) among the bytes `record` names, past its header
@@ -285,6 +291,7 @@ pub enum Body<'a> {
 
 impl Body<'_> {
     /// The object it writes: as it was read, or as it's to be written anew.
+    #[must_use]
     pub fn object(&self) -> &Object {
         match self {
             Body::New(object) | Body::Read { object, .. } => object,
@@ -297,25 +304,86 @@ impl Body<'_> {
 /// reading it was read in copies, and an update after that reading's file
 /// passes over; the rest, built or changed, written anew ([`Body::New`]).
 /// The reading is the one `doc` was made of by [`Reading::to_document`]: a
-/// document read whole ([`bytes::read`](crate::bytes::read),
+/// document read whole ([`read::document`](crate::read::document),
 /// [`Reading::into_document`]) has records of a reading that's gone, which
 /// a write given another reading refuses ([`Error::Elsewhere`]), and a
 /// stream whose data no reading given holds refuses one given none
 /// ([`Error::Placed`]), until a reading of its file opened again takes them
 /// as its own ([`Reading::adopt`]).
-pub fn bodies(doc: &Document) -> impl DoubleEndedIterator<Item = (ObjectId, Body<'_>)> {
-    doc.objects_read().map(|(id, object, record)| {
-        let object = Cow::Borrowed(object);
-        let body = match record {
-            Some(record) => Body::Read {
-                object,
-                record: Cow::Borrowed(record),
-            },
-            None => Body::New(object),
-        };
-        (id, body)
-    })
+pub fn bodies(doc: &Document) -> Bodies<'_> {
+    Bodies {
+        held: doc.held_objects(),
+    }
 }
+
+/// A document's objects as a write's bodies, by number: what [`bodies`]
+/// gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct Bodies<'d> {
+    held: btree_map::Iter<'d, ObjectId, Held>,
+}
+
+/// The body of an object that reads, of what a document holds of `id`.
+fn body_of<'d>((&id, held): (&ObjectId, &'d Held)) -> Option<(ObjectId, Body<'d>)> {
+    let (object, record) = held.as_ref().ok()?;
+    let object = Cow::Borrowed(object);
+    let body = match record {
+        Some(record) => Body::Read {
+            object,
+            record: Cow::Borrowed(record),
+        },
+        None => Body::New(object),
+    };
+    Some((id, body))
+}
+
+impl<'d> Iterator for Bodies<'d> {
+    type Item = (ObjectId, Body<'d>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.held.find_map(body_of)
+    }
+
+    /// At most one an object left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.held.size_hint().1)
+    }
+
+    /// By the map's own, as `filter_map`'s is.
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        (self.held).fold(init, |acc, held| match body_of(held) {
+            Some(body) => f(acc, body),
+            None => acc,
+        })
+    }
+}
+
+impl DoubleEndedIterator for Bodies<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.held.by_ref().rev().find_map(body_of)
+    }
+
+    #[inline]
+    fn rfold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        (self.held).rfold(init, |acc, held| match body_of(held) {
+            Some(body) => f(acc, body),
+            None => acc,
+        })
+    }
+}
+
+impl FusedIterator for Bodies<'_> {}
 
 impl From<Object> for Body<'_> {
     fn from(object: Object) -> Self {
@@ -332,6 +400,7 @@ impl<'a> From<&'a Object> for Body<'a> {
 /// How a whole file or an update is written. A caller sets the fields on
 /// a copy of [`Options::DEFAULT`] (`options.kind = XrefKind::Stream`, say),
 /// as it does a reading's [`Options`](crate::Options).
+/// Not exhaustive, as more choices may come.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct Options<'a> {
@@ -415,6 +484,7 @@ pub struct Options<'a> {
     ///   An object given past [`NUMBERS`] and written below it is written.
     /// - **Errors name** an object by the number it's given at
     ///   ([`Error::Unnumbered`], [`Error::Elsewhere`], [`Error::Changed`],
+    ///   [`Error::Gone`], [`Error::Uncontained`],
     ///   [`Error::Placed`], [`Error::Data`], [`Error::Group`],
     ///   [`Error::Twice`], and [`Error::Moved`] the encryption's object); a
     ///   number the file uses by the number written ([`Error::Number`],
@@ -511,6 +581,7 @@ pub type Groups<'a> = dyn Fn(&[u32]) -> Vec<Vec<u32>> + Sync + 'a;
 /// before it has a key. A caller sets the fields on a copy of
 /// [`Pack::DEFAULT`]. Under an encryption that leaves streams in the
 /// clear and strings not, nothing is packed ([`Encryptor::packs`]).
+/// Not exhaustive, as more choices may come.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct Pack<'a> {
@@ -554,6 +625,8 @@ impl fmt::Debug for Pack<'_> {
 
 /// What a write wrote: where each object landed, and the file it's now,
 /// which an update after it goes after without reading it again.
+/// Not exhaustive, so that a write can come to say more of what it wrote; made
+/// only by the writer.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Written {
@@ -612,7 +685,7 @@ mod sealed {
     use pdf_objects::object::{Object, ObjectId, Span};
 
     use super::Error;
-    use crate::bytes::{SourceId, XrefEntry};
+    use crate::read::{SourceId, XrefEntry};
 
     /// What the writer reads of the reading its objects were read in.
     pub trait Reads {
@@ -635,7 +708,9 @@ mod sealed {
 
         /// The bytes at `span`, object `id`'s, as written, an encrypted
         /// file's as they are: refused where they aren't there to read any
-        /// more ([`Error::Changed`]), or don't read ([`Error::Io`]).
+        /// more ([`Error::Gone`]), where the object stream they're in
+        /// doesn't read ([`Error::Uncontained`]), or where they don't read
+        /// ([`Error::Io`]).
         fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error>;
 
         /// The newest entry its sections give number `n`.
@@ -683,8 +758,11 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
 
     fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error> {
         Reading::written(self, span).map_err(|why| match why {
-            crate::bytes::Error::Io(e) => Error::io(&e),
-            _ => Error::Changed(Some(id)),
+            crate::read::Error::Io(e) => Error::io(&e),
+            crate::read::Error::Unread(why) => Error::Uncontained { id, why },
+            // Outside the file, or the object stream's data: none other is
+            // given.
+            _ => Error::Gone { id, at: span },
         })
     }
 
@@ -705,6 +783,7 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
 }
 
 /// Why the writer wrote nothing.
+/// Not exhaustive, as more of what the writer refuses may be told apart.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -747,18 +826,19 @@ pub enum Error {
     #[error("it's encrypted, and no password opened it, so there's no key to encrypt by")]
     Locked,
     /// An encrypted file whose security handler the reader can't open, and
-    /// why ([`Encryptor::of`]).
+    /// why ([`Encryptor::of`]), as its reading says it
+    /// ([`Encryption::Unsupported`](crate::Encryption::Unsupported)).
     #[error("it's encrypted by a security handler the reader can't open: {0}")]
-    Unsupported(String),
+    Unsupported(Unsupported),
     /// An object number a written file may not use: 0, which heads the
     /// free list (ISO 32000-2, 7.5.4), or one at or past [`NUMBERS`], which
     /// a whole file's section would list every number up to.
     #[error("{}", number(*.0))]
     Number(u32),
-    /// An object number given twice, at any generation: under a
-    /// renumbering ([`Options::renumber`]), an update's among them where one
-    /// of the two is an object as read it passes over, which is in its file
-    /// at that number already ([`Body::Read`]).
+    /// An object number given twice, at any generation: an update's among
+    /// them where one of the two is an object as read it passes over, which
+    /// is in its file at that number already ([`Body::Read`]), so that the
+    /// other would replace it, renumbered ([`Options::renumber`]) or not.
     #[error("object {0} is given twice")]
     Twice(u32),
     /// Under a renumbering ([`Options::renumber`]), the number written that
@@ -821,7 +901,7 @@ pub enum Error {
     /// the reading the write was given read that number's stream's data,
     /// or with no reading given: its data is given as bytes instead, or the
     /// reading it was read in given, which a document read whole
-    /// ([`bytes::read`](crate::bytes::read)) has dropped
+    /// ([`read::document`](crate::read::document)) has dropped
     /// ([`Reading::to_document`] keeps it), or a reading of its file opened
     /// again that took the document ([`Reading::adopt`]).
     #[error("stream {0}'s data is where no stream of the reading given read it at that number")]
@@ -864,9 +944,32 @@ pub enum Error {
     /// The file the reading given reads isn't as it was when it was read:
     /// its source says so ([`ByteSource::unchanged`]), before anything's
     /// written; or the bytes object `id` was read from, read again to copy
-    /// them, aren't those it was read from ([`Body::Read`]).
+    /// them, aren't those it was read from, by their hash ([`Body::Read`]).
     #[error("{}", changed(*.0))]
     Changed(Option<ObjectId>),
+    /// The bytes object `id` was read from, `at`, read again to copy them
+    /// ([`Body::Read`]), aren't there to read: past the end of the file
+    /// the reading given reads, or of the decoded data of the object
+    /// stream they're in, or in an object stream the reading has none of
+    /// at that number. So the file isn't as it was when the object was
+    /// read, or the object's record isn't of where the reading read it.
+    #[error("{}", gone(*.id, *.at))]
+    Gone {
+        /// The object.
+        id: ObjectId,
+        /// Where its record says its bytes are.
+        at: Span,
+    },
+    /// The object stream object `id` was read from, decoded again to copy
+    /// its bytes ([`Body::Read`]), doesn't read or decode as it did when
+    /// the object was read, and why: so the file isn't as it was then.
+    #[error("object {} {}'s object stream doesn't read: {why}", id.number, id.generation)]
+    Uncontained {
+        /// The object.
+        id: ObjectId,
+        /// Why its object stream doesn't read.
+        why: Unread,
+    },
     /// An object as read ([`Body::Read`]) given with a record of another
     /// reading than the one given, or of another object: read as another
     /// number or generation ([`Record::id`]), or not the object given, nor,
@@ -933,6 +1036,19 @@ fn changed(id: Option<ObjectId>) -> String {
     }
 }
 
+/// What [`Error::Gone`] says of object `id`'s bytes at `at`.
+fn gone(id: ObjectId, at: Span) -> String {
+    let (n, g) = (id.number, id.generation);
+    let (start, end) = (at.start, at.end);
+    let place = match at.stream {
+        None => "the file".to_string(),
+        Some(stream) => format!("object stream {}'s decoded data", stream.number),
+    };
+    format!(
+        "object {n} {g}'s bytes, {start}..{end} of {place}, aren't there to read: the file has changed since it was read"
+    )
+}
+
 /// What [`Error::Number`] says of number `n`.
 fn number(n: u32) -> String {
     match n {
@@ -986,6 +1102,7 @@ const SECTION_KEYS: [&[u8]; 15] = [
 /// reference as `to` names it, `null` where it names none, as a whole file's
 /// are ([`full`]). `&()` names each as it is. `/Root` isn't one of those keys:
 /// a caller whose section writes it takes it out.
+#[must_use]
 pub fn trailer_entries(trailer: &Dict, to: &(dyn Renumber + Sync)) -> Dict {
     let mut trailer = trailer.clone();
     for key in SECTION_KEYS {
@@ -1002,6 +1119,7 @@ pub fn trailer_entries(trailer: &Dict, to: &(dyn Renumber + Sync)) -> Dict {
 /// `trailer`'s first `/ID` element, which an RC4 or AES-128 key is made
 /// from: the array's first element, when that's a string, however many
 /// elements the array has.
+#[must_use]
 pub fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
     let id = trailer.get(b"ID")?.as_array()?.first()?;
     match id.value() {
@@ -1015,6 +1133,7 @@ pub fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
 /// the same `/ID`. A file with no first string gets the hash for both
 /// where it's `encrypted`, which needs an `/ID` (ISO 32000-2, 14.4, has a
 /// new file's two the same), and none otherwise.
+#[must_use]
 pub fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Vec<u8>; 2]> {
     if kept.is_none() && !encrypted {
         return None;
@@ -1027,6 +1146,7 @@ pub fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option
 }
 
 /// `id`, as a trailer's `/ID` value: its two strings, in hex.
+#[must_use]
 pub fn id_value([first, second]: &[Vec<u8>; 2]) -> Object {
     Object::from(vec![
         Object::hex(first.clone()),
@@ -1077,9 +1197,8 @@ impl<'a> Numbering<'a> {
 /// use, given once and written once, not `encrypt_at`, the encryption
 /// dictionary's, and not one `encryptor`'s file lists free under keys made
 /// per object: the first that isn't, refused. `held` are the numbers of
-/// objects an update under a renumbering passes over, ascending, given and
-/// in its file at those numbers already, which no body is given or written
-/// at again.
+/// objects an update passes over, ascending, given and in its file at
+/// those numbers already, which no body is given or written at again.
 fn checked(
     bodies: &[(ObjectId, Body<'_>)],
     to: Numbering<'_>,
@@ -1189,16 +1308,16 @@ fn fresh(from: u32, passed: impl Fn(u32) -> bool) -> u32 {
 
 /// What resolves a reference in what a write writes: the objects it's
 /// given, then the reading they were read in.
-struct Bodies<'b> {
+struct Given<'b> {
     bodies: &'b [(ObjectId, Body<'b>)],
     index: HashMap<ObjectId, usize>,
     from: Option<&'b dyn ReadFrom>,
 }
 
-impl<'b> Bodies<'b> {
-    fn new(bodies: &'b [(ObjectId, Body<'b>)], from: Option<&'b dyn ReadFrom>) -> Bodies<'b> {
+impl<'b> Given<'b> {
+    fn new(bodies: &'b [(ObjectId, Body<'b>)], from: Option<&'b dyn ReadFrom>) -> Given<'b> {
         let index = (bodies.iter().enumerate()).map(|(i, (id, _))| (*id, i));
-        Bodies {
+        Given {
             bodies,
             index: index.collect(),
             from,
@@ -1206,7 +1325,7 @@ impl<'b> Bodies<'b> {
     }
 }
 
-impl<'b> Resolve<'b> for Bodies<'b> {
+impl<'b> Resolve<'b> for Given<'b> {
     fn resolve(&self, id: ObjectId) -> Option<&'b Object> {
         match self.index.get(&id) {
             Some(&i) => Some(self.bodies[i].1.object()),

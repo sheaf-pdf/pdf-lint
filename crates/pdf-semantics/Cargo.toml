@@ -28,7 +28,11 @@ clock = ["dep:chrono"]
 
 [dev-dependencies]
 # The tests' resolvers: a reading in memory, a reading by position, a document.
-pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
+pdf-structure.workspace = true
+# The tests' file writer. By its path alone, as it's never published, which
+# the package's manifest leaves out: so the crate's unit tests don't build
+# from its package.
+pdf-fixtures = { path = "../pdf-fixtures" }
 
 [lints.rust]
 unsafe_code = "forbid"

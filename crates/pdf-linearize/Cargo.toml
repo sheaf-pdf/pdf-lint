@@ -18,7 +18,7 @@ lopdf = { version = "0.45", default-features = false, optional = true }
 pdf-objects.workspace = true
 # The page tree and name trees, and not the clock.
 pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false, optional = true }
-pdf-structure = { path = "../pdf-structure", version = "0.1", optional = true }
+pdf-structure = { workspace = true, optional = true }
 thiserror = "2"
 
 [features]

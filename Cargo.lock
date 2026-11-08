@@ -676,6 +676,7 @@ name = "pdf-color"
 version = "0.1.0-alpha.1"
 dependencies = [
  "criterion",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-structure",
  "thiserror",
@@ -727,11 +728,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-fixtures"
+version = "0.0.0"
+dependencies = [
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-objects",
+ "pdf-structure",
+ "pdf-tokenizer",
+ "tempfile",
+]
+
+[[package]]
 name = "pdf-fonts"
 version = "0.1.0"
 dependencies = [
  "hayro-cmap",
  "pdf-content-streams",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-structure",
  "skrifa",
@@ -761,6 +775,7 @@ dependencies = [
  "pdf-color",
  "pdf-content-streams",
  "pdf-crypt",
+ "pdf-fixtures",
  "pdf-fonts",
  "pdf-linearize",
  "pdf-objects",
@@ -790,6 +805,7 @@ name = "pdf-semantics"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-structure",
  "quick-xml",
@@ -798,17 +814,20 @@ dependencies = [
 
 [[package]]
 name = "pdf-structure"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "chacha20",
+ "criterion",
  "libc",
  "pdf-crypt",
  "pdf-filters",
+ "pdf-fixtures",
  "pdf-objects",
  "pdf-tokenizer",
  "same-file",
  "tempfile",
  "thiserror",
+ "tracing",
  "twox-hash",
 ]
 
@@ -820,6 +839,12 @@ dependencies = [
  "memchr",
  "thiserror",
 ]
+
+[[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "proc-macro2"
@@ -1140,6 +1165,25 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "tracing"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+dependencies = [
+ "pin-project-lite",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
+]
 
 [[package]]
 name = "twox-hash"

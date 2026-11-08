@@ -17,16 +17,18 @@ use pdf_objects::serialize;
 use super::copy::{Copying, as_read, written};
 use super::crypt::Place;
 use super::{
-    Bodies, Body, Encryptor, Entry, Error, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
+    Body, Encryptor, Entry, Error, Given, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
     Section, Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
 };
-use crate::bytes::{ByteSource, Reading, SourceId};
+use crate::phases::phase;
+use crate::read::{ByteSource, Reading, SourceId};
 use crate::source::XrefKind;
 
 /// The file an update goes after, as its last section describes it. Made
 /// of a reading ([`Base::of`]), or of what a caller read otherwise
 /// ([`Base::new`]), its fields set after; and given back by each write
 /// ([`Written::base`]), for an update after it.
+/// Not exhaustive, so that it can come to say more of the file.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Base {
@@ -90,6 +92,8 @@ impl Base {
     /// numbers start past its trailer's `/Size` (below 2³²), every number
     /// its sections list, in use or free, and its cross-reference streams'
     /// numbers.
+    ///
+    /// # Errors
     ///
     /// Refused: a file with bytes before its header ([`Error::Prefixed`]),
     /// whose positions this crate's reader counts from the file's start
@@ -164,6 +168,7 @@ impl Base {
     /// that's direct; its header at 0, its last line taken as not ended (an
     /// update then starts with a newline), and of no reading. Each is a
     /// field, to set after.
+    #[must_use]
     pub fn new(len: usize, prev: usize, size: u32, kind: XrefKind, trailer: Dict) -> Base {
         Base {
             len,
@@ -184,6 +189,11 @@ impl Base {
     /// long, its last `startxref` its last section's. What keeps another
     /// writer from changing the file between this and an append is the
     /// caller's.
+    ///
+    /// # Errors
+    ///
+    /// The source's, where it doesn't give the bytes its last `startxref`
+    /// is read from.
     pub fn holds<S: ByteSource + ?Sized>(&self, source: &S) -> io::Result<bool> {
         Ok(source.len() == self.len && startxref(source)? == Some(self.prev))
     }
@@ -195,7 +205,9 @@ impl Base {
 /// file already and is passed over, so that a document's
 /// [`bodies`](super::bodies) write what was built or changed since; one
 /// of that reading's given at another number is refused
-/// ([`Error::Elsewhere`]), not passed over. After a newline, where `base`'s last
+/// ([`Error::Elsewhere`]), not passed over; and so is another object given
+/// at the number of one passed over, at any generation, which would
+/// replace it ([`Error::Twice`]). After a newline, where `base`'s last
 /// line isn't ended, each body at its number, in the order given, then a
 /// section of `base`'s kind listing only those, in runs, positions counted
 /// from `base`'s header, a stream's not deflated, numbered at
@@ -281,12 +293,15 @@ impl Base {
 /// doesn't want that writes the file whole under a new AES-256 encryption
 /// ([`Encryptor::create`]) instead.
 ///
+/// # Errors
+///
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
 /// object as read or a `from` after a file written under a renumbering; an
 /// encryptor that isn't `base`'s file's (another file's, though its
 /// `/Encrypt` is at the same number), or none for an encrypted file; a
-/// number 0 or at or past [`NUMBERS`], or given twice, or under a
-/// renumbering written at twice, one passed over among them; a body the
+/// number 0 or at or past [`NUMBERS`], or given twice, one passed over
+/// among them ([`Error::Twice`]), or under a renumbering written at twice,
+/// one passed over among them ([`Error::WrittenTwice`]); a body the
 /// renumbering gives no number; a body at the encryption dictionary's
 /// number; one at a number the file lists free where its keys are made
 /// per object ([`Encryptor::of`]); a renumbering that moves an encryption
@@ -296,7 +311,8 @@ impl Base {
 /// cross-reference stream with no number left below [`NUMBERS`]; a stream's data where it was written that isn't
 /// the reading's own for its number, or with no `from`; a `from` whose
 /// source says it changed, and a copy whose bytes aren't those it was read
-/// from ([`Error::Changed`]), or whose record is another reading's or
+/// from ([`Error::Changed`]), or aren't there to read ([`Error::Gone`],
+/// [`Error::Uncontained`]), or whose record is another reading's or
 /// another object's, or under a renumbering whose references aren't where
 /// its bytes have them ([`Error::Elsewhere`]); what pdf-objects' writer
 /// refuses, or the encryptor; and a write stopped.
@@ -308,6 +324,7 @@ pub fn update<'a>(
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
 ) -> Result<Option<Written>, Error> {
+    phase!(DEBUG, "update", at = base.len);
     let start = out.len();
     // After a file written under a renumbering, what was read is in
     // numbers the file doesn't have.
@@ -330,14 +347,16 @@ pub fn update<'a>(
         to.at(id) == Some(id) && object.references().all(|r| to.at(r) == Some(r))
     };
     let mut kept: Vec<(ObjectId, Body<'a>)> = Vec::new();
-    // Under a renumbering, the numbers of what's passed over, at which no
-    // other object is given or written.
+    // The numbers of what's passed over, at which no other object is given
+    // or written: renumbered or not, as one given there would replace it
+    // silently.
     let mut passed = Vec::new();
     match to.0 {
         None => {
             for (id, body) in bodies {
-                if !held(id, &body)? {
-                    kept.push((id, body));
+                match held(id, &body)? {
+                    true => passed.push(id.number),
+                    false => kept.push((id, body)),
                 }
             }
         }
@@ -398,7 +417,7 @@ fn appended(
     // bodies and the reading, by the numbers they're given at, the
     // document's metadata stream found there and kept as its number
     // written.
-    let resolve = encryptor.map(|_| Bodies::new(bodies, from));
+    let resolve = encryptor.map(|_| Given::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
         (Some(e), Some(resolve)) => Some(e.encrypting_at(&base.trailer, resolve, to)?),
         _ => None,

@@ -11,11 +11,12 @@ use pdf_linearize::family::{self, Error, Options};
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::parse::Parser;
 use pdf_objects::serialize;
-use pdf_structure::bytes::{self, Reading, XrefEntry};
+use pdf_structure::pdf_crypt::Password;
 use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::pdf_crypt::rand_core::SeedableRng;
+use pdf_structure::read::{self, Reading, XrefEntry};
 use pdf_structure::write::{self, Deflate, Encryptor};
-use pdf_structure::{Document, Encryption, Password, Source as _, XrefKind};
+use pdf_structure::{Document, Encryption, Source as _, XrefKind};
 
 mod written;
 use written::{KEYS, encrypted_as, file, kinds, opened, stream};
@@ -136,7 +137,7 @@ fn reads_back(out: &[u8], done: &family::Linearized, password: &str, name: &str)
         "{name}"
     );
     let doc = reading.to_document().unwrap();
-    assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+    assert!(doc.faults().is_empty(), "{name}: {:?}", doc.faults());
     for text in [1, 3, 4, 5, 6, 7, 8, 9].map(|n| format!("secret 0{n}")) {
         marked(&doc, &text);
     }
@@ -151,7 +152,7 @@ fn reads_back(out: &[u8], done: &family::Linearized, password: &str, name: &str)
         b"(a secret other stream) Tj",
         "{name}"
     );
-    let trailer = doc.trailer.dict();
+    let trailer = doc.trailer().dict();
     assert_eq!(
         trailer.get(b"Info").unwrap().as_reference(),
         Some(marked(&doc, "secret 09")),
@@ -464,7 +465,7 @@ fn a_metadata_stream_under_encrypt_metadata_false_is_in_the_clear_at_its_new_num
         assert!(holds(&out, METADATA.as_bytes()));
         let back = opened(&out, "user");
         let doc = back.to_document().unwrap();
-        let root = doc.trailer.dict().get(b"Root").unwrap().as_reference();
+        let root = doc.trailer().dict().get(b"Root").unwrap().as_reference();
         let catalog = doc.get_dict(root.unwrap()).unwrap();
         let metadata = catalog.get(b"Metadata").unwrap().as_reference().unwrap();
         assert_ne!(metadata, ObjectId::new(10, 0), "it's moved");
@@ -499,10 +500,10 @@ fn a_new_encryption_is_given_a_number_and_part_four() {
             let (out, done) = under(source, password, Some(&encryptor), &options).unwrap();
             reads_back(&out, &done, "user", name);
             assert!(
-                Reading::open(&out[..], &bytes::Options::DEFAULT)
+                Reading::open(&out[..], &read::Options::DEFAULT)
                     .unwrap()
                     .to_document()
-                    .is_ok_and(|doc| doc.encryption == Encryption::Locked),
+                    .is_ok_and(|doc| *doc.encryption() == Encryption::Locked),
                 "{name}: the empty password opens it"
             );
             let back = opened(&out, "user");
@@ -536,7 +537,7 @@ fn a_reference_to_no_object_doesnt_come_to_name_a_new_dictionary() {
         let (out, _) = under(&bytes, "", Some(&encryptor), &options).unwrap();
         let reading = opened(&out, "user");
         let doc = reading.to_document().unwrap();
-        let trailer = doc.trailer.dict();
+        let trailer = doc.trailer().dict();
         let encrypt = trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
         assert!(trailer.get(b"Dangling").unwrap().is_null());
         let root = trailer.get(b"Root").unwrap().as_reference().unwrap();
@@ -556,7 +557,7 @@ fn with_no_encryptor_an_encrypted_reading_is_written_in_the_clear() {
             assert_eq!(*back.encryption(), Encryption::None, "{name}");
             assert!(back.facts().linearized, "{name}");
             let doc = back.to_document().unwrap();
-            assert!(!doc.trailer.dict().has(b"Encrypt"), "{name}");
+            assert!(!doc.trailer().dict().has(b"Encrypt"), "{name}");
             assert_eq!(dictionaries(&doc), 0, "{name}");
             marked(&doc, "secret 07");
             assert_eq!(
@@ -579,9 +580,9 @@ fn what_no_password_opened_is_refused() {
         let (out, _) = under(&plain, "", Some(&encryptor), &Options::DEFAULT).unwrap();
         out
     };
-    let reading = Reading::open(&bytes[..], &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(&bytes[..], &read::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
-    assert_eq!(doc.encryption, Encryption::Locked);
+    assert_eq!(*doc.encryption(), Encryption::Locked);
     for given in [None, Some(&encryptor)] {
         let mut out = vec![7];
         let refused = family::linearize(&mut out, &doc, given, Some(&reading), &Options::DEFAULT)
@@ -849,7 +850,7 @@ fn an_object_at_an_earlier_dictionary_s_number_is_encrypted_as_any_is() {
     assert!(!holds(&out, text.as_bytes()), "it's in the clear");
     let back = opened(&out, "");
     let doc = back.to_document().unwrap();
-    let root = doc.trailer.dict().get(b"Root").unwrap().as_reference();
+    let root = doc.trailer().dict().get(b"Root").unwrap().as_reference();
     let mine = doc.get_dict(root.unwrap()).unwrap().get(b"Mine").unwrap();
     let mine = doc.get_dict(mine.as_reference().unwrap()).unwrap();
     assert_eq!(mine.get(b"Mine").unwrap().as_bytes(), Some(text.as_bytes()));
@@ -935,7 +936,7 @@ fn what_names_the_dictionary_of_the_file_read_names_what_s_written_or_nothing() 
         &[&value],
     );
     let named = |doc: &Document, key: &[u8]| {
-        let root = doc.trailer.dict().get(b"Root").unwrap().as_reference();
+        let root = doc.trailer().dict().get(b"Root").unwrap().as_reference();
         doc.get_dict(root.unwrap())
             .unwrap()
             .get(key)
@@ -946,7 +947,7 @@ fn what_names_the_dictionary_of_the_file_read_names_what_s_written_or_nothing() 
         // As it is, the catalog's and the trailer's are one.
         let (out, _) = own(&bytes, "", &options).unwrap();
         let doc = opened(&out, "").to_document().unwrap();
-        let encrypt = doc.trailer.dict().get(b"Encrypt").unwrap().as_reference();
+        let encrypt = doc.trailer().dict().get(b"Encrypt").unwrap().as_reference();
         assert_eq!(named(&doc, b"Mine").as_reference(), encrypt);
         assert_eq!(dictionaries(&doc), 1);
         let dictionary = doc.get_dict(encrypt.unwrap()).unwrap();

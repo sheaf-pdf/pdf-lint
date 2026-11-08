@@ -750,7 +750,7 @@ mod tests {
     use std::ops::Range;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_fixtures::fixture::{self, Body, Xref};
 
     use super::*;
     use crate::bytes::{self, ByteSource, Options, WithReading};
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn a_stream_s_data_within_its_limit_and_past_it() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
-        let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         for id in [ObjectId::new(2, 0), ObjectId::new(3, 0)] {
             let at = PLAIN.len();
             assert_eq!(asked(&read, id, at), (Ok(PLAIN.to_vec()), false), "{id:?}");
@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn a_font_stopped_by_data_not_given_is_ungiven() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
-        let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         let id = ObjectId::new(2, 0);
         let alone = Streams::decoded(read.document(), id, PLAIN.len()).unwrap_err();
         assert_eq!(alone.why, Why::Detached);
@@ -886,7 +886,7 @@ mod tests {
             (5, Body::stream(dict! { "Filter" => many }, b"41>")),
         ];
         let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
-        let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         let data = b"AB".to_vec();
         assert_eq!(asked(&read, ObjectId::new(1, 0), 100), (Ok(data), false));
         let given = [2, 3, 5].map(|n| asked(&read, ObjectId::new(n, 0), 100));
@@ -912,7 +912,7 @@ mod tests {
             encrypt_metadata: true,
         };
         let file = fixture::encrypted(&settings, &objects(), dict! {});
-        let locked = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let locked = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         assert!(matches!(
             locked.decoded_within(ObjectId::new(2, 0), 100),
             Some(Err(bytes::Error::Locked))
@@ -964,7 +964,7 @@ mod tests {
             bytes: fixture::file("1.7", &objects(), dict! {}, Xref::Table),
             failing: AtomicBool::new(false),
         };
-        let read = WithReading::new(&source, &[], &Options::DEFAULT).unwrap();
+        let read = WithReading::new(&source, &Options::DEFAULT).unwrap();
         let font = read.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         source.failing.store(true, Ordering::Relaxed);
         assert!(matches!(
@@ -1119,7 +1119,7 @@ mod tests {
     /// checked beside its reading, every object held as built.
     fn checked(version: &str, objects: &[(u32, Body)]) -> Report {
         let file = fixture::file(version, objects, dict! { "Root" => r(1) }, Xref::Table);
-        let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         check(
             &read,
             &Hold::All(Made::Built),
@@ -1384,7 +1384,7 @@ mod tests {
             ],
         );
         let file = fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) });
-        let locked = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let locked = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         let report = check(
             &locked,
             &Hold::All(Made::Built),
@@ -1440,7 +1440,7 @@ mod tests {
     /// `file` read beside its reading and checked, holding what `hold`
     /// does, under `options`.
     fn report_with(file: &[u8], hold: &Hold, options: &crate::check::Options) -> Report {
-        let read = WithReading::new(file, &[], &Options::DEFAULT).unwrap();
+        let read = WithReading::new(file, &Options::DEFAULT).unwrap();
         check(&read, hold, options)
     }
 

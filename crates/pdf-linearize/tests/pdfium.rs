@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use pdf_linearize::check::{Facts, HintData, Raw};
 use pdf_linearize::hint::{self, HintKeys};
 use pdf_linearize::{Finding, Limits, check, family};
-use pdf_structure::Password;
-use pdf_structure::bytes::{Options, Reading};
+use pdf_structure::pdf_crypt::Password;
+use pdf_structure::read::{Options, Reading};
 
 /// What PDFium reads ahead of what it's asked for, at most: a block on either side
 /// of a read (`kAlignBlockValue`, and its parser's buffer).
@@ -69,7 +69,9 @@ fn checked(name: &str) -> (Facts, pdf_linearize::Verdict, Vec<Finding>) {
     let (bytes, password) = case(name);
     let given = password.as_deref().map(Password);
     let given: Vec<Password> = given.into_iter().collect();
-    let reading = Reading::open_with(&bytes[..], &given, &Options::DEFAULT).unwrap();
+    let mut options = Options::DEFAULT;
+    options.passwords = &given;
+    let reading = Reading::open(&bytes[..], &options).unwrap();
     let facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
     let mut findings = Vec::new();
     let verdict = check(&facts, &Limits::DEFAULT, &mut findings);

@@ -5,11 +5,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pdf_lint::bytes::{self, WithReading, read_opened};
+use pdf_lint::bytes::{self, WithReading};
 use pdf_lint::pdf_crypt::{Encoding, Password};
 use pdf_lint::{
     Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check, check_with_reading,
 };
+
+/// `data` read whole, opened by `passwords` where it's encrypted.
+fn read_by(data: &[u8], passwords: &[Password]) -> Document {
+    let mut options = bytes::Options::DEFAULT;
+    options.passwords = passwords;
+    bytes::document(data, &options)
+}
 
 /// Each fixture's name, whether its dictionaries are in object streams,
 /// and whether it's encrypted, with the empty user password and `owner`
@@ -45,14 +52,14 @@ fn annotation(doc: &Document) -> &Object {
 fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
     for (name, packed, encrypted) in FIXTURES {
         let data = std::fs::read(fixture(name)).unwrap();
-        let doc = read_opened(&data, &[]);
+        let doc = read_by(&data, &[]);
         let opened = match encrypted {
-            true => matches!(doc.encryption, Encryption::Opened { owner: false, .. }),
-            false => doc.encryption == Encryption::None,
+            true => matches!(doc.encryption(), Encryption::Opened { owner: false, .. }),
+            false => *doc.encryption() == Encryption::None,
         };
-        assert!(opened, "{name}: {:?}", doc.encryption);
-        assert_eq!(doc.trailer.unwritten, None, "{name}");
-        assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+        assert!(opened, "{name}: {:?}", doc.encryption());
+        assert_eq!(doc.trailer().unwritten, None, "{name}");
+        assert!(doc.faults().is_empty(), "{name}: {:?}", doc.faults());
         assert_eq!(doc.unread().next(), None, "{name}");
         let annotation = annotation(&doc);
         assert_eq!(
@@ -81,9 +88,9 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         assert!(others.is_empty(), "{name}: {report}");
         // The owner's password opens it too, to the same.
         if encrypted {
-            let owned = read_opened(&data, &[Password("owner")]);
-            let opened = matches!(owned.encryption, Encryption::Opened { owner: true, .. });
-            assert!(opened, "{name}: {:?}", owned.encryption);
+            let owned = read_by(&data, &[Password("owner")]);
+            let opened = matches!(owned.encryption(), Encryption::Opened { owner: true, .. });
+            assert!(opened, "{name}: {:?}", owned.encryption());
             assert!(owned.objects().eq(doc.objects()), "{name}");
             assert!(owned.unread().eq(doc.unread()), "{name}");
         }
@@ -97,12 +104,12 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
 #[test]
 fn the_compressed_file_checks_clean() {
     let data = std::fs::read(fixture("qpdf-compressed")).unwrap();
-    let doc = read_opened(&data, &[]);
+    let doc = read_by(&data, &[]);
     let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
     assert_eq!(report.findings, [], "{report}");
     assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
     assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
-    let opened = WithReading::new(&data[..], &[], &bytes::Options::DEFAULT).unwrap();
+    let opened = WithReading::new(&data[..], &bytes::Options::DEFAULT).unwrap();
     let report = check_with_reading(&opened, &Hold::All(Made::Merged), &Options::default());
     assert_eq!(
         (&report.findings[..], report.content),
@@ -139,13 +146,13 @@ fn each_file_qpdf_wrote_checks_through_the_command_line() {
 fn a_wrong_password_on_a_file_any_password_opens_leaves_it_unread() {
     let path = fixture("qpdf-aes-256");
     let data = std::fs::read(&path).unwrap();
-    let wrong = read_opened(&data, &[Password("wrong")]);
-    assert_eq!(wrong.encryption, Encryption::Locked);
-    let owned = read_opened(&data, &[Password("owner")]);
+    let wrong = read_by(&data, &[Password("wrong")]);
+    assert_eq!(*wrong.encryption(), Encryption::Locked);
+    let owned = read_by(&data, &[Password("owner")]);
     let by = Some((0, Encoding::Utf8));
     let opened =
-        matches!(owned.encryption, Encryption::Opened { owner: true, by: b, .. } if b == by);
-    assert!(opened, "{:?}", owned.encryption);
+        matches!(owned.encryption(), Encryption::Opened { owner: true, by: b, .. } if *b == by);
+    assert!(opened, "{:?}", owned.encryption());
     let run = |password: &str| {
         Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
             .args(["--password", password])

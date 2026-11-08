@@ -4,9 +4,10 @@
 //! of what's left in the clear that the reader decrypts by.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, btree_map};
 use std::convert::Infallible;
 use std::fmt;
+use std::iter::FusedIterator;
 
 use pdf_crypt::rand_core::CryptoRng;
 use pdf_crypt::{Fault, Handler, Method, Protection, Unusable};
@@ -15,16 +16,16 @@ use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 use pdf_objects::serialize::{self, Encrypt, Renumber};
 
 use super::{Error, Numbering};
-use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::crypt::{self, List, Stream};
 use crate::filter;
+use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::source::Encryption;
 
 /// How a written file is encrypted: a security handler and its key, a
 /// reading's or a new file's; its encryption dictionary as it's written,
 /// and where the file it was read from had it; the `/ID[0]` the key is
 /// made from; and what it leaves in the clear, the list the reader
-/// decrypts by (see [`bytes`](crate::bytes), "What's encrypted"); and,
+/// decrypts by (see [`read`](crate::read), "What's encrypted"); and,
 /// where its keys are made per object, the numbers the file lists free,
 /// at which nothing new is written under it ([`Encryptor::free`]). It
 /// gives out nothing of the key, its `Debug` neither; a clone clones the
@@ -99,6 +100,40 @@ impl fmt::Debug for Encryptor {
     }
 }
 
+/// Each number an [`Encryptor`] says the file it was read from lists free,
+/// under keys made per object, with the generation its entry gives,
+/// ascending: what [`Encryptor::free_numbers`] gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct FreeNumbers<'e> {
+    free: btree_map::Iter<'e, u32, u16>,
+}
+
+impl Iterator for FreeNumbers<'_> {
+    type Item = (u32, u16);
+
+    #[inline]
+    fn next(&mut self) -> Option<(u32, u16)> {
+        self.free.next().map(|(&n, &generation)| (n, generation))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.free.size_hint()
+    }
+
+    /// By the map's own, as `map`'s is.
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, (u32, u16)) -> B,
+    {
+        (self.free).fold(init, |acc, (&n, &generation)| f(acc, (n, generation)))
+    }
+}
+
+impl FusedIterator for FreeNumbers<'_> {}
+
 impl Encryptor {
     /// How `reading`'s file is encrypted, to write it encrypted as it is:
     /// its handler, as the password the reading was given opened it; its
@@ -106,11 +141,7 @@ impl Encryptor {
     /// at its number or in the trailer; its first `/ID` element, as the
     /// handler opened by it (empty where the trailer has none); and what it
     /// leaves in the clear, as the reading decrypts it. None for a file that
-    /// isn't encrypted. Refused for one no password opened
-    /// ([`Error::Locked`], whether its strings and streams are encrypted or
-    /// not, [`Encryption::Plain`]), and for one whose security handler the
-    /// reader can't open ([`Error::Unsupported`]): there's nothing to
-    /// encrypt what's written by.
+    /// isn't encrypted.
     ///
     /// Where any of its methods makes keys per object, from the object's
     /// number and generation (RC4 and AES-128: its strings', its streams',
@@ -122,6 +153,14 @@ impl Encryptor {
     /// file, or in the earlier file a whole save replaces; and a whole file
     /// lists each free at that generation, so that a tool that follows its
     /// free list doesn't take one at a deleted object's key.
+    ///
+    /// # Errors
+    ///
+    /// Refused for a file no password opened ([`Error::Locked`], whether its
+    /// strings and streams are encrypted or not, [`Encryption::Plain`]), and
+    /// for one whose security handler the reader can't open
+    /// ([`Error::Unsupported`]): there's nothing to encrypt what's written
+    /// by.
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Option<Encryptor>, Error> {
         match (reading.encryption(), reading.handler(), reading.stored()) {
             (Encryption::None, ..) => Ok(None),
@@ -157,10 +196,13 @@ impl Encryptor {
     /// `Handler::create` makes it from `rng`'s draws; its dictionary with
     /// its crypt filter's `/Length 32` (bytes, as qpdf writes it) and
     /// `/AuthEvent /DocOpen`. Its key isn't made from the file's `/ID`
-    /// ([`Encryptor::first_id`] is none). Refused, as `Handler::create`
-    /// refuses: for a password that isn't prepared, or is empty or too
-    /// long; for no password; and for permissions withheld where the
-    /// owner's password is the user's.
+    /// ([`Encryptor::first_id`] is none).
+    ///
+    /// # Errors
+    ///
+    /// Refused, as `Handler::create` refuses: for a password that isn't
+    /// prepared, or is empty or too long; for no password; and for
+    /// permissions withheld where the owner's password is the user's.
     pub fn create(
         protection: &Protection,
         rng: &mut (impl CryptoRng + ?Sized),
@@ -189,20 +231,23 @@ impl Encryptor {
     /// where streams are left in the clear (`/StmF /Identity`) and strings
     /// aren't, whose strings would then be in the clear; nor where either's
     /// method isn't one.
+    #[must_use]
     pub fn packs(&self) -> bool {
         crypt::packs(self.handler.streams(), self.handler.strings())
     }
 
     /// The encryption dictionary, as the file it was read from stores it,
     /// its strings as written; or a new file's.
-    pub fn dictionary(&self) -> &Dict {
+    #[must_use]
+    pub const fn dictionary(&self) -> &Dict {
         &self.dict
     }
 
     /// Where the file it was read from has the dictionary: its number.
     /// None where it's in that file's trailer, and for a new file's, which
     /// has no number yet.
-    pub fn at(&self) -> Option<ObjectId> {
+    #[must_use]
+    pub const fn at(&self) -> Option<ObjectId> {
         match self.place {
             Place::At(id) => Some(id),
             Place::Direct | Place::New => None,
@@ -212,6 +257,7 @@ impl Encryptor {
     /// Whether the file it was read from has the dictionary in its
     /// trailer, direct, as a whole file and an update written under it
     /// keep it, where one at a number is written as an object.
+    #[must_use]
     pub fn direct(&self) -> bool {
         self.place == Place::Direct
     }
@@ -219,6 +265,7 @@ impl Encryptor {
     /// The first `/ID` element the key is made from: the file's it was read
     /// from, as its handler opened by it, empty where that file's trailer
     /// has none. None for a new file's, whose key isn't made from it.
+    #[must_use]
     pub fn first_id(&self) -> Option<&[u8]> {
         self.first_id.as_deref()
     }
@@ -235,6 +282,7 @@ impl Encryptor {
     /// reader of the file written decrypts it, where it would otherwise be
     /// left as written; what the dictionary refers to is still left in the
     /// clear. A file written whole under it is encrypted through this.
+    #[must_use]
     pub fn whole(&self, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
         let list = &self.list;
         let named = |id: &ObjectId| list.sections.contains(id) && Some(*id) != at;
@@ -274,6 +322,7 @@ impl Encryptor {
     /// dictionary again, so it encrypts by the list as it is, in its file's
     /// numbers, which its renumbering moves nothing of
     /// ([`Error::Moved`]).
+    #[must_use]
     pub fn renumbered<N: Renumber + ?Sized>(&self, to: &N) -> Cow<'_, Encryptor> {
         let list = &self.list;
         let numbers = list.dictionaries.iter().chain(&list.sections);
@@ -339,14 +388,17 @@ impl Encryptor {
     /// ([`Error::Free`]), and a file written whole lists it free at that
     /// generation. None for any other number, and every number under keys
     /// that aren't made per object.
+    #[must_use]
     pub fn free(&self, n: u32) -> Option<u16> {
         self.free.get(&n).copied()
     }
 
     /// Each number [`Encryptor::free`] gives a generation for, with it,
     /// ascending.
-    pub fn free_numbers(&self) -> impl Iterator<Item = (u32, u16)> + '_ {
-        self.free.iter().map(|(&n, &generation)| (n, generation))
+    pub fn free_numbers(&self) -> FreeNumbers<'_> {
+        FreeNumbers {
+            free: self.free.iter(),
+        }
     }
 
     /// Whether object `id` is an encryption dictionary, or what one's
@@ -354,6 +406,7 @@ impl Encryptor {
     /// key: left in the clear, and never put in an object stream, which is
     /// encrypted. [`packable`](super::packable) tells an encryption
     /// dictionary by its shape alone.
+    #[must_use]
     pub fn dictionary_object(&self, id: ObjectId) -> bool {
         self.list.dictionaries.contains(&id)
     }
@@ -440,10 +493,13 @@ impl Encryptor {
     /// crypt filter of its own. Both are in the numbers the objects are
     /// written at: a file whose objects are written at other numbers than
     /// they're held at is encrypted through
-    /// [`Encryptor::encrypting_renumbered`]. Refused where `/EncryptMetadata
-    /// false` leaves the document's metadata stream in the clear and
-    /// `resolve` doesn't give the catalog, which says which stream that is
-    /// ([`Error::Catalog`]), rather than encrypt it.
+    /// [`Encryptor::encrypting_renumbered`].
+    ///
+    /// # Errors
+    ///
+    /// Refused where `/EncryptMetadata false` leaves the document's metadata
+    /// stream in the clear and `resolve` doesn't give the catalog, which says
+    /// which stream that is ([`Error::Catalog`]), rather than encrypt it.
     pub fn encrypting<'a>(
         &'a self,
         trailer: &Dict,
@@ -463,8 +519,11 @@ impl Encryptor {
     /// through them. The document's metadata stream is found there, and
     /// kept as the number `to` writes it at, which pdf-objects' writer asks
     /// by: so `/EncryptMetadata false` leaves that one in the clear, and
-    /// not the object `to` writes at the number it's held at. Refused as
-    /// [`Encryptor::encrypting`] is.
+    /// not the object `to` writes at the number it's held at.
+    ///
+    /// # Errors
+    ///
+    /// Refused as [`Encryptor::encrypting`] is.
     pub fn encrypting_renumbered<'a, N: Renumber + ?Sized>(
         &'a self,
         trailer: &Dict,
@@ -521,7 +580,7 @@ impl Encryptor {
 /// the data, as pdf-crypt's `Handler::encrypt_string` and `encrypt_stream`
 /// derive it, so the same object encrypts to the same bytes on every save
 /// and no IV serves two plaintexts. What it leaves in the clear is the list
-/// the reader decrypts by (see [`bytes`](crate::bytes), "What's
+/// the reader decrypts by (see [`read`](crate::read), "What's
 /// encrypted"): an encryption dictionary and what its entries refer to, a
 /// cross-reference stream, a signature's `/Contents`, a stream whose crypt
 /// filter is `/Identity`, and the document's metadata stream's data under
@@ -547,7 +606,8 @@ impl fmt::Debug for Encrypting<'_> {
 /// Why a string or a stream's data of a file written encrypted isn't
 /// encrypted, which the writer refuses ([`Error::Encrypt`]), writing
 /// nothing in the clear.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Not exhaustive, as reasons are found as the writer learns.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unencryptable {
     /// pdf-crypt's fault: a crypt filter's method that isn't one, or one
@@ -711,10 +771,27 @@ fn context(
     context
 }
 
-/// The encryption dictionary of `values`, each crypt filter's `/Length`
-/// `length` where it's given, `/AuthEvent /DocOpen`, and `/StmF` and
-/// `/StrF` its first crypt filter; a value `values` hasn't left out.
-pub(crate) fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
+/// The encryption dictionary of `values`, pdf-crypt's form of a standard
+/// security handler's, as the writer writes a new file's
+/// ([`Encryptor::create`], `length` `Some(32)`): `/Filter /Standard`, `/V`
+/// and `/R`, then each value `values` holds of `/O`, `/U`, `/P` and
+/// `/Length`, from `/V` 5 of `/OE`, `/UE` and `/Perms`, and
+/// `/EncryptMetadata`; where it names a crypt filter, its first written as
+/// `/CF`'s `/StdCF`, its method its `/CFM`, with `/AuthEvent /DocOpen` and a
+/// `/Length` of `length` where that's given, and `/StmF` and `/StrF` naming
+/// it (ISO 32000-2, 7.6.2, 7.6.4.2 and 7.6.6). A value `values` hasn't is
+/// left out.
+///
+/// It's a new file's dictionary, not [`read::encryption`]'s inverse: of
+/// what that reads of a file's dictionary, it writes neither the
+/// `/Filter`, `/StmF` and `/StrF` read, nor a crypt filter's name, nor any
+/// filter past the first, so a dictionary read with one and written with
+/// the other names its first crypt filter `/StdCF`, for strings and
+/// streams both, whatever the file named.
+///
+/// [`read::encryption`]: crate::read::encryption
+#[must_use]
+pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
     let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
     let mut dict = pdf_objects::dict! {
         "Filter" => "Standard",

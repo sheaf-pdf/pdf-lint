@@ -7,17 +7,19 @@
 
 use pdf_filters::Fault;
 use pdf_objects::object::{Object, ObjectId, Value};
+use pdf_objects::parse;
 use pdf_tokenizer::{Kind, Tokenizer, is_white_space};
 
-use super::{Cx, Reader, Reading, XrefEntry, is_keyword, offset_of, predictor_row, rfind};
-use crate::bytes::reading::{ByteSource, Error};
-use crate::bytes::window::{Bytes, InMemory, Window};
+use super::{Cx, Reader, Reading, Unfiltered, XrefEntry, offset_of, predictor_row, rfind};
 use crate::crypt::is_xref;
-use crate::filter;
-use crate::source::{Trailer, XrefKind};
+use crate::read::reading::{ByteSource, Error};
+use crate::read::window::{Bytes, InMemory, Window};
+use crate::source::{Trailer, Unread, XrefKind};
 
 /// One row of a cross-reference section, as written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not exhaustive, so that it can come to say more of a row; made only by the
+/// reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SectionRow {
     /// The number it's for.
@@ -33,6 +35,8 @@ pub struct SectionRow {
 
 /// One cross-reference section of a file, as written, none of it merged with
 /// another's.
+/// Not exhaustive, so that it can come to say more of a section; made only by
+/// the reader.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct SectionRows {
@@ -62,6 +66,8 @@ pub struct SectionRows {
 
 /// A file's sections along `/Prev`, the newest first: as many as read, and what
 /// stopped it short of the last, if anything did.
+/// Not exhaustive, so that it can come to say more of the sections; made only
+/// by the reader.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Sections {
@@ -71,8 +77,15 @@ pub struct Sections {
     pub stopped: Option<SectionFault>,
 }
 
-/// Why a section doesn't read ([`Reading::sections`]), or why no more of them are
-/// read.
+/// Why a section doesn't read ([`Reading::sections`]), or why no more of
+/// them are read: each section's own view, for a checker of a file's
+/// sections, each reason with the byte it was found at where there's one.
+/// Why the reading's sections, read as one, don't read is
+/// [`Unwritten`](super::Unwritten)'s (the trailer's reason, and a
+/// fault's), which names the same reasons in its own shape and words,
+/// without the byte, as a fault says it at its place; each kept as its
+/// readers have it.
+/// Not exhaustive, as reasons are found as the reader learns.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SectionFault {
@@ -138,8 +151,8 @@ pub enum SectionFault {
     Trailer {
         /// Where.
         at: usize,
-        /// What the parser says.
-        why: String,
+        /// pdf-objects' parser's error.
+        why: parse::Error,
     },
     /// What follows `trailer` isn't a dictionary.
     #[error("the trailer at byte {at} isn't a dictionary")]
@@ -152,8 +165,8 @@ pub enum SectionFault {
     Unread {
         /// Where.
         at: usize,
-        /// What the reader says.
-        why: String,
+        /// Why it doesn't read.
+        why: Box<Unread>,
     },
     /// The object isn't a stream.
     #[error("the object at byte {at} isn't a stream")]
@@ -185,13 +198,24 @@ pub enum SectionFault {
         /// Where.
         at: usize,
     },
-    /// A stream's data doesn't decode as far as its rows.
+    /// A stream's `/Filter` or `/DecodeParms` are ones the reader doesn't
+    /// take.
     #[error("the stream at byte {at} doesn't decode: {why}")]
+    Filters {
+        /// Where.
+        at: usize,
+        /// What it doesn't take of them.
+        why: Unfiltered,
+    },
+    /// A stream's data doesn't decode as far as its rows, and pdf-filters'
+    /// first fault: [`Fault::Limit`] where none stopped it short of its
+    /// limit.
+    #[error("the stream at byte {at} doesn't decode: {fault}")]
     Decode {
         /// Where.
         at: usize,
-        /// What's wrong.
-        why: String,
+        /// The fault.
+        fault: Fault,
     },
     /// A stream's data ends before its `/Index` does.
     #[error("the stream at byte {at} has data that ends before its /Index does")]
@@ -202,6 +226,8 @@ pub enum SectionFault {
 }
 
 /// The first object in a file, after its header, as written.
+/// Not exhaustive, so that it can come to say more of the object; made only by
+/// the reader.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct FirstObject {
@@ -226,7 +252,11 @@ impl<S: ByteSource> Reading<S> {
     /// can differ from [`Reading::entries`], which is what a reader made of them.
     /// Positions are from the file's first byte, as a reading reads them. A stream's
     /// rows are decoded from its own data, and that's never encrypted (ISO 32000-2,
-    /// 7.5.8.2). It fails only when the source doesn't give its bytes ([`Error::Io`]).
+    /// 7.5.8.2).
+    ///
+    /// # Errors
+    ///
+    /// It fails only when the source doesn't give its bytes ([`Error::Io`]).
     pub fn sections(&self) -> Result<Sections, Error> {
         match self.source().whole() {
             Some(file) => {
@@ -240,6 +270,9 @@ impl<S: ByteSource> Reading<S> {
     /// The file's first object, from its header on, as written: none with no header,
     /// or where what's first doesn't read as an object. It isn't kept. Its strings
     /// aren't decrypted, a linearization dictionary having none that a reader wants.
+    ///
+    /// # Errors
+    ///
     /// It fails only when the source doesn't give its bytes ([`Error::Io`]).
     pub fn first_object(&self) -> Result<Option<FirstObject>, Error> {
         match self.source().whole() {
@@ -266,7 +299,7 @@ impl Reader {
         let Some(header) = self.facts.header_offset else {
             return Ok(None);
         };
-        let mut cx = Cx::default();
+        let mut cx = Cx::new(false);
         Ok(self
             .indirect(file, &mut cx, header, None)?
             .ok()
@@ -329,11 +362,11 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::default();
+        let mut cx = Cx::new(false);
         let what = file.read_from(&mut cx, at, 0, |w, cx| {
             let mut t = w.tokenizer(at);
             Ok(match w.significant(&mut t) {
-                Some(token) if is_keyword(Some(&token), b"xref") => {
+                Some(token) if token.is_keyword(b"xref") => {
                     let left = *left;
                     Some(self.table_again(w, cx, &mut t, at, left))
                 }
@@ -377,7 +410,7 @@ impl Reader {
         loop {
             let at = w.place(t.offset());
             match w.significant(&mut t.clone()) {
-                Some(token) if is_keyword(Some(&token), b"trailer") => {
+                Some(token) if token.is_keyword(b"trailer") => {
                     w.significant(t);
                     break;
                 }
@@ -437,11 +470,8 @@ impl Reader {
         }
         let at = w.place(t.offset());
         let mut parser = w.parser(at).limits(self.limits.parser);
-        let trailer = w.parsed(parser.value(&mut cx.warned(None)));
-        let trailer = trailer.map_err(|why| SectionFault::Trailer {
-            at,
-            why: why.to_string(),
-        })?;
+        let trailer = w.parsed(parser.value(&mut cx.parsed(None)));
+        let trailer = trailer.map_err(|why| SectionFault::Trailer { at, why })?;
         let Some(dict) = trailer.as_dict() else {
             return Err(SectionFault::TrailerNotADictionary { at });
         };
@@ -468,11 +498,11 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::default();
+        let mut cx = Cx::new(false);
         let (id, object, record) = match self.indirect(file, &mut cx, at, None)? {
             Ok(read) => read,
             Err(why) => {
-                let why = why.to_string();
+                let why = Box::new(why);
                 return Ok(Err(SectionFault::Unread { at, why }));
             }
         };
@@ -565,10 +595,8 @@ impl Reader {
             all.checked_add(usize::try_from(count).ok()?)
         });
         let size = count.and_then(|count| count.checked_mul(row));
-        let filters = filter::filters(dict, None).map_err(|why| SectionFault::Decode {
-            at,
-            why: why.to_string(),
-        })?;
+        let filters =
+            super::filters(dict, None).map_err(|why| SectionFault::Filters { at, why })?;
         let decoded;
         let data = match filters.is_empty() {
             true => written,
@@ -582,9 +610,11 @@ impl Reader {
                     // What's past its rows, and a cut there, aren't its rows' fault.
                     Err(error) if size.is_some_and(|size| error.data.len() >= size) => error.data,
                     Err(error) => {
-                        let fault = error.faults.first().map(|(_, fault)| fault);
-                        let why = fault.map_or_else(|| Fault::Limit.to_string(), Fault::to_string);
-                        return Err(SectionFault::Decode { at, why });
+                        let fault = error
+                            .faults
+                            .first()
+                            .map_or(Fault::Limit, |&(_, fault)| fault);
+                        return Err(SectionFault::Decode { at, fault });
                     }
                 };
                 &decoded[..]
@@ -641,10 +671,10 @@ fn last_startxref<'f, F: Bytes<'f>>(file: F) -> Result<Result<usize, SectionFaul
         };
         let at = w.place(i);
         let mut t = Tokenizer::at(w.bytes, i);
-        if !is_keyword(t.next().as_ref(), b"startxref") {
+        if !t.next().is_some_and(|token| token.is_keyword(b"startxref")) {
             return Err(SectionFault::StartxrefInWord { at });
         }
-        (super::significant(&mut t))
+        t.next_significant()
             .filter(|token| token.kind == Kind::Integer)
             .and_then(|token| usize::try_from(token.integer().ok()?).ok())
             .ok_or(SectionFault::StartxrefNoOffset { at })
@@ -655,7 +685,7 @@ fn last_startxref<'f, F: Bytes<'f>>(file: F) -> Result<Result<usize, SectionFaul
 fn startxref_at(w: &Window<'_>, at: usize) -> Option<usize> {
     let mut t = w.tokenizer(at);
     let keyword = w.significant(&mut t);
-    if !is_keyword(keyword.as_ref(), b"startxref") {
+    if !keyword.is_some_and(|token| token.is_keyword(b"startxref")) {
         return None;
     }
     (w.significant(&mut t))
@@ -666,7 +696,7 @@ fn startxref_at(w: &Window<'_>, at: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytes::{Limits, Options};
+    use crate::read::{Limits, Options};
 
     /// A file of a catalog, its table at the end as `table` writes it, its trailer
     /// `trailer`, and its `startxref` at the table unless the file gives its own.
@@ -1034,10 +1064,13 @@ mod tests {
     fn a_filter_that_isnt_one_is_said() {
         let dict = format!("{XREF} /Filter /NoSuchFilter");
         let file = stream_file(&dict, &three_rows(45));
-        assert!(
-            matches!(stopped(&file), SectionFault::Decode { at: 45, .. }),
-            "{:?}",
-            stopped(&file)
+        let why = Unfiltered::Unsupported {
+            filter: b"NoSuchFilter".to_vec(),
+        };
+        assert_eq!(stopped(&file), SectionFault::Filters { at: 45, why });
+        assert_eq!(
+            stopped(&file).to_string(),
+            "the stream at byte 45 doesn't decode: its filter /NoSuchFilter isn't one the reader decodes"
         );
     }
 

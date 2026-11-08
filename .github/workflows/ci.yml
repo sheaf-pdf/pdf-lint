@@ -14,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
 
 # Each step runs a recipe from the justfile, so `just ci` locally checks the
-# same things.
+# same things, but `structure-windows`'s, which is cargo's on Windows.
 jobs:
   check:
     name: Rust checks
@@ -66,8 +66,9 @@ jobs:
       - name: Build and check the archive
         run: just dist
 
-  # pdf-structure for Windows and a 32-bit target without files, whose
-  # code of their own nothing else here builds.
+  # pdf-structure linted for Windows, the code of its own that
+  # `structure-windows` runs there, and for a 32-bit target without files,
+  # which nothing else here builds.
   structure-cross:
     name: pdf-structure for Windows and wasm32
     runs-on: ubuntu-latest
@@ -82,6 +83,21 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Lint for x86_64-pc-windows-gnu and wasm32-unknown-unknown
         run: just structure-cross
+
+  # pdf-structure's tests run on Windows, where a file is read by position
+  # and its identity held by code of its own (same-file's), which no other
+  # job runs. Its one step is cargo's, not a recipe's: `just ci` runs where
+  # this platform isn't.
+  structure-windows:
+    name: pdf-structure's tests on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --locked -p pdf-structure
 
   # The tokenizer's own promises: no std, no alloc, its oldest Rust, what
   # its package holds, and its API against the version published. None of
@@ -276,6 +292,24 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Package, and check what the package holds
         run: just color-package
+
+  # pdf-structure packaged as a publish would, as the tokenizer, pdf-objects,
+  # the filters, pdf-crypt and pdf-color are: in a fresh target directory,
+  # and what the package holds checked, its sources, README, CHANGELOG,
+  # manifest and lock, nothing else, no benchmark among them. Every crate of
+  # the family it names is on crates.io at that version, so cargo verifies
+  # the package against those.
+  structure-package:
+    name: Structure packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just structure-package
 
   # pdf-objects', the filters', pdf-crypt's and pdf-color's public API
   # against their version on crates.io, as the tokenizer's job holds its

@@ -5,10 +5,10 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::parse::Parser;
 use pdf_objects::{Str, dict, serialize};
-use pdf_structure::bytes::{self, ByteSource, Options, Reading};
-use pdf_structure::fixture::{self, Body, Xref};
+use pdf_structure::read::{self, ByteSource, Options, Reading};
 use pdf_structure::source::Document;
 
 use super::*;
@@ -190,8 +190,8 @@ fn reads_a_number_tree_with_kids() {
         (0, ObjectId::new(0, 0), true),
         (2, ObjectId::new(5, 0), false),
     ];
-    let document = bytes::read(&bytes);
-    assert_eq!(entries(&document, document.trailer.dict()), expected);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
+    assert_eq!(entries(&document, document.trailer().dict()), expected);
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
     assert_eq!(entries(&reading, reading.trailer().dict()), expected);
     let source = ByPosition::new(&bytes);
@@ -265,9 +265,11 @@ fn number_tree_round_trips() {
         dict! { "Root" => Object::reference(1) },
         Xref::Table,
     );
-    let document = bytes::read(&bytes);
+    let document = read::document(&bytes, &read::Options::DEFAULT);
     let objects = &document;
-    let catalog = catalog(objects, document.trailer.dict()).unwrap().unwrap();
+    let catalog = catalog(objects, document.trailer().dict())
+        .unwrap()
+        .unwrap();
     let root = catalog.get(b"PageLabels").unwrap();
     let mut walk = numbers(objects, root, &Limits::DEFAULT, Kept::default());
     let read: Vec<(i64, Vec<u8>)> = (walk.by_ref())
@@ -1320,8 +1322,8 @@ fn a_document_gives_what_its_reading_gives() {
         ]
     );
 
-    let document: Document = bytes::read(&bytes);
-    assert_eq!(walked(&document, document.trailer.dict()), read);
+    let document: Document = read::document(&bytes, &read::Options::DEFAULT);
+    assert_eq!(walked(&document, document.trailer().dict()), read);
     let source = ByPosition::new(&bytes);
     let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
     assert_eq!(walked(&reading, reading.trailer().dict()), read);

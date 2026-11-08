@@ -70,7 +70,7 @@ impl<'d> Prepared<'d> {
         encryptor: Option<&Encryptor>,
         options: &Options<'_>,
     ) -> Result<Prepared<'d>, Error> {
-        let trailer = doc.trailer.dict();
+        let trailer = doc.trailer().dict();
         // The object that's the catalog, through any references to it: a
         // section's /Root names it, and it's never packed (F.3.1).
         let root = trailer
@@ -208,7 +208,7 @@ impl<'d> Prepared<'d> {
             dests.extend(name_tree.into_iter().flat_map(roots));
             self.groups.push((Group::Dests, dests));
         }
-        if let Some(info) = doc.trailer.dict().get(b"Info") {
+        if let Some(info) = doc.trailer().dict().get(b"Info") {
             self.groups.push((Group::Info, roots(info)));
         }
         let form = catalog
@@ -338,7 +338,8 @@ fn dictionary_id(
             None => Ok(at),
         };
     }
-    let trailer = (doc.trailer.dict().entries().iter()).flat_map(|entry| entry.value.references());
+    let trailer =
+        (doc.trailer().dict().entries().iter()).flat_map(|entry| entry.value.references());
     let named = bodies.iter().flat_map(|(id, body)| {
         let references = body.object().references();
         std::iter::once(*id).chain(references)
@@ -358,7 +359,7 @@ fn dictionary_id(
 /// writer writes direct, so an object only that names is one nothing in the
 /// file names.
 fn reached(doc: &Document, values: &[ObjectId]) -> HashSet<ObjectId> {
-    let trailer = write::trailer_entries(doc.trailer.dict(), &());
+    let trailer = write::trailer_entries(doc.trailer().dict(), &());
     let mut stack: Vec<ObjectId> = (trailer.entries().iter())
         .flat_map(|entry| entry.value.references())
         .chain(values.iter().copied())

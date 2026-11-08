@@ -225,11 +225,12 @@ use pdf_objects::{Resolve, Unreadable};
 use pdf_semantics::date::Date;
 use pdf_structure::write::KeptOut;
 
+use crate::bytes::Fault;
 use crate::bytes::{ByteSource, WithReading};
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
-use crate::source::{Origin, Revision, RevisionEnd, Source, Trailer, Warning};
+use crate::source::{Origin, Revision, RevisionEnd, Source, Trailer};
 use crate::text;
 use crate::version::Version;
 
@@ -686,7 +687,7 @@ pub enum Rule {
     /// object without `endobj`, a name's stray `#` or `#00`, a
     /// cross-reference table's rows not 20 bytes, a file whose last line
     /// isn't `%%EOF` alone, an object an object stream's header starts
-    /// inside another's bytes, and the like ([`Warning`]).
+    /// inside another's bytes, and the like ([`Fault`]), in its words.
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
@@ -1399,7 +1400,7 @@ fn check_in(
         walk.graphics(font_budget);
         walk.linearized();
         walk.unreached();
-        walk.read_as(&source.warnings());
+        walk.read_as(&source.faults());
         std::mem::take(&mut walk.report)
     })
 }
@@ -1425,7 +1426,7 @@ fn walking<R>(
             table: "FileTrailer".to_string(),
             key: "-".to_string(),
             rule: Rule::Unresolved,
-            value: why.clone(),
+            value: why.to_string(),
             at: None,
             revision: None,
         });
@@ -4363,22 +4364,23 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The reader's warnings in held objects, and those of the file as a
-    /// whole as the trailer's, each a [`Rule::Reader`] finding.
-    fn read_as(&mut self, warnings: &[Warning]) {
-        for warning in warnings {
-            let Some(made) = self.made(warning.object) else {
+    /// The reader's faults in held objects, and those of the file as a
+    /// whole as the trailer's, each a [`Rule::Reader`] finding in its
+    /// words.
+    fn read_as(&mut self, faults: &[(pdf_objects::fault::Place, Fault)]) {
+        for (place, fault) in faults {
+            let Some(made) = self.made(place.object) else {
                 continue;
             };
             self.report.findings.push(Finding {
-                object: warning.object,
+                object: place.object,
                 made,
                 path: "-".to_string(),
                 table: "-".to_string(),
                 key: "-".to_string(),
                 rule: Rule::Reader,
-                value: warning.message.clone(),
-                at: warning.at,
+                value: fault.to_string(),
+                at: place.at,
                 revision: None,
             });
         }
@@ -5137,7 +5139,7 @@ mod tests {
     //! TestGrammar chooses them; only held objects found in; and every walk
     //! bounded, on cycles and on deep nesting.
 
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_fixtures::fixture::{self, Body, Xref};
 
     use super::*;
     use crate::bytes;
@@ -5159,7 +5161,11 @@ mod tests {
 
     /// `bytes` read and checked, holding what `hold` does.
     fn checked_as(bytes: &[u8], hold: &Hold) -> Report {
-        check(&bytes::read(bytes), hold, &Options::default())
+        check(
+            &bytes::document(bytes, &bytes::Options::DEFAULT),
+            hold,
+            &Options::default(),
+        )
     }
 
     /// `objects` written at 1.7 with a table and checked, every object held
@@ -5763,7 +5769,7 @@ mod tests {
     #[test]
     fn every_table_scores_a_dictionary_as_by_each_rows_key() {
         let bytes = scored_file();
-        let doc = bytes::read(&bytes);
+        let doc = bytes::document(&bytes, &bytes::Options::DEFAULT);
         let catalog = doc.get(ObjectId::new(1, 0)).unwrap();
         let mut random = Random(0x9e37_79b9_7f4a_7c15);
         let made: Vec<_> = (grammar().tables())
@@ -5877,7 +5883,11 @@ mod tests {
             one_table: true,
             ..Options::default()
         };
-        check(&bytes::read(&bytes), &Hold::All(Made::Built), &options)
+        check(
+            &bytes::document(&bytes, &bytes::Options::DEFAULT),
+            &Hold::All(Made::Built),
+            &options,
+        )
     }
 
     /// [`clean`] with an interactive form whose fields are objects 6 on,
@@ -6686,7 +6696,7 @@ mod tests {
         file.extend_from_slice(
             format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
         );
-        let doc = bytes::read(&file);
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
         assert_eq!(
             doc.get(ObjectId::new(3, 0)).unwrap().at,
             doc.get(ObjectId::new(4, 0)).unwrap().at
@@ -6817,7 +6827,7 @@ mod tests {
             ],
             &[(10, "/Type /ObjStm /Extends 1 0 R /Bogus 1", &[(3, page)])],
         );
-        let doc = bytes::read(&file);
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         let extends = "<< /Pages 2 0 R /Type /Catalog >>";
         assert_eq!(
@@ -7029,7 +7039,7 @@ mod tests {
         let mut file = Vec::new();
         let trailer = dict! { "Root" => r(1) };
         write::full(&mut file, bodies, &trailer, None, None, &options).unwrap();
-        let doc = bytes::read(&file);
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
         let containers = doc.objects().filter(|&(_, o)| object_stream(o)).count();
         assert_eq!(containers, 1);
         assert!(
@@ -7156,7 +7166,7 @@ mod tests {
                 &[(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"), (3, page)],
             )],
         );
-        let doc = bytes::read(&file);
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
         let why = doc.get(ObjectId::new(2, 0)).unwrap_err().to_string();
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
@@ -7446,8 +7456,8 @@ mod tests {
         file.end(first).object(2, PAGES);
         let second = file.table(&[2], &format!("/Size 3 /Root 1 0 R /Prev {first}"));
         file.end(second);
-        let doc = bytes::read(&file.out);
-        assert_eq!(doc.revisions.len(), 2);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert_eq!(doc.revisions().len(), 2);
         let missing = (
             None,
             "trailer 1",
@@ -7531,14 +7541,16 @@ mod tests {
         };
         let all = Hold::All(Made::Merged);
         let some = Hold::Only(BTreeMap::from([(ObjectId::new(2, 0), Made::Merged)]));
-        let mut doc = bytes::read(&file.out);
-        assert_eq!(doc.revisions.len(), 5);
+        let mut doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert_eq!(doc.revisions().len(), 5);
         let report = check(&doc, &all, &Options::default());
         assert_eq!(missing(&report), ["trailer 2", "trailer 1"], "{report}");
         assert_eq!(trailers(&report), [], "{report}");
 
         // The third's numbers not known: the first two not checked.
-        doc.revisions[2].numbers = None;
+        let mut revisions = doc.revisions().to_vec();
+        revisions[2].numbers = None;
+        doc.set_revisions(revisions);
         let report = check(&doc, &all, &Options::default());
         assert_eq!(missing(&report), Vec::<String>::new(), "{report}");
         let untold = not_checked("FileTrailer", UNTOLD);
@@ -7553,7 +7565,7 @@ mod tests {
         let doc = (bytes::Reading::open(&file.out[..], &options))
             .and_then(bytes::Reading::into_document)
             .unwrap();
-        assert!(doc.revisions.is_empty() && doc.warnings.is_empty());
+        assert!(doc.revisions().is_empty() && doc.faults().is_empty());
         let report = check(&doc, &all, &Options::default());
         assert_eq!(missing(&report), Vec::<String>::new(), "{report}");
         assert_eq!(trailers(&report), [(not_checked("-", UNKEPT), 1)]);
@@ -7572,7 +7584,7 @@ mod tests {
         file.end(first).object(2, PAGES);
         let second = file.table(&[2], &format!("/Size 4 /Root 1 0 R /Prev {first}"));
         file.end(second);
-        let doc = bytes::read(&file.out);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
         let only = |n| Hold::Only(BTreeMap::from([(ObjectId::new(n, 0), Made::Built)]));
         let id = (Some(3), "3 0 R", "XRefStream", "ID", Rule::Type, "(abc)");
         for (hold, found) in [
@@ -7759,8 +7771,8 @@ mod tests {
         file.object(2, PAGES);
         let update = file.table(&[2], &format!("/Size 3 /Root 1 0 R /Prev {first}"));
         file.end(update);
-        let doc = bytes::read(&file.out);
-        assert_eq!(doc.revisions.len(), 2);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert_eq!(doc.revisions().len(), 2);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
@@ -7780,9 +7792,9 @@ mod tests {
         file.end(first).object(2, PAGES);
         let second = file.table(&[2], &format!("/Size 5 /Root 1 0 R /Prev {first}"));
         file.end(second);
-        let doc = bytes::read(&file.out);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
-        assert_eq!(doc.revisions.len(), 2);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
+        assert_eq!(doc.revisions().len(), 2);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
@@ -7813,8 +7825,8 @@ mod tests {
         let trailer = format!("/Size 9 /Root 1 0 R /Info 6 0 R /Prev {first}");
         let second = file.table(&[6], &trailer);
         file.end(second);
-        let doc = bytes::read(&file.out);
-        assert_eq!(doc.revisions.len(), 2);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert_eq!(doc.revisions().len(), 2);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         // The reader can't follow the stream's own /Length before its rows
         // are read, and says so.
@@ -7859,12 +7871,12 @@ mod tests {
         let revisions = |doc: &Document| {
             vec![
                 Revision::new(100, earlier.clone(), None),
-                Revision::new(300, doc.trailer.clone(), Some(Box::new([2]))),
+                Revision::new(300, doc.trailer().clone(), Some(Box::new([2]))),
             ]
         };
         let mut doc = bare(Version::new(1, 7));
         doc.insert(7, stream(100));
-        doc.revisions = revisions(&doc);
+        doc.set_revisions(revisions(&doc));
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         let found: Vec<_> = (walked(&report).into_iter())
             .map(|(object, path, table, key, rule, _)| (object, path, table, key, rule))
@@ -7883,7 +7895,7 @@ mod tests {
         // Object 7 written over since, elsewhere: it's unreached.
         let mut doc = bare(Version::new(1, 7));
         doc.insert(7, stream(400));
-        doc.revisions = revisions(&doc);
+        doc.set_revisions(revisions(&doc));
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         let unreached: Vec<_> = (report.findings.iter())
             .filter(|f| f.rule == Rule::Unreached)
@@ -8050,10 +8062,18 @@ mod tests {
             .collect()
     }
 
+    /// The object streams `doc` holds whose objects' strings are in the
+    /// clear, by number.
+    fn in_the_clear(doc: &Document) -> BTreeSet<ObjectId> {
+        (doc.ids().into_iter())
+            .filter(|&id| doc.in_the_clear(id))
+            .collect()
+    }
+
     /// The bytes `doc`'s object stream's data holds where `finding` is.
     fn in_data<'d>(doc: &'d Document, finding: &Finding) -> &'d str {
         let at = (finding.at).unwrap_or_else(|| panic!("{finding} says nowhere"));
-        let data = &doc.decoded[&at.stream.expect("in an object stream's data")];
+        let data = (doc.held(at.stream.expect("in an object stream's data"))).expect("held");
         std::str::from_utf8(&data[at.start..at.end]).unwrap()
     }
 
@@ -8088,8 +8108,8 @@ mod tests {
         );
         let at = file.stream(11, &[0, 1, 2, 3, 4, 5, 10], "/Root 1 0 R");
         file.end(at);
-        let doc = bytes::read(&file.out);
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),
@@ -8133,9 +8153,9 @@ mod tests {
         file.end(first).object(2, PAGES);
         let second = file.stream(12, &[2], &format!("/Root 1 0 R /Prev {first}"));
         file.end(second);
-        let doc = bytes::read(&file.out);
-        assert_eq!(doc.encryption, crate::source::Encryption::None);
-        assert_eq!(doc.revisions.len(), 2);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert_eq!(*doc.encryption(), crate::source::Encryption::None);
+        assert_eq!(doc.revisions().len(), 2);
         let found = packed_of(&doc, Made::Merged);
         let value = "7 0 R, the file's encryption dictionary";
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
@@ -8151,8 +8171,8 @@ mod tests {
         file.object_stream(13, "", &[(7, "<< /Type /Mine >>")]);
         let third = file.stream(14, &[7, 13], &format!("/Root 1 0 R /Prev {second}"));
         file.end(third);
-        let doc = bytes::read(&file.out);
-        assert_eq!(doc.revisions.len(), 3);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert_eq!(doc.revisions().len(), 3);
         assert_eq!(packed_of(&doc, Made::Merged), []);
 
         // The newest trailer's.
@@ -8165,9 +8185,9 @@ mod tests {
             &format!("/Root 1 0 R /Encrypt 7 0 R {id}"),
         );
         file.end(at);
-        let doc = bytes::read(&file.out);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
         assert!(matches!(
-            doc.encryption,
+            doc.encryption(),
             crate::source::Encryption::Unsupported(_)
         ));
         assert!(doc.get(ObjectId::new(7, 0)).is_err());
@@ -8205,7 +8225,7 @@ mod tests {
         let numbers = [0, 1, 2, 4, 10, 11, 12, 14, 15];
         let at = file.stream(13, &numbers, "/Root 1 0 R");
         file.end(at);
-        let doc = bytes::read(&file.out);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
         assert!(doc.get(ObjectId::new(4, 0)).is_ok() && doc.get(ObjectId::new(15, 0)).is_ok());
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
@@ -8231,8 +8251,8 @@ mod tests {
         file.object_stream(10, "", &[(5, linearization)]);
         let at = file.stream(11, &[0, 1, 2, 5, 10], "/Root 1 0 R");
         file.end(at);
-        let doc = bytes::read(&file.out);
-        assert!(!doc.facts.linearized);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert!(!doc.facts().linearized);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),
@@ -8259,8 +8279,8 @@ mod tests {
         let length = file.out.len().to_string();
         let at = find(&file.out, b"/L ") + 3;
         file.out[at..at + length.len()].copy_from_slice(length.as_bytes());
-        let doc = bytes::read(&file.out);
-        assert!(doc.facts.linearized);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert!(doc.facts().linearized);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),
@@ -8277,8 +8297,8 @@ mod tests {
         file.object(2, pages);
         let second = file.table(&[2], &format!("/Size 21 /Root 1 0 R /Prev {first}"));
         file.end(second);
-        let doc = bytes::read(&file.out);
-        assert!(!doc.facts.linearized);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
+        assert!(!doc.facts().linearized);
         assert_eq!(packed_of(&doc, Made::Merged), []);
     }
 
@@ -8325,9 +8345,9 @@ mod tests {
             "ArrayOf_4Integers",
         );
         let file = first_written(LINEARIZATION, &[]);
-        let doc = bytes::read(&file);
-        assert!(!doc.facts.linearized);
-        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
+        assert!(!doc.facts().linearized);
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let options = Options {
             paths: true,
             ..Options::default()
@@ -8398,7 +8418,7 @@ mod tests {
             file
         };
         let unreached = |file: &[u8]| -> Vec<Vec<ObjectId>> {
-            let read = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+            let read = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
             let hold = Hold::All(Made::Built);
             let reports = [
                 check(read.document(), &hold, &Options::default()),
@@ -8468,7 +8488,7 @@ mod tests {
         assert_eq!(report.checked.get(two), Some(&1), "{report}");
 
         let unlisted_key = LINEARIZATION.replace(" >>", " /Foo 1 >>");
-        let doc = bytes::read(&first_written(&unlisted_key, &[]));
+        let doc = bytes::document(&first_written(&unlisted_key, &[]), &bytes::Options::DEFAULT);
         let foo = unlisted(table, "Foo", Class::Other);
         let report = check(&doc, &merged, &Options::default());
         assert_eq!(report.findings, [], "{report}");
@@ -8528,7 +8548,7 @@ mod tests {
         file.object(1, CATALOG).object(2, ONE_PAGE).object(3, PAGE);
         let at = file.stream(11, &[0, 1, 2, 3, 4, 10], "/Root 1 0 R");
         file.end(at);
-        let doc = bytes::read(&file.out);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
         let report = check(&doc, &Hold::All(Made::Built), &Options::default());
         assert_eq!(
             walked(&report),
@@ -8560,7 +8580,7 @@ mod tests {
     #[test]
     fn a_linearization_dictionary_is_held_by_its_number() {
         let zero = LINEARIZATION.replace("/E 400", "/E 0");
-        let doc = bytes::read(&first_written(&zero, &[]));
+        let doc = bytes::document(&first_written(&zero, &[]), &bytes::Options::DEFAULT);
         let table = "LinearizationParameterDict";
         let held = Hold::Only(BTreeMap::from([(ObjectId::new(4, 0), Made::Built)]));
         let report = check(&doc, &held, &Options::default());
@@ -8639,7 +8659,7 @@ mod tests {
             numbers.extend(members.iter().map(|&(n, _)| n));
             let at = file.stream(11, &numbers, &trailer);
             file.end(at);
-            bytes::read(&file.out)
+            bytes::document(&file.out, &bytes::Options::DEFAULT)
         };
         let catalog = "<< /Type /Catalog /Pages 2 0 R /Lang (en-US) >>";
         let info = "<< /Title (A test) /Producer (Its own) >>";
@@ -8651,11 +8671,11 @@ mod tests {
             let clear = encryption(kind, "/Identity", "/StdCF");
             let doc = file(&clear, &three);
             assert!(
-                matches!(doc.encryption, crate::source::Encryption::Opened { .. }),
+                matches!(doc.encryption(), crate::source::Encryption::Opened { .. }),
                 "{kind:?}"
             );
             assert_eq!(
-                doc.in_the_clear,
+                in_the_clear(&doc),
                 BTreeSet::from([ObjectId::new(10, 0)]),
                 "{kind:?}"
             );
@@ -8681,7 +8701,7 @@ mod tests {
 
             let identity = encryption(kind, "/Identity", "/Identity");
             let doc = file(&identity, &three);
-            assert_eq!(doc.in_the_clear, BTreeSet::new(), "{kind:?}");
+            assert_eq!(in_the_clear(&doc), BTreeSet::new(), "{kind:?}");
             assert_eq!(packed_of(&doc, Made::Merged), []);
         }
     }
@@ -8696,7 +8716,7 @@ mod tests {
         file.object_stream(10, "", &[(3, "<< /Length 5 >>\nstream\nhello\nendstream")]);
         let at = file.stream(11, &[0, 1, 2, 3, 10], "/Root 1 0 R");
         file.end(at);
-        let doc = bytes::read(&file.out);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
         for (named, made) in [
             ("10 0 built\n", Made::Built),
             ("10 0 merged\n", Made::Merged),
@@ -8808,7 +8828,10 @@ mod tests {
             ),
             (8, Body::stream(image, &[0])),
         ]);
-        let mut doc = bytes::read(&written("1.7", &objects, Xref::Table));
+        let mut doc = bytes::document(
+            &written("1.7", &objects, Xref::Table),
+            &bytes::Options::DEFAULT,
+        );
         let content = |doc: &Document| {
             let report = check(doc, &Hold::All(Made::Built), &Options::default());
             let found = (found(&report).into_iter())
@@ -9047,7 +9070,10 @@ mod tests {
         both.push((7, Body::stream(embedded, b"a,b")));
         let findings = |objects: &[(u32, Body)], options: &Options| {
             let report = check(
-                &bytes::read(&written("1.7", objects, Xref::Table)),
+                &bytes::document(
+                    &written("1.7", objects, Xref::Table),
+                    &bytes::Options::DEFAULT,
+                ),
                 &Hold::All(Made::Built),
                 options,
             );
@@ -9330,7 +9356,11 @@ mod tests {
                 deprecations,
                 ..Options::default()
             };
-            check(&bytes::read(bytes), &Hold::All(Made::Built), &options)
+            check(
+                &bytes::document(bytes, &bytes::Options::DEFAULT),
+                &Hold::All(Made::Built),
+                &options,
+            )
         };
         let blend = |bm: Object| {
             changed(clean(), 5, |form| {
@@ -9492,8 +9522,13 @@ mod tests {
             }],
             ..Options::default()
         };
-        let checked_with =
-            |bytes: &[u8], made: Made| check(&bytes::read(bytes), &Hold::All(made), &options);
+        let checked_with = |bytes: &[u8], made: Made| {
+            check(
+                &bytes::document(bytes, &bytes::Options::DEFAULT),
+                &Hold::All(made),
+                &options,
+            )
+        };
         // The trailer's /DocChecksum is OpenOffice's extension's key.
         let trailer = dict! { "DocChecksum" => "Sum" };
         let bytes = written_with("1.7", &keys, Xref::Table, trailer);
@@ -9550,7 +9585,11 @@ mod tests {
                 unlisted,
                 ..options.clone()
             };
-            check(&bytes::read(&bytes), &Hold::All(made), &options)
+            check(
+                &bytes::document(&bytes, &bytes::Options::DEFAULT),
+                &Hold::All(made),
+                &options,
+            )
         };
         let report = unlisted_in(UnlistedIn::All, Made::Merged);
         let made: Vec<(&str, Made)> = (report.findings.iter())
@@ -9821,7 +9860,13 @@ mod tests {
             ..Options::default()
         };
         let hold = Hold::All(Made::Merged);
-        let checked = |file: Vec<u8>| check(&bytes::read(&file), &hold, &options);
+        let checked = |file: Vec<u8>| {
+            check(
+                &bytes::document(&file, &bytes::Options::DEFAULT),
+                &hold,
+                &options,
+            )
+        };
         // The /Extends of type its row doesn't allow: its object and path.
         let typed = |report: &Report| {
             let found = walked(report).into_iter();
@@ -9861,7 +9906,7 @@ mod tests {
     #[test]
     fn paths_are_recorded_when_asked() {
         let bytes = written("1.7", &clean(), Xref::Table);
-        let doc = bytes::read(&bytes);
+        let doc = bytes::document(&bytes, &bytes::Options::DEFAULT);
         let hold = Hold::All(Made::Merged);
         assert!(check(&doc, &hold, &Options::default()).paths.is_empty());
         let options = Options {
@@ -10072,7 +10117,10 @@ mod tests {
         let piece = changed(clean(), 3, |page| {
             page.set("PieceInfo", dict! { "Mine" => dict! {} })
         });
-        let doc = bytes::read(&written("1.2", &piece, Xref::Table));
+        let doc = bytes::document(
+            &written("1.2", &piece, Xref::Table),
+            &bytes::Options::DEFAULT,
+        );
         assert_eq!(file_version(&doc), Version::new(1, 2));
         let hold = Hold::All(Made::Built);
         let as_written = check(&doc, &hold, &Options::default());
@@ -10137,7 +10185,7 @@ mod tests {
         let start = Instant::now();
         for path in &files {
             let data = std::fs::read(path).unwrap();
-            let doc = std::panic::catch_unwind(|| bytes::read_opened(&data, &[]))
+            let doc = std::panic::catch_unwind(|| bytes::document(&data, &bytes::Options::DEFAULT))
                 .unwrap_or_else(|_| panic!("{} panicked reading", path.display()));
             let report = std::panic::catch_unwind(|| {
                 check(&doc, &Hold::All(Made::Merged), &Options::default())
@@ -10152,7 +10200,7 @@ mod tests {
                     Some(at) => {
                         let within = match at.stream {
                             None => data.len(),
-                            Some(stream) => doc.decoded[&stream].len(),
+                            Some(stream) => doc.held(stream).expect("held").len(),
                         };
                         let inside = at.start <= at.end && at.end <= within;
                         assert!(inside, "{}: {f}", path.display());
@@ -10553,9 +10601,9 @@ mod tests {
     fn a_file_over_a_document_or_a_reading_is_send_and_sync() {
         fn shared<T: Send + Sync>(_: &T) {}
         let file = written("1.7", &clean(), Xref::Table);
-        let doc = bytes::read(&file);
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
         let reading = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
-        let trailer = doc.trailer.dict();
+        let trailer = doc.trailer().dict();
         let over_doc = FileCx::new(trailer, Version::new(1, 7), &doc);
         let over_reading = FileCx::new(trailer, Version::new(1, 7), &reading);
         shared(&over_doc);
@@ -10800,7 +10848,7 @@ mod tests {
         let mut trees = 0;
         for (name, seed) in crate::fuzz::seeds() {
             let file = &seed[2..];
-            let document = bytes::read(file);
+            let document = bytes::document(file, &bytes::Options::DEFAULT);
             let reading = bytes::Reading::open(file, &bytes::Options::DEFAULT).unwrap();
             let objects = &reading;
             let trailer = reading.trailer().dict();
@@ -10822,7 +10870,7 @@ mod tests {
                 trees += 1;
             }
             let objects = &document;
-            let trailer = document.trailer.dict();
+            let trailer = document.trailer().dict();
             let names = document.catalog().and_then(|catalog| catalog.get(b"Names"));
             let names =
                 names.and_then(|names| pdf_semantics::follow(objects, names).ok().flatten());
@@ -10855,7 +10903,7 @@ mod tests {
         let trailer = "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>";
         let at = file.stream(11, &[0, 1, 2, 3, 4, 10], trailer);
         file.end(at);
-        let doc = bytes::read(&file.out);
+        let doc = bytes::document(&file.out, &bytes::Options::DEFAULT);
         let (own, objects) = (&doc, Objects(&doc));
         let whys = [
             (ObjectId::new(1, 0), None),

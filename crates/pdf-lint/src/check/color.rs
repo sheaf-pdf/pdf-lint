@@ -348,7 +348,7 @@ pub(super) mod tests {
     //! DeviceN space's and a halftone's, as a check of a file evaluates
     //! them.
 
-    use pdf_structure::fixture::{self, Body, Xref};
+    use pdf_fixtures::fixture::{self, Body, Xref};
 
     use super::*;
     use crate::bytes::{Options, WithReading};
@@ -398,7 +398,7 @@ pub(super) mod tests {
             (3, page.into()),
         ];
         let file = fixture::file(version, &objects, dict! { "Root" => r(1) }, Xref::Table);
-        let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
         check(
             &read,
             &Hold::All(Made::Built),
@@ -603,7 +603,7 @@ pub(super) mod tests {
     /// `file` read and checked, holding what `hold` does.
     fn report(file: &[u8], hold: &Hold) -> Report {
         check(
-            &crate::bytes::read(file),
+            &crate::bytes::document(file, &crate::bytes::Options::DEFAULT),
             hold,
             &crate::check::Options::default(),
         )
@@ -1458,7 +1458,11 @@ pub(super) mod tests {
                  >> >>{more}]"
             );
             let file = spaces(&space, &[(two, &tint)]);
-            check(&crate::bytes::read(&file), &ALL, &options)
+            check(
+                &crate::bytes::document(&file, &crate::bytes::Options::DEFAULT),
+                &ALL,
+                &options,
+            )
         };
         fn values(found: Vec<&Finding>) -> Vec<&str> {
             (found.into_iter())

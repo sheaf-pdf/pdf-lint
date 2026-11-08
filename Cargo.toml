@@ -7,13 +7,16 @@ resolver = "3"
 # the table as its first release is made ready; until then, its dependents
 # name its path and version themselves, or its path alone where it's a
 # dev-dependency of a crate published before it, which that crate's package
-# then leaves out. Nothing else is inherited from here.
+# then leaves out. pdf-fixtures, the tests' file writer and qpdf, is never
+# published: a crate whose tests use it takes it by its path alone, a
+# dev-dependency. Nothing else is inherited from here.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
     "crates/pdf-crypt",
     "crates/pdf-objects",
     "crates/pdf-structure",
+    "crates/pdf-fixtures",
     "crates/pdf-content-streams",
     "crates/pdf-semantics",
     "crates/pdf-color",
@@ -27,17 +30,19 @@ exclude = ["fuzz"]
 
 # Each crate by its path here and the version its dependents require once
 # published: pdf-tokenizer's by caret; pdf-objects', pdf-filters',
-# pdf-crypt's and pdf-color's exactly, as an alpha promises nothing of the
-# next, and a requirement matches a pre-release only where it names one. A
-# crate some member takes without its default features has them off here,
-# as an older cargo (1.85's) refused a member's `default-features = false`
-# over an entry that leaves them on, and every member that takes it names
-# the features it takes: pdf-filters', its Flate backend.
+# pdf-crypt's, pdf-structure's and pdf-color's exactly, as an alpha
+# promises nothing of the next, and a requirement matches a pre-release
+# only where it names one. A crate some member takes without its default
+# features has them off here, as an older cargo (1.85's) refused a member's
+# `default-features = false` over an entry that leaves them on, and every
+# member that takes it names the features it takes: pdf-filters', its Flate
+# backend.
 [workspace.dependencies]
 pdf-tokenizer = { path = "crates/pdf-tokenizer", version = "0.2" }
 pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.2" }
 pdf-filters = { path = "crates/pdf-filters", version = "=0.1.0-alpha.2", default-features = false }
 pdf-crypt = { path = "crates/pdf-crypt", version = "=0.1.0-alpha.1" }
+pdf-structure = { path = "crates/pdf-structure", version = "=0.1.0-alpha.1" }
 pdf-color = { path = "crates/pdf-color", version = "=0.1.0-alpha.1" }
 
 # pdf-crypt's revision 6 hash runs thousands of AES blocks and SHA-2

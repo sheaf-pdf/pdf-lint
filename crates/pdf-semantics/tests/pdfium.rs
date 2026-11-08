@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use pdf_semantics::pages::{Error, Origin, Page, Pages, Rect, counted, pages};
 use pdf_semantics::{Limits, Rules, catalog};
-use pdf_structure::bytes::{Options, Reading};
+use pdf_structure::read::{Options, Reading};
 
 /// How many pages of a file the oracle asks for, as `oracle/pdfium.py` has it.
 const PAGES: usize = 64;

@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pdf_linearize::check::{Attribute, Facts, HintData};
 use pdf_linearize::family::{self, Options};
 use pdf_linearize::{Finding, Grade, Limits, Verdict};
-use pdf_structure::bytes::{self, ByteSource, Reading, WithReading, XrefEntry};
+use pdf_structure::XrefKind;
+use pdf_structure::pdf_crypt::Password;
+use pdf_structure::read::{self, ByteSource, Reading, WithReading, XrefEntry};
 use pdf_structure::write::{Deflate, Encryptor};
-use pdf_structure::{Password, XrefKind};
 
 mod written;
 use written::{KEYS, encrypted_as, opened};
@@ -38,7 +39,7 @@ fn plain() -> Vec<u8> {
 
 /// `doc` as read and written in `kind`.
 fn laid_out(file: &[u8], kind: XrefKind, pack: bool) -> Vec<u8> {
-    let reading = Reading::open(file, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(file, &read::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
     let mut options = Options::DEFAULT;
     options.kind = kind;
@@ -57,7 +58,7 @@ fn kinds() -> [(XrefKind, bool); 3] {
 }
 
 fn checked(file: &[u8]) -> (Verdict, Vec<Finding>) {
-    let reading = Reading::open(file, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(file, &read::Options::DEFAULT).unwrap();
     let mut findings = Vec::new();
     let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
     let quiet = family::check(&reading, &Limits::DEFAULT, &mut ()).unwrap();
@@ -101,7 +102,7 @@ fn what_the_writer_writes_holds_in_each_kind_with_nothing_to_say() {
 #[test]
 fn it_has_read_each_thing_it_held_the_file_to() {
     let file = laid_out(&plain(), XrefKind::Table, false);
-    let reading = Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
     let facts: Facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
     assert_eq!(facts.len, file.len() as u64);
     assert_eq!(facts.header, 0);
@@ -119,7 +120,7 @@ fn it_has_read_each_thing_it_held_the_file_to() {
 #[test]
 fn a_file_that_doesnt_say_it_is_has_nothing_read_and_nothing_said() {
     let file = plain();
-    let reading = Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
     let facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
     assert!(facts.first.is_none() && facts.hint.is_none() && facts.graph.is_none());
     let (verdict, findings) = checked(&file);
@@ -332,7 +333,7 @@ fn with_no_key_it_says_what_it_can_and_doesnt_say_it_read_the_tables() {
     ))
     .unwrap();
     // No password opens it this way, and there's no graph for what's locked.
-    let reading = Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
     assert!(
         family::facts(&reading, &Limits::DEFAULT)
             .unwrap()
@@ -348,7 +349,9 @@ fn with_no_key_it_says_what_it_can_and_doesnt_say_it_read_the_tables() {
         "{findings:?}"
     );
     let password = [Password("user")];
-    let reading = Reading::open_with(&file[..], &password, &bytes::Options::DEFAULT).unwrap();
+    let mut options = read::Options::DEFAULT;
+    options.passwords = &password;
+    let reading = Reading::open(&file[..], &options).unwrap();
     let mut findings = Vec::new();
     let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
     assert!(
@@ -392,7 +395,7 @@ fn a_page_with_no_attribute_of_its_own_is_said() {
 
 #[test]
 fn another_first_page_holds_by_what_p_says() {
-    let reading = Reading::open(&plain()[..], &bytes::Options::DEFAULT)
+    let reading = Reading::open(&plain()[..], &read::Options::DEFAULT)
         .unwrap()
         .to_document();
     let doc = reading.unwrap();
@@ -450,9 +453,11 @@ fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
     let (mut graphs, mut packed) = (0, 0);
     for (name, file, password) in &files {
         let passwords: Vec<Password> = password.iter().map(|p| Password(p.trim_end())).collect();
-        let read = WithReading::new(&file[..], &passwords, &bytes::Options::DEFAULT).unwrap();
+        let mut options = read::Options::DEFAULT;
+        options.passwords = &passwords;
+        let read = WithReading::new(&file[..], &options).unwrap();
         let with = family::facts_with_reading(&read, &Limits::DEFAULT).unwrap();
-        let reading = Reading::open_with(&file[..], &passwords, &bytes::Options::DEFAULT).unwrap();
+        let reading = Reading::open(&file[..], &options).unwrap();
         let alone = family::facts(&reading, &Limits::DEFAULT).unwrap();
         assert_eq!(format!("{with:?}"), format!("{alone:?}"), "{name}");
         // And of the reading the document was read beside, asked after it.
@@ -491,7 +496,7 @@ impl ByteSource for ByPosition<'_> {
 fn by_position_it_says_the_same() {
     for (kind, pack) in kinds() {
         let file = laid_out(&plain(), kind, pack);
-        let reading = Reading::open(ByPosition(&file), &bytes::Options::DEFAULT).unwrap();
+        let reading = Reading::open(ByPosition(&file), &read::Options::DEFAULT).unwrap();
         let mut findings = Vec::new();
         let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
         assert_eq!((verdict, findings), checked(&file));
@@ -518,15 +523,15 @@ impl ByteSource for Failing<'_> {
 fn a_source_that_fails_is_an_error_not_a_finding() {
     let file = laid_out(&plain(), XrefKind::Table, false);
     let source = Failing(&file, AtomicBool::new(false));
-    let reading = Reading::open(&source, &bytes::Options::DEFAULT).unwrap();
+    let reading = Reading::open(&source, &read::Options::DEFAULT).unwrap();
     source.1.store(true, Ordering::Relaxed);
     assert!(matches!(
         family::facts(&reading, &Limits::DEFAULT),
-        Err(family::Error::Read(bytes::Error::Io(_)))
+        Err(family::Error::Read(read::Error::Io(_)))
     ));
     assert!(matches!(
         family::check(&reading, &Limits::DEFAULT, &mut ()),
-        Err(family::Error::Read(bytes::Error::Io(_)))
+        Err(family::Error::Read(read::Error::Io(_)))
     ));
 }
 
@@ -544,7 +549,7 @@ fn a_node_is_what_the_writer_calls_one() {
         };
         let length = all(&linearized(0)).len();
         let bytes = all(&linearized(length));
-        let reading = Reading::open(&bytes[..], &bytes::Options::DEFAULT).unwrap();
+        let reading = Reading::open(&bytes[..], &read::Options::DEFAULT).unwrap();
         let mut findings = Vec::new();
         let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
         assert!(verdict.linearized);

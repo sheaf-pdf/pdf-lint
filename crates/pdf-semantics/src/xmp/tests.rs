@@ -1,6 +1,6 @@
+use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::dict;
-use pdf_structure::bytes::{Options, Reading};
-use pdf_structure::fixture::{self, Body, Xref};
+use pdf_structure::read::{Options, Reading};
 use pdf_structure::source::Document;
 
 use super::*;
@@ -85,7 +85,7 @@ fn conformance_of(file: &[u8]) -> Result<Conformance, ClaimError> {
     let Some(id) = id else {
         return Ok(Conformance::default());
     };
-    let xml = reading.decoded(id).unwrap();
+    let xml = reading.decoded_within(id, usize::MAX).unwrap();
     read(&xml, None, &Limits::DEFAULT, &mut ())
         .unwrap()
         .conformance()
@@ -810,7 +810,7 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
     assert_eq!(found, Some(ObjectId::new(4, 0)));
     let document: Document = reading.to_document().unwrap();
     let objects = &document;
-    assert_eq!(catalog_of(objects, document.trailer.dict()), found);
+    assert_eq!(catalog_of(objects, document.trailer().dict()), found);
 
     // An object that doesn't read says so, and isn't taken for none.
     let locked = |id: ObjectId| -> Result<Option<&Object>, Unreadable> {

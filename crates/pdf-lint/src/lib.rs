@@ -70,18 +70,23 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 // pdf-arlington's; which model every check reads is this crate's.
 pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!`, versions, what resolves a reference and what gives
-// a stream's data are pdf-objects'.
+// a stream's data are pdf-objects': re-exported whole too, so that what
+// the reader's faults name (`fault::Place`, and the `fault::Sink` a
+// `Source` tells them to) is named at the version this crate takes.
+pub use pdf_objects;
 pub use pdf_objects::{Resolve, Streams, Unreadable, Why, dict, object, version};
-// The reader, and what it reads a file into, are pdf-structure's; the
+// The reader, and what it reads a file into, are pdf-structure's: its
+// `read` module is this crate's `bytes`, the name it has had here; the
 // error a stream's data that doesn't decode cleanly gives is pdf-filters',
 // and the passwords a reader is given and its security handler are
 // pdf-crypt's.
-pub use pdf_structure::{bytes, pdf_crypt, pdf_filters, source};
+pub use pdf_structure::read as bytes;
+pub use pdf_structure::{pdf_crypt, pdf_filters, source};
 // The rules a reader reads by, ISO 32000-2's or PDFium's, are
 // pdf-tokenizer's.
 pub use pdf_tokenizer::Rules;
 pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
-pub use source::{Document, Encryption, Revision, Source, Trailer, Update, Warning};
+pub use source::{Document, Encryption, Revision, Source, Trailer, Update};
 pub use version::Version;
 
 /// The model's tables, pdf-arlington's [`grammar`](pdf_arlington::grammar)
@@ -299,7 +304,7 @@ pub mod extension {
             );
             assert_eq!(declared(&doc), BTreeSet::from(["ISO_TS_32001".to_string()]));
             assert_eq!(declared(&doc), quietly(&doc));
-            doc.metadata = Some(xmp(r#"pdfaid:part="3""#));
+            doc.set_metadata(Some(xmp(r#"pdfaid:part="3""#)));
             let both = ["ISO_19005_3", "ISO_TS_32001"].map(String::from);
             assert_eq!(declared(&doc), BTreeSet::from(both));
             assert_eq!(declared(&doc), quietly(&doc));
@@ -310,7 +315,7 @@ pub mod extension {
         /// which reads it with both, as neither changes what's read.
         fn quietly(doc: &Document) -> BTreeSet<String> {
             let resolve = |id| doc.get(id).ok().cloned();
-            let read = (doc.metadata().as_deref())
+            let read = (doc.metadata())
                 .map(|xml| {
                     xmp::read(xml, None, &Limits::DEFAULT, &mut ())
                         .unwrap_or_else(|error| error.read)
@@ -319,7 +324,7 @@ pub mod extension {
             let mut claims = Claims::default();
             claims.pdfa_part = read.pdfa_part.as_deref();
             claims.pdfvt_version = read.pdfvt_version.as_deref();
-            pdf_arlington::extension::declared(doc.trailer.dict().get(b"Root"), claims, &resolve)
+            pdf_arlington::extension::declared(doc.trailer().dict().get(b"Root"), claims, &resolve)
         }
 
         /// A packet read once, for what it declares and what it tells: with
@@ -344,7 +349,7 @@ pub mod extension {
             let both = ["ISO_19005_3", "PDF_VT2"].map(String::from);
             for (data, faults) in [(&clean, 0), (&faulty, 1)] {
                 doc.insert(5, stream(data));
-                doc.metadata = Some(data.clone());
+                doc.set_metadata(Some(data.clone()));
                 let (claimed, got) = read(&doc);
                 assert_eq!(claimed, BTreeSet::from(both.clone()));
                 assert_eq!(claimed, declared(&doc));
@@ -364,7 +369,7 @@ pub mod extension {
             }
             // With no catalog to name its stream, a fault's in no object.
             let mut alone = Document::new(Version::new(2, 0), dict! {});
-            alone.metadata = Some(faulty.clone());
+            alone.set_metadata(Some(faulty.clone()));
             let (claimed, got) = read(&alone);
             assert_eq!(claimed, BTreeSet::from(both.clone()));
             assert_eq!(got.stream, None);
@@ -373,13 +378,13 @@ pub mod extension {
             assert_eq!((place.object, place.at), (None, None));
             // What stops the read, with what's claimed before it.
             let stops = [packet(r#"pdfaid:part="3""#, ""), b"</e>".to_vec()].concat();
-            alone.metadata = Some(stops);
+            alone.set_metadata(Some(stops));
             let (claimed, got) = read(&alone);
             assert_eq!(claimed, BTreeSet::from(["ISO_19005_3".to_string()]));
             assert_eq!(claimed, quietly(&alone));
             assert!(matches!(got.stopped.unwrap().why, xmp::XmpWhy::Xml(_)));
             // With no packet, nothing.
-            alone.metadata = None;
+            alone.set_metadata(None);
             let (_, none) = read(&alone);
             assert_eq!((none.stream, none.len), (None, 0));
             assert!(none.kept.told().is_empty() && none.stopped.is_none());
@@ -406,7 +411,7 @@ pub mod extension {
         /// what it declared read quietly.
         fn from(packet: &[u8]) -> Vec<String> {
             let mut doc = Document::new(Version::new(2, 0), dict! {});
-            doc.metadata = Some(packet.to_vec());
+            doc.set_metadata(Some(packet.to_vec()));
             let declared = declared(&doc);
             let quiet = quietly(&doc);
             assert_eq!(declared, quiet, "{}", String::from_utf8_lossy(packet));

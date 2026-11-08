@@ -658,7 +658,9 @@ fn with_reading<S: bytes::ByteSource>(
     passwords: &[Password],
     options: &bytes::Options,
 ) -> WithReading<S> {
-    WithReading::new(data, passwords, options).expect("a file in memory reads")
+    let mut options = *options;
+    options.passwords = passwords;
+    WithReading::new(data, &options).expect("a file in memory reads")
 }
 
 /// `--password`'s, as the reader takes it, which tries it in each of its
@@ -672,7 +674,7 @@ fn password(args: &Args) -> Option<Password<'_>> {
 /// its strings or streams: what's in its object streams would be missing,
 /// its content unread, and its strings ciphertext.
 fn locked(doc: &Document, password: bool) -> Option<&'static str> {
-    (doc.encryption == Encryption::Locked).then_some(match password {
+    (*doc.encryption() == Encryption::Locked).then_some(match password {
         false => "it needs a password: give it with --password",
         true => "the password --password gives doesn't open it",
     })
@@ -717,7 +719,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
     // merged, so that only the file's findings take its exempt keys.
     let mut options = against(args, Some(checked_as));
     options.exempt = exempt.clone();
-    let (report, against) = match (args.last_update, &doc.document().update) {
+    let (report, against) = match (args.last_update, doc.document().update()) {
         (false, _) => {
             let report = check_with_reading(&doc, hold, &options);
             // An incremental update of the baseline begins with its bytes.
@@ -738,7 +740,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             // The revision before: its bytes up to where it ends, as it was
             // written, else the file as of its section.
             let password = password(args);
-            let revisions = &doc.document().revisions;
+            let revisions = doc.document().revisions();
             let end = (revisions.iter().find(|r| r.at == update.previous)).and_then(|r| r.end);
             let previous = match end.map(|end| end.line()) {
                 Some(end) => {
@@ -837,8 +839,8 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
                 // An object stream's data, which the document holds; else a
                 // content stream's or the metadata stream's, which the
                 // reading decodes again, as content was read.
-                let decoded = match doc.document().decoded.get(&stream) {
-                    Some(decoded) => Some(&decoded[..]),
+                let decoded = match doc.document().held(stream) {
+                    Some(decoded) => Some(decoded),
                     None => {
                         if content.as_ref().is_none_or(|(id, _)| *id != stream) {
                             content = (doc.decoded_within(stream, usize::MAX))

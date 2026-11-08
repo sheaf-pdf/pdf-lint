@@ -2,7 +2,7 @@
 //! values: the rules the reader decrypts a file's strings and streams' data
 //! by, and the writer encrypts them by ([`write::Encrypting`]). Each, with
 //! the clause of ISO 32000-2 that says so and the tests that hold it, is
-//! listed in [`bytes`](crate::bytes) ("What's encrypted").
+//! listed in [`read`](crate::read) ("What's encrypted").
 //!
 //! [`write::Encrypting`]: crate::write::Encrypting
 //!

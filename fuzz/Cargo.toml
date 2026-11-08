@@ -137,7 +137,7 @@ pdf-objects = { path = "../crates/pdf-objects" }
 # With its default features, so the semantics target fuzzes the clock's
 # reading of a count of seconds too.
 pdf-semantics = { path = "../crates/pdf-semantics" }
-pdf-structure = { path = "../crates/pdf-structure", features = ["fixtures"] }
+pdf-structure = { path = "../crates/pdf-structure" }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [[bin]]

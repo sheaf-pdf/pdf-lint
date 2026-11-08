@@ -49,6 +49,12 @@ impl Identity {
     /// device does. One that becomes such a thing as it's opened is opened
     /// without waiting, then refused. On Windows, what it holds open still
     /// lets others write the file, rename it and remove it.
+    ///
+    /// # Errors
+    ///
+    /// The file system's, where the path's metadata doesn't read or the
+    /// file doesn't open; `InvalidInput` where it's neither a file nor a
+    /// folder.
     pub fn of(path: impl AsRef<Path>) -> io::Result<Identity> {
         let path = path.as_ref();
         let metadata = std::fs::metadata(path)?;
@@ -133,8 +139,13 @@ impl FileBytes {
     /// How many bytes a read at an offset reads first.
     const WINDOW: usize = 4096;
 
-    /// `file`, as long as it is now, read by position. A file longer than
-    /// the target addresses (past 4 GiB on 32 bits) isn't read.
+    /// `file`, as long as it is now, read by position.
+    ///
+    /// # Errors
+    ///
+    /// The file system's, where what identifies the file doesn't read;
+    /// `FileTooLarge` where it's longer than the target addresses (past 4
+    /// GiB on 32 bits), which isn't read.
     pub fn new(file: std::fs::File) -> io::Result<FileBytes> {
         let identity = Identity::held(Arc::new(Handle::from_file(file)?))?;
         let len = usize::try_from(identity.len).map_err(|_| {
@@ -149,7 +160,8 @@ impl FileBytes {
 
     /// The file's identity as it was made. It holds the file open, and so
     /// does a clone of it kept after this is dropped.
-    pub fn identity(&self) -> &Identity {
+    #[must_use]
+    pub const fn identity(&self) -> &Identity {
         &self.identity
     }
 
@@ -157,6 +169,10 @@ impl FileBytes {
     /// length and modification time the same. A file changed in place
     /// isn't; one another replaced at its path still is, as reads go on
     /// reading the one it holds, which [`Identity::of`] the path tells.
+    ///
+    /// # Errors
+    ///
+    /// The file system's, where the file's metadata doesn't read.
     pub fn unchanged(&self) -> io::Result<bool> {
         let metadata = self.identity.file.as_file().metadata()?;
         let now = (metadata.len(), metadata.modified().ok());
@@ -220,12 +236,12 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
+    use pdf_fixtures::fixture::{self, Xref};
     use tempfile::TempDir;
 
     use super::super::tests::{clean, root, startxref};
-    use super::super::{ByteSource, Options, Reading, read};
+    use super::super::{ByteSource, Options, Reading, document};
     use super::*;
-    use crate::fixture::{self, Xref};
     use crate::source::RevisionEnd;
 
     /// A file of the test's own, in a folder of its own in the temp
@@ -268,7 +284,10 @@ mod tests {
         ids.iter()
             .rev()
             .for_each(|&id| assert!(reading.get(id).is_ok()));
-        assert_eq!(reading.into_document().unwrap(), read(&bytes));
+        assert_eq!(
+            reading.into_document().unwrap(),
+            document(&bytes, &Options::DEFAULT)
+        );
     }
 
     /// A file opened from its path and read by position, made a document
@@ -283,7 +302,7 @@ mod tests {
         let file = FileBytes::new(File::open(&temp.0).unwrap()).unwrap();
         let reading = Reading::open(file, &Options::DEFAULT).unwrap();
         let doc = reading.to_document().unwrap();
-        assert_eq!(doc, read(&bytes));
+        assert_eq!(doc, document(&bytes, &Options::DEFAULT));
         let mut streams = 0;
         for (id, object) in doc.objects() {
             let Some(at) = object.as_stream().and_then(|s| s.data.at()) else {
@@ -319,7 +338,10 @@ mod tests {
             let (read, expected) = (prefix.into_document(), expected.into_document());
             assert_eq!(read.unwrap(), expected.unwrap(), "{end}");
         }
-        assert_eq!(read(&base), read(&bytes[..length]));
+        assert_eq!(
+            document(&base, &Options::DEFAULT),
+            document(&bytes[..length], &Options::DEFAULT)
+        );
     }
 
     /// A file changed in place after it's opened isn't unchanged, by a

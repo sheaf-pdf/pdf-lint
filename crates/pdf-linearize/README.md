@@ -92,7 +92,7 @@ And from a file's bytes, with `family`:
 
 ```rust
 use pdf_linearize::family::{Options, check, linearize_bytes};
-use pdf_linearize::pdf_structure::{Reading, XrefKind, bytes};
+use pdf_linearize::pdf_structure::{Reading, XrefKind, read};
 use pdf_linearize::{Finding, Limits};
 
 let mut file = b"%PDF-1.7\n".to_vec();
@@ -121,7 +121,7 @@ let linearized = linearize_bytes(&file, &[], &options).unwrap();
 assert!(linearized.windows(11).any(|w| w == b"/Linearized"));
 
 // What's written holds, and nothing else is to be said of it.
-let reading = Reading::open(&linearized[..], &bytes::Options::DEFAULT).unwrap();
+let reading = Reading::open(&linearized[..], &read::Options::DEFAULT).unwrap();
 let mut findings: Vec<Finding> = Vec::new();
 let verdict = check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
 assert!(verdict.linearized && verdict.holds && verdict.hints_read);

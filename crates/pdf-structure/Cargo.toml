@@ -1,10 +1,11 @@
 [package]
 name = "pdf-structure"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-structure"
 description = "PDF's file structure, read whole or on demand into a document in memory, and written whole or as an incremental update, encrypted as it's written"
 keywords = ["pdf", "parser", "writer", "xref", "object-streams"]
 categories = ["encoding", "parser-implementations"]
@@ -19,48 +20,74 @@ pdf-crypt.workspace = true
 pdf-filters = { workspace = true, features = ["miniz_oxide"] }
 pdf-objects.workspace = true
 pdf-tokenizer.workspace = true
-# The file `fixtures` hands qpdf a stream in.
-tempfile = { version = "3", optional = true }
 thiserror = "2"
 # A written file's second `/ID` element, XXH3-128 of what it wrote; and
 # XXH3-64 of each object's bytes as it's read, which a copy of them checks.
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64", "xxhash3_128"] }
+# The spans of the reader's and the writer's phases, with the `tracing`
+# feature: without its default features, so without the proc macros of
+# `attributes` and the `log` bridge; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
-# A file's identity, by a handle held open (`bytes::Identity`): its device
+# A file's identity, by a handle held open (`read::Identity`): its device
 # and inode on Unix, its volume serial number and file index on Windows.
 [target.'cfg(any(unix, windows))'.dependencies]
 same-file = "1"
 
 # On Unix, `Identity::of` opens a file without waiting (`O_NONBLOCK`), as a
-# FIFO put at its path would have it wait for a writer.
+# FIFO put at its path would have it wait for a writer. At least the
+# release the rest of the crate's dependencies take, pdf-crypt's SHA-2's
+# among them, so that its least is one a build can resolve.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.155"
 
 [features]
-# Files built in code, and qpdf as a second reader, for other crates' tests
-# and fuzz targets: hidden, not for a user. Its encrypted files need
-# pdf-crypt's writer; the file it hands qpdf a stream in, tempfile, which
-# makes it in the temp folder and removes it after.
-fixtures = ["pdf-crypt/writer", "dep:tempfile"]
 # pdf-filters' zlib-rs, so that `Options::flate` and `write::Deflate` can
 # name it.
 zlib-rs = ["pdf-filters/zlib-rs"]
+# Spans over the reader's and the writer's phases, through `tracing`: the
+# open, its sections and a scan, each object stream decoded, a whole read,
+# an earlier revision's open, and each write and the object streams it
+# builds. Off by default; without it, none is compiled.
+tracing = ["dep:tracing"]
 
 # docs.rs documents both Flate backends, as `Options::flate` and
-# `write::Deflate` name either; not `fixtures`, which is hidden.
+# `write::Deflate` name either, and the spans.
 [package.metadata.docs.rs]
-features = ["zlib-rs"]
+features = ["zlib-rs", "tracing"]
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
 
 [dev-dependencies]
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # zlib-rs beside the miniz_oxide the normal dependency names, so that the
 # tests read each file on each Flate backend.
 pdf-filters = { workspace = true, features = ["zlib-rs"] }
 # The tests' encrypted files.
 pdf-crypt = { workspace = true, features = ["writer"] }
+# The tests' file writer, and qpdf as a second reader and a decoder to set
+# the reader's decoding beside. By its path alone, as it's never published,
+# which the package's manifest leaves out: so this crate's unit tests don't
+# build from its package. It depends on this crate, so a test build links a
+# second copy of it, whose types the tests never take: what they take of it
+# is bytes, and pdf-objects' values and text.
+pdf-fixtures = { path = "../pdf-fixtures" }
 # The tests' folders of their own, removed after.
 tempfile = "3"
 # A seeded generator for the tests' new encrypted files.
 chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
+
+# The benchmarks: `cargo bench -p pdf-structure`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "structure"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

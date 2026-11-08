@@ -5,9 +5,10 @@
 
 use pdf_linearize::family::Options;
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_structure::bytes::{self, Reading};
+use pdf_structure::XrefKind;
+use pdf_structure::pdf_crypt::Password;
+use pdf_structure::read::{self, Reading};
 use pdf_structure::write::{self, Encryptor};
-use pdf_structure::{Password, XrefKind};
 
 /// The keys of a file qpdf encrypted, each with its empty user password: one of
 /// each of the standard handler's revisions, `qpdf --encrypt` on a small clean file.
@@ -21,11 +22,12 @@ pub const KEYS: [(&str, &[u8]); 5] = [
 
 /// The reading of `bytes`, by the empty password or `password`.
 pub fn opened<'b>(bytes: &'b [u8], password: &str) -> Reading<&'b [u8]> {
-    let options = &bytes::Options::DEFAULT;
-    match password {
-        "" => Reading::open(bytes, options).unwrap(),
-        password => Reading::open_with(bytes, &[Password(password)], options).unwrap(),
+    let given = [Password(password)];
+    let mut options = read::Options::DEFAULT;
+    if !password.is_empty() {
+        options.passwords = &given;
     }
+    Reading::open(bytes, &options).unwrap()
 }
 
 /// `plain`'s objects as a whole file under `key`'s encryption, its dictionary at
