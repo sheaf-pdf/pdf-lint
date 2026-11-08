@@ -129,8 +129,8 @@ impl<'w> Parts<'w> {
     /// whose data would be more than the reader takes
     /// ([`MAX_DATA`](super::MAX_DATA)), or that has more members than a place in
     /// it can say. Built on up to `threads` threads, 0 for as many as the machine
-    /// runs at once, up to 8, the same bytes on any number, `stop` checked before
-    /// each.
+    /// runs at once, up to 8, the same objects on any number (the same bytes in
+    /// the clear, and under the same IVs), `stop` checked before each.
     ///
     /// # Errors
     ///

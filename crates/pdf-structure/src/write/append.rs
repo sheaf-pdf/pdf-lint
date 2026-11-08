@@ -285,7 +285,8 @@ impl Base {
 ///   isn't an object (7.6.2).
 /// - **The `/ID`** keeps its first string, the encryptor's, else `base`'s;
 ///   the second is the first 16 bytes of SHA-256 of what the update wrote
-///   before its section, so the same update writes the same bytes. A file
+///   before its section, so in the clear the same update writes the same
+///   bytes. A file
 ///   that isn't encrypted and has no first string gets none.
 /// - **Encrypted** as `base`'s file is, by `encryptor`, which is that
 ///   file's ([`Encryptor::of`] of a reading of its bytes): its dictionary
@@ -333,7 +334,7 @@ impl Base {
 /// changed. So it is for an object a renumbering writes at a number another
 /// object of the file had, under that one's keystream: the XOR of the two
 /// objects' plaintexts. AES-128 and AES-256 don't leak so, as each string
-/// and stream has an IV of its own, derived from its data. A caller who
+/// and stream has an IV of its own, random. A caller who
 /// doesn't want that writes the file whole under a new AES-256 encryption
 /// ([`Encryptor::create`]) instead.
 ///

@@ -62,9 +62,9 @@
 //! another object's plaintext. One who holds both the file read and this one
 //! has, for each number, the XOR of the two plaintexts
 //! ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). AES-128's IVs are
-//! made from the data and the number, so nothing leaks that way. A caller who
-//! doesn't want that gives [`Encryptor::create`] a new password, whose key is
-//! new.
+//! random, each write's own from the operating system, so nothing leaks that
+//! way. A caller who doesn't want that gives [`Encryptor::create`] a new
+//! password, whose key is new.
 //!
 //! # Where everything goes
 //!
@@ -125,7 +125,7 @@ pub struct Options<'a> {
     pub deflate: Deflate,
     /// How many threads object streams are built on, at most: 0, the default,
     /// for as many as the machine runs at once, up to 8. Built on any number,
-    /// they're the same bytes.
+    /// they're the same objects, and in the clear the same bytes.
     pub threads: usize,
     /// The version the header says: by default the document's, at least 1.5
     /// where a stream lists the file (7.5.8); given, it's written as given.
@@ -177,7 +177,8 @@ impl Default for Options<'_> {
 pub struct Linearized {
     /// The trailer's `/ID`, when it has one: the first string the encryptor's,
     /// else the document's, the second the first 16 bytes of SHA-256 of the
-    /// bodies in file order, so the same document writes the same bytes. A
+    /// bodies in file order, so in the clear the same document writes the
+    /// same bytes. A
     /// document with no first string has none, but written under a new
     /// encryption: that has the hash for both.
     pub id: Option<[Vec<u8>; 2]>,

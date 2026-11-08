@@ -51,6 +51,11 @@ zlib-rs = ["pdf-filters/zlib-rs"]
 # an earlier revision's open, and each write and the object streams it
 # builds. Off by default; without it, none is compiled.
 tracing = ["dep:tracing"]
+# pdf-crypt's test writer, and the writer's choices for tests it makes
+# reachable: a new file's encryption from a seeded generator, each write's
+# IVs fixed or derived. For tests, never for a document's protection; off
+# by default, its items hidden from the docs.
+insecure-test-writer = ["pdf-crypt/insecure-test-writer"]
 
 # docs.rs documents both Flate backends, as `Options::flate` and
 # `write::Deflate` name either, and the spans.

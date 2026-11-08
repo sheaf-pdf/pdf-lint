@@ -37,12 +37,14 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+#[cfg(any(test, feature = "insecure-test-writer"))]
 use std::convert::Infallible;
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pdf_crypt::Password;
+#[cfg(any(test, feature = "insecure-test-writer"))]
 use pdf_crypt::rand_core::{TryCryptoRng, TryRng};
 use pdf_objects::Resolve;
 use pdf_objects::fault::Place;
@@ -839,8 +841,9 @@ const LISTED: u32 = 1 << 16;
 /// but where it would list a number past [`LISTED`]: with a table, a
 /// stream, or a stream packed, by number or in sevens on one thread, as
 /// the choice's next two bits give; encrypted as it was read, decrypted,
-/// or under a new encryption of revision 6 for `new` whose randomness the
-/// file's bytes give ([`Drawn`]), as its two after give; under the
+/// or under a new encryption of revision 6 for `new`, whose randomness the
+/// file's bytes give with the test writer (`Drawn`), the operating system's
+/// without it, as its two after give; under the
 /// renumbering; each object as read ([`write::bodies`]), so copied where
 /// the rules for a copy hold.
 /// And, when its sixth bit is set, an update after it, of the document's
@@ -1135,11 +1138,21 @@ struct Way {
 }
 
 impl Way {
+    /// The way `choice` picks; its new encryption's draws `file`'s bytes,
+    /// with the test writer.
+    #[cfg_attr(
+        not(any(test, feature = "insecure-test-writer")),
+        allow(unused_variables)
+    )]
     fn of(file: &[u8], choice: u16) -> Way {
         let new = NEW.prepared().ok().and_then(|password| {
             let mut protection = pdf_crypt::Protection::new(&password);
             protection.encrypt_metadata = choice & 64 == 0;
-            Encryptor::create(&protection, &mut Drawn::over(file)).ok()
+            #[cfg(any(test, feature = "insecure-test-writer"))]
+            let new = Encryptor::create_with(&protection, &mut Drawn::over(file));
+            #[cfg(not(any(test, feature = "insecure-test-writer")))]
+            let new = Encryptor::create(&protection);
+            new.ok()
         });
         Way {
             choice: (choice >> 3) & 3,
@@ -1458,14 +1471,16 @@ fn written(object: &Object) -> Vec<u8> {
 
 /// A random number generator for the `write` target's body alone: the
 /// input's bytes, then a counter's. It's no cryptographic generator, but
-/// says it is (`TryCryptoRng`) so that pdf-crypt's `Handler::create` takes
-/// it, through `Encryptor::create`, which only a fuzz body and the tests
-/// may do: it's compiled for nothing else.
+/// says it is (`TryCryptoRng`) so that pdf-crypt's test writer takes it,
+/// through `Encryptor::create_with`, which only a fuzz body and the tests
+/// may do: it's compiled for nothing else, and only with the test writer.
+#[cfg(any(test, feature = "insecure-test-writer"))]
 pub struct Drawn<'a> {
     data: &'a [u8],
     counter: u8,
 }
 
+#[cfg(any(test, feature = "insecure-test-writer"))]
 impl Drawn<'_> {
     /// `data`'s bytes, then a counter's.
     pub fn over(data: &[u8]) -> Drawn<'_> {
@@ -1473,6 +1488,7 @@ impl Drawn<'_> {
     }
 }
 
+#[cfg(any(test, feature = "insecure-test-writer"))]
 impl TryRng for Drawn<'_> {
     type Error = Infallible;
 
@@ -1505,6 +1521,7 @@ impl TryRng for Drawn<'_> {
     }
 }
 
+#[cfg(any(test, feature = "insecure-test-writer"))]
 impl TryCryptoRng for Drawn<'_> {}
 
 #[cfg(test)]

@@ -1449,6 +1449,25 @@ fn encryptor_of(file: &[u8]) -> Encryptor {
     Encryptor::of(&opened(file, "user")).unwrap().unwrap()
 }
 
+/// `encryptor`, each write under it taking the test writer's derived IVs
+/// (pdf-crypt's `Ivs::derived`), so that two writes of the same objects are
+/// the same bytes, as the tests that compare two writes need: under the
+/// operating system's, its default, every AES ciphertext written anew
+/// differs.
+fn derived(encryptor: Encryptor) -> Encryptor {
+    encryptor.with_test_ivs(pdf_crypt::Ivs::derived)
+}
+
+/// [`methods`], each encryptor [`derived`].
+fn derived_methods() -> Vec<Method> {
+    (methods().into_iter())
+        .map(|m| Method {
+            encryptor: derived(m.encryptor),
+            ..m
+        })
+        .collect()
+}
+
 /// An encryption the tests write under, and what it leaves in the clear.
 pub(crate) struct Method {
     pub(crate) name: &'static str,
@@ -1500,7 +1519,7 @@ pub(crate) fn methods() -> Vec<Method> {
     .collect();
     let prepared = Password("user").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(8);
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     methods.push(all("AES-256 created", created));
     let mut eff = dictionary_of(Kind::Aes128, true);
     eff.set("StmF", "Identity");
@@ -1771,12 +1790,17 @@ fn objects_encrypt_as_the_lazy_reader_decrypts() {
     }
 }
 
-/// The same objects encrypt to the same bytes, twice and on two threads.
+/// The same objects encrypt to the same bytes, twice and on two threads,
+/// under the test writer's derived IVs; under the operating system's, an
+/// AES object that holds a string or a stream to another's bytes each time
+/// (its strings written in whichever form fits their bytes, so not always
+/// the same length), an RC4 one to the same.
 #[test]
 fn objects_encrypt_alike_every_time() {
     let (plain, trailer) = plaintext();
     for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
-        let crypt = encryptor_of(&source(dictionary_of(kind, true), false));
+        let os = encryptor_of(&source(dictionary_of(kind, true), false));
+        let crypt = derived(os.clone());
         let resolve = |id: ObjectId| {
             (plain.iter())
                 .find(|(n, _)| ObjectId::new(*n, 0) == id)
@@ -1804,19 +1828,121 @@ fn objects_encrypt_alike_every_time() {
                 .map(|t| t.join().unwrap())
                 .collect::<Vec<_>>()
         });
-        assert_eq!(again, [once.clone(), once], "{kind:?}");
+        assert_eq!(again, [once.clone(), once.clone()], "{kind:?}");
+        let resolve = |id: ObjectId| {
+            (plain.iter())
+                .find(|(n, _)| ObjectId::new(*n, 0) == id)
+                .map(|(_, o)| o)
+        };
+        let [first, second] = [(); 2].map(|()| {
+            let encrypting = os.encrypting(&trailer, &resolve).unwrap();
+            (plain.iter())
+                .map(|(num, obj)| {
+                    let mut out = Vec::new();
+                    let id = ObjectId::new(*num, 0);
+                    serialize::indirect_with(&mut out, id, obj, &encrypting).unwrap();
+                    out
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut differing = 0;
+        for (((num, _), a), (b, derived)) in plain.iter().zip(&first).zip(second.iter().zip(&once))
+        {
+            match kind {
+                Kind::Rc4By128 => assert!(a == derived && b == derived, "{kind:?}: {num}"),
+                // An object with nothing encrypted is the same from either.
+                _ if a == derived => assert_eq!(b, derived, "{kind:?}: {num}"),
+                _ => {
+                    assert!(a != b && b != derived, "{kind:?}: {num}");
+                    differing += 1;
+                }
+            }
+        }
+        assert_eq!(differing > 0, kind != Kind::Rc4By128, "{kind:?}");
     }
 }
 
-/// What the writer writes is keyed by what it is: an AES string's IV is
-/// the same for the same object and value, every time it's written, and
-/// another at another number, or for another value; and it decrypts, as
-/// the reader decrypts, by the number it's at.
+/// Every AES IV a file holds, as written: the first 16 bytes of each
+/// string and each stream's data, read by no password, so as ciphertext;
+/// but the encryption dictionary's and a signature's `/Contents`, left in
+/// the clear.
+fn ivs_written(bytes: &[u8]) -> Vec<[u8; 16]> {
+    fn walk(o: &Object, file: &[u8], out: &mut Vec<[u8; 16]>) {
+        match o.value() {
+            Value::String(Str::Bytes(b) | Str::Encrypted(b), _) if b.len() >= 32 => {
+                out.push(b[..16].try_into().unwrap());
+            }
+            Value::Array(a) => a.iter().for_each(|o| walk(o, file, out)),
+            Value::Dict(d) => (d.iter())
+                .filter(|(key, _)| !(*key == b"Contents" && d.get(b"ByteRange").is_some()))
+                .for_each(|(_, o)| walk(o, file, out)),
+            Value::Stream(s) => {
+                s.dict.iter().for_each(|(_, o)| walk(o, file, out));
+                let at = s
+                    .data
+                    .at()
+                    .filter(|at| at.stream.is_none() && at.end - at.start >= 32);
+                if let Some(at) = at {
+                    out.push(file[at.start..at.start + 16].try_into().unwrap());
+                }
+            }
+            _ => {}
+        }
+    }
+    let reading = open(bytes);
+    assert_eq!(reading.encryption(), &Encryption::Locked);
+    let encrypt = reading.trailer().object.as_dict().unwrap().get(b"Encrypt");
+    let encrypt = encrypt.and_then(Object::as_reference);
+    let mut out = Vec::new();
+    for id in reading
+        .ids()
+        .filter(|&id| Some(id) != encrypt)
+        .collect::<Vec<_>>()
+    {
+        if let Ok(object) = reading.get(id) {
+            walk(object, bytes, &mut out);
+        }
+    }
+    out
+}
+
+/// An encryptor, a reading's and a new one alike, draws each write's IVs
+/// from the operating system unless a test sets others, whatever features
+/// the build has: two whole writes of one file under it share no IV, nor
+/// do two strings or streams of one write, and each reads back.
+#[test]
+fn an_encryptor_draws_each_writes_ivs_from_the_operating_system() {
+    let (plain, trailer) = plaintext();
+    let prepared = Password("user").prepared().unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared)).unwrap();
+    let of = encryptor_of(&source(dictionary_of(Kind::Aes128, true), false));
+    for (name, encryptor) in [("created", &created), ("a reading's", &of)] {
+        let one = whole(&plain, &trailer, XrefKind::Table, Some(encryptor));
+        let two = whole(&plain, &trailer, XrefKind::Table, Some(encryptor));
+        let (a, b) = (ivs_written(&one), ivs_written(&two));
+        assert!(a.len() > 10, "{name}: {}", a.len());
+        assert_eq!(a.len(), b.len(), "{name}");
+        let mut every: Vec<[u8; 16]> = a.iter().chain(&b).copied().collect();
+        every.sort_unstable();
+        every.dedup();
+        assert_eq!(every.len(), a.len() + b.len(), "{name}: an IV twice");
+        for file in [&one, &two] {
+            assert_reads_to(&plain, file, true, name);
+        }
+    }
+}
+
+/// Under the test writer's derived IVs, an AES string's IV is the same for
+/// the same object and value, every time it's written, and another at
+/// another number, or for another value; under the operating system's,
+/// another every time. Either way it decrypts, as the reader decrypts, by
+/// the number it's at.
 #[test]
 fn ivs_are_keyed_by_what_the_object_is() {
     let (plain, trailer) = plaintext();
     for kind in [Kind::Aes128, Kind::Aes256R5, Kind::Aes256] {
-        let crypt = encryptor_of(&source(dictionary_of(kind, true), false));
+        let os = encryptor_of(&source(dictionary_of(kind, true), false));
+        let crypt = derived(os.clone());
         let resolve = |id: ObjectId| {
             (plain.iter())
                 .find(|(n, _)| ObjectId::new(*n, 0) == id)
@@ -1833,6 +1959,14 @@ fn ivs_are_keyed_by_what_the_object_is() {
         ] {
             assert_ne!(other, first, "{kind:?}");
         }
+        let resolve_os = |id: ObjectId| {
+            (plain.iter())
+                .find(|(n, _)| ObjectId::new(*n, 0) == id)
+                .map(|(_, o)| o)
+        };
+        let drawn = os.encrypting(&trailer, &resolve_os).unwrap();
+        let os_iv = |value: &[u8]| drawn.string(ObjectId::new(5, 0), value).unwrap()[..16].to_vec();
+        assert_ne!(os_iv(b"a value"), os_iv(b"a value"), "{kind:?}");
         // Decrypted as the reader decrypts: by the number it's at.
         let mut file = b"%PDF-1.7\n".to_vec();
         let mut section = Section::full(0);
@@ -2274,15 +2408,15 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     // password, which the owner's being the user's would lift.
     let mut rng = chacha20::ChaCha20Rng::seed_from_u64(8);
     let unprepared = pdf_crypt::Encoded::verbatim(b"user");
-    let refused = Encryptor::create(&Protection::new(&unprepared), &mut rng);
+    let refused = Encryptor::create_with(&Protection::new(&unprepared), &mut rng);
     let unprepared = pdf_crypt::Unusable::Unprepared(pdf_crypt::Encoding::Verbatim);
     assert_eq!(refused.err(), Some(unprepared));
-    let refused = Encryptor::create(&Protection::DEFAULT, &mut rng);
+    let refused = Encryptor::create_with(&Protection::DEFAULT, &mut rng);
     assert_eq!(refused.err(), Some(pdf_crypt::Unusable::NoPassword));
     let prepared = Password("user").prepared().unwrap();
     let mut one = Protection::new(&prepared);
     one.permissions = pdf_crypt::Permissions::NONE;
-    let refused = Encryptor::create(&one, &mut rng);
+    let refused = Encryptor::create_with(&one, &mut rng);
     assert_eq!(refused.err(), Some(pdf_crypt::Unusable::Shared));
 }
 
@@ -2482,10 +2616,28 @@ fn sources(methods: &[Method]) -> Vec<(String, XrefKind, &Method, Vec<u8>)> {
     sources
 }
 
+/// A whole write writes the same bytes every time, twice and on two
+/// threads, plain and under RC4, AES-128 and AES-256, under the test
+/// writer's derived IVs; under the operating system's, an AES file's bytes
+/// another's each time, an RC4 file's the same, each read back soundly.
 #[test]
 fn full_writes_are_deterministic() {
     let (plain, trailer) = plaintext();
-    let methods = methods();
+    for method in
+        (methods().iter()).filter(|m| ["RC4-128", "AES-128", "AES-256 R6"].contains(&m.name))
+    {
+        for kind in KINDS {
+            let write = || whole(&plain, &trailer, kind, Some(&method.encryptor));
+            let (one, two) = (write(), write());
+            let name = format!("{kind:?}, {}, from the operating system", method.name);
+            assert_eq!(one == two, method.name == "RC4-128", "{name}");
+            for file in [&one, &two] {
+                let pdf = read_back(file, true);
+                assert!(sound(&pdf), "{name}: {:?}", pdf.faults());
+            }
+        }
+    }
+    let methods = derived_methods();
     let encryptors = (methods.iter())
         .filter(|m| ["RC4-128", "AES-128", "AES-256 R6"].contains(&m.name))
         .map(|m| Some(&m.encryptor));
@@ -2622,11 +2774,24 @@ fn with_many(count: u32) -> (Vec<(u32, Object)>, Dict) {
 
 /// A packed write writes the same bytes every time: twice and on two
 /// threads, plain and under every method that packs, with eleven object
-/// streams to build on a thread per core.
+/// streams to build on a thread per core, under the test writer's derived
+/// IVs; under the operating system's, another's bytes each time where AES
+/// takes an IV, each read back soundly.
 #[test]
 fn packed_writes_are_deterministic() {
     let (plain, trailer) = with_many(1000);
-    let methods = methods();
+    for method in methods().iter().filter(|m| m.encryptor.packs()) {
+        let write = || whole_packed(&plain, &trailer, Some(&method.encryptor), None);
+        let (one, two) = (write(), write());
+        // RC4 takes no IV: its files are the same.
+        let aes = !method.name.starts_with("RC4");
+        assert_eq!(one != two, aes, "{}", method.name);
+        for file in [&one, &two] {
+            let pdf = read_back(file, true);
+            assert!(sound(&pdf), "{}: {:?}", method.name, pdf.faults());
+        }
+    }
+    let methods = derived_methods();
     let packing =
         (methods.iter().filter(|m| m.encryptor.packs())).map(|m| (m.name, Some(&m.encryptor)));
     for (name, encryptor) in std::iter::once(("plain", None)).chain(packing) {
@@ -2648,8 +2813,9 @@ fn packed_writes_are_deterministic() {
 }
 
 /// Object streams build the same on one thread as on eight, plain and
-/// under every method that packs: forty of them, on eight threads in eight
-/// runs of five. Stopped, neither builds.
+/// under every method that packs, under the test writer's derived IVs:
+/// forty of them, on eight threads in eight runs of five. Stopped, neither
+/// builds.
 #[test]
 fn containers_build_alike_on_one_thread_and_on_eight() {
     let objects: Vec<(ObjectId, Object)> = (1..=4000)
@@ -2669,7 +2835,7 @@ fn containers_build_alike_on_one_thread_and_on_eight() {
     // The catalog given, which says which stream is the metadata where
     // `/EncryptMetadata false` leaves it in the clear.
     let resolve = |id: ObjectId| (objects.iter()).find(|(at, _)| *at == id).map(|(_, o)| o);
-    let methods = methods();
+    let methods = derived_methods();
     let encrypting: Vec<(&str, Option<write::Encrypting<'_>>)> = std::iter::once(("plain", None))
         .chain((methods.iter().filter(|m| m.encryptor.packs())).map(|m| {
             (
@@ -2724,7 +2890,8 @@ fn encrypts(method: &Method, text: &[u8]) -> bool {
 /// password, and not without one; nothing is in the clear, even inflated,
 /// but what the method leaves so and a signature's `/Contents`; the
 /// `/Encrypt` dictionary and `/ID[0]` are the source's; and it writes the
-/// same bytes twice.
+/// same bytes twice under the test writer's derived IVs, and two another's
+/// under the operating system's, each read back alike.
 #[test]
 fn containers_encrypt_once_as_the_reader_decrypts() {
     let (plain, trailer) = plaintext();
@@ -2761,7 +2928,14 @@ fn containers_encrypt_once_as_the_reader_decrypts() {
             assert_eq!(now.first_id(), Some(first), "{name}");
         }
         let again = whole_packed(&plain, &trailer, Some(crypt), None);
-        assert_eq!(again, bytes, "{name}");
+        let encrypted = method.strings || method.streams || method.attachment;
+        let differ = !name.starts_with("RC4") && encrypted;
+        assert_eq!(again != bytes, differ, "{name}");
+        assert_reads_to(&plain, &again, true, name);
+        let crypt = derived(crypt.clone());
+        let once = whole_packed(&plain, &trailer, Some(&crypt), None);
+        let again = whole_packed(&plain, &trailer, Some(&crypt), None);
+        assert_eq!(again, once, "{name}: derived");
     }
 }
 
@@ -3399,14 +3573,14 @@ fn encrypted_files_append_encrypted() {
         let base = write::Base::of(&reading).unwrap();
         let encryptor = Encryptor::of(&reading).unwrap();
         let given = || [PAGE, note].map(|id| (id, write::Body::from(doc.get(id).unwrap())));
-        let update = || {
+        let update_under = |encryptor: Option<&Encryptor>| {
             let mut out = source.clone();
             let options = write::Options::DEFAULT;
             write::update(
                 &mut out,
                 &base,
                 given(),
-                encryptor.as_ref(),
+                encryptor,
                 Some(&reading),
                 &options,
             )
@@ -3414,8 +3588,13 @@ fn encrypted_files_append_encrypted() {
             .unwrap();
             out
         };
+        let update = || update_under(encryptor.as_ref());
         let bytes = update();
-        assert_eq!(update(), bytes, "{name}");
+        let again = update();
+        assert!(again.starts_with(source), "{name}");
+        let derived = encryptor.clone().map(derived);
+        let once = update_under(derived.as_ref());
+        assert_eq!(update_under(derived.as_ref()), once, "{name}: derived");
         assert!(bytes.starts_with(source), "{name}");
         let section = &bytes[source.len()..];
         for text in [PAGE_STRING, NOTE] {
@@ -3912,9 +4091,10 @@ fn listed_rows(method: &Method) -> Vec<(&'static [u8], bool)> {
 
 /// Under each method, [`listed`] written whole (a table, and a stream
 /// packed) and as an update rewriting every object of a file of it,
-/// twice each: the same bytes twice; what the list encrypts not in the
-/// clear, as it is, in hex or inflated, and what it leaves so in the
-/// clear; and every object read back by the user's password.
+/// twice each, the same bytes twice under the test writer's derived IVs;
+/// what the list encrypts not in the clear, as it is, in hex or inflated,
+/// and what it leaves so in the clear; and every object read back by the
+/// user's password.
 #[test]
 fn each_method_writes_whole_packed_and_updated_with_nothing_in_the_clear() {
     let (plain, trailer) = listed();
@@ -3924,29 +4104,29 @@ fn each_method_writes_whole_packed_and_updated_with_nothing_in_the_clear() {
         let reading = opened(&source, "user");
         let base = write::Base::of(&reading).unwrap();
         let own = Encryptor::of(&reading).unwrap();
-        let updated = || {
+        let updated_under = |own: Option<&Encryptor>| {
             let mut out = source.clone();
             let options = write::Options::DEFAULT;
-            write::update(
-                &mut out,
-                &base,
-                bodies(&plain),
-                own.as_ref(),
-                None,
-                &options,
-            )
-            .unwrap();
+            write::update(&mut out, &base, bodies(&plain), own, None, &options).unwrap();
             out
         };
+        let updated = || updated_under(own.as_ref());
         let ways: [(&str, &dyn Fn() -> Vec<u8>); 3] = [
             ("whole", &|| whole(&plain, &trailer, XrefKind::Table, crypt)),
             ("packed", &|| whole_packed(&plain, &trailer, crypt, None)),
             ("updated", &updated),
         ];
-        for (way, write) in ways {
+        let (derived_crypt, derived_own) =
+            (derived(method.encryptor.clone()), own.clone().map(derived));
+        let derived_ways: [&dyn Fn() -> Vec<u8>; 3] = [
+            &|| whole(&plain, &trailer, XrefKind::Table, Some(&derived_crypt)),
+            &|| whole_packed(&plain, &trailer, Some(&derived_crypt), None),
+            &|| updated_under(derived_own.as_ref()),
+        ];
+        for ((way, write), derived_write) in ways.into_iter().zip(derived_ways) {
             let name = format!("{}, {way}", method.name);
             let bytes = write();
-            assert_eq!(write(), bytes, "{name}");
+            assert_eq!(derived_write(), derived_write(), "{name}: derived");
             let written = match way {
                 "updated" => &bytes[source.len()..],
                 _ => &bytes[..],
@@ -3987,7 +4167,7 @@ fn a_decrypting_write_and_a_new_revision_6_read_back() {
             .and_then(Object::as_reference);
         assert_eq!(encrypt, Some(ObjectId::new(ENCRYPT, 0)), "{}", method.name);
         let mut rng = ChaCha20Rng::seed_from_u64(9);
-        let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+        let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
         for (way, encryptor) in [("decrypted", None), ("created", Some(&created))] {
             let name = format!("{}, {way}", method.name);
             let mut out = Vec::new();
@@ -4159,7 +4339,7 @@ fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object()
     // A new encryption's key is new; a file that isn't encrypted has none.
     let mut rng = ChaCha20Rng::seed_from_u64(10);
     let prepared = Password("user").prepared().unwrap();
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     let given = [
         (ObjectId::new(1, 0), write::Body::from(&catalog)),
         (ObjectId::new(2, 0), write::Body::from(&two)),
@@ -5264,7 +5444,7 @@ fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
     // too.
     let mut rng = ChaCha20Rng::seed_from_u64(11);
     let prepared = Password("user").prepared().unwrap();
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     let mut out = Vec::new();
     let options = write::Options::DEFAULT;
     write::full(
@@ -5498,7 +5678,7 @@ fn objects_at_offsets_are_copied_under_their_own_reading_s_encryption_alone() {
     let (plain, _) = plaintext();
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(12);
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     for kind in KINDS_ENCRYPTED {
         let source = written_otherwise(kind, true);
         let reading = opened(&source, "user");
@@ -5547,7 +5727,7 @@ fn parts_copy_only_what_is_encrypted_under_the_key_it_was_read_under() {
 
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(14);
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
 
     // Written object by object, whether each is what it was read from.
     fn each_copied<'a, S: ByteSource + 'a>(
@@ -5688,7 +5868,7 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
     // So too under a new encryption, which copies nothing at an offset.
     let prepared = Password("user").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(12);
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     let mut out = Vec::new();
     let refused = write::full(
         &mut out,
@@ -6021,7 +6201,7 @@ fn members_are_copied_into_object_streams_under_any_encryption() {
     let doc = reading.to_document().unwrap();
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(13);
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     let pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
     let assert_back = |out: &[u8], password: &str, name: &str| {
         let back = opened(out, password);
@@ -6498,7 +6678,8 @@ fn shared() -> Vec<u8> {
 /// left out, which `document`, giving every object, refuses), each object
 /// is the source's at its number, its references renumbered, the trailer's
 /// `/Root` too, and the write said renumbered. And moved down from past
-/// [`write::NUMBERS`], decrypted, written anew, the same.
+/// [`write::NUMBERS`], decrypted, written anew, the same. Under the test
+/// writer's derived IVs, so that two writes are the same bytes.
 #[test]
 fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
@@ -6517,7 +6698,7 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
     let mut copies = 0;
     for (file, bytes) in &files {
         let reading = opened(bytes, "");
-        let encryptor = Encryptor::of(&reading).unwrap();
+        let encryptor = Encryptor::of(&reading).unwrap().map(derived);
         let encrypted = encryptor.is_some();
         let doc = reading.to_document().unwrap();
         let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
@@ -6933,7 +7114,7 @@ fn a_reference_the_renumbering_names_none_of_is_written_null() {
     let to = by(&map);
     let mut rng = ChaCha20Rng::seed_from_u64(14);
     let prepared = Password("user").prepared().unwrap();
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     for (kind, pack, encryptor) in [
         (XrefKind::Table, None, None),
         (XrefKind::Stream, Some(write::Pack::DEFAULT), None),
@@ -6987,12 +7168,13 @@ fn a_reference_the_renumbering_names_none_of_is_written_null() {
 
 /// An object written anew under a renumbering is the bytes its value
 /// renumbered in memory writes at its new number, and so is the file: plain
-/// and under RC4, AES-128 and AES-256, a table reversed and a stream packed
-/// shifted (packed by number, which shifting keeps in order).
+/// and under RC4, AES-128 and AES-256 (the test writer's derived IVs), a
+/// table reversed and a stream packed shifted (packed by number, which
+/// shifting keeps in order).
 #[test]
 fn written_anew_renumbered_is_the_value_renumbered_written() {
     let (plain, trailer) = plaintext();
-    let methods = methods();
+    let methods = derived_methods();
     let encryptors = (methods.iter())
         .filter(|m| ["RC4-128", "AES-128", "AES-256 R6"].contains(&m.name))
         .map(|m| (m.name, Some(&m.encryptor)));
@@ -7768,7 +7950,7 @@ fn members_are_copied_renumbered_into_object_streams_under_any_encryption() {
     let to = by(&map);
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(15);
-    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     let mut pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
     pack.renumber = Some(&to);
     // Its members' bytes, renumbered `by` on, in the object streams written.
@@ -8400,10 +8582,10 @@ fn each_method_updates_renumbered_with_nothing_in_the_clear() {
 
 /// An update given the identity, every number named as it is, is the
 /// update given none, byte for byte: of [`SPELLED`] and [`NAMING`] written
-/// with a table and with a stream, and of [`plaintext`] under each method,
-/// a table and a stream, given its document's objects as read, one changed,
-/// and its reading, it passes over the rest as with none; and what it
-/// writes says it was renumbered.
+/// with a table and with a stream, and of [`plaintext`] under each method
+/// (the test writer's derived IVs), a table and a stream, given its
+/// document's objects as read, one changed, and its reading, it passes over
+/// the rest as with none; and what it writes says it was renumbered.
 #[test]
 fn an_update_under_the_identity_is_the_update_under_none() {
     let mut objects = SPELLED.to_vec();
@@ -8427,7 +8609,7 @@ fn an_update_under_the_identity_is_the_update_under_none() {
     }
     for (name, file, password, changed) in sources {
         let reading = opened(&file, password);
-        let own = Encryptor::of(&reading).unwrap();
+        let own = Encryptor::of(&reading).unwrap().map(derived);
         let mut doc = reading.to_document().unwrap();
         doc.get_dict_mut(changed).unwrap().set("Rotate", 90);
         let base = write::Base::of(&reading).unwrap();
@@ -8720,7 +8902,8 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
 // as a document made beside the reading is; else left as it was.
 
 /// What `doc`, a document of `file`, writes through `reading`, a reading
-/// of `file`, under that reading's own encryption: whole, with a table and
+/// of `file`, under that reading's own encryption, the test writer's
+/// derived IVs, so that two are the same bytes: whole, with a table and
 /// with a stream, packed; and as an update after the file, under no
 /// renumbering and under `map`. And how many objects the table copied as
 /// the bytes they were read from.
@@ -8730,7 +8913,7 @@ fn written_through<S: ByteSource>(
     file: &[u8],
     map: &Map,
 ) -> (Vec<Vec<u8>>, usize) {
-    let encryptor = Encryptor::of(reading).unwrap();
+    let encryptor = Encryptor::of(reading).unwrap().map(derived);
     let encryptor = encryptor.as_ref();
     let mut outs = Vec::new();
     let mut copies = 0;

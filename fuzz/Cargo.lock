@@ -404,6 +404,7 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "aes",
  "cbc",
+ "getrandom",
  "hmac",
  "md-5",
  "rand_core",

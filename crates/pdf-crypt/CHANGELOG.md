@@ -2,11 +2,25 @@
 
 ## 0.1.0-alpha.2 (unreleased)
 
-The test writer's feature says what it is. Depend on this alpha exactly, `=0.1.0-alpha.2`.
+AES's IVs and a new file's key and salts come from the operating system, and the test writer's feature says what it is. Depend on this alpha exactly, `=0.1.0-alpha.2`.
+
+### Added
+
+- `Ivs`: one write's AES IVs, each 16 bytes from the operating system's random number generator (getrandom's), drawn 4 KiB at a time and shared by the write's threads. It isn't `Clone`, so no IV is given out twice.
+- `Random`, `Fault::Random` and `Unusable::Random`: the operating system's generator failing. Nothing is encrypted or made then, and nothing is given in the clear in its place.
 
 ### Changed
 
+- `Handler::encrypt_string(id, data, &ivs)` and `Handler::encrypt_stream(id, data, crypt, &ivs)` take the write's `Ivs` in place of a context. **Migrating:** make an `Ivs::new()` for each write, pass it to every encrypt of that write, and drop the context.
+- `Handler::create(&protection)` draws the new file's key and salts from the operating system. **Migrating:** drop the generator argument.
+- `pdf_crypt::rand_core`, and the rand_core dependency, are there with `insecure-test-writer` alone, hidden. **Migrating:** nothing names a generator for `create` now.
+- A build for wasm32-unknown-unknown picks getrandom's backend (its `wasm_js` feature, or a custom one), as getrandom's docs say.
 - The `writer` feature is now `insecure-test-writer`, and its items (`writer::Kind`, `Settings`, `dictionary`, `encrypt_string`, `encrypt_stream`) are hidden from the docs. It writes test files, never a document's protection. **Migrating:** turn on `insecure-test-writer` where a test turned on `writer`.
+
+### Security
+
+- AES's IVs are random, as ISO 32000-2 asks (7.6.3.2, 7.6.3.3). They were derived by HMAC-SHA256 under the file's key from the object and the data, so equal strings encrypted alike, an object unchanged across saves showed as unchanged, and AES-256's key keyed the HMAC too.
+- A new file's key and salts come from the operating system. A caller's generator, seeded, made a key as guessable as its seed.
 
 ## 0.1.0-alpha.1 (2026-11-07)
 

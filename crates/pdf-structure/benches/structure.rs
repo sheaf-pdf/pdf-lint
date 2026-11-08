@@ -41,7 +41,9 @@
 //!   table (`full`); the table's file read whole written again, each object
 //!   copied as the bytes it was read from (`document`); and an update after
 //!   that file writing each annotation whose number is a multiple of 20,
-//!   changed (`update`).
+//!   changed (`update`); and the objects written as a whole file under a new
+//!   AES-256 encryption, each IV drawn from the operating system
+//!   (`encrypted`).
 //!
 //! The objects are a catalog, a page tree and 222 pages, each with its
 //! content stream, whose `/Length` is an object of its own, and six link
@@ -184,6 +186,37 @@ mod api {
     ) {
         let options = write::Options::DEFAULT;
         write::update(out, base, bodies, None, None, &options).expect("the update is written");
+    }
+
+    /// A new file's encryption (AES-256) for `password`, its key and salts
+    /// from the operating system.
+    pub fn created(password: &str) -> write::Encryptor {
+        use pdf_structure::pdf_crypt::{Password, Protection};
+        let prepared = Password(password)
+            .prepared()
+            .expect("a password SASLprep takes");
+        write::Encryptor::create(&Protection::new(&prepared)).expect("a new encryption")
+    }
+
+    /// `bodies` written as a whole file with a table under `encryptor`, each
+    /// AES IV from the operating system.
+    pub fn full_under<'a>(
+        out: &mut Vec<u8>,
+        bodies: impl IntoIterator<Item = (ObjectId, Body<'a>)>,
+        trailer: &Dict,
+        encryptor: &write::Encryptor,
+    ) {
+        let options = write::Options::DEFAULT;
+        write::full(out, bodies, trailer, Some(encryptor), None, &options)
+            .expect("the file is written");
+    }
+
+    /// `file` opened by `password`.
+    pub fn open_by<'f>(file: &'f [u8], password: &str) -> Read<'f> {
+        let passwords = [pdf_structure::pdf_crypt::Password(password)];
+        let mut options = Options::DEFAULT;
+        options.passwords = &passwords;
+        Reading::open(file, &options).expect("a file in memory opens")
     }
 }
 
@@ -900,6 +933,15 @@ fn write_group(c: &mut Criterion, objects: &[(u32, Text)], files: &Files) {
     }
     read_back("update", &update, &after);
     let update_len = update.len() - files.table.len();
+    // Under a new encryption, opened by its password, every object read.
+    let created = api::created("bench");
+    let mut encrypted = Vec::new();
+    api::full_under(&mut encrypted, bodies(), &trailer, &created);
+    let opened = api::open_by(&encrypted, "bench");
+    for (id, _) in &built {
+        (opened.get(*id)).unwrap_or_else(|e| panic!("write/encrypted: {id} R: {e}"));
+    }
+    assert_eq!(api::reading_faults(&opened), 0, "write/encrypted: no fault");
     let mut group = c.benchmark_group("write");
     group.throughput(Throughput::Bytes(full.len() as u64));
     group.bench_function("full", |b| {
@@ -922,6 +964,14 @@ fn write_group(c: &mut Criterion, objects: &[(u32, Text)], files: &Files) {
         b.iter(|| {
             let mut out = Vec::new();
             api::update(&mut out, &base, given());
+            out
+        })
+    });
+    group.throughput(Throughput::Bytes(encrypted.len() as u64));
+    group.bench_function("encrypted", |b| {
+        b.iter(|| {
+            let mut out = Vec::new();
+            api::full_under(&mut out, bodies(), &trailer, &created);
             out
         })
     });

@@ -1,5 +1,5 @@
-//! HMAC-SHA256 (RFC 2104, FIPS 198-1), which the handler derives the IVs
-//! it encrypts under with: RustCrypto's `hmac` over `sha2`.
+//! HMAC-SHA256 (RFC 2104, FIPS 198-1), which the test writer derives its
+//! IVs with (`Ivs::derived`): RustCrypto's `hmac` over `sha2`.
 
 use ::hmac::{Hmac, KeyInit, Mac};
 use ::sha2::Sha256;

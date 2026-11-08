@@ -23,6 +23,8 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::{canonical_combining_class, compose};
 use zeroize::Zeroizing;
 
+use crate::Random;
+
 /// A password as typed: text, before any encoding. A reader tries it in
 /// each encoding it may have been set in ([`Password::encodings`]); a new
 /// file takes it in one, strictly ([`Password::prepared`]). Its `Debug`
@@ -253,7 +255,8 @@ pub(crate) fn is_prepared(bytes: &[u8]) -> bool {
 /// Why a password can't be a new file's ([`Password::prepared`],
 /// [`Handler::create`](crate::Handler::create)), or a new file's passwords
 /// can't protect it as asked ([`Unusable::NoPassword`],
-/// [`Unusable::Shared`]).
+/// [`Unusable::Shared`]), or a new file's key and salts weren't drawn
+/// ([`Unusable::Random`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unusable {
@@ -325,6 +328,10 @@ pub enum Unusable {
         "the owner's password is the user's, so the permissions withheld would bind no one who opens the file"
     )]
     Shared,
+    /// The operating system's random number generator failed, so a new
+    /// file's key and salts weren't drawn: nothing is made.
+    #[error("{0}")]
+    Random(Random),
 }
 
 /// Why SASLprep refuses `text`: the first of its characters it refuses

@@ -9,11 +9,10 @@ use std::convert::Infallible;
 use std::fmt;
 use std::iter::FusedIterator;
 
-use pdf_crypt::rand_core::CryptoRng;
-use pdf_crypt::{Fault, Handler, Method, Protection, Unusable};
+use pdf_crypt::{Fault, Handler, Ivs, Method, Protection, Unusable};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
-use pdf_objects::serialize::{self, Encrypt, Renumber};
+use pdf_objects::serialize::{Encrypt, Renumber};
 
 use super::{Error, Numbering};
 use crate::crypt::{self, List, Stream};
@@ -78,6 +77,10 @@ pub struct Encryptor {
     /// file's, so that what's written under it says which of a reading's
     /// objects are encrypted as they're read.
     read_list: Option<Box<List>>,
+    /// What makes each write's IVs: pdf-crypt's `Ivs::new`, the operating
+    /// system's, but where a test sets another (`with_test_ivs`, under
+    /// `insecure-test-writer` alone).
+    ivs: fn() -> Ivs,
 }
 
 /// Where an encryption dictionary was.
@@ -184,6 +187,7 @@ impl Encryptor {
                     per_object,
                     source: Some(reading.id()),
                     read_list: None,
+                    ivs: Ivs::new,
                 }))
             }
             _ => Err(Error::Locked),
@@ -193,27 +197,60 @@ impl Encryptor {
     /// A new file's encryption, of revision 6 (AES-256), protected as
     /// `protection` says (its passwords, prepared, its permissions, and
     /// whether the document's metadata is encrypted), as pdf-crypt's
-    /// `Handler::create` makes it from `rng`'s draws; its dictionary with
-    /// its crypt filter's `/Length 32` (bytes, as qpdf writes it) and
-    /// `/AuthEvent /DocOpen`. Its key isn't made from the file's `/ID`
-    /// ([`Encryptor::first_id`] is none).
+    /// `Handler::create` makes it, its key and salts from the operating
+    /// system; its dictionary with its crypt filter's `/Length 32` (bytes,
+    /// as qpdf writes it) and `/AuthEvent /DocOpen`. Its key isn't made from
+    /// the file's `/ID` ([`Encryptor::first_id`] is none).
     ///
     /// # Errors
     ///
     /// Refused, as `Handler::create` refuses: for a password that isn't
-    /// prepared, or is empty or too long; for no password; and for
-    /// permissions withheld where the owner's password is the user's.
-    pub fn create(
+    /// prepared, or is empty or too long; for no password; for permissions
+    /// withheld where the owner's password is the user's; and where the
+    /// operating system's random number generator fails
+    /// (`Unusable::Random`).
+    pub fn create(protection: &Protection) -> Result<Encryptor, Unusable> {
+        Handler::create(protection).map(Encryptor::created)
+    }
+
+    /// [`Encryptor::create`], its key and salts drawn from `rng` in
+    /// pdf-crypt's order, as the test writer's `create` draws them: for a
+    /// test that pins a new file's bytes, never a document's protection.
+    ///
+    /// # Errors
+    ///
+    /// Refused as [`Encryptor::create`] is.
+    #[cfg(any(test, feature = "insecure-test-writer"))]
+    #[doc(hidden)]
+    pub fn create_with(
         protection: &Protection,
-        rng: &mut (impl CryptoRng + ?Sized),
+        rng: &mut (impl pdf_crypt::rand_core::CryptoRng + ?Sized),
     ) -> Result<Encryptor, Unusable> {
-        let (handler, values) = Handler::create(protection, rng)?;
+        pdf_crypt::writer::create(protection, rng).map(Encryptor::created)
+    }
+
+    /// It, each write's IVs made by `ivs` in place of the operating
+    /// system's: pdf-crypt's `Ivs::fixed` or `Ivs::derived`, for a test that
+    /// writes the same file to the same bytes, never a document's
+    /// protection. Every write under it and its clones takes them, whole,
+    /// as an update, or laid out by another crate.
+    #[cfg(any(test, feature = "insecure-test-writer"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_ivs(mut self, ivs: fn() -> Ivs) -> Encryptor {
+        self.ivs = ivs;
+        self
+    }
+
+    /// The encryptor of a new file whose handler and dictionary's values
+    /// pdf-crypt made.
+    fn created((handler, values): (Handler, pdf_crypt::Dictionary)) -> Encryptor {
         let mut list = List {
             encrypts: true,
             ..List::default()
         };
         list.settle(&values, Ok(&handler));
-        Ok(Encryptor {
+        Encryptor {
             handler,
             list,
             dict: encryption(&values, Some(32)),
@@ -223,7 +260,8 @@ impl Encryptor {
             per_object: false,
             source: None,
             read_list: None,
-        })
+            ivs: Ivs::new,
+        }
     }
 
     /// Whether objects may go in object streams under it: a container is
@@ -568,6 +606,7 @@ impl Encryptor {
             encryptor: self,
             resolve,
             metadata,
+            ivs: (self.ivs)(),
         })
     }
 }
@@ -576,10 +615,11 @@ impl Encryptor {
 /// as pdf-objects' writer writes them: its `serialize::Encrypt`, which
 /// every string and stream's data of an indirect object written by
 /// `indirect_with` or `indirect_stream_with` passes through, encrypted by
-/// the handler with the object's key, AES's IV derived from `n g obj` and
-/// the data, as pdf-crypt's `Handler::encrypt_string` and `encrypt_stream`
-/// derive it, so the same object encrypts to the same bytes on every save
-/// and no IV serves two plaintexts. What it leaves in the clear is the list
+/// the handler with the object's key, AES's IV the next of the write's
+/// own (pdf-crypt's `Ivs`, made with it and dropped with it): 16 bytes from
+/// the operating system, so no IV serves two plaintexts, and two saves of
+/// one document differ in every AES ciphertext written anew. The threads of
+/// one write share them. What it leaves in the clear is the list
 /// the reader decrypts by (see [`read`](crate::read), "What's
 /// encrypted"): an encryption dictionary and what its entries refer to, a
 /// cross-reference stream, a signature's `/Contents`, a stream whose crypt
@@ -592,6 +632,8 @@ pub struct Encrypting<'a> {
     /// The document's metadata stream, where `/EncryptMetadata false`
     /// leaves its data in the clear, at the number it's written at.
     metadata: Option<ObjectId>,
+    /// The write's IVs, which its every AES string and stream takes.
+    ivs: Ivs,
 }
 
 impl fmt::Debug for Encrypting<'_> {
@@ -599,6 +641,7 @@ impl fmt::Debug for Encrypting<'_> {
         f.debug_struct("Encrypting")
             .field("encryptor", &self.encryptor)
             .field("metadata", &self.metadata)
+            .field("ivs", &self.ivs)
             .finish_non_exhaustive()
     }
 }
@@ -611,7 +654,9 @@ impl fmt::Debug for Encrypting<'_> {
 #[non_exhaustive]
 pub enum Unencryptable {
     /// pdf-crypt's fault: a crypt filter's method that isn't one, or one
-    /// the dictionary hasn't, or AES that the file's key isn't for.
+    /// the dictionary hasn't, or AES that the file's key isn't for; or the
+    /// operating system's random number generator failing, so AES had no
+    /// IV.
     #[error("{0}")]
     Fault(Fault),
     /// It's a stream an encryption dictionary refers to, whose strings are
@@ -699,7 +744,7 @@ impl Encrypt for Encrypting<'_> {
             return Ok(Cow::Borrowed(text));
         }
         let handler = &self.encryptor.handler;
-        (handler.encrypt_string(id.into(), &context(id), text))
+        (handler.encrypt_string(id.into(), text, &self.ivs))
             .map(Cow::Owned)
             .map_err(Unencryptable::Fault)
     }
@@ -732,7 +777,7 @@ impl Encrypt for Encrypting<'_> {
                 if matches!(method, Method::Identity | Method::None) {
                     return Ok(Cow::Borrowed(data));
                 }
-                (handler.encrypt_stream(id.into(), &context(id), data, Some(method)))
+                (handler.encrypt_stream(id.into(), data, Some(method), &self.ivs))
                     .map(Cow::Owned)
                     .map_err(Unencryptable::Fault)
             }
@@ -753,22 +798,6 @@ fn per_object(handler: &Handler, dict: &Dict) -> bool {
     keyed(handler.strings())
         || keyed(handler.streams())
         || named.into_iter().any(|name| keyed(&handler.named(name)))
-}
-
-/// What AES's IV for a string or stream's data of object `id` is derived
-/// from beside the data: `n g obj`, as the object is written.
-fn context(
-    ObjectId {
-        number: n,
-        generation: g,
-    }: ObjectId,
-) -> Vec<u8> {
-    let mut context = Vec::with_capacity(20);
-    serialize::decimal(&mut context, n.into());
-    context.push(b' ');
-    serialize::decimal(&mut context, g.into());
-    context.extend_from_slice(b" obj");
-    context
 }
 
 /// The encryption dictionary of `values`, pdf-crypt's form of a standard

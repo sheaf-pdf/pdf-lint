@@ -93,6 +93,19 @@ case ",$features," in
     fail "pdf-lint's build turns on pdf-fonts' features $features, whose notices (FreeType's, skrifa's, hayro-cmap's) aren't taken" ;;
 esac
 
+# pdf-crypt and pdf-structure as pdf-lint's build compiles them, without
+# `insecure-test-writer`: the test writer (IVs given or derived, a new
+# file's key from a generator given) is for tests, never in the shipped
+# binary, so a build that turns it on stops here.
+for crate in pdf-crypt pdf-structure; do
+    features=$(cargo tree --locked -e normal --target "$target" -p pdf-lint -i "$crate" --depth 0 --format '{f}') ||
+        fail "$crate isn't in pdf-lint's build"
+    case ",$features," in
+    *,insecure-test-writer,*)
+        fail "pdf-lint's build turns on $crate's insecure-test-writer, the tests' writer" ;;
+    esac
+done
+
 # pdf-fonts' data, compiled in whole: Adobe's Core 14 font metrics, which
 # go with the file Adobe distributes them with, as its paragraph, which
 # each carries on its third line too, has it; and the Adobe Glyph List and

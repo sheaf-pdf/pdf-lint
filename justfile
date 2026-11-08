@@ -197,10 +197,14 @@ fixtures: _qpdf
 # so that what only they compile, the fuzz modules, can't break unseen; and
 # lint the libraries so with no feature, as a crate that depends on one and
 # fuzzes itself builds them, pdf-lint's among them: the seeds that use the
-# tests' file writer are compiled for the tests alone.
+# tests' file writer are compiled for the tests alone. Then pdf-crypt,
+# pdf-structure and pdf-linearize alone, without the test writer, which
+# pdf-fixtures turns on in every workspace build: what of their fuzz bodies
+# needs it is compiled with it alone.
 fuzzing:
     RUSTFLAGS="--cfg fuzzing" cargo check --locked --manifest-path fuzz/Cargo.toml --target-dir target/fuzzing
     RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --lib --target-dir target/fuzzing -- -D warnings
+    RUSTFLAGS="--cfg fuzzing" cargo clippy --locked -p pdf-crypt -p pdf-structure -p pdf-linearize --lib --target-dir target/fuzzing -- -D warnings
 
 # Build the API docs, failing on warnings: with every feature on, then
 # as they're published, then pdf-content-streams without `image-ends`,
@@ -242,12 +246,14 @@ dist:
 # position are code of its own, and whose file identity is same-file's,
 # through winapi-util: the only build of that code; and its library for a
 # target whose `usize` is 32 bits and which has no files
-# (wasm32-unknown-unknown). Both targets must be installed (`rustup target
-# add x86_64-pc-windows-gnu wasm32-unknown-unknown`); every other recipe
-# builds for this platform alone.
+# (wasm32-unknown-unknown), where getrandom has no generator unless a build
+# picks one: its `unsupported` backend, which refuses every draw at run
+# time. Both targets must be installed (`rustup target add
+# x86_64-pc-windows-gnu wasm32-unknown-unknown`); every other recipe builds
+# for this platform alone.
 structure-cross:
     cargo clippy --locked -p pdf-structure --all-targets --target x86_64-pc-windows-gnu -- -D warnings
-    cargo clippy --locked -p pdf-structure --lib --target wasm32-unknown-unknown -- -D warnings
+    RUSTFLAGS='--cfg getrandom_backend="unsupported"' cargo clippy --locked -p pdf-structure --lib --target wasm32-unknown-unknown -- -D warnings
 
 # Build the tokenizer for a target without std, which must be installed
 # (`rustup target add thumbv6m-none-eabi`).

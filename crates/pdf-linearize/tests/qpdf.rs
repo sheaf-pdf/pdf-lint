@@ -315,7 +315,7 @@ mod family {
         }
         // A new encryption, by its password: over a plain reading, and an RC4 one.
         let prepared = Password("user").prepared().unwrap();
-        let new = Encryptor::create(
+        let new = Encryptor::create_with(
             &Protection::new(&prepared),
             &mut ChaCha20Rng::seed_from_u64(15),
         )

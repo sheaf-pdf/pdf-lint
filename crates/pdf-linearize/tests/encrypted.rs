@@ -12,8 +12,8 @@ use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::parse::Parser;
 use pdf_objects::serialize;
 use pdf_structure::pdf_crypt::Password;
-use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::pdf_crypt::rand_core::SeedableRng;
+use pdf_structure::pdf_crypt::{Ivs, Protection};
 use pdf_structure::read::{self, Reading, XrefEntry};
 use pdf_structure::write::{self, Deflate, Encryptor};
 use pdf_structure::{Document, Encryption, Source as _, XrefKind};
@@ -48,13 +48,15 @@ fn built(objects: &[String]) -> Vec<u8> {
     file(&objects, "/Root 1 0 R /Info 9 0 R")
 }
 
-/// A new encryption for `password`, the same each time.
+/// A new encryption for `password`, the same each time: its key from a
+/// seeded generator, and each write's IVs derived, by the test writer.
 fn created(password: &str, encrypt_metadata: bool) -> Encryptor {
     let prepared = Password(password).prepared().unwrap();
     let mut protection = Protection::new(&prepared);
     protection.encrypt_metadata = encrypt_metadata;
     let mut rng = ChaCha20Rng::seed_from_u64(14);
-    Encryptor::create(&protection, &mut rng).unwrap()
+    let created = Encryptor::create_with(&protection, &mut rng).unwrap();
+    created.with_test_ivs(Ivs::derived)
 }
 
 /// `bytes`, read by `password`, written under `encryptor` as `options` says.
@@ -78,12 +80,69 @@ fn own(
     password: &str,
     options: &Options<'_>,
 ) -> Result<(Vec<u8>, family::Linearized), Error> {
+    own_by(bytes, password, options, |encryptor| encryptor)
+}
+
+/// [`own`], each write's IVs the test writer's derived ones, so that a file
+/// written twice is the same bytes.
+fn own_derived(
+    bytes: &[u8],
+    password: &str,
+    options: &Options<'_>,
+) -> Result<(Vec<u8>, family::Linearized), Error> {
+    own_by(bytes, password, options, |encryptor| {
+        encryptor.with_test_ivs(Ivs::derived)
+    })
+}
+
+/// [`own`], its encryptor as `how` makes it of the reading's.
+fn own_by(
+    bytes: &[u8],
+    password: &str,
+    options: &Options<'_>,
+    how: impl Fn(Encryptor) -> Encryptor,
+) -> Result<(Vec<u8>, family::Linearized), Error> {
     let reading = opened(bytes, password);
     let doc = reading.to_document().unwrap();
-    let encryptor = Encryptor::of(&reading).unwrap();
+    let encryptor = Encryptor::of(&reading).unwrap().map(how);
     let mut out = Vec::new();
     let done = family::linearize(&mut out, &doc, encryptor.as_ref(), Some(&reading), options)?;
     Ok((out, done))
+}
+
+/// `file`'s objects read by `password`, each as it's written in the clear,
+/// and each stream's data decrypted, but the linearization dictionary, the
+/// hint stream (the stream with `/S`) and the cross-reference streams, which
+/// say where the objects are and hash the file (`/ID`'s second string):
+/// what two files of one document share, whatever IVs their AES
+/// ciphertexts are under, which their strings' lengths written follow.
+fn in_the_clear(file: &[u8], password: &str) -> Vec<(ObjectId, Vec<u8>, Vec<u8>)> {
+    let reading = opened(file, password);
+    let doc = reading.to_document().unwrap();
+    let placing = |object: &Object| match object.as_stream() {
+        Some(stream) => {
+            let xref = stream.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef");
+            xref || stream.dict.get(b"S").is_some()
+        }
+        None => object
+            .as_dict()
+            .is_some_and(|d| d.get(b"Linearized").is_some()),
+    };
+    (doc.objects())
+        .filter(|(_, object)| !placing(object))
+        .map(|(id, object)| {
+            let mut written = Vec::new();
+            let (value, data) = match object.as_stream() {
+                Some(stream) => {
+                    let data = reading.data(id).unwrap().to_vec();
+                    (Object::from(stream.dict.clone()), data)
+                }
+                None => (object.clone(), Vec::new()),
+            };
+            serialize::write(&mut written, &value).unwrap();
+            (id, written, data)
+        })
+        .collect()
 }
 
 /// `data` as the hint stream's deflated.
@@ -177,9 +236,10 @@ fn each_kind_reads_back_under_each_encryption() {
             let name = format!("{name}, kind {kind}");
             let (out, done) = own(&bytes, "", options).unwrap();
             reads_back(&out, &done, "", &name);
-            // By the bytes alone it's the same file.
+            // By the bytes alone it's the same file: the same document read
+            // back, its AES ciphertexts under IVs of their own.
             let alone = family::linearize_bytes(&bytes, &[], options).unwrap();
-            assert_eq!(alone, out, "{name}");
+            assert_eq!(in_the_clear(&alone, ""), in_the_clear(&out, ""), "{name}");
         }
     }
 }
@@ -971,6 +1031,9 @@ fn what_names_the_dictionary_of_the_file_read_names_what_s_written_or_nothing() 
     }
 }
 
+/// The same document writes the same bytes on one thread as on four, under
+/// the test writer's derived IVs; under the operating system's, another's
+/// bytes, which read back to the same document.
 #[test]
 fn the_same_document_writes_the_same_bytes_on_any_number_of_threads() {
     let mut objects = secrets("");
@@ -984,11 +1047,19 @@ fn the_same_document_writes_the_same_bytes_on_any_number_of_threads() {
     let bytes = encrypted_as(KEYS[2].1, &built(&objects));
     let [_, _, mut packed] = kinds();
     packed.threads = 1;
+    let (one, _) = own_derived(&bytes, "", &packed).unwrap();
+    packed.threads = 4;
+    let (four, _) = own_derived(&bytes, "", &packed).unwrap();
+    assert_eq!(one, four);
+    assert!(!holds(&one, SECRET));
+    // Under the operating system's IVs, as a caller writes, another's bytes
+    // on four threads as on one, the same document read back.
+    packed.threads = 1;
     let (one, _) = own(&bytes, "", &packed).unwrap();
     packed.threads = 4;
     let (four, _) = own(&bytes, "", &packed).unwrap();
-    assert_eq!(one, four);
-    assert!(!holds(&one, SECRET));
+    assert_ne!(one, four);
+    assert_eq!(in_the_clear(&one, ""), in_the_clear(&four, ""));
 }
 
 #[test]

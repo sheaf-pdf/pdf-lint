@@ -12,7 +12,7 @@
 //!   and one cross-reference section, a table or a stream, with no
 //!   `/Prev`; the trailer the caller's but for the keys a section writes
 //!   itself, and an `/ID` whose second string is a hash of what's
-//!   written, so the same objects write the same bytes. Packed
+//!   written, so in the clear the same objects write the same bytes. Packed
 //!   ([`Options::pack`]), what may go in an object stream goes in one,
 //!   built on threads. [`document`] writes a [`Document`]'s
 //!   objects so, but those a whole file leaves out.
@@ -74,11 +74,12 @@
 //!   and stream's data, as pdf-objects' writer writes each, by an
 //!   [`Encryptor`], a reading's ([`Encryptor::of`]) or a new file's
 //!   ([`Encryptor::create`]), through what it gives for the file's objects
-//!   ([`Encrypting`]): with the object's key, AES's IV derived from `n g
-//!   obj` and the data, so the same object encrypts to the same bytes on
-//!   every save. What it leaves in the clear is the list the reader
-//!   decrypts by, one list both ways (see [`read`](crate::read), "What's
-//!   encrypted"). Under RC4 a changed object written again at its number
+//!   ([`Encrypting`]): with the object's key, AES's IV the next of the
+//!   write's own, 16 bytes from the operating system (pdf-crypt's `Ivs`), so
+//!   no IV serves two plaintexts and two saves of one document differ in
+//!   every AES ciphertext written anew. What it leaves in the clear is the
+//!   list the reader decrypts by, one list both ways (see
+//!   [`read`](crate::read), "What's encrypted"). Under RC4 a changed object written again at its number
 //!   and generation is encrypted with the keystream its earlier version
 //!   was, which leaks what changed to one who holds both (pdf-crypt's
 //!   `Method::Rc4`), and so is an object a renumbering writes at a number
@@ -421,7 +422,8 @@ pub struct Options<'a> {
     pub deflate: Deflate,
     /// How many threads object streams are built on, at most: 0, the
     /// default, for as many as the machine runs at once, up to 8, or one
-    /// where that isn't known. Built on any number, they're the same bytes.
+    /// where that isn't known. Built on any number, they're the same objects,
+    /// and in the clear the same bytes.
     pub threads: usize,
     /// Where a whole file's encryption dictionary goes, when it's written
     /// as an object, a number the file uses ([`Options::renumber`]): by

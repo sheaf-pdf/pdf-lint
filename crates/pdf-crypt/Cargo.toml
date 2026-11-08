@@ -15,8 +15,8 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 [dependencies]
 # RustCrypto's, the primitives under the handler, without what it doesn't
 # use (padding schemes, OIDs), each wiping its key schedule or state when
-# it's dropped; HMAC-SHA256 for the IVs it encrypts under; and zeroize, for
-# the keys and passwords it holds itself.
+# it's dropped; HMAC-SHA256, which the test writer derives its IVs with;
+# and zeroize, for the keys and passwords it holds itself.
 aes = { version = "0.9", features = ["zeroize"] }
 cbc = { version = "0.2", default-features = false, features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }
@@ -31,9 +31,14 @@ zeroize = "1.9"
 stringprep = "0.1.5"
 unicode-normalization = "0.1"
 
-# The traits a caller's random number generator meets, which a new file's
-# key and salts are drawn from: pdf-crypt has no randomness of its own.
-rand_core = "0.10"
+# The operating system's random number generator, which AES's IVs and a new
+# file's key and salts are drawn from: getrandom's `fill`, with `std` for
+# its errors' words.
+getrandom = { version = "0.4", features = ["std"] }
+
+# The traits a test's seeded generator meets, which the test writer draws a
+# new file's key and salts from, with `insecure-test-writer` alone.
+rand_core = { version = "0.10", optional = true }
 
 thiserror = "2"
 
@@ -44,8 +49,11 @@ bench = false
 
 [dev-dependencies]
 # A seeded generator for the tests' new files: RustCrypto's ChaCha20 as a
-# rand_core generator, without its cipher.
+# rand_core generator, without its cipher; and rand_core, its traits, for
+# the tests built without `insecure-test-writer`, which compile the test
+# writer by themselves.
 chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
+rand_core = "0.10"
 # The benchmarks' harness, for `cargo bench`; without its plots and HTML
 # reports, which need more than the numbers. Never built for a user of
 # the crate.
@@ -55,7 +63,7 @@ criterion = { version = "0.7", default-features = false, features = ["cargo_benc
 # An encryption dictionary, and strings and streams encrypted, with salts,
 # keys and IVs given, not random: for writing test files, never for a
 # writer to protect a document with. Its items are hidden from the docs.
-insecure-test-writer = []
+insecure-test-writer = ["dep:rand_core"]
 
 # The benchmarks: `cargo bench -p pdf-crypt --features insecure-test-writer`,
 # as they open the writer's dictionaries; without the feature, cargo skips

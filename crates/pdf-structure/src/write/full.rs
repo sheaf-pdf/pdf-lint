@@ -45,7 +45,8 @@ use crate::source::{Document, XrefKind};
 ///   clear in an encrypted file.
 /// - **The `/ID`** keeps its first string, the encryptor's, else
 ///   `trailer`'s; the second is the first 16 bytes of SHA-256 of the bytes
-///   written before the section, so the same bodies write the same bytes.
+///   written before the section, so in the clear the same bodies write the
+///   same bytes.
 ///   A file that isn't encrypted and has no first string has none; an
 ///   encrypted one with none gets the hash for both.
 /// - **Encrypted** by `encryptor`, every string and stream's data is
@@ -75,9 +76,9 @@ use crate::source::{Document, XrefKind};
 ///   32000-2, 7.3.10), doesn't come to name one of the writer's own, and
 ///   over one an encryption dictionary refers to, what's there being read
 ///   in the clear (7.6.2) (a new encryption dictionary's number passes over
-///   them too); built on up to [`Options::threads`] threads, the same bytes
-///   on any number; each encrypted once, whole, as a stream, under its
-///   number. An object stream whose data would be more than the reader
+///   them too); built on up to [`Options::threads`] threads, the same
+///   objects on any number; each encrypted once, whole, as a stream, under
+///   its number. An object stream whose data would be more than the reader
 ///   decodes ([`MAX_DATA`](super::MAX_DATA)) is written as its members on
 ///   their own, and so are all of them where no number is left for the
 ///   cross-reference stream, or under an encryption that leaves streams in
@@ -585,7 +586,8 @@ fn container_numbers(
 /// or that has more members than a place in it can say. Built on up to
 /// `threads` threads, 4 object streams to one at least, `stop` checked
 /// before each, and joined in order, so that the same groups build the
-/// same bytes however many threads build them, and a refusal is the first
+/// same objects however many threads build them (the same bytes in the
+/// clear, and under the same IVs), and a refusal is the first
 /// in their order; a part no thread can be had for is built on the
 /// calling thread.
 pub(super) fn containers(

@@ -706,6 +706,7 @@ dependencies = [
  "cbc",
  "chacha20",
  "criterion",
+ "getrandom",
  "hmac",
  "md-5",
  "rand_core",

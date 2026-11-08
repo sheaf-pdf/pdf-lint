@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use crate::handler::{File, Handler, Method, seal, xored};
 use crate::rc4::rc4;
 use crate::sha2::sha256;
-use crate::{CryptFilter, Dictionary, Fault};
+use crate::{CryptFilter, Dictionary, Fault, Protection, Unusable};
 
 /// The kind of encryption to write.
 ///
@@ -142,7 +142,7 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
 }
 
 /// String `data` of object `id` encrypted by `handler`, AES's from `iv`,
-/// in place of the IV [`Handler::encrypt_string`] derives.
+/// in place of the IV [`Handler::encrypt_string`] draws.
 ///
 /// # Errors
 ///
@@ -156,12 +156,12 @@ pub fn encrypt_string(
     data: &[u8],
     iv: [u8; 16],
 ) -> Result<Vec<u8>, Fault> {
-    handler.encrypt(handler.strings(), id, data, || iv)
+    handler.encrypt(handler.strings(), id, data, || Ok(iv))
 }
 
 /// Stream `id`'s `data` encrypted by `handler`, by `crypt` when it names
 /// the stream's own crypt filter's method, AES's from `iv`, in place of the
-/// IV [`Handler::encrypt_stream`] derives.
+/// IV [`Handler::encrypt_stream`] draws.
 ///
 /// # Errors
 ///
@@ -176,5 +176,25 @@ pub fn encrypt_stream(
     crypt: Option<&Method>,
     iv: [u8; 16],
 ) -> Result<Vec<u8>, Fault> {
-    handler.encrypt(crypt.unwrap_or(handler.streams()), id, data, || iv)
+    handler.encrypt(crypt.unwrap_or(handler.streams()), id, data, || Ok(iv))
+}
+
+/// [`Handler::create`], what it draws drawn from `rng` in its order (the
+/// file's key, the four salts, `/Perms`' 4 bytes), in place of the
+/// operating system: for a test that pins a new file's bytes, with a
+/// seeded generator, the same draws giving the same dictionary. Never for
+/// a document's protection, whose key is then as guessable as `rng`'s seed.
+///
+/// # Errors
+///
+/// [`Unusable`], as [`Handler::create`] refuses, nothing drawn.
+#[doc(hidden)]
+pub fn create(
+    protection: &Protection,
+    rng: &mut (impl rand_core::CryptoRng + ?Sized),
+) -> Result<(Handler, Dictionary), Unusable> {
+    Handler::create_from(protection, &mut |buf| {
+        rng.fill_bytes(buf);
+        Ok(())
+    })
 }

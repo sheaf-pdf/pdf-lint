@@ -8,17 +8,16 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use crate::aes::Aes;
-use crate::hmac::HmacSha256;
 use crate::md5::md5;
 use crate::password::is_prepared;
 use crate::rc4::rc4;
 use crate::sha2::{sha256, sha384, sha512};
 use crate::{
-    CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Permissions, Refused, Unusable,
+    CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Ivs, Permissions, Random, Refused,
+    Unusable,
 };
 
 /// The padding a password of revisions 2 to 4 is filled out with
@@ -69,7 +68,7 @@ pub enum Method {
     /// one of them, a number its file listed free among them. A writer that
     /// doesn't want that writes the file whole under a new AES-256
     /// encryption ([`Handler::create`]), which leaks neither way: its key
-    /// is new, and its IVs differ for different data.
+    /// is new, and its IVs random ([`Ivs`]).
     Rc4,
     /// AES-128, the key each object's (`/CFM /AESV2`).
     Aes128,
@@ -90,9 +89,6 @@ pub struct Handler {
     /// From `/V` 5, AES keyed by the file's key, once, as every AES string
     /// and stream is (Algorithm 1.A).
     aes: Option<Aes>,
-    /// HMAC-SHA256 keyed by the file's key, once, for the AES IVs it
-    /// encrypts under.
-    ivs: HmacSha256,
     v: i64,
     owner: bool,
     strings: Method,
@@ -286,7 +282,6 @@ impl Handler {
         let (strings, streams, filters) = methods(dictionary, file.v);
         Ok(Handler {
             aes: (file.v >= 5).then(|| Aes::new(&key)).flatten(),
-            ivs: HmacSha256::new(&key),
             key,
             v: file.v,
             owner,
@@ -310,13 +305,12 @@ impl Handler {
     /// and `/UE` are made from the user's password, the empty one where
     /// there's none, and `/O` and `/OE` from the owner's, the user's where
     /// there's none (Algorithms 8 and 9), and `/Perms` from `/P` and
-    /// `/EncryptMetadata` (Algorithm 10), from what's drawn from `rng` in
-    /// this order: the file's key (32 bytes), the user's validation and key
+    /// `/EncryptMetadata` (Algorithm 10), from what's drawn from the
+    /// operating system's random number generator (getrandom's) in this
+    /// order: the file's key (32 bytes), the user's validation and key
     /// salts, the owner's (8 bytes each), and `/Perms`' 4 random bytes, the
-    /// same draws whichever passwords are given. pdf-crypt draws on no
-    /// randomness of its own: a program passes the operating system's, and
-    /// a test a seeded generator, the same draws giving the same dictionary.
-    /// The dictionary is whole as it's given: its crypt filter's
+    /// same draws whichever passwords are given. The dictionary is whole as
+    /// it's given: its crypt filter's
     /// `/AuthEvent` and `/Length`, which [`CryptFilter`] has no fields for,
     /// can be left out (`/AuthEvent`'s default is `/DocOpen`, ISO 32000-2,
     /// Table 25, and AES-256's key is 256 bits whatever `/Length` says), as
@@ -341,10 +335,18 @@ impl Handler {
     /// permissions withheld, of those `/P` would grant, with no owner's
     /// password apart from the user's, none given or the same bytes
     /// ([`Unusable::Shared`]): the one password would open the file as its
-    /// owner's, whom they don't bind.
-    pub fn create(
+    /// owner's, whom they don't bind. Then, nothing made, the operating
+    /// system's generator failing ([`Unusable::Random`]). A protection
+    /// refused draws nothing.
+    pub fn create(protection: &Protection) -> Result<(Handler, Dictionary), Unusable> {
+        Handler::create_from(protection, &mut |buf| crate::random::fill(buf))
+    }
+
+    /// [`Handler::create`], what it draws drawn by `fill`, in its order: the
+    /// operating system's, or the test writer's generator.
+    pub(crate) fn create_from(
         protection: &Protection,
-        rng: &mut (impl CryptoRng + ?Sized),
+        fill: &mut dyn FnMut(&mut [u8]) -> Result<(), Random>,
     ) -> Result<(Handler, Dictionary), Unusable> {
         let user = protection.user.map(prepared).transpose()?;
         let owner = protection.owner.map(prepared).transpose()?;
@@ -361,13 +363,13 @@ impl Handler {
         }
         let encrypt_metadata = protection.encrypt_metadata;
         let mut key = Zeroizing::new(vec![0; 32]);
-        rng.fill_bytes(&mut key);
+        fill(&mut key).map_err(Unusable::Random)?;
         let mut salts = [[0; 8]; 4];
         for salt in &mut salts {
-            rng.fill_bytes(salt);
+            fill(salt).map_err(Unusable::Random)?;
         }
         let mut rand = [0; 4];
-        rng.fill_bytes(&mut rand);
+        fill(&mut rand).map_err(Unusable::Random)?;
         let mut dictionary = Dictionary {
             filter: b"Standard".to_vec(),
             v: 5,
@@ -387,7 +389,6 @@ impl Handler {
         let (strings, streams, filters) = methods(&dictionary, dictionary.v);
         let handler = Handler {
             aes: Aes::new(&key),
-            ivs: HmacSha256::new(&key),
             key,
             v: dictionary.v,
             owner: true,
@@ -417,9 +418,9 @@ impl Handler {
         self.owner
     }
 
-    /// The file's key, for the tests: never public, as each object's key
-    /// follows from it.
-    #[cfg(test)]
+    /// The file's key, for the tests and the test writer's derived IVs:
+    /// never public, as each object's key follows from it.
+    #[cfg(any(test, feature = "insecure-test-writer"))]
     pub(crate) fn key(&self) -> &[u8] {
         &self.key
     }
@@ -514,72 +515,57 @@ impl Handler {
 
     /// The string `data` of object `id`, encrypted as strings are.
     ///
-    /// AES's IV is the first 16 bytes of HMAC-SHA256, under the file's key,
-    /// of `context`'s length (8 bytes, big-endian), `context` and `data`.
-    /// `context` is the caller's name for the object, the same each time
-    /// it's written, so the same string of the same object encrypts to the
-    /// same bytes on every save, under any number (AES-256's key is the
-    /// file's), and no IV serves two plaintexts. RC4 takes no IV, and
-    /// `/Identity` and `/None` leave `data` as it is.
+    /// AES's IV is the next of `ivs`, the write's: 16 bytes from the
+    /// operating system, so the same string encrypts apart each time and no
+    /// IV serves two plaintexts. RC4 takes no IV, and `/Identity` and
+    /// `/None` leave `data` as it is.
     ///
     /// # Errors
     ///
     /// [`Fault::Method`] when strings are encrypted by a method that isn't
-    /// one, and [`Fault::Key`] when by AES that the file's key isn't for:
-    /// nothing is encrypted, and nothing is given as plaintext.
-    pub fn encrypt_string(
-        &self,
-        id: (u32, u16),
-        context: &[u8],
-        data: &[u8],
-    ) -> Result<Vec<u8>, Fault> {
-        self.encrypt(&self.strings, id, data, || self.iv(context, data))
+    /// one, and [`Fault::Key`] when by AES that the file's key isn't for,
+    /// neither drawing an IV; [`Fault::Random`] when the operating system's
+    /// generator fails as AES's IV is drawn. Nothing is encrypted, and
+    /// nothing is given as plaintext.
+    pub fn encrypt_string(&self, id: (u32, u16), data: &[u8], ivs: &Ivs) -> Result<Vec<u8>, Fault> {
+        self.encrypt(&self.strings, id, data, || ivs.next(self, id, data))
     }
 
     /// The data of stream `id`, encrypted: by its own `/Crypt` filter's
     /// method when it has one (`crypt`, see [`Handler::named`]), else as
-    /// streams are; AES's IV from `context` and `data` as
+    /// streams are; AES's IV the next of `ivs`, as
     /// [`Handler::encrypt_string`]'s is.
     ///
     /// # Errors
     ///
-    /// [`Fault::Method`] and [`Fault::Key`], as
+    /// [`Fault::Method`], [`Fault::Key`] and [`Fault::Random`], as
     /// [`Handler::encrypt_string`] gives them, by the stream's method.
     pub fn encrypt_stream(
         &self,
         id: (u32, u16),
-        context: &[u8],
         data: &[u8],
         crypt: Option<&Method>,
+        ivs: &Ivs,
     ) -> Result<Vec<u8>, Fault> {
         let method = crypt.unwrap_or(&self.streams);
-        self.encrypt(method, id, data, || self.iv(context, data))
-    }
-
-    /// The AES IV for `data` of what `context` names: the first 16 bytes of
-    /// HMAC-SHA256, under the file's key, of `context`'s length (8 bytes,
-    /// big-endian), `context` and `data`. The length first, so no context
-    /// and data run together into another's.
-    fn iv(&self, context: &[u8], data: &[u8]) -> [u8; 16] {
-        let len = (context.len() as u64).to_be_bytes();
-        let mac = self.ivs.mac(&[&len, context, data]);
-        mac[..16].try_into().expect("16 bytes")
+        self.encrypt(method, id, data, || ivs.next(self, id, data))
     }
 
     /// `data` of object `id` encrypted by `method`, AES's from the IV `iv`
-    /// gives, which nothing else asks for; or [`Fault::Method`], when it's a
-    /// method that isn't one, and [`Fault::Key`], when it's AES that the
-    /// file's key isn't for.
+    /// gives, which nothing else asks for, and only once AES's key is had;
+    /// or [`Fault::Method`], when it's a method that isn't one,
+    /// [`Fault::Key`], when it's AES that the file's key isn't for, and
+    /// `iv`'s fault where it gives none.
     pub(crate) fn encrypt(
         &self,
         method: &Method,
         id: (u32, u16),
         data: &[u8],
-        iv: impl FnOnce() -> [u8; 16],
+        iv: impl FnOnce() -> Result<[u8; 16], Fault>,
     ) -> Result<Vec<u8>, Fault> {
         let aes = || {
             let cipher = self.cipher(method, id)?;
-            let iv = iv();
+            let iv = iv()?;
             let pad = 16 - data.len() % 16;
             let mut out = Vec::with_capacity(16 + data.len() + pad);
             out.extend_from_slice(&iv);

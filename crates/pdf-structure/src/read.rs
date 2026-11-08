@@ -72,7 +72,7 @@
 //!   `a_streams_dictionary_strings_decrypt_but_its_data_is_left_as_written`
 //!   and `strings_that_dont_decrypt_cleanly_are_said_once_an_object_and_a_fault`.
 //!   The writer encrypts every string of an object it writes so, in its
-//!   form, AES's IV derived from `n g obj` and the string. Held by
+//!   form, AES's IV the write's own, from the operating system. Held by
 //!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`,
 //!   `objects_encrypt_as_the_lazy_reader_decrypts`,
 //!   `objects_encrypt_alike_every_time` and
