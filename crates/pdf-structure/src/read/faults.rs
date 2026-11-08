@@ -358,8 +358,12 @@ fn an_opened_file_says_what_its_p_grants_by_either_password() {
             let by = Some((0, Encoding::Utf8));
             let opened = Encryption::opened(owner).by(by).permitting(granted);
             let reading = Reading::open(&file[..], &options).unwrap();
-            assert_eq!(*reading.encryption(), opened, "{kind:?}, {password}");
-            assert_eq!(*document(&file, &options).encryption(), opened);
+            assert_eq!(
+                reading.encryption().as_opened(),
+                opened,
+                "{kind:?}, {password}"
+            );
+            assert_eq!(document(&file, &options).encryption().as_opened(), opened);
             let locked = Reading::open(&file[..], &Options::DEFAULT).unwrap();
             assert_eq!(*locked.encryption(), Encryption::Locked, "{kind:?}");
             let unlocked = locked.unlock(&given[0].encodings()).unwrap();

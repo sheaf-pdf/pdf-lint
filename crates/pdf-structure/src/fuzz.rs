@@ -1833,7 +1833,7 @@ mod tests {
             if doc.encryption != Encryption::None {
                 encrypted += 1;
                 assert_eq!(
-                    doc.encryption,
+                    doc.encryption.as_opened(),
                     Encryption::opened(false).permitting(pdf_crypt::Permissions::ALL)
                 );
                 let opened = read::document(
@@ -1846,7 +1846,7 @@ mod tests {
                 .encryption;
                 let by = Some((0, pdf_crypt::Encoding::Utf8));
                 assert_eq!(
-                    opened,
+                    opened.as_opened(),
                     Encryption::opened(true)
                         .by(by)
                         .permitting(pdf_crypt::Permissions::ALL)

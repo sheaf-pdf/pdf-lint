@@ -361,12 +361,10 @@ mod tests {
             // owner's.
             let doc = read::read_with(&data, &Unaskable);
             assert_eq!(
-                doc.encryption,
-                crate::Encryption::Opened {
-                    owner: false,
-                    by: None,
-                    permissions: pdf_crypt::Permissions::ALL,
-                },
+                doc.encryption.as_opened(),
+                crate::Encryption::opened(false)
+                    .by(None)
+                    .permitting(pdf_crypt::Permissions::ALL),
                 "{kind}"
             );
             assert!(doc.faults().is_empty(), "{kind}: {:?}", doc.faults());
@@ -397,12 +395,10 @@ mod tests {
             );
             let by = Some((0, pdf_crypt::Encoding::Utf8));
             assert_eq!(
-                owned.encryption,
-                crate::Encryption::Opened {
-                    owner: true,
-                    by,
-                    permissions: pdf_crypt::Permissions::ALL
-                },
+                owned.encryption.as_opened(),
+                crate::Encryption::opened(true)
+                    .by(by)
+                    .permitting(pdf_crypt::Permissions::ALL),
                 "{kind}"
             );
             assert_eq!(owned.decoded, doc.decoded, "{kind}");
@@ -654,12 +650,10 @@ mod tests {
                 },
             )
             .unwrap();
-            let opened = crate::Encryption::Opened {
-                owner: true,
-                by: Some((0, password_by(typed, prepared))),
-                permissions: pdf_crypt::Permissions::ALL,
-            };
-            assert_eq!(*ours.encryption(), opened, "{typed}");
+            let opened = crate::Encryption::opened(true)
+                .by(Some((0, password_by(typed, prepared))))
+                .permitting(pdf_crypt::Permissions::ALL);
+            assert_eq!(ours.encryption().as_opened(), opened, "{typed}");
             let theirs = std::fs::read(&decrypted).unwrap();
             let theirs = read::Reading::open(theirs, &options).unwrap();
             assert_eq!(*theirs.encryption(), crate::Encryption::None, "{typed}");
@@ -894,12 +888,8 @@ mod tests {
                         let (doc, handler) = read::read_opened_by(&data, &[Password(password)]);
                         let by = Some((0, Encoding::Utf8));
                         // What `/P` grants a user, whoever opened it.
-                        let opened = crate::Encryption::Opened {
-                            owner,
-                            by,
-                            permissions: set,
-                        };
-                        assert_eq!(doc.encryption, opened, "{what}");
+                        let opened = crate::Encryption::opened(owner).by(by).permitting(set);
+                        assert_eq!(doc.encryption.as_opened(), opened, "{what}");
                         assert_eq!(p_of(&doc), Some(set.p()), "{what}");
                         assert_eq!(handler.unwrap().permissions(), set, "{what}");
                         println!("{what}: /P {}, {set}", set.p());
@@ -1296,12 +1286,10 @@ mod tests {
         );
         let doc = read::document(&data, &read::Options::DEFAULT);
         assert!(doc.faults().is_empty(), "{:?}", doc.faults());
-        let opened = crate::Encryption::Opened {
-            owner: false,
-            by: None,
-            permissions: pdf_crypt::Permissions::ALL,
-        };
-        assert_eq!(doc.encryption, opened);
+        let opened = crate::Encryption::opened(false)
+            .by(None)
+            .permitting(pdf_crypt::Permissions::ALL);
+        assert_eq!(doc.encryption.as_opened(), opened);
         let contents = contents(&doc);
         assert_eq!(
             *contents.value(),

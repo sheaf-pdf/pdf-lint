@@ -1355,12 +1355,10 @@ fn an_undefined_crypt_filter_reads_on_demand_as_whole() {
     );
     let by = Some((0, pdf_crypt::Encoding::Utf8));
     assert_eq!(
-        doc.encryption,
-        Encryption::Opened {
-            owner: false,
-            by,
-            permissions: pdf_crypt::Permissions::ALL
-        }
+        doc.encryption.as_opened(),
+        Encryption::opened(false)
+            .by(by)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(
         on_demand("undefined", &file, &[Password("user")], &Options::DEFAULT),
@@ -1592,12 +1590,10 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     let reading = reading.unlock(&Password("owner").encodings()).unwrap();
     let by = Some((0, pdf_crypt::Encoding::Utf8));
     assert_eq!(
-        *reading.encryption(),
-        Encryption::Opened {
-            owner: true,
-            by,
-            permissions: pdf_crypt::Permissions::ALL
-        }
+        (reading.encryption().as_opened()).as_opened(),
+        Encryption::opened(true)
+            .by(by)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(reading.id(), id, "the same reading");
 
@@ -1663,18 +1659,16 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         (plain, Encryption::None),
         (
             opened,
-            Encryption::Opened {
-                owner: false,
-                by: None,
-                permissions: pdf_crypt::Permissions::ALL,
-            },
+            Encryption::opened(false)
+                .by(None)
+                .permitting(pdf_crypt::Permissions::ALL),
         ),
     ] {
         let reading = open(&file, &[], &Options::DEFAULT);
         reading.get(ObjectId::new(1, 0)).unwrap();
         let before = kept(&reading);
         let reading = reading.unlock(&Password("owner").encodings()).unwrap();
-        assert_eq!(*reading.encryption(), encryption);
+        assert_eq!(reading.encryption().as_opened(), encryption);
         assert_eq!(kept(&reading), before);
     }
 }
@@ -1703,20 +1697,16 @@ fn the_passwords_options_give_are_tried_in_the_empty_ones_place() {
     assert_eq!(by(&[Password("wrong")]), Encryption::Locked);
     let utf8 = pdf_crypt::Encoding::Utf8;
     assert_eq!(
-        by(&[Password("wrong"), Password("owner")]),
-        Encryption::Opened {
-            owner: true,
-            by: Some((1, utf8)),
-            permissions: pdf_crypt::Permissions::ALL,
-        }
+        (by(&[Password("wrong"), Password("owner")])).as_opened(),
+        Encryption::opened(true)
+            .by(Some((1, utf8)))
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(
-        by(&[]),
-        Encryption::Opened {
-            owner: false,
-            by: None,
-            permissions: pdf_crypt::Permissions::ALL,
-        }
+        (by(&[])).as_opened(),
+        Encryption::opened(false)
+            .by(None)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(
         by(&[]),
@@ -1741,12 +1731,10 @@ fn the_passwords_options_give_are_tried_in_the_empty_ones_place() {
     .unwrap();
     let by = Some((0, pdf_crypt::Encoding::PdfDoc));
     assert_eq!(
-        *reading.encryption(),
-        Encryption::Opened {
-            owner: false,
-            by,
-            permissions: pdf_crypt::Permissions::ALL
-        }
+        (reading.encryption().as_opened()).as_opened(),
+        Encryption::opened(false)
+            .by(by)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
 }
 

@@ -12,7 +12,7 @@ use std::iter::FusedIterator;
 use std::ops::RangeBounds;
 use std::sync::LazyLock;
 
-use pdf_crypt::{Encoding, Permissions, Refused};
+use pdf_crypt::{Encoding, Method, Permissions, Protection, Refused};
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Data, Dict, Entry, Object, ObjectId, Span, Str, Value};
 use pdf_objects::parse;
@@ -752,10 +752,15 @@ pub enum Encryption {
     #[default]
     None,
     /// It is, and a password it was given opened it, the owner's or the
-    /// user's: its strings and object streams are decrypted. A reader
-    /// outside the crate makes it by [`Encryption::opened`], and says which
-    /// password by [`Encryption::by`], and what the file grants by
-    /// [`Encryption::permitting`].
+    /// user's: its strings and object streams are decrypted. It says how
+    /// the file is encrypted, and what its security handler found wrong
+    /// with the encryption dictionary, whatever faults a reading looks
+    /// for; and the protection a new encryption takes to grant no more
+    /// ([`Encryption::protection`]). A reader outside the crate makes it by
+    /// [`Encryption::opened`], and says which password by
+    /// [`Encryption::by`], what the file grants by
+    /// [`Encryption::permitting`], and each of the rest by a setter of its
+    /// own.
     #[non_exhaustive]
     Opened {
         /// Whether by the owner's password.
@@ -771,6 +776,39 @@ pub enum Encryption {
         /// still what `/P` grants a user. The reader enforces none of
         /// them, as it decrypts all of a file it opens.
         permissions: Permissions,
+        /// How its strings are encrypted (`/StrF` from `/V` 4, RC4 below),
+        /// by its security handler: RC4 and AES-128 are of revisions ISO
+        /// 32000-2 deprecates (7.6.4.2, Table 21). None until a reader says
+        /// ([`Encryption::encrypting_strings`]), as a reading always does.
+        strings: Option<Method>,
+        /// How its streams are (`/StmF` from `/V` 4, RC4 below), but those
+        /// with a crypt filter of their own. None until a reader says
+        /// ([`Encryption::encrypting_streams`]).
+        streams: Option<Method>,
+        /// How its embedded files are, but those with a crypt filter of
+        /// their own: as `/EFF` names it (from `/V` 4, ISO 32000-2, 7.6.6
+        /// and Table 20), else as its streams are. None where `/EFF` isn't
+        /// a name, which doesn't say how, and until a reader says
+        /// ([`Encryption::encrypting_files`]).
+        files: Option<Method>,
+        /// The revision of its standard security handler, its `/R`: 2 to
+        /// 6. 0 until a reader says ([`Encryption::of_revision`]).
+        revision: i64,
+        /// Whether its metadata stream is encrypted (`/EncryptMetadata`,
+        /// which counts from `/V` 4). True until a reader says otherwise
+        /// ([`Encryption::encrypting_metadata`]).
+        encrypts_metadata: bool,
+        /// What its security handler found wrong with the encryption
+        /// dictionary as it opened the file (pdf-crypt's `Handler::faults`):
+        /// `/Perms` that doesn't match `/P` and `/EncryptMetadata`
+        /// ([`pdf_crypt::Fault::Perms`]), or that doesn't confirm the key the
+        /// password unwrapped from `/OE` or `/UE`
+        /// ([`pdf_crypt::Fault::Unconfirmed`]), so that what decrypts may not
+        /// be plaintext. Here whatever faults a reading looks for
+        /// ([`Options::faults`](crate::read::Options::faults)), where its
+        /// faults say each as a [`Fault::Dictionary`] only where they're
+        /// kept. Empty until a reader says ([`Encryption::finding`]).
+        faults: Vec<pdf_crypt::Fault>,
     },
     /// It is, and no password it was given opens it.
     Locked,
@@ -1009,15 +1047,23 @@ impl Unread {
 impl Encryption {
     /// [`Encryption::Opened`]: by the owner's password when `owner`, else
     /// by the user's; by the empty password, given none, until
-    /// [`Encryption::by`] says which of those given; and granting none,
-    /// until [`Encryption::permitting`] says what. Each field `Opened`
-    /// gains has a setter of its own, so this stays as it is.
+    /// [`Encryption::by`] says which of those given; granting none, until
+    /// [`Encryption::permitting`] says what; its methods and revision not
+    /// said, its metadata encrypted and no fault found, until the setters
+    /// after them say otherwise. Each field `Opened` gains has a setter of
+    /// its own, so this stays as it is.
     #[must_use]
     pub const fn opened(owner: bool) -> Encryption {
         Encryption::Opened {
             owner,
             by: None,
             permissions: Permissions::NONE,
+            strings: None,
+            streams: None,
+            files: None,
+            revision: 0,
+            encrypts_metadata: true,
+            faults: Vec::new(),
         }
     }
 
@@ -1025,31 +1071,143 @@ impl Encryption {
     /// or none, by the empty password, given none: `Opened`'s `by`. Any
     /// other is given back as it is.
     #[must_use = "it gives the Encryption back, with which password opened it"]
-    pub fn by(self, by: Option<(usize, Encoding)>) -> Encryption {
-        match self {
-            Encryption::Opened {
-                owner, permissions, ..
-            } => Encryption::Opened {
-                owner,
-                by,
-                permissions,
-            },
-            other => other,
+    pub fn by(mut self, by: Option<(usize, Encoding)>) -> Encryption {
+        if let Encryption::Opened { by: opened_by, .. } = &mut self {
+            *opened_by = by;
         }
+        self
     }
 
     /// It, opened, granting `permissions` to one who opens it by the
     /// user's password: `Opened`'s `permissions`. Any other is given back
     /// as it is.
     #[must_use = "it gives the Encryption back, with what it grants"]
-    pub fn permitting(self, permissions: Permissions) -> Encryption {
+    pub fn permitting(mut self, permissions: Permissions) -> Encryption {
+        if let Encryption::Opened {
+            permissions: granted,
+            ..
+        } = &mut self
+        {
+            *granted = permissions;
+        }
+        self
+    }
+
+    /// It, opened, its strings encrypted by `method`: `Opened`'s
+    /// `strings`. Any other is given back as it is.
+    #[must_use = "it gives the Encryption back, with how its strings are encrypted"]
+    pub fn encrypting_strings(mut self, method: Method) -> Encryption {
+        if let Encryption::Opened { strings, .. } = &mut self {
+            *strings = Some(method);
+        }
+        self
+    }
+
+    /// It, opened, its streams encrypted by `method`: `Opened`'s
+    /// `streams`. Any other is given back as it is.
+    #[must_use = "it gives the Encryption back, with how its streams are encrypted"]
+    pub fn encrypting_streams(mut self, method: Method) -> Encryption {
+        if let Encryption::Opened { streams, .. } = &mut self {
+            *streams = Some(method);
+        }
+        self
+    }
+
+    /// It, opened, its embedded files encrypted by `method`, none where
+    /// its `/EFF` doesn't say how: `Opened`'s `files`. Any other is given
+    /// back as it is.
+    #[must_use = "it gives the Encryption back, with how its embedded files are encrypted"]
+    pub fn encrypting_files(mut self, method: Option<Method>) -> Encryption {
+        if let Encryption::Opened { files, .. } = &mut self {
+            *files = method;
+        }
+        self
+    }
+
+    /// It, opened, of its standard security handler's revision `revision`:
+    /// `Opened`'s `revision`. Any other is given back as it is.
+    #[must_use = "it gives the Encryption back, with its revision"]
+    pub fn of_revision(mut self, revision: i64) -> Encryption {
+        if let Encryption::Opened { revision: r, .. } = &mut self {
+            *r = revision;
+        }
+        self
+    }
+
+    /// It, opened, its metadata stream encrypted or not as `encrypts`
+    /// says: `Opened`'s `encrypts_metadata`. Any other is given back as it
+    /// is.
+    #[must_use = "it gives the Encryption back, with whether its metadata is encrypted"]
+    pub fn encrypting_metadata(mut self, encrypts: bool) -> Encryption {
+        if let Encryption::Opened {
+            encrypts_metadata, ..
+        } = &mut self
+        {
+            *encrypts_metadata = encrypts;
+        }
+        self
+    }
+
+    /// It, opened, its security handler having found `faults` in the
+    /// encryption dictionary: `Opened`'s `faults`. Any other is given back
+    /// as it is.
+    #[must_use = "it gives the Encryption back, with what its handler found wrong"]
+    pub fn finding(mut self, faults: Vec<pdf_crypt::Fault>) -> Encryption {
+        if let Encryption::Opened { faults: found, .. } = &mut self {
+            *found = faults;
+        }
+        self
+    }
+
+    /// The protection a new encryption of the file takes so as to grant
+    /// no more than it does, where it opened: its permissions and whether
+    /// its metadata is encrypted, and no password, which the caller sets,
+    /// the user's and the owner's, before
+    /// [`Encryptor::create`](crate::write::Encryptor::create) makes a whole
+    /// rewrite's encryption of it (revision 6, AES-256). None where it
+    /// didn't open.
+    ///
+    /// The permissions are kept, each one the file grants and each it
+    /// withholds, but bit 10 ([`Permissions::ACCESSIBILITY`]), which
+    /// revision 6 sets whatever's asked and PDF 2.0 readers pass over: a
+    /// file of an earlier revision that withholds it is rewritten granting
+    /// it. With the user's password alone, a file that withholds any is
+    /// refused (`Unusable::Shared`), as one password would open it as its
+    /// owner's, whom they don't bind: the owner's is given too. Opened by
+    /// the user's password, the reading knows no owner's password, so an
+    /// owner's set anew gives whoever holds it what the file's owner had.
+    #[must_use]
+    pub fn protection(&self) -> Option<Protection<'static>> {
+        let Encryption::Opened {
+            permissions,
+            encrypts_metadata,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let mut protection = Protection::DEFAULT;
+        protection.permissions = *permissions;
+        protection.encrypt_metadata = *encrypts_metadata;
+        Some(protection)
+    }
+}
+
+#[cfg(test)]
+impl Encryption {
+    /// It, saying only who opened it, by which password, and what it
+    /// grants, the rest as [`Encryption::opened`] leaves them: for a test
+    /// that holds those three, as `opened_says_how_each_kind_is_encrypted`
+    /// holds the rest.
+    pub(crate) fn as_opened(&self) -> Encryption {
         match self {
-            Encryption::Opened { owner, by, .. } => Encryption::Opened {
+            Encryption::Opened {
                 owner,
                 by,
                 permissions,
-            },
-            other => other,
+                ..
+            } => Encryption::opened(*owner).by(*by).permitting(*permissions),
+            other => other.clone(),
         }
     }
 }
@@ -2673,7 +2831,7 @@ pub(crate) mod tests {
         assert_eq!(doc.facts.newest, Some((startxref(&file), XrefKind::Stream)));
         assert_ne!(doc.encryption, Encryption::None);
         assert_eq!(
-            doc.encryption,
+            doc.encryption.as_opened(),
             Encryption::opened(false).permitting(pdf_crypt::Permissions::ALL)
         );
     }
@@ -3597,7 +3755,7 @@ pub(crate) mod tests {
                     },
                 );
                 assert_eq!(
-                    doc.encryption,
+                    doc.encryption.as_opened(),
                     Encryption::opened(owner)
                         .by(by)
                         .permitting(pdf_crypt::Permissions::ALL),

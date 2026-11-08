@@ -47,8 +47,10 @@ impl Identity {
     /// device, is refused (`InvalidInput`), never opened: opening a FIFO
     /// would wait for a writer, and a device's opening can do what the
     /// device does. One that becomes such a thing as it's opened is opened
-    /// without waiting, then refused. On Windows, what it holds open still
-    /// lets others write the file, rename it and remove it.
+    /// without waiting, and on Unix without making a terminal the
+    /// process's own, then refused by what the handle is. On Windows, what
+    /// it holds open still lets others write the file, rename it and remove
+    /// it.
     ///
     /// # Errors
     ///
@@ -59,27 +61,37 @@ impl Identity {
         let path = path.as_ref();
         let metadata = std::fs::metadata(path)?;
         plain(&metadata)?;
-        #[cfg(unix)]
-        let file = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let file = (std::fs::OpenOptions::new().read(true))
-                .custom_flags(libc::O_NONBLOCK)
-                .open(path)?;
-            Handle::from_file(file)?
-        };
-        #[cfg(windows)]
-        let file = Handle::from_path(path)?;
         #[cfg(any(unix, windows))]
-        let identity = {
-            plain(&file.as_file().metadata()?)?;
-            Identity::held(Arc::new(file))?
-        };
+        let identity = Identity::opened(path)?;
         #[cfg(not(any(unix, windows)))]
         let identity = Identity {
             len: metadata.len(),
             modified: metadata.modified().ok(),
         };
         Ok(identity)
+    }
+
+    /// The identity of the file at `path`, which its metadata said is a
+    /// file or a folder: opened to read without waiting (`O_NONBLOCK`), and
+    /// on Unix without becoming the process's controlling terminal
+    /// (`O_NOCTTY`), were a terminal put at the path since; then refused
+    /// unless the handle is a file's or a folder's. So what was swapped in
+    /// after the metadata was read is refused by what's held, never waited
+    /// on.
+    #[cfg(any(unix, windows))]
+    fn opened(path: &Path) -> io::Result<Identity> {
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = (std::fs::OpenOptions::new().read(true))
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+                .open(path)?;
+            Handle::from_file(file)?
+        };
+        #[cfg(windows)]
+        let file = Handle::from_path(path)?;
+        plain(&file.as_file().metadata()?)?;
+        Identity::held(Arc::new(file))
     }
 
     /// The identity of the file `file` holds open, its length and
@@ -451,5 +463,43 @@ mod tests {
             let message = format!("neither a file nor a folder: {what}");
             assert_eq!(got, Err((io::ErrorKind::InvalidInput, message)));
         }
+    }
+
+    /// A FIFO put at a path after its metadata said it was a file is
+    /// opened without waiting for a writer, and refused by what its handle
+    /// is, saying so: the open after the metadata, as `Identity::of` makes
+    /// it, asked of the FIFO's path, on a thread of its own so that one
+    /// that waits fails the test rather than hanging it. A file there is
+    /// taken.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_the_metadata_is_refused_by_its_handle() {
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let temp = Temp::new("swapped", b"%PDF-1.7\n");
+        assert!(fs::metadata(&temp.0).unwrap().is_file());
+        assert_eq!(
+            Identity::opened(&temp.0).unwrap(),
+            Identity::of(&temp.0).unwrap()
+        );
+        let fifo = temp.1.path().join("fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            let got = Identity::opened(&fifo).map_err(|e| (e.kind(), e.to_string()));
+            send.send(got.map(drop)).unwrap();
+        });
+        let got = (receive.recv_timeout(Duration::from_secs(10)))
+            .unwrap_or_else(|_| panic!("still waiting after 10 s"));
+        let message = "neither a file nor a folder: a FIFO".to_string();
+        assert_eq!(got, Err((io::ErrorKind::InvalidInput, message)));
     }
 }
