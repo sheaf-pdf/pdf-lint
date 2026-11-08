@@ -27,7 +27,7 @@ fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 pdfium_build := "8125"
 
 # The crates' PDFium cases, each a crate's tests/pdfium.
-pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-fonts/tests/pdfium crates/pdf-linearize/tests/pdfium"
+pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-structure/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-fonts/tests/pdfium crates/pdf-linearize/tests/pdfium"
 
 # List the recipes.
 default:

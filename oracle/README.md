@@ -1,7 +1,8 @@
 # PDFium, the oracle
 
 pdf-tokenizer's PDFium rules (`Rules::Pdfium`, `decode::pdfium`),
-pdf-objects' (`Parser::rules`), pdf-semantics' page tree (`pages::pages`),
+pdf-objects' (`Parser::rules`), pdf-structure's reading of a damaged file
+(`Recovery::Pdfium`), pdf-semantics' page tree (`pages::pages`),
 pdf-color's count of a space's components (`components`), pdf-fonts' reading
 of a font (`Font`) and
 pdf-content-streams, which reads content as PDFium does throughout, follow

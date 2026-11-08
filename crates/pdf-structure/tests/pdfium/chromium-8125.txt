@@ -1,0 +1,22 @@
+# PDFium's answer for each case, as chromium/8125 gives it (oracle/pdfium.py record)
+pages-plain	count 3 : 3 200 0 ; 4 200 0 ; 5 200 0 ; null ; null
+pages-startxref-past-its-section	count 3 : 3 200 0 ; 4 200 0 ; 5 200 0 ; null ; null
+pages-cut	count 3 : 3 200 0 ; 4 200 0 ; 5 200 0 ; null ; null
+pages-rows-past-a-cut	count 3 : 3 200 0 ; null ; null ; null ; null
+pages-no-startxref	count 2 : 3 200 0 ; 4 200 0 ; null ; null
+pages-stream-without-endstream	count 2 : 3 200 0 ; 4 200 0 ; null ; null
+pages-update	count 3 : 3 200 0 ; 4 200 0 ; 6 200 0 ; null ; null
+pages-update-prev-past-the-end	count 3 : 3 200 0 ; 4 200 0 ; 6 200 0 ; null ; null
+pages-update-prev-past-the-end-hidden	count 3 : 3 200 0 ; 4 200 0 ; null ; null ; null
+pages-update-first-prev-back-to-it	count 3 : 3 200 0 ; 4 200 0 ; 6 200 0 ; null ; null
+pages-update-xrefstm-unread	count 3 : 3 200 0 ; 4 200 0 ; 6 200 0 ; null ; null
+pages-prev-zero	count 2 : 1 200 0 ; 6 200 0 ; null ; null
+pages-update-xrefstm-zero	count 3 : 3 200 0 ; 4 200 0 ; 6 200 0 ; null ; null
+pages-first-object-elsewhere	count 3 : 1 200 0 ; 2 200 0 ; 3 200 0 ; null ; null
+pages-first-object-elsewhere-and-xrefstm-unread	count 1 : 3 200 0 ; null ; null
+pages-hidden-in-a-stream	count 2 : 1 200 0 ; 6 200 0 ; null ; null
+pages-catalog-elsewhere	count 2 : 2 200 0 ; 3 200 0 ; null ; null
+pages-pages-elsewhere	count 2 : 4 200 0 ; 5 200 0 ; null ; null
+pages-misnumbered-subsection	count 2 : 3 200 0 ; 4 200 0 ; null ; null
+pages-member-after-an-object	count 2 : 3 200 0 ; 4 200 0 ; null ; null
+pages-object-after-a-member	count 2 : 3 300 0 ; 4 200 0 ; null ; null

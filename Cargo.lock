@@ -823,6 +823,7 @@ dependencies = [
  "pdf-filters",
  "pdf-fixtures",
  "pdf-objects",
+ "pdf-semantics",
  "pdf-tokenizer",
  "same-file",
  "sha2",

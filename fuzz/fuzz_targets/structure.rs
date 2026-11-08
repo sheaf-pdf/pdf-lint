@@ -14,7 +14,9 @@
 //! says, in memory and by position, and counts no failed read. Each
 //! revision ends past a `%%EOF` and its line's end, and the file as each
 //! was written, its bytes up to there, reads the same twice and by
-//! position as in memory.
+//! position as in memory. Each under the verified recovery, or as PDFium
+//! reads a file, as the input's first bytes choose (the second's fifth
+//! bit).
 
 #![no_main]
 

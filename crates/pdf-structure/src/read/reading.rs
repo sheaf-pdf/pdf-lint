@@ -20,7 +20,8 @@ use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{
-    Crypt, Decode, Fault, Faults, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry,
+    Crypt, Decode, Fault, Faults, Limits, Options, Reader, Stored, Unfiltered, Unwritten, Whole,
+    XrefEntry,
 };
 use crate::crypt::{List, is_xref};
 use crate::phases::phase;
@@ -648,6 +649,7 @@ impl<S: ByteSource> Reading<S> {
             Ok(()) => {
                 if locked && self.reader.handler.is_some() {
                     self.members_again();
+                    self.pages_again();
                 }
                 Ok(self)
             }
@@ -675,6 +677,60 @@ impl<S: ByteSource> Reading<S> {
             }
         };
         self.reader.said_members(fault);
+    }
+
+    /// Under [`Recovery::Pdfium`], the reading opened again and scanned
+    /// after its sections are read, where a password has opened it since it
+    /// was opened and now its trailer gives no page, as PDFium, opened by
+    /// that password, scans it; opened by this reading's key, so the same
+    /// way, and its object streams' members listed. Where the source
+    /// doesn't give its bytes again, it's left as it is.
+    fn pages_again(&mut self) {
+        let reader = &self.reader;
+        let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) else {
+            return;
+        };
+        let options = Options {
+            limits: reader.limits,
+            section: None,
+            flate: reader.flate,
+            passwords: &[],
+            faults: match reader.wants {
+                true => Faults::Kept,
+                false => Faults::Off,
+            },
+            recovery: reader.recovery,
+        };
+        let why = || Some(Unwritten::NoPages);
+        let again = match self.source.whole() {
+            Some(file) => {
+                let file = InMemory(file);
+                let Ok(scans) = reader.scans_for_pages(file);
+                if !scans {
+                    return;
+                }
+                let Ok(again) = Reader::open_as(file, &options, reader.native, None, why(), true);
+                again
+            }
+            None => {
+                let file = ByPosition::new(&self.source, self.bound);
+                if !matches!(reader.scans_for_pages(file), Ok(true)) {
+                    return;
+                }
+                match Reader::open_as(file, &options, reader.native, None, why(), true) {
+                    Ok(again) => again,
+                    Err(_) => return,
+                }
+            }
+        };
+        let mut again = again;
+        let (handler, values, id) = (handler.clone(), stored.values.clone(), stored.id.clone());
+        let encryption = reader.encryption.clone();
+        again.key(&handler, &values, &id, &encryption);
+        self.reader = again;
+        if self.reader.handler.is_some() {
+            self.members_again();
+        }
     }
 
     /// The file read by position.
@@ -955,6 +1011,7 @@ impl<S: ByteSource> Reading<S> {
             prefix.reader.key(handler, values, id, &reader.encryption);
             if locked && prefix.reader.handler.is_some() {
                 prefix.members_again();
+                prefix.pages_again();
             }
         }
         Ok(prefix)

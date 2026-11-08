@@ -406,7 +406,12 @@ impl Reader {
     /// found no object stream, or listed none and read every one's header.
     /// In a file whose sections read, a member no section lists isn't
     /// listed: a reference to it is to no object (ISO 32000-2, 7.3.10).
+    /// Under [`Recovery::Pdfium`], as PDFium lists them
+    /// ([`Reader::members_as_pdfium`]).
     pub(super) fn members<'f, F: Bytes<'f>>(&mut self, file: F) -> Result<Option<Fault>, F::Error> {
+        if self.recovery == Recovery::Pdfium {
+            return self.members_as_pdfium(file);
+        }
         if !self.scanned || self.object_streams.is_empty() {
             return Ok(None);
         }

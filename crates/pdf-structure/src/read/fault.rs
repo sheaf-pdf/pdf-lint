@@ -577,6 +577,34 @@ pub enum Unwritten {
     /// 4,294,967,295.
     #[error("its /Index numbers no object")]
     IndexNumber,
+    /// The `/Prev` chain comes back to the section at byte `at`, read
+    /// before: under [`Recovery::Pdfium`](super::Recovery::Pdfium), which
+    /// scans a file for that, as it does one whose sections don't read.
+    #[error("the /Prev chain comes back to byte {at}")]
+    Loop {
+        /// Where it comes back to.
+        at: usize,
+    },
+    /// The first object in use, by number, that the table at byte `table`
+    /// lists, `id`, isn't at byte `offset`, where the table puts it: the
+    /// first word there isn't its number. Under
+    /// [`Recovery::Pdfium`](super::Recovery::Pdfium), which scans a file
+    /// for that, the table being its first-written section's.
+    #[error("the table at byte {table} puts {id} R at byte {offset}, where its number isn't")]
+    Misplaced {
+        /// The table.
+        table: usize,
+        /// The object.
+        id: ObjectId,
+        /// Where the table puts it.
+        offset: usize,
+    },
+    /// The trailer's `/Root` gives no page: it doesn't refer to a
+    /// dictionary that reads, or that dictionary's `/Pages` counts none.
+    /// Under [`Recovery::Pdfium`](super::Recovery::Pdfium), which scans a
+    /// file whose sections read for that.
+    #[error("the trailer's /Root gives no page")]
+    NoPages,
     /// A compressed cross-reference stream, its filters `filter` as
     /// written (`/FlateDecode`, or `filters` for an array), that the
     /// decoder doesn't decode, in its words. Only where a decoder decodes
@@ -1211,11 +1239,14 @@ mod tests {
             Unwritten::Decoded { .. } => 23,
             Unwritten::Other(_) => 24,
             Unwritten::Decode { .. } => 25,
+            Unwritten::Loop { .. } => 26,
+            Unwritten::Misplaced { .. } => 27,
+            Unwritten::NoPages => 28,
         }
     }
 
     /// How many variants [`reason`] names.
-    const REASONS: usize = 26;
+    const REASONS: usize = 29;
 
     /// Each reason the sections don't read, built by a literal, says its
     /// words, every variant and each way its words go.
@@ -1282,6 +1313,19 @@ mod tests {
             ),
             (Unwritten::DataShort, "its data ends before its /Index does"),
             (Unwritten::IndexNumber, "its /Index numbers no object"),
+            (
+                Unwritten::Loop { at: 120 },
+                "the /Prev chain comes back to byte 120",
+            ),
+            (
+                Unwritten::Misplaced {
+                    table: 700,
+                    id: id(1),
+                    offset: 15,
+                },
+                "the table at byte 700 puts 1 0 R at byte 15, where its number isn't",
+            ),
+            (Unwritten::NoPages, "the trailer's /Root gives no page"),
             (
                 Unwritten::Decode {
                     fault: pdf_filters::Fault::NoEnd,

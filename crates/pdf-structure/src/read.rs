@@ -12,7 +12,8 @@
 //! before it, and every position a reading gives is in the file's bytes,
 //! the header's offset added ([`Facts::header_offset`]). A section or an
 //! object away from where the file says is read where the file proves it
-//! is, and said ([`Recovery`]). Where the sections don't read, it finds
+//! is, and said ([`Recovery`]); or the file is read as PDFium reads it
+//! ([`Recovery::Pdfium`]). Where the sections don't read, it finds
 //! the objects by scanning the file, and says so. An object that doesn't read says why ([`Unread`]): it doesn't
 //! parse, its offset holds another, or the object stream it's in doesn't
 //! decode ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where
@@ -304,6 +305,7 @@ use crate::source::{
 mod fault;
 mod file;
 mod limits;
+mod pdfium;
 mod reading;
 pub(crate) mod recovery;
 mod sections;
@@ -315,6 +317,7 @@ pub use fault::{Fault, ParseKind, RowShape, Unwritten};
 pub use file::FileBytes;
 pub use file::Identity;
 pub use limits::{Faults, Limits, Options, Recovery};
+use pdfium::{Loaded, Rebuild, Stop};
 pub(crate) use reading::missing;
 pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed};
 #[cfg(any(test, fuzzing))]
@@ -1151,6 +1154,20 @@ struct Reader {
     /// The object streams a scan found, by number, whose members it lists
     /// ([`Reader::members`]).
     object_streams: Box<[u32]>,
+    /// Under [`Recovery::Pdfium`], why its sections are to be read and the
+    /// file scanned after, as PDFium scans a file whose trailer gives no
+    /// page ([`Reader::open_as`]).
+    force: Option<Unwritten>,
+    /// Whether an encrypted file is opened by no password, not the empty
+    /// one either: a reading opened again for another's key.
+    untried: bool,
+    /// Under [`Recovery::Pdfium`], what the sections had given where the
+    /// file is scanned after them, between their read and the scan's.
+    loaded: Option<Box<Loaded>>,
+    /// Under [`Recovery::Pdfium`], what its scan found, which the object
+    /// streams' members are listed by, again where a password opens the
+    /// file later.
+    rebuild: Option<Box<Rebuild>>,
     /// The newest entry for each object number, with its generation, by
     /// number: as the sections give them, once they're read.
     entries: Box<[(u32, (u16, XrefEntry))]>,
@@ -1417,6 +1434,8 @@ struct Section {
     /// Where a hybrid table's `/XRefStm` was read, where it doesn't read
     /// where it's said.
     stream_found: Option<Found>,
+    /// Why a hybrid table's `/XRefStm` doesn't read, where it read nowhere.
+    stream_unread: Option<Unwritten>,
 }
 
 fn span(start: usize, end: usize) -> Span {
@@ -1588,12 +1607,37 @@ impl Reader {
     /// when they don't read, its last `%%EOF`, and its encryption
     /// dictionary, its security handler opened with `options.passwords`,
     /// each in each of its encodings, which aren't kept. `decoder` decodes
-    /// the cross-reference streams the reader is made not to.
+    /// the cross-reference streams the reader is made not to. Under
+    /// [`Recovery::Pdfium`], a file opened whose trailer gives no page is
+    /// opened again and scanned after its sections are read, as PDFium
+    /// opens it ([`Reader::gives_pages`]).
     fn new<'f, F: Bytes<'f>>(
         file: F,
         options: &Options<'_>,
         native: bool,
         decoder: Option<&dyn Decode>,
+    ) -> Result<Reader, F::Error> {
+        let reader = Reader::open_as(file, options, native, decoder, None, false)?;
+        match reader.scans_for_pages(file)? {
+            true => {
+                let why = Some(Unwritten::NoPages);
+                Reader::open_as(file, options, native, decoder, why, false)
+            }
+            false => Ok(reader),
+        }
+    }
+
+    /// [`Reader::new`]'s open, its sections read and then the file scanned
+    /// under [`Recovery::Pdfium`] for `force` where that's given; and, where
+    /// `untried`, an encrypted file opened by no password, not the empty
+    /// one either, for another reading's key ([`Reader::key`]).
+    fn open_as<'f, F: Bytes<'f>>(
+        file: F,
+        options: &Options<'_>,
+        native: bool,
+        decoder: Option<&dyn Decode>,
+        force: Option<Unwritten>,
+        untried: bool,
     ) -> Result<Reader, F::Error> {
         phase!(DEBUG, "open", len = file.len());
         let limits = options.limits;
@@ -1616,6 +1660,10 @@ impl Reader {
             found: Box::default(),
             shifts: Box::default(),
             object_streams: Box::default(),
+            force,
+            untried,
+            loaded: None,
+            rebuild: None,
             entries: Box::default(),
             offsets: Box::default(),
             handler: None,
@@ -1634,9 +1682,10 @@ impl Reader {
             Some(section) => reader.sections_from(file, &mut cx, section, false, decoder)?,
             None => reader.sections(file, &mut cx, decoder)?,
         };
-        let trailer = match sections {
-            Ok(trailer) => trailer,
-            Err(why) => reader.scan(file, &mut cx, why)?,
+        let trailer = match (sections, reader.recovery) {
+            (Ok(trailer), _) => trailer,
+            (Err(why), Recovery::Pdfium) => reader.rebuild_in(file, &mut cx, why)?,
+            (Err(why), _) => reader.scan(file, &mut cx, why)?,
         };
         // The file's end is read back only to say what's wrong with it.
         if options.section.is_none() && cx.wants {
@@ -1853,7 +1902,7 @@ impl Reader {
                     if self.list.strings && is_xref_stream(&o) {
                         plain_strings(&mut o);
                     }
-                    if self.scanned {
+                    if self.scanned && !self.sections_gave(id.number) {
                         record.origin = Origin::Recovered;
                     } else if let Some(origin) = self.shift(id.number) {
                         record.origin = origin;
@@ -2728,7 +2777,12 @@ impl Reader {
     /// ([`Reader::section_found`]), and each section's entries read at a
     /// shift where the file proves one, or where a scan finds those
     /// neither there nor where they're written ([`Reader::shifted`]), each
-    /// section's said once, after what's said of its rows.
+    /// section's said once, after what's said of its rows. Under
+    /// [`Recovery::Pdfium`], a `/Prev` of 0 ends the chain, as PDFium reads
+    /// one, and, read as of no section given, the sections are read where
+    /// they're said, and where PDFium would scan the file for them
+    /// ([`Stop`]), that's why they don't read, and what PDFium had read of
+    /// them is kept for the scan ([`Loaded`]).
     fn sections_from<'f, F: Bytes<'f>>(
         &mut self,
         file: F,
@@ -2749,9 +2803,17 @@ impl Reader {
         let mut places = HashSet::new();
         let mut next = Some(offset);
         let mut search = search;
+        // Where PDFium would scan the file rather than read it by them, and
+        // why.
+        let pdfium = self.recovery == Recovery::Pdfium && self.as_of.is_none();
+        let mut stop: Option<(Unwritten, Stop)> = None;
+        let header = self.facts.header_offset.unwrap_or(0);
         while let Some(offset) = next {
             if !seen.insert(offset) || places.contains(&offset) {
                 cx.tell(None, None, Fault::Loop { at: offset });
+                if pdfium {
+                    stop = Some((Unwritten::Loop { at: offset }, Stop::Chain));
+                }
                 break;
             }
             if seen.len() > self.limits.sections {
@@ -2759,10 +2821,26 @@ impl Reader {
                 cx.tell(None, None, Fault::Sections { limit });
                 break;
             }
+            // Under Pdfium a /Prev of 0, the header's place, ends the
+            // chain, as PDFium reads one: what's there isn't taken for a
+            // section, nor the file scanned for want of one; that none
+            // reads there is said, as under Verified.
+            if self.recovery == Recovery::Pdfium && !sections.is_empty() && offset == header {
+                let mut told = cx.apart();
+                if let Err(why) = self.section_found(file, &mut told, offset, false)? {
+                    cx.faults.append(&mut told.faults);
+                    let why = Box::new(why);
+                    cx.tell(None, None, Fault::Section { at: offset, why });
+                }
+                break;
+            }
             let (section, found) = match self.section_found(file, cx, offset, search)? {
                 Ok(section) => section,
                 Err(why) if sections.is_empty() => return Ok(Err(why)),
                 Err(why) => {
+                    if pdfium {
+                        stop = Some((why.clone(), Stop::Chain));
+                    }
                     let why = Box::new(why);
                     cx.tell(None, None, Fault::Section { at: offset, why });
                     break;
@@ -2771,6 +2849,9 @@ impl Reader {
             let place = found.map_or(offset, |found| found.found);
             if !places.insert(place) {
                 cx.tell(None, None, Fault::Loop { at: place });
+                if pdfium {
+                    stop = Some((Unwritten::Loop { at: place }, Stop::Chain));
+                }
                 break;
             }
             // Every /Prev is looked for near, as startxref's is.
@@ -2815,9 +2896,16 @@ impl Reader {
         // reading those told, which is told below with the rest of what's
         // said of the section, in the sections' order.
         let mut lists: Vec<(Rows, Vec<(Place, Fault)>)> = Vec::with_capacity(sections.len());
+        // The first-written section's table's own rows, which PDFium checks
+        // its first object by.
+        let last = sections.len().saturating_sub(1);
+        let mut first_table: Option<Rows> = None;
         for (i, section) in sections.iter_mut().enumerate() {
             let mut told = cx.apart();
             let mut listed = std::mem::take(&mut section.table);
+            if pdfium && i == last && section.trailer.stream.is_none() {
+                first_table = Some(listed.clone());
+            }
             if let Some((offset, id, stream)) = &section.stream {
                 let hybrid = section.trailer.stream.is_none();
                 match self.rows(
@@ -2857,10 +2945,23 @@ impl Reader {
             }
             lists.push((listed, told.faults));
         }
+        // Where PDFium would scan the file for what it reads of its
+        // sections: its first-written table's first object not where it's
+        // put, or a later section's /XRefStm that doesn't read; or a scan
+        // asked for; and what it had read of them by then.
+        if pdfium && stop.is_none() {
+            stop = self.stops(file, &sections, &lists, first_table.as_ref(), &offsets)?;
+        }
+        if pdfium && stop.is_none() {
+            stop = self.force.take().map(|why| (why, Stop::Whole));
+        }
+        if let Some((_, how)) = &stop {
+            let loaded = pdfium::loaded(&sections, &lists, first_table.as_ref(), *how);
+            self.loaded = Some(Box::new(loaded));
+        }
         // Where the file proves its entries aren't where its sections put
         // them: each section's read at one shift.
         let shifts = self.shifted(file, &mut lists, &said)?;
-        let header = self.facts.header_offset.unwrap_or(0);
         let mut moved_entries = BTreeMap::new();
         let mut entries = BTreeMap::new();
         let mut trailer = None;
@@ -3012,6 +3113,9 @@ impl Reader {
             header_offset: self.facts.header_offset,
             ..facts
         };
+        if let Some((why, _)) = stop {
+            return Ok(Err(why));
+        }
         Ok(Ok(trailer))
     }
 
@@ -3079,8 +3183,15 @@ impl Reader {
         match at {
             At::Table(Ok((mut section, xref_stm))) => {
                 if let Some(at) = xref_stm {
+                    // Under Pdfium a /XRefStm of 0, the header's place, is
+                    // none, as PDFium reads one: what's there isn't taken
+                    // for its stream, nor the file scanned for want of it;
+                    // that none reads there is said, as under Verified.
+                    let none = self.recovery == Recovery::Pdfium
+                        && at == self.facts.header_offset.unwrap_or(0);
                     let mut told = cx.apart();
                     section.stream = match self.xref_stream(file, &mut told, at)? {
+                        Ok(_) if none => None,
                         Ok((id, object, _)) => {
                             cx.faults.append(&mut told.faults);
                             Some((at, id, object))
@@ -3114,6 +3225,9 @@ impl Reader {
                             }
                             if found.is_none() {
                                 cx.faults.append(&mut told.faults);
+                                if !none {
+                                    section.stream_unread = Some(why.clone());
+                                }
                                 let why = Box::new(why);
                                 cx.tell(None, None, Fault::XrefStm { at, why });
                             }
@@ -3147,6 +3261,7 @@ impl Reader {
                     hybrid: false,
                     end,
                     stream_found: None,
+                    stream_unread: None,
                 }))
             }
             At::Neither => Ok(Err(Unwritten::Neither { at: offset })),
@@ -3257,6 +3372,7 @@ impl Reader {
             hybrid: xref_stm.is_some(),
             end: eof_after(w, parser.offset()),
             stream_found: None,
+            stream_unread: None,
         };
         Ok((section, xref_stm))
     }
@@ -3566,8 +3682,9 @@ impl Reader {
     fn scan_in(&mut self, file: &[u8], cx: &mut Cx, why: Unwritten) -> Trailer {
         let Scan {
             objects,
-            mut object_streams,
+            object_streams,
             trailers,
+            ..
         } = scan_of(file);
         let mut entries = BTreeMap::new();
         for (id, offset) in objects {
@@ -3580,6 +3697,7 @@ impl Reader {
         self.entries = entries.into_iter().collect();
         self.scanned = true;
         self.facts.recovered = true;
+        let mut object_streams: Vec<u32> = object_streams.into_iter().map(|(n, _)| n).collect();
         object_streams.sort_unstable();
         object_streams.dedup();
         self.object_streams = object_streams.into();
@@ -3796,7 +3914,10 @@ impl Reader {
         let (encoded, of): (Vec<Encoded>, Vec<usize>) = (passwords.iter().enumerate())
             .flat_map(|(i, password)| password.encodings().into_iter().map(move |e| (e, i)))
             .unzip();
-        let opened = Handler::open(&values, &id, &encoded);
+        let opened = match self.untried {
+            true => Err(Refused::Password),
+            false => Handler::open(&values, &id, &encoded),
+        };
         // Where a key is made, or would be by a password: the handler
         // takes the dictionary.
         if no_id && matches!(opened, Ok(_) | Err(Refused::Password)) {
@@ -4177,10 +4298,14 @@ struct Scan {
     /// order.
     objects: Vec<(ObjectId, usize)>,
     /// The objects whose dictionaries name `/ObjStm` before `stream`, by
-    /// number, in the file's order.
-    object_streams: Vec<u32>,
+    /// number and where their `n` starts, in the file's order.
+    object_streams: Vec<(u32, usize)>,
     /// Where each `trailer` keyword ends, in the file's order.
     trailers: Vec<usize>,
+    /// Where the `n` of each object whose dictionary names `/XRef` before
+    /// `stream` starts, in the file's order: a cross-reference stream's,
+    /// whose dictionary [`Recovery::Pdfium`]'s scan takes as a trailer.
+    xref_streams: Vec<usize>,
 }
 
 /// The `n g obj` headers, object streams and `trailer` keywords in `file`,
@@ -4189,15 +4314,23 @@ struct Scan {
 /// [`Reader::shifted`] finds an entry neither where its section puts it nor
 /// at its shift by.
 fn scan_of(file: &[u8]) -> Scan {
+    scan_by(file, None)
+}
+
+/// [`scan_of`], each stream's data passed over to where `ends` puts its end,
+/// given where its `stream` keyword ends and where its object's `n` is, where
+/// that's given; else up to `endstream`.
+fn scan_by(file: &[u8], ends: Option<&dyn Fn(usize, Option<usize>) -> usize>) -> Scan {
     let mut objects = Vec::new();
     let mut t = Tokenizer::new(file);
     let mut before: [Option<Token>; 2] = [None, None];
     let mut trailers = Vec::new();
-    // The object whose `obj` was last seen, and whether its dictionary
-    // names `/ObjStm`: an object stream's, whose members the reading
-    // lists once its handler is open.
-    let mut object: Option<(u32, bool)> = None;
+    // The object whose `obj` was last seen, where its `n` starts, and
+    // whether its dictionary names `/ObjStm`, an object stream's, whose
+    // members the reading lists once its handler is open, or `/XRef`.
+    let mut object: Option<(u32, usize, Named)> = None;
     let mut object_streams = Vec::new();
+    let mut xref_streams = Vec::new();
     while let Some(token) = t.next() {
         match token.kind {
             Kind::Space | Kind::Comment => continue,
@@ -4212,21 +4345,34 @@ fn scan_of(file: &[u8]) -> Scan {
                     )
                 {
                     objects.push((ObjectId::new(number, generation), n.start));
-                    object = Some((number, false));
+                    object = Some((number, n.start, Named::Neither));
                 }
             }
             Kind::Name if is_name(token.bytes, b"ObjStm") => {
-                if let Some((_, named)) = &mut object {
-                    *named = true;
+                if let Some((_, _, named)) = &mut object {
+                    *named = Named::ObjStm;
+                }
+            }
+            Kind::Name if is_name(token.bytes, b"XRef") => {
+                if let Some((_, _, named @ Named::Neither)) = &mut object {
+                    *named = Named::XRef;
                 }
             }
             Kind::Keyword if token.bytes == b"endobj" => object = None,
             Kind::Keyword if token.bytes == b"stream" => {
-                if let Some((number, true)) = object.take() {
-                    object_streams.push(number);
+                let start = object.map(|(_, at, _)| at);
+                match object.take() {
+                    Some((number, at, Named::ObjStm)) => object_streams.push((number, at)),
+                    Some((_, at, Named::XRef)) => xref_streams.push(at),
+                    _ => {}
                 }
-                t.eol();
-                t.data_until(b"endstream");
+                match ends {
+                    Some(ends) => t = Tokenizer::at(file, ends(token.end(), start)),
+                    None => {
+                        t.eol();
+                        t.data_until(b"endstream");
+                    }
+                }
             }
             Kind::Keyword if token.bytes == b"trailer" => trailers.push(token.end()),
             _ => {}
@@ -4237,7 +4383,18 @@ fn scan_of(file: &[u8]) -> Scan {
         objects,
         object_streams,
         trailers,
+        xref_streams,
     }
+}
+
+/// Which name a scanned object's dictionary gives before its `stream`
+/// ([`scan_of`]).
+#[derive(Clone, Copy)]
+enum Named {
+    Neither,
+    /// `/ObjStm`, which wins over `/XRef`: an object stream's.
+    ObjStm,
+    XRef,
 }
 
 /// Whether a name token's bytes, `/` and the name as written, are the name

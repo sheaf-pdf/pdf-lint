@@ -15,8 +15,9 @@
 //! ends past a `%%EOF` and its line's end, and the file as it was written,
 //! its bytes up to there, reads the same twice and by position as in
 //! memory; and opened by a wrong password, then unlocked by the owner's,
-//! it's the file opened by the owner's. It reads under small limits, so
-//! that a run tries more inputs. It's compiled only for tests and under
+//! it's the file opened by the owner's; each under the verified recovery,
+//! or as PDFium reads a file, as the input chooses. It reads under small
+//! limits, so that a run tries more inputs. It's compiled only for tests and under
 //! cargo-fuzz's `--cfg fuzzing`.
 //!
 //! And what the `write` target checks ([`write_file`]): a file read is
@@ -50,7 +51,8 @@ use pdf_objects::object::{Object, ObjectId, Span, Value};
 use pdf_objects::serialize;
 
 use crate::read::{
-    ByteSource, Error, Fault, Faults, Options, Reading, Whole, XrefEntry, header_exactly, shown,
+    ByteSource, Error, Fault, Faults, Options, Reading, Recovery, Whole, XrefEntry, header_exactly,
+    shown,
 };
 use crate::source::{Document, Encryption, Origin, Source, Unread, XrefKind};
 use crate::write::{self, Base, Body, Encryptor, Pack};
@@ -69,6 +71,24 @@ pub fn options() -> Options<'static> {
     let mut options = Options::DEFAULT;
     options.limits.stream = 1 << 20;
     options.limits.budget = 4 << 20;
+    options
+}
+
+/// The recovery the `structure` body reads a file under, as the choice's
+/// thirteenth bit (`1 << 12`) gives it: [`Recovery::Pdfium`] where it's
+/// set, else the verified default, so that an input that sets none reads
+/// as it did before the bit chose.
+fn recovery_of(choice: u16) -> Recovery {
+    match choice & (1 << 12) {
+        0 => Recovery::Verified,
+        _ => Recovery::Pdfium,
+    }
+}
+
+/// [`options`], read under `recovery`.
+fn options_under(recovery: Recovery) -> Options<'static> {
+    let mut options = options();
+    options.recovery = recovery;
     options
 }
 
@@ -217,18 +237,21 @@ pub fn open<S: ByteSource>(
 /// lowest bit set, so is the file opened by the owner's password `owner`,
 /// and its revision before an update, and so are its revisions, and the
 /// file opened by a wrong password, then unlocked by the owner's
-/// (`unlocked`). Panics on a broken promise.
+/// (`unlocked`). All of it under the recovery the choice's thirteenth bit
+/// gives ([`recovery_of`]): as PDFium reads a file where it's set, else the
+/// verified default. Panics on a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
         _ => (0, data),
     };
+    let recovery = recovery_of(choice);
     alike(file, &[], choice);
-    sections(file);
-    revisions(file, &[]);
+    sections(file, recovery);
+    revisions(file, &[], recovery);
     if choice & 1 != 0 {
         alike(file, &[OWNER], choice);
-        revisions(file, &[OWNER]);
+        revisions(file, &[OWNER], recovery);
         unlocked(file, choice);
     }
 }
@@ -242,18 +265,19 @@ pub fn read_file(data: &[u8]) {
 /// can end after a later one, as a `/Prev` chain that turns back on itself
 /// makes, and a prefix can read another chain, as a `startxref` that gives
 /// another section's offset makes.
-fn revisions(file: &[u8], passwords: &[Password]) {
+fn revisions(file: &[u8], passwords: &[Password], recovery: Recovery) {
     let reading = Reading::in_memory(
         file,
         &Options {
             passwords,
-            ..options()
+            ..options_under(recovery)
         },
         true,
         None,
     );
     let source = Counted::new(file, 1 + file.len() / 3);
-    let by_position = open(&source, passwords, &options(), true).expect("it's in memory");
+    let by_position =
+        open(&source, passwords, &options_under(recovery), true).expect("it's in memory");
     let whole = |len: usize| {
         let prefix = reading.prefix(len, reading.limits());
         prefix
@@ -284,7 +308,8 @@ fn revisions(file: &[u8], passwords: &[Password]) {
 /// kept for nobody so the same again, under the caps, each row a section says it has
 /// in it, and what's in use at a number of the sections the reader's when it read them
 /// and nothing's newer.
-fn sections(file: &[u8]) {
+fn sections(file: &[u8], recovery: Recovery) {
+    let options = || options_under(recovery);
     let reading = Reading::in_memory(file, &options(), true, None);
     let read = reading.sections().expect("it's in memory");
     assert_eq!(reading.sections().expect("it's in memory"), read);
@@ -315,15 +340,21 @@ fn sections(file: &[u8]) {
     }
 }
 
-/// `file` read whole under [`options`], opened by `passwords`, as of the
-/// section at `section` when there's one.
-fn whole(file: &[u8], passwords: &[Password], section: Option<usize>) -> Whole {
-    whole_as(file, passwords, section, true)
+/// `file` read whole under [`options`] and `recovery`, opened by
+/// `passwords`, as of the section at `section` when there's one.
+fn whole(file: &[u8], passwords: &[Password], section: Option<usize>, recovery: Recovery) -> Whole {
+    whole_as(file, passwords, section, true, recovery)
 }
 
 /// [`whole`], with faults looked for or not, as `faults` says.
-fn whole_as(file: &[u8], passwords: &[Password], section: Option<usize>, faults: bool) -> Whole {
-    let mut options = options();
+fn whole_as(
+    file: &[u8],
+    passwords: &[Password],
+    section: Option<usize>,
+    faults: bool,
+    recovery: Recovery,
+) -> Whole {
+    let mut options = options_under(recovery);
     options.section = section;
     options.faults = if faults { Faults::Kept } else { Faults::Off };
     Reading::in_memory(
@@ -344,14 +375,18 @@ fn whole_as(file: &[u8], passwords: &[Password], section: Option<usize>, faults:
 /// none, and read on demand in the order `choice` gives, the same; and when
 /// the file has an update, the same of the revision before it.
 fn alike(file: &[u8], passwords: &[Password], choice: u16) {
-    let read = whole(file, passwords, None);
+    let recovery = recovery_of(choice);
+    let read = whole(file, passwords, None, recovery);
     let doc = &read.document;
     assert_eq!(
         *doc,
-        whole(file, passwords, None).document,
+        whole(file, passwords, None, recovery).document,
         "a reading is the same twice"
     );
-    quiet(whole_as(file, passwords, None, false).document, doc);
+    quiet(
+        whole_as(file, passwords, None, false, recovery).document,
+        doc,
+    );
     within(file, doc);
     if let Some(newest) = doc.revisions.last() {
         assert_eq!(
@@ -365,10 +400,10 @@ fn alike(file: &[u8], passwords: &[Password], choice: u16) {
     streams(file, passwords, choice);
     if let Some(update) = &doc.update {
         let section = Some(update.previous);
-        let previous = whole(file, passwords, section);
+        let previous = whole(file, passwords, section, recovery);
         assert_eq!(
             previous.document,
-            whole(file, passwords, section).document,
+            whole(file, passwords, section, recovery).document,
             "the revision before an update reads the same twice"
         );
         within(file, &previous.document);
@@ -407,7 +442,7 @@ fn by_position(
     doc: &Document,
     choice: u16,
 ) {
-    let mut options = options();
+    let mut options = options_under(recovery_of(choice));
     options.section = section;
     let first = 1 + usize::from((choice >> 4) & 63);
     let source = Counted::new(file, first);
@@ -472,7 +507,7 @@ fn said_of_document(doc: &Document) {
 /// data decoded, the same each way, or the same error; the data, where
 /// it's borrowed, a borrow of the file's bytes.
 fn streams(file: &[u8], passwords: &[Password], choice: u16) {
-    let options = options();
+    let options = options_under(recovery_of(choice));
     let reading = Reading::in_memory(
         file,
         &Options {
@@ -522,7 +557,7 @@ fn on_demand(
     whole: &Whole,
     choice: u16,
 ) {
-    let mut options = options();
+    let mut options = options_under(recovery_of(choice));
     options.section = section;
     let reading = Reading::in_memory(
         file,
@@ -606,7 +641,7 @@ fn ordered<S: ByteSource>(reading: &Reading<S>, choice: u16) -> Vec<ObjectId> {
 /// read one, what it told of, and made a document, the whole read; but
 /// where the wrong password opened it, which unlocking leaves as it was.
 fn unlocked(file: &[u8], choice: u16) {
-    let options = options();
+    let options = options_under(recovery_of(choice));
     let in_memory = "bytes in memory are read without fail";
     let locked = Reading::open(
         file,
@@ -1757,7 +1792,8 @@ mod tests {
     /// mutated many times as a fuzzer might: bytes changed, cut, repeated,
     /// and moved, each file read by the empty password and, in turn, by
     /// the owner's too, and made a document with its reading kept at a
-    /// point chosen at random.
+    /// point chosen at random; each under the verified recovery, and then
+    /// as PDFium reads it.
     #[test]
     fn mutated_files_read_within_their_bytes_the_same_twice() {
         // As written, each reads without a fault, an encrypted one opens
@@ -1888,6 +1924,9 @@ mod tests {
                     break;
                 }
             }
+            read_file(&file);
+            // And as PDFium reads it, the choice's thirteenth bit set.
+            file[1] |= 1 << 4;
             read_file(&file);
         }
     }

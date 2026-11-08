@@ -102,7 +102,8 @@ pub struct Options<'a> {
     /// ([`Source::faults`](crate::Source::faults)), or [`Faults::Off`].
     pub faults: Faults,
     /// How a file is read where a section or an object isn't where the file
-    /// says: [`Recovery::Verified`] by default.
+    /// says: [`Recovery::Verified`] by default, or as PDFium reads it
+    /// ([`Recovery::Pdfium`]).
     pub recovery: Recovery,
 }
 
@@ -132,6 +133,26 @@ pub enum Recovery {
     /// section doesn't keeps those it read before it.
     #[default]
     Verified,
+    /// As PDFium reads a file, as of chromium/8125: its sections where
+    /// they're said, none looked for near, a `/Prev` or `/XRefStm` of 0
+    /// taken for none, and the file scanned for its objects where
+    /// `startxref` gives no section that reads, a section along the `/Prev`
+    /// chain doesn't read or the chain comes back on itself, the first
+    /// object in use its first-written table lists isn't where the table
+    /// puts it, a later section's `/XRefStm` doesn't read, or, once the
+    /// file is opened, its trailer's `/Root` gives no page (an encrypted
+    /// file's, where a password opened it), each said by the trailer the
+    /// scan makes ([`Trailer::unwritten`](crate::Trailer::unwritten)).
+    /// The scan lists every `n g obj`, a later one of a number over an
+    /// earlier but where that has a higher generation, and each object
+    /// stream's members at its place in the file, where its data isn't
+    /// encrypted; its trailer is each `trailer` dictionary and
+    /// cross-reference stream's, a later one's keys over an earlier's; and
+    /// it's merged over what the sections had given, each object the scan
+    /// doesn't find kept where they put it. A file whose
+    /// sections read and give a page reads as under
+    /// [`Recovery::Verified`] where that takes no recovery.
+    Pdfium,
 }
 
 /// What a reading does with the faults it finds ([`Options::faults`]).

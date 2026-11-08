@@ -1,0 +1,22 @@
+# name	kind	files
+pages-plain	pages	pages-plain.pdf
+pages-startxref-past-its-section	pages	pages-startxref-past-its-section.pdf
+pages-cut	pages	pages-cut.pdf
+pages-rows-past-a-cut	pages	pages-rows-past-a-cut.pdf
+pages-no-startxref	pages	pages-no-startxref.pdf
+pages-stream-without-endstream	pages	pages-stream-without-endstream.pdf
+pages-update	pages	pages-update.pdf
+pages-update-prev-past-the-end	pages	pages-update-prev-past-the-end.pdf
+pages-update-prev-past-the-end-hidden	pages	pages-update-prev-past-the-end-hidden.pdf
+pages-update-first-prev-back-to-it	pages	pages-update-first-prev-back-to-it.pdf
+pages-update-xrefstm-unread	pages	pages-update-xrefstm-unread.pdf
+pages-prev-zero	pages	pages-prev-zero.pdf
+pages-update-xrefstm-zero	pages	pages-update-xrefstm-zero.pdf
+pages-first-object-elsewhere	pages	pages-first-object-elsewhere.pdf
+pages-first-object-elsewhere-and-xrefstm-unread	pages	pages-first-object-elsewhere-and-xrefstm-unread.pdf
+pages-hidden-in-a-stream	pages	pages-hidden-in-a-stream.pdf
+pages-catalog-elsewhere	pages	pages-catalog-elsewhere.pdf
+pages-pages-elsewhere	pages	pages-pages-elsewhere.pdf
+pages-misnumbered-subsection	pages	pages-misnumbered-subsection.pdf
+pages-member-after-an-object	pages	pages-member-after-an-object.pdf
+pages-object-after-a-member	pages	pages-object-after-a-member.pdf
