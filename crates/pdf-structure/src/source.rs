@@ -2280,29 +2280,34 @@ pub(crate) mod tests {
         assert_eq!(given(&doc).as_deref(), Some(&xmp[..]), "the catalog edited");
         let metadata = ObjectId::new(2, 0);
         let new = Stream::new(dict! { "Type" => "Metadata" }, b"new".to_vec());
-        let edits: [(&str, &dyn Fn(&mut Document)); 6] = [
-            ("put", &|doc| drop(doc.set(metadata, new.clone()))),
-            ("taken to edit", &|doc| drop(doc.get_mut(metadata))),
-            ("set unread", &|doc| {
-                drop(doc.set_unread(metadata, Unread::Other("gone".into())));
-            }),
-            ("removed", &|doc| drop(doc.remove(metadata))),
-            ("its /Metadata removed", &|doc| {
-                doc.catalog_mut().unwrap().remove(b"Metadata");
-            }),
-            ("another /Root", &|doc| {
-                doc.trailer_mut()
-                    .dict_mut()
-                    .set("Root", Object::reference(4));
-            }),
+        let edit = |doc: &mut Document, what: &str| match what {
+            "put" => drop(doc.set(metadata, new.clone())),
+            "taken to edit" => {
+                doc.get_mut(metadata);
+            }
+            "set unread" => drop(doc.set_unread(metadata, Unread::Other("gone".into()))),
+            "removed" => drop(doc.remove(metadata)),
+            "its /Metadata removed" => drop(doc.catalog_mut().unwrap().remove(b"Metadata")),
+            _ => {
+                let root = Object::reference(4);
+                doc.trailer_mut().dict_mut().set("Root", root);
+            }
+        };
+        let edits = [
+            "put",
+            "taken to edit",
+            "set unread",
+            "removed",
+            "its /Metadata removed",
+            "another /Root",
         ];
-        for (what, edit) in edits {
+        for what in edits {
             let mut doc = read.clone();
-            edit(&mut doc);
+            edit(&mut doc, what);
             assert_eq!(given(&doc), None, "{what}");
             let mut doc = read.clone();
             doc.set_metadata(Some(b"set".to_vec()));
-            edit(&mut doc);
+            edit(&mut doc, what);
             assert_eq!(given(&doc).as_deref(), Some(&b"set"[..]), "{what}, set");
         }
     }
