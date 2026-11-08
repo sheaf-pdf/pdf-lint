@@ -321,7 +321,7 @@ pub(crate) use reading::missing;
 pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed};
 #[cfg(any(test, fuzzing))]
 pub(crate) use recovery::header_exactly;
-use recovery::{Found, Shift};
+use recovery::{Found, Shift, count};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
 pub use with_reading::WithReading;
@@ -3022,9 +3022,7 @@ impl Reader {
                 told.retain(|(_, fault)| !matches!(fault, Fault::Unlisted { id: unlisted } if unlisted == id));
             }
             cx.faults.append(&mut told);
-            // What was found elsewhere, said once a section: counts of
-            // object numbers, each held by a u32.
-            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            // What was found elsewhere, said once a section.
             let moved = shift.as_ref().map_or(0, |shift| count(shift.moved.len()));
             let scanned = shift.as_ref().map_or(0, |shift| count(shift.scanned.len()));
             let neither = shift.as_ref().map_or(0, |shift| count(shift.neither));
@@ -3044,7 +3042,7 @@ impl Reader {
                     entries_away = true;
                     let back = i64::try_from(header).map(|h| -h);
                     let fault = Fault::Shifted {
-                        section: offsets[i],
+                        at: offsets[i],
                         by: shift.by,
                         from_start: header > 0 && back == Ok(shift.by),
                         moved,

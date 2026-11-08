@@ -397,7 +397,7 @@ fn a_tables_rows_two_bytes_off_are_read_where_their_objects_are() {
         );
         let doc = read(&file);
         let shifted = Fault::Shifted {
-            section: table,
+            at: table,
             by: -i64::try_from(by).unwrap(),
             from_start: false,
             moved: 4,
@@ -507,7 +507,7 @@ fn a_shift_onto_another_objects_header_isnt_taken() {
     );
     let doc = read(&file);
     let shifted = Fault::Shifted {
-        section: table,
+        at: table,
         by: -2,
         from_start: false,
         moved: 3,
@@ -604,7 +604,7 @@ fn a_section_checked_at_anothers_shift_says_what_a_scan_finds() {
         neither: 0,
     };
     let shifted = Fault::Shifted {
-        section: table,
+        at: table,
         by: -5,
         from_start: false,
         moved: 0,
@@ -705,7 +705,7 @@ fn a_reading_as_of_a_section_finds_nothing_a_later_update_wrote() {
     let mut options = Options::DEFAULT;
     options.section = Some(previous);
     let shifted = Fault::Shifted {
-        section: previous,
+        at: previous,
         by: -3,
         from_start: false,
         moved: 1,
@@ -764,7 +764,7 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
     let (rows, _, table) = laid_out(b"", &OBJECTS, &|_, at| at + 2, &|at| at);
     let (two, _, two_table) = two_shifts();
     let rows_shift = Fault::Shifted {
-        section: table,
+        at: table,
         by: -2,
         from_start: false,
         moved: 4,
@@ -790,7 +790,7 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
             "from the first byte",
             start,
             vec![Fault::Shifted {
-                section: first,
+                at: first,
                 by: -100,
                 from_start: true,
                 moved: 4,
@@ -804,7 +804,7 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
             "two shifts",
             two,
             vec![Fault::Shifted {
-                section: two_table,
+                at: two_table,
                 by: -5,
                 from_start: false,
                 moved: 2,

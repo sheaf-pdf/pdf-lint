@@ -73,6 +73,12 @@ impl Shift {
     }
 }
 
+/// `n` as a recovery's fault counts it: object numbers, or object streams
+/// among them, so a `u32` holds them.
+pub(super) fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// How far `to` is from `from`: less than 0 before it.
 pub(super) fn between(from: usize, to: usize) -> i64 {
     let by = i64::try_from(from.abs_diff(to)).unwrap_or(i64::MAX);
@@ -503,9 +509,9 @@ impl Reader {
             self.slots = self.entries.iter().map(|_| OnceLock::new()).collect();
         }
         let fault = Fault::Members {
-            objects,
-            streams: from.len(),
-            unread,
+            objects: count(objects),
+            streams: count(from.len()),
+            unread: count(unread),
         };
         Ok((objects > 0 || unread > 0).then_some(fault))
     }
@@ -525,7 +531,7 @@ impl Reader {
         let fault = Fault::Members {
             objects: 0,
             streams: 0,
-            unread,
+            unread: count(unread),
         };
         (self.scanned && unread > 0).then_some(fault)
     }

@@ -15,7 +15,7 @@ use pdf_tokenizer::{Rules, is_delimiter};
 use super::window::Bytes;
 use super::{
     Cx, Fault, InMemory, Reader, Recovery, Rows, Scan, Section, Trailer, Unwritten, XrefEntry,
-    is_xref_stream, scan_by,
+    count, is_xref_stream, scan_by,
 };
 use crate::phases::phase;
 use crate::source::{Encryption, Facts};
@@ -685,9 +685,9 @@ impl Reader {
         self.rebuild = Some(rebuild);
         let objects = members.len();
         let fault = Fault::Members {
-            objects,
-            streams: from.len(),
-            unread,
+            objects: count(objects),
+            streams: count(from.len()),
+            unread: count(unread),
         };
         Ok((objects > 0 || unread > 0).then_some(fault))
     }

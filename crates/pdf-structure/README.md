@@ -185,7 +185,7 @@ assert!(doc.facts().recovered);
 let [(_, fault)] = doc.faults() else { panic!() };
 let moved = Fault::Moved { at, found, from_start: false, moved: 0, scanned: 0, neither: 0 };
 assert_eq!(*fault, moved);
-assert_eq!(fault.to_string(), format!("the section at byte {at} is 3 bytes before, at byte {found}"));
+assert_eq!(fault.to_string(), format!("the section said to be at byte {at} is at byte {found}, 3 bytes before"));
 assert_eq!(doc.record(ObjectId::new(1, 0)).unwrap().origin, Origin::File);
 
 // As PDFium reads it: no section looked for near, so the file is scanned.
