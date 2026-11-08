@@ -652,7 +652,10 @@ fn checked_in_order(setup: &Setup, mut report: impl FnMut(Checked) -> bool) {
 }
 
 /// `data` read whole beside its reading, opened by `passwords` under
-/// `options`, which in memory can't fail.
+/// `options`, which in memory can't fail. Every file is read by the
+/// verified recovery: a section or an object away from where the file
+/// says is read only where the file proves it, so the pages are reached
+/// and each recovery is still a finding.
 fn with_reading<S: bytes::ByteSource>(
     data: S,
     passwords: &[Password],
@@ -660,6 +663,7 @@ fn with_reading<S: bytes::ByteSource>(
 ) -> WithReading<S> {
     let mut options = *options;
     options.passwords = passwords;
+    options.recovery = bytes::Recovery::Verified;
     WithReading::new(data, &options).expect("a file in memory reads")
 }
 

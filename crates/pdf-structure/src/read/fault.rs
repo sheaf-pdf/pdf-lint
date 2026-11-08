@@ -103,6 +103,51 @@ pub enum Fault {
         /// Why it doesn't read.
         why: Box<Unwritten>,
     },
+    /// The cross-reference section `startxref`, a `/Prev` or a `/XRefStm`
+    /// puts at byte `at` doesn't read there, and is read at byte `found`
+    /// ([`Recovery::Verified`](super::Recovery::Verified)): where that
+    /// offset puts it counted from the file's first byte rather than its
+    /// header (`from_start`, against ISO 32000-2, 7.5.2), or the nearest
+    /// `xref` or cross-reference stream within 64 bytes that reads, exactly
+    /// there. Of the entries it lists in use that aren't where it puts them,
+    /// `moved` are read as far off, each exactly at its own `n g obj`, and
+    /// `neither` aren't there either, and are read where it puts them.
+    #[error("{}", moved_words(*.at, *.found, *.from_start, *.moved, *.neither))]
+    Moved {
+        /// Where it's said to be.
+        at: usize,
+        /// Where it's read.
+        found: usize,
+        /// Whether that's where the offset puts it counted from the file's
+        /// first byte.
+        from_start: bool,
+        /// How many of its entries are read as far off.
+        moved: usize,
+        /// How many are neither where it puts them nor there.
+        neither: usize,
+    },
+    /// `moved` of the entries the cross-reference section at byte `section`
+    /// lists in use aren't where it puts them, and are read `by` bytes from
+    /// there, each exactly at its own `n g obj`
+    /// ([`Recovery::Verified`](super::Recovery::Verified)): the header's
+    /// offset taken back (`from_start`, the offsets counting from the file's
+    /// first byte, against ISO 32000-2, 7.5.2), or as far as its first
+    /// object in use is, or another section's are. `neither` aren't there
+    /// either, and are read where it puts them.
+    #[error("{}", shifted_words(*.section, *.by, *.from_start, *.moved, *.neither))]
+    Shifted {
+        /// Where the section is.
+        section: usize,
+        /// How far each is from where the section puts it: before it where
+        /// it's less than 0.
+        by: i64,
+        /// Whether that's the header's offset taken back.
+        from_start: bool,
+        /// How many are read so.
+        moved: usize,
+        /// How many are neither where it puts them nor there.
+        neither: usize,
+    },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
     /// ([`Limits::entries`](super::Limits::entries)): those aren't read.
@@ -571,6 +616,65 @@ fn length_words(length: Option<usize>) -> String {
     }
 }
 
+/// How many bytes `by` is, and which way: "3 bytes before".
+fn off_words(by: i64) -> String {
+    let way = if by < 0 { "before" } else { "after" };
+    match by.unsigned_abs() {
+        1 => format!("1 byte {way}"),
+        n => format!("{n} bytes {way}"),
+    }
+}
+
+/// What [`Fault::Moved`] and [`Fault::Shifted`] say of a section's
+/// entries: how many are `by` bytes off, and how many neither there nor
+/// where it puts them.
+fn entries_words(moved: usize, by: i64, neither: usize) -> String {
+    let off = off_words(by);
+    let moved_words = match moved {
+        1 => format!("1 of its entries is {off} where it puts it"),
+        n => format!("{n} of its entries are {off} where they're put"),
+    };
+    match (moved, neither) {
+        (_, 0) => moved_words,
+        (0, 1) => format!("1 of its entries is neither where it puts it nor {off}"),
+        (0, n) => format!("{n} of its entries are neither where they're put nor {off}"),
+        (_, 1) => format!("{moved_words}, and 1 is at neither place"),
+        (_, n) => format!("{moved_words}, and {n} are at neither place"),
+    }
+}
+
+/// What a section's offsets counting from the file's first byte says.
+const FROM_START: &str = ", its offsets counting from the file's first byte, not its header";
+
+/// [`Fault::Moved`]'s words.
+fn moved_words(at: usize, found: usize, from_start: bool, moved: usize, neither: usize) -> String {
+    let by = i64::try_from(found).unwrap_or(i64::MAX) - i64::try_from(at).unwrap_or(i64::MAX);
+    let from_start = if from_start { FROM_START } else { "" };
+    let section = format!(
+        "the section at byte {at} is {}, at byte {found}{from_start}",
+        off_words(by)
+    );
+    match (moved, neither) {
+        (0, 0) => section,
+        _ => format!("{section}; {}", entries_words(moved, by, neither)),
+    }
+}
+
+/// [`Fault::Shifted`]'s words.
+fn shifted_words(
+    section: usize,
+    by: i64,
+    from_start: bool,
+    moved: usize,
+    neither: usize,
+) -> String {
+    let from_start = if from_start { FROM_START } else { "" };
+    format!(
+        "in the section at byte {section}{from_start}, {}",
+        entries_words(moved, by, neither)
+    )
+}
+
 /// [`Fault::Strings`]' words.
 fn strings_words(count: usize, fault: &pdf_crypt::Fault) -> String {
     match count {
@@ -643,11 +747,13 @@ mod tests {
             Fault::Strings { .. } => 28,
             Fault::Ciphertext { .. } => 29,
             Fault::Undecrypted { .. } => 30,
+            Fault::Moved { .. } => 31,
+            Fault::Shifted { .. } => 32,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 31;
+    const ARMS: usize = 33;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -842,6 +948,76 @@ mod tests {
                     why: "no key".to_string(),
                 },
                 "3 objects' strings stay ciphertext: no key",
+            ),
+            (
+                Fault::Moved {
+                    at: 49380,
+                    found: 49377,
+                    from_start: false,
+                    moved: 1,
+                    neither: 0,
+                },
+                "the section at byte 49380 is 3 bytes before, at byte 49377; 1 of its entries is 3 bytes before where it puts it",
+            ),
+            (
+                Fault::Moved {
+                    at: 120,
+                    found: 121,
+                    from_start: false,
+                    moved: 0,
+                    neither: 0,
+                },
+                "the section at byte 120 is 1 byte after, at byte 121",
+            ),
+            (
+                Fault::Moved {
+                    at: 158,
+                    found: 58,
+                    from_start: true,
+                    moved: 4,
+                    neither: 2,
+                },
+                "the section at byte 158 is 100 bytes before, at byte 58, its offsets counting from the file's first byte, not its header; 4 of its entries are 100 bytes before where they're put, and 2 are at neither place",
+            ),
+            (
+                Fault::Moved {
+                    at: 571,
+                    found: 575,
+                    from_start: false,
+                    moved: 0,
+                    neither: 6,
+                },
+                "the section at byte 571 is 4 bytes after, at byte 575; 6 of its entries are neither where they're put nor 4 bytes after",
+            ),
+            (
+                Fault::Moved {
+                    at: 734,
+                    found: 732,
+                    from_start: false,
+                    moved: 0,
+                    neither: 1,
+                },
+                "the section at byte 734 is 2 bytes before, at byte 732; 1 of its entries is neither where it puts it nor 2 bytes before",
+            ),
+            (
+                Fault::Shifted {
+                    section: 700,
+                    by: 2,
+                    from_start: false,
+                    moved: 30,
+                    neither: 1,
+                },
+                "in the section at byte 700, 30 of its entries are 2 bytes after where they're put, and 1 is at neither place",
+            ),
+            (
+                Fault::Shifted {
+                    section: 701,
+                    by: -1,
+                    from_start: true,
+                    moved: 1,
+                    neither: 0,
+                },
+                "in the section at byte 701, its offsets counting from the file's first byte, not its header, 1 of its entries is 1 byte before where it puts it",
             ),
         ];
         for (fault, words) in &cases {

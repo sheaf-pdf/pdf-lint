@@ -51,8 +51,9 @@ impl Default for Limits {
 
 /// How a file is opened: under which [`Limits`], as of which
 /// cross-reference section, by which passwords where it's encrypted, which
-/// Flate backend its streams inflate on, and whether its faults are looked
-/// for. A caller sets them on a copy
+/// Flate backend its streams inflate on, whether its faults are looked
+/// for, and how it's read where its sections or objects aren't where it
+/// says. A caller sets them on a copy
 /// of [`Options::DEFAULT`] (`options.section = Some(previous)`, or
 /// `options.passwords = &given`, say).
 ///
@@ -69,7 +70,9 @@ pub struct Options<'a> {
     /// what later updates wrote isn't in it. For an update's
     /// [`Update::previous`](crate::Update::previous), that's the revision it
     /// updates. A position in the file's bytes, as every position a reading
-    /// gives is, taken exactly: no header's offset is added to it. None, the
+    /// gives is, taken exactly: no header's offset is added to it, nor is
+    /// it looked for near, as a section `startxref` or a `/Prev` gives is
+    /// ([`Recovery::Verified`]). None, the
     /// default, for the file as its `startxref` gives it. A reading so is of the whole file's bytes, its length the whole
     /// file's: the file as a revision was written, its bytes up to its end
     /// alone, is [`Reading::prefix`](super::Reading::prefix)'s.
@@ -98,6 +101,35 @@ pub struct Options<'a> {
     /// Whether faults are looked for and kept: [`Faults::Kept`] by default
     /// ([`Source::faults`](crate::Source::faults)), or [`Faults::Off`].
     pub faults: Faults,
+    /// How a file is read where a section or an object isn't where the file
+    /// says: [`Recovery::Verified`] by default.
+    pub recovery: Recovery,
+}
+
+/// How a reading reads a file whose cross-reference sections or objects
+/// aren't where it says ([`Options::recovery`]). Whatever it takes, each
+/// recovery is a fault ([`Fault`](super::Fault)), and an object read
+/// elsewhere says so ([`Origin`](crate::Origin)); a reading with faults off
+/// still says whether it took one ([`Facts::recovered`](crate::Facts::recovered)).
+/// Not exhaustive, as other readers' ways may come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum Recovery {
+    /// Only where the file proves it, the default. A section that doesn't
+    /// read where `startxref`, a `/Prev` or a `/XRefStm` puts it is read
+    /// where that offset puts it counted from the file's first byte rather
+    /// than its header, or at the nearest `xref` or cross-reference stream
+    /// within 64 bytes of it, exactly there, where one reads
+    /// ([`Fault::Moved`](super::Fault::Moved)). A section's entries are
+    /// read at one shift, the section's own move, or its first object's,
+    /// found exactly at its `n g obj` within 64 bytes, or the header's
+    /// offset taken back: each entry where it's written, else exactly at
+    /// its own `n g obj` at that shift, else where it's written
+    /// ([`Fault::Shifted`](super::Fault::Shifted)). A file whose newest
+    /// section doesn't read is scanned for its objects, as one whose later
+    /// section doesn't keeps those it read before it.
+    #[default]
+    Verified,
 }
 
 /// What a reading does with the faults it finds ([`Options::faults`]).
@@ -125,13 +157,15 @@ pub enum Faults {
 impl Options<'static> {
     /// The options a file is opened with unless it's given others: the
     /// default limits, the file as its `startxref` gives it, miniz_oxide's
-    /// Flate, no password but the empty one, and faults looked for.
+    /// Flate, no password but the empty one, faults looked for, and the
+    /// verified recovery.
     pub const DEFAULT: Options<'static> = Options {
         limits: Limits::DEFAULT,
         section: None,
         flate: Backend::MinizOxide,
         passwords: &[],
         faults: Faults::Kept,
+        recovery: Recovery::Verified,
     };
 }
 

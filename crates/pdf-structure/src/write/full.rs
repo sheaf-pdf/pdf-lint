@@ -409,6 +409,8 @@ fn file(
         encryption: encryptor.map(|e| e.dictionary().clone()),
         source: None,
         renumbered: to.0.is_some(),
+        startxref: None,
+        shifted: Vec::new(),
     };
     Ok(Written {
         section,

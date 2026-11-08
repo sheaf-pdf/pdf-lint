@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 
 use pdf_fixtures::fixture::{self, Xref};
 
-use super::lengths;
 use super::tests::{
     KINDS, clean, compressed, filtered, junk, objects_2_and_3, root, settings, small, to_encrypt,
     unfiltered, updated_with_padding, xref_row,
 };
 use super::*;
+use super::{lengths, recovery};
 use crate::source::Source;
 
 /// What a test that reads a bomb takes at most.
@@ -277,6 +277,24 @@ pub(super) fn files() -> Vec<Named> {
         ),
     ];
     for (name, file) in before {
+        files.push((name.to_string(), file, none.clone()));
+    }
+    // Sections and objects not where the file says, read where it proves
+    // they are: a cut, offsets from the first byte past a header 100
+    // bytes in, and rows two bytes past their objects.
+    let laid = &recovery::tests::OBJECTS;
+    let recovered = [
+        ("a cut", recovery::tests::cut().0),
+        (
+            "offsets from the first byte, 100 bytes before the header",
+            recovery::tests::laid_out(&[b'~'; 100], laid, &|_, at| at, &|at| at).0,
+        ),
+        (
+            "rows two bytes past their objects",
+            recovery::tests::laid_out(b"", laid, &|_, at| at + 2, &|at| at).0,
+        ),
+    ];
+    for (name, file) in recovered {
         files.push((name.to_string(), file, none.clone()));
     }
     let aes = fixture::encrypted(&settings(KINDS[4], b"user"), &to_encrypt(&[]), root());

@@ -10,9 +10,10 @@
 //! stream's data by its `/Length` when that ends at `endstream`. Offsets
 //! count from the header (ISO 32000-2, 7.5.2), past any bytes a writer put
 //! before it, and every position a reading gives is in the file's bytes,
-//! the header's offset added ([`Facts::header_offset`]). Where the
-//! sections don't read, it finds the objects by scanning the file, and
-//! says so. An object that doesn't read says why ([`Unread`]): it doesn't
+//! the header's offset added ([`Facts::header_offset`]). A section or an
+//! object away from where the file says is read where the file proves it
+//! is, and said ([`Recovery`]). Where the sections don't read, it finds
+//! the objects by scanning the file, and says so. An object that doesn't read says why ([`Unread`]): it doesn't
 //! parse, its offset holds another, or the object stream it's in doesn't
 //! decode ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where
 //! it is ([`Unindexed`]). One read from an object stream that starts
@@ -303,6 +304,7 @@ mod fault;
 mod file;
 mod limits;
 mod reading;
+pub(crate) mod recovery;
 mod sections;
 mod window;
 mod with_reading;
@@ -311,9 +313,12 @@ pub use fault::{Fault, ParseKind, RowShape, Unwritten};
 #[cfg(any(unix, windows))]
 pub use file::FileBytes;
 pub use file::Identity;
-pub use limits::{Faults, Limits, Options};
+pub use limits::{Faults, Limits, Options, Recovery};
 pub(crate) use reading::missing;
 pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed};
+use recovery::Found;
+#[cfg(any(test, fuzzing))]
+pub(crate) use recovery::header_exactly;
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
 pub use with_reading::WithReading;
@@ -330,6 +335,11 @@ pub const SECTIONS: usize = 1024;
 /// How many bytes a stream the reader decodes may decode to, unless a
 /// reading is given other [`Limits`]; more is cut off there.
 pub const STREAM: usize = 256 << 20;
+
+/// How far from where the file puts a cross-reference section, or the
+/// first object a section lists, the reader looks for it, in bytes either
+/// way ([`Recovery::Verified`]).
+pub(crate) const NEAR: usize = 64;
 
 /// How many bytes the streams the reader decodes in a reading of a file
 /// may decode to in all, unless it's given other [`Limits`]; more is cut
@@ -1128,6 +1138,14 @@ struct Reader {
     as_of: Option<usize>,
     /// Whether its entries were found by scanning the file.
     scanned: bool,
+    /// How it reads a file whose sections or objects aren't where it says.
+    recovery: Recovery,
+    /// Where each section read away from where it's said was said to be
+    /// and where it was read ([`Fault::Moved`]), by the first.
+    found: Box<[(usize, usize)]>,
+    /// How far each object an entry lists at a shift is from where its
+    /// section puts it ([`Origin::Shifted`]), by number.
+    shifts: Box<[(u32, i64)]>,
     /// The newest entry for each object number, with its generation, by
     /// number: as the sections give them, once they're read.
     entries: Box<[(u32, (u16, XrefEntry))]>,
@@ -1281,6 +1299,15 @@ impl Cx {
         }
     }
 
+    /// A sink for a read whose faults are told only where what it read is
+    /// kept: as this one, empty.
+    fn apart(&self) -> Cx {
+        Cx {
+            faults: Vec::new(),
+            ..*self
+        }
+    }
+
     /// Tells `fault`, on object `object` (none, the file's) at `at`, where
     /// faults are wanted.
     fn tell(&mut self, object: Option<ObjectId>, at: Option<Span>, fault: Fault) {
@@ -1364,6 +1391,10 @@ enum At {
     Neither,
 }
 
+/// A section and where it was read, where that isn't where it's said
+/// ([`Reader::section_found`]).
+type Placed = (Section, Option<Found>);
+
 /// A cross-reference section, read but for its stream's rows.
 struct Section {
     trailer: Trailer,
@@ -1378,6 +1409,9 @@ struct Section {
     /// Where the `%%EOF` after the `startxref` that follows it ends, and
     /// where that line does ([`eof_after`]).
     end: Option<RevisionEnd>,
+    /// Where a hybrid table's `/XRefStm` was read, where it doesn't read
+    /// where it's said.
+    stream_found: Option<Found>,
 }
 
 fn span(start: usize, end: usize) -> Span {
@@ -1573,6 +1607,9 @@ impl Reader {
             revisions: Vec::new(),
             as_of: options.section,
             scanned: false,
+            recovery: options.recovery,
+            found: Box::default(),
+            shifts: Box::default(),
             entries: Box::default(),
             offsets: Box::default(),
             handler: None,
@@ -1588,7 +1625,7 @@ impl Reader {
         let mut cx = Cx::opening(reader.wants);
         reader.version = reader.header(file, &mut cx)?;
         let sections = match options.section {
-            Some(section) => reader.sections_from(file, &mut cx, section, decoder)?,
+            Some(section) => reader.sections_from(file, &mut cx, section, false, decoder)?,
             None => reader.sections(file, &mut cx, decoder)?,
         };
         let trailer = match sections {
@@ -1807,6 +1844,8 @@ impl Reader {
                     }
                     if self.scanned {
                         record.origin = Origin::Recovered;
+                    } else if let Some(by) = self.shift(id.number) {
+                        record.origin = Origin::Shifted { by };
                     }
                     (o, record)
                 });
@@ -2652,7 +2691,10 @@ impl Reader {
                 .ok_or(Unwritten::StartxrefNoOffset)
         })?;
         match offset {
-            Ok(offset) => self.sections_from(file, cx, self.in_bytes(offset), decoder),
+            Ok(offset) => {
+                let search = self.recovery == Recovery::Verified;
+                self.sections_from(file, cx, self.in_bytes(offset), search, decoder)
+            }
             Err(why) => Ok(Err(why)),
         }
     }
@@ -2668,22 +2710,35 @@ impl Reader {
     /// [`Reader::sections`] reads them from `startxref`'s; and the
     /// revisions they make, each ending where its last-written section's
     /// `%%EOF` does ([`eof_after`]). `offset` is a position in the file's
-    /// bytes, taken as it is ([`Options::section`]'s among them); each
-    /// `/Prev` and `/XRefStm`, and each row, counts from the header.
+    /// bytes, taken as it is ([`Options::section`]'s among them) unless the
+    /// reader is to `search` near it; each `/Prev` and `/XRefStm`, and each
+    /// row, counts from the header. Under [`Recovery::Verified`], a later
+    /// section that doesn't read where it's said is looked for near it
+    /// ([`Reader::section_found`]), and each section's entries read at a
+    /// shift where the file proves one ([`Reader::shifted`]), each said
+    /// once, after what's said of the section's rows.
     fn sections_from<'f, F: Bytes<'f>>(
         &mut self,
         file: F,
         cx: &mut Cx,
         offset: usize,
+        search: bool,
         decoder: Option<&dyn Decode>,
     ) -> Result<Result<Trailer, Unwritten>, F::Error> {
         phase!(DEBUG, "sections", at = offset);
         let mut sections: Vec<Section> = Vec::new();
         let mut offsets = Vec::new();
+        // Where each section was said to be, where it was read elsewhere,
+        // and every section read elsewhere, a hybrid's stream among them.
+        let mut said: Vec<Option<Found>> = Vec::new();
+        let mut moves: Vec<(usize, usize)> = Vec::new();
         let mut seen = HashSet::new();
+        // Where each section was read, which a chain may come back to.
+        let mut places = HashSet::new();
         let mut next = Some(offset);
+        let mut search = search;
         while let Some(offset) = next {
-            if !seen.insert(offset) {
+            if !seen.insert(offset) || places.contains(&offset) {
                 cx.tell(None, None, Fault::Loop { at: offset });
                 break;
             }
@@ -2692,7 +2747,7 @@ impl Reader {
                 cx.tell(None, None, Fault::Sections { limit });
                 break;
             }
-            let section = match self.section(file, cx, offset)? {
+            let (section, found) = match self.section_found(file, cx, offset, search)? {
                 Ok(section) => section,
                 Err(why) if sections.is_empty() => return Ok(Err(why)),
                 Err(why) => {
@@ -2701,14 +2756,24 @@ impl Reader {
                     break;
                 }
             };
+            let place = found.map_or(offset, |found| found.found);
+            if !places.insert(place) {
+                cx.tell(None, None, Fault::Loop { at: place });
+                break;
+            }
+            // Every /Prev is looked for near, as startxref's is.
+            search = self.recovery == Recovery::Verified;
             next = section.prev;
             let encrypt = section.trailer.dict().get(b"Encrypt");
             if let Some(Value::Ref(id)) = encrypt.map(Object::value) {
                 self.list.dictionaries.insert(*id);
                 self.list.sections.insert(*id);
             }
+            moves.extend(found.map(|found| (found.at, found.found)));
+            moves.extend(section.stream_found.map(|found| (found.at, found.found)));
             sections.push(section);
-            offsets.push(offset);
+            offsets.push(place);
+            said.push(found);
         }
         // Asked of the decoder only when the reader is made to.
         let compressed: Vec<ObjectId> = (sections.iter())
@@ -2734,6 +2799,57 @@ impl Reader {
         facts.max_stream = (sections.iter())
             .filter_map(|s| s.stream.as_ref().map(|(_, id, _)| id.number))
             .max();
+        // Each section's entries, its stream's rows among them, and what
+        // reading those told, which is told below with the rest of what's
+        // said of the section, in the sections' order.
+        let mut lists: Vec<(Rows, Vec<(Place, Fault)>)> = Vec::with_capacity(sections.len());
+        for (i, section) in sections.iter_mut().enumerate() {
+            let mut told = cx.apart();
+            let mut listed = std::mem::take(&mut section.table);
+            if let Some((offset, id, stream)) = &section.stream {
+                let hybrid = section.trailer.stream.is_none();
+                match self.rows(
+                    file,
+                    &mut told,
+                    *offset,
+                    *id,
+                    stream,
+                    decoded.get(id),
+                    !hybrid,
+                    decoder,
+                )? {
+                    // A section's own stream's rows are its entries.
+                    Ok(rows) if listed.is_empty() => listed = rows,
+                    // A hybrid file's stream lists what its table leaves free.
+                    Ok(rows) => {
+                        for (n, entry) in rows {
+                            let free = matches!(listed.get(&n), None | Some((_, XrefEntry::Free)));
+                            if free {
+                                listed.insert(n, entry);
+                            }
+                        }
+                    }
+                    Err(why) if i == 0 && !hybrid => {
+                        cx.faults.append(&mut told.faults);
+                        return Ok(Err(why));
+                    }
+                    Err(why) => {
+                        let (at, why) = (*offset, Box::new(why));
+                        let fault = match hybrid {
+                            true => Fault::XrefStm { at, why },
+                            false => Fault::StreamRows { at, why },
+                        };
+                        told.tell(None, None, fault);
+                    }
+                }
+            }
+            lists.push((listed, told.faults));
+        }
+        // Where the file proves its entries aren't where its sections put
+        // them: each section's read at one shift.
+        let shifts = self.shifted(file, &mut lists, &said)?;
+        let header = self.facts.header_offset.unwrap_or(0);
+        let mut moved_entries = BTreeMap::new();
         let mut entries = BTreeMap::new();
         let mut trailer = None;
         // Where each section, and each stream a section's rows are in,
@@ -2758,42 +2874,43 @@ impl Reader {
         let mut numbers: Vec<u32> = Vec::new();
         let mut kept = 0usize;
         let mut fits = true;
-        for (i, section) in sections.into_iter().enumerate() {
-            let mut listed = section.table;
-            if let Some((offset, id, stream)) = &section.stream {
-                let hybrid = section.trailer.stream.is_none();
-                match self.rows(
-                    file,
-                    cx,
-                    *offset,
-                    *id,
-                    stream,
-                    decoded.get(id),
-                    !hybrid,
-                    decoder,
-                )? {
-                    // A section's own stream's rows are its entries.
-                    Ok(rows) if listed.is_empty() => listed = rows,
-                    // A hybrid file's stream lists what its table leaves free.
-                    Ok(rows) => {
-                        for (n, entry) in rows {
-                            let free = matches!(listed.get(&n), None | Some((_, XrefEntry::Free)));
-                            if free {
-                                listed.insert(n, entry);
-                            }
-                        }
-                    }
-                    Err(why) if i == 0 && !hybrid => return Ok(Err(why)),
-                    Err(why) => {
-                        let (at, why) = (*offset, Box::new(why));
-                        let fault = match hybrid {
-                            true => Fault::XrefStm { at, why },
-                            false => Fault::StreamRows { at, why },
-                        };
-                        cx.tell(None, None, fault);
-                    }
+        let each = sections
+            .into_iter()
+            .zip(lists)
+            .zip(shifts.into_iter().zip(&said));
+        for (i, ((section, (mut listed, mut told)), (shift, found))) in each.enumerate() {
+            cx.faults.append(&mut told);
+            // What was found elsewhere, said once a section.
+            let moved = shift.as_ref().map_or(0, |shift| shift.moved.len());
+            let neither = shift.as_ref().map_or(0, |shift| shift.neither);
+            match (found, &shift) {
+                (Some(found), _) => {
+                    let fault = Fault::Moved {
+                        at: found.at,
+                        found: found.found,
+                        from_start: found.from_start,
+                        moved,
+                        neither,
+                    };
+                    cx.tell(None, None, fault);
                 }
+                (None, Some(shift)) if moved > 0 => {
+                    let back = i64::try_from(header).map(|h| -h);
+                    let fault = Fault::Shifted {
+                        section: offsets[i],
+                        by: shift.by,
+                        from_start: header > 0 && back == Ok(shift.by),
+                        moved,
+                        neither,
+                    };
+                    cx.tell(None, None, fault);
+                }
+                _ => {}
             }
+            let by = shift.as_ref().map_or(0, |shift| shift.by);
+            let shifted: BTreeSet<u32> = shift
+                .map(|shift| shift.moved.into_iter().collect())
+                .unwrap_or_default();
             // Where a revision begins, at its newest section, the one after
             // it, read before it, is done.
             let begins = i == 0 || back[i] != back[i - 1];
@@ -2826,11 +2943,18 @@ impl Reader {
             // entries so far.
             if entries.is_empty() && listed.len() <= most {
                 entries = std::mem::take(&mut listed);
+                moved_entries.extend(shifted.iter().map(|&n| (n, by)));
             }
             for (n, entry) in listed {
                 match entries.len() < most || entries.contains_key(&n) {
                     true => {
-                        entries.entry(n).or_insert(entry);
+                        if let std::collections::btree_map::Entry::Vacant(vacant) = entries.entry(n)
+                        {
+                            vacant.insert(entry);
+                            if shifted.contains(&n) {
+                                moved_entries.insert(n, by);
+                            }
+                        }
                     }
                     false => past += 1,
                 }
@@ -2861,9 +2985,14 @@ impl Reader {
         if !fits {
             revisions.clear();
         }
+        moves.sort_unstable();
+        moves.dedup_by_key(|&mut (at, _)| at);
+        facts.recovered = !moves.is_empty() || !moved_entries.is_empty();
         self.revisions = revisions;
         self.entries = entries.into_iter().collect();
         self.offsets = starts.into();
+        self.found = moves.into();
+        self.shifts = moved_entries.into_iter().collect();
         self.facts = Facts {
             header_offset: self.facts.header_offset,
             ..facts
@@ -2871,7 +3000,49 @@ impl Reader {
         Ok(Ok(trailer))
     }
 
-    /// The section at `offset`: a table, or a cross-reference stream.
+    /// The section at `offset`, a table or a cross-reference stream, and
+    /// where it was read when that isn't there: where it doesn't read at
+    /// `offset`, and the reader is to `search`, at the first place near it
+    /// where one reads ([`Reader::near`]). What reading at a place told is
+    /// told where the section is read there, and what reading at `offset`
+    /// told where none is read at all, as it would be with no search.
+    fn section_found<'f, F: Bytes<'f>>(
+        &mut self,
+        file: F,
+        cx: &mut Cx,
+        offset: usize,
+        search: bool,
+    ) -> Result<Result<Placed, Unwritten>, F::Error> {
+        let mut told = cx.apart();
+        let why = match self.section(file, &mut told, offset)? {
+            Ok(section) => {
+                cx.faults.append(&mut told.faults);
+                return Ok(Ok((section, None)));
+            }
+            Err(why) => why,
+        };
+        if search {
+            for (place, from_start) in self.near(file, offset)? {
+                let mut there = cx.apart();
+                if let Ok(section) = self.section(file, &mut there, place)? {
+                    cx.faults.append(&mut there.faults);
+                    let found = Found {
+                        at: offset,
+                        found: place,
+                        from_start,
+                    };
+                    return Ok(Ok((section, Some(found))));
+                }
+            }
+        }
+        cx.faults.append(&mut told.faults);
+        Ok(Err(why))
+    }
+
+    /// The section at `offset`: a table, or a cross-reference stream. A
+    /// hybrid table's `/XRefStm` that doesn't read where it's said is
+    /// looked for near it, as a section is ([`Reader::near`]), and its move
+    /// said.
     fn section<'f, F: Bytes<'f>>(
         &mut self,
         file: F,
@@ -2893,12 +3064,44 @@ impl Reader {
         match at {
             At::Table(Ok((mut section, xref_stm))) => {
                 if let Some(at) = xref_stm {
-                    section.stream = match self.xref_stream(file, cx, at)? {
-                        Ok((id, object, _)) => Some((at, id, object)),
+                    let mut told = cx.apart();
+                    section.stream = match self.xref_stream(file, &mut told, at)? {
+                        Ok((id, object, _)) => {
+                            cx.faults.append(&mut told.faults);
+                            Some((at, id, object))
+                        }
                         Err(why) => {
-                            let why = Box::new(why);
-                            cx.tell(None, None, Fault::XrefStm { at, why });
-                            None
+                            let mut found = None;
+                            for (place, from_start) in self.near(file, at)? {
+                                let mut there = cx.apart();
+                                if let Ok((id, object, _)) =
+                                    self.xref_stream(file, &mut there, place)?
+                                {
+                                    cx.faults.append(&mut there.faults);
+                                    let moved = Found {
+                                        at,
+                                        found: place,
+                                        from_start,
+                                    };
+                                    let fault = Fault::Moved {
+                                        at,
+                                        found: place,
+                                        from_start,
+                                        moved: 0,
+                                        neither: 0,
+                                    };
+                                    cx.tell(None, None, fault);
+                                    section.stream_found = Some(moved);
+                                    found = Some((place, id, object));
+                                    break;
+                                }
+                            }
+                            if found.is_none() {
+                                cx.faults.append(&mut told.faults);
+                                let why = Box::new(why);
+                                cx.tell(None, None, Fault::XrefStm { at, why });
+                            }
+                            found
                         }
                     };
                 }
@@ -2927,6 +3130,7 @@ impl Reader {
                     stream: Some((offset, id, object)),
                     hybrid: false,
                     end,
+                    stream_found: None,
                 }))
             }
             At::Neither => Ok(Err(Unwritten::Neither { at: offset })),
@@ -3036,6 +3240,7 @@ impl Reader {
             stream: None,
             hybrid: xref_stm.is_some(),
             end: eof_after(w, parser.offset()),
+            stream_found: None,
         };
         Ok((section, xref_stm))
     }
@@ -3377,6 +3582,7 @@ impl Reader {
         }
         self.entries = entries.into_iter().collect();
         self.scanned = true;
+        self.facts.recovered = true;
         // The last trailer, with what it lacks of the document's entries
         // from those before it, newest first: a linearized file's last
         // may have only /Size, its first page's the rest.

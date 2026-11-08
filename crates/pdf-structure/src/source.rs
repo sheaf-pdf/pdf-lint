@@ -585,6 +585,14 @@ pub enum Origin {
         /// Which of the stream's objects it is, from 0.
         index: u32,
     },
+    /// `by` bytes from the offset its cross-reference section gives, exactly
+    /// at its own `n g obj`, where the section's entries are shifted
+    /// ([`Fault::Shifted`], [`Fault::Moved`]): before it where `by` is
+    /// less than 0.
+    Shifted {
+        /// How far.
+        by: i64,
+    },
 }
 
 /// Which bytes a stream's data is, and how the reader chose them.
@@ -635,6 +643,11 @@ pub struct Facts {
     /// the file's length counted from there. An update appended after it,
     /// which changes the length, voids it. Its hint tables aren't read.
     pub linearized: bool,
+    /// Whether the reader read a section or an object away from where the
+    /// file's sections put it, or found the objects by scanning: what its
+    /// faults say ([`Options::recovery`](crate::Options::recovery)), told
+    /// with faults off too.
+    pub recovered: bool,
 }
 
 /// One of a file's revisions (ISO 32000-2, 7.5.6): the file as first

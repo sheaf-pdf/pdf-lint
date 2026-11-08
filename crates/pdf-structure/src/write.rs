@@ -256,9 +256,10 @@ pub enum Body<'a> {
     ///    its id, one in an object stream at the place the reading's
     ///    sections give its number, else refused so. One an edit changed,
     ///    which dropped its place ([`Object::at`]), is written anew;
-    /// 4. where it wasn't found by scanning
-    ///    ([`Origin::Recovered`](crate::Origin::Recovered)), as the file's
-    ///    sections didn't read;
+    /// 4. where it was read where the file's sections put it: not found by
+    ///    scanning ([`Origin::Recovered`](crate::Origin::Recovered)), as
+    ///    the file's sections didn't read, nor read away from where its
+    ///    section puts it ([`Origin::Shifted`](crate::Origin::Shifted));
     /// 5. for an object at an offset, where `endobj` follows it;
     /// 6. for a stream, where its `/Length` is no reference, and its data is
     ///    as long as that says ([`DataExtent`](crate::DataExtent));
@@ -629,8 +630,9 @@ impl fmt::Debug for Pack<'_> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Written {
-    /// Its cross-reference section: where each object it wrote is, and the
-    /// cross-reference stream's own, when it's one, as positions in the
+    /// Its cross-reference section: where each object it wrote is (and,
+    /// in an update, each its base's reading read at a shift: [`update`]),
+    /// and the cross-reference stream's own, when it's one, as positions in the
     /// file: a whole file's counted from where it starts in `out`, its
     /// header; an update's from its file's first byte, as [`Base::len`]
     /// counts, past any bytes before the header, which the section's rows

@@ -41,7 +41,9 @@ pub struct Base {
     /// and qpdf read them.
     pub header: usize,
     /// Where its last section starts, from the header: what its last
-    /// `startxref` says, which the update's `/Prev` gives.
+    /// `startxref` says, which the update's `/Prev` gives. Of a reading
+    /// that read that section away from where `startxref` said
+    /// ([`Fault::Moved`](crate::Fault::Moved)), where it read it.
     pub prev: usize,
     /// Past every object number it uses, its cross-reference streams'
     /// included: where its new numbers start, below which an update's
@@ -78,18 +80,30 @@ pub struct Base {
     /// nothing to renumber is given none. [`Base::of`] and [`Base::new`]
     /// leave it unset.
     pub renumbered: bool,
+    /// What its last `startxref` says, where that isn't `prev`: of a
+    /// reading that read the last section elsewhere, which
+    /// [`Base::holds`] reads again.
+    pub(super) startxref: Option<usize>,
+    /// Each object of the reading it was made of that the reading read at
+    /// a shift ([`Origin::Shifted`](crate::Origin::Shifted)): its number,
+    /// its generation and where it is in the file's bytes, which an update
+    /// after it lists, so that it's read there with no shift to find.
+    pub(super) shifted: Vec<(u32, u16, usize)>,
 }
 
 impl Base {
     /// `reading`'s file, as its last section describes it: its length, its
     /// last byte, where its header starts ([`Facts::header_offset`], 0
     /// without one), its newest section's start, counted from the header as
-    /// its `startxref` writes it, and its kind, its trailer, its `/ID[0]` (an
+    /// its `startxref` writes it (where the reading read it, where that
+    /// isn't where `startxref` says, so that the update's `/Prev` is), and
+    /// its kind, its trailer, its `/ID[0]` (an
     /// encrypted file's as its handler opened by it, empty where the
     /// trailer has none) and its encryption dictionary as stored, and the
     /// reading's [`SourceId`]. New numbers start past its trailer's `/Size`
     /// (below 2³²), every number its sections list, in use or free, and its
-    /// cross-reference streams' numbers.
+    /// cross-reference streams' numbers. Where the reading read objects at
+    /// a shift, it keeps where each is, which an update after it lists.
     ///
     /// # Errors
     ///
@@ -111,8 +125,11 @@ impl Base {
             return Err(Error::Unsound);
         };
         // The reading's positions are the file's bytes'; a section's
-        // offsets count from the header.
+        // offsets count from the header. Where the reading read the newest
+        // section away from where startxref said, startxref's value is
+        // kept, to tell the file is as read.
         let prev = newest.saturating_sub(header);
+        let said = (reading.said(newest)).map(|said| said.saturating_sub(header));
         let dict = trailer.dict();
         if !dict.has(b"Root") {
             return Err(Error::Rootless);
@@ -160,6 +177,8 @@ impl Base {
             encryption: reading.stored().map(|stored| stored.dict.clone()),
             source: Some(reading.id()),
             renumbered: false,
+            startxref: said,
+            shifted: reading.shifted(),
         })
     }
 
@@ -183,20 +202,24 @@ impl Base {
             trailer,
             source: None,
             renumbered: false,
+            startxref: None,
+            shifted: Vec::new(),
         }
     }
 
     /// Whether `source` is still the file it describes, read again: as
-    /// long, its last `startxref` its last section's. What keeps another
-    /// writer from changing the file between this and an append is the
-    /// caller's.
+    /// long, its last `startxref` its last section's, or what it said where
+    /// the reading [`Base::of`] was made of read that section elsewhere.
+    /// What keeps another writer from changing the file between this and an
+    /// append is the caller's.
     ///
     /// # Errors
     ///
     /// The source's, where it doesn't give the bytes its last `startxref`
     /// is read from.
     pub fn holds<S: ByteSource + ?Sized>(&self, source: &S) -> io::Result<bool> {
-        Ok(source.len() == self.len && startxref(source)? == Some(self.prev))
+        let said = self.startxref.unwrap_or(self.prev);
+        Ok(source.len() == self.len && startxref(source)? == Some(said))
     }
 }
 
@@ -210,7 +233,11 @@ impl Base {
 /// at the number of one passed over, at any generation, which would
 /// replace it ([`Error::Twice`]). After a newline, where `base`'s last
 /// line isn't ended, each body at its number, in the order given, then a
-/// section of `base`'s kind listing only those, in runs, positions counted
+/// section of `base`'s kind listing only those, and each object the reading
+/// [`Base::of`] was made of read at a shift
+/// ([`Origin::Shifted`](crate::Origin::Shifted)) where it is, unless a body
+/// is written at its number, so that a reader reads it there with no shift
+/// to find; in runs, positions counted
 /// from `base`'s header, a stream's not deflated, numbered at
 /// [`Options::xref_from`] or past `base.size` and every number written,
 /// whichever is higher, passing over a number the objects written or the
@@ -451,6 +478,13 @@ fn appended(
             },
         );
     }
+    // Each object the base's reading read at a shift, where it is, unless
+    // a body was written at its number.
+    for &(number, generation, offset) in &base.shifted {
+        if !section.lists(number) {
+            section.insert(number, Entry::InUse { offset, generation });
+        }
+    }
     // The file's entries, in the numbers written.
     let named = |value: &Object| {
         let mut value = value.clone();
@@ -513,6 +547,8 @@ fn appended(
         encryption: base.encryption.clone(),
         source: base.source,
         renumbered: base.renumbered || to.0.is_some(),
+        startxref: None,
+        shifted: Vec::new(),
     };
     Ok(Written {
         section,

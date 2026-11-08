@@ -369,8 +369,10 @@ mod tests {
     /// A file of a catalog, its page tree and, after them, an 8 MiB stream,
     /// then its cross-reference table: opened by position, it reads little
     /// of the file, a window at its head for the header and the
-    /// linearization, two at its tail for `startxref` and `%%EOF`, and one
-    /// at its table; and its catalog, little more.
+    /// linearization, two at its tail for `startxref` and `%%EOF`, one at
+    /// its table, and a few bytes at its first object and its furthest,
+    /// which tell its entries are where they're written; and its catalog,
+    /// little more.
     #[test]
     fn opening_by_position_reads_little_of_a_large_file() {
         let data = vec![b'x'; 8 << 20];

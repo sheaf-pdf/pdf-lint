@@ -1488,6 +1488,83 @@ mod tests {
         }
     }
 
+    /// An update after a reading that read the file's sections or objects
+    /// where the file proves they are (`Base::of`): a cut file, its main
+    /// section and an object past the cut three bytes before where they're
+    /// said; one whose offsets count from its first byte, 100 bytes before
+    /// its header; one whose `startxref` gives the line after `xref`; and
+    /// one whose rows are each two bytes past their objects. The update
+    /// writes its `/Prev` where the newest section was read and lists each
+    /// object read at a shift where it is: read through qpdf alone as the
+    /// reader reads it, qpdf saying nothing where it says nothing of the
+    /// file before the update, and reconstructing only where it does that
+    /// of the file too (the cut's first section still gives the main
+    /// section three bytes off); the reader telling only what it finds of
+    /// the file before the update.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn an_update_after_a_recovered_reading_reads_through_qpdf_as_through_the_reader() {
+        use crate::read::recovery::tests::{OBJECTS, cut, laid_out};
+        use crate::write;
+
+        let files = [
+            ("cut", cut().0),
+            (
+                "from the first byte",
+                laid_out(&[b'~'; 100], &OBJECTS, &|_, at| at, &|at| at).0,
+            ),
+            (
+                "startxref past",
+                laid_out(b"", &OBJECTS, &|_, at| at, &|at| at + 5).0,
+            ),
+            (
+                "rows past",
+                laid_out(b"", &OBJECTS, &|_, at| at + 2, &|at| at).0,
+            ),
+        ];
+        let dir = scratch("recovered");
+        for (test, file) in files {
+            let reading = read::Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
+            let base = write::Base::of(&reading).unwrap();
+            let marked = Object::from(
+                dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0), "Marked" => true },
+            );
+            let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
+            let mut data = file.clone();
+            write::update(
+                &mut data,
+                &base,
+                given,
+                None,
+                None,
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            let path = dir.path().join(format!("{test}.pdf"));
+            std::fs::write(&path, &data).unwrap();
+            let (alone, heard) = qpdf(&path).heard().unwrap();
+            let before = dir.path().join(format!("{test}, before.pdf"));
+            std::fs::write(&before, &file).unwrap();
+            let (as_was, _) = qpdf(&before).heard().unwrap();
+            if as_was.trailer.unwritten.is_none() {
+                assert_eq!(alone.trailer.unwritten, None, "{test}");
+                assert!(heard.is_empty(), "{test}: {heard:?}");
+            }
+            let doc = read::document(&data, &read::Options::DEFAULT);
+            assert_eq!(doc.trailer.unwritten, None, "{test}");
+            let recovery = |fault: &crate::Fault| {
+                matches!(
+                    fault,
+                    crate::Fault::HeaderAt { .. }
+                        | crate::Fault::Moved { .. }
+                        | crate::Fault::Shifted { .. }
+                )
+            };
+            assert!(doc.faults().iter().all(|(_, f)| recovery(f)), "{test}");
+            assert_eq!(differences(&doc, &alone), [], "{test}");
+        }
+    }
+
     /// The writer's encrypted files, under every method, with a table and
     /// with a stream, checked by qpdf by their password ("No syntax or
     /// stream encoding errors found") and read through qpdf alone as the

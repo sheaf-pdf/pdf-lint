@@ -1,6 +1,7 @@
 //! What the fuzz target checks, which a unit test checks too: on any bytes,
 //! a file is read without a panic, in the same way twice, with every place
-//! the reading gives inside what was read; read on demand, in an order the
+//! the reading gives inside what was read, and each object read at a shift
+//! exactly at its own `n g obj`; read on demand, in an order the
 //! input chooses, it's the whole read, so long as no stream either decodes
 //! reaches the budget, and made a document with the reading kept, at a
 //! point the input chooses, it's the reading's whole read after; read by
@@ -25,7 +26,9 @@
 //! number the renumbering gives it, those copied as the bytes they were
 //! read from among them, their headers and the references that move
 //! written anew in place, and an update after one whose one fault is the
-//! bytes before its header read back with that fault again; as the input
+//! bytes before its header read back with that fault again, and after one
+//! whose faults are that and where its sections or objects were found
+//! read back with those alone, but what the update moves of them; as the input
 //! picks, the document written is the
 //! file read whole and taken by the reading, which takes it where it read
 //! soundly, and leaves it as it was where it doesn't; and where a byte of
@@ -46,7 +49,9 @@ use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 use pdf_objects::serialize;
 
-use crate::read::{ByteSource, Error, Fault, Faults, Options, Reading, Whole, XrefEntry, shown};
+use crate::read::{
+    ByteSource, Error, Fault, Faults, Options, Reading, Whole, XrefEntry, header_exactly, shown,
+};
 use crate::source::{Document, Encryption, Origin, Source, Unread, XrefKind};
 use crate::write::{self, Base, Body, Encryptor, Pack};
 
@@ -190,7 +195,8 @@ pub fn open<S: ByteSource>(
 /// inside what was read: each object's, each value's and key's in it, each
 /// stream's data's, the trailer's and each fault's, in the file or in
 /// the decoded data of the object stream it names, which the reading
-/// keeps. Read with no faults looked for ([`Options::faults`]), in memory
+/// keeps; and each object read at a shift ([`Origin::Shifted`]) starts
+/// exactly at its own `n g obj`. Read with no faults looked for ([`Options::faults`]), in memory
 /// and by position, it's the same read, every object, record and decoded
 /// stream, and keeps no fault. Read on demand, its objects asked for in an
 /// order the choice's next bits give, some read unkept first, each the
@@ -710,8 +716,19 @@ fn pruned(doc: &Document) {
 /// Checks that every place `doc` gives is inside what was read, the file
 /// or the decoded data of the object stream it names: each object's, and
 /// each value's and key's in it, each stream's data's, the trailer's, each
-/// revision's trailer's, and each fault's.
+/// revision's trailer's, and each fault's; and that an object read at a
+/// shift starts exactly at its own `n g obj`.
 fn within(file: &[u8], doc: &Document) {
+    for (id, record) in doc.records() {
+        if let Origin::Shifted { .. } = record.origin {
+            let at = header_exactly(file, 0, record.at.start, true);
+            assert_eq!(
+                at,
+                Some(id),
+                "{id:?}, read at a shift, isn't at its own n g obj"
+            );
+        }
+    }
     let inside = |at: Span, of: Option<ObjectId>| {
         let len = match at.stream {
             None => Some(file.len()),
@@ -1230,9 +1247,13 @@ fn updated(
         for (at, object) in doc.objects() {
             let moves = to(at) != Some(at) || object.references().any(|r| to(r) != Some(r));
             let listed = written.section.lists(to(at).expect("numbered").number);
-            assert_eq!(
-                listed,
-                at == id || moves,
+            // One read at a shift is listed where it is, though not written.
+            let shifted = matches!(
+                doc.record(at).map(|r| r.origin),
+                Some(Origin::Shifted { .. })
+            );
+            assert!(
+                listed == (at == id || moves) || (listed && shifted),
                 "{at:?} written alone of what's read"
             );
         }
@@ -1247,17 +1268,32 @@ fn updated(
     false
 }
 
-/// The faults `reading` told where the one it told is the bytes before the
-/// file's header and its sections read: none otherwise.
+/// The faults `reading` told where its sections read and what it told is
+/// the bytes before the file's header, once at most, and where it found
+/// sections or objects that weren't where the file says
+/// ([`Fault::Moved`], [`Fault::Shifted`]): none otherwise.
 fn header_alone(reading: &Reading<&[u8]>) -> Option<Vec<(Place, Fault)>> {
     let told = reading.faults();
     let header = |(_, fault): &(Place, Fault)| matches!(fault, Fault::HeaderAt { .. });
-    let alone = reading.trailer().unwritten.is_none() && told.len() == 1 && told.iter().all(header);
+    let alone = reading.trailer().unwritten.is_none()
+        && told.iter().filter(|f| header(f)).count() <= 1
+        && told.iter().all(|f| header(f) || recovery(f))
+        && !told.is_empty();
     alone.then(|| told.to_vec())
 }
 
+/// Whether `fault` says a section or an object was found away from where
+/// the file says.
+fn recovery((_, fault): &(Place, Fault)) -> bool {
+    matches!(fault, Fault::Moved { .. } | Fault::Shifted { .. })
+}
+
 /// `file`, written, read again under [`options`] by `password`: sound, but
-/// for what it was to tell, `told`.
+/// for what it was to tell, `told`. Where that says sections or objects
+/// were found away from where the file says, what it tells but those is
+/// `told`'s, and of those it tells no more kinds: an update after such a
+/// file writes its `/Prev` where its newest section was found, so that
+/// section may be read where it's said, its entries at its move.
 fn read_back<'f>(
     file: &'f [u8],
     password: Password<'_>,
@@ -1274,8 +1310,18 @@ fn read_back<'f>(
     if back.trailer().unwritten.is_none() {
         let _ = back.to_document();
     }
+    let faults = back.faults();
+    let alike = match told.iter().any(recovery) {
+        false => faults == told,
+        true => {
+            let other = |faults: &[(Place, Fault)]| -> Vec<(Place, Fault)> {
+                faults.iter().filter(|f| !recovery(f)).cloned().collect()
+            };
+            other(&faults) == other(told)
+        }
+    };
     assert!(
-        back.trailer().unwritten.is_none() && back.faults() == told,
+        back.trailer().unwritten.is_none() && alike,
         "a written file reads soundly: {:?} {:?}",
         back.trailer().unwritten,
         back.faults()

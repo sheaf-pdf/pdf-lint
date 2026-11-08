@@ -35,7 +35,10 @@ pub struct SectionRow {
 /// One cross-reference section of a file, as written, none of it merged with
 /// another's. Its places are positions in the file's bytes, as a reading's are:
 /// what's written, which counts from the header (ISO 32000-2, 7.5.2), past the
-/// header's offset.
+/// header's offset. It's where the reading read it, which may be away from
+/// where it's said to be ([`SectionRows::said`]); its rows are as written,
+/// though the reading may read their objects at a shift
+/// ([`Origin::Shifted`](crate::Origin::Shifted)).
 /// Not exhaustive, so that it can come to say more of a section; made only by
 /// the reader.
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +68,10 @@ pub struct SectionRows {
     /// Where the `startxref` after it says the newest section is, where one
     /// follows it.
     pub startxref: Option<usize>,
+    /// Where `startxref`, a `/Prev` or a `/XRefStm` said it is, where it
+    /// doesn't read there and the reading read it here instead
+    /// ([`Fault::Moved`](super::Fault::Moved)).
+    pub said: Option<usize>,
 }
 
 /// A file's sections along `/Prev`, the newest first: as many as read, and what
@@ -170,7 +177,9 @@ impl<S: ByteSource> Reading<S> {
     /// can differ from [`Reading::entries`], which is what a reader made of them.
     /// Positions are in the file's bytes, as a reading's are: each offset written,
     /// which counts from the header (ISO 32000-2, 7.5.2), past the header's offset;
-    /// a section the reading was opened as of at its byte. A stream's
+    /// a section the reading was opened as of at its byte. Each section is read
+    /// where the reading read it, away from where it's said to be where it didn't
+    /// read there ([`SectionRows::said`]), so the list goes as far as the reading's. A stream's
     /// rows are decoded from its own data, and that's never encrypted (ISO 32000-2,
     /// 7.5.8.2). Its data is found as the reading found it, so the rows are the
     /// reading's whatever it has read: a `/Length` that's a reference isn't followed,
@@ -268,8 +277,11 @@ impl Reader {
                 break;
             }
             seen.push(at);
-            match self.section_again(file, at, &mut left)? {
-                Ok(section) => {
+            // Where the reading read it.
+            let place = self.found_at(at);
+            match self.section_again(file, place, &mut left)? {
+                Ok(mut section) => {
+                    section.said = (place != at).then_some(at);
                     next = section.prev;
                     sections.push(section);
                 }
@@ -310,8 +322,12 @@ impl Reader {
         let stream = section.trailer.dict().get(b"XRefStm").and_then(offset_of);
         let stream = stream.map(|at| self.in_bytes(at));
         if let Some(stream) = stream {
-            match self.stream_again(file, stream, left)? {
-                Ok(rows) => section.hybrid = Some(Box::new(rows)),
+            let place = self.found_at(stream);
+            match self.stream_again(file, place, left)? {
+                Ok(mut rows) => {
+                    rows.said = (place != stream).then_some(stream);
+                    section.hybrid = Some(Box::new(rows));
+                }
                 Err(fault) => return Ok(Err(fault)),
             }
         }
@@ -424,6 +440,7 @@ impl Reader {
             stream: None,
             hybrid: None,
             startxref,
+            said: None,
         })
     }
 
@@ -481,6 +498,7 @@ impl Reader {
             stream: Some(id),
             hybrid: None,
             startxref,
+            said: None,
         }))
     }
 

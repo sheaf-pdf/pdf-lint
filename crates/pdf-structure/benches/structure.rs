@@ -7,8 +7,11 @@
 //!   cross-reference stream, the objects but the streams in object streams
 //!   (`stream`); the table's file with its `startxref` pointing at no
 //!   section, so that the reader finds the objects by scanning (`scanned`);
-//!   and the table's file with 100 bytes before its header, which its
-//!   offsets count from (`prefixed`).
+//!   the table's file with 100 bytes before its header, which its
+//!   offsets count from (`prefixed`); and the table's file as a cut left
+//!   it, its section and each of its rows three bytes past where they are,
+//!   so that the reader finds the section and reads each object at that
+//!   shift (`shifted`).
 //! - `get`: each of the 2,000 objects of the table's file and the stream's
 //!   read by number from a reading just opened, each as it's first asked
 //!   for, an object stream decoded once for its members (`table/cold`,
@@ -139,6 +142,11 @@ mod api {
     /// 7.5.2): a version of the crate that reads them from its first byte
     /// finds the objects of a file with bytes before its header by scanning.
     pub const FROM_HEADER: bool = true;
+
+    /// Whether a section, and the objects it lists, away from where the
+    /// file says are read where it proves they are: a version of the crate
+    /// that doesn't finds the objects of a file cut so by scanning.
+    pub const SHIFTS: bool = true;
 
     /// Whether `reading` found stream `id`'s data by its `/Length`, as it
     /// read the stream.
@@ -320,6 +328,28 @@ fn table_file_as(objects: &[(u32, Text)], scanned: bool, endobj: bool) -> Vec<u8
     out
 }
 
+/// [`table_file`]'s file as a cut before its first object left it: its
+/// `startxref` and every row `by` bytes past where they are.
+fn shifted_file(objects: &[(u32, Text)], by: usize) -> Vec<u8> {
+    let mut out = header();
+    let mut offsets = vec![0; objects.len() + 1];
+    for (n, text) in objects {
+        offsets[*n as usize] = out.len();
+        indirect_as(&mut out, *n, text, true);
+    }
+    let xref = out.len();
+    let size = objects.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+    for offset in &offsets[1..] {
+        out.extend_from_slice(format!("{:010} 00000 n \n", offset + by).as_bytes());
+    }
+    let startxref = xref + by;
+    let trailer =
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n");
+    out.extend_from_slice(trailer.as_bytes());
+    out
+}
+
 /// `data` deflated at zlib's default level.
 fn deflated(data: &[u8]) -> Vec<u8> {
     let flate = Encoder::Flate {
@@ -492,6 +522,7 @@ struct Files {
     stream: Vec<u8>,
     scanned: Vec<u8>,
     prefixed: Vec<u8>,
+    shifted: Vec<u8>,
     faulty: Vec<u8>,
     twice: Vec<u8>,
     lengths: Vec<u8>,
@@ -504,6 +535,7 @@ impl Files {
             stream: stream_file(objects),
             scanned: table_file(objects, true),
             prefixed: [&[b'~'; 100][..], &table_file(objects, false)].concat(),
+            shifted: shifted_file(objects, 3),
             faulty: table_file_as(objects, false, false),
             twice: twice_file(),
             lengths: lengths_file(),
@@ -540,8 +572,9 @@ fn opened(name: &str, reading: &Read, listed: usize, scanned: bool, faults: usiz
 
 fn open_group(c: &mut Criterion, files: &Files) {
     // Each object; the stream's file lists its object streams and itself;
-    // the prefixed file says its header is past its first byte.
-    let cases: [(&str, &[u8], usize, bool, usize); 4] = [
+    // the prefixed file says its header is past its first byte, and the
+    // shifted one that its section and its rows are three bytes off.
+    let cases: [(&str, &[u8], usize, bool, usize); 5] = [
         ("table", &files.table, OBJECTS as usize, false, 0),
         (
             "stream",
@@ -558,6 +591,7 @@ fn open_group(c: &mut Criterion, files: &Files) {
             !api::FROM_HEADER,
             1,
         ),
+        ("shifted", &files.shifted, OBJECTS as usize, !api::SHIFTS, 1),
     ];
     for &(name, file, listed, scanned, faults) in &cases {
         opened(name, &api::open(file), listed, scanned, faults);

@@ -801,6 +801,28 @@ impl<S: ByteSource> Reading<S> {
         self.reader.as_of
     }
 
+    /// Where the section the reading read at `at` was said to be, where it
+    /// read it elsewhere ([`Fault::Moved`]): for the writer, which reads
+    /// `startxref` again to tell the file is as read.
+    pub(crate) fn said(&self, at: usize) -> Option<usize> {
+        (self.reader.found.iter()).find_map(|&(said, found)| (found == at).then_some(said))
+    }
+
+    /// Each object whose entry the reading read at a shift
+    /// ([`Origin::Shifted`](crate::Origin::Shifted)): its number, its
+    /// generation and where it is, for the writer, whose update lists each
+    /// where it is.
+    pub(crate) fn shifted(&self) -> Vec<(u32, u16, usize)> {
+        (self.reader.shifts.iter())
+            .filter_map(|&(n, _)| match self.reader.entry(n) {
+                Some(&(generation, XrefEntry::InUse { offset, .. })) => {
+                    Some((n, generation, offset))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The file's newest incremental update, when its cross-reference
     /// sections were read and the newest follows one written before it.
     #[must_use]
@@ -892,6 +914,7 @@ impl<S: ByteSource> Reading<S> {
                 true => Faults::Kept,
                 false => Faults::Off,
             },
+            recovery: self.reader.recovery,
         };
         let source = Prefix::new(&self.source, len);
         let mut prefix = Reading::open_by(source, &options, self.bound)?;
