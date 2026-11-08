@@ -94,18 +94,31 @@ pub struct Options<'a> {
     /// [`Encryption::Opened`](crate::Encryption::Opened)'s `by`, its index
     /// here. They're borrowed for the open alone: a reading keeps none.
     pub passwords: &'a [Password<'a>],
-    /// Whether faults are looked for and kept, as they are by default
-    /// ([`Source::faults`](crate::Source::faults)). False for a caller that
-    /// wants none: then none is looked for, pdf-objects' parser asked for
-    /// none, no fault made, and none kept, and a check the reader makes
-    /// only to say a fault, such as reading the file's end back for its
-    /// `%%EOF` or sorting an object stream's members for those that overlap,
-    /// isn't made. What's read is the same either way: every object,
-    /// record, trailer, section and decoded stream, what's decrypted and
-    /// what's refused. But nothing says what's wrong with it: that the
-    /// encryption dictionary isn't right (`/Perms`), or that a string
-    /// didn't decrypt cleanly, among the rest.
-    pub faults: bool,
+    /// Whether faults are looked for and kept: [`Faults::Kept`] by default
+    /// ([`Source::faults`](crate::Source::faults)), or [`Faults::Off`].
+    pub faults: Faults,
+}
+
+/// What a reading does with the faults it finds ([`Options::faults`]).
+/// Not exhaustive, as other ways to take them may come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum Faults {
+    /// Looked for and kept by the reading, the default: each read keeps
+    /// what it tells, and the reading gives them in the whole read's order
+    /// ([`Source::faults`](crate::Source::faults)).
+    #[default]
+    Kept,
+    /// None looked for, for a caller that wants none: pdf-objects' parser
+    /// asked for none, no fault made, and none kept, and a check the reader
+    /// makes only to say a fault, such as reading the file's end back for
+    /// its `%%EOF` or sorting an object stream's members for those that
+    /// overlap, isn't made. What's read is the same either way: every
+    /// object, record, trailer, section and decoded stream, what's
+    /// decrypted and what's refused. But nothing says what's wrong with
+    /// it: that the encryption dictionary isn't right (`/Perms`), or that a
+    /// string didn't decrypt cleanly, among the rest.
+    Off,
 }
 
 impl Options<'static> {
@@ -117,7 +130,7 @@ impl Options<'static> {
         section: None,
         flate: Backend::MinizOxide,
         passwords: &[],
-        faults: true,
+        faults: Faults::Kept,
     };
 }
 

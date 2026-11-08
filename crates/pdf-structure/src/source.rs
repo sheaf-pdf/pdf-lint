@@ -61,8 +61,9 @@ pub trait Source: Streams {
     /// weren't looked for ([`Options::faults`](crate::Options::faults)).
     #[must_use]
     fn faults(&self) -> Cow<'_, [(Place, Fault)]>;
-    /// Tells `sink` each of [`Source::faults`], in their order, none where
-    /// it wants none: so that one sink takes the faults of several crates'
+    /// Tells `sink` each of [`Source::faults`], in their order, while it
+    /// wants them, asked before each: none where it wants none, and none
+    /// after it stops. So that one sink takes the faults of several crates'
     /// readers, each its own type.
     fn tell_faults(&self, sink: &mut dyn Sink<Fault>) {
         if !sink.wants() {
@@ -71,11 +72,17 @@ pub trait Source: Streams {
         match self.faults() {
             Cow::Borrowed(faults) => {
                 for (place, fault) in faults {
+                    if !sink.wants() {
+                        return;
+                    }
                     sink.fault(*place, fault.clone());
                 }
             }
             Cow::Owned(faults) => {
                 for (place, fault) in faults {
+                    if !sink.wants() {
+                        return;
+                    }
                     sink.fault(place, fault);
                 }
             }

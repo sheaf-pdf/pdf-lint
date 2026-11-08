@@ -289,7 +289,7 @@ use pdf_objects::version::Version;
 
 use crate::crypt::{self, Eff, Get, List, Stream, follow, is_xref};
 use crate::filter;
-pub use crate::filter::Unfiltered;
+pub use crate::filter::{FILTERS, Unfiltered};
 use crate::phases::phase;
 use crate::source::{
     DataExtent, Document, Encryption, Facts, Held, Origin, Record, Revision, RevisionEnd, Trailer,
@@ -308,16 +308,17 @@ pub use fault::{Fault, ParseKind, RowShape, Unwritten};
 #[cfg(any(unix, windows))]
 pub use file::FileBytes;
 pub use file::Identity;
-pub use limits::{Limits, Options};
+pub use limits::{Faults, Limits, Options};
 pub(crate) use reading::missing;
 pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
 pub use with_reading::WithReading;
 
-// How deeply arrays and dictionaries may nest in an object is the
-// parser's, pdf-objects'.
-pub use pdf_objects::parse::NESTING;
+/// How deeply arrays and dictionaries may nest in an object, unless a
+/// reading is given other [`Limits`]: pdf-objects' parser's default,
+/// [`pdf_objects::parse::NESTING`], at the version the reader takes.
+pub const NESTING: usize = pdf_objects::parse::NESTING;
 
 /// How many cross-reference sections the `/Prev` chain may have, unless a
 /// reading is given other [`Limits`].
@@ -389,6 +390,8 @@ pub enum Undecoded {
     /// Another decoder's words, where one decodes for the reader: only the
     /// crate's own tests give one, qpdf, to set beside the reader's
     /// decoding. A reading never gives it.
+    // Hidden, as only the tests' decoder gives it: not part of the API.
+    #[doc(hidden)]
     #[error("{0}")]
     Other(String),
 }
@@ -538,9 +541,9 @@ pub fn document(file: &[u8], options: &Options<'_>) -> Document {
 /// # Errors
 ///
 /// What the reader doesn't take of them ([`Unfiltered`]): a `/Filter`
-/// that isn't a name or an array of names, more than 25 of them,
-/// a filter it doesn't decode, `/DecodeParms` it can't take, or a
-/// reference where no `resolve` follows one.
+/// that isn't a name or an array of names, more than 25 of them
+/// ([`FILTERS`]), a filter it doesn't decode, `/DecodeParms` it can't
+/// take, or a reference where no `resolve` follows one.
 pub fn filters<'o>(
     dict: &'o Dict,
     resolve: Option<&dyn Resolve<'o>>,
@@ -1544,7 +1547,7 @@ impl Reader {
             listable: limits.entries.unwrap_or_else(|| listable(file.len())),
             version: None,
             trailer: Trailer::new(Object::new(Value::Dict(Dict::new()))),
-            wants: options.faults,
+            wants: options.faults == Faults::Kept,
             opened: Vec::new(),
             update: None,
             facts: Facts::default(),

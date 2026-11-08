@@ -77,8 +77,14 @@ pub struct Sections {
     pub stopped: Option<SectionFault>,
 }
 
-/// Why a section doesn't read ([`Reading::sections`]), or why no more of them are
-/// read.
+/// Why a section doesn't read ([`Reading::sections`]), or why no more of
+/// them are read: each section's own view, for a checker of a file's
+/// sections, each reason with the byte it was found at where there's one.
+/// Why the reading's sections, read as one, don't read is
+/// [`Unwritten`](super::Unwritten)'s (the trailer's reason, and a
+/// fault's), which names the same reasons in its own shape and words,
+/// without the byte, as a fault says it at its place; each kept as its
+/// readers have it.
 /// Not exhaustive, as reasons are found as the reader learns.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

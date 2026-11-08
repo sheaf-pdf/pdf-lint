@@ -18,7 +18,7 @@ use crate::fuzz::Counted;
 use crate::source::Source;
 
 /// `options` but for whether faults are looked for, `faults`.
-fn looking(options: &Options<'_>, faults: bool) -> Options<'static> {
+fn looking(options: &Options<'_>, faults: Faults) -> Options<'static> {
     Options {
         passwords: &[],
         faults,
@@ -104,7 +104,7 @@ fn with_faults_off_none_is_kept_and_every_object_is_read_alike() {
         let kept = document(&file, &options);
         faulty += usize::from(!kept.faults().is_empty());
         let quiet = Options {
-            faults: false,
+            faults: Faults::Off,
             ..options
         };
         let none = document(&file, &quiet);
@@ -162,7 +162,7 @@ fn with_faults_off_the_files_end_isnt_read_back() {
     let mut file = fixture::file("1.7", &super::tests::clean(), root(), fixture::Xref::Table);
     file.extend_from_slice(b"% more\n");
     let len = file.len();
-    let ranges = |faults: bool| {
+    let ranges = |faults: Faults| {
         let source = Ranges {
             bytes: &file,
             first: len,
@@ -176,8 +176,8 @@ fn with_faults_off_the_files_end_isnt_read_back() {
         read.sort_by_key(|range| (range.start, range.end));
         (doc, read)
     };
-    let (kept, mut on) = ranges(true);
-    let (none, off) = ranges(false);
+    let (kept, mut on) = ranges(Faults::Kept);
+    let (none, off) = ranges(Faults::Off);
     assert!(
         (kept.faults().iter()).any(|(_, fault)| *fault == Fault::AfterEof { bytes: 8 }),
         "{:?}",
@@ -210,10 +210,24 @@ impl Sink<Fault> for Told {
     }
 }
 
+/// A sink that wants the first fault it's told alone.
+struct First(Vec<(Place, Fault)>);
+
+impl Sink<Fault> for First {
+    fn fault(&mut self, at: Place, fault: Fault) {
+        self.0.push((at, fault));
+    }
+
+    fn wants(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// What a source tells a sink is its faults, in the whole read's order: a
 /// reading's of what it has read, whatever order it read in, which once it
-/// has read every object is its document's; and a sink that wants none is
-/// told none.
+/// has read every object is its document's; a sink that wants none is
+/// told none, and one that stops wanting them after the first is told the
+/// first alone.
 #[test]
 fn a_source_tells_its_faults_in_the_whole_reads_order() {
     for (name, file, passwords) in files() {
@@ -248,6 +262,10 @@ fn a_source_tells_its_faults_in_the_whole_reads_order() {
             source.tell_faults(&mut unwanted);
             assert_eq!(unwanted.faults, [], "{name}: {which}");
             assert!(unwanted.asked.get() > 0, "{name}: {which}");
+            let mut first = First(Vec::new());
+            source.tell_faults(&mut first);
+            let faults = doc.faults();
+            assert_eq!(first.0, faults[..faults.len().min(1)], "{name}: {which}");
         }
     }
 }

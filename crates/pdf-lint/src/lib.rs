@@ -70,7 +70,10 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 // pdf-arlington's; which model every check reads is this crate's.
 pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!`, versions, what resolves a reference and what gives
-// a stream's data are pdf-objects'.
+// a stream's data are pdf-objects': re-exported whole too, so that what
+// the reader's faults name (`fault::Place`, and the `fault::Sink` a
+// `Source` tells them to) is named at the version this crate takes.
+pub use pdf_objects;
 pub use pdf_objects::{Resolve, Streams, Unreadable, Why, dict, object, version};
 // The reader, and what it reads a file into, are pdf-structure's: its
 // `read` module is this crate's `bytes`, the name it has had here; the

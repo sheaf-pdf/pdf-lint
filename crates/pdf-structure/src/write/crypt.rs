@@ -772,6 +772,15 @@ fn context(
 /// `/Length` of `length` where that's given, and `/StmF` and `/StrF` naming
 /// it (ISO 32000-2, 7.6.2, 7.6.4.2 and 7.6.6). A value `values` hasn't is
 /// left out.
+///
+/// It's a new file's dictionary, not [`read::encryption`]'s inverse: of
+/// what that reads of a file's dictionary, it writes neither the
+/// `/Filter`, `/StmF` and `/StrF` read, nor a crypt filter's name, nor any
+/// filter past the first, so a dictionary read with one and written with
+/// the other names its first crypt filter `/StdCF`, for strings and
+/// streams both, whatever the file named.
+///
+/// [`read::encryption`]: crate::read::encryption
 #[must_use]
 pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
     let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));

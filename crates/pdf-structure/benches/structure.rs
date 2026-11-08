@@ -63,7 +63,7 @@ use pdf_objects::parse::Parser;
 /// for another version of the crate rewrites.
 mod api {
     use pdf_objects::object::{Dict, ObjectId};
-    use pdf_structure::read::{Options, Reading};
+    use pdf_structure::read::{Faults, Options, Reading};
     pub use pdf_structure::write::Body;
     use pdf_structure::write::{self, Base};
     use pdf_structure::{Document, Source};
@@ -89,7 +89,7 @@ mod api {
     /// `faults` says, where it can be made to look for none ([`QUIET`]).
     pub fn whole_as(file: &[u8], faults: bool) -> Document {
         let mut options = Options::DEFAULT;
-        options.faults = faults;
+        options.faults = if faults { Faults::Kept } else { Faults::Off };
         pdf_structure::read::document(file, &options)
     }
 

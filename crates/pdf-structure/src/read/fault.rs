@@ -282,6 +282,8 @@ pub enum Fault {
     /// the object otherwise. Only where a decoder decrypts for the reader,
     /// which only the crate's own tests give, qpdf; a reading never gives
     /// it.
+    // Hidden, as only the tests' decoder gives it: not part of the API.
+    #[doc(hidden)]
     #[error("{left} of {id} R's strings stay ciphertext: the decoder reads the object otherwise")]
     Ciphertext {
         /// How many.
@@ -292,6 +294,8 @@ pub enum Fault {
     /// The strings of `objects` objects stay ciphertext, and the decoder's
     /// words for why. Only where a decoder decrypts for the reader, which
     /// only the crate's own tests give, qpdf; a reading never gives it.
+    // Hidden, as only the tests' decoder gives it: not part of the API.
+    #[doc(hidden)]
     #[error("{} strings stay ciphertext: {why}", objects_words(*.objects))]
     Undecrypted {
         /// How many objects.
@@ -380,8 +384,11 @@ pub enum RowShape {
 /// instead says ([`Trailer::unwritten`](crate::Trailer::unwritten)), and
 /// what a fault on a section further along does ([`Fault::Section`]). Each
 /// in the reader's words, its fields the whole of what they say; or
-/// another reader's words ([`Unwritten::Other`]). Not exhaustive, as
-/// reasons are found as the reader learns.
+/// another reader's words ([`Unwritten::Other`]). Each section's own view,
+/// for a checker of the sections one by one, is
+/// [`SectionFault`](super::SectionFault)'s, which names the same reasons
+/// with the byte each was found at. Not exhaustive, as reasons are found as
+/// the reader learns.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unwritten {
@@ -494,6 +501,8 @@ pub enum Unwritten {
     /// decoder doesn't decode, in its words. Only where a decoder decodes
     /// for the reader, which only the crate's own tests give, qpdf; a
     /// reading never gives it.
+    // Hidden, as only the tests' decoder gives it: not part of the API.
+    #[doc(hidden)]
     #[error("its cross-reference stream ({filter}) doesn't decode: {why}")]
     Decoder {
         /// Its filters, as written.
@@ -504,6 +513,8 @@ pub enum Unwritten {
     /// A compressed cross-reference stream, its filters `filter` as
     /// written, where the reader is made to ask a decoder and has none.
     /// Only in the crate's own tests; a reading never gives it.
+    // Hidden, as only the tests' decoder gives it: not part of the API.
+    #[doc(hidden)]
     #[error("its cross-reference stream is compressed ({filter}), and nothing decodes it")]
     Compressed {
         /// Its filters, as written.
@@ -514,6 +525,8 @@ pub enum Unwritten {
     /// than a count holds): the decoder may have decoded another object at
     /// its number. Only where a decoder decodes for the reader, which only
     /// the crate's own tests give, qpdf; a reading never gives it.
+    // Hidden, as only the tests' decoder gives it: not part of the API.
+    #[doc(hidden)]
     #[error(
         "decoded, it's {len} bytes, not the {} its /W and /Index make: the decoder may have decoded another object {id} R",
         size_words(*.size)

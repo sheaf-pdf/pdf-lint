@@ -40,7 +40,7 @@
 //!   where it was written, as pdf-objects' `fault::Place` says it, and told
 //!   to any of pdf-objects' `fault::Sink`s ([`Source::tell_faults`]); none
 //!   looked for, at no cost, where the caller wants none
-//!   ([`Options::faults`]).
+//!   ([`Options::faults`], [`read::Faults::Off`]).
 //! - **Its phases traced**, with the `tracing` feature: the open, its
 //!   sections and a scan, each object stream decoded, a whole read, an
 //!   earlier revision's open, and each write and the object streams it

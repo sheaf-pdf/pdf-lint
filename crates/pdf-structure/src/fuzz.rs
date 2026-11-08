@@ -44,7 +44,7 @@ use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 use pdf_objects::serialize;
 
-use crate::read::{ByteSource, Error, Fault, Options, Reading, Whole, XrefEntry, shown};
+use crate::read::{ByteSource, Error, Fault, Faults, Options, Reading, Whole, XrefEntry, shown};
 use crate::source::{Document, Encryption, Origin, Source, Unread, XrefKind};
 use crate::write::{self, Base, Body, Encryptor, Pack};
 
@@ -316,7 +316,7 @@ fn whole(file: &[u8], passwords: &[Password], section: Option<usize>) -> Whole {
 fn whole_as(file: &[u8], passwords: &[Password], section: Option<usize>, faults: bool) -> Whole {
     let mut options = options();
     options.section = section;
-    options.faults = faults;
+    options.faults = if faults { Faults::Kept } else { Faults::Off };
     Reading::in_memory(
         file,
         &Options {
@@ -410,7 +410,7 @@ fn by_position(
     said_as_got(&reading.expect("it opened"));
     // And with no faults looked for, which leaves out the reads made only
     // to say one, the file's end read back among them.
-    options.faults = false;
+    options.faults = Faults::Off;
     let read = open(&source, passwords, &options, choice & 8 != 0)
         .and_then(|reading| reading.into_document());
     quiet(

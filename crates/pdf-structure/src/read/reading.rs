@@ -19,7 +19,9 @@ use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
-use super::{Crypt, Decode, Fault, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
+use super::{
+    Crypt, Decode, Fault, Faults, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry,
+};
 use crate::crypt::{List, is_xref};
 use crate::phases::phase;
 use crate::source::{
@@ -863,7 +865,10 @@ impl<S: ByteSource> Reading<S> {
             section: None,
             flate: self.reader.flate,
             passwords: &[],
-            faults: self.reader.wants,
+            faults: match self.reader.wants {
+                true => Faults::Kept,
+                false => Faults::Off,
+            },
         };
         let source = Prefix::new(&self.source, len);
         let mut prefix = Reading::open_by(source, &options, self.bound)?;
