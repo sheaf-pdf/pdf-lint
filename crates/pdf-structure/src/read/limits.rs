@@ -124,8 +124,10 @@ pub enum Recovery {
     /// read at one shift, the section's own move, or its first object's,
     /// found exactly at its `n g obj` within 64 bytes, or the header's
     /// offset taken back: each entry where it's written, else exactly at
-    /// its own `n g obj` at that shift, else where it's written
-    /// ([`Fault::Shifted`](super::Fault::Shifted)). A file whose newest
+    /// its own `n g obj` at that shift, else where a scan of the file finds
+    /// its `n g obj`, of its number and generation, exactly
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), else where it's
+    /// written ([`Fault::Shifted`](super::Fault::Shifted)). A file whose newest
     /// section doesn't read is scanned for its objects, as one whose later
     /// section doesn't keeps those it read before it.
     #[default]

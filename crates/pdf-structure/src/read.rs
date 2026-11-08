@@ -24,7 +24,8 @@
 //! ([`Reading::open`], the one way in): its header, cross-reference
 //! sections and trailer read and its security handler opened, then each
 //! object read when it's first asked for, and each object stream decoded
-//! when an object in it is. Read whole, every object is read so, in order,
+//! when an object in it is (but in a file found by scanning, whose object
+//! streams the open decodes to list their objects). Read whole, every object is read so, in order,
 //! into a [`Document`] ([`document`], [`Reading::into_document`]), or into
 //! one beside the reading, which hands
 //! out what the document doesn't hold, a stream's data among it
@@ -316,9 +317,9 @@ pub use file::Identity;
 pub use limits::{Faults, Limits, Options, Recovery};
 pub(crate) use reading::missing;
 pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed};
-use recovery::Found;
 #[cfg(any(test, fuzzing))]
 pub(crate) use recovery::header_exactly;
+use recovery::{Found, Shift};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
 pub use with_reading::WithReading;
@@ -1143,9 +1144,13 @@ struct Reader {
     /// Where each section read away from where it's said was said to be
     /// and where it was read ([`Fault::Moved`]), by the first.
     found: Box<[(usize, usize)]>,
-    /// How far each object an entry lists at a shift is from where its
-    /// section puts it ([`Origin::Shifted`]), by number.
-    shifts: Box<[(u32, i64)]>,
+    /// How each object whose entry the reading read away from where its
+    /// section puts it was found, by number: at a shift
+    /// ([`Origin::Shifted`]), or by a scan ([`Origin::Recovered`]).
+    shifts: Box<[(u32, Origin)]>,
+    /// The object streams a scan found, by number, whose members it lists
+    /// ([`Reader::members`]).
+    object_streams: Box<[u32]>,
     /// The newest entry for each object number, with its generation, by
     /// number: as the sections give them, once they're read.
     entries: Box<[(u32, (u16, XrefEntry))]>,
@@ -1610,6 +1615,7 @@ impl Reader {
             recovery: options.recovery,
             found: Box::default(),
             shifts: Box::default(),
+            object_streams: Box::default(),
             entries: Box::default(),
             offsets: Box::default(),
             handler: None,
@@ -1663,6 +1669,11 @@ impl Reader {
         if let Some(lock) = &mut reader.lock {
             lock.budget = reader.budget.load(Ordering::Relaxed);
             lock.reached = reader.reached.load(Ordering::Relaxed);
+        }
+        // A scanned file's object streams' members, once its handler is
+        // open: what a password that opens it later lists again.
+        if let Some(fault) = reader.members(file)? {
+            cx.tell(None, None, fault);
         }
         reader.trailer = trailer;
         reader.opened = cx.faults;
@@ -1844,8 +1855,8 @@ impl Reader {
                     }
                     if self.scanned {
                         record.origin = Origin::Recovered;
-                    } else if let Some(by) = self.shift(id.number) {
-                        record.origin = Origin::Shifted { by };
+                    } else if let Some(origin) = self.shift(id.number) {
+                        record.origin = origin;
                     }
                     (o, record)
                 });
@@ -2715,8 +2726,9 @@ impl Reader {
     /// row, counts from the header. Under [`Recovery::Verified`], a later
     /// section that doesn't read where it's said is looked for near it
     /// ([`Reader::section_found`]), and each section's entries read at a
-    /// shift where the file proves one ([`Reader::shifted`]), each said
-    /// once, after what's said of the section's rows.
+    /// shift where the file proves one, or where a scan finds those
+    /// neither there nor where they're written ([`Reader::shifted`]), each
+    /// section's said once, after what's said of its rows.
     fn sections_from<'f, F: Bytes<'f>>(
         &mut self,
         file: F,
@@ -2880,9 +2892,12 @@ impl Reader {
             .zip(shifts.into_iter().zip(&said));
         for (i, ((section, (mut listed, mut told)), (shift, found))) in each.enumerate() {
             cx.faults.append(&mut told);
-            // What was found elsewhere, said once a section.
-            let moved = shift.as_ref().map_or(0, |shift| shift.moved.len());
-            let neither = shift.as_ref().map_or(0, |shift| shift.neither);
+            // What was found elsewhere, said once a section: counts of
+            // object numbers, each held by a u32.
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            let moved = shift.as_ref().map_or(0, |shift| count(shift.moved.len()));
+            let scanned = shift.as_ref().map_or(0, |shift| count(shift.scanned.len()));
+            let neither = shift.as_ref().map_or(0, |shift| count(shift.neither));
             match (found, &shift) {
                 (Some(found), _) => {
                     let fault = Fault::Moved {
@@ -2890,27 +2905,27 @@ impl Reader {
                         found: found.found,
                         from_start: found.from_start,
                         moved,
+                        scanned,
                         neither,
                     };
                     cx.tell(None, None, fault);
                 }
-                (None, Some(shift)) if moved > 0 => {
+                (None, Some(shift)) if moved > 0 || scanned > 0 => {
                     let back = i64::try_from(header).map(|h| -h);
                     let fault = Fault::Shifted {
                         section: offsets[i],
                         by: shift.by,
                         from_start: header > 0 && back == Ok(shift.by),
                         moved,
+                        scanned,
                         neither,
                     };
                     cx.tell(None, None, fault);
                 }
                 _ => {}
             }
-            let by = shift.as_ref().map_or(0, |shift| shift.by);
-            let shifted: BTreeSet<u32> = shift
-                .map(|shift| shift.moved.into_iter().collect())
-                .unwrap_or_default();
+            // How each entry read elsewhere was found, by number.
+            let away: BTreeMap<u32, Origin> = shift.map(Shift::origins).unwrap_or_default();
             // Where a revision begins, at its newest section, the one after
             // it, read before it, is done.
             let begins = i == 0 || back[i] != back[i - 1];
@@ -2943,7 +2958,7 @@ impl Reader {
             // entries so far.
             if entries.is_empty() && listed.len() <= most {
                 entries = std::mem::take(&mut listed);
-                moved_entries.extend(shifted.iter().map(|&n| (n, by)));
+                moved_entries.extend(away.iter().map(|(&n, &origin)| (n, origin)));
             }
             for (n, entry) in listed {
                 match entries.len() < most || entries.contains_key(&n) {
@@ -2951,8 +2966,8 @@ impl Reader {
                         if let std::collections::btree_map::Entry::Vacant(vacant) = entries.entry(n)
                         {
                             vacant.insert(entry);
-                            if shifted.contains(&n) {
-                                moved_entries.insert(n, by);
+                            if let Some(&origin) = away.get(&n) {
+                                moved_entries.insert(n, origin);
                             }
                         }
                     }
@@ -3088,6 +3103,7 @@ impl Reader {
                                         found: place,
                                         from_start,
                                         moved: 0,
+                                        scanned: 0,
                                         neither: 0,
                                     };
                                     cx.tell(None, None, fault);
@@ -3548,41 +3564,25 @@ impl Reader {
 
     /// [`Reader::scan`] of `file`, every byte.
     fn scan_in(&mut self, file: &[u8], cx: &mut Cx, why: Unwritten) -> Trailer {
+        let Scan {
+            objects,
+            mut object_streams,
+            trailers,
+        } = scan_of(file);
         let mut entries = BTreeMap::new();
-        let mut t = Tokenizer::new(file);
-        let mut before: [Option<Token>; 2] = [None, None];
-        let mut trailers = Vec::new();
-        while let Some(token) = t.next() {
-            match token.kind {
-                Kind::Space | Kind::Comment => continue,
-                Kind::Keyword if token.bytes == b"obj" => {
-                    if let [Some(n), Some(g)] = before
-                        && n.kind == Kind::Integer
-                        && g.kind == Kind::Integer
-                        && let (Some(number), Some(generation)) = (
-                            n.integer().ok().and_then(|n| u32::try_from(n).ok()),
-                            g.integer().ok().and_then(|g| u16::try_from(g).ok()),
-                        )
-                    {
-                        let offset = n.start;
-                        entries.insert(
-                            number,
-                            (generation, XrefEntry::InUse { offset, generation }),
-                        );
-                    }
-                }
-                Kind::Keyword if token.bytes == b"stream" => {
-                    t.eol();
-                    t.data_until(b"endstream");
-                }
-                Kind::Keyword if token.bytes == b"trailer" => trailers.push(token.end()),
-                _ => {}
-            }
-            before = [before[1], Some(token)];
+        for (id, offset) in objects {
+            let generation = id.generation;
+            entries.insert(
+                id.number,
+                (generation, XrefEntry::InUse { offset, generation }),
+            );
         }
         self.entries = entries.into_iter().collect();
         self.scanned = true;
         self.facts.recovered = true;
+        object_streams.sort_unstable();
+        object_streams.dedup();
+        self.object_streams = object_streams.into();
         // The last trailer, with what it lacks of the document's entries
         // from those before it, newest first: a linearized file's last
         // may have only /Size, its first page's the rest.
@@ -4121,9 +4121,12 @@ impl Reader {
     /// decode, so no object stream's decode waits on its own or another's;
     /// and an encryption dictionary, or what one refers to, which the open
     /// reads before it has the handler an object stream's data is
-    /// decrypted by.
+    /// decrypted by. Nor in a file found by scanning, whose object streams'
+    /// members the open lists only after it has read what it reads of the
+    /// file's end ([`Reader::members`]), so that each read reads alike.
     fn follows_into_members(&self, cx: &Cx, dict: &Dict, id: ObjectId) -> bool {
         cx.members
+            && !self.scanned
             && self.native_containers()
             && !self.containers.contains_key(&id.number)
             && dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm")
@@ -4166,6 +4169,102 @@ impl Reader {
         let read = self.in_stream(cx, id, stream, header, index, container);
         Ok(read.ok().map(|(object, _)| object))
     }
+}
+
+/// What scanning a file's every byte finds ([`scan_of`]).
+struct Scan {
+    /// Each `n g obj`, its id and where its `n` starts, in the file's
+    /// order.
+    objects: Vec<(ObjectId, usize)>,
+    /// The objects whose dictionaries name `/ObjStm` before `stream`, by
+    /// number, in the file's order.
+    object_streams: Vec<u32>,
+    /// Where each `trailer` keyword ends, in the file's order.
+    trailers: Vec<usize>,
+}
+
+/// The `n g obj` headers, object streams and `trailer` keywords in `file`,
+/// read token by token, each stream's data passed over up to `endstream`:
+/// what [`Reader::scan`] reads a file whose sections don't read by, and
+/// [`Reader::shifted`] finds an entry neither where its section puts it nor
+/// at its shift by.
+fn scan_of(file: &[u8]) -> Scan {
+    let mut objects = Vec::new();
+    let mut t = Tokenizer::new(file);
+    let mut before: [Option<Token>; 2] = [None, None];
+    let mut trailers = Vec::new();
+    // The object whose `obj` was last seen, and whether its dictionary
+    // names `/ObjStm`: an object stream's, whose members the reading
+    // lists once its handler is open.
+    let mut object: Option<(u32, bool)> = None;
+    let mut object_streams = Vec::new();
+    while let Some(token) = t.next() {
+        match token.kind {
+            Kind::Space | Kind::Comment => continue,
+            Kind::Keyword if token.bytes == b"obj" => {
+                object = None;
+                if let [Some(n), Some(g)] = before
+                    && n.kind == Kind::Integer
+                    && g.kind == Kind::Integer
+                    && let (Some(number), Some(generation)) = (
+                        n.integer().ok().and_then(|n| u32::try_from(n).ok()),
+                        g.integer().ok().and_then(|g| u16::try_from(g).ok()),
+                    )
+                {
+                    objects.push((ObjectId::new(number, generation), n.start));
+                    object = Some((number, false));
+                }
+            }
+            Kind::Name if is_name(token.bytes, b"ObjStm") => {
+                if let Some((_, named)) = &mut object {
+                    *named = true;
+                }
+            }
+            Kind::Keyword if token.bytes == b"endobj" => object = None,
+            Kind::Keyword if token.bytes == b"stream" => {
+                if let Some((number, true)) = object.take() {
+                    object_streams.push(number);
+                }
+                t.eol();
+                t.data_until(b"endstream");
+            }
+            Kind::Keyword if token.bytes == b"trailer" => trailers.push(token.end()),
+            _ => {}
+        }
+        before = [before[1], Some(token)];
+    }
+    Scan {
+        objects,
+        object_streams,
+        trailers,
+    }
+}
+
+/// Whether a name token's bytes, `/` and the name as written, are the name
+/// `name`, its `#xx` escapes read (ISO 32000-2, 7.3.5).
+fn is_name(token: &[u8], name: &[u8]) -> bool {
+    let Some(written) = token.strip_prefix(b"/") else {
+        return false;
+    };
+    if !written.contains(&b'#') {
+        return written == name;
+    }
+    let mut read = Vec::with_capacity(written.len());
+    let mut bytes = written.iter();
+    while let Some(&b) = bytes.next() {
+        let escaped = (b == b'#')
+            .then(|| bytes.as_slice().get(..2))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match escaped {
+            Some(byte) => {
+                read.push(byte);
+                bytes.nth(1);
+            }
+            None => read.push(b),
+        }
+    }
+    read == name
 }
 
 /// Whether `o` is a reference, or holds one, at any depth.
@@ -8216,7 +8315,8 @@ pub(crate) mod tests {
     fn a_stream_that_doesnt_decode_says_why() {
         // A filter the reader doesn't decode, on the object stream, and on
         // the cross-reference stream, whose rows don't read, so the file
-        // is scanned, and the compressed objects aren't found.
+        // is scanned, and the compressed objects are found in the object
+        // stream the scan found.
         let (file, _) = compressed(false);
         let image = |file: &[u8], from: usize| {
             let at = from + find(&file[from..], b"/FlateDecode").unwrap();
@@ -8241,7 +8341,10 @@ pub(crate) mod tests {
             why.contains("its cross-reference stream doesn't decode: its filter /JBIG2Decode"),
             "{why}"
         );
-        assert!(doc.get(ObjectId::new(2, 0)).is_err());
+        let record = doc.record(ObjectId::new(2, 0)).unwrap();
+        assert!(matches!(record.origin, Origin::Stream { stream: 4, .. }));
+        let members = (doc.faults().iter()).filter(|(_, f)| matches!(f, Fault::Members { .. }));
+        assert_eq!(members.count(), 1);
         // An encrypted file's object streams, without a decoder.
         let (file, _) = compressed(true);
         let why = document(&file, &Options::DEFAULT)

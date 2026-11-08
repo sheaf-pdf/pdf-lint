@@ -574,8 +574,11 @@ impl Eq for Record {}
 pub enum Origin {
     /// At the offset a cross-reference section gives.
     File,
-    /// At an offset found by scanning the file, as its sections don't read
-    /// ([`Trailer::unwritten`]).
+    /// At an offset found by scanning the file: as its sections don't read
+    /// ([`Trailer::unwritten`]), or as its entry is neither where its
+    /// cross-reference section puts it nor at the shift the section's
+    /// entries are read at ([`Fault::Moved`], [`Fault::Shifted`]), exactly
+    /// at its own `n g obj`.
     Recovered,
     /// In object stream `stream`'s decoded data, the `index`th of its
     /// objects (ISO 32000-2, 7.5.7).

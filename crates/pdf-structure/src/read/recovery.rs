@@ -4,17 +4,25 @@
 //! where that offset puts it counted from the file's first byte rather
 //! than its header, else at the nearest `xref` or cross-reference stream
 //! within [`NEAR`] bytes, exactly there, that reads; and a section's
-//! entries read at one shift, each exactly at its own `n g obj` there, else
-//! where it's written. A section read where it's said pays two probes, its
-//! first object's header and its furthest's, each where it's written. What's looked at to tell where they are tells
-//! nothing of its own: only what's found is said, one fault a section.
+//! entries read at one shift, each exactly at its own `n g obj` there,
+//! else, once the file is shown not to be as written, where a scan of the
+//! file finds its `n g obj`, else where it's written. A section read where
+//! it's said pays two probes, its first object's header and its
+//! furthest's, each where it's written. What's looked at to tell where
+//! they are tells nothing of its own: only what's found is said, one fault
+//! a section.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
+
+use pdf_objects::fault::Place;
 use pdf_objects::object::ObjectId;
 use pdf_objects::parse::{self, Parser};
 use pdf_tokenizer::{Kind, Tokenizer, is_delimiter, is_white_space};
 
 use super::window::Bytes;
-use super::{Cx, NEAR, Reader, Recovery, Rows, XrefEntry};
+use super::{Cx, Fault, NEAR, Reader, Recovery, Rows, XrefEntry, scan_of};
+use crate::source::Origin;
 
 /// How many bytes from where an `n g obj` starts its three tokens are
 /// looked for in: one as written ends well within it.
@@ -48,9 +56,21 @@ pub(super) struct Shift {
     pub(super) by: i64,
     /// The numbers whose entries it moved.
     pub(super) moved: Vec<u32>,
-    /// How many entries in use are neither where the section puts them
-    /// nor there.
+    /// The numbers whose entries are neither where the section puts them
+    /// nor at the shift, and are read where a scan of the file finds them.
+    pub(super) scanned: Vec<u32>,
+    /// How many entries in use are at none of those places.
     pub(super) neither: usize,
+}
+
+impl Shift {
+    /// How each entry it moved was found, by number.
+    pub(super) fn origins(self) -> BTreeMap<u32, Origin> {
+        let by = self.by;
+        let moved = (self.moved.into_iter()).map(|n| (n, Origin::Shifted { by }));
+        let scanned = (self.scanned.into_iter()).map(|n| (n, Origin::Recovered));
+        moved.chain(scanned).collect()
+    }
 }
 
 /// How far `to` is from `from`: less than 0 before it.
@@ -111,6 +131,19 @@ fn xref_exactly(bytes: &[u8], base: usize, p: usize) -> bool {
         return false;
     };
     bytes[i..].starts_with(b"xref") && bytes.get(i + 4).is_some_and(|&b| stops(b))
+}
+
+/// Where a scan of `file`, every byte, finds each object's `n g obj`
+/// ([`scan_of`]), exactly ([`header_exactly`]), by its id: the last in the
+/// file, as an update appends.
+fn scanned(file: &[u8]) -> BTreeMap<ObjectId, usize> {
+    let mut found = BTreeMap::new();
+    for (id, at) in scan_of(file).objects {
+        if header_exactly(file, 0, at, true) == Some(id) {
+            found.insert(id, at);
+        }
+    }
+    found
 }
 
 impl Reader {
@@ -290,9 +323,13 @@ impl Reader {
     /// after it, and an earlier section may list objects past it. Each
     /// entry in use is read where it's written, where its `n g obj` is,
     /// else exactly at its own `n g obj` at the shift, its offset moved
-    /// there, else where it's written. None for any section where no
-    /// section has a shift, the file read as written; each section `said`
-    /// to be elsewhere has its move.
+    /// there; else, as the file is then shown not to be as written, where
+    /// a scan of its every byte finds its `n g obj`, its number and
+    /// generation, exactly, the last in the file ([`scan_of`], as a file
+    /// whose sections don't read is scanned), its offset moved there; else
+    /// where it's written. None for any section where no section has a
+    /// shift, the file read as written; each section `said` to be
+    /// elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
         &self,
         file: F,
@@ -308,12 +345,16 @@ impl Reader {
         let Some(&first) = own.iter().flatten().next() else {
             return Ok(lists.iter().map(|_| None).collect());
         };
+        // Where a scan of the file finds each object's `n g obj`, made
+        // where an entry is first found at neither place.
+        let mut scan: Option<BTreeMap<ObjectId, usize>> = None;
         let mut shifts = Vec::with_capacity(lists.len());
         for ((rows, _), by) in lists.iter_mut().zip(own) {
             let by = by.unwrap_or(first);
             let mut shift = Shift {
                 by,
                 moved: Vec::new(),
+                scanned: Vec::new(),
                 neither: 0,
             };
             for (&n, (generation, entry)) in rows.iter_mut() {
@@ -329,10 +370,18 @@ impl Reader {
                 let moved = isize::try_from(by)
                     .ok()
                     .and_then(|by| offset.checked_add_signed(by));
-                match (self.exactly(file, *offset, by)? == Some(id), moved) {
-                    (true, Some(moved)) => {
-                        *offset = moved;
-                        shift.moved.push(n);
+                if let (true, Some(moved)) = (self.exactly(file, *offset, by)? == Some(id), moved) {
+                    *offset = moved;
+                    shift.moved.push(n);
+                    continue;
+                }
+                if scan.is_none() {
+                    scan = Some(scanned(&file.all()?));
+                }
+                match scan.as_ref().and_then(|found| found.get(&id)) {
+                    Some(&at) if at != *offset => {
+                        *offset = at;
+                        shift.scanned.push(n);
                     }
                     _ => shift.neither += 1,
                 }
@@ -342,9 +391,131 @@ impl Reader {
         Ok(shifts)
     }
 
-    /// How far object number `n`'s entry was moved from where its section
-    /// put it, where it was ([`Reader::shifted`]).
-    pub(super) fn shift(&self, n: u32) -> Option<i64> {
+    /// Each object in the object streams a scan found
+    /// ([`Reader::scan`]), listed as their headers give them: by the last
+    /// such stream in the file that has it, as an update appends, unless
+    /// the scan found its number at an offset, which stands; at generation
+    /// 0, read from the stream ([`Origin::Stream`](crate::Origin::Stream)).
+    /// Each stream it decodes is kept as the container a member's read
+    /// decodes, so it's decoded once, its faults told once and the budget
+    /// spent once. Where the reader can't decode them, in an encrypted file
+    /// no password opened, none is listed, and a password that opens it
+    /// later lists them as one given at the open would; what it listed
+    /// before is listed anew. What it found, said
+    /// ([`Fault::Members`](super::Fault::Members)): none where the scan
+    /// found no object stream, or listed none and read every one's header.
+    /// In a file whose sections read, a member no section lists isn't
+    /// listed: a reference to it is to no object (ISO 32000-2, 7.3.10).
+    pub(super) fn members<'f, F: Bytes<'f>>(&mut self, file: F) -> Result<Option<Fault>, F::Error> {
+        if !self.scanned || self.object_streams.is_empty() {
+            return Ok(None);
+        }
+        let listed = |&(_, (_, entry)): &(u32, (u16, XrefEntry))| {
+            !matches!(entry, XrefEntry::Compressed { .. })
+        };
+        if !self.entries.iter().all(listed) {
+            self.entries = self.entries.iter().copied().filter(listed).collect();
+            self.slots = self.entries.iter().map(|_| OnceLock::new()).collect();
+        }
+        // The object streams, in the order their offsets come in the file.
+        let mut streams: Vec<(usize, u32)> = (self.object_streams.iter())
+            .filter_map(|&s| match self.entry(s) {
+                Some(&(0, XrefEntry::InUse { offset, .. })) => Some((offset, s)),
+                _ => None,
+            })
+            .collect();
+        streams.sort_unstable();
+        let mut headers: Vec<(u32, Vec<u32>)> = Vec::new();
+        let mut unread = 0;
+        match self.native_containers() {
+            false => unread = streams.len(),
+            true => {
+                for &(_, s) in &streams {
+                    self.containers.entry(s).or_default();
+                }
+                for &(_, s) in &streams {
+                    match self.container(file, s)?.map(|c| &c.header) {
+                        Some(Ok(header)) => {
+                            headers.push((s, header.iter().map(|&(n, _)| n).collect()));
+                        }
+                        _ => unread += 1,
+                    }
+                }
+            }
+        }
+        let mut members = BTreeMap::new();
+        for (stream, numbers) in &headers {
+            for (index, &n) in numbers.iter().enumerate() {
+                let Ok(index) = u32::try_from(index) else {
+                    break;
+                };
+                if n != 0 && self.index(n).is_none() {
+                    members.insert(n, (*stream, index));
+                }
+            }
+        }
+        let from: BTreeSet<u32> = members.values().map(|&(stream, _)| stream).collect();
+        let objects = members.len();
+        if !members.is_empty() {
+            let mut entries: BTreeMap<u32, (u16, XrefEntry)> = std::mem::take(&mut self.entries)
+                .into_vec()
+                .into_iter()
+                .collect();
+            for (n, (stream, index)) in members {
+                entries.insert(n, (0, XrefEntry::Compressed { stream, index }));
+            }
+            self.entries = entries.into_iter().collect();
+            // A slot for each entry, nothing read; the object streams kept
+            // as decoded.
+            self.slots = self.entries.iter().map(|_| OnceLock::new()).collect();
+        }
+        let fault = Fault::Members {
+            objects,
+            streams: from.len(),
+            unread,
+        };
+        Ok((objects > 0 || unread > 0).then_some(fault))
+    }
+
+    /// What [`Reader::members`] says where none of the object streams a
+    /// scan found is read: none of their members listed, and each said as
+    /// one whose objects don't read.
+    pub(super) fn unlisted(&mut self) -> Option<Fault> {
+        let listed = |&(_, (_, entry)): &(u32, (u16, XrefEntry))| {
+            !matches!(entry, XrefEntry::Compressed { .. })
+        };
+        if !self.entries.iter().all(listed) {
+            self.entries = self.entries.iter().copied().filter(listed).collect();
+            self.slots = self.entries.iter().map(|_| OnceLock::new()).collect();
+        }
+        let unread = self.object_streams.len();
+        let fault = Fault::Members {
+            objects: 0,
+            streams: 0,
+            unread,
+        };
+        (self.scanned && unread > 0).then_some(fault)
+    }
+
+    /// What [`Reader::members`] says, `fault`, in place of what it said as
+    /// the file was opened: where faults are looked for.
+    pub(super) fn said_members(&mut self, fault: Option<Fault>) {
+        if !self.wants {
+            return;
+        }
+        let said = (self.opened.iter()).position(|(_, f)| matches!(f, Fault::Members { .. }));
+        match (said, fault) {
+            (Some(i), Some(fault)) => self.opened[i].1 = fault,
+            (Some(i), None) => drop(self.opened.remove(i)),
+            (None, Some(fault)) => self.opened.push((Place::new(None, None), fault)),
+            (None, None) => {}
+        }
+    }
+
+    /// How object number `n`'s entry was found away from where its section
+    /// put it, where it was ([`Reader::shifted`]): at a shift
+    /// ([`Origin::Shifted`]), or by a scan ([`Origin::Recovered`]).
+    pub(super) fn shift(&self, n: u32) -> Option<Origin> {
         let i = self.shifts.binary_search_by_key(&n, |&(n, _)| n).ok()?;
         Some(self.shifts[i].1)
     }

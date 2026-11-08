@@ -85,9 +85,10 @@ pub struct Base {
     /// [`Base::holds`] reads again.
     pub(super) startxref: Option<usize>,
     /// Each object of the reading it was made of that the reading read at
-    /// a shift ([`Origin::Shifted`](crate::Origin::Shifted)): its number,
-    /// its generation and where it is in the file's bytes, which an update
-    /// after it lists, so that it's read there with no shift to find.
+    /// a shift ([`Origin::Shifted`](crate::Origin::Shifted)) or where a
+    /// scan found it ([`Origin::Recovered`](crate::Origin::Recovered)): its
+    /// number, its generation and where it is in the file's bytes, which an
+    /// update after it lists, so that it's read there with nothing to find.
     pub(super) shifted: Vec<(u32, u16, usize)>,
 }
 
@@ -103,7 +104,8 @@ impl Base {
     /// reading's [`SourceId`]. New numbers start past its trailer's `/Size`
     /// (below 2³²), every number its sections list, in use or free, and its
     /// cross-reference streams' numbers. Where the reading read objects at
-    /// a shift, it keeps where each is, which an update after it lists.
+    /// a shift, or where a scan found them, it keeps where each is, which
+    /// an update after it lists.
     ///
     /// # Errors
     ///
@@ -235,9 +237,10 @@ impl Base {
 /// line isn't ended, each body at its number, in the order given, then a
 /// section of `base`'s kind listing only those, and each object the reading
 /// [`Base::of`] was made of read at a shift
-/// ([`Origin::Shifted`](crate::Origin::Shifted)) where it is, unless a body
-/// is written at its number, so that a reader reads it there with no shift
-/// to find; in runs, positions counted
+/// ([`Origin::Shifted`](crate::Origin::Shifted)) or where a scan found it
+/// ([`Origin::Recovered`](crate::Origin::Recovered)) where it is, unless a
+/// body is written at its number, so that a reader reads it there with
+/// nothing to find; in runs, positions counted
 /// from `base`'s header, a stream's not deflated, numbered at
 /// [`Options::xref_from`] or past `base.size` and every number written,
 /// whichever is higher, passing over a number the objects written or the

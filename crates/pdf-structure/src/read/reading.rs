@@ -643,10 +643,38 @@ impl<S: ByteSource> Reading<S> {
     // would make neither side smaller.
     #[allow(clippy::result_large_err)]
     pub fn unlock(mut self, passwords: &[Encoded]) -> Result<Reading<S>, (Reading<S>, Refused)> {
+        let locked = self.reader.handler.is_none();
         match self.reader.unlock(passwords) {
-            Ok(()) => Ok(self),
+            Ok(()) => {
+                if locked && self.reader.handler.is_some() {
+                    self.members_again();
+                }
+                Ok(self)
+            }
             Err(refused) => Err((self, refused)),
         }
+    }
+
+    /// A scanned file's object streams' members listed again, now that a
+    /// password opened it, as a reading opened by that password lists them
+    /// ([`Reader::members`]). Where the source doesn't give the bytes of
+    /// one, its members aren't listed, and it's said as one whose objects
+    /// don't read.
+    fn members_again(&mut self) {
+        let fault = match self.source.whole() {
+            Some(file) => {
+                let Ok(fault) = self.reader.members(InMemory(file));
+                fault
+            }
+            None => {
+                let file = ByPosition::new(&self.source, self.bound);
+                match self.reader.members(file) {
+                    Ok(fault) => fault,
+                    Err(_) => self.reader.unlisted(),
+                }
+            }
+        };
+        self.reader.said_members(fault);
     }
 
     /// The file read by position.
@@ -809,7 +837,9 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// Each object whose entry the reading read at a shift
-    /// ([`Origin::Shifted`](crate::Origin::Shifted)): its number, its
+    /// ([`Origin::Shifted`](crate::Origin::Shifted)) or where a scan found
+    /// it, in a file whose sections read
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)): its number, its
     /// generation and where it is, for the writer, whose update lists each
     /// where it is.
     pub(crate) fn shifted(&self) -> Vec<(u32, u16, usize)> {
@@ -921,7 +951,11 @@ impl<S: ByteSource> Reading<S> {
         let reader = &self.reader;
         if let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) {
             let (values, id) = (&stored.values, &stored.id);
+            let locked = prefix.reader.handler.is_none();
             prefix.reader.key(handler, values, id, &reader.encryption);
+            if locked && prefix.reader.handler.is_some() {
+                prefix.members_again();
+            }
         }
         Ok(prefix)
     }

@@ -263,7 +263,8 @@ mod tests {
     /// reading of the file, as a source, answers as the file opened, once
     /// it has read every object, its faults in the same order; before, it
     /// holds no object stream's data, and has none in the clear, until it
-    /// reads an object in it.
+    /// reads an object in it, but in a file found by scanning, whose object
+    /// streams the open decodes to list their members.
     #[test]
     fn an_opened_file_answers_as_its_document_and_decodes_as_its_reading() {
         let (mut streams, mut held, mut lent, mut decoded) = (0, 0, 0, 0);
@@ -298,7 +299,8 @@ mod tests {
                 .chain(&alone.in_the_clear)
                 .copied()
                 .collect();
-            for &stream in &containers {
+            let scanned = reading.trailer().unwritten.is_some();
+            for &stream in containers.iter().filter(|_| !scanned) {
                 assert_eq!(Source::held(&reading, stream), None, "{name}: {stream}");
                 assert!(!Source::in_the_clear(&reading, stream), "{name}: {stream}");
             }

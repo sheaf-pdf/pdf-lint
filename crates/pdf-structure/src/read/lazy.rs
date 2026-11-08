@@ -281,7 +281,8 @@ pub(super) fn files() -> Vec<Named> {
     }
     // Sections and objects not where the file says, read where it proves
     // they are: a cut, offsets from the first byte past a header 100
-    // bytes in, and rows two bytes past their objects.
+    // bytes in, rows two bytes past their objects, and a section moved
+    // whose rows are at two shifts.
     let laid = &recovery::tests::OBJECTS;
     let recovered = [
         ("a cut", recovery::tests::cut().0),
@@ -293,10 +294,32 @@ pub(super) fn files() -> Vec<Named> {
             "rows two bytes past their objects",
             recovery::tests::laid_out(b"", laid, &|_, at| at + 2, &|at| at).0,
         ),
+        (
+            "a section moved, its rows at two shifts",
+            recovery::tests::two_shifts().0,
+        ),
     ];
     for (name, file) in recovered {
         files.push((name.to_string(), file, none.clone()));
     }
+    // Scanned, its objects in object streams, which the reading lists: in
+    // the clear, and encrypted, read by its password and by a wrong one.
+    files.push((
+        "scanned, its objects in object streams".to_string(),
+        recovery::tests::scanned_with_object_streams().0,
+        none.clone(),
+    ));
+    let encrypted = recovery::tests::scanned_encrypted_with_object_streams();
+    files.push((
+        "scanned, its objects in encrypted object streams".to_string(),
+        encrypted.clone(),
+        vec![Password("user")],
+    ));
+    files.push((
+        "scanned, its objects in encrypted object streams, locked".to_string(),
+        encrypted,
+        vec![Password("wrong")],
+    ));
     let aes = fixture::encrypted(&settings(KINDS[4], b"user"), &to_encrypt(&[]), root());
     files.push((
         "AES-256, a byte before its header".to_string(),

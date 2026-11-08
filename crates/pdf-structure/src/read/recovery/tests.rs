@@ -187,6 +187,7 @@ fn a_cut_files_section_and_objects_past_the_cut_are_read_where_they_are() {
         found: main,
         from_start: false,
         moved: 1,
+        scanned: 0,
         neither: 0,
     };
     assert_eq!(doc.faults(), [(Place::new(None, None), moved)]);
@@ -237,6 +238,7 @@ fn a_file_whose_offsets_count_from_its_first_byte_is_read_so() {
             found: table,
             from_start: true,
             moved: 4,
+            scanned: 0,
             neither: 0,
         };
         let header = Fault::HeaderAt { at: h };
@@ -273,6 +275,7 @@ fn a_tables_rows_two_bytes_off_are_read_where_their_objects_are() {
             by: -i64::try_from(by).unwrap(),
             from_start: false,
             moved: 4,
+            scanned: 0,
             neither: 0,
         };
         assert_eq!(recoveries(&doc), [shifted], "{by}");
@@ -302,6 +305,7 @@ fn a_startxref_past_its_xref_is_read_at_the_xref() {
         found: table,
         from_start: false,
         moved: 0,
+        scanned: 0,
         neither: 0,
     };
     assert_eq!(doc.faults(), [(Place::new(None, None), moved)]);
@@ -333,10 +337,12 @@ fn a_section_near_that_doesnt_read_isnt_taken() {
 
 /// A table whose rows are two bytes past their objects, but object 3's,
 /// which at that shift is object 4's `n g obj`, object 5's, which is
-/// object 5's at another generation, and object 6's, one byte past its
-/// object, so that at that shift it's the line's end before its `n g obj`:
-/// those three aren't taken, read where they're written, and said as
-/// neither.
+/// object 5's at another generation, object 6's, one byte past its
+/// object, so that at that shift it's the line's end before its `n g obj`,
+/// and object 7's, one byte past its object after a blank line, so that
+/// at that shift it's white-space after white-space before its `n g obj`:
+/// none of those four taken at the shift, and of them 3, 6 and 7 read
+/// where a scan of the file finds them, 5 0 found nowhere.
 #[test]
 fn a_shift_onto_another_objects_header_isnt_taken() {
     let objects = [
@@ -346,28 +352,32 @@ fn a_shift_onto_another_objects_header_isnt_taken() {
         OBJECTS[3],
         (5, "(five)"),
         (6, "(six)"),
+        (7, "(seven)"),
     ];
     let mut file = b"%PDF-1.7\n".to_vec();
     let mut places = Vec::new();
     for &(n, body) in &objects {
+        if n == 7 {
+            file.extend_from_slice(b"\n");
+        }
         places.push((n, file.len()));
         let generation = if n == 5 { 1 } else { 0 };
         file.extend_from_slice(format!("{n} {generation} obj\n{body}\nendobj\n").as_bytes());
     }
     let at = |n: u32| places.iter().find(|&&(m, _)| m == n).unwrap().1;
     let table = file.len();
-    file.extend_from_slice(b"xref\n0 7\n0000000000 65535 f \n");
-    for n in 1..=6 {
-        // Object 3's row is object 4's, two past; object 6's one past.
+    file.extend_from_slice(b"xref\n0 8\n0000000000 65535 f \n");
+    for n in 1..=7 {
+        // Object 3's row is object 4's, two past; 6's and 7's one past.
         let written = match n {
             3 => at(4) + 2,
-            6 => at(6) + 1,
+            6 | 7 => at(n) + 1,
             n => at(n) + 2,
         };
         file.extend_from_slice(format!("{written:010} 00000 n \n").as_bytes());
     }
     file.extend_from_slice(
-        format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes(),
+        format!("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes(),
     );
     let doc = read(&file);
     let shifted = Fault::Shifted {
@@ -375,7 +385,8 @@ fn a_shift_onto_another_objects_header_isnt_taken() {
         by: -2,
         from_start: false,
         moved: 3,
-        neither: 3,
+        scanned: 3,
+        neither: 1,
     };
     assert_eq!(recoveries(&doc), [shifted]);
     for n in [1, 2, 4] {
@@ -383,11 +394,108 @@ fn a_shift_onto_another_objects_header_isnt_taken() {
         assert_eq!(record.origin, Origin::Shifted { by: -2 }, "{n}");
         assert_eq!(record.at.start, at(n), "{n}");
     }
-    // None read: not object 4's bytes as 3, nor 5 1 obj as 5 0, nor 6
-    // past the white-space its shift lands on.
-    for n in [3, 5, 6] {
-        assert!(doc.get(ObjectId::new(n, 0)).is_err(), "{n}");
+    // Not object 4's bytes as 3, nor 6 or 7 past the white-space their
+    // shift lands on: each where its own `n g obj` is.
+    for n in [3, 6, 7] {
+        let record = doc.record(ObjectId::new(n, 0)).unwrap();
+        assert_eq!(record.origin, Origin::Recovered, "{n}");
+        assert_eq!(record.at.start, at(n), "{n}");
     }
+    // Nor 5 1 obj as 5 0.
+    assert!(doc.get(ObjectId::new(5, 0)).is_err());
+}
+
+/// A file whose `startxref` is five bytes past its `xref`, so that its
+/// section is read five bytes before, and whose rows for objects 1 and 2
+/// are five bytes past them, at the section's move, but those for 3 and 4
+/// four bytes before them: a file cut in two places. Also each object's
+/// place and the table's.
+pub(crate) fn two_shifts() -> (Vec<u8>, Vec<(u32, usize)>, usize) {
+    let row = |n: u32, at: usize| if n <= 2 { at + 5 } else { at - 4 };
+    laid_out(b"", &OBJECTS, &row, &|at| at + 5)
+}
+
+/// [`two_shifts`]: the section read where it is, objects 1 and 2 at its
+/// move, and 3 and 4, neither where they're written nor at that move,
+/// where a scan of the file finds their `n g obj`; one fault, every object
+/// read and the page reached.
+#[test]
+fn a_moved_sections_entries_at_neither_place_are_read_where_a_scan_finds_them() {
+    let (file, places, table) = two_shifts();
+    let doc = read(&file);
+    let moved = Fault::Moved {
+        at: table + 5,
+        found: table,
+        from_start: false,
+        moved: 2,
+        scanned: 2,
+        neither: 0,
+    };
+    assert_eq!(doc.faults(), [(Place::new(None, None), moved)]);
+    let origin = |n| match n {
+        1 | 2 => Origin::Shifted { by: -5 },
+        _ => Origin::Recovered,
+    };
+    each_object_at(&doc, &places, &origin);
+    reaches_its_page(&doc);
+    assert!(doc.facts.recovered);
+    assert_eq!(doc.trailer.unwritten, None);
+    // Its rows as written.
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let sections = reading.sections().unwrap();
+    assert_eq!(sections.sections[0].said, Some(table + 5));
+    assert_eq!(row(&sections.sections[0], 3), places[2].1 - 4);
+}
+
+/// An update whose section is five bytes before where its `startxref`
+/// says, after a file whose section is where it's said, its first and
+/// last rows too, but whose row for object 2 is seven bytes before it: the
+/// update's section moved, and the earlier section's entries checked at
+/// that move, object 2 at neither place, where a scan finds it; a fault
+/// each, the earlier's saying what the scan found though it moved none.
+#[test]
+fn a_section_checked_at_anothers_shift_says_what_a_scan_finds() {
+    let row = |n: u32, at: usize| if n == 2 { at - 7 } else { at };
+    let (mut file, mut places, table) = laid_out(b"", &OBJECTS, &row, &|at| at);
+    let five = file.len();
+    file.extend_from_slice(b"5 0 obj\n(five)\nendobj\n");
+    places.push((5, five));
+    let update = file.len();
+    file.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n5 1\n{five:010} 00000 n \ntrailer\n<< /Size 6 /Root 1 0 R /Prev {table} >>\nstartxref\n{}\n%%EOF\n",
+            update + 5
+        )
+        .as_bytes(),
+    );
+    let doc = read(&file);
+    let moved = Fault::Moved {
+        at: update + 5,
+        found: update,
+        from_start: false,
+        moved: 0,
+        scanned: 0,
+        neither: 0,
+    };
+    let shifted = Fault::Shifted {
+        section: table,
+        by: -5,
+        from_start: false,
+        moved: 0,
+        scanned: 1,
+        neither: 0,
+    };
+    assert_eq!(recoveries(&doc), [moved, shifted]);
+    assert_eq!(doc.faults().len(), 2);
+    let origin = |n| match n {
+        2 => Origin::Recovered,
+        _ => Origin::File,
+    };
+    for &(n, at) in &places {
+        let record = doc.record(ObjectId::new(n, 0)).unwrap();
+        assert_eq!((record.at.start, record.origin), (at, origin(n)), "{n}");
+    }
+    reaches_its_page(&doc);
 }
 
 /// An update whose `/Prev` gives no section, none near it either: said,
@@ -458,8 +566,9 @@ fn a_section_given_a_few_bytes_off_isnt_looked_for() {
 /// An update after a reading whose sections or objects were read
 /// elsewhere ([`Base::of`]): its `/Prev` where the reading read the newest
 /// section, so that the update read back reads that section where it's
-/// said, and its section listing each object the reading read at a shift
-/// where it is, so that it's read there as written; each object as the
+/// said, and its section listing each object the reading read at a shift,
+/// or where a scan found it, where it is, so that it's read there as
+/// written; each object as the
 /// reading read it, and the update's; and its base holds its file, not
 /// the file one byte longer, though its last `startxref` isn't the
 /// `/Prev` the update writes.
@@ -470,11 +579,13 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
     let (start, _, first) = laid_out(&prefix, &OBJECTS, &|_, at| at, &|at| at);
     let (past, _, _) = laid_out(b"", &OBJECTS, &|_, at| at, &|at| at + 5);
     let (rows, _, table) = laid_out(b"", &OBJECTS, &|_, at| at + 2, &|at| at);
+    let (two, _, two_table) = two_shifts();
     let rows_shift = Fault::Shifted {
         section: table,
         by: -2,
         from_start: false,
         moved: 4,
+        scanned: 0,
         neither: 0,
     };
     // What the update read back says of the file before it: the newest
@@ -488,6 +599,7 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
                 found: main,
                 from_start: false,
                 moved: 1,
+                scanned: 0,
                 neither: 0,
             }],
         ),
@@ -499,11 +611,24 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
                 by: -100,
                 from_start: true,
                 moved: 4,
+                scanned: 0,
                 neither: 0,
             }],
         ),
         ("startxref past", past, vec![]),
         ("rows past", rows, vec![rows_shift]),
+        (
+            "two shifts",
+            two,
+            vec![Fault::Shifted {
+                section: two_table,
+                by: -5,
+                from_start: false,
+                moved: 2,
+                scanned: 2,
+                neither: 0,
+            }],
+        ),
     ];
     for (name, file, said) in files {
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
@@ -537,24 +662,296 @@ fn an_update_after_a_recovered_reading_reads_back_alike() {
             got.unplace();
             want.unplace();
             assert_eq!(got, want, "{name}: {id}");
-            // One read at a shift the update lists where it is.
+            // One read at a shift, or where a scan found it, the update
+            // lists where it is.
             let (got, want) = (back.record(id).unwrap(), before.record(id).unwrap());
-            let origin = match want.origin {
-                Origin::Shifted { .. } => Origin::File,
-                origin => origin,
-            };
+            let elsewhere = matches!(want.origin, Origin::Shifted { .. } | Origin::Recovered);
+            let origin = if elsewhere { Origin::File } else { want.origin };
             assert_eq!((got.origin, got.at), (origin, want.at), "{name}: {id}");
             let listed = written.section.lists(id.number);
-            assert_eq!(
-                listed,
-                matches!(want.origin, Origin::Shifted { .. }),
-                "{name}: {id}"
-            );
+            assert_eq!(listed, elsewhere, "{name}: {id}");
         }
         assert_eq!(
             back.get(id).ok().and_then(Object::as_integer),
             Some(7),
             "{name}"
         );
+    }
+}
+
+/// A file whose sections don't read, so that it's scanned, of a catalog
+/// and objects in two object streams, 10 and 11, after it, and object 4
+/// at an offset too: 10, whose data is hexadecimal without its end marker,
+/// a fault its decode says, holds 2 and 3; 11, later, holds 3 again and 4.
+/// The file, and how many bytes 10 decodes to, which is all the budget
+/// spends, as 11 isn't filtered.
+pub(crate) fn scanned_with_object_streams() -> (Vec<u8>, usize) {
+    let stream = |n: u32, members: &[(u32, &str)], hex: bool| {
+        let mut header = String::new();
+        let mut body = String::new();
+        for (n, value) in members {
+            header.push_str(&format!("{n} {} ", body.len()));
+            body.push_str(value);
+            body.push(' ');
+        }
+        let data = format!("{header}{body}");
+        let first = header.len();
+        let (filter, written) = match hex {
+            true => {
+                let hex: String = data.bytes().map(|b| format!("{b:02X}")).collect();
+                (" /Filter /ASCIIHexDecode", hex)
+            }
+            false => ("", data.clone()),
+        };
+        let object = format!(
+            "{n} 0 obj\n<< /Type /ObjStm /N {} /First {first}{filter} /Length {} >>\nstream\n{written}\nendstream\nendobj\n",
+            members.len(),
+            written.len()
+        );
+        (object, data.len())
+    };
+    let (ten, ten_len) = stream(
+        10,
+        &[
+            (2, "<< /Type /Pages /Kids [] /Count 0 >>"),
+            (3, "(three, old)"),
+        ],
+        true,
+    );
+    let (eleven, eleven_len) = stream(11, &[(3, "(three)"), (4, "(four, in a stream)")], false);
+    let mut file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_vec();
+    file.extend_from_slice(ten.as_bytes());
+    file.extend_from_slice(eleven.as_bytes());
+    file.extend_from_slice(b"4 0 obj\n(four, at an offset)\nendobj\n");
+    file.extend_from_slice(b"trailer\n<< /Size 12 /Root 1 0 R >>\nstartxref\n99999\n%%EOF\n");
+    let _ = eleven_len;
+    (file, ten_len)
+}
+
+/// A scanned file's object streams' members are listed: each by the later
+/// stream that has it, the scan's offset of a number winning, every way
+/// alike, with one fault; each stream decoded once, its fault said once,
+/// and the budget spent once: a budget of the filtered stream's decoded
+/// bytes, which a second decode would find spent, reads its members.
+#[test]
+fn a_scanned_files_object_streams_members_are_listed() {
+    let (file, decoded) = scanned_with_object_streams();
+    let doc = read(&file);
+    assert!(doc.trailer.unwritten.is_some());
+    let origin = |n: u32| doc.record(ObjectId::new(n, 0)).map(|r| r.origin);
+    assert_eq!(origin(1), Some(Origin::Recovered));
+    assert_eq!(
+        origin(2),
+        Some(Origin::Stream {
+            stream: 10,
+            index: 0
+        })
+    );
+    assert_eq!(
+        origin(3),
+        Some(Origin::Stream {
+            stream: 11,
+            index: 0
+        })
+    );
+    assert_eq!(origin(4), Some(Origin::Recovered));
+    let three = doc.get(ObjectId::new(3, 0)).unwrap();
+    assert_eq!(three.as_bytes(), Some(&b"three"[..]));
+    let members = Fault::Members {
+        objects: 2,
+        streams: 2,
+        unread: 0,
+    };
+    let told: Vec<&Fault> = doc.faults().iter().map(|(_, f)| f).collect();
+    assert_eq!(
+        told.iter().filter(|f| ***f == members).count(),
+        1,
+        "{told:?}"
+    );
+    let decodes = told
+        .iter()
+        .filter(|f| matches!(f, Fault::Decode { .. }))
+        .count();
+    assert_eq!(decodes, 1, "{told:?}");
+    // The budget of what 10 decodes to reads its member, decoded once.
+    let mut options = Options::DEFAULT;
+    options.limits.budget = decoded;
+    let reading = Reading::open(&file[..], &options).unwrap();
+    let doc = reading.into_document().unwrap();
+    let pages = doc.get(ObjectId::new(2, 0)).unwrap().as_dict().unwrap();
+    assert_eq!(
+        pages.get(b"Type").and_then(Object::as_name),
+        Some(&b"Pages"[..])
+    );
+    let four = doc.get(ObjectId::new(4, 0)).unwrap();
+    assert_eq!(four.as_bytes(), Some(&b"four, at an offset"[..]));
+}
+
+/// A file whose sections read lists only what they list: an object in an
+/// object stream no section names isn't read, as a reference to it is to
+/// no object (ISO 32000-2, 7.3.10), and nothing is said of it.
+#[test]
+fn a_member_no_section_lists_isnt_listed() {
+    let (scanned, _) = scanned_with_object_streams();
+    let end = String::from_utf8_lossy(&scanned).find("trailer").unwrap();
+    let mut file = scanned[..end].to_vec();
+    let at = |name: &[u8]| file.windows(name.len()).position(|w| w == name).unwrap();
+    let (one, ten, eleven, four) = (
+        at(b"1 0 obj"),
+        at(b"10 0 obj"),
+        at(b"11 0 obj"),
+        at(b"4 0 obj"),
+    );
+    let table = file.len();
+    let mut rows = String::from("xref\n0 1\n0000000000 65535 f \n1 1\n");
+    rows.push_str(&format!("{one:010} 00000 n \n4 1\n{four:010} 00000 n \n"));
+    rows.push_str(&format!(
+        "10 2\n{ten:010} 00000 n \n{eleven:010} 00000 n \n"
+    ));
+    rows.push_str(&format!(
+        "trailer\n<< /Size 12 /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n"
+    ));
+    file.extend_from_slice(rows.as_bytes());
+    let doc = read(&file);
+    assert_eq!(doc.trailer.unwritten, None);
+    assert!(doc.get(ObjectId::new(2, 0)).is_err());
+    assert!(doc.get(ObjectId::new(3, 0)).is_err());
+    assert!(!doc.facts.recovered);
+    let members = doc
+        .faults()
+        .iter()
+        .filter(|(_, f)| matches!(f, Fault::Members { .. }));
+    assert_eq!(members.count(), 0);
+}
+
+/// [`OBJECTS`] written whole under AES-256, its password `user`, each in
+/// an object stream, with a cross-reference stream, and its `startxref`
+/// past its end, so that it's scanned.
+pub(crate) fn scanned_encrypted_with_object_streams() -> Vec<u8> {
+    use crate::XrefKind;
+    use crate::write::Pack;
+    use crate::write::tests::methods;
+
+    let method = (methods().into_iter())
+        .find(|m| m.name == "AES-256 created")
+        .unwrap();
+    let objects: Vec<(u32, Object)> = (OBJECTS.iter())
+        .map(|&(n, body)| {
+            (
+                n,
+                pdf_objects::parse::Parser::at(body.as_bytes(), 0)
+                    .value(&mut ())
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let bodies = objects
+        .iter()
+        .map(|(n, o)| (ObjectId::new(*n, 0), Body::from(o)));
+    let mut trailer = pdf_objects::object::Dict::new();
+    trailer.set("Root", ObjectId::new(1, 0));
+    let mut options = write::Options::DEFAULT;
+    options.kind = XrefKind::Stream;
+    options.pack = Some(Pack::DEFAULT);
+    let mut file = Vec::new();
+    write::full(
+        &mut file,
+        bodies,
+        &trailer,
+        Some(&method.encryptor),
+        None,
+        &options,
+    )
+    .unwrap();
+    // Its startxref past its end, so that it's scanned.
+    let at = file.windows(9).rposition(|w| w == b"startxref").unwrap();
+    file.truncate(at);
+    file.extend_from_slice(b"startxref\n999999\n%%EOF\n");
+    file
+}
+
+/// A scanned encrypted file whose objects are in object streams: opened by
+/// its password, its members listed, decrypted; opened by a wrong one, none
+/// listed and the streams said unread; then unlocked by the password,
+/// read as the file opened by it is, in memory and by position.
+#[test]
+fn a_scanned_encrypted_files_members_are_listed_once_it_opens() {
+    use pdf_crypt::Password;
+
+    let file = scanned_encrypted_with_object_streams();
+    let user = [Password("user")];
+    let by_password = |passwords: &[Password]| {
+        let mut options = Options::DEFAULT;
+        options.passwords = passwords;
+        document(&file, &options)
+    };
+    let opened = by_password(&user);
+    assert!(opened.trailer.unwritten.is_some());
+    let member = |doc: &Document, n: u32| doc.record(ObjectId::new(n, 0)).map(|r| r.origin);
+    for n in 1..=3 {
+        assert!(
+            matches!(member(&opened, n), Some(Origin::Stream { .. })),
+            "{n}"
+        );
+    }
+    let four = opened.get(ObjectId::new(4, 0)).unwrap();
+    assert_eq!(four.as_bytes(), Some(&b"four"[..]));
+    let said = |doc: &Document| -> Vec<Fault> {
+        (doc.faults().iter())
+            .filter(|(_, f)| matches!(f, Fault::Members { .. }))
+            .map(|(_, f)| f.clone())
+            .collect()
+    };
+    let listed = said(&opened);
+    assert!(
+        matches!(
+            &listed[..],
+            [Fault::Members {
+                objects: 4,
+                unread: 0,
+                ..
+            }]
+        ),
+        "{listed:?}"
+    );
+    // Locked: none listed, each stream said unread.
+    let locked = by_password(&[Password("wrong")]);
+    assert!(locked.get(ObjectId::new(1, 0)).is_err());
+    let unread = said(&locked);
+    assert!(
+        matches!(
+            &unread[..],
+            [Fault::Members {
+                objects: 0,
+                streams: 0,
+                unread: 1..
+            }]
+        ),
+        "{unread:?}"
+    );
+    // Unlocked later, as opened by the password, every way.
+    for first in [None, Some(7)] {
+        let mut options = Options::DEFAULT;
+        let wrong = [Password("wrong")];
+        options.passwords = &wrong;
+        let unlocked = match first {
+            None => Reading::open(&file[..], &options)
+                .unwrap()
+                .unlock(&user[0].encodings()),
+            Some(first) => {
+                let source = crate::fuzz::Counted::new(&file, first);
+                let reading = crate::fuzz::open(&source, &wrong, &Options::DEFAULT, true).unwrap();
+                let doc = reading
+                    .unlock(&user[0].encodings())
+                    .ok()
+                    .unwrap()
+                    .into_document()
+                    .unwrap();
+                assert_eq!(doc, opened, "by position");
+                continue;
+            }
+        };
+        let doc = unlocked.ok().unwrap().into_document().unwrap();
+        assert_eq!(doc, opened);
     }
 }

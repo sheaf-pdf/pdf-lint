@@ -110,9 +110,12 @@ pub enum Fault {
     /// header (`from_start`, against ISO 32000-2, 7.5.2), or the nearest
     /// `xref` or cross-reference stream within 64 bytes that reads, exactly
     /// there. Of the entries it lists in use that aren't where it puts them,
-    /// `moved` are read as far off, each exactly at its own `n g obj`, and
-    /// `neither` aren't there either, and are read where it puts them.
-    #[error("{}", moved_words(*.at, *.found, *.from_start, *.moved, *.neither))]
+    /// `moved` are read as far off, each exactly at its own `n g obj`;
+    /// `scanned` aren't there either, and are read where a scan of the file
+    /// finds their `n g obj`, of their number and generation, exactly
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)); and `neither`
+    /// are at none of those places, and are read where it puts them.
+    #[error("{}", moved_words(*.at, *.found, *.from_start, *.moved, *.scanned, *.neither))]
     Moved {
         /// Where it's said to be.
         at: usize,
@@ -121,10 +124,13 @@ pub enum Fault {
         /// Whether that's where the offset puts it counted from the file's
         /// first byte.
         from_start: bool,
-        /// How many of its entries are read as far off.
-        moved: usize,
-        /// How many are neither where it puts them nor there.
-        neither: usize,
+        /// How many of its entries are read as far off: object numbers,
+        /// so a `u32` holds them.
+        moved: u32,
+        /// How many are read where a scan finds them.
+        scanned: u32,
+        /// How many are at none of those places.
+        neither: u32,
     },
     /// `moved` of the entries the cross-reference section at byte `section`
     /// lists in use aren't where it puts them, and are read `by` bytes from
@@ -132,9 +138,13 @@ pub enum Fault {
     /// ([`Recovery::Verified`](super::Recovery::Verified)): the header's
     /// offset taken back (`from_start`, the offsets counting from the file's
     /// first byte, against ISO 32000-2, 7.5.2), or as far as its first
-    /// object in use is, or another section's are. `neither` aren't there
-    /// either, and are read where it puts them.
-    #[error("{}", shifted_words(*.section, *.by, *.from_start, *.moved, *.neither))]
+    /// object in use is, or another section's are. `scanned` aren't there
+    /// either, and are read where a scan of the file finds their `n g obj`,
+    /// of their number and generation, exactly
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)); and `neither` are
+    /// at none of those places, and are read where it puts them. Said where
+    /// it reads any entry elsewhere.
+    #[error("{}", shifted_words(*.section, *.by, *.from_start, *.moved, *.scanned, *.neither))]
     Shifted {
         /// Where the section is.
         section: usize,
@@ -143,10 +153,26 @@ pub enum Fault {
         by: i64,
         /// Whether that's the header's offset taken back.
         from_start: bool,
-        /// How many are read so.
-        moved: usize,
-        /// How many are neither where it puts them nor there.
-        neither: usize,
+        /// How many are read so: object numbers, so a `u32` holds them.
+        moved: u32,
+        /// How many are read where a scan finds them.
+        scanned: u32,
+        /// How many are at none of those places.
+        neither: u32,
+    },
+    /// The sections didn't read, and the object streams the scan found
+    /// hold `objects` objects it didn't find at an offset, read from
+    /// `streams` of them; and the objects of `unread` more don't read: a
+    /// stream's data doesn't decode or its header doesn't say where its
+    /// objects are, or the file is encrypted and no password opened it.
+    #[error("{}", members_words(*.objects, *.streams, *.unread))]
+    Members {
+        /// How many objects are read from object streams.
+        objects: usize,
+        /// From how many.
+        streams: usize,
+        /// How many object streams' objects don't read.
+        unread: usize,
     },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
@@ -626,20 +652,45 @@ fn off_words(by: i64) -> String {
 }
 
 /// What [`Fault::Moved`] and [`Fault::Shifted`] say of a section's
-/// entries: how many are `by` bytes off, and how many neither there nor
-/// where it puts them.
-fn entries_words(moved: usize, by: i64, neither: usize) -> String {
+/// entries: how many are `by` bytes off, how many neither there nor where
+/// it puts them but where a scan finds them, and how many at none of those
+/// places.
+fn entries_words(moved: u32, by: i64, scanned: u32, neither: u32) -> String {
     let off = off_words(by);
     let moved_words = match moved {
         1 => format!("1 of its entries is {off} where it puts it"),
         n => format!("{n} of its entries are {off} where they're put"),
     };
-    match (moved, neither) {
-        (_, 0) => moved_words,
-        (0, 1) => format!("1 of its entries is neither where it puts it nor {off}"),
-        (0, n) => format!("{n} of its entries are neither where they're put nor {off}"),
-        (_, 1) => format!("{moved_words}, and 1 is at neither place"),
-        (_, n) => format!("{moved_words}, and {n} are at neither place"),
+    let scanned_words = match scanned {
+        1 => "1 is where a scan of the file finds it".to_string(),
+        n => format!("{n} are where a scan of the file finds them"),
+    };
+    let not_found = match neither {
+        1 => "1 isn't found at all".to_string(),
+        n => format!("{n} aren't found at all"),
+    };
+    match (moved, scanned, neither) {
+        (_, 0, 0) => moved_words,
+        (0, 0, 1) => format!("1 of its entries is neither where it puts it nor {off}"),
+        (0, 0, n) => format!("{n} of its entries are neither where they're put nor {off}"),
+        (_, 0, 1) => format!("{moved_words}, and 1 is at neither place"),
+        (_, 0, n) => format!("{moved_words}, and {n} are at neither place"),
+        (0, s, n) => {
+            let words = match s {
+                1 => format!(
+                    "1 of its entries is neither where it puts it nor {off}, but where a scan of the file finds it"
+                ),
+                s => format!(
+                    "{s} of its entries are neither where they're put nor {off}, but where a scan of the file finds them"
+                ),
+            };
+            match n {
+                0 => words,
+                _ => format!("{words}, and {not_found}"),
+            }
+        }
+        (_, _, 0) => format!("{moved_words}, and {scanned_words}"),
+        _ => format!("{moved_words}, {scanned_words}, and {not_found}"),
     }
 }
 
@@ -647,16 +698,23 @@ fn entries_words(moved: usize, by: i64, neither: usize) -> String {
 const FROM_START: &str = ", its offsets counting from the file's first byte, not its header";
 
 /// [`Fault::Moved`]'s words.
-fn moved_words(at: usize, found: usize, from_start: bool, moved: usize, neither: usize) -> String {
+fn moved_words(
+    at: usize,
+    found: usize,
+    from_start: bool,
+    moved: u32,
+    scanned: u32,
+    neither: u32,
+) -> String {
     let by = i64::try_from(found).unwrap_or(i64::MAX) - i64::try_from(at).unwrap_or(i64::MAX);
     let from_start = if from_start { FROM_START } else { "" };
     let section = format!(
         "the section at byte {at} is {}, at byte {found}{from_start}",
         off_words(by)
     );
-    match (moved, neither) {
-        (0, 0) => section,
-        _ => format!("{section}; {}", entries_words(moved, by, neither)),
+    match (moved, scanned, neither) {
+        (0, 0, 0) => section,
+        _ => format!("{section}; {}", entries_words(moved, by, scanned, neither)),
     }
 }
 
@@ -665,14 +723,34 @@ fn shifted_words(
     section: usize,
     by: i64,
     from_start: bool,
-    moved: usize,
-    neither: usize,
+    moved: u32,
+    scanned: u32,
+    neither: u32,
 ) -> String {
     let from_start = if from_start { FROM_START } else { "" };
     format!(
         "in the section at byte {section}{from_start}, {}",
-        entries_words(moved, by, neither)
+        entries_words(moved, by, scanned, neither)
     )
+}
+
+/// [`Fault::Members`]' words.
+fn members_words(objects: usize, streams: usize, unread: usize) -> String {
+    let streams = match streams {
+        1 => "1 object stream".to_string(),
+        n => format!("{n} object streams"),
+    };
+    let read = match objects {
+        1 => format!("1 object the scan found no offset of is read from {streams} it found"),
+        n => format!("{n} objects the scan found no offset of are read from {streams} it found"),
+    };
+    match (objects, unread) {
+        (_, 0) => read,
+        (0, 1) => "the objects of 1 object stream the scan found don't read".to_string(),
+        (0, n) => format!("the objects of {n} object streams the scan found don't read"),
+        (_, 1) => format!("{read}, and those of 1 more don't read"),
+        (_, n) => format!("{read}, and those of {n} more don't read"),
+    }
 }
 
 /// [`Fault::Strings`]' words.
@@ -749,11 +827,12 @@ mod tests {
             Fault::Undecrypted { .. } => 30,
             Fault::Moved { .. } => 31,
             Fault::Shifted { .. } => 32,
+            Fault::Members { .. } => 33,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 33;
+    const ARMS: usize = 34;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -955,6 +1034,7 @@ mod tests {
                     found: 49377,
                     from_start: false,
                     moved: 1,
+                    scanned: 0,
                     neither: 0,
                 },
                 "the section at byte 49380 is 3 bytes before, at byte 49377; 1 of its entries is 3 bytes before where it puts it",
@@ -965,6 +1045,7 @@ mod tests {
                     found: 121,
                     from_start: false,
                     moved: 0,
+                    scanned: 0,
                     neither: 0,
                 },
                 "the section at byte 120 is 1 byte after, at byte 121",
@@ -975,6 +1056,7 @@ mod tests {
                     found: 58,
                     from_start: true,
                     moved: 4,
+                    scanned: 0,
                     neither: 2,
                 },
                 "the section at byte 158 is 100 bytes before, at byte 58, its offsets counting from the file's first byte, not its header; 4 of its entries are 100 bytes before where they're put, and 2 are at neither place",
@@ -985,6 +1067,7 @@ mod tests {
                     found: 575,
                     from_start: false,
                     moved: 0,
+                    scanned: 0,
                     neither: 6,
                 },
                 "the section at byte 571 is 4 bytes after, at byte 575; 6 of its entries are neither where they're put nor 4 bytes after",
@@ -995,9 +1078,34 @@ mod tests {
                     found: 732,
                     from_start: false,
                     moved: 0,
+                    scanned: 0,
                     neither: 1,
                 },
                 "the section at byte 734 is 2 bytes before, at byte 732; 1 of its entries is neither where it puts it nor 2 bytes before",
+            ),
+            (
+                Fault::Members {
+                    objects: 12,
+                    streams: 2,
+                    unread: 0,
+                },
+                "12 objects the scan found no offset of are read from 2 object streams it found",
+            ),
+            (
+                Fault::Members {
+                    objects: 1,
+                    streams: 1,
+                    unread: 1,
+                },
+                "1 object the scan found no offset of is read from 1 object stream it found, and those of 1 more don't read",
+            ),
+            (
+                Fault::Members {
+                    objects: 0,
+                    streams: 0,
+                    unread: 2,
+                },
+                "the objects of 2 object streams the scan found don't read",
             ),
             (
                 Fault::Shifted {
@@ -1005,6 +1113,7 @@ mod tests {
                     by: 2,
                     from_start: false,
                     moved: 30,
+                    scanned: 0,
                     neither: 1,
                 },
                 "in the section at byte 700, 30 of its entries are 2 bytes after where they're put, and 1 is at neither place",
@@ -1015,9 +1124,54 @@ mod tests {
                     by: -1,
                     from_start: true,
                     moved: 1,
+                    scanned: 0,
                     neither: 0,
                 },
                 "in the section at byte 701, its offsets counting from the file's first byte, not its header, 1 of its entries is 1 byte before where it puts it",
+            ),
+            (
+                Fault::Moved {
+                    at: 2589,
+                    found: 2547,
+                    from_start: false,
+                    moved: 7,
+                    scanned: 5,
+                    neither: 0,
+                },
+                "the section at byte 2589 is 42 bytes before, at byte 2547; 7 of its entries are 42 bytes before where they're put, and 5 are where a scan of the file finds them",
+            ),
+            (
+                Fault::Moved {
+                    at: 571,
+                    found: 575,
+                    from_start: false,
+                    moved: 0,
+                    scanned: 2,
+                    neither: 1,
+                },
+                "the section at byte 571 is 4 bytes after, at byte 575; 2 of its entries are neither where they're put nor 4 bytes after, but where a scan of the file finds them, and 1 isn't found at all",
+            ),
+            (
+                Fault::Shifted {
+                    section: 900,
+                    by: -2,
+                    from_start: false,
+                    moved: 3,
+                    scanned: 1,
+                    neither: 2,
+                },
+                "in the section at byte 900, 3 of its entries are 2 bytes before where they're put, 1 is where a scan of the file finds it, and 2 aren't found at all",
+            ),
+            (
+                Fault::Shifted {
+                    section: 902,
+                    by: 5,
+                    from_start: false,
+                    moved: 0,
+                    scanned: 1,
+                    neither: 0,
+                },
+                "in the section at byte 902, 1 of its entries is neither where it puts it nor 5 bytes after, but where a scan of the file finds it",
             ),
         ];
         for (fault, words) in &cases {

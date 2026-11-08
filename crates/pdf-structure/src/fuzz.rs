@@ -195,7 +195,8 @@ pub fn open<S: ByteSource>(
 /// inside what was read: each object's, each value's and key's in it, each
 /// stream's data's, the trailer's and each fault's, in the file or in
 /// the decoded data of the object stream it names, which the reading
-/// keeps; and each object read at a shift ([`Origin::Shifted`]) starts
+/// keeps; and each object read at a shift ([`Origin::Shifted`]), or found
+/// by a scan in a file whose sections read ([`Origin::Recovered`]), starts
 /// exactly at its own `n g obj`. Read with no faults looked for ([`Options::faults`]), in memory
 /// and by position, it's the same read, every object, record and decoded
 /// stream, and keeps no fault. Read on demand, its objects asked for in an
@@ -717,15 +718,22 @@ fn pruned(doc: &Document) {
 /// or the decoded data of the object stream it names: each object's, and
 /// each value's and key's in it, each stream's data's, the trailer's, each
 /// revision's trailer's, and each fault's; and that an object read at a
-/// shift starts exactly at its own `n g obj`.
+/// shift, or found by a scan in a file whose sections read, starts exactly
+/// at its own `n g obj`.
 fn within(file: &[u8], doc: &Document) {
+    let sound = doc.trailer.unwritten.is_none();
     for (id, record) in doc.records() {
-        if let Origin::Shifted { .. } = record.origin {
+        let elsewhere = match record.origin {
+            Origin::Shifted { .. } => true,
+            Origin::Recovered => sound,
+            _ => false,
+        };
+        if elsewhere {
             let at = header_exactly(file, 0, record.at.start, true);
             assert_eq!(
                 at,
                 Some(id),
-                "{id:?}, read at a shift, isn't at its own n g obj"
+                "{id:?}, read elsewhere, isn't at its own n g obj"
             );
         }
     }
@@ -1247,10 +1255,11 @@ fn updated(
         for (at, object) in doc.objects() {
             let moves = to(at) != Some(at) || object.references().any(|r| to(r) != Some(r));
             let listed = written.section.lists(to(at).expect("numbered").number);
-            // One read at a shift is listed where it is, though not written.
+            // One read at a shift, or where a scan found it, is listed
+            // where it is, though not written.
             let shifted = matches!(
                 doc.record(at).map(|r| r.origin),
-                Some(Origin::Shifted { .. })
+                Some(Origin::Shifted { .. } | Origin::Recovered)
             );
             assert!(
                 listed == (at == id || moves) || (listed && shifted),

@@ -38,7 +38,8 @@ pub struct SectionRow {
 /// header's offset. It's where the reading read it, which may be away from
 /// where it's said to be ([`SectionRows::said`]); its rows are as written,
 /// though the reading may read their objects at a shift
-/// ([`Origin::Shifted`](crate::Origin::Shifted)).
+/// ([`Origin::Shifted`](crate::Origin::Shifted)) or where a scan finds them
+/// ([`Origin::Recovered`](crate::Origin::Recovered)).
 /// Not exhaustive, so that it can come to say more of a section; made only by
 /// the reader.
 #[derive(Debug, Clone, PartialEq)]

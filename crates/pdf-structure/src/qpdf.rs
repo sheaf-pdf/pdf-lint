@@ -1492,10 +1492,13 @@ mod tests {
     /// where the file proves they are (`Base::of`): a cut file, its main
     /// section and an object past the cut three bytes before where they're
     /// said; one whose offsets count from its first byte, 100 bytes before
-    /// its header; one whose `startxref` gives the line after `xref`; and
-    /// one whose rows are each two bytes past their objects. The update
+    /// its header; one whose `startxref` gives the line after `xref`; one
+    /// whose rows are each two bytes past their objects; and one whose
+    /// section is five bytes before where it's said, two of its rows at
+    /// that move and two four bytes before their objects. The update
     /// writes its `/Prev` where the newest section was read and lists each
-    /// object read at a shift where it is: read through qpdf alone as the
+    /// object read at a shift, or where a scan found it, where it is: read
+    /// through qpdf alone as the
     /// reader reads it, qpdf saying nothing where it says nothing of the
     /// file before the update, and reconstructing only where it does that
     /// of the file too (the cut's first section still gives the main
@@ -1504,7 +1507,7 @@ mod tests {
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn an_update_after_a_recovered_reading_reads_through_qpdf_as_through_the_reader() {
-        use crate::read::recovery::tests::{OBJECTS, cut, laid_out};
+        use crate::read::recovery::tests::{OBJECTS, cut, laid_out, two_shifts};
         use crate::write;
 
         let files = [
@@ -1521,6 +1524,7 @@ mod tests {
                 "rows past",
                 laid_out(b"", &OBJECTS, &|_, at| at + 2, &|at| at).0,
             ),
+            ("two shifts", two_shifts().0),
         ];
         let dir = scratch("recovered");
         for (test, file) in files {
