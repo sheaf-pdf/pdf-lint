@@ -1058,7 +1058,8 @@ fn compared(data: &[u8]) -> [bool; 3] {
         if let (true, Ok(written)) = (sound, written) {
             assert_eq!(written.base.renumbered, renumbering.0.is_some());
             let back = read_back(&out, opens, &[]);
-            same_objects(&doc, &reading, &back, None, &to);
+            let anew = encryptor.is_some_and(Encryptor::writes_metadata_anew);
+            same_objects(&doc, &reading, &back, None, &to, anew);
             compared[0] = true;
         }
     }
@@ -1237,7 +1238,8 @@ fn flipped(
     match write::document(&mut out, &doc, encryptor, Some(&reading), options) {
         Ok(_) => {
             let back = read_back(&out, opens, &[]);
-            same_objects(&doc, &reading, &back, None, to);
+            let anew = encryptor.is_some_and(Encryptor::writes_metadata_anew);
+            same_objects(&doc, &reading, &back, None, to, anew);
         }
         Err(write::Error::Changed(Some(id))) => {
             let record = doc.record(id).expect("a copy's record");
@@ -1316,7 +1318,7 @@ fn updated(
             );
         }
         let back = read_back(&out, password, told);
-        same_objects(doc, reading, &back, Some(id), &to);
+        same_objects(doc, reading, &back, Some(id), &to, false);
         let at = to(id).expect("numbered");
         let got = back.get(at).expect("the changed object reads");
         let key = got.as_dict().and_then(|d| d.get(b"WriteFuzzed"));
@@ -1399,14 +1401,20 @@ fn read_back<'f>(
 /// and what it refers to, at the number `to` gives it, its references as
 /// `to` names them: each as pdf-objects' writer writes it, a stream's
 /// dictionary but its `/Length`, and its data as each reading hands it
-/// out.
+/// out. Written `anew` under a new encryption that encrypts metadata, the
+/// document's metadata stream is without its own `/Crypt` filter that left
+/// it in the clear.
 fn same_objects<S: ByteSource>(
     doc: &Document,
     reading: &Reading<S>,
     back: &Reading<&[u8]>,
     changed: Option<ObjectId>,
     to: &dyn Fn(ObjectId) -> Option<ObjectId>,
+    anew: bool,
 ) {
+    let get: crate::crypt::Get<'_, '_, std::convert::Infallible> = &|id| Ok(doc.get(id).ok());
+    let Ok(metadata) = crate::crypt::metadata_stream(doc.trailer.dict(), get);
+    let metadata = metadata.filter(|_| anew);
     let encrypt = doc.trailer.dict().get(b"Encrypt");
     let mut encryption: HashSet<ObjectId> = encrypt
         .map(|e| e.references().collect())
@@ -1433,6 +1441,17 @@ fn same_objects<S: ByteSource>(
             .get(at)
             .unwrap_or_else(|e| panic!("{id:?} reads back at {at:?}: {e}"));
         let mut renumbered = Cow::Borrowed(object);
+        if let Value::Stream(stream) = object.value()
+            && metadata == Some(id)
+        {
+            let resolve = |id| doc.get(id).ok();
+            if let Some(dict) = crate::filter::without_identity_crypt(&stream.dict, Some(&resolve))
+            {
+                let mut stream = stream.clone();
+                stream.dict = dict;
+                renumbered = Cow::Owned(Object::new(Value::Stream(stream)));
+            }
+        }
         if at != id || object.references().any(|r| to(r) != Some(r)) {
             renumbered.to_mut().renumber(to);
         }

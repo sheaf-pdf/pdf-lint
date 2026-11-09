@@ -5370,6 +5370,403 @@ fn a_base_by_hand_of_a_dictionary_at_a_number_takes_an_update_once_told_it() {
     }
 }
 
+/// An encrypted file's direct `/Info`, whose strings a trailer holds in the
+/// clear, is written as an object at a fresh number, past every number the
+/// file read lists, encrypted, the trailer naming it: whole, under the
+/// file's own encryption (a table, a stream, packed) and under a new one,
+/// and in an update, whose own trailer names it while the earlier one stays
+/// as it was. Read back, it's the dictionary it was, and its strings are in
+/// the clear nowhere the write wrote. In the clear, it stays direct.
+#[test]
+fn a_direct_info_is_written_encrypted_as_an_object() {
+    use chacha20::ChaCha20Rng;
+
+    let objects = [
+        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (2, Body::from(dict! { "Title" => lit(b"a page") })),
+    ];
+    let info = Object::from(dict! { "Title" => lit(TITLE), "Producer" => lit(b"a producer") });
+    let root = dict! { "Root" => ObjectId::new(1, 0), "Info" => info.clone() };
+    let prepared = Password("new").prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(40);
+    let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
+    // The trailer's /Info of `back`, an object at a number past `past`.
+    let moved = |back: &Reading<Arc<[u8]>>, past: u32, name: &str| {
+        let at = (back.trailer().dict().get(b"Info"))
+            .and_then(Object::as_reference)
+            .unwrap_or_else(|| panic!("{name}: /Info is direct"));
+        assert!(at.number >= past, "{name}: {at:?}");
+        assert_eq!(unplaced(&value(back, at)), info, "{name}");
+    };
+    for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
+        let name = format!("{kind:?}");
+        let source = fixture::encrypted(&settings(kind, true), &objects, root.clone());
+        assert!(holds(&source, TITLE), "{name}: in the clear in the trailer");
+        let reading = opened(&source, "user");
+        let doc = reading.to_document().unwrap();
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let past = size(&reading);
+        let layouts = [
+            (XrefKind::Table, None),
+            (XrefKind::Stream, None),
+            (XrefKind::Stream, Some(write::Pack::DEFAULT)),
+        ];
+        for (layout, pack) in layouts {
+            let name = format!("{name}, {layout:?}, packed {}", pack.is_some());
+            let options = options(layout, pack);
+            for (by, encryptor, password) in [("own", &own, "user"), ("new", &created, "new")] {
+                let name = format!("{name}, {by}");
+                let mut out = Vec::new();
+                write::document(&mut out, &doc, Some(encryptor), Some(&reading), &options).unwrap();
+                assert!(!in_clear(&out, TITLE), "{name}");
+                let back = opened(&out, password);
+                assert!(sound(&back), "{name}: {:?}", back.faults());
+                moved(&back, if by == "own" { past } else { 3 }, &name);
+            }
+        }
+        // An update: its own trailer names the object; the earlier one is
+        // as it was.
+        let base = write::Base::of(&reading).unwrap();
+        let page = Object::from(dict! { "Title" => lit(b"a page, changed") });
+        let given = [(ObjectId::new(2, 0), write::Body::from(&page))];
+        let mut out = source.clone();
+        let options = write::Options::DEFAULT;
+        let written = (write::update(&mut out, &base, given, Some(&own), None, &options))
+            .unwrap()
+            .unwrap();
+        assert!(!in_clear(&out[source.len()..], TITLE), "{name}: the update");
+        assert_eq!(&out[..source.len()], &source[..], "{name}: the file before");
+        let back = opened(&out, "user");
+        assert!(sound(&back), "{name}: {:?}", back.faults());
+        moved(&back, past, &format!("{name}, updated"));
+        assert!(
+            written
+                .base
+                .trailer
+                .get(b"Info")
+                .unwrap()
+                .as_reference()
+                .is_some()
+        );
+    }
+    // A whole file that drops the file's last object, past the encryption
+    // dictionary, writes its /Info past that number too, which was under the
+    // file's key, and under RC4 its keystream.
+    let (mut plain, mut trailer) = plaintext();
+    plain.push((50, Object::from(dict! { "Note" => lit(b"dropped") })));
+    trailer.set("Info", info.clone());
+    for method in methods()
+        .iter()
+        .filter(|m| ["RC4-128", "AES-128"].contains(&m.name))
+    {
+        let source = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
+        let reading = opened(&source, "user");
+        let doc = reading.to_document().unwrap();
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        assert_eq!(own.at(), Some(ObjectId::new(ENCRYPT, 0)), "{}", method.name);
+        let left = write::encryption_objects(&doc, Some(&own));
+        let bodies = write::bodies(&doc).filter(|(id, _)| id.number != 50 && !left.contains(id));
+        let (mut out, options) = (Vec::new(), write::Options::DEFAULT);
+        write::full(
+            &mut out,
+            bodies,
+            doc.trailer.dict(),
+            Some(&own),
+            Some(&reading),
+            &options,
+        )
+        .unwrap();
+        let back = opened(&out, "user");
+        assert!(sound(&back), "{}: {:?}", method.name, back.faults());
+        moved(&back, 51, method.name);
+    }
+    // In the clear, the trailer's /Info is written as it is.
+    let (plain, trailer) = plaintext();
+    let mut trailer = trailer;
+    trailer.set("Info", info.clone());
+    let file = whole(&plain, &trailer, XrefKind::Table, None);
+    let back = open(&file);
+    assert_eq!(back.trailer().dict().get(b"Info").map(unplaced), Some(info));
+}
+
+/// Under a new encryption that encrypts metadata, the document's metadata
+/// stream is encrypted as its `/EncryptMetadata` says: its own `/Crypt`
+/// filter that would leave it in the clear, `/Identity` by name or by
+/// default, as the one filter or before `/FlateDecode`, is taken out of
+/// `/Filter` and `/DecodeParms` as it's written, and it reads back as it
+/// was. Another stream's own `/Identity` is kept, its data in the clear; so
+/// is the metadata stream's under a new encryption that doesn't encrypt
+/// metadata, and under a reading's own encryption.
+#[test]
+fn a_new_encryption_drops_the_metadata_streams_own_identity_crypt() {
+    use chacha20::ChaCha20Rng;
+
+    let r = Object::reference;
+    let crypt = || Object::from("Crypt");
+    let identity =
+        || Object::from(dict! { "Type" => "CryptFilterDecodeParms", "Name" => "Identity" });
+    let shapes: [(&str, Dict, Vec<u8>); 3] = [
+        (
+            "by name",
+            dict! { "Filter" => crypt(), "DecodeParms" => identity() },
+            XMP.to_vec(),
+        ),
+        (
+            "by default",
+            dict! { "Filter" => vec![crypt()] },
+            XMP.to_vec(),
+        ),
+        (
+            "before /FlateDecode",
+            dict! {
+                "Filter" => vec![crypt(), Object::from("FlateDecode")],
+                "DecodeParms" => vec![identity(), Object::null()],
+            },
+            fixture::zlib(XMP),
+        ),
+    ];
+    let kept = || {
+        let mut dict = dict! { "Filter" => vec![crypt()], "DecodeParms" => vec![identity()] };
+        dict.set("Type", "Note");
+        Object::from(Stream::new(dict, OWN_IDENTITY.to_vec()))
+    };
+    let prepared = Password("new").prepared().unwrap();
+    for (shape, filters, data) in shapes {
+        let mut dict = filters.clone();
+        dict.set("Type", "Metadata");
+        dict.set("Subtype", "XML");
+        let objects = vec![
+            (
+                1,
+                Object::from(dict! { "Type" => "Catalog", "Metadata" => r(2), "Note" => r(3) }),
+            ),
+            (2, Object::from(Stream::new(dict, data))),
+            (3, kept()),
+        ];
+        let trailer = dict! { "Root" => r(1) };
+        let file = whole(&objects, &trailer, XrefKind::Table, None);
+        let reading = open(&file);
+        let doc = reading.to_document().unwrap();
+        for encrypt_metadata in [true, false] {
+            let name = format!("{shape}, /EncryptMetadata {encrypt_metadata}");
+            let mut protection = Protection::new(&prepared);
+            protection.encrypt_metadata = encrypt_metadata;
+            let mut rng = ChaCha20Rng::seed_from_u64(41);
+            let created = Encryptor::create_with(&protection, &mut rng).unwrap();
+            let mut out = Vec::new();
+            let options = write::Options::DEFAULT;
+            write::document(&mut out, &doc, Some(&created), Some(&reading), &options).unwrap();
+            let back = opened(&out, "new");
+            assert!(sound(&back), "{name}: {:?}", back.faults());
+            let metadata = back.get(ObjectId::new(2, 0)).unwrap().as_stream().unwrap();
+            let own = crate::filter::crypt_filter(&metadata.dict, None);
+            assert_eq!(
+                own.is_none(),
+                encrypt_metadata,
+                "{name}: {:?}",
+                metadata.dict
+            );
+            assert_eq!(holds(&out, XMP), !encrypt_metadata, "{name}");
+            assert_eq!(
+                back.decoded_within(ObjectId::new(2, 0), usize::MAX)
+                    .unwrap(),
+                XMP,
+                "{name}"
+            );
+            // Another stream's own /Identity: as it was.
+            let note = back.get(ObjectId::new(3, 0)).unwrap().as_stream().unwrap();
+            assert!(
+                crate::filter::crypt_filter(&note.dict, None).is_some(),
+                "{name}"
+            );
+            assert!(holds(&out, OWN_IDENTITY), "{name}");
+        }
+    }
+    // Under a reading's own encryption, as it was read.
+    let method = (methods().into_iter())
+        .find(|m| m.name == "AES-128")
+        .unwrap();
+    let (_, filters, data) = (
+        "by name",
+        dict! { "Filter" => crypt(), "DecodeParms" => identity() },
+        XMP.to_vec(),
+    );
+    let mut dict = filters;
+    dict.set("Type", "Metadata");
+    dict.set("Subtype", "XML");
+    let objects = vec![
+        (
+            1,
+            Object::from(dict! { "Type" => "Catalog", "Metadata" => r(2) }),
+        ),
+        (2, Object::from(Stream::new(dict, data))),
+    ];
+    let id = Object::hex(ID);
+    let trailer = dict! { "Root" => r(1), "ID" => vec![id.clone(), id] };
+    let source = encrypted_by(&method.encryptor, &objects, &trailer, XrefKind::Table);
+    assert!(
+        holds(&source, XMP),
+        "left in the clear by its own /Identity"
+    );
+    let reading = opened(&source, "user");
+    let doc = reading.to_document().unwrap();
+    let own = Encryptor::of(&reading).unwrap().unwrap();
+    let mut out = Vec::new();
+    write::document(
+        &mut out,
+        &doc,
+        Some(&own),
+        Some(&reading),
+        &write::Options::DEFAULT,
+    )
+    .unwrap();
+    let back = opened(&out, "user");
+    let metadata = back.get(ObjectId::new(2, 0)).unwrap().as_stream().unwrap();
+    assert!(crate::filter::crypt_filter(&metadata.dict, None).is_some());
+    assert!(holds(&out, XMP));
+}
+
+/// `write::encryption` writes what pdf-crypt's values say, so that
+/// `read::encryption` of what it writes is the values: of each committed
+/// file qpdf encrypted, the test writer's every kind with and without
+/// `/EncryptMetadata`, a new file's, and values naming their crypt filters
+/// otherwise (two, one without `/CFM`, strings and streams by each), or
+/// none, or without `/Filter`; with and without a crypt filter's
+/// `/Length`. A new file's dictionary, and the test writer's, are the bytes
+/// they were (their SHA-256 pinned).
+#[test]
+fn the_encryption_dictionary_is_written_as_its_values_say() {
+    use chacha20::ChaCha20Rng;
+
+    let read_back = |dict: &Dict| read::encryption(dict, &mut |_| None);
+    let mut all: Vec<(String, pdf_crypt::Dictionary)> = Vec::new();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
+    let mut files: Vec<_> = (std::fs::read_dir(dir).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    files.sort();
+    for path in &files {
+        let file = std::fs::read(path).unwrap();
+        let reading = opened(&file, "");
+        let Some(stored) = reading.stored() else {
+            continue;
+        };
+        let values = read::encryption(&stored.dict, &mut |id| {
+            reading.get(id).ok().map(Cow::Borrowed)
+        });
+        all.push((path.display().to_string(), values));
+    }
+    assert_eq!(all.len(), 6, "the encrypted files");
+    for kind in [
+        Kind::Rc4By40,
+        Kind::Rc4By128,
+        Kind::Aes128,
+        Kind::Aes256R5,
+        Kind::Aes256,
+    ] {
+        for metadata in [true, false] {
+            all.push((
+                format!("{kind:?}, {metadata}"),
+                writer::dictionary(&settings(kind, metadata)),
+            ));
+        }
+    }
+    let prepared = Password("user").prepared().unwrap();
+    let (_, created) = writer::create(
+        &Protection::new(&prepared),
+        &mut ChaCha20Rng::seed_from_u64(36),
+    )
+    .unwrap();
+    all.push(("created".into(), created.clone()));
+    let mut named = writer::dictionary(&settings(Kind::Aes128, true));
+    named.crypt_filters = vec![
+        pdf_crypt::CryptFilter::default(),
+        pdf_crypt::CryptFilter::default(),
+    ];
+    (named.crypt_filters[0].name, named.crypt_filters[0].method) =
+        (b"Strings".to_vec(), Some(b"AESV2".to_vec()));
+    named.crypt_filters[1].name = b"Unsaid".to_vec();
+    (named.stm_f, named.str_f) = (Some(b"Unsaid".to_vec()), Some(b"Strings".to_vec()));
+    all.push(("named otherwise".into(), named.clone()));
+    let mut none = named.clone();
+    (none.crypt_filters, none.stm_f, none.str_f) = (Vec::new(), None, None);
+    none.filter = Vec::new();
+    all.push(("no crypt filter, no /Filter".into(), none));
+    for (name, values) in &all {
+        for length in [None, Some(16)] {
+            let written = write::encryption(values, length);
+            assert_eq!(read_back(&written), *values, "{name}, {length:?}");
+        }
+    }
+    let written = write::encryption(&named, None);
+    let filters = written.get(b"CF").and_then(Object::as_dict).unwrap();
+    let names: Vec<&[u8]> = filters.iter().map(|(name, _)| name).collect();
+    assert_eq!(names, [&b"Strings"[..], b"Unsaid"]);
+    assert!(
+        !filters
+            .get(b"Unsaid")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .has(b"CFM")
+    );
+    // The bytes they were.
+    let digest = |dict: &Dict| -> String {
+        (Sha256::digest(as_written(dict)).iter())
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let mut protection = Protection::new(&prepared);
+    protection.encrypt_metadata = false;
+    let (_, unencrypted) =
+        writer::create(&protection, &mut ChaCha20Rng::seed_from_u64(37)).unwrap();
+    let pinned = [
+        (
+            write::encryption(&created, Some(32)),
+            "65b7baab42fd4cbb7d7739dcaabc315efd8d445209f0717ace93ea00538d17ed",
+        ),
+        (
+            write::encryption(&unencrypted, Some(32)),
+            "4042fd79199b5056a6af3d434e228519df90497840be5c6a4073440f863433e5",
+        ),
+        (
+            dictionary_of(Kind::Rc4By40, true),
+            "361868f3b4a25b9a1aa68d4189eecc903eec1e1ca762282f48a53061c2d41fe3",
+        ),
+        (
+            dictionary_of(Kind::Rc4By128, true),
+            "af02398bfb684c770d501dc2764a9807654925117068127b4e5287c40acf602e",
+        ),
+        (
+            dictionary_of(Kind::Aes128, true),
+            "d8a64100bf2c04cd4e8f68b4c50c61dedc70810b31c1a722d27d890ba5713e3f",
+        ),
+        (
+            dictionary_of(Kind::Aes128, false),
+            "f772a3958f3cbd56607d2498d0b2048a97307c6856d0d8a72097afd976074984",
+        ),
+        (
+            dictionary_of(Kind::Aes256R5, true),
+            "a7fac63b97869a043f393ef67de3507065b7877cacb518464d5f595fdd064ed9",
+        ),
+        (
+            dictionary_of(Kind::Aes256R5, false),
+            "7faccbffeac87cdaf1c10f24b1e5da39009d1cbac431595dc560a7542b029ece",
+        ),
+        (
+            dictionary_of(Kind::Aes256, true),
+            "73aacb90c155ac27dfec391401e149f2e80a52b1ba9c4effefbda57d3c931c31",
+        ),
+        (
+            dictionary_of(Kind::Aes256, false),
+            "b65b6a8ded96d9dd5c7e9bcef8ac6f5362526905268ed599ad17d11b61a18ee6",
+        ),
+    ];
+    for (i, (dict, want)) in pinned.iter().enumerate() {
+        assert_eq!(digest(dict), *want, "{i}");
+    }
+}
+
 /// What an encryption dictionary refers to is read before a reader has a
 /// key, so a packed write leaves it out of its object streams, which are
 /// encrypted: here `/CF`, a reference to object 41.

@@ -22,8 +22,8 @@ use super::crypt::Place;
 use super::{
     Base, Body, Deflate, Encrypting, Encryptor, Entry, Error, Given, MEMBERS, NUMBERS, Numbering,
     Options, Pack, Packed, Parts, ReadFrom, Section, Written, bodies as read, checked,
-    container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped,
-    trailer_entries, usable,
+    container as objstm, dangling, direct_info, file_id, first_id, fresh, id_value, packable,
+    stopped, trailer_entries, usable,
 };
 use crate::phases::phase;
 use crate::source::{Document, XrefKind};
@@ -41,8 +41,12 @@ use crate::source::{Document, XrefKind};
 ///   stream's dictionary's own, `/Encrypt` and `/ID`), then `/Encrypt`
 ///   and `/ID`. Its values are written as they are, never encrypted, as a
 ///   trailer isn't an object (ISO 32000-2, 7.6.2), and a reader reads
-///   them as written: a direct `/Info` dictionary's strings are in the
-///   clear in an encrypted file.
+///   them as written. So in an encrypted file a direct `/Info`, whose
+///   strings would be in the clear there, is written as an object, after
+///   the encryption dictionary, at a number past every one written and
+///   every one the encryptor's file lists (none of its keys or keystreams),
+///   passing over what's written refers to and doesn't hold, encrypted as
+///   any object, the trailer naming it.
 /// - **The `/ID`** keeps its first string, the encryptor's, else
 ///   `trailer`'s; the second is the first 16 bytes of SHA-256 of the bytes
 ///   written before the section, so in the clear the same bodies write the
@@ -164,6 +168,14 @@ pub fn full<'a>(
 /// encryption dictionary refers to are left out too. What's left out is
 /// told by the numbers of `doc`.
 ///
+/// An object of an object stream it reads is written on its own unless
+/// `options` packs, and only strings and streams are encrypted (ISO
+/// 32000-2, 7.6.2): so what an encrypted file held only inside an object
+/// stream, its numbers, names and keys, encrypted with the stream's data,
+/// is in the clear once written unpacked, under any encryption. A caller
+/// who minds packs ([`Options::pack`], which the encryptor allows where
+/// [`Encryptor::packs`] says so).
+///
 /// # Errors
 ///
 /// As [`full`] refuses, with nothing written. It gives every other object
@@ -255,9 +267,13 @@ fn file(
     let reuse = options.pack.map_or(&[][..], |pack| pack.reuse);
     // The writer numbers objects of its own only for a stream section,
     // object streams and a new encryption dictionary.
+    // An encrypted file's direct /Info, which the trailer would hold in the
+    // clear, is written as an object.
+    let info = (trailer.get(b"Info")).filter(|info| given.is_some() && direct_info(info));
     let numbers = options.kind == XrefKind::Stream
         || pack.is_some()
-        || (place == Some(Place::New) && options.encrypt_at.is_none());
+        || (place == Some(Place::New) && options.encrypt_at.is_none())
+        || info.is_some();
     // Those, and what the encryptor leaves in the clear by number, in the
     // numbers written, which no object of the writer's own takes.
     let dangling = match numbers {
@@ -353,6 +369,25 @@ fn file(
                 next = next.max(at.number + 1);
             }
         }
+    }
+    // The direct /Info, at a number past every one written and every one the
+    // file read lists, encrypted as any object, the trailer naming it.
+    let moved = info.and_then(|_| trailer.get(b"Info").cloned());
+    if let (Some(e), Some(info)) = (encrypting, moved) {
+        let past = next.max(given.map_or(1, Encryptor::past));
+        let at = fresh(past, |n| dangling.contains(&n) || section.lists(n));
+        usable(at)?;
+        let at = ObjectId::new(at, 0);
+        let pos = serialize::indirect_with(out, at, &info, e)? - start;
+        section.insert(
+            at.number,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
+        trailer.set("Info", Object::from(at));
+        next = next.max(at.number + 1);
     }
     if let Some(pack) = pack {
         let packing = Packing {

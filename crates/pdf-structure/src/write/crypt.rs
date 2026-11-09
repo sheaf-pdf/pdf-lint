@@ -82,6 +82,11 @@ pub struct Encryptor {
     /// system's, but where a test sets another (`with_test_ivs`, under
     /// `insecure-test-writer` alone).
     ivs: fn() -> Ivs,
+    /// Past every number the file it was read from lists, in use or free,
+    /// its trailer's `/Size` and its cross-reference streams' numbers: an
+    /// object the writer numbers itself at or past it is at no number that
+    /// file used, so under no key or keystream of it. 1 for a new file's.
+    past: u32,
 }
 
 /// Where an encryption dictionary was.
@@ -144,6 +149,15 @@ impl Encryptor {
                         .collect(),
                     false => BTreeMap::new(),
                 };
+                let size = (reading.trailer().dict().get(b"Size"))
+                    .and_then(Object::as_integer)
+                    .and_then(|size| u32::try_from(size).ok());
+                let listed = reading.entries().map(|(n, ..)| n.saturating_add(1)).max();
+                let streams = (reading.facts().max_stream).map(|n| n.saturating_add(1));
+                let past = [size, listed, streams]
+                    .into_iter()
+                    .flatten()
+                    .fold(1, u32::max);
                 Ok(Some(Encryptor {
                     handler: handler.clone(),
                     list: reading.list().clone(),
@@ -155,6 +169,7 @@ impl Encryptor {
                     source: Some(reading.id()),
                     read_list: None,
                     ivs: Ivs::new,
+                    past,
                 }))
             }
             _ => Err(Error::Locked),
@@ -228,6 +243,7 @@ impl Encryptor {
             source: None,
             read_list: None,
             ivs: Ivs::new,
+            past: 1,
         }
     }
 
@@ -403,6 +419,22 @@ impl Encryptor {
     /// ascending.
     pub(crate) fn free_numbers(&self) -> impl FusedIterator<Item = (u32, u16)> + Clone + '_ {
         self.free.iter().map(|(&n, &generation)| (n, generation))
+    }
+
+    /// Whether it's a new file's that encrypts the document's metadata, which
+    /// is then written without its own `/Crypt` filter that would leave it in
+    /// the clear ([`Encrypting::anew`]): for the fuzz body, which reads
+    /// back what's written.
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn writes_metadata_anew(&self) -> bool {
+        self.place == Place::New && !self.list.unencrypted_metadata
+    }
+
+    /// Past every number the file it was read from lists ([`Encryptor::of`]):
+    /// where the writer numbers an object of its own that's under no key or
+    /// keystream that file used.
+    pub(super) fn past(&self) -> u32 {
+        self.past
     }
 
     /// Its key's check (pdf-crypt's `Handler::key_check`), which an update
@@ -627,6 +659,10 @@ pub struct Encrypting<'a> {
     metadata: Option<ObjectId>,
     /// The write's IVs, which its every AES string and stream takes.
     ivs: Ivs,
+    /// The document's metadata stream, at the number it's written at,
+    /// where a new encryption encrypts it: written without its own `/Crypt`
+    /// filter that would leave it in the clear ([`Encrypting::anew`]).
+    metadata_anew: Option<ObjectId>,
     /// Where each object it encrypts is written: the renumbering
     /// [`Parts::new`](super::Parts::new) writes by.
     to: Numbering<'a>,
@@ -639,6 +675,7 @@ impl fmt::Debug for Encrypting<'_> {
         f.debug_struct("Encrypting")
             .field("encryptor", &self.encryptor)
             .field("metadata", &self.metadata)
+            .field("metadata_anew", &self.metadata_anew)
             .field("ivs", &self.ivs)
             .field("to", &self.to.0.map(|_| "a caller's"))
             .field("at", &self.at)
@@ -681,9 +718,12 @@ impl<'a> Encrypting<'a> {
     /// gives it, the dictionary at `at`: `trailer` and `resolve`, in the
     /// numbers the objects are held at, say which stream is the document's
     /// metadata, kept as the number `to` writes it at, and a stream's own
-    /// crypt filter ([`Encryptor::laid_out`]). Refused where
-    /// `/EncryptMetadata false` leaves the document's metadata stream in the
-    /// clear and `resolve` doesn't give the catalog ([`Error::Catalog`]).
+    /// crypt filter ([`Encryptor::laid_out`]). Under a new encryption that
+    /// encrypts metadata, the metadata stream is kept so too, as it's
+    /// written without its own `/Crypt` that would leave it in the clear
+    /// ([`Encrypting::anew`]). Refused where `/EncryptMetadata false` leaves
+    /// the document's metadata stream in the clear and `resolve` doesn't
+    /// give the catalog ([`Error::Catalog`]).
     pub(super) fn of(
         encryptor: Cow<'a, Encryptor>,
         trailer: &Dict,
@@ -691,17 +731,25 @@ impl<'a> Encrypting<'a> {
         to: Numbering<'a>,
         at: Option<ObjectId>,
     ) -> Result<Encrypting<'a>, Error> {
-        let metadata = match encryptor.list.unencrypted_metadata {
+        let found = || {
+            let get: crypt::Get<'_, '_, Infallible> = &|id| Ok(resolve.resolve(id));
+            let Ok(metadata) = crypt::metadata_stream(trailer, get);
+            metadata.and_then(|id| to.at(id))
+        };
+        let unencrypted = encryptor.list.unencrypted_metadata;
+        let metadata = match unencrypted {
             true => {
                 let root = trailer.get(b"Root").and_then(Object::as_reference);
                 if let Some(root) = root.filter(|&root| resolve.resolve(root).is_none()) {
                     return Err(Error::Catalog(root));
                 }
-                let get: crypt::Get<'_, '_, Infallible> = &|id| Ok(resolve.resolve(id));
-                let Ok(metadata) = crypt::metadata_stream(trailer, get);
-                metadata.and_then(|id| to.at(id))
+                found()
             }
             false => None,
+        };
+        let metadata_anew = match (encryptor.place, unencrypted) {
+            (Place::New, false) => found(),
+            _ => None,
         };
         let ivs = (encryptor.ivs)();
         Ok(Encrypting {
@@ -709,6 +757,7 @@ impl<'a> Encrypting<'a> {
             resolve,
             metadata,
             ivs,
+            metadata_anew,
             to,
             at,
         })
@@ -746,6 +795,28 @@ impl<'a> Encrypting<'a> {
     #[must_use]
     pub fn dictionary_object(&self, at: ObjectId) -> bool {
         self.encryptor.list.dictionaries.contains(&at)
+    }
+
+    /// Object `obj`, written at `at`, as a new encryption writes it where
+    /// that isn't as it's held: the document's metadata stream, where the
+    /// encryption encrypts metadata, without its own `/Crypt` filter that
+    /// would leave its data in the clear (`/Identity`, named or not), so
+    /// that it's encrypted as the file's streams are, as its
+    /// `/EncryptMetadata` says (ISO 32000-2, 7.6.4.2, 7.6.6, 14.3.2). A
+    /// reading's own encryption ([`Encryptor::of`]) writes it as read, as
+    /// any other stream's own `/Crypt`. None where it's written as it is.
+    pub(super) fn anew(&self, at: ObjectId, obj: &Object) -> Option<Object> {
+        if self.metadata_anew != Some(at) {
+            return None;
+        }
+        let Value::Stream(stream) = obj.value() else {
+            return None;
+        };
+        let resolve = |id| self.resolve.resolve(id);
+        let dict = filter::without_identity_crypt(&stream.dict, Some(&resolve))?;
+        let mut stream = stream.clone();
+        stream.dict = dict;
+        Some(Object::new(Value::Stream(stream)))
     }
 
     /// The encryption it's of, in the numbers written.
@@ -878,32 +949,31 @@ fn per_object(handler: &Handler, dict: &Dict) -> bool {
 }
 
 /// The encryption dictionary of `values`, pdf-crypt's form of a standard
-/// security handler's, as the writer writes a new file's
-/// ([`Encryptor::create`], `length` `Some(32)`): `/Filter /Standard`, `/V`
-/// and `/R`, then each value `values` holds of `/O`, `/U`, `/P` and
-/// `/Length`, from `/V` 5 of `/OE`, `/UE` and `/Perms`, and
-/// `/EncryptMetadata`; where it names a crypt filter, its first written as
-/// `/CF`'s `/StdCF`, its method its `/CFM`, with `/AuthEvent /DocOpen` and a
-/// `/Length` of `length` where that's given, and `/StmF` and `/StrF` naming
-/// it (ISO 32000-2, 7.6.2, 7.6.4.2 and 7.6.6). A value `values` hasn't is
-/// left out.
-///
-/// It's a new file's dictionary, not [`read::encryption`]'s inverse: of
-/// what that reads of a file's dictionary, it writes neither the
-/// `/Filter`, `/StmF` and `/StrF` read, nor a crypt filter's name, nor any
-/// filter past the first, so a dictionary read with one and written with
-/// the other names its first crypt filter `/StdCF`, for strings and
-/// streams both, whatever the file named.
+/// security handler's (ISO 32000-2, 7.6.2, 7.6.4.2 and 7.6.6), as the values
+/// say it: `/Filter`, where it's a name; `/V` and `/R`; each value `values`
+/// holds of `/O`, `/U`, `/P`, `/Length`, `/OE`, `/UE`, `/Perms` and
+/// `/EncryptMetadata`; `/CF`, where it names crypt filters, each by its name,
+/// its method its `/CFM`, with `/AuthEvent /DocOpen` and a `/Length` of
+/// `length` where that's given; and `/StmF` and `/StrF` as given. A value
+/// `values` hasn't is left out. So a new file's ([`Encryptor::create`],
+/// `length` `Some(32)`) names its one crypt filter `/StdCF` for strings and
+/// streams both, as its values do, and a dictionary [`read::encryption`]
+/// read is written back naming what the file named: `read::encryption` of
+/// what this writes is `values`. What pdf-crypt's values don't hold isn't
+/// written: `/EFF`, a crypt filter's own `/AuthEvent` and `/Length` but
+/// `length`, and any key the standard security handler doesn't read.
 ///
 /// [`read::encryption`]: crate::read::encryption
 #[must_use]
 pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
     let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
-    let mut dict = pdf_objects::dict! {
-        "Filter" => "Standard",
-        "V" => values.v,
-        "R" => values.r,
-    };
+    let name = |bytes: &[u8]| Object::new(Value::Name(bytes.to_vec()));
+    let mut dict = Dict::new();
+    if !values.filter.is_empty() {
+        dict.set("Filter", name(&values.filter));
+    }
+    dict.set("V", values.v);
+    dict.set("R", values.r);
     for (key, value) in [(&b"O"[..], &values.o), (b"U", &values.u)] {
         if let Some(value) = value {
             dict.set(key, s(value));
@@ -915,31 +985,38 @@ pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
     if let Some(length) = values.length {
         dict.set("Length", length);
     }
-    if values.v >= 5 {
-        let keys = [
-            (&b"OE"[..], &values.oe),
-            (b"UE", &values.ue),
-            (b"Perms", &values.perms),
-        ];
-        for (key, value) in keys {
-            if let Some(value) = value {
-                dict.set(key, s(value));
-            }
+    let keys = [
+        (&b"OE"[..], &values.oe),
+        (b"UE", &values.ue),
+        (b"Perms", &values.perms),
+    ];
+    for (key, value) in keys {
+        if let Some(value) = value {
+            dict.set(key, s(value));
         }
     }
     if let Some(encrypt_metadata) = values.encrypt_metadata {
         dict.set("EncryptMetadata", encrypt_metadata);
     }
-    if let Some(filter) = values.crypt_filters.first() {
-        let method =
-            String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default()).into_owned();
-        let mut std_cf = pdf_objects::dict! { "CFM" => method.as_str(), "AuthEvent" => "DocOpen" };
-        if let Some(length) = length {
-            std_cf.set("Length", length);
+    if !values.crypt_filters.is_empty() {
+        let mut filters = Dict::new();
+        for filter in &values.crypt_filters {
+            let mut cf = Dict::new();
+            if let Some(method) = &filter.method {
+                cf.set("CFM", name(method));
+            }
+            cf.set("AuthEvent", "DocOpen");
+            if let Some(length) = length {
+                cf.set("Length", length);
+            }
+            filters.set(&filter.name[..], cf);
         }
-        dict.set("CF", pdf_objects::dict! { "StdCF" => std_cf });
-        dict.set("StmF", "StdCF");
-        dict.set("StrF", "StdCF");
+        dict.set("CF", filters);
+    }
+    for (key, value) in [(&b"StmF"[..], &values.stm_f), (b"StrF", &values.str_f)] {
+        if let Some(value) = value {
+            dict.set(key, name(value));
+        }
     }
     dict
 }

@@ -222,6 +222,53 @@ pub(crate) fn crypt_filter<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Opti
     Some(name.unwrap_or(b"Identity").to_vec())
 }
 
+/// `dict`, a stream's, without its own `/Crypt` filter where that leaves its
+/// data in the clear (its parameters' `/Name` `/Identity`, or none, ISO
+/// 32000-2, Table 14): the filter taken out of `/Filter`, and its parameters
+/// out of `/DecodeParms` where that's an array of one for each filter, each
+/// of the two written direct, and both left out where no filter is left.
+/// None where it has no such filter.
+pub(crate) fn without_identity_crypt<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Option<Dict> {
+    if crypt_filter(dict, resolve)? != b"Identity" {
+        return None;
+    }
+    let mut out = dict.clone();
+    let filters: &'a [Object] = match resolved(dict.get(b"Filter")?, resolve).ok()??.value() {
+        Value::Array(array) => array,
+        _ => &[],
+    };
+    let named = |o: &'a Object| {
+        resolved(o, resolve)
+            .ok()
+            .flatten()
+            .and_then(Object::as_name)
+    };
+    let at = filters.iter().position(|o| named(o) == Some(&b"Crypt"[..]));
+    let parameters = (dict.get(b"DecodeParms"))
+        .and_then(|parms| resolved(parms, resolve).ok().flatten())
+        .map(Object::value);
+    match at {
+        Some(at) if filters.len() > 1 => {
+            let mut filters = filters.to_vec();
+            filters.remove(at);
+            if let Some(Value::Array(parms)) = parameters
+                && parms.len() == filters.len() + 1
+            {
+                let mut parms = parms.clone();
+                parms.remove(at);
+                out.set("DecodeParms", parms);
+            }
+            out.set("Filter", filters);
+        }
+        // The one filter, as a name or an array of one.
+        _ => {
+            out.remove(b"Filter");
+            out.remove(b"DecodeParms");
+        }
+    }
+    Some(out)
+}
+
 /// `o`, or what it refers to: references followed, as many as a chain of
 /// them may take; none for a null, or a reference to no object.
 fn resolved<'a>(

@@ -72,23 +72,28 @@
 //!   starts, deflated, no bigger than the reader decodes a stream to
 //!   ([`MAX_DATA`]).
 //! - **Deflated** by the backend and at the level a [`Deflate`] says.
-//! - **Encrypted as it's written** (7.6): an encrypted file's every string
-//!   and stream's data, as pdf-objects' writer writes each, by an
-//!   [`Encryptor`], a reading's ([`Encryptor::of`]) or a new file's
-//!   ([`Encryptor::create`]), through what it gives for the file's objects
-//!   ([`Encrypting`]): with the object's key, AES's IV the next of the
-//!   write's own, 16 bytes from the operating system (pdf-crypt's `Ivs`), so
-//!   no IV serves two plaintexts and two saves of one document differ in
-//!   every AES ciphertext written anew. What it leaves in the clear is the
-//!   list the reader decrypts by, one list both ways (see
-//!   [`read`](crate::read), "What's encrypted"). Under RC4 a changed object written again at its number
-//!   and generation is encrypted with the keystream its earlier version
+//! - **Encrypted as it's written** (7.6): an encrypted file's every string and
+//!   stream's data, as pdf-objects' writer writes each, by an [`Encryptor`], a
+//!   reading's ([`Encryptor::of`]) or a new file's ([`Encryptor::create`]),
+//!   through what it gives for the file's objects ([`Encrypting`]): with the
+//!   object's key, AES's IV the next of the write's own, 16 bytes from the
+//!   operating system (pdf-crypt's `Ivs`), so no IV serves two plaintexts and
+//!   two saves of one document differ in every AES ciphertext written anew.
+//!   What it leaves in the clear is the list the reader decrypts by, one list
+//!   both ways (see [`read`](crate::read), "What's encrypted"). A trailer isn't
+//!   encrypted, so a direct `/Info` is written as an object, encrypted as any;
+//!   and only strings and streams are (7.6.2), so what a file held only inside
+//!   an object stream is in the clear once written unpacked ([`document`] says
+//!   so). Under a new encryption that encrypts metadata, the document's
+//!   metadata stream's own `/Crypt` filter that would leave it in the clear is
+//!   taken out as it's written. Under RC4 a changed object written again at its
+//!   number and generation is encrypted with the keystream its earlier version
 //!   was, which leaks what changed to one who holds both (pdf-crypt's
 //!   `Method::Rc4`), and so is an object a renumbering writes at a number
-//!   another object had, which leaks the XOR of the two; a file written
-//!   whole under a new AES-256 encryption ([`Encryptor::create`]) doesn't.
-//!   The encryption dictionary of pdf-crypt's values, as a new file's is
-//!   written, is [`encryption`].
+//!   another object had, which leaks the XOR of the two; a file written whole
+//!   under a new AES-256 encryption ([`Encryptor::create`]) doesn't. The
+//!   encryption dictionary of pdf-crypt's values, a new file's or one read, as
+//!   the values say it, is [`encryption`].
 //!
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
@@ -1307,6 +1312,14 @@ fn dangling(
     named
 }
 
+/// Whether a trailer's `/Info` is held in the trailer itself, not as an
+/// object: any value but a reference or null, whose strings a trailer, which
+/// isn't encrypted (ISO 32000-2, 7.6.2), would hold in the clear. An
+/// encrypted write writes it as an object.
+fn direct_info(info: &Object) -> bool {
+    !matches!(info.value(), Value::Ref(_) | Value::Null)
+}
+
 /// The first number from `from` on that isn't `passed`.
 fn fresh(from: u32, passed: impl Fn(u32) -> bool) -> u32 {
     (from..=u32::MAX).find(|&n| !passed(n)).unwrap_or(u32::MAX)
@@ -1363,6 +1376,9 @@ fn indirect(
     from: Option<&dyn ReadFrom>,
     to: Numbering<'_>,
 ) -> Result<usize, Error> {
+    // As a new encryption writes it, where that isn't as it's held.
+    let anew = encrypting.and_then(|e| e.anew(at, obj));
+    let obj = anew.as_ref().unwrap_or(obj);
     if let Value::Stream(stream) = obj.value()
         && let Some(span) = stream.data.at()
     {

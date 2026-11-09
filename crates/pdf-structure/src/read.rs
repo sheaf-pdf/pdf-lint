@@ -160,7 +160,13 @@
 //!   where its own crypt filter names one the dictionary hasn't
 //!   ([`write::Unencryptable`](crate::write::Unencryptable)). Held by
 //!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`
-//!   and `what_cant_be_encrypted_is_refused_and_nothing_written`.
+//!   and `what_cant_be_encrypted_is_refused_and_nothing_written`. Under a new
+//!   encryption that encrypts metadata, the writer takes the document's
+//!   metadata stream's own `/Crypt` filter `/Identity` out of its `/Filter`
+//!   and `/DecodeParms` as it writes it, so that its data is encrypted as
+//!   `/EncryptMetadata` says (7.6.4.2, 14.3.2); under a reading's own
+//!   encryption it writes it as read, as any stream's own. Held by
+//!   `a_new_encryption_drops_the_metadata_streams_own_identity_crypt`.
 //!   But for these:
 //!   - **A cross-reference stream's** is handed out as written (7.5.8.2).
 //!     Held by `a_cross_reference_streams_data_is_handed_out_as_written`.

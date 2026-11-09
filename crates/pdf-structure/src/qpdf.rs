@@ -958,6 +958,106 @@ mod tests {
         }
     }
 
+    /// An encrypted file's direct `/Info`, which the writer writes as an
+    /// object, encrypted, reads through qpdf as through the reader: of the
+    /// test writer's RC4, AES-128 and AES-256 files, each written whole under
+    /// its own encryption and under a new one, and updated under its own,
+    /// each passes qpdf's `--check` by its password, and qpdf's `--decrypt`
+    /// gives a file whose trailer's `/Info` is the dictionary the reader
+    /// reads from the trailer of the one written.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn a_direct_info_written_as_an_object_reads_through_qpdf_as_through_the_reader() {
+        use chacha20::ChaCha20Rng;
+        use pdf_crypt::rand_core::SeedableRng;
+        use pdf_crypt::writer::{Kind, Settings};
+
+        use crate::write::{self, Encryptor};
+
+        let dir = scratch("info");
+        let info = Object::from(dict! { "Title" => Object::text("A title") });
+        let trailer = dict! { "Root" => Object::reference(1), "Info" => info };
+        let prepared = Password("new").prepared().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let created =
+            Encryptor::create_with(&pdf_crypt::Protection::new(&prepared), &mut rng).unwrap();
+        let opened = |file: &[u8], password: &str| {
+            let passwords = [Password(password)];
+            let options = read::Options {
+                passwords: &passwords,
+                ..read::Options::DEFAULT
+            };
+            read::Reading::open(file.to_vec(), &options).unwrap()
+        };
+        let kinds = [Kind::Rc4By128, Kind::Aes128, Kind::Aes256];
+        for (k, kind) in kinds.into_iter().enumerate() {
+            let settings = Settings {
+                kind,
+                user: b"user",
+                owner: b"owner",
+                p: -4,
+                id: b"0123456789abcdef",
+                encrypt_metadata: true,
+            };
+            let source = fixture::encrypted(&settings, &clean(), trailer.clone());
+            let reading = opened(&source, "user");
+            let doc = reading.to_document().unwrap();
+            let own = Encryptor::of(&reading).unwrap().unwrap();
+            let options = write::Options::DEFAULT;
+            let mut whole = Vec::new();
+            write::document(&mut whole, &doc, Some(&own), Some(&reading), &options).unwrap();
+            let mut new = Vec::new();
+            write::document(&mut new, &doc, Some(&created), Some(&reading), &options).unwrap();
+            let base = write::Base::of(&reading).unwrap();
+            let mut updated = source.clone();
+            let catalog = doc.get(ObjectId::new(1, 0)).unwrap().clone();
+            let given = [(ObjectId::new(1, 0), write::Body::from(&catalog))];
+            write::update(&mut updated, &base, given, Some(&own), None, &options).unwrap();
+            for (way, file, password) in [
+                ("whole", whole, "user"),
+                ("new", new, "new"),
+                ("updated", updated, "user"),
+            ] {
+                let what = format!("{kind:?}, {way}");
+                let path = dir.path().join(format!("{k}-{way}.pdf"));
+                std::fs::write(&path, &file).unwrap();
+                let qpdf = qpdf(&path).password(password);
+                let run = |args: &[&Path]| {
+                    let mut all = vec![format!("--password={password}")];
+                    all.extend(args.iter().map(|a| a.display().to_string()));
+                    qpdf.exec(&all).unwrap()
+                };
+                let check = run(&[Path::new("--check"), &path]);
+                let said = String::from_utf8_lossy(&check.stderr).into_owned();
+                assert_eq!((check.code, said.as_str()), (Some(0), ""), "{what}");
+                let ours = opened(&file, password);
+                let at = (ours.trailer().dict().get(b"Info"))
+                    .and_then(Object::as_reference)
+                    .unwrap_or_else(|| panic!("{what}: /Info is direct"));
+                let decrypted = dir.path().join(format!("{k}-{way}-decrypted.pdf"));
+                let wrote = run(&[
+                    Path::new("--decrypt"),
+                    Path::new("--compress-streams=n"),
+                    Path::new("--decode-level=none"),
+                    &path,
+                    &decrypted,
+                ]);
+                assert_eq!(wrote.code, Some(0), "{what}");
+                let theirs = std::fs::read(&decrypted).unwrap();
+                let theirs = read::Reading::open(theirs, &read::Options::DEFAULT).unwrap();
+                let mut followed = BTreeMap::new();
+                let x = Object::from(at);
+                let y = theirs.trailer().dict().get(b"Info").unwrap();
+                assert_eq!(
+                    alike((&ours, &x), (&theirs, y), &mut followed),
+                    Ok(()),
+                    "{what}"
+                );
+                assert_eq!(followed.len(), 1, "{what}: /Info followed");
+            }
+        }
+    }
+
     /// What reading through qpdf alone loses: where anything was written,
     /// any key written twice, which encoding a text string had, and whether
     /// a string was written literal or hex. `a` with these left out, as `b`

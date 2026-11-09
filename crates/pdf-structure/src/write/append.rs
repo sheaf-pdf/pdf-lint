@@ -19,7 +19,7 @@ use super::copy::{Copying, as_read, written};
 use super::crypt::Place;
 use super::{
     Body, Encryptor, Entry, Error, Given, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
-    Section, Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
+    Section, Written, checked, dangling, direct_info, file_id, first_id, fresh, id_value, stopped,
 };
 use crate::phases::phase;
 use crate::read::{ByteSource, Reading, SourceId};
@@ -296,7 +296,14 @@ impl Base {
 ///   `base.prev`, `/Info`, `/Encrypt` and `/ID` first, then the rest in
 ///   `base`'s order, then `/Size`. Its values are written as they are, each
 ///   reference as the renumbering names it, never encrypted, as a trailer
-///   isn't an object (7.6.2).
+///   isn't an object (7.6.2). So in an encrypted file a direct `/Info`,
+///   whose strings would be in the clear there, is written as an object
+///   after the update's bodies, at a number past every one the file and
+///   the update use (none of its keys or keystreams), passing over what's
+///   written refers to and doesn't hold, encrypted as any object, the
+///   trailer naming it. An update appends: the earlier sections' trailers
+///   stay in the file as they were, a direct `/Info`'s strings among them
+///   in the clear, which only a whole file written anew leaves behind.
 /// - **The `/ID`** keeps its first string, the encryptor's, else `base`'s;
 ///   the second is the first 16 bytes of SHA-256 of what the update wrote
 ///   before its section, so in the clear the same update writes the same
@@ -515,13 +522,6 @@ fn appended(
             },
         );
     }
-    // Each object the base's reading read at a shift, where it is, unless
-    // a body was written at its number.
-    for &(number, generation, offset) in &base.shifted {
-        if !section.lists(number) {
-            section.insert(number, Entry::InUse { offset, generation });
-        }
-    }
     // The file's entries, in the numbers written.
     let named = |value: &Object| {
         let mut value = value.clone();
@@ -530,11 +530,43 @@ fn appended(
         }
         value
     };
+    // An encrypted file's direct /Info, which the trailer would hold in the
+    // clear, written as an object at a number past every one the file and
+    // the update use, encrypted as any, the trailer naming it.
+    let info = match (base.trailer.get(b"Info"), &encrypting) {
+        (Some(info), Some(e)) if direct_info(info) => {
+            let past = base.size.max(section.size());
+            let dangling = dangling(bodies, to, &base.trailer, past, &[]);
+            let num = fresh(past, |n| dangling.contains(&n));
+            if num >= NUMBERS {
+                return Err(Error::NoNumber(num));
+            }
+            let id = ObjectId::new(num, 0);
+            let pos = at(out);
+            serialize::indirect_with(out, id, &named(info), e)?;
+            section.insert(
+                num,
+                Entry::InUse {
+                    offset: pos,
+                    generation: 0,
+                },
+            );
+            Some(Object::from(id))
+        }
+        (info, _) => info.map(named),
+    };
+    // Each object the base's reading read at a shift, where it is, unless
+    // a body was written at its number.
+    for &(number, generation, offset) in &base.shifted {
+        if !section.lists(number) {
+            section.insert(number, Entry::InUse { offset, generation });
+        }
+    }
     let mut trailer = Dict::new();
     trailer.set("Root", named(root));
     trailer.set("Prev", base.prev as i64);
-    if let Some(info) = base.trailer.get(b"Info") {
-        trailer.set("Info", named(info));
+    if let Some(info) = info {
+        trailer.set("Info", info);
     }
     if let Some(e) = encryptor {
         match e.place() {
