@@ -1565,21 +1565,25 @@ fn a_scanned_streams_endstream_run_into_endobj_ends_it_under_the_verified_recove
 /// to that `endobj`, as it passes over any stream's, and says so, so the
 /// catalog isn't found; [`Recovery::Pdfium`] reads on through it, as
 /// PDFium's scan reads through any words but an object's, so every object
-/// is found and nothing's said.
+/// is found and nothing's said. An `endstream` after the trailer, the
+/// first after the stream's data, takes nothing back, as the stream is no
+/// object's.
 #[test]
 fn a_stream_no_n_g_obj_comes_before_is_read_through_as_pdfium_reads_it() {
-    let (file, places) = scanned_after(b"<< /Length 999 >>\nstream\n", b"");
-    let doc = read(&file);
-    assert!(doc.get(ObjectId::new(1, 0)).is_err());
-    each_object_at(&doc, &places[1..], &|_| Origin::Recovered);
-    let start = b"%PDF-1.7\n<< /Length 999 >>\nstream\n".len();
-    let (_, catalog) = places[0];
-    let endobj = catalog + format!("1 0 obj\n{}\n", OBJECTS[0].1).len();
-    assert_eq!(stream_ends(&doc), [ended(None, start, Some(endobj))]);
-    let doc = document(&file, &as_pdfium());
-    each_object_at(&doc, &places, &|_| Origin::Recovered);
-    reaches_its_page(&doc);
-    assert_eq!(stream_ends(&doc), []);
+    for after in [&b""[..], b"endstream\n"] {
+        let (file, places) = scanned_after(b"<< /Length 999 >>\nstream\n", after);
+        let doc = read(&file);
+        assert!(doc.get(ObjectId::new(1, 0)).is_err());
+        each_object_at(&doc, &places[1..], &|_| Origin::Recovered);
+        let start = b"%PDF-1.7\n<< /Length 999 >>\nstream\n".len();
+        let (_, catalog) = places[0];
+        let endobj = catalog + format!("1 0 obj\n{}\n", OBJECTS[0].1).len();
+        assert_eq!(stream_ends(&doc), [ended(None, start, Some(endobj))]);
+        let doc = document(&file, &as_pdfium());
+        each_object_at(&doc, &places, &|_| Origin::Recovered);
+        reaches_its_page(&doc);
+        assert_eq!(stream_ends(&doc), []);
+    }
 }
 
 /// A scanned file whose last stream's `/Length` ends at its `endstream`,
