@@ -1466,7 +1466,7 @@ fn a_document_in_a_scanned_streams_data_doesnt_stand_over_the_files_own_objects(
         start,
         Some(start + "q Q\n".len()),
     );
-    assert_eq!(stream_ends(&doc), [said.clone()]);
+    assert_eq!(stream_ends(&doc), std::slice::from_ref(&said));
 
     let keywordless = "5 0 obj\n<< /Length 3 >>\nq Q\nendstream\nendobj\n";
     let (file, places) = scanned_after(unended.as_bytes(), keywordless.as_bytes());
