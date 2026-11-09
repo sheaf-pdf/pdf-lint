@@ -536,14 +536,14 @@ impl rand_core::TryCryptoRng for Drawn<'_> {}
 /// (stringprep's) where it's neither, then the text as typed, then
 /// single-byte forms of the text composed, a byte a character, none twice
 /// among those a revision takes first; 3.2's form is there exactly where
-/// stringprep takes the text with Corrigendum #4's five characters mapped
-/// to their 3.2 decompositions and 3.2 assigned each of its characters,
-/// and has that form's characters, decomposed, in another order at most;
-/// prepared, the text is SASLprep's form by both, of 1 to 127 bytes and
-/// its own SASLprep by both, or it's refused for what the text is: over
-/// `Password::LONGEST` bytes as typed, whatever else it is; a character by
-/// its place and the first table it's in; forms that part
-/// at a place no shorter beginning of the text parts at.
+/// stringprep takes the text with Corrigendum #4's five characters mapped to
+/// their 3.2 decompositions and 3.2 assigned each of its characters, and has
+/// that form's characters, decomposed, in another order at most; prepared, the
+/// text is SASLprep's form by both, of 1 to 127 bytes and its own SASLprep by
+/// both, or it's refused for what the text is: over `Password::LONGEST` bytes
+/// as typed, whatever else it is; a character by its place and the first table
+/// it's in; forms that part at a place no shorter beginning of the text parts
+/// at.
 pub fn password(data: &[u8]) {
     use crate::password::{CORRIGENDUM_4, saslprep_32};
     use crate::{Encoding, Password, Unusable};
@@ -651,9 +651,10 @@ pub fn password(data: &[u8]) {
                 assert!(len > 127, "too long");
                 assert_eq!(prepared.map(|p| p.len()).ok(), Some(len), "its length");
             }
-            Err(Unusable::TypedTooLong { len }) => {
+            Err(Unusable::TypedTooLong { len, most }) => {
                 assert_eq!(len, text.len(), "its length as typed");
-                assert!(len > Password::LONGEST, "too long as typed");
+                assert_eq!(most, Password::LONGEST, "the most");
+                assert!(len > most, "too long as typed");
             }
             Err(Unusable::Prohibited { at, why }) => {
                 let c = text.chars().nth(at).expect("a character of the text");

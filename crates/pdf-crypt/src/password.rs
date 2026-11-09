@@ -236,7 +236,10 @@ impl Password<'_> {
     pub fn prepared(&self) -> Result<Encoded, Unusable> {
         let text = self.0;
         if text.len() > Password::LONGEST {
-            return Err(Unusable::TypedTooLong { len: text.len() });
+            return Err(Unusable::TypedTooLong {
+                len: text.len(),
+                most: Password::LONGEST,
+            });
         }
         if text.is_empty() {
             return Err(Unusable::Empty);
@@ -346,10 +349,13 @@ pub enum Unusable {
     /// Over [`Password::LONGEST`] bytes as typed (UTF-8): refused before
     /// any of it's prepared, as no password near so long is typed, and
     /// preparing one is slow.
-    #[error("the password is {len} bytes as typed, over the 1,024 a password is prepared from")]
+    #[error("the password is {len} bytes as typed, over the {most} a password is prepared from")]
     TypedTooLong {
         /// Its length as typed.
         len: usize,
+        /// The most a password is prepared from as typed:
+        /// [`Password::LONGEST`].
+        most: usize,
     },
     /// Neither the user's password nor the owner's, for a new file, as in
     /// [`Protection::DEFAULT`](crate::Protection::DEFAULT) before one is
@@ -993,8 +999,11 @@ mod tests {
             // Over 1,024 bytes as typed, refused before it's prepared.
             (
                 why(&"a".repeat(1025)),
-                Unusable::TypedTooLong { len: 1025 },
-                "the password is 1025 bytes as typed, over the 1,024 a password is prepared from",
+                Unusable::TypedTooLong {
+                    len: 1025,
+                    most: 1024,
+                },
+                "the password is 1025 bytes as typed, over the 1024 a password is prepared from",
             ),
         ];
         for (why, reason, text) in reasons {
@@ -1215,7 +1224,10 @@ mod tests {
         assert_eq!(over.len(), 1025);
         assert_eq!(
             Password(&over).prepared().unwrap_err(),
-            Unusable::TypedTooLong { len: 1025 }
+            Unusable::TypedTooLong {
+                len: 1025,
+                most: Password::LONGEST
+            }
         );
         // A reader tries a text of any length, as typed among its forms.
         let forms = Password(&over).encodings();

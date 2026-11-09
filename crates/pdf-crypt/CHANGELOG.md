@@ -10,7 +10,7 @@ AES's IVs and a new file's key and salts come from the operating system, and the
 - `Random`, with `Fault::Random` and `Unusable::Random`: the operating system's generator failed. Nothing is encrypted or made then, and nothing is given in the clear in its place.
 - `Handler::revision`: the revision a handler opened by, its dictionary's `/R`. A new file's is 6.
 - `KeyCheck`, `Handler::key_check` and `Handler::has_key`: tell whether two handlers have one key without giving it out. The check is compared in constant time, and its `Debug` shows none of its bytes.
-- `Password::LONGEST` and `Unusable::TypedTooLong`: `Password::prepared` refuses a text over 1,024 bytes as typed before it prepares any of it. `Password::encodings`, a reader's, takes a text of any length.
+- `Password::LONGEST` and `Unusable::TypedTooLong { len, most }`: `Password::prepared` refuses a text over 1,024 bytes as typed before it prepares any of it, saying its length and that most. `Password::encodings`, a reader's, takes a text of any length.
 - `Prohibition`: which of RFC 4013's tables refuses a character, with its words.
 
 ### Changed
@@ -18,7 +18,7 @@ AES's IVs and a new file's key and salts come from the operating system, and the
 - `Handler::encrypt_string(id, data, &ivs)` and `Handler::encrypt_stream(id, data, crypt, &ivs)` take the write's `Ivs` in place of a context. **Migrating:** make one `Ivs::new()` for each write, pass it to every encrypt of that write, and drop the context.
 - `Handler::create(&protection)` draws the new file's key and salts from the operating system. **Migrating:** drop the generator argument.
 - `Unusable::Prohibited { at, why }` and `Unusable::Ambiguous { at }` give the character's place among the password's characters, from 0, and never the character. **Migrating:** match `Prohibited { at, why }` and `Ambiguous { at }` where you matched `Prohibited(c)` and `Ambiguous(c)`. `text.chars().nth(at)` is the character, for a program that shows its user which.
-- pdf-crypt depends on getrandom 0.4. A build for wasm32-unknown-unknown picks getrandom's backend, its `wasm_js` feature or a custom one, as getrandom's docs say.
+- pdf-crypt depends on getrandom 0.4. A build for wasm32-unknown-unknown picks getrandom's backend, its `wasm_js` feature or a custom one, as getrandom's docs say. **Migrating:** on wasm32-unknown-unknown, depend on getrandom 0.4 beside pdf-crypt, with its `wasm_js` feature for a browser, or pick a custom backend; a build that picks none fails.
 
 ### Fixed
 
@@ -27,7 +27,7 @@ AES's IVs and a new file's key and salts come from the operating system, and the
 ### Removed
 
 - The `writer` feature. The test writer is behind `insecure-test-writer` now, and its items are hidden from the docs. It writes test files, never a document's protection. **Migrating:** turn on `insecure-test-writer` where a test turned on `writer`.
-- `pdf_crypt::rand_core` and the rand_core dependency, from a default build. They're there with `insecure-test-writer` alone, hidden. **Migrating:** no default item takes a generator now. A test that seeds the test writer's turns on `insecure-test-writer`.
+- `pdf_crypt::rand_core` and the rand_core dependency, from a default build. They're there with `insecure-test-writer` alone, hidden. **Migrating:** no default item takes a generator now. A test that gives the test writer a seeded generator turns on `insecure-test-writer`.
 
 ### Security
 
