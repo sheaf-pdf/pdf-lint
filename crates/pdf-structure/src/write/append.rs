@@ -11,6 +11,7 @@
 
 use std::io;
 
+use pdf_crypt::{Handler, KeyCheck};
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::serialize;
 
@@ -32,9 +33,12 @@ use crate::source::XrefKind;
 /// read objects at a shift or where a scan found them, it also keeps,
 /// privately, what that `startxref` said, which [`Base::holds`] reads
 /// again in place of `prev`, and where each such object is, which an
-/// update after it lists: neither is a field, so one made by
-/// [`Base::new`] and its fields set as another's has neither, and a caller
-/// that keeps a base for later keeps the `Base` itself.
+/// update after it lists; and, made of an encrypted file's reading or
+/// given back by a write under an encryption, a check of the file's key
+/// (pdf-crypt's `KeyCheck`, which gives nothing of the key), which an
+/// update's encryptor must have ([`Error::Unmatched`]). None is a field,
+/// so one made by [`Base::new`] and its fields set as another's has none,
+/// and a caller that keeps a base for later keeps the `Base` itself.
 /// Not exhaustive, so that it can come to say more of the file.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -68,8 +72,9 @@ pub struct Base {
     /// known: an update's encryptor must have the same
     /// ([`Error::Unmatched`]). None for a file that isn't encrypted, and for
     /// one described by [`Base::new`] whose `/Encrypt` is a reference,
-    /// unless the caller sets it: an update's encryptor is then matched to
-    /// the file by where the dictionary is and by `/ID[0]` alone.
+    /// unless the caller sets it: with neither it nor a key's check, which
+    /// such a base has none of, nothing says an encryptor's key is the
+    /// file's, so an update after it is refused.
     pub encryption: Option<Dict>,
     /// The reading its bytes are the bytes of, when it was made of one:
     /// kept by an update after it, which appends, and none after a whole
@@ -97,6 +102,10 @@ pub struct Base {
     /// number, its generation and where it is in the file's bytes, which an
     /// update after it lists, so that it's read there with nothing to find.
     pub(super) shifted: Vec<(u32, u16, usize)>,
+    /// Its key's check, made of the handler its reading was opened by, or
+    /// the encryptor a write that gave it back was under: an update's
+    /// encryptor must have the same key ([`Error::Unmatched`]).
+    pub(super) key: Option<KeyCheck>,
 }
 
 impl Base {
@@ -107,8 +116,9 @@ impl Base {
     /// isn't where `startxref` says, so that the update's `/Prev` is), and
     /// its kind, its trailer, its `/ID[0]` (an
     /// encrypted file's as its handler opened by it, empty where the
-    /// trailer has none) and its encryption dictionary as stored, and the
-    /// reading's [`SourceId`]. New numbers start past its trailer's `/Size`
+    /// trailer has none), its encryption dictionary as stored and its key's
+    /// check, and the reading's [`SourceId`]. New numbers start past its
+    /// trailer's `/Size`
     /// (below 2³²), every number its sections list, in use or free, and its
     /// cross-reference streams' numbers. Where the reading read objects at
     /// a shift, or where a scan found them, it keeps where each is, which
@@ -193,6 +203,7 @@ impl Base {
             renumbered: false,
             startxref: said,
             shifted: reading.shifted(),
+            key: reading.handler().map(Handler::key_check),
         })
     }
 
@@ -201,7 +212,9 @@ impl Base {
     /// `/ID[0]` the trailer's, its encryption dictionary the trailer's where
     /// that's direct; its header at 0, its last line taken as not ended (an
     /// update then starts with a newline), and of no reading. Each is a
-    /// field, to set after.
+    /// field, to set after: a file whose `/Encrypt` is a reference is
+    /// updated only once [`Base::encryption`] is set, as nothing else says
+    /// an encryptor is the file's.
     #[must_use]
     pub fn new(len: usize, prev: usize, size: u32, kind: XrefKind, trailer: Dict) -> Base {
         Base {
@@ -218,6 +231,7 @@ impl Base {
             renumbered: false,
             startxref: None,
             shifted: Vec::new(),
+            key: None,
         }
     }
 
@@ -269,8 +283,8 @@ impl Base {
 /// a renumbering, whole or as an update ([`Base::renumbered`]), whose
 /// numbers aren't the document's, it's given objects at the numbers
 /// written, built or edited, under the encryptor in those numbers (after a
-/// whole file, [`Encryptor::renumbered`]'s; after an update, the file's
-/// own), and refuses an object as read and a reading
+/// whole file, [`Encryptor::of`] a reading of the file written; after an
+/// update, the file's own), and refuses an object as read and a reading
 /// ([`Error::Renumbered`]); a caller that copies opens the file written and
 /// goes after [`Base::of`] that reading. With no reading to resolve it,
 /// where `/EncryptMetadata false` leaves the document's metadata stream in
@@ -291,7 +305,10 @@ impl Base {
 /// - **Encrypted** as `base`'s file is, by `encryptor`, which is that
 ///   file's ([`Encryptor::of`] of a reading of its bytes): its dictionary
 ///   where the file's trailer has it, the one the file stores where `base`
-///   knows it ([`Base::encryption`]), and its `/ID[0]`, `base`'s; every
+///   knows it ([`Base::encryption`]), which it must where the trailer
+///   names it by number, its `/ID[0]`, `base`'s, and its key, where `base`
+///   keeps a check of it (one of a reading, [`Base::of`], or given back by
+///   a write); every
 ///   string and stream's data as [`Encrypting`](super::Encrypting) says; a
 ///   stream's whose data is where it was written read from `from`,
 ///   decrypted, and encrypted again. Its `/Encrypt` is repeated as the
@@ -343,7 +360,10 @@ impl Base {
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
 /// object as read or a `from` after a file written under a renumbering; an
 /// encryptor that isn't `base`'s file's (another file's, though its
-/// `/Encrypt` is at the same number), or none for an encrypted file; a
+/// `/Encrypt` is at the same number and its `/ID[0]` the same, or another
+/// key's of the same file), or none for an encrypted file, or any for a
+/// `base` that doesn't know the dictionary its file's `/Encrypt` names by
+/// number; a
 /// number 0 or at or past [`NUMBERS`], or given twice, one passed over
 /// among them ([`Error::Twice`]), or under a renumbering written at twice,
 /// one passed over among them ([`Error::WrittenTwice`]); a body the
@@ -566,6 +586,7 @@ fn appended(
         renumbered: base.renumbered || to.0.is_some(),
         startxref: None,
         shifted: Vec::new(),
+        key: base.key.clone(),
     };
     Ok(Written {
         section,
@@ -579,11 +600,16 @@ fn appended(
 /// Whether `encryptor` is how `base`'s file is encrypted, or neither
 /// encrypts: its dictionary where the file's trailer has it, at the same
 /// number or the same direct dictionary; the same dictionary as the one
-/// `base` knows the file stores ([`Base::encryption`]); and the same
-/// `/ID[0]`, an absent one empty. Those are what a password's key is made
-/// from and checked by (ISO 32000-2, 7.6.4.3), so its key is then the
-/// file's; another file's, whose `/Encrypt` is at the same number, isn't
-/// taken for it.
+/// `base` knows the file stores ([`Base::encryption`]), which it must know
+/// where the trailer names it by number; the same `/ID[0]`, an absent one
+/// empty; and the same key, where `base` has a check of it (pdf-crypt's
+/// `KeyCheck`, compared in constant time). The dictionary and `/ID[0]` are
+/// what a password's key is made from and checked by (ISO 32000-2,
+/// 7.6.4.3), but a dictionary can be made to give one key by the owner's
+/// password and another by the user's, which the check tells apart; so
+/// another file's encryptor, whose `/Encrypt` is at the same number, or
+/// another reading's of the same file by a key it wasn't written under,
+/// isn't taken for it.
 fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
     // A null is no entry (ISO 32000-2, 7.3.9), so no encryption.
     let encrypt = (base.trailer.get(b"Encrypt")).filter(|e| !e.is_null());
@@ -601,9 +627,15 @@ fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
         (Place::Direct, Value::Dict(dict)) => alike(dict),
         _ => false,
     };
-    let stored = base.encryption.as_ref().is_none_or(alike);
+    // A dictionary at a number, which the base doesn't know: nothing says
+    // the encryptor's is the one stored there.
+    let stored = match &base.encryption {
+        Some(dict) => alike(dict),
+        None => encrypt.as_reference().is_none(),
+    };
     let id = e.first_id().unwrap_or_default() == base.first_id.as_deref().unwrap_or_default();
-    placed && stored && id
+    let key = base.key.as_ref().is_none_or(|key| e.has_key(key));
+    placed && stored && id && key
 }
 
 /// `dict` as pdf-objects' writer writes it, where it can.

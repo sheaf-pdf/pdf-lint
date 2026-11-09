@@ -410,7 +410,7 @@ fn file(
     let (plan, containers) = loop {
         let plan = plan(&graph, &options.limits).map_err(Error::Plan)?;
         lap("plan");
-        let built = writing.under(&plan, |parts, _, _| {
+        let built = writing.under(&plan, |parts, _| {
             containers(&prepared, &plan, parts, options)
         })?;
         let before = alone.len();
@@ -424,21 +424,25 @@ fn file(
         }
         graph = prepared.graph(kind, pack, &alone);
     };
-    writing.under(&plan, |parts, now, encrypting| {
-        let lengths = bodies(out, &prepared, &plan, containers, parts, now, options)?;
+    writing.under(&plan, |parts, encrypting| {
+        let lengths = bodies(
+            out, &prepared, &plan, containers, parts, encrypting, options,
+        )?;
         lap("bodies");
 
         let given = doc.trailer().dict();
-        let kept = now.and_then(Encryptor::first_id).map(<[u8]>::to_vec);
+        let kept = encrypting
+            .and_then(Encrypting::first_id)
+            .map(<[u8]>::to_vec);
         let kept = kept.or_else(|| write::first_id(given));
-        let id = write::file_id(kept, now.is_some(), &out[start..]);
+        let id = write::file_id(kept, encrypting.is_some(), &out[start..]);
         let to = |id: ObjectId| plan.number(id);
         let mut trailer = write::trailer_entries(given, &to);
         trailer.remove(b"Root");
-        if let Some(encryptor) = now {
-            match prepared.dictionary().and_then(|id| plan.number(id)) {
+        if let Some(encrypting) = encrypting {
+            match encrypting.at() {
                 Some(at) => trailer.set("Encrypt", Object::from(at)),
-                None => trailer.set("Encrypt", encryptor.dictionary().clone()),
+                None => trailer.set("Encrypt", encrypting.dictionary().clone()),
             }
         }
         if let Some(id) = &id {
@@ -476,29 +480,29 @@ struct Writing<'w, 'd> {
 
 impl Writing<'_, '_> {
     /// `then`, given what writes bodies at `plan`'s numbers, and the encryption
-    /// in those numbers, as a whole file has it, where there's one: its
-    /// dictionary at the number planned for it, and what's encrypted under each
-    /// object's.
+    /// in those numbers, as a whole file has it, where there's one
+    /// ([`Encryptor::laid_out`]): its dictionary at the number planned for it,
+    /// and what's encrypted under each object's.
     fn under<R>(
         &self,
         plan: &Plan,
-        then: impl FnOnce(&Parts<'_>, Option<&Encryptor>, Option<&Encrypting<'_>>) -> Result<R, Error>,
+        then: impl FnOnce(&Parts<'_>, Option<&Encrypting<'_>>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let to = |id: ObjectId| plan.number(id);
-        let renumbered = self.encryptor.map(|encryptor| encryptor.renumbered(&to));
         let at = self.prepared.dictionary().and_then(|id| plan.number(id));
-        let whole = renumbered.as_deref().map(|encryptor| encryptor.whole(at));
-        let now = whole.as_deref();
         // In the numbers objects are held at, as they're asked of it.
         let doc = self.doc;
         let trailer = doc.trailer().dict();
-        let encrypting = now
-            .map(|encryptor| encryptor.encrypting_renumbered(trailer, &doc, &to))
+        let encrypting = (self.encryptor)
+            .map(|encryptor| encryptor.laid_out(Some(&to), at, trailer, &doc))
             .transpose()
             .map_err(Error::Write)?;
-        let encrypting = encrypting.as_ref();
-        let parts = Parts::new(encrypting, self.from, Some(&to)).map_err(Error::Write)?;
-        then(&parts, now, encrypting)
+        let parts = match &encrypting {
+            Some(encrypting) => Parts::new(encrypting, self.from),
+            None => Parts::plain(self.from, Some(&to)),
+        };
+        let parts = parts.map_err(Error::Write)?;
+        then(&parts, encrypting.as_ref())
     }
 }
 
@@ -526,7 +530,7 @@ fn containers(
 }
 
 /// Each of `plan`'s writes, in file order, at the end of `out`: their lengths.
-/// The encryption dictionary is written from `encryptor`, in the numbers
+/// The encryption dictionary is written as `encrypting` has it, in the numbers
 /// written, and in the clear (7.6.2).
 fn bodies(
     out: &mut Vec<u8>,
@@ -534,7 +538,7 @@ fn bodies(
     plan: &Plan,
     mut containers: Vec<Option<Vec<u8>>>,
     parts: &Parts<'_>,
-    encryptor: Option<&Encryptor>,
+    encrypting: Option<&Encrypting<'_>>,
     options: &Options<'_>,
 ) -> Result<Vec<u64>, Error> {
     let mut lengths = Vec::with_capacity(plan.writes().len());
@@ -547,9 +551,9 @@ fn bodies(
         }
         let at = out.len();
         match write.what {
-            What::Object(id) => match encryptor.filter(|_| prepared.dictionary() == Some(id)) {
-                Some(encryptor) => {
-                    let dictionary = Object::from(encryptor.dictionary().clone());
+            What::Object(id) => match encrypting.filter(|_| prepared.dictionary() == Some(id)) {
+                Some(encrypting) => {
+                    let dictionary = Object::from(encrypting.dictionary().clone());
                     serialize::indirect(out, ObjectId::new(write.number, 0), &dictionary)
                         .map_err(|why| Error::Write(write::Error::Serialize(why)))?;
                 }

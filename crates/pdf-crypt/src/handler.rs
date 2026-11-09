@@ -11,6 +11,7 @@ use std::fmt;
 use zeroize::Zeroizing;
 
 use crate::aes::Aes;
+use crate::hmac::HmacSha256;
 use crate::md5::md5;
 use crate::password::is_prepared;
 use crate::rc4::rc4;
@@ -119,6 +120,28 @@ impl fmt::Debug for Handler {
             .finish_non_exhaustive()
     }
 }
+
+/// What a handler's key is told apart by ([`Handler::key_check`]):
+/// HMAC-SHA256 under the file's key of a label of pdf-crypt's own, so it
+/// says nothing of the key but whether another handler's is the same
+/// ([`Handler::has_key`]). Two compare in constant time, as hmac's own
+/// output does; its `Debug` gives none of its bytes, and it has no `Hash`,
+/// which would compare it otherwise. It's wiped when it's dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyCheck(::hmac::digest::CtOutput<::hmac::Hmac<::sha2::Sha256>>);
+
+impl KeyCheck {
+    /// Its bytes, for the tests alone: never public, as it's compared, not
+    /// read.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+/// The message a [`KeyCheck`] is the MAC of: a label of pdf-crypt's own,
+/// so that no other use of the key gives the same.
+const KEY_CHECK: &[u8] = b"pdf-crypt: the file key's check";
 
 /// How a new file is protected ([`Handler::create`]): the user's password,
 /// which opens it under its permissions, and the owner's, which opens it
@@ -420,6 +443,24 @@ impl Handler {
     #[must_use]
     pub const fn owner(&self) -> bool {
         self.owner
+    }
+
+    /// Its key's check: what tells whether another handler has the same
+    /// key, the file's ([`Handler::has_key`]), and gives nothing of it. A
+    /// file's handler opened by the user's password and one opened by the
+    /// owner's have the same key, and so the same check, but where the
+    /// file's dictionary is made to wrap other keys for the two (`/OE` and
+    /// `/UE` of revision 6), which [`Fault::Unconfirmed`] says.
+    #[must_use]
+    pub fn key_check(&self) -> KeyCheck {
+        KeyCheck(HmacSha256::new(&self.key).tag(&[KEY_CHECK]))
+    }
+
+    /// Whether its key is the one `check` was made of
+    /// ([`Handler::key_check`]), compared in constant time.
+    #[must_use]
+    pub fn has_key(&self, check: &KeyCheck) -> bool {
+        self.key_check() == *check
     }
 
     /// The file's key, for the tests and the test writer's derived IVs:

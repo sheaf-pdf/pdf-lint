@@ -37,15 +37,17 @@
 //!   trailer's too. What's given stays at its numbers, which a stream's
 //!   data, a copy's record and what the encryptor resolves are found by; an
 //!   encrypted file's objects are encrypted under the numbers they're
-//!   written at, a whole file's by the encryptor in those numbers
-//!   ([`Encryptor::renumbered`]), an update's by its file's, whose
-//!   encryption dictionary and what that refers to it doesn't move. An
+//!   written at, a whole file's by the encryptor in those numbers (as
+//!   [`Encryptor::laid_out`] gives it for a caller's own layout), an
+//!   update's by its file's, whose encryption dictionary and what that
+//!   refers to it doesn't move. An
 //!   object as read is copied as its bytes, its header and each reference
 //!   that moves written anew where its bytes had it; at another number only
 //!   where its key isn't made of its number. An update passes over only
 //!   what doesn't move, nor names what does.
 //! - **For a caller that lays a file out itself** ([`Parts`]): each body and
-//!   object stream written as a whole file's are, at the numbers it gives; with
+//!   object stream written as a whole file's are, at the numbers it gives,
+//!   encrypted by what [`Encryptor::laid_out`] gives for those numbers; with
 //!   what a whole file leaves out ([`left_out`], [`encryption_objects`]), a
 //!   trailer's own entries ([`trailer_entries`]), and `/ID` ([`first_id`],
 //!   [`file_id`], [`id_value`]).
@@ -119,7 +121,7 @@ use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::source::{Document, Held, Record, Unread, Unsupported, XrefKind};
 
 pub use append::{Base, update};
-pub use crypt::{Encrypting, Encryptor, FreeNumbers, Unencryptable, encryption};
+pub use crypt::{Encrypting, Encryptor, Unencryptable, encryption};
 pub use full::{document, encryption_objects, full, left_out};
 pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
 pub use parts::{Packed, Parts};
@@ -480,8 +482,7 @@ pub struct Options<'a> {
     ///   [`NUMBERS`], a number two objects are written at, the encryption
     ///   dictionary's ([`Options::encrypt_at`]), one the encryptor's file
     ///   lists free under keys made per object ([`Error::Free`]), which a
-    ///   renumbering passes over ([`Encryptor::free_numbers`]),
-    ///   [`Pack::reuse`], those the writer gives its own objects, and an
+    ///   renumbering passes over, [`Pack::reuse`], those the writer gives its own objects, and an
     ///   update's file's where it passes over an object as read;
     ///   [`Pack::groups`] is given the numbers packed objects are given at.
     ///   An object given past [`NUMBERS`] and written below it is written.
@@ -497,10 +498,11 @@ pub struct Options<'a> {
     ///   [`Error::Encrypt`]).
     /// - **Encrypted**, each object is encrypted under the number it's
     ///   written at: a whole file's by the encryptor in the numbers written
-    ///   ([`Encryptor::renumbered`]: what it leaves in the clear, its
-    ///   dictionary's place and the references in it), the document's
-    ///   metadata stream found in the numbers given and kept as its number
-    ///   written ([`Encryptor::encrypting_renumbered`]); an update's by its
+    ///   (what it leaves in the clear, its dictionary's place and the
+    ///   references in it), the document's metadata stream found in the
+    ///   numbers given and kept as its number written, as
+    ///   [`Encryptor::laid_out`] gives it a caller laying a file out; an
+    ///   update's by its
     ///   encryptor as it is, in its file's numbers, the metadata stream
     ///   told by the number it's written at: it doesn't write the
     ///   dictionary again, and moves neither it nor what it refers to
@@ -657,10 +659,10 @@ pub struct Written {
     /// it says so ([`Base::renumbered`]): the document's numbers aren't
     /// the file's, so an update after it is given objects at the numbers
     /// written, built or edited, under the encryptor in those numbers
-    /// (after a whole file, [`Encryptor::renumbered`]'s), and refuses an
-    /// object as read and a reading ([`Error::Renumbered`]); one that
-    /// copies opens the file written and goes after [`Base::of`] that
-    /// reading. With no reading to resolve it, an update after a
+    /// (after a whole file, [`Encryptor::of`] a reading of the file
+    /// written), and refuses an object as read and a reading
+    /// ([`Error::Renumbered`]); one that copies opens the file written and
+    /// goes after [`Base::of`] that reading. With no reading to resolve it, an update after a
     /// renumbered write is given the catalog where `/EncryptMetadata false`
     /// leaves the metadata stream it names in the clear ([`Error::Catalog`]).
     /// After an update it's of the reading its base was, and renumbered
@@ -885,9 +887,12 @@ pub enum Error {
     /// An update whose encryption isn't its file's: none for an encrypted
     /// file, or one for a file that isn't, or another file's, whose
     /// dictionary is elsewhere or isn't the one the file stores
-    /// ([`Base::encryption`]), or whose `/ID[0]` isn't the file's. An
-    /// update can't change how the revisions before it are encrypted, and
-    /// under another file's key what it writes wouldn't decrypt.
+    /// ([`Base::encryption`]), or whose `/ID[0]` isn't the file's, or
+    /// whose key isn't the one the base keeps a check of; or any, where the
+    /// base doesn't know the dictionary its file's `/Encrypt` names by
+    /// number. An update can't change how the revisions before it are
+    /// encrypted, and under another file's key what it writes wouldn't
+    /// decrypt.
     #[error("an update is encrypted as its file is, and this one's encryption isn't its file's")]
     Unmatched,
     /// An object at a number the file its [`Encryptor`] was read from
@@ -1002,8 +1007,8 @@ pub enum Error {
     /// the number of object `id` of the file the encryptor was read from,
     /// an encryption dictionary or what one refers to, by the number it's
     /// given at: at the number it gives `id`, in a whole file, which writes
-    /// the encryption dictionary again in the numbers written
-    /// ([`Encryptor::renumbered`]); at `id`'s own, in an update, which
+    /// the encryption dictionary again in the numbers written; at `id`'s
+    /// own, in an update, which
     /// doesn't, so the file's `/Encrypt` names them where they are, and
     /// whose renumbering then moves none of them, nor names one none. A
     /// reader reads what's at their numbers in the clear (ISO 32000-2,
@@ -1178,6 +1183,7 @@ struct Numbering<'a>(Option<&'a (dyn Renumber + Sync + 'a)>);
 
 impl<'a> Numbering<'a> {
     /// None: each object at the number it's given at.
+    #[cfg(test)]
     const NONE: Numbering<'static> = Numbering(None);
 
     /// Where an object given at `id` is written, and what a reference to

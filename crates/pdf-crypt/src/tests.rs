@@ -1604,6 +1604,78 @@ fn a_handler_is_clone_send_and_sync() {
     assert_eq!(each, [encrypted.clone(), encrypted]);
 }
 
+/// A handler's key check is HMAC-SHA256 under its key of pdf-crypt's label,
+/// pinned to values computed apart (Python's hmac and hashlib, of qpdf's
+/// keys): a 5-byte RC4 key's and a 32-byte AES-256 key's.
+#[test]
+fn a_key_check_is_hmac_sha256_of_its_label_under_the_key() {
+    let pinned = [
+        (
+            0,
+            "e0cf5c5afce046fb44bb0582f37dd44326a3afee002acf812a0d1aa55478b19e",
+        ),
+        (
+            6,
+            "2b22a9ca2a64d6a5d7736dcb45e9d04f88635952d9b1a861ece238e9b693ec4a",
+        ),
+    ];
+    for (i, want) in pinned {
+        let v = &vectors()[i];
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+        assert_eq!(hex(handler.key()), v.key, "{}", v.name);
+        assert_eq!(hex(handler.key_check().bytes()), want, "{}", v.name);
+    }
+}
+
+/// Whether two handlers have one key is told by its check: a clone's and
+/// the other password's handler of the same file have it, over every kind
+/// the writer makes and every file qpdf wrote; of the rest, exactly those
+/// whose key is the same (the writer's revisions 5 and 6 of one `/ID` and
+/// passwords, either way of `/EncryptMetadata`). Where a file's `/UE` is
+/// made to wrap another key than `/OE`'s, its user's handler and its
+/// owner's are told apart. Its `Debug` gives none of its bytes.
+#[test]
+fn a_key_check_tells_a_handler_of_the_key_from_another() {
+    let kinds = every_kind();
+    let (mut same, mut other) = (0, 0);
+    for (name, user, owner) in &kinds {
+        let check = user.key_check();
+        assert!(user.has_key(&check), "{name}");
+        assert!(user.clone().has_key(&check), "{name}");
+        assert!(owner.has_key(&check), "{name}");
+        assert_eq!(owner.key_check(), check, "{name}");
+        for (theirs, handler, _) in &kinds {
+            let alike = handler.key() == user.key();
+            assert_eq!(handler.has_key(&check), alike, "{name} beside {theirs}");
+            assert_eq!(
+                handler.key_check() == check,
+                alike,
+                "{name} beside {theirs}"
+            );
+            match alike {
+                true => same += 1,
+                false => other += 1,
+            }
+        }
+        let debug = format!("{check:?}");
+        assert_eq!(debug, "KeyCheck(CtOutput { ... })", "{name}");
+        assert!(!debug.contains(&hex(check.bytes())), "{name}");
+    }
+    assert!(same > kinds.len() && other > 0, "{same} {other}");
+    // /UE wrapping another key: the user's opens by that one, which /Perms
+    // doesn't confirm; the owner's by the file's.
+    let v = &vectors()[6];
+    let mut dictionary = v.dictionary.clone();
+    dictionary.ue.as_mut().unwrap()[0] ^= 1;
+    let open = |password| Handler::open(&dictionary, v.id, &[Encoded::verbatim(password)]);
+    let (user, owner) = (open(v.user).unwrap(), open(v.owner).unwrap());
+    assert_eq!(user.faults(), [Fault::Unconfirmed]);
+    assert!(owner.owner() && owner.faults().is_empty());
+    assert!(!user.has_key(&owner.key_check()));
+    assert!(!owner.has_key(&user.key_check()));
+    assert_ne!(user.key_check(), owner.key_check());
+}
+
 /// Two new files of one protection, from the operating system, differ in
 /// every value a key or salt makes (`/O`, `/U`, `/OE`, `/UE`, `/Perms`), and
 /// each opens by each of its passwords, as the owner's or the user's, its

@@ -48,6 +48,9 @@
 //!   the file's key and each object's, and gives out neither, its `Debug`
 //!   included. Each is wiped when it's dropped (RustCrypto's `zeroize`), as
 //!   is every buffer a password or a key passes through on the way to one.
+//!   Whether two handlers have one key is told by a check of it
+//!   ([`KeyCheck`], [`Handler::has_key`]), compared in constant time, which
+//!   gives nothing of the key.
 //! - **RustCrypto's primitives:** MD5 (`md-5`), SHA-256, SHA-384 and
 //!   SHA-512 (`sha2`), HMAC-SHA256 (`hmac`), RC4 (`rc4`), and AES-128 and
 //!   AES-256 (`aes`, in CBC by `cbc`), each built to wipe its own state.
@@ -121,7 +124,6 @@ mod aes;
 #[doc(hidden)]
 pub mod fuzz;
 mod handler;
-#[cfg(any(test, feature = "insecure-test-writer"))]
 mod hmac;
 mod ivs;
 mod md5;
@@ -141,7 +143,7 @@ pub mod writer;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-pub use handler::{Handler, Method, Protection};
+pub use handler::{Handler, KeyCheck, Method, Protection};
 pub use ivs::Ivs;
 pub use password::{Encoded, Encoding, Password, Prohibition, Unusable};
 pub use permissions::{Changes, Permissions, Printing};

@@ -11,6 +11,7 @@ AES's IVs and a new file's key and salts come from the operating system, the tes
 - `Password::LONGEST` and `Unusable::TypedTooLong`: `Password::prepared` refuses a text over 1,024 bytes as typed before any of it's prepared. Finding where a text's two SASLprep forms part costs the square of its length, so a text of 40,000 bytes took seconds; one of 1,024 takes about 2 ms. `Password::encodings`, a reader's, takes a text of any length.
 - `Prohibition`, which of RFC 4013's tables refuses a character (`Control`, `PrivateUse`, `NonCharacter`, `NotText`, `NotCanonical`, `Display`, `Tagging`, `Unassigned`), each by stringprep's own table, and its words.
 - `Handler::revision`, the revision the handler opened by, its dictionary's `/R`: 6 for a new file's.
+- `KeyCheck`, `Handler::key_check` and `Handler::has_key`: whether two handlers have one key, the file's, told without giving it out. The check is HMAC-SHA256 under the key of a label of pdf-crypt's own, compared in constant time; its `Debug` gives none of its bytes. A writer matches an update's encryptor to the file it goes after by it.
 
 ### Changed
 

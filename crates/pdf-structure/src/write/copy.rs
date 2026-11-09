@@ -121,9 +121,9 @@ impl<'w> Spliced<'w> {
 }
 
 impl<'w> Copying<'w> {
-    /// What a write given `from`, encrypted by `encryptor` as it's given
-    /// (a whole file's before [`Encryptor::renumbered`] and
-    /// [`Encryptor::whole`]), copies by. Refused where `from`'s source says
+    /// What a write given `from`, encrypted by `encryptor` as it's given,
+    /// or as a whole file's in the numbers written ([`Encryptor::laid`]),
+    /// which keeps what it was read with, copies by. Refused where `from`'s source says
     /// its bytes aren't those it was read from.
     pub(super) fn new(
         from: &'w dyn ReadFrom,

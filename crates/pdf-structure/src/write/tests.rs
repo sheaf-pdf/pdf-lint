@@ -4452,14 +4452,14 @@ fn encrypting_without_the_catalog_where_metadata_is_in_the_clear_is_refused() {
 }
 
 /// A caller laying a renumbered file out itself encrypts it as a whole file
-/// does, through `Encryptor::renumbered`, `whole`, then
-/// `encrypting_renumbered`, given the renumbering, the trailer and what
-/// resolves in the numbers held: under `/EncryptMetadata false`, the
-/// document's metadata stream (5) and the page's content (3) swapped, the
-/// metadata stream written at 3 is in the clear, and the content written at
-/// 5 encrypted, under AES-128 and AES-256; `encrypting`, given the same,
-/// finds the metadata stream at the number it's held at. Refused alike
-/// where the catalog doesn't resolve.
+/// does, through `Encryptor::laid_out`, given the renumbering, where the
+/// dictionary goes, the trailer and what resolves in the numbers held:
+/// under `/EncryptMetadata false`, the document's metadata stream (5) and
+/// the page's content (3) swapped, the metadata stream written at 3 is in
+/// the clear, and the content written at 5 encrypted, under AES-128 and
+/// AES-256; laid out with no renumbering, given the same, it finds the
+/// metadata stream at the number it's held at. Refused alike where the
+/// catalog doesn't resolve.
 #[test]
 fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
     for kind in [Kind::Aes128, Kind::Aes256] {
@@ -4479,10 +4479,9 @@ fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
             } => Some(ObjectId::new(5, 0)),
             id => Some(id),
         };
-        let renumbered = own.renumbered(&swap);
-        let whole = renumbered.whole(renumbered.at());
+        let at = own.at().and_then(swap);
         let (trailer, resolve) = (doc.trailer.dict(), &&doc);
-        let renumbering = whole.encrypting_renumbered(trailer, resolve, &swap);
+        let renumbering = own.laid_out(Some(&swap), at, trailer, resolve);
         let encrypting = renumbering.unwrap();
         let dict_of = |n: u32| {
             doc.get(ObjectId::new(n, 0))
@@ -4500,11 +4499,11 @@ fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
             .unwrap();
         assert_ne!(content.as_ref(), CONTENT, "{name}: the content, at 5");
         assert_eq!(metadata.as_ref(), XMP, "{name}: the metadata, at 3");
-        let held = whole.encrypting(trailer, resolve).unwrap();
+        let held = own.laid_out(None, own.at(), trailer, resolve).unwrap();
         let metadata = held.stream(ObjectId::new(5, 0), &dict_of(5), XMP).unwrap();
         assert_eq!(metadata.as_ref(), XMP, "{name}: the metadata, held at 5");
         let none = |_: ObjectId| -> Option<&Object> { None };
-        let refused = whole.encrypting_renumbered(trailer, &none, &swap).err();
+        let refused = own.laid_out(Some(&swap), at, trailer, &none).err();
         let root = trailer.get(b"Root").and_then(Object::as_reference);
         assert_eq!(refused, root.map(Error::Catalog), "{name}");
     }
@@ -5240,6 +5239,137 @@ fn an_update_under_another_file_s_encryptor_is_refused() {
     }
 }
 
+/// An update's encryptor is matched to its file by the file's key too, by a
+/// check of it (pdf-crypt's `KeyCheck`) that `Base::of` keeps: another
+/// file's, its `/Encrypt` at the same number and its `/ID[0]` the same, is
+/// refused though the base is told its dictionary (`Base::encryption`),
+/// under RC4, AES-128 and AES-256, as its key is another; while the
+/// encryptor of a reading of the same file by the owner's password, and a
+/// clone, have the key.
+#[test]
+fn an_update_is_matched_to_its_file_by_the_key() {
+    let objects = [
+        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (2, Body::from(dict! { "Title" => lit(b"secret") })),
+    ];
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
+    let changed = Object::from(dict! { "Title" => lit(b"changed") });
+    let given = [(ObjectId::new(2, 0), write::Body::from(&changed))];
+    let options = &write::Options::DEFAULT;
+    for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
+        let name = format!("{kind:?}");
+        let mut other = settings(kind, true);
+        other.owner = b"another owner";
+        let a = fixture::encrypted(&settings(kind, true), &objects, root.clone());
+        let b = fixture::encrypted(&other, &objects, root.clone());
+        let (theirs, ours) = (encryptor_of(&b), encryptor_of(&a));
+        assert_eq!(theirs.at(), ours.at(), "{name}");
+        assert_eq!(theirs.first_id(), ours.first_id(), "{name}");
+        let mut base = write::Base::of(&opened(&a, "user")).unwrap();
+        let key = base.key.clone().unwrap();
+        assert!(ours.has_key(&key) && ours.clone().has_key(&key), "{name}");
+        let by_owner = Encryptor::of(&opened(&a, "owner")).unwrap().unwrap();
+        assert!(by_owner.has_key(&key), "{name}");
+        assert!(!theirs.has_key(&key), "{name}");
+        // Told their dictionary, the base is theirs in all but the key.
+        base.encryption = Some(theirs.dictionary().clone());
+        let mut out = a.clone();
+        let refused = write::update(&mut out, &base, given.clone(), Some(&theirs), None, options);
+        assert_eq!(refused, Err(Error::Unmatched), "{name}");
+        assert_eq!(out, a, "{name}");
+    }
+}
+
+/// Of a file whose `/UE` is made to wrap another key than its `/OE`, a
+/// reading by the user's password and one by the owner's, which its
+/// dictionary and `/ID[0]` can't tell apart, are each refused the other's
+/// base by the key's check, nothing written, and each written under its
+/// own, read back by its password.
+#[test]
+fn an_update_by_one_password_isnt_taken_for_the_other_s_key() {
+    let options = &write::Options::DEFAULT;
+    // /UE wrapping another key: by the user's password, the file opens by
+    // that one, which /Perms doesn't confirm; by the owner's, by the file's.
+    let mut dict = dictionary_of(Kind::Aes256, true);
+    let Some(Value::String(Str::Bytes(ue), _)) = dict.get(b"UE").map(Object::value) else {
+        panic!("/UE is a string");
+    };
+    let mut ue = ue.clone();
+    ue[0] ^= 1;
+    dict.set("UE", Object::new(Value::String(Str::Bytes(ue), None)));
+    let file = source(dict, false);
+    let readings = [
+        ("user", opened(&file, "user")),
+        ("owner", opened(&file, "owner")),
+    ];
+    let unconfirmed = |reading: &Reading<Arc<[u8]>>| matches!(reading.encryption(), Encryption::Opened { faults, .. } if faults == &[Fault::Unconfirmed]);
+    assert!(unconfirmed(&readings[0].1) && !unconfirmed(&readings[1].1));
+    let catalog = Object::from(dict! { "Type" => "Catalog", "Lang" => lit(b"en") });
+    for (by, reading) in &readings {
+        let base = write::Base::of(reading).unwrap();
+        for (with, other) in &readings {
+            let encryptor = Encryptor::of(other).unwrap().unwrap();
+            let mut out = file.clone();
+            let given = [(ObjectId::new(1, 0), write::Body::from(&catalog))];
+            let written = write::update(&mut out, &base, given, Some(&encryptor), None, options);
+            match by == with {
+                true => {
+                    written.unwrap().unwrap();
+                    let back = opened(&out, by);
+                    assert_eq!(value(&back, ObjectId::new(1, 0)), catalog, "{by}");
+                }
+                false => {
+                    assert_eq!(written, Err(Error::Unmatched), "{by} by {with}'s");
+                    assert_eq!(out, file, "{by} by {with}'s");
+                }
+            }
+        }
+    }
+}
+
+/// A base described by hand (`Base::new`) of a file whose `/Encrypt` is a
+/// reference knows neither the dictionary stored there nor the file's key,
+/// so an update after it is refused, nothing written, until
+/// `Base::encryption` is set: then the file's encryptor writes, read back
+/// by the user's password, and another file's, its `/Encrypt` at the same
+/// number and its `/ID[0]` the same, is refused by the dictionary. Under
+/// RC4, AES-128 and AES-256.
+#[test]
+fn a_base_by_hand_of_a_dictionary_at_a_number_takes_an_update_once_told_it() {
+    let objects = [
+        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (2, Body::from(dict! { "Title" => lit(b"secret") })),
+    ];
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
+    let changed = Object::from(dict! { "Title" => lit(b"changed") });
+    let given = [(ObjectId::new(2, 0), write::Body::from(&changed))];
+    let options = &write::Options::DEFAULT;
+    for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
+        let name = format!("{kind:?}");
+        let mut other = settings(kind, true);
+        other.owner = b"another owner";
+        let a = fixture::encrypted(&settings(kind, true), &objects, root.clone());
+        let theirs = encryptor_of(&fixture::encrypted(&other, &objects, root.clone()));
+        let ours = encryptor_of(&a);
+        let reading = opened(&a, "user");
+        let (prev, xref) = newest(&reading);
+        let trailer = reading.trailer().dict().clone();
+        let mut base = write::Base::new(a.len(), prev, size(&reading), xref, trailer);
+        assert!(base.encryption.is_none(), "{name}");
+        let mut out = a.clone();
+        let refused = write::update(&mut out, &base, given.clone(), Some(&ours), None, options);
+        assert_eq!(refused, Err(Error::Unmatched), "{name}");
+        assert_eq!(out, a, "{name}");
+        base.encryption = Some(ours.dictionary().clone());
+        let refused = write::update(&mut out, &base, given.clone(), Some(&theirs), None, options);
+        assert_eq!(refused, Err(Error::Unmatched), "{name}");
+        assert_eq!(out, a, "{name}");
+        write::update(&mut out, &base, given.clone(), Some(&ours), None, options).unwrap();
+        let back = opened(&out, "user");
+        assert_eq!(value(&back, ObjectId::new(2, 0)), changed, "{name}");
+    }
+}
+
 /// What an encryption dictionary refers to is read before a reader has a
 /// key, so a packed write leaves it out of its object streams, which are
 /// encrypted: here `/CF`, a reference to object 41.
@@ -5736,7 +5866,11 @@ fn parts_copy_only_what_is_encrypted_under_the_key_it_was_read_under() {
         encrypting: Option<&'a write::Encrypting<'a>>,
     ) -> (Vec<u8>, Vec<bool>) {
         let from: &dyn write::ReadFrom = reading;
-        let parts = write::Parts::new(encrypting, Some(from), None).unwrap();
+        let parts = match encrypting {
+            Some(encrypting) => write::Parts::new(encrypting, Some(from)),
+            None => write::Parts::plain(Some(from), None),
+        };
+        let parts = parts.unwrap();
         let (mut all, mut copied) = (Vec::new(), Vec::new());
         for (id, body) in write::bodies(doc) {
             let write::Body::Read { record, .. } = &body else {
@@ -5783,10 +5917,9 @@ fn parts_copy_only_what_is_encrypted_under_the_key_it_was_read_under() {
             assert!(!holds(&out, &read), "{kind:?}: {id:?}, the old key's");
         }
 
-        // Under its own, made a whole file's, as it's read: copied.
+        // Under its own, laid out as a whole file's, as it's read: copied.
         let own = Encryptor::of(&reading).unwrap().unwrap();
-        let whole = own.whole(own.at());
-        let encrypting = whole.encrypting(trailer, &held).unwrap();
+        let encrypting = own.laid_out(None, own.at(), trailer, &held).unwrap();
         let (_, copied) = each_copied(&reading, &doc, Some(&encrypting));
         assert!(copied.iter().any(|copied| *copied), "{kind:?}");
 

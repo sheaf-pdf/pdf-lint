@@ -325,10 +325,14 @@ fn nothing_is_listed_free_and_each_number_is_reused() {
     for (name, key) in KEYS {
         let bytes = encrypted_as(key, &plain);
         let reading = opened(&bytes, "");
-        let encryptor = Encryptor::of(&reading).unwrap().unwrap();
         let per_object = !name.starts_with("AES-256");
-        let free: Vec<u32> = encryptor.free_numbers().map(|(n, _)| n).collect();
-        assert_eq!(!free.is_empty(), per_object, "{name}");
+        // The numbers the file read lists free, whose keys an object there
+        // takes under RC4 and AES-128.
+        let free: Vec<u32> = (reading.entries())
+            .filter(|(n, _, entry)| *n != 0 && matches!(entry, XrefEntry::Free { .. }))
+            .map(|(n, ..)| n)
+            .collect();
+        assert!(!free.is_empty(), "{name}");
         for options in kinds() {
             let (out, _) = own(&bytes, "", &options).unwrap();
             let back = opened(&out, "");

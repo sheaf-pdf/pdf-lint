@@ -4,12 +4,12 @@
 //! of what's left in the clear that the reader decrypts by.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet, btree_map};
+use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::fmt;
 use std::iter::FusedIterator;
 
-use pdf_crypt::{Fault, Handler, Ivs, Method, Protection, Unusable};
+use pdf_crypt::{Fault, Handler, Ivs, KeyCheck, Method, Protection, Unusable};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 use pdf_objects::serialize::{Encrypt, Renumber};
@@ -26,22 +26,23 @@ use crate::source::Encryption;
 /// made from; and what it leaves in the clear, the list the reader
 /// decrypts by (see [`read`](crate::read), "What's encrypted"); and,
 /// where its keys are made per object, the numbers the file lists free,
-/// at which nothing new is written under it ([`Encryptor::free`]). It
-/// gives out nothing of the key, its `Debug` neither; a clone clones the
+/// at which nothing new is written under it ([`Error::Free`]). It gives
+/// out nothing of the key, its `Debug` neither; a clone clones the
 /// handler, each key wiped when it's dropped (pdf-crypt's `Handler`).
 ///
 /// A caller that lays a file out itself, as [`full`](super::full) does,
-/// writes it encrypted as `full` does: through [`Encryptor::whole`], then
-/// [`Encryptor::encrypting`]; or, where it renumbers its objects, through
-/// [`Encryptor::renumbered`], [`Encryptor::whole`], then
-/// [`Encryptor::encrypting_renumbered`], given the renumbering, which finds
-/// the document's metadata stream in the numbers held and keeps it as its
-/// number written. It writes no object at a number [`Encryptor::free`]
-/// gives, and lists each free at its generation
-/// ([`Encryptor::free_numbers`]); puts in no object stream an object
-/// [`Encryptor::dictionary_object`] says is the encryption dictionary's;
-/// and numbers no object but that one there, as what's there is left in
-/// the clear.
+/// writes it encrypted through [`Encryptor::laid_out`], given where each
+/// object and the dictionary go: what that gives encrypts each object
+/// under the number it's written at, says what to write of the dictionary
+/// ([`Encrypting::dictionary`], [`Encrypting::at`],
+/// [`Encrypting::first_id`]), and is what [`Parts::new`](super::Parts::new)
+/// writes the bodies by, in the same numbers. Such a caller puts in no
+/// object stream an object [`Encrypting::dictionary_object`] says is an
+/// encryption dictionary's, and numbers no object but that one there, as
+/// what's there is left in the clear. Where the dictionary goes, and which
+/// numbers are listed free, stay its own: a whole file of the writer's
+/// writes nothing at a number the file it was read from lists free under
+/// keys made per object, and lists each free at its generation.
 ///
 /// A caller a layout binds otherwise can't keep the rule on free numbers: a
 /// linearized file's sections list none free but 0, and its numbers run from
@@ -103,40 +104,6 @@ impl fmt::Debug for Encryptor {
     }
 }
 
-/// Each number an [`Encryptor`] says the file it was read from lists free,
-/// under keys made per object, with the generation its entry gives,
-/// ascending: what [`Encryptor::free_numbers`] gives.
-#[must_use = "an iterator is lazy: it gives nothing until asked"]
-#[derive(Debug, Clone)]
-pub struct FreeNumbers<'e> {
-    free: btree_map::Iter<'e, u32, u16>,
-}
-
-impl Iterator for FreeNumbers<'_> {
-    type Item = (u32, u16);
-
-    #[inline]
-    fn next(&mut self) -> Option<(u32, u16)> {
-        self.free.next().map(|(&n, &generation)| (n, generation))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.free.size_hint()
-    }
-
-    /// By the map's own, as `map`'s is.
-    #[inline]
-    fn fold<B, F>(self, init: B, mut f: F) -> B
-    where
-        F: FnMut(B, (u32, u16)) -> B,
-    {
-        (self.free).fold(init, |acc, (&n, &generation)| f(acc, (n, generation)))
-    }
-}
-
-impl FusedIterator for FreeNumbers<'_> {}
-
 impl Encryptor {
     /// How `reading`'s file is encrypted, to write it encrypted as it is:
     /// its handler, as the password the reading was given opened it; its
@@ -150,7 +117,7 @@ impl Encryptor {
     /// number and generation (RC4 and AES-128: its strings', its streams',
     /// a crypt filter's its dictionary has, or `/EFF`'s), it keeps the
     /// numbers the reading lists free, each with the generation it's to be
-    /// used at next ([`Encryptor::free`]): a whole file or an update written
+    /// used at next: a whole file or an update written
     /// under it refuses an object at one ([`Error::Free`]), as its key
     /// would be a deleted object's, whose ciphertext may still be in the
     /// file, or in the earlier file a whole save replaces; and a whole file
@@ -313,25 +280,28 @@ impl Encryptor {
         self.place
     }
 
-    /// It, for a file written whole that writes its dictionary at `at`, or
-    /// direct where that's none, every section of it naming that one: an
-    /// object at a number the file it was read from named `/Encrypt` by, in
-    /// its trailer or an earlier section's, is encrypted as any is, as a
-    /// reader of the file written decrypts it, where it would otherwise be
-    /// left as written; what the dictionary refers to is still left in the
-    /// clear. A file written whole under it is encrypted through this.
-    #[must_use]
-    pub fn whole(&self, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
-        let list = &self.list;
-        let named = |id: &ObjectId| list.sections.contains(id) && Some(*id) != at;
-        if !list.dictionaries.iter().any(named) {
-            return Cow::Borrowed(self);
+    /// It in the numbers a file laid out by `to` writes, made whole with its
+    /// dictionary at `at`, a number written, or direct where that's none
+    /// ([`Encryptor::renumbered`], then [`whole`]): what that file's
+    /// objects are encrypted by, as [`Encryptor::laid_out`] and
+    /// [`full`](super::full) encrypt them.
+    pub(super) fn laid(&self, to: Numbering<'_>, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
+        let renumbered = match to.0 {
+            Some(to) => self.renumbered(to),
+            None => Cow::Borrowed(self),
+        };
+        whole(renumbered, at)
+    }
+
+    /// Where the file a renumbering `to` writes has its dictionary, as
+    /// [`Encryptor::renumbered`] places it: at the number `to` gives its
+    /// own, nowhere yet where `to` gives none, as a new file's; direct or
+    /// new as it is.
+    pub(super) fn placed(&self, to: Numbering<'_>) -> Place {
+        match self.place {
+            Place::At(at) => to.at(at).map_or(Place::New, Place::At),
+            place => place,
         }
-        let mut whole = self.clone();
-        whole.keep_read_list();
-        whole.list.dictionaries.retain(|id| !named(id));
-        whole.list.sections = at.into_iter().collect();
-        Cow::Owned(whole)
     }
 
     /// It, for a file whose objects are written at the numbers `to` gives
@@ -347,7 +317,7 @@ impl Encryptor {
     /// keys made per object. Where `to` moves none of those, it's itself.
     ///
     /// A whole file written under a renumbering is encrypted through this,
-    /// then [`Encryptor::whole`]; and so is an update after it, given
+    /// then [`whole`]; and so is an update after it, given
     /// objects at the numbers written ([`Written::base`](super::Written::base)),
     /// whose place and dictionary are then the file's, as an update's
     /// encryptor must have ([`Error::Unmatched`]), where the whole write
@@ -360,8 +330,7 @@ impl Encryptor {
     /// dictionary again, so it encrypts by the list as it is, in its file's
     /// numbers, which its renumbering moves nothing of
     /// ([`Error::Moved`]).
-    #[must_use]
-    pub fn renumbered<N: Renumber + ?Sized>(&self, to: &N) -> Cow<'_, Encryptor> {
+    pub(super) fn renumbered<N: Renumber + ?Sized>(&self, to: &N) -> Cow<'_, Encryptor> {
         let list = &self.list;
         let numbers = list.dictionaries.iter().chain(&list.sections);
         let place = match self.place {
@@ -426,17 +395,26 @@ impl Encryptor {
     /// ([`Error::Free`]), and a file written whole lists it free at that
     /// generation. None for any other number, and every number under keys
     /// that aren't made per object.
-    #[must_use]
-    pub fn free(&self, n: u32) -> Option<u16> {
+    pub(crate) fn free(&self, n: u32) -> Option<u16> {
         self.free.get(&n).copied()
     }
 
     /// Each number [`Encryptor::free`] gives a generation for, with it,
     /// ascending.
-    pub fn free_numbers(&self) -> FreeNumbers<'_> {
-        FreeNumbers {
-            free: self.free.iter(),
-        }
+    pub(crate) fn free_numbers(&self) -> impl FusedIterator<Item = (u32, u16)> + Clone + '_ {
+        self.free.iter().map(|(&n, &generation)| (n, generation))
+    }
+
+    /// Its key's check (pdf-crypt's `Handler::key_check`), which an update
+    /// after a file written under it is matched by.
+    pub(super) fn key_check(&self) -> KeyCheck {
+        self.handler.key_check()
+    }
+
+    /// Whether its key is the one `check` was made of, compared in constant
+    /// time (pdf-crypt's `Handler::has_key`).
+    pub(super) fn has_key(&self, check: &KeyCheck) -> bool {
+        self.handler.has_key(check)
     }
 
     /// Whether object `id` is an encryption dictionary, or what one's
@@ -455,8 +433,8 @@ impl Encryptor {
     /// dictionary's, by number in the file, that `to` moves, or names none,
     /// or that `written` puts another object's number on. None where
     /// there's none, and with no renumbering. A whole file writes the
-    /// dictionary again, in the numbers written ([`Encryptor::renumbered`]);
-    /// an update doesn't, so the file names those where they are, and its
+    /// dictionary again, in the numbers written ([`Encryptor::laid`]); an
+    /// update doesn't, so the file names those where they are, and its
     /// reader reads what's there in the clear.
     pub(super) fn moved(
         &self,
@@ -478,8 +456,8 @@ impl Encryptor {
     }
 
     /// For a whole file under the renumbering `to`, itself the encryptor as
-    /// given and `now` it in the numbers written ([`Encryptor::renumbered`],
-    /// then [`Encryptor::whole`]), whose objects are each given at, and
+    /// given and `now` it in the numbers written ([`Encryptor::laid`]),
+    /// whose objects are each given at, and
     /// written at, as `written` pairs them: the least of the objects
     /// [`Encryptor::dictionary_object`] says are an encryption dictionary's,
     /// by number in the file, at whose number written `written` puts an
@@ -509,10 +487,11 @@ impl Encryptor {
     }
 
     /// The numbers [`Encryptor::dictionary_object`] says are an encryption
-    /// dictionary's, or what one refers to: what's at them is left in the
-    /// clear, so the writer numbers no object of its own there.
-    pub(super) fn dictionary_numbers(&self) -> impl Iterator<Item = u32> + '_ {
-        self.list.dictionaries.iter().map(|id| id.number)
+    /// dictionary's, or what one refers to, in the numbers the renumbering
+    /// `to` writes, as [`Encryptor::renumbered`] has them: what's at them is
+    /// left in the clear, so the writer numbers no object of its own there.
+    pub(super) fn dictionary_numbers(&self, to: Numbering<'_>) -> impl Iterator<Item = u32> {
+        (self.list.dictionaries.iter()).filter_map(move |&id| to.at(id).map(|id| id.number))
     }
 
     /// Whether `/EncryptMetadata false` leaves the document's metadata
@@ -522,23 +501,61 @@ impl Encryptor {
         self.list.unencrypted_metadata
     }
 
-    /// What encrypts the objects of a file written under it: pdf-objects'
-    /// encryptor, for its `indirect_with` and `indirect_stream_with`.
-    /// `trailer` is the file's trailer, which says which stream is the
-    /// document's metadata (its catalog's `/Metadata`), and `resolve` gives
-    /// the objects a reference names: the metadata stream's way there, and a
-    /// stream's `/Filter` and `/DecodeParms`, which say whether it has a
-    /// crypt filter of its own. Both are in the numbers the objects are
-    /// written at: a file whose objects are written at other numbers than
-    /// they're held at is encrypted through
-    /// [`Encryptor::encrypting_renumbered`].
+    /// What encrypts the objects of a file a caller lays out itself, as
+    /// [`full`](super::full) lays out a whole one: pdf-objects' encryptor,
+    /// for its `indirect_with` and `indirect_stream_with`, and what
+    /// [`Parts::new`](super::Parts::new) writes the file's bodies by. It's
+    /// itself in the numbers the file is written in: each object at the
+    /// number the renumbering `to` gives it (none for each at the number
+    /// it's given at), what it leaves in the clear by number, an encryption
+    /// dictionary and what one refers to, at the number `to` gives each,
+    /// and its dictionary's references as `to` names them, `null` where it
+    /// names none; and made whole, every section of the file naming the one
+    /// dictionary at `at`, a number written, or the one in the trailer
+    /// where that's none, so that an object at a number the file it was
+    /// read from named `/Encrypt` by, in its trailer or an earlier
+    /// section's, is encrypted as any is, as a reader of the file written
+    /// decrypts it; what the dictionary refers to is still left in the
+    /// clear.
+    ///
+    /// `trailer` and `resolve` are in the numbers the objects are held at,
+    /// as the dictionary of a stream pdf-objects' writer asks it to encrypt
+    /// is, its references not renumbered (`serialize::Encrypt`): `trailer`
+    /// the file's, whose catalog's `/Metadata` says which stream is the
+    /// document's metadata, found through `resolve` and kept as the number
+    /// `to` writes it at; and `resolve` what gives the objects a reference
+    /// names, through which a stream's `/Filter` and `/DecodeParms` say
+    /// whether it has a crypt filter of its own.
+    ///
+    /// What's left to the caller: the dictionary written at `at` as
+    /// [`Encrypting::dictionary`] has it, or in the trailer, `at` none only
+    /// where the file it was read from had it there
+    /// ([`Encryptor::direct`]); no object stream holding, and no other
+    /// object at the number of, what [`Encrypting::dictionary_object`] says
+    /// is left in the clear; and which numbers it lists free, which a whole
+    /// file of the writer's lists at the generations the file it was read
+    /// from gives them, where its keys are made per object.
     ///
     /// # Errors
     ///
     /// Refused where `/EncryptMetadata false` leaves the document's metadata
     /// stream in the clear and `resolve` doesn't give the catalog, which says
     /// which stream that is ([`Error::Catalog`]), rather than encrypt it.
-    pub fn encrypting<'a>(
+    pub fn laid_out<'a>(
+        &'a self,
+        to: Option<&'a (dyn Renumber + Sync + 'a)>,
+        at: Option<ObjectId>,
+        trailer: &Dict,
+        resolve: &'a (dyn Resolve<'a> + Sync),
+    ) -> Result<Encrypting<'a>, Error> {
+        let to = Numbering(to);
+        Encrypting::of(self.laid(to, at), trailer, resolve, to, at)
+    }
+
+    /// What encrypts the objects of a file written under it as it is, each
+    /// at the number it's given at ([`Encrypting::of`]).
+    #[cfg(test)]
+    pub(super) fn encrypting<'a>(
         &'a self,
         trailer: &Dict,
         resolve: &'a (dyn Resolve<'a> + Sync),
@@ -546,73 +563,46 @@ impl Encryptor {
         self.encrypting_at(trailer, resolve, Numbering::NONE)
     }
 
-    /// [`Encryptor::encrypting`], for a file whose objects are written at
-    /// the numbers `to` gives them, as [`full`](super::full) writes one
-    /// under [`Options::renumber`](super::Options::renumber): itself in the
-    /// numbers written ([`Encryptor::renumbered`], then
-    /// [`Encryptor::whole`]); `trailer` and `resolve` in the numbers the
-    /// objects are held at, as the dictionary of a stream pdf-objects'
-    /// writer asks it to encrypt is, its references not renumbered
-    /// (`serialize::Encrypt`), so that a stream's own crypt filter is found
-    /// through them. The document's metadata stream is found there, and
-    /// kept as the number `to` writes it at, which pdf-objects' writer asks
-    /// by: so `/EncryptMetadata false` leaves that one in the clear, and
-    /// not the object `to` writes at the number it's held at.
-    ///
-    /// # Errors
-    ///
-    /// Refused as [`Encryptor::encrypting`] is.
-    pub fn encrypting_renumbered<'a, N: Renumber + ?Sized>(
-        &'a self,
-        trailer: &Dict,
-        resolve: &'a (dyn Resolve<'a> + Sync),
-        to: &N,
-    ) -> Result<Encrypting<'a>, Error> {
-        self.encrypting_by(trailer, resolve, |id| to.renumber(id))
-    }
-
-    /// [`Encryptor::encrypting_renumbered`] by the renumbering a write is
-    /// given, or none.
+    /// What encrypts an update's objects under it as it is, in its file's
+    /// numbers, each written at the number `to` gives it, the document's
+    /// metadata stream found in the numbers given and kept as its number
+    /// written ([`Encrypting::of`]): an update doesn't write the dictionary
+    /// again, so it encrypts by the list as it is.
     pub(super) fn encrypting_at<'a>(
         &'a self,
         trailer: &Dict,
         resolve: &'a (dyn Resolve<'a> + Sync),
-        to: Numbering<'_>,
+        to: Numbering<'a>,
     ) -> Result<Encrypting<'a>, Error> {
-        self.encrypting_by(trailer, resolve, |id| to.at(id))
-    }
-
-    /// [`Encryptor::encrypting`], `trailer` and `resolve` in the numbers the
-    /// objects are held at, `at` giving the number each is written at.
-    fn encrypting_by<'a>(
-        &'a self,
-        trailer: &Dict,
-        resolve: &'a (dyn Resolve<'a> + Sync),
-        at: impl Fn(ObjectId) -> Option<ObjectId>,
-    ) -> Result<Encrypting<'a>, Error> {
-        let metadata = match self.list.unencrypted_metadata {
-            true => {
-                let root = trailer.get(b"Root").and_then(Object::as_reference);
-                if let Some(root) = root.filter(|&root| resolve.resolve(root).is_none()) {
-                    return Err(Error::Catalog(root));
-                }
-                let get: crypt::Get<'_, '_, Infallible> = &|id| Ok(resolve.resolve(id));
-                let Ok(metadata) = crypt::metadata_stream(trailer, get);
-                metadata.and_then(at)
-            }
-            false => None,
-        };
-        Ok(Encrypting {
-            encryptor: self,
-            resolve,
-            metadata,
-            ivs: (self.ivs)(),
-        })
+        Encrypting::of(Cow::Borrowed(self), trailer, resolve, to, self.at())
     }
 }
 
-/// What encrypts the objects of one file written under an [`Encryptor`]
-/// as pdf-objects' writer writes them: its `serialize::Encrypt`, which
+/// `encryptor`, for a file written whole that writes its dictionary at `at`,
+/// or direct where that's none, every section of it naming that one: an
+/// object at a number the file it was read from named `/Encrypt` by, in its
+/// trailer or an earlier section's, is encrypted as any is, as a reader of
+/// the file written decrypts it, where it would otherwise be left as
+/// written; what the dictionary refers to is still left in the clear. A
+/// file written whole is encrypted through this.
+fn whole(encryptor: Cow<'_, Encryptor>, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
+    let list = &encryptor.list;
+    let named: Vec<ObjectId> = (list.dictionaries.iter().copied())
+        .filter(|id| list.sections.contains(id) && Some(*id) != at)
+        .collect();
+    if named.is_empty() {
+        return encryptor;
+    }
+    let mut whole = encryptor.into_owned();
+    whole.keep_read_list();
+    whole.list.dictionaries.retain(|id| !named.contains(id));
+    whole.list.sections = at.into_iter().collect();
+    Cow::Owned(whole)
+}
+
+/// What encrypts the objects of one file written under an [`Encryptor`],
+/// in the numbers they're written at ([`Encryptor::laid_out`]), as
+/// pdf-objects' writer writes them: its `serialize::Encrypt`, which
 /// every string and stream's data of an indirect object written by
 /// `indirect_with` or `indirect_stream_with` passes through, encrypted by
 /// the handler with the object's key, AES's IV the next of the write's
@@ -625,15 +615,23 @@ impl Encryptor {
 /// cross-reference stream, a signature's `/Contents`, a stream whose crypt
 /// filter is `/Identity`, and the document's metadata stream's data under
 /// `/EncryptMetadata false`. It gives out nothing of the key: it encrypts
-/// as the reading that opened the file decrypts.
+/// as the reading that opened the file decrypts. What a layout writes of
+/// the encryption is its to say: the dictionary, where it goes, and the
+/// first `/ID` element.
 pub struct Encrypting<'a> {
-    encryptor: &'a Encryptor,
+    /// The encryptor in the numbers written.
+    encryptor: Cow<'a, Encryptor>,
     resolve: &'a (dyn Resolve<'a> + Sync),
     /// The document's metadata stream, where `/EncryptMetadata false`
     /// leaves its data in the clear, at the number it's written at.
     metadata: Option<ObjectId>,
     /// The write's IVs, which its every AES string and stream takes.
     ivs: Ivs,
+    /// Where each object it encrypts is written: the renumbering
+    /// [`Parts::new`](super::Parts::new) writes by.
+    to: Numbering<'a>,
+    /// Where the file written has the dictionary, none for its trailer.
+    at: Option<ObjectId>,
 }
 
 impl fmt::Debug for Encrypting<'_> {
@@ -642,6 +640,8 @@ impl fmt::Debug for Encrypting<'_> {
             .field("encryptor", &self.encryptor)
             .field("metadata", &self.metadata)
             .field("ivs", &self.ivs)
+            .field("to", &self.to.0.map(|_| "a caller's"))
+            .field("at", &self.at)
             .finish_non_exhaustive()
     }
 }
@@ -676,9 +676,86 @@ pub enum Unencryptable {
 }
 
 impl<'a> Encrypting<'a> {
+    /// What encrypts the objects of a file written under `encryptor`, which
+    /// is in the numbers written, each object written at the number `to`
+    /// gives it, the dictionary at `at`: `trailer` and `resolve`, in the
+    /// numbers the objects are held at, say which stream is the document's
+    /// metadata, kept as the number `to` writes it at, and a stream's own
+    /// crypt filter ([`Encryptor::laid_out`]). Refused where
+    /// `/EncryptMetadata false` leaves the document's metadata stream in the
+    /// clear and `resolve` doesn't give the catalog ([`Error::Catalog`]).
+    pub(super) fn of(
+        encryptor: Cow<'a, Encryptor>,
+        trailer: &Dict,
+        resolve: &'a (dyn Resolve<'a> + Sync),
+        to: Numbering<'a>,
+        at: Option<ObjectId>,
+    ) -> Result<Encrypting<'a>, Error> {
+        let metadata = match encryptor.list.unencrypted_metadata {
+            true => {
+                let root = trailer.get(b"Root").and_then(Object::as_reference);
+                if let Some(root) = root.filter(|&root| resolve.resolve(root).is_none()) {
+                    return Err(Error::Catalog(root));
+                }
+                let get: crypt::Get<'_, '_, Infallible> = &|id| Ok(resolve.resolve(id));
+                let Ok(metadata) = crypt::metadata_stream(trailer, get);
+                metadata.and_then(|id| to.at(id))
+            }
+            false => None,
+        };
+        let ivs = (encryptor.ivs)();
+        Ok(Encrypting {
+            encryptor,
+            resolve,
+            metadata,
+            ivs,
+            to,
+            at,
+        })
+    }
+
+    /// The encryption dictionary, as the file it's laid out for writes it:
+    /// the encryptor's, as the file it was read from stores it, or a new
+    /// file's, its references in the numbers written.
+    #[must_use]
+    pub fn dictionary(&self) -> &Dict {
+        &self.encryptor.dict
+    }
+
+    /// Where the file it's laid out for has the encryption dictionary: the
+    /// number [`Encryptor::laid_out`] was given, none where it's in the
+    /// trailer.
+    #[must_use]
+    pub const fn at(&self) -> Option<ObjectId> {
+        self.at
+    }
+
+    /// The first `/ID` element the key is made from, which the file's
+    /// trailer keeps: [`Encryptor::first_id`]'s.
+    #[must_use]
+    pub fn first_id(&self) -> Option<&[u8]> {
+        self.encryptor.first_id()
+    }
+
+    /// Whether the object at `at`, a number written, is an encryption
+    /// dictionary, or what one's entries refer to, by number, which a
+    /// reader reads before it has a key: left in the clear, so never put in
+    /// an object stream, which is encrypted, and no other object written
+    /// there. [`Encryptor::dictionary_object`] says it of the numbers the
+    /// objects are given at.
+    #[must_use]
+    pub fn dictionary_object(&self, at: ObjectId) -> bool {
+        self.encryptor.list.dictionaries.contains(&at)
+    }
+
     /// The encryption it's of, in the numbers written.
-    pub(super) fn encryptor(&self) -> &'a Encryptor {
-        self.encryptor
+    pub(super) fn encryptor(&self) -> &Encryptor {
+        &self.encryptor
+    }
+
+    /// The renumbering the objects it encrypts are written by.
+    pub(super) fn renumbering(&self) -> Numbering<'a> {
+        self.to
     }
 
     /// Whether object `obj`, which the reading `read` was made of read at

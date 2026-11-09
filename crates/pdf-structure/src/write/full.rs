@@ -58,8 +58,8 @@ use crate::source::{Document, XrefKind};
 ///   from, else past every body; or direct in the trailer where that file
 ///   had it so. Where its keys are made per object, each number its file
 ///   lists free is listed free at the generation that file's entry gives
-///   it ([`Encryptor::free`]), `/Size` past it, and no object of the
-///   writer's own is numbered there.
+///   it, `/Size` past it, and no object of the writer's own is numbered
+///   there ([`Error::Free`]).
 /// - **Copied**, an object as read ([`Body::Read`]) is written as the
 ///   bytes it was read from, read from `from`, where the rules for a copy
 ///   hold; one read from an object stream, which goes in one of the
@@ -90,7 +90,8 @@ use crate::source::{Document, XrefKind};
 ///   dictionary goes at the number it gives the encryptor's, else past
 ///   every object, its references renumbered, a direct one's too, and each
 ///   object is encrypted under the number it's written at, by the encryptor
-///   in the numbers written ([`Encryptor::renumbered`]); under RC4, an
+///   in the numbers written (as [`Encryptor::laid_out`] gives it); under
+///   RC4, an
 ///   object written at a number another had in the file the encryptor was
 ///   read from leaks the XOR of the two plaintexts to one who keeps both
 ///   files. No body is written at the number of an encryption dictionary or
@@ -241,13 +242,10 @@ fn file(
     let to = Numbering(options.renumber);
     let pack = (options.pack).filter(|_| encryptor.is_none_or(Encryptor::packs));
     // The encryptor as given, whose list and place are of the numbers its
-    // file has, which are what's given; and in the numbers written.
+    // file has, which are what's given; and where its dictionary is in the
+    // numbers written.
     let given = encryptor;
-    let renumbered = match (encryptor, to.0) {
-        (Some(e), Some(to)) => Some(e.renumbered(to)),
-        _ => None,
-    };
-    let encryptor = renumbered.as_deref().or(encryptor);
+    let place = given.map(|e| e.placed(to));
     // Past every number written, which a body given and not written is
     // refused at below.
     let past = (bodies.iter())
@@ -259,22 +257,18 @@ fn file(
     // object streams and a new encryption dictionary.
     let numbers = options.kind == XrefKind::Stream
         || pack.is_some()
-        || encryptor.is_some_and(|e| e.place() == Place::New && options.encrypt_at.is_none());
+        || (place == Some(Place::New) && options.encrypt_at.is_none());
     // Those, and what the encryptor leaves in the clear by number, in the
     // numbers written, which no object of the writer's own takes.
     let dangling = match numbers {
         true => {
             let mut dangling = dangling(bodies, to, trailer, past, reuse);
-            dangling.extend(
-                encryptor
-                    .into_iter()
-                    .flat_map(Encryptor::dictionary_numbers),
-            );
+            dangling.extend(given.into_iter().flat_map(|e| e.dictionary_numbers(to)));
             dangling
         }
         false => HashSet::new(),
     };
-    let encrypt_at = match encryptor.map(Encryptor::place) {
+    let encrypt_at = match place {
         None | Some(Place::Direct) => None,
         Some(Place::At(at)) => Some(options.encrypt_at.unwrap_or(at)),
         Some(Place::New) => {
@@ -289,13 +283,13 @@ fn file(
     }
     // What's copied, by the encryption as given.
     let copying = from.map(|from| Copying::new(from, given)).transpose()?;
-    // One section, whose /Encrypt is the only one: what's at a number the
-    // file read named so, and this one doesn't, is encrypted.
-    let whole = encryptor.map(|e| e.whole(encrypt_at));
-    let encryptor = whole.as_deref().or(encryptor);
+    // In the numbers written, one section, whose /Encrypt is the only one:
+    // what's at a number the file read named so, and this one doesn't, is
+    // encrypted. As a caller laying a file out has it (`laid_out`).
+    let now = given.map(|e| e.laid(to, encrypt_at));
     // No object at the number of what's left in the clear by number but
     // the object that is.
-    if let (Some(given), Some(now)) = (given, encryptor) {
+    if let (Some(given), Some(now)) = (given, now.as_deref()) {
         let written = bodies.iter().map(|(id, _)| *id).zip(at.iter().copied());
         if let Some(id) = given.shared(now, to, written) {
             return Err(Error::Moved(id));
@@ -303,9 +297,9 @@ fn file(
     }
     // What the encryptor resolves references by, where there's one: the
     // bodies and the reading, by the numbers they're given at.
-    let resolve = encryptor.map(|_| Given::new(bodies, from));
-    let encrypting = match (encryptor, &resolve) {
-        (Some(e), Some(resolve)) => Some(e.encrypting_at(trailer, resolve, to)?),
+    let resolve = now.as_ref().map(|_| Given::new(bodies, from));
+    let encrypting = match (now, &resolve) {
+        (Some(now), Some(resolve)) => Some(Encrypting::of(now, trailer, resolve, to, encrypt_at)?),
         _ => None,
     };
     let encrypting = encrypting.as_ref();
@@ -322,7 +316,7 @@ fn file(
         stopped(options.stop)?;
         let (id, obj) = (*id, body.object());
         next = next.max(at.number + 1);
-        let dictionary = encryptor.is_some_and(|e| e.dictionary_object(at));
+        let dictionary = encrypting.is_some_and(|e| e.dictionary_object(at));
         if pack.is_some() && packable(at, obj) && !dictionary {
             members.push((id, at, body));
             continue;
@@ -341,7 +335,7 @@ fn file(
     // The caller's entries in the numbers written, before the writer's own,
     // which are.
     let mut trailer = trailer_entries(trailer, to.0.unwrap_or(&()));
-    if let Some(e) = encryptor {
+    if let Some(e) = encrypting {
         match encrypt_at {
             None => trailer.set("Encrypt", e.dictionary().clone()),
             Some(at) => {
@@ -363,7 +357,7 @@ fn file(
     if let Some(pack) = pack {
         let packing = Packing {
             start,
-            encryptor,
+            encryptor: given,
             parts: &parts,
             options,
             dangling: &dangling,
@@ -374,13 +368,16 @@ fn file(
     // free at the generation each is to be used at next, so that a tool
     // that follows this file's free list doesn't take one at a deleted
     // object's key.
-    for (n, generation) in encryptor.into_iter().flat_map(Encryptor::free_numbers) {
+    for (n, generation) in given.into_iter().flat_map(Encryptor::free_numbers) {
         if !section.lists(n) {
             section.insert(n, Entry::Free { generation });
         }
     }
-    let kept = (encryptor.and_then(Encryptor::first_id).map(<[u8]>::to_vec)).or(given_id);
-    let id = file_id(kept, encryptor.is_some(), &out[start..]);
+    let kept = (encrypting
+        .and_then(Encrypting::first_id)
+        .map(<[u8]>::to_vec))
+    .or(given_id);
+    let id = file_id(kept, encrypting.is_some(), &out[start..]);
     if let Some(id) = &id {
         trailer.set("ID", id_value(id));
     }
@@ -407,7 +404,8 @@ fn file(
         kind: options.kind,
         first_id: id.as_ref().map(|[first, _]| first.clone()),
         trailer: kept,
-        encryption: encryptor.map(|e| e.dictionary().clone()),
+        encryption: encrypting.map(|e| e.dictionary().clone()),
+        key: given.map(Encryptor::key_check),
         source: None,
         renumbered: to.0.is_some(),
         startxref: None,
