@@ -279,6 +279,7 @@ pub(super) fn stream_end(
         end,
         by,
         over: false,
+        endstream: None,
     };
     let length = object.and_then(|at| {
         let mut parser = Parser::at(file, at).limits(limits);
@@ -322,7 +323,10 @@ pub(super) fn stream_end(
     });
     let endobj = Ends::first(&mut ends.endobj, data, || word_after(file, data, b"endobj"));
     match (endstream, endobj) {
-        (Some(endstream), Some(endobj)) if endobj < endstream => passed(endobj, Ended::Endobj),
+        (Some(endstream), Some(endobj)) if endobj < endstream => Passed {
+            endstream: Some(endstream),
+            ..passed(endobj, Ended::Endobj)
+        },
         (Some(endstream), _) => passed(endstream, Ended::Endstream),
         (None, Some(endobj)) => passed(endobj, Ended::Endobj),
         (None, None) => passed(data, Ended::Neither),

@@ -1417,6 +1417,57 @@ fn a_scanned_streams_data_holding_endobj_is_passed_by_its_length() {
     assert!(nine.data.unwrap().declared);
 }
 
+/// A scanned file whose last stream's data is a document of its own, an
+/// `endobj` and object 3 among it, its `/Length` a reference, then
+/// `endstream`: the verified recovery ends the data at that `endobj`, reads
+/// on, and meets `endstream` on its own, so the data ran there. What it
+/// found inside is taken back, so the file's own object 3 stands, nothing
+/// in the data is taken for an object, and nothing's said of its end,
+/// every way; the stream's own read takes its data by its `/Length`.
+/// Under [`Recovery::Pdfium`], the data's object 3 stands over the file's,
+/// as PDFium and qpdf read it, and the scan says where it ended the data.
+/// Where the stream has no `endstream` of its own, the first after its data
+/// a later stream's, which the scan meets as it passes that one's data, the
+/// objects between stand.
+#[test]
+fn a_document_in_a_scanned_streams_data_doesnt_stand_over_the_files_own_objects() {
+    let data = "%PDF-1.4\n7 0 obj\n<< /Type /Catalog >>\nendobj\n3 0 obj\n<< /Embedded true >>\nendobj\n%%EOF\n";
+    let head = "9 0 obj\n<< /Type /EmbeddedFile /Length 8 0 R >>\nstream\n";
+    let length = format!("8 0 obj\n{}\nendobj\n", data.len());
+    let after = format!("{head}{data}\nendstream\nendobj\n{length}");
+    let (file, places) = scanned_after(b"", after.as_bytes());
+    let start = file.len() - after.len() + head.len();
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert!(doc.get(ObjectId::new(7, 0)).is_err());
+    assert_eq!(stream_ends(&doc), []);
+    let nine = doc.record(ObjectId::new(9, 0)).unwrap().data.unwrap();
+    assert_eq!((nine.at.start, nine.at.end), (start, start + data.len()));
+    assert!(nine.declared);
+    let doc = document(&file, &as_pdfium());
+    let three = doc.get(ObjectId::new(3, 0)).unwrap().as_dict().unwrap();
+    assert!(three.has(b"Embedded"));
+    let endobj = start + data.find("endobj").unwrap();
+    let said = ended(Some(ObjectId::new(9, 0)), start, Some(endobj));
+    assert_eq!(stream_ends(&doc), [said]);
+
+    let unended = "9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n";
+    let later = "5 0 obj\n<< /Length 3 >>\nstream\nq Q\nendstream\nendobj\n";
+    let (file, mut places) = scanned_after(unended.as_bytes(), later.as_bytes());
+    places.push((5, file.len() - later.len()));
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    let start = b"%PDF-1.7\n".len() + unended.len() - "q Q\nendobj\n".len();
+    let said = ended(
+        Some(ObjectId::new(9, 0)),
+        start,
+        Some(start + "q Q\n".len()),
+    );
+    assert_eq!(stream_ends(&doc), [said]);
+}
+
 /// [`two_shifts`], a stream without `endstream` written before objects 3
 /// and 4, which are at neither place: the scan that finds them ends the
 /// stream's data at its `endobj`, finds them past it and says so, every
@@ -1632,7 +1683,7 @@ fn a_first_subsection_from_1_whose_rows_land_from_0_is_read_from_0() {
         count: 5,
     };
     assert_eq!(doc.faults(), [(Place::new(None, None), renumbered)]);
-    each_object_at(&doc, &places, &|_| Origin::Shifted { by: 0 });
+    each_object_at(&doc, &places, &|_| Origin::Renumbered { by: 0 });
     reaches_its_page(&doc);
     assert!(doc.get(ObjectId::new(5, 0)).is_err());
     let ids: Vec<u32> = doc.objects().map(|(id, _)| id.number).collect();
@@ -1663,7 +1714,7 @@ fn a_first_subsection_from_1_whose_rows_land_from_0_is_read_from_0() {
     let none = Place::new(None, None);
     assert_eq!(doc.faults(), [(none, renumbered), (none, moved)]);
     let four_on: Vec<(u32, usize)> = places.iter().map(|&(n, at)| (n, at + 4)).collect();
-    each_object_at(&doc, &four_on, &|_| Origin::Shifted { by: 4 });
+    each_object_at(&doc, &four_on, &|_| Origin::Renumbered { by: 4 });
     reaches_its_page(&doc);
     assert!(doc.get(ObjectId::new(5, 0)).is_err());
     // Under Recovery::Pdfium, as PDFium reads it: its table's first

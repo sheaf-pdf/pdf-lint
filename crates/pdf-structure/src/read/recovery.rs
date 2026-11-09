@@ -627,7 +627,8 @@ impl Reader {
 
     /// How object number `n`'s entry was found away from where its section
     /// put it, where it was ([`Reader::shifted`]): at a shift
-    /// ([`Origin::Shifted`]), or by a scan ([`Origin::Recovered`]).
+    /// ([`Origin::Shifted`]), by a row renumbered ([`Origin::Renumbered`]),
+    /// or by a scan ([`Origin::Recovered`]).
     pub(super) fn shift(&self, n: u32) -> Option<Origin> {
         let i = self.shifts.binary_search_by_key(&n, |&(n, _)| n).ok()?;
         Some(self.shifts[i].1)

@@ -99,8 +99,9 @@ pub struct Base {
     /// [`Base::holds`] reads again.
     pub(super) startxref: Option<usize>,
     /// Each object of the reading it was made of that the reading read at
-    /// a shift ([`Origin::Shifted`](crate::Origin::Shifted)) or where a
-    /// scan found it ([`Origin::Recovered`](crate::Origin::Recovered)): its
+    /// a shift ([`Origin::Shifted`](crate::Origin::Shifted)), by a row of
+    /// its section renumbered ([`Origin::Renumbered`](crate::Origin::Renumbered))
+    /// or where a scan found it ([`Origin::Recovered`](crate::Origin::Recovered)): its
     /// number, its generation and where it is in the file's bytes, which an
     /// update after it lists, so that it's read there with nothing to find.
     pub(super) shifted: Vec<(u32, u16, usize)>,

@@ -275,7 +275,8 @@ pub enum Body<'a> {
     ///    scanning ([`Origin::Recovered`](crate::Origin::Recovered)), as
     ///    the file was read by scanning or its entry is at neither its
     ///    place nor its section's shift, nor read away from where its
-    ///    section puts it ([`Origin::Shifted`](crate::Origin::Shifted));
+    ///    section puts it ([`Origin::Shifted`](crate::Origin::Shifted),
+    ///    [`Origin::Renumbered`](crate::Origin::Renumbered));
     /// 5. for an object at an offset, where `endobj` follows it;
     /// 6. for a stream, where its `/Length` is no reference, and its data is
     ///    as long as that says ([`DataExtent`](crate::DataExtent));

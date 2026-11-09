@@ -764,7 +764,7 @@ fn within(file: &[u8], doc: &Document) {
     let sound = doc.trailer.unwritten.is_none();
     for (id, record) in doc.records() {
         let elsewhere = match record.origin {
-            Origin::Shifted { .. } => true,
+            Origin::Shifted { .. } | Origin::Renumbered { .. } => true,
             Origin::Recovered => sound,
             _ => false,
         };
@@ -1380,7 +1380,7 @@ fn updated(
             // where it is, though not written.
             let shifted = matches!(
                 doc.record(at).map(|r| r.origin),
-                Some(Origin::Shifted { .. } | Origin::Recovered)
+                Some(Origin::Shifted { .. } | Origin::Renumbered { .. } | Origin::Recovered)
             );
             assert!(
                 listed == (at == id || moves) || (listed && shifted),

@@ -1163,7 +1163,8 @@ struct Reader {
     found: Box<[(usize, usize)]>,
     /// How each object whose entry the reading read away from where its
     /// section puts it was found, by number: at a shift
-    /// ([`Origin::Shifted`]), or by a scan ([`Origin::Recovered`]).
+    /// ([`Origin::Shifted`]), by a row renumbered ([`Origin::Renumbered`]),
+    /// or by a scan ([`Origin::Recovered`]).
     shifts: Box<[(u32, Origin)]>,
     /// The object streams a scan found, by number, whose members it lists
     /// ([`Reader::members`]).
@@ -3133,11 +3134,14 @@ impl Reader {
                 _ => {}
             }
             // How each entry read elsewhere was found, by number: of a first
-            // subsection renumbered from 0, each read where its row puts it
-            // at no shift.
+            // subsection renumbered from 0, each read where its row puts it,
+            // at the section's shift if it's shifted.
             let mut away: BTreeMap<u32, Origin> = shift.map(Shift::origins).unwrap_or_default();
             for &n in &section.renumbered {
-                away.entry(n).or_insert(Origin::Shifted { by: 0 });
+                let origin = away.entry(n).or_insert(Origin::Renumbered { by: 0 });
+                if let Origin::Shifted { by } = *origin {
+                    *origin = Origin::Renumbered { by };
+                }
                 entries_away = true;
             }
             // Where a revision begins, at its newest section, the one after
@@ -4538,15 +4542,32 @@ enum Ended {
 }
 
 /// Where a scan passed over a stream's data: where it starts, where the
-/// scan ended it, and how ([`pdfium::stream_end`]); and whether the
-/// verified recovery passed it by its `/Length` over an `endstream` inside
-/// it.
+/// scan ended it, and how ([`pdfium::stream_end`]); whether the verified
+/// recovery passed it by its `/Length` over an `endstream` inside it; and,
+/// where it ended it at its `endobj` before an `endstream`, where that
+/// `endstream` is.
 #[derive(Debug, Clone, Copy)]
 struct Passed {
     start: usize,
     end: usize,
     by: Ended,
     over: bool,
+    endstream: Option<usize>,
+}
+
+/// Where a verified scan ended a stream's data at its `endobj`, before the
+/// first `endstream` after it ([`scan_from`]): that `endstream`, and how
+/// much of each of its lists the scan had found by then, which it takes
+/// back to where it meets that `endstream` on its own.
+#[derive(Debug, Clone, Copy)]
+struct EndedAt {
+    endstream: usize,
+    objects: usize,
+    object_streams: usize,
+    xref_streams: usize,
+    trailers: usize,
+    unended: usize,
+    diverged: bool,
 }
 
 /// A stream whose data a scan ended at its `endobj`, or found no end to
@@ -4588,15 +4609,23 @@ impl Unended {
 /// over: PDFium's scan reads a stream's data as it reads the object it
 /// found, and reads on through one of no object as through any words.
 /// Under [`Recovery::Verified`], where the scan ended a stream's data
-/// before the first `endstream` after it (at its `endobj`), or passed it
-/// by its `/Length` over one inside it, the file is scanned again as this
+/// before the first `endstream` after it (at its `endobj`), and then meets
+/// that `endstream` on its own, not where a pass over another stream's
+/// data put it, the data ran there: what the scan found since is taken
+/// back, and the stream is ended there, as this crate's scan before ended
+/// it. So a document embedded in a stream's data, with no stream of its
+/// own, doesn't stand over the file's own objects; one with streams of its
+/// own is read as PDFium and qpdf read it, what's past its first stream
+/// standing, as it did in the scan before. Where the scan still ended a
+/// stream's data before the first `endstream` after it, or passed it by
+/// its `/Length` over one inside it, the file is scanned again as this
 /// crate's scan read it before either did ([`Pass::ToEndstream`]), and
 /// what that finds is taken too: each object of a number the first scan
 /// found nowhere, its object streams and cross-reference streams so, and
 /// each `trailer`. So a scan that reads on from an `endobj` into data it
 /// can't read as tokens (a string that doesn't close, a comment) finds no
-/// less than that one did; and a document embedded in a stream's data
-/// doesn't stand over the file's own objects.
+/// less than that one did; and a document embedded in data passed by its
+/// `/Length` doesn't stand over the file's own objects.
 fn scan_of(file: &[u8], limits: parse::Limits, recovery: Recovery) -> Scan {
     let (mut scan, diverged) = scan_from(file, limits, Pass::As(recovery));
     if !diverged {
@@ -4662,9 +4691,39 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
     let mut xref_streams = Vec::new();
     let mut unended = Vec::new();
     let mut ends = pdfium::Ends::default();
+    // The verified scan's streams ended at `endobj` before an `endstream`,
+    // in the file's order, and whether the token before was where a pass
+    // over a stream's data put the scan, so that an `endstream` there is
+    // that stream's.
+    let mut ended_at: Vec<EndedAt> = Vec::new();
+    let mut after_data = false;
     while let Some(token) = t.next() {
+        if matches!(token.kind, Kind::Space | Kind::Comment) {
+            continue;
+        }
+        // An `endstream` on its own, the first after the data of a stream
+        // the scan ended at its `endobj`: the scan was in that data, which
+        // ran there, as this crate's scan before ended it. What it found
+        // since is taken back, the stream ended there, so that a document
+        // embedded in it doesn't stand over the file's own objects.
+        let passed_to = std::mem::take(&mut after_data);
+        if !ended_at.is_empty() && !passed_to && token.kind == Kind::Keyword {
+            if let Some(i) = ended_at.iter().position(|e| e.endstream == token.start) {
+                let back = ended_at[i];
+                objects.truncate(back.objects);
+                object_streams.truncate(back.object_streams);
+                xref_streams.truncate(back.xref_streams);
+                trailers.truncate(back.trailers);
+                unended.truncate(back.unended);
+                diverged = back.diverged;
+                ended_at.truncate(i);
+                object = None;
+                before = [None, Some(token)];
+                continue;
+            }
+            ended_at.retain(|e| e.endstream > token.start);
+        }
         match token.kind {
-            Kind::Space | Kind::Comment => continue,
             Kind::Keyword if token.bytes == b"obj" => {
                 object = None;
                 if let [Some(n), Some(g)] = before
@@ -4716,6 +4775,19 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
                         Ended::Endobj => Some(Some(passed.end)),
                         Ended::Neither => Some(None),
                     };
+                    if recovery == Recovery::Verified
+                        && let Some(endstream) = passed.endstream
+                    {
+                        ended_at.push(EndedAt {
+                            endstream,
+                            objects: objects.len(),
+                            object_streams: object_streams.len(),
+                            xref_streams: xref_streams.len(),
+                            trailers: trailers.len(),
+                            unended: unended.len(),
+                            diverged,
+                        });
+                    }
                     if let Some(end) = end {
                         unended.push(Unended {
                             id: start.map(|(id, _)| id),
@@ -4725,6 +4797,7 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
                     }
                     diverged |= recovery == Recovery::Verified
                         && (passed.by == Ended::Endobj || passed.over);
+                    after_data = passed.by != Ended::Endobj;
                     t = Tokenizer::at(file, passed.end);
                 }
             }

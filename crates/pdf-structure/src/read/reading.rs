@@ -911,8 +911,9 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// Each object whose entry the reading read at a shift
-    /// ([`Origin::Shifted`](crate::Origin::Shifted)) or where a scan found
-    /// it, in a file whose sections read
+    /// ([`Origin::Shifted`](crate::Origin::Shifted)), by a row of its
+    /// section renumbered ([`Origin::Renumbered`](crate::Origin::Renumbered)),
+    /// or where a scan found it, in a file whose sections read
     /// ([`Origin::Recovered`](crate::Origin::Recovered)): its number, its
     /// generation and where it is, for the writer, whose update lists each
     /// where it is.
