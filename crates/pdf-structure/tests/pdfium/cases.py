@@ -328,6 +328,43 @@ def stream_of_no_object():
     return f.bytes()
 
 
+def unclosed(where):
+    """No startxref, and a literal string that doesn't close before the
+    catalog and its pages: as object 9's dictionary's value, between
+    objects, or where object 9's dictionary has a key. PDFium reads it to
+    the file's end where it reads it as a string, a value or a `(` between
+    objects, and finds no catalog; where a key goes it passes over it."""
+    f = File()
+    if where == "value":
+        f.raw(b"9 0 obj\n<< /Title (open /Producer (x) >>\nendobj\n")
+    elif where == "between":
+        f.obj(9, b"<< /Title (closed) >>")
+        f.raw(b"(open\n")
+    else:
+        f.raw(b"9 0 obj\n<< /Title (closed) ( /Producer (x) >>\nendobj\n")
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.obj(4, page(4))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
+def unclosed_later_copy():
+    """No startxref, and the catalog, its pages and the trailer, then a
+    literal string that doesn't close between objects and page 4 again, its
+    dictionary cut short. PDFium reads the string to the file's end, and
+    page 4 where it's first written."""
+    f = File()
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.obj(4, page(4))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    f.raw(b"(open\n4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 300]\n")
+    return f.bytes()
+
+
 def member_and_object(member_first):
     """No startxref, and page 3 twice: at an offset, 300 high, and in object
     stream 9, 200 high, the stream first where `member_first`."""
@@ -398,6 +435,11 @@ CASES = {
     "stream-with-no-end": stream_with_no_end(),
     "endstream-run-into-endobj": endstream_run_into_endobj(),
     "stream-of-no-object": stream_of_no_object(),
+    # A string that doesn't close, in a file found by scanning.
+    "unclosed-string-value": unclosed("value"),
+    "unclosed-string-between": unclosed("between"),
+    "unclosed-string-key": unclosed("key"),
+    "unclosed-string-later-copy": unclosed_later_copy(),
     # A later section that doesn't read, or comes back on itself.
     "update": updated(),
     "update-prev-past-the-end": updated(prev=999999),

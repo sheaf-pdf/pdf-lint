@@ -1927,11 +1927,13 @@ fn objects_after_a_string_closed_late_into_data_that_doesnt_close_are_found() {
 /// would read again and again, were each string read: runs of `(` closed
 /// by a `)` after each third, so that some close and some don't; `(` again
 /// and again, then one `)`; streams each with a string that doesn't close
-/// in its dictionary, and `trailer` dictionaries each with one, both with a
-/// trailer that reads at the end; and 64 KiB of `(`. Under either recovery
-/// the scan reads no more than three times the file's bytes as strings
-/// that don't close and in its own parses of each stream's head and each
-/// trailer, and finds the catalog first and the trailer last.
+/// in its dictionary, `trailer` dictionaries each with one, and an object
+/// written again and again each with one, which the open reads past the
+/// first to see which stands, each with a trailer that reads at the end;
+/// and 64 KiB of `(`. Under either recovery the scan reads no more than
+/// three times the file's bytes as strings that don't close, in its own
+/// parses of each stream's head and each trailer, and in those reads, and
+/// finds the catalog first and the trailer last.
 #[test]
 fn a_scan_reads_past_strings_that_dont_close_in_a_bounded_number_of_bytes() {
     let catalog = "%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
@@ -1949,6 +1951,7 @@ fn a_scan_reads_past_strings_that_dont_close_in_a_bounded_number_of_bytes() {
         (format!("{})", "(".repeat(8192)), "one close"),
         (streams, "streams"),
         ("trailer\n<< /A (\n".repeat(n), "trailers"),
+        ("5 0 obj\n<< /A (\nendobj\n".repeat(n), "copies"),
         ("(".repeat(64 << 10), "64 KiB"),
     ];
     for (middle, name) in shapes {
@@ -2003,6 +2006,161 @@ fn a_scans_own_parses_read_over_their_bytes_as_over_the_whole_file() {
     each_object_at(&doc, &places, &|_| Origin::Recovered);
     reaches_its_page(&doc);
     assert!(doc.trailer.dict().has(b"Root"));
+}
+
+/// The faults `doc` says of objects a scan found again past a string read
+/// past, which don't read there.
+fn earlier(doc: &Document) -> Vec<(Place, Fault)> {
+    (doc.faults().iter())
+        .filter(|(_, f)| matches!(f, Fault::Earlier { .. }))
+        .cloned()
+        .collect()
+}
+
+/// The fault a scan says of object `n`, read at byte `at`, where it found
+/// it before it found it again at byte `later`, which doesn't read, at its
+/// place.
+fn read_earlier(n: u32, at: usize, later: usize) -> (Place, Fault) {
+    let fault = Fault::Earlier {
+        id: ObjectId::new(n, 0),
+        at,
+        later,
+    };
+    (
+        Place::new(None, Some(Span::new(None, later, later + 1))),
+        fault,
+    )
+}
+
+/// Page 3, its dictionary cut short.
+const CUT_PAGE: &str = "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n";
+
+/// Page 3 whole, 20 wide.
+const WIDE_PAGE: &str =
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20] /Resources << >> >>\nendobj\n";
+
+/// The width page 3 has in `doc`.
+fn width(doc: &Document) -> i64 {
+    let page = doc.get(ObjectId::new(3, 0)).unwrap().as_dict().unwrap();
+    let media = page.get(b"MediaBox").unwrap().as_array().unwrap();
+    media[2].as_integer().unwrap()
+}
+
+/// Scanned files whose catalog, page tree and page 3 come before a string
+/// that doesn't close, after which the scan finds page 3 again: a revision
+/// cut short, its dictionary unclosed, which doesn't read. The verified
+/// recovery reads on past the string, and page 3 found there would stand
+/// over the one before it, as a later object of a number does; but one
+/// found past a string read past stands only where it reads, so page 3 is
+/// read where it was found first, as the scan read the file before it read
+/// past strings, every way, and that's said. Where a whole page 3 comes
+/// between, past the string too, that one's read. Where object 5 doesn't
+/// read before the string either, the one before still stands, as the scan
+/// read it before, and that's said. Under [`Recovery::Pdfium`] the scan
+/// reads no further than the string, and page 3 is read where it was found
+/// first, as PDFium reads it.
+#[test]
+fn an_object_found_again_past_a_string_read_past_stands_only_where_it_reads() {
+    let (file, places) = scanned_after(b"", format!("(open\n{CUT_PAGE}").as_bytes());
+    let later = file.len() - CUT_PAGE.len();
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert_eq!(width(&doc), 10);
+    assert_eq!(earlier(&doc), [read_earlier(3, places[2].1, later)]);
+    assert_eq!(unclosed(&doc).len(), 1);
+    let doc = read_as(&file, &as_pdfium());
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    assert_eq!(earlier(&doc), []);
+    let between = format!("(open\n{WIDE_PAGE}{CUT_PAGE}");
+    let (file, places) = scanned_after(b"", between.as_bytes());
+    let wide = file.len() - CUT_PAGE.len() - WIDE_PAGE.len();
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(width(&doc), 20);
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, wide);
+    let later = file.len() - CUT_PAGE.len();
+    assert_eq!(earlier(&doc), [read_earlier(3, wide, later)]);
+    assert_eq!(
+        doc.record(ObjectId::new(1, 0)).unwrap().at.start,
+        places[0].1
+    );
+    let five = b"5 0 obj\n<< /A 1\nendobj\n";
+    let (file, _) = scanned_after(five, b"(open\n5 0 obj\n<< /B 2\n");
+    let later = file.len() - "5 0 obj\n<< /B 2\n".len();
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert!(doc.get(ObjectId::new(5, 0)).is_err());
+    assert_eq!(earlier(&doc), [read_earlier(5, 9, later)]);
+}
+
+/// A later page 3 that reads, past a string read past, stands over the one
+/// before the string, as a later object of a number does, and nothing's
+/// said of it; and where no string is read past, page 3 cut short stands
+/// over the one before it, as a scan reads an update, and doesn't read.
+/// So the rule reaches only what's found past such a string.
+#[test]
+fn an_object_found_again_stands_as_the_last_where_it_reads_or_no_string_is_read_past() {
+    let (file, _) = scanned_after(b"", format!("(open\n{WIDE_PAGE}").as_bytes());
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(width(&doc), 20);
+    assert_eq!(earlier(&doc), []);
+    let (file, _) = scanned_after(b"", CUT_PAGE.as_bytes());
+    let doc = read(&file);
+    assert!(doc.get(ObjectId::new(3, 0)).is_err());
+    assert_eq!(earlier(&doc), []);
+}
+
+/// [`a_string_that_doesnt_close_met_by_the_second_scan_alone_is_read_past`]'s
+/// file, with page 3 before the string too, and the one past it cut short:
+/// the second scan alone finds page 3, before the string it reads past and
+/// again past it, where it doesn't read; page 3 is read where that scan
+/// found it first, every way, and that's said.
+#[test]
+fn a_number_the_second_scan_finds_again_past_a_string_stands_only_where_it_reads() {
+    let mut file =
+        b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n%\x80 endstream endobj "
+            .to_vec();
+    let first = file.len();
+    file.extend_from_slice(format!("3 0 obj {} endobj (open", OBJECTS[2].1).as_bytes());
+    let mut later = 0;
+    for &(n, text) in &OBJECTS {
+        file.push(b' ');
+        match n {
+            3 => {
+                later = file.len();
+                file.extend_from_slice(b"3 0 obj << /Type /Page /Parent 2 0 R");
+            }
+            _ => file.extend_from_slice(format!("{n} 0 obj {text} endobj").as_bytes()),
+        }
+    }
+    file.extend_from_slice(b" trailer << /Size 10 /Root 1 0 R >>\n");
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, first);
+    assert_eq!(earlier(&doc), [read_earlier(3, first, later)]);
+    assert_eq!(unclosed(&doc), []);
+}
+
+/// [`two_shifts`], with a string that doesn't close after it and page 3
+/// again, cut short: the section's entries for objects 3 and 4 are at
+/// neither place, so a scan of the file finds them, reads on past the
+/// string and finds page 3 again, which doesn't read; page 3 is read where
+/// the scan found it first, every way, and that's said.
+#[test]
+fn an_entry_a_scan_finds_again_past_a_string_read_past_is_read_where_it_reads() {
+    let (mut file, places, _) = two_shifts();
+    let later = file.len() + "(open\n".len();
+    file.extend_from_slice(format!("(open\n{CUT_PAGE}").as_bytes());
+    let doc = read(&file);
+    let origin = |n| match n {
+        1 | 2 => Origin::Shifted { by: -5 },
+        _ => Origin::Recovered,
+    };
+    each_object_at(&doc, &places, &origin);
+    reaches_its_page(&doc);
+    assert_eq!(earlier(&doc), [read_earlier(3, places[2].1, later)]);
 }
 
 /// [`Unclosing`] says, at each `(`, what pdf-tokenizer reads of the literal

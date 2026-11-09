@@ -20,8 +20,9 @@
 //! ([`Fault::StreamEnd`]); and reading on from just past the `(` of a
 //! literal string it finds no `)` closing, which would take every byte
 //! after it, or, as PDFium reads a file, reading the rest of the file as
-//! that string, either said ([`Fault::Unclosed`]). An object that doesn't
-//! read says why
+//! that string, either said ([`Fault::Unclosed`]), an object found again
+//! past such a string standing over the one before only where it reads
+//! ([`Fault::Earlier`]). An object that doesn't read says why
 //! ([`Unread`]): it doesn't parse, its offset holds another, or the object
 //! stream it's in doesn't decode ([`Undecoded`], its filters
 //! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
@@ -3815,10 +3816,12 @@ impl Reader {
     }
 
     /// The objects found by scanning the file for `n g obj`, a later one
-    /// of a number over an earlier, when the sections don't read, each
-    /// stream's data passed over as PDFium passes over it, and each the
-    /// scan ended at its `endobj`, or found no end to and read on through,
-    /// said ([`Fault::StreamEnd`]); and the last `trailer` that reads, or
+    /// of a number over an earlier, but one past a string that doesn't
+    /// close the scan read past only where it reads, which is said
+    /// ([`Reader::standing`]), when the sections don't read, each stream's
+    /// data passed over as PDFium passes over it, and each the scan ended
+    /// at its `endobj`, or found no end to and read on through, said
+    /// ([`Fault::StreamEnd`]); and the last `trailer` that reads, or
     /// else the last cross-reference stream, looked for from the file's
     /// end, what reading each object on the way told said, but of a stream
     /// that awaits the members ([`Reader::awaits_members`]), which its own
@@ -3847,6 +3850,7 @@ impl Reader {
             xref_streams,
             unended,
             unclosed,
+            past,
         } = scan_of(file, self.limits.parser, self.recovery, None);
         if cx.wants {
             for unended in &unended {
@@ -3857,14 +3861,43 @@ impl Reader {
             }
         }
         let mut entries = BTreeMap::new();
-        for (id, offset) in objects {
+        // The numbers found again past a string read past, where the copy
+        // that stands is the last that reads ([`Reader::standing`]).
+        let mut again = BTreeSet::new();
+        for &(id, offset) in &objects {
             let generation = id.generation;
-            entries.insert(
+            let was = entries.insert(
                 id.number,
                 (generation, XrefEntry::InUse { offset, generation }),
             );
+            if was.is_some() && past.binary_search_by_key(&offset, |&(at, _)| at).is_ok() {
+                again.insert(id.number);
+            }
         }
         self.entries = entries.into_iter().collect();
+        if !again.is_empty() {
+            let mut copies: BTreeMap<u32, Vec<(ObjectId, usize)>> = BTreeMap::new();
+            for &(id, at) in objects.iter().filter(|(id, _)| again.contains(&id.number)) {
+                copies.entry(id.number).or_default().push((id, at));
+            }
+            for (n, copies) in copies {
+                let Some((id, at, later)) = self.standing(file, &copies, &past) else {
+                    continue;
+                };
+                if let Some(i) = self.index(n) {
+                    let entry = XrefEntry::InUse {
+                        offset: at,
+                        generation: id.generation,
+                    };
+                    self.entries[i].1 = (id.generation, entry);
+                }
+                cx.tell(
+                    None,
+                    Some(span(later, later + 1)),
+                    Fault::Earlier { id, at, later },
+                );
+            }
+        }
         self.scanned = true;
         self.facts.recovered = true;
         let mut object_streams: Vec<u32> = object_streams.into_iter().map(|(n, _)| n).collect();
@@ -3955,6 +3988,50 @@ impl Reader {
             object,
             unwritten: Some(why),
         }
+    }
+
+    /// Of `copies`, the `n g obj` a scan of `file` found of one object, or
+    /// of one number, each where its `n` starts, in the file's order, the
+    /// one read where it isn't the last, with where the last is: none where
+    /// the last is read, as an update appends. A copy found past a literal
+    /// string that doesn't close, which the scan read past (`past`, where
+    /// such copies' `n` start and their bytes end, in order), stands over
+    /// an earlier one only where it reads; so a revision cut short, or
+    /// bytes such a string held, past one, don't take out of the reading
+    /// what a scan that read no further reads ([`Fault::Earlier`]). Each
+    /// such copy is read once at most, from the last back, as the open
+    /// reads, over its own bytes, a `/Length` that's a reference not
+    /// followed, its data then up to `endstream`: so the reads of the
+    /// copies one scan found read no more than the file together, whatever
+    /// they hold.
+    fn standing(
+        &self,
+        file: &[u8],
+        copies: &[(ObjectId, usize)],
+        past: &[(usize, usize)],
+    ) -> Option<(ObjectId, usize, usize)> {
+        let &(_, later) = copies.last()?;
+        let mut i = copies.len() - 1;
+        while i > 0 {
+            let (id, at) = copies[i];
+            let Ok(k) = past.binary_search_by_key(&at, |&(at, _)| at) else {
+                break;
+            };
+            let bytes = &file[..past[k].1];
+            #[cfg(test)]
+            scan_read(bytes.len() - at);
+            let mut cx = Cx {
+                resolving: true,
+                ..Cx::opening(false)
+            };
+            let Ok(read) = self.indirect(InMemory(bytes), &mut cx, at, Some(id));
+            if read.is_ok() {
+                break;
+            }
+            i -= 1;
+        }
+        let (id, at) = copies[i];
+        (at != later).then_some((id, at, later))
     }
 
     /// Whether the file's strings are encrypted, from the trailer's
@@ -4545,6 +4622,12 @@ struct Scan {
     /// The literal strings the scan found no `)` closing
     /// ([`Fault::Unclosed`]).
     unclosed: Unclosed,
+    /// Where the `n` of each object the scan found past the first such
+    /// string it read past starts, in the file's order: what a scan that
+    /// read no further than that string doesn't find
+    /// ([`Reader::standing`]). With where its bytes end, as the scan
+    /// found them: at the next `n g obj` it found, else the file's end.
+    past: Vec<(usize, usize)>,
 }
 
 /// The literal strings that don't close that a scan met ([`scan_from`]):
@@ -4777,10 +4860,17 @@ fn scan_of(file: &[u8], limits: parse::Limits, recovery: Recovery, within: Optio
             .into_iter()
             .filter(|at| added.contains(at)),
     );
+    (scan.past).extend(
+        earlier
+            .past
+            .into_iter()
+            .filter(|(at, _)| added.contains(at)),
+    );
     scan.trailers.extend(earlier.trailers);
     scan.objects.sort_by_key(|&(_, at)| at);
     scan.object_streams.sort_by_key(|&(_, at)| at);
     scan.xref_streams.sort_unstable();
+    scan.past.sort_unstable();
     // A `trailer` both found, read over the fewer bytes either gives it:
     // each reads it alike.
     scan.trailers.sort_unstable();
@@ -4828,6 +4918,9 @@ fn scan_from(
     // those it met.
     let resumes = pass != Pass::As(Recovery::Pdfium);
     let mut unclosed = Unclosed::default();
+    // Where the first string read past is, which a take-back leaves: what
+    // the scan finds after it, a scan that read no further doesn't.
+    let mut resumed = None;
     // The object whose `obj` was last seen, where its `n` starts, and
     // whether its dictionary names `/ObjStm`, an object stream's, whose
     // members the reading lists once its handler is open, or `/XRef`.
@@ -4883,6 +4976,7 @@ fn scan_from(
                 if within.is_none_or(|within| q < within) {
                     unclosed.add(object.map(|(id, _, _)| id), q);
                 }
+                resumed.get_or_insert(q);
                 for (_, end) in &mut trailers[open_trailers..] {
                     *end = q;
                 }
@@ -5005,6 +5099,15 @@ fn scan_from(
         }
         before = [before[1], Some(token)];
     }
+    // An object's `n` comes after any string read past before its `obj`.
+    let mut past = Vec::new();
+    if let Some(q) = resumed {
+        let first = objects.partition_point(|&(_, at)| at < q);
+        for (i, &(_, at)) in objects.iter().enumerate().skip(first) {
+            let end = objects.get(i + 1).map_or(file.len(), |&(_, next)| next);
+            past.push((at, end));
+        }
+    }
     let scan = Scan {
         objects,
         object_streams,
@@ -5012,6 +5115,7 @@ fn scan_from(
         xref_streams,
         unended,
         unclosed,
+        past,
     };
     (scan, diverged)
 }

@@ -587,6 +587,8 @@ impl Reader {
             xref_streams,
             unended,
             unclosed,
+            // None: PDFium's scan reads no further than such a string.
+            past: _,
         } = scan_of(file, self.limits.parser, Recovery::Pdfium, None);
         if cx.wants {
             for unended in &unended {

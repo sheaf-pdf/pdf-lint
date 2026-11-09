@@ -158,7 +158,10 @@ pub enum Recovery {
     /// literal string either scan finds no `)` closing is read past, from
     /// just past its `(`, the bytes it held read as tokens, so that what's
     /// after it is found; the first scan says so, once, with how many
-    /// ([`Fault::Unclosed`](super::Fault::Unclosed)). A table's first
+    /// ([`Fault::Unclosed`](super::Fault::Unclosed)). An object found again
+    /// past such a string stands over the one found before it only where it
+    /// reads, so that what's read past one takes nothing out of the reading
+    /// ([`Fault::Earlier`](super::Fault::Earlier)). A table's first
     /// subsection numbered from 1 that starts with object 0's row is read
     /// from 0 where each of its rows in use is at its object's `n g obj` so
     /// numbered, where it's written or at the section's shift

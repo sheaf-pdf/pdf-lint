@@ -257,6 +257,33 @@ pub enum Fault {
         /// every count a recovery says.
         past: u32,
     },
+    /// A scan of the file, as a file whose sections don't read is scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
+    /// an object not where its section puts it
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), found `id`'s
+    /// number again at byte `later`, past a literal string that doesn't
+    /// close, which it read past ([`Fault::Unclosed`]), and that object
+    /// doesn't read there: a revision cut short, say, or bytes the string
+    /// held. `id` is read at byte `at` instead, where the scan found it
+    /// before: of its copies past the string, the last that reads; else
+    /// the last before the string, as a scan that read no further reads
+    /// it; else, where there's none, the first. A later `n g obj` of a
+    /// number stands over an earlier one, as an update appends, but one
+    /// past such a string only where it reads, so what's read past one
+    /// takes nothing out of the reading.
+    /// [`Recovery::Verified`](super::Recovery::Verified) alone: under
+    /// [`Recovery::Pdfium`](super::Recovery::Pdfium) the scan reads no
+    /// further than such a string.
+    #[error("{}", earlier_words(*.id, *.at, *.later))]
+    Earlier {
+        /// The object read.
+        id: ObjectId,
+        /// Where its `n g obj` is.
+        at: usize,
+        /// Where the scan found its number again, past such a string,
+        /// where that doesn't read.
+        later: usize,
+    },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
     /// ([`Limits::entries`](super::Limits::entries)): those aren't read.
@@ -935,6 +962,14 @@ fn unclosed_words(id: Option<ObjectId>, start: usize, past: u32) -> String {
     }
 }
 
+/// [`Fault::Earlier`]'s words.
+fn earlier_words(id: ObjectId, at: usize, later: usize) -> String {
+    format!(
+        "the scan finds object {} again at byte {later}, past a string that doesn't close, where it doesn't read, and reads {id} R at byte {at}, where it found it before",
+        id.number
+    )
+}
+
 /// [`Fault::Strings`]' words.
 fn strings_words(count: usize, fault: &pdf_crypt::Fault) -> String {
     match count {
@@ -1014,11 +1049,12 @@ mod tests {
             Fault::StreamEnd { .. } => 35,
             Fault::Renumbered { .. } => 36,
             Fault::Unclosed { .. } => 37,
+            Fault::Earlier { .. } => 38,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 38;
+    const ARMS: usize = 39;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -1348,6 +1384,14 @@ mod tests {
                     past: 0,
                 },
                 "the scan finds no ) closing the string at byte 30 in 9 0 R and reads the rest of the file as that string, as PDFium's scan does",
+            ),
+            (
+                Fault::Earlier {
+                    id: id(9),
+                    at: 30,
+                    later: 470,
+                },
+                "the scan finds object 9 again at byte 470, past a string that doesn't close, where it doesn't read, and reads 9 0 R at byte 30, where it found it before",
             ),
             (
                 Fault::Shifted {
