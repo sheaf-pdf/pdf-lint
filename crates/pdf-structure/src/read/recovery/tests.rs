@@ -1427,8 +1427,9 @@ fn a_scanned_streams_data_holding_endobj_is_passed_by_its_length() {
 /// Under [`Recovery::Pdfium`], the data's object 3 stands over the file's,
 /// as PDFium and qpdf read it, and the scan says where it ended the data.
 /// Where the stream has no `endstream` of its own, the first after its data
-/// a later stream's, which the scan meets as it passes that one's data, the
-/// objects between stand.
+/// a later stream's, which the scan meets as it passes that one's data, or
+/// inside a later object whose `stream` keyword is missing, the objects
+/// between stand.
 #[test]
 fn a_document_in_a_scanned_streams_data_doesnt_stand_over_the_files_own_objects() {
     let data = "%PDF-1.4\n7 0 obj\n<< /Type /Catalog >>\nendobj\n3 0 obj\n<< /Embedded true >>\nendobj\n%%EOF\n";
@@ -1465,6 +1466,13 @@ fn a_document_in_a_scanned_streams_data_doesnt_stand_over_the_files_own_objects(
         start,
         Some(start + "q Q\n".len()),
     );
+    assert_eq!(stream_ends(&doc), [said.clone()]);
+
+    let keywordless = "5 0 obj\n<< /Length 3 >>\nq Q\nendstream\nendobj\n";
+    let (file, places) = scanned_after(unended.as_bytes(), keywordless.as_bytes());
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
     assert_eq!(stream_ends(&doc), [said]);
 }
 

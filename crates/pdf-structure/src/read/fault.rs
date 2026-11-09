@@ -217,8 +217,8 @@ pub enum Fault {
     /// over, as PDFium's doesn't. The object's own read reads its data as
     /// any stream's is read ([`Fault::Length`]). Under
     /// [`Recovery::Verified`](super::Recovery::Verified), not where the
-    /// scan, reading on, meets that `endstream` on its own: the data ran
-    /// there, and what it found inside is taken back.
+    /// scan, reading on, meets that `endstream` on its own between objects:
+    /// the data ran there, and what it found inside is taken back.
     #[error("{}", stream_end_words(*.id, *.start, *.end))]
     StreamEnd {
         /// The stream's object.

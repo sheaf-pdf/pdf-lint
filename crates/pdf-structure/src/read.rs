@@ -4555,10 +4555,11 @@ struct Passed {
     endstream: Option<usize>,
 }
 
-/// Where a verified scan ended a stream's data at its `endobj`, before the
-/// first `endstream` after it ([`scan_from`]): that `endstream`, and how
-/// much of each of its lists the scan had found by then, which it takes
-/// back to where it meets that `endstream` on its own.
+/// Where a verified scan ended an object's stream's data at its `endobj`,
+/// before the first `endstream` after it ([`scan_from`]): that `endstream`,
+/// and how much of each of its lists the scan had found by then, which it
+/// takes back to where it meets that `endstream` on its own between
+/// objects.
 #[derive(Debug, Clone, Copy)]
 struct EndedAt {
     endstream: usize,
@@ -4608,10 +4609,11 @@ impl Unended {
 /// [`Recovery::Pdfium`] a stream no `n g obj` comes before isn't passed
 /// over: PDFium's scan reads a stream's data as it reads the object it
 /// found, and reads on through one of no object as through any words.
-/// Under [`Recovery::Verified`], where the scan ended a stream's data
-/// before the first `endstream` after it (at its `endobj`), and then meets
-/// that `endstream` on its own, not where a pass over another stream's
-/// data put it, the data ran there: what the scan found since is taken
+/// Under [`Recovery::Verified`], where the scan ended an object's stream's
+/// data before the first `endstream` after it (at its `endobj`), and then
+/// meets that `endstream` on its own between objects, not where a pass
+/// over another stream's data put it nor inside an object whose `stream`
+/// it didn't find, the data ran there: what the scan found since is taken
 /// back, and the stream is ended there, as this crate's scan before ended
 /// it. So a document embedded in a stream's data, with no stream of its
 /// own, doesn't stand over the file's own objects; one with streams of its
@@ -4691,23 +4693,26 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
     let mut xref_streams = Vec::new();
     let mut unended = Vec::new();
     let mut ends = pdfium::Ends::default();
-    // The verified scan's streams ended at `endobj` before an `endstream`,
-    // in the file's order, and whether the token before was where a pass
-    // over a stream's data put the scan, so that an `endstream` there is
-    // that stream's.
+    // The verified scan's streams of an object ended at `endobj` before an
+    // `endstream`, in the file's order, and whether the token before was
+    // where a pass over a stream's data put the scan, so that an
+    // `endstream` there is that stream's.
     let mut ended_at: Vec<EndedAt> = Vec::new();
     let mut after_data = false;
     while let Some(token) = t.next() {
         if matches!(token.kind, Kind::Space | Kind::Comment) {
             continue;
         }
-        // An `endstream` on its own, the first after the data of a stream
-        // the scan ended at its `endobj`: the scan was in that data, which
-        // ran there, as this crate's scan before ended it. What it found
-        // since is taken back, the stream ended there, so that a document
-        // embedded in it doesn't stand over the file's own objects.
+        // An `endstream` on its own between objects, the first after the
+        // data of a stream the scan ended at its `endobj`: the scan was in
+        // that data, which ran there, as this crate's scan before ended it.
+        // What it found since is taken back, the stream ended there, so that
+        // a document embedded in it doesn't stand over the file's own
+        // objects. One inside an object whose `n g obj` the scan found and
+        // whose `stream` it didn't is that object's.
         let passed_to = std::mem::take(&mut after_data);
-        if !ended_at.is_empty() && !passed_to && token.kind == Kind::Keyword {
+        let between = object.is_none();
+        if !ended_at.is_empty() && !passed_to && between && token.kind == Kind::Keyword {
             if let Some(i) = ended_at.iter().position(|e| e.endstream == token.start) {
                 let back = ended_at[i];
                 objects.truncate(back.objects);
@@ -4776,6 +4781,7 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
                         Ended::Neither => Some(None),
                     };
                     if recovery == Recovery::Verified
+                        && start.is_some()
                         && let Some(endstream) = passed.endstream
                     {
                         ended_at.push(EndedAt {
