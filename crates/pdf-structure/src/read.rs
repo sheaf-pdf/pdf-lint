@@ -1450,6 +1450,23 @@ struct Section {
     stream_found: Option<Found>,
     /// Why a hybrid table's `/XRefStm` doesn't read, where it read nowhere.
     stream_unread: Option<Unwritten>,
+    /// A table's first subsection numbered from 1 whose first row is
+    /// object 0's, before the file proves it's numbered from 0
+    /// ([`Reader::renumbers`]).
+    misnumbered: Option<Misnumbered>,
+    /// The numbers in use of a table's first subsection renumbered from 0
+    /// ([`Fault::Renumbered`]), each read where its row puts it.
+    renumbered: Vec<u32>,
+}
+
+/// A table's first subsection numbered from 1 whose first row is object
+/// 0's (ISO 32000-2, 7.5.4): how many rows it has, and the first row of a
+/// later subsection for its last number, which its own row hides as it's
+/// read, and which renumbering it from 0 leaves free.
+#[derive(Debug, Clone, Copy)]
+struct Misnumbered {
+    count: u32,
+    later: Option<(u16, XrefEntry)>,
 }
 
 fn span(start: usize, end: usize) -> Span {
@@ -2932,6 +2949,36 @@ impl Reader {
             if pdfium && i == last && section.trailer.stream.is_none() {
                 first_table = Some(listed.clone());
             }
+            // A first subsection numbered from 1 that starts with object
+            // 0's row, read from 0 where the file proves it, where the
+            // section's rows are written or at its move or the header's
+            // offset taken back, which the shifts below read its entries at.
+            if let Some(misnumbered) = section.misnumbered.take()
+                && self.recovery == Recovery::Verified
+            {
+                let moved = said[i].as_ref().map(Found::by);
+                let back = i64::try_from(header)
+                    .ok()
+                    .filter(|_| header > 0)
+                    .map(|h| -h);
+                let shifts = [Some(0), moved, back].into_iter().flatten();
+                if let Some(renumbered) = self.renumbers(file, &listed, misnumbered, shifts)? {
+                    section.renumbered = renumbered;
+                    let count = misnumbered.count;
+                    let moved: Vec<(u32, (u16, XrefEntry))> = (1..=count)
+                        .filter_map(|n| listed.remove(&n).map(|entry| (n - 1, entry)))
+                        .collect();
+                    listed.extend(moved);
+                    if let Some(later) = misnumbered.later {
+                        listed.entry(count).or_insert(later);
+                    }
+                    let fault = Fault::Renumbered {
+                        at: offsets[i],
+                        count,
+                    };
+                    told.tell(None, None, fault);
+                }
+            }
             if let Some((offset, id, stream)) = &section.stream {
                 let hybrid = section.trailer.stream.is_none();
                 match self.rows(
@@ -3074,8 +3121,14 @@ impl Reader {
                 }
                 _ => {}
             }
-            // How each entry read elsewhere was found, by number.
-            let away: BTreeMap<u32, Origin> = shift.map(Shift::origins).unwrap_or_default();
+            // How each entry read elsewhere was found, by number: of a first
+            // subsection renumbered from 0, each read where its row puts it
+            // at no shift.
+            let mut away: BTreeMap<u32, Origin> = shift.map(Shift::origins).unwrap_or_default();
+            for &n in &section.renumbered {
+                away.entry(n).or_insert(Origin::Shifted { by: 0 });
+                entries_away = true;
+            }
             // Where a revision begins, at its newest section, the one after
             // it, read before it, is done.
             let begins = i == 0 || back[i] != back[i - 1];
@@ -3311,6 +3364,8 @@ impl Reader {
                     end,
                     stream_found: None,
                     stream_unread: None,
+                    misnumbered: None,
+                    renumbered: Vec::new(),
                 }))
             }
             At::Neither => Ok(Err(Unwritten::Neither { at: offset })),
@@ -3335,6 +3390,9 @@ impl Reader {
         // looked at only to say so.
         let (mut rows, mut misshapen) = (0, 0);
         let mut first: Option<(u32, Span, RowShape)> = None;
+        // A first subsection numbered from 1 whose first row is object 0's.
+        let mut subsections = 0usize;
+        let mut misnumbered: Option<Misnumbered> = None;
         loop {
             let at = w.place(t.offset());
             match w.significant(&mut t.clone()) {
@@ -3348,6 +3406,8 @@ impl Reader {
                     let (Some(start), Some(count)) = (start, count) else {
                         return Err(Unwritten::Subsection { at });
                     };
+                    let from_one = subsections == 0 && start == 1;
+                    subsections += 1;
                     for i in 0..count {
                         let row = w
                             .significant(&mut t.clone())
@@ -3372,6 +3432,10 @@ impl Reader {
                         else {
                             return Err(Unwritten::Row { at: row });
                         };
+                        if from_one && i == 0 && kind == b"f" && (offset, generation) == (0, 65535)
+                        {
+                            misnumbered = Some(Misnumbered { count, later: None });
+                        }
                         let entry = match (usize::try_from(offset), u16::try_from(generation)) {
                             (Ok(offset), Ok(generation)) if kind == b"n" => {
                                 let offset = self.in_bytes(offset);
@@ -3386,6 +3450,12 @@ impl Reader {
                                 (u16::MAX, XrefEntry::Free)
                             }
                         };
+                        if let Some(m) = &mut misnumbered
+                            && subsections > 1
+                            && n == m.count
+                        {
+                            m.later.get_or_insert(entry);
+                        }
                         entries.entry(n).or_insert(entry);
                     }
                 }
@@ -3422,6 +3492,8 @@ impl Reader {
             end: eof_after(w, parser.offset()),
             stream_found: None,
             stream_unread: None,
+            misnumbered,
+            renumbered: Vec::new(),
         };
         Ok((section, xref_stm))
     }

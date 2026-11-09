@@ -142,7 +142,11 @@ pub enum Recovery {
     /// passes over a stream's data as PDFium's does, by its `/Length` where
     /// `endstream` follows that, else to the first `endstream` or `endobj`,
     /// and says where it ended one at `endobj` or the file's end
-    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A later
+    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A table's first
+    /// subsection numbered from 1 that starts with object 0's row is read
+    /// from 0 where each of its rows in use is at its object's `n g obj` so
+    /// numbered, where it's written or at the section's shift
+    /// ([`Fault::Renumbered`](super::Fault::Renumbered)). A later
     /// section that doesn't read is said, and what the sections before it
     /// gave is kept.
     #[default]

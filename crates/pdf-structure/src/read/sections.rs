@@ -39,7 +39,9 @@ pub struct SectionRow {
 /// where it's said to be ([`SectionRows::said`]); its rows are as written,
 /// though the reading may read their objects at a shift
 /// ([`Origin::Shifted`](crate::Origin::Shifted)) or where a scan finds them
-/// ([`Origin::Recovered`](crate::Origin::Recovered)).
+/// ([`Origin::Recovered`](crate::Origin::Recovered)), and read a first
+/// subsection numbered from 1 as numbered from 0
+/// ([`Fault::Renumbered`](super::Fault::Renumbered)).
 /// Not exhaustive, so that it can come to say more of a section; made only by
 /// the reader.
 #[derive(Debug, Clone, PartialEq)]

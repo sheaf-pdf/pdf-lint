@@ -1301,3 +1301,176 @@ fn an_entry_a_scan_finds_past_a_stream_without_endstream_is_read_there() {
     let place = Place::new(None, Some(Span::new(None, start, end)));
     assert_eq!(stream_ends(&doc), [(place, said)]);
 }
+
+/// A file of [`OBJECTS`] whose table's one subsection is numbered from 1
+/// though it starts with object 0's row, the rows after it each the place
+/// of the object one less than its number: as the writer meant it, numbered
+/// from 0. Also each object's place and the table's.
+fn misnumbered() -> (Vec<u8>, Vec<(u32, usize)>, usize) {
+    let (mut file, places, table) = plain(b"");
+    let rows = &mut file[table..];
+    let at = rows.windows(4).position(|w| w == b"0 5\n").unwrap();
+    rows[at..at + 3].copy_from_slice(b"1 5");
+    (file, places, table)
+}
+
+/// [`misnumbered`]: each row in use exactly at its object's `n g obj` as
+/// numbered from 0, and none so from 1, so the subsection is read from 0,
+/// said once, each object where its row puts it and no object 5, every way
+/// and with faults off; the page reached.
+#[test]
+fn a_first_subsection_from_1_whose_rows_land_from_0_is_read_from_0() {
+    let (file, places, table) = misnumbered();
+    let doc = read(&file);
+    let renumbered = Fault::Renumbered {
+        at: table,
+        count: 5,
+    };
+    assert_eq!(doc.faults(), [(Place::new(None, None), renumbered)]);
+    each_object_at(&doc, &places, &|_| Origin::Shifted { by: 0 });
+    reaches_its_page(&doc);
+    assert!(doc.get(ObjectId::new(5, 0)).is_err());
+    let ids: Vec<u32> = doc.objects().map(|(id, _)| id.number).collect();
+    assert_eq!(ids, [1, 2, 3, 4]);
+    assert!(doc.facts.recovered);
+    assert_eq!(doc.trailer.unwritten, None);
+    // Its rows as written.
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let sections = reading.sections().unwrap();
+    assert_eq!(sections.sections[0].subsections, [(1, 5)]);
+    // Four bytes more after the header, so every offset written, its
+    // startxref's too, is four short: the table read at its move, and its
+    // rows from 0 at that shift.
+    let shifted = [&file[..9], b"abc\n", &file[9..]].concat();
+    let doc = read(&shifted);
+    let moved = Fault::Moved {
+        at: table,
+        found: table + 4,
+        from_start: false,
+        moved: 4,
+        scanned: 0,
+        neither: 0,
+    };
+    let renumbered = Fault::Renumbered {
+        at: table + 4,
+        count: 5,
+    };
+    let none = Place::new(None, None);
+    assert_eq!(doc.faults(), [(none, renumbered), (none, moved)]);
+    let four_on: Vec<(u32, usize)> = places.iter().map(|&(n, at)| (n, at + 4)).collect();
+    each_object_at(&doc, &four_on, &|_| Origin::Shifted { by: 4 });
+    reaches_its_page(&doc);
+    assert!(doc.get(ObjectId::new(5, 0)).is_err());
+    // Under Recovery::Pdfium, as PDFium reads it: its table's first
+    // object in use isn't where it's put, so the file is scanned.
+    let mut pdfium = Options::DEFAULT;
+    pdfium.recovery = Recovery::Pdfium;
+    let doc = document(&file, &pdfium);
+    assert!(doc.trailer.unwritten.is_some());
+    assert!(
+        !doc.faults()
+            .iter()
+            .any(|(_, f)| matches!(f, Fault::Renumbered { .. }))
+    );
+}
+
+/// A first subsection numbered from 1 that starts with object 0's row but
+/// whose rows land on their own objects as written, from 1, and one whose
+/// rows land some from 0 and some from 1: each read as written, nothing
+/// renumbered.
+#[test]
+fn a_first_subsection_from_1_whose_rows_dont_all_land_from_0_is_read_as_written() {
+    // Objects 2 to 4, object 1 free at 65535, as written.
+    let objects = [
+        (2, "<< /Type /Catalog /Pages 3 0 R >>"),
+        (3, "<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
+        (4, OBJECTS[2].1),
+    ];
+    let mut file = b"%PDF-1.7\n".to_vec();
+    let mut places = Vec::new();
+    for (n, text) in objects {
+        places.push((n, file.len()));
+        file.extend_from_slice(format!("{n} 0 obj\n{text}\nendobj\n").as_bytes());
+    }
+    let table = file.len();
+    file.extend_from_slice(b"xref\n1 4\n0000000000 65535 f \n");
+    for &(_, at) in &places {
+        file.extend_from_slice(format!("{at:010} 00000 n \n").as_bytes());
+    }
+    file.extend_from_slice(
+        format!("trailer\n<< /Size 5 /Root 2 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes(),
+    );
+    let doc = read(&file);
+    assert_eq!(doc.faults(), []);
+    let ids: Vec<u32> = doc.objects().map(|(id, _)| id.number).collect();
+    assert_eq!(ids, [2, 3, 4]);
+    for (n, at) in places {
+        let record = doc.record(ObjectId::new(n, 0)).unwrap();
+        assert_eq!((record.at.start, record.origin), (at, Origin::File), "{n}");
+    }
+    // [`misnumbered`] with object 3's row the place of object 4, as
+    // numbered from 1 as written, the rest from 0: neither way for all.
+    let (mut both, _, table) = misnumbered();
+    let rows = table
+        + both[table..]
+            .windows(4)
+            .position(|w| w == b" f \n")
+            .unwrap()
+        + 4;
+    let four = both.windows(7).position(|w| w == b"4 0 obj").unwrap();
+    let third = rows + 2 * 20;
+    assert_eq!(&both[third + 11..third + 20], b"00000 n \n");
+    both[third..third + 10].copy_from_slice(format!("{four:010}").as_bytes());
+    let doc = document(&both, &Options::DEFAULT);
+    assert!(doc.get(ObjectId::new(1, 0)).is_err());
+    assert!(
+        !doc.faults()
+            .iter()
+            .any(|(_, f)| matches!(f, Fault::Renumbered { .. }))
+    );
+}
+
+/// An update after [`misnumbered`] read from 0 ([`Base::of`]): its section
+/// lists each object renumbered where it is, so that a reader of the
+/// update's newest section reads each there as written; read back, each
+/// object as before, the update's too, and the first table still read
+/// from 0 and said.
+#[test]
+fn an_update_after_a_renumbered_subsection_lists_each_object_where_it_is() {
+    let (file, places, table) = misnumbered();
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let before = reading.to_document().unwrap();
+    let base = Base::of(&reading).unwrap();
+    assert!(base.holds(&file[..]).unwrap());
+    let id = ObjectId::new(base.size, 0);
+    let object = Object::new(Value::Integer(7));
+    let bodies = [(id, Body::New(Cow::Borrowed(&object)))];
+    let mut out = file.clone();
+    let written = write::update(
+        &mut out,
+        &base,
+        bodies,
+        None,
+        None,
+        &write::Options::DEFAULT,
+    );
+    let written = written.unwrap().unwrap();
+    for &(n, _) in &places {
+        assert!(written.section.lists(n), "{n}");
+    }
+    let back = read(&out);
+    let renumbered = Fault::Renumbered {
+        at: table,
+        count: 5,
+    };
+    assert_eq!(back.faults(), [(Place::new(None, None), renumbered)]);
+    each_object_at(&back, &places, &|_| Origin::File);
+    for (id, object) in before.objects() {
+        let (mut got, mut want) = (back.get(id).unwrap().clone(), object.clone());
+        got.unplace();
+        want.unplace();
+        assert_eq!(got, want, "{id}");
+    }
+    assert_eq!(back.get(id).ok().and_then(Object::as_integer), Some(7));
+    reaches_its_page(&back);
+}

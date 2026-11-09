@@ -182,6 +182,24 @@ pub enum Fault {
         /// How many object streams' objects don't read.
         unread: u32,
     },
+    /// The table at byte `at` numbers its first subsection from 1, but its
+    /// first row is object 0's, free at generation 65535 (ISO 32000-2,
+    /// 7.5.4), and each of its rows in use is exactly at its own `n g obj`
+    /// as the number one before its row's, where it's written or at the
+    /// section's shift ([`Fault::Moved`], [`Fault::Shifted`])
+    /// ([`Recovery::Verified`](super::Recovery::Verified)): its `count` rows
+    /// are read as numbered from 0, as pdf.js reads such a subsection, each
+    /// object in use where its row puts it, or at that shift
+    /// ([`Origin::Shifted`](crate::Origin::Shifted)). A file whose rows land
+    /// so for some and not others is read as written.
+    #[error("{}", renumbered_words(*.at, *.count))]
+    Renumbered {
+        /// Where the table is.
+        at: usize,
+        /// How many rows its first subsection has: object numbers, so a
+        /// `u32` holds them.
+        count: u32,
+    },
     /// A scan of the file, as a file whose sections don't read is scanned
     /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
     /// an object not where its section puts it
@@ -823,6 +841,13 @@ fn members_words(objects: u32, streams: u32, unread: u32) -> String {
     }
 }
 
+/// [`Fault::Renumbered`]'s words.
+fn renumbered_words(at: usize, count: u32) -> String {
+    format!(
+        "the table at byte {at} numbers its first subsection from 1 but starts it with object 0's row: its {count} rows are read as numbered from 0, each in use being its object's so numbered"
+    )
+}
+
 /// [`Fault::StreamEnd`]'s words.
 fn stream_end_words(id: Option<ObjectId>, end: usize, endobj: bool) -> String {
     let whose = match id {
@@ -916,11 +941,12 @@ mod tests {
             Fault::Members { .. } => 33,
             Fault::XrefLength => 34,
             Fault::StreamEnd { .. } => 35,
+            Fault::Renumbered { .. } => 36,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 36;
+    const ARMS: usize = 37;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -1198,6 +1224,10 @@ mod tests {
                     unread: 2,
                 },
                 "the objects of 2 object streams the scan found don't read",
+            ),
+            (
+                Fault::Renumbered { at: 400, count: 7 },
+                "the table at byte 400 numbers its first subsection from 1 but starts it with object 0's row: its 7 rows are read as numbered from 0, each in use being its object's so numbered",
             ),
             (
                 Fault::StreamEnd {

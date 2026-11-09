@@ -21,7 +21,7 @@ use pdf_objects::parse::{self, Parser};
 use pdf_tokenizer::{Kind, Tokenizer, is_delimiter, is_white_space};
 
 use super::window::Bytes;
-use super::{Cx, Fault, NEAR, Reader, Recovery, Rows, Unended, XrefEntry, scan_of};
+use super::{Cx, Fault, Misnumbered, NEAR, Reader, Recovery, Rows, Unended, XrefEntry, scan_of};
 use crate::source::Origin;
 
 /// How many bytes from where an `n g obj` starts its three tokens are
@@ -278,6 +278,40 @@ impl Reader {
             }));
         }
         self.exactly(file, offset, by)
+    }
+
+    /// The numbers in use of a table's first subsection, `misnumbered`,
+    /// numbered from 1 with object 0's row first, its rows `table` as read,
+    /// where the file proves it's numbered from 0: at the first of `shifts`
+    /// at which each row in use is at its own `n g obj` as the number one
+    /// before its row's and its generation, exactly
+    /// ([`Reader::at_shift`]), and at least one is in use. So none is at
+    /// its own as the number written, and the subsection is renumbered
+    /// from 0 ([`Fault::Renumbered`]); none where at each shift some row is
+    /// otherwise, so a file whose rows land both ways, or neither, is read
+    /// as written. A window each row in use a shift, the first that isn't
+    /// so ending it.
+    pub(super) fn renumbers<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        table: &Rows,
+        misnumbered: Misnumbered,
+        shifts: impl Iterator<Item = i64>,
+    ) -> Result<Option<Vec<u32>>, F::Error> {
+        'shift: for by in shifts {
+            let mut renumbered = Vec::new();
+            for n in 1..=misnumbered.count {
+                let Some(&(generation, XrefEntry::InUse { offset, .. })) = table.get(&n) else {
+                    continue;
+                };
+                if self.at_shift(file, offset, by)? != Some(ObjectId::new(n - 1, generation)) {
+                    continue 'shift;
+                }
+                renumbered.push(n - 1);
+            }
+            return Ok((!renumbered.is_empty()).then_some(renumbered));
+        }
+        Ok(None)
     }
 
     /// The `n g obj` that starts exactly `by` bytes from `offset`

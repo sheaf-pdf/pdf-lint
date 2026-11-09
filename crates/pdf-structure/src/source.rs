@@ -595,6 +595,10 @@ pub enum Origin {
     /// takes the header's offset back, past white-space alone there, as a
     /// writer that counts from the file's first byte and gives the line's
     /// end before an object puts it; before it where `by` is less than 0.
+    /// And, `by` 0, at the offset its section's row gives, the row of the
+    /// number after its own, where the section's first subsection is
+    /// numbered from 1 with object 0's row first and read from 0
+    /// ([`Fault::Renumbered`]).
     Shifted {
         /// How far.
         by: i64,
