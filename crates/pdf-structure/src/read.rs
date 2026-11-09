@@ -4888,6 +4888,7 @@ struct EndedAt {
     unended: usize,
     unclosed: Unclosed,
     late: usize,
+    over: usize,
     diverged: bool,
 }
 
@@ -4941,13 +4942,16 @@ impl Unended {
 /// standing, as it did in the scan before. Where the scan still ended a
 /// stream's data before the first `endstream` after it, or passed it by
 /// its `/Length` over one inside it, the file is scanned again as this
-/// crate's scan read it before either did ([`Pass::ToEndstream`]), and
-/// what that finds is taken too: each object of a number the first scan
-/// found nowhere, its object streams and cross-reference streams so, and
-/// each `trailer`. So a scan that reads on from an `endobj` into data it
-/// can't read as tokens (a comment, a string closed late) finds no less
-/// than that one did; and a document embedded in data passed by its
-/// `/Length` doesn't stand over the file's own objects.
+/// crate's scan read it before either did, skipping the data the first
+/// passed so by its `/Length`, which is the stream's (ISO 32000-2,
+/// 7.3.8.1); and what that finds is taken too ([`Pass::ToEndstream`]):
+/// each object of a number the first scan found nowhere, its object
+/// streams and cross-reference streams so, and each `trailer`. So a scan
+/// that reads on from an `endobj` into data it can't read as tokens (a
+/// comment, a string closed late) finds no less than that one did outside
+/// such data; and nothing inside data passed by its `/Length` is taken, a
+/// document embedded there among it, as PDFium's scan takes nothing
+/// there.
 ///
 /// A literal string the scan finds no `)` closing (ISO 32000-2, 7.3.4.2)
 /// would take every byte after it, so under [`Recovery::Verified`] each
@@ -4978,16 +4982,18 @@ impl Unended {
 fn scan_of(file: &[u8], limits: parse::Limits, recovery: Recovery, within: Option<usize>) -> Scan {
     let mut unclosing = None;
     let first = Pass::As(recovery);
-    let (mut scan, diverged) = scan_from(file, limits, first, within, &mut unclosing);
+    let (mut scan, diverged, over) = scan_from(file, limits, first, within, &mut unclosing);
     if diverged {
-        scan_again(file, limits, &mut scan, &mut unclosing);
+        scan_again(file, limits, &mut scan, &over, &mut unclosing);
     }
     take_late(file, limits, &mut scan, within);
     scan
 }
 
 /// What [`scan_of`] takes of `file` scanned again, each stream's data to
-/// its first `endstream` ([`Pass::ToEndstream`]), into `scan`, the first
+/// its first `endstream` but that of each stream the first scan passed by
+/// its `/Length` over one inside it, from where it starts to where its
+/// `/Length` ends in `over` ([`Pass::ToEndstream`]), into `scan`, the first
 /// scan's: each object of a number the first found nowhere, its object
 /// streams and cross-reference streams so, and each `trailer`; each string
 /// that doesn't close read past by `unclosing`, the first scan's.
@@ -4995,9 +5001,11 @@ fn scan_again(
     file: &[u8],
     limits: parse::Limits,
     scan: &mut Scan,
+    over: &[(usize, usize)],
     unclosing: &mut Option<Unclosing>,
 ) {
-    let (earlier, _) = scan_from(file, limits, Pass::ToEndstream, None, unclosing);
+    let second = Pass::ToEndstream(over);
+    let (earlier, _, _) = scan_from(file, limits, second, None, unclosing);
     let found: BTreeSet<u32> = scan.objects.iter().map(|(id, _)| id.number).collect();
     let new = |n: &u32| !found.contains(n);
     let added: BTreeSet<usize> = (earlier.objects.iter())
@@ -5108,14 +5116,20 @@ fn late_named(file: &[u8], at: usize, bound: usize, limits: parse::Limits) -> Na
 
 /// How a scan passes over a stream's data ([`scan_from`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pass {
+enum Pass<'a> {
     /// As the recovery's scan does ([`pdfium::stream_end`]).
     As(Recovery),
     /// Up to the first `endstream` after its `stream` keyword, found as its
     /// bytes are, else to the file's end: the scan this crate made before a
     /// `/Length` or an `endobj` ended a stream's data, which the verified
-    /// recovery's scan reads beside its own ([`scan_of`]).
-    ToEndstream,
+    /// recovery's scan reads beside its own ([`scan_of`]). But for the data
+    /// of each stream that scan passed by its `/Length` over an `endstream`
+    /// inside it, from where it starts to where its `/Length` ends, in the
+    /// file's order: none of it is read as tokens, and the scan goes on from
+    /// its end, as that one did. So at such a stream's `stream` this scan
+    /// comes to its first `endstream`, inside the data, and goes on from the
+    /// data's end.
+    ToEndstream(&'a [(usize, usize)]),
 }
 
 /// [`scan_of`] of `file`, each stream's data passed over as `pass` says,
@@ -5124,16 +5138,19 @@ enum Pass {
 /// where that's made, else made the first time one is met, and, where
 /// `pass` is the verified recovery's, each string that closes whose lines
 /// start with an `n g obj` ([`Late`]), none of those objects yet taken;
-/// and whether, under [`Recovery::Verified`], it ended a stream's data at
-/// its `endobj`, or passed one by its `/Length` over an `endstream` inside
-/// it, where the scan before either ended it at the first `endstream`.
+/// whether, under [`Recovery::Verified`], it ended a stream's data at its
+/// `endobj`, or passed one by its `/Length` over an `endstream` inside it,
+/// where the scan before either ended it at the first `endstream`; and,
+/// for the second, where each such stream's data starts and its `/Length`
+/// ends, in the file's order, which the second scan skips
+/// ([`Pass::ToEndstream`]).
 fn scan_from(
     file: &[u8],
     limits: parse::Limits,
     pass: Pass,
     within: Option<usize>,
     unclosing: &mut Option<Unclosing>,
-) -> (Scan, bool) {
+) -> (Scan, bool, Vec<(usize, usize)>) {
     let mut objects = Vec::new();
     let mut t = Tokenizer::new(file);
     let mut diverged = false;
@@ -5169,11 +5186,29 @@ fn scan_from(
     // `endstream` there is that stream's.
     let mut ended_at: Vec<EndedAt> = Vec::new();
     let mut after_data = false;
+    // The verified scan's streams passed by their `/Length` over an
+    // `endstream` inside their data: where that data starts, and where the
+    // `/Length` ends it.
+    let mut over: Vec<(usize, usize)> = Vec::new();
     loop {
+        let at = t.offset();
+        // Data the first scan passed by its `/Length` over an `endstream`
+        // inside it, which is the stream's (ISO 32000-2, 7.3.8.1): the
+        // second scan reads none of it, an embedded document's objects and
+        // trailer among it, and goes on from its end as the first did, the
+        // data a token that's no integer and in no object's head.
+        if let Pass::ToEndstream(skips) = pass
+            && let Some(&(start, end)) = skips.get(skips.partition_point(|&(_, end)| end <= at))
+            && start <= at
+        {
+            t = Tokenizer::at(file, end);
+            before = [before[1], None];
+            object = None;
+            continue;
+        }
         // A string that doesn't close, where the scan reads on past it: the
         // tokenizer gives the first to the file's end; each after it,
         // which `unclosing` then says, isn't read at all.
-        let at = t.offset();
         let marked = resumes
             && file.get(at) == Some(&b'(')
             && unclosing.as_ref().is_some_and(|unclosing| unclosing.at(at));
@@ -5241,6 +5276,12 @@ fn scan_from(
                 unended.truncate(back.unended);
                 unclosed = back.unclosed;
                 late.truncate(back.late);
+                // Nothing since was passed by its `/Length` over an
+                // `endstream`: that `endstream`, past this data's start,
+                // would come no earlier than this one, the first after it,
+                // and the scan, past it, wouldn't be here.
+                debug_assert_eq!(over.len(), back.over, "taken back past data passed over");
+                over.truncate(back.over);
                 diverged = back.diverged;
                 ended_at.truncate(i);
                 object = None;
@@ -5300,7 +5341,7 @@ fn scan_from(
                 }
                 let recovery = match pass {
                     Pass::As(recovery) => recovery,
-                    Pass::ToEndstream => {
+                    Pass::ToEndstream(_) => {
                         let end = pdfium::bytes_after(file, token.end(), b"endstream");
                         t = Tokenizer::at(file, end.unwrap_or(file.len()));
                         before = [before[1], Some(token)];
@@ -5329,8 +5370,12 @@ fn scan_from(
                             unended: unended.len(),
                             unclosed,
                             late: late.len(),
+                            over: over.len(),
                             diverged,
                         });
+                    }
+                    if recovery == Recovery::Verified && passed.over {
+                        over.push((passed.start, passed.end));
                     }
                     if let Some(end) = end {
                         unended.push(Unended {
@@ -5369,7 +5414,7 @@ fn scan_from(
         past,
         late,
     };
-    (scan, diverged)
+    (scan, diverged, over)
 }
 
 /// What a scan reads next ([`scan_from`]): a token, or a literal string

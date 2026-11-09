@@ -153,8 +153,12 @@ pub enum Recovery {
     /// its `/Length` over one inside it, it scans the file again, each
     /// stream's data to its first `endstream`, and takes from that what it
     /// found nowhere: each object of a number it didn't find, and each
-    /// `trailer`. Each scan says where it ended a stream at `endobj` or found
-    /// no end to one ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A
+    /// `trailer`. That scan skips the data the first passed by its
+    /// `/Length` so, which is the stream's (ISO 32000-2, 7.3.8.1): nothing
+    /// inside it is taken, a document embedded there among it, as PDFium
+    /// takes nothing there. Each scan says where it ended a stream at
+    /// `endobj` or found no end to one
+    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A
     /// literal string either scan finds no `)` closing is read past, from
     /// just past its `(`, the bytes it held read as tokens, so that what's
     /// after it is found; the first scan says so, once, with how many

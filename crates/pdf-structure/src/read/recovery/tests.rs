@@ -1600,29 +1600,99 @@ fn a_stream_no_n_g_obj_comes_before_is_read_through_as_pdfium_reads_it() {
 /// past an `endstream` inside its data, after which its data holds object
 /// 5, found nowhere else, and object 4, found before it: the verified
 /// recovery passes the data by its `/Length`, and its second scan, to each
-/// stream's first `endstream`, gives it object 5 from the data, every way,
-/// object 4 kept where the first found it; under [`Recovery::Pdfium`]
-/// object 5 isn't found, as PDFium passes the data by its `/Length` alone.
+/// stream's first `endstream`, skips that data, which is the stream's, so
+/// object 5 isn't read, every way, object 4 is read where the first found
+/// it, and nothing's said; under [`Recovery::Pdfium`] alike, as PDFium
+/// passes the data by its `/Length`.
 #[test]
-fn an_object_found_only_inside_a_streams_data_passed_by_its_length_is_read_there() {
+fn an_object_inside_a_streams_data_passed_by_its_length_isnt_read() {
     let data = "q Q\nendstream\nendobj\n5 0 obj\n(five)\nendobj\n4 0 obj\n(not four)\nendobj\n";
     let head = format!("9 0 obj\n<< /Length {} >>\nstream\n", data.len());
     let (file, places) =
         scanned_after(b"", format!("{head}{data}\nendstream\nendobj\n").as_bytes());
-    let five_at =
-        file.len() - data.len() - "\nendstream\nendobj\n".len() + "q Q\nendstream\nendobj\n".len();
-    let doc = read(&file);
-    each_object_at(&doc, &places, &|_| Origin::Recovered);
-    reaches_its_page(&doc);
-    assert_eq!(
-        doc.get(ObjectId::new(5, 0)).unwrap().as_bytes(),
-        Some(&b"five"[..])
+    for options in [Options::DEFAULT, as_pdfium()] {
+        let how = options.recovery;
+        let doc = read_as(&file, &options);
+        each_object_at(&doc, &places, &|_| Origin::Recovered);
+        reaches_its_page(&doc);
+        assert!(doc.get(ObjectId::new(5, 0)).is_err(), "{how:?}");
+        let nine = doc.record(ObjectId::new(9, 0)).unwrap().data.unwrap();
+        assert!(nine.declared);
+        assert_eq!(nine.at.end - nine.at.start, data.len());
+        assert_eq!(stream_ends(&doc), [], "{how:?}");
+    }
+}
+
+/// A scanned file whose last stream, after the trailer, holds a document of
+/// its own as its data, its `/Length` ending at its `endstream`: the
+/// document's stream 7, then its catalog 8, a number the file doesn't use,
+/// and its trailer, which names that catalog. The verified recovery passes
+/// the data by its `/Length`, over 7's `endstream`, and its second scan
+/// skips it, so neither the document's objects nor its trailer are taken,
+/// every way: the file's own catalog is the root, its page is reached, and
+/// what's said is what's said where the data holds no document but its
+/// `%%EOF`. Under [`Recovery::Pdfium`] alike, as PDFium passes the data by
+/// its `/Length`.
+#[test]
+fn a_document_in_data_passed_by_its_length_gives_no_object_nor_trailer() {
+    let data = "%PDF-1.4\n7 0 obj\n<< /Length 3 >>\nstream\nq Q\nendstream\nendobj\n8 0 obj\n<< /Type /Catalog /Pages 9 0 R >>\nendobj\ntrailer\n<< /Size 9 /Root 8 0 R >>\n%%EOF\n";
+    let embedded = |data: &str| {
+        format!(
+            "6 0 obj\n<< /Type /EmbeddedFile /Length {} >>\nstream\n{data}\nendstream\nendobj\n",
+            data.len()
+        )
+    };
+    let (file, places) = scanned_after(b"", embedded(data).as_bytes());
+    // Data as long, ending as the document does: the bytes past the last
+    // `%%EOF` are said wherever it is.
+    let eof = "%%EOF\n";
+    let plain = format!("{}{eof}", "x".repeat(data.len() - eof.len()));
+    let (plain, _) = scanned_after(b"", embedded(&plain).as_bytes());
+    for options in [Options::DEFAULT, as_pdfium()] {
+        let how = options.recovery;
+        let doc = read_as(&file, &options);
+        each_object_at(&doc, &places, &|_| Origin::Recovered);
+        reaches_its_page(&doc);
+        let root = doc.trailer.dict().get(b"Root").map(Object::value);
+        assert_eq!(root, Some(&Value::Ref(ObjectId::new(1, 0))), "{how:?}");
+        for n in [7, 8] {
+            assert!(doc.get(ObjectId::new(n, 0)).is_err(), "{n}: {how:?}");
+        }
+        let six = doc.record(ObjectId::new(6, 0)).unwrap().data.unwrap();
+        assert!(six.declared);
+        assert_eq!(six.at.end - six.at.start, data.len());
+        assert_eq!(doc.faults(), document(&plain, &options).faults());
+    }
+}
+
+/// A scanned file whose stream 9 has no `/Length` that reads and an
+/// `endobj` of its own in its data, after which the data holds stream 7,
+/// whose `/Length` ends at its `endstream`, past an `endstream` inside its
+/// data, the first after 9's, then object 5, found nowhere else: the
+/// verified scan ends 9's data at that `endobj`, and passes 7's by its
+/// `/Length`. Its second scan, reading 9's data to its first `endstream`,
+/// comes to rest inside 7's data, and skips the rest of it, so 5 isn't
+/// read, every way, and the scan says where it ended 9's data. Under
+/// [`Recovery::Pdfium`] alike.
+#[test]
+fn data_passed_by_its_length_is_skipped_where_the_second_scan_comes_to_rest_inside() {
+    let inner = "q Q\nendstream\n5 0 obj\n(five)\nendobj\n";
+    let body = format!(
+        "9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n7 0 obj\n<< /Length {} >>\nstream\n{inner}\nendstream\nendobj\nendstream\nendobj\n",
+        inner.len()
     );
-    assert_eq!(doc.record(ObjectId::new(5, 0)).unwrap().at.start, five_at);
-    assert_eq!(stream_ends(&doc), []);
-    let doc = document(&file, &as_pdfium());
-    each_object_at(&doc, &places, &|_| Origin::Recovered);
-    assert!(doc.get(ObjectId::new(5, 0)).is_err());
+    let (file, places) = scanned_after(body.as_bytes(), b"");
+    let start = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
+    let said = ended(NINE, start, Some(start + "q Q\n".len()));
+    for options in [Options::DEFAULT, as_pdfium()] {
+        let how = options.recovery;
+        let doc = read_as(&file, &options);
+        each_object_at(&doc, &places, &|_| Origin::Recovered);
+        reaches_its_page(&doc);
+        assert!(doc.get(ObjectId::new(5, 0)).is_err(), "{how:?}");
+        assert!(doc.get(ObjectId::new(7, 0)).is_ok());
+        assert_eq!(stream_ends(&doc), std::slice::from_ref(&said));
+    }
 }
 
 /// A scanned file whose first stream has no `/Length` that reads and an
