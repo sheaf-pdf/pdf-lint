@@ -687,6 +687,9 @@ impl<S: ByteSource> Reading<S> {
             }
         };
         self.reader.said_members(fault);
+        let mut opened = std::mem::take(&mut self.reader.opened);
+        self.reader.said_late(&mut opened);
+        self.reader.opened = opened;
     }
 
     /// Under [`Recovery::Pdfium`](super::Recovery::Pdfium), the reading

@@ -284,6 +284,41 @@ pub enum Fault {
         /// where that doesn't read.
         later: usize,
     },
+    /// A scan of the file, as a file whose sections don't read is scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
+    /// an object not where its section puts it
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), read a literal
+    /// string from its `(` at byte `start` to a `)` at byte `end`, and
+    /// reads `objects` objects whose `n g obj` starts a line inside it
+    /// there, of numbers it found nowhere else. A string that lacks its
+    /// own `)` closes late, at a later string's or one in a stream's data,
+    /// and what's written up to there is read as its bytes. Each line's
+    /// first three tokens are read as qpdf's reconstruction reads a line's,
+    /// so that an object written there is found. None stands over an
+    /// object a scan found as written: not one of a number it found
+    /// elsewhere, nor a member of an object stream it found so, which
+    /// stands over one, and such a stream's members stand over those of
+    /// one found inside a string. Of a number written so more than once,
+    /// inside one string or two, the last stands, as a later `n g obj`
+    /// does. `objects` counts those that stand, each in the string it's
+    /// in, and a string none of whose objects stands isn't said. A
+    /// `trailer` there isn't taken. One a string. `id` is the object the
+    /// scan was in, as [`Fault::Unclosed`] has it.
+    /// [`Recovery::Verified`](super::Recovery::Verified) alone, and only
+    /// its first scan, which passes over each stream's data as PDFium's
+    /// does.
+    #[error("{}", in_string_words(*.id, *.start, *.end, *.objects))]
+    InString {
+        /// The object the string is in.
+        id: Option<ObjectId>,
+        /// Where its `(` is.
+        start: usize,
+        /// Where the `)` that closes it is.
+        end: usize,
+        /// How many objects it read there. A `u32`, as every count a
+        /// recovery says.
+        objects: u32,
+    },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
     /// ([`Limits::entries`](super::Limits::entries)): those aren't read.
@@ -970,6 +1005,22 @@ fn earlier_words(id: ObjectId, at: usize, later: usize) -> String {
     )
 }
 
+/// [`Fault::InString`]'s words.
+fn in_string_words(id: Option<ObjectId>, start: usize, end: usize, objects: u32) -> String {
+    let place = match id {
+        Some(id) => format!("at byte {start} in {id} R"),
+        None => format!("at byte {start}, outside any object,"),
+    };
+    match objects {
+        1 => format!(
+            "the scan reads the string {place} to a ) at byte {end}, past an object whose n g obj starts a line inside it, found nowhere else, and reads that object there"
+        ),
+        n => format!(
+            "the scan reads the string {place} to a ) at byte {end}, past {n} objects whose n g obj starts a line inside it, found nowhere else, and reads those objects there"
+        ),
+    }
+}
+
 /// [`Fault::Strings`]' words.
 fn strings_words(count: usize, fault: &pdf_crypt::Fault) -> String {
     match count {
@@ -1050,11 +1101,12 @@ mod tests {
             Fault::Renumbered { .. } => 36,
             Fault::Unclosed { .. } => 37,
             Fault::Earlier { .. } => 38,
+            Fault::InString { .. } => 39,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 39;
+    const ARMS: usize = 40;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -1392,6 +1444,24 @@ mod tests {
                     later: 470,
                 },
                 "the scan finds object 9 again at byte 470, past a string that doesn't close, where it doesn't read, and reads 9 0 R at byte 30, where it found it before",
+            ),
+            (
+                Fault::InString {
+                    id: Some(id(46)),
+                    start: 30,
+                    end: 470,
+                    objects: 1,
+                },
+                "the scan reads the string at byte 30 in 46 0 R to a ) at byte 470, past an object whose n g obj starts a line inside it, found nowhere else, and reads that object there",
+            ),
+            (
+                Fault::InString {
+                    id: None,
+                    start: 30,
+                    end: 470,
+                    objects: 3,
+                },
+                "the scan reads the string at byte 30, outside any object, to a ) at byte 470, past 3 objects whose n g obj starts a line inside it, found nowhere else, and reads those objects there",
             ),
             (
                 Fault::Shifted {

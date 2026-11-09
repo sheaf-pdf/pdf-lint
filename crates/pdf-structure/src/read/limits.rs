@@ -161,7 +161,15 @@ pub enum Recovery {
     /// ([`Fault::Unclosed`](super::Fault::Unclosed)). An object found again
     /// past such a string stands over the one found before it only where it
     /// reads, so that what's read past one takes nothing out of the reading
-    /// ([`Fault::Earlier`](super::Fault::Earlier)). A table's first
+    /// ([`Fault::Earlier`](super::Fault::Earlier)). A literal string that
+    /// lacks its own `)` closes late, at a later one, and holds what's
+    /// written up to there: the first scan looks at each line inside each
+    /// string that closes, at its first three tokens, as qpdf's
+    /// reconstruction reads a line's, and an object whose `n g obj` starts
+    /// one is read there where neither scan found its number elsewhere,
+    /// and said ([`Fault::InString`](super::Fault::InString)); none stands
+    /// over an object, or an object stream's member, found as written,
+    /// and a `trailer` there isn't taken. A table's first
     /// subsection numbered from 1 that starts with object 0's row is read
     /// from 0 where each of its rows in use is at its object's `n g obj` so
     /// numbered, where it's written or at the section's shift

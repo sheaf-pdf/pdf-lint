@@ -23,8 +23,8 @@ use pdf_tokenizer::{Kind, Tokenizer, is_delimiter, is_white_space};
 
 use super::window::Bytes;
 use super::{
-    Cx, Fault, Misnumbered, NEAR, Reader, Recovery, Rows, Unclosed, Unended, XrefEntry, scan_of,
-    span,
+    Cx, Fault, Late, Misnumbered, NEAR, Reader, Recovery, Rows, Unclosed, Unended, XrefEntry,
+    scan_of, span,
 };
 use crate::source::Origin;
 
@@ -169,14 +169,15 @@ struct Scanned {
 /// ([`header_exactly`]), by its id, of those before byte `within` where
 /// that's given ([`Reader::scanned_at`] reads it); each stream before there
 /// whose data the scan ended at its `endobj`, or found no end to and read
-/// on through, which is said ([`Fault::StreamEnd`]); and the strings
-/// before there it found no `)` closing and read past, which are said
-/// ([`Fault::Unclosed`]).
+/// on through, which is said ([`Fault::StreamEnd`]); the strings before
+/// there it found no `)` closing and read past, which are said
+/// ([`Fault::Unclosed`]); and the strings whose lines inside them gave it
+/// objects before there, which are said ([`Fault::InString`]).
 fn scanned(
     file: &[u8],
     within: Option<usize>,
     limits: parse::Limits,
-) -> (Scanned, Vec<Unended>, Unclosed) {
+) -> (Scanned, Vec<Unended>, Unclosed, Vec<Late>) {
     let scan = scan_of(file, limits, Recovery::Verified, within);
     let before = |at: usize| within.is_none_or(|within| at < within);
     let exact: Vec<(ObjectId, usize)> = (scan.objects.into_iter())
@@ -203,7 +204,7 @@ fn scanned(
         earlier,
         past: scan.past,
     };
-    (scanned, unended, scan.unclosed)
+    (scanned, unended, scan.unclosed, scan.late)
 }
 
 impl Reader {
@@ -464,9 +465,10 @@ impl Reader {
     /// ([`Reader::scanned_at`]); its offset moved there; else where it's
     /// written. Where the scan is made, each stream before `within` whose
     /// data it ended at its `endobj`, or found no end to and read on
-    /// through, is said to `cx` ([`Fault::StreamEnd`]), and the strings
+    /// through, is said to `cx` ([`Fault::StreamEnd`]), the strings
     /// before there it found no `)` closing and read past
-    /// ([`Fault::Unclosed`]). None for any
+    /// ([`Fault::Unclosed`]), and those whose lines inside them gave it
+    /// objects ([`Fault::InString`]). None for any
     /// section where no section has a shift, the file read as written; each
     /// section `said` to be elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
@@ -520,12 +522,16 @@ impl Reader {
                 }
                 if scan.is_none() {
                     let all = file.all()?;
-                    let (found, unended, unclosed) = scanned(&all, within, self.limits.parser);
+                    let (found, unended, unclosed, late) =
+                        scanned(&all, within, self.limits.parser);
                     for unended in &unended {
                         cx.tell(None, Some(unended.at()), unended.fault());
                     }
                     if let Some((at, fault)) = unclosed.fault() {
                         cx.tell(None, Some(at), fault);
+                    }
+                    for late in &late {
+                        cx.tell(None, Some(late.at()), late.fault());
                     }
                     scan = Some((all, found));
                 }
@@ -581,7 +587,14 @@ impl Reader {
     /// ([`Reader::scan`]), listed as their headers give them: by the last
     /// such stream in the file that has it, as an update appends, unless
     /// the scan found its number at an offset, which stands; at generation
-    /// 0, read from the stream ([`Origin::Stream`]).
+    /// 0, read from the stream ([`Origin::Stream`]). But what a literal
+    /// string closed late holds stands over nothing the scan found as
+    /// written ([`Fault::InString`]): a stream whose `n g obj` starts a
+    /// line inside one lists its members under those of every other,
+    /// wherever each is; and a member of a stream found as written stands
+    /// over an object found inside such a string, an object stream among
+    /// them, which then lists no member, the string then saying only the
+    /// objects that stand ([`Reader::said_late`]).
     /// Each stream it decodes is kept as the container a member's read
     /// decodes, so it's decoded once, its faults told once and the budget
     /// spent once. Where the reader can't decode them, in an encrypted file
@@ -608,10 +621,17 @@ impl Reader {
             self.entries = self.entries.iter().copied().filter(listed).collect();
             self.slots = self.entries.iter().map(|_| OnceLock::new()).collect();
         }
-        // The object streams, in the order their offsets come in the file.
-        let mut streams: Vec<(usize, u32)> = (self.object_streams.iter())
+        // The objects found where a line starts inside a string.
+        let late: BTreeSet<u32> = (self.late.iter())
+            .flat_map(|late| late.objects.iter().map(|(id, _)| id.number))
+            .collect();
+        // The object streams, in the order their offsets come in the file,
+        // those found inside a string first.
+        let mut streams: Vec<(bool, usize, u32)> = (self.object_streams.iter())
             .filter_map(|&s| match self.entry(s) {
-                Some(&(0, XrefEntry::InUse { offset, .. })) => Some((offset, s)),
+                Some(&(0, XrefEntry::InUse { offset, .. })) => {
+                    Some((!late.contains(&s), offset, s))
+                }
                 _ => None,
             })
             .collect();
@@ -621,10 +641,10 @@ impl Reader {
         match self.native_containers() {
             false => unread = streams.len(),
             true => {
-                for &(_, s) in &streams {
+                for &(_, _, s) in &streams {
                     self.containers.entry(s).or_default();
                 }
-                for &(_, s) in &streams {
+                for &(_, _, s) in &streams {
                     match self.container(file, s)?.map(|c| &c.header) {
                         Some(Ok(header)) => {
                             headers.push((s, header.iter().map(|&(n, _)| n).collect()));
@@ -634,15 +654,28 @@ impl Reader {
                 }
             }
         }
+        // The objects found inside a string that a stream found as written
+        // lists, whose members stand over them.
+        let over: BTreeSet<u32> = (headers.iter())
+            .filter(|(s, _)| !late.contains(s))
+            .flat_map(|(_, numbers)| numbers.iter().copied())
+            .filter(|n| late.contains(n))
+            .collect();
+        headers.retain(|(s, _)| !over.contains(s));
         let mut members = BTreeMap::new();
         for (stream, numbers) in &headers {
             for (index, &n) in numbers.iter().enumerate() {
                 let Ok(index) = u32::try_from(index) else {
                     break;
                 };
-                if n != 0 && self.index(n).is_none() {
+                if n != 0 && (self.index(n).is_none() || over.contains(&n)) {
                     members.insert(n, (*stream, index));
                 }
+            }
+        }
+        if !over.is_empty() {
+            for late in &mut self.late {
+                late.objects.retain(|(id, _)| !over.contains(&id.number));
             }
         }
         let from: BTreeSet<u32> = members.values().map(|&(stream, _)| stream).collect();
@@ -686,6 +719,27 @@ impl Reader {
             unread: count(unread),
         };
         (self.scanned && unread > 0).then_some(fault)
+    }
+
+    /// What `faults`, those said as the file was opened, say of the strings
+    /// whose lines inside them gave a scan objects ([`Fault::InString`]),
+    /// said again of the objects that stand once the object streams'
+    /// members are listed ([`Reader::members`]): a string none of whose
+    /// objects stands, said no more.
+    pub(super) fn said_late(&self, faults: &mut Vec<(Place, Fault)>) {
+        if self.late.is_empty() {
+            return;
+        }
+        faults.retain_mut(|(_, fault)| {
+            let Fault::InString { start, objects, .. } = fault else {
+                return true;
+            };
+            let Some(late) = self.late.iter().find(|late| late.start == *start) else {
+                return true;
+            };
+            *objects = count(late.objects.len());
+            !late.objects.is_empty()
+        });
     }
 
     /// What [`Reader::members`] says, `fault`, in place of what it said as

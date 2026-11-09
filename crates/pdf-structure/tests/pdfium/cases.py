@@ -365,6 +365,24 @@ def unclosed_later_copy():
     return f.bytes()
 
 
+def closed_late():
+    """No startxref, and object 9's /Title opening a literal string that
+    lacks its `)`, so that it closes late, at the second `)` of object 5's
+    /Author, closed twice, past page 4, whose `n g obj` starts a line inside
+    it; then the catalog, its pages and page 3. PDFium reads the string as
+    the dictionary's value, page 4 among its bytes, and doesn't find page
+    4."""
+    f = File()
+    f.raw(b"9 0 obj\n<< /Title (nine >>\nendobj\n")
+    f.obj(4, page(4))
+    f.obj(5, b"<< /Author (five)) >>")
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
 def member_and_object(member_first):
     """No startxref, and page 3 twice: at an offset, 300 high, and in object
     stream 9, 200 high, the stream first where `member_first`."""
@@ -440,6 +458,8 @@ CASES = {
     "unclosed-string-between": unclosed("between"),
     "unclosed-string-key": unclosed("key"),
     "unclosed-string-later-copy": unclosed_later_copy(),
+    # A string closed late, in a file found by scanning.
+    "string-closed-late": closed_late(),
     # A later section that doesn't read, or comes back on itself.
     "update": updated(),
     "update-prev-past-the-end": updated(prev=999999),

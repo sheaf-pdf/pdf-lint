@@ -1894,6 +1894,53 @@ fn a_reading_as_of_a_section_says_only_the_strings_before_its_end() {
     assert!(doc.get(ObjectId::new(3, 0)).is_err());
 }
 
+/// A file with three bytes cut out of object 3's `n g obj`, object 4's
+/// string holding object 5's `n g obj` at a line's start, and an update
+/// that writes object 3 again and object 6, whose string holds object 5's
+/// again: read whole, the scan that looks for object 3 finds 5 in both
+/// strings, the later standing, so only 6's string is said; read as of the
+/// section the update follows, only 4's, before that revision's end, as it
+/// takes nothing later updates wrote, and that one is said.
+#[test]
+fn a_reading_as_of_a_section_says_the_objects_strings_give_before_its_end() {
+    let objects = [
+        OBJECTS[0],
+        OBJECTS[1],
+        OBJECTS[2],
+        (4, "(four\n5 0 obj\n(five)\nendobj\n)"),
+    ];
+    let (mut file, places, table) = laid_out(b"", &objects, &|_, at| at, &|at| at);
+    let four = places[3].1 + "4 0 obj\n".len() - 3;
+    let three = file.windows(7).position(|w| w == b"3 0 obj").unwrap();
+    file.drain(three..three + 3);
+    let end = file.len();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 792] /Resources << >> >>";
+    let six = end + format!("3 0 obj\n{page}\nendobj\n6 0 obj\n").len();
+    let string = "(six\n5 0 obj\n(five)\nendobj\n)";
+    file.extend_from_slice(
+        format!("3 0 obj\n{page}\nendobj\n6 0 obj\n{string}\nendobj\n").as_bytes(),
+    );
+    let update = file.len();
+    file.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n3 1\n{end:010} 00000 n \ntrailer\n<< /Size 7 /Root 1 0 R /Prev {table} >>\nstartxref\n{update}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let whole = read(&file);
+    let id = |n| Some(ObjectId::new(n, 0));
+    let said = read_in_string(id(6), six, six + string.len() - 1, 1);
+    assert_eq!(in_string(&whole), [said]);
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let previous = reading.update().unwrap().previous;
+    let mut options = Options::DEFAULT;
+    options.section = Some(previous);
+    let doc = read_as(&file, &options);
+    let body = objects[3].1;
+    let said = read_in_string(id(4), four, four + body.len() - 1, 1);
+    assert_eq!(in_string(&doc), [said]);
+}
+
 /// A file in the shape of one a writer damaged: object 46's `/Creator`
 /// closed twice, so its `/Producer`, which doesn't close its own, nests the
 /// date after it and closes at a `)` in the raw data of stream 40 after it,
@@ -1901,7 +1948,9 @@ fn a_reading_as_of_a_section_says_only_the_strings_before_its_end() {
 /// `(` in that data that doesn't close. The verified recovery reads on from
 /// just past it, so the catalog, its page and the trailer after the stream
 /// are found, every way, and says so once, in object 46, where the scan
-/// last found an `n g obj`; under [`Recovery::Pdfium`] nothing after it is.
+/// last found an `n g obj`; and finds stream 40, whose `n g obj` starts a
+/// line inside that string, there, and says so; under
+/// [`Recovery::Pdfium`] nothing after it is, nor 40.
 #[test]
 fn objects_after_a_string_closed_late_into_data_that_doesnt_close_are_found() {
     let info = b"46 0 obj\n<< /Creator (MIX)) /Producer (BU\n/ModDate (D:1)\n>>\nendobj\n";
@@ -1909,6 +1958,7 @@ fn objects_after_a_string_closed_late_into_data_that_doesnt_close_are_found() {
     let mut body = info.to_vec();
     body.extend_from_slice(format!("40 0 obj\n<< /Length {} >>\nstream\n", data.len()).as_bytes());
     let opened = body.len() + 5;
+    let closed = body.len() + 2;
     body.extend_from_slice(data);
     body.extend_from_slice(b"\nendstream\nendobj\n");
     let (file, places) = scanned_after(&body, b"");
@@ -1918,9 +1968,18 @@ fn objects_after_a_string_closed_late_into_data_that_doesnt_close_are_found() {
     reaches_its_page(&doc);
     let forty_six = Some(ObjectId::new(46, 0));
     assert_eq!(unclosed(&doc), [read_past(forty_six, start, 1)]);
+    let forty = ObjectId::new(40, 0);
+    let header = b"%PDF-1.7\n".len();
+    assert_eq!(doc.record(forty).unwrap().at.start, header + info.len());
+    assert!(doc.get(forty).is_ok());
+    let producer = header + info.windows(3).position(|w| w == b"(BU").unwrap();
+    let said = read_in_string(forty_six, producer, header + closed, 1);
+    assert_eq!(in_string(&doc), [said]);
     let doc = read_as(&file, &as_pdfium());
     assert!(doc.get(ObjectId::new(1, 0)).is_err());
+    assert!(doc.get(forty).is_err());
     assert_eq!(unclosed(&doc), [read_past(forty_six, start, 0)]);
+    assert_eq!(in_string(&doc), []);
 }
 
 /// Scanned files whose bytes a scan reads past strings that don't close
@@ -1929,11 +1988,14 @@ fn objects_after_a_string_closed_late_into_data_that_doesnt_close_are_found() {
 /// and again, then one `)`; streams each with a string that doesn't close
 /// in its dictionary, `trailer` dictionaries each with one, and an object
 /// written again and again each with one, which the open reads past the
-/// first to see which stands, each with a trailer that reads at the end;
+/// first to see which stands; a string that closes, its lines each a `(`,
+/// and one whose lines start objects, each a dictionary opening a string
+/// that closes only at its end; each with a trailer that reads at the end;
 /// and 64 KiB of `(`. Under either recovery the scan reads no more than
 /// three times the file's bytes as strings that don't close, in its own
-/// parses of each stream's head and each trailer, and in those reads, and
-/// finds the catalog first and the trailer last.
+/// parses of each stream's head and each trailer, its looks at each line
+/// inside a string and each object it finds there, and in those reads,
+/// and finds the catalog first and the trailer last.
 #[test]
 fn a_scan_reads_past_strings_that_dont_close_in_a_bounded_number_of_bytes() {
     let catalog = "%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
@@ -1952,6 +2014,20 @@ fn a_scan_reads_past_strings_that_dont_close_in_a_bounded_number_of_bytes() {
         (streams, "streams"),
         ("trailer\n<< /A (\n".repeat(n), "trailers"),
         ("5 0 obj\n<< /A (\nendobj\n".repeat(n), "copies"),
+        (
+            format!("(lines{}{}", "\n(".repeat(4 * n), ")".repeat(4 * n + 1)),
+            "lines",
+        ),
+        (
+            format!(
+                "(objects{}{}",
+                (0..n)
+                    .map(|k| format!("\n{} 0 obj\n<< /A (", k + 10))
+                    .collect::<String>(),
+                ")".repeat(n + 1)
+            ),
+            "objects",
+        ),
         ("(".repeat(64 << 10), "64 KiB"),
     ];
     for (middle, name) in shapes {
@@ -2161,6 +2237,309 @@ fn an_entry_a_scan_finds_again_past_a_string_read_past_is_read_where_it_reads() 
     each_object_at(&doc, &places, &origin);
     reaches_its_page(&doc);
     assert_eq!(earlier(&doc), [read_earlier(3, places[2].1, later)]);
+}
+
+/// The faults `doc` says of strings whose lines inside them gave a scan
+/// objects.
+fn in_string(doc: &Document) -> Vec<(Place, Fault)> {
+    (doc.faults().iter())
+        .filter(|(_, f)| matches!(f, Fault::InString { .. }))
+        .cloned()
+        .collect()
+}
+
+/// The fault a scan says of the string from its `(` at byte `start` to the
+/// `)` at byte `end` that closes it, in object `id`, whose lines inside it
+/// gave it `objects` objects, at its place.
+fn read_in_string(id: Option<ObjectId>, start: usize, end: usize, objects: u32) -> (Place, Fault) {
+    let fault = Fault::InString {
+        id,
+        start,
+        end,
+        objects,
+    };
+    (
+        Place::new(None, Some(Span::new(None, start, end + 1))),
+        fault,
+    )
+}
+
+/// Object 6.
+const SIX: Option<ObjectId> = Some(ObjectId::new(6, 0));
+
+/// A scanned file of `before`, then object 6, whose `/Title` lacks its
+/// `)`, so that its string reads on over `inside`, and object 5 after it,
+/// and closes late, at the second `)` of 5's `/Author`, closed twice; then
+/// `after`, the catalog, its page tree, object 4 and the trailer. The
+/// file, and where 6's string's `(` is and the `)` that closes it.
+fn closed_late(before: &str, inside: &str, after: &str) -> (Vec<u8>, usize, usize) {
+    let mut file = format!("%PDF-1.7\n{before}6 0 obj\n<< /Title (six >>\nendobj\n").into_bytes();
+    let start = file.len() - "(six >>\nendobj\n".len();
+    file.extend_from_slice(inside.as_bytes());
+    file.extend_from_slice(b"5 0 obj\n<< /Author (five)) >>\nendobj\n");
+    let end = file.len() - " >>\nendobj\n".len() - 1;
+    file.extend_from_slice(after.as_bytes());
+    for &(n, text) in &[OBJECTS[0], OBJECTS[1], OBJECTS[3]] {
+        file.extend_from_slice(format!("{n} 0 obj\n{text}\nendobj\n").as_bytes());
+    }
+    file.extend_from_slice(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n");
+    (file, start, end)
+}
+
+/// Page 3 as [`OBJECTS`] has it, 10 wide.
+fn page() -> String {
+    format!("3 0 obj\n{}\nendobj\n", OBJECTS[2].1)
+}
+
+/// [`closed_late`], page 3 inside the string closed late, and nowhere
+/// else: the verified recovery's scan finds page 3's `n g obj` where it
+/// starts a line inside the string, and object 5's, and reads them there,
+/// every way, saying so once, so the page is reached, and 5, closed twice,
+/// doesn't read; under
+/// [`Recovery::Pdfium`] neither is found, as PDFium reads the string as a
+/// dictionary's value, and nothing's said.
+#[test]
+fn an_object_starting_a_line_inside_a_string_closed_late_is_read_there() {
+    let (file, start, end) = closed_late("", &page(), "");
+    let three = start + "(six >>\nendobj\n".len();
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    let record = doc.record(ObjectId::new(3, 0)).unwrap();
+    assert_eq!((record.at.start, record.origin), (three, Origin::Recovered));
+    assert!(record.endobj);
+    // Object 5, `)` where its dictionary's key goes, doesn't read there.
+    let unread: Vec<ObjectId> = doc.unread().map(|(id, _)| id).collect();
+    assert_eq!(unread, [ObjectId::new(5, 0)]);
+    assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 2)]);
+    assert_eq!(unclosed(&doc), []);
+    let doc = read_as(&file, &as_pdfium());
+    assert!(doc.get(ObjectId::new(1, 0)).is_ok());
+    assert!(doc.get(ObjectId::new(3, 0)).is_err());
+    assert!(doc.get(ObjectId::new(5, 0)).is_err());
+    assert_eq!(in_string(&doc), []);
+}
+
+/// [`closed_late`], page 3, 20 wide, inside the string, and 10 wide before
+/// it or after it: page 3 as the scan found it as written stands, every
+/// way, and only object 5 is read from inside the string, and said.
+#[test]
+fn an_object_inside_a_string_closed_late_of_a_number_found_elsewhere_isnt_taken() {
+    for (before, after) in [(page(), String::new()), (String::new(), page())] {
+        let (file, start, end) = closed_late(&before, WIDE_PAGE, &after);
+        let doc = read(&file);
+        reaches_its_page(&doc);
+        assert_eq!(width(&doc), 10);
+        let at = file.windows(7).rposition(|w| w == b"3 0 obj").unwrap();
+        let at = match before.is_empty() {
+            true => at,
+            false => file.windows(7).position(|w| w == b"3 0 obj").unwrap(),
+        };
+        assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+        assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 1)]);
+    }
+}
+
+/// [`closed_late`], page 3 inside the string twice, 20 wide then 10 wide:
+/// the later stands, every way, as a later `n g obj` of a number does, and
+/// the string says the objects that stand there, the page and object 5;
+/// and with a string closed late before it, in object 8, holding page 3,
+/// 20 wide: the later string's page 3 stands over that one too, so 8's
+/// string isn't said where the page is all it gave, and says object 7
+/// alone where 7 is written there after the page.
+#[test]
+fn an_object_written_twice_inside_strings_closed_late_is_said_where_it_stands() {
+    let twice = format!("{WIDE_PAGE}{}", page());
+    let (file, start, end) = closed_late("", &twice, "");
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(width(&doc), 10);
+    let at = file.windows(7).rposition(|w| w == b"3 0 obj").unwrap();
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+    assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 2)]);
+
+    for seven in ["", "7 0 obj\n(seven)\nendobj\n"] {
+        let eight = format!("8 0 obj\n<< /Title (eight >>\nendobj\n{WIDE_PAGE}{seven})\n");
+        let (file, start, end) = closed_late(&eight, &page(), "");
+        let doc = read(&file);
+        reaches_its_page(&doc);
+        assert_eq!(width(&doc), 10);
+        let at = file.windows(7).rposition(|w| w == b"3 0 obj").unwrap();
+        assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+        let six = read_in_string(SIX, start, end, 2);
+        match seven.is_empty() {
+            true => assert_eq!(in_string(&doc), [six]),
+            false => {
+                let from = b"%PDF-1.7\n8 0 obj\n<< /Title ".len();
+                let to = b"%PDF-1.7\n".len() + eight.len() - ")\n".len();
+                let eight = read_in_string(Some(ObjectId::new(8, 0)), from, to, 1);
+                assert_eq!(in_string(&doc), [eight, six]);
+                assert!(doc.get(ObjectId::new(7, 0)).is_ok());
+            }
+        }
+    }
+}
+
+/// [`closed_late`], page 3, 20 wide, inside the string, after stream 9,
+/// which has no `/Length` that reads, its data ended at an `endobj` of its
+/// own, then a comment whose line holds its `endstream` and page 3, 10
+/// wide: the first scan finds page 3 only inside the string, the second,
+/// to each stream's first `endstream`, as written on the comment's line,
+/// and that one stands, every way, as the scan before either read it;
+/// only object 5 is read from inside the string, and said.
+#[test]
+fn an_object_inside_a_string_closed_late_that_the_second_scan_finds_elsewhere_isnt_taken() {
+    let head = "9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n% endstream endobj ";
+    let before = format!("{head}3 0 obj {} endobj\n", OBJECTS[2].1);
+    let (file, start, end) = closed_late(&before, WIDE_PAGE, "");
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(width(&doc), 10);
+    let at = b"%PDF-1.7\n".len() + head.len();
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+    assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 1)]);
+    let data = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
+    let said = ended(NINE, data, Some(data + "q Q\n".len()));
+    assert_eq!(stream_ends(&doc), [said]);
+}
+
+/// Object stream `n`, unfiltered, of `members`, each a number and its
+/// value, written whole.
+fn object_stream(n: u32, members: &[(u32, &str)]) -> String {
+    let mut header = String::new();
+    let mut body = String::new();
+    for (m, value) in members {
+        header.push_str(&format!("{m} {} ", body.len()));
+        body.push_str(value);
+        body.push('\n');
+    }
+    let data = format!("{header}\n{body}");
+    format!(
+        "{n} 0 obj\n<< /Type /ObjStm /N {} /First {} /Length {} >>\nstream\n{data}\nendstream\nendobj\n",
+        members.len(),
+        header.len() + 1,
+        data.len()
+    )
+}
+
+/// Page 3, 20 wide, as an object stream's member.
+const WIDE: &str = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20] /Resources << >> >>";
+
+/// [`closed_late`], object stream 7, holding page 3, inside the string:
+/// 7 is read there, by its `/Type` an object stream, so page 3 is read
+/// from it, every way; where object stream 8, as written before the
+/// string, holds page 3 too, 10 wide, 8's member stands, though 7 comes
+/// later, as what a string closed late holds stands over nothing found as
+/// written; and where page 3, 20 wide, is inside the string as an object of
+/// its own, 8's member stands over it too, which then isn't said.
+#[test]
+fn an_object_stream_inside_a_string_closed_late_lists_its_members_under_the_others() {
+    let seven = object_stream(7, &[(3, OBJECTS[2].1)]);
+    let (file, start, end) = closed_late("", &seven, "");
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    let origin = |doc: &Document| doc.record(ObjectId::new(3, 0)).unwrap().origin;
+    let stream = |stream| Origin::Stream { stream, index: 0 };
+    assert_eq!(origin(&doc), stream(7));
+    assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 2)]);
+
+    let eight = object_stream(8, &[(3, OBJECTS[2].1)]);
+    let seven = object_stream(7, &[(3, WIDE)]);
+    let (file, start, end) = closed_late(&eight, &seven, "");
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(width(&doc), 10);
+    assert_eq!(origin(&doc), stream(8));
+    assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 2)]);
+
+    let (file, start, end) = closed_late(&eight, WIDE_PAGE, "");
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(width(&doc), 10);
+    assert_eq!(origin(&doc), stream(8));
+    assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 1)]);
+    let members = Fault::Members {
+        objects: 1,
+        streams: 1,
+        unread: 0,
+    };
+    assert!(doc.faults().iter().any(|(_, f)| *f == members));
+}
+
+/// A scanned file whose object 6, after the trailer, holds in a string a
+/// document's text, the catalog's and page 3's `n g obj` each starting a
+/// line, and its `trailer`, numbers the file uses: nothing in it is taken,
+/// every way, the file's own catalog and page standing, and nothing's
+/// said; and one whose string holds a `trailer` at a line's start naming
+/// another catalog: it isn't taken for one.
+#[test]
+fn a_string_holding_a_documents_text_gives_no_object_found_elsewhere_nor_a_trailer() {
+    let text = "6 0 obj\n<< /Source (%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 9 0 R >>\nendobj\n3 0 obj\n<< /Type /Page >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n) >>\nendobj\n";
+    let (file, places) = scanned_after(b"", text.as_bytes());
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert!(doc.get(ObjectId::new(6, 0)).is_ok());
+    assert_eq!(in_string(&doc), []);
+    let note = "6 0 obj\n<< /Note (a note\ntrailer\n<< /Size 10 /Root 7 0 R >>\n) >>\nendobj\n";
+    let (file, places) = scanned_after(b"", note.as_bytes());
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    let root = doc.trailer.dict().get(b"Root").map(Object::value);
+    assert_eq!(root, Some(&Value::Ref(ObjectId::new(1, 0))));
+    assert_eq!(in_string(&doc), []);
+}
+
+/// A scanned file whose stream 9 has no `/Length` that reads and an
+/// `endobj` of its own in its data, then a comment whose line holds its
+/// `endstream` and opens a string, then stream 8, whose data, passed by its
+/// `/Length`, holds object 7, and the string's `)`: the second scan, to
+/// each stream's first `endstream`, reads that string, 7's `n g obj`
+/// starting a line inside it, but looks at no string's lines, as the scan
+/// before either didn't, so 7 isn't read, every way, and nothing's said
+/// of it; the first scan finds every object, and passes 8's data by its
+/// `/Length`.
+#[test]
+fn an_object_starting_a_line_inside_a_string_the_second_scan_alone_reads_isnt_taken() {
+    let data = "7 0 obj\n(seven)\nendobj\n)";
+    let body = format!(
+        "9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n% endstream endobj (late\n8 0 obj\n<< /Length {} >>\nstream\n{data}\nendstream\nendobj\n",
+        data.len()
+    );
+    let (file, places) = scanned_after(body.as_bytes(), b"");
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert!(doc.get(ObjectId::new(7, 0)).is_err());
+    assert!(
+        doc.record(ObjectId::new(8, 0))
+            .unwrap()
+            .data
+            .unwrap()
+            .declared
+    );
+    assert_eq!(in_string(&doc), []);
+    let start = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
+    assert_eq!(stream_ends(&doc), [ended(NINE, start, Some(start + 4))]);
+}
+
+/// A scanned file whose stream 9 has no `/Length` that reads and an
+/// `endobj` of its own in its data, after which the data holds a string,
+/// object 7's `n g obj` starting a line inside it, then `endstream`, before
+/// the catalog, its page and the trailer: the verified scan ends the data at
+/// that `endobj`, reads the string, and meets `endstream` on its own
+/// between objects, so the data ran there, and what it found inside is
+/// taken back, object 7 among it, every way, and nothing's said.
+#[test]
+fn an_object_starting_a_line_inside_a_string_in_data_the_take_back_drops_isnt_taken() {
+    let stream =
+        b"9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n(late\n7 0 obj\n(seven)\nendobj\n)\nendstream\nendobj\n";
+    let (file, places) = scanned_after(stream, b"");
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert!(doc.get(ObjectId::new(7, 0)).is_err());
+    assert_eq!(in_string(&doc), []);
+    assert_eq!(stream_ends(&doc), []);
 }
 
 /// [`Unclosing`] says, at each `(`, what pdf-tokenizer reads of the literal

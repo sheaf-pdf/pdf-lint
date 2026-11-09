@@ -12,6 +12,7 @@ pages-unclosed-string-value	no-document
 pages-unclosed-string-between	no-document
 pages-unclosed-string-key	count 2 : 3 200 0 ; 4 200 0 ; null ; null
 pages-unclosed-string-later-copy	count 2 : 3 200 0 ; 4 200 0 ; null ; null
+pages-string-closed-late	count 2 : 3 200 0 ; null ; null ; null
 pages-update	count 3 : 3 200 0 ; 4 200 0 ; 6 200 0 ; null ; null
 pages-update-prev-past-the-end	count 3 : 3 200 0 ; 4 200 0 ; 6 200 0 ; null ; null
 pages-update-prev-past-the-end-hidden	count 3 : 3 200 0 ; 4 200 0 ; null ; null ; null
