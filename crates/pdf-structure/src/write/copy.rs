@@ -24,6 +24,10 @@ use crate::source::{Origin, Record};
 pub(super) struct Copying<'w> {
     from: &'w dyn ReadFrom,
     offsets: Offsets<'w>,
+    /// Whether one whose references aren't where its bytes have them is
+    /// written anew rather than refused, as a whole file's renumbering under
+    /// RC4 that the caller didn't ask for writes it.
+    lenient: bool,
 }
 
 /// Whether a write copies the objects read at offsets, by how it's
@@ -141,7 +145,20 @@ impl<'w> Copying<'w> {
             },
             _ => Offsets::No,
         };
-        Ok(Copying { from, offsets })
+        Ok(Copying {
+            from,
+            offsets,
+            lenient: false,
+        })
+    }
+
+    /// It, where a copy's references aren't where its bytes have them
+    /// (rule 9), not copying it, so that it's written anew, rather than
+    /// refusing it: for a whole file under RC4 renumbered by the writer
+    /// alone, which writes what it doesn't copy anew where it was, as read.
+    pub(super) fn leniently(mut self) -> Copying<'w> {
+        self.lenient = true;
+        self
     }
 
     /// Object `id`, `body`, written on its own at `at` with its references
@@ -163,35 +180,7 @@ impl<'w> Copying<'w> {
         let Body::Read { object, record } = body else {
             return Ok(None);
         };
-        if !as_read(id, object, record, self.from.id())? {
-            return Ok(None);
-        }
-        // Read at an offset its sections give, `endobj` after it.
-        if record.origin != Origin::File || !record.endobj {
-            return Ok(None);
-        }
-        // A stream's /Length a number, its data as long.
-        if record
-            .data
-            .is_some_and(|d| !d.declared || d.indirect_length)
-        {
-            return Ok(None);
-        }
-        // Encrypted, its bytes are right under the same key alone: at its
-        // own number, or where no key is made of the number, at any.
-        let keeps = match &self.offsets {
-            Offsets::No => false,
-            // A reading in the clear, written encrypted, is written anew.
-            Offsets::Plain => encrypting.is_none(),
-            Offsets::Same { read, metadata } => {
-                (at == id || !read.per_object())
-                    && encrypting.is_some_and(|e| {
-                        let there = |id| -> Option<&Object> { self.from.object(id) };
-                        e.keeps(read, &there, *metadata, (id, at), object)
-                    })
-            }
-        };
-        if !keeps {
+        if !self.copies(id, at, body, encrypting)? {
             return Ok(None);
         }
         let bytes = self.checked(id, record)?;
@@ -210,9 +199,60 @@ impl<'w> Copying<'w> {
                 Some(data) => data.at.start.saturating_sub(record.at.start),
                 None => bytes.len(),
             };
-            references(id, object, record, &bytes, header..end, to, &mut anew)?;
+            let placed = references(id, object, record, &bytes, header..end, to, &mut anew);
+            match placed {
+                Err(Error::Elsewhere(_)) if self.lenient => return Ok(None),
+                placed => placed?,
+            }
         }
         Ok(Some(Spliced { bytes, anew }))
+    }
+
+    /// Whether object `id`, `body`, written on its own at `at`, encrypted
+    /// by `encrypting`, is copied, by what of the rules for a copy reads
+    /// nothing again ([`Body::Read`], rules 1 to 7): its bytes, read again,
+    /// may still be refused, and, under a renumbering, its references. A
+    /// whole file under RC4 asks it before anything's written, of a copy at
+    /// its own number, which it keeps there. Refused where its record is
+    /// another reading's, or another object's ([`Error::Elsewhere`]).
+    pub(super) fn copies(
+        &self,
+        id: ObjectId,
+        at: ObjectId,
+        body: &Body<'_>,
+        encrypting: Option<&Encrypting<'_>>,
+    ) -> Result<bool, Error> {
+        let Body::Read { object, record } = body else {
+            return Ok(false);
+        };
+        if !as_read(id, object, record, self.from.id())? {
+            return Ok(false);
+        }
+        // Read at an offset its sections give, `endobj` after it.
+        if record.origin != Origin::File || !record.endobj {
+            return Ok(false);
+        }
+        // A stream's /Length a number, its data as long.
+        if record
+            .data
+            .is_some_and(|d| !d.declared || d.indirect_length)
+        {
+            return Ok(false);
+        }
+        // Encrypted, its bytes are right under the same key alone: at its
+        // own number, or where no key is made of the number, at any.
+        Ok(match &self.offsets {
+            Offsets::No => false,
+            // A reading in the clear, written encrypted, is written anew.
+            Offsets::Plain => encrypting.is_none(),
+            Offsets::Same { read, metadata } => {
+                (at == id || !read.per_object())
+                    && encrypting.is_some_and(|e| {
+                        let there = |id| -> Option<&Object> { self.from.object(id) };
+                        e.keeps(read, &there, *metadata, (id, at), object)
+                    })
+            }
+        })
     }
 
     /// Object `id`, `body`, which goes in an object stream of the write's,
@@ -252,7 +292,11 @@ impl<'w> Copying<'w> {
             return Ok(Some(bytes));
         }
         let mut anew = Vec::new();
-        references(id, object, record, &bytes, 0..bytes.len(), to, &mut anew)?;
+        let placed = references(id, object, record, &bytes, 0..bytes.len(), to, &mut anew);
+        match placed {
+            Err(Error::Elsewhere(_)) if self.lenient => return Ok(None),
+            placed => placed?,
+        }
         Ok(Some(Spliced { bytes, anew }.into_bytes()))
     }
 

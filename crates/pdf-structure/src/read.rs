@@ -1146,6 +1146,10 @@ struct Reader {
     /// was: a writer's update after it would go after that section, not
     /// the file's last.
     as_of: Option<usize>,
+    /// Whether it reads a file's first bytes, as an earlier revision of it
+    /// was written ([`Reading::prefix`]): a writer under its encryption
+    /// can't tell from it what the later revisions used.
+    part: bool,
     /// Whether its entries were found by scanning the file.
     scanned: bool,
     /// How it reads a file whose sections or objects aren't where it says.
@@ -1661,6 +1665,7 @@ impl Reader {
             facts: Facts::default(),
             revisions: Vec::new(),
             as_of: options.section,
+            part: false,
             scanned: false,
             recovery: options.recovery,
             found: Box::default(),

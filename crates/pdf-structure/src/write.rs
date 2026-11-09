@@ -86,14 +86,18 @@
 //!   an object stream is in the clear once written unpacked ([`document`] says
 //!   so). Under a new encryption that encrypts metadata, the document's
 //!   metadata stream's own `/Crypt` filter that would leave it in the clear is
-//!   taken out as it's written. Under RC4 a changed object written again at its
-//!   number and generation is encrypted with the keystream its earlier version
-//!   was, which leaks what changed to one who holds both (pdf-crypt's
-//!   `Method::Rc4`), and so is an object a renumbering writes at a number
-//!   another object had, which leaks the XOR of the two; a file written whole
-//!   under a new AES-256 encryption ([`Encryptor::create`]) doesn't. The
-//!   encryption dictionary of pdf-crypt's values, a new file's or one read, as
-//!   the values say it, is [`encryption`].
+//!   taken out as it's written. Under RC4, which encrypts each object's
+//!   strings and data from the start of a keystream its number and generation
+//!   make, so that two plaintexts under one leak their XOR (pdf-crypt's
+//!   `Method::Rc4`), nothing new goes under a keystream the file read shows
+//!   used: a whole file writes what it writes anew at a generation its number
+//!   hasn't used ([`Written::regenerated`]), and an update refuses what would
+//!   be new there ([`Unencryptable::Keystream`], [`Error::Free`]) unless it's
+//!   told otherwise ([`Encryptor::reusing_rc4_keystreams`]); see
+//!   [`Encryptor`], "Under RC4". A whole file under a reading's encryption
+//!   lists each number that file listed and it doesn't write free at its next
+//!   generation (7.5.4). The encryption dictionary of pdf-crypt's values, a
+//!   new file's or one read, as the values say it, is [`encryption`].
 //!
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
@@ -114,6 +118,7 @@ use std::fmt;
 use std::iter::FusedIterator;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use pdf_crypt::KeyCheck;
 use pdf_filters::{Backend, Encoder, Level, Prediction, Unencodable};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
@@ -485,10 +490,11 @@ pub struct Options<'a> {
     ///   would be written there in the clear ([`Error::Moved`]).
     /// - **The numbers the file uses are those written:** 0 and
     ///   [`NUMBERS`], a number two objects are written at, the encryption
-    ///   dictionary's ([`Options::encrypt_at`]), one the encryptor's file
-    ///   lists free under keys made per object ([`Error::Free`]), which a
-    ///   renumbering passes over, [`Pack::reuse`], those the writer gives its own objects, and an
-    ///   update's file's where it passes over an object as read;
+    ///   dictionary's ([`Options::encrypt_at`]), one an update's encryptor's
+    ///   file lists free under RC4 below the generation given
+    ///   ([`Error::Free`]), [`Pack::reuse`], those the writer gives its own
+    ///   objects, and an update's file's where it passes over an object as
+    ///   read;
     ///   [`Pack::groups`] is given the numbers packed objects are given at.
     ///   An object given past [`NUMBERS`] and written below it is written.
     /// - **Errors name** an object by the number it's given at
@@ -511,15 +517,19 @@ pub struct Options<'a> {
     ///   encryptor as it is, in its file's numbers, the metadata stream
     ///   told by the number it's written at: it doesn't write the
     ///   dictionary again, and moves neither it nor what it refers to
-    ///   ([`Error::Moved`]). **Under RC4**, an object written at a number
-    ///   another object had in the file the encryptor was read from is
-    ///   encrypted with that object's keystream, the key and `/ID[0]` being
-    ///   the file's: where the earlier file is kept, or the update's file
-    ///   holds both, the XOR of the two ciphertexts is the XOR of the two
-    ///   plaintexts, for every object moved onto another's number
-    ///   (pdf-crypt's `Method::Rc4`). A caller who doesn't want that writes
-    ///   the file under a new AES-256 encryption ([`Encryptor::create`])
-    ///   instead.
+    ///   ([`Error::Moved`]). **Under RC4**, an object written at a number and
+    ///   generation another object had in the file the encryptor was read
+    ///   from would be encrypted with that object's keystream, so the XOR of
+    ///   the two ciphertexts would be the XOR of the two plaintexts: a whole
+    ///   file writes each object it writes anew where the renumbering puts
+    ///   it, but at a generation its number hasn't used there, or past every
+    ///   number where its generations are spent ([`Written::regenerated`],
+    ///   which a caller takes the numbers written from); an update refuses
+    ///   one whose strings or data would be new there
+    ///   ([`Unencryptable::Keystream`]), unless its encryptor is told to
+    ///   reuse keystreams ([`Encryptor::reusing_rc4_keystreams`]). What the
+    ///   whole file's rule can't see, two whole files written from one
+    ///   reading, is said in [`Encryptor`], "Under RC4".
     /// - **Copied**, an object as read ([`Body::Read`]) is its bytes, its
     ///   header and each reference the renumbering names otherwise written
     ///   anew where its bytes had them, where the rules for a copy hold:
@@ -601,9 +611,10 @@ pub struct Pack<'a> {
     /// Numbers the object streams take first, in order: a source's own
     /// object streams', say, whose numbers are free once their members are
     /// written anew. 0, a number past what a file may use ([`NUMBERS`]),
-    /// one an object written has, one given already and one the file the
-    /// encryptor was read from lists free under keys made per object are
-    /// passed over; then they're numbered past every object written and
+    /// one an object written has, one given already and, under RC4, one
+    /// whose keystream at generation 0 the file the encryptor was read from
+    /// used, as an object stream is encrypted under it, are passed over;
+    /// then they're numbered past every object written and
     /// [`Options::xref_from`]. They're numbers the file uses, so under a
     /// renumbering ([`Options::renumber`]) they're numbers written.
     pub reuse: &'a [u32],
@@ -671,8 +682,30 @@ pub struct Written {
     /// renumbered write is given the catalog where `/EncryptMetadata false`
     /// leaves the metadata stream it names in the clear ([`Error::Catalog`]).
     /// After an update it's of the reading its base was, and renumbered
-    /// where its base was or the update was.
+    /// where its base was or the update was. After a whole file that moved
+    /// an object ([`Written::regenerated`]) it says it was renumbered too.
     pub base: Base,
+    /// Under RC4, each object a whole file wrote anew elsewhere than it was
+    /// given at, or than the renumbering gave it: the number and generation
+    /// it was given at, and where it's written, ascending. Each string and
+    /// stream of an object is encrypted from the start of the keystream its
+    /// number and generation make (ISO 32000-2, 7.6.3, Algorithm 1), so an
+    /// object written anew goes at a generation its number hasn't used in
+    /// any section of the file read, or past every number that file lists
+    /// where its generations are spent, every reference to it with it (see
+    /// [`Encryptor`], "Under RC4"); copies keep theirs. A caller that holds
+    /// the document's ids, or gives an update after it, takes them from
+    /// here. Empty under any other encryption, and for an update.
+    pub regenerated: Vec<(ObjectId, ObjectId)>,
+    /// Each object, by where it's written, whose strings or stream's data
+    /// RC4 encrypted with a keystream the file used, or at a number the file
+    /// lists free below the generation its entry gives, as the encryptor was
+    /// told to reuse keystreams
+    /// ([`Encryptor::reusing_rc4_keystreams`]), ascending: what leaks, to
+    /// whoever holds the file and what it was before, the XOR of its
+    /// plaintexts with what's encrypted there already. Empty where nothing
+    /// was.
+    pub keystreams_reused: Vec<ObjectId>,
 }
 
 /// The reading the objects a write is given were read in, which a stream's
@@ -693,6 +726,9 @@ impl<S: ByteSource> ReadFrom for Reading<S> {}
 mod sealed {
     use std::borrow::Cow;
 
+    use std::collections::HashMap;
+
+    use pdf_crypt::KeyCheck;
     use pdf_objects::object::{Object, ObjectId, Span};
 
     use super::Error;
@@ -735,6 +771,21 @@ mod sealed {
         /// (its catalog's `/Metadata`): what `/EncryptMetadata false`
         /// leaves in the clear.
         fn metadata(&self) -> Option<ObjectId>;
+
+        /// For each of `ids`, the plaintexts RC4 encrypted it with under its
+        /// keystream, in each version of it the reading's file holds at that
+        /// number and generation: the reading's own, and, where `earlier`,
+        /// each earlier revision's, read as of its end
+        /// ([`Reading::prefix`](crate::Reading::prefix)), where it's known.
+        /// Only a reading whose handler's key is the one `key` checks counts,
+        /// as another key's keystreams are other ones. What doesn't read
+        /// gives none, so that less is taken as already in the file.
+        fn versions(
+            &self,
+            ids: &[ObjectId],
+            earlier: bool,
+            key: &KeyCheck,
+        ) -> HashMap<ObjectId, Vec<Vec<u8>>>;
     }
 }
 
@@ -790,6 +841,42 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
         let get: Get<'_, '_, std::convert::Infallible> = &|id| Ok(reading.resolve(id));
         let Ok(metadata) = crate::crypt::metadata_stream(self.trailer().dict(), get);
         metadata
+    }
+
+    fn versions(
+        &self,
+        ids: &[ObjectId],
+        earlier: bool,
+        key: &KeyCheck,
+    ) -> HashMap<ObjectId, Vec<Vec<u8>>> {
+        let mut found: HashMap<ObjectId, Vec<Vec<u8>>> =
+            ids.iter().map(|&id| (id, Vec::new())).collect();
+        let take = |found: &mut HashMap<ObjectId, Vec<Vec<u8>>>,
+                    plaintexts: &dyn Fn(ObjectId) -> Vec<Vec<u8>>| {
+            for &id in ids {
+                found.entry(id).or_default().extend(plaintexts(id));
+            }
+        };
+        if self.handler().is_some_and(|h| h.has_key(key)) {
+            take(&mut found, &|id| crypt::rc4_plaintexts(self, id));
+        }
+        if !earlier {
+            return found;
+        }
+        // Each revision but the newest, which is the reading's own, as of
+        // its end.
+        let revisions = self.revisions();
+        let ends = (revisions.iter().take(revisions.len().saturating_sub(1)))
+            .filter_map(|revision| revision.end);
+        for end in ends {
+            let Ok(prefix) = self.prefix(end.line(), self.limits()) else {
+                continue;
+            };
+            if prefix.handler().is_some_and(|h| h.has_key(key)) {
+                take(&mut found, &|id| crypt::rc4_plaintexts(&prefix, id));
+            }
+        }
+        found
     }
 }
 
@@ -900,11 +987,16 @@ pub enum Error {
     /// decrypt.
     #[error("an update is encrypted as its file is, and this one's encryption isn't its file's")]
     Unmatched,
-    /// An object at a number the file its [`Encryptor`] was read from
-    /// lists free, under keys made per object (RC4, AES-128): it would be
-    /// encrypted with a deleted object's key ([`Encryptor::of`]).
+    /// An update's object at a number the file its [`Encryptor`] was read
+    /// from lists free, under RC4, below the generation the free entry
+    /// gives: its keystream would be a deleted object's, whose ciphertext
+    /// the file, or one it was written from, may still hold, and this one
+    /// not, to tell whether what's written is new (see [`Encryptor`],
+    /// "Under RC4"). At that generation or past it, it's written; under
+    /// AES its IVs are random, and it's written at any.
+    /// [`Encryptor::reusing_rc4_keystreams`] writes it, saying so.
     #[error(
-        "object {0} is at a number its file lists free, so its key would be a deleted object's"
+        "object {0} is below the generation its file lists its number free at, so under RC4 its keystream may be a deleted object's"
     )]
     Free(ObjectId),
     /// A stream whose data is where it was written
@@ -1206,8 +1298,9 @@ impl<'a> Numbering<'a> {
 /// Where each of `bodies` is written, by `to`, in order: refused where `to`
 /// gives one none ([`Error::Unnumbered`]); each a number a written file may
 /// use, given once and written once, not `encrypt_at`, the encryption
-/// dictionary's, and not one `encryptor`'s file lists free under keys made
-/// per object: the first that isn't, refused. `held` are the numbers of
+/// dictionary's, and, under RC4, not below the generation `encryptor`'s
+/// file lists its number free at, but where it's told to reuse keystreams:
+/// the first that isn't, refused. `held` are the numbers of
 /// objects an update passes over, ascending, given and in its file at
 /// those numbers already, which no body is given or written at again.
 fn checked(
@@ -1237,7 +1330,7 @@ fn checked(
         if encrypt_at == Some(at.number) {
             return Err(Error::EncryptAt(at.number));
         }
-        if encryptor.is_some_and(|e| e.free(at.number).is_some()) {
+        if encryptor.is_some_and(|e| !e.reusing() && e.free_below(at)) {
             return Err(Error::Free(at));
         }
         written.push(at);

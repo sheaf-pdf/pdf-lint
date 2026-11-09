@@ -1775,7 +1775,9 @@ mod tests {
             let own = Encryptor::of(&reading).unwrap();
             let mut updated = source.clone();
             let options = write::Options::DEFAULT;
-            write::update(&mut updated, &base, bodies(), own.as_ref(), None, &options).unwrap();
+            // The reading given, which holds what RC4 encrypted each with.
+            let from: Option<&dyn write::ReadFrom> = Some(&reading);
+            write::update(&mut updated, &base, bodies(), own.as_ref(), from, &options).unwrap();
             files.push(("updated", updated));
             for (way, data) in files {
                 let name = format!("{name}, {way}");
@@ -1959,6 +1961,96 @@ mod tests {
         sources
     }
 
+    /// An RC4 file written whole under its own encryption, each object it
+    /// writes anew moved past every generation any section of it lists
+    /// (`Written::regenerated`), reads through qpdf as through the reader:
+    /// the file of three revisions' worth of numbers, a catalog, a page and
+    /// an object written over edited, with a table, a stream and packed,
+    /// renumbered onto a number listed free and not, each passes qpdf's
+    /// `--check` by the user's password, and qpdf reads what the reader
+    /// reads, every object at the number and generation written.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn an_rc4_file_written_whole_past_its_keystreams_reads_through_qpdf_as_through_the_reader() {
+        use std::collections::BTreeMap;
+
+        use crate::XrefKind;
+        use crate::write::tests::{lit, rc4_revised};
+        use crate::write::{self, Encryptor, Pack};
+
+        let dir = scratch("rc4");
+        let file = rc4_revised();
+        let passwords = [Password("user")];
+        let options = read::Options {
+            passwords: &passwords,
+            ..read::Options::DEFAULT
+        };
+        let reading = read::Reading::open(&file[..], &options).unwrap();
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let mut doc = reading.to_document().unwrap();
+        doc.catalog_mut().unwrap().set("Edited", true);
+        let (page, six) = (ObjectId::new(3, 0), ObjectId::new(6, 1));
+        doc.get_dict_mut(page)
+            .unwrap()
+            .set("Title", lit(b"a page, edited"));
+        doc.get_dict_mut(six)
+            .unwrap()
+            .set("Note", lit(b"six, edited"));
+        let map: BTreeMap<ObjectId, ObjectId> = (doc.objects())
+            .map(|(id, _)| match id.number {
+                9 => (id, ObjectId::new(7, 0)),
+                _ => (id, id),
+            })
+            .collect();
+        let to = |id| map.get(&id).copied();
+        for renumbered in [false, true] {
+            for (way, kind, pack) in [
+                ("table", XrefKind::Table, None),
+                ("stream", XrefKind::Stream, None),
+                ("packed", XrefKind::Stream, Some(Pack::DEFAULT)),
+            ] {
+                let name = format!("{way}, renumbered {renumbered}");
+                let mut options = write::Options::DEFAULT;
+                (options.kind, options.pack) = (kind, pack);
+                if renumbered {
+                    options.renumber = Some(&to);
+                }
+                let mut data = Vec::new();
+                let written =
+                    write::document(&mut data, &doc, Some(&own), Some(&reading), &options).unwrap();
+                assert!(written.regenerated.len() >= 3, "{name}");
+                let path = dir
+                    .path()
+                    .join(format!("{}.pdf", name.replace([' ', ','], "-")));
+                std::fs::write(&path, &data).unwrap();
+                let qpdf = qpdf(&path).password("user");
+                let check = ["--password=user", "--check", &path.display().to_string()];
+                let (out, _) = qpdf.run(&check.map(String::from)).expect(&name);
+                let out = String::from_utf8_lossy(&out);
+                assert!(
+                    out.contains("No syntax or stream encoding errors found"),
+                    "{name}: {out}"
+                );
+                let (alone, heard) = qpdf.heard().expect(&name);
+                assert_eq!(alone.trailer.unwritten, None, "{name}");
+                assert!(heard.is_empty(), "{name}: {heard:?}");
+                let back = read::document(
+                    &data,
+                    &read::Options {
+                        passwords: &passwords,
+                        ..read::Options::DEFAULT
+                    },
+                );
+                assert!(back.faults().is_empty(), "{name}: {:?}", back.faults());
+                let found = differences(&back, &alone);
+                assert!(found.is_empty(), "{name}: {found:?}");
+                for &(_, at) in &written.regenerated {
+                    assert!(alone.get(at).is_ok(), "{name}: qpdf reads {at:?}");
+                }
+            }
+        }
+    }
+
     /// Whole files written under two renumberings, each object's number
     /// reversed (each at the number of the one as far from the end as it is
     /// from the start), and every other number kept, the rest moved past
@@ -2023,16 +2115,25 @@ mod tests {
             }
             for (numbering, map, way, kind, pack) in ways {
                 let to = |id| map.get(&id).copied();
-                let untyped = match to(ObjectId::new(10, 0)) {
-                    Some(id) => format!("{id} R/Contents: "),
-                    None => String::new(),
-                };
                 let name = format!("{name}, {numbering}, {way}");
                 let mut options = write::Options::DEFAULT;
                 (options.kind, options.pack) = (kind, pack);
                 options.renumber = Some(&to);
                 let mut data = Vec::new();
-                write::document(&mut data, &doc, own.as_ref(), Some(&reading), &options).unwrap();
+                let written =
+                    write::document(&mut data, &doc, own.as_ref(), Some(&reading), &options)
+                        .unwrap();
+                // Under RC4, an object written anew at a number the file used
+                // is at its next generation.
+                let regenerated = &written.regenerated;
+                let landed = |id| match regenerated.iter().find(|(given, _)| *given == id) {
+                    Some(&(_, at)) => Some(at),
+                    None => to(id),
+                };
+                let untyped = match landed(ObjectId::new(10, 0)) {
+                    Some(id) => format!("{id} R/Contents: "),
+                    None => String::new(),
+                };
                 let path = dir
                     .path()
                     .join(format!("{}.pdf", name.replace([' ', ','], "-")));

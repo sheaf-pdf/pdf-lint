@@ -24,9 +24,13 @@
 //! written whole and as an update, under a renumbering the input picks or
 //! none, each way the input picks, without a panic, and where it read
 //! soundly, written and read again it's the same objects, each at the
-//! number the renumbering gives it, those copied as the bytes they were
-//! read from among them, their headers and the references that move
-//! written anew in place, and an update after one whose one fault is the
+//! number the renumbering gives it, or, written whole under RC4, where the
+//! write says it moved it past every keystream the file used, those copied
+//! as the bytes they were read from among them, their headers and the
+//! references that move written anew in place; an update under RC4 that
+//! would put a new plaintext under a keystream the file used is refused,
+//! and written told to reuse keystreams, saying where; and an update after
+//! one whose one fault is the
 //! bytes before its header read back with that fault again, and after one
 //! whose faults are that and where its sections or objects were found
 //! read back with those alone, but what the update's `/Prev` moves of
@@ -997,6 +1001,19 @@ impl Renumbering {
     }
 }
 
+/// Where a whole file put each object, and what a reference to one names:
+/// where `to` puts it, but where the writer moved it under RC4, as
+/// `regenerated` says ([`write::Written::regenerated`]).
+fn landed<'a>(
+    regenerated: &'a [(ObjectId, ObjectId)],
+    to: &'a dyn Fn(ObjectId) -> Option<ObjectId>,
+) -> impl Fn(ObjectId) -> Option<ObjectId> + 'a {
+    move |id| match regenerated.binary_search_by_key(&id, |&(given, _)| given) {
+        Ok(i) => Some(regenerated[i].1),
+        Err(_) => to(id),
+    }
+}
+
 /// [`write_file`]'s body: whether the whole file, the update and the whole
 /// file after a byte was flipped were written, or refused, and compared.
 fn compared(data: &[u8]) -> [bool; 3] {
@@ -1056,10 +1073,20 @@ fn compared(data: &[u8]) -> [bool; 3] {
         let mut out = Vec::new();
         let written = write::document(&mut out, &doc, encryptor, Some(&reading), &options);
         if let (true, Ok(written)) = (sound, written) {
-            assert_eq!(written.base.renumbered, renumbering.0.is_some());
+            let regenerated = &written.regenerated;
+            let moved = !regenerated.is_empty();
+            assert!(
+                !moved || encryptor.is_some_and(Encryptor::rc4),
+                "only RC4 moves"
+            );
+            assert_eq!(written.base.renumbered, renumbering.0.is_some() || moved);
+            assert!(
+                written.keystreams_reused.is_empty(),
+                "a whole file reuses none"
+            );
             let back = read_back(&out, opens, &[]);
             let anew = encryptor.is_some_and(Encryptor::writes_metadata_anew);
-            same_objects(&doc, &reading, &back, None, &to, anew);
+            same_objects(&doc, &reading, &back, None, &landed(regenerated, &to), anew);
             compared[0] = true;
         }
     }
@@ -1236,10 +1263,11 @@ fn flipped(
     let (encryptor, opens) = way.encryptor(own.as_ref(), password);
     let mut out = Vec::new();
     match write::document(&mut out, &doc, encryptor, Some(&reading), options) {
-        Ok(_) => {
+        Ok(written) => {
             let back = read_back(&out, opens, &[]);
             let anew = encryptor.is_some_and(Encryptor::writes_metadata_anew);
-            same_objects(&doc, &reading, &back, None, to, anew);
+            let to = landed(&written.regenerated, to);
+            same_objects(&doc, &reading, &back, None, &to, anew);
         }
         Err(write::Error::Changed(Some(id))) => {
             let record = doc.record(id).expect("a copy's record");
@@ -1292,11 +1320,53 @@ fn updated(
         options.renumber = Some(&to);
     }
     let mut out = file.to_vec();
-    let given = write::bodies(doc).map(|(at, body)| match at == id {
-        true => (at, Body::from(&changed)),
-        false => (at, body),
-    });
-    let written = write::update(&mut out, &base, given, encryptor, Some(reading), &options);
+    let given = || {
+        write::bodies(doc).map(|(at, body)| match at == id {
+            true => (at, Body::from(&changed)),
+            false => (at, body),
+        })
+    };
+    let written = write::update(&mut out, &base, given(), encryptor, Some(reading), &options);
+    // Under RC4, refused where it would put a new plaintext under a
+    // keystream the file used; told to reuse them, written, saying where.
+    let rc4 = encryptor.is_some_and(Encryptor::rc4);
+    let refused = match &written {
+        Err(write::Error::Encrypt {
+            id,
+            why: write::Unencryptable::Keystream,
+        })
+        | Err(write::Error::Free(id)) => Some(*id),
+        _ => None,
+    };
+    let written = match (refused, encryptor) {
+        (Some(at), Some(e)) => {
+            assert!(rc4, "refused for a keystream under RC4 alone: {at:?}");
+            assert_eq!(out, file, "nothing written");
+            let reusing = e.clone().reusing_rc4_keystreams();
+            let written = write::update(
+                &mut out,
+                &base,
+                given(),
+                Some(&reusing),
+                Some(reading),
+                &options,
+            );
+            if let Ok(Some(written)) = &written {
+                let reused = &written.keystreams_reused;
+                assert!(reused.contains(&at), "{at:?} listed among {reused:?}");
+            }
+            written
+        }
+        _ => {
+            if let Ok(Some(written)) = &written {
+                assert!(
+                    written.keystreams_reused.is_empty(),
+                    "none reused unless told"
+                );
+            }
+            written
+        }
+    };
     if let (Some(told), Ok(Some(written))) = (told, written) {
         assert!(
             written.base.holds(&out[..]).expect("in memory"),

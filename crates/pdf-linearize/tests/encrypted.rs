@@ -16,7 +16,7 @@ use pdf_structure::pdf_crypt::rand_core::SeedableRng;
 use pdf_structure::pdf_crypt::{Ivs, Protection};
 use pdf_structure::read::{self, Reading, XrefEntry};
 use pdf_structure::write::{self, Deflate, Encryptor};
-use pdf_structure::{Document, Encryption, Source as _, XrefKind};
+use pdf_structure::{Document, Encryption, XrefKind};
 
 mod written;
 use written::{KEYS, encrypted_as, file, kinds, opened, stream};
@@ -372,6 +372,13 @@ fn stored_mark(file: &[u8], n: u32) -> Option<Vec<u8>> {
     }
 }
 
+/// Under RC4, an object laid out at a number and generation another object of
+/// the file read was at is encrypted with that one's keystream: the XOR of the
+/// two ciphertexts is the XOR of the two marks. The file read is a whole file of
+/// pdf-structure's under the key's encryption, which writes an object at a
+/// number the key's file used at its next generation, under another keystream
+/// than the one laid out there at 0: those don't leak so. Under AES nothing
+/// does.
 #[test]
 fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_doesn_t() {
     let plain = built(&secrets(""));
@@ -381,8 +388,9 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
         let before = opened(&bytes, "").to_document().unwrap();
         let (out, _) = own(&bytes, "", &Options::DEFAULT).unwrap();
         let after = opened(&out, "").to_document().unwrap();
+        // The mark of number `n`, at the generation the document holds it at.
         let mark_at = |doc: &Document, n: u32| {
-            let object = doc.get(ObjectId::new(n, 0)).ok()?;
+            let (id, object) = doc.objects().find(|(id, _)| id.number == n)?;
             let dict = match object.value() {
                 Value::Dict(dict) => dict,
                 Value::Stream(stream) => &stream.dict,
@@ -390,13 +398,14 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
             };
             let mark = dict.get(b"Mark")?;
             match mark.value() {
-                Value::String(text, _) => text.as_bytes().map(<[u8]>::to_vec),
+                Value::String(text, _) => Some((id.generation, text.as_bytes()?.to_vec())),
                 _ => None,
             }
         };
-        let (mut moved, mut leaked) = (0, 0);
+        let (mut moved, mut leaked, mut apart) = (0, 0, 0);
         for n in 1..40 {
-            let (Some(was), Some(is)) = (mark_at(&before, n), mark_at(&after, n)) else {
+            let (Some((then, was)), Some((now, is))) = (mark_at(&before, n), mark_at(&after, n))
+            else {
                 continue;
             };
             if was == is {
@@ -407,12 +416,22 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
             else {
                 continue;
             };
-            moved += 1;
-            if xor(&stored_was, &stored_is) == xor(&was, &is) {
-                leaked += 1;
+            let xored = xor(&stored_was, &stored_is) == xor(&was, &is);
+            match then == now {
+                true => {
+                    moved += 1;
+                    leaked += usize::from(xored);
+                }
+                false => {
+                    apart += 1;
+                    assert!(!xored, "{name}: {n}, at another generation, leaks");
+                }
             }
         }
-        assert!(moved > 2, "{name}: {moved} moved");
+        assert!(
+            moved > 0 && moved + apart > 2,
+            "{name}: {moved} and {apart} moved"
+        );
         let rc4 = name.starts_with("RC4");
         assert_eq!(leaked, if rc4 { moved } else { 0 }, "{name}");
     }

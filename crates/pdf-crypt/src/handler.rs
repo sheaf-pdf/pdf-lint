@@ -51,25 +51,27 @@ pub enum Method {
     ///
     /// It takes no IV: every string and stream of an object is encrypted
     /// with one keystream, made from the file's key and the object's number
-    /// and generation (Algorithm 1), from its start each time. So an object
-    /// written again at its number and generation with a string or a
-    /// stream changed, as an incremental update writes a changed object, is
-    /// encrypted with the keystream its earlier version was, and the XOR of
-    /// the two ciphertexts is the XOR of the two plaintexts: what changed
-    /// leaks to one who holds both. An update's file holds both; after a
-    /// file is saved whole again under the same key and `/ID`, the earlier
-    /// file does, wherever it's kept. So too where a file saved whole
-    /// again, or an update, puts an object at a number another object had,
-    /// as a writer that renumbers its objects does: it's encrypted with
-    /// that object's keystream, and the XOR of the two ciphertexts, one in
-    /// each file or both in the updated one, is the XOR of the two
-    /// plaintexts, for every object moved onto another's number. Laid out
-    /// for reading over a network (ISO 32000-2, Annex F), a file's objects
-    /// all move, onto numbers that run from 1 without a gap, so that's every
-    /// one of them, a number its file listed free among them. A writer that
-    /// doesn't want that writes the file whole under a new AES-256
-    /// encryption ([`Handler::create`]), which leaks neither way: its key
-    /// is new, and its IVs random ([`Ivs`]).
+    /// and generation (Algorithm 1), from its start each time. So two
+    /// plaintexts under one keystream leave their XOR in their two
+    /// ciphertexts, which gives each away where the other is known: an
+    /// object written again at its number and generation with a string or
+    /// a stream changed, as an incremental update writes a changed object,
+    /// beside the version before it, which the update's file holds; and an
+    /// object put at a number and generation another object had, as a
+    /// writer that renumbers its objects does, or one laying a file out
+    /// for reading over a network (ISO 32000-2, Annex F), whose objects
+    /// move onto numbers that run from 1 without a gap, beside that one,
+    /// in the same file or in the earlier file a whole save under the same
+    /// key and `/ID` leaves wherever it's kept. A writer that leaks
+    /// nothing puts no new plaintext under a keystream the file it writes
+    /// over, or from, shows used: it writes each object anew at a number
+    /// and generation no cross-reference section of that file lists in
+    /// use, nor below a free entry's generation, or writes the file whole
+    /// under a new AES-256 encryption ([`Handler::create`]), whose key is
+    /// new and whose IVs are random ([`Ivs`]). What no file shows: two
+    /// files written from one, each putting what it writes anew at the
+    /// same fresh number and generation, leave the XOR of what each wrote
+    /// there to whoever keeps both.
     Rc4,
     /// AES-128, the key each object's (`/CFM /AESV2`).
     Aes128,

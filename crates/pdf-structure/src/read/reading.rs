@@ -896,6 +896,13 @@ impl<S: ByteSource> Reading<S> {
         self.reader.as_of
     }
 
+    /// Whether it reads a file's first bytes ([`Reading::prefix`]), not
+    /// the whole file: for the writer, which can't tell from it what the
+    /// later revisions used of RC4's keystreams.
+    pub(crate) fn part(&self) -> bool {
+        self.reader.part
+    }
+
     /// Where the section the reading read at `at` was said to be, where it
     /// read it elsewhere ([`Fault::Moved`]): for the writer, which reads
     /// `startxref` again to tell the file is as read.
@@ -1017,7 +1024,9 @@ impl<S: ByteSource> Reading<S> {
             recovery: self.reader.recovery,
         };
         let source = Prefix::new(&self.source, len);
+        let part = source.len() < self.source.len();
         let mut prefix = Reading::open_by(source, &options, self.bound)?;
+        prefix.reader.part = part;
         let reader = &self.reader;
         if let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) {
             let (values, id) = (&stored.values, &stored.id);
