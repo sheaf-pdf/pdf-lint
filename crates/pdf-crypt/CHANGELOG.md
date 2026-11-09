@@ -10,7 +10,7 @@ AES's IVs and a new file's key and salts come from the operating system, and the
 - `Random`, with `Fault::Random` and `Unusable::Random`: the operating system's generator failed. Nothing is encrypted or made then, and nothing is given in the clear in its place.
 - `Handler::revision`: the revision a handler opened by, its dictionary's `/R`. A new file's is 6.
 - `KeyCheck`, `Handler::key_check` and `Handler::has_key`: tell whether two handlers have one key without giving it out. The check is compared in constant time, and its `Debug` shows none of its bytes.
-- `Password::LONGEST` and `Unusable::TypedTooLong { len, most }`: `Password::prepared` refuses a text over 1,024 bytes as typed before it prepares any of it, saying its length and that most. `Password::encodings`, a reader's, takes a text of any length.
+- `Password::LONGEST` and `Unusable::TypedTooLong { len, most }`: `Password::prepared` refuses a text over 1,024 bytes as typed before it prepares any of it, saying its length and the cap. `Password::encodings`, a reader's, takes a text of any length.
 - `Prohibition`: which of RFC 4013's tables refuses a character, with its words.
 
 ### Changed
