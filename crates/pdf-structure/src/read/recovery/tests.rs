@@ -9,8 +9,11 @@ use std::borrow::Cow;
 use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 
-use super::super::lengths::every_way;
-use super::super::{Fault, Faults, Options, Reading, Recovery, SectionRows, Unwritten, document};
+use super::super::lengths::every_way_under;
+use super::super::{
+    Fault, Faults, Options, Reading, Recovery, SCAN_READ, SectionRows, Unclosing, Unwritten,
+    document,
+};
 use crate::source::{Document, Origin, Source};
 use crate::write::{self, Base, Body};
 
@@ -72,16 +75,23 @@ fn plain(prefix: &[u8]) -> (Vec<u8>, Vec<(u32, usize)>, usize) {
 }
 
 /// What a test holds of a reading: what reading `file` whole gives, every
-/// way a reading reads it alike ([`every_way`]), and with faults off the
+/// way a reading reads it alike ([`every_way_under`]), and with faults off the
 /// same but no fault, the reading still saying it recovered.
 fn read(file: &[u8]) -> Document {
-    let mut readings = every_way(file, &[]).into_iter();
+    read_as(file, &Options::DEFAULT)
+}
+
+/// [`read`], under `options`.
+fn read_as(file: &[u8], options: &Options) -> Document {
+    let mut readings = every_way_under(file, options).into_iter();
     let (_, whole) = readings.next().unwrap();
     for (way, doc) in readings {
         assert_eq!(doc, whole, "{way}");
     }
-    let mut quiet = Options::DEFAULT;
-    quiet.faults = Faults::Off;
+    let quiet = Options {
+        faults: Faults::Off,
+        ..*options
+    };
     let off = document(file, &quiet);
     assert_eq!(off.faults(), [], "faults off");
     assert_eq!(off.facts, whole.facts, "faults off");
@@ -1616,27 +1626,428 @@ fn an_object_found_only_inside_a_streams_data_passed_by_its_length_is_read_there
 }
 
 /// A scanned file whose first stream has no `/Length` that reads and an
-/// `endobj` of its own in its data, after which the data opens a string it
-/// doesn't close, then `endstream` and the catalog, its page and the
-/// trailer: the verified scan ends the data at that `endobj` and reads the
-/// string to the file's end, so its second scan, to each stream's first
-/// `endstream`, gives it every object and the trailer, every way; it says
-/// where it ended the data.
+/// `endobj` of its own in its data, after which what the data holds, a
+/// string closed late or a comment, hides its `endstream` and the catalog,
+/// its page and the trailer from a scan reading on from that `endobj`,
+/// each object's `n g obj` written after the last one's `endobj` on its
+/// line, as a writer running objects together writes them: the verified
+/// scan ends the data at that `endobj` and finds nothing past it, so its
+/// second scan, to each stream's first `endstream`, gives it every object
+/// and the trailer, every way; it says where it ended the data.
 #[test]
 fn what_a_scan_reading_on_from_an_endobj_loses_its_second_scan_finds() {
+    let head = "%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n";
+    let start = head.len();
+    let end = start + "q Q\n".len();
+    // A string closed late, by a `)` after the trailer, and a comment, to
+    // the line's end, each of every object and the trailer.
+    let shapes = [
+        (
+            "(late\nendstream\nendobj",
+            "\n",
+            " trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n)\n",
+        ),
+        (
+            "%late endstream endobj",
+            " ",
+            " trailer << /Size 10 /Root 1 0 R >>\n",
+        ),
+    ];
+    for (hiding, line, after) in shapes {
+        let mut file = format!("{head}q Q\nendobj\n{hiding}").into_bytes();
+        let mut places = Vec::new();
+        for &(n, text) in &OBJECTS {
+            file.push(b' ');
+            places.push((n, file.len()));
+            file.extend_from_slice(format!("{n} 0 obj{line}{text}{line}endobj").as_bytes());
+        }
+        file.extend_from_slice(after.as_bytes());
+        let doc = read(&file);
+        each_object_at(&doc, &places, &|_| Origin::Recovered);
+        reaches_its_page(&doc);
+        let root = (doc.trailer.object.as_dict())
+            .and_then(|trailer| trailer.get(b"Root"))
+            .map(Object::value);
+        assert_eq!(root, Some(&Value::Ref(ObjectId::new(1, 0))), "{hiding}");
+        let said = ended(Some(ObjectId::new(9, 0)), start, Some(end));
+        assert_eq!(stream_ends(&doc), [said], "{hiding}");
+        assert_eq!(unclosed(&doc), [], "{hiding}");
+    }
+}
+
+/// The faults `doc` says of the strings a scan found no `)` closing.
+fn unclosed(doc: &Document) -> Vec<(Place, Fault)> {
+    (doc.faults().iter())
+        .filter(|(_, f)| matches!(f, Fault::Unclosed { .. }))
+        .cloned()
+        .collect()
+}
+
+/// The fault a scan says of the strings it found no `)` closing: the
+/// first's `(` at byte `start` in object `id`, at its place, and `past` of
+/// them read past.
+fn read_past(id: Option<ObjectId>, start: usize, past: u32) -> (Place, Fault) {
+    let fault = Fault::Unclosed { id, start, past };
+    (
+        Place::new(None, Some(Span::new(None, start, start + 1))),
+        fault,
+    )
+}
+
+/// Object 9.
+const NINE: Option<ObjectId> = Some(ObjectId::new(9, 0));
+
+/// Scanned files whose string that doesn't close comes before the catalog,
+/// its page and the trailer: as object 9's dictionary's value, between
+/// objects, and where object 9's dictionary has a key. The verified
+/// recovery reads on from just past its `(`, so each object after it is
+/// found, every way, and says so once, at the `(`; under
+/// [`Recovery::Pdfium`] the scan reads the rest of the file as that string,
+/// as PDFium's does where it reads a string (a value, or a `(` between
+/// objects), so nothing after it is found, and says that. PDFium reads past
+/// a `(` where a key goes, which a scan of tokens doesn't tell from a value.
+/// Object 9's own read of its string doesn't read.
+#[test]
+fn a_string_that_doesnt_close_is_read_past_under_the_verified_recovery() {
+    let shapes = [
+        ("9 0 obj\n<< /Title (open /Producer (x) >>\nendobj\n", NINE),
+        ("9 0 obj\n<< /Title (closed) >>\nendobj\n(open\n", None),
+        (
+            "9 0 obj\n<< /Title (closed) ( /Producer (x) >>\nendobj\n",
+            NINE,
+        ),
+    ];
+    for (body, id) in shapes {
+        let (file, places) = scanned_after(body.as_bytes(), b"");
+        let start = b"%PDF-1.7\n".len() + body.find("(open").or(body.find("( ")).unwrap();
+        let doc = read(&file);
+        each_object_at(&doc, &places, &|_| Origin::Recovered);
+        reaches_its_page(&doc);
+        assert_eq!(unclosed(&doc), [read_past(id, start, 1)], "{body}");
+        assert_eq!(doc.get(ObjectId::new(9, 0)).is_ok(), id.is_none(), "{body}");
+        let doc = read_as(&file, &as_pdfium());
+        assert!(doc.get(ObjectId::new(1, 0)).is_err(), "{body}");
+        assert!(doc.trailer.dict().get(b"Root").is_none(), "{body}");
+        assert_eq!(unclosed(&doc), [read_past(id, start, 0)], "pdfium: {body}");
+    }
+}
+
+/// Scanned files of stream 9, with neither `endstream` nor `endobj` after
+/// its data, a string that doesn't close in its data, first or after an
+/// operator, then the page without `endobj` either, after the catalog, its
+/// page tree and the trailer: the scan finds no end to the data and reads
+/// on through it, as PDFium's does, and the verified recovery reads on from
+/// just past the string's `(`, so the page is found, every way, and says
+/// both; under [`Recovery::Pdfium`] the scan reads the rest of the file as
+/// that string, so the page isn't found, and says both. The string is no
+/// object's, as the scan reads its data. Its `(` first, the token right
+/// after the data the scan passed over to its start, it's read past as one
+/// after any other token is.
+#[test]
+fn a_string_that_doesnt_close_in_data_read_on_through_is_read_past() {
+    let head = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\ntrailer\n<< /Size 10 /Root 1 0 R >>\n9 0 obj\n<< /Length 999 >>\nstream\n";
+    let page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources << >> >>\n";
+    let no_end = ended(NINE, head.len(), None);
+    for data in [&b"(open\n"[..], b"q Q (open\n"] {
+        let file = [&head[..], data, page].concat();
+        let start = head.len() + data.iter().position(|&b| b == b'(').unwrap();
+        let doc = read(&file);
+        reaches_its_page(&doc);
+        let at = doc.record(ObjectId::new(3, 0)).unwrap().at.start;
+        assert_eq!(at, head.len() + data.len());
+        assert_eq!(stream_ends(&doc), std::slice::from_ref(&no_end));
+        assert_eq!(unclosed(&doc), [read_past(None, start, 1)]);
+        let doc = read_as(&file, &as_pdfium());
+        assert!(doc.get(ObjectId::new(3, 0)).is_err());
+        assert_eq!(stream_ends(&doc), std::slice::from_ref(&no_end));
+        assert_eq!(unclosed(&doc), [read_past(None, start, 0)]);
+    }
+}
+
+/// A scanned file whose first stream has no `/Length` that reads and an
+/// `endobj` of its own in its data, after which the data opens a string it
+/// doesn't close, then `endstream` and the catalog, its page and the
+/// trailer: the verified scan ends the data at that `endobj`, reads on from
+/// just past the string's `(` and meets `endstream` on its own, so the data
+/// ran there: what it found inside, that string among it, is taken back,
+/// and every object and the trailer are found, every way, nothing said of
+/// the scan. Under [`Recovery::Pdfium`] the scan ends the data at that `endobj` and
+/// reads the rest of the file as the string, so the catalog isn't found,
+/// and says both.
+#[test]
+fn a_string_that_doesnt_close_in_data_the_take_back_drops_is_said_nowhere() {
     let stream = b"9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n(open\nendstream\nendobj\n";
     let (file, places) = scanned_after(stream, b"");
     let doc = read(&file);
     each_object_at(&doc, &places, &|_| Origin::Recovered);
     reaches_its_page(&doc);
-    let root = (doc.trailer.object.as_dict())
-        .and_then(|trailer| trailer.get(b"Root"))
-        .map(Object::value);
-    assert_eq!(root, Some(&Value::Ref(ObjectId::new(1, 0))));
+    assert_eq!(stream_ends(&doc), []);
+    assert_eq!(unclosed(&doc), []);
+    let doc = read_as(&file, &as_pdfium());
+    assert!(doc.get(ObjectId::new(1, 0)).is_err());
     let start = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
     let end = start + "q Q\n".len();
-    let said = ended(Some(ObjectId::new(9, 0)), start, Some(end));
+    assert_eq!(stream_ends(&doc), [ended(NINE, start, Some(end))]);
+    assert_eq!(unclosed(&doc), [read_past(None, end + "endobj\n".len(), 0)]);
+}
+
+/// A scanned file whose first stream has no `/Length` that reads and an
+/// `endobj` of its own in its data, then a comment whose line holds the
+/// data's `endstream`, a string that doesn't close, and the catalog, its
+/// page and the trailer: the verified scan ends the data at that `endobj`
+/// and finds nothing on the comment's line, so its second scan, to each
+/// stream's first `endstream`, reads on from just past the string's `(`
+/// and gives it every object and the trailer, every way; it says where it
+/// ended the data, and nothing of the string, which the first scan didn't
+/// meet.
+#[test]
+fn a_string_that_doesnt_close_met_by_the_second_scan_alone_is_read_past() {
+    let mut file =
+        b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n%\x80 endstream endobj (open"
+            .to_vec();
+    let mut places = Vec::new();
+    for &(n, text) in &OBJECTS {
+        file.push(b' ');
+        places.push((n, file.len()));
+        file.extend_from_slice(format!("{n} 0 obj {text} endobj").as_bytes());
+    }
+    file.extend_from_slice(b" trailer << /Size 10 /Root 1 0 R >>\n");
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    let start = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
+    let said = ended(NINE, start, Some(start + "q Q\n".len()));
+    assert_eq!(stream_ends(&doc), std::slice::from_ref(&said));
+    assert_eq!(unclosed(&doc), []);
+    let doc = read_as(&file, &as_pdfium());
+    assert!(doc.get(ObjectId::new(1, 0)).is_err());
     assert_eq!(stream_ends(&doc), [said]);
+    assert_eq!(unclosed(&doc), []);
+}
+
+/// A scanned file with three strings that don't close before the catalog,
+/// its page and the trailer: the verified recovery reads on past each, and
+/// says so once, at the first, with their count; under
+/// [`Recovery::Pdfium`] it reads the rest of the file as the first, and
+/// says so once.
+#[test]
+fn strings_that_dont_close_are_said_once_a_scan_with_their_count() {
+    let body = b"(a\n(b (c\n";
+    let (file, places) = scanned_after(body, b"");
+    let start = b"%PDF-1.7\n".len();
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert_eq!(doc.faults(), [read_past(None, start, 3)]);
+    let doc = read_as(&file, &as_pdfium());
+    assert_eq!(doc.objects().count(), 0);
+    assert_eq!(doc.faults(), [read_past(None, start, 0)]);
+}
+
+/// A scanned file where `5 0` and then a string that doesn't close come
+/// before `obj`: the scan reads on from just past the `(`, which stands
+/// between the numbers and `obj`, so no object 5 is listed; and where they
+/// come with a stream's data between, `5 0` its last bytes, not either.
+#[test]
+fn a_string_read_past_stands_between_an_objects_numbers_and_obj() {
+    for body in [&b"5 0 (\nobj\n"[..], b"5 0 (obj\n"] {
+        let (file, places) = scanned_after(body, b"");
+        let doc = read(&file);
+        each_object_at(&doc, &places, &|_| Origin::Recovered);
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        assert!(!reading.ids().any(|id| id.number == 5), "{body:?}");
+        assert_eq!(doc.unread().count(), 0);
+        assert_eq!(unclosed(&doc), [read_past(None, 9 + 4, 1)]);
+    }
+}
+
+/// A file with three bytes cut out of object 3's `n g obj`, a string that
+/// doesn't close after object 4, and an update that writes object 3 again
+/// with another after it: read whole, the scan that looks for object 3 says
+/// both; read as of the section the update follows, only the first, before
+/// that revision's end, as it takes nothing later updates wrote.
+#[test]
+fn a_reading_as_of_a_section_says_only_the_strings_before_its_end() {
+    let objects = [OBJECTS[0], OBJECTS[1], OBJECTS[2], (4, "(four)\nendobj\n(")];
+    let (mut file, places, table) = laid_out(b"", &objects, &|_, at| at, &|at| at);
+    let first = places[3].1 + "4 0 obj\n(four)\nendobj\n".len() - 3;
+    let three = file.windows(7).position(|w| w == b"3 0 obj").unwrap();
+    file.drain(three..three + 3);
+    let end = file.len();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 792] /Resources << >> >>";
+    file.extend_from_slice(format!("3 0 obj\n{page}\nendobj\n(\n").as_bytes());
+    let update = file.len();
+    file.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n3 1\n{end:010} 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Prev {table} >>\nstartxref\n{update}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let whole = read(&file);
+    assert_eq!(unclosed(&whole), [read_past(None, first, 2)]);
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let previous = reading.update().unwrap().previous;
+    let mut options = Options::DEFAULT;
+    options.section = Some(previous);
+    let doc = read_as(&file, &options);
+    assert_eq!(unclosed(&doc), [read_past(None, first, 1)]);
+    assert!(doc.get(ObjectId::new(3, 0)).is_err());
+}
+
+/// A file in the shape of one a writer damaged: object 46's `/Creator`
+/// closed twice, so its `/Producer`, which doesn't close its own, nests the
+/// date after it and closes at a `)` in the raw data of stream 40 after it,
+/// the scan reading `40 0 obj` and its `stream` as that string's; then a
+/// `(` in that data that doesn't close. The verified recovery reads on from
+/// just past it, so the catalog, its page and the trailer after the stream
+/// are found, every way, and says so once, in object 46, where the scan
+/// last found an `n g obj`; under [`Recovery::Pdfium`] nothing after it is.
+#[test]
+fn objects_after_a_string_closed_late_into_data_that_doesnt_close_are_found() {
+    let info = b"46 0 obj\n<< /Creator (MIX)) /Producer (BU\n/ModDate (D:1)\n>>\nendobj\n";
+    let data = b"\x9c\x01)\x02\x03(\x04\x05";
+    let mut body = info.to_vec();
+    body.extend_from_slice(format!("40 0 obj\n<< /Length {} >>\nstream\n", data.len()).as_bytes());
+    let opened = body.len() + 5;
+    body.extend_from_slice(data);
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    let (file, places) = scanned_after(&body, b"");
+    let start = b"%PDF-1.7\n".len() + opened;
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    let forty_six = Some(ObjectId::new(46, 0));
+    assert_eq!(unclosed(&doc), [read_past(forty_six, start, 1)]);
+    let doc = read_as(&file, &as_pdfium());
+    assert!(doc.get(ObjectId::new(1, 0)).is_err());
+    assert_eq!(unclosed(&doc), [read_past(forty_six, start, 0)]);
+}
+
+/// Scanned files whose bytes a scan reads past strings that don't close
+/// would read again and again, were each string read: runs of `(` closed
+/// by a `)` after each third, so that some close and some don't; `(` again
+/// and again, then one `)`; streams each with a string that doesn't close
+/// in its dictionary, and `trailer` dictionaries each with one, both with a
+/// trailer that reads at the end; and 64 KiB of `(`. Under either recovery
+/// the scan reads no more than three times the file's bytes as strings
+/// that don't close and in its own parses of each stream's head and each
+/// trailer, and finds the catalog first and the trailer last.
+#[test]
+fn a_scan_reads_past_strings_that_dont_close_in_a_bounded_number_of_bytes() {
+    let catalog = "%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+    let trailer = "trailer\n<< /Size 2 /Root 1 0 R >>\n";
+    let n = 512;
+    let mut streams = String::new();
+    for k in 0..n {
+        let k = k + 2;
+        streams.push_str(&format!(
+            "{k} 0 obj\n<< /A ( /Length 3 >>\nstream\nabc\nendstream\nendobj\n"
+        ));
+    }
+    let shapes = [
+        ("((()".repeat(2048), "runs"),
+        (format!("{})", "(".repeat(8192)), "one close"),
+        (streams, "streams"),
+        ("trailer\n<< /A (\n".repeat(n), "trailers"),
+        ("(".repeat(64 << 10), "64 KiB"),
+    ];
+    for (middle, name) in shapes {
+        let file = format!("{catalog}{middle}\n{trailer}").into_bytes();
+        for recovery in [Recovery::Verified, Recovery::Pdfium] {
+            let options = Options {
+                recovery,
+                ..Options::DEFAULT
+            };
+            SCAN_READ.with(|read| read.set(0));
+            let reading = Reading::open(&file[..], &options).unwrap();
+            let read = SCAN_READ.with(|read| read.get());
+            assert!(
+                read <= 3 * file.len(),
+                "{name}, {recovery:?}: {read} of {}",
+                file.len()
+            );
+            assert!(
+                reading.ids().any(|id| id.number == 1),
+                "{name}, {recovery:?}"
+            );
+            if recovery == Recovery::Verified {
+                let root = reading.trailer().dict().get(b"Root").map(Object::value);
+                assert_eq!(root, Some(&Value::Ref(ObjectId::new(1, 0))), "{name}");
+            }
+        }
+    }
+}
+
+/// Where a scan reads past strings that don't close, its own parses of an
+/// object's head for its `/Length` and of each `trailer`'s dictionary are
+/// read over the bytes up to the `stream` keyword and up to the next string
+/// it read past: a dictionary whose `/Length` comes after a string that
+/// closes reads it, so the stream's data is passed by it, and a trailer
+/// before a string that doesn't close reads, so the file's catalog is
+/// reached, as over the whole file.
+#[test]
+fn a_scans_own_parses_read_over_their_bytes_as_over_the_whole_file() {
+    let data = "q Q\nendstream\n";
+    let stream = format!(
+        "9 0 obj\n<< /Title (a (b) c) /Length {} >>\nstream\n{data}\nendstream\nendobj\n(open\n",
+        data.len()
+    );
+    let (file, places) = scanned_after(stream.as_bytes(), b"");
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    let nine = doc.record(ObjectId::new(9, 0)).unwrap().data.unwrap();
+    assert!(nine.declared);
+    assert_eq!(nine.at.end - nine.at.start, data.len());
+    let (file, places) = scanned_after(b"", b"(open\n");
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert!(doc.trailer.dict().has(b"Root"));
+}
+
+/// [`Unclosing`] says, at each `(`, what pdf-tokenizer reads of the literal
+/// string it starts: that it doesn't close, or that it does. Every input of
+/// up to 8 bytes of `(`, `)`, a backslash and another byte, and seeded
+/// inputs of up to 4 KiB of them, with ends of line.
+#[test]
+fn which_strings_dont_close_is_what_the_tokenizer_reads() {
+    use pdf_tokenizer::Tokenizer;
+    let check = |input: &[u8]| {
+        let unclosing = Unclosing::of(input);
+        for (q, &b) in input.iter().enumerate() {
+            if b != b'(' {
+                continue;
+            }
+            let token = Tokenizer::at(input, q).next().unwrap();
+            assert_eq!(unclosing.at(q), !token.closed, "{input:?} at {q}");
+        }
+    };
+    let alphabet = *b"()\\x";
+    for len in 0..=8u32 {
+        for mut code in 0..4usize.pow(len) {
+            let mut input = Vec::new();
+            for _ in 0..len {
+                input.push(alphabet[code % 4]);
+                code /= 4;
+            }
+            check(&input);
+        }
+    }
+    let alphabet = *b"(()\\x\n\r";
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..32 {
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let len = (next() % 4096) as usize + 1;
+        let input: Vec<u8> = (0..len)
+            .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+            .collect();
+        check(&input);
+    }
 }
 
 /// A scanned file without a `trailer` dictionary, whose last

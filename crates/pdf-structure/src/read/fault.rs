@@ -228,6 +228,35 @@ pub enum Fault {
         /// Where it was ended, at its `endobj`; none where no end was found.
         end: Option<usize>,
     },
+    /// A scan of the file, as a file whose sections don't read is scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
+    /// an object not where its section puts it
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), found no `)`
+    /// closing a literal string whose `(` is at byte `start` (ISO 32000-2,
+    /// 7.3.4.2), which would take every byte after it. Under
+    /// [`Recovery::Verified`](super::Recovery::Verified) it reads on from
+    /// just past that `(`, the bytes the string held read as tokens, so that
+    /// what's after it is found; `past` is how many such strings it read
+    /// past, the first at `start`, each read on from just past its `(`.
+    /// Under [`Recovery::Pdfium`](super::Recovery::Pdfium) it reads the
+    /// rest of the file as that string, as PDFium's scan does where it
+    /// reads a string, and finds nothing after it; `past` is 0. One a scan,
+    /// however many such strings it meets. `id` is the object the scan was
+    /// in, its `n g obj` found and neither its `stream` nor its `endobj`
+    /// yet; none where it was in none, between objects or in a stream's
+    /// data it read on through. The object's own read of such a string
+    /// doesn't read ([`Unread`](crate::Unread)).
+    #[error("{}", unclosed_words(*.id, *.start, *.past))]
+    Unclosed {
+        /// The object the first string is in.
+        id: Option<ObjectId>,
+        /// Where the first string's `(` is.
+        start: usize,
+        /// How many strings the scan read past, each from just past its
+        /// `(`; 0 where it read the first to the file's end. A `u32`, as
+        /// every count a recovery says.
+        past: u32,
+    },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
     /// ([`Limits::entries`](super::Limits::entries)): those aren't read.
@@ -887,6 +916,25 @@ fn stream_end_words(id: Option<ObjectId>, start: usize, end: Option<usize>) -> S
     }
 }
 
+/// [`Fault::Unclosed`]'s words.
+fn unclosed_words(id: Option<ObjectId>, start: usize, past: u32) -> String {
+    let place = match id {
+        Some(id) => format!("at byte {start} in {id} R"),
+        None => format!("at byte {start}, outside any object,"),
+    };
+    match past {
+        0 => format!(
+            "the scan finds no ) closing the string {place} and reads the rest of the file as that string, as PDFium's scan does"
+        ),
+        1 => format!(
+            "the scan finds no ) closing the string {place} and reads on from just past its ("
+        ),
+        n => format!(
+            "the scan finds no ) closing {n} strings, the first {place} and reads on from just past each one's ("
+        ),
+    }
+}
+
 /// [`Fault::Strings`]' words.
 fn strings_words(count: usize, fault: &pdf_crypt::Fault) -> String {
     match count {
@@ -965,11 +1013,12 @@ mod tests {
             Fault::XrefLength => 34,
             Fault::StreamEnd { .. } => 35,
             Fault::Renumbered { .. } => 36,
+            Fault::Unclosed { .. } => 37,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 37;
+    const ARMS: usize = 38;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -1275,6 +1324,30 @@ mod tests {
                     end: Some(47),
                 },
                 "the scan ends the data of a stream with no n g obj before it at its endobj, at byte 47, as no endstream comes before it and no /Length ends at one",
+            ),
+            (
+                Fault::Unclosed {
+                    id: Some(id(9)),
+                    start: 30,
+                    past: 1,
+                },
+                "the scan finds no ) closing the string at byte 30 in 9 0 R and reads on from just past its (",
+            ),
+            (
+                Fault::Unclosed {
+                    id: None,
+                    start: 30,
+                    past: 3,
+                },
+                "the scan finds no ) closing 3 strings, the first at byte 30, outside any object, and reads on from just past each one's (",
+            ),
+            (
+                Fault::Unclosed {
+                    id: Some(id(9)),
+                    start: 30,
+                    past: 0,
+                },
+                "the scan finds no ) closing the string at byte 30 in 9 0 R and reads the rest of the file as that string, as PDFium's scan does",
             ),
             (
                 Fault::Shifted {

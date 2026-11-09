@@ -281,8 +281,15 @@ pub(super) fn stream_end(
         over: false,
         endstream: None,
     };
+    // The object's head is read over its own bytes, up to its `stream`
+    // keyword's end: a dictionary that hasn't closed before it reads no
+    // `/Length` over the whole file either, as the keyword inside it, or a
+    // string that doesn't close, fails the read.
     let length = object.and_then(|at| {
-        let mut parser = Parser::at(file, at).limits(limits);
+        let head = &file[..keyword];
+        #[cfg(test)]
+        super::scan_read(head.len() - at);
+        let mut parser = Parser::at(head, at).limits(limits);
         parser.header().ok()?;
         let value = parser.value(&mut ()).ok()?;
         let length = value.as_dict()?.get(b"Length")?;
@@ -579,10 +586,14 @@ impl Reader {
             trailers,
             xref_streams,
             unended,
-        } = scan_of(file, self.limits.parser, Recovery::Pdfium);
+            unclosed,
+        } = scan_of(file, self.limits.parser, Recovery::Pdfium, None);
         if cx.wants {
             for unended in &unended {
                 cx.tell(None, Some(unended.at()), unended.fault());
+            }
+            if let Some((at, fault)) = unclosed.fault() {
+                cx.tell(None, Some(at), fault);
             }
         }
         let loaded = self.loaded.take().map(|loaded| *loaded).unwrap_or_default();
@@ -608,8 +619,11 @@ impl Reader {
         // The trailers, each `trailer` dictionary and cross-reference
         // stream's, in the file's order, each placed where it's written.
         let mut dicts: Vec<(usize, Object)> = Vec::new();
-        for at in trailers {
-            let read = Parser::at(file, at)
+        for (at, end) in trailers {
+            let bytes = &file[..end];
+            #[cfg(test)]
+            super::scan_read(bytes.len() - at);
+            let read = Parser::at(bytes, at)
                 .limits(self.limits.parser)
                 .value(&mut cx.parsed(None));
             if let Ok(object) = read

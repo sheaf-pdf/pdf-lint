@@ -154,7 +154,11 @@ pub enum Recovery {
     /// stream's data to its first `endstream`, and takes from that what it
     /// found nowhere: each object of a number it didn't find, and each
     /// `trailer`. Each scan says where it ended a stream at `endobj` or found
-    /// no end to one ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A table's first
+    /// no end to one ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A
+    /// literal string either scan finds no `)` closing is read past, from
+    /// just past its `(`, the bytes it held read as tokens, so that what's
+    /// after it is found; the first scan says so, once, with how many
+    /// ([`Fault::Unclosed`](super::Fault::Unclosed)). A table's first
     /// subsection numbered from 1 that starts with object 0's row is read
     /// from 0 where each of its rows in use is at its object's `n g obj` so
     /// numbered, where it's written or at the section's shift
@@ -180,7 +184,11 @@ pub enum Recovery {
     /// `/Length` where `endstream` follows that, else to the first
     /// `endstream` or `endobj` that's a word of its own, else nowhere,
     /// reading on through it, and reading on through a stream no `n g obj`
-    /// comes before, as PDFium reads through any words but an object's; its trailer is each `trailer` dictionary and
+    /// comes before, as PDFium reads through any words but an object's; a
+    /// literal string it finds no `)` closing it reads to the file's end,
+    /// finding nothing after it, as PDFium reads a string, a dictionary's
+    /// value or one between objects, and says so
+    /// ([`Fault::Unclosed`](super::Fault::Unclosed)); its trailer is each `trailer` dictionary and
     /// cross-reference stream's, a later one's keys over an earlier's; and
     /// it's merged over what the sections had given, each object the scan
     /// doesn't find kept where they put it. A file it doesn't scan reads
@@ -197,7 +205,9 @@ pub enum Recovery {
     ///
     /// It parts from PDFium in what it parses: each object is read by this
     /// crate's reader, by ISO 32000-2's rules, so a damaged dictionary
-    /// PDFium's parser reads past doesn't read here. And a file PDFium
+    /// PDFium's parser reads past doesn't read here; and the scan reads
+    /// tokens, not objects, so a `(` PDFium passes over where a
+    /// dictionary's key goes is a string here. And a file PDFium
     /// doesn't open, one without `%PDF-` or an encrypted one no password
     /// given opens, is read all the same, as far as it reads. A few edges
     /// of how PDFium finds and lists sections are read by this crate's

@@ -17,7 +17,11 @@
 //! stream's data as PDFium's scan does: by its `/Length` where `endstream`
 //! follows that, else to the first `endstream` or `endobj` after it, else
 //! nowhere, the scan reading on through the data, the last two said
-//! ([`Fault::StreamEnd`]). An object that doesn't read says why
+//! ([`Fault::StreamEnd`]); and reading on from just past the `(` of a
+//! literal string it finds no `)` closing, which would take every byte
+//! after it, or, as PDFium reads a file, reading the rest of the file as
+//! that string, either said ([`Fault::Unclosed`]). An object that doesn't
+//! read says why
 //! ([`Unread`]): it doesn't parse, its offset holds another, or the object
 //! stream it's in doesn't decode ([`Undecoded`], its filters
 //! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
@@ -3842,10 +3846,14 @@ impl Reader {
             trailers,
             xref_streams,
             unended,
-        } = scan_of(file, self.limits.parser, self.recovery);
+            unclosed,
+        } = scan_of(file, self.limits.parser, self.recovery, None);
         if cx.wants {
             for unended in &unended {
                 cx.tell(None, Some(unended.at()), unended.fault());
+            }
+            if let Some((at, fault)) = unclosed.fault() {
+                cx.tell(None, Some(at), fault);
             }
         }
         let mut entries = BTreeMap::new();
@@ -3868,8 +3876,11 @@ impl Reader {
         // may have only /Size, its first page's the rest.
         let mut found: Option<Object> = None;
         let mut taken = Vec::new();
-        for at in trailers.into_iter().rev() {
-            let read = Parser::at(file, at)
+        for (at, end) in trailers.into_iter().rev() {
+            let bytes = &file[..end];
+            #[cfg(test)]
+            scan_read(bytes.len() - at);
+            let read = Parser::at(bytes, at)
                 .limits(self.limits.parser)
                 .value(&mut cx.parsed(None));
             let Ok(object) = read else {
@@ -4515,8 +4526,14 @@ struct Scan {
     /// The objects whose dictionaries name `/ObjStm` before `stream`, by
     /// number and where their `n` starts, in the file's order.
     object_streams: Vec<(u32, usize)>,
-    /// Where each `trailer` keyword ends, in the file's order.
-    trailers: Vec<usize>,
+    /// Where each `trailer` keyword ends, in the file's order, with where
+    /// the bytes its dictionary is read over end: at the first string that
+    /// doesn't close the scan read past after it, else the file's end
+    /// ([`Unclosed`]). Up to there the scan's tokens are those a parse
+    /// from the keyword reads, so the dictionary reads there as it would
+    /// over the whole file, and a string that doesn't close isn't read to
+    /// the file's end once a trailer.
+    trailers: Vec<(usize, usize)>,
     /// Where the `n` of each object whose dictionary names `/XRef` before
     /// `stream` starts, in the file's order: a cross-reference stream's,
     /// whose dictionary [`Recovery::Pdfium`]'s scan takes as a trailer.
@@ -4525,6 +4542,99 @@ struct Scan {
     /// end to and read on through, in the file's order
     /// ([`Fault::StreamEnd`]).
     unended: Vec<Unended>,
+    /// The literal strings the scan found no `)` closing
+    /// ([`Fault::Unclosed`]).
+    unclosed: Unclosed,
+}
+
+/// The literal strings that don't close that a scan met ([`scan_from`]):
+/// the first, where its `(` is and the object the scan found it in, none
+/// where it was in none; and how many the scan read on past, each from
+/// just past its `(`, none where it read the first to the file's end, as
+/// PDFium's scan does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Unclosed {
+    first: Option<(Option<ObjectId>, usize)>,
+    past: u32,
+}
+
+impl Unclosed {
+    /// One more, at byte `start`, in object `id`.
+    fn add(&mut self, id: Option<ObjectId>, start: usize) {
+        self.first.get_or_insert((id, start));
+        self.past = self.past.saturating_add(1);
+    }
+
+    /// Where the first's `(` is, and what says so; none where the scan met
+    /// none.
+    fn fault(&self) -> Option<(Span, Fault)> {
+        let (id, start) = self.first?;
+        let fault = Fault::Unclosed {
+            id,
+            start,
+            past: self.past,
+        };
+        Some((span(start, start + 1), fault))
+    }
+}
+
+/// Which `(` of a file start a literal string that doesn't close: one bit
+/// a byte, made in one pass from the file's end, so that a scan reading on
+/// past each such string reads each byte as a token no more than twice,
+/// however many there are. pdf-tokenizer's rule, restated (ISO 32000-2,
+/// 7.3.4.2): a backslash takes the byte after it, and the parentheses
+/// that aren't so taken nest. Whether a byte is taken so is its own: an
+/// odd run of backslashes right before it, which can't reach back past a
+/// string's own `(`. So the string at `q` doesn't close where no running
+/// sum from `q + 1`, +1 at each `(` and -1 at each `)` not taken, comes to
+/// -1.
+struct Unclosing {
+    bits: Vec<u64>,
+}
+
+impl Unclosing {
+    /// `file`'s.
+    fn of(file: &[u8]) -> Unclosing {
+        let mut bits = vec![0u64; file.len().div_ceil(64)];
+        // The least running sum from the byte after the one looked at to
+        // the end, or 0, whichever is less.
+        let mut least: i64 = 0;
+        for (i, &b) in file.iter().enumerate().rev() {
+            if !matches!(b, b'(' | b')') {
+                continue;
+            }
+            if b == b'(' && least == 0 {
+                bits[i / 64] |= 1 << (i % 64);
+            }
+            let run = (file[..i].iter().rev())
+                .take_while(|&&c| c == b'\\')
+                .count();
+            if run % 2 == 1 {
+                continue;
+            }
+            least = (least + if b == b'(' { 1 } else { -1 }).min(0);
+        }
+        Unclosing { bits }
+    }
+
+    /// Whether the literal string a `(` at byte `q` starts doesn't close.
+    fn at(&self, q: usize) -> bool {
+        (self.bits.get(q / 64)).is_some_and(|&word| word >> (q % 64) & 1 == 1)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many bytes a scan has read as strings that don't close, and
+    /// handed its own parses to read: a test's measure that it reads a
+    /// file's bytes a bounded number of times ([`Unclosing`]).
+    pub(crate) static SCAN_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`SCAN_READ`], `bytes` more.
+#[cfg(test)]
+fn scan_read(bytes: usize) {
+    SCAN_READ.with(|read| read.set(read.get() + bytes));
 }
 
 /// How a scan passed over a stream's data ([`pdfium::stream_end`]).
@@ -4557,9 +4667,9 @@ struct Passed {
 
 /// Where a verified scan ended an object's stream's data at its `endobj`,
 /// before the first `endstream` after it ([`scan_from`]): that `endstream`,
-/// and how much of each of its lists the scan had found by then, which it
-/// takes back to where it meets that `endstream` on its own between
-/// objects.
+/// and how much of each of its lists the scan had found by then, and the
+/// strings that don't close it had met, which it takes back to where it
+/// meets that `endstream` on its own between objects.
 #[derive(Debug, Clone, Copy)]
 struct EndedAt {
     endstream: usize,
@@ -4568,6 +4678,7 @@ struct EndedAt {
     xref_streams: usize,
     trailers: usize,
     unended: usize,
+    unclosed: Unclosed,
     diverged: bool,
 }
 
@@ -4625,15 +4736,28 @@ impl Unended {
 /// what that finds is taken too: each object of a number the first scan
 /// found nowhere, its object streams and cross-reference streams so, and
 /// each `trailer`. So a scan that reads on from an `endobj` into data it
-/// can't read as tokens (a string that doesn't close, a comment) finds no
-/// less than that one did; and a document embedded in data passed by its
+/// can't read as tokens (a comment, a string closed late) finds no less
+/// than that one did; and a document embedded in data passed by its
 /// `/Length` doesn't stand over the file's own objects.
-fn scan_of(file: &[u8], limits: parse::Limits, recovery: Recovery) -> Scan {
-    let (mut scan, diverged) = scan_from(file, limits, Pass::As(recovery));
+///
+/// A literal string the scan finds no `)` closing (ISO 32000-2, 7.3.4.2)
+/// would take every byte after it, so under [`Recovery::Verified`] each
+/// scan reads on from just past its `(`, the bytes it held read as tokens,
+/// and the first scan counts them, but only those before byte `within`
+/// where that's given, as a reading as of a section takes nothing later
+/// updates wrote ([`Fault::Unclosed`]); each byte is read as a token no
+/// more than twice, however many such strings there are ([`Unclosing`],
+/// made once, for both scans). Under [`Recovery::Pdfium`] the scan reads
+/// the first such string to the file's end, as PDFium's does where it
+/// reads a string, and says so.
+fn scan_of(file: &[u8], limits: parse::Limits, recovery: Recovery, within: Option<usize>) -> Scan {
+    let mut unclosing = None;
+    let first = Pass::As(recovery);
+    let (mut scan, diverged) = scan_from(file, limits, first, within, &mut unclosing);
     if !diverged {
         return scan;
     }
-    let (earlier, _) = scan_from(file, limits, Pass::ToEndstream);
+    let (earlier, _) = scan_from(file, limits, Pass::ToEndstream, None, &mut unclosing);
     let found: BTreeSet<u32> = scan.objects.iter().map(|(id, _)| id.number).collect();
     let new = |n: &u32| !found.contains(n);
     let added: BTreeSet<usize> = (earlier.objects.iter())
@@ -4657,8 +4781,10 @@ fn scan_of(file: &[u8], limits: parse::Limits, recovery: Recovery) -> Scan {
     scan.objects.sort_by_key(|&(_, at)| at);
     scan.object_streams.sort_by_key(|&(_, at)| at);
     scan.xref_streams.sort_unstable();
+    // A `trailer` both found, read over the fewer bytes either gives it:
+    // each reads it alike.
     scan.trailers.sort_unstable();
-    scan.trailers.dedup();
+    scan.trailers.dedup_by_key(|&mut (at, _)| at);
     scan
 }
 
@@ -4675,16 +4801,33 @@ enum Pass {
 }
 
 /// [`scan_of`] of `file`, each stream's data passed over as `pass` says,
-/// without what a second scan adds; and whether, under
-/// [`Recovery::Verified`], it ended a stream's data at its `endobj`, or
-/// passed one by its `/Length` over an `endstream` inside it, where the
+/// without what a second scan adds, its strings that don't close counted
+/// before byte `within` where that's given, each read past by `unclosing`
+/// where that's made, else made the first time one is met; and whether,
+/// under [`Recovery::Verified`], it ended a stream's data at its `endobj`,
+/// or passed one by its `/Length` over an `endstream` inside it, where the
 /// scan before either ended it at the first `endstream`.
-fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
+fn scan_from(
+    file: &[u8],
+    limits: parse::Limits,
+    pass: Pass,
+    within: Option<usize>,
+    unclosing: &mut Option<Unclosing>,
+) -> (Scan, bool) {
     let mut objects = Vec::new();
     let mut t = Tokenizer::new(file);
     let mut diverged = false;
+    // The two tokens before this one, none for one that's no integer the
+    // scan read past (a string's `(`).
     let mut before: [Option<Token>; 2] = [None, None];
-    let mut trailers = Vec::new();
+    let mut trailers: Vec<(usize, usize)> = Vec::new();
+    // The first trailer not yet given the end of its dictionary's bytes,
+    // the next string read past giving it.
+    let mut open_trailers = 0;
+    // Whether the scan reads on past a string that doesn't close, and
+    // those it met.
+    let resumes = pass != Pass::As(Recovery::Pdfium);
+    let mut unclosed = Unclosed::default();
     // The object whose `obj` was last seen, where its `n` starts, and
     // whether its dictionary names `/ObjStm`, an object stream's, whose
     // members the reading lists once its handler is open, or `/XRef`.
@@ -4699,10 +4842,57 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
     // `endstream` there is that stream's.
     let mut ended_at: Vec<EndedAt> = Vec::new();
     let mut after_data = false;
-    while let Some(token) = t.next() {
-        if matches!(token.kind, Kind::Space | Kind::Comment) {
-            continue;
-        }
+    loop {
+        // A string that doesn't close, where the scan reads on past it: the
+        // tokenizer gives the first to the file's end; each after it,
+        // which `unclosing` then says, isn't read at all.
+        let at = t.offset();
+        let marked = resumes
+            && file.get(at) == Some(&b'(')
+            && unclosing.as_ref().is_some_and(|unclosing| unclosing.at(at));
+        let next = match marked {
+            true => Next::Past(at),
+            false => match t.next() {
+                None => break,
+                Some(token) if matches!(token.kind, Kind::Space | Kind::Comment) => continue,
+                Some(token) if token.kind == Kind::LiteralString && !token.closed => {
+                    #[cfg(test)]
+                    scan_read(token.bytes.len());
+                    if resumes {
+                        unclosing.get_or_insert_with(|| Unclosing::of(file));
+                        Next::Past(token.start)
+                    } else {
+                        if within.is_none_or(|within| token.start < within) {
+                            let id = object.map(|(id, _, _)| id);
+                            unclosed.first.get_or_insert((id, token.start));
+                        }
+                        Next::Token(token)
+                    }
+                }
+                Some(token) => Next::Token(token),
+            },
+        };
+        // Read past, from the byte after its `(`: the bytes it held read as
+        // tokens, the `(` taken as a token that's no integer, before them,
+        // and as the one after any data passed over before it. The trailers
+        // since the last one read past have their dictionaries' bytes end
+        // there.
+        let token = match next {
+            Next::Token(token) => token,
+            Next::Past(q) => {
+                if within.is_none_or(|within| q < within) {
+                    unclosed.add(object.map(|(id, _, _)| id), q);
+                }
+                for (_, end) in &mut trailers[open_trailers..] {
+                    *end = q;
+                }
+                open_trailers = trailers.len();
+                after_data = false;
+                before = [before[1], None];
+                t = Tokenizer::at(file, q + 1);
+                continue;
+            }
+        };
         // An `endstream` on its own between objects, the first after the
         // data of a stream the scan ended at its `endobj`: the scan was in
         // that data, which ran there, as this crate's scan before ended it.
@@ -4719,7 +4909,9 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
                 object_streams.truncate(back.object_streams);
                 xref_streams.truncate(back.xref_streams);
                 trailers.truncate(back.trailers);
+                open_trailers = open_trailers.min(trailers.len());
                 unended.truncate(back.unended);
+                unclosed = back.unclosed;
                 diverged = back.diverged;
                 ended_at.truncate(i);
                 object = None;
@@ -4791,6 +4983,7 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
                             xref_streams: xref_streams.len(),
                             trailers: trailers.len(),
                             unended: unended.len(),
+                            unclosed,
                             diverged,
                         });
                     }
@@ -4807,7 +5000,7 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
                     t = Tokenizer::at(file, passed.end);
                 }
             }
-            Kind::Keyword if token.bytes == b"trailer" => trailers.push(token.end()),
+            Kind::Keyword if token.bytes == b"trailer" => trailers.push((token.end(), file.len())),
             _ => {}
         }
         before = [before[1], Some(token)];
@@ -4818,8 +5011,17 @@ fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
         trailers,
         xref_streams,
         unended,
+        unclosed,
     };
     (scan, diverged)
+}
+
+/// What a scan reads next ([`scan_from`]): a token, or a literal string
+/// that doesn't close, which it reads past from just past its `(`, where
+/// that `(` is.
+enum Next<'a> {
+    Token(Token<'a>),
+    Past(usize),
 }
 
 /// Which name a scanned object's dictionary gives before its `stream`

@@ -21,7 +21,9 @@ use pdf_objects::parse::{self, Parser};
 use pdf_tokenizer::{Kind, Tokenizer, is_delimiter, is_white_space};
 
 use super::window::Bytes;
-use super::{Cx, Fault, Misnumbered, NEAR, Reader, Recovery, Rows, Unended, XrefEntry, scan_of};
+use super::{
+    Cx, Fault, Misnumbered, NEAR, Reader, Recovery, Rows, Unclosed, Unended, XrefEntry, scan_of,
+};
 use crate::source::Origin;
 
 /// How many bytes from where an `n g obj` starts its three tokens are
@@ -151,16 +153,18 @@ fn past_white_space(bytes: &[u8], base: usize, p: usize) -> Option<usize> {
 /// Where a scan of `file`, every byte, finds each object's `n g obj`
 /// ([`scan_of`], under `limits`, as the verified recovery scans), exactly
 /// ([`header_exactly`]), by its id: the last in the file, as an update
-/// appends, of those before byte `within` where that's given; and each
-/// stream before there whose data the scan ended at its `endobj`, or found
-/// no end to and read on through, which is said ([`Fault::StreamEnd`]).
+/// appends, of those before byte `within` where that's given; each stream
+/// before there whose data the scan ended at its `endobj`, or found no end
+/// to and read on through, which is said ([`Fault::StreamEnd`]); and the
+/// strings before there it found no `)` closing and read past, which are
+/// said ([`Fault::Unclosed`]).
 fn scanned(
     file: &[u8],
     within: Option<usize>,
     limits: parse::Limits,
-) -> (BTreeMap<ObjectId, usize>, Vec<Unended>) {
+) -> (BTreeMap<ObjectId, usize>, Vec<Unended>, Unclosed) {
     let mut found = BTreeMap::new();
-    let scan = scan_of(file, limits, Recovery::Verified);
+    let scan = scan_of(file, limits, Recovery::Verified, within);
     let before = |at: usize| within.is_none_or(|within| at < within);
     for (id, at) in scan.objects {
         if before(at) && header_exactly(file, 0, at, true) == Some(id) {
@@ -169,7 +173,7 @@ fn scanned(
     }
     let mut unended = scan.unended;
     unended.retain(|unended| before(unended.start));
-    (found, unended)
+    (found, unended, scan.unclosed)
 }
 
 impl Reader {
@@ -428,7 +432,9 @@ impl Reader {
     /// nothing later updates wrote; its offset moved there; else where it's
     /// written. Where the scan is made, each stream before `within` whose
     /// data it ended at its `endobj`, or found no end to and read on
-    /// through, is said to `cx` ([`Fault::StreamEnd`]). None for any
+    /// through, is said to `cx` ([`Fault::StreamEnd`]), and the strings
+    /// before there it found no `)` closing and read past
+    /// ([`Fault::Unclosed`]). None for any
     /// section where no section has a shift, the file read as written; each
     /// section `said` to be elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
@@ -480,9 +486,13 @@ impl Reader {
                     continue;
                 }
                 if scan.is_none() {
-                    let (found, unended) = scanned(&file.all()?, within, self.limits.parser);
+                    let (found, unended, unclosed) =
+                        scanned(&file.all()?, within, self.limits.parser);
                     for unended in &unended {
                         cx.tell(None, Some(unended.at()), unended.fault());
+                    }
+                    if let Some((at, fault)) = unclosed.fault() {
+                        cx.tell(None, Some(at), fault);
                     }
                     scan = Some(found);
                 }

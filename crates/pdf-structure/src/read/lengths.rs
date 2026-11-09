@@ -283,9 +283,14 @@ pub(super) fn every_way(file: &[u8], passwords: &[Password]) -> Vec<(String, Doc
         passwords,
         ..Options::DEFAULT
     };
-    let mut readings = vec![("whole".to_string(), document(file, &options))];
+    every_way_under(file, &options)
+}
+
+/// [`every_way`], each reading under `options`.
+pub(super) fn every_way_under(file: &[u8], options: &Options) -> Vec<(String, Document)> {
+    let mut readings = vec![("whole".to_string(), document(file, options))];
     for back in [false, true] {
-        let reading = Reading::open(file, &options).unwrap();
+        let reading = Reading::open(file, options).unwrap();
         let mut ids: Vec<ObjectId> = reading.ids().collect();
         if back {
             ids.reverse();
@@ -297,7 +302,7 @@ pub(super) fn every_way(file: &[u8], passwords: &[Password]) -> Vec<(String, Doc
     for first in [1, 7, 64, 4096] {
         for bound in [true, false] {
             let source = Counted::new(file, first);
-            let reading = open(&source, passwords, &Options::DEFAULT, bound).unwrap();
+            let reading = open(&source, options.passwords, options, bound).unwrap();
             let ids: Vec<ObjectId> = reading.ids().collect();
             ids.iter().rev().for_each(|&id| drop(reading.get(id)));
             let name = format!("by position, {first} bytes, {bound}");
