@@ -418,30 +418,29 @@ impl Base {
 ///
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
 /// object as read or a `from` after a file written under a renumbering; an
-/// encryptor that isn't `base`'s file's (another file's, though its
-/// `/Encrypt` is at the same number and its `/ID[0]` the same, or another
-/// key's of the same file), or none for an encrypted file, or any for a
-/// `base` that doesn't know the dictionary its file's `/Encrypt` names by
-/// number; a
-/// number 0 or at or past [`NUMBERS`], or given twice, one passed over
-/// among them ([`Error::Twice`]), or under a renumbering written at twice,
-/// one passed over among them ([`Error::WrittenTwice`]); a body the
-/// renumbering gives no number; a body at the encryption dictionary's
-/// number; under RC4, one at a number the file lists free below the
-/// generation its entry gives, and a string or stream's data that would be
-/// new under a keystream the file used, but where the encryptor is told to
-/// reuse keystreams; a renumbering that moves an encryption
-/// dictionary or what one refers to, or writes another object there; a
-/// catalog neither given nor in `from`, where `/EncryptMetadata false`
-/// leaves the metadata stream it names in the clear ([`Error::Catalog`]); a
-/// cross-reference stream with no number left below [`NUMBERS`]; a stream's data where it was written that isn't
-/// the reading's own for its number, or with no `from`; a `from` whose
-/// source says it changed, and a copy whose bytes aren't those it was read
-/// from ([`Error::Changed`]), or aren't there to read ([`Error::Gone`],
-/// [`Error::Uncontained`]), or whose record is another reading's or
-/// another object's, or under a renumbering whose references aren't where
-/// its bytes have them ([`Error::Elsewhere`]); what pdf-objects' writer
-/// refuses, or the encryptor; and a write stopped.
+/// encryptor that isn't `base`'s file's (another file's, though its `/Encrypt`
+/// is at the same number and its `/ID[0]` the same, or another key's of the
+/// same file), or none for an encrypted file, or any for a `base` that doesn't
+/// know the dictionary its file's `/Encrypt` names by number; a number 0 or at
+/// or past [`NUMBERS`], or given twice, one passed over among them
+/// ([`Error::Twice`]), or under a renumbering written at twice, one passed over
+/// among them ([`Error::WrittenTwice`]); a body the renumbering gives no
+/// number; a body at the encryption dictionary's number; under RC4, one at a
+/// number the file lists free below the generation its entry gives, and a
+/// string or stream's data that would be new under a keystream the file used,
+/// but where the encryptor is told to reuse keystreams; a renumbering that
+/// moves an encryption dictionary or what one refers to, or writes another
+/// object there; a catalog neither given nor in `from`, where
+/// `/EncryptMetadata false` leaves the metadata stream it names in the clear
+/// ([`Error::Catalog`]); a cross-reference stream with no number left below
+/// [`NUMBERS`]; a stream's data where it was written that isn't the reading's
+/// own for its number, or with no `from`; a `from` whose source says it
+/// changed, and a copy whose bytes aren't those it was read from
+/// ([`Error::Changed`]), or aren't there to read ([`Error::Gone`],
+/// [`Error::Uncontained`]), or whose record is another reading's or another
+/// object's, or under a renumbering whose references aren't where its bytes
+/// have them ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the
+/// encryptor; and a write stopped.
 pub fn update<'a>(
     out: &mut Vec<u8>,
     base: &Base,

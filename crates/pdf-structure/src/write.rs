@@ -1103,15 +1103,14 @@ pub enum Error {
         "the file was written under a renumbering, so an update after it is given objects at its numbers, built or edited, and no reading"
     )]
     Renumbered,
-    /// A renumbering ([`Options::renumber`]) that writes another object at
-    /// the number of object `id` of the file the encryptor was read from,
-    /// an encryption dictionary or what one refers to, by the number it's
-    /// given at: at the number it gives `id`, in a whole file, which writes
-    /// the encryption dictionary again in the numbers written; at `id`'s
-    /// own, in an update, which
-    /// doesn't, so the file's `/Encrypt` names them where they are, and
-    /// whose renumbering then moves none of them, nor names one none. A
-    /// reader reads what's at their numbers in the clear (ISO 32000-2,
+    /// A renumbering ([`Options::renumber`]) that writes another object at the
+    /// number of object `id` of the file the encryptor was read from, an
+    /// encryption dictionary or what one refers to, by the number it's given
+    /// at: at the number it gives `id`, in a whole file, which writes the
+    /// encryption dictionary again in the numbers written; at `id`'s own, in an
+    /// update, which doesn't, so the file's `/Encrypt` names them where they
+    /// are, and whose renumbering then moves none of them, nor names one none.
+    /// A reader reads what's at their numbers in the clear (ISO 32000-2,
     /// 7.6.2), which another object's strings would then be.
     #[error(
         "object {0} is an encryption dictionary or what one refers to, whose number a reader reads in the clear: the renumbering writes another object there, or moves it in an update, which leaves it where it is"

@@ -23,8 +23,9 @@ thiserror = "2"
 
 [features]
 default = ["family"]
-# `family`: linearize a document of pdf-structure's. The engine and its tests build
-# without it, with no document model: an object is pdf-objects' `ObjectId`.
+# `family`: linearize a document of pdf-structure's. The engine builds without it,
+# with no document model: an object is pdf-objects' `ObjectId`. The tests take
+# pdf-structure as a dev-dependency (below), so they build it either way.
 family = ["dep:pdf-semantics", "dep:pdf-structure"]
 # `lopdf`: linearize a document of lopdf's, through its public objects alone.
 lopdf = ["dep:lopdf"]
