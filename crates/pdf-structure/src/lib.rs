@@ -2,8 +2,9 @@
 //! 32000-2, 7.5): a file's header, its cross-reference tables and streams
 //! along their `/Prev` chain, and each object at the offset they give,
 //! through pdf-objects' parser, every value, key and stream's data with
-//! where it was written. Where the sections don't read, it finds the
-//! objects by scanning the file, and says so. What it reads is a
+//! where it was written. Where a file's sections or objects aren't where
+//! it says, it reads them where the file proves they are, or scans the
+//! file for them, and says so. What it reads is a
 //! document, which a caller can build in memory too, to number new
 //! objects in, edit, walk and prune. And it writes a file of numbered
 //! objects, whole or as an incremental update, and what a file's structure
@@ -41,6 +42,13 @@
 //!   to any of pdf-objects' `fault::Sink`s ([`Source::tell_faults`]); none
 //!   looked for, at no cost, where the caller wants none
 //!   ([`Options::faults`], [`read::Faults::Off`]).
+//! - **A damaged file read where it proves it is:** a section or an object
+//!   a few bytes off is read where the file shows it is
+//!   ([`read::Recovery::Verified`], the default), each recovery a
+//!   [`Fault`] and each object read elsewhere its [`Origin`]. Or the file
+//!   is read as PDFium reads it ([`read::Recovery::Pdfium`]), for a caller
+//!   that shows it as a viewer would. The choice is
+//!   [`Options::recovery`].
 //! - **Its phases traced**, with the `tracing` feature: the open, its
 //!   sections and a scan, each object stream decoded, a whole read, an
 //!   earlier revision's open, and each write and the object streams it
@@ -60,8 +68,8 @@
 //!   [`Encoded`](pdf_crypt::Encoded)), through pdf-crypt's standard
 //!   security handler: object streams decrypted before they're decoded,
 //!   strings decrypted where they are; [`Encryption`] says whether the file
-//!   opened, and by which password. What's decrypted and what's left as
-//!   written is listed in [`read`].
+//!   opened, by which password, and how it's encrypted. What's decrypted
+//!   and what's left as written is listed in [`read`].
 //! - **A revision before an update** read as the file was then
 //!   ([`Options::section`]), or the file as a revision was written, its
 //!   bytes up to the revision's end ([`Revision::end`]) read as a file of
@@ -78,8 +86,9 @@
 //!   copied so once a reading of its file opened again takes its objects
 //!   as its own ([`Reading::adopt`]).
 //! - **Bodies written one at a time** ([`write::Parts`]), for a caller that
-//!   lays a file out itself: each at the number it gives, under the one
-//!   encryption it's given, copied where that's the key it was read under.
+//!   lays a file out itself: each at the number it gives, under the
+//!   encryption [`write::Encryptor::laid_out`] gives for those numbers,
+//!   copied where that's the key it was read under.
 //! - **Sections and object streams written** ([`write`](mod@write)): a
 //!   whole file's cross-reference section or an update's, as a table or a
 //!   stream, a whole file's stream deflated under PNG's Up predictor; and
@@ -90,7 +99,10 @@
 //!   An encrypted file's objects encrypted as pdf-objects' writer writes
 //!   them, encrypted as a reading's file is or under a new AES-256
 //!   encryption ([`write::Encryptor`]), by the same list of what's left in
-//!   the clear that the reader decrypts by ([`write::Encrypting`]).
+//!   the clear that the reader decrypts by ([`write::Encrypting`]). AES's
+//!   IVs come from the operating system, and under RC4 no new plaintext
+//!   goes under a keystream the file used, but where the encryptor is told
+//!   to reuse them, which lists each.
 //!
 //! The objects are pdf-objects' types, re-exported as [`pdf_objects`];
 //! a stream that doesn't decode cleanly says so in pdf-filters' error,

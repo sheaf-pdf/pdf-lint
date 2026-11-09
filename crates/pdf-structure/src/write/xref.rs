@@ -3,8 +3,9 @@
 //! write as free; an append's is runs of the numbers it lists, which for
 //! an update are only those it writes: an update frees nothing. Free
 //! entries are linked in a list from entry 0. Positions are written from
-//! the header: PDFium, pdf.js and qpdf count them from `%PDF-`, past any
-//! bytes a writer put before it. An object in an object stream is listed
+//! the header (ISO 32000-2, 7.5.2): this crate's reader, PDFium, pdf.js and
+//! qpdf count them from `%PDF-`, past any bytes a writer put before it. An
+//! object in an object stream is listed
 //! as its container and its place there (7.5.8.3's type 2), which only a
 //! stream can say. A full write's stream is deflated under the PNG Up
 //! predictor, as qpdf writes its own; an update's is written uncompressed.

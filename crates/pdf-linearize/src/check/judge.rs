@@ -69,6 +69,13 @@ fn number(raw: Raw) -> Option<u64> {
     }
 }
 
+/// Where `offset`, a value the file gives as an offset, which counts from
+/// the header (ISO 32000-2, 7.5.2), puts something in the file: past the
+/// header, as every position the facts give is.
+fn in_file(facts: &Facts, offset: u64) -> u64 {
+    offset.saturating_add(facts.header)
+}
+
 /// What a section's rows and a file's positions are to each other.
 struct Index {
     /// What each number is, by number: the first group's before the second's
@@ -241,6 +248,7 @@ fn placing(facts: &Facts, h: (u64, u64), index: &Index) -> (u64, u64) {
 /// [`Facts::hint_extent`](super::Facts::hint_extent).
 pub(super) fn hint_extent(facts: &Facts) -> (u64, u64) {
     let h = facts.first_object.as_ref().map_or((0, 0), h_extent);
+    let h = (in_file(facts, h.0), h.1);
     placing(facts, h, &Index::new(facts, h.0, h.1))
 }
 
@@ -279,7 +287,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let first = self.first_object;
         let from_header = first.end.saturating_sub(self.facts.header);
         if from_header > 1024 {
-            self.say(Finding::DictionaryPast1024 { end: from_header })?;
+            self.say(Finding::DictionaryPast1024 { end: first.end })?;
         }
         for (key, raw) in [
             (DictKey::H, first.h),
@@ -347,7 +355,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let read = (self.facts.objects.iter()).find(|e| e.number == number && e.start == at);
         let least = read.map_or(at.saturating_add(1), |extent| extent.end);
         let most = self.index.next_after(at).max(least);
-        if e < least || e > most {
+        let end = in_file(self.facts, e);
+        if end < least || end > most {
             self.say(Finding::FirstPageEnd {
                 e: e as i64,
                 least,
@@ -365,7 +374,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let Some((least, most)) = main.first_row else {
             return Ok(());
         };
-        if t < least || t > most {
+        let at = in_file(self.facts, t);
+        if at < least || at > most {
             self.say(Finding::MainFirstEntry {
                 t: t as i64,
                 least,
@@ -388,18 +398,21 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let Some(hint) = &self.facts.hint else {
             return self.say(Finding::HintNotListed { at: at as i64 });
         };
-        if hint.at != at {
+        if hint.at != in_file(self.facts, at) {
             return self.say(Finding::HintNotListed { at: at as i64 });
         }
+        // Each stream as `/H` says it, and where it is.
+        let overflow = items.get(2).copied().and_then(number);
         let streams = [
-            items.get(1).map(|raw| (at, hint.end, *raw)),
-            (hint.overflow).and_then(|(at, end)| Some((at, end, *items.get(3)?))),
+            items.get(1).map(|raw| (at, hint.at, hint.end, *raw)),
+            (hint.overflow.zip(overflow))
+                .and_then(|((place, end), at)| Some((at, place, end, *items.get(3)?))),
         ];
-        for (at, end, length) in streams.into_iter().flatten() {
+        for (at, place, end, length) in streams.into_iter().flatten() {
             let Raw::Integer(length) = length else {
                 continue;
             };
-            let (least, most) = hint_room(&self.index, at, end);
+            let (least, most) = hint_room(&self.index, place, end);
             if u64::try_from(length).is_ok_and(|len| len >= least && len <= most) {
                 continue;
             }
@@ -678,7 +691,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
     fn page_table(&mut self, tables: &Tables) -> Go {
         let facts = self.facts;
         let table = &tables.pages;
-        let first_page_at = u64::from(table.header.first_page_at);
+        let first_page_at = in_file(facts, u64::from(table.header.first_page_at));
         let number_of = |page: u64| {
             let page = usize::try_from(page).ok()?;
             facts.pages.get(page)?.id.map(|id| id.number)
@@ -768,10 +781,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 total: header.entries,
             })?;
         }
-        let mut at = u64::from(tables.pages.header.first_page_at);
+        let mut at = in_file(self.facts, u64::from(tables.pages.header.first_page_at));
         for (entry, group) in (0u64..).zip(&table.groups) {
             if entry == u64::from(header.first_page_entries) {
-                at = u64::from(header.first_at);
+                at = in_file(self.facts, u64::from(header.first_at));
                 let computed = self.index.placed_at(header.first_object);
                 if computed != Some(at) {
                     self.say(Finding::SharedFirstAt {
@@ -880,7 +893,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         ];
         for (table, generic) in generic {
             if let Some(g) = generic {
-                let (first, at) = (g.first_object, u64::from(g.first_at));
+                let (first, at) = (g.first_object, in_file(self.facts, u64::from(g.first_at)));
                 self.stretch(table, first, at, u64::from(g.objects), u64::from(g.length))?;
             }
         }
@@ -892,7 +905,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         for (table, extended) in extended {
             if let Some(e) = extended {
                 let g = &e.generic;
-                let (first, at) = (g.first_object, u64::from(g.first_at));
+                let (first, at) = (g.first_object, in_file(self.facts, u64::from(g.first_at)));
                 self.stretch(table, first, at, u64::from(g.objects), u64::from(g.length))?;
                 for &id in &e.shared {
                     if id >= entries {
@@ -905,9 +918,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             let h = &thumbnails.header;
             let objects: u64 = thumbnails.pages.iter().map(|page| page.objects).sum();
             let length: u64 = thumbnails.pages.iter().map(|page| page.length).sum();
-            self.stretch("/T", h.first_object, u64::from(h.first_at), objects, length)?;
+            let at = in_file(self.facts, u64::from(h.first_at));
+            self.stretch("/T", h.first_object, at, objects, length)?;
             let shared = u64::from(h.shared_objects);
-            let at = u64::from(h.shared_first_at);
+            let at = in_file(self.facts, u64::from(h.shared_first_at));
             let long = u64::from(h.shared_length);
             self.stretch("/T", h.shared_first_object, at, shared, long)?;
             let gaps = thumbnails.pages.iter().map(|page| u64::from(page.gap));
@@ -918,7 +932,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             }
         }
         if let Some(files) = &tables.files {
-            let mut at = u64::from(files.header.first_at);
+            let mut at = in_file(self.facts, u64::from(files.header.first_at));
             for (group, entry) in (0u64..).zip(&files.groups) {
                 let first = match group {
                     0 => files.header.first_object,
@@ -991,7 +1005,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let count = table.pages.len() as u64;
         let first = self.first_page.min(count.saturating_sub(1));
         let starts = self.page_starts(tables);
-        let shared_at = shared_starts(tables, &self.index);
+        let shared_at = shared_starts(tables, &self.index, self.facts);
         let entry_of = |at: u64| {
             let after = shared_at.partition_point(|&(start, _, _)| start <= at);
             (after > 0)
@@ -1043,7 +1057,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let count = table.pages.len() as u64;
         let mut starts = vec![0; table.pages.len()];
         let first = self.first_page.min(count.saturating_sub(1));
-        let mut at = u64::from(table.header.first_page_at);
+        let mut at = in_file(self.facts, u64::from(table.header.first_page_at));
         for page in page_order(first, count) {
             let page = page as usize;
             let own = (self.facts.pages.get(page))
@@ -1066,16 +1080,17 @@ fn page_order(first: u64, count: u64) -> impl Iterator<Item = u64> {
 }
 
 /// Where each entry of the shared object table starts and how long it is, in
-/// order of where it starts, with which it is. A wrong first place is the
-/// shared table's to say: from there on they're from where the first shared
-/// object is, as it holds them.
-fn shared_starts(tables: &Tables, index: &Index) -> Vec<(u64, u64, u64)> {
+/// order of where it starts, with which it is, in the file `facts` are of. A
+/// wrong first place is the shared table's to say: from there on they're from
+/// where the first shared object is, as it holds them.
+fn shared_starts(tables: &Tables, index: &Index, facts: &Facts) -> Vec<(u64, u64, u64)> {
     let header = &tables.shared.header;
-    let mut at = u64::from(tables.pages.header.first_page_at);
+    let mut at = in_file(facts, u64::from(tables.pages.header.first_page_at));
     let mut starts = Vec::with_capacity(tables.shared.groups.len());
     for (entry, group) in (0u64..).zip(&tables.shared.groups) {
         if entry == u64::from(header.first_page_entries) {
-            at = (index.placed_at(header.first_object)).unwrap_or(u64::from(header.first_at));
+            let first_at = in_file(facts, u64::from(header.first_at));
+            at = (index.placed_at(header.first_object)).unwrap_or(first_at);
         }
         starts.push((at, group.length, entry));
         at = at.saturating_add(group.length);
@@ -1180,6 +1195,7 @@ pub(super) fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut
         return verdict(false);
     }
     let h = h_extent(first);
+    let h = (in_file(facts, h.0), h.1);
     let mut index = Index::new(facts, h.0, h.1);
     // A wrong /H is said once: what's as if the hint stream weren't there goes
     // by the stream that's there, so it isn't said again of everything after

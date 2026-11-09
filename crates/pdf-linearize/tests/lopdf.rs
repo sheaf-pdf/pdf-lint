@@ -5,7 +5,6 @@
 
 #![cfg(all(feature = "lopdf", feature = "family"))]
 
-use chacha20::ChaCha20Rng;
 use lopdf::{Document, Object as LopdfObject, dictionary};
 use pdf_linearize::family::{self, Options};
 use pdf_linearize::lopdf::{self as adapter, Error, PageTree};
@@ -15,7 +14,6 @@ use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_structure::Source as _;
 use pdf_structure::pdf_crypt::Password;
 use pdf_structure::pdf_crypt::Protection;
-use pdf_structure::pdf_crypt::rand_core::SeedableRng;
 use pdf_structure::read::{self, Reading};
 use pdf_structure::write::{self, Encryptor};
 
@@ -1151,11 +1149,7 @@ fn a_file_lopdf_didn_t_open_is_refused() {
     let reading = Reading::open(&plain[..], &read::Options::DEFAULT).unwrap();
     let doc = reading.to_document().unwrap();
     let prepared = Password("user").prepared().unwrap();
-    let new = Encryptor::create(
-        &Protection::new(&prepared),
-        &mut ChaCha20Rng::seed_from_u64(1),
-    )
-    .unwrap();
+    let new = Encryptor::create(&Protection::new(&prepared)).unwrap();
     let mut encrypted = Vec::new();
     let options = write::Options::DEFAULT;
     write::document(&mut encrypted, &doc, Some(&new), Some(&reading), &options).unwrap();

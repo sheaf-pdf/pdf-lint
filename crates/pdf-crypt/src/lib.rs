@@ -11,6 +11,7 @@
 //! - **Every revision of the standard handler:** 2 to 4 (RC4, and AES-128
 //!   in version 4), 5 (Adobe's Extension Level 3, AES-256) and 6 (ISO
 //!   32000-2, AES-256), the owner's password or the user's.
+//!   [`Handler::revision`] says which a file is.
 //! - **A password as typed, and the bytes tried:** a [`Password`]'s text
 //!   [`encodings`](Password::encodings) are its SASLprep form (RFC 4013)
 //!   as of Unicode 3.2, and by a later Unicode where that's another, and
@@ -25,9 +26,8 @@
 //!   as a [`Protection`] says: an open password (the user's), a
 //!   permissions password (the owner's) or both, each prepared, and what
 //!   one who opens it by the open password may do. Its key and salts are
-//!   drawn from a random number generator the caller passes
-//!   ([`rand_core`]'s `CryptoRng`, re-exported so that a caller names the
-//!   version it takes): pdf-crypt has no randomness of its own.
+//!   drawn from the operating system's random number generator
+//!   (getrandom's).
 //! - **Permissions, said:** a [`Permissions`] set of the eight `/P` has a
 //!   bit for, a security dialog's levels of printing and of changes
 //!   reachable from it ([`Printing`], [`Changes`]), written as a new
@@ -39,14 +39,19 @@
 //!   isn't, a crypt filter's method that isn't one, AES that the file's key
 //!   isn't for, `/Perms` that doesn't match or doesn't confirm the key.
 //! - **Encrypting for a writer:** [`Handler::encrypt_string`] and
-//!   [`Handler::encrypt_stream`] encrypt as the handler decrypts, AES's IV
-//!   derived from the data and what the caller names its object by, so
-//!   the same object encrypts the same on every save and no IV serves two
-//!   plaintexts. RC4 takes no IV; a method that isn't one is refused.
+//!   [`Handler::encrypt_stream`] encrypt as the handler decrypts. AES's IV
+//!   is the next of a write's [`Ivs`], 16 bytes from the operating system,
+//!   so equal plaintexts encrypt apart and no IV holds anything of the key.
+//!   RC4 takes no IV. A method that isn't one is refused. So is a draw the
+//!   operating system fails ([`Random`]), and nothing is written in the
+//!   clear in its place.
 //! - **Keys kept in, and wiped:** a [`Handler`] decrypts and encrypts with
 //!   the file's key and each object's, and gives out neither, its `Debug`
 //!   included. Each is wiped when it's dropped (RustCrypto's `zeroize`), as
 //!   is every buffer a password or a key passes through on the way to one.
+//!   Whether two handlers have one key is told by a check of it
+//!   ([`KeyCheck`], [`Handler::has_key`]), compared in constant time, which
+//!   gives nothing of the key.
 //! - **RustCrypto's primitives:** MD5 (`md-5`), SHA-256, SHA-384 and
 //!   SHA-512 (`sha2`), HMAC-SHA256 (`hmac`), RC4 (`rc4`), and AES-128 and
 //!   AES-256 (`aes`, in CBC by `cbc`), each built to wipe its own state.
@@ -56,23 +61,20 @@
 //! dictionary's own, a cross-reference stream, a signature's `/Contents`,
 //! is the caller's to know: pdf-structure's reader decrypts by one list of
 //! it, and its writer encrypts by the same. Under RC4 a changed object
-//! written again at its number and generation leaks what changed
-//! ([`Method::Rc4`]).
+//! written again at a number and generation the file used leaks what
+//! changed ([`Method::Rc4`]).
 //!
-//! The `writer` feature, off by default, writes an encryption dictionary of
-//! every revision and encrypts under IVs given, its salts and keys given
-//! too: for test files, not for protecting a document. docs.rs documents
-//! the crate without it.
+//! The `insecure-test-writer` feature, off by default, is for writing test
+//! files: an encryption dictionary of every revision, its salts and keys
+//! given, strings and streams encrypted under IVs given or derived, and a
+//! new file's key and salts drawn from a generator given. It's never for
+//! protecting a document, and its items are hidden from these docs.
 //!
 //! A new file's encryption under an open password and a permissions
-//! password, from a seeded generator (RustCrypto's `chacha20`, with its
-//! `rng` feature) where a program would pass the operating system's, and
-//! the file opened by each:
+//! password, and the file opened by each:
 //!
 //! ```
-//! use chacha20::ChaCha20Rng;
-//! use pdf_crypt::rand_core::SeedableRng;
-//! use pdf_crypt::{Changes, Encoding, Handler, Password, Permissions, Printing, Protection, Refused};
+//! use pdf_crypt::{Changes, Encoding, Handler, Ivs, Password, Permissions, Printing, Protection, Refused};
 //!
 //! // The two passwords prepared: the open password, and the permissions
 //! // password, Ⅸ, whose SASLprep form is `IX`.
@@ -86,14 +88,15 @@
 //! let mut protection = Protection::new(&user);
 //! protection.owner = Some(&owner);
 //! protection.permissions = Permissions::from(Printing::Low) | Permissions::from(Changes::FillForms);
-//! let mut rng = ChaCha20Rng::seed_from_u64(7);
-//! let (writer, dictionary) = Handler::create(&protection, &mut rng).unwrap();
+//! let (writer, dictionary) = Handler::create(&protection).unwrap();
 //! assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-2108)));
 //!
-//! // A writer encrypts a string of object 5 under it, AES's IV derived from
-//! // what it names the object by and the string: the same each time.
-//! let title = writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap();
-//! assert_eq!(writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap(), title);
+//! // A writer encrypts a string of object 5 under it, AES's IV the next of
+//! // the write's, from the operating system: the same string encrypts apart
+//! // each time.
+//! let ivs = Ivs::new();
+//! let title = writer.encrypt_string((5, 0), b"A title", &ivs).unwrap();
+//! assert_ne!(writer.encrypt_string((5, 0), b"A title", &ivs).unwrap(), title);
 //!
 //! // A reader opens it by the open password as the user's (revision 6 takes
 //! // no /ID), with those permissions and bit 10, which revision 6 always
@@ -123,23 +126,32 @@ mod aes;
 pub mod fuzz;
 mod handler;
 mod hmac;
+mod ivs;
 mod md5;
 mod password;
 mod permissions;
+mod random;
 mod rc4;
 mod sha2;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod vectors;
-#[cfg(any(test, feature = "writer"))]
+#[cfg(any(test, feature = "insecure-test-writer"))]
+#[doc(hidden)]
 pub mod writer;
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
-pub use handler::{Handler, Method, Protection};
-pub use password::{Encoded, Encoding, Password, Unusable};
+pub use handler::{Handler, KeyCheck, Method, Protection};
+pub use ivs::Ivs;
+pub use password::{Encoded, Encoding, Password, Prohibition, Unusable};
 pub use permissions::{Changes, Permissions, Printing};
+/// rand_core, the version the test writer's generator form of
+/// [`Handler::create`] takes, with `insecure-test-writer` alone.
+#[cfg(any(test, feature = "insecure-test-writer"))]
+#[doc(hidden)]
 pub use rand_core;
 
 /// An encryption dictionary's values, as the standard security handler
@@ -239,7 +251,8 @@ pub enum Refused {
 /// Each variant's fields are the whole of what it says (a length, a count,
 /// a name), so outside the crate one is built by a literal, as a test
 /// compares with it, and matched without `..`; a fault found that says
-/// more joins as a variant of its own.
+/// more joins as a variant of its own. [`Fault::Random`]'s [`Random`] is
+/// pdf-crypt's to make, and matched as `Fault::Random(_)`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
@@ -291,6 +304,29 @@ pub enum Fault {
     /// one `/Perms` confirms, but what it decrypts may not be plaintext.
     #[error("its /Perms doesn't confirm the key its /OE or /UE unwraps to")]
     Unconfirmed,
+    /// The operating system's random number generator failed, so AES had no
+    /// IV ([`Ivs`]): nothing is encrypted, and nothing is given as
+    /// plaintext in its place.
+    #[error("{0}")]
+    Random(Random),
+}
+
+/// The operating system's random number generator failed, and why, in
+/// getrandom's words: no IV was drawn ([`Fault::Random`]), or no new file's
+/// key and salts ([`Unusable::Random`]). A build for wasm32-unknown-unknown
+/// has no generator unless it picks getrandom's backend, and every draw
+/// fails so.
+///
+/// Only pdf-crypt makes one. Two are equal where getrandom's errors are, and
+/// hashed by the operating system's error code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the operating system's random number generator failed: {0}")]
+pub struct Random(pub(crate) getrandom::Error);
+
+impl Hash for Random {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.raw_os_error().hash(state);
+    }
 }
 
 /// Ciphertext that didn't decrypt cleanly: what decrypted, if anything,
@@ -336,7 +372,7 @@ impl fmt::Debug for Length {
     }
 }
 
-/// The README's examples, run as doctests.
-#[cfg(all(doctest, feature = "writer"))]
+/// The README's example, run as a doctest.
+#[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;

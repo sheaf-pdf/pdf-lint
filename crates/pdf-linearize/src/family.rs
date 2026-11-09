@@ -59,12 +59,13 @@
 //! 1 without a gap (F.3.1), so what [`Encryptor::of`] says of a file's free
 //! numbers can't hold here: none is listed, and an object may be written at
 //! one. Every object moves, so under RC4 every number's keystream now encrypts
-//! another object's plaintext. One who holds both the file read and this one
-//! has, for each number, the XOR of the two plaintexts
+//! another object's plaintext, as pdf-structure's writer writes only told to
+//! ([`Encryptor::reusing_rc4_keystreams`]). One who holds both the file read
+//! and this one has, for each number, the XOR of the two plaintexts
 //! ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). AES-128's IVs are
-//! made from the data and the number, so nothing leaks that way. A caller who
-//! doesn't want that gives [`Encryptor::create`] a new password, whose key is
-//! new.
+//! random, each write's own from the operating system, so nothing leaks that
+//! way. A caller who doesn't want that gives [`Encryptor::create`] a new
+//! password, whose key is new.
 //!
 //! # Where everything goes
 //!
@@ -125,7 +126,7 @@ pub struct Options<'a> {
     pub deflate: Deflate,
     /// How many threads object streams are built on, at most: 0, the default,
     /// for as many as the machine runs at once, up to 8. Built on any number,
-    /// they're the same bytes.
+    /// they're the same objects, and in the clear the same bytes.
     pub threads: usize,
     /// The version the header says: by default the document's, at least 1.5
     /// where a stream lists the file (7.5.8); given, it's written as given.
@@ -176,10 +177,10 @@ impl Default for Options<'_> {
 #[non_exhaustive]
 pub struct Linearized {
     /// The trailer's `/ID`, when it has one: the first string the encryptor's,
-    /// else the document's, the second XXH3-128 of the bodies in file order, so
-    /// the same document writes the same bytes. A document with no first string
-    /// has none, but written under a new encryption: that has the hash for
-    /// both.
+    /// else the document's, the second the first 16 bytes of SHA-256 of the
+    /// bodies in file order, so in the clear the same document writes the same
+    /// bytes. A document with no first string has none, but written under a new
+    /// encryption: that has the hash for both.
     pub id: Option<[Vec<u8>; 2]>,
     /// What's around the bodies, and where everything is, counted from the
     /// file's first byte.
@@ -409,7 +410,7 @@ fn file(
     let (plan, containers) = loop {
         let plan = plan(&graph, &options.limits).map_err(Error::Plan)?;
         lap("plan");
-        let built = writing.under(&plan, |parts, _, _| {
+        let built = writing.under(&plan, |parts, _| {
             containers(&prepared, &plan, parts, options)
         })?;
         let before = alone.len();
@@ -423,21 +424,25 @@ fn file(
         }
         graph = prepared.graph(kind, pack, &alone);
     };
-    writing.under(&plan, |parts, now, encrypting| {
-        let lengths = bodies(out, &prepared, &plan, containers, parts, now, options)?;
+    writing.under(&plan, |parts, encrypting| {
+        let lengths = bodies(
+            out, &prepared, &plan, containers, parts, encrypting, options,
+        )?;
         lap("bodies");
 
         let given = doc.trailer().dict();
-        let kept = now.and_then(Encryptor::first_id).map(<[u8]>::to_vec);
+        let kept = encrypting
+            .and_then(Encrypting::first_id)
+            .map(<[u8]>::to_vec);
         let kept = kept.or_else(|| write::first_id(given));
-        let id = write::file_id(kept, now.is_some(), &out[start..]);
+        let id = write::file_id(kept, encrypting.is_some(), &out[start..]);
         let to = |id: ObjectId| plan.number(id);
         let mut trailer = write::trailer_entries(given, &to);
         trailer.remove(b"Root");
-        if let Some(encryptor) = now {
-            match prepared.dictionary().and_then(|id| plan.number(id)) {
+        if let Some(encrypting) = encrypting {
+            match encrypting.at() {
                 Some(at) => trailer.set("Encrypt", Object::from(at)),
-                None => trailer.set("Encrypt", encryptor.dictionary().clone()),
+                None => trailer.set("Encrypt", encrypting.dictionary().clone()),
             }
         }
         if let Some(id) = &id {
@@ -475,29 +480,32 @@ struct Writing<'w, 'd> {
 
 impl Writing<'_, '_> {
     /// `then`, given what writes bodies at `plan`'s numbers, and the encryption
-    /// in those numbers, as a whole file has it, where there's one: its
-    /// dictionary at the number planned for it, and what's encrypted under each
-    /// object's.
+    /// in those numbers, as a whole file has it, where there's one
+    /// ([`Encryptor::laid_out`]): its dictionary at the number planned for it,
+    /// and what's encrypted under each object's.
     fn under<R>(
         &self,
         plan: &Plan,
-        then: impl FnOnce(&Parts<'_>, Option<&Encryptor>, Option<&Encrypting<'_>>) -> Result<R, Error>,
+        then: impl FnOnce(&Parts<'_>, Option<&Encrypting<'_>>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let to = |id: ObjectId| plan.number(id);
-        let renumbered = self.encryptor.map(|encryptor| encryptor.renumbered(&to));
         let at = self.prepared.dictionary().and_then(|id| plan.number(id));
-        let whole = renumbered.as_deref().map(|encryptor| encryptor.whole(at));
-        let now = whole.as_deref();
         // In the numbers objects are held at, as they're asked of it.
         let doc = self.doc;
         let trailer = doc.trailer().dict();
-        let encrypting = now
-            .map(|encryptor| encryptor.encrypting_renumbered(trailer, &doc, &to))
+        // Under RC4 every number's keystream is reused, as the module says,
+        // which pdf-structure refuses unless it's told so.
+        let reusing = (self.encryptor).map(|e| e.clone().reusing_rc4_keystreams());
+        let encrypting = (reusing.as_ref())
+            .map(|encryptor| encryptor.laid_out(Some(&to), at, trailer, &doc))
             .transpose()
             .map_err(Error::Write)?;
-        let encrypting = encrypting.as_ref();
-        let parts = Parts::new(encrypting, self.from, Some(&to)).map_err(Error::Write)?;
-        then(&parts, now, encrypting)
+        let parts = match &encrypting {
+            Some(encrypting) => Parts::new(encrypting, self.from),
+            None => Parts::plain(self.from, Some(&to)),
+        };
+        let parts = parts.map_err(Error::Write)?;
+        then(&parts, encrypting.as_ref())
     }
 }
 
@@ -525,7 +533,7 @@ fn containers(
 }
 
 /// Each of `plan`'s writes, in file order, at the end of `out`: their lengths.
-/// The encryption dictionary is written from `encryptor`, in the numbers
+/// The encryption dictionary is written as `encrypting` has it, in the numbers
 /// written, and in the clear (7.6.2).
 fn bodies(
     out: &mut Vec<u8>,
@@ -533,7 +541,7 @@ fn bodies(
     plan: &Plan,
     mut containers: Vec<Option<Vec<u8>>>,
     parts: &Parts<'_>,
-    encryptor: Option<&Encryptor>,
+    encrypting: Option<&Encrypting<'_>>,
     options: &Options<'_>,
 ) -> Result<Vec<u64>, Error> {
     let mut lengths = Vec::with_capacity(plan.writes().len());
@@ -546,9 +554,9 @@ fn bodies(
         }
         let at = out.len();
         match write.what {
-            What::Object(id) => match encryptor.filter(|_| prepared.dictionary() == Some(id)) {
-                Some(encryptor) => {
-                    let dictionary = Object::from(encryptor.dictionary().clone());
+            What::Object(id) => match encrypting.filter(|_| prepared.dictionary() == Some(id)) {
+                Some(encrypting) => {
+                    let dictionary = Object::from(encrypting.dictionary().clone());
                     serialize::indirect(out, ObjectId::new(write.number, 0), &dictionary)
                         .map_err(|why| Error::Write(write::Error::Serialize(why)))?;
                 }

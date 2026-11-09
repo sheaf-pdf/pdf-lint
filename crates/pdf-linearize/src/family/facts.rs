@@ -118,14 +118,17 @@ fn end_of<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<Option<u6
     }
 }
 
-/// The primary hint stream, by what's listed at `/H`'s first offset.
+/// The primary hint stream, by what's listed at `/H`'s first offset, which
+/// counts from the header (ISO 32000-2, 7.5.2), so is `header` bytes into the
+/// file past where it says, as the rows' offsets are.
 fn hint<S: ByteSource>(
     reading: &Reading<S>,
     items: &[Raw],
     sections: &[SectionRows],
+    header: u64,
 ) -> Result<Option<HintFacts>, Error> {
     let offset = |raw: Option<&Raw>| match raw {
-        Some(&Raw::Integer(at)) => u64::try_from(at).ok(),
+        Some(&Raw::Integer(at)) => u64::try_from(at).ok().map(|at| at.saturating_add(header)),
         _ => None,
     };
     let Some(at) = offset(items.first()) else {
@@ -288,7 +291,7 @@ fn facts_of<S: ByteSource>(
     facts.first = listed.next().map(section);
     facts.main = listed.next().map(section);
     let items = facts.first_object.as_ref().map_or(&[][..], |f| &f.h_items);
-    facts.hint = hint(reading, items, &read)?;
+    facts.hint = hint(reading, items, &read, facts.header)?;
     let (pages, nodes) = page_tree(reading, limits);
     facts.pages = pages;
     facts.nodes = nodes;
@@ -467,7 +470,9 @@ mod tests {
         let reading = Reading::open(&file[..], &Open::DEFAULT).unwrap();
         let read = reading.sections().unwrap().sections;
         let items = [Raw::Integer(at as i64), Raw::Integer(0)];
-        let hint = hint(&reading, &items, &read).unwrap().expect("it's listed");
+        let hint = hint(&reading, &items, &read, 0)
+            .unwrap()
+            .expect("it's listed");
         assert_eq!(hint.at, at);
         assert_eq!(hint.number, 2);
         assert_eq!(hint.end, end);
@@ -490,7 +495,9 @@ mod tests {
             Raw::Integer(at),
             Raw::Integer(0),
         ];
-        let hint = hint(&reading, &items, &read).unwrap().expect("it's listed");
+        let hint = hint(&reading, &items, &read, 0)
+            .unwrap()
+            .expect("it's listed");
         assert_eq!(hint.data, HintData::Decoded(b"abab".to_vec()));
         assert!(hint.overflow.is_some());
     }

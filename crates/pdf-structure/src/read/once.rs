@@ -4,11 +4,18 @@
 //! the objects the scan reads; a stream's read, of its indirect `/Length`)
 //! is said where the object's own read says it, in its place in the whole
 //! read's order; and by a reading that hasn't read the object, once, where
-//! it was told.
+//! it was told. What the open reads of a stream whose `/Length` is a
+//! reference it can't follow yet, its own read reads alike.
 
 use pdf_fixtures::fixture;
 use pdf_objects::dict;
 
+use super::lengths::{
+    a_cross_reference_streams_length_by_reference,
+    a_cross_reference_streams_length_in_an_object_stream, alike,
+    an_encryption_dictionarys_stream_with_its_length_in_an_object_stream, data, no_length, scanned,
+    unfollowed,
+};
 use super::tests::{KINDS, encryption_updated, root, settings, to_encrypt};
 use super::*;
 
@@ -317,4 +324,63 @@ fn an_object_of_many_faults_read_on_the_way_is_said_once_each() {
     assert_eq!(doc.faults(), whole, "read whole");
     reading.get(ObjectId::new(3, 0)).unwrap();
     assert_eq!(reading.faults(), whole, "read on demand");
+}
+
+/// What the open reads before it lists an object, or has the handler that
+/// decrypts an object stream, a stream whose `/Length` is a reference
+/// among it, is read alike by the object's own read: a cross-reference
+/// stream's rows, its `/Length` in an object stream or at an offset, and
+/// what an encryption dictionary refers to, its `/Length` in an object
+/// stream. So the fault that its `/Length` doesn't read, or in a
+/// cross-reference stream that it's a reference, which isn't followed, is
+/// said once, where its own read says it: told as the file opens, and by
+/// the object's read alike, its data found by `endstream` either way.
+#[test]
+fn what_the_open_reads_of_a_length_in_an_object_stream_its_own_read_reads_alike() {
+    let cases = [
+        (
+            "a cross-reference stream",
+            a_cross_reference_streams_length_in_an_object_stream(),
+            7,
+        ),
+        (
+            "a cross-reference stream, its /Length at an offset",
+            a_cross_reference_streams_length_by_reference(),
+            6,
+        ),
+        (
+            "what an encryption dictionary refers to",
+            an_encryption_dictionarys_stream_with_its_length_in_an_object_stream(),
+            9,
+        ),
+    ];
+    for (what, file, n) in cases {
+        let doc = alike(&file, &[]);
+        let id = ObjectId::new(n, 0);
+        // A cross-reference stream's reference is followed by no read, and
+        // its data holds no `endstream`; the other's data is [`CONTENT`].
+        let (fault, expected) = match n {
+            6 | 7 => (unfollowed(&doc, n), vec![unfollowed(&doc, n)]),
+            _ => (no_length(&doc, n), scanned(&doc, n).to_vec()),
+        };
+        let told: Vec<_> = (doc.faults().iter())
+            .filter(|(place, _)| place.object == Some(id))
+            .cloned()
+            .collect();
+        assert_eq!(told, expected, "{what}");
+        assert!(!data(&doc, &file, n).1, "{what}: by endstream");
+        // The open tells it; the object's own read, read alone, reads as
+        // the open did, and tells it too, so it's said once.
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let opened = reading.faults();
+        assert!(opened.contains(&fault), "{what}: {opened:?}");
+        reading.get(id).unwrap();
+        assert!(
+            !reading.record(id).unwrap().data.unwrap().declared,
+            "{what}"
+        );
+        let said = reading.faults().into_iter().filter(|told| *told == fault);
+        assert_eq!(said.count(), 1, "{what}");
+        assert_eq!(reading.into_document().unwrap(), doc, "{what}");
+    }
 }

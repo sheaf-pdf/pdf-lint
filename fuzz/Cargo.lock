@@ -400,10 +400,11 @@ dependencies = [
 
 [[package]]
 name = "pdf-crypt"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aes",
  "cbc",
+ "getrandom",
  "hmac",
  "md-5",
  "rand_core",
@@ -492,8 +493,8 @@ dependencies = [
  "pdf-objects",
  "pdf-tokenizer",
  "same-file",
+ "sha2",
  "thiserror",
- "twox-hash",
 ]
 
 [[package]]

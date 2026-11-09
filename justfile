@@ -27,7 +27,7 @@ fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 pdfium_build := "8125"
 
 # The crates' PDFium cases, each a crate's tests/pdfium.
-pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-fonts/tests/pdfium crates/pdf-linearize/tests/pdfium"
+pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-structure/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-fonts/tests/pdfium crates/pdf-linearize/tests/pdfium"
 
 # List the recipes.
 default:
@@ -197,10 +197,14 @@ fixtures: _qpdf
 # so that what only they compile, the fuzz modules, can't break unseen; and
 # lint the libraries so with no feature, as a crate that depends on one and
 # fuzzes itself builds them, pdf-lint's among them: the seeds that use the
-# tests' file writer are compiled for the tests alone.
+# tests' file writer are compiled for the tests alone. Then pdf-crypt,
+# pdf-structure and pdf-linearize alone, without the test writer, which
+# pdf-fixtures turns on in every workspace build: what of their fuzz bodies
+# needs it is compiled with it alone.
 fuzzing:
     RUSTFLAGS="--cfg fuzzing" cargo check --locked --manifest-path fuzz/Cargo.toml --target-dir target/fuzzing
     RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --lib --target-dir target/fuzzing -- -D warnings
+    RUSTFLAGS="--cfg fuzzing" cargo clippy --locked -p pdf-crypt -p pdf-structure -p pdf-linearize --lib --target-dir target/fuzzing -- -D warnings
 
 # Build the API docs, failing on warnings: with every feature on, then
 # as they're published, then pdf-content-streams without `image-ends`,
@@ -242,12 +246,14 @@ dist:
 # position are code of its own, and whose file identity is same-file's,
 # through winapi-util: the only build of that code; and its library for a
 # target whose `usize` is 32 bits and which has no files
-# (wasm32-unknown-unknown). Both targets must be installed (`rustup target
-# add x86_64-pc-windows-gnu wasm32-unknown-unknown`); every other recipe
-# builds for this platform alone.
+# (wasm32-unknown-unknown), where getrandom has no generator unless a build
+# picks one: its `unsupported` backend, which refuses every draw at run
+# time. Both targets must be installed (`rustup target add
+# x86_64-pc-windows-gnu wasm32-unknown-unknown`); every other recipe builds
+# for this platform alone.
 structure-cross:
     cargo clippy --locked -p pdf-structure --all-targets --target x86_64-pc-windows-gnu -- -D warnings
-    cargo clippy --locked -p pdf-structure --lib --target wasm32-unknown-unknown -- -D warnings
+    RUSTFLAGS='--cfg getrandom_backend="unsupported"' cargo clippy --locked -p pdf-structure --lib --target wasm32-unknown-unknown -- -D warnings
 
 # Build the tokenizer for a target without std, which must be installed
 # (`rustup target add thumbv6m-none-eabi`).
@@ -314,10 +320,9 @@ crypt-package: (_package "pdf-crypt")
 # version it names isn't published; `_package` says what's checked.
 color-package: (_package "pdf-color" "pdf-objects")
 
-# Package pdf-structure as a publish would; `_package` says what's checked.
-# Every crate of the family it depends on is on crates.io at the version it
-# names, so the package is verified against those.
-structure-package: (_package "pdf-structure")
+# Package pdf-structure as a publish would, pdf-crypt beside it while the
+# version it names isn't published; `_package` says what's checked.
+structure-package: (_package "pdf-structure" "pdf-crypt")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs

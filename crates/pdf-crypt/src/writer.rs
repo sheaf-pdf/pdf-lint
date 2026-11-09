@@ -1,7 +1,9 @@
 //! Encrypting as the handler decrypts, to write files to test a reader
 //! with: an encryption dictionary for a user's and an owner's password,
 //! and strings and streams encrypted under it. Its salts, keys and IVs are
-//! given, not random or derived, so it's no way to protect a document.
+//! given, not random, so it's no way to protect a document: the feature
+//! that has it is `insecure-test-writer`, and every item of it is hidden
+//! from the docs.
 
 use std::fmt;
 
@@ -10,12 +12,13 @@ use zeroize::Zeroizing;
 use crate::handler::{File, Handler, Method, seal, xored};
 use crate::rc4::rc4;
 use crate::sha2::sha256;
-use crate::{CryptFilter, Dictionary, Fault};
+use crate::{CryptFilter, Dictionary, Fault, Protection, Unusable};
 
 /// The kind of encryption to write.
 ///
 /// `#[non_exhaustive]`, as a kind may join it in a minor release: RC4 at
 /// another key length, or by a crypt filter of `/V` 4, say.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Kind {
@@ -38,6 +41,7 @@ pub enum Kind {
 /// Exhaustive on purpose: settings are built by a literal, each field
 /// public, where a test writes a file, so a field more would be a breaking
 /// release.
+#[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Settings<'a> {
     /// The kind.
@@ -68,6 +72,7 @@ impl fmt::Debug for Settings<'_> {
 }
 
 /// The encryption dictionary `settings` describe.
+#[doc(hidden)]
 #[must_use]
 pub fn dictionary(settings: &Settings) -> Dictionary {
     let Settings {
@@ -137,31 +142,33 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
 }
 
 /// String `data` of object `id` encrypted by `handler`, AES's from `iv`,
-/// in place of the IV [`Handler::encrypt_string`] derives.
+/// in place of the IV [`Handler::encrypt_string`] draws.
 ///
 /// # Errors
 ///
 /// [`Fault::Method`], when strings are encrypted by a method that isn't
 /// one, and [`Fault::Key`], when by AES that the file's key isn't for, as
 /// [`Handler::encrypt_string`] gives them.
+#[doc(hidden)]
 pub fn encrypt_string(
     handler: &Handler,
     id: (u32, u16),
     data: &[u8],
     iv: [u8; 16],
 ) -> Result<Vec<u8>, Fault> {
-    handler.encrypt(handler.strings(), id, data, || iv)
+    handler.encrypt(handler.strings(), id, data, || Ok(iv))
 }
 
 /// Stream `id`'s `data` encrypted by `handler`, by `crypt` when it names
 /// the stream's own crypt filter's method, AES's from `iv`, in place of the
-/// IV [`Handler::encrypt_stream`] derives.
+/// IV [`Handler::encrypt_stream`] draws.
 ///
 /// # Errors
 ///
 /// [`Fault::Method`], when the stream's method isn't one, and
 /// [`Fault::Key`], when it's AES that the file's key isn't for, as
 /// [`Handler::encrypt_stream`] gives them.
+#[doc(hidden)]
 pub fn encrypt_stream(
     handler: &Handler,
     id: (u32, u16),
@@ -169,5 +176,25 @@ pub fn encrypt_stream(
     crypt: Option<&Method>,
     iv: [u8; 16],
 ) -> Result<Vec<u8>, Fault> {
-    handler.encrypt(crypt.unwrap_or(handler.streams()), id, data, || iv)
+    handler.encrypt(crypt.unwrap_or(handler.streams()), id, data, || Ok(iv))
+}
+
+/// [`Handler::create`], what it draws drawn from `rng` in its order (the
+/// file's key, the four salts, `/Perms`' 4 bytes), in place of the
+/// operating system: for a test that pins a new file's bytes, with a
+/// seeded generator, the same draws giving the same dictionary. Never for
+/// a document's protection, whose key is then as guessable as `rng`'s seed.
+///
+/// # Errors
+///
+/// [`Unusable`], as [`Handler::create`] refuses, nothing drawn.
+#[doc(hidden)]
+pub fn create(
+    protection: &Protection,
+    rng: &mut (impl rand_core::CryptoRng + ?Sized),
+) -> Result<(Handler, Dictionary), Unusable> {
+    Handler::create_from(protection, &mut |buf| {
+        rng.fill_bytes(buf);
+        Ok(())
+    })
 }

@@ -8,22 +8,24 @@
 //! encrypted once, as a stream, under its own number. An object as read is
 //! copied where the rules for a copy hold ([`Body::Read`]). Under a
 //! renumbering, each object is written at the number it gives, and each
-//! reference as it names it, a copy's in place.
+//! reference as it names it, a copy's in place. Under RC4, what's written
+//! anew at a keystream the file read used is moved to its number's next
+//! generation, a renumbering of the writer's own under the caller's.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
-use pdf_objects::serialize;
+use pdf_objects::serialize::{self, Renumber};
 
 use super::copy::{Copying, Member};
-use super::crypt::Place;
+use super::crypt::{Guard, Place};
 use super::{
     Base, Body, Deflate, Encrypting, Encryptor, Entry, Error, Given, MEMBERS, NUMBERS, Numbering,
     Options, Pack, Packed, Parts, ReadFrom, Section, Written, bodies as read, checked,
-    container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped,
-    trailer_entries, usable,
+    container as objstm, dangling, direct_info, file_id, first_id, fresh, id_value, packable,
+    stopped, trailer_entries, usable,
 };
 use crate::phases::phase;
 use crate::source::{Document, XrefKind};
@@ -41,13 +43,18 @@ use crate::source::{Document, XrefKind};
 ///   stream's dictionary's own, `/Encrypt` and `/ID`), then `/Encrypt`
 ///   and `/ID`. Its values are written as they are, never encrypted, as a
 ///   trailer isn't an object (ISO 32000-2, 7.6.2), and a reader reads
-///   them as written: a direct `/Info` dictionary's strings are in the
-///   clear in an encrypted file.
+///   them as written. So in an encrypted file a direct `/Info`, whose
+///   strings would be in the clear there, is written as an object, after
+///   the encryption dictionary, at a number past every one written and
+///   every one the encryptor's file lists (none of its keys or keystreams),
+///   passing over what's written refers to and doesn't hold, encrypted as
+///   any object, the trailer naming it.
 /// - **The `/ID`** keeps its first string, the encryptor's, else
-///   `trailer`'s; the second is XXH3-128 of the bytes written before the
-///   section, so the same bodies write the same bytes. A file that isn't
-///   encrypted and has no first string has none; an encrypted one with
-///   none gets the hash for both.
+///   `trailer`'s; the second is the first 16 bytes of SHA-256 of the bytes
+///   written before the section, so in the clear the same bodies write the
+///   same bytes.
+///   A file that isn't encrypted and has no first string has none; an
+///   encrypted one with none gets the hash for both.
 /// - **Encrypted** by `encryptor`, every string and stream's data is
 ///   encrypted as [`Encrypting`] says, but a stream's whose data is where
 ///   it was written, which is read from `from` as the reading hands it out,
@@ -55,10 +62,37 @@ use crate::source::{Document, XrefKind};
 ///   dictionary is written as the encryptor has it, as an object at
 ///   [`Options::encrypt_at`], else at its number in the file it was read
 ///   from, else past every body; or direct in the trailer where that file
-///   had it so. Where its keys are made per object, each number its file
-///   lists free is listed free at the generation that file's entry gives
-///   it ([`Encryptor::free`]), `/Size` past it, and no object of the
-///   writer's own is numbered there.
+///   had it so. Under a reading's encryption ([`Encryptor::of`]), each
+///   number any section of its file lists and this one doesn't write is
+///   listed free at the generation it's to be used at next (ISO 32000-2,
+///   7.5.4), 65,535 where it's spent, `/Size` past it; but one past
+///   [`NUMBERS`].
+/// - **Under RC4**, whose keystream an object's number and generation make
+///   (7.6.3, Algorithm 1), what's written anew goes under none the file
+///   read shows used: a pass before anything's written tells which bodies
+///   are copied, each at its own number and generation; each other one,
+///   where its keystream there is used (a section lists it in use at an
+///   offset at that generation or past it, or free past it), is written at
+///   the generation its number is to be used at next, or, where that's
+///   spent, at a number past every one that file lists and every one
+///   written, generation 0, passing over what's written refers to and
+///   doesn't hold; every reference to it named so, the trailer's too, as a
+///   renumbering under the caller's, so that what's written says it was
+///   renumbered. Each moved is listed ([`Written::regenerated`]). One
+///   written anew at a number whose keystream at 0 was used so goes on its
+///   own, not in an object stream, whose members are of generation 0; one
+///   as read at its own goes in one as any, encrypted with it; and no
+///   object stream is numbered at one. A copy whose references aren't where
+///   its bytes have them is written anew at its own number, as read, where
+///   the caller gave no renumbering. Nothing else is refused for it, but where
+///   the file read's sections don't all read ([`Encryptor::of`]): there
+///   each object RC4 encrypts written anew is refused
+///   ([`Unencryptable::Keystream`](super::Unencryptable::Keystream)) unless
+///   the encryptor is told to reuse keystreams, which lists it. Two whole
+///   files written from one reading put what each writes anew at the same
+///   fresh generations, so where the two differ and both are kept, their
+///   XOR leaks; a caller saving twice opens the file it wrote before
+///   writing again, or writes under [`Encryptor::create`].
 /// - **Copied**, an object as read ([`Body::Read`]) is written as the
 ///   bytes it was read from, read from `from`, where the rules for a copy
 ///   hold; one read from an object stream, which goes in one of the
@@ -75,9 +109,9 @@ use crate::source::{Document, XrefKind};
 ///   32000-2, 7.3.10), doesn't come to name one of the writer's own, and
 ///   over one an encryption dictionary refers to, what's there being read
 ///   in the clear (7.6.2) (a new encryption dictionary's number passes over
-///   them too); built on up to [`Options::threads`] threads, the same bytes
-///   on any number; each encrypted once, whole, as a stream, under its
-///   number. An object stream whose data would be more than the reader
+///   them too); built on up to [`Options::threads`] threads, the same
+///   objects on any number; each encrypted once, whole, as a stream, under
+///   its number. An object stream whose data would be more than the reader
 ///   decodes ([`MAX_DATA`](super::MAX_DATA)) is written as its members on
 ///   their own, and so are all of them where no number is left for the
 ///   cross-reference stream, or under an encryption that leaves streams in
@@ -89,16 +123,16 @@ use crate::source::{Document, XrefKind};
 ///   dictionary goes at the number it gives the encryptor's, else past
 ///   every object, its references renumbered, a direct one's too, and each
 ///   object is encrypted under the number it's written at, by the encryptor
-///   in the numbers written ([`Encryptor::renumbered`]); under RC4, an
-///   object written at a number another had in the file the encryptor was
-///   read from leaks the XOR of the two plaintexts to one who keeps both
-///   files. No body is written at the number of an encryption dictionary or
-///   what one refers to but that object, what's there being left in the
-///   clear ([`Error::Moved`]). An object as read is copied, its header and
-///   each reference that moves written anew where its bytes had it; at
-///   another number only where neither file is encrypted or no key is made
-///   per object (AES-256), else written anew. The numbers checked, listed
-///   and taken by the writer's own objects are those written, but
+///   in the numbers written (as [`Encryptor::laid_out`] gives it); under
+///   RC4, at a generation that number hasn't used, as above, so that no
+///   object goes under the keystream another had in the file the encryptor
+///   was read from. No body is written at the number of an encryption
+///   dictionary or what one refers to but that object, what's there being
+///   left in the clear ([`Error::Moved`]). An object as read is copied, its
+///   header and each reference that moves written anew where its bytes had
+///   it; at another number only where neither file is encrypted or no key
+///   is made per object (AES-256), else written anew. The numbers checked,
+///   listed and taken by the writer's own objects are those written, but
 ///   [`Pack::groups`]', which are those given (see [`Options::renumber`]);
 ///   what's written says it was renumbered ([`Base::renumbered`]).
 ///
@@ -116,9 +150,10 @@ use crate::source::{Document, XrefKind};
 /// cross-reference stream's; one given twice; a body the renumbering gives
 /// no number, two it writes at one, and one it writes at the number of an
 /// encryption dictionary or what one refers to that isn't that object; a
-/// body at the encryption dictionary's; a body at a number `encryptor`'s
-/// file lists free, where its keys are made per object
-/// ([`Encryptor::of`]); a table asked to pack;
+/// body at the encryption dictionary's; under RC4, an object written anew
+/// where `encryptor`'s file's sections don't all read, but where it's told
+/// to reuse keystreams, and one whose generations are spent with no number
+/// left; a table asked to pack;
 /// a stream's data where it was written that isn't the reading's own for
 /// its number, or with no `from`; a group naming a number that isn't
 /// packed, or one twice; a `from` whose source says it changed, and a copy
@@ -161,6 +196,14 @@ pub fn full<'a>(
 /// `doc`'s file was read with (none, or a new one), the objects its
 /// encryption dictionary refers to are left out too. What's left out is
 /// told by the numbers of `doc`.
+///
+/// An object of an object stream it reads is written on its own unless
+/// `options` packs, and only strings and streams are encrypted (ISO
+/// 32000-2, 7.6.2): so what an encrypted file held only inside an object
+/// stream, its numbers, names and keys, encrypted with the stream's data,
+/// is in the clear once written unpacked, under any encryption. A caller
+/// who minds packs ([`Options::pack`], which the encryptor allows where
+/// [`Encryptor::packs`] says so).
 ///
 /// # Errors
 ///
@@ -237,16 +280,33 @@ fn file(
     if options.pack.is_some() && options.kind == XrefKind::Table {
         return Err(Error::PackedTable);
     }
-    let to = Numbering(options.renumber);
+    let caller = Numbering(options.renumber);
     let pack = (options.pack).filter(|_| encryptor.is_none_or(Encryptor::packs));
     // The encryptor as given, whose list and place are of the numbers its
-    // file has, which are what's given; and in the numbers written.
+    // file has, which are what's given; and where its dictionary is in the
+    // numbers written, which no regeneration moves, as it's no body.
     let given = encryptor;
-    let renumbered = match (encryptor, to.0) {
-        (Some(e), Some(to)) => Some(e.renumbered(to)),
+    let place = given.map(|e| e.placed(caller));
+    // Under RC4, each object written anew at a keystream the file read
+    // used goes elsewhere, the caller's renumbering under it: the
+    // numbering everything after is written by.
+    let regenerated = match (given, place) {
+        (Some(e), Some(place)) if e.rc4() => {
+            let at = match place {
+                Place::At(at) => Some(options.encrypt_at.unwrap_or(at)),
+                Place::Direct | Place::New => None,
+            };
+            // What's refused of the caller's numbering, before what reads
+            // the copies, so that it's refused as under another method.
+            checked(bodies, caller, at.map(|at| at.number), None, &[])?;
+            Regenerated::of(bodies, trailer, e, from, caller, at)?
+        }
         _ => None,
     };
-    let encryptor = renumbered.as_deref().or(encryptor);
+    let to = match &regenerated {
+        Some(regenerated) => Numbering(Some(regenerated)),
+        None => caller,
+    };
     // Past every number written, which a body given and not written is
     // refused at below.
     let past = (bodies.iter())
@@ -256,24 +316,24 @@ fn file(
     let reuse = options.pack.map_or(&[][..], |pack| pack.reuse);
     // The writer numbers objects of its own only for a stream section,
     // object streams and a new encryption dictionary.
+    // An encrypted file's direct /Info, which the trailer would hold in the
+    // clear, is written as an object.
+    let info = (trailer.get(b"Info")).filter(|info| given.is_some() && direct_info(info));
     let numbers = options.kind == XrefKind::Stream
         || pack.is_some()
-        || encryptor.is_some_and(|e| e.place() == Place::New && options.encrypt_at.is_none());
+        || (place == Some(Place::New) && options.encrypt_at.is_none())
+        || info.is_some();
     // Those, and what the encryptor leaves in the clear by number, in the
     // numbers written, which no object of the writer's own takes.
     let dangling = match numbers {
         true => {
             let mut dangling = dangling(bodies, to, trailer, past, reuse);
-            dangling.extend(
-                encryptor
-                    .into_iter()
-                    .flat_map(Encryptor::dictionary_numbers),
-            );
+            dangling.extend(given.into_iter().flat_map(|e| e.dictionary_numbers(to)));
             dangling
         }
         false => HashSet::new(),
     };
-    let encrypt_at = match encryptor.map(Encryptor::place) {
+    let encrypt_at = match place {
         None | Some(Place::Direct) => None,
         Some(Place::At(at)) => Some(options.encrypt_at.unwrap_or(at)),
         Some(Place::New) => {
@@ -286,15 +346,21 @@ fn file(
     if let Some(at) = encrypt_at {
         usable(at.number)?;
     }
-    // What's copied, by the encryption as given.
+    // What's copied, by the encryption as given; under a regeneration the
+    // caller didn't ask for, one whose references aren't where its bytes
+    // have them is written anew at its own number, as read.
     let copying = from.map(|from| Copying::new(from, given)).transpose()?;
-    // One section, whose /Encrypt is the only one: what's at a number the
-    // file read named so, and this one doesn't, is encrypted.
-    let whole = encryptor.map(|e| e.whole(encrypt_at));
-    let encryptor = whole.as_deref().or(encryptor);
+    let copying = match caller.0.is_none() && regenerated.is_some() {
+        true => copying.map(Copying::leniently),
+        false => copying,
+    };
+    // In the numbers written, one section, whose /Encrypt is the only one:
+    // what's at a number the file read named so, and this one doesn't, is
+    // encrypted. As a caller laying a file out has it (`laid_out`).
+    let now = given.map(|e| e.laid(to, encrypt_at));
     // No object at the number of what's left in the clear by number but
     // the object that is.
-    if let (Some(given), Some(now)) = (given, encryptor) {
+    if let (Some(given), Some(now)) = (given, now.as_deref()) {
         let written = bodies.iter().map(|(id, _)| *id).zip(at.iter().copied());
         if let Some(id) = given.shared(now, to, written) {
             return Err(Error::Moved(id));
@@ -302,9 +368,12 @@ fn file(
     }
     // What the encryptor resolves references by, where there's one: the
     // bodies and the reading, by the numbers they're given at.
-    let resolve = encryptor.map(|_| Given::new(bodies, from));
-    let encrypting = match (encryptor, &resolve) {
-        (Some(e), Some(resolve)) => Some(e.encrypting_at(trailer, resolve, to)?),
+    let resolve = now.as_ref().map(|_| Given::new(bodies, from));
+    let encrypting = match (now, &resolve, given) {
+        (Some(now), Some(resolve), Some(given)) => {
+            let encrypting = Encrypting::of(now, trailer, resolve, to, encrypt_at)?;
+            Some(encrypting.guarded(Guard::whole(given, from)))
+        }
         _ => None,
     };
     let encrypting = encrypting.as_ref();
@@ -321,7 +390,7 @@ fn file(
         stopped(options.stop)?;
         let (id, obj) = (*id, body.object());
         next = next.max(at.number + 1);
-        let dictionary = encryptor.is_some_and(|e| e.dictionary_object(at));
+        let dictionary = encrypting.is_some_and(|e| e.dictionary_object(at));
         if pack.is_some() && packable(at, obj) && !dictionary {
             members.push((id, at, body));
             continue;
@@ -340,7 +409,7 @@ fn file(
     // The caller's entries in the numbers written, before the writer's own,
     // which are.
     let mut trailer = trailer_entries(trailer, to.0.unwrap_or(&()));
-    if let Some(e) = encryptor {
+    if let Some(e) = encrypting {
         match encrypt_at {
             None => trailer.set("Encrypt", e.dictionary().clone()),
             Some(at) => {
@@ -359,27 +428,50 @@ fn file(
             }
         }
     }
+    // The direct /Info, at a number past every one written and every one the
+    // file read lists, encrypted as any object, the trailer naming it.
+    let moved = info.and_then(|_| trailer.get(b"Info").cloned());
+    if let (Some(e), Some(info)) = (encrypting, moved) {
+        let past = next.max(given.map_or(1, Encryptor::past));
+        let at = fresh(past, |n| dangling.contains(&n) || section.lists(n));
+        usable(at)?;
+        let at = ObjectId::new(at, 0);
+        let pos = serialize::indirect_with(out, at, &info, e)? - start;
+        section.insert(
+            at.number,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
+        trailer.set("Info", Object::from(at));
+        next = next.max(at.number + 1);
+    }
     if let Some(pack) = pack {
         let packing = Packing {
             start,
-            encryptor,
+            encryptor: given,
             parts: &parts,
             options,
             dangling: &dangling,
         };
         next = packing.packed(out, &mut section, &members, pack, next)?;
     }
-    // The numbers the file read lists free under keys made per object,
-    // free at the generation each is to be used at next, so that a tool
-    // that follows this file's free list doesn't take one at a deleted
-    // object's key.
-    for (n, generation) in encryptor.into_iter().flat_map(Encryptor::free_numbers) {
-        if !section.lists(n) {
+    // Each number the file read lists that this one doesn't write, free at
+    // the generation it's to be used at next, under that file's key, so
+    // that a tool that follows this file's free list doesn't take one at a
+    // deleted object's key, or keystream: but one past what a file may use,
+    // which no section of a file written lists.
+    for (n, generation) in given.into_iter().flat_map(Encryptor::listed) {
+        if n < NUMBERS && !section.lists(n) {
             section.insert(n, Entry::Free { generation });
         }
     }
-    let kept = (encryptor.and_then(Encryptor::first_id).map(<[u8]>::to_vec)).or(given_id);
-    let id = file_id(kept, encryptor.is_some(), &out[start..]);
+    let kept = (encrypting
+        .and_then(Encrypting::first_id)
+        .map(<[u8]>::to_vec))
+    .or(given_id);
+    let id = file_id(kept, encrypting.is_some(), &out[start..]);
     if let Some(id) = &id {
         trailer.set("ID", id_value(id));
     }
@@ -397,6 +489,13 @@ fn file(
     }
     let size = section.size();
     kept.set("Size", i64::from(size));
+    let keystreams_reused = encrypting
+        .map(Encrypting::keystreams_reused)
+        .unwrap_or_default();
+    let regenerated = match &regenerated {
+        Some(regenerated) => regenerated.pairs(bodies),
+        None => Vec::new(),
+    };
     let base = Base {
         len: out.len() - start,
         ends_line: true,
@@ -406,9 +505,13 @@ fn file(
         kind: options.kind,
         first_id: id.as_ref().map(|[first, _]| first.clone()),
         trailer: kept,
-        encryption: encryptor.map(|e| e.dictionary().clone()),
+        encryption: encrypting.map(|e| e.dictionary().clone()),
+        key: given.map(Encryptor::key_check),
         source: None,
         renumbered: to.0.is_some(),
+        startxref: None,
+        shifted: Vec::new(),
+        wrote: BTreeMap::new(),
     };
     Ok(Written {
         section,
@@ -416,7 +519,116 @@ fn file(
         size,
         id,
         base,
+        regenerated,
+        keystreams_reused,
     })
+}
+
+/// Under RC4, where a whole file writes each object it writes anew whose
+/// keystream, where it's given or the caller's renumbering puts it, the
+/// file read shows used: at the generation its number is to be used at
+/// next, or, where that's spent, at a number past every one that file
+/// lists and every one written, passing over what's written refers to and
+/// doesn't hold. A renumbering, the caller's under it, which names each
+/// reference with its object.
+struct Regenerated<'a> {
+    /// The caller's renumbering.
+    caller: Numbering<'a>,
+    /// Where each moved object is written, by where the caller's
+    /// renumbering puts it.
+    moved: HashMap<ObjectId, ObjectId>,
+}
+
+impl Renumber for Regenerated<'_> {
+    fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
+        let at = self.caller.at(id)?;
+        Some(self.moved.get(&at).copied().unwrap_or(at))
+    }
+}
+
+impl<'a> Regenerated<'a> {
+    /// Where `bodies`, whole under `encryptor`, written of `from`, `caller`
+    /// renumbering them, go: none where no object moves. A body is copied
+    /// as read, and kept where it is, where the rules for a copy hold at
+    /// its own number ([`Body::Read`]), judged by the encryptor in the
+    /// numbers the caller gives, its dictionary at `at`, as no copy moves
+    /// it; else it's written anew, and moved where its keystream is used.
+    /// Refused where a copy's record is another reading's, or another
+    /// object's ([`Error::Elsewhere`]), or `from`'s source says it changed;
+    /// and where no number is left for one whose generations are spent.
+    fn of(
+        bodies: &[(ObjectId, Body<'_>)],
+        trailer: &Dict,
+        encryptor: &Encryptor,
+        from: Option<&dyn ReadFrom>,
+        caller: Numbering<'a>,
+        at: Option<ObjectId>,
+    ) -> Result<Option<Regenerated<'a>>, Error> {
+        let copying = from
+            .map(|from| Copying::new(from, Some(encryptor)))
+            .transpose()?;
+        let resolve = Given::new(bodies, from);
+        let judged = match copying {
+            Some(_) => Some(Encrypting::of(
+                encryptor.laid(caller, at),
+                trailer,
+                &resolve,
+                caller,
+                at,
+            )?),
+            None => None,
+        };
+        let mut moved = HashMap::new();
+        let mut spent = Vec::new();
+        for (id, body) in bodies {
+            // One given no number is refused after.
+            let Some(at) = caller.at(*id) else {
+                continue;
+            };
+            let kept = match (&copying, &judged) {
+                (Some(copying), Some(judged)) if at == *id => {
+                    copying.copies(*id, at, body, Some(judged))?
+                }
+                _ => false,
+            };
+            match encryptor.regenerated(at) {
+                _ if kept => {}
+                Some(now) if now == at => {}
+                Some(now) => {
+                    moved.insert(at, now);
+                }
+                None => spent.push(at),
+            }
+        }
+        if !spent.is_empty() {
+            let past = (bodies.iter())
+                .filter_map(|(id, _)| caller.at(*id))
+                .map(|at| at.number.saturating_add(1))
+                .fold(encryptor.past(), u32::max);
+            let dangling = dangling(bodies, caller, trailer, past, &[]);
+            let mut next = past;
+            for at in spent {
+                let n = fresh(next, |n| dangling.contains(&n));
+                usable(n)?;
+                moved.insert(at, ObjectId::new(n, 0));
+                next = n.saturating_add(1);
+            }
+        }
+        Ok((!moved.is_empty()).then_some(Regenerated { caller, moved }))
+    }
+
+    /// Each of `bodies` moved, the number and generation it's given at
+    /// and where it's written, ascending.
+    fn pairs(&self, bodies: &[(ObjectId, Body<'_>)]) -> Vec<(ObjectId, ObjectId)> {
+        let mut pairs: Vec<(ObjectId, ObjectId)> = (bodies.iter())
+            .filter_map(|&(id, _)| {
+                let at = self.caller.at(id)?;
+                self.moved.get(&at).map(|&now| (id, now))
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
 }
 
 /// What a whole file's object streams are written with.
@@ -479,11 +691,13 @@ impl Packing<'_> {
             None => by_number.contains_key(&n),
         };
         let encryptor = self.encryptor;
+        // Under RC4, an object stream is encrypted with its number's
+        // keystream at generation 0, so not at one the file read used.
         let taken = |n| {
             section.lists(n)
                 || member_at(n)
                 || self.dangling.contains(&n)
-                || encryptor.is_some_and(|e| e.free(n).is_some())
+                || encryptor.is_some_and(|e| e.rc4() && e.used().keyed(ObjectId::new(n, 0)))
         };
         let from = next.max(self.options.xref_from);
         let Some(given) = container_numbers(grouped.len(), pack.reuse, from, taken) else {
@@ -583,7 +797,8 @@ fn container_numbers(
 /// or that has more members than a place in it can say. Built on up to
 /// `threads` threads, 4 object streams to one at least, `stop` checked
 /// before each, and joined in order, so that the same groups build the
-/// same bytes however many threads build them, and a refusal is the first
+/// same objects however many threads build them (the same bytes in the
+/// clear, and under the same IVs), and a refusal is the first
 /// in their order; a part no thread can be had for is built on the
 /// calling thread.
 pub(super) fn containers(

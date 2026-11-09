@@ -13,6 +13,7 @@ use super::tests::{
     unfiltered, updated_with_padding, xref_row,
 };
 use super::*;
+use super::{lengths, recovery};
 use crate::source::Source;
 
 /// What a test that reads a bomb takes at most.
@@ -210,6 +211,36 @@ pub(super) fn files() -> Vec<Named> {
             both.clone(),
         ),
     ];
+    // A stream's /Length in an object stream, and those not read from one.
+    let lengths = [
+        (
+            "a /Length in an object stream",
+            lengths::a_length_in_an_object_stream(),
+        ),
+        (
+            "object streams whose /Lengths are in each other",
+            lengths::object_streams_whose_lengths_are_in_each_other(),
+        ),
+        (
+            "a /Length in an object stream that refers",
+            lengths::a_length_in_an_object_stream_that_refers(),
+        ),
+        (
+            "a cross-reference stream's /Length in an object stream",
+            lengths::a_cross_reference_streams_length_in_an_object_stream(),
+        ),
+        (
+            "a cross-reference stream's /Length by reference",
+            lengths::a_cross_reference_streams_length_by_reference(),
+        ),
+        (
+            "an encryption dictionary's stream, its /Length in an object stream",
+            lengths::an_encryption_dictionarys_stream_with_its_length_in_an_object_stream(),
+        ),
+    ];
+    for (name, file) in lengths {
+        files.push((name.to_string(), file, none.clone()));
+    }
     let (objects, _) = objects_2_and_3();
     let zlib = fixture::zlib(&objects);
     let filters = [
@@ -232,6 +263,69 @@ pub(super) fn files() -> Vec<Named> {
     let at = rfind(&scanned, b"startxref").unwrap();
     scanned.truncate(at);
     files.push(("scanned".to_string(), scanned, none.clone()));
+    // Bytes before the header, which the offsets count from (ISO 32000-2,
+    // 7.5.2): a hundred, a line, and one before an encrypted file's.
+    let table = fixture::file("1.7", &clean(), root(), Xref::Table);
+    let before = [
+        (
+            "a table, 100 bytes before its header",
+            [&[b'~'; 100][..], &table].concat(),
+        ),
+        (
+            "compressed, a line before its header",
+            [&b"junk\r\n"[..], &compressed(false).0].concat(),
+        ),
+    ];
+    for (name, file) in before {
+        files.push((name.to_string(), file, none.clone()));
+    }
+    // Sections and objects not where the file says, read where it proves
+    // they are: a cut, offsets from the first byte past a header 100
+    // bytes in, rows two bytes past their objects, and a section moved
+    // whose rows are at two shifts.
+    let laid = &recovery::tests::OBJECTS;
+    let recovered = [
+        ("a cut", recovery::tests::cut().0),
+        (
+            "offsets from the first byte, 100 bytes before the header",
+            recovery::tests::laid_out(&[b'~'; 100], laid, &|_, at| at, &|at| at).0,
+        ),
+        (
+            "rows two bytes past their objects",
+            recovery::tests::laid_out(b"", laid, &|_, at| at + 2, &|at| at).0,
+        ),
+        (
+            "a section moved, its rows at two shifts",
+            recovery::tests::two_shifts().0,
+        ),
+    ];
+    for (name, file) in recovered {
+        files.push((name.to_string(), file, none.clone()));
+    }
+    // Scanned, its objects in object streams, which the reading lists: in
+    // the clear, and encrypted, read by its password and by a wrong one.
+    files.push((
+        "scanned, its objects in object streams".to_string(),
+        recovery::tests::scanned_with_object_streams().0,
+        none.clone(),
+    ));
+    let encrypted = recovery::tests::scanned_encrypted_with_object_streams();
+    files.push((
+        "scanned, its objects in encrypted object streams".to_string(),
+        encrypted.clone(),
+        vec![Password("user")],
+    ));
+    files.push((
+        "scanned, its objects in encrypted object streams, locked".to_string(),
+        encrypted,
+        vec![Password("wrong")],
+    ));
+    let aes = fixture::encrypted(&settings(KINDS[4], b"user"), &to_encrypt(&[]), root());
+    files.push((
+        "AES-256, a byte before its header".to_string(),
+        [&b" "[..], &aes].concat(),
+        both.clone(),
+    ));
     for kind in KINDS {
         let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
         files.push((
@@ -1261,12 +1355,10 @@ fn an_undefined_crypt_filter_reads_on_demand_as_whole() {
     );
     let by = Some((0, pdf_crypt::Encoding::Utf8));
     assert_eq!(
-        doc.encryption,
-        Encryption::Opened {
-            owner: false,
-            by,
-            permissions: pdf_crypt::Permissions::ALL
-        }
+        doc.encryption.as_opened(),
+        Encryption::opened(false)
+            .by(by)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(
         on_demand("undefined", &file, &[Password("user")], &Options::DEFAULT),
@@ -1498,12 +1590,10 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     let reading = reading.unlock(&Password("owner").encodings()).unwrap();
     let by = Some((0, pdf_crypt::Encoding::Utf8));
     assert_eq!(
-        *reading.encryption(),
-        Encryption::Opened {
-            owner: true,
-            by,
-            permissions: pdf_crypt::Permissions::ALL
-        }
+        (reading.encryption().as_opened()).as_opened(),
+        Encryption::opened(true)
+            .by(by)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(reading.id(), id, "the same reading");
 
@@ -1569,18 +1659,16 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         (plain, Encryption::None),
         (
             opened,
-            Encryption::Opened {
-                owner: false,
-                by: None,
-                permissions: pdf_crypt::Permissions::ALL,
-            },
+            Encryption::opened(false)
+                .by(None)
+                .permitting(pdf_crypt::Permissions::ALL),
         ),
     ] {
         let reading = open(&file, &[], &Options::DEFAULT);
         reading.get(ObjectId::new(1, 0)).unwrap();
         let before = kept(&reading);
         let reading = reading.unlock(&Password("owner").encodings()).unwrap();
-        assert_eq!(*reading.encryption(), encryption);
+        assert_eq!(reading.encryption().as_opened(), encryption);
         assert_eq!(kept(&reading), before);
     }
 }
@@ -1609,20 +1697,16 @@ fn the_passwords_options_give_are_tried_in_the_empty_ones_place() {
     assert_eq!(by(&[Password("wrong")]), Encryption::Locked);
     let utf8 = pdf_crypt::Encoding::Utf8;
     assert_eq!(
-        by(&[Password("wrong"), Password("owner")]),
-        Encryption::Opened {
-            owner: true,
-            by: Some((1, utf8)),
-            permissions: pdf_crypt::Permissions::ALL,
-        }
+        (by(&[Password("wrong"), Password("owner")])).as_opened(),
+        Encryption::opened(true)
+            .by(Some((1, utf8)))
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(
-        by(&[]),
-        Encryption::Opened {
-            owner: false,
-            by: None,
-            permissions: pdf_crypt::Permissions::ALL,
-        }
+        (by(&[])).as_opened(),
+        Encryption::opened(false)
+            .by(None)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
     assert_eq!(
         by(&[]),
@@ -1647,12 +1731,10 @@ fn the_passwords_options_give_are_tried_in_the_empty_ones_place() {
     .unwrap();
     let by = Some((0, pdf_crypt::Encoding::PdfDoc));
     assert_eq!(
-        *reading.encryption(),
-        Encryption::Opened {
-            owner: false,
-            by,
-            permissions: pdf_crypt::Permissions::ALL
-        }
+        (reading.encryption().as_opened()).as_opened(),
+        Encryption::opened(false)
+            .by(by)
+            .permitting(pdf_crypt::Permissions::ALL)
     );
 }
 

@@ -38,11 +38,13 @@ use crate::source::{Document, RevisionEnd, Source, Update};
 use crate::version::Version;
 
 /// The limits the fuzz target reads under: a stream decodes to at most
-/// 1 MiB, and a reading's streams to 4 MiB.
+/// 1 MiB, and a reading's streams to 4 MiB; and the recovery the tool
+/// reads by, the verified one.
 pub fn options() -> bytes::Options<'static> {
     let mut options = bytes::Options::DEFAULT;
     options.limits.stream = 1 << 20;
     options.limits.budget = 4 << 20;
+    options.recovery = bytes::Recovery::Verified;
     options
 }
 

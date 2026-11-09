@@ -476,16 +476,18 @@ fn an_encrypted_files_prefix_is_opened_by_its_readings_handler() {
             )
             .unwrap();
             let by = Some((1, Encoding::Utf8));
-            let opened = Encryption::Opened {
-                owner,
-                by,
-                permissions: pdf_crypt::Permissions::ALL,
-            };
-            assert_eq!(reading.encryption(), &opened, "{kind:?}");
+            let opened = Encryption::opened(owner)
+                .by(by)
+                .permitting(pdf_crypt::Permissions::ALL);
+            assert_eq!(&reading.encryption().as_opened(), &opened, "{kind:?}");
             let end = reading.revisions()[0].end.unwrap().line();
             assert_eq!(end, base.len());
             let prefix = reading.prefix(end, reading.limits()).unwrap();
-            assert_eq!(prefix.encryption(), &opened, "{kind:?} {password}");
+            assert_eq!(
+                &prefix.encryption().as_opened(),
+                &opened,
+                "{kind:?} {password}"
+            );
             assert!(prefix.faults().is_empty(), "{:?}", prefix.faults());
             let note = prefix.get(ObjectId::new(4, 0)).unwrap().as_dict().unwrap();
             let contents = note.get(b"Contents").unwrap().value();
@@ -514,11 +516,9 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     let base = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
     let end = base.len();
     let user = [Password("user")];
-    let opened = Encryption::Opened {
-        owner: false,
-        by: Some((0, Encoding::Utf8)),
-        permissions: pdf_crypt::Permissions::ALL,
-    };
+    let opened = Encryption::opened(false)
+        .by(Some((0, Encoding::Utf8)))
+        .permitting(pdf_crypt::Permissions::ALL);
     // Another first /ID element.
     let file = encrypted_updated(&base, "fedcba9876543210");
     let reading = Reading::open(
@@ -529,7 +529,7 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
         },
     )
     .unwrap();
-    assert_eq!(reading.encryption(), &opened);
+    assert_eq!(&reading.encryption().as_opened(), &opened);
     assert_eq!(reading.revisions()[0].end, RevisionEnd::new(end - 1, end));
     let prefix = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(prefix.encryption(), &Encryption::Locked);
@@ -557,7 +557,7 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     )
     .unwrap();
     let prefix = reading.prefix(end, reading.limits()).unwrap();
-    assert_eq!(prefix.encryption(), &opened);
+    assert_eq!(&prefix.encryption().as_opened(), &opened);
     // A locked reading's: locked, and unlocked by the password as any is.
     let file = encrypted_updated(&base, "0123456789abcdef");
     let wrong = [Password("wrong")];
@@ -576,7 +576,7 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     let unlocked = prefix.unlock(&encoded).unwrap();
     let by = Some((0, Encoding::Verbatim));
     assert_eq!(
-        unlocked.encryption(),
+        &unlocked.encryption().as_opened(),
         &Encryption::opened(false)
             .by(by)
             .permitting(pdf_crypt::Permissions::ALL)
@@ -596,14 +596,14 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     )
     .unwrap();
     assert_eq!(
-        reading.encryption(),
+        &reading.encryption().as_opened(),
         &Encryption::opened(true)
             .by(Some((0, Encoding::Utf8)))
             .permitting(pdf_crypt::Permissions::ALL)
     );
     let prefix = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(
-        prefix.encryption(),
+        &prefix.encryption().as_opened(),
         &Encryption::opened(false).permitting(pdf_crypt::Permissions::ALL)
     );
 }

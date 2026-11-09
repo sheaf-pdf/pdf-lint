@@ -1494,7 +1494,9 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
 /// then, by the input's length, under a new encryption. Where it's written, it
 /// reads linearized by its password, with the same pages, and every object the
 /// plan numbers is the same value at its number under the numbering, a stream's
-/// data the same; on any refusal, `out` as it was.
+/// data the same; on any refusal, `out` as it was. The new encryption's key and
+/// every AES IV are the operating system's, so the bytes written differ from run
+/// to run, and a failure that hangs on them may not come again from its input.
 #[cfg(feature = "family")]
 pub fn over(data: &[u8]) {
     use pdf_structure::XrefKind;
@@ -1514,7 +1516,7 @@ pub fn over(data: &[u8]) {
         let password = pdf_structure::pdf_crypt::Password(NEW).prepared().ok()?;
         let mut protection = pdf_structure::pdf_crypt::Protection::new(&password);
         protection.encrypt_metadata = data.len().is_multiple_of(16);
-        Encryptor::create(&protection, &mut Drawn::over(data)).ok()
+        Encryptor::create(&protection).ok()
     });
     for (kind, stream, pack) in [
         (Kind::Table, XrefKind::Table, false),
@@ -1637,58 +1639,6 @@ fn written_back<S: pdf_structure::ByteSource>(
         }
     }
 }
-
-/// A new encryption's draws, in a fuzz body or a test alone: the input's bytes,
-/// then a counter's. It's no cryptographic generator, but says it is so that
-/// [`Encryptor::create`](pdf_structure::write::Encryptor::create) takes it.
-#[cfg(feature = "family")]
-struct Drawn<'a> {
-    data: &'a [u8],
-    counter: u8,
-}
-
-#[cfg(feature = "family")]
-impl Drawn<'_> {
-    fn over(data: &[u8]) -> Drawn<'_> {
-        Drawn { data, counter: 0 }
-    }
-}
-
-#[cfg(feature = "family")]
-impl pdf_structure::pdf_crypt::rand_core::TryRng for Drawn<'_> {
-    type Error = Infallible;
-
-    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
-        let mut bytes = [0; 4];
-        self.try_fill_bytes(&mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
-        let mut bytes = [0; 8];
-        self.try_fill_bytes(&mut bytes)?;
-        Ok(u64::from_le_bytes(bytes))
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
-        for byte in dst {
-            *byte = match self.data.split_first() {
-                Some((&first, rest)) => {
-                    self.data = rest;
-                    first
-                }
-                None => {
-                    self.counter = self.counter.wrapping_add(1);
-                    self.counter
-                }
-            };
-        }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "family")]
-impl pdf_structure::pdf_crypt::rand_core::TryCryptoRng for Drawn<'_> {}
 
 /// Whether `written`, read back, is `value` under `planned`'s numbers: a
 /// reference to what it doesn't number reads null.

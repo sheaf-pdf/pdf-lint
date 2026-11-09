@@ -12,11 +12,11 @@ use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::parse::Parser;
 use pdf_objects::serialize;
 use pdf_structure::pdf_crypt::Password;
-use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::pdf_crypt::rand_core::SeedableRng;
+use pdf_structure::pdf_crypt::{Ivs, Protection};
 use pdf_structure::read::{self, Reading, XrefEntry};
 use pdf_structure::write::{self, Deflate, Encryptor};
-use pdf_structure::{Document, Encryption, Source as _, XrefKind};
+use pdf_structure::{Document, Encryption, XrefKind};
 
 mod written;
 use written::{KEYS, encrypted_as, file, kinds, opened, stream};
@@ -48,13 +48,15 @@ fn built(objects: &[String]) -> Vec<u8> {
     file(&objects, "/Root 1 0 R /Info 9 0 R")
 }
 
-/// A new encryption for `password`, the same each time.
+/// A new encryption for `password`, the same each time: its key from a
+/// seeded generator, and each write's IVs derived, by the test writer.
 fn created(password: &str, encrypt_metadata: bool) -> Encryptor {
     let prepared = Password(password).prepared().unwrap();
     let mut protection = Protection::new(&prepared);
     protection.encrypt_metadata = encrypt_metadata;
     let mut rng = ChaCha20Rng::seed_from_u64(14);
-    Encryptor::create(&protection, &mut rng).unwrap()
+    let created = Encryptor::create_with(&protection, &mut rng).unwrap();
+    created.with_test_ivs(Ivs::derived)
 }
 
 /// `bytes`, read by `password`, written under `encryptor` as `options` says.
@@ -78,12 +80,69 @@ fn own(
     password: &str,
     options: &Options<'_>,
 ) -> Result<(Vec<u8>, family::Linearized), Error> {
+    own_by(bytes, password, options, |encryptor| encryptor)
+}
+
+/// [`own`], each write's IVs the test writer's derived ones, so that a file
+/// written twice is the same bytes.
+fn own_derived(
+    bytes: &[u8],
+    password: &str,
+    options: &Options<'_>,
+) -> Result<(Vec<u8>, family::Linearized), Error> {
+    own_by(bytes, password, options, |encryptor| {
+        encryptor.with_test_ivs(Ivs::derived)
+    })
+}
+
+/// [`own`], its encryptor as `how` makes it of the reading's.
+fn own_by(
+    bytes: &[u8],
+    password: &str,
+    options: &Options<'_>,
+    how: impl Fn(Encryptor) -> Encryptor,
+) -> Result<(Vec<u8>, family::Linearized), Error> {
     let reading = opened(bytes, password);
     let doc = reading.to_document().unwrap();
-    let encryptor = Encryptor::of(&reading).unwrap();
+    let encryptor = Encryptor::of(&reading).unwrap().map(how);
     let mut out = Vec::new();
     let done = family::linearize(&mut out, &doc, encryptor.as_ref(), Some(&reading), options)?;
     Ok((out, done))
+}
+
+/// `file`'s objects read by `password`, each as it's written in the clear,
+/// and each stream's data decrypted, but the linearization dictionary, the
+/// hint stream (the stream with `/S`) and the cross-reference streams, which
+/// say where the objects are and hash the file (`/ID`'s second string):
+/// what two files of one document share, whatever IVs their AES
+/// ciphertexts are under, which their strings' lengths written follow.
+fn in_the_clear(file: &[u8], password: &str) -> Vec<(ObjectId, Vec<u8>, Vec<u8>)> {
+    let reading = opened(file, password);
+    let doc = reading.to_document().unwrap();
+    let placing = |object: &Object| match object.as_stream() {
+        Some(stream) => {
+            let xref = stream.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef");
+            xref || stream.dict.get(b"S").is_some()
+        }
+        None => object
+            .as_dict()
+            .is_some_and(|d| d.get(b"Linearized").is_some()),
+    };
+    (doc.objects())
+        .filter(|(_, object)| !placing(object))
+        .map(|(id, object)| {
+            let mut written = Vec::new();
+            let (value, data) = match object.as_stream() {
+                Some(stream) => {
+                    let data = reading.data(id).unwrap().to_vec();
+                    (Object::from(stream.dict.clone()), data)
+                }
+                None => (object.clone(), Vec::new()),
+            };
+            serialize::write(&mut written, &value).unwrap();
+            (id, written, data)
+        })
+        .collect()
 }
 
 /// `data` as the hint stream's deflated.
@@ -177,9 +236,10 @@ fn each_kind_reads_back_under_each_encryption() {
             let name = format!("{name}, kind {kind}");
             let (out, done) = own(&bytes, "", options).unwrap();
             reads_back(&out, &done, "", &name);
-            // By the bytes alone it's the same file.
+            // By the bytes alone it's the same file: the same document read
+            // back, its AES ciphertexts under IVs of their own.
             let alone = family::linearize_bytes(&bytes, &[], options).unwrap();
-            assert_eq!(alone, out, "{name}");
+            assert_eq!(in_the_clear(&alone, ""), in_the_clear(&out, ""), "{name}");
         }
     }
 }
@@ -265,10 +325,14 @@ fn nothing_is_listed_free_and_each_number_is_reused() {
     for (name, key) in KEYS {
         let bytes = encrypted_as(key, &plain);
         let reading = opened(&bytes, "");
-        let encryptor = Encryptor::of(&reading).unwrap().unwrap();
         let per_object = !name.starts_with("AES-256");
-        let free: Vec<u32> = encryptor.free_numbers().map(|(n, _)| n).collect();
-        assert_eq!(!free.is_empty(), per_object, "{name}");
+        // The numbers the file read lists free, whose keys an object there
+        // takes under RC4 and AES-128.
+        let free: Vec<u32> = (reading.entries())
+            .filter(|(n, _, entry)| *n != 0 && matches!(entry, XrefEntry::Free { .. }))
+            .map(|(n, ..)| n)
+            .collect();
+        assert!(!free.is_empty(), "{name}");
         for options in kinds() {
             let (out, _) = own(&bytes, "", &options).unwrap();
             let back = opened(&out, "");
@@ -308,6 +372,13 @@ fn stored_mark(file: &[u8], n: u32) -> Option<Vec<u8>> {
     }
 }
 
+/// Under RC4, an object laid out at a number and generation another object of
+/// the file read was at is encrypted with that one's keystream: the XOR of the
+/// two ciphertexts is the XOR of the two marks. The file read is a whole file of
+/// pdf-structure's under the key's encryption, which writes an object at a
+/// number the key's file used at its next generation, under another keystream
+/// than the one laid out there at 0: those don't leak so. Under AES nothing
+/// does.
 #[test]
 fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_doesn_t() {
     let plain = built(&secrets(""));
@@ -317,8 +388,9 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
         let before = opened(&bytes, "").to_document().unwrap();
         let (out, _) = own(&bytes, "", &Options::DEFAULT).unwrap();
         let after = opened(&out, "").to_document().unwrap();
+        // The mark of number `n`, at the generation the document holds it at.
         let mark_at = |doc: &Document, n: u32| {
-            let object = doc.get(ObjectId::new(n, 0)).ok()?;
+            let (id, object) = doc.objects().find(|(id, _)| id.number == n)?;
             let dict = match object.value() {
                 Value::Dict(dict) => dict,
                 Value::Stream(stream) => &stream.dict,
@@ -326,13 +398,14 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
             };
             let mark = dict.get(b"Mark")?;
             match mark.value() {
-                Value::String(text, _) => text.as_bytes().map(<[u8]>::to_vec),
+                Value::String(text, _) => Some((id.generation, text.as_bytes()?.to_vec())),
                 _ => None,
             }
         };
-        let (mut moved, mut leaked) = (0, 0);
+        let (mut moved, mut leaked, mut apart) = (0, 0, 0);
         for n in 1..40 {
-            let (Some(was), Some(is)) = (mark_at(&before, n), mark_at(&after, n)) else {
+            let (Some((then, was)), Some((now, is))) = (mark_at(&before, n), mark_at(&after, n))
+            else {
                 continue;
             };
             if was == is {
@@ -343,12 +416,22 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
             else {
                 continue;
             };
-            moved += 1;
-            if xor(&stored_was, &stored_is) == xor(&was, &is) {
-                leaked += 1;
+            let xored = xor(&stored_was, &stored_is) == xor(&was, &is);
+            match then == now {
+                true => {
+                    moved += 1;
+                    leaked += usize::from(xored);
+                }
+                false => {
+                    apart += 1;
+                    assert!(!xored, "{name}: {n}, at another generation, leaks");
+                }
             }
         }
-        assert!(moved > 2, "{name}: {moved} moved");
+        assert!(
+            moved > 0 && moved + apart > 2,
+            "{name}: {moved} and {apart} moved"
+        );
         let rc4 = name.starts_with("RC4");
         assert_eq!(leaked, if rc4 { moved } else { 0 }, "{name}");
     }
@@ -971,6 +1054,9 @@ fn what_names_the_dictionary_of_the_file_read_names_what_s_written_or_nothing() 
     }
 }
 
+/// The same document writes the same bytes on one thread as on four, under
+/// the test writer's derived IVs; under the operating system's, another's
+/// bytes, which read back to the same document.
 #[test]
 fn the_same_document_writes_the_same_bytes_on_any_number_of_threads() {
     let mut objects = secrets("");
@@ -984,11 +1070,19 @@ fn the_same_document_writes_the_same_bytes_on_any_number_of_threads() {
     let bytes = encrypted_as(KEYS[2].1, &built(&objects));
     let [_, _, mut packed] = kinds();
     packed.threads = 1;
+    let (one, _) = own_derived(&bytes, "", &packed).unwrap();
+    packed.threads = 4;
+    let (four, _) = own_derived(&bytes, "", &packed).unwrap();
+    assert_eq!(one, four);
+    assert!(!holds(&one, SECRET));
+    // Under the operating system's IVs, as a caller writes, another's bytes
+    // on four threads as on one, the same document read back.
+    packed.threads = 1;
     let (one, _) = own(&bytes, "", &packed).unwrap();
     packed.threads = 4;
     let (four, _) = own(&bytes, "", &packed).unwrap();
-    assert_eq!(one, four);
-    assert!(!holds(&one, SECRET));
+    assert_ne!(one, four);
+    assert_eq!(in_the_clear(&one, ""), in_the_clear(&four, ""));
 }
 
 #[test]

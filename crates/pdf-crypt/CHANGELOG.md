@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.0-alpha.2 (2026-11-09)
+
+AES's IVs and a new file's key and salts come from the operating system, and the test writer's feature says what it is. Depend on this alpha exactly, `=0.1.0-alpha.2`.
+
+### Added
+
+- `Ivs`: a write's AES IVs, each 16 random bytes from the operating system (getrandom). The write's threads share one, and it isn't `Clone`, so no IV is given out twice. It draws 4 KiB at a time, so a process that forks during a write and writes on in both gives the same IVs twice.
+- `Random`, with `Fault::Random` and `Unusable::Random`: the operating system's generator failed. Nothing is encrypted or made then, and nothing is given in the clear in its place.
+- `Handler::revision`: the revision a handler opened by, its dictionary's `/R`. A new file's is 6.
+- `KeyCheck`, `Handler::key_check` and `Handler::has_key`: tell whether two handlers have one key without giving it out. The check is compared in constant time, and its `Debug` shows none of its bytes.
+- `Password::LONGEST` and `Unusable::TypedTooLong { len, most }`: `Password::prepared` refuses a text over 1,024 bytes as typed before it prepares any of it, saying its length and the cap. `Password::encodings`, a reader's, takes a text of any length.
+- `Prohibition`: which of RFC 4013's tables refuses a character, with its words.
+
+### Changed
+
+- `Handler::encrypt_string(id, data, &ivs)` and `Handler::encrypt_stream(id, data, crypt, &ivs)` take the write's `Ivs` in place of a context. **Migrating:** make one `Ivs::new()` for each write, pass it to every encrypt of that write, and drop the context.
+- `Handler::create(&protection)` draws the new file's key and salts from the operating system. **Migrating:** drop the generator argument.
+- `Unusable::Prohibited { at, why }` and `Unusable::Ambiguous { at }` give the character's place among the password's characters, from 0, and never the character. **Migrating:** match `Prohibited { at, why }` and `Ambiguous { at }` where you matched `Prohibited(c)` and `Ambiguous(c)`. `text.chars().nth(at)` is the character, for a program that shows its user which.
+- pdf-crypt depends on getrandom 0.4. A build for wasm32-unknown-unknown picks getrandom's backend, its `wasm_js` feature or a custom one, as getrandom's docs say. **Migrating:** on wasm32-unknown-unknown, depend on getrandom 0.4 beside pdf-crypt, with its `wasm_js` feature for a browser, or pick a custom backend; a build that picks none fails.
+
+### Fixed
+
+- `Password::encodings` no longer takes the square of a text's length where combining marks of two classes alternate. 40,000 bytes of them took 264 ms, and now take 5 ms. Its forms are the same.
+
+### Removed
+
+- The `writer` feature. The test writer is behind `insecure-test-writer` now, and its items are hidden from the docs. It writes test files, never a document's protection. **Migrating:** turn on `insecure-test-writer` where a test turned on `writer`.
+- `pdf_crypt::rand_core` and the rand_core dependency, from a default build. They're there with `insecure-test-writer` alone, hidden. **Migrating:** no default item takes a generator now. A test that gives the test writer a seeded generator turns on `insecure-test-writer`.
+
+### Security
+
+- AES's IVs are random, as ISO 32000-2 asks (7.6.3.2, 7.6.3.3). They were derived by HMAC-SHA256 under the file's key from the object and its data. So equal strings encrypted alike, an object unchanged across saves showed as unchanged, and AES-256's key keyed the HMAC too.
+- A new file's key and salts come from the operating system. A caller's seeded generator made a key as guessable as its seed.
+- A refused password's error holds no character of it, so a log of the error holds no part of the password.
+- A typed password's length is capped before it's prepared. Finding where its two SASLprep forms part takes the square of its length, so 40,000 bytes took seconds. At the cap it takes about 2.5 ms.
+
 ## 0.1.0-alpha.1 (2026-11-07)
 
 The first release, and an alpha: until a release says it's stable, any alpha may change the API, each saying here what changed and how code follows. A crate that depends on an alpha names it exactly, `=0.1.0-alpha.1`: cargo's default, `0.1.0-alpha.1`, takes any later alpha of 0.1.0 too.

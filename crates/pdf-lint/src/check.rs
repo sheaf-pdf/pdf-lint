@@ -4500,16 +4500,18 @@ fn linearization(object: &Object) -> bool {
 /// The hint streams `dict`, a file's linearization dictionary, names by
 /// where they're written, the offsets `/H` gives first and third (ISO
 /// 32000-2, F.3.6, Table F.1): each stream whose record starts at one of
-/// those bytes of the file's own; and what their dictionaries refer to, a
-/// `/Length` written indirect. Nothing refers to a hint stream, and the
-/// walk visits none.
+/// those bytes of the file's own, past its header, as offsets count from
+/// there (7.5.2); and what their dictionaries refer to, a `/Length` written
+/// indirect. Nothing refers to a hint stream, and the walk visits none.
 fn hint_streams(source: &dyn Source, dict: &Object) -> HashSet<ObjectId> {
     let items = (dict.as_dict())
         .and_then(|d| d.get(b"H"))
         .and_then(Object::as_array)
         .unwrap_or_default();
+    let header = source.facts().and_then(|f| f.header_offset).unwrap_or(0);
     let offsets: Vec<usize> = (items.iter().step_by(2).take(2))
         .filter_map(|item| usize::try_from(item.as_integer()?).ok())
+        .map(|at| at.saturating_add(header))
         .collect();
     if offsets.is_empty() {
         return HashSet::new();
@@ -8401,9 +8403,10 @@ mod tests {
     /// A linearized file's hint stream, which its linearization dictionary
     /// names by where it's written (`/H`), and what it refers to, its
     /// `/Length`, aren't unreached, in a check of its document and beside
-    /// its reading alike, though nothing refers to the stream; an object
-    /// `/H` names that's no stream is, as is any other object nothing
-    /// refers to, and what a stream nothing names refers to.
+    /// its reading alike, though nothing refers to the stream, and with
+    /// bytes before its header, which `/H` counts from; an object `/H`
+    /// names that's no stream is, as is any other object nothing refers
+    /// to, and what a stream nothing names refers to.
     #[test]
     fn a_hint_stream_and_what_it_refers_to_are_never_unreached() {
         let hint = "<< /S 36 /Length 9 0 R >>\nstream\n0123456789\nendstream";
@@ -8441,6 +8444,12 @@ mod tests {
             ObjectId::new(9, 0),
         ];
         assert_eq!(unreached(&named(8)), [all.clone(), all]);
+        // Bytes before the header, which `/H` counts from: the same.
+        let prefixed = [&b"junk\n"[..], &named(5)].concat();
+        assert_eq!(
+            unreached(&prefixed),
+            [vec![ObjectId::new(8, 0)], vec![ObjectId::new(8, 0)]]
+        );
     }
 
     /// A file's linearization dictionary is held to Table F.1 as the model

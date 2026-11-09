@@ -125,7 +125,9 @@ libfuzzer-sys = "0.4"
 # data decoded to find where an inline image's ends, as it asks to.
 pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
 pdf-color = { path = "../crates/pdf-color" }
-pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
+# With the test writer, so the crypt target makes new files from the input's
+# draws, and the write target new encryptions.
+pdf-crypt = { path = "../crates/pdf-crypt", features = ["insecure-test-writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # With `predefined-cmaps`, so a name that's a predefined CMap's reaches its bundle.
@@ -137,7 +139,7 @@ pdf-objects = { path = "../crates/pdf-objects" }
 # With its default features, so the semantics target fuzzes the clock's
 # reading of a count of seconds too.
 pdf-semantics = { path = "../crates/pdf-semantics" }
-pdf-structure = { path = "../crates/pdf-structure" }
+pdf-structure = { path = "../crates/pdf-structure", features = ["insecure-test-writer"] }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [[bin]]

@@ -170,6 +170,88 @@ fn what_a_plan_lays_out_holds_in_each_kind() {
     }
 }
 
+/// `facts` of the file with `by` bytes before its header: each position
+/// that many further on, every value the file writes as it was, as those
+/// count from the header (ISO 32000-2, 7.5.2).
+fn past(facts: &Facts, by: u64) -> Facts {
+    let mut facts = facts.clone();
+    facts.len += by;
+    facts.header += by;
+    if let Some(first) = &mut facts.first_object {
+        (first.at, first.end) = (first.at + by, first.end + by);
+    }
+    let rows = |rows: &mut Vec<RowFacts>| {
+        for row in rows {
+            if let RowEntry::InUse(at) = &mut row.entry {
+                *at += by;
+            }
+        }
+    };
+    for section in facts.first.iter_mut().chain(&mut facts.main) {
+        section.at += by;
+        rows(&mut section.rows);
+        rows(&mut section.hybrid);
+        section.first_row = (section.first_row).map(|(space, row)| (space + by, row + by));
+        section.startxref = section.startxref.map(|at| at + by);
+    }
+    if let Some(hint) = &mut facts.hint {
+        (hint.at, hint.end) = (hint.at + by, hint.end + by);
+        hint.overflow = (hint.overflow).map(|(at, end)| (at + by, end + by));
+    }
+    for extent in &mut facts.objects {
+        (extent.start, extent.end) = (extent.start + by, extent.end + by);
+    }
+    facts.update = facts.update.map(|at| at + by);
+    facts
+}
+
+/// Bytes before the header move nothing the check holds: what a plan lays
+/// out holds in each kind, its hints read, whatever's before its header;
+/// and an `/E` short of the first page is told alike, the places it's held
+/// to further on, its value as written.
+#[test]
+fn bytes_before_the_header_move_nothing_the_check_holds() {
+    for kind in [Kind::Table, Kind::Stream] {
+        let facts = laid_out(kind);
+        for by in [1, 7, 300] {
+            let moved = past(&facts, by);
+            assert_eq!(findings(&moved), [], "{kind:?} {by}");
+            let verdict = check(&moved, &Limits::DEFAULT, &mut ());
+            assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+            assert_eq!(moved.hint_extent().0, facts.hint_extent().0 + by);
+        }
+    }
+    let mut facts = table();
+    let Raw::Integer(e) = dict(&mut facts).e else {
+        panic!("/E");
+    };
+    dict(&mut facts).e = Raw::Integer(e + 1);
+    let found = findings(&facts);
+    let [
+        Finding::FirstPageEnd {
+            e: said,
+            least,
+            most,
+        },
+    ] = found[..]
+    else {
+        panic!("{found:?}");
+    };
+    for by in [1, 7, 300] {
+        let moved = findings(&past(&facts, by));
+        let (least, most) = (least + by, most + by);
+        assert_eq!(
+            moved,
+            [Finding::FirstPageEnd {
+                e: said,
+                least,
+                most
+            }],
+            "{by}"
+        );
+    }
+}
+
 #[test]
 fn a_file_that_doesnt_say_it_is_has_no_findings() {
     let mut none = Facts::new(100);

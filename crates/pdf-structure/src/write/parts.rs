@@ -20,11 +20,16 @@ pub type Packed<'a> = (ObjectId, ObjectId, &'a Body<'a>);
 /// object encrypted under the number it's written at, its references as a
 /// renumbering names them, copied where the rules for a copy hold
 /// ([`Body::Read`]), and object streams of them, by a caller that lays the file
-/// out itself. What's around them, its numbers among it, is that caller's: the
-/// guards [`full`](super::full) keeps on a file as a whole aren't here (a number
-/// given twice, one its encryptor's file lists free, what's written where a
-/// reader looks for what's in the clear), and [`Encryptor`](super::Encryptor)
-/// says what comes of leaving each out.
+/// out itself. An encrypted file's are written by what
+/// [`Encryptor::laid_out`](super::Encryptor::laid_out) gives ([`Parts::new`]),
+/// in its numbers, so that what's encrypted and where it's written can't be
+/// two renumberings; one in the clear by a renumbering given
+/// ([`Parts::plain`]). What's around them, its numbers among it, is that
+/// caller's: the guards [`full`](super::full) keeps on a file as a whole aren't
+/// here (a number given twice, one its encryptor's file lists free, what's
+/// written where a reader looks for what's in the clear), and
+/// [`Encryptor::laid_out`](super::Encryptor::laid_out) says what comes of
+/// leaving each out.
 pub struct Parts<'w> {
     encrypting: Option<&'w Encrypting<'w>>,
     from: Option<&'w dyn ReadFrom>,
@@ -46,26 +51,42 @@ impl fmt::Debug for Parts<'_> {
 }
 
 impl<'w> Parts<'w> {
-    /// What writes bodies: `encrypting` what encrypts them, none for a file in
-    /// the clear; `from` the reading the objects were read in; `to` where each
-    /// goes, none for each at the number it's given at. What's copied follows from
-    /// those: in the clear, what `from` holds in the clear; encrypted, only what's
-    /// encrypted under the key it was read under, so an `encrypting` of an
-    /// [`Encryptor::of`](super::Encryptor::of) `from`, renumbered and made whole or not. Under any other
-    /// key each object is written anew.
+    /// What writes the bodies of a file encrypted by `encrypting`, at the
+    /// numbers the renumbering it was laid out by gives them
+    /// ([`Encryptor::laid_out`](super::Encryptor::laid_out)), each encrypted
+    /// under the number it's written at; `from` the reading the objects were
+    /// read in. What's copied is only what's encrypted under the key it was
+    /// read under, so of an `encrypting` of
+    /// [`Encryptor::of`](super::Encryptor::of) `from`; under any other key
+    /// each object is written anew.
     ///
     /// # Errors
     ///
     /// Refused where `from`'s source says its bytes aren't those it was read
     /// from ([`Error::Changed`]), or can't tell ([`Error::Io`]).
     pub fn new(
-        encrypting: Option<&'w Encrypting<'w>>,
+        encrypting: &'w Encrypting<'w>,
+        from: Option<&'w dyn ReadFrom>,
+    ) -> Result<Parts<'w>, Error> {
+        let encryptor = encrypting.encryptor();
+        let copying = (from.map(|from| Copying::new(from, Some(encryptor)))).transpose()?;
+        let to = encrypting.renumbering();
+        Ok(Parts::of(Some(encrypting), from, copying, to))
+    }
+
+    /// What writes the bodies of a file in the clear: `from` the reading the
+    /// objects were read in, `to` where each goes, none for each at the number
+    /// it's given at. What's copied is what `from` holds in the clear.
+    ///
+    /// # Errors
+    ///
+    /// Refused as [`Parts::new`] is.
+    pub fn plain(
         from: Option<&'w dyn ReadFrom>,
         to: Option<&'w (dyn Renumber + Sync + 'w)>,
     ) -> Result<Parts<'w>, Error> {
-        let encryptor = encrypting.map(Encrypting::encryptor);
-        let copying = from.map(|from| Copying::new(from, encryptor)).transpose()?;
-        Ok(Parts::of(encrypting, from, copying, Numbering(to)))
+        let copying = from.map(|from| Copying::new(from, None)).transpose()?;
+        Ok(Parts::of(None, from, copying, Numbering(to)))
     }
 
     /// What writes bodies, what's copied by already made.
@@ -129,8 +150,8 @@ impl<'w> Parts<'w> {
     /// whose data would be more than the reader takes
     /// ([`MAX_DATA`](super::MAX_DATA)), or that has more members than a place in
     /// it can say. Built on up to `threads` threads, 0 for as many as the machine
-    /// runs at once, up to 8, the same bytes on any number, `stop` checked before
-    /// each.
+    /// runs at once, up to 8, the same objects on any number (the same bytes in
+    /// the clear, and under the same IVs), `stop` checked before each.
     ///
     /// # Errors
     ///

@@ -9,16 +9,19 @@
 //! the number the renumbering gives it, the encryption dictionary and what
 //! it refers to staying where they are.
 
+use std::collections::BTreeMap;
 use std::io;
 
+use pdf_crypt::{Handler, KeyCheck};
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::serialize;
 
 use super::copy::{Copying, as_read, written};
-use super::crypt::Place;
+use super::crypt::{Guard, Place};
 use super::{
-    Body, Encryptor, Entry, Error, Given, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
-    Section, Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
+    Body, Encrypting, Encryptor, Entry, Error, Given, NUMBERS, Numbering, Options, ReadFrom,
+    SECTION_KEYS, Section, Written, checked, dangling, direct_info, file_id, first_id, fresh,
+    id_value, stopped,
 };
 use crate::phases::phase;
 use crate::read::{ByteSource, Reading, SourceId};
@@ -27,7 +30,17 @@ use crate::source::XrefKind;
 /// The file an update goes after, as its last section describes it. Made
 /// of a reading ([`Base::of`]), or of what a caller read otherwise
 /// ([`Base::new`]), its fields set after; and given back by each write
-/// ([`Written::base`]), for an update after it.
+/// ([`Written::base`]), for an update after it. Made of a reading that
+/// found its newest section away from where its last `startxref` says, or
+/// read objects at a shift or where a scan found them, it also keeps,
+/// privately, what that `startxref` said, which [`Base::holds`] reads
+/// again in place of `prev`, and where each such object is, which an
+/// update after it lists; and, made of an encrypted file's reading or
+/// given back by a write under an encryption, a check of the file's key
+/// (pdf-crypt's `KeyCheck`, which gives nothing of the key), which an
+/// update's encryptor must have ([`Error::Unmatched`]). None is a field,
+/// so one made by [`Base::new`] and its fields set as another's has none,
+/// and a caller that keeps a base for later keeps the `Base` itself.
 /// Not exhaustive, so that it can come to say more of the file.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -37,13 +50,13 @@ pub struct Base {
     /// Whether its last line is ended; if not, the update ends it.
     pub ends_line: bool,
     /// Where its header, `%PDF-`, starts: the update's positions count from
-    /// there, as PDFium, pdf.js and qpdf read them. This crate's reader
-    /// counts them from the file's start (ISO 32000-2, 7.5.4), so it reads
-    /// an update after a file with bytes before its header only by
-    /// scanning.
+    /// there (ISO 32000-2, 7.5.2), as this crate's reader, PDFium, pdf.js
+    /// and qpdf read them.
     pub header: usize,
     /// Where its last section starts, from the header: what its last
-    /// `startxref` says, which the update's `/Prev` gives.
+    /// `startxref` says, which the update's `/Prev` gives. Of a reading
+    /// that read that section away from where `startxref` said
+    /// ([`Fault::Moved`](crate::Fault::Moved)), where it read it.
     pub prev: usize,
     /// Past every object number it uses, its cross-reference streams'
     /// included: where its new numbers start, below which an update's
@@ -61,8 +74,9 @@ pub struct Base {
     /// known: an update's encryptor must have the same
     /// ([`Error::Unmatched`]). None for a file that isn't encrypted, and for
     /// one described by [`Base::new`] whose `/Encrypt` is a reference,
-    /// unless the caller sets it: an update's encryptor is then matched to
-    /// the file by where the dictionary is and by `/ID[0]` alone.
+    /// unless the caller sets it: with neither it nor a key's check, which
+    /// such a base has none of, nothing says an encryptor's key is the
+    /// file's, so an update after it is refused.
     pub encryption: Option<Dict>,
     /// The reading its bytes are the bytes of, when it was made of one:
     /// kept by an update after it, which appends, and none after a whole
@@ -80,53 +94,99 @@ pub struct Base {
     /// nothing to renumber is given none. [`Base::of`] and [`Base::new`]
     /// leave it unset.
     pub renumbered: bool,
+    /// What its last `startxref` says, where that isn't `prev`: of a
+    /// reading that read the last section elsewhere, which
+    /// [`Base::holds`] reads again.
+    pub(super) startxref: Option<usize>,
+    /// Each object of the reading it was made of that the reading read at
+    /// a shift ([`Origin::Shifted`](crate::Origin::Shifted)), by a row of
+    /// its section renumbered ([`Origin::Renumbered`](crate::Origin::Renumbered))
+    /// or where a scan found it ([`Origin::Recovered`](crate::Origin::Recovered)): its
+    /// number, its generation and where it is in the file's bytes, which an
+    /// update after it lists, so that it's read there with nothing to find.
+    pub(super) shifted: Vec<(u32, u16, usize)>,
+    /// Its key's check, made of the handler its reading was opened by, or
+    /// the encryptor a write that gave it back was under: an update's
+    /// encryptor must have the same key ([`Error::Unmatched`]).
+    pub(super) key: Option<KeyCheck>,
+    /// Under RC4, each number an update after the reading it was made of
+    /// wrote an object at, given back by [`Written::base`], with the
+    /// highest generation it wrote it at: an update after it under that
+    /// reading's encryptor counts each keystream there and below as used,
+    /// as the reading, which doesn't hold those updates, doesn't show it.
+    pub(super) wrote: BTreeMap<u32, u16>,
 }
 
 impl Base {
     /// `reading`'s file, as its last section describes it: its length, its
-    /// last byte, its newest section's start and kind, its trailer, its
-    /// `/ID[0]` (an encrypted file's as its handler opened by it, empty
-    /// where the trailer has none) and its encryption dictionary as stored,
-    /// its header at 0, as the reader counts positions from the file's
-    /// start (ISO 32000-2, 7.5.4), and the reading's [`SourceId`]. New
-    /// numbers start past its trailer's `/Size` (below 2³²), every number
-    /// its sections list, in use or free, and its cross-reference streams'
-    /// numbers.
+    /// last byte, where its header starts ([`Facts::header_offset`], 0
+    /// without one), its newest section's start, counted from the header as
+    /// its `startxref` writes it (where the reading read it, where that
+    /// isn't where `startxref` says, so that the update's `/Prev` is), and
+    /// its kind, its trailer, its `/ID[0]` (an
+    /// encrypted file's as its handler opened by it, empty where the
+    /// trailer has none), its encryption dictionary as stored and its key's
+    /// check, and the reading's [`SourceId`]. New numbers start past its
+    /// trailer's `/Size`
+    /// (below 2³²), every number its sections list, in use or free, and its
+    /// cross-reference streams' numbers. Where the reading read objects at
+    /// a shift, or where a scan found them, it keeps where each is, which
+    /// an update after it lists.
     ///
     /// # Errors
     ///
-    /// Refused: a file with bytes before its header ([`Error::Prefixed`]),
-    /// whose positions this crate's reader counts from the file's start
-    /// (ISO 32000-2, 7.5.4) and PDFium, pdf.js and qpdf from the header, so
-    /// that an update's would be misread by one or the other; a file whose
-    /// sections didn't read, read by scanning ([`Error::Unsound`]); a
-    /// trailer without `/Root`
+    /// Refused: a file read by scanning, not by its sections
+    /// ([`Error::Unsound`]); a trailer without `/Root`
     /// ([`Error::Rootless`]); a reading as of an earlier revision
     /// ([`Options::section`](crate::Options::section)), whose last section
     /// isn't the file's ([`Error::Earlier`]), as an update after it would
     /// leave every later revision unreachable; and a source whose bytes
-    /// don't read ([`Error::Io`]). A caller that means any of those, or
-    /// counts positions from the header, describes the file by
-    /// [`Base::new`].
+    /// don't read ([`Error::Io`]). A reading as of a section is taken where
+    /// that's the file's newest: the place the last `startxref` gives, or
+    /// where a reading of the whole file reads the section `startxref`
+    /// gives, near it or counted from the file's first byte
+    /// ([`Recovery::Verified`](crate::read::Recovery::Verified)), which the
+    /// base keeps what `startxref` said of, as of a whole reading that
+    /// read it there. A caller that means any of those describes the file
+    /// by [`Base::new`].
+    ///
+    /// [`Facts::header_offset`]: crate::Facts::header_offset
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Base, Error> {
-        if let Some(header @ 1..) = reading.facts().header_offset {
-            return Err(Error::Prefixed(header));
-        }
+        let header = reading.facts().header_offset.unwrap_or(0);
         let trailer = reading.trailer();
         let newest = reading.facts().newest;
-        let Some((prev, kind)) = newest.filter(|_| trailer.unwritten.is_none()) else {
+        let Some((newest, kind)) = newest.filter(|_| trailer.unwritten.is_none()) else {
             return Err(Error::Unsound);
         };
+        // The reading's positions are the file's bytes'; a section's
+        // offsets count from the header. Where the reading read the newest
+        // section away from where startxref said, startxref's value is
+        // kept, to tell the file is as read.
+        let prev = newest.saturating_sub(header);
+        let mut said = (reading.said(newest)).map(|said| said.saturating_sub(header));
         let dict = trailer.dict();
         if !dict.has(b"Root") {
             return Err(Error::Rootless);
         }
         let source = reading.source();
         let io = |e: io::Error| Error::io(&e);
+        // A section the reading was opened as of is at its byte; the last
+        // startxref's value counts from the header. Where that isn't the
+        // section, it's the file's newest only where a reading of the
+        // whole file reads that section there, as its search finds it, and
+        // startxref's value is kept to tell the file is as read.
         if let Some(section) = reading.as_of()
-            && startxref(source).map_err(io)? != Some(section)
+            && startxref(source)
+                .map_err(io)?
+                .map(|at| at.saturating_add(header))
+                != Some(section)
         {
-            return Err(Error::Earlier(section));
+            match reading.newest_section().map_err(io)? {
+                Some((at, found)) if found == section => {
+                    said = Some(at.saturating_sub(header));
+                }
+                _ => return Err(Error::Earlier(section)),
+            }
         }
         let len = source.len();
         let ends_line = match len {
@@ -147,7 +207,7 @@ impl Base {
         Ok(Base {
             len,
             ends_line,
-            header: 0,
+            header,
             prev,
             size,
             kind,
@@ -159,6 +219,10 @@ impl Base {
             encryption: reading.stored().map(|stored| stored.dict.clone()),
             source: Some(reading.id()),
             renumbered: false,
+            startxref: said,
+            shifted: reading.shifted(),
+            key: reading.handler().map(Handler::key_check),
+            wrote: BTreeMap::new(),
         })
     }
 
@@ -167,7 +231,13 @@ impl Base {
     /// `/ID[0]` the trailer's, its encryption dictionary the trailer's where
     /// that's direct; its header at 0, its last line taken as not ended (an
     /// update then starts with a newline), and of no reading. Each is a
-    /// field, to set after.
+    /// field, to set after: a file whose `/Encrypt` is a reference is
+    /// updated only once [`Base::encryption`] is set, as nothing else says
+    /// an encryptor is the file's. It has no check of the file's key, so an
+    /// update after it takes an encryptor whose dictionary and `/ID[0]` are
+    /// the file's, whatever its key: one of a dictionary crafted to give the
+    /// user's password and the owner's two keys among them, unless it's
+    /// given the key's check ([`Base::keyed`]).
     #[must_use]
     pub fn new(len: usize, prev: usize, size: u32, kind: XrefKind, trailer: Dict) -> Base {
         Base {
@@ -182,20 +252,37 @@ impl Base {
             trailer,
             source: None,
             renumbered: false,
+            startxref: None,
+            shifted: Vec::new(),
+            key: None,
+            wrote: BTreeMap::new(),
         }
     }
 
+    /// It, with `check` the check of its file's key (pdf-crypt's
+    /// `Handler::key_check`, of the handler that opened the file), which an
+    /// update's encryptor must have ([`Error::Unmatched`]), as one of
+    /// [`Base::of`] has its reading's.
+    #[must_use]
+    pub fn keyed(mut self, check: KeyCheck) -> Base {
+        self.key = Some(check);
+        self
+    }
+
     /// Whether `source` is still the file it describes, read again: as
-    /// long, its last `startxref` its last section's. What keeps another
-    /// writer from changing the file between this and an append is the
-    /// caller's.
+    /// long, its last `startxref` its last section's, `prev`, or what it
+    /// said where the reading [`Base::of`] was made of read that section
+    /// elsewhere, which the base keeps, `prev` aside ([`Base`]).
+    /// What keeps another writer from changing the file between this and an
+    /// append is the caller's.
     ///
     /// # Errors
     ///
     /// The source's, where it doesn't give the bytes its last `startxref`
     /// is read from.
     pub fn holds<S: ByteSource + ?Sized>(&self, source: &S) -> io::Result<bool> {
-        Ok(source.len() == self.len && startxref(source)? == Some(self.prev))
+        let said = self.startxref.unwrap_or(self.prev);
+        Ok(source.len() == self.len && startxref(source)? == Some(said))
     }
 }
 
@@ -209,7 +296,12 @@ impl Base {
 /// at the number of one passed over, at any generation, which would
 /// replace it ([`Error::Twice`]). After a newline, where `base`'s last
 /// line isn't ended, each body at its number, in the order given, then a
-/// section of `base`'s kind listing only those, in runs, positions counted
+/// section of `base`'s kind listing only those, and each object the reading
+/// [`Base::of`] was made of read at a shift
+/// ([`Origin::Shifted`](crate::Origin::Shifted)) or where a scan found it
+/// ([`Origin::Recovered`](crate::Origin::Recovered)) where it is, unless a
+/// body is written at its number, so that a reader reads it there with
+/// nothing to find; in runs, positions counted
 /// from `base`'s header, a stream's not deflated, numbered at
 /// [`Options::xref_from`] or past `base.size` and every number written,
 /// whichever is higher, passing over a number the objects written or the
@@ -224,11 +316,12 @@ impl Base {
 /// changed since a save is the caller's to give. After a file written under
 /// a renumbering, whole or as an update ([`Base::renumbered`]), whose
 /// numbers aren't the document's, it's given objects at the numbers
-/// written, built or edited, under the encryptor in those numbers (after a
-/// whole file, [`Encryptor::renumbered`]'s; after an update, the file's
-/// own), and refuses an object as read and a reading
-/// ([`Error::Renumbered`]); a caller that copies opens the file written and
-/// goes after [`Base::of`] that reading. With no reading to resolve it,
+/// written, built or edited (after a whole file under RC4, those
+/// [`Written::regenerated`] gives), under the encryptor in those numbers
+/// (after a whole file, [`Encryptor::of`] a reading of the file written;
+/// after an update, the file's own), and refuses an object as read and a
+/// reading ([`Error::Renumbered`]); a caller that copies opens the file
+/// written and goes after [`Base::of`] that reading. With no reading to resolve it,
 /// where `/EncryptMetadata false` leaves the document's metadata stream in
 /// the clear, the catalog, which says which stream that is, is among what
 /// it's given ([`Error::Catalog`]).
@@ -238,15 +331,26 @@ impl Base {
 ///   `base.prev`, `/Info`, `/Encrypt` and `/ID` first, then the rest in
 ///   `base`'s order, then `/Size`. Its values are written as they are, each
 ///   reference as the renumbering names it, never encrypted, as a trailer
-///   isn't an object (7.6.2).
+///   isn't an object (7.6.2). So in an encrypted file a direct `/Info`,
+///   whose strings would be in the clear there, is written as an object
+///   after the update's bodies, at a number past every one the file and
+///   the update use (none of its keys or keystreams), passing over what's
+///   written refers to and doesn't hold, encrypted as any object, the
+///   trailer naming it. An update appends: the earlier sections' trailers
+///   stay in the file as they were, a direct `/Info`'s strings among them
+///   in the clear, which only a whole file written anew leaves behind.
 /// - **The `/ID`** keeps its first string, the encryptor's, else `base`'s;
-///   the second is XXH3-128 of what the update wrote before its section,
-///   so the same update writes the same bytes. A file that isn't
-///   encrypted and has no first string gets none.
+///   the second is the first 16 bytes of SHA-256 of what the update wrote
+///   before its section, so in the clear the same update writes the same
+///   bytes. A file
+///   that isn't encrypted and has no first string gets none.
 /// - **Encrypted** as `base`'s file is, by `encryptor`, which is that
 ///   file's ([`Encryptor::of`] of a reading of its bytes): its dictionary
 ///   where the file's trailer has it, the one the file stores where `base`
-///   knows it ([`Base::encryption`]), and its `/ID[0]`, `base`'s; every
+///   knows it ([`Base::encryption`]), which it must where the trailer
+///   names it by number, its `/ID[0]`, `base`'s, and its key, where `base`
+///   keeps a check of it (one of a reading, [`Base::of`], or given back by
+///   a write); every
 ///   string and stream's data as [`Encrypting`](super::Encrypting) says; a
 ///   stream's whose data is where it was written read from `from`,
 ///   decrypted, and encrypted again. Its `/Encrypt` is repeated as the
@@ -279,43 +383,64 @@ impl Base {
 ///   every object a reference in which moves, as the writer reads nothing
 ///   it isn't given.
 ///
-/// **Under RC4**, an object written again at its number and generation is
-/// encrypted with the keystream its earlier version, still in the file,
-/// was: each string and stream of an object from the start of one
-/// keystream, made from the file's key and the object's number and
-/// generation (Algorithm 1). So where a string's or stream's plaintext
-/// changed, the XOR of the two ciphertexts is the XOR of the two
-/// plaintexts, and one who holds the file, which holds both, has what
-/// changed. So it is for an object a renumbering writes at a number another
-/// object of the file had, under that one's keystream: the XOR of the two
-/// objects' plaintexts. AES-128 and AES-256 don't leak so, as each string
-/// and stream has an IV of its own, derived from its data. A caller who
-/// doesn't want that writes the file whole under a new AES-256 encryption
-/// ([`Encryptor::create`]) instead.
+/// **Under RC4**, each string and stream of an object is encrypted from the
+/// start of one keystream, made from the file's key and the object's number and
+/// generation (Algorithm 1), and an update's file holds the versions before it:
+/// an object written again at its number and generation, or at one another
+/// object of the file had, with a string or its stream's data that isn't one of
+/// theirs, would leave the XOR of the two plaintexts to whoever holds the file.
+/// So each string and stream's data RC4 encrypts at a number and generation
+/// whose keystream the file used (a section lists it in use at an offset at it
+/// or past it, or free past it, the sections of the updates written after the
+/// encryptor's reading among them, as [`Written::base`] gives them back; any
+/// number of a file written after that reading but those it lists) is written
+/// only where it's the same as, or the start of, a plaintext a version of that
+/// object has there, every revision's read through `from` as of its end, where
+/// `from` is the reading `base` was made of
+/// ([`Reading::prefix`](crate::Reading::prefix)), which doesn't hold what those
+/// updates wrote; else the update is refused, naming the object at the number
+/// it would be written at
+/// ([`Unencryptable::Keystream`](super::Unencryptable::Keystream)). So a page
+/// tree's `/Count` changed, a string changed back to an earlier revision's, or
+/// a new object past every number is written; an annotation's `/Contents`
+/// changed isn't, nor, with no `from`, any string at a number the file used.
+/// One at a number the file lists free, below the generation its entry gives,
+/// is refused too ([`Error::Free`]), as the deleted version its keystream
+/// encrypted may not be there to tell. Told to reuse keystreams
+/// ([`Encryptor::reusing_rc4_keystreams`]), each is written, and listed
+/// ([`Written::keystreams_reused`]). AES-128 and AES-256 don't leak so, as each
+/// string and stream has an IV of its own, random. A caller who would write
+/// what the rule refuses writes the file whole: under its own encryption, which
+/// moves what it writes anew to a fresh generation, or under a new AES-256 one
+/// ([`Encryptor::create`]).
 ///
 /// # Errors
 ///
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
 /// object as read or a `from` after a file written under a renumbering; an
-/// encryptor that isn't `base`'s file's (another file's, though its
-/// `/Encrypt` is at the same number), or none for an encrypted file; a
-/// number 0 or at or past [`NUMBERS`], or given twice, one passed over
-/// among them ([`Error::Twice`]), or under a renumbering written at twice,
-/// one passed over among them ([`Error::WrittenTwice`]); a body the
-/// renumbering gives no number; a body at the encryption dictionary's
-/// number; one at a number the file lists free where its keys are made
-/// per object ([`Encryptor::of`]); a renumbering that moves an encryption
-/// dictionary or what one refers to, or writes another object there; a
-/// catalog neither given nor in `from`, where `/EncryptMetadata false`
-/// leaves the metadata stream it names in the clear ([`Error::Catalog`]); a
-/// cross-reference stream with no number left below [`NUMBERS`]; a stream's data where it was written that isn't
-/// the reading's own for its number, or with no `from`; a `from` whose
-/// source says it changed, and a copy whose bytes aren't those it was read
-/// from ([`Error::Changed`]), or aren't there to read ([`Error::Gone`],
-/// [`Error::Uncontained`]), or whose record is another reading's or
-/// another object's, or under a renumbering whose references aren't where
-/// its bytes have them ([`Error::Elsewhere`]); what pdf-objects' writer
-/// refuses, or the encryptor; and a write stopped.
+/// encryptor that isn't `base`'s file's (another file's, though its `/Encrypt`
+/// is at the same number and its `/ID[0]` the same, or another key's of the
+/// same file), or none for an encrypted file, or any for a `base` that doesn't
+/// know the dictionary its file's `/Encrypt` names by number; a number 0 or at
+/// or past [`NUMBERS`], or given twice, one passed over among them
+/// ([`Error::Twice`]), or under a renumbering written at twice, one passed over
+/// among them ([`Error::WrittenTwice`]); a body the renumbering gives no
+/// number; a body at the encryption dictionary's number; under RC4, one at a
+/// number the file lists free below the generation its entry gives, and a
+/// string or stream's data that would be new under a keystream the file used,
+/// but where the encryptor is told to reuse keystreams; a renumbering that
+/// moves an encryption dictionary or what one refers to, or writes another
+/// object there; a catalog neither given nor in `from`, where
+/// `/EncryptMetadata false` leaves the metadata stream it names in the clear
+/// ([`Error::Catalog`]); a cross-reference stream with no number left below
+/// [`NUMBERS`]; a stream's data where it was written that isn't the reading's
+/// own for its number, or with no `from`; a `from` whose source says it
+/// changed, and a copy whose bytes aren't those it was read from
+/// ([`Error::Changed`]), or aren't there to read ([`Error::Gone`],
+/// [`Error::Uncontained`]), or whose record is another reading's or another
+/// object's, or under a renumbering whose references aren't where its bytes
+/// have them ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the
+/// encryptor; and a write stopped.
 pub fn update<'a>(
     out: &mut Vec<u8>,
     base: &Base,
@@ -419,8 +544,27 @@ fn appended(
     // written.
     let resolve = encryptor.map(|_| Given::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
-        (Some(e), Some(resolve)) => Some(e.encrypting_at(&base.trailer, resolve, to)?),
+        (Some(e), Some(resolve)) => {
+            let guard = Guard::update(e, base, from);
+            Some(e.encrypting_at(&base.trailer, resolve, to)?.guarded(guard))
+        }
         _ => None,
+    };
+    // Under RC4, what's in the file under each keystream the update writes
+    // at that the file used, read once.
+    if let Some(guard) = encrypting.as_ref().and_then(Encrypting::guard) {
+        let used: Vec<ObjectId> = (written_at.iter().copied())
+            .filter(|&at| guard.used(at))
+            .collect();
+        guard.load(&used);
+    }
+    // Those at a number the file lists free, below its generation, which
+    // it was told to write.
+    let freed: Vec<ObjectId> = match encryptor {
+        Some(e) if e.reusing() => (written_at.iter().copied())
+            .filter(|&at| e.free_below(at))
+            .collect(),
+        _ => Vec::new(),
     };
 
     let at = |out: &Vec<u8>| base.len + (out.len() - start);
@@ -458,11 +602,45 @@ fn appended(
         }
         value
     };
+    // An encrypted file's direct /Info, which the trailer would hold in the
+    // clear, written as an object at a number past every one the file and
+    // the update use, encrypted as any, the trailer naming it.
+    let mut info_at = None;
+    let info = match (base.trailer.get(b"Info"), &encrypting) {
+        (Some(info), Some(e)) if direct_info(info) => {
+            let past = base.size.max(section.size());
+            let dangling = dangling(bodies, to, &base.trailer, past, &[]);
+            let num = fresh(past, |n| dangling.contains(&n));
+            if num >= NUMBERS {
+                return Err(Error::NoNumber(num));
+            }
+            let id = ObjectId::new(num, 0);
+            let pos = at(out);
+            serialize::indirect_with(out, id, &named(info), e)?;
+            section.insert(
+                num,
+                Entry::InUse {
+                    offset: pos,
+                    generation: 0,
+                },
+            );
+            info_at = Some(id);
+            Some(Object::from(id))
+        }
+        (info, _) => info.map(named),
+    };
+    // Each object the base's reading read at a shift, where it is, unless
+    // a body was written at its number.
+    for &(number, generation, offset) in &base.shifted {
+        if !section.lists(number) {
+            section.insert(number, Entry::InUse { offset, generation });
+        }
+    }
     let mut trailer = Dict::new();
     trailer.set("Root", named(root));
     trailer.set("Prev", base.prev as i64);
-    if let Some(info) = base.trailer.get(b"Info") {
-        trailer.set("Info", named(info));
+    if let Some(info) = info {
+        trailer.set("Info", info);
     }
     if let Some(e) = encryptor {
         match e.place() {
@@ -500,6 +678,23 @@ fn appended(
     let size = section.size();
     kept.set("Size", i64::from(size));
     let prev = pos - base.header;
+    let mut keystreams_reused = encrypting
+        .as_ref()
+        .map(Encrypting::keystreams_reused)
+        .unwrap_or_default();
+    keystreams_reused.extend(freed);
+    keystreams_reused.sort_unstable();
+    keystreams_reused.dedup();
+    // Under RC4, what this update wrote, which an update after it under the
+    // same reading's encryptor counts as used, with what those before it
+    // wrote.
+    let mut wrote = base.wrote.clone();
+    if encryptor.is_some_and(Encryptor::rc4) {
+        for at in written_at.iter().copied().chain(info_at) {
+            let had = wrote.entry(at.number).or_insert(at.generation);
+            *had = (*had).max(at.generation);
+        }
+    }
     let base = Base {
         len: at(out),
         ends_line: true,
@@ -512,6 +707,10 @@ fn appended(
         encryption: base.encryption.clone(),
         source: base.source,
         renumbered: base.renumbered || to.0.is_some(),
+        startxref: None,
+        shifted: Vec::new(),
+        key: base.key.clone(),
+        wrote,
     };
     Ok(Written {
         section,
@@ -519,17 +718,24 @@ fn appended(
         size,
         id,
         base,
+        regenerated: Vec::new(),
+        keystreams_reused,
     })
 }
 
 /// Whether `encryptor` is how `base`'s file is encrypted, or neither
 /// encrypts: its dictionary where the file's trailer has it, at the same
 /// number or the same direct dictionary; the same dictionary as the one
-/// `base` knows the file stores ([`Base::encryption`]); and the same
-/// `/ID[0]`, an absent one empty. Those are what a password's key is made
-/// from and checked by (ISO 32000-2, 7.6.4.3), so its key is then the
-/// file's; another file's, whose `/Encrypt` is at the same number, isn't
-/// taken for it.
+/// `base` knows the file stores ([`Base::encryption`]), which it must know
+/// where the trailer names it by number; the same `/ID[0]`, an absent one
+/// empty; and the same key, where `base` has a check of it (pdf-crypt's
+/// `KeyCheck`, compared in constant time). The dictionary and `/ID[0]` are
+/// what a password's key is made from and checked by (ISO 32000-2,
+/// 7.6.4.3), but a dictionary can be made to give one key by the owner's
+/// password and another by the user's, which the check tells apart; so
+/// another file's encryptor, whose `/Encrypt` is at the same number, or
+/// another reading's of the same file by a key it wasn't written under,
+/// isn't taken for it.
 fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
     // A null is no entry (ISO 32000-2, 7.3.9), so no encryption.
     let encrypt = (base.trailer.get(b"Encrypt")).filter(|e| !e.is_null());
@@ -547,9 +753,15 @@ fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
         (Place::Direct, Value::Dict(dict)) => alike(dict),
         _ => false,
     };
-    let stored = base.encryption.as_ref().is_none_or(alike);
+    // A dictionary at a number, which the base doesn't know: nothing says
+    // the encryptor's is the one stored there.
+    let stored = match &base.encryption {
+        Some(dict) => alike(dict),
+        None => encrypt.as_reference().is_none(),
+    };
     let id = e.first_id().unwrap_or_default() == base.first_id.as_deref().unwrap_or_default();
-    placed && stored && id
+    let key = base.key.as_ref().is_none_or(|key| e.has_key(key));
+    placed && stored && id && key
 }
 
 /// `dict` as pdf-objects' writer writes it, where it can.

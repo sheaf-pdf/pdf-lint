@@ -1,6 +1,8 @@
-//! HMAC-SHA256 (RFC 2104, FIPS 198-1), which the handler derives the IVs
-//! it encrypts under with: RustCrypto's `hmac` over `sha2`.
+//! HMAC-SHA256 (RFC 2104, FIPS 198-1), which a handler's key check is
+//! made with (`Handler::key_check`) and the test writer derives its IVs
+//! with (`Ivs::derived`): RustCrypto's `hmac` over `sha2`.
 
+use ::hmac::digest::CtOutput;
 use ::hmac::{Hmac, KeyInit, Mac};
 use ::sha2::Sha256;
 
@@ -16,12 +18,20 @@ impl HmacSha256 {
     }
 
     /// The MAC of `parts`, one after the other.
+    #[cfg(any(test, feature = "insecure-test-writer"))]
     pub(crate) fn mac(&self, parts: &[&[u8]]) -> [u8; 32] {
+        self.tag(parts).into_bytes().into()
+    }
+
+    /// The MAC of `parts`, one after the other, as hmac gives it: a value
+    /// that compares in constant time, its `Debug` without its bytes,
+    /// wiped when it's dropped.
+    pub(crate) fn tag(&self, parts: &[&[u8]]) -> CtOutput<Hmac<Sha256>> {
         let mut mac = self.0.clone();
         for part in parts {
             mac.update(part);
         }
-        mac.finalize().into_bytes().into()
+        mac.finalize()
     }
 }
 

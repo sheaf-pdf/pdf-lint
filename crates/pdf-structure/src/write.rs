@@ -12,7 +12,7 @@
 //!   and one cross-reference section, a table or a stream, with no
 //!   `/Prev`; the trailer the caller's but for the keys a section writes
 //!   itself, and an `/ID` whose second string is a hash of what's
-//!   written, so the same objects write the same bytes. Packed
+//!   written, so in the clear the same objects write the same bytes. Packed
 //!   ([`Options::pack`]), what may go in an object stream goes in one,
 //!   built on threads. [`document`] writes a [`Document`]'s
 //!   objects so, but those a whole file leaves out.
@@ -37,15 +37,17 @@
 //!   trailer's too. What's given stays at its numbers, which a stream's
 //!   data, a copy's record and what the encryptor resolves are found by; an
 //!   encrypted file's objects are encrypted under the numbers they're
-//!   written at, a whole file's by the encryptor in those numbers
-//!   ([`Encryptor::renumbered`]), an update's by its file's, whose
-//!   encryption dictionary and what that refers to it doesn't move. An
+//!   written at, a whole file's by the encryptor in those numbers (as
+//!   [`Encryptor::laid_out`] gives it for a caller's own layout), an
+//!   update's by its file's, whose encryption dictionary and what that
+//!   refers to it doesn't move. An
 //!   object as read is copied as its bytes, its header and each reference
 //!   that moves written anew where its bytes had it; at another number only
 //!   where its key isn't made of its number. An update passes over only
 //!   what doesn't move, nor names what does.
 //! - **For a caller that lays a file out itself** ([`Parts`]): each body and
-//!   object stream written as a whole file's are, at the numbers it gives; with
+//!   object stream written as a whole file's are, at the numbers it gives,
+//!   encrypted by what [`Encryptor::laid_out`] gives for those numbers; with
 //!   what a whole file leaves out ([`left_out`], [`encryption_objects`]), a
 //!   trailer's own entries ([`trailer_entries`]), and `/ID` ([`first_id`],
 //!   [`file_id`], [`id_value`]).
@@ -59,12 +61,10 @@
 //!   stream is deflated under PNG's Up predictor, each row less the row
 //!   above it, as qpdf writes its own; an update's is written as it is.
 //! - **Positions counted from the header,** where `%PDF-` starts, which a
-//!   whole file's section has at its start: PDFium, pdf.js and qpdf count
-//!   them so, past any bytes a writer put before the header, where ISO
-//!   32000-2 counts them from the file's start (7.5.4), as this crate's
-//!   reader does. The two differ only for an update of a file with bytes
-//!   before its header ([`Section::append`]), whose sections this crate's
-//!   reader reads only by scanning.
+//!   whole file's section has at its start (ISO 32000-2, 7.5.2): past any
+//!   bytes a writer put before the header, as this crate's reader, PDFium,
+//!   pdf.js and qpdf count them. An update of a file with bytes before its
+//!   header counts from there ([`Section::append`], [`Base::header`]).
 //! - **Object streams** (7.5.7): which objects may go in one
 //!   ([`packable`]), by the clause's list of what mustn't ([`KeptOut`]),
 //!   what of it an object alone tells ([`kept_out`]); and a container of
@@ -72,22 +72,34 @@
 //!   starts, deflated, no bigger than the reader decodes a stream to
 //!   ([`MAX_DATA`]).
 //! - **Deflated** by the backend and at the level a [`Deflate`] says.
-//! - **Encrypted as it's written** (7.6): an encrypted file's every string
-//!   and stream's data, as pdf-objects' writer writes each, by an
-//!   [`Encryptor`], a reading's ([`Encryptor::of`]) or a new file's
-//!   ([`Encryptor::create`]), through what it gives for the file's objects
-//!   ([`Encrypting`]): with the object's key, AES's IV derived from `n g
-//!   obj` and the data, so the same object encrypts to the same bytes on
-//!   every save. What it leaves in the clear is the list the reader
-//!   decrypts by, one list both ways (see [`read`](crate::read), "What's
-//!   encrypted"). Under RC4 a changed object written again at its number
-//!   and generation is encrypted with the keystream its earlier version
-//!   was, which leaks what changed to one who holds both (pdf-crypt's
-//!   `Method::Rc4`), and so is an object a renumbering writes at a number
-//!   another object had, which leaks the XOR of the two; a file written
-//!   whole under a new AES-256 encryption ([`Encryptor::create`]) doesn't.
-//!   The encryption dictionary of pdf-crypt's values, as a new file's is
-//!   written, is [`encryption`].
+//! - **Encrypted as it's written** (7.6): an encrypted file's every string and
+//!   stream's data, as pdf-objects' writer writes each, by an [`Encryptor`], a
+//!   reading's ([`Encryptor::of`]) or a new file's ([`Encryptor::create`]),
+//!   through what it gives for the file's objects ([`Encrypting`]): with the
+//!   object's key, AES's IV the next of the write's own, 16 bytes from the
+//!   operating system (pdf-crypt's `Ivs`), so no IV serves two plaintexts and
+//!   two saves of one document differ in every AES ciphertext written anew.
+//!   What it leaves in the clear is the list the reader decrypts by, one list
+//!   both ways (see [`read`](crate::read), "What's encrypted"). A trailer isn't
+//!   encrypted, so a whole file's or an update's direct `/Info` is written as
+//!   an object, encrypted as any, as a caller laying a file out writes it
+//!   itself ([`Encryptor::laid_out`]); and only strings and streams are
+//!   (7.6.2), so what a file held only inside an object stream is in the clear
+//!   once written unpacked ([`document`] says so). Under a new encryption that
+//!   encrypts metadata, the document's metadata stream's own `/Crypt` filter
+//!   that would leave it in the clear is taken out as it's written ([`Parts`]),
+//!   and written otherwise it's refused ([`Unencryptable::Metadata`]). Under
+//!   RC4, which encrypts each object's strings and data from the start of a
+//!   keystream its number and generation make, so that two plaintexts under
+//!   one leak their XOR (pdf-crypt's `Method::Rc4`), nothing new goes under a
+//!   keystream the file read shows used: a whole file writes what it writes
+//!   anew at a generation its number hasn't used ([`Written::regenerated`]),
+//!   and an update, and what a caller lays out, refuses what would be new there
+//!   ([`Unencryptable::Keystream`], [`Error::Free`]) unless told otherwise
+//!   ([`Encryptor::reusing_rc4_keystreams`]); see [`Encryptor`], "Under RC4". A whole file under a reading's encryption
+//!   lists each number that file listed and it doesn't write free at its next
+//!   generation (7.5.4). The encryption dictionary of pdf-crypt's values, a
+//!   new file's or one read, as the values say it, is [`encryption`].
 //!
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
@@ -108,18 +120,20 @@ use std::fmt;
 use std::iter::FusedIterator;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use pdf_crypt::KeyCheck;
 use pdf_filters::{Backend, Encoder, Level, Prediction, Unencodable};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::serialize::{self, Refused, Renumber};
 use pdf_objects::version::Version;
+use sha2::{Digest, Sha256};
 
 use crate::crypt::Get;
 use crate::read::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::source::{Document, Held, Record, Unread, Unsupported, XrefKind};
 
 pub use append::{Base, update};
-pub use crypt::{Encrypting, Encryptor, FreeNumbers, Unencryptable, encryption};
+pub use crypt::{Encrypting, Encryptor, Unencryptable, encryption};
 pub use full::{document, encryption_objects, full, left_out};
 pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
 pub use parts::{Packed, Parts};
@@ -257,9 +271,12 @@ pub enum Body<'a> {
     ///    its id, one in an object stream at the place the reading's
     ///    sections give its number, else refused so. One an edit changed,
     ///    which dropped its place ([`Object::at`]), is written anew;
-    /// 4. where it wasn't found by scanning
-    ///    ([`Origin::Recovered`](crate::Origin::Recovered)), as the file's
-    ///    sections didn't read;
+    /// 4. where it was read where the file's sections put it: not found by
+    ///    scanning ([`Origin::Recovered`](crate::Origin::Recovered)), as
+    ///    the file was read by scanning or its entry is at neither its
+    ///    place nor its section's shift, nor read away from where its
+    ///    section puts it ([`Origin::Shifted`](crate::Origin::Shifted),
+    ///    [`Origin::Renumbered`](crate::Origin::Renumbered));
     /// 5. for an object at an offset, where `endobj` follows it;
     /// 6. for a stream, where its `/Length` is no reference, and its data is
     ///    as long as that says ([`DataExtent`](crate::DataExtent));
@@ -420,7 +437,8 @@ pub struct Options<'a> {
     pub deflate: Deflate,
     /// How many threads object streams are built on, at most: 0, the
     /// default, for as many as the machine runs at once, up to 8, or one
-    /// where that isn't known. Built on any number, they're the same bytes.
+    /// where that isn't known. Built on any number, they're the same objects,
+    /// and in the clear the same bytes.
     pub threads: usize,
     /// Where a whole file's encryption dictionary goes, when it's written
     /// as an object, a number the file uses ([`Options::renumber`]): by
@@ -475,11 +493,11 @@ pub struct Options<'a> {
     ///   would be written there in the clear ([`Error::Moved`]).
     /// - **The numbers the file uses are those written:** 0 and
     ///   [`NUMBERS`], a number two objects are written at, the encryption
-    ///   dictionary's ([`Options::encrypt_at`]), one the encryptor's file
-    ///   lists free under keys made per object ([`Error::Free`]), which a
-    ///   renumbering passes over ([`Encryptor::free_numbers`]),
-    ///   [`Pack::reuse`], those the writer gives its own objects, and an
-    ///   update's file's where it passes over an object as read;
+    ///   dictionary's ([`Options::encrypt_at`]), one an update's encryptor's
+    ///   file lists free under RC4 below the generation given
+    ///   ([`Error::Free`]), [`Pack::reuse`], those the writer gives its own
+    ///   objects, and an update's file's where it passes over an object as
+    ///   read;
     ///   [`Pack::groups`] is given the numbers packed objects are given at.
     ///   An object given past [`NUMBERS`] and written below it is written.
     /// - **Errors name** an object by the number it's given at
@@ -494,22 +512,27 @@ pub struct Options<'a> {
     ///   [`Error::Encrypt`]).
     /// - **Encrypted**, each object is encrypted under the number it's
     ///   written at: a whole file's by the encryptor in the numbers written
-    ///   ([`Encryptor::renumbered`]: what it leaves in the clear, its
-    ///   dictionary's place and the references in it), the document's
-    ///   metadata stream found in the numbers given and kept as its number
-    ///   written ([`Encryptor::encrypting_renumbered`]); an update's by its
+    ///   (what it leaves in the clear, its dictionary's place and the
+    ///   references in it), the document's metadata stream found in the
+    ///   numbers given and kept as its number written, as
+    ///   [`Encryptor::laid_out`] gives it a caller laying a file out; an
+    ///   update's by its
     ///   encryptor as it is, in its file's numbers, the metadata stream
     ///   told by the number it's written at: it doesn't write the
     ///   dictionary again, and moves neither it nor what it refers to
-    ///   ([`Error::Moved`]). **Under RC4**, an object written at a number
-    ///   another object had in the file the encryptor was read from is
-    ///   encrypted with that object's keystream, the key and `/ID[0]` being
-    ///   the file's: where the earlier file is kept, or the update's file
-    ///   holds both, the XOR of the two ciphertexts is the XOR of the two
-    ///   plaintexts, for every object moved onto another's number
-    ///   (pdf-crypt's `Method::Rc4`). A caller who doesn't want that writes
-    ///   the file under a new AES-256 encryption ([`Encryptor::create`])
-    ///   instead.
+    ///   ([`Error::Moved`]). **Under RC4**, an object written at a number and
+    ///   generation another object had in the file the encryptor was read
+    ///   from would be encrypted with that object's keystream, so the XOR of
+    ///   the two ciphertexts would be the XOR of the two plaintexts: a whole
+    ///   file writes each object it writes anew where the renumbering puts
+    ///   it, but at a generation its number hasn't used there, or past every
+    ///   number where its generations are spent ([`Written::regenerated`],
+    ///   which a caller takes the numbers written from); an update refuses
+    ///   one whose strings or data would be new there
+    ///   ([`Unencryptable::Keystream`]), unless its encryptor is told to
+    ///   reuse keystreams ([`Encryptor::reusing_rc4_keystreams`]). What the
+    ///   whole file's rule can't see, two whole files written from one
+    ///   reading, is said in [`Encryptor`], "Under RC4".
     /// - **Copied**, an object as read ([`Body::Read`]) is its bytes, its
     ///   header and each reference the renumbering names otherwise written
     ///   anew where its bytes had them, where the rules for a copy hold:
@@ -591,9 +614,10 @@ pub struct Pack<'a> {
     /// Numbers the object streams take first, in order: a source's own
     /// object streams', say, whose numbers are free once their members are
     /// written anew. 0, a number past what a file may use ([`NUMBERS`]),
-    /// one an object written has, one given already and one the file the
-    /// encryptor was read from lists free under keys made per object are
-    /// passed over; then they're numbered past every object written and
+    /// one an object written has, one given already and, under RC4, one
+    /// whose keystream at generation 0 the file the encryptor was read from
+    /// used, as an object stream is encrypted under it, are passed over;
+    /// then they're numbered past every object written and
     /// [`Options::xref_from`]. They're numbers the file uses, so under a
     /// renumbering ([`Options::renumber`]) they're numbers written.
     pub reuse: &'a [u32],
@@ -630,8 +654,9 @@ impl fmt::Debug for Pack<'_> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Written {
-    /// Its cross-reference section: where each object it wrote is, and the
-    /// cross-reference stream's own, when it's one, as positions in the
+    /// Its cross-reference section: where each object it wrote is (and,
+    /// in an update, each its base's reading read at a shift: [`update`]),
+    /// and the cross-reference stream's own, when it's one, as positions in the
     /// file: a whole file's counted from where it starts in `out`, its
     /// header; an update's from its file's first byte, as [`Base::len`]
     /// counts, past any bytes before the header, which the section's rows
@@ -653,15 +678,37 @@ pub struct Written {
     /// it says so ([`Base::renumbered`]): the document's numbers aren't
     /// the file's, so an update after it is given objects at the numbers
     /// written, built or edited, under the encryptor in those numbers
-    /// (after a whole file, [`Encryptor::renumbered`]'s), and refuses an
-    /// object as read and a reading ([`Error::Renumbered`]); one that
-    /// copies opens the file written and goes after [`Base::of`] that
-    /// reading. With no reading to resolve it, an update after a
+    /// (after a whole file, [`Encryptor::of`] a reading of the file
+    /// written), and refuses an object as read and a reading
+    /// ([`Error::Renumbered`]); one that copies opens the file written and
+    /// goes after [`Base::of`] that reading. With no reading to resolve it, an update after a
     /// renumbered write is given the catalog where `/EncryptMetadata false`
     /// leaves the metadata stream it names in the clear ([`Error::Catalog`]).
     /// After an update it's of the reading its base was, and renumbered
-    /// where its base was or the update was.
+    /// where its base was or the update was. After a whole file that moved
+    /// an object ([`Written::regenerated`]) it says it was renumbered too.
     pub base: Base,
+    /// Under RC4, each object a whole file wrote anew elsewhere than it was
+    /// given at, or than the renumbering gave it: the number and generation
+    /// it was given at, and where it's written, ascending. Each string and
+    /// stream of an object is encrypted from the start of the keystream its
+    /// number and generation make (ISO 32000-2, 7.6.3, Algorithm 1), so an
+    /// object written anew goes at a generation its number hasn't used in
+    /// any section of the file read, or past every number that file lists
+    /// where its generations are spent, every reference to it with it (see
+    /// [`Encryptor`], "Under RC4"); copies keep theirs. A caller that holds
+    /// the document's ids, or gives an update after it, takes them from
+    /// here. Empty under any other encryption, and for an update.
+    pub regenerated: Vec<(ObjectId, ObjectId)>,
+    /// Each object, by where it's written, whose strings or stream's data
+    /// RC4 encrypted with a keystream the file used, or at a number the file
+    /// lists free below the generation its entry gives, as the encryptor was
+    /// told to reuse keystreams
+    /// ([`Encryptor::reusing_rc4_keystreams`]), ascending: what leaks, to
+    /// whoever holds the file and what it was before, the XOR of its
+    /// plaintexts with what's encrypted there already. Empty where nothing
+    /// was.
+    pub keystreams_reused: Vec<ObjectId>,
 }
 
 /// The reading the objects a write is given were read in, which a stream's
@@ -682,6 +729,9 @@ impl<S: ByteSource> ReadFrom for Reading<S> {}
 mod sealed {
     use std::borrow::Cow;
 
+    use std::collections::HashMap;
+
+    use pdf_crypt::KeyCheck;
     use pdf_objects::object::{Object, ObjectId, Span};
 
     use super::Error;
@@ -724,6 +774,21 @@ mod sealed {
         /// (its catalog's `/Metadata`): what `/EncryptMetadata false`
         /// leaves in the clear.
         fn metadata(&self) -> Option<ObjectId>;
+
+        /// For each of `ids`, the plaintexts RC4 encrypted it with under its
+        /// keystream, in each version of it the reading's file holds at that
+        /// number and generation: the reading's own, and, where `earlier`,
+        /// each earlier revision's, read as of its end
+        /// ([`Reading::prefix`](crate::Reading::prefix)), where it's known.
+        /// Only a reading whose handler's key is the one `key` checks counts,
+        /// as another key's keystreams are other ones. What doesn't read
+        /// gives none, so that less is taken as already in the file.
+        fn versions(
+            &self,
+            ids: &[ObjectId],
+            earlier: bool,
+            key: &KeyCheck,
+        ) -> HashMap<ObjectId, Vec<Vec<u8>>>;
     }
 }
 
@@ -779,6 +844,42 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
         let get: Get<'_, '_, std::convert::Infallible> = &|id| Ok(reading.resolve(id));
         let Ok(metadata) = crate::crypt::metadata_stream(self.trailer().dict(), get);
         metadata
+    }
+
+    fn versions(
+        &self,
+        ids: &[ObjectId],
+        earlier: bool,
+        key: &KeyCheck,
+    ) -> HashMap<ObjectId, Vec<Vec<u8>>> {
+        let mut found: HashMap<ObjectId, Vec<Vec<u8>>> =
+            ids.iter().map(|&id| (id, Vec::new())).collect();
+        let take = |found: &mut HashMap<ObjectId, Vec<Vec<u8>>>,
+                    plaintexts: &dyn Fn(ObjectId) -> Vec<Vec<u8>>| {
+            for &id in ids {
+                found.entry(id).or_default().extend(plaintexts(id));
+            }
+        };
+        if self.handler().is_some_and(|h| h.has_key(key)) {
+            take(&mut found, &|id| crypt::rc4_plaintexts(self, id));
+        }
+        if !earlier {
+            return found;
+        }
+        // Each revision but the newest, which is the reading's own, as of
+        // its end.
+        let revisions = self.revisions();
+        let ends = (revisions.iter().take(revisions.len().saturating_sub(1)))
+            .filter_map(|revision| revision.end);
+        for end in ends {
+            let Ok(prefix) = self.prefix(end.line(), self.limits()) else {
+                continue;
+            };
+            if prefix.handler().is_some_and(|h| h.has_key(key)) {
+                take(&mut found, &|id| crypt::rc4_plaintexts(&prefix, id));
+            }
+        }
+        found
     }
 }
 
@@ -860,18 +961,15 @@ pub enum Error {
     /// [`NUMBERS`], past every number its file and it use: its number.
     #[error("no object number left for an update's cross-reference stream: it would be {0}")]
     NoNumber(u32),
-    /// A file with this many bytes before its header ([`Base::of`]): this
-    /// crate's reader counts its positions from the file's start, and
-    /// PDFium, pdf.js and qpdf from the header, so an update's would be
-    /// misread by one or the other; [`Base::new`] says which.
+    /// A file read by scanning
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), as its
+    /// cross-reference sections didn't read or, under
+    /// [`Recovery::Pdfium`](crate::read::Recovery::Pdfium), weren't taken:
+    /// there's no section the reading read by for an update's `/Prev` to
+    /// give ([`Base::of`]).
     #[error(
-        "it has {0} bytes before its header, so an update's positions would count from where one reader or another doesn't"
+        "it was read by scanning, not by its cross-reference sections, so an update has no /Prev to give"
     )]
-    Prefixed(usize),
-    /// A file whose cross-reference sections didn't read, which was read
-    /// by scanning: there's no section for an update's `/Prev` to give
-    /// ([`Base::of`]).
-    #[error("its cross-reference sections didn't read, so an update has no /Prev to give")]
     Unsound,
     /// A trailer that names no catalog: no `/Root`.
     #[error("its trailer names no catalog (/Root)")]
@@ -884,16 +982,24 @@ pub enum Error {
     /// An update whose encryption isn't its file's: none for an encrypted
     /// file, or one for a file that isn't, or another file's, whose
     /// dictionary is elsewhere or isn't the one the file stores
-    /// ([`Base::encryption`]), or whose `/ID[0]` isn't the file's. An
-    /// update can't change how the revisions before it are encrypted, and
-    /// under another file's key what it writes wouldn't decrypt.
+    /// ([`Base::encryption`]), or whose `/ID[0]` isn't the file's, or
+    /// whose key isn't the one the base keeps a check of; or any, where the
+    /// base doesn't know the dictionary its file's `/Encrypt` names by
+    /// number. An update can't change how the revisions before it are
+    /// encrypted, and under another file's key what it writes wouldn't
+    /// decrypt.
     #[error("an update is encrypted as its file is, and this one's encryption isn't its file's")]
     Unmatched,
-    /// An object at a number the file its [`Encryptor`] was read from
-    /// lists free, under keys made per object (RC4, AES-128): it would be
-    /// encrypted with a deleted object's key ([`Encryptor::of`]).
+    /// An update's object at a number the file its [`Encryptor`] was read
+    /// from lists free, under RC4, below the generation the free entry
+    /// gives: its keystream would be a deleted object's, whose ciphertext
+    /// the file, or one it was written from, may still hold, and this one
+    /// not, to tell whether what's written is new (see [`Encryptor`],
+    /// "Under RC4"). At that generation or past it, it's written; under
+    /// AES its IVs are random, and it's written at any.
+    /// [`Encryptor::reusing_rc4_keystreams`] writes it, saying so.
     #[error(
-        "object {0} is at a number its file lists free, so its key would be a deleted object's"
+        "object {0} is below the generation its file lists its number free at, so under RC4 its keystream may be a deleted object's"
     )]
     Free(ObjectId),
     /// A stream whose data is where it was written
@@ -997,15 +1103,14 @@ pub enum Error {
         "the file was written under a renumbering, so an update after it is given objects at its numbers, built or edited, and no reading"
     )]
     Renumbered,
-    /// A renumbering ([`Options::renumber`]) that writes another object at
-    /// the number of object `id` of the file the encryptor was read from,
-    /// an encryption dictionary or what one refers to, by the number it's
-    /// given at: at the number it gives `id`, in a whole file, which writes
-    /// the encryption dictionary again in the numbers written
-    /// ([`Encryptor::renumbered`]); at `id`'s own, in an update, which
-    /// doesn't, so the file's `/Encrypt` names them where they are, and
-    /// whose renumbering then moves none of them, nor names one none. A
-    /// reader reads what's at their numbers in the clear (ISO 32000-2,
+    /// A renumbering ([`Options::renumber`]) that writes another object at the
+    /// number of object `id` of the file the encryptor was read from, an
+    /// encryption dictionary or what one refers to, by the number it's given
+    /// at: at the number it gives `id`, in a whole file, which writes the
+    /// encryption dictionary again in the numbers written; at `id`'s own, in an
+    /// update, which doesn't, so the file's `/Encrypt` names them where they
+    /// are, and whose renumbering then moves none of them, nor names one none.
+    /// A reader reads what's at their numbers in the clear (ISO 32000-2,
     /// 7.6.2), which another object's strings would then be.
     #[error(
         "object {0} is an encryption dictionary or what one refers to, whose number a reader reads in the clear: the renumbering writes another object there, or moves it in an update, which leaves it where it is"
@@ -1101,7 +1206,10 @@ const SECTION_KEYS: [&[u8]; 15] = [
 /// cross-reference stream's dictionary's own, `/Encrypt` and `/ID`), each
 /// reference as `to` names it, `null` where it names none, as a whole file's
 /// are ([`full`]). `&()` names each as it is. `/Root` isn't one of those keys:
-/// a caller whose section writes it takes it out.
+/// a caller whose section writes it takes it out. A direct `/Info` is kept as
+/// it is, where a whole file of the writer's under an encryption writes it as
+/// an object, encrypted, as a trailer isn't: a caller laying out an encrypted
+/// file does the same ([`Encryptor::laid_out`]).
 #[must_use]
 pub fn trailer_entries(trailer: &Dict, to: &(dyn Renumber + Sync)) -> Dict {
     let mut trailer = trailer.clone();
@@ -1129,18 +1237,17 @@ pub fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
 }
 
 /// A trailer's `/ID`: `kept`, the first string a file has already, and
-/// XXH3-128 of `written`, 16 bytes, big-endian, so that the same bytes get
-/// the same `/ID`. A file with no first string gets the hash for both
-/// where it's `encrypted`, which needs an `/ID` (ISO 32000-2, 14.4, has a
-/// new file's two the same), and none otherwise.
+/// the first 16 bytes of SHA-256 of `written`. The same bytes get the same
+/// `/ID`, and its second string says nothing but what's written. A file
+/// with no first string gets the hash for both where it's `encrypted`,
+/// which needs an `/ID` (ISO 32000-2, 14.4, has a new file's two the
+/// same), and none otherwise.
 #[must_use]
 pub fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Vec<u8>; 2]> {
     if kept.is_none() && !encrypted {
         return None;
     }
-    let hash = twox_hash::XxHash3_128::oneshot(written)
-        .to_be_bytes()
-        .to_vec();
+    let hash = Sha256::digest(written)[..16].to_vec();
     let first = kept.unwrap_or_else(|| hash.clone());
     Some([first, hash])
 }
@@ -1178,6 +1285,7 @@ struct Numbering<'a>(Option<&'a (dyn Renumber + Sync + 'a)>);
 
 impl<'a> Numbering<'a> {
     /// None: each object at the number it's given at.
+    #[cfg(test)]
     const NONE: Numbering<'static> = Numbering(None);
 
     /// Where an object given at `id` is written, and what a reference to
@@ -1195,8 +1303,9 @@ impl<'a> Numbering<'a> {
 /// Where each of `bodies` is written, by `to`, in order: refused where `to`
 /// gives one none ([`Error::Unnumbered`]); each a number a written file may
 /// use, given once and written once, not `encrypt_at`, the encryption
-/// dictionary's, and not one `encryptor`'s file lists free under keys made
-/// per object: the first that isn't, refused. `held` are the numbers of
+/// dictionary's, and, under RC4, not below the generation `encryptor`'s
+/// file lists its number free at, but where it's told to reuse keystreams:
+/// the first that isn't, refused. `held` are the numbers of
 /// objects an update passes over, ascending, given and in its file at
 /// those numbers already, which no body is given or written at again.
 fn checked(
@@ -1226,7 +1335,7 @@ fn checked(
         if encrypt_at == Some(at.number) {
             return Err(Error::EncryptAt(at.number));
         }
-        if encryptor.is_some_and(|e| e.free(at.number).is_some()) {
+        if encryptor.is_some_and(|e| !e.reusing() && e.free_below(at)) {
             return Err(Error::Free(at));
         }
         written.push(at);
@@ -1301,6 +1410,14 @@ fn dangling(
     named
 }
 
+/// Whether a trailer's `/Info` is held in the trailer itself, not as an
+/// object: any value but a reference or null, whose strings a trailer, which
+/// isn't encrypted (ISO 32000-2, 7.6.2), would hold in the clear. An
+/// encrypted write writes it as an object.
+fn direct_info(info: &Object) -> bool {
+    !matches!(info.value(), Value::Ref(_) | Value::Null)
+}
+
 /// The first number from `from` on that isn't `passed`.
 fn fresh(from: u32, passed: impl Fn(u32) -> bool) -> u32 {
     (from..=u32::MAX).find(|&n| !passed(n)).unwrap_or(u32::MAX)
@@ -1357,6 +1474,9 @@ fn indirect(
     from: Option<&dyn ReadFrom>,
     to: Numbering<'_>,
 ) -> Result<usize, Error> {
+    // As a new encryption writes it, where that isn't as it's held.
+    let anew = encrypting.and_then(|e| e.anew(at, obj));
+    let obj = anew.as_ref().unwrap_or(obj);
     if let Value::Stream(stream) = obj.value()
         && let Some(span) = stream.data.at()
     {

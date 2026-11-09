@@ -2,7 +2,10 @@
 //! as a reader can give them, no document model's type among them, an object by
 //! its pdf-objects [`ObjectId`]. Every position is from the file's first byte,
 //! as a section's rows have them. A value the file gives is given as it stands,
-//! wrong or not: what's wrong with it is for the check to say.
+//! wrong or not: what's wrong with it is for the check to say. The offsets the
+//! file writes (the linearization dictionary's, the hint tables') count from
+//! its header (ISO 32000-2, 7.5.2), so the check holds each against a position
+//! [`Facts::header`] bytes past it.
 
 use crate::plan::{Graph, Kind};
 use pdf_objects::ObjectId;
@@ -160,7 +163,8 @@ pub struct SectionFacts {
     pub prev: Raw,
     /// `/Root`.
     pub root: Raw,
-    /// What the `startxref` after it gives, if one does.
+    /// Where the `startxref` after it says the newest section is, if one
+    /// follows it.
     pub startxref: Option<u64>,
     /// What a hybrid table's `/XRefStm` lists (7.5.8.4): none of a file that
     /// has none, and what's free in the table isn't free where it's in use
@@ -205,7 +209,8 @@ pub enum HintData {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct HintFacts {
-    /// Where its `n g obj` starts.
+    /// Where its `n g obj` starts: `/H`'s first offset, past the header, where
+    /// that lists it.
     pub at: u64,
     /// Where it ends: past its `endobj`, or an indirect `/Length`'s object's
     /// that follows it (Table F.1).
@@ -214,7 +219,8 @@ pub struct HintFacts {
     pub number: u32,
     /// Its dictionary's keys, and what each says, as written.
     pub keys: Vec<(Vec<u8>, Raw)>,
-    /// An overflow stream's place and end, where `/H` names one.
+    /// An overflow stream's place and end, where `/H` names one: its third
+    /// item, past the header.
     pub overflow: Option<(u64, u64)>,
     /// Its data.
     pub data: HintData,
@@ -302,7 +308,7 @@ impl Extent {
 pub struct Facts {
     /// The file's length.
     pub len: u64,
-    /// Where `%PDF-` starts.
+    /// Where `%PDF-` starts: the offsets the file writes count from there.
     pub header: u64,
     /// Its first object after that.
     pub first_object: Option<FirstObject>,
@@ -357,7 +363,8 @@ impl Facts {
     /// Where the primary hint stream is and how long, as the check has a
     /// hint table's positions as if it weren't there, the extent
     /// [`hint::located`](crate::hint::located) gives a position's byte by:
-    /// `/H`'s first two items, each 0 where it isn't a non-negative integer;
+    /// `/H`'s first two items, each 0 where it isn't a non-negative integer,
+    /// the first past the header;
     /// but where the stream listed at that offset takes fewer bytes than
     /// that length, or more than it may, to where what's listed after it
     /// starts, the most it may, as the check then tells `/H`'s length once

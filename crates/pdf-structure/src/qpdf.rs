@@ -361,12 +361,10 @@ mod tests {
             // owner's.
             let doc = read::read_with(&data, &Unaskable);
             assert_eq!(
-                doc.encryption,
-                crate::Encryption::Opened {
-                    owner: false,
-                    by: None,
-                    permissions: pdf_crypt::Permissions::ALL,
-                },
+                doc.encryption.as_opened(),
+                crate::Encryption::opened(false)
+                    .by(None)
+                    .permitting(pdf_crypt::Permissions::ALL),
                 "{kind}"
             );
             assert!(doc.faults().is_empty(), "{kind}: {:?}", doc.faults());
@@ -397,12 +395,10 @@ mod tests {
             );
             let by = Some((0, pdf_crypt::Encoding::Utf8));
             assert_eq!(
-                owned.encryption,
-                crate::Encryption::Opened {
-                    owner: true,
-                    by,
-                    permissions: pdf_crypt::Permissions::ALL
-                },
+                owned.encryption.as_opened(),
+                crate::Encryption::opened(true)
+                    .by(by)
+                    .permitting(pdf_crypt::Permissions::ALL),
                 "{kind}"
             );
             assert_eq!(owned.decoded, doc.decoded, "{kind}");
@@ -654,12 +650,10 @@ mod tests {
                 },
             )
             .unwrap();
-            let opened = crate::Encryption::Opened {
-                owner: true,
-                by: Some((0, password_by(typed, prepared))),
-                permissions: pdf_crypt::Permissions::ALL,
-            };
-            assert_eq!(*ours.encryption(), opened, "{typed}");
+            let opened = crate::Encryption::opened(true)
+                .by(Some((0, password_by(typed, prepared))))
+                .permitting(pdf_crypt::Permissions::ALL);
+            assert_eq!(ours.encryption().as_opened(), opened, "{typed}");
             let theirs = std::fs::read(&decrypted).unwrap();
             let theirs = read::Reading::open(theirs, &options).unwrap();
             assert_eq!(*theirs.encryption(), crate::Encryption::None, "{typed}");
@@ -894,12 +888,8 @@ mod tests {
                         let (doc, handler) = read::read_opened_by(&data, &[Password(password)]);
                         let by = Some((0, Encoding::Utf8));
                         // What `/P` grants a user, whoever opened it.
-                        let opened = crate::Encryption::Opened {
-                            owner,
-                            by,
-                            permissions: set,
-                        };
-                        assert_eq!(doc.encryption, opened, "{what}");
+                        let opened = crate::Encryption::opened(owner).by(by).permitting(set);
+                        assert_eq!(doc.encryption.as_opened(), opened, "{what}");
                         assert_eq!(p_of(&doc), Some(set.p()), "{what}");
                         assert_eq!(handler.unwrap().permissions(), set, "{what}");
                         println!("{what}: /P {}, {set}", set.p());
@@ -964,6 +954,106 @@ mod tests {
                 let lines = shown_permissions(&shown);
                 println!("{what}: {ours}\n{}", lines.join("\n"));
                 assert_eq!(lines, permission_lines(ours), "{what}\n{shown}");
+            }
+        }
+    }
+
+    /// An encrypted file's direct `/Info`, which the writer writes as an
+    /// object, encrypted, reads through qpdf as through the reader: of the
+    /// test writer's RC4, AES-128 and AES-256 files, each written whole under
+    /// its own encryption and under a new one, and updated under its own,
+    /// each passes qpdf's `--check` by its password, and qpdf's `--decrypt`
+    /// gives a file whose trailer's `/Info` is the dictionary the reader
+    /// reads from the trailer of the one written.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn a_direct_info_written_as_an_object_reads_through_qpdf_as_through_the_reader() {
+        use chacha20::ChaCha20Rng;
+        use pdf_crypt::rand_core::SeedableRng;
+        use pdf_crypt::writer::{Kind, Settings};
+
+        use crate::write::{self, Encryptor};
+
+        let dir = scratch("info");
+        let info = Object::from(dict! { "Title" => Object::text("A title") });
+        let trailer = dict! { "Root" => Object::reference(1), "Info" => info };
+        let prepared = Password("new").prepared().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let created =
+            Encryptor::create_with(&pdf_crypt::Protection::new(&prepared), &mut rng).unwrap();
+        let opened = |file: &[u8], password: &str| {
+            let passwords = [Password(password)];
+            let options = read::Options {
+                passwords: &passwords,
+                ..read::Options::DEFAULT
+            };
+            read::Reading::open(file.to_vec(), &options).unwrap()
+        };
+        let kinds = [Kind::Rc4By128, Kind::Aes128, Kind::Aes256];
+        for (k, kind) in kinds.into_iter().enumerate() {
+            let settings = Settings {
+                kind,
+                user: b"user",
+                owner: b"owner",
+                p: -4,
+                id: b"0123456789abcdef",
+                encrypt_metadata: true,
+            };
+            let source = fixture::encrypted(&settings, &clean(), trailer.clone());
+            let reading = opened(&source, "user");
+            let doc = reading.to_document().unwrap();
+            let own = Encryptor::of(&reading).unwrap().unwrap();
+            let options = write::Options::DEFAULT;
+            let mut whole = Vec::new();
+            write::document(&mut whole, &doc, Some(&own), Some(&reading), &options).unwrap();
+            let mut new = Vec::new();
+            write::document(&mut new, &doc, Some(&created), Some(&reading), &options).unwrap();
+            let base = write::Base::of(&reading).unwrap();
+            let mut updated = source.clone();
+            let catalog = doc.get(ObjectId::new(1, 0)).unwrap().clone();
+            let given = [(ObjectId::new(1, 0), write::Body::from(&catalog))];
+            write::update(&mut updated, &base, given, Some(&own), None, &options).unwrap();
+            for (way, file, password) in [
+                ("whole", whole, "user"),
+                ("new", new, "new"),
+                ("updated", updated, "user"),
+            ] {
+                let what = format!("{kind:?}, {way}");
+                let path = dir.path().join(format!("{k}-{way}.pdf"));
+                std::fs::write(&path, &file).unwrap();
+                let qpdf = qpdf(&path).password(password);
+                let run = |args: &[&Path]| {
+                    let mut all = vec![format!("--password={password}")];
+                    all.extend(args.iter().map(|a| a.display().to_string()));
+                    qpdf.exec(&all).unwrap()
+                };
+                let check = run(&[Path::new("--check"), &path]);
+                let said = String::from_utf8_lossy(&check.stderr).into_owned();
+                assert_eq!((check.code, said.as_str()), (Some(0), ""), "{what}");
+                let ours = opened(&file, password);
+                let at = (ours.trailer().dict().get(b"Info"))
+                    .and_then(Object::as_reference)
+                    .unwrap_or_else(|| panic!("{what}: /Info is direct"));
+                let decrypted = dir.path().join(format!("{k}-{way}-decrypted.pdf"));
+                let wrote = run(&[
+                    Path::new("--decrypt"),
+                    Path::new("--compress-streams=n"),
+                    Path::new("--decode-level=none"),
+                    &path,
+                    &decrypted,
+                ]);
+                assert_eq!(wrote.code, Some(0), "{what}");
+                let theirs = std::fs::read(&decrypted).unwrap();
+                let theirs = read::Reading::open(theirs, &read::Options::DEFAULT).unwrap();
+                let mut followed = BTreeMap::new();
+                let x = Object::from(at);
+                let y = theirs.trailer().dict().get(b"Info").unwrap();
+                assert_eq!(
+                    alike((&ours, &x), (&theirs, y), &mut followed),
+                    Ok(()),
+                    "{what}"
+                );
+                assert_eq!(followed.len(), 1, "{what}: /Info followed");
             }
         }
     }
@@ -1296,12 +1386,10 @@ mod tests {
         );
         let doc = read::document(&data, &read::Options::DEFAULT);
         assert!(doc.faults().is_empty(), "{:?}", doc.faults());
-        let opened = crate::Encryption::Opened {
-            owner: false,
-            by: None,
-            permissions: pdf_crypt::Permissions::ALL,
-        };
-        assert_eq!(doc.encryption, opened);
+        let opened = crate::Encryption::opened(false)
+            .by(None)
+            .permitting(pdf_crypt::Permissions::ALL);
+        assert_eq!(doc.encryption.as_opened(), opened);
         let contents = contents(&doc);
         assert_eq!(
             *contents.value(),
@@ -1343,9 +1431,10 @@ mod tests {
     /// cross-reference stream deflated under Up; a table linking its free
     /// entries, and an update after it freeing an object; a stream listing
     /// objects in an object stream, and an update after it with 100 bytes
-    /// before the header, which qpdf counts positions from, where the
-    /// reader counts them from the file's start, so it reads the file from
-    /// the header.
+    /// before the header, which qpdf and the reader count positions from
+    /// (ISO 32000-2, 7.5.2), the reader saying where the header is and
+    /// nothing else; and an update after that file as a reading of it
+    /// describes it (`Base::of`), read so.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn written_sections_and_containers_read_through_qpdf_as_through_the_reader() {
@@ -1435,6 +1524,19 @@ mod tests {
             .stream(&mut packs, 8, root(), prev, deflate)
             .unwrap();
         let mut file = [vec![b'~'; 100], packs.clone()].concat();
+        // The same file updated after a reading of it, as `Base::of`
+        // describes it: its header past the bytes before it.
+        let mut by_base = file.clone();
+        let reading = read::Reading::open(&by_base[..], &read::Options::DEFAULT).unwrap();
+        let base = write::Base::of(&reading).unwrap();
+        assert_eq!(base.header, 100);
+        let marked = Object::from(
+            dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0), "Marked" => true },
+        );
+        let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
+        let options = write::Options::DEFAULT;
+        write::update(&mut by_base, &base, given, None, None, &options).unwrap();
+        files.push(("prefixed, by its base", by_base, 100));
         files.push(("packed", packs, 0));
         let mut section = Section::append(9, 100);
         let sixty = packed(&[(6, Object::from(dict! { "Six" => 60 }))]);
@@ -1460,9 +1562,115 @@ mod tests {
             let (alone, heard) = qpdf(&path).heard().unwrap();
             assert_eq!(alone.trailer.unwritten, None, "{test}");
             assert!(heard.is_empty(), "{test}: {heard:?}");
-            let doc = read::document(&data[header..], &read::Options::DEFAULT);
+            let doc = read::document(&data, &read::Options::DEFAULT);
             assert_eq!(doc.trailer.unwritten, None, "{test}");
-            assert!(doc.faults().is_empty(), "{test}: {:?}", doc.faults());
+            let said: Vec<crate::Fault> = (doc.faults().iter())
+                .map(|(_, fault)| fault.clone())
+                .collect();
+            let want = match header {
+                0 => vec![],
+                at => vec![crate::Fault::HeaderAt { at }],
+            };
+            assert_eq!(said, want, "{test}");
+            assert_eq!(differences(&doc, &alone), [], "{test}");
+        }
+    }
+
+    /// An update after a reading that read the file's sections or objects
+    /// where the file proves they are (`Base::of`): a cut file, its main
+    /// section and an object past the cut three bytes before where they're
+    /// said; one whose offsets count from its first byte, 100 bytes before
+    /// its header; one whose `startxref` gives the line after `xref`; one
+    /// whose rows are each two bytes past their objects; and one whose
+    /// section is five bytes before where it's said, two of its rows at
+    /// that move and two four bytes before their objects. The update
+    /// writes its `/Prev` where the newest section was read and lists each
+    /// object read at a shift, or where a scan found it, where it is: read
+    /// through qpdf alone as the reader reads it, qpdf saying nothing where it
+    /// says nothing of the file before the update, and reconstructing only
+    /// where it does that of the file too (the cut's first section still gives
+    /// the main section three bytes off); the reader telling only what it
+    /// finds of the file before the update. An update after a reading as of
+    /// the newest section, where the whole reading read it, writes the same.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn an_update_after_a_recovered_reading_reads_through_qpdf_as_through_the_reader() {
+        use crate::read::recovery::tests::{OBJECTS, cut, laid_out, two_shifts};
+        use crate::write;
+
+        let files = [
+            ("cut", cut().0),
+            (
+                "from the first byte",
+                laid_out(&[b'~'; 100], &OBJECTS, &|_, at| at, &|at| at).0,
+            ),
+            (
+                "startxref past",
+                laid_out(b"", &OBJECTS, &|_, at| at, &|at| at + 5).0,
+            ),
+            (
+                "rows past",
+                laid_out(b"", &OBJECTS, &|_, at| at + 2, &|at| at).0,
+            ),
+            ("two shifts", two_shifts().0),
+        ];
+        let dir = scratch("recovered");
+        for (test, file) in files {
+            let reading = read::Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
+            let base = write::Base::of(&reading).unwrap();
+            let marked = Object::from(
+                dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0), "Marked" => true },
+            );
+            let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
+            let mut data = file.clone();
+            write::update(
+                &mut data,
+                &base,
+                given,
+                None,
+                None,
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            // As of the newest section, where the whole reading read it:
+            // the same update.
+            let mut options = read::Options::DEFAULT;
+            options.section = reading.facts().newest.map(|(at, _)| at);
+            let as_of = read::Reading::open(&file[..], &options).unwrap();
+            let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
+            let mut again = file.clone();
+            let base = write::Base::of(&as_of).unwrap();
+            write::update(
+                &mut again,
+                &base,
+                given,
+                None,
+                None,
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            assert_eq!(again, data, "{test}: as of the newest");
+            let path = dir.path().join(format!("{test}.pdf"));
+            std::fs::write(&path, &data).unwrap();
+            let (alone, heard) = qpdf(&path).heard().unwrap();
+            let before = dir.path().join(format!("{test}, before.pdf"));
+            std::fs::write(&before, &file).unwrap();
+            let (as_was, _) = qpdf(&before).heard().unwrap();
+            if as_was.trailer.unwritten.is_none() {
+                assert_eq!(alone.trailer.unwritten, None, "{test}");
+                assert!(heard.is_empty(), "{test}: {heard:?}");
+            }
+            let doc = read::document(&data, &read::Options::DEFAULT);
+            assert_eq!(doc.trailer.unwritten, None, "{test}");
+            let recovery = |fault: &crate::Fault| {
+                matches!(
+                    fault,
+                    crate::Fault::HeaderAt { .. }
+                        | crate::Fault::Moved { .. }
+                        | crate::Fault::Shifted { .. }
+                )
+            };
+            assert!(doc.faults().iter().all(|(_, f)| recovery(f)), "{test}");
             assert_eq!(differences(&doc, &alone), [], "{test}");
         }
     }
@@ -1529,9 +1737,10 @@ mod tests {
     /// syntax or stream encoding errors found") and read through qpdf alone,
     /// without reconstructing, as the reader reads them, but a signature's
     /// `/Contents` with no `/Type`, as above. And an update of a file with
-    /// 100 bytes before its header, its positions counted from there: read
-    /// by qpdf as its sections say, as the reader reads the file without
-    /// them.
+    /// 100 bytes before its header after a reading of it (`Base::of`), its
+    /// positions counted from there: read by qpdf as its sections say, as
+    /// the reader reads it, saying where the header is and nothing else;
+    /// past them, the update of the file without them.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn written_whole_files_and_updates_read_through_qpdf_as_through_the_reader() {
@@ -1585,7 +1794,9 @@ mod tests {
             let own = Encryptor::of(&reading).unwrap();
             let mut updated = source.clone();
             let options = write::Options::DEFAULT;
-            write::update(&mut updated, &base, bodies(), own.as_ref(), None, &options).unwrap();
+            // The reading given, which holds what RC4 encrypted each with.
+            let from: Option<&dyn write::ReadFrom> = Some(&reading);
+            write::update(&mut updated, &base, bodies(), own.as_ref(), from, &options).unwrap();
             files.push(("updated", updated));
             for (way, data) in files {
                 let name = format!("{name}, {way}");
@@ -1636,22 +1847,21 @@ mod tests {
         let mut appended = file.clone();
         write::update(&mut appended, &base, given(), None, None, &options).unwrap();
         let mut prefixed = [&[b'~'; 100][..], &file].concat();
-        let mut after = Base::new(
-            prefixed.len(),
-            base.prev,
-            base.size,
-            base.kind,
-            base.trailer,
-        );
-        (after.header, after.ends_line) = (100, true);
+        let after = {
+            let reading = Reading::open(&prefixed[..], &Options::DEFAULT).unwrap();
+            Base::of(&reading).unwrap()
+        };
+        assert_eq!((after.header, after.prev), (100, base.prev));
         write::update(&mut prefixed, &after, given(), None, None, &options).unwrap();
+        assert!(prefixed[100..] == appended[..]);
         let path = dir.path().join("prefixed.pdf");
         std::fs::write(&path, &prefixed).unwrap();
         let (alone, heard) = qpdf(&path).heard().unwrap();
         assert_eq!(alone.trailer.unwritten, None);
         assert!(heard.is_empty(), "{heard:?}");
-        let doc = read::document(&appended, &read::Options::DEFAULT);
-        assert!(doc.faults().is_empty(), "{:?}", doc.faults());
+        let doc = read::document(&prefixed, &read::Options::DEFAULT);
+        let said: Vec<&crate::Fault> = doc.faults().iter().map(|(_, fault)| fault).collect();
+        assert_eq!(said, [&crate::Fault::HeaderAt { at: 100 }]);
         assert_eq!(differences(&doc, &alone), []);
     }
 
@@ -1770,6 +1980,96 @@ mod tests {
         sources
     }
 
+    /// An RC4 file written whole under its own encryption, each object it
+    /// writes anew moved past every generation any section of it lists
+    /// (`Written::regenerated`), reads through qpdf as through the reader:
+    /// the file of three revisions' worth of numbers, a catalog, a page and
+    /// an object written over edited, with a table, a stream and packed,
+    /// renumbered onto a number listed free and not, each passes qpdf's
+    /// `--check` by the user's password, and qpdf reads what the reader
+    /// reads, every object at the number and generation written.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn an_rc4_file_written_whole_past_its_keystreams_reads_through_qpdf_as_through_the_reader() {
+        use std::collections::BTreeMap;
+
+        use crate::XrefKind;
+        use crate::write::tests::{lit, rc4_revised};
+        use crate::write::{self, Encryptor, Pack};
+
+        let dir = scratch("rc4");
+        let file = rc4_revised();
+        let passwords = [Password("user")];
+        let options = read::Options {
+            passwords: &passwords,
+            ..read::Options::DEFAULT
+        };
+        let reading = read::Reading::open(&file[..], &options).unwrap();
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let mut doc = reading.to_document().unwrap();
+        doc.catalog_mut().unwrap().set("Edited", true);
+        let (page, six) = (ObjectId::new(3, 0), ObjectId::new(6, 1));
+        doc.get_dict_mut(page)
+            .unwrap()
+            .set("Title", lit(b"a page, edited"));
+        doc.get_dict_mut(six)
+            .unwrap()
+            .set("Note", lit(b"six, edited"));
+        let map: BTreeMap<ObjectId, ObjectId> = (doc.objects())
+            .map(|(id, _)| match id.number {
+                9 => (id, ObjectId::new(7, 0)),
+                _ => (id, id),
+            })
+            .collect();
+        let to = |id| map.get(&id).copied();
+        for renumbered in [false, true] {
+            for (way, kind, pack) in [
+                ("table", XrefKind::Table, None),
+                ("stream", XrefKind::Stream, None),
+                ("packed", XrefKind::Stream, Some(Pack::DEFAULT)),
+            ] {
+                let name = format!("{way}, renumbered {renumbered}");
+                let mut options = write::Options::DEFAULT;
+                (options.kind, options.pack) = (kind, pack);
+                if renumbered {
+                    options.renumber = Some(&to);
+                }
+                let mut data = Vec::new();
+                let written =
+                    write::document(&mut data, &doc, Some(&own), Some(&reading), &options).unwrap();
+                assert!(written.regenerated.len() >= 3, "{name}");
+                let path = dir
+                    .path()
+                    .join(format!("{}.pdf", name.replace([' ', ','], "-")));
+                std::fs::write(&path, &data).unwrap();
+                let qpdf = qpdf(&path).password("user");
+                let check = ["--password=user", "--check", &path.display().to_string()];
+                let (out, _) = qpdf.run(&check.map(String::from)).expect(&name);
+                let out = String::from_utf8_lossy(&out);
+                assert!(
+                    out.contains("No syntax or stream encoding errors found"),
+                    "{name}: {out}"
+                );
+                let (alone, heard) = qpdf.heard().expect(&name);
+                assert_eq!(alone.trailer.unwritten, None, "{name}");
+                assert!(heard.is_empty(), "{name}: {heard:?}");
+                let back = read::document(
+                    &data,
+                    &read::Options {
+                        passwords: &passwords,
+                        ..read::Options::DEFAULT
+                    },
+                );
+                assert!(back.faults().is_empty(), "{name}: {:?}", back.faults());
+                let found = differences(&back, &alone);
+                assert!(found.is_empty(), "{name}: {found:?}");
+                for &(_, at) in &written.regenerated {
+                    assert!(alone.get(at).is_ok(), "{name}: qpdf reads {at:?}");
+                }
+            }
+        }
+    }
+
     /// Whole files written under two renumberings, each object's number
     /// reversed (each at the number of the one as far from the end as it is
     /// from the start), and every other number kept, the rest moved past
@@ -1834,16 +2134,25 @@ mod tests {
             }
             for (numbering, map, way, kind, pack) in ways {
                 let to = |id| map.get(&id).copied();
-                let untyped = match to(ObjectId::new(10, 0)) {
-                    Some(id) => format!("{id} R/Contents: "),
-                    None => String::new(),
-                };
                 let name = format!("{name}, {numbering}, {way}");
                 let mut options = write::Options::DEFAULT;
                 (options.kind, options.pack) = (kind, pack);
                 options.renumber = Some(&to);
                 let mut data = Vec::new();
-                write::document(&mut data, &doc, own.as_ref(), Some(&reading), &options).unwrap();
+                let written =
+                    write::document(&mut data, &doc, own.as_ref(), Some(&reading), &options)
+                        .unwrap();
+                // Under RC4, an object written anew at a number the file used
+                // is at its next generation.
+                let regenerated = &written.regenerated;
+                let landed = |id| match regenerated.iter().find(|(given, _)| *given == id) {
+                    Some(&(_, at)) => Some(at),
+                    None => to(id),
+                };
+                let untyped = match landed(ObjectId::new(10, 0)) {
+                    Some(id) => format!("{id} R/Contents: "),
+                    None => String::new(),
+                };
                 let path = dir
                     .path()
                     .join(format!("{}.pdf", name.replace([' ', ','], "-")));
@@ -2575,9 +2884,6 @@ mod tests {
             ),
             _ if kind.starts_with("verdicts differ: the reader: opens; qpdf: can't open (root of pages tree has no /Kids array)") => Some(
                 "qpdf refuses the whole file for its page tree; the reader opens it",
-            ),
-            "verdicts differ: the reader: can't open (its /Encrypt doesn't read); qpdf: opens" => Some(
-                "junk before %PDF, which qpdf shifts every offset for and the reader doesn't yet: no object reads, the encryption dictionary first",
             ),
             _ if kind.starts_with("decrypted, ") && kind.contains("by a /Crypt filter that names none") => Some(
                 "qpdf decrypts what isn't encrypted (see below), and what it gives doesn't decode",

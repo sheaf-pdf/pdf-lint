@@ -1,6 +1,7 @@
 //! The fuzz target `crypt`'s bodies, for the fuzz crate. They're compiled
 //! only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
+#[cfg(any(test, feature = "insecure-test-writer"))]
 use std::convert::Infallible;
 
 /// The fuzz target `crypt`'s body: a dictionary of any version, revision
@@ -8,17 +9,20 @@ use std::convert::Infallible;
 /// that opens, now and then another handler's or one without a `/Filter`,
 /// opened with passwords from it, each encoding of its text and its bytes
 /// as they are, and when it opens, strings and streams from it decrypted
-/// by each method, one that isn't among them, and encrypted under a
-/// context from it; and now and then, as revision 6 is, a new file's
-/// dictionary created for passwords and permissions from it (`created`).
+/// by each method, one that isn't among them, and encrypted under IVs
+/// from the operating system, and with the test writer under the IVs it
+/// derives; and with the test writer, now and then, as revision 6 is, a new
+/// file's dictionary created for passwords and permissions from it
+/// (`created`).
 /// Panics on a broken promise: none should; a dictionary of another handler
 /// is refused as that, by its name, and none other is; a version refused
 /// is the dictionary's; the handler says which password opened it, which
 /// opens it alike alone, and the permissions its `/P` grants by its
 /// revision; decrypting gives no more than it's given, and an error's
 /// `Debug` gives what decrypted by its length; and what's encrypted
-/// decrypts to what it was, the same bytes each time, or is refused alike
-/// both ways.
+/// decrypts to what it was, AES's another IV each time from the operating
+/// system and the same bytes each time from the derived IVs, or is refused
+/// alike both ways.
 pub fn handler(data: &[u8]) {
     use crate::{
         CryptFilter, Dictionary, Encoded, Fault, Handler, Method, Password, Permissions, Refused,
@@ -74,7 +78,7 @@ pub fn handler(data: &[u8]) {
     };
     // Half the time, a dictionary the writer makes for the password, which
     // opens, so that decrypting is fuzzed too.
-    #[cfg(any(test, feature = "writer"))]
+    #[cfg(any(test, feature = "insecure-test-writer"))]
     let dictionary = match head[0] & 0x80 {
         0 => dictionary,
         _ => {
@@ -105,6 +109,7 @@ pub fn handler(data: &[u8]) {
     };
     let rest: Vec<u8> = data.iter().copied().skip(8 + 5 * 64 + 28).collect();
     // A new file's dictionary runs revision 6's hash a dozen times: rare.
+    #[cfg(any(test, feature = "insecure-test-writer"))]
     if head[1] == 254 {
         created(&rest, head[6] & 1 == 0);
     }
@@ -174,15 +179,34 @@ pub fn handler(data: &[u8]) {
             check(handler.decrypt_string(id, data));
         }
     }
-    // Encrypted under a context from the input, by each method: decrypted,
-    // it's what it was; or it's refused, as decrypting refuses it.
-    let context = &rest[..rest.len().min(usize::from(head[4] % 40))];
+    // Encrypted under IVs from the operating system, by each method:
+    // decrypted, it's what it was, AES's IV another each time; or it's
+    // refused, as decrypting refuses it. With the test writer, under the
+    // derived IVs, the same bytes each time.
+    let ivs = crate::Ivs::new();
     for method in &methods {
         for data in [&rest[..], &rest[..rest.len().min(17)]] {
-            let stream = handler.encrypt_stream(id, context, data, method.as_ref());
-            let again = handler.encrypt_stream(id, context, data, method.as_ref());
-            assert_eq!(stream, again, "the same each time");
-            let string = handler.encrypt_string(id, context, data);
+            let stream = handler.encrypt_stream(id, data, method.as_ref(), &ivs);
+            let again = handler.encrypt_stream(id, data, method.as_ref(), &ivs);
+            let aes = matches!(
+                method.as_ref().unwrap_or(handler.streams()),
+                Method::Aes128 | Method::Aes256
+            );
+            match (&stream, &again) {
+                (Ok(stream), Ok(again)) if aes => {
+                    assert_ne!(stream[..16], again[..16], "another IV each time");
+                }
+                _ => assert_eq!(stream, again, "the same, or refused alike"),
+            }
+            #[cfg(any(test, feature = "insecure-test-writer"))]
+            {
+                let derived = crate::Ivs::derived();
+                let once = handler.encrypt_stream(id, data, method.as_ref(), &derived);
+                let twice = handler.encrypt_stream(id, data, method.as_ref(), &derived);
+                assert_eq!(once, twice, "the same each time, derived");
+                assert_eq!(once.is_ok(), stream.is_ok(), "refused alike, derived");
+            }
+            let string = handler.encrypt_string(id, data, &ivs);
             let decrypted = [
                 stream.map(|s| handler.decrypt_stream(id, &s, method.as_ref())),
                 string.map(|s| handler.decrypt_string(id, &s)),
@@ -220,7 +244,9 @@ fn by_length(error: &crate::Error) {
     assert_eq!(format!("{error:?}"), said, "an error's Debug");
 }
 
-/// A new file's handler and dictionary ([`Handler::create`](crate::Handler::create)),
+/// A new file's handler and dictionary (the test writer's
+/// [`create`](crate::writer::create), from a generator, beside
+/// [`Handler::create`](crate::Handler::create) from the operating system),
 /// protected as `data` says: a user's text, then an owner's, each by its
 /// length's byte and the text (UTF-8, lossily), none where the byte is 255
 /// or there's none; then a byte whose bits choose the permissions
@@ -241,8 +267,11 @@ fn by_length(error: &crate::Error) {
 /// other. `/Perms` confirms the key and matches `/P` and
 /// `/EncryptMetadata` as asked, each handler says the permissions written,
 /// and the handler made and each opened encrypt alike and each decrypts
-/// the other's.
+/// the other's. `Handler::create` from the operating system refuses or
+/// makes it alike, and what it makes opens by the same passwords.
+#[cfg(any(test, feature = "insecure-test-writer"))]
 fn created(data: &[u8], encrypt_metadata: bool) {
+    use crate::writer::create;
     use crate::{Encoded, Encoding, Handler, Password, Permissions, Protection, Refused, Unusable};
     let (user, rest) = text(data);
     let (owner, rest) = text(rest);
@@ -313,7 +342,7 @@ fn created(data: &[u8], encrypt_metadata: bool) {
             true => protected(Some(&form), owner_ok, how),
             false => protected(user_ok, Some(&form), how),
         };
-        let created = Handler::create(&protection, &mut Drawn::over(draws));
+        let created = create(&protection, &mut Drawn::over(draws));
         let created = created.map(|_| ());
         assert_eq!(created, expected(&protection), "refused for the first why");
         if created.is_ok() {
@@ -327,7 +356,7 @@ fn created(data: &[u8], encrypt_metadata: bool) {
             }
         }
     }
-    let neither = Handler::create(&protected(None, None, how), &mut Drawn::over(draws));
+    let neither = create(&protected(None, None, how), &mut Drawn::over(draws));
     assert_eq!(neither.map(|_| ()), Err(Unusable::NoPassword), "neither");
     // A text given that doesn't prepare makes no file.
     let unprepared =
@@ -336,14 +365,20 @@ fn created(data: &[u8], encrypt_metadata: bool) {
         return;
     }
     let protection = protected(user_ok, owner_ok, how);
-    let created = Handler::create(&protection, &mut Drawn::over(draws));
+    let created = create(&protection, &mut Drawn::over(draws));
     let expected = expected(&protection);
+    let from_os = Handler::create(&protection);
+    assert_eq!(
+        from_os.as_ref().map(|_| ()),
+        created.as_ref().map(|_| ()),
+        "made or refused alike from the operating system"
+    );
     let Ok((handler, dictionary)) = created else {
         assert_eq!(created.map(|_| ()), expected, "refused, prepared");
         return;
     };
     assert_eq!(expected, Ok(()), "made, prepared");
-    let again = Handler::create(&protection, &mut Drawn::over(draws));
+    let again = create(&protection, &mut Drawn::over(draws));
     assert_eq!(
         again.map(|(_, d)| d).as_ref(),
         Ok(&dictionary),
@@ -369,7 +404,10 @@ fn created(data: &[u8], encrypt_metadata: bool) {
         }
     }
     let id = (1, 0);
+    let (_, os) = from_os.expect("made from the operating system as from the generator");
     for (passwords, owner) in opens {
+        let by_os = Handler::open(&os, b"", &passwords).expect("it opens");
+        assert_eq!(by_os.owner(), owner, "as the owner's or the user's");
         let opened = Handler::open(&dictionary, b"", &passwords).expect("it opens");
         assert_eq!(opened.owner(), owner, "as the owner's or the user's");
         assert!(opened.faults().is_empty(), "/Perms confirms and matches");
@@ -379,17 +417,14 @@ fn created(data: &[u8], encrypt_metadata: bool) {
             encrypt_metadata,
             "/EncryptMetadata"
         );
+        let derived = crate::Ivs::derived();
         for data in [draws, &draws[..draws.len().min(17)]] {
-            let string = handler.encrypt_string(id, b"a context", data);
-            assert_eq!(
-                opened.encrypt_string(id, b"a context", data),
-                string,
-                "alike"
-            );
+            let string = handler.encrypt_string(id, data, &derived);
+            assert_eq!(opened.encrypt_string(id, data, &derived), string, "alike");
             let string = string.expect("AES-256");
             assert_eq!(opened.decrypt_string(id, &string), Ok(data.to_vec()));
             let stream = opened
-                .encrypt_stream(id, b"a context", data, None)
+                .encrypt_stream(id, data, None, &crate::Ivs::new())
                 .expect("AES-256");
             assert_eq!(handler.decrypt_stream(id, &stream, None), Ok(data.to_vec()));
         }
@@ -403,6 +438,7 @@ fn created(data: &[u8], encrypt_metadata: bool) {
 /// A text from `data`: its first byte its length, then the text (UTF-8,
 /// lossily), none where the byte is 255 or there's none; and what's after
 /// it.
+#[cfg(any(test, feature = "insecure-test-writer"))]
 fn text(data: &[u8]) -> (Option<String>, &[u8]) {
     match data.split_first() {
         None => (None, data),
@@ -419,6 +455,7 @@ fn text(data: &[u8]) -> (Option<String>, &[u8]) {
 /// filling in forms, accessibility, assembling, printing at high
 /// resolution. Each of the 256 sets, by one byte; the tests take them so
 /// too.
+#[cfg(any(test, feature = "insecure-test-writer"))]
 pub(crate) fn permissions(bits: u8) -> crate::Permissions {
     use crate::Permissions;
     let each = [
@@ -438,20 +475,23 @@ pub(crate) fn permissions(bits: u8) -> crate::Permissions {
 
 /// A random number generator for the fuzz body alone: the input's bytes,
 /// then a counter's. It's no cryptographic generator, but says it is
-/// (`TryCryptoRng`) so that [`Handler::create`](crate::Handler::create)
-/// takes it, which only a fuzz body may do: it's compiled for nothing
-/// else.
+/// (`TryCryptoRng`) so that the test writer's
+/// [`create`](crate::writer::create) takes it, which only a fuzz body may
+/// do: it's compiled for nothing else, and only with the test writer.
+#[cfg(any(test, feature = "insecure-test-writer"))]
 struct Drawn<'a> {
     data: &'a [u8],
     counter: u8,
 }
 
+#[cfg(any(test, feature = "insecure-test-writer"))]
 impl Drawn<'_> {
     fn over(data: &[u8]) -> Drawn<'_> {
         Drawn { data, counter: 0 }
     }
 }
 
+#[cfg(any(test, feature = "insecure-test-writer"))]
 impl rand_core::TryRng for Drawn<'_> {
     type Error = Infallible;
 
@@ -484,6 +524,7 @@ impl rand_core::TryRng for Drawn<'_> {
     }
 }
 
+#[cfg(any(test, feature = "insecure-test-writer"))]
 impl rand_core::TryCryptoRng for Drawn<'_> {}
 
 /// The fuzz target `crypt`'s body for passwords as typed: text from
@@ -495,11 +536,14 @@ impl rand_core::TryCryptoRng for Drawn<'_> {}
 /// (stringprep's) where it's neither, then the text as typed, then
 /// single-byte forms of the text composed, a byte a character, none twice
 /// among those a revision takes first; 3.2's form is there exactly where
-/// stringprep takes the text with Corrigendum #4's five characters mapped
-/// to their 3.2 decompositions and 3.2 assigned each of its characters,
-/// and has that form's characters, decomposed, in another order at most;
-/// prepared, the text is SASLprep's form by both, of 1 to 127 bytes and
-/// its own SASLprep by both, or it's refused for what the text is.
+/// stringprep takes the text with Corrigendum #4's five characters mapped to
+/// their 3.2 decompositions and 3.2 assigned each of its characters, and has
+/// that form's characters, decomposed, in another order at most; prepared, the
+/// text is SASLprep's form by both, of 1 to 127 bytes and its own SASLprep by
+/// both, or it's refused for what the text is: over `Password::LONGEST` bytes
+/// as typed, whatever else it is; a character by its place and the first table
+/// it's in; forms that part at a place no shorter beginning of the text parts
+/// at.
 pub fn password(data: &[u8]) {
     use crate::password::{CORRIGENDUM_4, saslprep_32};
     use crate::{Encoding, Password, Unusable};
@@ -573,8 +617,10 @@ pub fn password(data: &[u8]) {
                 assert!(!fit[i + 1..].contains(a), "twice for revision {revision}");
             }
         }
+        let capped = text.len() <= Password::LONGEST;
         match typed.prepared() {
             Ok(encoded) => {
+                assert!(capped, "prepared within the cap");
                 assert_eq!(encoded.encoding(), Encoding::Saslprep);
                 let bytes = encoded.as_bytes();
                 assert!((1..=127).contains(&bytes.len()), "1 to 127 bytes");
@@ -605,15 +651,23 @@ pub fn password(data: &[u8]) {
                 assert!(len > 127, "too long");
                 assert_eq!(prepared.map(|p| p.len()).ok(), Some(len), "its length");
             }
-            Err(Unusable::Prohibited(c)) => {
-                assert!(text.contains(c), "prohibited");
+            Err(Unusable::TypedTooLong { len, most }) => {
+                assert_eq!(len, text.len(), "its length as typed");
+                assert_eq!(most, Password::LONGEST, "the most");
+                assert!(len > most, "too long as typed");
+            }
+            Err(Unusable::Prohibited { at, why }) => {
+                let c = text.chars().nth(at).expect("a character of the text");
                 // Unassigned in 3.2, or refused, alone too.
                 let alone = saslprep(c.encode_utf8(&mut [0; 4])).is_err();
                 assert!(unassigned_code_point(c) || (prepared.is_err() && alone));
+                // The first of its tables.
+                let of = crate::password::Prohibition::of(c);
+                assert_eq!(of, Some(why), "its table");
             }
             Err(Unusable::Bidi) => assert!(prepared.is_err(), "bidi"),
-            Err(Unusable::Ambiguous(c)) => {
-                assert!(text.contains(c), "ambiguous");
+            Err(Unusable::Ambiguous { at }) => {
+                assert!(at < text.chars().count(), "ambiguous at a character");
                 let new = prepared.as_deref().map(str::as_bytes).ok();
                 assert!(new.is_some_and(|new| (1..=127).contains(&new.len())));
                 assert_ne!(
@@ -621,6 +675,14 @@ pub fn password(data: &[u8]) {
                     new,
                     "the forms differ"
                 );
+                // No beginning of it before the place has forms that differ.
+                let end = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(i, _)| i);
+                for n in 1..=at {
+                    let begun = &text[..end(n)];
+                    let begun_new = saslprep(begun).ok().map(|f| f.into_owned().into_bytes());
+                    let begun_old = saslprep_32(begun).map(|f| f.to_vec());
+                    assert_eq!(begun_old, begun_new, "parted before its place");
+                }
             }
             Err(other) => panic!("{other:?}"),
         }

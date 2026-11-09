@@ -1,6 +1,6 @@
 //! pdf-crypt timed on inputs made here, so that a change to the handler, a
 //! password's forms or the primitives under them can be judged before and
-//! after it, by `cargo bench -p pdf-crypt --features writer`, as the
+//! after it, by `cargo bench -p pdf-crypt --features insecure-test-writer`, as the
 //! dictionaries of revisions 2 to 5 are the writer's:
 //!
 //! - `open`: `Handler::open` of the writer's dictionary of each kind, by
@@ -9,8 +9,8 @@
 //!   and of revision 6's by a wrong one, hashed both ways
 //!   (`aes-256-r6/wrong`). Revision 6's hash, thousands of AES blocks and
 //!   SHA-2 digests a password, is the crate's heaviest path.
-//! - `create`: `Handler::create`, a new file's revision 6 dictionary, from
-//!   a generator seeded afresh each time.
+//! - `create`: `Handler::create`, a new file's revision 6 dictionary, its
+//!   key and salts from the operating system.
 //! - `passwords`: a password's forms (`encodings`) and its prepared form
 //!   (`prepared`): ASCII, Latin text typed composed and decomposed, and
 //!   Japanese with full-width digits, which SASLprep makes ASCII.
@@ -20,7 +20,8 @@
 //!   and 128 bits, AES-128, AES-256); and 1 MiB of a page's content as 256
 //!   streams of 4 KiB and as one stream (`stream/*/4k`, `stream/*/1m`).
 //! - `encrypt`: the strings, and the 1 MiB stream under AES, as a writer
-//!   encrypts them, AES's IV by HMAC-SHA256.
+//!   encrypts them, AES's IVs from the operating system, a write's `Ivs`
+//!   made for each pass.
 //!
 //! Throughput is in bytes of plaintext for decrypting and encrypting, and
 //! in calls for the rest. Each input is held to what it gives before it's
@@ -32,11 +33,9 @@
 
 use std::hint::black_box;
 
-use chacha20::ChaCha20Rng;
-use criterion::{BatchSize, Criterion, Throughput};
-use pdf_crypt::rand_core::SeedableRng;
+use criterion::{Criterion, Throughput};
 use pdf_crypt::writer::{self, Kind, Settings};
-use pdf_crypt::{Encoded, Encoding, Handler, Password, Protection, Refused};
+use pdf_crypt::{Encoded, Encoding, Handler, Ivs, Password, Protection, Refused};
 
 /// The file's first `/ID` element.
 const ID: &[u8] = b"0123456789abcdef";
@@ -140,12 +139,6 @@ fn strings() -> Vec<(Object, Vec<u8>)> {
         .collect()
 }
 
-/// What AES's IV is derived from beside the data, as a writer names an
-/// object: `n g obj`.
-fn context((n, g): Object) -> Vec<u8> {
-    format!("{n} {g} obj").into_bytes()
-}
-
 /// 1 MiB, so that a stream's run is a millisecond or so and past the
 /// faster caches.
 const TEXT_LEN: usize = 1 << 20;
@@ -229,15 +222,11 @@ fn open_group(c: &mut Criterion) {
     group.finish();
 }
 
-/// The seed a new file's key and salts are drawn from.
-const SEED: u64 = 7;
-
 fn create_group(c: &mut Criterion) {
     let password = Password(ASCII).prepared();
     let password = password.expect("create/aes-256-r6: a password SASLprep takes");
     let protection = Protection::new(&password);
-    let rng = &mut ChaCha20Rng::seed_from_u64(SEED);
-    let created = Handler::create(&protection, rng);
+    let created = Handler::create(&protection);
     let (_, dictionary) = created.expect("create/aes-256-r6: made");
     let r = (dictionary.v, dictionary.r);
     assert_eq!(r, (5, 6), "create/aes-256-r6: revision 6's");
@@ -247,11 +236,7 @@ fn create_group(c: &mut Criterion) {
     let mut group = c.benchmark_group("create");
     group.throughput(Throughput::Elements(1));
     group.bench_function("aes-256-r6", |b| {
-        b.iter_batched(
-            || ChaCha20Rng::seed_from_u64(SEED),
-            |mut rng| Handler::create(black_box(&protection), &mut rng),
-            BatchSize::SmallInput,
-        )
+        b.iter(|| Handler::create(black_box(&protection)))
     });
     group.finish();
 }
@@ -352,7 +337,7 @@ fn encrypted_strings(
 ) -> Vec<(Object, Vec<u8>)> {
     let encrypted: Vec<_> = (strings.iter())
         .map(|(id, plain)| {
-            let encrypted = handler.encrypt_string(*id, &context(*id), plain);
+            let encrypted = handler.encrypt_string(*id, plain, &Ivs::new());
             (*id, encrypted.expect("a method that's one"))
         })
         .collect();
@@ -375,7 +360,7 @@ fn encrypted_streams(
 ) -> Vec<(Object, Vec<u8>)> {
     let encrypted: Vec<_> = (streams.iter())
         .map(|&(id, plain)| {
-            let encrypted = handler.encrypt_stream(id, &context(id), plain, None);
+            let encrypted = handler.encrypt_stream(id, plain, None, &Ivs::new());
             (id, encrypted.expect("a method that's one"))
         })
         .collect();
@@ -445,7 +430,6 @@ fn decrypt_group(c: &mut Criterion) {
 
 fn encrypt_group(c: &mut Criterion) {
     let strings = strings();
-    let contexts: Vec<Vec<u8>> = strings.iter().map(|(id, _)| context(*id)).collect();
     let plain: usize = strings.iter().map(|(_, string)| string.len()).sum();
     let mut group = c.benchmark_group("encrypt");
     group.throughput(Throughput::Bytes(plain as u64));
@@ -455,9 +439,10 @@ fn encrypt_group(c: &mut Criterion) {
         encrypted_strings(&format!("encrypt/{id}"), &handler, &strings);
         group.bench_function(&id, |b| {
             b.iter(|| {
+                let ivs = Ivs::new();
                 let mut len = 0;
-                for ((id, string), context) in strings.iter().zip(&contexts) {
-                    let encrypted = handler.encrypt_string(*id, context, black_box(string));
+                for (id, string) in &strings {
+                    let encrypted = handler.encrypt_string(*id, black_box(string), &ivs);
                     len += encrypted.map_or(0, |data| data.len());
                 }
                 len
@@ -466,14 +451,13 @@ fn encrypt_group(c: &mut Criterion) {
     }
     let text = text();
     let stream = [((300, 0), &text[..])];
-    let context = context(stream[0].0);
     group.throughput(Throughput::Bytes(text.len() as u64));
     for &(name, kind) in &STREAM_KINDS[1..] {
         let handler = opened(kind);
         let id = format!("stream/{name}/1m");
         encrypted_streams(&format!("encrypt/{id}"), &handler, &stream);
         group.bench_function(&id, |b| {
-            b.iter(|| handler.encrypt_stream((300, 0), &context, black_box(&text), None))
+            b.iter(|| handler.encrypt_stream((300, 0), black_box(&text), None, &Ivs::new()))
         });
     }
     group.finish();

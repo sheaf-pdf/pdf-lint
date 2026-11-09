@@ -131,13 +131,14 @@ pub(crate) fn attached(how: &Attached, extra: &[(u32, &[u8])]) -> Vec<u8> {
     values.stm_f = Some(how.streams.as_bytes().to_vec());
     values.str_f = Some(how.strings.as_bytes().to_vec());
     let handler = Handler::open(&values, settings.id, &[Encoded::verbatim(settings.user)]).unwrap();
+    let ivs = pdf_crypt::Ivs::new();
     let name = |n: u32| {
-        let name = handler.encrypt_string((n, 0), b"its name", b"a.txt");
+        let name = handler.encrypt_string((n, 0), b"a.txt", &ivs);
         format!("<{}>", hex(&name.unwrap()))
     };
     let stream = |n: u32, entries: String, data: &[u8], by: Option<&str>| {
         let method = by.map(|name| handler.named(name.as_bytes()));
-        let data = handler.encrypt_stream((n, 0), b"its data", data, method.as_ref());
+        let data = handler.encrypt_stream((n, 0), data, method.as_ref(), &ivs);
         let data = data.unwrap();
         let head = format!("<< {entries}/Length {} >>\nstream\n", data.len());
         [head.as_bytes(), &data, b"\nendstream"].concat()

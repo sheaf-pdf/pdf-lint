@@ -99,7 +99,8 @@ impl std::fmt::Debug for KeyName {
 pub enum Place {
     /// A byte of the file, from its first.
     Byte(u64),
-    /// A position as a hint table has one, as if the hint stream weren't there:
+    /// A position as a hint table has one, as if the hint stream weren't there,
+    /// from the file's first byte (the table's offset past the header):
     /// [`hint::located`] gives the byte, under the hint stream's extent the
     /// check places it by, [`Facts::hint_extent`](super::Facts::hint_extent).
     Position(u64),
@@ -125,7 +126,10 @@ pub enum Place {
 /// so a sink keeps it as it is; its [`Display`](std::fmt::Display) is the whole
 /// message, with the place, a byte or a page or an entry of a table, where
 /// there's one, and [`Finding::place`] and [`Finding::clause`] give those
-/// apart.
+/// apart. Its positions are from the file's first byte, a hint table's offsets
+/// taken past the header; a linearization dictionary's value it quotes is as
+/// written, counted from the header (ISO 32000-2, 7.5.2). In a file whose
+/// header is its first byte, the two are the same.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Finding {
@@ -167,7 +171,7 @@ pub enum Finding {
     /// (F.3.3).
     #[error("the dictionary runs on to byte {end}, past the first 1024 bytes (ISO 32000-2, F.3.3)")]
     DictionaryPast1024 {
-        /// Where it ends, from the header.
+        /// Where it ends: more than 1024 bytes past the header.
         end: u64,
     },
     /// `/H` hasn't two or four items (Table F.1).
@@ -199,7 +203,7 @@ pub enum Finding {
         "/E is {e}, where the first page's last object ends by {least} to {most} (ISO 32000-2, Table F.1)"
     )]
     FirstPageEnd {
-        /// What it says.
+        /// What it says, which counts from the header.
         e: i64,
         /// The first place it could be: past that object's `endobj`.
         least: u64,
@@ -211,7 +215,7 @@ pub enum Finding {
         "/T is {t}, where the main section's first entry is at {least} to {most} (ISO 32000-2, Table F.1)"
     )]
     MainFirstEntry {
-        /// What it says.
+        /// What it says, which counts from the header.
         t: i64,
         /// The first place it could be: the white-space before the row.
         least: u64,
@@ -481,7 +485,7 @@ pub enum Finding {
         "the page table has the first page at {hint}, where it's at {computed} as if the hint stream weren't there (ISO 32000-2, F.4.2)"
     )]
     FirstPageAt {
-        /// What it says.
+        /// Where it says, from the file's first byte.
         hint: u64,
         /// Where it is.
         computed: u64,
@@ -494,7 +498,7 @@ pub enum Finding {
         "the page table has the first page at {hint}, the start of its section, where its object is at {computed} as if the hint stream weren't there (ISO 32000-2, F.3.7)"
     )]
     FirstPageNotFirstObject {
-        /// What it says.
+        /// Where it says, from the file's first byte.
         hint: u64,
         /// Where its object is.
         computed: u64,
@@ -590,7 +594,7 @@ pub enum Finding {
     SharedFirstAt {
         /// Its number.
         number: u32,
-        /// What it says.
+        /// Where it says, from the file's first byte.
         hint: u64,
         /// Where it is, if it's listed.
         computed: Option<u64>,
@@ -643,7 +647,7 @@ pub enum Finding {
     TableAt {
         /// Which table.
         table: &'static str,
-        /// What it says.
+        /// Where it says, from the file's first byte.
         hint: u64,
         /// Where it is.
         computed: u64,

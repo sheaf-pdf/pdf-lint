@@ -7,14 +7,13 @@
 
 use pdf_filters::Fault;
 use pdf_objects::object::{Object, ObjectId, Value};
-use pdf_objects::parse;
 use pdf_tokenizer::{Kind, Tokenizer, is_white_space};
 
-use super::{Cx, Reader, Reading, Unfiltered, XrefEntry, offset_of, predictor_row, rfind};
+use super::{Cx, Reader, Reading, Recovery, Unwritten, XrefEntry, offset_of, predictor_row, rfind};
 use crate::crypt::is_xref;
 use crate::read::reading::{ByteSource, Error};
 use crate::read::window::{Bytes, InMemory, Window};
-use crate::source::{Trailer, Unread, XrefKind};
+use crate::source::{Trailer, XrefKind};
 
 /// One row of a cross-reference section, as written.
 /// Not exhaustive, so that it can come to say more of a row; made only by the
@@ -34,7 +33,15 @@ pub struct SectionRow {
 }
 
 /// One cross-reference section of a file, as written, none of it merged with
-/// another's.
+/// another's. Its places are positions in the file's bytes, as a reading's are:
+/// what's written, which counts from the header (ISO 32000-2, 7.5.2), past the
+/// header's offset. It's where the reading read it, which may be away from
+/// where it's said to be ([`SectionRows::said`]); its rows are as written,
+/// though the reading may read their objects at a shift
+/// ([`Origin::Shifted`](crate::Origin::Shifted)) or where a scan finds them
+/// ([`Origin::Recovered`](crate::Origin::Recovered)), and read a first
+/// subsection numbered from 1 as numbered from 0
+/// ([`Fault::Renumbered`](super::Fault::Renumbered)).
 /// Not exhaustive, so that it can come to say more of a section; made only by
 /// the reader.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,14 +61,20 @@ pub struct SectionRows {
     pub first_row: Option<(usize, usize)>,
     /// Its trailer: the dictionary after `trailer`, or the stream's.
     pub trailer: Trailer,
-    /// Its `/Prev`, as the reader reads it: none where it isn't an offset.
+    /// Where its `/Prev` says the section before it is: none where it isn't
+    /// an offset.
     pub prev: Option<usize>,
     /// The number and generation of the stream it's written as.
     pub stream: Option<ObjectId>,
     /// What a hybrid table's `/XRefStm` lists (7.5.8.4), as a section of its own.
     pub hybrid: Option<Box<SectionRows>>,
-    /// The offset the `startxref` after it gives, where one follows it.
+    /// Where the `startxref` after it says the newest section is, where one
+    /// follows it.
     pub startxref: Option<usize>,
+    /// Where `startxref`, a `/Prev` or a `/XRefStm` said it is, where it
+    /// doesn't read there and the reading read it here instead
+    /// ([`Fault::Moved`](super::Fault::Moved)).
+    pub said: Option<usize>,
 }
 
 /// A file's sections along `/Prev`, the newest first: as many as read, and what
@@ -77,14 +90,20 @@ pub struct Sections {
     pub stopped: Option<SectionFault>,
 }
 
-/// Why a section doesn't read ([`Reading::sections`]), or why no more of
-/// them are read: each section's own view, for a checker of a file's
-/// sections, each reason with the byte it was found at where there's one.
-/// Why the reading's sections, read as one, don't read is
-/// [`Unwritten`](super::Unwritten)'s (the trailer's reason, and a
-/// fault's), which names the same reasons in its own shape and words,
-/// without the byte, as a fault says it at its place; each kept as its
-/// readers have it.
+/// Why no more of a file's sections are read ([`Reading::sections`]): the
+/// chain's own reasons, each with the byte it was found at where there's one,
+/// or a section that doesn't read ([`SectionFault::Section`]), why in
+/// [`Unwritten`]'s words, as a reading's trailer and its faults say it. So one
+/// match over [`Unwritten`] reads a section's reason wherever it's given. The
+/// chain's own are kept apart, as the faults of a reading keep theirs
+/// ([`Fault::Loop`](super::Fault::Loop),
+/// [`Fault::Sections`](super::Fault::Sections)): where the trailer a reading
+/// made says the same, it's in [`Unwritten`]'s variant of the same name
+/// ([`Unwritten::NoStartxref`], [`Unwritten::StartxrefInWord`],
+/// [`Unwritten::StartxrefNoOffset`], which gives no byte, and
+/// [`Unwritten::Loop`], which only
+/// [`Recovery::Pdfium`](super::Recovery::Pdfium) gives), so a caller holding
+/// one beside the other matches the two by name.
 /// Not exhaustive, as reasons are found as the reader learns.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -122,107 +141,25 @@ pub enum SectionFault {
         /// The cap.
         limit: usize,
     },
-    /// Neither `xref` nor an object is where a section is said to be.
-    #[error("byte {at}, which startxref or /Prev gives, is at neither `xref` nor an object")]
-    Neither {
-        /// Where.
-        at: usize,
-    },
-    /// A table's subsection header doesn't read.
-    #[error("a subsection's header at byte {at} doesn't read")]
-    Subsection {
-        /// Where.
-        at: usize,
-    },
-    /// A table's row doesn't read, or numbers no object.
-    #[error("the table's row at byte {at} doesn't read")]
-    Row {
-        /// Where.
-        at: usize,
-    },
-    /// A table isn't followed by `trailer`.
-    #[error("the table at byte {at} has no trailer")]
-    NoTrailer {
-        /// Where what's there is.
-        at: usize,
-    },
-    /// What follows `trailer` doesn't read.
-    #[error("the trailer at byte {at} doesn't read: {why}")]
-    Trailer {
-        /// Where.
-        at: usize,
-        /// pdf-objects' parser's error.
-        why: parse::Error,
-    },
-    /// What follows `trailer` isn't a dictionary.
-    #[error("the trailer at byte {at} isn't a dictionary")]
-    TrailerNotADictionary {
-        /// Where.
-        at: usize,
-    },
-    /// The object where a stream is said to be doesn't read.
-    #[error("the object at byte {at} doesn't read: {why}")]
-    Unread {
-        /// Where.
+    /// The section at byte `at`, which `startxref`, a `/Prev` or a
+    /// `/XRefStm` gives, doesn't read, and why: as the trailer a reading
+    /// makes instead says it ([`Trailer::unwritten`](crate::Trailer::unwritten)),
+    /// and a fault on a later section ([`Fault::Section`](super::Fault::Section)).
+    #[error("the section at byte {at} doesn't read: {why}")]
+    Section {
+        /// Where it is.
         at: usize,
         /// Why it doesn't read.
-        why: Box<Unread>,
+        why: Box<Unwritten>,
     },
-    /// The object isn't a stream.
-    #[error("the object at byte {at} isn't a stream")]
-    NotAStream {
-        /// Where.
-        at: usize,
-    },
-    /// The stream isn't `/Type /XRef`.
-    #[error("the stream at byte {at} isn't /Type /XRef")]
-    NotXref {
-        /// Where.
-        at: usize,
-    },
-    /// A stream's `/W` isn't three widths of 8 bytes or fewer.
-    #[error("the stream at byte {at} has no /W of three widths of 8 bytes or fewer")]
-    Widths {
-        /// Where.
-        at: usize,
-    },
-    /// A stream's `/Index` isn't pairs of numbers.
-    #[error("the stream at byte {at} has an /Index that isn't pairs of numbers")]
-    Index {
-        /// Where.
-        at: usize,
-    },
-    /// A stream with no `/Index` has no `/Size` for one.
-    #[error("the stream at byte {at} has neither /Index nor /Size")]
-    NoSize {
-        /// Where.
-        at: usize,
-    },
-    /// A stream's `/Filter` or `/DecodeParms` are ones the reader doesn't
-    /// take.
-    #[error("the stream at byte {at} doesn't decode: {why}")]
-    Filters {
-        /// Where.
-        at: usize,
-        /// What it doesn't take of them.
-        why: Unfiltered,
-    },
-    /// A stream's data doesn't decode as far as its rows, and pdf-filters'
-    /// first fault: [`Fault::Limit`] where none stopped it short of its
-    /// limit.
-    #[error("the stream at byte {at} doesn't decode: {fault}")]
-    Decode {
-        /// Where.
-        at: usize,
-        /// The fault.
-        fault: Fault,
-    },
-    /// A stream's data ends before its `/Index` does.
-    #[error("the stream at byte {at} has data that ends before its /Index does")]
-    DataShort {
-        /// Where.
-        at: usize,
-    },
+}
+
+impl SectionFault {
+    /// The section at `at`, which doesn't read for `why`.
+    fn section(at: usize, why: Unwritten) -> SectionFault {
+        let why = Box::new(why);
+        SectionFault::Section { at, why }
+    }
 }
 
 /// The first object in a file, after its header, as written.
@@ -250,9 +187,16 @@ impl<S: ByteSource> Reading<S> {
     /// list, and [`Sections::stopped`] says why; a file with no section that reads
     /// has none, though its reading found its objects by scanning. So what's here
     /// can differ from [`Reading::entries`], which is what a reader made of them.
-    /// Positions are from the file's first byte, as a reading reads them. A stream's
-    /// rows are decoded from its own data, and that's never encrypted (ISO 32000-2,
-    /// 7.5.8.2).
+    /// Positions are in the file's bytes, as a reading's are: each offset written,
+    /// which counts from the header (ISO 32000-2, 7.5.2), past the header's offset;
+    /// a section the reading was opened as of at its byte. Each section is read where
+    /// the reading read it, away from where it's said to be where it didn't read
+    /// there ([`SectionRows::said`]), so the list goes as far as the reading's. A
+    /// stream's rows are decoded from its own data, and that's never encrypted
+    /// (ISO 32000-2, 7.5.8.2). Its data is found as the reading found it, so the rows
+    /// are the reading's whatever it has read: a `/Length` that's a reference isn't
+    /// followed, as a cross-reference stream's entries are direct (7.5.8.2), and the
+    /// open reads them before it lists any object.
     ///
     /// # Errors
     ///
@@ -270,6 +214,8 @@ impl<S: ByteSource> Reading<S> {
     /// The file's first object, from its header on, as written: none with no header,
     /// or where what's first doesn't read as an object. It isn't kept. Its strings
     /// aren't decrypted, a linearization dictionary having none that a reader wants.
+    /// A stream's `/Length` in an object stream isn't read from it, as the open reads
+    /// none: such a stream's data is found by `endstream`, whatever was read before.
     ///
     /// # Errors
     ///
@@ -282,6 +228,43 @@ impl<S: ByteSource> Reading<S> {
             }
             None => (self.reader.first_object(self.by_position())).map_err(Error::Io),
         }
+    }
+}
+
+impl<S: ByteSource> Reading<S> {
+    /// Where the file's last `startxref` says its newest section is, and
+    /// where a reading of the whole file reads that section, as the open
+    /// finds it ([`Reader::section_found`]): there, or, under the verified
+    /// recovery, near it or where it puts it counted from the file's first
+    /// byte. Each a position in the file's bytes; none where no `startxref`
+    /// gives an offset, or no section reads there. Read again from the
+    /// source, as [`Reading::sections`] is, whatever the reading was opened
+    /// as of: for the writer, whose update after a reading as of a section
+    /// goes after the file's newest alone ([`Base::of`](crate::write::Base::of)).
+    pub(crate) fn newest_section(&self) -> std::io::Result<Option<(usize, usize)>> {
+        match self.source().whole() {
+            Some(file) => {
+                let Ok(newest) = self.reader.newest_again(InMemory(file));
+                Ok(newest)
+            }
+            None => self.reader.newest_again(self.by_position()),
+        }
+    }
+}
+
+impl Reader {
+    /// [`Reading::newest_section`], of `file`.
+    fn newest_again<'f, F: Bytes<'f>>(&self, file: F) -> Result<Option<(usize, usize)>, F::Error> {
+        let Ok(offset) = last_startxref(file)? else {
+            return Ok(None);
+        };
+        let said = self.in_bytes(offset);
+        let search = self.recovery == Recovery::Verified;
+        let mut cx = Cx::opening(false);
+        Ok(match self.section_found(file, &mut cx, said, search)? {
+            Ok((_, found)) => Some((said, found.map_or(said, |found| found.found))),
+            Err(_) => None,
+        })
     }
 }
 
@@ -299,7 +282,7 @@ impl Reader {
         let Some(header) = self.facts.header_offset else {
             return Ok(None);
         };
-        let mut cx = Cx::new(false);
+        let mut cx = Cx::opening(false);
         Ok(self
             .indirect(file, &mut cx, header, None)?
             .ok()
@@ -314,9 +297,11 @@ impl Reader {
     /// [`Reading::sections`], of `file`.
     fn sections_again<'f, F: Bytes<'f>>(&self, file: F) -> Result<Sections, F::Error> {
         let mut sections = Vec::new();
+        // A section the reading was opened as of is at its byte; startxref's
+        // value counts from the header.
         let start = match self.as_of {
             Some(at) => Ok(at),
-            None => last_startxref(file)?,
+            None => last_startxref(file)?.map(|at| self.in_bytes(at)),
         };
         let mut next = match start {
             Ok(at) => Some(at),
@@ -341,8 +326,11 @@ impl Reader {
                 break;
             }
             seen.push(at);
-            match self.section_again(file, at, &mut left)? {
-                Ok(section) => {
+            // Where the reading read it.
+            let place = self.found_at(at);
+            match self.section_again(file, place, &mut left)? {
+                Ok(mut section) => {
+                    section.said = (place != at).then_some(at);
                     next = section.prev;
                     sections.push(section);
                 }
@@ -362,7 +350,7 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::new(false);
+        let mut cx = Cx::opening(false);
         let what = file.read_from(&mut cx, at, 0, |w, cx| {
             let mut t = w.tokenizer(at);
             Ok(match w.significant(&mut t) {
@@ -371,7 +359,7 @@ impl Reader {
                     Some(self.table_again(w, cx, &mut t, at, left))
                 }
                 Some(token) if token.kind == Kind::Integer => None,
-                _ => Some(Err(SectionFault::Neither { at })),
+                _ => Some(Err(SectionFault::section(at, Unwritten::Neither { at }))),
             })
         })?;
         let mut section = match what {
@@ -381,9 +369,14 @@ impl Reader {
         };
         *left -= section.rows.len();
         let stream = section.trailer.dict().get(b"XRefStm").and_then(offset_of);
+        let stream = stream.map(|at| self.in_bytes(at));
         if let Some(stream) = stream {
-            match self.stream_again(file, stream, left)? {
-                Ok(rows) => section.hybrid = Some(Box::new(rows)),
+            let place = self.found_at(stream);
+            match self.stream_again(file, place, left)? {
+                Ok(mut rows) => {
+                    rows.said = (place != stream).then_some(stream);
+                    section.hybrid = Some(Box::new(rows));
+                }
                 Err(fault) => return Ok(Err(fault)),
             }
         }
@@ -418,7 +411,7 @@ impl Reader {
                     let start = integer(t).and_then(|n| u32::try_from(n).ok());
                     let count = integer(t).and_then(|n| u32::try_from(n).ok());
                     let (Some(start), Some(count)) = (start, count) else {
-                        return Err(SectionFault::Subsection { at });
+                        return Err(SectionFault::section(section, Unwritten::Subsection { at }));
                     };
                     subsections.push((start, count));
                     let header_end = w.place(t.offset());
@@ -434,14 +427,17 @@ impl Reader {
                                 limit: self.listable,
                             });
                         }
-                        let number = start.checked_add(i);
+                        let row_fault = |why| SectionFault::section(section, why);
+                        let Some(number) = start.checked_add(i) else {
+                            return Err(row_fault(Unwritten::RowNumber { at: row }));
+                        };
                         let offset = integer(t);
                         let generation = integer(t);
                         let kind = w.significant(t);
-                        let (Some(number), Some(offset), Some(generation), Some(kind)) =
-                            (number, offset, generation, kind.as_ref().map(|k| k.bytes))
+                        let (Some(offset), Some(generation), Some(kind)) =
+                            (offset, generation, kind.as_ref().map(|k| k.bytes))
                         else {
-                            return Err(SectionFault::Row { at: row });
+                            return Err(row_fault(Unwritten::Row { at: row }));
                         };
                         let fits = usize::try_from(offset)
                             .ok()
@@ -450,7 +446,10 @@ impl Reader {
                             (Some((offset, generation)), b"n") => SectionRow {
                                 number,
                                 generation,
-                                entry: Some(XrefEntry::InUse { offset, generation }),
+                                entry: Some(XrefEntry::InUse {
+                                    offset: self.in_bytes(offset),
+                                    generation,
+                                }),
                             },
                             (_, b"n" | b"f") => SectionRow {
                                 number,
@@ -460,23 +459,25 @@ impl Reader {
                                     .unwrap_or(u16::MAX),
                                 entry: Some(XrefEntry::Free),
                             },
-                            _ => return Err(SectionFault::Row { at: row }),
+                            _ => return Err(row_fault(Unwritten::Row { at: row })),
                         };
                         rows.push(row_read);
                     }
                 }
-                _ => return Err(SectionFault::NoTrailer { at }),
+                _ => return Err(SectionFault::section(section, Unwritten::NoTrailer { at })),
             }
         }
         let at = w.place(t.offset());
         let mut parser = w.parser(at).limits(self.limits.parser);
         let trailer = w.parsed(parser.value(&mut cx.parsed(None)));
-        let trailer = trailer.map_err(|why| SectionFault::Trailer { at, why })?;
+        let fault = |why| SectionFault::section(section, why);
+        let trailer = trailer.map_err(|why| fault(Unwritten::Trailer(why)))?;
         let Some(dict) = trailer.as_dict() else {
-            return Err(SectionFault::TrailerNotADictionary { at });
+            return Err(fault(Unwritten::TrailerNotADictionary));
         };
         let prev = dict.get(b"Prev").and_then(offset_of);
-        let startxref = startxref_at(w, parser.offset());
+        let prev = prev.map(|at| self.in_bytes(at));
+        let startxref = startxref_at(w, parser.offset()).map(|at| self.in_bytes(at));
         Ok(SectionRows {
             at: section,
             kind: XrefKind::Table,
@@ -488,6 +489,7 @@ impl Reader {
             stream: None,
             hybrid: None,
             startxref,
+            said: None,
         })
     }
 
@@ -498,30 +500,29 @@ impl Reader {
         at: usize,
         left: &mut usize,
     ) -> Result<Result<SectionRows, SectionFault>, F::Error> {
-        let mut cx = Cx::new(false);
+        let mut cx = Cx::opening(false);
         let (id, object, record) = match self.indirect(file, &mut cx, at, None)? {
             Ok(read) => read,
-            Err(why) => {
-                let why = Box::new(why);
-                return Ok(Err(SectionFault::Unread { at, why }));
-            }
+            Err(why) => return Ok(Err(SectionFault::section(at, Unwritten::Unread(why)))),
         };
+        let fault = |why| Ok(Err(SectionFault::section(at, why)));
         let Value::Stream(stream) = object.value() else {
-            return Ok(Err(SectionFault::NotAStream { at }));
+            return fault(Unwritten::NotAStream { id, at });
         };
         if !is_xref(&stream.dict) {
-            return Ok(Err(SectionFault::NotXref { at }));
+            return fault(Unwritten::NotXref { id, at });
         }
         let written = stream.data.at().map(|at| file.get(at.start..at.end));
         let written = written.transpose()?.flatten().unwrap_or_default();
         let end = record.at.end;
         let startxref = file.read_from(&mut cx, end, 0, |w, _| Ok(startxref_at(w, end)))?;
+        let startxref = startxref.map(|at| self.in_bytes(at));
         // As many bytes before it as a writer has ever been seen to put there.
         let before = file.get(at.saturating_sub(SPACE)..at)?.unwrap_or_default();
         let space = (before.iter().rev())
             .take_while(|&&b| is_white_space(b))
             .count();
-        let rows = self.stream_rows(&object, &written, at, *left);
+        let rows = self.stream_rows(id, &object, &written, at, *left);
         let (subsections, rows) = match rows {
             Ok(rows) => rows,
             Err(fault) => return Ok(Err(fault)),
@@ -529,6 +530,7 @@ impl Reader {
         *left -= rows.len();
         let dict = object.as_dict().expect("it's a stream");
         let prev = dict.get(b"Prev").and_then(offset_of);
+        let prev = prev.map(|at| self.in_bytes(at));
         let trailer = Trailer {
             stream: Some(id),
             object: object.clone(),
@@ -545,21 +547,24 @@ impl Reader {
             stream: Some(id),
             hybrid: None,
             startxref,
+            said: None,
         }))
     }
 
     /// A stream's subsections and rows, by its `/W` and `/Index` (7.5.8.2), from its
-    /// own data as `written`.
+    /// own data as `written`: stream `id`, at `at`.
     #[allow(clippy::type_complexity)]
     fn stream_rows(
         &self,
+        id: ObjectId,
         object: &Object,
         written: &[u8],
         at: usize,
         left: usize,
     ) -> Result<(Vec<(u32, u32)>, Vec<SectionRow>), SectionFault> {
+        let fault = |why| SectionFault::section(at, why);
         let Value::Stream(stream) = object.value() else {
-            return Err(SectionFault::NotAStream { at });
+            return Err(fault(Unwritten::Streamless { id }));
         };
         let dict = &stream.dict;
         let widths: Option<Vec<usize>> = match dict.get(b"W").map(Object::value) {
@@ -572,7 +577,9 @@ impl Reader {
                 .collect(),
             _ => None,
         };
-        let widths = widths.ok_or(SectionFault::Widths { at })?;
+        // Each reason built only where it's given back, as one made unused
+        // costs its box, at each row below among them.
+        let widths = widths.ok_or_else(|| fault(Unwritten::Widths))?;
         let size = dict.get(b"Size").and_then(Object::as_integer);
         let subsections: Vec<(u32, u32)> = match dict.get(b"Index").map(Object::value) {
             Some(Value::Array(index)) => (index.chunks(2))
@@ -584,10 +591,10 @@ impl Reader {
                     _ => None,
                 })
                 .collect::<Option<_>>()
-                .ok_or(SectionFault::Index { at })?,
+                .ok_or_else(|| fault(Unwritten::Index))?,
             _ => {
                 let size = size.and_then(|s| u32::try_from(s).ok());
-                vec![(0, size.ok_or(SectionFault::NoSize { at })?)]
+                vec![(0, size.ok_or_else(|| fault(Unwritten::NoSize))?)]
             }
         };
         let row = widths.iter().sum::<usize>();
@@ -595,8 +602,7 @@ impl Reader {
             all.checked_add(usize::try_from(count).ok()?)
         });
         let size = count.and_then(|count| count.checked_mul(row));
-        let filters =
-            super::filters(dict, None).map_err(|why| SectionFault::Filters { at, why })?;
+        let filters = super::filters(dict, None).map_err(|why| fault(Unwritten::Filters(why)))?;
         let decoded;
         let data = match filters.is_empty() {
             true => written,
@@ -610,11 +616,8 @@ impl Reader {
                     // What's past its rows, and a cut there, aren't its rows' fault.
                     Err(error) if size.is_some_and(|size| error.data.len() >= size) => error.data,
                     Err(error) => {
-                        let fault = error
-                            .faults
-                            .first()
-                            .map_or(Fault::Limit, |&(_, fault)| fault);
-                        return Err(SectionFault::Decode { at, fault });
+                        let first = (error.faults.first()).map_or(Fault::Limit, |&(_, f)| f);
+                        return Err(fault(Unwritten::Decode { fault: first }));
                     }
                 };
                 &decoded[..]
@@ -629,17 +632,20 @@ impl Reader {
                         limit: self.listable,
                     });
                 }
-                let bytes = rows_read.next().ok_or(SectionFault::DataShort { at })?;
+                let bytes = rows_read
+                    .next()
+                    .ok_or_else(|| fault(Unwritten::DataShort))?;
                 let (one, rest) = bytes.split_at(widths[0]);
                 let (two, three) = rest.split_at(widths[1]);
                 let kind = if widths[0] == 0 { 1 } else { field(one) };
                 let (two, three) = (field(two), field(three));
-                let number = start.checked_add(i).ok_or(SectionFault::DataShort { at })?;
+                let number = (start.checked_add(i)).ok_or_else(|| fault(Unwritten::IndexNumber))?;
                 let generation = u16::try_from(three).unwrap_or(u16::MAX);
                 let (generation, entry) = match kind {
                     0 => (generation, Some(XrefEntry::Free)),
                     1 => {
                         let offset = usize::try_from(two).unwrap_or(usize::MAX);
+                        let offset = self.in_bytes(offset);
                         let entry = XrefEntry::InUse { offset, generation };
                         (generation, Some(entry))
                     }
@@ -696,7 +702,7 @@ fn startxref_at(w: &Window<'_>, at: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read::{Limits, Options};
+    use crate::read::{Limits, Options, Unfiltered};
 
     /// A file of a catalog, its table at the end as `table` writes it, its trailer
     /// `trailer`, and its `startxref` at the table unless the file gives its own.
@@ -745,6 +751,29 @@ mod tests {
         sections(file).stopped.expect("it stops")
     }
 
+    /// That the sections of `file` stop at the section at `at`, which
+    /// doesn't read for `why`, in `words`, as a fault on a section says it;
+    /// and, where the reading reads it `alike`, that the trailer it made
+    /// instead gives the same reason.
+    fn section_stops(file: &[u8], at: usize, why: Unwritten, words: &str, alike: bool) {
+        let fault = stopped(file);
+        let want = SectionFault::Section {
+            at,
+            why: Box::new(why.clone()),
+        };
+        assert_eq!(fault, want);
+        let said = format!("the section at byte {at} doesn't read: {words}");
+        assert_eq!(fault.to_string(), said);
+        let on_a_section = super::super::Fault::Section {
+            at,
+            why: Box::new(why.clone()),
+        };
+        assert_eq!(on_a_section.to_string(), said);
+        let reading = Reading::open(file, &Options::DEFAULT).unwrap();
+        let unwritten = reading.trailer().unwritten.clone();
+        assert_eq!(unwritten == Some(why), alike, "{unwritten:?}");
+    }
+
     #[test]
     fn a_tables_rows_are_as_written() {
         let table =
@@ -752,7 +781,8 @@ mod tests {
         let file = table_file(table, "trailer\n<< /Size 4 /Prev 2 /Root 1 0 R >>\n");
         let read = sections(&file);
         // Its /Prev goes nowhere: what's there is said, with the section read.
-        assert_eq!(read.stopped, Some(SectionFault::Neither { at: 2 }));
+        let why = Box::new(Unwritten::Neither { at: 2 });
+        assert_eq!(read.stopped, Some(SectionFault::Section { at: 2, why }));
         let [section] = &read.sections[..] else {
             panic!("one section");
         };
@@ -962,22 +992,29 @@ mod tests {
         assert_eq!(stopped(file), SectionFault::StartxrefNoOffset { at: 9 });
     }
 
+    // A section that doesn't read is said as a fault on a later section
+    // says it, its reason an `Unwritten`, which the trailer the reading
+    // made instead gives too, but where only the sections one by one say it.
+
     #[test]
     fn neither_xref_nor_an_object_is_said() {
         let file = b"%PDF-1.7\nstartxref\n0\n%%EOF\n";
-        assert_eq!(stopped(file), SectionFault::Neither { at: 0 });
+        let words = "byte 0, which startxref or /Prev gives, is at neither `xref` nor an object";
+        section_stops(file, 0, Unwritten::Neither { at: 0 }, words, true);
     }
 
     #[test]
     fn a_subsection_header_that_doesnt_read_is_said() {
         let file = table_file("xref\n0 x\n", TRAILER);
-        assert_eq!(stopped(&file), SectionFault::Subsection { at: 49 });
+        let words = "a subsection's header at byte 49 doesn't read";
+        section_stops(&file, 45, Unwritten::Subsection { at: 49 }, words, true);
     }
 
     #[test]
     fn a_row_that_doesnt_read_is_said() {
         let file = table_file("xref\n0 2\n0000000000 65535 q \n", TRAILER);
-        assert_eq!(stopped(&file), SectionFault::Row { at: 54 });
+        let words = "the table's row at byte 54 doesn't read";
+        section_stops(&file, 45, Unwritten::Row { at: 54 }, words, true);
     }
 
     #[test]
@@ -986,78 +1023,96 @@ mod tests {
             "xref\n4294967295 2\n0000000000 65535 f \n0000000000 65535 f \n",
             TRAILER,
         );
-        assert_eq!(stopped(&file), SectionFault::Row { at: 83 });
+        let words = "the table's row at byte 83 numbers no object";
+        section_stops(&file, 45, Unwritten::RowNumber { at: 83 }, words, true);
     }
 
     #[test]
     fn a_table_with_no_trailer_is_said() {
         let file = table_file(ROWS, "");
-        assert!(
-            matches!(stopped(&file), SectionFault::NoTrailer { .. }),
-            "{:?}",
-            stopped(&file)
-        );
+        // Past the last row's `n`, where `trailer` should be.
+        let at = 45 + ROWS.len() - " \n".len();
+        let words = format!("the table at byte {at} has no trailer");
+        section_stops(&file, 45, Unwritten::NoTrailer { at }, &words, true);
     }
 
     #[test]
     fn a_trailer_that_doesnt_read_is_said() {
         let file = table_file(ROWS, "trailer\n<< /Size");
-        assert!(
-            matches!(stopped(&file), SectionFault::Trailer { .. }),
-            "{:?}",
-            stopped(&file)
-        );
+        let SectionFault::Section { at: 45, why } = stopped(&file) else {
+            panic!("{:?}", stopped(&file));
+        };
+        let Unwritten::Trailer(error) = *why else {
+            panic!("{why:?}");
+        };
+        let words = error.to_string();
+        section_stops(&file, 45, Unwritten::Trailer(error), &words, true);
     }
 
     #[test]
     fn a_trailer_that_isnt_a_dictionary_is_said() {
         let file = table_file(ROWS, "trailer\n12\n");
-        assert!(
-            matches!(stopped(&file), SectionFault::TrailerNotADictionary { .. }),
-            "{:?}",
-            stopped(&file)
-        );
+        let words = "the trailer isn't a dictionary";
+        section_stops(&file, 45, Unwritten::TrailerNotADictionary, words, true);
     }
 
     #[test]
     fn an_object_that_doesnt_read_is_said() {
         let mut file = b"%PDF-1.7\n".to_vec();
         file.extend_from_slice(b"7 oops\nstartxref\n9\n%%EOF\n");
-        assert!(
-            matches!(stopped(&file), SectionFault::Unread { at: 9, .. }),
-            "{:?}",
-            stopped(&file)
-        );
+        let SectionFault::Section { at: 9, why } = stopped(&file) else {
+            panic!("{:?}", stopped(&file));
+        };
+        let Unwritten::Unread(unread) = *why else {
+            panic!("{why:?}");
+        };
+        let words = unread.to_string();
+        section_stops(&file, 9, Unwritten::Unread(unread), &words, true);
     }
 
     #[test]
     fn an_object_that_isnt_a_stream_is_said() {
         let file = b"%PDF-1.7\n1 0 obj\n<< >>\nendobj\nstartxref\n9\n%%EOF\n";
-        assert_eq!(stopped(file), SectionFault::NotAStream { at: 9 });
+        let id = ObjectId::new(1, 0);
+        let words = "1 0 R, at byte 9, isn't a stream";
+        section_stops(file, 9, Unwritten::NotAStream { id, at: 9 }, words, true);
     }
 
     #[test]
     fn a_stream_of_another_type_is_said() {
         let file = stream_file("/Type /ObjStm /Size 3 /W [1 2 1]", &three_rows(45));
-        assert_eq!(stopped(&file), SectionFault::NotXref { at: 45 });
+        let id = ObjectId::new(2, 0);
+        let words = "2 0 R, at byte 45, isn't /Type /XRef";
+        section_stops(&file, 45, Unwritten::NotXref { id, at: 45 }, words, true);
     }
 
     #[test]
     fn widths_that_arent_are_said() {
         let file = stream_file("/Type /XRef /Size 3 /W [1 9 1]", &three_rows(45));
-        assert_eq!(stopped(&file), SectionFault::Widths { at: 45 });
+        let words = "its /W isn't three widths of 8 bytes or fewer";
+        section_stops(&file, 45, Unwritten::Widths, words, true);
     }
 
     #[test]
     fn an_index_of_no_pairs_is_said() {
         let file = stream_file(&format!("{XREF} /Index [0 3 1]"), &three_rows(45));
-        assert_eq!(stopped(&file), SectionFault::Index { at: 45 });
+        let words = "its /Index isn't pairs of numbers";
+        section_stops(&file, 45, Unwritten::Index, words, true);
+    }
+
+    #[test]
+    fn an_index_past_the_numbers_is_said() {
+        let dict = "/Type /XRef /Size 3 /W [1 2 1] /Root 1 0 R /Index [4294967294 3]";
+        let file = stream_file(dict, &three_rows(45));
+        let words = "its /Index numbers no object";
+        section_stops(&file, 45, Unwritten::IndexNumber, words, true);
     }
 
     #[test]
     fn no_size_for_an_index_is_said() {
         let file = stream_file("/Type /XRef /W [1 2 1]", &three_rows(45));
-        assert_eq!(stopped(&file), SectionFault::NoSize { at: 45 });
+        let words = "it has no /Size";
+        section_stops(&file, 45, Unwritten::NoSize, words, true);
     }
 
     #[test]
@@ -1067,28 +1122,47 @@ mod tests {
         let why = Unfiltered::Unsupported {
             filter: b"NoSuchFilter".to_vec(),
         };
-        assert_eq!(stopped(&file), SectionFault::Filters { at: 45, why });
-        assert_eq!(
-            stopped(&file).to_string(),
-            "the stream at byte 45 doesn't decode: its filter /NoSuchFilter isn't one the reader decodes"
-        );
+        let words = "its cross-reference stream doesn't decode: its filter /NoSuchFilter isn't one the reader decodes";
+        section_stops(&file, 45, Unwritten::Filters(why), words, true);
     }
 
+    /// Only the sections one by one say it: a reading tells the decode's
+    /// faults on the stream, and its rows end where they decode.
     #[test]
     fn data_that_doesnt_decode_as_far_as_its_rows_is_said() {
         let dict = format!("{XREF} /Filter /ASCIIHexDecode");
         let file = stream_file(&dict, b"00zz");
-        assert!(
-            matches!(stopped(&file), SectionFault::Decode { at: 45, .. }),
-            "{:?}",
-            stopped(&file)
-        );
+        let SectionFault::Section { at: 45, why } = stopped(&file) else {
+            panic!("{:?}", stopped(&file));
+        };
+        let Unwritten::Decode { fault } = *why else {
+            panic!("{why:?}");
+        };
+        let words = format!("its data doesn't decode as far as its rows: {fault}");
+        section_stops(&file, 45, Unwritten::Decode { fault }, &words, false);
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        assert_eq!(reading.trailer().unwritten, Some(Unwritten::DataShort));
     }
 
     #[test]
     fn data_short_of_its_index_is_said() {
         let file = stream_file(XREF, &three_rows(45)[..8]);
-        assert_eq!(stopped(&file), SectionFault::DataShort { at: 45 });
+        let words = "its data ends before its /Index does";
+        section_stops(&file, 45, Unwritten::DataShort, words, true);
+    }
+
+    /// A hybrid table's `/XRefStm` that doesn't read stops the sections at
+    /// the stream, its reason the stream's.
+    #[test]
+    fn a_hybrid_tables_stream_that_doesnt_read_is_said() {
+        let mut file = b"%PDF-1.7\n1 0 obj\n<< >>\nendobj\n".to_vec();
+        let table = file.len();
+        file.extend_from_slice(ROWS.as_bytes());
+        file.extend_from_slice(b"trailer\n<< /Size 2 /Root 1 0 R /XRefStm 9 >>\n");
+        file.extend_from_slice(format!("startxref\n{table}\n%%EOF\n").as_bytes());
+        let id = ObjectId::new(1, 0);
+        let why = Box::new(Unwritten::NotAStream { id, at: 9 });
+        assert_eq!(stopped(&file), SectionFault::Section { at: 9, why });
     }
 
     #[test]

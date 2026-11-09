@@ -20,7 +20,8 @@ use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{
-    Crypt, Decode, Fault, Faults, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry,
+    Crypt, Decode, Fault, Faults, Limits, Options, Reader, Stored, Unfiltered, Unwritten, Whole,
+    XrefEntry,
 };
 use crate::crypt::{List, is_xref};
 use crate::phases::phase;
@@ -616,14 +617,24 @@ impl<S: ByteSource> Reading<S> {
     /// that fit the file's revision first, in the order given, then the
     /// rest, each as the owner's and then the user's (see pdf-crypt's
     /// `Handler::open`), and [`Encryption::Opened`]'s `by` the index among
-    /// `passwords` of the one that opened it. Nothing of the file is read again: the
-    /// reading kept its encryption dictionary's values and its first `/ID`
-    /// element while no password had opened it. What it read and decoded
-    /// is dropped, to be read again decrypted, and what it told of is what
-    /// it told of opening the file, with what's wrong with `/Perms` among
-    /// it, where faults are looked for; its budget is what opening the file
-    /// left. [`Encryption::Opened`] says, as an open by the password does,
-    /// what the file grants.
+    /// `passwords` of the one that opened it. The handler is opened from
+    /// what the reading kept while no password had opened it, its
+    /// encryption dictionary's values and its first `/ID` element. What it
+    /// read and decoded is dropped, to be read again decrypted, and what it
+    /// told of is what it told of opening the file, with what's wrong with
+    /// `/Perms` among it, where faults are looked for; its budget is what
+    /// opening the file left. [`Encryption::Opened`] says, as an open by the
+    /// password does, what the file grants. A file read by scanning has
+    /// its object streams decoded from the source again, now decrypted, for
+    /// their members, as an open by the password lists them. And under
+    /// [`Recovery::Pdfium`](super::Recovery::Pdfium), as PDFium opened by
+    /// the password would, its catalog and page tree are read from the
+    /// source, and where they give no page, the file is opened again and
+    /// scanned under this reading's key: a reading of its own then, with
+    /// a [`Reading::id`] of its own, so that a base or a document taken of
+    /// it before isn't taken for what it reads now. Where the source
+    /// doesn't give those bytes again, its members aren't listed, said by
+    /// [`Fault::Members`], and it isn't scanned.
     ///
     /// # Errors
     ///
@@ -643,9 +654,93 @@ impl<S: ByteSource> Reading<S> {
     // would make neither side smaller.
     #[allow(clippy::result_large_err)]
     pub fn unlock(mut self, passwords: &[Encoded]) -> Result<Reading<S>, (Reading<S>, Refused)> {
+        let locked = self.reader.handler.is_none();
         match self.reader.unlock(passwords) {
-            Ok(()) => Ok(self),
+            Ok(()) => {
+                if locked && self.reader.handler.is_some() {
+                    self.members_again();
+                    self.pages_again();
+                }
+                Ok(self)
+            }
             Err(refused) => Err((self, refused)),
+        }
+    }
+
+    /// A scanned file's object streams' members listed again, now that a
+    /// password opened it, as a reading opened by that password lists them
+    /// ([`Reader::members`]). Where the source doesn't give the bytes of
+    /// one, its members aren't listed, and it's said as one whose objects
+    /// don't read.
+    fn members_again(&mut self) {
+        let fault = match self.source.whole() {
+            Some(file) => {
+                let Ok(fault) = self.reader.members(InMemory(file));
+                fault
+            }
+            None => {
+                let file = ByPosition::new(&self.source, self.bound);
+                match self.reader.members(file) {
+                    Ok(fault) => fault,
+                    Err(_) => self.reader.unlisted(),
+                }
+            }
+        };
+        self.reader.said_members(fault);
+    }
+
+    /// Under [`Recovery::Pdfium`](super::Recovery::Pdfium), the reading
+    /// opened again and scanned after its sections are read, where a
+    /// password has opened it since it was opened and now its trailer gives
+    /// no page, as PDFium, opened by that password, scans it; opened by this
+    /// reading's key, so the same way, and its object streams' members
+    /// listed. Where the source doesn't give its bytes again, it's left as
+    /// it is.
+    fn pages_again(&mut self) {
+        let reader = &self.reader;
+        let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) else {
+            return;
+        };
+        let options = Options {
+            limits: reader.limits,
+            section: None,
+            flate: reader.flate,
+            passwords: &[],
+            faults: match reader.wants {
+                true => Faults::Kept,
+                false => Faults::Off,
+            },
+            recovery: reader.recovery,
+        };
+        let why = || Some(Unwritten::NoPages);
+        let again = match self.source.whole() {
+            Some(file) => {
+                let file = InMemory(file);
+                let Ok(scans) = reader.scans_for_pages(file);
+                if !scans {
+                    return;
+                }
+                let Ok(again) = Reader::open_as(file, &options, reader.native, None, why(), true);
+                again
+            }
+            None => {
+                let file = ByPosition::new(&self.source, self.bound);
+                if !matches!(reader.scans_for_pages(file), Ok(true)) {
+                    return;
+                }
+                match Reader::open_as(file, &options, reader.native, None, why(), true) {
+                    Ok(again) => again,
+                    Err(_) => return,
+                }
+            }
+        };
+        let mut again = again;
+        let (handler, values, id) = (handler.clone(), stored.values.clone(), stored.id.clone());
+        let encryption = reader.encryption.clone();
+        again.key(&handler, &values, &id, &encryption);
+        self.reader = again;
+        if self.reader.handler.is_some() {
+            self.members_again();
         }
     }
 
@@ -801,8 +896,42 @@ impl<S: ByteSource> Reading<S> {
         self.reader.as_of
     }
 
-    /// The file's newest incremental update, when its cross-reference
-    /// sections were read and the newest follows one written before it.
+    /// Whether it reads a file's first bytes ([`Reading::prefix`]), not
+    /// the whole file: for the writer, which can't tell from it what the
+    /// later revisions used of RC4's keystreams.
+    pub(crate) fn part(&self) -> bool {
+        self.reader.part
+    }
+
+    /// Where the section the reading read at `at` was said to be, where it
+    /// read it elsewhere ([`Fault::Moved`]): for the writer, which reads
+    /// `startxref` again to tell the file is as read.
+    pub(crate) fn said(&self, at: usize) -> Option<usize> {
+        (self.reader.found.iter()).find_map(|&(said, found)| (found == at).then_some(said))
+    }
+
+    /// Each object whose entry the reading read at a shift
+    /// ([`Origin::Shifted`](crate::Origin::Shifted)), by a row of its
+    /// section renumbered ([`Origin::Renumbered`](crate::Origin::Renumbered)),
+    /// or where a scan found it, in a file whose sections read
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)): its number, its
+    /// generation and where it is, for the writer, whose update lists each
+    /// where it is.
+    pub(crate) fn shifted(&self) -> Vec<(u32, u16, usize)> {
+        (self.reader.shifts.iter())
+            .filter_map(|&(n, _)| match self.reader.entry(n) {
+                Some(&(generation, XrefEntry::InUse { offset, .. })) => {
+                    Some((n, generation, offset))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The file's newest incremental update, when it was read by its
+    /// cross-reference sections, not scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), and the newest
+    /// follows one written before it.
     #[must_use]
     pub const fn update(&self) -> Option<&Update> {
         self.reader.update.as_ref()
@@ -816,9 +945,10 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// The file's revisions, the first first, as [`Document::revisions`]
-    /// gives them: none where its sections didn't read, nor where its later
-    /// revisions list more numbers in all than it reads entries
-    /// ([`Limits::entries`](crate::Limits::entries)).
+    /// gives them: none where it was read by scanning
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), whatever its
+    /// sections gave, nor where its later revisions list more numbers in all
+    /// than it reads entries ([`Limits::entries`](crate::Limits::entries)).
     #[must_use]
     pub fn revisions(&self) -> &[Revision] {
         &self.reader.revisions
@@ -892,13 +1022,21 @@ impl<S: ByteSource> Reading<S> {
                 true => Faults::Kept,
                 false => Faults::Off,
             },
+            recovery: self.reader.recovery,
         };
         let source = Prefix::new(&self.source, len);
+        let part = source.len() < self.source.len();
         let mut prefix = Reading::open_by(source, &options, self.bound)?;
+        prefix.reader.part = part;
         let reader = &self.reader;
         if let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) {
             let (values, id) = (&stored.values, &stored.id);
+            let locked = prefix.reader.handler.is_none();
             prefix.reader.key(handler, values, id, &reader.encryption);
+            if locked && prefix.reader.handler.is_some() {
+                prefix.members_again();
+                prefix.pages_again();
+            }
         }
         Ok(prefix)
     }
@@ -1260,7 +1398,9 @@ impl<S: ByteSource> Reading<S> {
         })
     }
 
-    /// Which reading this is, which each of its records holds.
+    /// Which reading this is, which each of its records holds: the same
+    /// for as long as it reads the file as it opened it, and another where
+    /// [`Reading::unlock`] reads it again otherwise.
     #[must_use]
     pub const fn id(&self) -> SourceId {
         self.reader.id
