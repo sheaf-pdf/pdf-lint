@@ -16,13 +16,13 @@
 //! the objects by scanning the file, and says so, passing over each
 //! stream's data as PDFium's scan does: by its `/Length` where `endstream`
 //! follows that, else to the first `endstream` or `endobj` after it, else
-//! to the file's end, the last two said ([`Fault::StreamEnd`]). An object
-//! that doesn't read says why ([`Unread`]): it doesn't parse, its offset
-//! holds another, or the object stream it's in doesn't decode
-//! ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where it is
-//! ([`Unindexed`]). One read from an object stream that starts inside the
-//! bytes of another read from it, where the stream's header puts it, is
-//! read all the same, and said.
+//! nowhere, the scan reading on through the data, the last two said
+//! ([`Fault::StreamEnd`]). An object that doesn't read says why
+//! ([`Unread`]): it doesn't parse, its offset holds another, or the object
+//! stream it's in doesn't decode ([`Undecoded`], its filters
+//! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
+//! from an object stream that starts inside the bytes of another read from
+//! it, where the stream's header puts it, is read all the same, and said.
 //!
 //! A file is read one way, by a [`Reading`], opened under [`Options`]
 //! ([`Reading::open`], the one way in): its header, cross-reference
@@ -1714,10 +1714,21 @@ impl Reader {
             Some(section) => reader.sections_from(file, &mut cx, section, false, decoder)?,
             None => reader.sections(file, &mut cx, decoder)?,
         };
-        let trailer = match (sections, reader.recovery) {
-            (Ok(trailer), _) => trailer,
-            (Err(why), Recovery::Pdfium) => reader.rebuild_in(file, &mut cx, why)?,
-            (Err(why), _) => reader.scan(file, &mut cx, why)?,
+        let trailer = match (sections, reader.recovery, options.section) {
+            (Ok(trailer), ..) => trailer,
+            (Err(why), Recovery::Pdfium, _) => reader.rebuild_in(file, &mut cx, why)?,
+            // As of a section that doesn't read, nothing: a scan would find
+            // what later updates wrote, which a reading as of a section
+            // doesn't hold, and no revision's end is known to bound it by.
+            (Err(why), _, Some(at)) => Trailer {
+                stream: None,
+                object: Object::new(Value::Dict(Dict::new())),
+                unwritten: Some(Unwritten::AsOf {
+                    at,
+                    why: Box::new(why),
+                }),
+            },
+            (Err(why), _, None) => reader.scan(file, &mut cx, why)?,
         };
         // The file's end is read back only to say what's wrong with it.
         if options.section.is_none() && cx.wants {
@@ -3228,7 +3239,7 @@ impl Reader {
     /// told where the section is read there, and what reading at `offset`
     /// told where none is read at all, as it would be with no search.
     fn section_found<'f, F: Bytes<'f>>(
-        &mut self,
+        &self,
         file: F,
         cx: &mut Cx,
         offset: usize,
@@ -3265,7 +3276,7 @@ impl Reader {
     /// looked for near it, as a section is ([`Reader::near`]), and its move
     /// said.
     fn section<'f, F: Bytes<'f>>(
-        &mut self,
+        &self,
         file: F,
         cx: &mut Cx,
         offset: usize,
@@ -3798,12 +3809,14 @@ impl Reader {
     /// The objects found by scanning the file for `n g obj`, a later one
     /// of a number over an earlier, when the sections don't read, each
     /// stream's data passed over as PDFium passes over it, and each the
-    /// scan ended at its `endobj` or at the file's end said
-    /// ([`Fault::StreamEnd`]); and the last `trailer` that reads, or else
-    /// the last cross-reference stream, looked for from the file's end,
-    /// what reading each object on the way told said, but of a stream that
-    /// awaits the members ([`Reader::awaits_members`]), which its own read
-    /// alone says, as it reads it.
+    /// scan ended at its `endobj`, or found no end to and read on through,
+    /// said ([`Fault::StreamEnd`]); and the last `trailer` that reads, or
+    /// else the last cross-reference stream, looked for from the file's
+    /// end, what reading each object on the way told said, but of a stream
+    /// that awaits the members ([`Reader::awaits_members`]), which its own
+    /// read alone says, as it reads it; either with what it lacks of the
+    /// document's entries from an earlier one ([`Fault::Taken`]), the
+    /// earlier cross-reference streams those the scan found naming `/XRef`.
     ///
     /// Read by position, the file is read whole for it.
     fn scan<'f, F: Bytes<'f>>(
@@ -3823,9 +3836,9 @@ impl Reader {
             objects,
             object_streams,
             trailers,
+            xref_streams,
             unended,
-            ..
-        } = scan_of(file, self.limits.parser);
+        } = scan_of(file, self.limits.parser, self.recovery);
         if cx.wants {
             for unended in &unended {
                 cx.tell(None, Some(unended.at()), unended.fault());
@@ -3865,21 +3878,7 @@ impl Reader {
                 found = Some(object);
                 continue;
             };
-            let at = trailer.at;
-            if let Value::Dict(last) = trailer.value_mut() {
-                for key in [&b"Root"[..], b"Encrypt", b"ID", b"Info"] {
-                    if let (false, Some(entry)) = (last.has(key), earlier.entry(key)) {
-                        last.push_entry(entry.clone());
-                        if cx.wants {
-                            taken.push(key.to_vec());
-                        }
-                    }
-                }
-            }
-            // An edit, which drops its span; but the trailer this makes
-            // stands where the last was written, which its fault, and
-            // what's reported of it, point at.
-            trailer.at = at;
+            take_document_keys(trailer, &earlier, &mut taken, cx.wants);
         }
         if let Some(object) = found {
             if !taken.is_empty() {
@@ -3898,25 +3897,47 @@ impl Reader {
             })
             .collect();
         offsets.sort();
+        // The last cross-reference stream, with what it lacks of the
+        // document's entries from those before it, newest first, as the
+        // last trailer: a linearized file's last may have only /Size, its
+        // first page's the rest. Past the last, only those the scan found
+        // naming /XRef are read.
+        let named: BTreeSet<usize> = xref_streams.into_iter().collect();
+        let mut found: Option<(ObjectId, Object)> = None;
+        let mut taken = Vec::new();
         for (offset, id) in offsets.into_iter().rev() {
+            if found.is_some() && !named.contains(&offset) {
+                continue;
+            }
             let mut told = cx.apart();
             let Ok(read) = self.indirect(InMemory(file), &mut told, offset, Some(id));
-            match read {
-                Ok((_, object, _)) if is_xref_stream(&object) => {
-                    cx.faults.append(&mut told.faults);
-                    return Trailer {
-                        stream: Some(id),
-                        object,
-                        unwritten: Some(why),
-                    };
+            match (read, &mut found) {
+                (Ok((_, object, _)), found @ None) if is_xref_stream(&object) => {
+                    *found = Some((id, object));
                 }
-                Ok((_, object, _)) if self.awaits_members(&object) => {}
-                _ => cx.faults.append(&mut told.faults),
+                (Ok((_, object, _)), Some((_, last))) if is_xref_stream(&object) => {
+                    if let Value::Stream(earlier) = object.value() {
+                        take_document_keys(last, &earlier.dict, &mut taken, cx.wants);
+                    }
+                }
+                (Ok((_, object, _)), None) if self.awaits_members(&object) => continue,
+                _ => {}
             }
+            cx.faults.append(&mut told.faults);
+        }
+        let Some((id, object)) = found else {
+            return Trailer {
+                stream: None,
+                object: Object::new(Value::Dict(Dict::new())),
+                unwritten: Some(why),
+            };
+        };
+        if !taken.is_empty() {
+            cx.tell(None, object.at, Fault::Taken { keys: taken });
         }
         Trailer {
-            stream: None,
-            object: Object::new(Value::Dict(Dict::new())),
+            stream: Some(id),
+            object,
             unwritten: Some(why),
         }
     }
@@ -4496,8 +4517,9 @@ struct Scan {
     /// `stream` starts, in the file's order: a cross-reference stream's,
     /// whose dictionary [`Recovery::Pdfium`]'s scan takes as a trailer.
     xref_streams: Vec<usize>,
-    /// Each stream whose data the scan ended at its `endobj` or at the
-    /// file's end, in the file's order ([`Fault::StreamEnd`]).
+    /// Each stream whose data the scan ended at its `endobj`, or found no
+    /// end to and read on through, in the file's order
+    /// ([`Fault::StreamEnd`]).
     unended: Vec<Unended>,
 }
 
@@ -4510,56 +4532,126 @@ enum Ended {
     Endstream,
     /// At the first `endobj` after it, no `endstream` before that.
     Endobj,
-    /// At the file's end, neither coming after it.
-    File,
+    /// Not at all, neither coming after it: the scan reads on through the
+    /// data from where it starts.
+    Neither,
 }
 
 /// Where a scan passed over a stream's data: where it starts, where the
-/// scan ended it, and how ([`pdfium::stream_end`]).
+/// scan ended it, and how ([`pdfium::stream_end`]); and whether the
+/// verified recovery passed it by its `/Length` over an `endstream` inside
+/// it.
 #[derive(Debug, Clone, Copy)]
 struct Passed {
     start: usize,
     end: usize,
     by: Ended,
+    over: bool,
 }
 
-/// A stream whose data a scan ended at its `endobj` or at the file's end:
-/// the object whose stream it is, where the scan found its `n g obj`
-/// before its `stream`, and where its data starts and ends so.
+/// A stream whose data a scan ended at its `endobj`, or found no end to
+/// and read on through: the object whose stream it is, where the scan
+/// found its `n g obj` before its `stream`, where its data starts, and
+/// where it ended it, none where it found no end.
 #[derive(Debug, Clone, Copy)]
 struct Unended {
     id: Option<ObjectId>,
     start: usize,
-    end: usize,
-    endobj: bool,
+    end: Option<usize>,
 }
 
 impl Unended {
-    /// Where the data the scan took is.
+    /// Where the data the scan took is: none of it where it found no end,
+    /// at the data's start.
     fn at(&self) -> Span {
-        span(self.start, self.end)
+        span(self.start, self.end.unwrap_or(self.start))
     }
 
     /// What says so.
     fn fault(&self) -> Fault {
         Fault::StreamEnd {
             id: self.id,
+            start: self.start,
             end: self.end,
-            endobj: self.endobj,
         }
     }
 }
 
 /// The `n g obj` headers, object streams and `trailer` keywords in `file`,
 /// read token by token, each stream's data passed over as PDFium's scan
-/// passes over it ([`pdfium::stream_end`]), its `/Length` read under
-/// `limits`, under either recovery: what [`Reader::scan`] reads a file
-/// whose sections don't read by, what [`Reader::shifted`] finds an entry
-/// neither where its section puts it nor at its shift by, and what
-/// [`Recovery::Pdfium`]'s rebuild lists.
-fn scan_of(file: &[u8], limits: parse::Limits) -> Scan {
+/// passes over it under `recovery` ([`pdfium::stream_end`]), its `/Length`
+/// read under `limits`, and read on through where no end is found: what
+/// [`Reader::scan`] reads a file whose sections don't read by, what
+/// [`Reader::shifted`] finds an entry neither where its section puts it nor
+/// at its shift by, and what [`Recovery::Pdfium`]'s rebuild lists. Under
+/// [`Recovery::Pdfium`] a stream no `n g obj` comes before isn't passed
+/// over: PDFium's scan reads a stream's data as it reads the object it
+/// found, and reads on through one of no object as through any words.
+/// Under [`Recovery::Verified`], where the scan ended a stream's data
+/// before the first `endstream` after it (at its `endobj`), or passed it
+/// by its `/Length` over one inside it, the file is scanned again as this
+/// crate's scan read it before either did ([`Pass::ToEndstream`]), and
+/// what that finds is taken too: each object of a number the first scan
+/// found nowhere, its object streams and cross-reference streams so, and
+/// each `trailer`. So a scan that reads on from an `endobj` into data it
+/// can't read as tokens (a string that doesn't close, a comment) finds no
+/// less than that one did; and a document embedded in a stream's data
+/// doesn't stand over the file's own objects.
+fn scan_of(file: &[u8], limits: parse::Limits, recovery: Recovery) -> Scan {
+    let (mut scan, diverged) = scan_from(file, limits, Pass::As(recovery));
+    if !diverged {
+        return scan;
+    }
+    let (earlier, _) = scan_from(file, limits, Pass::ToEndstream);
+    let found: BTreeSet<u32> = scan.objects.iter().map(|(id, _)| id.number).collect();
+    let new = |n: &u32| !found.contains(n);
+    let added: BTreeSet<usize> = (earlier.objects.iter())
+        .filter(|(id, _)| new(&id.number))
+        .map(|&(_, at)| at)
+        .collect();
+    (scan.objects).extend(
+        earlier
+            .objects
+            .into_iter()
+            .filter(|(id, _)| new(&id.number)),
+    );
+    (scan.object_streams).extend(earlier.object_streams.into_iter().filter(|(n, _)| new(n)));
+    (scan.xref_streams).extend(
+        earlier
+            .xref_streams
+            .into_iter()
+            .filter(|at| added.contains(at)),
+    );
+    scan.trailers.extend(earlier.trailers);
+    scan.objects.sort_by_key(|&(_, at)| at);
+    scan.object_streams.sort_by_key(|&(_, at)| at);
+    scan.xref_streams.sort_unstable();
+    scan.trailers.sort_unstable();
+    scan.trailers.dedup();
+    scan
+}
+
+/// How a scan passes over a stream's data ([`scan_from`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// As the recovery's scan does ([`pdfium::stream_end`]).
+    As(Recovery),
+    /// Up to the first `endstream` after its `stream` keyword, found as its
+    /// bytes are, else to the file's end: the scan this crate made before a
+    /// `/Length` or an `endobj` ended a stream's data, which the verified
+    /// recovery's scan reads beside its own ([`scan_of`]).
+    ToEndstream,
+}
+
+/// [`scan_of`] of `file`, each stream's data passed over as `pass` says,
+/// without what a second scan adds; and whether, under
+/// [`Recovery::Verified`], it ended a stream's data at its `endobj`, or
+/// passed one by its `/Length` over an `endstream` inside it, where the
+/// scan before either ended it at the first `endstream`.
+fn scan_from(file: &[u8], limits: parse::Limits, pass: Pass) -> (Scan, bool) {
     let mut objects = Vec::new();
     let mut t = Tokenizer::new(file);
+    let mut diverged = false;
     let mut before: [Option<Token>; 2] = [None, None];
     let mut trailers = Vec::new();
     // The object whose `obj` was last seen, where its `n` starts, and
@@ -4569,6 +4661,7 @@ fn scan_of(file: &[u8], limits: parse::Limits) -> Scan {
     let mut object_streams = Vec::new();
     let mut xref_streams = Vec::new();
     let mut unended = Vec::new();
+    let mut ends = pdfium::Ends::default();
     while let Some(token) = t.next() {
         match token.kind {
             Kind::Space | Kind::Comment => continue,
@@ -4605,29 +4698,49 @@ fn scan_of(file: &[u8], limits: parse::Limits) -> Scan {
                     Some((_, at, Named::XRef)) => xref_streams.push(at),
                     _ => {}
                 }
-                let passed = pdfium::stream_end(file, token.end(), start.map(|(_, at)| at), limits);
-                if matches!(passed.by, Ended::Endobj | Ended::File) {
-                    unended.push(Unended {
-                        id: start.map(|(id, _)| id),
-                        start: passed.start,
-                        end: passed.end,
-                        endobj: passed.by == Ended::Endobj,
-                    });
+                let recovery = match pass {
+                    Pass::As(recovery) => recovery,
+                    Pass::ToEndstream => {
+                        let end = pdfium::bytes_after(file, token.end(), b"endstream");
+                        t = Tokenizer::at(file, end.unwrap_or(file.len()));
+                        before = [before[1], Some(token)];
+                        continue;
+                    }
+                };
+                if start.is_some() || recovery != Recovery::Pdfium {
+                    let at = start.map(|(_, at)| at);
+                    let passed =
+                        pdfium::stream_end(file, token.end(), at, limits, recovery, &mut ends);
+                    let end = match passed.by {
+                        Ended::Length | Ended::Endstream => None,
+                        Ended::Endobj => Some(Some(passed.end)),
+                        Ended::Neither => Some(None),
+                    };
+                    if let Some(end) = end {
+                        unended.push(Unended {
+                            id: start.map(|(id, _)| id),
+                            start: passed.start,
+                            end,
+                        });
+                    }
+                    diverged |= recovery == Recovery::Verified
+                        && (passed.by == Ended::Endobj || passed.over);
+                    t = Tokenizer::at(file, passed.end);
                 }
-                t = Tokenizer::at(file, passed.end);
             }
             Kind::Keyword if token.bytes == b"trailer" => trailers.push(token.end()),
             _ => {}
         }
         before = [before[1], Some(token)];
     }
-    Scan {
+    let scan = Scan {
         objects,
         object_streams,
         trailers,
         xref_streams,
         unended,
-    }
+    };
+    (scan, diverged)
 }
 
 /// Which name a scanned object's dictionary gives before its `stream`
@@ -4724,6 +4837,31 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
 /// Whether `o` is a cross-reference stream.
 fn is_xref_stream(o: &Object) -> bool {
     matches!(o.value(), Value::Stream(s) if is_xref(&s.dict))
+}
+
+/// What the last trailer of a scanned file, `trailer`, a dictionary or a
+/// cross-reference stream's, lacks of the document's entries, given from
+/// an earlier one's dictionary, `earlier`: each key taken added to `taken`
+/// where faults are wanted (`wants`) ([`Fault::Taken`]).
+fn take_document_keys(trailer: &mut Object, earlier: &Dict, taken: &mut Vec<Vec<u8>>, wants: bool) {
+    let at = trailer.at;
+    let last = match trailer.value_mut() {
+        Value::Dict(dict) => dict,
+        Value::Stream(stream) => &mut stream.dict,
+        _ => return,
+    };
+    for key in [&b"Root"[..], b"Encrypt", b"ID", b"Info"] {
+        if let (false, Some(entry)) = (last.has(key), earlier.entry(key)) {
+            last.push_entry(entry.clone());
+            if wants {
+                taken.push(key.to_vec());
+            }
+        }
+    }
+    // An edit, which drops its span; but the trailer this makes stands
+    // where the last was written, which its fault, and what's reported of
+    // it, point at.
+    trailer.at = at;
 }
 
 /// In an encrypted file it opened, object `id`'s strings in plain view

@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::parse::{self, Parser};
-use pdf_tokenizer::{Rules, is_delimiter};
+use pdf_tokenizer::{Rules, Tokenizer, is_delimiter};
 
 use super::window::Bytes;
 use super::{
@@ -246,17 +246,26 @@ fn integer_of(o: &Object) -> i64 {
 
 /// Where a scan goes on past a stream whose `stream` keyword ends at
 /// `keyword`, its object's `n g obj` at `object`, as PDFium reads a stream
-/// as it scans (`FindStreamEndPos` as of chromium/8125), under either
-/// recovery: its data from the line after `stream` as long as its `/Length`
-/// says, a direct number, where `endstream` follows that past an end of
-/// line, white-space and comments; else up to the first `endstream` or
-/// `endobj`, a word of its own, after it; else the file's end. With where
-/// its data starts and how it was ended.
+/// as it scans (`FindStreamEndPos` as of chromium/8125): its data from the
+/// line after `stream` as long as its `/Length` says, a direct number,
+/// where `endstream` follows that past an end of line, white-space and
+/// comments; else up to the first `endstream` or `endobj`, a word of its
+/// own, after it; else nowhere: where neither comes after it, PDFium's
+/// parse of the stream fails, and its scan reads on through the data from
+/// where it starts. Under [`Recovery::Verified`], `endstream` is found as
+/// its bytes are, run into what's before or after it or not, as this
+/// crate's scan always found it, so that a writer's keywords run together
+/// (`endstreamendobj`) still end the data there; and where it passes the
+/// data by its `/Length` over an `endstream` inside it, that's said too
+/// ([`scan_of`]). With where its data starts and how it was ended; `ends`
+/// keeps what the scan's searches found.
 pub(super) fn stream_end(
     file: &[u8],
     keyword: usize,
     object: Option<usize>,
     limits: parse::Limits,
+    recovery: Recovery,
+    ends: &mut Ends,
 ) -> Passed {
     let line = (file.get(keyword..).unwrap_or_default().iter())
         .position(|&b| matches!(b, b'\r' | b'\n'))
@@ -269,6 +278,7 @@ pub(super) fn stream_end(
         start: data,
         end,
         by,
+        over: false,
     };
     let length = object.and_then(|at| {
         let mut parser = Parser::at(file, at).limits(limits);
@@ -294,21 +304,80 @@ pub(super) fn stream_end(
             _ => {}
         }
         if word_from(file, p).starts_with(b"endstream") {
-            return passed(end, Ended::Length);
+            let inside = match recovery {
+                Recovery::Pdfium => None,
+                _ => Ends::first(&mut ends.endstream, data, || {
+                    bytes_after(file, data, b"endstream")
+                }),
+            };
+            return Passed {
+                over: inside.is_some_and(|at| at < end),
+                ..passed(end, Ended::Length)
+            };
         }
     }
-    // Both words looked for in one pass, so that the scan reads each byte
-    // once, whatever follows.
-    let found = (data..file.len()).find_map(|i| {
-        if whole_word(file, i, b"endstream") {
-            Some(passed(i, Ended::Endstream))
-        } else if whole_word(file, i, b"endobj") {
-            Some(passed(i, Ended::Endobj))
-        } else {
-            None
-        }
+    let endstream = Ends::first(&mut ends.endstream, data, || match recovery {
+        Recovery::Pdfium => word_after(file, data, b"endstream"),
+        _ => bytes_after(file, data, b"endstream"),
     });
-    found.unwrap_or_else(|| passed(file.len(), Ended::File))
+    let endobj = Ends::first(&mut ends.endobj, data, || word_after(file, data, b"endobj"));
+    match (endstream, endobj) {
+        (Some(endstream), Some(endobj)) if endobj < endstream => passed(endobj, Ended::Endobj),
+        (Some(endstream), _) => passed(endstream, Ended::Endstream),
+        (None, Some(endobj)) => passed(endobj, Ended::Endobj),
+        (None, None) => passed(data, Ended::Neither),
+    }
+}
+
+/// What a scan's searches for the words that end a stream's data found
+/// ([`stream_end`]): for each word, the byte it was looked for from and
+/// the first found there, none where none comes before the file's end. A
+/// later stream's search from no earlier than the one and no later than
+/// the other finds the same, so it isn't made again: a scan looks at each
+/// byte once for each word, however many streams it reads on through.
+#[derive(Debug, Default)]
+pub(super) struct Ends {
+    endstream: Option<(usize, Option<usize>)>,
+    endobj: Option<(usize, Option<usize>)>,
+}
+
+impl Ends {
+    /// The first of a word at or past byte `from`, from what `kept` says
+    /// of it where that holds, else by `search`, kept.
+    fn first(
+        kept: &mut Option<(usize, Option<usize>)>,
+        from: usize,
+        search: impl FnOnce() -> Option<usize>,
+    ) -> Option<usize> {
+        if let Some((since, found)) = *kept
+            && since <= from
+            && found.is_none_or(|at| from <= at)
+        {
+            return found;
+        }
+        let found = search();
+        *kept = Some((from, found));
+        found
+    }
+}
+
+/// The first `word` at or past byte `from` of `file`, as its bytes are.
+pub(super) fn bytes_after(file: &[u8], from: usize, word: &[u8]) -> Option<usize> {
+    let at = from + Tokenizer::at(file, from).data_until(word).bytes.len();
+    file.get(at..)?.starts_with(word).then_some(at)
+}
+
+/// The first `word` at or past byte `from` of `file` that's a word of its
+/// own as PDFium finds one ([`whole_word`]).
+fn word_after(file: &[u8], from: usize, word: &[u8]) -> Option<usize> {
+    let mut from = from;
+    loop {
+        let at = bytes_after(file, from, word)?;
+        if whole_word(file, at, word) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
 }
 
 /// The word PDFium reads at byte `at` of `file`, past white-space and
@@ -506,7 +575,7 @@ impl Reader {
             trailers,
             xref_streams,
             unended,
-        } = scan_of(file, self.limits.parser);
+        } = scan_of(file, self.limits.parser, Recovery::Pdfium);
         if cx.wants {
             for unended in &unended {
                 cx.tell(None, Some(unended.at()), unended.fault());

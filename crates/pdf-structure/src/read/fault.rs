@@ -203,23 +203,27 @@ pub enum Fault {
     /// A scan of the file, as a file whose sections don't read is scanned
     /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
     /// an object not where its section puts it
-    /// ([`Origin::Recovered`](crate::Origin::Recovered)), ended a stream's
-    /// data at byte `end`: at its `endobj` (`endobj`), or at the file's end,
-    /// as no `endstream` comes before that and no `/Length` written as a
-    /// number ends at one. The scan reads on from there, as PDFium's does,
-    /// under either [`Recovery`](super::Recovery), so that what's after
-    /// the stream is found. `id` is the stream's object, its `n g obj` as
-    /// the scan found it before `stream`; none where it found none. The
-    /// object's own read reads its data as any stream's is read
-    /// ([`Fault::Length`]).
-    #[error("{}", stream_end_words(*.id, *.end, *.endobj))]
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), found no
+    /// `/Length` written as a number that ends at `endstream` for a
+    /// stream's data, which starts at byte `start`, and no `endstream`
+    /// after it before an `endobj`: it ended the data at that `endobj`, at
+    /// byte `end`, and read on from there; or, neither coming after it,
+    /// found no end (`end` none) and read on through the data from where it
+    /// starts. Either way, as PDFium's scan does, under either
+    /// [`Recovery`](super::Recovery), so that what's after the stream is
+    /// found. `id` is the stream's object, its `n g obj` as the scan found
+    /// it before `stream`; none where it found none, which
+    /// [`Recovery::Pdfium`](super::Recovery::Pdfium)'s scan doesn't pass
+    /// over, as PDFium's doesn't. The object's own read reads its data as
+    /// any stream's is read ([`Fault::Length`]).
+    #[error("{}", stream_end_words(*.id, *.start, *.end))]
     StreamEnd {
         /// The stream's object.
         id: Option<ObjectId>,
-        /// Where its data was ended.
-        end: usize,
-        /// Whether that's its `endobj`, not the file's end.
-        endobj: bool,
+        /// Where its data starts.
+        start: usize,
+        /// Where it was ended, at its `endobj`; none where no end was found.
+        end: Option<usize>,
     },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
@@ -286,9 +290,11 @@ pub enum Fault {
     ObjectZero,
     /// The last trailer of a file found by scanning lacks `keys`, which it's
     /// given from an earlier one: a linearized file's last trailer may have
-    /// only `/Size`, its first page's the rest. Each key as written, without
-    /// its `/`, in the order taken: of `/Root`, `/Encrypt`, `/ID` and
-    /// `/Info`, the newest earlier trailer's first.
+    /// only `/Size`, its first page's the rest. Where no `trailer`
+    /// dictionary reads, the trailers are the cross-reference streams'
+    /// dictionaries. Each key as written, without its `/`, in the order
+    /// taken: of `/Root`, `/Encrypt`, `/ID` and `/Info`, the newest earlier
+    /// trailer's first.
     #[error(
         "the last trailer lacks {}, which it's given from an earlier one",
         names(.keys)
@@ -712,6 +718,20 @@ pub enum Unwritten {
     /// a document of it ([`Document::new`](crate::Document::new)).
     #[error("{0}")]
     Other(String),
+    /// The section at byte `at`, which the file is read as of
+    /// ([`Options::section`](super::Options::section)), doesn't read, and
+    /// why: under [`Recovery::Verified`](super::Recovery::Verified)
+    /// nothing is read, no object and no trailer, as a scan of the file
+    /// would find what later updates wrote.
+    #[error(
+        "the section at byte {at}, which the file is read as of, doesn't read, so nothing is: {why}"
+    )]
+    AsOf {
+        /// Where it is.
+        at: usize,
+        /// Why it doesn't read.
+        why: Box<Unwritten>,
+    },
 }
 
 /// [`Fault::Taken`]'s keys, each a name, joined.
@@ -849,17 +869,17 @@ fn renumbered_words(at: usize, count: u32) -> String {
 }
 
 /// [`Fault::StreamEnd`]'s words.
-fn stream_end_words(id: Option<ObjectId>, end: usize, endobj: bool) -> String {
+fn stream_end_words(id: Option<ObjectId>, start: usize, end: Option<usize>) -> String {
     let whose = match id {
         Some(id) => format!("{id} R's stream data"),
         None => "the data of a stream with no n g obj before it".to_string(),
     };
-    match endobj {
-        true => format!(
+    match end {
+        Some(end) => format!(
             "the scan ends {whose} at its endobj, at byte {end}, as no endstream comes before it and no /Length ends at one"
         ),
-        false => format!(
-            "the scan runs {whose} to the file's end, at byte {end}, as neither endstream nor endobj comes after it and no /Length ends at one"
+        None => format!(
+            "the scan finds no end to {whose}, at byte {start}, as neither endstream nor endobj comes after it and no /Length ends at one, and reads on through it"
         ),
     }
 }
@@ -1232,24 +1252,24 @@ mod tests {
             (
                 Fault::StreamEnd {
                     id: Some(id(9)),
-                    end: 47,
-                    endobj: true,
+                    start: 30,
+                    end: Some(47),
                 },
                 "the scan ends 9 0 R's stream data at its endobj, at byte 47, as no endstream comes before it and no /Length ends at one",
             ),
             (
                 Fault::StreamEnd {
                     id: Some(id(9)),
-                    end: 300,
-                    endobj: false,
+                    start: 30,
+                    end: None,
                 },
-                "the scan runs 9 0 R's stream data to the file's end, at byte 300, as neither endstream nor endobj comes after it and no /Length ends at one",
+                "the scan finds no end to 9 0 R's stream data, at byte 30, as neither endstream nor endobj comes after it and no /Length ends at one, and reads on through it",
             ),
             (
                 Fault::StreamEnd {
                     id: None,
-                    end: 47,
-                    endobj: true,
+                    start: 30,
+                    end: Some(47),
                 },
                 "the scan ends the data of a stream with no n g obj before it at its endobj, at byte 47, as no endstream comes before it and no /Length ends at one",
             ),
@@ -1360,11 +1380,12 @@ mod tests {
             Unwritten::Loop { .. } => 26,
             Unwritten::Misplaced { .. } => 27,
             Unwritten::NoPages => 28,
+            Unwritten::AsOf { .. } => 29,
         }
     }
 
     /// How many variants [`reason`] names.
-    const REASONS: usize = 29;
+    const REASONS: usize = 30;
 
     /// Each reason the sections don't read, built by a literal, says its
     /// words, every variant and each way its words go.
@@ -1444,6 +1465,13 @@ mod tests {
                 "the table at byte 700 puts 1 0 R at byte 15, where its number isn't",
             ),
             (Unwritten::NoPages, "the trailer's /Root gives no page"),
+            (
+                Unwritten::AsOf {
+                    at: 120,
+                    why: Box::new(Unwritten::Neither { at: 120 }),
+                },
+                "the section at byte 120, which the file is read as of, doesn't read, so nothing is: byte 120, which startxref or /Prev gives, is at neither `xref` nor an object",
+            ),
             (
                 Unwritten::Decode {
                     fault: pdf_filters::Fault::NoEnd,

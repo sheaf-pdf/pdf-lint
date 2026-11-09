@@ -1590,7 +1590,8 @@ mod tests {
     /// says nothing of the file before the update, and reconstructing only
     /// where it does that of the file too (the cut's first section still gives
     /// the main section three bytes off); the reader telling only what it
-    /// finds of the file before the update.
+    /// finds of the file before the update. An update after a reading as of
+    /// the newest section, where the whole reading read it, writes the same.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn an_update_after_a_recovered_reading_reads_through_qpdf_as_through_the_reader() {
@@ -1631,6 +1632,24 @@ mod tests {
                 &write::Options::DEFAULT,
             )
             .unwrap();
+            // As of the newest section, where the whole reading read it:
+            // the same update.
+            let mut options = read::Options::DEFAULT;
+            options.section = reading.facts().newest.map(|(at, _)| at);
+            let as_of = read::Reading::open(&file[..], &options).unwrap();
+            let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
+            let mut again = file.clone();
+            let base = write::Base::of(&as_of).unwrap();
+            write::update(
+                &mut again,
+                &base,
+                given,
+                None,
+                None,
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            assert_eq!(again, data, "{test}: as of the newest");
             let path = dir.path().join(format!("{test}.pdf"));
             std::fs::write(&path, &data).unwrap();
             let (alone, heard) = qpdf(&path).heard().unwrap();

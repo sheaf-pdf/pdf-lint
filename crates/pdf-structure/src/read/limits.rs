@@ -73,8 +73,12 @@ pub struct Options<'a> {
     /// revision it updates. A position in the file's bytes, as every
     /// position a reading gives is, taken exactly: no header's offset is
     /// added to it, nor is a section looked for near it, as one that
-    /// `startxref` or a `/Prev` gives is. How [`Recovery::Pdfium`] reads a
-    /// file so, its doc says. None, the default, for the file as its
+    /// `startxref` or a `/Prev` gives is. Where no section reads there,
+    /// under [`Recovery::Verified`] nothing is read, no object, and the
+    /// trailer says why
+    /// ([`Unwritten::AsOf`](super::Unwritten::AsOf)): a scan of the file
+    /// would find what later updates wrote. How [`Recovery::Pdfium`] reads
+    /// a file so, its doc says. None, the default, for the file as its
     /// `startxref` gives it. A reading so is of the whole file's bytes, its
     /// length the whole file's: the file as a revision was written, its
     /// bytes up to its end alone, is
@@ -141,8 +145,16 @@ pub enum Recovery {
     /// newest section doesn't read is scanned for its objects. Either scan
     /// passes over a stream's data as PDFium's does, by its `/Length` where
     /// `endstream` follows that, else to the first `endstream` or `endobj`,
-    /// and says where it ended one at `endobj` or the file's end
-    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A table's first
+    /// else nowhere, reading on through the data; but `endstream` is found
+    /// wherever it's written, run into the bytes beside it or not, where
+    /// PDFium takes only a word of its own, so that keywords written run
+    /// together (`endstreamendobj`) end the data there. Where it ends a
+    /// stream's data at its `endobj`, before an `endstream`, or passes it by
+    /// its `/Length` over one inside it, it scans the file again, each
+    /// stream's data to its first `endstream`, and takes from that what it
+    /// found nowhere: each object of a number it didn't find, and each
+    /// `trailer`. Each scan says where it ended a stream at `endobj` or found
+    /// no end to one ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A table's first
     /// subsection numbered from 1 that starts with object 0's row is read
     /// from 0 where each of its rows in use is at its object's `n g obj` so
     /// numbered, where it's written or at the section's shift
@@ -164,7 +176,11 @@ pub enum Recovery {
     /// The scan lists every `n g obj`, a later one of a number over an
     /// earlier but where that has a higher generation, and each object
     /// stream's members at its place in the file, where its data isn't
-    /// encrypted; its trailer is each `trailer` dictionary and
+    /// encrypted, passing over each stream's data as PDFium's does, by its
+    /// `/Length` where `endstream` follows that, else to the first
+    /// `endstream` or `endobj` that's a word of its own, else nowhere,
+    /// reading on through it, and reading on through a stream no `n g obj`
+    /// comes before, as PDFium reads through any words but an object's; its trailer is each `trailer` dictionary and
     /// cross-reference stream's, a later one's keys over an earlier's; and
     /// it's merged over what the sections had given, each object the scan
     /// doesn't find kept where they put it. A file it doesn't scan reads

@@ -9,7 +9,7 @@ use pdf_filters::Fault;
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_tokenizer::{Kind, Tokenizer, is_white_space};
 
-use super::{Cx, Reader, Reading, Unwritten, XrefEntry, offset_of, predictor_row, rfind};
+use super::{Cx, Reader, Reading, Recovery, Unwritten, XrefEntry, offset_of, predictor_row, rfind};
 use crate::crypt::is_xref;
 use crate::read::reading::{ByteSource, Error};
 use crate::read::window::{Bytes, InMemory, Window};
@@ -228,6 +228,43 @@ impl<S: ByteSource> Reading<S> {
             }
             None => (self.reader.first_object(self.by_position())).map_err(Error::Io),
         }
+    }
+}
+
+impl<S: ByteSource> Reading<S> {
+    /// Where the file's last `startxref` says its newest section is, and
+    /// where a reading of the whole file reads that section, as the open
+    /// finds it ([`Reader::section_found`]): there, or, under the verified
+    /// recovery, near it or where it puts it counted from the file's first
+    /// byte. Each a position in the file's bytes; none where no `startxref`
+    /// gives an offset, or no section reads there. Read again from the
+    /// source, as [`Reading::sections`] is, whatever the reading was opened
+    /// as of: for the writer, whose update after a reading as of a section
+    /// goes after the file's newest alone ([`Base::of`](crate::write::Base::of)).
+    pub(crate) fn newest_section(&self) -> std::io::Result<Option<(usize, usize)>> {
+        match self.source().whole() {
+            Some(file) => {
+                let Ok(newest) = self.reader.newest_again(InMemory(file));
+                Ok(newest)
+            }
+            None => self.reader.newest_again(self.by_position()),
+        }
+    }
+}
+
+impl Reader {
+    /// [`Reading::newest_section`], of `file`.
+    fn newest_again<'f, F: Bytes<'f>>(&self, file: F) -> Result<Option<(usize, usize)>, F::Error> {
+        let Ok(offset) = last_startxref(file)? else {
+            return Ok(None);
+        };
+        let said = self.in_bytes(offset);
+        let search = self.recovery == Recovery::Verified;
+        let mut cx = Cx::opening(false);
+        Ok(match self.section_found(file, &mut cx, said, search)? {
+            Ok((_, found)) => Some((said, found.map_or(said, |found| found.found))),
+            Err(_) => None,
+        })
     }
 }
 

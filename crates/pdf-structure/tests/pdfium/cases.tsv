@@ -5,6 +5,9 @@ pages-cut	pages	pages-cut.pdf
 pages-rows-past-a-cut	pages	pages-rows-past-a-cut.pdf
 pages-no-startxref	pages	pages-no-startxref.pdf
 pages-stream-without-endstream	pages	pages-stream-without-endstream.pdf
+pages-stream-with-no-end	pages	pages-stream-with-no-end.pdf
+pages-endstream-run-into-endobj	pages	pages-endstream-run-into-endobj.pdf
+pages-stream-of-no-object	pages	pages-stream-of-no-object.pdf
 pages-update	pages	pages-update.pdf
 pages-update-prev-past-the-end	pages	pages-update-prev-past-the-end.pdf
 pages-update-prev-past-the-end-hidden	pages	pages-update-prev-past-the-end-hidden.pdf

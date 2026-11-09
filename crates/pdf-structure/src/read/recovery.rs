@@ -149,18 +149,18 @@ fn past_white_space(bytes: &[u8], base: usize, p: usize) -> Option<usize> {
 }
 
 /// Where a scan of `file`, every byte, finds each object's `n g obj`
-/// ([`scan_of`], under `limits`), exactly ([`header_exactly`]), by its id:
-/// the last in the file, as an update appends, of those before byte
-/// `within` where that's given; and each stream before there whose data the
-/// scan ended at its `endobj` or the file's end, which is said
-/// ([`Fault::StreamEnd`]).
+/// ([`scan_of`], under `limits`, as the verified recovery scans), exactly
+/// ([`header_exactly`]), by its id: the last in the file, as an update
+/// appends, of those before byte `within` where that's given; and each
+/// stream before there whose data the scan ended at its `endobj`, or found
+/// no end to and read on through, which is said ([`Fault::StreamEnd`]).
 fn scanned(
     file: &[u8],
     within: Option<usize>,
     limits: parse::Limits,
 ) -> (BTreeMap<ObjectId, usize>, Vec<Unended>) {
     let mut found = BTreeMap::new();
-    let scan = scan_of(file, limits);
+    let scan = scan_of(file, limits, Recovery::Verified);
     let before = |at: usize| within.is_none_or(|within| at < within);
     for (id, at) in scan.objects {
         if before(at) && header_exactly(file, 0, at, true) == Some(id) {
@@ -427,10 +427,10 @@ impl Reader {
     /// `within` where that's given, as a reading as of a section takes
     /// nothing later updates wrote; its offset moved there; else where it's
     /// written. Where the scan is made, each stream before `within` whose
-    /// data it ended at its `endobj` or the file's end is said to `cx`
-    /// ([`Fault::StreamEnd`]). None for any section where no section has a
-    /// shift, the file read as written; each section `said` to be elsewhere
-    /// has its move.
+    /// data it ended at its `endobj`, or found no end to and read on
+    /// through, is said to `cx` ([`Fault::StreamEnd`]). None for any
+    /// section where no section has a shift, the file read as written; each
+    /// section `said` to be elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
         &self,
         file: F,

@@ -10,7 +10,7 @@ use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 
 use super::super::lengths::every_way;
-use super::super::{Fault, Faults, Options, Reading, Recovery, SectionRows, document};
+use super::super::{Fault, Faults, Options, Reading, Recovery, SectionRows, Unwritten, document};
 use crate::source::{Document, Origin, Source};
 use crate::write::{self, Base, Body};
 
@@ -772,19 +772,163 @@ fn a_reading_as_of_a_section_finds_nothing_a_later_update_wrote() {
 }
 
 /// A reading opened as of a place a few bytes from a section: taken as
-/// it's given, not looked for near, so the file is scanned.
+/// it's given, not looked for near, so nothing reads there, and nothing
+/// is read ([`as_of_nothing`]).
 #[test]
 fn a_section_given_a_few_bytes_off_isnt_looked_for() {
     let (file, _, table) = plain(b"");
+    let why = Unwritten::Neither { at: table + 3 };
+    as_of_nothing(&file, table + 3, why);
     let mut options = Options::DEFAULT;
-    options.section = Some(table + 3);
-    let doc = document(&file, &options);
-    assert_eq!(recoveries(&doc), []);
-    assert!(doc.trailer.unwritten.is_some());
     options.section = Some(table);
     let doc = document(&file, &options);
     assert_eq!(doc.trailer.unwritten, None);
     assert!(!doc.facts.recovered);
+}
+
+/// `file` read as of the section at `at`, which doesn't read for `why`,
+/// every way, faults off too: no object, an empty trailer whose reason
+/// says so, nothing recovered, and no fault but what reading the section
+/// told.
+fn as_of_nothing(file: &[u8], at: usize, why: Unwritten) -> Document {
+    let mut options = Options::DEFAULT;
+    options.section = Some(at);
+    let whole = document(file, &options);
+    let unwritten = Unwritten::AsOf {
+        at,
+        why: Box::new(why),
+    };
+    assert_eq!(whole.trailer.unwritten, Some(unwritten));
+    assert_eq!(whole.trailer.dict(), &pdf_objects::object::Dict::new());
+    assert_eq!(whole.objects().count(), 0);
+    assert_eq!(whole.unread().count(), 0);
+    assert!(!whole.facts.recovered);
+    assert_eq!(whole.facts.sections, 0);
+    assert_eq!(recoveries(&whole), []);
+    let reading = Reading::open(file, &options).unwrap();
+    assert_eq!(reading.ids().count(), 0);
+    assert_eq!(reading.into_document().unwrap(), whole);
+    for first in [1, 7, 64] {
+        for bound in [true, false] {
+            let source = crate::fuzz::Counted::new(file, first);
+            let reading = crate::fuzz::open(&source, &[], &options, bound).unwrap();
+            assert_eq!(
+                reading.into_document().unwrap(),
+                whole,
+                "by position, {first}"
+            );
+        }
+    }
+    options.faults = Faults::Off;
+    let quiet = document(file, &options);
+    assert_eq!(quiet.faults(), []);
+    assert_eq!(quiet.trailer, whole.trailer);
+    assert_eq!(quiet.objects().count(), 0);
+    whole
+}
+
+/// A file whose first section is a cross-reference stream whose rows don't
+/// read, and an update after it whose table does: read whole, the update's
+/// section and what it lists, the stream's said; read as of the stream, the
+/// revision before the update, nothing, not the scan of the whole file,
+/// which would find what the update wrote.
+#[test]
+fn a_reading_as_of_a_section_that_doesnt_read_reads_nothing() {
+    let mut file = b"%PDF-1.7\n".to_vec();
+    file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    file.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+    let stream = file.len();
+    file.extend_from_slice(
+        format!(
+            "3 0 obj\n<< /Type /XRef /Size 4 /W [1 2] /Root 1 0 R /Length 0 >>\nstream\n\nendstream\nendobj\nstartxref\n{stream}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let four = file.len();
+    file.extend_from_slice(b"4 0 obj\n(the update's)\nendobj\n");
+    let table = file.len();
+    file.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n4 1\n{four:010} 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Prev {stream} >>\nstartxref\n{table}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let whole = document(&file, &Options::DEFAULT);
+    assert_eq!(whole.trailer.unwritten, None);
+    let ids: Vec<u32> = whole.objects().map(|(id, _)| id.number).collect();
+    assert_eq!(ids, [4]);
+    let said = whole.faults().iter().map(|(_, f)| f);
+    assert!(
+        said.into_iter()
+            .any(|f| matches!(f, Fault::StreamRows { at, .. } if *at == stream))
+    );
+    assert_eq!(whole.update.as_ref().map(|u| u.previous), Some(stream));
+    let before = as_of_nothing(&file, stream, Unwritten::Widths);
+    assert!(before.get(ObjectId::new(4, 0)).is_err());
+}
+
+/// A reading as of the newest section, where a reading of the whole file
+/// finds it away from where `startxref` says: near it, and where it puts
+/// it counted from the file's first byte. Its base is the whole
+/// reading's ([`Base::of`]), keeping what `startxref` said, so it holds the
+/// file and not the file one byte longer; an update after it writes what
+/// one after the whole reading writes, read back alike. As of the section
+/// `startxref` says, where none reads, nothing ([`as_of_nothing`]).
+#[test]
+fn a_base_as_of_the_newest_section_found_elsewhere_is_the_whole_readings() {
+    let files = [
+        (
+            "startxref past",
+            laid_out(b"", &OBJECTS, &|_, at| at, &|at| at + 5),
+        ),
+        (
+            "from the first byte",
+            laid_out(&[b'~'; 100], &OBJECTS, &|_, at| at, &|at| at),
+        ),
+    ];
+    for (name, (file, _, table)) in files {
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let newest = reading.facts().newest.map(|(at, _)| at);
+        assert_eq!(newest, Some(table), "{name}");
+        let base = Base::of(&reading).unwrap();
+        let mut options = Options::DEFAULT;
+        options.section = Some(table);
+        let as_of = Reading::open(&file[..], &options).unwrap();
+        let mut of = Base::of(&as_of).unwrap();
+        assert_eq!(of.source, Some(as_of.id()), "{name}");
+        assert!(of.holds(&file[..]).unwrap(), "{name}");
+        let longer = [&file[..], b"\n"].concat();
+        assert!(!of.holds(&longer[..]).unwrap(), "{name}");
+        of.source = base.source;
+        assert_eq!(of, base, "{name}");
+        // An update after each, read back alike.
+        let id = ObjectId::new(base.size, 0);
+        let object = Object::new(Value::Integer(7));
+        let update = |base: &Base| {
+            let bodies = [(id, Body::New(Cow::Borrowed(&object)))];
+            let mut out = file.clone();
+            let written =
+                write::update(&mut out, base, bodies, None, None, &write::Options::DEFAULT);
+            let written = written.unwrap().unwrap();
+            assert!(written.base.holds(&out[..]).unwrap(), "{name}");
+            out
+        };
+        let after = update(&Base::of(&as_of).unwrap());
+        assert_eq!(after, update(&base), "{name}");
+        let back = read(&after);
+        assert_eq!(back.trailer.unwritten, None, "{name}");
+        assert_eq!(
+            back.get(id).ok().and_then(Object::as_integer),
+            Some(7),
+            "{name}"
+        );
+        reaches_its_page(&back);
+    }
+    // As of where startxref says, past the table, nothing reads.
+    let (file, _, table) = laid_out(b"", &OBJECTS, &|_, at| at, &|at| at + 5);
+    let header = pdf_objects::parse::Error::Header { at: table + 5 };
+    let why = Unwritten::Unread(crate::source::Unread::Parse(header));
+    as_of_nothing(&file, table + 5, why);
 }
 
 /// An update after a reading whose sections or objects were read
@@ -1198,8 +1342,8 @@ fn scanned_after(body: &[u8], after: &[u8]) -> (Vec<u8>, Vec<(u32, usize)>) {
     (file, places)
 }
 
-/// The faults `doc` says of the streams a scan ended at their `endobj` or
-/// the file's end.
+/// The faults `doc` says of the streams a scan ended at their `endobj`, or
+/// found no end to.
 fn stream_ends(doc: &Document) -> Vec<(Place, Fault)> {
     (doc.faults().iter())
         .filter(|(_, f)| matches!(f, Fault::StreamEnd { .. }))
@@ -1207,12 +1351,21 @@ fn stream_ends(doc: &Document) -> Vec<(Place, Fault)> {
         .collect()
 }
 
+/// The fault a scan says of a stream whose data starts at byte `start`,
+/// ended at its `endobj` at byte `end`, or found no end to where that's
+/// none, at its place.
+fn ended(id: Option<ObjectId>, start: usize, end: Option<usize>) -> (Place, Fault) {
+    let fault = Fault::StreamEnd { id, start, end };
+    let at = Span::new(None, start, end.unwrap_or(start));
+    (Place::new(None, Some(at)), fault)
+}
+
 /// A scanned file whose first object is a stream with no `endstream`, its
 /// `/Length` past its data: the scan ends its data at its `endobj`, as
 /// PDFium's does, and reads on, so the catalog, its page and the trailer
 /// after it are found, every way, and says where it ended it; and one at
-/// the file's end without `endobj` either, its data run to the file's end
-/// and said so. Under [`Recovery::Pdfium`] alike. The stream's own read
+/// the file's end without `endobj` either, to which the scan finds no end,
+/// and says so. Under [`Recovery::Pdfium`] alike. The stream's own read
 /// finds no `endstream` after its data, and it doesn't read.
 #[test]
 fn a_scanned_stream_without_endstream_ends_at_its_endobj_and_what_follows_reads() {
@@ -1222,18 +1375,10 @@ fn a_scanned_stream_without_endstream_ends_at_its_endobj_and_what_follows_reads(
     let endobj = b"%PDF-1.7\n".len() + stream.len();
     let (last, last_places) = scanned_after(b"", stream);
     let last_start = last.len() - 4;
-    let ended = |id, start: usize, end: usize, endobj| {
-        let fault = Fault::StreamEnd { id, end, endobj };
-        (Place::new(None, Some(Span::new(None, start, end))), fault)
-    };
     let nine = Some(ObjectId::new(9, 0));
     let cases = [
-        (&first, &places, ended(nine, start, endobj, true)),
-        (
-            &last,
-            &last_places,
-            ended(nine, last_start, last.len(), false),
-        ),
+        (&first, &places, ended(nine, start, Some(endobj))),
+        (&last, &last_places, ended(nine, last_start, None)),
     ];
     for (file, places, said) in cases {
         let doc = read(file);
@@ -1293,13 +1438,173 @@ fn an_entry_a_scan_finds_past_a_stream_without_endstream_is_read_there() {
     let (_, at) = places[2];
     let start = at + "5 0 obj\n<< /Length 999 >>\nstream\n".len();
     let end = start + "q Q\n".len();
-    let said = Fault::StreamEnd {
-        id: Some(ObjectId::new(5, 0)),
-        end,
-        endobj: true,
+    let said = ended(Some(ObjectId::new(5, 0)), start, Some(end));
+    assert_eq!(stream_ends(&doc), [said]);
+}
+
+/// The options of a reading under [`Recovery::Pdfium`].
+fn as_pdfium() -> Options<'static> {
+    let mut options = Options::DEFAULT;
+    options.recovery = Recovery::Pdfium;
+    options
+}
+
+/// A scanned file whose stream has neither `endstream` nor `endobj`, a
+/// word of its own, after its data, then its page, without `endobj`
+/// either: the scan finds no end to the stream's data and reads on through
+/// it, as PDFium's does, so the page is found, every way, and says so.
+/// Under [`Recovery::Pdfium`] alike. Where the data ends in `endstream` run
+/// into a byte before it, the verified recovery ends it there, as it ends
+/// a stream at `endstream` wherever it's found, and says nothing, where
+/// [`Recovery::Pdfium`] reads on through it, as PDFium does, and says so.
+#[test]
+fn a_scanned_stream_with_no_end_is_read_on_through_and_what_follows_reads() {
+    let head = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\ntrailer\n<< /Size 10 /Root 1 0 R >>\n9 0 obj\n<< /Length 999 >>\nstream\n";
+    let page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources << >> >>\n";
+    let nine = Some(ObjectId::new(9, 0));
+    let no_end = vec![ended(nine, head.len(), None)];
+    for (data, verified) in [(&b"q Q\n"[..], &no_end), (b"q Q\x10endstream\n", &vec![])] {
+        let file = [&head[..], data, page].concat();
+        for (doc, said) in [
+            (read(&file), verified),
+            (document(&file, &as_pdfium()), &no_end),
+        ] {
+            reaches_its_page(&doc);
+            let at = doc.record(ObjectId::new(3, 0)).unwrap().at.start;
+            assert_eq!(at, head.len() + data.len());
+            assert_eq!(&stream_ends(&doc), said);
+        }
+    }
+}
+
+/// A scanned file whose first object is a stream whose data ends in
+/// `endstream` run into `endobj`, neither a word of its own, then the
+/// catalog, its page and the trailer: the verified recovery ends its data
+/// at `endstream`, wherever it's found, so each object is found, every way,
+/// and nothing's said; [`Recovery::Pdfium`] ends it at the catalog's
+/// `endobj`, the first word of its own after it, as PDFium does, so the
+/// catalog isn't found, and says so.
+#[test]
+fn a_scanned_streams_endstream_run_into_endobj_ends_it_under_the_verified_recovery() {
+    let stream = b"9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendstreamendobj\n";
+    let (file, places) = scanned_after(stream, b"");
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert_eq!(stream_ends(&doc), []);
+    let doc = document(&file, &as_pdfium());
+    assert!(doc.get(ObjectId::new(1, 0)).is_err());
+    let start = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
+    let (_, catalog) = places[0];
+    let endobj = catalog + format!("1 0 obj\n{}\n", OBJECTS[0].1).len();
+    let said = ended(Some(ObjectId::new(9, 0)), start, Some(endobj));
+    assert_eq!(stream_ends(&doc), [said]);
+}
+
+/// A scanned file whose first stream no `n g obj` comes before, its data
+/// up to the catalog's `endobj`: the verified recovery passes over its data
+/// to that `endobj`, as it passes over any stream's, and says so, so the
+/// catalog isn't found; [`Recovery::Pdfium`] reads on through it, as
+/// PDFium's scan reads through any words but an object's, so every object
+/// is found and nothing's said.
+#[test]
+fn a_stream_no_n_g_obj_comes_before_is_read_through_as_pdfium_reads_it() {
+    let (file, places) = scanned_after(b"<< /Length 999 >>\nstream\n", b"");
+    let doc = read(&file);
+    assert!(doc.get(ObjectId::new(1, 0)).is_err());
+    each_object_at(&doc, &places[1..], &|_| Origin::Recovered);
+    let start = b"%PDF-1.7\n<< /Length 999 >>\nstream\n".len();
+    let (_, catalog) = places[0];
+    let endobj = catalog + format!("1 0 obj\n{}\n", OBJECTS[0].1).len();
+    assert_eq!(stream_ends(&doc), [ended(None, start, Some(endobj))]);
+    let doc = document(&file, &as_pdfium());
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert_eq!(stream_ends(&doc), []);
+}
+
+/// A scanned file whose last stream's `/Length` ends at its `endstream`,
+/// past an `endstream` inside its data, after which its data holds object
+/// 5, found nowhere else, and object 4, found before it: the verified
+/// recovery passes the data by its `/Length`, and its second scan, to each
+/// stream's first `endstream`, gives it object 5 from the data, every way,
+/// object 4 kept where the first found it; under [`Recovery::Pdfium`]
+/// object 5 isn't found, as PDFium passes the data by its `/Length` alone.
+#[test]
+fn an_object_found_only_inside_a_streams_data_passed_by_its_length_is_read_there() {
+    let data = "q Q\nendstream\nendobj\n5 0 obj\n(five)\nendobj\n4 0 obj\n(not four)\nendobj\n";
+    let head = format!("9 0 obj\n<< /Length {} >>\nstream\n", data.len());
+    let (file, places) =
+        scanned_after(b"", format!("{head}{data}\nendstream\nendobj\n").as_bytes());
+    let five_at =
+        file.len() - data.len() - "\nendstream\nendobj\n".len() + "q Q\nendstream\nendobj\n".len();
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    assert_eq!(
+        doc.get(ObjectId::new(5, 0)).unwrap().as_bytes(),
+        Some(&b"five"[..])
+    );
+    assert_eq!(doc.record(ObjectId::new(5, 0)).unwrap().at.start, five_at);
+    assert_eq!(stream_ends(&doc), []);
+    let doc = document(&file, &as_pdfium());
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    assert!(doc.get(ObjectId::new(5, 0)).is_err());
+}
+
+/// A scanned file whose first stream has no `/Length` that reads and an
+/// `endobj` of its own in its data, after which the data opens a string it
+/// doesn't close, then `endstream` and the catalog, its page and the
+/// trailer: the verified scan ends the data at that `endobj` and reads the
+/// string to the file's end, so its second scan, to each stream's first
+/// `endstream`, gives it every object and the trailer, every way; it says
+/// where it ended the data.
+#[test]
+fn what_a_scan_reading_on_from_an_endobj_loses_its_second_scan_finds() {
+    let stream = b"9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n(open\nendstream\nendobj\n";
+    let (file, places) = scanned_after(stream, b"");
+    let doc = read(&file);
+    each_object_at(&doc, &places, &|_| Origin::Recovered);
+    reaches_its_page(&doc);
+    let root = (doc.trailer.object.as_dict())
+        .and_then(|trailer| trailer.get(b"Root"))
+        .map(Object::value);
+    assert_eq!(root, Some(&Value::Ref(ObjectId::new(1, 0))));
+    let start = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
+    let end = start + "q Q\n".len();
+    let said = ended(Some(ObjectId::new(9, 0)), start, Some(end));
+    assert_eq!(stream_ends(&doc), [said]);
+}
+
+/// A scanned file without a `trailer` dictionary, whose last
+/// cross-reference stream has only `/Size`, an earlier one `/Root`, as a
+/// linearized file's may: its trailer is the last's, given `/Root` from
+/// the earlier one, so its page is reached, every way, and says so.
+#[test]
+fn a_scanned_files_last_cross_reference_stream_takes_root_from_an_earlier_one() {
+    let xref = |n: u32, more: &str| {
+        format!(
+            "{n} 0 obj\n<< /Type /XRef /Size 8 /W [1 1 1]{more} /Length 0 >>\nstream\nendstream\nendobj\n"
+        )
     };
-    let place = Place::new(None, Some(Span::new(None, start, end)));
-    assert_eq!(stream_ends(&doc), [(place, said)]);
+    let mut file = b"%PDF-1.7\n".to_vec();
+    file.extend_from_slice(xref(6, " /Root 1 0 R").as_bytes());
+    for &(n, text) in &OBJECTS {
+        file.extend_from_slice(format!("{n} 0 obj\n{text}\nendobj\n").as_bytes());
+    }
+    let last = file.len();
+    file.extend_from_slice(xref(7, "").as_bytes());
+    let doc = read(&file);
+    reaches_its_page(&doc);
+    assert_eq!(doc.trailer.stream, Some(ObjectId::new(7, 0)));
+    let taken: Vec<&(Place, Fault)> = (doc.faults().iter())
+        .filter(|(_, f)| matches!(f, Fault::Taken { .. }))
+        .collect();
+    let keys = vec![b"Root".to_vec()];
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].1, Fault::Taken { keys });
+    let dict = last + "7 0 obj\n".len();
+    assert_eq!(taken[0].0.at.map(|at| at.start), Some(dict));
 }
 
 /// A file of [`OBJECTS`] whose table's one subsection is numbered from 1

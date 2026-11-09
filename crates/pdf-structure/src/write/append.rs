@@ -133,13 +133,14 @@ impl Base {
     /// ([`Options::section`](crate::Options::section)), whose last section
     /// isn't the file's ([`Error::Earlier`]), as an update after it would
     /// leave every later revision unreachable; and a source whose bytes
-    /// don't read ([`Error::Io`]). A reading as of a section is taken only
-    /// where that's the place the last `startxref` gives, exactly: one
-    /// opened as of the newest section where a reading of the whole file
-    /// found it elsewhere is refused as earlier too, as nothing in it says
-    /// that's where `startxref`'s section is; [`Base::of`] the whole
-    /// reading takes it. A caller that means any of those describes the
-    /// file by [`Base::new`].
+    /// don't read ([`Error::Io`]). A reading as of a section is taken where
+    /// that's the file's newest: the place the last `startxref` gives, or
+    /// where a reading of the whole file reads the section `startxref`
+    /// gives, near it or counted from the file's first byte
+    /// ([`Recovery::Verified`](crate::read::Recovery::Verified)), which the
+    /// base keeps what `startxref` said of, as of a whole reading that
+    /// read it there. A caller that means any of those describes the file
+    /// by [`Base::new`].
     ///
     /// [`Facts::header_offset`]: crate::Facts::header_offset
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Base, Error> {
@@ -154,7 +155,7 @@ impl Base {
         // section away from where startxref said, startxref's value is
         // kept, to tell the file is as read.
         let prev = newest.saturating_sub(header);
-        let said = (reading.said(newest)).map(|said| said.saturating_sub(header));
+        let mut said = (reading.said(newest)).map(|said| said.saturating_sub(header));
         let dict = trailer.dict();
         if !dict.has(b"Root") {
             return Err(Error::Rootless);
@@ -162,14 +163,22 @@ impl Base {
         let source = reading.source();
         let io = |e: io::Error| Error::io(&e);
         // A section the reading was opened as of is at its byte; the last
-        // startxref's value counts from the header.
+        // startxref's value counts from the header. Where that isn't the
+        // section, it's the file's newest only where a reading of the
+        // whole file reads that section there, as its search finds it, and
+        // startxref's value is kept to tell the file is as read.
         if let Some(section) = reading.as_of()
             && startxref(source)
                 .map_err(io)?
                 .map(|at| at.saturating_add(header))
                 != Some(section)
         {
-            return Err(Error::Earlier(section));
+            match reading.newest_section().map_err(io)? {
+                Some((at, found)) if found == section => {
+                    said = Some(at.saturating_sub(header));
+                }
+                _ => return Err(Error::Earlier(section)),
+            }
         }
         let len = source.len();
         let ends_line = match len {

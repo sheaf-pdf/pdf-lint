@@ -286,6 +286,48 @@ def stream_without_endstream():
     return f.bytes()
 
 
+def stream_with_no_end():
+    """No startxref, and a stream with neither `endstream` nor `endobj` after
+    its data, then pages 3 and 4 without `endobj` either: PDFium finds no
+    end to its data, reads on through it from where it starts, and finds
+    both pages."""
+    f = File()
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n")
+    f.raw(b"9 0 obj\n<< /Length 999 >>\nstream\nq Q\n")
+    f.raw(b"3 0 obj\n" + page(3) + b"\n4 0 obj\n" + page(4) + b"\n")
+    return f.bytes()
+
+
+def endstream_run_into_endobj():
+    """No startxref, and a stream whose data ends `endstreamendobj`, neither a
+    word of its own, before page 4: PDFium ends its data at page 4's
+    `endobj`, the first word of its own after it, and doesn't find page 4."""
+    f = File()
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.raw(b"9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendstreamendobj\n")
+    f.obj(4, page(4))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
+def stream_of_no_object():
+    """No startxref, and a stream no `n g obj` comes before, page 4 in its
+    data before `endobj` and `endstream`: PDFium's scan reads through it as
+    through any words but an object's, and finds page 4."""
+    f = File()
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.raw(b"<< /Length 999 >>\nstream\n")
+    f.obj(4, page(4))
+    f.raw(b"endstream\ntrailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
 def member_and_object(member_first):
     """No startxref, and page 3 twice: at an offset, 300 high, and in object
     stream 9, 200 high, the stream first where `member_first`."""
@@ -353,6 +395,9 @@ CASES = {
     "rows-past-a-cut": cut(rows_after=False),
     "no-startxref": no_startxref(),
     "stream-without-endstream": stream_without_endstream(),
+    "stream-with-no-end": stream_with_no_end(),
+    "endstream-run-into-endobj": endstream_run_into_endobj(),
+    "stream-of-no-object": stream_of_no_object(),
     # A later section that doesn't read, or comes back on itself.
     "update": updated(),
     "update-prev-past-the-end": updated(prev=999999),
