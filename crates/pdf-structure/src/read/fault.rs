@@ -182,6 +182,27 @@ pub enum Fault {
         /// How many object streams' objects don't read.
         unread: u32,
     },
+    /// A scan of the file, as a file whose sections don't read is scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
+    /// an object not where its section puts it
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), ended a stream's
+    /// data at byte `end`: at its `endobj` (`endobj`), or at the file's end,
+    /// as no `endstream` comes before that and no `/Length` written as a
+    /// number ends at one. The scan reads on from there, as PDFium's does,
+    /// under either [`Recovery`](super::Recovery), so that what's after
+    /// the stream is found. `id` is the stream's object, its `n g obj` as
+    /// the scan found it before `stream`; none where it found none. The
+    /// object's own read reads its data as any stream's is read
+    /// ([`Fault::Length`]).
+    #[error("{}", stream_end_words(*.id, *.end, *.endobj))]
+    StreamEnd {
+        /// The stream's object.
+        id: Option<ObjectId>,
+        /// Where its data was ended.
+        end: usize,
+        /// Whether that's its `endobj`, not the file's end.
+        endobj: bool,
+    },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
     /// ([`Limits::entries`](super::Limits::entries)): those aren't read.
@@ -802,6 +823,22 @@ fn members_words(objects: u32, streams: u32, unread: u32) -> String {
     }
 }
 
+/// [`Fault::StreamEnd`]'s words.
+fn stream_end_words(id: Option<ObjectId>, end: usize, endobj: bool) -> String {
+    let whose = match id {
+        Some(id) => format!("{id} R's stream data"),
+        None => "the data of a stream with no n g obj before it".to_string(),
+    };
+    match endobj {
+        true => format!(
+            "the scan ends {whose} at its endobj, at byte {end}, as no endstream comes before it and no /Length ends at one"
+        ),
+        false => format!(
+            "the scan runs {whose} to the file's end, at byte {end}, as neither endstream nor endobj comes after it and no /Length ends at one"
+        ),
+    }
+}
+
 /// [`Fault::Strings`]' words.
 fn strings_words(count: usize, fault: &pdf_crypt::Fault) -> String {
     match count {
@@ -878,11 +915,12 @@ mod tests {
             Fault::Shifted { .. } => 32,
             Fault::Members { .. } => 33,
             Fault::XrefLength => 34,
+            Fault::StreamEnd { .. } => 35,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 35;
+    const ARMS: usize = 36;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -1160,6 +1198,30 @@ mod tests {
                     unread: 2,
                 },
                 "the objects of 2 object streams the scan found don't read",
+            ),
+            (
+                Fault::StreamEnd {
+                    id: Some(id(9)),
+                    end: 47,
+                    endobj: true,
+                },
+                "the scan ends 9 0 R's stream data at its endobj, at byte 47, as no endstream comes before it and no /Length ends at one",
+            ),
+            (
+                Fault::StreamEnd {
+                    id: Some(id(9)),
+                    end: 300,
+                    endobj: false,
+                },
+                "the scan runs 9 0 R's stream data to the file's end, at byte 300, as neither endstream nor endobj comes after it and no /Length ends at one",
+            ),
+            (
+                Fault::StreamEnd {
+                    id: None,
+                    end: 47,
+                    endobj: true,
+                },
+                "the scan ends the data of a stream with no n g obj before it at its endobj, at byte 47, as no endstream comes before it and no /Length ends at one",
             ),
             (
                 Fault::Shifted {

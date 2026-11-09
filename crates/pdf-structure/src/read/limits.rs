@@ -138,7 +138,11 @@ pub enum Recovery {
     /// finds its `n g obj`, of its number and generation, exactly
     /// ([`Origin::Recovered`](crate::Origin::Recovered)), else where it's
     /// written ([`Fault::Shifted`](super::Fault::Shifted)). A file whose
-    /// newest section doesn't read is scanned for its objects. A later
+    /// newest section doesn't read is scanned for its objects. Either scan
+    /// passes over a stream's data as PDFium's does, by its `/Length` where
+    /// `endstream` follows that, else to the first `endstream` or `endobj`,
+    /// and says where it ended one at `endobj` or the file's end
+    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A later
     /// section that doesn't read is said, and what the sections before it
     /// gave is kept.
     #[default]

@@ -15,8 +15,8 @@ use pdf_tokenizer::{Rules, is_delimiter};
 
 use super::window::Bytes;
 use super::{
-    Cx, Fault, InMemory, Reader, Recovery, Rows, Scan, Section, Trailer, Unwritten, XrefEntry,
-    count, is_xref_stream, scan_by,
+    Cx, Ended, Fault, InMemory, Passed, Reader, Recovery, Rows, Scan, Section, Trailer, Unwritten,
+    XrefEntry, count, is_xref_stream, scan_of,
 };
 use crate::phases::phase;
 use crate::source::{Encryption, Facts};
@@ -244,19 +244,31 @@ fn integer_of(o: &Object) -> i64 {
     }
 }
 
-/// Where a scan as PDFium's goes on past a stream whose `stream` keyword
-/// ends at `keyword`, its object's `n g obj` at `object`, as PDFium reads a
-/// stream as it scans: its data from the line after `stream` as long as its
-/// `/Length` says, a direct number, where `endstream` follows that past an
-/// end of line, white-space and comments; else up to the first `endstream`
-/// or `endobj`, a word of its own, after it; else the file's end.
-fn stream_end(file: &[u8], keyword: usize, object: Option<usize>, limits: parse::Limits) -> usize {
+/// Where a scan goes on past a stream whose `stream` keyword ends at
+/// `keyword`, its object's `n g obj` at `object`, as PDFium reads a stream
+/// as it scans (`FindStreamEndPos` as of chromium/8125), under either
+/// recovery: its data from the line after `stream` as long as its `/Length`
+/// says, a direct number, where `endstream` follows that past an end of
+/// line, white-space and comments; else up to the first `endstream` or
+/// `endobj`, a word of its own, after it; else the file's end. With where
+/// its data starts and how it was ended.
+pub(super) fn stream_end(
+    file: &[u8],
+    keyword: usize,
+    object: Option<usize>,
+    limits: parse::Limits,
+) -> Passed {
     let line = (file.get(keyword..).unwrap_or_default().iter())
         .position(|&b| matches!(b, b'\r' | b'\n'))
         .map_or(file.len(), |i| keyword + i);
     let data = match file.get(line..line + 2) {
         Some(b"\r\n") => line + 2,
         _ => (line + 1).min(file.len()),
+    };
+    let passed = |end, by| Passed {
+        start: data,
+        end,
+        by,
     };
     let length = object.and_then(|at| {
         let mut parser = Parser::at(file, at).limits(limits);
@@ -282,14 +294,21 @@ fn stream_end(file: &[u8], keyword: usize, object: Option<usize>, limits: parse:
             _ => {}
         }
         if word_from(file, p).starts_with(b"endstream") {
-            return end;
+            return passed(end, Ended::Length);
         }
     }
     // Both words looked for in one pass, so that the scan reads each byte
     // once, whatever follows.
-    (data..file.len())
-        .find(|&i| whole_word(file, i, b"endstream") || whole_word(file, i, b"endobj"))
-        .unwrap_or(file.len())
+    let found = (data..file.len()).find_map(|i| {
+        if whole_word(file, i, b"endstream") {
+            Some(passed(i, Ended::Endstream))
+        } else if whole_word(file, i, b"endobj") {
+            Some(passed(i, Ended::Endobj))
+        } else {
+            None
+        }
+    });
+    found.unwrap_or_else(|| passed(file.len(), Ended::File))
 }
 
 /// The word PDFium reads at byte `at` of `file`, past white-space and
@@ -486,10 +505,13 @@ impl Reader {
             object_streams,
             trailers,
             xref_streams,
-        } = scan_by(
-            file,
-            Some(&|keyword, object| stream_end(file, keyword, object, self.limits.parser)),
-        );
+            unended,
+        } = scan_of(file, self.limits.parser);
+        if cx.wants {
+            for unended in &unended {
+                cx.tell(None, Some(unended.at()), unended.fault());
+            }
+        }
         let loaded = self.loaded.take().map(|loaded| *loaded).unwrap_or_default();
         let listed = listed_of(&objects);
         let kept: Vec<u32> = (loaded.rows.keys().copied())
@@ -523,8 +545,14 @@ impl Reader {
                 dicts.push((at, object));
             }
         }
+        // What reading one told is said, but of a stream that awaits the
+        // members, which its own read alone says, as it reads it.
         for at in xref_streams {
-            let Ok(read) = self.indirect(InMemory(file), cx, at, None);
+            let mut told = cx.apart();
+            let Ok(read) = self.indirect(InMemory(file), &mut told, at, None);
+            if !read.as_ref().is_ok_and(|(_, o, _)| self.awaits_members(o)) {
+                cx.faults.append(&mut told.faults);
+            }
             if let Ok((_, object, _)) = read
                 && is_xref_stream(&object)
                 && let Value::Stream(stream) = object.value()

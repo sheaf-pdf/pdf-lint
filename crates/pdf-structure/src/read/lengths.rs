@@ -509,6 +509,38 @@ fn a_chain_of_length_references_isnt_followed() {
     }
 }
 
+/// [`a_length_in_an_object_stream`] scanned, its `startxref` giving no
+/// section, and the content stream written again after the cross-reference
+/// stream, so that the open's search for a trailer from the file's end
+/// reads it first, before the object stream's members are listed: every
+/// read after the open reads its `/Length` from the object stream, every
+/// way alike, and nothing the open's read of it told is said.
+#[test]
+fn a_scanned_files_stream_whose_length_is_in_an_object_stream_is_read_by_it() {
+    let file = a_length_in_an_object_stream();
+    let at = rfind(&file, b"startxref").unwrap();
+    let content = format!("4 0 obj\n{}\nendobj\n", content("5 0 R"));
+    let file = [&file[..at], content.as_bytes(), b"startxref\n9\n%%EOF\n"].concat();
+    let doc = alike(&file, &[]);
+    assert!(doc.trailer.unwritten.is_some());
+    assert_eq!(doc.trailer.stream, Some(ObjectId::new(7, 0)));
+    let members = Fault::Members {
+        objects: 1,
+        streams: 1,
+        unread: 0,
+    };
+    assert_eq!(doc.faults(), [(Place::new(None, None), members)]);
+    assert_eq!(data(&doc, &file, 4), (CONTENT.to_string(), true));
+    let record = doc.record(ObjectId::new(4, 0)).unwrap();
+    assert_eq!(record.at.start, at);
+    assert!(record.data.unwrap().indirect_length);
+    // Read alone, the stream says nothing either.
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    assert_eq!(reading.faults(), doc.faults());
+    reading.get(ObjectId::new(4, 0)).unwrap();
+    assert_eq!(reading.faults(), doc.faults());
+}
+
 /// A file's first object, a stream whose `/Length` is an object in an
 /// object stream, as written ([`Reading::first_object`]): read as the open
 /// reads, its `/Length` not read from the object stream, its data found by

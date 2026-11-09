@@ -13,12 +13,16 @@
 //! or an object away from where the file says is read where the file
 //! proves it is, and said ([`Recovery`]); or the file is read as PDFium
 //! reads it ([`Recovery::Pdfium`]). Where the sections don't read, it finds
-//! the objects by scanning the file, and says so. An object that doesn't
-//! read says why ([`Unread`]): it doesn't parse, its offset holds another,
-//! or the object stream it's in doesn't decode ([`Undecoded`], its filters
-//! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
-//! from an object stream that starts inside the bytes of another read from
-//! it, where the stream's header puts it, is read all the same, and said.
+//! the objects by scanning the file, and says so, passing over each
+//! stream's data as PDFium's scan does: by its `/Length` where `endstream`
+//! follows that, else to the first `endstream` or `endobj` after it, else
+//! to the file's end, the last two said ([`Fault::StreamEnd`]). An object
+//! that doesn't read says why ([`Unread`]): it doesn't parse, its offset
+//! holds another, or the object stream it's in doesn't decode
+//! ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where it is
+//! ([`Unindexed`]). One read from an object stream that starts inside the
+//! bytes of another read from it, where the stream's header puts it, is
+//! read all the same, and said.
 //!
 //! A file is read one way, by a [`Reading`], opened under [`Options`]
 //! ([`Reading::open`], the one way in): its header, cross-reference
@@ -2992,7 +2996,7 @@ impl Reader {
                 .max()
                 .unwrap_or(0)
         });
-        let shifts = self.shifted(file, &mut lists, &said, within)?;
+        let shifts = self.shifted(file, cx, &mut lists, &said, within)?;
         let mut moved_entries = BTreeMap::new();
         let mut entries = BTreeMap::new();
         let mut trailer = None;
@@ -3720,8 +3724,14 @@ impl Reader {
     }
 
     /// The objects found by scanning the file for `n g obj`, a later one
-    /// of a number over an earlier, when the sections don't read; and the
-    /// last `trailer` that reads, or else the last cross-reference stream.
+    /// of a number over an earlier, when the sections don't read, each
+    /// stream's data passed over as PDFium passes over it, and each the
+    /// scan ended at its `endobj` or at the file's end said
+    /// ([`Fault::StreamEnd`]); and the last `trailer` that reads, or else
+    /// the last cross-reference stream, looked for from the file's end,
+    /// what reading each object on the way told said, but of a stream that
+    /// awaits the members ([`Reader::awaits_members`]), which its own read
+    /// alone says, as it reads it.
     ///
     /// Read by position, the file is read whole for it.
     fn scan<'f, F: Bytes<'f>>(
@@ -3741,8 +3751,14 @@ impl Reader {
             objects,
             object_streams,
             trailers,
+            unended,
             ..
-        } = scan_of(file);
+        } = scan_of(file, self.limits.parser);
+        if cx.wants {
+            for unended in &unended {
+                cx.tell(None, Some(unended.at()), unended.fault());
+            }
+        }
         let mut entries = BTreeMap::new();
         for (id, offset) in objects {
             let generation = id.generation;
@@ -3811,15 +3827,19 @@ impl Reader {
             .collect();
         offsets.sort();
         for (offset, id) in offsets.into_iter().rev() {
-            let Ok(read) = self.indirect(InMemory(file), cx, offset, Some(id));
-            if let Ok((_, object, _)) = read
-                && is_xref_stream(&object)
-            {
-                return Trailer {
-                    stream: Some(id),
-                    object,
-                    unwritten: Some(why),
-                };
+            let mut told = cx.apart();
+            let Ok(read) = self.indirect(InMemory(file), &mut told, offset, Some(id));
+            match read {
+                Ok((_, object, _)) if is_xref_stream(&object) => {
+                    cx.faults.append(&mut told.faults);
+                    return Trailer {
+                        stream: Some(id),
+                        object,
+                        unwritten: Some(why),
+                    };
+                }
+                Ok((_, object, _)) if self.awaits_members(&object) => {}
+                _ => cx.faults.append(&mut told.faults),
             }
         }
         Trailer {
@@ -4319,16 +4339,37 @@ impl Reader {
     /// decode, so no object stream's decode waits on its own or another's;
     /// and an encryption dictionary, or what one refers to, which the open
     /// reads before it has the handler an object stream's data is
-    /// decrypted by. Nor in a file found by scanning, whose object streams'
-    /// members the open lists only after it has read what it reads of the
-    /// file's end ([`Reader::members`]), so that each read reads alike.
+    /// decrypted by. In a file found by scanning, whose object streams'
+    /// members the open lists last ([`Reader::members`]), every read after
+    /// the open follows one, as the open reads none: what the open's read
+    /// of such a stream told, on its way to the file's trailer, isn't said
+    /// ([`Reader::awaits_members`]), so that each stream reads one way.
     fn follows_into_members(&self, cx: &Cx, dict: &Dict, id: ObjectId) -> bool {
         cx.members
-            && !self.scanned
             && self.native_containers()
             && !self.containers.contains_key(&id.number)
             && dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm")
             && !self.list.dictionaries.contains(&id)
+    }
+
+    /// Whether `object`, read as the open reads, is a stream whose `/Length`
+    /// refers to a number no entry lists yet: in a file found by scanning,
+    /// whose object streams' members the open lists last, one that may be
+    /// a member, which every read after the open follows its `/Length` into
+    /// ([`Reader::follows_into_members`]), so that what the open's read of
+    /// it told isn't what the stream's own read reads. Not a
+    /// cross-reference stream, whose `/Length` no read follows.
+    fn awaits_members(&self, object: &Object) -> bool {
+        let Value::Stream(stream) = object.value() else {
+            return false;
+        };
+        if is_xref(&stream.dict) {
+            return false;
+        }
+        match stream.dict.get(b"Length").map(Object::value) {
+            Some(&Value::Ref(to)) => self.listed_entry(to).is_none(),
+            _ => false,
+        }
     }
 
     /// Object `id`, the `index`th of object stream `stream`, read for a
@@ -4383,21 +4424,68 @@ struct Scan {
     /// `stream` starts, in the file's order: a cross-reference stream's,
     /// whose dictionary [`Recovery::Pdfium`]'s scan takes as a trailer.
     xref_streams: Vec<usize>,
+    /// Each stream whose data the scan ended at its `endobj` or at the
+    /// file's end, in the file's order ([`Fault::StreamEnd`]).
+    unended: Vec<Unended>,
+}
+
+/// How a scan passed over a stream's data ([`pdfium::stream_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// As long as its `/Length` says, which `endstream` follows.
+    Length,
+    /// At the first `endstream` after it.
+    Endstream,
+    /// At the first `endobj` after it, no `endstream` before that.
+    Endobj,
+    /// At the file's end, neither coming after it.
+    File,
+}
+
+/// Where a scan passed over a stream's data: where it starts, where the
+/// scan ended it, and how ([`pdfium::stream_end`]).
+#[derive(Debug, Clone, Copy)]
+struct Passed {
+    start: usize,
+    end: usize,
+    by: Ended,
+}
+
+/// A stream whose data a scan ended at its `endobj` or at the file's end:
+/// the object whose stream it is, where the scan found its `n g obj`
+/// before its `stream`, and where its data starts and ends so.
+#[derive(Debug, Clone, Copy)]
+struct Unended {
+    id: Option<ObjectId>,
+    start: usize,
+    end: usize,
+    endobj: bool,
+}
+
+impl Unended {
+    /// Where the data the scan took is.
+    fn at(&self) -> Span {
+        span(self.start, self.end)
+    }
+
+    /// What says so.
+    fn fault(&self) -> Fault {
+        Fault::StreamEnd {
+            id: self.id,
+            end: self.end,
+            endobj: self.endobj,
+        }
+    }
 }
 
 /// The `n g obj` headers, object streams and `trailer` keywords in `file`,
-/// read token by token, each stream's data passed over up to `endstream`:
-/// what [`Reader::scan`] reads a file whose sections don't read by, and
-/// [`Reader::shifted`] finds an entry neither where its section puts it nor
-/// at its shift by.
-fn scan_of(file: &[u8]) -> Scan {
-    scan_by(file, None)
-}
-
-/// [`scan_of`], each stream's data passed over to where `ends` puts its end,
-/// given where its `stream` keyword ends and where its object's `n` is, where
-/// that's given; else up to `endstream`.
-fn scan_by(file: &[u8], ends: Option<&dyn Fn(usize, Option<usize>) -> usize>) -> Scan {
+/// read token by token, each stream's data passed over as PDFium's scan
+/// passes over it ([`pdfium::stream_end`]), its `/Length` read under
+/// `limits`, under either recovery: what [`Reader::scan`] reads a file
+/// whose sections don't read by, what [`Reader::shifted`] finds an entry
+/// neither where its section puts it nor at its shift by, and what
+/// [`Recovery::Pdfium`]'s rebuild lists.
+fn scan_of(file: &[u8], limits: parse::Limits) -> Scan {
     let mut objects = Vec::new();
     let mut t = Tokenizer::new(file);
     let mut before: [Option<Token>; 2] = [None, None];
@@ -4405,9 +4493,10 @@ fn scan_by(file: &[u8], ends: Option<&dyn Fn(usize, Option<usize>) -> usize>) ->
     // The object whose `obj` was last seen, where its `n` starts, and
     // whether its dictionary names `/ObjStm`, an object stream's, whose
     // members the reading lists once its handler is open, or `/XRef`.
-    let mut object: Option<(u32, usize, Named)> = None;
+    let mut object: Option<(ObjectId, usize, Named)> = None;
     let mut object_streams = Vec::new();
     let mut xref_streams = Vec::new();
+    let mut unended = Vec::new();
     while let Some(token) = t.next() {
         match token.kind {
             Kind::Space | Kind::Comment => continue,
@@ -4421,8 +4510,9 @@ fn scan_by(file: &[u8], ends: Option<&dyn Fn(usize, Option<usize>) -> usize>) ->
                         g.integer().ok().and_then(|g| u16::try_from(g).ok()),
                     )
                 {
-                    objects.push((ObjectId::new(number, generation), n.start));
-                    object = Some((number, n.start, Named::Neither));
+                    let id = ObjectId::new(number, generation);
+                    objects.push((id, n.start));
+                    object = Some((id, n.start, Named::Neither));
                 }
             }
             Kind::Name if is_name(token.bytes, b"ObjStm") => {
@@ -4437,19 +4527,22 @@ fn scan_by(file: &[u8], ends: Option<&dyn Fn(usize, Option<usize>) -> usize>) ->
             }
             Kind::Keyword if token.bytes == b"endobj" => object = None,
             Kind::Keyword if token.bytes == b"stream" => {
-                let start = object.map(|(_, at, _)| at);
+                let start = object.map(|(id, at, _)| (id, at));
                 match object.take() {
-                    Some((number, at, Named::ObjStm)) => object_streams.push((number, at)),
+                    Some((id, at, Named::ObjStm)) => object_streams.push((id.number, at)),
                     Some((_, at, Named::XRef)) => xref_streams.push(at),
                     _ => {}
                 }
-                match ends {
-                    Some(ends) => t = Tokenizer::at(file, ends(token.end(), start)),
-                    None => {
-                        t.eol();
-                        t.data_until(b"endstream");
-                    }
+                let passed = pdfium::stream_end(file, token.end(), start.map(|(_, at)| at), limits);
+                if matches!(passed.by, Ended::Endobj | Ended::File) {
+                    unended.push(Unended {
+                        id: start.map(|(id, _)| id),
+                        start: passed.start,
+                        end: passed.end,
+                        endobj: passed.by == Ended::Endobj,
+                    });
                 }
+                t = Tokenizer::at(file, passed.end);
             }
             Kind::Keyword if token.bytes == b"trailer" => trailers.push(token.end()),
             _ => {}
@@ -4461,6 +4554,7 @@ fn scan_by(file: &[u8], ends: Option<&dyn Fn(usize, Option<usize>) -> usize>) ->
         object_streams,
         trailers,
         xref_streams,
+        unended,
     }
 }
 
