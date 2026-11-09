@@ -81,20 +81,22 @@
 //!   two saves of one document differ in every AES ciphertext written anew.
 //!   What it leaves in the clear is the list the reader decrypts by, one list
 //!   both ways (see [`read`](crate::read), "What's encrypted"). A trailer isn't
-//!   encrypted, so a direct `/Info` is written as an object, encrypted as any;
-//!   and only strings and streams are (7.6.2), so what a file held only inside
-//!   an object stream is in the clear once written unpacked ([`document`] says
-//!   so). Under a new encryption that encrypts metadata, the document's
-//!   metadata stream's own `/Crypt` filter that would leave it in the clear is
-//!   taken out as it's written. Under RC4, which encrypts each object's
-//!   strings and data from the start of a keystream its number and generation
-//!   make, so that two plaintexts under one leak their XOR (pdf-crypt's
-//!   `Method::Rc4`), nothing new goes under a keystream the file read shows
-//!   used: a whole file writes what it writes anew at a generation its number
-//!   hasn't used ([`Written::regenerated`]), and an update refuses what would
-//!   be new there ([`Unencryptable::Keystream`], [`Error::Free`]) unless it's
-//!   told otherwise ([`Encryptor::reusing_rc4_keystreams`]); see
-//!   [`Encryptor`], "Under RC4". A whole file under a reading's encryption
+//!   encrypted, so a whole file's or an update's direct `/Info` is written as
+//!   an object, encrypted as any, as a caller laying a file out writes it
+//!   itself ([`Encryptor::laid_out`]); and only strings and streams are
+//!   (7.6.2), so what a file held only inside an object stream is in the clear
+//!   once written unpacked ([`document`] says so). Under a new encryption that
+//!   encrypts metadata, the document's metadata stream's own `/Crypt` filter
+//!   that would leave it in the clear is taken out as it's written ([`Parts`]),
+//!   and written otherwise it's refused ([`Unencryptable::Metadata`]). Under
+//!   RC4, which encrypts each object's strings and data from the start of a
+//!   keystream its number and generation make, so that two plaintexts under
+//!   one leak their XOR (pdf-crypt's `Method::Rc4`), nothing new goes under a
+//!   keystream the file read shows used: a whole file writes what it writes
+//!   anew at a generation its number hasn't used ([`Written::regenerated`]),
+//!   and an update, and what a caller lays out, refuses what would be new there
+//!   ([`Unencryptable::Keystream`], [`Error::Free`]) unless told otherwise
+//!   ([`Encryptor::reusing_rc4_keystreams`]); see [`Encryptor`], "Under RC4". A whole file under a reading's encryption
 //!   lists each number that file listed and it doesn't write free at its next
 //!   generation (7.5.4). The encryption dictionary of pdf-crypt's values, a
 //!   new file's or one read, as the values say it, is [`encryption`].
@@ -1204,7 +1206,10 @@ const SECTION_KEYS: [&[u8]; 15] = [
 /// cross-reference stream's dictionary's own, `/Encrypt` and `/ID`), each
 /// reference as `to` names it, `null` where it names none, as a whole file's
 /// are ([`full`]). `&()` names each as it is. `/Root` isn't one of those keys:
-/// a caller whose section writes it takes it out.
+/// a caller whose section writes it takes it out. A direct `/Info` is kept as
+/// it is, where a whole file of the writer's under an encryption writes it as
+/// an object, encrypted, as a trailer isn't: a caller laying out an encrypted
+/// file does the same ([`Encryptor::laid_out`]).
 #[must_use]
 pub fn trailer_entries(trailer: &Dict, to: &(dyn Renumber + Sync)) -> Dict {
     let mut trailer = trailer.clone();

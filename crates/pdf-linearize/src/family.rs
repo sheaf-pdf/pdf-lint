@@ -59,8 +59,9 @@
 //! 1 without a gap (F.3.1), so what [`Encryptor::of`] says of a file's free
 //! numbers can't hold here: none is listed, and an object may be written at
 //! one. Every object moves, so under RC4 every number's keystream now encrypts
-//! another object's plaintext. One who holds both the file read and this one
-//! has, for each number, the XOR of the two plaintexts
+//! another object's plaintext, as pdf-structure's writer writes only told to
+//! ([`Encryptor::reusing_rc4_keystreams`]). One who holds both the file read
+//! and this one has, for each number, the XOR of the two plaintexts
 //! ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). AES-128's IVs are
 //! random, each write's own from the operating system, so nothing leaks that
 //! way. A caller who doesn't want that gives [`Encryptor::create`] a new
@@ -493,7 +494,10 @@ impl Writing<'_, '_> {
         // In the numbers objects are held at, as they're asked of it.
         let doc = self.doc;
         let trailer = doc.trailer().dict();
-        let encrypting = (self.encryptor)
+        // Under RC4 every number's keystream is reused, as the module says,
+        // which pdf-structure refuses unless it's told so.
+        let reusing = (self.encryptor).map(|e| e.clone().reusing_rc4_keystreams());
+        let encrypting = (reusing.as_ref())
             .map(|encryptor| encryptor.laid_out(Some(&to), at, trailer, &doc))
             .transpose()
             .map_err(Error::Write)?;

@@ -56,25 +56,26 @@ use crate::source::Encryption;
 /// writes it encrypted through [`Encryptor::laid_out`], given where each
 /// object and the dictionary go: what that gives encrypts each object
 /// under the number it's written at, says what to write of the dictionary
-/// ([`Encrypting::dictionary`], [`Encrypting::at`],
-/// [`Encrypting::first_id`]), and is what [`Parts::new`](super::Parts::new)
-/// writes the bodies by, in the same numbers. Such a caller puts in no
-/// object stream an object [`Encrypting::dictionary_object`] says is an
-/// encryption dictionary's, and numbers no object but that one there, as
-/// what's there is left in the clear. Where the dictionary goes, which
-/// numbers are listed free, and which generations objects are written at
-/// stay its own: a whole file of the writer's lists each number the file
-/// it was read from lists and it doesn't write free at the generation that
-/// number is to be used at next, and under RC4 writes no object anew at a
-/// keystream that file used.
+/// ([`Encrypting::dictionary`], [`Encrypting::at`], [`Encrypting::first_id`]),
+/// and is what [`Parts::new`](super::Parts::new) writes the bodies by, in the
+/// same numbers. Such a caller puts in no object stream an object
+/// [`Encrypting::dictionary_object`] says is an encryption dictionary's, and
+/// numbers no object but that one there, as what's there is left in the clear.
+/// Where the dictionary goes, which numbers are listed free, and which
+/// generations objects are written at stay its own: a whole file of the
+/// writer's lists each number the file it was read from lists and it doesn't
+/// write free at the generation that number is to be used at next, and under
+/// RC4 writes no object anew at a keystream that file used. Under RC4, what it
+/// lays out at a keystream that file's sections show used is refused
+/// ([`Unencryptable::Keystream`]), unless it's told to reuse them.
 ///
 /// A caller a layout binds otherwise can't keep those rules: a linearized
 /// file's sections list none free but 0, and its numbers run from 1 without
 /// a gap (ISO 32000-2, F.3.1, F.3.4, F.3.11). It writes objects at those
-/// numbers and lists none. Moving every object, under RC4 it has encrypted
-/// each with another object's keystream by then, as pdf-crypt's
-/// `Method::Rc4` says. So it says so to its own callers, and points them to
-/// [`Encryptor::create`], a new key.
+/// numbers and lists none. Moving every object, under RC4 it encrypts each
+/// with another object's keystream, as pdf-crypt's `Method::Rc4` says, so
+/// it writes under the encryptor told to reuse them, says so to its own
+/// callers, and points them to [`Encryptor::create`], a new key.
 #[derive(Clone)]
 pub struct Encryptor {
     handler: Handler,
@@ -414,10 +415,13 @@ impl Encryptor {
     /// It, an update under it writing an object whose strings or data are
     /// new under an RC4 keystream the file used rather than refusing it
     /// ([`Unencryptable::Keystream`]), and one at a number the file lists
-    /// free below the generation its entry gives ([`Error::Free`]); and a
+    /// free below the generation its entry gives ([`Error::Free`]); a
     /// whole file under it, of a reading whose file's later sections it
-    /// can't read ([`Encryptor::of`]), every object it writes anew. What's
-    /// written lists each so ([`Written::keystreams_reused`]).
+    /// can't read ([`Encryptor::of`]), every object it writes anew; and a
+    /// file a caller lays out under it ([`Encryptor::laid_out`]), each
+    /// string and stream's data at a keystream the file used. What's
+    /// written lists each so ([`Written::keystreams_reused`],
+    /// [`Encrypting::keystreams_reused`]).
     ///
     /// What that leaks, to whoever holds the file (an update's file holds
     /// the versions before it too) or the file before it: for each object
@@ -734,14 +738,13 @@ impl Encryptor {
     }
 
     /// For a whole file under the renumbering `to`, itself the encryptor as
-    /// given and `now` it in the numbers written ([`Encryptor::laid`]),
-    /// whose objects are each given at, and
-    /// written at, as `written` pairs them: the least of the objects
-    /// [`Encryptor::dictionary_object`] says are an encryption dictionary's,
-    /// by number in the file, at whose number written `written` puts an
-    /// object that isn't one of those. `now` leaves what's there in the
-    /// clear, as the reader of the file written reads it, which that
-    /// object's strings would then be. None where there's none, and with
+    /// given and `now` it in the numbers written ([`Encryptor::laid`]), whose
+    /// objects are each given at, and written at, as `written` pairs them: the
+    /// least of the objects [`Encryptor::dictionary_object`] says are an
+    /// encryption dictionary's, by number in the file, at whose number written
+    /// `written` puts an object that isn't one of those. `now` leaves what's
+    /// there in the clear, as the reader of the file written reads it, which
+    /// that object's strings would then be. None where there's none, and with
     /// no renumbering, which puts no object at another's number.
     pub(super) fn shared(
         &self,
@@ -807,16 +810,26 @@ impl Encryptor {
     ///
     /// What's left to the caller: the dictionary written at `at` as
     /// [`Encrypting::dictionary`] has it, or in the trailer, `at` none only
-    /// where the file it was read from had it there
-    /// ([`Encryptor::direct`]); no object stream holding, and no other
-    /// object at the number of, what [`Encrypting::dictionary_object`] says
-    /// is left in the clear; which numbers it lists free, which a whole file
-    /// of the writer's lists at the generation each is to be used at next
-    /// where the file it was read from lists it and the write doesn't; and,
-    /// under RC4, which generations objects go at, which a whole file of the
-    /// writer's moves past every one the file it was read from used, as what's
-    /// laid out here is encrypted by its number and generation as given, and
-    /// no write guards it (see [`Encryptor`], "Under RC4").
+    /// where the file it was read from had it there ([`Encryptor::direct`]); no
+    /// object stream holding, and no other object at the number of, what
+    /// [`Encrypting::dictionary_object`] says is left in the clear; a direct
+    /// `/Info`, whose strings the trailer would hold in the clear
+    /// ([`trailer_entries`](super::trailer_entries) keeps it as it is), written
+    /// as an object, as a whole file of the writer's writes it; the document's
+    /// metadata stream written through [`Parts`](super::Parts), which takes its
+    /// own `/Identity` out where the encryption encrypts metadata, as it's
+    /// refused otherwise ([`Unencryptable::Metadata`]); which numbers it lists
+    /// free, which a whole file of the writer's lists at the generation each is
+    /// to be used at next where the file it was read from lists it and the
+    /// write doesn't; and, under RC4, which generations objects go at, which a
+    /// whole file of the writer's moves past every one the file it was read
+    /// from used. What's laid out here is encrypted by its number and
+    /// generation as given, so under RC4 a string or stream's data at a
+    /// keystream the file's sections show used is refused
+    /// ([`Unencryptable::Keystream`]), as nothing here reads the versions there
+    /// to tell it's unchanged, but where the encryptor is told to reuse them,
+    /// which writes and lists it ([`Encrypting::keystreams_reused`]; see
+    /// [`Encryptor`], "Under RC4").
     ///
     /// # Errors
     ///
@@ -831,7 +844,8 @@ impl Encryptor {
         resolve: &'a (dyn Resolve<'a> + Sync),
     ) -> Result<Encrypting<'a>, Error> {
         let to = Numbering(to);
-        Encrypting::of(self.laid(to, at), trailer, resolve, to, at)
+        let encrypting = Encrypting::of(self.laid(to, at), trailer, resolve, to, at)?;
+        Ok(encrypting.guarded(Guard::whole(self, None)))
     }
 
     /// What encrypts the objects of a file written under it as it is, each
@@ -919,8 +933,8 @@ pub struct Encrypting<'a> {
     /// Where the file written has the dictionary, none for its trailer.
     at: Option<ObjectId>,
     /// Under RC4, what keeps the write from putting a new plaintext under
-    /// a keystream its file used: a whole file's or an update's, none for
-    /// a file a caller lays out.
+    /// a keystream its file used: a whole file's, an update's, or a
+    /// caller's layout's, which reads no versions.
     guard: Option<Guard<'a>>,
 }
 
@@ -941,6 +955,12 @@ pub(super) struct Guard<'a> {
     /// isn't known to be the file written to, or not every section of it
     /// read. None for a whole file of a file whose every section read.
     beyond: Range<u32>,
+    /// Below those, each number an update after the encryptor's reading
+    /// wrote at, with the highest generation it wrote: each keystream there
+    /// and below counts as used too, as the reading's sections don't show
+    /// it ([`Base`](super::Base)'s, as [`Written::base`](super::Written::base)
+    /// gives it back).
+    wrote: BTreeMap<u32, u16>,
     /// The reading the versions are read from, where it reads the file
     /// written to, or the one a whole file is written of.
     from: Option<&'a dyn ReadFrom>,
@@ -970,38 +990,46 @@ impl<'a> Guard<'a> {
             false => 0..u32::MAX,
         };
         let from = from.filter(|from| Some(from.id()) == encryptor.read_in());
-        Guard::new(encryptor, beyond, from, false)
+        Guard::new(encryptor, beyond, BTreeMap::new(), from, false)
     }
 
-    /// An update's under `encryptor`, after a file the reading `source` was
-    /// made of, or written after one, none where it's of no reading, which
-    /// now uses the numbers below `size`; the versions read from `from`
-    /// where that's the reading `source` is, in every revision of it.
+    /// An update's under `encryptor`, after `base`: a file the reading
+    /// `base.source` was made of, or written after one, which now uses the
+    /// numbers below `base.size`, and at those the reading's file listed
+    /// what the updates since wrote (`base.wrote`); none where it's of no
+    /// reading. The versions are read from `from` where that's the reading
+    /// `base.source` is, in every revision of it.
     pub(super) fn update(
         encryptor: &Encryptor,
-        source: Option<SourceId>,
-        size: u32,
+        base: &super::Base,
         from: Option<&'a dyn ReadFrom>,
     ) -> Guard<'a> {
+        let source = base.source;
         let own = source.is_some() && source == encryptor.read_in();
         let beyond = match (encryptor.sections_whole(), own) {
             (false, _) => 0..u32::MAX,
-            (true, true) => encryptor.past()..size,
-            (true, false) => 0..size,
+            (true, true) => encryptor.past()..base.size,
+            (true, false) => 0..base.size,
+        };
+        let wrote = match own {
+            true => base.wrote.clone(),
+            false => BTreeMap::new(),
         };
         let from = from.filter(|from| source == Some(from.id()));
-        Guard::new(encryptor, beyond, from, true)
+        Guard::new(encryptor, beyond, wrote, from, true)
     }
 
     fn new(
         encryptor: &Encryptor,
         beyond: Range<u32>,
+        wrote: BTreeMap<u32, u16>,
         from: Option<&'a dyn ReadFrom>,
         earlier: bool,
     ) -> Guard<'a> {
         Guard {
             used: Arc::clone(&encryptor.used),
             beyond,
+            wrote,
             from,
             key: encryptor.key_check(),
             earlier,
@@ -1014,7 +1042,9 @@ impl<'a> Guard<'a> {
     /// Whether RC4's keystream at `at` is one the file written to may have
     /// encrypted another plaintext with.
     pub(super) fn used(&self, at: ObjectId) -> bool {
-        self.beyond.contains(&at.number) || self.used.keyed(at)
+        self.beyond.contains(&at.number)
+            || self.used.keyed(at)
+            || (self.wrote.get(&at.number)).is_some_and(|&g| at.generation <= g)
     }
 
     /// The versions of each of `ids` read at once, for an update, which
@@ -1124,6 +1154,15 @@ pub enum Unencryptable {
         "RC4 would encrypt it with a keystream the file already encrypted something else with, which leaks the two's XOR: written whole under a new encryption (Encryptor::create), it wouldn't"
     )]
     Keystream,
+    /// It's the document's metadata stream, under a new encryption that
+    /// encrypts metadata, and its own `/Crypt` filter (`/Identity`) would leave
+    /// its data in the clear: written through [`Parts`](super::Parts), as every
+    /// write of the writer's is, that filter is taken out and the stream
+    /// encrypted, as its `/EncryptMetadata` says (ISO 32000-2, 7.6.4.2).
+    #[error(
+        "it's the document's metadata stream, whose own /Identity crypt filter would leave it in the clear under an encryption that encrypts metadata: written through Parts, which takes that filter out, it's encrypted"
+    )]
+    Metadata,
 }
 
 impl<'a> Encrypting<'a> {
@@ -1192,9 +1231,13 @@ impl<'a> Encrypting<'a> {
         self.guard.as_ref()
     }
 
-    /// What its guard wrote that it would otherwise have refused, as it was
-    /// told to reuse keystreams, ascending: none without one.
-    pub(super) fn reused(&self) -> Vec<ObjectId> {
+    /// Under RC4, each object at whose number and generation it encrypted a
+    /// string or stream's data under a keystream the file used, as its
+    /// encryptor was told to reuse them
+    /// ([`Encryptor::reusing_rc4_keystreams`]), ascending: what leaks, as that
+    /// says. None under another method, and none where it refused.
+    #[must_use]
+    pub fn keystreams_reused(&self) -> Vec<ObjectId> {
         self.guard.as_ref().map(Guard::reused).unwrap_or_default()
     }
 
@@ -1343,10 +1386,12 @@ impl Encrypt for Encrypting<'_> {
     }
 
     /// Encrypted by its own crypt filter when it has one, else an embedded
-    /// file's as `/EFF` says, else as the handler's streams are (7.6.6);
-    /// in the clear where that's `/Identity`, and the document's metadata
-    /// stream's under `/EncryptMetadata false` but where its own crypt
-    /// filter encrypts it (7.6.4.2, 14.3.2); under RC4, as its guard says.
+    /// file's as `/EFF` says, else as the handler's streams are (7.6.6); in the
+    /// clear where that's `/Identity`, and the document's metadata stream's
+    /// under `/EncryptMetadata false` but where its own crypt filter encrypts
+    /// it (7.6.4.2, 14.3.2); under RC4, as its guard says. The document's
+    /// metadata stream under a new encryption that encrypts metadata, with its
+    /// own `/Identity` still, is refused ([`Unencryptable::Metadata`]).
     fn stream<'d>(
         &self,
         id: ObjectId,
@@ -1354,6 +1399,14 @@ impl Encrypt for Encrypting<'_> {
         data: &'d [u8],
     ) -> Result<Cow<'d, [u8]>, Unencryptable> {
         let resolve = |id| self.resolve.resolve(id);
+        // The metadata a new encryption encrypts, its own /Identity still
+        // there, as only a caller writing it past `Parts` gives it: in the
+        // clear as it says, which its /EncryptMetadata says it isn't.
+        if self.metadata_anew == Some(id)
+            && filter::without_identity_crypt(dict, Some(&resolve)).is_some()
+        {
+            return Err(Unencryptable::Metadata);
+        }
         let own = || filter::crypt_filter(dict, Some(&resolve));
         let handler = &self.encryptor.handler;
         let list = &self.encryptor.list;

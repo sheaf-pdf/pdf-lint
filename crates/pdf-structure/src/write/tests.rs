@@ -4483,6 +4483,129 @@ fn under_rc4_an_update_below_a_free_number_s_generation_is_refused_and_at_it_wri
     }
 }
 
+/// A whole file refuses what's wrong with the numbering it's given before
+/// it reads a copy, under every method: a number given twice, the first
+/// time as read by another reading than the one written from, is refused
+/// as given twice, under RC4, whose regeneration reads the copies first,
+/// as under AES.
+#[test]
+fn a_whole_file_refuses_a_number_given_twice_before_a_copy_under_every_method() {
+    let objects = [
+        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (3, Body::from(dict! { "Note" => lit(b"three") })),
+    ];
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
+    let three = ObjectId::new(3, 0);
+    for kind in [Kind::Rc4By40, Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
+        let name = format!("{kind:?}");
+        let file = fixture::encrypted(&settings(kind, true), &objects, root.clone());
+        let mut other = file.clone();
+        other.insert(0, b'%');
+        let (reading, elsewhere) = (opened(&file, "user"), opened(&other, "user"));
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let doc = elsewhere.to_document().unwrap();
+        let again = elsewhere.get(three).unwrap().clone();
+        let mut bodies: Vec<_> = write::bodies(&doc).filter(|(id, _)| *id == three).collect();
+        bodies.push((three, write::Body::from(&again)));
+        let mut out = Vec::new();
+        let options = write::Options::DEFAULT;
+        let trailer = reading.trailer().dict();
+        let written = write::full(
+            &mut out,
+            bodies,
+            trailer,
+            Some(&own),
+            Some(&reading),
+            &options,
+        );
+        assert_eq!(written.err(), Some(Error::Twice(3)), "{name}");
+    }
+}
+
+/// Under RC4, an update after another, given that one's `Written::base`,
+/// counts what the first wrote as used, though the reading its encryptor
+/// was made of doesn't hold it: an object the first wrote at a free
+/// number's own generation (2 1), or at the next generation of a number in
+/// use (3 1), written there again with another plaintext, is refused,
+/// nothing written; told to reuse keystreams, it's written and listed, and
+/// the XOR of the two ciphertexts, both in the file, is the XOR of the two
+/// plaintexts. One at the generation past it is written, a keystream
+/// unused. Under AES-128 each is written, and nothing leaks.
+#[test]
+fn under_rc4_an_update_after_another_counts_what_the_first_wrote_as_used() {
+    const FIRST: &[u8] = b"the first new text";
+    const OTHER: &[u8] = b"some other new one";
+    assert_eq!(FIRST.len(), OTHER.len());
+    let note = |text: &[u8]| Object::from(dict! { "Note" => lit(text) });
+    let xor = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(a, b)| a ^ b).collect::<Vec<u8>>();
+    let written_note = |file: &[u8], at: ObjectId| {
+        let locked = open(file);
+        let object = locked.get(at).unwrap().as_dict().unwrap();
+        match object.get(b"Note").unwrap().value() {
+            Value::String(Str::Encrypted(bytes), _) => bytes.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let options = write::Options::DEFAULT;
+    for kind in [Kind::Rc4By40, Kind::Rc4By128, Kind::Aes128] {
+        let rc4 = matches!(kind, Kind::Rc4By40 | Kind::Rc4By128);
+        let file = freed_at_one(kind);
+        let reading = opened(&file, "user");
+        let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        let base = write::Base::of(&reading).unwrap();
+        let from: Option<&dyn write::ReadFrom> = Some(&reading);
+        for at in [ObjectId::new(2, 1), ObjectId::new(3, 1)] {
+            let name = format!("{kind:?}, {at:?}");
+            let (first, other) = (note(FIRST), note(OTHER));
+            let mut out = file.clone();
+            let given = [(at, write::Body::from(&first))];
+            let written = write::update(&mut out, &base, given, Some(&encryptor), from, &options);
+            let written = written.unwrap().unwrap();
+            assert!(written.keystreams_reused.is_empty(), "{name}");
+            let after_first = written.base;
+            let once = out.clone();
+            let given = [(at, write::Body::from(&other))];
+            let again = |out: &mut Vec<u8>, encryptor: &Encryptor| {
+                let given = given.clone();
+                write::update(out, &after_first, given, Some(encryptor), from, &options)
+            };
+            let written = match rc4 {
+                true => {
+                    let why = write::Unencryptable::Keystream;
+                    assert_eq!(
+                        again(&mut out, &encryptor),
+                        Err(Error::Encrypt { id: at, why }),
+                        "{name}"
+                    );
+                    assert_eq!(out, once, "{name}");
+                    let reusing = encryptor.clone().reusing_rc4_keystreams();
+                    let written = again(&mut out, &reusing).unwrap().unwrap();
+                    assert_eq!(written.keystreams_reused, [at], "{name}");
+                    written
+                }
+                false => {
+                    let written = again(&mut out, &encryptor).unwrap().unwrap();
+                    assert!(written.keystreams_reused.is_empty(), "{name}");
+                    written
+                }
+            };
+            assert_eq!(value(&opened(&out, "user"), at), other, "{name}");
+            let leaks = xor(&written_note(&once, at), &written_note(&out, at)) == xor(FIRST, OTHER);
+            assert_eq!(leaks, rc4, "{name}");
+            // Past both, a keystream unused.
+            let past = ObjectId::new(at.number, at.generation + 1);
+            let given = [(past, write::Body::from(&first))];
+            let base = written.base;
+            let written = write::update(&mut out, &base, given, Some(&encryptor), from, &options);
+            assert!(
+                written.unwrap().unwrap().keystreams_reused.is_empty(),
+                "{name}"
+            );
+            assert_eq!(value(&opened(&out, "user"), past), first, "{name}");
+        }
+    }
+}
+
 /// A whole file written under its reading's encryption lists each number
 /// the reading listed and it doesn't write free at the generation it's to
 /// be used at next, under every method, so that a tool that follows its
@@ -4547,7 +4670,7 @@ fn a_whole_file_lists_its_reading_s_numbers_it_drops_free_at_their_next_generati
     }
 }
 
-/// `Encryptor::encrypting`, as a caller laying a file out has it, refuses
+/// `Encryptor::laid_out`, as a caller laying a file out has it, refuses
 /// as a whole file does where `/EncryptMetadata false` leaves the
 /// document's metadata stream in the clear and the catalog, which says
 /// which stream that is, doesn't resolve, rather than encrypt it.
@@ -4559,15 +4682,22 @@ fn encrypting_without_the_catalog_where_metadata_is_in_the_clear_is_refused() {
         .unwrap();
     let (plain, trailer) = plaintext();
     let root = trailer.get(b"Root").and_then(Object::as_reference).unwrap();
+    let encryptor = &clear.encryptor;
     let none = |_: ObjectId| -> Option<&Object> { None };
-    let refused = clear.encryptor.encrypting(&trailer, &none).err();
+    let refused = encryptor
+        .laid_out(None, encryptor.at(), &trailer, &none)
+        .err();
     assert_eq!(refused, Some(Error::Catalog(root)));
     let resolve = |id: ObjectId| {
         (plain.iter())
             .find(|(n, _)| ObjectId::new(*n, 0) == id)
             .map(|(_, o)| o)
     };
-    assert!(clear.encryptor.encrypting(&trailer, &resolve).is_ok());
+    assert!(
+        encryptor
+            .laid_out(None, encryptor.at(), &trailer, &resolve)
+            .is_ok()
+    );
 }
 
 /// A caller laying a renumbered file out itself encrypts it as a whole file
@@ -4625,6 +4755,129 @@ fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
         let refused = own.laid_out(Some(&swap), at, trailer, &none).err();
         let root = trailer.get(b"Root").and_then(Object::as_reference);
         assert_eq!(refused, root.map(Error::Catalog), "{name}");
+    }
+}
+
+/// Under RC4, what a caller lays out through `Encryptor::laid_out` is kept from
+/// a keystream the file read used as a whole file is: a string written anew at
+/// the number and generation its file had it at is refused, by pdf-objects'
+/// writer and through `Parts` alike, nothing to tell it's unchanged; at the
+/// next generation, a keystream unused, it's written. Told to reuse keystreams,
+/// it's written and listed (`Encrypting::keystreams_reused`). Under AES-128,
+/// it's written, and nothing is listed.
+#[test]
+fn under_rc4_what_a_caller_lays_out_at_a_used_keystream_is_refused_unless_told_to_reuse() {
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let info = ObjectId::new(13, 0);
+    let next = ObjectId::new(13, 1);
+    for method in methods
+        .iter()
+        .filter(|m| ["RC4-40", "RC4-128", "AES-128"].contains(&m.name))
+    {
+        let name = method.name;
+        let rc4 = name.starts_with("RC4");
+        let source = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
+        let reading = opened(&source, "user");
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let doc = reading.to_document().unwrap();
+        let mut changed = reading.get(info).unwrap().clone();
+        changed
+            .as_dict_mut()
+            .unwrap()
+            .set("Title", lit(b"another title"));
+        let (trailer, resolve) = (doc.trailer.dict(), &&doc);
+        let encrypting = own.laid_out(None, own.at(), trailer, resolve).unwrap();
+        let why = Unencryptable::Keystream;
+        let said = encrypting.string(info, b"another title");
+        assert_eq!(said.is_err(), rc4, "{name}");
+        if rc4 {
+            assert_eq!(said, Err(why.clone()), "{name}");
+        }
+        let parts = write::Parts::new(&encrypting, Some(&reading)).unwrap();
+        let mut out = Vec::new();
+        let body = write::Body::from(&changed);
+        let written = parts.body(&mut out, info, info, &body);
+        match rc4 {
+            true => assert_eq!(written, Err(Error::Encrypt { id: info, why }), "{name}"),
+            false => assert!(written.is_ok(), "{name}"),
+        }
+        assert!(encrypting.string(next, b"another title").is_ok(), "{name}");
+        assert!(encrypting.keystreams_reused().is_empty(), "{name}");
+        let reusing = own.clone().reusing_rc4_keystreams();
+        let encrypting = reusing.laid_out(None, own.at(), trailer, resolve).unwrap();
+        let parts = write::Parts::new(&encrypting, Some(&reading)).unwrap();
+        let mut out = Vec::new();
+        parts.body(&mut out, info, info, &body).unwrap();
+        let reused: &[ObjectId] = if rc4 { &[info] } else { &[] };
+        assert_eq!(encrypting.keystreams_reused(), reused, "{name}");
+    }
+}
+
+/// Under a new encryption that encrypts metadata, the document's metadata
+/// stream with its own `/Identity` crypt filter, written by pdf-objects'
+/// writer under what `Encryptor::laid_out` gives, is refused, as it would
+/// be in the clear (`Unencryptable::Metadata`); through `Parts`, that
+/// filter is taken out and it's encrypted. Under a new encryption that
+/// doesn't encrypt metadata, it's written as it is, in the clear.
+#[test]
+fn a_caller_laying_out_writes_the_metadata_s_own_identity_crypt_through_parts_alone() {
+    use chacha20::ChaCha20Rng;
+
+    let r = Object::reference;
+    let identity =
+        || Object::from(dict! { "Type" => "CryptFilterDecodeParms", "Name" => "Identity" });
+    let mut dict =
+        dict! { "Filter" => vec![Object::from("Crypt")], "DecodeParms" => vec![identity()] };
+    dict.set("Type", "Metadata");
+    dict.set("Subtype", "XML");
+    let objects = vec![
+        (
+            1,
+            Object::from(dict! { "Type" => "Catalog", "Metadata" => r(2) }),
+        ),
+        (2, Object::from(Stream::new(dict.clone(), XMP.to_vec()))),
+    ];
+    let trailer = dict! { "Root" => r(1) };
+    let file = whole(&objects, &trailer, XrefKind::Table, None);
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let prepared = Password("new").prepared().unwrap();
+    let metadata = ObjectId::new(2, 0);
+    for encrypt_metadata in [true, false] {
+        let name = format!("/EncryptMetadata {encrypt_metadata}");
+        let mut protection = Protection::new(&prepared);
+        protection.encrypt_metadata = encrypt_metadata;
+        let mut rng = ChaCha20Rng::seed_from_u64(43);
+        let created = Encryptor::create_with(&protection, &mut rng).unwrap();
+        let (trailer, resolve) = (doc.trailer.dict(), &&doc);
+        let encrypting = created.laid_out(None, None, trailer, resolve).unwrap();
+        let mut out = Vec::new();
+        let direct = serialize::indirect_stream_with(&mut out, metadata, &dict, XMP, &encrypting);
+        match encrypt_metadata {
+            true => {
+                let why = Unencryptable::Metadata;
+                let refused = Refused::Encrypt {
+                    id: metadata,
+                    why: why.clone(),
+                };
+                assert_eq!(direct.err(), Some(refused), "{name}");
+                let said = Error::Encrypt { id: metadata, why }.to_string();
+                assert_eq!(
+                    said,
+                    "object 2 0 can't be encrypted: it's the document's metadata stream, whose own \
+                     /Identity crypt filter would leave it in the clear under an encryption that \
+                     encrypts metadata: written through Parts, which takes that filter out, it's \
+                     encrypted"
+                );
+            }
+            false => assert!(direct.is_ok() && holds(&out, XMP), "{name}"),
+        }
+        let parts = write::Parts::new(&encrypting, Some(&reading)).unwrap();
+        let mut out = Vec::new();
+        let body = write::Body::from(doc.get(metadata).unwrap());
+        parts.body(&mut out, metadata, metadata, &body).unwrap();
+        assert_eq!(holds(&out, XMP), !encrypt_metadata, "{name}");
     }
 }
 
@@ -5448,6 +5701,59 @@ fn an_update_by_one_password_isnt_taken_for_the_other_s_key() {
             }
         }
     }
+}
+
+/// A base described by hand (`Base::new`) of a file whose direct
+/// `/Encrypt` has a `/UE` made to wrap another key than its `/OE` has no
+/// check of the file's key, so an update after it takes the encryptor of a
+/// reading by either password, whose dictionary and `/ID[0]` are the
+/// file's; given the user's reading's check (`Base::keyed`), the owner's is
+/// refused, nothing written, and the user's taken.
+#[test]
+fn a_base_by_hand_is_matched_by_the_key_it_is_given() {
+    let options = &write::Options::DEFAULT;
+    let mut dict = dictionary_of(Kind::Aes256, true);
+    let Some(Value::String(Str::Bytes(ue), _)) = dict.get(b"UE").map(Object::value) else {
+        panic!("/UE is a string");
+    };
+    let mut ue = ue.clone();
+    ue[0] ^= 1;
+    dict.set("UE", Object::new(Value::String(Str::Bytes(ue), None)));
+    let file = source(dict, true);
+    let (user, owner) = (opened(&file, "user"), opened(&file, "owner"));
+    let checked = write::Base::of(&user).unwrap().key.unwrap();
+    let by_hand = || {
+        let (prev, xref) = newest(&user);
+        let trailer = user.trailer().dict().clone();
+        write::Base::new(file.len(), prev, size(&user), xref, trailer)
+    };
+    let catalog = Object::from(dict! { "Type" => "Catalog", "Lang" => lit(b"en") });
+    let given = [(ObjectId::new(1, 0), write::Body::from(&catalog))];
+    let (ours, theirs) = (encryptor_of(&file), Encryptor::of(&owner).unwrap().unwrap());
+    let mut out = file.clone();
+    let written = write::update(
+        &mut out,
+        &by_hand(),
+        given.clone(),
+        Some(&theirs),
+        None,
+        options,
+    );
+    assert!(written.is_ok());
+    let keyed = by_hand().keyed(checked);
+    let mut out = file.clone();
+    let refused = write::update(
+        &mut out,
+        &keyed,
+        given.clone(),
+        Some(&theirs),
+        None,
+        options,
+    );
+    assert_eq!(refused, Err(Error::Unmatched));
+    assert_eq!(out, file);
+    write::update(&mut out, &keyed, given, Some(&ours), None, options).unwrap();
+    assert_eq!(value(&opened(&out, "user"), ObjectId::new(1, 0)), catalog);
 }
 
 /// A base described by hand (`Base::new`) of a file whose `/Encrypt` is a

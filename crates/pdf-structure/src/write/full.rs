@@ -13,7 +13,7 @@
 //! generation, a renumbering of the writer's own under the caller's.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
@@ -296,6 +296,9 @@ fn file(
                 Place::At(at) => Some(options.encrypt_at.unwrap_or(at)),
                 Place::Direct | Place::New => None,
             };
+            // What's refused of the caller's numbering, before what reads
+            // the copies, so that it's refused as under another method.
+            checked(bodies, caller, at.map(|at| at.number), None, &[])?;
             Regenerated::of(bodies, trailer, e, from, caller, at)?
         }
         _ => None,
@@ -486,7 +489,9 @@ fn file(
     }
     let size = section.size();
     kept.set("Size", i64::from(size));
-    let keystreams_reused = encrypting.map(Encrypting::reused).unwrap_or_default();
+    let keystreams_reused = encrypting
+        .map(Encrypting::keystreams_reused)
+        .unwrap_or_default();
     let regenerated = match &regenerated {
         Some(regenerated) => regenerated.pairs(bodies),
         None => Vec::new(),
@@ -506,6 +511,7 @@ fn file(
         renumbered: to.0.is_some(),
         startxref: None,
         shifted: Vec::new(),
+        wrote: BTreeMap::new(),
     };
     Ok(Written {
         section,

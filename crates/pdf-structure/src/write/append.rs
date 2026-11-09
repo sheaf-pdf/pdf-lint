@@ -9,6 +9,7 @@
 //! the number the renumbering gives it, the encryption dictionary and what
 //! it refers to staying where they are.
 
+use std::collections::BTreeMap;
 use std::io;
 
 use pdf_crypt::{Handler, KeyCheck};
@@ -107,6 +108,12 @@ pub struct Base {
     /// the encryptor a write that gave it back was under: an update's
     /// encryptor must have the same key ([`Error::Unmatched`]).
     pub(super) key: Option<KeyCheck>,
+    /// Under RC4, each number an update after the reading it was made of
+    /// wrote an object at, given back by [`Written::base`], with the
+    /// highest generation it wrote it at: an update after it under that
+    /// reading's encryptor counts each keystream there and below as used,
+    /// as the reading, which doesn't hold those updates, doesn't show it.
+    pub(super) wrote: BTreeMap<u32, u16>,
 }
 
 impl Base {
@@ -214,6 +221,7 @@ impl Base {
             startxref: said,
             shifted: reading.shifted(),
             key: reading.handler().map(Handler::key_check),
+            wrote: BTreeMap::new(),
         })
     }
 
@@ -224,7 +232,11 @@ impl Base {
     /// update then starts with a newline), and of no reading. Each is a
     /// field, to set after: a file whose `/Encrypt` is a reference is
     /// updated only once [`Base::encryption`] is set, as nothing else says
-    /// an encryptor is the file's.
+    /// an encryptor is the file's. It has no check of the file's key, so an
+    /// update after it takes an encryptor whose dictionary and `/ID[0]` are
+    /// the file's, whatever its key: one of a dictionary crafted to give the
+    /// user's password and the owner's two keys among them, unless it's
+    /// given the key's check ([`Base::keyed`]).
     #[must_use]
     pub fn new(len: usize, prev: usize, size: u32, kind: XrefKind, trailer: Dict) -> Base {
         Base {
@@ -242,7 +254,18 @@ impl Base {
             startxref: None,
             shifted: Vec::new(),
             key: None,
+            wrote: BTreeMap::new(),
         }
+    }
+
+    /// It, with `check` the check of its file's key (pdf-crypt's
+    /// `Handler::key_check`, of the handler that opened the file), which an
+    /// update's encryptor must have ([`Error::Unmatched`]), as one of
+    /// [`Base::of`] has its reading's.
+    #[must_use]
+    pub fn keyed(mut self, check: KeyCheck) -> Base {
+        self.key = Some(check);
+        self
     }
 
     /// Whether `source` is still the file it describes, read again: as
@@ -360,33 +383,35 @@ impl Base {
 ///   it isn't given.
 ///
 /// **Under RC4**, each string and stream of an object is encrypted from the
-/// start of one keystream, made from the file's key and the object's number
-/// and generation (Algorithm 1), and an update's file holds the versions
-/// before it: an object written again at its number and generation, or at
-/// one another object of the file had, with a string or its stream's data
-/// that isn't one of theirs, would leave the XOR of the two plaintexts to
-/// whoever holds the file. So each string and stream's data RC4 encrypts
-/// at a number and generation whose keystream the file used (a section
-/// lists it in use at an offset at it or past it, or free past it; any
-/// number of a file written after the encryptor's reading but those it
-/// lists) is written only where it's the same as, or the start of, a
-/// plaintext a version of that object has there, every revision's read
-/// through `from` as of its end, where `from` is the reading `base` was
-/// made of ([`Reading::prefix`](crate::Reading::prefix)); else the update
-/// is refused, naming the object at the number it would be written at
-/// ([`Unencryptable::Keystream`](super::Unencryptable::Keystream)). So a
-/// page tree's `/Count` changed, a string changed back to an earlier
-/// revision's, or a new object past every number is written; an
-/// annotation's `/Contents` changed isn't, nor, with no `from`, any string
-/// at a number the file used. One at a number the file lists free, below
-/// the generation its entry gives, is refused too ([`Error::Free`]), as
-/// the deleted version its keystream encrypted may not be there to tell.
-/// Told to reuse keystreams ([`Encryptor::reusing_rc4_keystreams`]), each
-/// is written, and listed ([`Written::keystreams_reused`]). AES-128 and
-/// AES-256 don't leak so, as each string and stream has an IV of its own,
-/// random. A caller who would write what the rule refuses writes the file
-/// whole: under its own encryption, which moves what it writes anew to a
-/// fresh generation, or under a new AES-256 one ([`Encryptor::create`]).
+/// start of one keystream, made from the file's key and the object's number and
+/// generation (Algorithm 1), and an update's file holds the versions before it:
+/// an object written again at its number and generation, or at one another
+/// object of the file had, with a string or its stream's data that isn't one of
+/// theirs, would leave the XOR of the two plaintexts to whoever holds the file.
+/// So each string and stream's data RC4 encrypts at a number and generation
+/// whose keystream the file used (a section lists it in use at an offset at it
+/// or past it, or free past it, the sections of the updates written after the
+/// encryptor's reading among them, as [`Written::base`] gives them back; any
+/// number of a file written after that reading but those it lists) is written
+/// only where it's the same as, or the start of, a plaintext a version of that
+/// object has there, every revision's read through `from` as of its end, where
+/// `from` is the reading `base` was made of
+/// ([`Reading::prefix`](crate::Reading::prefix)), which doesn't hold what those
+/// updates wrote; else the update is refused, naming the object at the number
+/// it would be written at
+/// ([`Unencryptable::Keystream`](super::Unencryptable::Keystream)). So a page
+/// tree's `/Count` changed, a string changed back to an earlier revision's, or
+/// a new object past every number is written; an annotation's `/Contents`
+/// changed isn't, nor, with no `from`, any string at a number the file used.
+/// One at a number the file lists free, below the generation its entry gives,
+/// is refused too ([`Error::Free`]), as the deleted version its keystream
+/// encrypted may not be there to tell. Told to reuse keystreams
+/// ([`Encryptor::reusing_rc4_keystreams`]), each is written, and listed
+/// ([`Written::keystreams_reused`]). AES-128 and AES-256 don't leak so, as each
+/// string and stream has an IV of its own, random. A caller who would write
+/// what the rule refuses writes the file whole: under its own encryption, which
+/// moves what it writes anew to a fresh generation, or under a new AES-256 one
+/// ([`Encryptor::create`]).
 ///
 /// # Errors
 ///
@@ -520,7 +545,7 @@ fn appended(
     let resolve = encryptor.map(|_| Given::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
         (Some(e), Some(resolve)) => {
-            let guard = Guard::update(e, base.source, base.size, from);
+            let guard = Guard::update(e, base, from);
             Some(e.encrypting_at(&base.trailer, resolve, to)?.guarded(guard))
         }
         _ => None,
@@ -580,6 +605,7 @@ fn appended(
     // An encrypted file's direct /Info, which the trailer would hold in the
     // clear, written as an object at a number past every one the file and
     // the update use, encrypted as any, the trailer naming it.
+    let mut info_at = None;
     let info = match (base.trailer.get(b"Info"), &encrypting) {
         (Some(info), Some(e)) if direct_info(info) => {
             let past = base.size.max(section.size());
@@ -598,6 +624,7 @@ fn appended(
                     generation: 0,
                 },
             );
+            info_at = Some(id);
             Some(Object::from(id))
         }
         (info, _) => info.map(named),
@@ -653,11 +680,21 @@ fn appended(
     let prev = pos - base.header;
     let mut keystreams_reused = encrypting
         .as_ref()
-        .map(Encrypting::reused)
+        .map(Encrypting::keystreams_reused)
         .unwrap_or_default();
     keystreams_reused.extend(freed);
     keystreams_reused.sort_unstable();
     keystreams_reused.dedup();
+    // Under RC4, what this update wrote, which an update after it under the
+    // same reading's encryptor counts as used, with what those before it
+    // wrote.
+    let mut wrote = base.wrote.clone();
+    if encryptor.is_some_and(Encryptor::rc4) {
+        for at in written_at.iter().copied().chain(info_at) {
+            let had = wrote.entry(at.number).or_insert(at.generation);
+            *had = (*had).max(at.generation);
+        }
+    }
     let base = Base {
         len: at(out),
         ends_line: true,
@@ -673,6 +710,7 @@ fn appended(
         startxref: None,
         shifted: Vec::new(),
         key: base.key.clone(),
+        wrote,
     };
     Ok(Written {
         section,

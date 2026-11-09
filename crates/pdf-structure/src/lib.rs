@@ -101,7 +101,8 @@
 //!   encryption ([`write::Encryptor`]), by the same list of what's left in
 //!   the clear that the reader decrypts by ([`write::Encrypting`]). AES's
 //!   IVs come from the operating system, and under RC4 no new plaintext
-//!   goes under a keystream the file used.
+//!   goes under a keystream the file used, but where the encryptor is told
+//!   to reuse them, which lists each.
 //!
 //! The objects are pdf-objects' types, re-exported as [`pdf_objects`];
 //! a stream that doesn't decode cleanly says so in pdf-filters' error,
