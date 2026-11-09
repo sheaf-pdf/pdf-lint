@@ -214,11 +214,18 @@ pub enum Fault {
     /// found. `id` is the stream's object, its `n g obj` as the scan found
     /// it before `stream`; none where it found none, which
     /// [`Recovery::Pdfium`](super::Recovery::Pdfium)'s scan doesn't pass
-    /// over, as PDFium's doesn't. The object's own read reads its data as
-    /// any stream's is read ([`Fault::Length`]). Under
-    /// [`Recovery::Verified`](super::Recovery::Verified), not where the
-    /// scan, reading on, meets that `endstream` on its own between objects:
-    /// the data ran there, and what it found inside is taken back.
+    /// over, as PDFium's doesn't. Where its `/Length` doesn't end its data
+    /// at `endstream` ([`Fault::Length`]), the object's own read takes its
+    /// data to where the scan ended it, at that `endobj`, as PDFium's read
+    /// of the object does, not to an `endstream` past it, which may be a
+    /// later stream's; but where the data starts on the `stream` keyword's
+    /// line, which the scan, as PDFium's, passes over to start it on the
+    /// next, to an `endstream` on that line; and where no end was found,
+    /// as any stream's is read. Under
+    /// [`Recovery::Verified`](super::Recovery::Verified), it isn't said
+    /// where the scan, reading on, meets that `endstream` on its own
+    /// between objects: the data ran there, what the scan found inside is
+    /// taken back, and the object's read takes its data to there.
     #[error("{}", stream_end_words(*.id, *.start, *.end))]
     StreamEnd {
         /// The stream's object.

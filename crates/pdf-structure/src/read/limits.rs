@@ -158,7 +158,9 @@ pub enum Recovery {
     /// inside it is taken, a document embedded there among it, as PDFium
     /// takes nothing there. Each scan says where it ended a stream at
     /// `endobj` or found no end to one
-    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A
+    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)); a stream the first
+    /// ended at its `endobj` is read to there, as PDFium reads it, where
+    /// no `/Length` ends its data at `endstream`. A
     /// literal string either scan finds no `)` closing is read past, from
     /// just past its `(`, the bytes it held read as tokens, so that what's
     /// after it is found; the first scan says so, once, with how many
@@ -199,7 +201,9 @@ pub enum Recovery {
     /// `/Length` where `endstream` follows that, else to the first
     /// `endstream` or `endobj` that's a word of its own, else nowhere,
     /// reading on through it, and reading on through a stream no `n g obj`
-    /// comes before, as PDFium reads through any words but an object's; a
+    /// comes before, as PDFium reads through any words but an object's, a
+    /// stream it ended at its `endobj` read to there, as PDFium reads the
+    /// object, where no `/Length` ends its data at `endstream`; a
     /// literal string it finds no `)` closing it reads to the file's end,
     /// finding nothing after it, as PDFium reads a string, a dictionary's
     /// value or one between objects, and says so

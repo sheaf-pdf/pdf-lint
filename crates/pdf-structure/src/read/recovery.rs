@@ -24,7 +24,7 @@ use pdf_tokenizer::{Kind, Tokenizer, is_delimiter, is_white_space};
 use super::window::Bytes;
 use super::{
     Cx, Fault, Late, Misnumbered, NEAR, Reader, Recovery, Rows, Unclosed, Unended, XrefEntry,
-    scan_of, span,
+    ended_of, scan_of, span,
 };
 use crate::source::Origin;
 
@@ -468,11 +468,14 @@ impl Reader {
     /// through, is said to `cx` ([`Fault::StreamEnd`]), the strings
     /// before there it found no `)` closing and read past
     /// ([`Fault::Unclosed`]), and those whose lines inside them gave it
-    /// objects ([`Fault::InString`]). None for any
+    /// objects ([`Fault::InString`]); and each stream whose data it ended at
+    /// its `endobj`, of an entry it moves to where it found it, is kept, so
+    /// that its object's read reads it so ([`Reader::ended`]), while the
+    /// copies it checks are read as that read does. None for any
     /// section where no section has a shift, the file read as written; each
     /// section `said` to be elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
-        &self,
+        &mut self,
         file: F,
         cx: &mut Cx,
         lists: &mut [(Rows, T)],
@@ -492,6 +495,8 @@ impl Reader {
         // where an entry is first found at neither place, with the file's
         // bytes.
         let mut scan: Option<(Cow<'f, [u8]>, Scanned)> = None;
+        // Where the entries moved to the scan's places are.
+        let mut recovered = BTreeSet::new();
         let mut shifts = Vec::with_capacity(lists.len());
         for ((rows, _), by) in lists.iter_mut().zip(own) {
             let by = by.unwrap_or(first);
@@ -533,6 +538,7 @@ impl Reader {
                     for late in &late {
                         cx.tell(None, Some(late.at()), late.fault());
                     }
+                    self.ended = ended_of(&unended).into();
                     scan = Some((all, found));
                 }
                 let at = match &mut scan {
@@ -543,11 +549,19 @@ impl Reader {
                     Some(at) if at != *offset => {
                         *offset = at;
                         shift.scanned.push(n);
+                        recovered.insert(at);
                     }
                     _ => shift.neither += 1,
                 }
             }
             shifts.push(Some(shift));
+        }
+        // An entry read where its section puts it, or at the shift, is read
+        // as any in a file read by its sections.
+        if !self.ended.is_empty() {
+            let mut ended = std::mem::take(&mut self.ended).into_vec();
+            ended.retain(|(at, ..)| recovered.contains(at));
+            self.ended = ended.into();
         }
         Ok(shifts)
     }

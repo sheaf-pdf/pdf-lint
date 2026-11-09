@@ -16,7 +16,7 @@ use pdf_tokenizer::{Rules, Tokenizer, is_delimiter};
 use super::window::Bytes;
 use super::{
     Cx, Ended, Fault, InMemory, Passed, Reader, Recovery, Rows, Scan, Section, Trailer, Unwritten,
-    XrefEntry, count, is_xref_stream, scan_of,
+    XrefEntry, count, ended_of, is_xref_stream, scan_of,
 };
 use crate::phases::phase;
 use crate::source::{Encryption, Facts};
@@ -600,6 +600,8 @@ impl Reader {
                 cx.tell(None, Some(at), fault);
             }
         }
+        // Before the streams naming `/XRef` are read, below.
+        self.ended = ended_of(&unended).into();
         let loaded = self.loaded.take().map(|loaded| *loaded).unwrap_or_default();
         let listed = listed_of(&objects);
         let kept: Vec<u32> = (loaded.rows.keys().copied())
@@ -637,10 +639,13 @@ impl Reader {
             }
         }
         // What reading one told is said, but of a stream that awaits the
-        // members, which its own read alone says, as it reads it.
+        // members, which its own read alone says, as it reads it. Each is
+        // read as the object the scan found there, as its own read reads it.
         for at in xref_streams {
             let mut told = cx.apart();
-            let Ok(read) = self.indirect(InMemory(file), &mut told, at, None);
+            let found = (objects.binary_search_by_key(&at, |&(_, at)| at)).ok();
+            let id = found.map(|i| objects[i].0);
+            let Ok(read) = self.indirect(InMemory(file), &mut told, at, id);
             if !read.as_ref().is_ok_and(|(_, o, _)| self.awaits_members(o)) {
                 cx.faults.append(&mut told.faults);
             }

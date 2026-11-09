@@ -17,19 +17,21 @@
 //! stream's data as PDFium's scan does: by its `/Length` where `endstream`
 //! follows that, else to the first `endstream` or `endobj` after it, else
 //! nowhere, the scan reading on through the data, the last two said
-//! ([`Fault::StreamEnd`]); and reading on from just past the `(` of a
-//! literal string it finds no `)` closing, which would take every byte
-//! after it, or, as PDFium reads a file, reading the rest of the file as
-//! that string, either said ([`Fault::Unclosed`]), an object found again
-//! past such a string standing over the one before only where it reads
-//! ([`Fault::Earlier`]); and reading an object whose `n g obj` starts a
-//! line inside a string it read, closed late, where it found its number
-//! nowhere else, said ([`Fault::InString`]). An object that doesn't read
-//! says why ([`Unread`]): it doesn't parse, its offset holds another, or
-//! the object stream it's in doesn't decode ([`Undecoded`], its filters
-//! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
-//! from an object stream that starts inside the bytes of another read from
-//! it, where the stream's header puts it, is read all the same, and said.
+//! ([`Fault::StreamEnd`]), a stream it ended at `endobj` read to there
+//! where no `/Length` ends it at `endstream`; and reading on from just
+//! past the `(` of a literal string it finds no `)` closing, which would
+//! take every byte after it, or, as PDFium reads a file, reading the rest
+//! of the file as that string, either said ([`Fault::Unclosed`]), an
+//! object found again past such a string standing over the one before only
+//! where it reads ([`Fault::Earlier`]); and reading an object whose
+//! `n g obj` starts a line inside a string it read, closed late, where it
+//! found its number nowhere else, said ([`Fault::InString`]). An object
+//! that doesn't read says why ([`Unread`]): it doesn't parse, its offset
+//! holds another, or the object stream it's in doesn't decode
+//! ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where it is
+//! ([`Unindexed`]). One read from an object stream that starts inside the
+//! bytes of another read from it, where the stream's header puts it, is
+//! read all the same, and said.
 //!
 //! A file is read one way, by a [`Reading`], opened under [`Options`]
 //! ([`Reading::open`], the one way in): its header, cross-reference
@@ -1182,6 +1184,17 @@ struct Reader {
     /// ([`Fault::InString`]): a member of an object stream found as
     /// written stands over one ([`Reader::members`]).
     late: Box<[Late]>,
+    /// Where a scan of the file ended the data of an object's stream at its
+    /// `endobj`, an `endstream` coming after it or none ([`Fault::StreamEnd`]),
+    /// by where the object's `n` starts, with where the scan started the
+    /// data and where that `endobj` is: each such object the scan found,
+    /// where the reading is the scan's, and each whose entry it moved to
+    /// where the scan found it ([`Origin::Recovered`]), where the reading is
+    /// by its sections. The object's own read reads its data to there where
+    /// no `/Length` checks, as the scan read it, unless an `endstream` comes
+    /// before where the scan started it ([`Reader::indirect`]). Set before
+    /// the open reads an object, so that every read of one reads it so.
+    ended: Box<[(usize, usize, usize)]>,
     /// Under [`Recovery::Pdfium`], why its sections are to be read and the
     /// file scanned after, as PDFium scans a file whose trailer gives no
     /// page ([`Reader::open_as`]).
@@ -1707,6 +1720,7 @@ impl Reader {
             shifts: Box::default(),
             object_streams: Box::default(),
             late: Box::default(),
+            ended: Box::default(),
             force,
             untried,
             loaded: None,
@@ -3877,6 +3891,9 @@ impl Reader {
                 cx.tell(None, Some(late.at()), late.fault());
             }
         }
+        // Before any object is read, the copies a string read past checks
+        // and the search for a cross-reference stream among them.
+        self.ended = ended_of(&unended).into();
         self.late = late.into();
         let mut entries = BTreeMap::new();
         // The numbers found again past a string read past, where the copy
@@ -4368,9 +4385,14 @@ impl Reader {
     /// The indirect object at `offset`: `n g obj`, a value (a dictionary
     /// with its stream), `endobj`. When `expected`, it must be that one. A
     /// stream's data is as long as its `/Length` says when that ends at
-    /// `endstream`, else up to `endstream`. With it, where it was read
-    /// from: from its `n` to past its `endobj`, the reader looking past the
-    /// parser as the parser's own check for `endobj` looks.
+    /// `endstream`, else up to `endstream`; but, read as an object the
+    /// reading lists (`expected`, as a section's stream isn't), up to its
+    /// `endobj` where a scan of the reading ended it there
+    /// ([`Reader::ended`]) and no `endstream` comes before where the scan
+    /// started it, as on the `stream` keyword's line, which the scan passes
+    /// over. With it, where it was read from: from its `n` to past its
+    /// `endobj`, the reader looking past the parser as the parser's own
+    /// check for `endobj` looks.
     ///
     /// Read by position, it's read in a window from `offset`, at first to
     /// a byte past where it can end ([`Reader::bound`]), so that an object
@@ -4414,16 +4436,29 @@ impl Reader {
             }));
         }
         let mut parser = parser.ciphertext(self.list.encrypted(id));
+        // Where its value starts, at its first token past here.
+        let value = parser.offset();
         let body = w.parsed(parser.body(id, &mut cx.parsed(Some(id))));
         let body = match body {
             Ok(body) => body,
             Err(error) => return Ok(Err(Unread::Parse(error))),
         };
-        let (object, data) = match body {
-            Body::Object(object) => (object, None),
+        let (object, data, end) = match body {
+            Body::Object(object) => (object, None, parser.offset()),
             Body::Stream(head) => {
                 let length = self.length(file, cx, head.dict(), id)?;
                 let declared = length.and_then(|len| head.declared(len));
+                // Where no `/Length` checks, the data of a stream a scan of
+                // the reading ended at its `endobj` ends there, as the scan
+                // ended it, read as the object the scan listed; but where an
+                // `endstream` comes before the scan's start of the data, in
+                // bytes the scan didn't look at for one, the data ends at it,
+                // as any stream's does.
+                let ended = (declared.is_none() && expected.is_some())
+                    .then(|| self.ended_at(offset))
+                    .flatten()
+                    .filter(|&(from, _)| !endstream_before(w, head.start(), from))
+                    .map(|(_, end)| end);
                 let data = match declared {
                     Some(data) => data,
                     None => {
@@ -4434,7 +4469,10 @@ impl Reader {
                             _ => Fault::Length { length },
                         };
                         cx.tell(Some(id), Some(at), fault);
-                        head.scanned()
+                        match ended {
+                            Some(end) => span(head.start(), end.max(head.start())),
+                            None => head.scanned(),
+                        }
                     }
                 };
                 let extent = DataExtent {
@@ -4443,14 +4481,17 @@ impl Reader {
                     indirect_length: (head.dict().get(b"Length"))
                         .is_some_and(|l| matches!(l.value(), Value::Ref(_))),
                 };
-                let object = w.parsed(parser.stream(head, data, &mut cx.parsed(Some(id))));
-                match object {
-                    Ok(object) => (object, Some(extent)),
+                let read = match ended {
+                    Some(_) => self.ended_stream(w, &mut parser, head, data, value, id, cx),
+                    None => (w.parsed(parser.stream(head, data, &mut cx.parsed(Some(id)))))
+                        .map(|object| (object, parser.offset())),
+                };
+                match read {
+                    Ok((object, end)) => (object, Some(extent), end),
                     Err(error) => return Ok(Err(Unread::Parse(error))),
                 }
             }
         };
-        let end = parser.offset();
         let endobj =
             (w.significant(&mut w.tokenizer(end))).filter(|token| token.is_keyword(b"endobj"));
         let start = (w.significant(&mut w.tokenizer(offset))).map_or(offset, |n| w.place(n.start));
@@ -4477,6 +4518,70 @@ impl Reader {
             hash: Record::hash_of(bytes.unwrap_or_default()),
         };
         Ok(Ok((id, object, record)))
+    }
+
+    /// Where a scan of the reading started the data of the stream of the
+    /// object whose `n` starts at byte `offset`, and where it ended it at
+    /// its `endobj`, where it did ([`Reader::ended`]).
+    fn ended_at(&self, offset: usize) -> Option<(usize, usize)> {
+        let i = (self.ended.binary_search_by_key(&offset, |&(at, ..)| at)).ok()?;
+        let (_, from, end) = self.ended[i];
+        Some((from, end))
+    }
+
+    /// Stream `head` of object `id`, read in window `w` by `parser`, its
+    /// value's first token at or past byte `value`, its data `data`, which
+    /// a scan of the reading ended at the stream's `endobj`
+    /// ([`Reader::ended`]): the object [`Parser::stream`] would make, but
+    /// for the `endstream` it wants after the data, which isn't there. So
+    /// it's placed from its dictionary to its data's end, and where the
+    /// reader's tokens don't read `endobj` there, as the scan's, taking
+    /// PDFium's white-space, may, the parser's fault for it is told, as its
+    /// look past `endstream` tells it. With where its bytes end, at the
+    /// data's end; or the parser's error where it would give one, as where
+    /// more of the file could change what the stream's `/Length` reads
+    /// ([`parse::Error::Short`]), so that a window read by position is read
+    /// again in a larger one.
+    #[allow(clippy::too_many_arguments)]
+    fn ended_stream<'w>(
+        &self,
+        w: &Window<'w>,
+        parser: &mut Parser<'w>,
+        head: parse::StreamHead<'w>,
+        data: Span,
+        value: usize,
+        id: ObjectId,
+        cx: &mut Cx,
+    ) -> Result<(Object, usize), parse::Error> {
+        // The parser's own read of the data, which looks for `endstream`
+        // past it, so that the window is read again where more of the file
+        // could change what that look, or the head's `/Length`, read. It
+        // finds the `endobj` there, which is no `endstream`; but where the
+        // data is empty at its start, the scan's end before it, which a
+        // scan of the same `stream` keyword never gives, it reads as the
+        // parser reads it.
+        let probe = w.parsed(parser.stream(head.clone(), data, &mut ()));
+        match probe {
+            Err(parse::Error::Endstream { .. }) => {}
+            Err(error) => return Err(error),
+            Ok(_) => {
+                let object = w.parsed(parser.stream(head, data, &mut cx.parsed(Some(id))))?;
+                return Ok((object, parser.offset()));
+            }
+        }
+        let dict = (w.significant(&mut w.tokenizer(value))).map_or(value, |t| w.place(t.start));
+        let mut stream = pdf_objects::object::Stream::default();
+        stream.dict = head.dict().clone();
+        stream.data = pdf_objects::object::Data::At(data);
+        let object = Object::from(stream).at(span(dict, data.end));
+        if cx.wants {
+            let next = w.significant(&mut w.tokenizer(data.end));
+            if !next.is_some_and(|token| token.is_keyword(b"endobj")) {
+                let fault = parse::Fault::NoEndobj { id };
+                parse::Sink::fault(&mut cx.parsed(Some(id)), span(dict, data.end), fault);
+            }
+        }
+        Ok((object, data.end))
     }
 
     /// A stream's `/Length`: an integer, or a reference to one, read again
@@ -4893,12 +4998,13 @@ struct EndedAt {
 }
 
 /// A stream whose data a scan ended at its `endobj`, or found no end to
-/// and read on through: the object whose stream it is, where the scan
-/// found its `n g obj` before its `stream`, where its data starts, and
-/// where it ended it, none where it found no end.
+/// and read on through: the object whose stream it is, as the scan found
+/// its `n g obj` before its `stream`, and where that `n` starts; where its
+/// data starts, and where it ended it, none where it found no end.
 #[derive(Debug, Clone, Copy)]
 struct Unended {
     id: Option<ObjectId>,
+    offset: Option<usize>,
     start: usize,
     end: Option<usize>,
 }
@@ -4918,6 +5024,35 @@ impl Unended {
             end: self.end,
         }
     }
+}
+
+/// Of `unended`, each stream of an object whose data the scan ended at its
+/// `endobj`: where the object's `n` starts, with where the scan started its
+/// data and where that `endobj` is, by the first `endobj`
+/// ([`Reader::ended`]).
+fn ended_of(unended: &[Unended]) -> Vec<(usize, usize, usize)> {
+    let mut ended: Vec<(usize, usize, usize)> = (unended.iter())
+        .filter_map(|unended| Some((unended.offset?, unended.start, unended.end?)))
+        .collect();
+    ended.sort_unstable_by_key(|&(at, _, end)| (at, end));
+    ended.dedup_by_key(|&mut (at, ..)| at);
+    ended
+}
+
+/// Whether an `endstream` starts in window `w` at or past byte `start`,
+/// where the parser starts a stream's data, and before byte `from`, where
+/// a scan started it, past the end of the `stream` keyword's line, as
+/// PDFium's does: bytes the scan didn't look at for one, which hold data
+/// written on that line. One that starts there ends there too, as the end
+/// of line is in no `endstream`; so where the window doesn't hold the bytes
+/// to `from`, and none is found in what it holds, the read of the data to
+/// the scan's end, past `from`, runs past the window and is read again in
+/// a larger one.
+fn endstream_before(w: &Window<'_>, start: usize, from: usize) -> bool {
+    let bytes = (start.checked_sub(w.base))
+        .zip(from.checked_sub(w.base))
+        .and_then(|(start, from)| w.bytes.get(start..from.min(w.bytes.len())));
+    bytes.is_some_and(|bytes| pdfium::bytes_after(bytes, 0, b"endstream").is_some())
 }
 
 /// The `n g obj` headers, object streams and `trailer` keywords in `file`,
@@ -5380,6 +5515,7 @@ fn scan_from(
                     if let Some(end) = end {
                         unended.push(Unended {
                             id: start.map(|(id, _)| id),
+                            offset: at,
                             start: passed.start,
                             end,
                         });
