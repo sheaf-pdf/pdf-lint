@@ -30,14 +30,17 @@
 //! references that move written anew in place; an update under RC4 that
 //! would put a new plaintext under a keystream the file used is refused,
 //! and written told to reuse keystreams, saying where; and an update after
-//! one whose one fault is the
-//! bytes before its header read back with that fault again, and after one
-//! whose faults are that and where its sections or objects were found
-//! read back with those alone, but what the update's `/Prev` moves of
-//! them; as the input picks, the document written is the file read whole
-//! and taken by the reading, which takes it where it read soundly, and
-//! leaves it as it was where it doesn't; and where a byte of it changed
-//! after it was read, a copy of an object whose bytes hold it is refused.
+//! one whose one fault is the bytes before its header read back with that
+//! fault again, and after one whose faults are that and where its sections
+//! or objects were found read back with those alone, but what the update's
+//! `/Prev` moves of them; as the input picks, the document written is the
+//! file read whole and taken by the reading, which takes it where it read
+//! soundly, and leaves it as it was where it doesn't; and where a byte of
+//! it changed after it was read, a copy of an object whose bytes hold it is
+//! refused. Built with the test writer, as the fuzz targets are, each
+//! write's AES IVs are the test writer's derived ones, so the bytes written
+//! are the input's alone and a failure its input saves runs again; without
+//! it, the operating system's.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -1058,7 +1061,7 @@ fn compared(data: &[u8]) -> [bool; 3] {
             (XrefKind::Stream, Some(sevens_on_one))
         }
     };
-    let own = Encryptor::of(&reading);
+    let own = Encryptor::of(&reading).map(|e| e.map(derived_ivs));
     let way = Way::of(file, choice);
     let (encryptor, opens) = way.encryptor(own.as_ref().ok().and_then(Option::as_ref), password);
     let renumbering = Renumbering::of(byte, &doc, encryptor);
@@ -1155,6 +1158,16 @@ fn adopted(
     }
 }
 
+/// `encryptor`, its writes' AES IVs derived by the test writer where it's
+/// built (pdf-crypt's `Ivs::derived`), from the object and its data, so
+/// that what's written is the input's alone; else as it is, the operating
+/// system's.
+fn derived_ivs(encryptor: Encryptor) -> Encryptor {
+    #[cfg(any(test, feature = "insecure-test-writer"))]
+    let encryptor = encryptor.with_test_ivs(pdf_crypt::Ivs::derived);
+    encryptor
+}
+
 /// How the `write` target encrypts a whole file, as the choice's bits
 /// from the fourth say: as it was read, decrypted, or under a new
 /// encryption of revision 6 for `new`, its randomness the file's bytes,
@@ -1180,7 +1193,7 @@ impl Way {
             let new = Encryptor::create_with(&protection, &mut Drawn::over(file));
             #[cfg(not(any(test, feature = "insecure-test-writer")))]
             let new = Encryptor::create(&protection);
-            new.ok()
+            new.ok().map(derived_ivs)
         });
         Way {
             choice: (choice >> 3) & 3,
@@ -1259,7 +1272,7 @@ fn flipped(
         return false;
     };
     source.flip(at);
-    let own = Encryptor::of(&reading).ok().flatten();
+    let own = Encryptor::of(&reading).ok().flatten().map(derived_ivs);
     let (encryptor, opens) = way.encryptor(own.as_ref(), password);
     let mut out = Vec::new();
     match write::document(&mut out, &doc, encryptor, Some(&reading), options) {

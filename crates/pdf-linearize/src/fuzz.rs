@@ -1494,7 +1494,9 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
 /// then, by the input's length, under a new encryption. Where it's written, it
 /// reads linearized by its password, with the same pages, and every object the
 /// plan numbers is the same value at its number under the numbering, a stream's
-/// data the same; on any refusal, `out` as it was.
+/// data the same; on any refusal, `out` as it was. The new encryption's key and
+/// every AES IV are the operating system's, so the bytes written differ from run
+/// to run, and a failure that hangs on them may not come again from its input.
 #[cfg(feature = "family")]
 pub fn over(data: &[u8]) {
     use pdf_structure::XrefKind;
