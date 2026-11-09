@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.2 (unreleased)
+## 0.1.0-alpha.2 (2026-11-09)
 
 AES's IVs and a new file's key and salts come from the operating system, and the test writer's feature says what it is. Depend on this alpha exactly, `=0.1.0-alpha.2`.
 
