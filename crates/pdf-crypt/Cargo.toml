@@ -15,8 +15,9 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 [dependencies]
 # RustCrypto's, the primitives under the handler, without what it doesn't
 # use (padding schemes, OIDs), each wiping its key schedule or state when
-# it's dropped; HMAC-SHA256, which the test writer derives its IVs with;
-# and zeroize, for the keys and passwords it holds itself.
+# it's dropped; HMAC-SHA256, which a key's check is made with, and the test
+# writer's derived IVs; and zeroize, for the keys and passwords it holds
+# itself.
 aes = { version = "0.9", features = ["zeroize"] }
 cbc = { version = "0.2", default-features = false, features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }

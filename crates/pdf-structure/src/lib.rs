@@ -68,8 +68,8 @@
 //!   [`Encoded`](pdf_crypt::Encoded)), through pdf-crypt's standard
 //!   security handler: object streams decrypted before they're decoded,
 //!   strings decrypted where they are; [`Encryption`] says whether the file
-//!   opened, and by which password. What's decrypted and what's left as
-//!   written is listed in [`read`].
+//!   opened, by which password, and how it's encrypted. What's decrypted
+//!   and what's left as written is listed in [`read`].
 //! - **A revision before an update** read as the file was then
 //!   ([`Options::section`]), or the file as a revision was written, its
 //!   bytes up to the revision's end ([`Revision::end`]) read as a file of
@@ -86,8 +86,9 @@
 //!   copied so once a reading of its file opened again takes its objects
 //!   as its own ([`Reading::adopt`]).
 //! - **Bodies written one at a time** ([`write::Parts`]), for a caller that
-//!   lays a file out itself: each at the number it gives, under the one
-//!   encryption it's given, copied where that's the key it was read under.
+//!   lays a file out itself: each at the number it gives, under the
+//!   encryption [`write::Encryptor::laid_out`] gives for those numbers,
+//!   copied where that's the key it was read under.
 //! - **Sections and object streams written** ([`write`](mod@write)): a
 //!   whole file's cross-reference section or an update's, as a table or a
 //!   stream, a whole file's stream deflated under PNG's Up predictor; and
@@ -98,7 +99,9 @@
 //!   An encrypted file's objects encrypted as pdf-objects' writer writes
 //!   them, encrypted as a reading's file is or under a new AES-256
 //!   encryption ([`write::Encryptor`]), by the same list of what's left in
-//!   the clear that the reader decrypts by ([`write::Encrypting`]).
+//!   the clear that the reader decrypts by ([`write::Encrypting`]). AES's
+//!   IVs come from the operating system, and under RC4 no new plaintext
+//!   goes under a keystream the file used.
 //!
 //! The objects are pdf-objects' types, re-exported as [`pdf_objects`];
 //! a stream that doesn't decode cleanly says so in pdf-filters' error,

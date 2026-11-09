@@ -11,6 +11,7 @@
 //! - **Every revision of the standard handler:** 2 to 4 (RC4, and AES-128
 //!   in version 4), 5 (Adobe's Extension Level 3, AES-256) and 6 (ISO
 //!   32000-2, AES-256), the owner's password or the user's.
+//!   [`Handler::revision`] says which a file is.
 //! - **A password as typed, and the bytes tried:** a [`Password`]'s text
 //!   [`encodings`](Password::encodings) are its SASLprep form (RFC 4013)
 //!   as of Unicode 3.2, and by a later Unicode where that's another, and
@@ -38,11 +39,11 @@
 //!   isn't, a crypt filter's method that isn't one, AES that the file's key
 //!   isn't for, `/Perms` that doesn't match or doesn't confirm the key.
 //! - **Encrypting for a writer:** [`Handler::encrypt_string`] and
-//!   [`Handler::encrypt_stream`] encrypt as the handler decrypts, AES's IV
-//!   the next of a write's [`Ivs`], 16 bytes from the operating system, so
-//!   equal plaintexts encrypt apart and no IV holds anything of the key.
-//!   RC4 takes no IV. A method that isn't one is refused, and so is a draw
-//!   the operating system fails ([`Random`]): nothing is written in the
+//!   [`Handler::encrypt_stream`] encrypt as the handler decrypts. AES's IV
+//!   is the next of a write's [`Ivs`], 16 bytes from the operating system,
+//!   so equal plaintexts encrypt apart and no IV holds anything of the key.
+//!   RC4 takes no IV. A method that isn't one is refused. So is a draw the
+//!   operating system fails ([`Random`]), and nothing is written in the
 //!   clear in its place.
 //! - **Keys kept in, and wiped:** a [`Handler`] decrypts and encrypts with
 //!   the file's key and each object's, and gives out neither, its `Debug`
@@ -60,8 +61,8 @@
 //! dictionary's own, a cross-reference stream, a signature's `/Contents`,
 //! is the caller's to know: pdf-structure's reader decrypts by one list of
 //! it, and its writer encrypts by the same. Under RC4 a changed object
-//! written again at its number and generation leaks what changed
-//! ([`Method::Rc4`]).
+//! written again at a number and generation the file used leaks what
+//! changed ([`Method::Rc4`]).
 //!
 //! The `insecure-test-writer` feature, off by default, is for writing test
 //! files: an encryption dictionary of every revision, its salts and keys
