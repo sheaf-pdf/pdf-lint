@@ -13,21 +13,22 @@
 //! or an object away from where the file says is read where the file
 //! proves it is, and said ([`Recovery`]); or the file is read as PDFium
 //! reads it ([`Recovery::Pdfium`]). Where the sections don't read, it finds
-//! the objects by scanning the file, and says so, passing over each
-//! stream's data as PDFium's scan does: by its `/Length` where `endstream`
+//! the objects by scanning the file, and says so. The scan passes over
+//! each stream's data as PDFium's does: by its `/Length` where `endstream`
 //! follows that, else to the first `endstream` or `endobj` after it, else
-//! nowhere, the scan reading on through the data, the last two said
-//! ([`Fault::StreamEnd`]), a stream it ended at `endobj` read to there
-//! where no `/Length` ends it at `endstream`; and reading on from just
-//! past the `(` of a literal string it finds no `)` closing, which would
-//! take every byte after it, or, as PDFium reads a file, reading the rest
-//! of the file as that string, either said ([`Fault::Unclosed`]), an
-//! object found again past such a string standing over the one before only
-//! where it reads ([`Fault::Earlier`]); and reading an object whose
-//! `n g obj` starts a line inside a string it read, closed late, where it
-//! found its number nowhere else, said ([`Fault::InString`]). An object
-//! that doesn't read says why ([`Unread`]): it doesn't parse, its offset
-//! holds another, or the object stream it's in doesn't decode
+//! nowhere, reading on through the data. It says where it ended a stream
+//! at `endobj` or found no end to one ([`Fault::StreamEnd`]). Where no
+//! `/Length` ends its data at `endstream`, a stream it ended at `endobj` is
+//! read no further. It reads on from just past the `(` of a literal string
+//! it finds no `)` closing, which would take every byte after it. As
+//! PDFium reads a file, it reads the rest of the file as that string
+//! instead. It says either ([`Fault::Unclosed`]). An object found again
+//! past such a string stands over the one before only where it reads
+//! ([`Fault::Earlier`]). Under [`Recovery::Verified`], an object whose
+//! `n g obj` starts a line inside a string closed late is read there,
+//! where the scan found its number nowhere else ([`Fault::InString`]). An
+//! object that doesn't read says why ([`Unread`]): it doesn't parse, its
+//! offset holds another, or the object stream it's in doesn't decode
 //! ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where it is
 //! ([`Unindexed`]). One read from an object stream that starts inside the
 //! bytes of another read from it, where the stream's header puts it, is
@@ -4893,7 +4894,7 @@ impl Unclosed {
 
 /// Which `(` of a file start a literal string that doesn't close: one bit
 /// a byte, made in one pass from the file's end, so that a scan reading on
-/// past each such string reads each byte as a token no more than twice,
+/// past each such string reads each byte as a token at most once more,
 /// however many there are. pdf-tokenizer's rule, restated (ISO 32000-2,
 /// 7.3.4.2): a backslash takes the byte after it, and the parentheses
 /// that aren't so taken nest. Whether a byte is taken so is its own: an
@@ -5093,11 +5094,11 @@ fn endstream_before(w: &Window<'_>, start: usize, from: usize) -> bool {
 /// scan reads on from just past its `(`, the bytes it held read as tokens,
 /// and the first scan counts them, but only those before byte `within`
 /// where that's given, as a reading as of a section takes nothing later
-/// updates wrote ([`Fault::Unclosed`]); each byte is read as a token no
-/// more than twice, however many such strings there are ([`Unclosing`],
-/// made once, for both scans). Under [`Recovery::Pdfium`] the scan reads
-/// the first such string to the file's end, as PDFium's does where it
-/// reads a string, and says so.
+/// updates wrote ([`Fault::Unclosed`]); reading on so reads each byte as
+/// a token at most once more, however many such strings there are
+/// ([`Unclosing`], made once, for both scans). Under [`Recovery::Pdfium`]
+/// the scan reads the first such string to the file's end, as PDFium's
+/// does where it reads a string, and says so.
 ///
 /// A literal string that lacks its own `)` closes late, at a later
 /// string's or one in a stream's data, and the scan reads what's written

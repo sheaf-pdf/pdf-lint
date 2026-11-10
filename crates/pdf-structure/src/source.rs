@@ -620,7 +620,8 @@ pub struct DataExtent {
     /// Where the data is, as the stream's [`Data::At`] has it.
     pub at: Span,
     /// Whether it's as long as the stream's `/Length` says, which ended at
-    /// `endstream`; else it runs up to `endstream`, found by scanning.
+    /// `endstream`; else it runs up to `endstream`, found by scanning, or to
+    /// the `endobj` a scan of the file ended it at ([`Fault::StreamEnd`]).
     pub declared: bool,
     /// Whether the stream's `/Length` is a reference to another object.
     pub indirect_length: bool,
