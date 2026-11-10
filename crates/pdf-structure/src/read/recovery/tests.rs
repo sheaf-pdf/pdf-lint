@@ -2549,6 +2549,66 @@ fn a_reading_as_of_a_section_says_the_objects_strings_give_before_its_end() {
     );
 }
 
+/// A file with three bytes cut out of object 3's `n g obj`, object 4's
+/// string holding object 5's `n g obj` at a line's start, a row for 5 that
+/// lands nowhere, and an update that writes object 3 again and object 5 as
+/// written: read whole, the scan finds 5 as written, which stands, and the
+/// string gives nothing; read as of the section the update follows, what
+/// the update wrote isn't in the reading, so 5 is read in 4's string, and
+/// that's said.
+#[test]
+fn a_reading_as_of_a_section_takes_an_object_a_later_update_writes_from_a_string_before() {
+    let objects = [
+        OBJECTS[0],
+        OBJECTS[1],
+        OBJECTS[2],
+        (4, "(four\n5 0 obj\n(five)\nendobj\n)"),
+    ];
+    let (mut file, places, table) = laid_out(b"", &objects, &|_, at| at, &|at| at);
+    let four = places[3].1 + "4 0 obj\n".len() - 3;
+    let three = file.windows(7).position(|w| w == b"3 0 obj").unwrap();
+    file.drain(three..three + 3);
+    let cut = table - 3;
+    let rows = cut + "xref\n0 5\n".len() + 5 * 20;
+    file.splice(rows..rows, b"0000000001 00000 n \n".iter().copied());
+    for (from, to) in [(&b"0 5\n"[..], &b"0 6\n"[..]), (b"/Size 5", b"/Size 6")] {
+        let at = cut
+            + file[cut..]
+                .windows(from.len())
+                .position(|w| w == from)
+                .unwrap();
+        file[at..at + from.len()].copy_from_slice(to);
+    }
+    let end = file.len();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 792] /Resources << >> >>";
+    let written = end + format!("3 0 obj\n{page}\nendobj\n").len();
+    file.extend_from_slice(
+        format!("3 0 obj\n{page}\nendobj\n5 0 obj\n(five)\nendobj\n").as_bytes(),
+    );
+    let update = file.len();
+    file.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n3 1\n{end:010} 00000 n \ntrailer\n<< /Size 7 /Root 1 0 R /Prev {table} >>\nstartxref\n{update}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let five = |doc: &Document| (doc.record(ObjectId::new(5, 0))).map(|r| (r.origin, r.at.start));
+    let whole = read(&file);
+    assert_eq!(in_string(&whole), []);
+    assert_eq!(five(&whole), Some((Origin::Recovered, written)));
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let mut options = Options::DEFAULT;
+    options.section = Some(reading.update().unwrap().previous);
+    let doc = read_as(&file, &options);
+    let body = objects[3].1;
+    let said = read_in_string(Some(ObjectId::new(4, 0)), four, four + body.len() - 1, 1);
+    assert_eq!(in_string(&doc), [said]);
+    assert_eq!(
+        five(&doc),
+        Some((Origin::Recovered, four + "(four\n".len()))
+    );
+}
+
 /// A file read by its table at a shift, every row 3 bytes past its object
 /// but object 3's, which lands nowhere, so a scan finds 3; object 4's
 /// `/Subject` holding a line `7 0 obj` inside it: with no row for 7, no

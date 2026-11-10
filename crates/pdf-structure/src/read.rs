@@ -5213,7 +5213,8 @@ fn scan_again(
 /// The objects whose `n g obj` starts a line inside a literal string the
 /// first scan read ([`Late`]) taken into `scan` (the first scan's, with
 /// what a second took), each of a number neither scan found elsewhere,
-/// so that none stands over an object a scan found as written; each read
+/// before byte `within` where that's given, so that none stands over an
+/// object a scan found as written in what the reading holds; each read
 /// for its dictionary's `/Type` over its own bytes ([`stream_type`]),
 /// listed as an object stream or a cross-reference stream where it is
 /// one. Each string is left in `scan` with those it gave before byte
@@ -5226,7 +5227,13 @@ fn take_late(file: &[u8], limits: parse::Limits, scan: &mut Scan, within: Option
     if scan.late.is_empty() {
         return;
     }
-    let found: BTreeSet<u32> = scan.objects.iter().map(|(id, _)| id.number).collect();
+    // The numbers a scan found as written, before `within` where that's
+    // given: what's past it, later updates wrote, which a reading as of a
+    // section doesn't hold.
+    let found: BTreeSet<u32> = (scan.objects.iter())
+        .filter(|&&(_, at)| within.is_none_or(|within| at < within))
+        .map(|(id, _)| id.number)
+        .collect();
     // Where the last of each number taken before `within` is, the strings
     // and their objects being in the file's order.
     let mut last: BTreeMap<u32, usize> = BTreeMap::new();
