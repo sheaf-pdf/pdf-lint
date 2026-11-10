@@ -2720,6 +2720,44 @@ fn a_scan_reads_past_strings_that_dont_close_in_a_bounded_number_of_bytes() {
     }
 }
 
+/// A scanned file with no `trailer`, its objects each a dictionary opening
+/// a string that doesn't close, with a cross-reference stream before them
+/// and without: the open's search for a cross-reference stream from the
+/// file's end looks at each object's dictionary over its own bytes alone,
+/// reading only the cross-reference stream whole, so the open reads no
+/// more than four times the file's bytes, where reading each object whole
+/// would read it about as many times as there are objects. With the
+/// stream, it's the trailer, naming the catalog; without, there's none.
+#[test]
+fn a_scanned_files_search_for_a_cross_reference_stream_reads_each_object_over_its_bytes() {
+    let n = 512;
+    let catalog = "%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+    let xref = "2 0 obj\n<< /Type /XRef /Size 3 /W [1 1 1] /Root 1 0 R /Length 3 >>\nstream\n\x00\x00\x01\nendstream\nendobj\n";
+    let objects: String = (0..n)
+        .map(|k| format!("{} 0 obj\n<< /A ( >>\nendobj\n", k + 3))
+        .collect();
+    for with in [true, false] {
+        let stream = if with { xref } else { "" };
+        let file = format!("{catalog}{stream}{objects}").into_bytes();
+        SCAN_READ.with(|read| read.set(0));
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let read = SCAN_READ.with(|read| read.get());
+        assert!(read <= 4 * file.len(), "{with}: {read} of {}", file.len());
+        assert_eq!(reading.ids().count(), n + 1 + usize::from(with), "{with}");
+        let root = reading.trailer().dict().get(b"Root").map(Object::value);
+        match with {
+            true => {
+                assert_eq!(reading.trailer().stream, Some(ObjectId::new(2, 0)));
+                assert_eq!(root, Some(&Value::Ref(ObjectId::new(1, 0))));
+            }
+            false => {
+                assert_eq!(reading.trailer().stream, None);
+                assert_eq!(root, None);
+            }
+        }
+    }
+}
+
 /// Where a scan reads past strings that don't close, its own parses of an
 /// object's head for its `/Length` and of each `trailer`'s dictionary are
 /// read over the bytes up to the `stream` keyword and up to the next string

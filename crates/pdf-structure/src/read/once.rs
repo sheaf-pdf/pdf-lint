@@ -232,11 +232,13 @@ fn a_fault_in_a_cross_reference_stream_that_lists_itself_is_said_once_at_its_own
     said_once_at_its_own_place(&file, 2, 4, None, "the stream");
 }
 
-/// A scanned file whose last object is without its `endobj`: the scan
-/// reads the objects from the file's end until a cross-reference stream,
-/// and the whole read reads each again as an object.
+/// A scanned file whose cross-reference stream is without its `endobj`,
+/// an object after it: the open's search from the file's end reads the
+/// stream, as the trailer, the object after it looked at for its
+/// dictionary's `/Type` alone, and the whole read reads the stream again
+/// as an object.
 #[test]
-fn a_fault_in_an_object_the_scan_reads_is_said_once_at_its_own_place() {
+fn a_fault_in_the_cross_reference_stream_a_scan_finds_is_said_once_at_its_own_place() {
     let trailer = dict! { "Root" => Object::reference(1) };
     let file = fixture::file("1.7", &objects(), trailer, fixture::Xref::Stream);
     // An object after the cross-reference stream, its last, and a
@@ -247,11 +249,11 @@ fn a_fault_in_an_object_the_scan_reads_is_said_once_at_its_own_place() {
         b"5 0 obj\n<< /B 2 >>\nendobj\nstartxref\n9\n%%EOF\n",
     ]
     .concat();
-    let file = unended(&unended(&file, 2), 5);
+    let file = unended(&unended(&file, 2), 4);
     let reading = Reading::open(file.clone(), &Options::DEFAULT).unwrap();
     assert!(reading.trailer().unwritten.is_some());
     assert_eq!(reading.trailer().stream, Some(ObjectId::new(4, 0)));
-    said_once_at_its_own_place(&file, 2, 5, None, "scanned");
+    said_once_at_its_own_place(&file, 2, 4, None, "scanned");
 }
 
 /// A stream whose `/Length` is an object without its `endobj`: the

@@ -1011,9 +1011,9 @@ fn overlaps<'r>(records: impl Iterator<Item = &'r Record>, sink: &mut impl Sink<
 /// its own read does, telling the same faults: the open reads the
 /// encryption dictionary and what its entries refer to, a cross-reference
 /// stream for its rows (which a section that lists itself lists as an
-/// object), and, where the sections don't read, the objects the scan finds
-/// from the file's end until a cross-reference stream; and a stream's read
-/// reads its indirect `/Length`. So a fault one read told on an object not
+/// object), and, where the sections don't read, the cross-reference
+/// streams the scan finds from the file's end; and a stream's read reads
+/// its indirect `/Length`. So a fault one read told on an object not
 /// its own is said where that object's own read says it, in its place in
 /// the whole read's order, and isn't said again where the other read told
 /// it. Where its own read hasn't told one equal to it (the reading hasn't
@@ -3851,12 +3851,14 @@ impl Reader {
     /// the scan ended at its `endobj`, or found no end to and read on
     /// through, said ([`Fault::StreamEnd`]); and the last `trailer` that
     /// reads, or else the last cross-reference stream, looked for from the
-    /// file's end, what reading each object on the way told said, but of a
-    /// stream that awaits the members ([`Reader::awaits_members`]), which
-    /// its own read alone says, as it reads it; either with what it lacks
-    /// of the document's entries from an earlier one ([`Fault::Taken`]),
-    /// the earlier cross-reference streams those the scan found naming
-    /// `/XRef`.
+    /// file's end: each object on the way looked at over its own bytes, to
+    /// the next object listed, for its dictionary's `/Type`
+    /// ([`stream_type`]), and only one whose `/Type` is `/XRef` read, what
+    /// reading it told said; either with what it lacks of the document's
+    /// entries from an earlier one ([`Fault::Taken`]), the earlier
+    /// cross-reference streams those the scan found naming `/XRef`. So an
+    /// object holding a literal string that doesn't close isn't read to the
+    /// file's end for it.
     ///
     /// Read by position, the file is read whole for it.
     fn scan<'f, F: Bytes<'f>>(
@@ -3982,18 +3984,46 @@ impl Reader {
             })
             .collect();
         offsets.sort();
+        // Where each object's bytes end, for a look at its dictionary: at
+        // the next object listed, past those found inside a string closed
+        // late, but for one of those, whose bytes end at the next of any.
+        let inside: BTreeSet<usize> = (self.late.iter())
+            .flat_map(|late| late.objects.iter().map(|&(_, at)| at))
+            .collect();
+        let outside: Vec<usize> = (offsets.iter())
+            .map(|&(at, _)| at)
+            .filter(|at| !inside.contains(at))
+            .collect();
+        let ends = |k: usize, at: usize| match inside.contains(&at) {
+            true => offsets.get(k + 1).map(|&(next, _)| next),
+            false => outside
+                .get(outside.partition_point(|&next| next <= at))
+                .copied(),
+        };
         // The last cross-reference stream, with what it lacks of the
         // document's entries from those before it, newest first, as the
         // last trailer: a linearized file's last may have only /Size, its
         // first page's the rest. Past the last, only those the scan found
-        // naming /XRef are read.
+        // naming /XRef are read. Each is looked at over its own bytes
+        // first, its dictionary's /Type, and read whole only where that's
+        // /XRef: so an object holding a string that doesn't close isn't
+        // read to the file's end once an object.
         let named: BTreeSet<usize> = xref_streams.into_iter().collect();
         let mut found: Option<(ObjectId, Object)> = None;
         let mut taken = Vec::new();
-        for (offset, id) in offsets.into_iter().rev() {
+        for (k, &(offset, id)) in offsets.iter().enumerate().rev() {
             if found.is_some() && !named.contains(&offset) {
                 continue;
             }
+            let bound = ends(k, offset).unwrap_or(file.len());
+            if !matches!(
+                stream_type(file, offset, bound, self.limits.parser),
+                Named::XRef
+            ) {
+                continue;
+            }
+            #[cfg(test)]
+            scan_read(file.len() - offset);
             let mut told = cx.apart();
             let Ok(read) = self.indirect(InMemory(file), &mut told, offset, Some(id));
             match (read, &mut found) {
@@ -4005,7 +4035,6 @@ impl Reader {
                         take_document_keys(last, &earlier.dict, &mut taken, cx.wants);
                     }
                 }
-                (Ok((_, object, _)), None) if self.awaits_members(&object) => continue,
                 _ => {}
             }
             cx.faults.append(&mut told.faults);
@@ -5183,7 +5212,7 @@ fn scan_again(
 /// first scan read ([`Late`]) taken into `scan` (the first scan's, with
 /// what a second took), each of a number neither scan found elsewhere,
 /// so that none stands over an object a scan found as written; each read
-/// for its dictionary's `/Type` over its own bytes ([`late_named`]),
+/// for its dictionary's `/Type` over its own bytes ([`stream_type`]),
 /// listed as an object stream or a cross-reference stream where it is
 /// one. Each string is left in `scan` with those it gave before byte
 /// `within`, where that's given, as a reading as of a section takes
@@ -5206,7 +5235,7 @@ fn take_late(file: &[u8], limits: parse::Limits, scan: &mut Scan, within: Option
                 continue;
             }
             let bound = objects.get(i + 1).map_or(late.end, |&(_, next)| next);
-            match late_named(file, at, bound, limits) {
+            match stream_type(file, at, bound, limits) {
                 Named::ObjStm => scan.object_streams.push((id.number, at)),
                 Named::XRef => scan.xref_streams.push(at),
                 Named::Neither => {}
@@ -5229,11 +5258,13 @@ fn take_late(file: &[u8], limits: parse::Limits, scan: &mut Scan, within: Option
 
 /// Which name the dictionary of the object at byte `at` gives as its
 /// `/Type`, where that object is a stream: read over `file`'s bytes up to
-/// `bound` alone, the next object's `n g obj` found in the same string, or
-/// the string's `)` ([`take_late`]). So each is read over bytes of its own,
+/// `bound` alone. Inside a string closed late, that's the next object's `n
+/// g obj` found in the same string, or the string's `)` ([`take_late`]);
+/// in the open's search for a cross-reference stream, the next object
+/// listed ([`Reader::scan`]). So each is read over bytes of its own,
 /// whatever its dictionary holds; one whose dictionary or `stream` keyword
-/// runs past them is named neither, and listed as an object alone.
-fn late_named(file: &[u8], at: usize, bound: usize, limits: parse::Limits) -> Named {
+/// runs past them is named neither.
+fn stream_type(file: &[u8], at: usize, bound: usize, limits: parse::Limits) -> Named {
     let bytes = &file[..bound];
     #[cfg(test)]
     scan_read(bound - at);

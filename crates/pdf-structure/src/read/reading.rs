@@ -1052,8 +1052,8 @@ impl<S: ByteSource> Reading<S> {
     /// of another read, by stream, then where it starts; and as it
     /// decrypted each object's strings, by number. Each once: what a read
     /// on the way to another object told of it (as the file is opened, of
-    /// the encryption dictionary and what its entries refer to, a
-    /// cross-reference stream and the objects a scan reads; as a stream is
+    /// the encryption dictionary and what its entries refer to, and of a
+    /// cross-reference stream, one a scan finds among them; as a stream is
     /// read, of its indirect `/Length`), which that object's own read tells
     /// too, is said there, and where it hasn't read the object, where it
     /// was told. What was read without keeping it isn't here; nor is any
