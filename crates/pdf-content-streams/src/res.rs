@@ -49,6 +49,7 @@ pub struct ResId(pub u128);
 impl ResId {
     /// The digest of `objects`, a resource's objects as
     /// [`ResBody::Objects`] holds them, every byte of them read once.
+    #[must_use]
     pub fn of(objects: &[Object]) -> ResId {
         let mut bytes = Vec::new();
         for object in objects {
@@ -153,6 +154,7 @@ impl Res {
 
     /// Object `id`, already written ([`ResBody::Written`]): named by its
     /// number, the digest of a reference to it.
+    #[must_use]
     pub fn written(id: ObjectId) -> Res {
         Res {
             id: ResId::of(&[Object::from(id)]),

@@ -134,7 +134,7 @@ pub struct Limits {
 /// ([`Limits::coded_ends`]): PDFium decodes the data to find it, every row,
 /// and ends it where its decoder then stands. Flate's and LZW's ends are
 /// found by decoding them always.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum CodedEnds {
     /// Found in the data's bytes, standing in for PDFium's decoders: a

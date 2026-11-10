@@ -9,6 +9,7 @@ use std::io::Write as _;
 use pdf_objects::{Data, Object, ObjectId, Resolve, Value, dict, serialize};
 
 use crate::Limits;
+use crate::iter;
 use crate::names::ResKind;
 use crate::operator::{FillRule, Paint};
 use crate::res::Res;
@@ -16,6 +17,7 @@ use crate::res::Res;
 /// A color in a device color space, each component from 0 to 1, as the
 /// color operators set it (8.6.8).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Color {
     /// A gray level: `g`, `G`.
     Gray(f32),
@@ -27,13 +29,19 @@ pub enum Color {
 
 impl Color {
     /// An RGB color from components of 0 to 255.
+    #[must_use]
     pub fn rgb8(c: [u8; 3]) -> Color {
         Color::Rgb(c.map(|v| f32::from(v) / 255.0))
     }
 }
 
 /// A blend mode, an ExtGState's `/BM` (11.3.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's blend modes (11.3.5), so
+/// a match on every one is checked by the compiler; another would be a
+/// breaking release. `Compatible`, deprecated, isn't among them: a writer
+/// doesn't write it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Blend {
     /// `Normal`: the source alone.
     Normal,
@@ -136,7 +144,10 @@ fn alpha(a: f32) -> f32 {
 }
 
 /// How a line's ends are drawn, `J`'s operand (8.4.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's three styles (8.4.3.3),
+/// so a match on every one is checked by the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineCap {
     /// 0: squared off at the end.
     Butt,
@@ -147,7 +158,10 @@ pub enum LineCap {
 }
 
 /// How a path's corners are drawn, `j`'s operand (8.4.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's three styles (8.4.3.4),
+/// so a match on every one is checked by the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineJoin {
     /// 0: the edges extended to meet.
     Miter,
@@ -158,7 +172,10 @@ pub enum LineJoin {
 }
 
 /// How text is drawn, `Tr`'s operand, the text rendering mode (9.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's eight modes (9.3.6), so a
+/// match on every one is checked by the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextMode {
     /// 0: filled.
     Fill,
@@ -180,7 +197,8 @@ pub enum TextMode {
 
 impl TextMode {
     /// The mode `n Tr` sets; none for a number that's none.
-    pub fn of(n: i32) -> Option<TextMode> {
+    #[must_use]
+    pub const fn of(n: i32) -> Option<TextMode> {
         Some(match n {
             0 => TextMode::Fill,
             1 => TextMode::Stroke,
@@ -195,7 +213,8 @@ impl TextMode {
     }
 
     /// Whether text shown in it is added to the clip (4 to 7).
-    pub fn clips(self) -> bool {
+    #[must_use]
+    pub const fn clips(self) -> bool {
         matches!(
             self,
             TextMode::FillClip | TextMode::StrokeClip | TextMode::FillStrokeClip | TextMode::Clip
@@ -308,8 +327,8 @@ impl Reserved {
     }
 
     /// Every name it keeps, each in its category.
-    pub fn names(&self) -> impl Iterator<Item = (ResKind, &[u8])> {
-        (self.names.keys()).map(|(kind, name)| (*kind, name.as_slice()))
+    pub fn names(&self) -> iter::ReservedNames<'_> {
+        iter::ReservedNames::new(self.names.keys())
     }
 
     /// Whether `name` may name `res` in `kind`: it binds nothing, or a
@@ -466,6 +485,7 @@ pub struct ContentWriter {
 
 impl ContentWriter {
     /// A writer of no content yet.
+    #[must_use]
     pub fn new() -> ContentWriter {
         ContentWriter::default()
     }
@@ -719,12 +739,14 @@ impl ContentWriter {
     /// The content, and the resources it draws with, named: each `Sh` and
     /// its digest's first six base32 characters, the next name up where
     /// `reserved`, or a name made before, has it.
+    #[must_use]
     pub fn finish(self, reserved: &Reserved) -> (Vec<u8>, ResourceNeeds) {
         self.named(reserved)
     }
 
     /// The content as [`finish`](Self::finish) gives it, the writer kept:
     /// what's written once can be named for each page it goes on.
+    #[must_use]
     pub fn named(&self, reserved: &Reserved) -> (Vec<u8>, ResourceNeeds) {
         let mut taken = BTreeSet::new();
         let needs: Vec<Need> = self

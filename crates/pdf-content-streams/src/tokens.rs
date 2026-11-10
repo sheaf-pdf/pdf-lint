@@ -15,6 +15,10 @@ use crate::limits::Limits;
 use crate::scan::{Raw, next_raw, tokenizer};
 
 /// A token of a content stream.
+///
+/// Exhaustive on purpose: content is operators, operands and inline
+/// images (7.8.2, 8.9.7), so a match on all three is checked by the
+/// compiler; a fourth would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Tok<'a> {
     /// An operator: any word that isn't a number, `true`, `false` or
@@ -191,6 +195,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
 /// A content stream's tokens, each with where it is ([`tokens`]), and
 /// where ISO 32000-2 would read them otherwise told to `S`, a
 /// [`Sink`](crate::fault::Sink): none for `()`.
+#[must_use = "tokens are lazy: nothing is read until one is asked for"]
 #[derive(Debug, Clone)]
 pub struct Tokens<'a, 'r, S = ()> {
     s: &'a [u8],

@@ -14,6 +14,7 @@ use pdf_objects::{Dict, Value};
 
 use crate::error::{Error, ErrorKind};
 use crate::inline::ResCx;
+use crate::iter;
 use crate::limits::Limits;
 use crate::operand::{Operand, Within};
 use crate::operations::Operation;
@@ -38,17 +39,21 @@ impl Properties {
     }
 
     /// The list named `name`.
+    #[must_use]
     pub fn get(&self, name: &[u8]) -> Option<&Dict> {
         self.lists.get(name)
     }
 
     /// Every list, in no order.
-    pub fn lists(&self) -> impl Iterator<Item = &Dict> {
-        self.lists.values()
+    pub fn lists(&self) -> iter::Lists<'_> {
+        iter::Lists::new(self.lists.values())
     }
 }
 
 /// A marked range's property list.
+///
+/// Exhaustive on purpose: a list is written in the content or named in the
+/// resources (14.6.2), so a match on both is checked by the compiler.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Props<'p> {
     /// Written in the content: `/Tag << … >> BDC`.
@@ -61,7 +66,8 @@ pub enum Props<'p> {
 
 impl Props<'_> {
     /// The list itself, wherever it's written.
-    pub fn dict(&self) -> Option<&Dict> {
+    #[must_use]
+    pub const fn dict(&self) -> Option<&Dict> {
         match self {
             Props::Inline(dict) => Some(dict),
             Props::Named(_, dict) => *dict,
@@ -109,6 +115,12 @@ pub struct Marked<'p> {
 /// assert!(list.get(b"Subtype").is_some());
 /// assert_eq!((&found[1].tag[..], found[1].depth), (&b"Span"[..], 1));
 /// ```
+///
+/// # Errors
+///
+/// The [`Error`] that stops its operations, or that [`MarkedNest::step`] or
+/// [`MarkedNest::done`] gives: an `EMC` that ends none, a range past
+/// [`Limits::depth`] or [`Limits::marked`], or one still open at the end.
 pub fn marked<'p>(
     content: &Concat,
     props: &'p Properties,
@@ -162,6 +174,9 @@ pub struct MarkedNest<'p> {
 
 /// What an operation did to marked content: the range it opened or
 /// ended, by its index among those found ([`MarkedNest::get`]).
+///
+/// Exhaustive on purpose: an operation opens a range or ends one, so a
+/// match on both is checked by the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MarkedEvent {
     /// A `BMC` or `BDC` opened it.
@@ -175,7 +190,8 @@ impl<'p> MarkedNest<'p> {
     /// `props`, ranges nested up to [`Limits::depth`] deep, and property
     /// lists read under `limits`, those found holding up to
     /// [`Limits::marked`] values.
-    pub fn new(props: &'p Properties, limits: &Limits) -> MarkedNest<'p> {
+    #[must_use]
+    pub const fn new(props: &'p Properties, limits: &Limits) -> MarkedNest<'p> {
         MarkedNest {
             props,
             limits: *limits,
@@ -196,6 +212,11 @@ impl<'p> MarkedNest<'p> {
     /// written in the content the values reading it built, read under
     /// what's left, so a list past it is read no further; the error is
     /// where its operator is.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Emc`], [`ErrorKind::Depth`] or [`ErrorKind::MarkedSize`],
+    /// where `op` is, as above.
     pub fn step(&mut self, content: &Concat, op: &Operation) -> Result<Option<MarkedEvent>, Error> {
         let at = op.at();
         let name = op.name();
@@ -270,6 +291,7 @@ impl<'p> MarkedNest<'p> {
 
     /// The range at `index` among those found, in the order they open:
     /// one still open spans its start alone.
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&Marked<'p>> {
         self.found.get(index)
     }
@@ -278,13 +300,18 @@ impl<'p> MarkedNest<'p> {
     /// ([`get`](MarkedNest::get)), the outermost first: at content's end,
     /// those it leaves open, which [`done`](MarkedNest::done) gives the
     /// first of.
-    pub fn open(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
-        self.open.iter().map(|&(index, _)| index)
+    pub fn open(&self) -> iter::Open<'_> {
+        iter::Open::new(&self.open)
     }
 
     /// Every range found, once content has ended; an error when one is
     /// still open ([`ErrorKind::Marked`]), where the first of those
     /// starts.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Marked`] where a range is still open, where the first of
+    /// those starts.
     pub fn done(self) -> Result<Vec<Marked<'p>>, Error> {
         match self.open.first() {
             Some(&(_, start)) => Err(Error {

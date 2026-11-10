@@ -17,6 +17,7 @@ use pdf_tokenizer::is_white_space;
 use crate::data::{Places, RunLength, Searched, a85_end, a85_stop, ei_scan, find};
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
+use crate::iter;
 use crate::limits::{CodedEnds, Limits};
 use crate::operand::{Operand, WORD, Within, hex, iso_name, literal, name};
 use crate::scan::{
@@ -38,6 +39,7 @@ pub struct ResCx {
 
 impl ResCx {
     /// No resources: what an annotation's `/DA` is read with.
+    #[must_use]
     pub fn none() -> ResCx {
         ResCx::default()
     }
@@ -85,6 +87,12 @@ impl ResCx {
     /// let image = read.next().unwrap().unwrap().inline_image().unwrap();
     /// assert_eq!(&content[image.data()], b"EI x");
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`] where an object it reads, of the dictionary or a space it
+    /// names, can't be read, but for one that's
+    /// [`Why::Damaged`](pdf_objects::Why::Damaged), which isn't there.
     pub fn read<'o, R: Resolve<'o> + Copy>(
         objects: R,
         resources: Option<&'o Object>,
@@ -130,8 +138,8 @@ impl ResCx {
     /// let read = ResCx::read(nothing, Some(&resources), &limits).unwrap();
     /// assert_eq!(read.capped().collect::<Vec<_>>(), [b"CS0"]);
     /// ```
-    pub fn capped(&self) -> impl Iterator<Item = &[u8]> {
-        self.capped.iter().map(Vec::as_slice)
+    pub fn capped(&self) -> iter::Capped<'_> {
+        iter::Capped::new(self.capped.iter())
     }
 
     /// Color spaces by name, each with its components, which
@@ -231,11 +239,13 @@ impl<'a> InlineImage<'a> {
     /// limits.space_values = 4;
     /// assert_eq!(image(&limits), (3, true));
     /// ```
-    pub fn capped(&self) -> bool {
+    #[must_use]
+    pub const fn capped(&self) -> bool {
         self.capped
     }
 
     /// Where it is, `BI` to `EI`.
+    #[must_use]
     pub fn at(&self) -> Range<usize> {
         self.at.clone()
     }
@@ -243,6 +253,7 @@ impl<'a> InlineImage<'a> {
     /// Where its dictionary is: what's between `BI` and `ID`, or, where
     /// an object that's no name is written for a key, `BI` and that
     /// object, which ends it as PDFium reads it ([`tokens`](crate::tokens)).
+    #[must_use]
     pub fn dict(&self) -> Range<usize> {
         let start = self.at.start + 2;
         // It was read under a cap on depth, so nothing in it is deeper;
@@ -256,6 +267,7 @@ impl<'a> InlineImage<'a> {
     }
 
     /// Where its data is, as [`tokens`](crate::tokens) found it.
+    #[must_use]
     pub fn data(&self) -> Range<usize> {
         self.data.clone()
     }
@@ -280,6 +292,7 @@ impl<'a> InlineImage<'a> {
     /// // No bytes, a size of 0; no stream, a filter PDFium can't decode.
     /// assert_eq!(read[1..], [ImageStream::Empty, ImageStream::Missing]);
     /// ```
+    #[must_use]
     pub fn stream(&self) -> ImageStream {
         match self.found {
             Found::Counted => ImageStream::Data(self.data.clone()),
@@ -311,6 +324,7 @@ impl<'a> InlineImage<'a> {
     /// written twice, the last; and a value PDFium reads as no object (a
     /// keyword, a closer, a brace or a dictionary that's none) takes the
     /// key out, as PDFium takes out a key it reads no value for.
+    #[must_use]
     pub fn entry(&self, key: &[u8]) -> Option<Operand<'a>> {
         let pair = KEYS
             .iter()
@@ -346,6 +360,7 @@ impl<'a> InlineImage<'a> {
     /// `ID` ([`entry`](InlineImage::entry)); and, where an object that's
     /// no name is written for a key, which ends the dictionary as PDFium
     /// reads it, to that object, as ISO 32000-2's keys are names (7.3.7).
+    #[must_use]
     pub fn length(&self) -> Option<u64> {
         let mut dict = ImageDict::default();
         // It was read under a cap on depth, so nothing in it is deeper.

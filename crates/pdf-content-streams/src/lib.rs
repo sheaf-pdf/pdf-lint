@@ -132,6 +132,7 @@ pub mod fault;
 #[doc(hidden)]
 pub mod fuzz;
 mod inline;
+pub mod iter;
 mod limits;
 mod marked;
 mod names;

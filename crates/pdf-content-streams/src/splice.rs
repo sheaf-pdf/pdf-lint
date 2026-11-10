@@ -163,6 +163,15 @@ pub enum SpliceError {
 /// let refused = splice(&page, &res, &limits, &[found[0].span]);
 /// assert!(matches!(refused, Err(SpliceError::Unsafe(_))));
 /// ```
+///
+/// # Errors
+///
+/// [`SpliceError::Unsafe`] for a range whose taking out could change what's
+/// drawn after it, or leaves what's kept read otherwise;
+/// [`SpliceError::Overlap`] and [`SpliceError::OutOfRange`] for ranges that
+/// overlap or aren't in the content; [`SpliceError::Capped`] for content that
+/// holds an image a cap sized; and [`SpliceError::Read`] for content that can't
+/// be read under `limits`.
 pub fn splice<'a>(
     content: &'a Concat,
     res: &ResCx,
@@ -187,6 +196,7 @@ pub struct Spliced {
 
 impl Spliced {
     /// Whether where `span` starts in `content` is taken out.
+    #[must_use]
     pub fn takes(&self, content: &Concat, span: SpanAcross) -> bool {
         let at = content.offset(span.start);
         (self.cuts.iter()).any(|c| at.is_some_and(|at| c.range.contains(&at)))
@@ -217,6 +227,14 @@ impl Spliced {
     /// rewrites, content that holds an image sized by a count past a cap
     /// ([`SpliceError::Capped`]). With rewrites, it costs two readings: of
     /// `content`, and of what it gives.
+    ///
+    /// # Errors
+    ///
+    /// [`SpliceError::OutOfRange`] for another content than the one given
+    /// before; [`SpliceError::Overlap`] for two rewrites of one list; and, with
+    /// rewrites, [`SpliceError::Unsafe`] and [`SpliceError::List`] where what
+    /// it gives reads otherwise, [`SpliceError::Capped`] and
+    /// [`SpliceError::Read`], as above.
     pub fn streams<'a>(
         &self,
         content: &'a Concat,
@@ -264,6 +282,11 @@ impl Spliced {
 /// those readings' bytes, before it's made, and past
 /// [`Limits::splice_reads`] in all it's refused ([`SpliceError::Reads`]),
 /// never a group left in unchecked.
+///
+/// # Errors
+///
+/// [`SpliceError::Read`], [`SpliceError::Capped`] and [`SpliceError::Reads`],
+/// each the call's: a group refused otherwise stays, and is no error.
 pub fn splice_each(
     content: &Concat,
     res: &ResCx,
@@ -397,6 +420,13 @@ pub struct Rewrite {
 /// let made = nothing.streams(&page, &res, &limits, &[rewrite]).unwrap().unwrap();
 /// assert_eq!(&*made[0], b"/Artifact <</Subtype /Watermark>> BDC q 0 g Q EMC");
 /// ```
+///
+/// # Errors
+///
+/// [`SpliceError::List`] where the list can't be written again without the
+/// keys, as above; [`SpliceError::OutOfRange`] where `span` isn't in the
+/// content; and [`SpliceError::Capped`] and [`SpliceError::Read`] as [`splice`]
+/// gives them.
 pub fn without_keys(
     content: &Concat,
     res: &ResCx,

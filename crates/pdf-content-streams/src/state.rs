@@ -101,17 +101,20 @@ impl State {
     };
 
     /// Whether `op` may be used here.
+    #[must_use]
     pub const fn allows(self, op: Operator) -> bool {
         self.after(op).is_some()
     }
 
     /// The operators that may be used here.
+    #[must_use]
     pub const fn allowed(self) -> Operators {
         State::ALLOWED[self as usize]
     }
 
     /// Where content is after `op`, where it may be used here: none where
     /// it may not.
+    #[must_use]
     pub const fn after(self, op: Operator) -> Option<State> {
         // What the content stream level and a text object allow, but the
         // operators that begin or end an object.
@@ -171,6 +174,7 @@ impl State {
     /// allowed where an inline image may begin, and content stays where it
     /// was, as nothing is drawn. Any other operation is its operator
     /// ([`Operation::operator`]).
+    #[must_use]
     pub fn step(self, op: &Operation) -> Option<State> {
         match op.operator() {
             Operator::BeginInlineImage if op.is_inline_image() => self

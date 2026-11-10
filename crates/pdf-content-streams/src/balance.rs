@@ -59,6 +59,10 @@ impl Balance {
 
 /// How `content`'s `q`s and `Q`s balance, its operations read with `res`
 /// under `limits`; the error that stops them, if one does.
+///
+/// # Errors
+///
+/// The [`Error`] that stops its operations ([`operations`](crate::operations)).
 pub fn balance(content: &Concat, res: &ResCx, limits: &Limits) -> Result<Balance, Error> {
     let mut balance = Balance::default();
     for op in content.operations(res, limits) {

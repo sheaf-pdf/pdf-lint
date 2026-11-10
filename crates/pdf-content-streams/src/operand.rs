@@ -62,17 +62,20 @@ impl<'a> Operand<'a> {
     }
 
     /// Its bytes, as written.
-    pub fn bytes(&self) -> &'a [u8] {
+    #[must_use]
+    pub const fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
     /// Where it is in the content read.
-    pub fn range(&self) -> Range<usize> {
+    #[must_use]
+    pub const fn range(&self) -> Range<usize> {
         self.at..self.at + self.bytes.len()
     }
 
     /// The name it is, its `#` escapes decoded as PDFium decodes them
     /// ([`name`]); None when it isn't one.
+    #[must_use]
     pub fn name(&self) -> Option<Cow<'a, [u8]>> {
         name(self.bytes)
     }
@@ -103,6 +106,7 @@ impl<'a> Operand<'a> {
     /// let numbers: Vec<f32> = re.operands().map(|o| o.number()).collect();
     /// assert_eq!(numbers, [0.0, 1.2, 0.0, 0.0, 0.5, 7.0]);
     /// ```
+    #[must_use]
     pub fn number(&self) -> f32 {
         if !self.is_number() {
             return 0.0;
@@ -113,6 +117,7 @@ impl<'a> Operand<'a> {
     /// It read as a PDF object ([`object`]), under `limits`' caps on how
     /// deep arrays and dictionaries nest and how many values it holds;
     /// None for what isn't one.
+    #[must_use]
     pub fn object(&self, limits: &Limits) -> Option<Object> {
         object(self.bytes, limits)
     }
@@ -315,7 +320,7 @@ impl<'a> Operand<'a> {
     /// array's [`object`](Operand::object) finds it. An array of PDFium's
     /// ends at the first `]` read for an element, so `[[1] 2]` is `[[1]`,
     /// its elements `[` and `1`.
-    pub fn elements(&self) -> Elements<'a> {
+    pub const fn elements(&self) -> Elements<'a> {
         let array = match self.bytes {
             [b'[', ..] => self.bytes,
             _ => &[],
@@ -331,17 +336,20 @@ impl<'a> Operand<'a> {
     /// and points only. It may be none as ISO 32000-2 writes a number, as
     /// `--5` isn't, which PDFium reads as 0 ([`number`](Operand::number),
     /// [`object`]).
+    #[must_use]
     pub fn is_number(&self) -> bool {
         !self.bytes.is_empty() && is_number(self.bytes)
     }
 
     /// Whether it's a name: it starts with `/`.
+    #[must_use]
     pub fn is_name(&self) -> bool {
         self.bytes.first() == Some(&b'/')
     }
 
     /// Whether it's a string: it starts with `(`, or with a `<` that
     /// isn't `<<`.
+    #[must_use]
     pub fn is_string(&self) -> bool {
         match self.bytes {
             [b'(', ..] => true,
@@ -351,6 +359,7 @@ impl<'a> Operand<'a> {
     }
 
     /// Whether it's an array: it starts with `[`.
+    #[must_use]
     pub fn is_array(&self) -> bool {
         self.bytes.first() == Some(&b'[')
     }
@@ -358,6 +367,7 @@ impl<'a> Operand<'a> {
     /// Whether it's a dictionary: it starts with `<<`. It may still read as
     /// none, where PDFium reads it so ([`object`]), such as `<< 1`, read to
     /// a key that's no name.
+    #[must_use]
     pub fn is_dict(&self) -> bool {
         self.bytes.starts_with(b"<<")
     }
@@ -374,6 +384,7 @@ impl fmt::Debug for Operand<'_> {
 
 /// An array operand's elements, as written, each where it is
 /// ([`Operand::elements`]).
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Debug, Clone)]
 pub struct Elements<'a> {
     /// The array, from its `[`.
@@ -416,6 +427,7 @@ impl FusedIterator for Elements<'_> {}
 /// assert_eq!(name(b"/F#3").as_deref(), Some(&b"F#3"[..]));
 /// assert_eq!(name(b"12"), None);
 /// ```
+#[must_use]
 pub fn name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
     if operand.first() != Some(&b'/') {
         return None;
@@ -502,6 +514,7 @@ pub(crate) fn iso_name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
 /// assert_eq!(big.as_ref().and_then(Object::as_integer), Some(0));
 /// assert_eq!(object(b"Tj", &limits), None);
 /// ```
+#[must_use]
 pub fn object(operand: &[u8], limits: &Limits) -> Option<Object> {
     Operand {
         bytes: operand,

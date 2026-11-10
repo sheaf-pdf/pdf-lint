@@ -11,6 +11,7 @@ use tinyvec::TinyVec;
 use crate::error::Error;
 use crate::fault::{Fault, Sink};
 use crate::inline::{Found, InlineImage, ResCx};
+use crate::iter;
 use crate::limits::Limits;
 use crate::operand::Operand;
 use crate::operator::Operator;
@@ -58,6 +59,7 @@ pub fn operations<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Opera
 /// A content stream's operations, in order ([`operations`]), and where
 /// ISO 32000-2 would read them otherwise told to `S`, a
 /// [`Sink`](crate::fault::Sink): none for `()`.
+#[must_use = "operations are lazy: nothing is read until one is asked for"]
 #[derive(Debug, Clone)]
 pub struct Operations<'a, 'r, S = ()> {
     tokens: Tokens<'a, 'r, S>,
@@ -177,6 +179,7 @@ pub struct Operation<'a> {
 impl<'a> Operation<'a> {
     /// The operator, as written: `BI` for an inline image, and for a `BI`
     /// that begins none ([`inline_image`](Operation::inline_image)).
+    #[must_use]
     pub fn name(&self) -> &'a [u8] {
         let end = match self.image {
             Some(_) => self.at.start + 2,
@@ -186,27 +189,27 @@ impl<'a> Operation<'a> {
     }
 
     /// Where the operator is, or the inline image, `BI` to `EI`.
+    #[must_use]
     pub fn at(&self) -> Range<usize> {
         self.at.clone()
     }
 
     /// Where the operation is: from its first operand, or its operator
     /// when it has none, to its operator's end.
+    #[must_use]
     pub fn range(&self) -> Range<usize> {
         self.operands.first().map_or(self.at.start, |r| r.start)..self.at.end
     }
 
     /// Its operands, in order, as written.
-    pub fn operands(&self) -> impl ExactSizeIterator<Item = Operand<'a>> + DoubleEndedIterator {
-        let content = self.content;
-        self.operands
-            .iter()
-            .map(move |r| Operand::new(content, r.clone()))
+    pub fn operands(&self) -> iter::Operands<'a, '_> {
+        iter::Operands::new(self.content, &self.operands)
     }
 
     /// Operand `i` from the last, as PDFium takes them: 0 is the last.
     /// None past the first. Operands before those an operator takes are
     /// passed over this way, as PDFium passes them over.
+    #[must_use]
     pub fn arg(&self, i: usize) -> Option<Operand<'a>> {
         let last = self.operands.len().checked_sub(1)?;
         let r = self.operands.get(last.checked_sub(i)?)?;
@@ -218,6 +221,7 @@ impl<'a> Operation<'a> {
     /// image, a keyword written where its dictionary's key should be, as
     /// PDFium reads it ([`tokens`](crate::tokens)): an operation of its
     /// own, with the operands before it, as PDFium clears them after it.
+    #[must_use]
     pub fn inline_image(&self) -> Option<InlineImage<'a>> {
         let (data, found, capped) = self.image.clone()?;
         Some(InlineImage::new(
@@ -233,6 +237,7 @@ impl<'a> Operation<'a> {
     /// `BI`'s, and a word ISO 32000-2's Annex A doesn't name is
     /// [`Operator::Other`]. Where it may be used is
     /// [`State`](crate::State)'s to say ([`State::step`](crate::State::step)).
+    #[must_use]
     pub fn operator(&self) -> Operator {
         Operator::of(self.name())
     }

@@ -73,6 +73,7 @@ pub struct Concat<'a> {
 impl<'a> Concat<'a> {
     /// `streams` as one; one stream is borrowed as it is. There's no cap
     /// here: a page's streams decoded under one are joined by [`Join`].
+    #[must_use]
     pub fn new(streams: &[&'a [u8]]) -> Concat<'a> {
         if let [one] = streams {
             return Concat {
@@ -89,22 +90,26 @@ impl<'a> Concat<'a> {
     }
 
     /// The streams' bytes, joined.
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
     /// How many streams there are.
+    #[must_use]
     pub fn stream_count(&self) -> usize {
         self.starts.len()
     }
 
     /// Stream `i`'s bytes. Panics if there's no stream `i`.
+    #[must_use]
     pub fn stream(&self, i: usize) -> &[u8] {
         &self.bytes[self.range(i)]
     }
 
     /// Where stream `i` is in the joined bytes. Panics if there's no
     /// stream `i`.
+    #[must_use]
     pub fn range(&self, i: usize) -> Range<usize> {
         let end = self
             .starts
@@ -115,6 +120,7 @@ impl<'a> Concat<'a> {
 
     /// Where offset `at` is: past a stream's last byte, the space after it
     /// is that stream's end.
+    #[must_use]
     pub fn pos(&self, at: usize) -> Pos {
         let stream = self
             .starts
@@ -129,6 +135,7 @@ impl<'a> Concat<'a> {
 
     /// Where `pos` is in the joined bytes; None past its stream's end, or
     /// past the last stream.
+    #[must_use]
     pub fn offset(&self, pos: Pos) -> Option<usize> {
         let stream = usize::try_from(pos.stream).ok()?;
         let range = (stream < self.starts.len()).then(|| self.range(stream))?;
@@ -138,12 +145,14 @@ impl<'a> Concat<'a> {
 
     /// Where `span` is in the joined bytes; None when either end is
     /// nowhere, or the end is before the start.
+    #[must_use]
     pub fn offsets(&self, span: SpanAcross) -> Option<Range<usize>> {
         let (start, end) = (self.offset(span.start)?, self.offset(span.end)?);
         (start <= end).then_some(start..end)
     }
 
     /// Where `range` is.
+    #[must_use]
     pub fn span(&self, range: Range<usize>) -> SpanAcross {
         SpanAcross {
             start: self.pos(range.start),
@@ -211,6 +220,7 @@ pub struct Join {
 impl Join {
     /// None yet, under `limits.content`, and under 4 GiB, past which a
     /// place in them can't be counted ([`Pos`]).
+    #[must_use]
     pub fn new(limits: &Limits) -> Join {
         Join {
             bytes: Vec::new(),
@@ -228,12 +238,18 @@ impl Join {
     }
 
     /// The bytes another stream may add, after the space before it.
+    #[must_use]
     pub fn room(&self) -> usize {
         self.cap.saturating_sub(self.with(0))
     }
 
     /// `stream` added, a space before it if it isn't the first; refused
     /// past the cap, with nothing added.
+    ///
+    /// # Errors
+    ///
+    /// [`TooLarge`] where it, and the space before it, would take the joined
+    /// bytes past the cap.
     pub fn push(&mut self, stream: &[u8]) -> Result<(), TooLarge> {
         if self.with(stream.len()) > self.cap {
             return Err(self.too_large());
@@ -256,6 +272,11 @@ impl Join {
     ///
     /// `decode` may only append: the bytes before its room are the
     /// streams joined so far. Panics if it leaves fewer than it was given.
+    ///
+    /// # Errors
+    ///
+    /// [`Pushed::TooLarge`] past the cap, and [`Pushed::Decode`] with
+    /// `decode`'s error.
     pub fn push_with<E>(
         &mut self,
         decode: impl FnOnce(&mut Vec<u8>, usize) -> Result<(), E>,
@@ -286,6 +307,7 @@ impl Join {
     }
 
     /// The streams joined.
+    #[must_use]
     pub fn finish(self) -> Concat<'static> {
         Concat {
             bytes: Cow::Owned(self.bytes),
