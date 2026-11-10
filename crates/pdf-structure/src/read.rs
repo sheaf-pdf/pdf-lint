@@ -1189,12 +1189,13 @@ struct Reader {
     /// `endobj`, an `endstream` coming after it or none ([`Fault::StreamEnd`]),
     /// by where the object's `n` starts, with where the scan started the
     /// data and where that `endobj` is: each such object the scan found,
-    /// where the reading is the scan's, and each whose entry it moved to
-    /// where the scan found it ([`Origin::Recovered`]), where the reading is
-    /// by its sections. The object's own read reads its data to there where
-    /// no `/Length` checks, as the scan read it, unless an `endstream` comes
-    /// before where the scan started it ([`Reader::indirect`]). Set before
-    /// the open reads an object, so that every read of one reads it so.
+    /// where the reading is the scan's, or where a reading by its sections
+    /// scanned the file for an entry at neither place ([`Reader::shifted`]),
+    /// wherever the entries are read. The object's own read reads its data
+    /// to there where no `/Length` checks, as the scan read it, unless an
+    /// `endstream` comes before where the scan started it
+    /// ([`Reader::indirect`]). Set before the open reads an object, so that
+    /// every read of one reads it so.
     ended: Box<[(usize, usize, usize)]>,
     /// Under [`Recovery::Pdfium`], why its sections are to be read and the
     /// file scanned after, as PDFium scans a file whose trailer gives no

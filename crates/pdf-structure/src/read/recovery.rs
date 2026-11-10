@@ -467,13 +467,14 @@ impl Reader {
     /// data it ended at its `endobj`, or found no end to and read on
     /// through, is said to `cx` ([`Fault::StreamEnd`]), the strings
     /// before there it found no `)` closing and read past
-    /// ([`Fault::Unclosed`]), and those whose lines inside them gave it
-    /// objects ([`Fault::InString`]); and each stream whose data it ended at
-    /// its `endobj`, of an entry it moves to where it found it, is kept, so
-    /// that its object's read reads it so ([`Reader::ended`]), while the
-    /// copies it checks are read as that read does. None for any
-    /// section where no section has a shift, the file read as written; each
-    /// section `said` to be elsewhere has its move.
+    /// ([`Fault::Unclosed`]), and those whose lines inside them gave it an
+    /// object an entry is moved to, with those alone ([`Fault::InString`]);
+    /// and each stream whose data it ended at its `endobj` is kept, so that
+    /// its object's read reads it so, wherever the entry is read
+    /// ([`Reader::ended`]), as the file is being scanned, while the copies
+    /// it checks are read as that read does. None for any section where no
+    /// section has a shift, the file read as written; each section `said`
+    /// to be elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
         &mut self,
         file: F,
@@ -497,6 +498,9 @@ impl Reader {
         let mut scan: Option<(Cow<'f, [u8]>, Scanned)> = None;
         // Where the entries moved to the scan's places are.
         let mut recovered = BTreeSet::new();
+        // Where among the faults told the strings whose lines gave the scan
+        // objects go, and those strings.
+        let mut late: (usize, Vec<Late>) = (0, Vec::new());
         let mut shifts = Vec::with_capacity(lists.len());
         for ((rows, _), by) in lists.iter_mut().zip(own) {
             let by = by.unwrap_or(first);
@@ -527,7 +531,7 @@ impl Reader {
                 }
                 if scan.is_none() {
                     let all = file.all()?;
-                    let (found, unended, unclosed, late) =
+                    let (found, unended, unclosed, found_late) =
                         scanned(&all, within, self.limits.parser);
                     for unended in &unended {
                         cx.tell(None, Some(unended.at()), unended.fault());
@@ -535,9 +539,7 @@ impl Reader {
                     if let Some((at, fault)) = unclosed.fault() {
                         cx.tell(None, Some(at), fault);
                     }
-                    for late in &late {
-                        cx.tell(None, Some(late.at()), late.fault());
-                    }
+                    late = (cx.faults.len(), found_late);
                     self.ended = ended_of(&unended).into();
                     scan = Some((all, found));
                 }
@@ -556,12 +558,19 @@ impl Reader {
             }
             shifts.push(Some(shift));
         }
-        // An entry read where its section puts it, or at the shift, is read
-        // as any in a file read by its sections.
-        if !self.ended.is_empty() {
-            let mut ended = std::mem::take(&mut self.ended).into_vec();
-            ended.retain(|(at, ..)| recovered.contains(at));
-            self.ended = ended.into();
+        // The strings whose lines gave the scan an object an entry is moved
+        // to, each with those, said where the scan's other faults are: the
+        // others give the reading nothing.
+        let (at, mut late) = late;
+        late.retain_mut(|late| {
+            late.objects.retain(|(_, at)| recovered.contains(at));
+            !late.objects.is_empty()
+        });
+        if cx.wants {
+            let said = late
+                .iter()
+                .map(|late| (Place::new(None, Some(late.at())), late.fault()));
+            cx.faults.splice(at..at, said);
         }
         Ok(shifts)
     }

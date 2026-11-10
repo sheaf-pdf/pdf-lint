@@ -2114,12 +2114,14 @@ fn a_section_the_scan_ended_at_its_endobj_is_read_again_as_the_open_read_it() {
 /// A file read by its section at a shift, whose stream 5, without
 /// `endstream`, its `/Length` past its data, is at neither its row's place
 /// nor the shift, so a scan finds it, ending its data at its `endobj`;
-/// and whose stream 6, without `endstream` either, is where its row puts
-/// it; the first `endstream` after each 7's: 5's own read takes its data to
-/// its `endobj`, as the scan that found it ended it, every way; 6's is read
-/// as any read by its section, to that first `endstream`.
+/// whose stream 6, without `endstream` either, is where its row puts it;
+/// and whose stream 8, likewise, is at the shift; the first `endstream`
+/// after each 7's. The scan ends 6's and 8's data at their `endobj` too,
+/// and says so of each. So each one's own read takes its data to its
+/// `endobj`, every way, wherever its entry is read, as the file is being
+/// scanned: none runs on to 7's `endstream`.
 #[test]
-fn an_entry_a_scan_finds_ended_at_its_endobj_is_read_to_there_and_one_in_place_as_written() {
+fn each_entry_a_scan_ended_at_its_endobj_is_read_to_there_wherever_it_is() {
     let unended = "<< /Length 999 >>\nstream\nq Q";
     let seven = (7, "<< /Length 3 >>\nstream\nq Q\nendstream");
     let objects = [
@@ -2129,10 +2131,11 @@ fn an_entry_a_scan_finds_ended_at_its_endobj_is_read_to_there_and_one_in_place_a
         OBJECTS[2],
         OBJECTS[3],
         (6, unended),
+        (8, unended),
         seven,
     ];
     let row = |n: u32, at: usize| match n {
-        1 | 2 => at + 5,
+        1 | 2 | 8 => at + 5,
         6 | 7 => at,
         _ => at - 4,
     };
@@ -2141,23 +2144,16 @@ fn an_entry_a_scan_finds_ended_at_its_endobj_is_read_to_there_and_one_in_place_a
     let head = "5 0 obj\n<< /Length 999 >>\nstream\n".len();
     let doc = read(&file);
     reaches_its_page(&doc);
-    assert_eq!(
-        doc.record(ObjectId::new(5, 0)).unwrap().origin,
-        Origin::Recovered
-    );
-    assert_eq!(
-        doc.record(ObjectId::new(6, 0)).unwrap().origin,
-        Origin::File
-    );
-    let five = place(5) + head;
-    assert_eq!(extent(&doc, 5), (five, five + 4, false));
-    let six = place(6) + head;
-    let endstream = place(7) + "7 0 obj\n<< /Length 3 >>\nstream\nq Q\n".len();
-    assert_eq!(extent(&doc, 6), (six, endstream, false));
-    let said = [
-        ended(Some(ObjectId::new(5, 0)), five, Some(five + 4)),
-        ended(Some(ObjectId::new(6, 0)), six, Some(six + 4)),
-    ];
+    let origin = |n: u32| doc.record(ObjectId::new(n, 0)).unwrap().origin;
+    assert_eq!(origin(5), Origin::Recovered);
+    assert_eq!(origin(6), Origin::File);
+    assert_eq!(origin(8), Origin::Shifted { by: -5 });
+    let data = |n: u32| place(n) + head;
+    for n in [5, 6, 8] {
+        assert_eq!(extent(&doc, n), (data(n), data(n) + 4, false), "{n}");
+    }
+    let id = |n: u32| Some(ObjectId::new(n, 0));
+    let said = [5, 6, 8].map(|n| ended(id(n), data(n), Some(data(n) + 4)));
     assert_eq!(stream_ends(&doc), said);
 }
 
@@ -2482,12 +2478,13 @@ fn a_reading_as_of_a_section_says_only_the_strings_before_its_end() {
 }
 
 /// A file with three bytes cut out of object 3's `n g obj`, object 4's
-/// string holding object 5's `n g obj` at a line's start, and an update
-/// that writes object 3 again and object 6, whose string holds object 5's
-/// again: read whole, the scan that looks for object 3 finds 5 in both
-/// strings, the later standing, so only 6's string is said; read as of the
-/// section the update follows, only 4's, before that revision's end, as it
-/// takes nothing later updates wrote, and that one is said.
+/// string holding object 5's `n g obj` at a line's start, a row for 5 that
+/// lands nowhere, and an update that writes object 3 again and object 6,
+/// whose string holds object 5's again: read whole, the scan that looks
+/// for objects 3 and 5 finds 5 in both strings, the later standing, so 5
+/// is read there and only 6's string is said; read as of the section the
+/// update follows, 5 is read in 4's, before that revision's end, as it
+/// takes nothing later updates wrote, and that string is said.
 #[test]
 fn a_reading_as_of_a_section_says_the_objects_strings_give_before_its_end() {
     let objects = [
@@ -2500,6 +2497,21 @@ fn a_reading_as_of_a_section_says_the_objects_strings_give_before_its_end() {
     let four = places[3].1 + "4 0 obj\n".len() - 3;
     let three = file.windows(7).position(|w| w == b"3 0 obj").unwrap();
     file.drain(three..three + 3);
+    // Object 5's row, at byte 1, after the table's five, now 3 bytes
+    // before where they were written.
+    let cut = table - 3;
+    let rows = cut + "xref\n0 5\n".len() + 5 * 20;
+    file.splice(rows..rows, b"0000000001 00000 n \n".iter().copied());
+    let size = |file: &mut Vec<u8>, from: &[u8], to: &[u8]| {
+        let at = cut
+            + file[cut..]
+                .windows(from.len())
+                .position(|w| w == from)
+                .unwrap();
+        file[at..at + from.len()].copy_from_slice(to);
+    };
+    size(&mut file, b"0 5\n", b"0 6\n");
+    size(&mut file, b"/Size 5", b"/Size 6");
     let end = file.len();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 792] /Resources << >> >>";
     let six = end + format!("3 0 obj\n{page}\nendobj\n6 0 obj\n").len();
@@ -2518,6 +2530,11 @@ fn a_reading_as_of_a_section_says_the_objects_strings_give_before_its_end() {
     let id = |n| Some(ObjectId::new(n, 0));
     let said = read_in_string(id(6), six, six + string.len() - 1, 1);
     assert_eq!(in_string(&whole), [said]);
+    let five = |doc: &Document| (doc.record(ObjectId::new(5, 0))).map(|r| (r.origin, r.at.start));
+    assert_eq!(
+        five(&whole),
+        Some((Origin::Recovered, six + "(six\n".len()))
+    );
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     let previous = reading.update().unwrap().previous;
     let mut options = Options::DEFAULT;
@@ -2526,6 +2543,65 @@ fn a_reading_as_of_a_section_says_the_objects_strings_give_before_its_end() {
     let body = objects[3].1;
     let said = read_in_string(id(4), four, four + body.len() - 1, 1);
     assert_eq!(in_string(&doc), [said]);
+    assert_eq!(
+        five(&doc),
+        Some((Origin::Recovered, four + "(four\n".len()))
+    );
+}
+
+/// A file read by its table at a shift, every row 3 bytes past its object
+/// but object 3's, which lands nowhere, so a scan finds 3; object 4's
+/// `/Subject` holding a line `7 0 obj` inside it: with no row for 7, no
+/// entry is moved to it, so 7 isn't read and the string isn't said; with
+/// a row for 7 that lands nowhere, 7's entry is moved there, and the string
+/// is said with it.
+#[test]
+fn a_string_whose_object_no_entry_takes_isnt_said_where_the_sections_read() {
+    let subject = "<< /Subject (a PDF object:\n7 0 obj\n<< /A 1 >>\nendobj\n) >>";
+    let objects = [OBJECTS[0], OBJECTS[1], OBJECTS[2], (4, subject)];
+    for listed in [false, true] {
+        let (mut file, places, _) = laid_out(
+            b"",
+            &objects,
+            &|n, at| match n {
+                3 => 1,
+                _ => at + 3,
+            },
+            &|at| at,
+        );
+        let string = places[3].1 + "4 0 obj\n<< /Subject ".len();
+        let seven = string + "(a PDF object:\n".len();
+        if listed {
+            let table = file.windows(5).position(|w| w == b"xref\n").unwrap();
+            let rows = table + "xref\n0 5\n".len() + 5 * 20;
+            file.splice(
+                rows..rows,
+                b"0000000000 00000 f \n0000000000 00000 f \n0000000001 00000 n \n"
+                    .iter()
+                    .copied(),
+            );
+            let count = table + "xref\n".len();
+            file[count..count + 3].copy_from_slice(b"0 8");
+            let at = file.windows(7).position(|w| w == b"/Size 5").unwrap();
+            file[at..at + 7].copy_from_slice(b"/Size 8");
+        }
+        let doc = read(&file);
+        reaches_its_page(&doc);
+        let id = ObjectId::new(7, 0);
+        let end = string + "(a PDF object:\n7 0 obj\n<< /A 1 >>\nendobj\n".len();
+        match listed {
+            false => {
+                assert_eq!(in_string(&doc), [], "{listed}");
+                assert!(doc.get(id).is_err());
+            }
+            true => {
+                let said = read_in_string(Some(ObjectId::new(4, 0)), string, end, 1);
+                assert_eq!(in_string(&doc), [said]);
+                let record = doc.record(id).unwrap();
+                assert_eq!((record.origin, record.at.start), (Origin::Recovered, seven));
+            }
+        }
+    }
 }
 
 /// A file in the shape of one a writer damaged: object 46's `/Creator`
