@@ -312,6 +312,24 @@ jobs:
       - name: Package, and check what the package holds
         run: just structure-package
 
+  # pdf-content-streams packaged as a publish would, as the tokenizer,
+  # pdf-objects, the filters, pdf-crypt, pdf-color and pdf-structure are: in
+  # a fresh target directory, and what the package holds checked, its
+  # sources, README, CHANGELOG, manifest and lock, nothing else, no
+  # benchmark among them. Every crate of the family it names is on
+  # crates.io.
+  content-streams-package:
+    name: Content streams packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just content-streams-package
+
   # pdf-objects', the filters', pdf-crypt's and pdf-color's public API
   # against their version on crates.io, as the tokenizer's job holds its
   # own, with the same pinned tool on the same pinned Rust. Each is an alpha, which the tool takes to
@@ -401,7 +419,8 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in
       # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
-      # reads, with and without the `image-ends` feature.
+      # reads, with and without the `image-ends` feature, and with it and
+      # `simd`.
       - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test

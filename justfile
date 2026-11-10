@@ -36,7 +36,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -48,7 +48,8 @@ fmt:
 # build a dependent that names no feature gets, which the workspace's
 # unified features hide (its other members turn zlib-rs on), and with
 # zlib-rs their only Flate backend; then the content streams without
-# `image-ends`, which pdf-lint turns on in every workspace build; then
+# `image-ends`, which pdf-lint turns on in every workspace build, and with
+# it and `simd`, which nothing else turns on; then
 # pdf-semantics without its clock, as pdf-lint takes it; then
 # pdf-linearize's engine, without its adapter, and with lopdf's, which
 # nothing else turns on; then pdf-fonts with Adobe's predefined CMaps,
@@ -60,6 +61,7 @@ clippy:
     cargo clippy --locked -p pdf-filters --all-targets -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-content-streams --features simd,image-ends --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
@@ -72,7 +74,8 @@ clippy:
 # streams `image-ends`, as pdf-lint turns it on; then the filters' with
 # their default alone, miniz_oxide, the build a dependent that names no
 # feature gets, which the workspace's unified features hide, and with
-# zlib-rs alone; then the content streams' without `image-ends`; then
+# zlib-rs alone; then the content streams' without `image-ends`, and with
+# it and `simd`, the dependencies' SIMD, which nothing else turns on; then
 # pdf-semantics' without its clock; then pdf-linearize's engine, without
 # its adapter, and with lopdf's; then pdf-fonts' with Adobe's predefined
 # CMaps, and with no feature at all; then pdf-structure's with its spans,
@@ -82,6 +85,7 @@ test:
     cargo test --locked -p pdf-filters
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-content-streams
+    cargo test --locked -p pdf-content-streams --features simd,image-ends
     cargo test --locked -p pdf-semantics --no-default-features
     cargo test --locked -p pdf-linearize --no-default-features
     cargo test --locked -p pdf-linearize --features lopdf
@@ -324,6 +328,9 @@ color-package: (_package "pdf-color" "pdf-objects")
 # version it names isn't published; `_package` says what's checked.
 structure-package: (_package "pdf-structure" "pdf-crypt")
 
+# Package the content streams as a publish would; `_package` says what's checked.
+content-streams-package: (_package "pdf-content-streams")
+
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
 # a pinned build): a break the version doesn't allow fails.
@@ -389,10 +396,11 @@ structure-msrv:
     cargo +{{ structure_msrv }} test --locked -p pdf-structure --features tracing
 
 # Test pdf-content-streams on its oldest Rust, then with `image-ends` on
-# that feature's, each of which must be installed.
+# that feature's, and with it and `simd`, each of which must be installed.
 content-msrv:
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends
+    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends,simd
 
 # Test pdf-semantics on its oldest supported Rust, which must be installed.
 semantics-msrv:
@@ -445,65 +453,69 @@ arlington-msrv:
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
 # `color`, `fonts` and `linearize` from those their own crates' fuzz modules make. The
-# nightly is `fuzz_toolchain`.
+# nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
+# to build the targets with: `simd`, the content streams' dependencies'
+# SIMD, which `content` reaches (`just fuzz content 300 simd`).
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
-fuzz target="tokenize" seconds="60":
+fuzz target="tokenize" seconds="60" features="":
     #!/usr/bin/env bash
     set -euo pipefail
     host=$(rustc -vV | sed -n 's/^host: //p')
+    built=()
+    if [ -n "{{ features }}" ]; then built=(--features "{{ features }}"); fi
     case "{{ target }}" in
     tokenize)
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" tokenize -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" tokenize -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     filters)
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" filters -- -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" filters -- -max_total_time={{ seconds }} -timeout=10
         ;;
     crypt)
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" crypt -- -max_total_time={{ seconds }} -timeout=10 -len_control=0
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" crypt -- -max_total_time={{ seconds }} -timeout=10 -len_control=0
         ;;
     objects)
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" objects -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" objects -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     structure)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/structure
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" structure fuzz/corpus/structure fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" structure fuzz/corpus/structure fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     write)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/write" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_write_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/write
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" write fuzz/corpus/write fuzz/seeds/write -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" write fuzz/corpus/write fuzz/seeds/write -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     content)
         PDF_CONTENT_STREAMS_FUZZ_SEEDS="$PWD/fuzz/seeds/content" cargo test --locked -q -p pdf-content-streams --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/content
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" content fuzz/corpus/content fuzz/seeds/content -- -dict=fuzz/content.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" content fuzz/corpus/content fuzz/seeds/content -- -dict=fuzz/content.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     semantics)
         PDF_SEMANTICS_FUZZ_SEEDS="$PWD/fuzz/seeds/semantics" cargo test --locked -q -p pdf-semantics --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/semantics
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" semantics fuzz/corpus/semantics fuzz/seeds/semantics -- -dict=fuzz/semantics.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" semantics fuzz/corpus/semantics fuzz/seeds/semantics -- -dict=fuzz/semantics.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     color)
         PDF_COLOR_FUZZ_SEEDS="$PWD/fuzz/seeds/color" cargo test --locked -q -p pdf-color --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/color
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" color fuzz/corpus/color fuzz/seeds/color -- -dict=fuzz/color.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" color fuzz/corpus/color fuzz/seeds/color -- -dict=fuzz/color.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     fonts)
         PDF_FONTS_FUZZ_SEEDS="$PWD/fuzz/seeds/fonts" cargo test --locked -q -p pdf-fonts --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/fonts
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" fonts fuzz/corpus/fonts fuzz/seeds/fonts -- -dict=fuzz/fonts.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" fonts fuzz/corpus/fonts fuzz/seeds/fonts -- -dict=fuzz/fonts.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     linearize)
         PDF_LINEARIZE_FUZZ_SEEDS="$PWD/fuzz/seeds/linearize" cargo test --locked -q -p pdf-linearize --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/linearize
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" linearize fuzz/corpus/linearize fuzz/seeds/linearize -- -dict=fuzz/linearize.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" linearize fuzz/corpus/linearize fuzz/seeds/linearize -- -dict=fuzz/linearize.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
         echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize or check" >&2

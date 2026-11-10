@@ -6,7 +6,7 @@
 //! operands, category and clause as a table of the tests' own reads them,
 //! and the graphics objects' states; and over the operations, a page's
 //! `q`/`Q` balance, marked content and resource names, and their steppers
-//! driven by hand.
+//! driven by hand; and the README's licence links.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -6079,4 +6079,22 @@ fn the_passes_give_the_operations_error() {
     assert_eq!(marked(&page, &props, &none, LIM), Err(e));
     assert_eq!(names_used(&page, &none, LIM, &[]), Err(e));
     assert_eq!(kept(&page, &none, LIM, &[]), Err(e));
+}
+
+/// The README is shown on crates.io and docs.rs, where a path beside the
+/// crate reaches nothing: its licence links are the repository's URLs, the
+/// manifest's `repository` and the file, and no link of it climbs out of
+/// the crate.
+#[test]
+fn the_readmes_licence_links_reach_the_files() {
+    let readme = include_str!("../README.md");
+    let repository = env!("CARGO_PKG_REPOSITORY");
+    for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+        let link = format!("[{file}]({repository}/blob/main/{file})");
+        assert!(
+            readme.contains(&link),
+            "{file}'s link isn't the repository's URL"
+        );
+    }
+    assert!(!readme.contains("](../"), "a link climbs out of the crate");
 }

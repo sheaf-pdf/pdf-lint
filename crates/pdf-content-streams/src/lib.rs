@@ -103,11 +103,20 @@
 //!   adds `CodedEnds::Decoded`, which a reading names in
 //!   [`Limits::coded_ends`] to find ends so: turned on, by this crate's
 //!   user or by any other crate built beside it, it changes nothing a
-//!   reading that doesn't name it gives. zune-jpeg is built without its SIMD features
-//!   (`x86`, `neon`), which hold all its `unsafe`, so it builds with
-//!   `unsafe_code` forbidden, as hayro-ccitt does always; a crate built
-//!   beside this one that turns those features on, as Cargo's features
-//!   are additive, turns them on here too.
+//!   reading that doesn't name it gives. zune-jpeg is built without its
+//!   SIMD features (`x86`, `neon`) unless `simd` is on: they hold all its
+//!   `unsafe`, and without them it forbids `unsafe_code`, as hayro-ccitt
+//!   does always. A crate built beside this one that turns those features
+//!   on, as Cargo's features are additive, turns them on here too.
+//! - **`simd`**, off by default: each dependency's SIMD, picked as it runs
+//!   by what the CPU has. memchr searches for an inline image's end
+//!   markers on it, twox-hash digests a resource ([`ResId`]) on it, and,
+//!   with `image-ends`, zune-jpeg decodes on it, its `x86` and `neon`
+//!   features turned on with its `std`, without which it finds none as it
+//!   runs. It changes nothing that's read or digested, only how fast. The
+//!   `unsafe` code it turns on is theirs: zune-jpeg's SIMD paths hold all
+//!   of its own. memchr's `std` is often on already, turned on by another
+//!   crate built beside this one.
 
 mod balance;
 mod data;

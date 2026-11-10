@@ -24,6 +24,10 @@ It's made for what reads content to draw it, check it or edit it, and what write
 
 Off by default. With it, a reading that asks for it (`limits.coded_ends = CodedEnds::Decoded`) decodes an inline image's DCT data on [zune-jpeg](https://crates.io/crates/zune-jpeg), and its CCITTFax data on [hayro-ccitt](https://crates.io/crates/hayro-ccitt), to find where it ends as PDFium's decoders do (above), and what's decoded isn't kept. A reading that doesn't ask finds the ends by the stand-in, as without the feature, so turning it on, in this crate or any other built beside it, changes nothing such a reading gives. PDFium's ends are those of a build with libjpeg-turbo as its JPEG decoder, as the build the crate is held to has it, not its Rust one, which says nothing of where it stopped. Where they part from PDFium's decoders: a JPEG of one scan whose last bits libjpeg-turbo's reader holds before it runs into the marker after them, where it stops short of the marker, zune-jpeg saying nothing of where the last bits end; and, on damaged data, a JPEG with no end of image after its coded data, or cut short, which zune-jpeg reads on through to the next marker, where libjpeg-turbo stops at the bits its last row needed; a JPEG of 12-bit samples, whose header zune-jpeg doesn't read; and fax data hayro-ccitt can't decode, where PDFium's decoder reads on as it can. Fax data is given to hayro-ccitt a window of what follows at a time, from 4 KiB, doubled while it runs into the window's end, so data it can't decode, as it says nothing of how far it read, counts as read to its window's end against `Limits::image_ends`, not to the content's end. A fault counts the data on to its filter's own end of data where the decoder ends it sooner, as ISO 32000-2 does: fax data's end-of-block pattern, a JPEG's end of image. zune-jpeg is built without its SIMD features (`x86`, `neon`), which hold all its `unsafe`, so it builds with `unsafe_code` forbidden, as hayro-ccitt does always; a crate built beside this one that turns those features on turns them on here too, as Cargo's features are additive.
 
+## The `simd` feature
+
+Off by default. With it, the dependencies pick the SIMD the CPU has as they run: memchr for its searches for an inline image's end markers, twox-hash for its digest of a resource (`ResId`), and, with `image-ends`, zune-jpeg for its decoding. Nothing that's read or digested changes, only how fast. The `unsafe` code it turns on is theirs.
+
 ## An example
 
 ```rust
@@ -125,4 +129,4 @@ assert_eq!(renamed.0[0].res, font);
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)) or MIT license ([LICENSE-MIT](../../LICENSE-MIT)) at your option.
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)) or MIT license ([LICENSE-MIT](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-MIT)) at your option.

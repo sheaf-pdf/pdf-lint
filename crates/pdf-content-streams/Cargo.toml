@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-content-streams"
 description = "PDF content streams read as PDFium reads them, written and spliced: tokens and operations, operators typed by Annex A, q/Q balance, marked content and resource names"
 keywords = ["pdf", "content-stream", "lexer", "iso-32000", "writer"]
 categories = ["parser-implementations", "graphics"]
@@ -14,7 +15,9 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 [dependencies]
 # An inline image's end markers searched for in its data (`EI`, ASCIIHex's
 # `>`, a JPEG's end of image), on SIMD where the target has it; its default
-# features off, as a library's, for the application to turn on.
+# features off, as a library's, for the application to turn on. With its
+# `std`, which `simd` turns on, it finds the widest SIMD the CPU has as it
+# runs.
 memchr = { version = "2.8", default-features = false }
 # The components of a color space, by which an unfiltered inline image is
 # sized: an image's own array, and what a resources dictionary names.
@@ -30,11 +33,14 @@ thiserror = "2"
 tinyvec = { version = "1.13", features = ["alloc"] }
 # A resource's name by what it is (`ResId`): XXH3-128 of its objects, fast
 # and the same on every build and platform, so equal resources are named
-# alike wherever content is written; its other hashes and `std` off.
+# alike wherever content is written; its other hashes off. Its `std`, off
+# but with `simd`, digests on the SIMD the CPU has, found as it runs.
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
 # With `image-ends`: DCT data in an inline image decoded to find where it
-# ends, as PDFium decodes it; without its SIMD features (`x86`, `neon`),
-# which hold all its `unsafe`, so it builds with `unsafe_code` forbidden.
+# ends, as PDFium decodes it. Its SIMD features (`x86`, `neon`), which hold
+# all its `unsafe`, are off but with `simd`, which turns on its `std` too:
+# without `std` it finds no SIMD as it runs, and takes it only where the
+# build targets it.
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
 # With `image-ends`: CCITTFax data in an inline image decoded to find where
 # it ends, as PDFium decodes it.
@@ -46,10 +52,33 @@ hayro-ccitt = { version = "0.3", optional = true }
 # decoders only when it asks.
 [features]
 image-ends = ["dep:zune-jpeg", "dep:hayro-ccitt"]
+# The dependencies' SIMD, each chosen as it runs by what the CPU has: the
+# searches' (memchr's `std`), the digest's (twox-hash's `std`), and, with
+# `image-ends`, the JPEG decoder's (zune-jpeg's `x86` and `neon`, and its
+# `std` to find them). Off by default. It changes nothing that's read or
+# digested, only how fast; the `unsafe` code it turns on is theirs.
+simd = ["memchr/std", "twox-hash/std", "zune-jpeg?/std", "zune-jpeg?/x86", "zune-jpeg?/neon"]
 
 # docs.rs documents what the feature adds, beside the default.
 [package.metadata.docs.rs]
 features = ["image-ends"]
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
+
+[dev-dependencies]
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+# The benchmarks: `cargo bench -p pdf-content-streams`. `benches/` is
+# outside `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "content"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
