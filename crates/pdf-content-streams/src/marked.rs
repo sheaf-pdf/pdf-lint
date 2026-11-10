@@ -9,6 +9,7 @@
 //! be told from the content around it.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use pdf_objects::{Dict, Value};
 
@@ -19,12 +20,13 @@ use crate::limits::Limits;
 use crate::operand::{Operand, Within};
 use crate::operations::Operation;
 use crate::page::{Concat, SpanAcross};
+use crate::unprinted::Unprinted;
 
 /// The property lists named marked content names: a page's or a form's
 /// `/Resources /Properties` (14.6.2), each list under its name, decoded,
 /// without its `/`. They're the caller's to read, references resolved as
 /// it reads them: no file is read here.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Properties {
     lists: HashMap<Vec<u8>, Dict>,
 }
@@ -50,11 +52,35 @@ impl Properties {
     }
 }
 
+/// Each list under its name, its strings and a stream's data in memory by
+/// their length, as they may be a page's text.
+impl fmt::Debug for Properties {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lists = (self.lists.iter()).map(|(name, list)| (name, Unprinted(list)));
+        let lists = DebugMap(lists.collect());
+        f.debug_struct("Properties").field("lists", &lists).finish()
+    }
+}
+
+/// Pairs as a map, in the order given.
+struct DebugMap<K, V>(Vec<(K, V)>);
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for DebugMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.iter().map(|(k, v)| (k, v)))
+            .finish()
+    }
+}
+
 /// A marked range's property list.
 ///
 /// Exhaustive on purpose: a list is written in the content or named in the
 /// resources (14.6.2), so a match on both is checked by the compiler.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Its `Debug` gives a list's strings and a stream's data in memory by
+/// their length, as they may be a page's text.
+#[derive(Clone, PartialEq)]
 pub enum Props<'p> {
     /// Written in the content: `/Tag << … >> BDC`.
     Inline(Dict),
@@ -62,6 +88,18 @@ pub enum Props<'p> {
     /// resources have under it ([`Properties`]), if they have one,
     /// borrowed, so ranges naming one list share it.
     Named(Vec<u8>, Option<&'p Dict>),
+}
+
+impl fmt::Debug for Props<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Props::Inline(dict) => f.debug_tuple("Inline").field(&Unprinted(dict)).finish(),
+            Props::Named(name, dict) => (f.debug_tuple("Named"))
+                .field(name)
+                .field(&dict.map(Unprinted))
+                .finish(),
+        }
+    }
 }
 
 impl Props<'_> {

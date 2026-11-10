@@ -1833,7 +1833,7 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
         }
     };
 
-    let shown = |op: &Result<Operation, Error>| format!("{op:?}");
+    let shown = crate::operations::written;
     let plain: Vec<String> = content
         .operations(res, limits)
         .map(|op| shown(&op))

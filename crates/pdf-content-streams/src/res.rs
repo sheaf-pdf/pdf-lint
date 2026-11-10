@@ -2,10 +2,13 @@
 //! and a digest of them, so that equal resources are written once and
 //! named alike.
 
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use pdf_objects::{Data, Dict, Object, ObjectId, Span, Str, Stream, Value};
+
+use crate::unprinted::Unprinted;
 
 /// A resource's name by what it is: a 128-bit digest of its objects. It
 /// names a resource and finds it, but doesn't decide what it is: two
@@ -101,7 +104,10 @@ pub struct Res {
 }
 
 /// What a resource is.
-#[derive(Debug, Clone)]
+///
+/// Its `Debug` gives its objects' strings and streams' data by their
+/// length, as they may be a file's text or decrypted.
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum ResBody {
     /// Its objects: the resource first, then those it reaches. A reference
@@ -110,6 +116,18 @@ pub enum ResBody {
     /// An object the caller has already written, by its number in the
     /// file being written: a page made a form, say.
     Written(ObjectId),
+}
+
+impl fmt::Debug for ResBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResBody::Objects(objects) => {
+                let objects: Vec<_> = objects.iter().map(Unprinted).collect();
+                f.debug_tuple("Objects").field(&objects).finish()
+            }
+            ResBody::Written(id) => f.debug_tuple("Written").field(id).finish(),
+        }
+    }
 }
 
 /// A resource refused by [`Res::of`]: one of its objects holds a stream

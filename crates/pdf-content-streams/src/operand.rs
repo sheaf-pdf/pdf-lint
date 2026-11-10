@@ -14,6 +14,7 @@ use pdf_tokenizer::{Kind, Token};
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
 use crate::scan::{Event, TOP, Visit, element, is_number, tokenizer, walk, walk_from};
+use crate::unprinted::Len;
 
 /// An operand as written, and where it is in the content read: what an
 /// operation's operands are
@@ -374,9 +375,11 @@ impl<'a> Operand<'a> {
 }
 
 impl fmt::Debug for Operand<'_> {
+    /// Its bytes by their length, not the bytes, which are content, and
+    /// where it is.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Operand")
-            .field("bytes", &String::from_utf8_lossy(self.bytes))
+            .field("bytes", &Len(self.bytes.len()))
             .field("range", &self.range())
             .finish()
     }
@@ -385,7 +388,7 @@ impl fmt::Debug for Operand<'_> {
 /// An array operand's elements, as written, each where it is
 /// ([`Operand::elements`]).
 #[must_use = "an iterator is lazy: it gives nothing until asked"]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Elements<'a> {
     /// The array, from its `[`.
     array: &'a [u8],
@@ -393,6 +396,17 @@ pub struct Elements<'a> {
     base: usize,
     /// Where the next element is looked for in `array`.
     at: usize,
+}
+
+impl fmt::Debug for Elements<'_> {
+    /// Where the array is, and where the next element is looked for; not
+    /// its bytes, which are content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Elements")
+            .field("array", &(self.base..self.base + self.array.len()))
+            .field("at", &(self.base + self.at))
+            .finish()
+    }
 }
 
 impl<'a> Iterator for Elements<'a> {

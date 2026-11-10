@@ -18,6 +18,7 @@ use crate::inline::ResCx;
 use crate::limits::Limits;
 use crate::operations::Operations;
 use crate::tokens::{Tokens, tokens};
+use crate::unprinted::Len;
 
 /// The most bytes a place in a page's content can count to: a [`Pos`]'s
 /// 32 bits.
@@ -63,11 +64,22 @@ impl fmt::Display for SpanAcross {
 /// [`Join`] keeps within, refusing past 4 GiB whatever [`Limits::content`]
 /// says; streams of more than 4 GiB together, joined by [`Concat::new`],
 /// which has no cap, give places past it as `u32::MAX`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Concat<'a> {
     bytes: Cow<'a, [u8]>,
     /// Where each stream starts.
     starts: Box<[usize]>,
+}
+
+impl fmt::Debug for Concat<'_> {
+    /// The joined bytes' length, and where each stream starts; not the
+    /// bytes, which are content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Concat")
+            .field("bytes", &Len(self.bytes.len()))
+            .field("starts", &self.starts)
+            .finish()
+    }
 }
 
 impl<'a> Concat<'a> {
@@ -210,11 +222,23 @@ fn small(n: usize) -> u32 {
 /// assert_eq!(page.bytes(), b"q 1 0 0 rg 0 0 9 9 re f Q");
 /// assert_eq!(page.pos(13), Pos { stream: 1, at: 2 });
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Join {
     bytes: Vec<u8>,
     starts: Vec<usize>,
     cap: usize,
+}
+
+impl fmt::Debug for Join {
+    /// The joined bytes' length, where each stream starts and the cap; not
+    /// the bytes, which are content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Join")
+            .field("bytes", &Len(self.bytes.len()))
+            .field("starts", &self.starts)
+            .field("cap", &self.cap)
+            .finish()
+    }
 }
 
 impl Join {

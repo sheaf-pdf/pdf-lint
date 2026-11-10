@@ -4,6 +4,7 @@
 //! of its keys (14.6.2). [`splice`] has the rules.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::ops::Range;
 
 use pdf_tokenizer::is_white_space;
@@ -15,6 +16,7 @@ use crate::operand::{Operand, name, object};
 use crate::page::{Concat, SpanAcross};
 use crate::scan::{Event, Raw, TOP, Visit, next_raw, walk};
 use crate::tokens::{Tok, Tokens};
+use crate::unprinted::Len;
 
 /// Why a splice, or a property list written again, was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
@@ -370,13 +372,26 @@ pub(crate) fn each(
 /// the range, where its list is in the joined bytes of the content it was
 /// read from, and what it's now. [`Spliced::streams`] makes it in that
 /// content's streams.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Rewrite {
     span: SpanAcross,
     pub(crate) range: Range<usize>,
     with: Vec<u8>,
     /// The length of the content's joined bytes.
     of: usize,
+}
+
+impl fmt::Debug for Rewrite {
+    /// Where its list is, and what it's now by its length; not the list,
+    /// whose strings may be a page's text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Rewrite")
+            .field("span", &self.span)
+            .field("range", &self.range)
+            .field("with", &Len(self.with.len()))
+            .field("of", &self.of)
+            .finish()
+    }
 }
 
 /// The property list of the `BDC` that opens `span` in `content` (14.6.2),

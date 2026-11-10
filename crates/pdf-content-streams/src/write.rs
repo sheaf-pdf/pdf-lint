@@ -4,6 +4,7 @@
 //! rules.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io::Write as _;
 
 use pdf_objects::{Data, Object, ObjectId, Resolve, Value, dict, serialize};
@@ -13,6 +14,7 @@ use crate::iter;
 use crate::names::ResKind;
 use crate::operator::{FillRule, Paint};
 use crate::res::Res;
+use crate::unprinted::Len;
 
 /// A color in a device color space, each component from 0 to 1, as the
 /// color operators set it (8.6.8).
@@ -474,13 +476,25 @@ fn told_by_content(object: &Object) -> bool {
 /// );
 /// assert_eq!(content, want.as_bytes());
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ContentWriter {
     out: Vec<u8>,
     /// Where a resource's name goes in `out`, in order: just past its
     /// `/`, and which of `needs` it names.
     slots: Vec<(usize, usize)>,
     needs: Vec<(ResKind, Res)>,
+}
+
+impl fmt::Debug for ContentWriter {
+    /// What's written by its length, where its names go, and the resources
+    /// it draws with; not what's written, which may hold a page's text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContentWriter")
+            .field("out", &Len(self.out.len()))
+            .field("slots", &self.slots)
+            .field("needs", &self.needs)
+            .finish()
+    }
 }
 
 impl ContentWriter {

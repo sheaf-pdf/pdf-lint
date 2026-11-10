@@ -23,6 +23,7 @@ use crate::operand::{Operand, WORD, Within, hex, iso_name, literal, name};
 use crate::scan::{
     Event, Raw, TOP, UNCAPPED, Visit, elements, is_number, is_space, next_raw, walk,
 };
+use crate::unprinted::Len;
 
 /// What reading content needs of the resources it's drawn with: how many
 /// components each named color space has, which sizes an unfiltered
@@ -425,7 +426,7 @@ pub(crate) enum Found {
 /// end, or whose ends have no `EI` after them, is searched and walked
 /// once, not once for each image; and what finding their ends may cost
 /// yet ([`Limits::image_ends`]), with one buffer for what decoding gives.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Images<'a, 'r> {
     s: &'a [u8],
     res: &'r ResCx,
@@ -448,6 +449,18 @@ pub(crate) struct Images<'a, 'r> {
     budget: usize,
     /// What decoding an image's data gives, emptied after each image.
     decoded: Vec<u8>,
+}
+
+impl fmt::Debug for Images<'_, '_> {
+    /// The content's length, what finding ends may cost yet and what's
+    /// decoded by its length; not the content, nor what's decoded from it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Images")
+            .field("content", &Len(self.s.len()))
+            .field("budget", &self.budget)
+            .field("decoded", &Len(self.decoded.len()))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a, 'r> Images<'a, 'r> {

@@ -9,7 +9,7 @@ use std::ops::Range;
 use tinyvec::TinyVec;
 
 use crate::error::Error;
-use crate::fault::{Fault, Sink};
+use crate::fault::{self, Fault, Sink};
 use crate::inline::{Found, InlineImage, ResCx};
 use crate::iter;
 use crate::limits::Limits;
@@ -60,7 +60,7 @@ pub fn operations<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Opera
 /// ISO 32000-2 would read them otherwise told to `S`, a
 /// [`Sink`](crate::fault::Sink): none for `()`.
 #[must_use = "operations are lazy: nothing is read until one is asked for"]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Operations<'a, 'r, S = ()> {
     tokens: Tokens<'a, 'r, S>,
 }
@@ -106,6 +106,15 @@ impl<'a, 'r, S> Operations<'a, 'r, S> {
         Operations {
             tokens: self.tokens.with_sink(sink),
         }
+    }
+}
+
+impl<S> fmt::Debug for Operations<'_, '_, S> {
+    /// Its tokens', which print no content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Operations")
+            .field("tokens", &self.tokens)
+            .finish()
     }
 }
 
@@ -255,12 +264,34 @@ impl<'a> Operation<'a> {
 }
 
 impl fmt::Debug for Operation<'_> {
+    /// Its operator's name, as a fault's text shows a word, and where it
+    /// is and its operands are; not its operands' bytes, which are
+    /// content.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Operation")
-            .field("name", &String::from_utf8_lossy(self.name()))
+            .field("name", &fault::shown(self.name()))
             .field("at", &self.at)
             .field("image", &self.image.as_ref().map(|(data, ..)| data))
             .field("operands", &self.operands.as_slice())
             .finish()
+    }
+}
+
+/// An operation read, or the error reading it gave, as an operation's
+/// `Debug` wrote it before it cut a long name to what a fault's text
+/// shows: its name whole, where it is, its image's data and its operands'
+/// places. What the tests and the fuzz body compare two readings'
+/// operations by.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn written(op: &Result<Operation<'_>, Error>) -> String {
+    match op {
+        Ok(op) => format!(
+            "Ok(Operation {{ name: {:?}, at: {:?}, image: {:?}, operands: {:?} }})",
+            String::from_utf8_lossy(op.name()),
+            op.at,
+            op.image.as_ref().map(|(data, ..)| data),
+            op.operands.as_slice(),
+        ),
+        Err(e) => format!("Err({e:?})"),
     }
 }

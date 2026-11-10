@@ -6,7 +6,8 @@
 //! operands, category and clause as a table of the tests' own reads them,
 //! and the graphics objects' states; and over the operations, a page's
 //! `q`/`Q` balance, marked content and resource names, and their steppers
-//! driven by hand; and the README's licence links.
+//! driven by hand; that no `Debug` prints content, and a fault's text cut
+//! at a character; and the README's licence links.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -3989,9 +3990,10 @@ fn operands_are_read_when_asked() {
             .count(),
         0
     );
+    // Its Debug gives its bytes by their length.
     assert_eq!(
         format!("{:?}", o[3]),
-        r#"Operand { bytes: "(s)", range: 14..17 }"#
+        "Operand { bytes: 3 bytes, range: 14..17 }"
     );
 }
 
@@ -4106,10 +4108,10 @@ fn numbers_iso_doesnt_write_are_faults() {
         words(&found)[6],
         "99999999999999999999 is past the numbers read here"
     );
-    // Its first 40 bytes.
+    // Its first 40 bytes, and a mark where it's cut.
     assert_eq!(
         words(&found)[10],
-        format!("{} is past the numbers read here", "1".repeat(40))
+        format!("{}… is past the numbers read here", "1".repeat(40))
     );
 }
 
@@ -4173,7 +4175,7 @@ fn operands_pdfium_reads_otherwise_are_told() {
         "the string (a\rb) has a CR written in it, read as written, where ISO 32000-2 reads LF"
             .to_string(),
         format!(
-            "/{} is longer than PDFium reads, and read as its first part",
+            "/{}… is longer than PDFium reads, and read as its first part",
             "F".repeat(39)
         ),
     ];
@@ -4950,11 +4952,11 @@ fn a_sink_that_wants_none_is_told_none() {
     let read: Vec<_> = page
         .operations(&none, &Limits::DEFAULT)
         .with_sink(&mut unwanted)
-        .map(|op| format!("{op:?}"))
+        .map(|op| crate::operations::written(&op))
         .collect();
     let plain: Vec<_> = page
         .operations(&none, &Limits::DEFAULT)
-        .map(|op| format!("{op:?}"))
+        .map(|op| crate::operations::written(&op))
         .collect();
     assert_eq!(read, plain);
     page.tokens(&none, &Limits::DEFAULT)
@@ -6401,4 +6403,211 @@ fn the_readmes_licence_links_reach_the_files() {
         );
     }
     assert!(!readme.contains("](../"), "a link climbs out of the crate");
+}
+
+/// A run of bytes the tests write into content, its strings and data,
+/// which no `Debug` of what holds them prints.
+const RUN: &[u8] = b"Zq8XwK3vJ";
+
+/// `debug`, what `what` prints, holds `RUN` neither as text nor as the
+/// numbers a `Debug` of its bytes writes; and holds something.
+fn unprinted(what: &str, debug: &str) {
+    let text = std::str::from_utf8(RUN).unwrap();
+    let numbers = format!("{RUN:?}");
+    let numbers = &numbers[1..numbers.len() - 1];
+    assert!(!debug.is_empty(), "{what} prints nothing");
+    assert!(
+        !debug.contains(text) && !debug.contains(numbers),
+        "{what} prints content: {debug}"
+    );
+}
+
+/// No `Debug` of what holds content prints a byte of it: tokens and
+/// operations, what's read from them, a page's streams joined, faults,
+/// marked content and its property lists, a list written again,
+/// resources and what the writer writes. Content's operators and names
+/// print, as a fault's text shows a word; strings, operands and data print
+/// by their length.
+#[test]
+fn no_debug_prints_content() {
+    let run = std::str::from_utf8(RUN).unwrap();
+    let content = format!(
+        "q /F1 12 Tf ({run}) Tj [({run}) -20 ({run})] TJ \
+         /Span <</ActualText ({run}) /Tool 1>> BDC EMC /Artifact /P0 BDC <{run}> Tj EMC \
+         BI /W 9 /H 1 /BPC 8 /CS /G ID {run} EI Q"
+    );
+    let s = content.as_bytes();
+    let none = ResCx::none();
+    let limits = Limits::DEFAULT;
+
+    // Tokens, as they're read and each one.
+    let mut read = tokens(s, &none, &limits);
+    unprinted("Tokens", &format!("{read:?}"));
+    for (at, tok) in read.by_ref().take(6).map(Result::unwrap) {
+        unprinted("Tok", &format!("{:?}", (at, tok)));
+    }
+    unprinted("Tokens read", &format!("{read:?}"));
+    assert_eq!(
+        format!("{:?}", Tok::Operand(RUN)),
+        "Operand(9 bytes)",
+        "its length"
+    );
+
+    // Operations, their operands, an array's elements and an image.
+    let mut ops = operations(s, &none, &limits);
+    unprinted("Operations", &format!("{ops:?}"));
+    for op in ops.by_ref().map(Result::unwrap) {
+        unprinted("Operation", &format!("{op:?}"));
+        unprinted("iter::Operands", &format!("{:?}", op.operands()));
+        for operand in op.operands() {
+            unprinted("Operand", &format!("{operand:?}"));
+            let mut elements = operand.elements();
+            unprinted("Elements", &format!("{elements:?}"));
+            for element in elements.by_ref() {
+                unprinted("an element", &format!("{element:?}"));
+            }
+        }
+        if let Some(image) = op.inline_image() {
+            unprinted("InlineImage", &format!("{image:?}"));
+        }
+    }
+    unprinted("Operations read", &format!("{ops:?}"));
+
+    // Faults: a hex string's bytes that are no hex digits.
+    let mut kept = Collected::default();
+    tokens(s, &none, &limits)
+        .with_sink(&mut kept)
+        .for_each(drop);
+    assert!(
+        kept.0
+            .iter()
+            .any(|(_, f)| matches!(f, Fault::HexString { .. }))
+    );
+    unprinted("Fault", &format!("{:?}", kept.0));
+
+    // A page's streams, joined and as they're joined.
+    let tail = format!("({run}) Tj");
+    let page = Concat::new(&[s, tail.as_bytes()]);
+    unprinted("Concat", &format!("{page:?}"));
+    let mut join = Join::new(&limits);
+    join.push(s).unwrap();
+    join.push(tail.as_bytes()).unwrap();
+    unprinted("Join", &format!("{join:?}"));
+
+    // Marked content, a named list, and what's stepped through.
+    let named = dict! {
+        "Alt" => Object::bytes(RUN),
+        "Text" => Object::text(run),
+        "Data" => Object::from(pdf_objects::Stream::new(dict! {}, RUN.to_vec())),
+    };
+    let props = Properties::new([(b"P0".to_vec(), named)]);
+    unprinted("Properties", &format!("{props:?}"));
+    unprinted("iter::Lists", &format!("{:?}", props.lists()));
+    let found = marked(&page, &props, &none, &limits).unwrap();
+    assert!(matches!(found[0].props, Some(Props::Inline(_))));
+    assert!(matches!(found[1].props, Some(Props::Named(_, Some(_)))));
+    unprinted("Marked", &format!("{found:?}"));
+    for m in &found {
+        unprinted("Props", &format!("{:?}", m.props));
+    }
+    let mut nest = MarkedNest::new(&props, &limits);
+    for op in page.operations(&none, &limits) {
+        nest.step(&page, &op.unwrap()).unwrap();
+    }
+    unprinted("MarkedNest", &format!("{nest:?}"));
+
+    // A list written again, its strings kept.
+    let keys: [&[u8]; 1] = [b"Tool"];
+    let rewrite = without_keys(&page, &none, &limits, found[0].span, &keys).unwrap();
+    unprinted("Rewrite", &format!("{rewrite:?}"));
+
+    // Resources: a string, text and data in memory, and the copies a
+    // resources dictionary's names give.
+    let res = Res::of([
+        Object::from(dict! { "Alt" => Object::bytes(RUN), "Text" => Object::text(run) }),
+        Object::from(pdf_objects::Stream::new(dict! {}, RUN.to_vec())),
+    ])
+    .unwrap();
+    unprinted("Res", &format!("{res:?}"));
+    unprinted("ResBody", &format!("{:?}", res.body));
+    assert!(format!("{res:?}").contains("Bytes(9 bytes)"));
+    let resources = Object::from(dict! {
+        "Properties" => dict! { "ShAAAAAA" => dict! { "Alt" => Object::bytes(RUN) } },
+    });
+    let nothing = |_: ObjectId| None;
+    let reserved = Reserved::read(nothing, Some(&resources), &limits);
+    unprinted("Reserved", &format!("{reserved:?}"));
+
+    // What the writer writes, and what it draws with.
+    let mut w = ContentWriter::new();
+    w.show(RUN);
+    let list = Res::dict(dict! { "ActualText" => Object::bytes(RUN) }).unwrap();
+    w.begin_marked("Span", list);
+    w.end_marked();
+    w.draw(res);
+    unprinted("ContentWriter", &format!("{w:?}"));
+    let (written, needs) = w.finish(&reserved);
+    assert!(written.windows(RUN.len()).any(|w| w == RUN));
+    unprinted("ResourceNeeds", &format!("{needs:?}"));
+    unprinted("Need", &format!("{:?}", needs.0[0]));
+}
+
+/// A fault's text, what a report shows, gives what's written whole up to
+/// 40 bytes, and past them its first 40 and `…`, cut before a character
+/// that runs past them; bytes that are no character's are U+FFFD, as
+/// before. An operator's name prints so in a `Debug`.
+#[test]
+fn a_faults_text_is_cut_at_a_character_and_marked() {
+    use crate::fault::shown;
+    let a = |n: usize| "a".repeat(n);
+    // 40 bytes whole, 41 cut.
+    assert_eq!(shown(a(40).as_bytes()), a(40));
+    assert_eq!(shown(a(41).as_bytes()), format!("{}…", a(40)));
+    // A three-byte character across byte 40, from 39 or 38: left out.
+    for before in [38, 39] {
+        let across = format!("{}€b", a(before));
+        assert_eq!(shown(across.as_bytes()), format!("{}…", a(before)));
+    }
+    // One that ends at byte 40, more after it: kept.
+    let ends = format!("{}€b", a(37));
+    assert_eq!(shown(ends.as_bytes()), format!("{}€…", a(37)));
+    // A four-byte one across it, from 37.
+    let four = format!("{}😀b", a(37));
+    assert_eq!(shown(four.as_bytes()), format!("{}…", a(37)));
+    // A byte that's no character's at the cut, alone or a lead byte with
+    // no more of its character after it: U+FFFD, then the mark.
+    for after in [&[0xFF, b'b'][..], &[0xE2, b'b', b'c'], &[0xE2, 0x82, b'c']] {
+        let mut bad = a(39).into_bytes();
+        bad.extend_from_slice(after);
+        let lossy = String::from_utf8_lossy(&bad[..40]).into_owned();
+        assert!(lossy.ends_with('\u{FFFD}'), "{bad:?}");
+        assert_eq!(shown(&bad), format!("{lossy}…"), "{bad:?}");
+    }
+    // Shorter than 40, a byte that's no character's: as before.
+    assert_eq!(shown(b"a\xFFb"), "a\u{FFFD}b");
+
+    // As a report shows it.
+    let long = format!("/{}€", a(38));
+    let fault = Fault::Long {
+        written: long.as_bytes(),
+    };
+    assert_eq!(
+        fault.to_string(),
+        format!(
+            "/{}… is longer than PDFium reads, and read as its first part",
+            a(38)
+        )
+    );
+    // An operator's name in a `Debug`.
+    let name = format!("{}€x", a(39));
+    let content = format!("{name} 1 Tz");
+    let none = ResCx::none();
+    let op = operations(content.as_bytes(), &none, &Limits::DEFAULT)
+        .next()
+        .unwrap()
+        .unwrap();
+    let shown_name = format!("{:?}", format!("{}…", a(39)));
+    assert!(format!("{op:?}").contains(&shown_name), "{op:?}");
+    let tok = Tok::Op(name.as_bytes());
+    assert_eq!(format!("{tok:?}"), format!("Op({shown_name})"));
 }

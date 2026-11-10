@@ -2,6 +2,7 @@
 //! written. They're the syntax and nothing of what an operator does, so
 //! an operator nobody knows is a token like any other.
 
+use std::fmt;
 use std::iter::FusedIterator;
 use std::ops::Range;
 
@@ -13,13 +14,17 @@ use crate::fault::{self, Fault, Sink};
 use crate::inline::{Found, Image, Images, ResCx};
 use crate::limits::Limits;
 use crate::scan::{Raw, next_raw, tokenizer};
+use crate::unprinted::Len;
 
 /// A token of a content stream.
 ///
 /// Exhaustive on purpose: content is operators, operands and inline
 /// images (7.8.2, 8.9.7), so a match on all three is checked by the
 /// compiler; a fourth would be a breaking release.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Its `Debug` gives an operator by its name, as a fault's text shows a
+/// word, and an operand by its length, not its bytes, which are content.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Tok<'a> {
     /// An operator: any word that isn't a number, `true`, `false` or
     /// `null`; `BI` among them where it begins no inline image, a keyword
@@ -33,6 +38,16 @@ pub enum Tok<'a> {
     Operand(&'a [u8]),
     /// An inline image, `BI` to `EI`: where its data is.
     InlineImage(Range<usize>),
+}
+
+impl fmt::Debug for Tok<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Tok::Op(name) => f.debug_tuple("Op").field(&fault::shown(name)).finish(),
+            Tok::Operand(bytes) => f.debug_tuple("Operand").field(&Len(bytes.len())).finish(),
+            Tok::InlineImage(data) => f.debug_tuple("InlineImage").field(data).finish(),
+        }
+    }
 }
 
 /// The tokens of `s`, in order, each with where it is. Between them is
@@ -196,7 +211,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
 /// where ISO 32000-2 would read them otherwise told to `S`, a
 /// [`Sink`](crate::fault::Sink): none for `()`.
 #[must_use = "tokens are lazy: nothing is read until one is asked for"]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Tokens<'a, 'r, S = ()> {
     s: &'a [u8],
     at: usize,
@@ -239,6 +254,21 @@ pub struct Tokens<'a, 'r, S = ()> {
     /// isn't read for them. None before the first look.
     high: Option<(usize, usize)>,
     sink: S,
+}
+
+impl<S> fmt::Debug for Tokens<'_, '_, S> {
+    /// Where it is in the content, the content's length, and how it reads;
+    /// not the content, nor the sink.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokens")
+            .field("at", &self.at)
+            .field("content", &Len(self.s.len()))
+            .field("joins", &self.joins.len())
+            .field("limits", &self.lim)
+            .field("images", &self.images)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a, S: Sink<'a>> Iterator for Tokens<'a, '_, S> {
