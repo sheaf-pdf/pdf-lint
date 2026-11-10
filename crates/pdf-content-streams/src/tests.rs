@@ -2609,11 +2609,16 @@ fn flate_and_lzw_data_ends_where_their_decoders_stop() {
             assert_eq!(found, data, "{dict}");
         }
     }
-    // LZW to its code of 257; refused at a code past the table's next
-    // entry, or where nothing's decoded.
+    // LZW to its code of 257, read on past a code past the table's next
+    // entry, as if it were that entry, as PDFium reads it; refused at one
+    // that's the first since a clear code or the data's start, or where
+    // nothing's decoded.
     let s = image("/F /LZW", LZW_EI, " EI");
     assert_eq!(first_image(&s, lim), (LZW_EI, Data(14..21)));
-    for codes in [&[256, 65, 300, 257][..], &[256, 257], &[300, 65, 257]] {
+    let data = lzw9(&[256, 65, 300, 257]);
+    let s = image("/F /LZW", &data, " EI");
+    assert_eq!(first_image(&s, lim), (&data[..], Data(14..19)));
+    for codes in [&[256, 300, 65, 257][..], &[256, 257], &[300, 65, 257]] {
         let data = lzw9(codes);
         let s = image("/F /LZW", &data, " EI");
         assert_eq!(first_image(&s, lim), (&data[..], Missing), "{codes:?}");
@@ -2768,6 +2773,91 @@ fn the_budget_holds_at_its_edge() {
     assert_eq!(first_image(&s, &Limits::DEFAULT).1, ImageStream::Missing);
     let e = error(&s, &budget(64 << 10));
     assert_eq!((e.at, e.kind), (0, ErrorKind::ImageEnds));
+}
+
+/// Behind a predictor, the budget holds where it held without one: what
+/// the decoder gives is spent, so 100 bytes in rows of 30, the last row
+/// short, read where 100 is left, as they did, and stop where 99 is,
+/// TIFF's and PNG's alike (PNG's 100 counting a tag a row), though the
+/// predictor's rows, the short one read with zeros, are past it.
+#[test]
+fn behind_a_predictor_the_budget_holds_at_its_edge() {
+    let budget = |image_ends| Limits {
+        image_ends,
+        ..Limits::DEFAULT
+    };
+    let hundred = stored(&[7; 100], true);
+    for dp in [
+        "<</Predictor 2 /Columns 30>>",
+        "<</Predictor 12 /Columns 30>>",
+        "<</Predictor 15 /Colors 3 /Columns 10>>",
+    ] {
+        let s = [
+            format!("BI /F /Fl /DP {dp} ID ").as_bytes(),
+            &hundred,
+            b" EI",
+        ]
+        .concat();
+        let start = s.len() - 3 - hundred.len();
+        let stream = ImageStream::Data(start..start + hundred.len());
+        assert_eq!(
+            first_image(&s, &budget(100)),
+            (&hundred[..], stream),
+            "{dp}"
+        );
+        let e = error(&s, &budget(99));
+        assert_eq!((e.at, e.kind), (0, ErrorKind::ImageEnds), "{dp}");
+    }
+    // LZW alike: 65 66 258 and 96 bytes more, 100 decoded.
+    let mut codes = vec![256, 65, 66, 258];
+    codes.extend((0..96).map(|i| 1 + i * 2));
+    codes.push(257);
+    let data = lzw9(&codes);
+    let s = [
+        &b"BI /F /LZW /DP <</Predictor 2 /Columns 30>> ID "[..],
+        &data,
+        b" EI",
+    ]
+    .concat();
+    assert_eq!(first_image(&s, &budget(100)).0, &data[..]);
+    assert_eq!(error(&s, &budget(99)).kind, ErrorKind::ImageEnds);
+}
+
+/// What the decoder gives is spent behind a predictor whatever it makes
+/// of it: 100 bytes in a layout PDFium undoes and this crate's predictor
+/// doesn't, of 3 bits a sample, give nothing undone, and still spend 100.
+/// The zeros a short last row is read with are spent too, after the image
+/// they end, for the images after it: 20 of them leave 19 for an image of
+/// 20 where 120 more were left.
+#[test]
+fn behind_a_predictor_what_the_decoder_gives_is_spent() {
+    let budget = |image_ends| Limits {
+        image_ends,
+        ..Limits::DEFAULT
+    };
+    let hundred = stored(&[7; 100], true);
+    let three = [
+        &b"BI /F /Fl /DP <</Predictor 2 /BPC 3 /Columns 2>> ID "[..],
+        &hundred,
+        b" EI ",
+    ]
+    .concat();
+    let s = three.repeat(2);
+    assert_eq!(read(&s, &ResCx::none(), &budget(200)).len(), 2);
+    let e = error(&s, &budget(199));
+    assert_eq!((e.at, e.kind), (three.len(), ErrorKind::ImageEnds));
+    // Rows of 30, the last of 10, read with 20 zeros, then 20 bytes.
+    let rows = [
+        &b"BI /F /Fl /DP <</Predictor 2 /Columns 30>> ID "[..],
+        &hundred,
+        b" EI ",
+    ]
+    .concat();
+    let twenty = [&b"BI /F /Fl ID "[..], &stored(&[7; 20], true), b" EI"].concat();
+    let s = [&rows[..], &twenty].concat();
+    assert_eq!(read(&s, &ResCx::none(), &budget(140)).len(), 2);
+    let e = error(&s, &budget(139));
+    assert_eq!((e.at, e.kind), (rows.len(), ErrorKind::ImageEnds));
 }
 
 /// A deflate bomb, Flate data of 64 KB that decodes to 16 MiB, decodes

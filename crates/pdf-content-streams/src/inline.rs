@@ -9,7 +9,7 @@ use std::fmt;
 use std::ops::Range;
 
 use pdf_color::Spaces;
-use pdf_filters::{Backend, Faults, Predictor, decode_prefix_into};
+use pdf_filters::{Backend, Faults, Layout, Predictor, Reading, decode_prefix_into_as};
 use pdf_objects::{Object, ObjectId, Resolve, Unreadable};
 use pdf_tokenizer::decode::{self, NumberError, pdfium};
 use pdf_tokenizer::is_white_space;
@@ -725,20 +725,30 @@ impl<'a, 'r> Images<'a, 'r> {
     /// Where an image's Flate or LZW data from `start` ends, as PDFium's
     /// `DecodeInlineStream` finds it: where its decoder stops reading it
     /// ([`End::Filter`]), its parameters read as PDFium reads them
-    /// ([`Images::params`]), the data decoded by pdf-filters, Flate's on
-    /// zlib-rs, whose count of what it read is zlib's, and so PDFium's
-    /// ([`Prefix::read`](pdf_filters::Prefix::read)), given all that
-    /// follows, which costs nothing more than what it reads. None
-    /// ([`End::Walk`]) where PDFium refuses the
-    /// parameters, and none, what was read in vain said
-    /// ([`End::Refused`]), where it refuses what decoding gives: an LZW
-    /// code that isn't in the table, LZW data that decodes to nothing, a
-    /// predictor whose rows would be no bytes, a PNG predictor on nothing
-    /// decoded, or an end past 2^31 − 1 bytes. (Of an LZW code that isn't
-    /// in the table, PDFium refuses one that's the first since a clear
-    /// code or the data's start, and reads on past a later one as if it
-    /// were the table's next entry, which isn't followed here.) What
-    /// decoding gives is spent: past the budget, an error at `bi`.
+    /// ([`Images::params`]), the data decoded by pdf-filters as PDFium
+    /// decodes it ([`Reading::Pdfium`]), the image's predictor among it,
+    /// Flate's on zlib-rs, whose count of what it read is zlib's, and so
+    /// PDFium's ([`Prefix::read`](pdf_filters::Prefix::read)), given all
+    /// that follows, which costs nothing more than what it reads. Past an
+    /// LZW code past the table, but the first since a clear code, PDFium's
+    /// decoder reads on as if it were the table's next entry, and so does
+    /// this. None ([`End::Walk`]) where PDFium refuses the parameters, and
+    /// none, what was read in vain said ([`End::Refused`]), where it
+    /// refuses what decoding gives, as pdf-filters says
+    /// ([`Refused`](pdf_filters::Fault::Refused)): an LZW code past the
+    /// table that's the first since a clear code or the data's start, LZW
+    /// data that decodes to nothing, a predictor whose rows would be no
+    /// bytes, a PNG predictor on nothing decoded; or where the end is past
+    /// 2^31 − 1 bytes.
+    ///
+    /// What the decoder gives is spent, whatever the predictor makes of it
+    /// ([`Prefix::decoded`](pdf_filters::Prefix::decoded)): past the
+    /// budget, an error at `bi`. It's decoded under the budget and a byte
+    /// more, so the decoder passing the budget is told from the
+    /// predictor's limit on its rows, which the error doesn't follow. The
+    /// zeros the predictor pads a short last row with are spent too, but
+    /// past the budget they leave none for the images after this one,
+    /// rather than an error at it.
     fn decoded_end(
         &mut self,
         bi: usize,
@@ -750,39 +760,38 @@ impl<'a, 'r> Images<'a, 'r> {
             return Ok(End::Walk);
         };
         let data = &self.s[start..];
-        let lzw = matches!(filter, Filter::Lzw);
-        // The decoder alone: a predictor changes no end, but by refusing.
-        let predictor = Predictor::None;
-        let filter = match lzw {
-            true => pdf_filters::Filter::Lzw {
+        let predictor = params.predictor();
+        let filter = match filter {
+            Filter::Lzw => pdf_filters::Filter::Lzw {
                 early_change: params.early_change,
                 predictor,
             },
-            false => pdf_filters::Filter::Flate { predictor },
+            _ => pdf_filters::Filter::Flate { predictor },
         };
-        let (prefix, decoded) = decode_prefix_into(
+        let (prefix, decoded) = decode_prefix_into_as(
             data,
             filter,
-            self.budget,
+            self.budget.saturating_add(1),
             Backend::ZlibRs,
+            Reading::Pdfium,
             &mut self.decoded,
         );
-        let made = self.decoded.len();
         self.decoded.clear();
-        let faults = decoded.err().map_or_else(Vec::new, |Faults(faults)| faults);
-        let faulted = |is: fn(&pdf_filters::Fault) -> bool| faults.iter().any(|(_, f)| is(f));
-        if faulted(|f| matches!(f, pdf_filters::Fault::Limit)) {
+        if prefix.decoded > self.budget {
             return Err(Error {
                 at: bi,
                 kind: ErrorKind::ImageEnds,
             });
         }
-        self.spend(bi, made)?;
-        let refused = (lzw
-            && (made == 0 || faulted(|f| matches!(f, pdf_filters::Fault::Code { .. }))))
-            || params.refuses(made)
-            || i32::try_from(prefix.read).is_err();
-        if refused {
+        self.spend(bi, prefix.decoded)?;
+        let faults = decoded.err().map_or_else(Vec::new, |Faults(faults)| faults);
+        for (_, fault) in &faults {
+            if let pdf_filters::Fault::PartialRow { missing } = *fault {
+                self.budget = self.budget.saturating_sub(missing);
+            }
+        }
+        let refused = (faults.iter()).any(|(_, f)| *f == pdf_filters::Fault::Refused);
+        if refused || i32::try_from(prefix.read).is_err() {
             return Ok(End::Refused(prefix.read));
         }
         Ok(End::Filter(start + prefix.read, prefix.read))
@@ -1085,7 +1094,8 @@ impl Walks {
 }
 
 /// What an image's `/DecodeParms` say to PDFium's Flate and LZW decoders,
-/// as PDFium reads them ([`Images::params`]).
+/// as PDFium reads them ([`Images::params`]): `/Colors`,
+/// `/BitsPerComponent` and `/Columns` none negative.
 #[derive(Debug, Clone, Copy)]
 struct Params {
     predictor: i32,
@@ -1105,17 +1115,19 @@ impl Params {
         columns: 1,
     };
 
-    /// Whether PDFium's predictor refuses what its decoder gave, `made`
-    /// bytes (`ApplyPredictor`): PNG's (a `/Predictor` of 10 or more) where
-    /// a row would be no bytes, or on nothing; TIFF's (2) where a row would
-    /// be no bytes. Any other predicts nothing.
-    fn refuses(&self, made: usize) -> bool {
-        let row =
-            i64::from(self.columns) * i64::from(self.colors) * i64::from(self.bits_per_component);
+    /// The predictor PDFium's decoder undoes (its `GetPredictor`): PNG's
+    /// for a `/Predictor` of 10 or more, TIFF's for 2, none for any other,
+    /// rows of `/Colors`, `/BitsPerComponent` and `/Columns`.
+    fn predictor(&self) -> Predictor {
+        let layout = Layout {
+            colors: self.colors.unsigned_abs(),
+            bits_per_component: self.bits_per_component.unsigned_abs(),
+            columns: self.columns.unsigned_abs(),
+        };
         match self.predictor {
-            10.. => row == 0 || made == 0,
-            2 => row == 0,
-            _ => false,
+            10.. => Predictor::Png(layout),
+            2 => Predictor::Tiff(layout),
+            _ => Predictor::None,
         }
     }
 }

@@ -74,14 +74,15 @@ pub enum Tok<'a> {
 ///   or the last whole code before the data's end. The first of an array
 ///   of filters, with the first object of an array of `/DecodeParms`, or
 ///   its one with its dictionary, each parameter as PDFium reads an
-///   integer from it (`/BPC` read as `/BitsPerComponent`). Where PDFium
-///   refuses the parameters (`/Colors`, `/BitsPerComponent` or `/Columns`
-///   negative, or multiplied past 2^31 − 8) or what decoding gives (an
-///   LZW code that isn't in the table yet, LZW data that decodes to
-///   nothing, a predictor whose rows would be no bytes, a PNG predictor
-///   on nothing): none. (Past an LZW code that isn't in its table, but
-///   for the first since a clear code, PDFium's decoder reads on as if it
-///   were the next entry, which isn't followed.)
+///   integer from it (`/BPC` read as `/BitsPerComponent`). Past an LZW
+///   code that isn't in its table, but the first since a clear code,
+///   PDFium's decoder reads on as if it were the next entry, and so does
+///   this. Where PDFium refuses the parameters (`/Colors`,
+///   `/BitsPerComponent` or `/Columns` negative, or multiplied past
+///   2^31 − 8) or what decoding gives (an LZW code past the table that's
+///   the first since a clear code, LZW data that decodes to nothing, a
+///   predictor whose rows would be no bytes, a PNG predictor on nothing):
+///   none.
 /// - `/DCT` and `/CCF`, which PDFium decodes to find their end too: by a
 ///   stand-in, unless the reading asks for them to be decoded
 ///   ([`Limits::coded_ends`], [`CodedEnds`](crate::CodedEnds)'

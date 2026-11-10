@@ -38,7 +38,8 @@ pub struct Limits {
     /// What finding inline images' data's ends may cost in one reading of
     /// content ([`tokens`](crate::tokens)), in bytes, in all: 256 MiB by
     /// default. Where PDFium decodes an image's data to find where it ends
-    /// (Flate and LZW), what decoding gives counts; where DCT and CCITTFax
+    /// (Flate and LZW), what the decoder gives counts, and the zeros its
+    /// predictor pads a short last row with; where DCT and CCITTFax
     /// data is decoded too ([`CodedEnds`]' `Decoded`, with the
     /// `image-ends` feature), what decoding a JPEG holds, its output and,
     /// decoding several scans, its coefficients, counted from its header

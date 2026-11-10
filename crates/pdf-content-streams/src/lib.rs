@@ -18,8 +18,8 @@
 //!   counted by [pdf-color](https://crates.io/crates/pdf-color) as PDFium
 //!   counts it ([`ResCx`]): Flate and LZW data decoded
 //!   to where the decoder stops reading it, as PDFium decodes it, by
-//!   [pdf-filters](https://crates.io/crates/pdf-filters), Flate on
-//!   zlib-rs; DCT and CCITTFax data, which PDFium decodes too, by a
+//!   [pdf-filters](https://crates.io/crates/pdf-filters) under its PDFium
+//!   reading, Flate on zlib-rs; DCT and CCITTFax data, which PDFium decodes too, by a
 //!   stand-in, or so where a reading asks for it ([`CodedEnds`], with the
 //!   `image-ends` feature, below; [`tokens`] says where). What an operator
 //!   does is no part of it, so one nobody knows is a token like any other.
