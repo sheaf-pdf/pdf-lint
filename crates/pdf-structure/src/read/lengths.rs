@@ -517,9 +517,10 @@ fn a_chain_of_length_references_isnt_followed() {
 /// [`a_length_in_an_object_stream`] scanned, its `startxref` giving no
 /// section, and the content stream written again after the cross-reference
 /// stream, so that the open's search for a trailer from the file's end
-/// reads it first, before the object stream's members are listed: every
-/// read after the open reads its `/Length` from the object stream, every
-/// way alike, and nothing the open's read of it told is said.
+/// meets it first, before the object stream's members are listed, and
+/// looks at its dictionary alone, as it isn't a cross-reference stream:
+/// every read after the open reads its `/Length` from the object stream,
+/// every way alike, and nothing an open's read of it would tell is said.
 #[test]
 fn a_scanned_files_stream_whose_length_is_in_an_object_stream_is_read_by_it() {
     let file = a_length_in_an_object_stream();
