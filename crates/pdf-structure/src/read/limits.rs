@@ -226,7 +226,10 @@ pub enum Recovery {
     /// crate's reader, by ISO 32000-2's rules, so a damaged dictionary
     /// PDFium's parser reads past doesn't read here; and the scan reads
     /// tokens, not objects, so a `(` PDFium passes over where a
-    /// dictionary's key goes is a string here. And a file PDFium
+    /// dictionary's key goes is a string here. A stream's data written on
+    /// its `stream` keyword's line, its `endstream` there too, is read to
+    /// that `endstream`, where PDFium starts the data on the next line and
+    /// reads none. And a file PDFium
     /// doesn't open, one without `%PDF-` or an encrypted one no password
     /// given opens, is read all the same, as far as it reads. A few edges
     /// of how PDFium finds and lists sections are read by this crate's

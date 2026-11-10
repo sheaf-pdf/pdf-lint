@@ -2940,6 +2940,52 @@ fn an_entry_a_scan_finds_again_past_a_string_read_past_is_read_where_it_reads() 
     assert_eq!(earlier(&doc), [read_earlier(3, places[2].1, later)]);
 }
 
+/// Scanned files whose stream 4, its `/Length` past its data, has its
+/// `endobj` before its first `endstream`, a `(` that doesn't close between
+/// them; then page 3 again, past that `endstream`, cut short or whole. The
+/// scan ends 4's data at its `endobj` and reads on past the string, then
+/// meets that `endstream` between objects and takes back what it found
+/// inside: the string, said nowhere, and the stream's end, so 4's data
+/// runs to the `endstream`, the string's `(` among it. Page 3 found past
+/// there is past the string all the same, which a scan that read no
+/// further than it doesn't reach. So it stands only where it reads: cut
+/// short, the page found before is read, and that's said, though no string
+/// is; whole, it's read, as a later copy is, and nothing is said.
+#[test]
+fn an_object_found_again_past_data_taken_back_stands_only_where_it_reads() {
+    let four = "4 0 obj\n<< /Length 99 >>\nstream\nq Q\nendobj\n(open\nendstream\n";
+    for (copy, whole) in [(CUT_PAGE, false), (WIDE_PAGE, true)] {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let mut places = Vec::new();
+        for &(n, text) in &OBJECTS[..3] {
+            places.push((n, file.len()));
+            file.extend_from_slice(format!("{n} 0 obj\n{text}\nendobj\n").as_bytes());
+        }
+        let data = file.len() + "4 0 obj\n<< /Length 99 >>\nstream\n".len();
+        file.extend_from_slice(four.as_bytes());
+        let endstream = file.len() - "endstream\n".len();
+        let later = file.len();
+        file.extend_from_slice(copy.as_bytes());
+        file.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n");
+        let doc = read(&file);
+        assert_eq!(unclosed(&doc), [], "{whole}");
+        assert_eq!(stream_ends(&doc), [], "{whole}");
+        assert_eq!(extent(&doc, 4), (data, endstream, false), "{whole}");
+        let three = doc.record(ObjectId::new(3, 0)).unwrap().at.start;
+        match whole {
+            false => {
+                reaches_its_page(&doc);
+                assert_eq!(three, places[2].1);
+                assert_eq!(earlier(&doc), [read_earlier(3, places[2].1, later)]);
+            }
+            true => {
+                assert_eq!((three, width(&doc)), (later, 20));
+                assert_eq!(earlier(&doc), []);
+            }
+        }
+    }
+}
+
 /// The faults `doc` says of strings whose lines inside them gave a scan
 /// objects.
 fn in_string(doc: &Document) -> Vec<(Place, Fault)> {

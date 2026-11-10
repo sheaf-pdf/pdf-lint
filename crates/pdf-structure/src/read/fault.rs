@@ -220,8 +220,9 @@ pub enum Fault {
     /// doesn't run on to an `endstream` past it, which may be a later
     /// stream's. But the data may start on the `stream` keyword's line,
     /// which the scan, as PDFium's, passes over to start it on the next.
-    /// Then an `endstream` on that line ends it. Where no end was found, it's
-    /// read as any stream's is. Under
+    /// Then an `endstream` on that line ends it, as this crate reads any
+    /// stream's, where PDFium's read finds no data. Where no end was found,
+    /// it's read as any stream's is. Under
     /// [`Recovery::Verified`](super::Recovery::Verified), it isn't said
     /// where the scan, reading on, meets that `endstream` on its own
     /// between objects. The data ran there, so what the scan found inside
@@ -270,12 +271,16 @@ pub enum Fault {
     /// an object not where its section puts it
     /// ([`Origin::Recovered`](crate::Origin::Recovered)), found `id`'s
     /// number again at byte `later`, past a literal string that doesn't
-    /// close, which it read past ([`Fault::Unclosed`]). That object doesn't
-    /// read there: a revision cut short, say, or bytes the string held. So
-    /// `id` is read at byte `at` instead, where the scan found it before.
-    /// That's the last of its copies past the string that reads. Where none
-    /// reads, it's the last before the string, as a scan that read no
-    /// further reads it. Where there's none before it, it's the first. A
+    /// close, which it read past ([`Fault::Unclosed`]). The string may be
+    /// in a stream's data the scan ended at its `endobj`, then took back to
+    /// its `endstream` ([`Fault::StreamEnd`]): then no string is said, but
+    /// a scan that read no further than it still doesn't reach what's past
+    /// that `endstream`. That object doesn't read there: a revision cut
+    /// short, say, or bytes the string held. So `id` is read at byte `at`
+    /// instead, where the scan found it before. That's the last of its
+    /// copies past the string that reads. Where none reads, it's the last
+    /// before the string, as a scan that read no further reads it. Where
+    /// there's none before it, it's the first. A
     /// later `n g obj` of a number stands over an earlier one, as an update
     /// appends. But one past such a string stands only where it reads, so
     /// what's read past one takes nothing out of the reading.

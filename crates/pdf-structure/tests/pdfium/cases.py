@@ -328,6 +328,22 @@ def stream_of_no_object():
     return f.bytes()
 
 
+def data_on_the_stream_line():
+    """No startxref, and object stream 9, page 4 its member, its data and
+    `endstream` on its `stream` keyword's line, `endobj` on the next, its
+    /Length past its data: PDFium starts the data on the next line, finds
+    no `endstream` after it, and reads no member."""
+    f = File()
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    head = b" 4 0 "
+    f.raw(b"9 0 obj\n<< /Type /ObjStm /N 1 /First %d /Length 999 >>\nstream%s%s endstream\nendobj\n"
+          % (len(head), head, page(4)))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
 def unclosed(where):
     """No startxref, and a literal string that doesn't close before the
     catalog and its pages: as object 9's dictionary's value, between
@@ -453,6 +469,7 @@ CASES = {
     "stream-with-no-end": stream_with_no_end(),
     "endstream-run-into-endobj": endstream_run_into_endobj(),
     "stream-of-no-object": stream_of_no_object(),
+    "stream-data-on-its-stream-line": data_on_the_stream_line(),
     # A string that doesn't close, in a file found by scanning.
     "unclosed-string-value": unclosed("value"),
     "unclosed-string-between": unclosed("between"),

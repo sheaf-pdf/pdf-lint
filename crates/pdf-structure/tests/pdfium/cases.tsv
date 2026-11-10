@@ -8,6 +8,7 @@ pages-stream-without-endstream	pages	pages-stream-without-endstream.pdf
 pages-stream-with-no-end	pages	pages-stream-with-no-end.pdf
 pages-endstream-run-into-endobj	pages	pages-endstream-run-into-endobj.pdf
 pages-stream-of-no-object	pages	pages-stream-of-no-object.pdf
+pages-stream-data-on-its-stream-line	pages	pages-stream-data-on-its-stream-line.pdf
 pages-unclosed-string-value	pages	pages-unclosed-string-value.pdf
 pages-unclosed-string-between	pages	pages-unclosed-string-between.pdf
 pages-unclosed-string-key	pages	pages-unclosed-string-key.pdf
