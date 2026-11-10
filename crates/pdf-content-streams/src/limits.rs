@@ -1,11 +1,13 @@
-//! The caps content is read under, and how far it decodes to find where
-//! inline images end: one value for all of them.
+//! The caps content is read under, how far it decodes to find where
+//! inline images end, and how far the writer follows references: one value
+//! for all of them.
 
 /// The caps on reading content: past one, it can't be read, and reading
 /// stops with an [`Error`](crate::Error) saying which and where, but for
 /// [`Limits::values`] and [`Limits::color`], whose values read otherwise,
-/// and no error says so; and how an inline image's DCT and CCITTFax data's
-/// end is found ([`Limits::coded_ends`]). A caller sets them on a copy of
+/// and no error says so; how an inline image's DCT and CCITTFax data's
+/// end is found ([`Limits::coded_ends`]); and how many references the
+/// writer follows ([`Limits::hops`]). A caller sets them on a copy of
 /// [`Limits::DEFAULT`] (`limits.operands = 64`, say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -81,6 +83,14 @@ pub struct Limits {
     /// [`ResCx::capped`](crate::ResCx::capped) names the spaces it was met
     /// for; of an array in an image, [`pdf_color::counted`] says.
     pub color: pdf_color::Limits,
+    /// How many references in a row [`Reserved::read`](crate::Reserved::read)
+    /// follows to find what a resources dictionary, a category of it or a
+    /// name binds: 8 by default. Past it, a dictionary or a category isn't
+    /// read, and a name binds nothing that can be told by what it is, so
+    /// the writer keeps clear of it. These are the only references this
+    /// crate follows itself: a color space's are pdf-color's to follow,
+    /// under [`Limits::color`].
+    pub hops: usize,
 }
 
 /// How an inline image's DCT and CCITTFax data's end is found
@@ -116,6 +126,7 @@ impl Limits {
         content: 256 << 20,
         coded_ends: CodedEnds::StandIn,
         color: pdf_color::Limits::DEFAULT,
+        hops: 8,
     };
 }
 

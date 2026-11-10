@@ -3,12 +3,13 @@
 //! same bytes from the same calls on any thread.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use pdf_objects::{Data, Dict, Object, ObjectId, Span, Str, Stream, Value, dict};
 
 use super::*;
 use crate::fuzz::read_as_written as close;
-use crate::{Limits, Operation, ResBody, ResCx, Tok, object, operations, tokens};
+use crate::{Limits, Operation, ResBody, ResCx, ResId, Tok, Unheld, object, operations, tokens};
 
 /// The text of what `w` wrote, with no resources reserved or given.
 fn written(w: ContentWriter) -> (String, ResourceNeeds) {
@@ -20,9 +21,14 @@ fn list(subtype: &str) -> Dict {
     dict! { "Type" => "Pagination", "Subtype" => subtype }
 }
 
+/// A pagination artifact's property list as a resource.
+fn props(subtype: &str) -> Res {
+    Res::dict(list(subtype)).unwrap()
+}
+
 /// A font's resource, standing in for one a font gives.
 fn font(base: &str) -> Res {
-    Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base })
+    Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base }).unwrap()
 }
 
 /// A name `Sh` and six base32 characters, counted up by one.
@@ -39,7 +45,11 @@ fn next(name: &[u8]) -> Vec<u8> {
 
 /// The names `resources` binds, its references resolved in `objects`.
 fn reserved(objects: &BTreeMap<ObjectId, Object>, resources: &Object) -> Reserved {
-    Reserved::read(&|id: ObjectId| objects.get(&id), Some(resources))
+    Reserved::read(
+        |id: ObjectId| objects.get(&id),
+        Some(resources),
+        &Limits::DEFAULT,
+    )
 }
 
 /// `content`'s operations, every one read.
@@ -374,14 +384,14 @@ fn fax_data_decoded_past_its_ei_may_read_otherwise_written_again() {
 #[test]
 fn marked_content_names_its_list() {
     let mut w = ContentWriter::new();
-    w.begin_marked("Artifact", list("Header"));
+    w.begin_marked("Artifact", props("Header"));
     w.gstate(GState {
         fill_alpha: Some(0.5),
         stroke_alpha: Some(2.0),
         blend: Some(Blend::Multiply),
     });
     w.end_marked();
-    w.begin_marked("A b/c", list("Header"));
+    w.begin_marked("A b/c", props("Header"));
     w.end_marked();
     w.begin_tagged("Span");
     w.end_marked();
@@ -399,7 +409,7 @@ fn marked_content_names_its_list() {
     );
     assert_eq!(
         (props.kind, &props.res),
-        (ResKind::Properties, &Res::dict(list("Header")))
+        (ResKind::Properties, &Res::dict(list("Header")).unwrap())
     );
     assert_eq!(
         (gs.kind, &gs.res),
@@ -408,6 +418,7 @@ fn marked_content_names_its_list() {
             &Res::dict(dict! {
                 "Type" => "ExtGState", "ca" => 0.5, "CA" => 1.0, "BM" => "Multiply",
             })
+            .unwrap()
         )
     );
     assert!(!text.contains("<<"));
@@ -429,7 +440,7 @@ fn a_gstate_is_written_as_it_sets() {
         blend: None,
     };
     let dict = |ca: f64, stroke: f64| {
-        Res::dict(dict! { "Type" => "ExtGState", "ca" => ca, "CA" => stroke })
+        Res::dict(dict! { "Type" => "ExtGState", "ca" => ca, "CA" => stroke }).unwrap()
     };
     for (state, want) in [
         (alphas(f32::NAN, f32::INFINITY), dict(0.0, 0.0)),
@@ -447,7 +458,7 @@ fn a_gstate_is_written_as_it_sets() {
     }
     assert_eq!(
         gs(GState::default()),
-        Res::dict(dict! { "Type" => "ExtGState" })
+        Res::dict(dict! { "Type" => "ExtGState" }).unwrap()
     );
     let blends = [
         (Blend::Normal, "Normal"),
@@ -472,7 +483,7 @@ fn a_gstate_is_written_as_it_sets() {
             blend: Some(blend),
             ..GState::default()
         };
-        let want = Res::dict(dict! { "Type" => "ExtGState", "BM" => name });
+        let want = Res::dict(dict! { "Type" => "ExtGState", "BM" => name }).unwrap();
         assert_eq!(gs(state), want);
     }
 }
@@ -482,9 +493,9 @@ fn a_gstate_is_written_as_it_sets() {
 #[test]
 fn names_are_bound_at_the_end() {
     let draw = |w: &mut ContentWriter| {
-        w.begin_marked("Artifact", list("Header"));
+        w.begin_marked("Artifact", props("Header"));
         w.end_marked();
-        w.begin_marked("Artifact", list("Footer"));
+        w.begin_marked("Artifact", props("Footer"));
         w.end_marked();
     };
     let mut w = ContentWriter::new();
@@ -561,12 +572,12 @@ fn names_are_bound_at_the_end() {
 }
 
 /// A resources dictionary, and a category of it, given by reference are
-/// followed, eight references in a row at most; a stream is read as its
-/// dictionary.
+/// followed, eight references in a row at most by default; a stream is
+/// read as its dictionary.
 #[test]
 fn resources_by_reference_are_followed() {
     let mut w = ContentWriter::new();
-    w.begin_marked("Artifact", list("Header"));
+    w.begin_marked("Artifact", props("Header"));
     let (_, needs) = w.clone().finish(&Reserved::default());
     let name = needs.0[0].name.clone();
     let category = dict! { name.clone() => list("Other") };
@@ -598,9 +609,10 @@ fn resources_by_reference_are_followed() {
 }
 
 /// A name bound to an object that holds a stream's data where a reader
-/// found it, or none, is told by its reference alone, never by a digest,
-/// which a place shares with another file's stream; one in memory is
-/// told by its digest too.
+/// found it, or none, is told by its reference alone, never by what it
+/// is: a place is shared by another file's stream, so a resource of the
+/// object is refused, and one made of it by hand is named clear of it.
+/// One in memory is told by what it is too.
 #[test]
 fn a_placed_stream_is_told_by_its_reference_alone() {
     let stream = |data: Data| {
@@ -614,7 +626,7 @@ fn a_placed_stream_is_told_by_its_reference_alone() {
         w.draw(res.clone());
         w.finish(reserved).1.0.remove(0).name
     };
-    for (object, by_digest) in [
+    for (object, by_content) in [
         (stream(Data::At(Span::new(None, 10, 20))), false),
         (
             stream(Data::At(Span::new(Some(ObjectId::new(4, 0)), 0, 7))),
@@ -632,10 +644,20 @@ fn a_placed_stream_is_told_by_its_reference_alone() {
             });
             (named, reserved(&objects, &resources))
         };
-        // The object itself, made a resource, digests as the page's does.
-        let res = Res::of([object.clone()]);
+        // The object itself, a resource where its data is in memory, and
+        // made one by hand where it isn't, digests as the page's does.
+        let res = match Res::of([object.clone()]) {
+            Ok(res) => res,
+            Err(refused) => {
+                assert_eq!(refused, Unheld { object: 0 }, "{object:?}");
+                Res {
+                    id: ResId::of(std::slice::from_ref(&object)),
+                    body: ResBody::Objects(Arc::from([object.clone()])),
+                }
+            }
+        };
         let (named, kept) = bound(&res);
-        assert_eq!(name(&res, &kept) == named, by_digest, "{object:?}");
+        assert_eq!(name(&res, &kept) == named, by_content, "{object:?}");
         // By its number, always.
         let res = Res::written(ObjectId::new(5, 0));
         let (named, kept) = bound(&res);
@@ -643,9 +665,9 @@ fn a_placed_stream_is_told_by_its_reference_alone() {
     }
 }
 
-/// What the names a resources dictionary binds end at is read and
-/// digested once, however many names bind it, so a dictionary of many
-/// names binding one large object costs what it holds; and only the
+/// What the names a resources dictionary binds end at is read and copied
+/// once, however many names bind it, the copy shared, so a dictionary of
+/// many names binding one large object costs what it holds; and only the
 /// writer's names are read for what they bind.
 #[test]
 fn each_object_names_bind_is_read_once() {
@@ -676,27 +698,143 @@ fn each_object_names_bind_is_read_once() {
         five.set(five.get() + usize::from(id == ObjectId::new(5, 0)));
         objects.get(&id)
     };
-    let kept = Reserved::read(&resolve, Some(&resources));
+    let kept = Reserved::read(resolve, Some(&resources), &Limits::DEFAULT);
     assert_eq!(five.get(), 1, "object 5 read once");
     assert_eq!(kept.names().count(), 400);
+    // Copied once: every name of the writer's binds it shared.
+    let copies: Vec<&Arc<[Object]>> = (kept.names.values().flatten())
+        .filter_map(|res| match &res.body {
+            ResBody::Objects(objects) => Some(objects),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copies.len(), 200);
+    assert!(copies.iter().all(|copy| Arc::ptr_eq(copy, copies[0])));
     // Names the writer doesn't give are kept clear of, unread.
     let others: Dict = (0..200u32)
         .map(|i| (format!("F{i}").into_bytes(), Object::reference(5)))
         .collect();
     let resources = Object::from(dict! { "XObject" => others });
     five.set(0);
-    let kept = Reserved::read(&resolve, Some(&resources));
+    let kept = Reserved::read(resolve, Some(&resources), &Limits::DEFAULT);
     assert_eq!((five.get(), kept.names().count()), (0, 200));
     // A name of the writer's binding the very resource, through a
     // reference of its own, is used again.
     let mut w = ContentWriter::new();
-    w.draw(Res::of([objects[&ObjectId::new(5, 0)].clone()]));
+    w.draw(Res::of([objects[&ObjectId::new(5, 0)].clone()]).unwrap());
     let (_, needs) = w.named(&Reserved::default());
     let mut bound = Dict::new();
     bound.push(&needs.0[0].name, Object::reference(101));
     let resources = Object::from(dict! { "XObject" => bound });
     let (_, again) = w.named(&reserved(&objects, &resources));
     assert_eq!(again.0[0].name, needs.0[0].name);
+}
+
+/// References in a row are followed as far as [`Limits::hops`] says and
+/// no further, to a category and to what a name binds: at 0 none, at 8 a
+/// chain of eight, and at 9 one of nine. A dictionary given as it is needs
+/// none.
+#[test]
+fn references_are_followed_as_far_as_hops_says() {
+    let mut w = ContentWriter::new();
+    w.begin_marked("Artifact", props("Header"));
+    let name = w.named(&Reserved::default()).1.0[0].name.clone();
+    // Objects 1 to 9 each refer to the next, and 10 is a category binding
+    // the name to another list; 21 to 29 likewise, and 30 is the very list.
+    let mut objects = BTreeMap::new();
+    for n in (1..10).chain(21..30) {
+        objects.insert(ObjectId::new(n, 0), Object::reference(n + 1));
+    }
+    let other = dict! { name.clone() => list("Other") };
+    objects.insert(ObjectId::new(10, 0), Object::from(other.clone()));
+    objects.insert(ObjectId::new(30, 0), Object::from(list("Header")));
+    let named = |category: Object, hops: usize| {
+        let resources = Object::from(dict! { "Properties" => category });
+        let limits = Limits {
+            hops,
+            ..Limits::DEFAULT
+        };
+        let resolve = |id: ObjectId| objects.get(&id);
+        w.named(&Reserved::read(resolve, Some(&resources), &limits))
+            .1
+            .0[0]
+            .name
+            .clone()
+    };
+    for (hops, eight, nine) in [(0, false, false), (8, true, false), (9, true, true)] {
+        // The category through eight references, from 3, and nine, from 2:
+        // read, the name is bumped past it.
+        let bumped = |from: u32| named(Object::reference(from), hops) != name;
+        assert_eq!((bumped(3), bumped(2)), (eight, nine), "category, {hops}");
+        // The name bound to the very list through eight, from 23, and
+        // nine, from 22: told by what it is, it's the name's again; past
+        // them, it's kept clear of.
+        let again = |from: u32| {
+            let category = dict! { name.clone() => Object::reference(from) };
+            named(Object::from(category), hops) == name
+        };
+        assert_eq!((again(23), again(22)), (eight, nine), "name, {hops}");
+        assert_ne!(named(Object::from(other.clone()), hops), name);
+        let category = dict! { name.clone() => list("Header") };
+        assert_eq!(named(Object::from(category), hops), name);
+    }
+}
+
+/// Two resources given one id by hand, of objects that aren't the same,
+/// are two needs with two names; and a name bound to either, in a
+/// resources dictionary or taken, isn't the other's.
+#[test]
+fn resources_of_one_id_and_other_objects_are_two() {
+    let header = props("Header");
+    let forged = Res {
+        id: header.id,
+        body: ResBody::Objects(Arc::from([Object::from(list("Footer"))])),
+    };
+    let mut w = ContentWriter::new();
+    w.begin_marked("A", header.clone());
+    w.begin_marked("B", forged.clone());
+    w.begin_marked("C", header.clone());
+    let (text, needs) = written(w);
+    let [first, second] = &needs.0[..] else {
+        panic!("{needs:?}")
+    };
+    assert_eq!((&first.res, &second.res), (&header, &forged));
+    assert_eq!(second.name, next(&first.name));
+    let (f, s) = (
+        String::from_utf8_lossy(&first.name),
+        String::from_utf8_lossy(&second.name),
+    );
+    assert_eq!(text, format!("/A /{f} BDC\n/B /{s} BDC\n/C /{f} BDC\n"));
+
+    let alone = |res: &Res, reserved: &Reserved| {
+        let mut w = ContentWriter::new();
+        w.begin_marked("A", res.clone());
+        w.finish(reserved).1.0.remove(0).name
+    };
+    // A page's resources binding the name to the header's list, or the
+    // footer's: the header's again, or bumped; the other, bumped either way.
+    for (bound, header_again) in [(list("Header"), true), (list("Footer"), false)] {
+        let resources = Object::from(dict! {
+            "Properties" => dict! { first.name.clone() => bound },
+        });
+        let kept = reserved(&BTreeMap::new(), &resources);
+        let want = |again: bool| match again {
+            true => first.name.clone(),
+            false => next(&first.name),
+        };
+        assert_eq!(alone(&header, &kept), want(header_again));
+        assert_eq!(alone(&forged, &kept), next(&first.name));
+    }
+    // The name taken for one is the other's to bump past.
+    for (taken, other) in [(&header, &forged), (&forged, &header)] {
+        let mut kept = Reserved::default();
+        kept.take(&ResourceNeeds(vec![Need {
+            res: taken.clone(),
+            ..first.clone()
+        }]));
+        assert_eq!(alone(taken, &kept), first.name);
+        assert_eq!(alone(other, &kept), next(&first.name));
+    }
 }
 
 /// A resolver kept in a binding reads resources dictionaries made one
@@ -710,7 +848,9 @@ fn a_resolver_reads_resources_made_after_it() {
         let resources = Object::from(dict! {
             "Properties" => dict! { name => Object::reference(1) },
         });
-        read += Reserved::read(&resolve, Some(&resources)).names().count();
+        read += Reserved::read(resolve, Some(&resources), &Limits::DEFAULT)
+            .names()
+            .count();
     }
     assert_eq!(read, 2);
 }
@@ -741,12 +881,15 @@ fn a_resource_in_two_categories_is_a_need_in_each() {
 #[test]
 fn resources_whose_digests_start_alike_are_named_apart() {
     let list = |n: i64| dict! { "Type" => "Pagination", "N" => n };
-    let (a, b) = (Res::dict(list(22_004)), Res::dict(list(27_618)));
+    let (a, b) = (
+        Res::dict(list(22_004)).unwrap(),
+        Res::dict(list(27_618)).unwrap(),
+    );
     assert_ne!(a.id, b.id);
     assert_eq!(a.id.0 >> 98, b.id.0 >> 98, "the same first 30 bits");
     let mut w = ContentWriter::new();
-    w.begin_marked("A", list(22_004));
-    w.begin_marked("B", list(27_618));
+    w.begin_marked("A", a.clone());
+    w.begin_marked("B", b.clone());
     let (text, needs) = written(w);
     let [first, second] = &needs.0[..] else {
         panic!("{needs:?}")
@@ -800,7 +943,7 @@ fn needs_are_one_a_resource_in_first_use_order() {
 #[test]
 fn the_names_kept_are_taken_and_forgotten() {
     let mut w = ContentWriter::new();
-    w.begin_marked("Artifact", list("Header"));
+    w.begin_marked("Artifact", props("Header"));
     w.draw(Res::written(ObjectId::new(3, 0)));
     let (_, needs) = w.named(&Reserved::default());
     let resources = Object::from(dict! { "Font" => dict! { "F1" => Object::reference(1) } });
@@ -852,7 +995,7 @@ fn an_image_fills_its_target() {
 fn identical_calls_give_identical_bytes() {
     fn draw() -> (Vec<u8>, ResourceNeeds) {
         let mut w = ContentWriter::new();
-        w.begin_marked("Artifact", list("Footer"));
+        w.begin_marked("Artifact", props("Footer"));
         w.save();
         w.gstate(GState {
             fill_alpha: Some(0.3),
@@ -930,7 +1073,7 @@ fn what_each_call_writes_reads_back_as_written() {
     let tags = ["A b/c#(d)", "\u{7f}é", "Span"];
     w.begin_tagged(tags[0]);
     w.begin_tagged(tags[1]);
-    w.begin_marked(tags[2], header.clone());
+    w.begin_marked(tags[2], Res::dict(header.clone()).unwrap());
     w.gstate(state);
     w.draw(Res::written(ObjectId::new(9, 0)));
     w.dash(&[3.0, 1.0 / 3.0], 2.0);
@@ -992,7 +1135,12 @@ fn what_each_call_writes_reads_back_as_written() {
     let written_9 = Res::written(ObjectId::new(9, 0));
     assert_eq!(
         res,
-        [&helvetica, &Res::dict(header), &state.res(), &written_9]
+        [
+            &helvetica,
+            &Res::dict(header).unwrap(),
+            &state.res(),
+            &written_9
+        ]
     );
 }
 

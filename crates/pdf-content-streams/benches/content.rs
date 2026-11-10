@@ -479,8 +479,8 @@ fn font() -> (Vec<Object>, usize) {
 
 fn res_group(c: &mut Criterion) {
     let (objects, written) = font();
-    let a = Res::of(objects.clone());
-    let b = Res::of(font().0);
+    let a = Res::of(objects.clone()).expect("res: its data in memory");
+    let b = Res::of(font().0).expect("res: its data in memory");
     let clone = a.clone();
     assert_eq!(ResId::of(&objects), a.id, "res/id: the resource's digest");
     assert_eq!(a.id, b.id, "res/eq-apart: one digest");
@@ -515,7 +515,9 @@ fn drawn() -> (Res, Res) {
         "BitsPerComponent" => 8, "ColorSpace" => "DeviceGray",
     };
     let image = Object::from(Stream::new(image, pixels()));
-    (Res::dict(font), Res::of([image]))
+    let font = Res::dict(font).expect("write/calls: a font of names");
+    let image = Res::of([image]).expect("write/calls: an image in memory");
+    (font, image)
 }
 
 /// The written page's calls.
@@ -527,7 +529,8 @@ fn calls(font: &Res, image: &Res) -> ContentWriter {
         w.fill_color(Color::rgb8([(i * 2) as u8, 64, 128]));
         w.rect(72.0, y, 468.0, 5.5);
         w.paint(Paint::Fill);
-        w.begin_marked("Span", dict! { "MCID" => i as i64 });
+        let list = Res::dict(dict! { "MCID" => i as i64 }).expect("write/calls: a list");
+        w.begin_marked("Span", list);
         w.begin_text();
         w.font(font.clone(), 12.0);
         w.text_move(72.0, y);
@@ -578,7 +581,7 @@ fn write_group(c: &mut Criterion) {
     let resources = Object::from(resources);
     let other = Object::from(dict! { "Type" => "Font", "BaseFont" => "Courier" });
     let resolve = |id: ObjectId| (id == ObjectId::new(1, 0)).then_some(&other);
-    let reserved = Reserved::read(&resolve, Some(&resources));
+    let reserved = Reserved::read(resolve, Some(&resources), LIM);
     assert_eq!(
         reserved.names().count(),
         100,
@@ -606,7 +609,7 @@ fn write_group(c: &mut Criterion) {
         b.iter(|| calls(black_box(&font), &image).finish(&Reserved::default()))
     });
     group.bench_function("reserved-100", |b| {
-        b.iter(|| Reserved::read(&resolve, Some(black_box(&resources))))
+        b.iter(|| Reserved::read(resolve, Some(black_box(&resources)), LIM))
     });
     group.throughput(Throughput::Bytes(named.len() as u64));
     group.bench_function("named-100", |b| {

@@ -14,7 +14,8 @@
 //! inline image's end and its walks past one to `EI`, remembered or not,
 //! and its skims of arrays and dictionaries, what plain ones find; its
 //! operations written again reading as they did, and the writer's calls its
-//! bytes choose read back as written; and its marked ranges at the top
+//! bytes choose read back as written, and resources they choose the same
+//! exactly where their digests' bytes are; and its marked ranges at the top
 //! taken out, alone and together, and their lists written again without a
 //! tool's keys, alone and with what's taken out, what's kept reading as it
 //! did; and an image's color space counted alike in its dictionary and in

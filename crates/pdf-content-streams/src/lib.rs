@@ -161,7 +161,7 @@ pub use operand::{Elements, Operand, name, object};
 pub use operations::{Operation, Operations, operations};
 pub use operator::{Category, FillRule, Operands, Operator, Operators, Paint, Type};
 pub use page::{Concat, Join, Pos, Pushed, SpanAcross, TooLarge};
-pub use res::{Res, ResBody, ResId};
+pub use res::{Res, ResBody, ResId, Unheld};
 pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use state::State;
 pub use tokens::{Tok, Tokens, tokens};
