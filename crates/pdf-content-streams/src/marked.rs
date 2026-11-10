@@ -15,7 +15,7 @@ use pdf_objects::{Dict, Value};
 use crate::error::{Error, ErrorKind};
 use crate::inline::ResCx;
 use crate::limits::Limits;
-use crate::operand::Operand;
+use crate::operand::{Operand, Within};
 use crate::operations::Operation;
 use crate::page::{Concat, SpanAcross};
 
@@ -156,6 +156,8 @@ pub struct MarkedNest<'p> {
     /// Each range open: where it is in `found`, and where it starts.
     open: Vec<(usize, usize)>,
     found: Vec<Marked<'p>>,
+    /// The values those found may hold yet ([`Limits::marked`]).
+    left: usize,
 }
 
 /// What an operation did to marked content: the range it opened or
@@ -171,13 +173,15 @@ pub enum MarkedEvent {
 impl<'p> MarkedNest<'p> {
     /// None open and none found yet, named lists to be looked up in
     /// `props`, ranges nested up to [`Limits::depth`] deep, and property
-    /// lists read under `limits`.
+    /// lists read under `limits`, those found holding up to
+    /// [`Limits::marked`] values.
     pub fn new(props: &'p Properties, limits: &Limits) -> MarkedNest<'p> {
         MarkedNest {
             props,
             limits: *limits,
             open: Vec::new(),
             found: Vec::new(),
+            left: limits.marked,
         }
     }
 
@@ -185,8 +189,13 @@ impl<'p> MarkedNest<'p> {
     /// `content`: a range opened by a `BMC` or `BDC`, its span from its
     /// first operand and, until its `EMC`, empty; or ended by an `EMC`,
     /// its span then through it. An error for an `EMC` with none open
-    /// ([`ErrorKind::Emc`]), or a range opened past [`Limits::depth`]
-    /// ([`ErrorKind::Depth`]), where its operator is.
+    /// ([`ErrorKind::Emc`]), a range opened past [`Limits::depth`]
+    /// ([`ErrorKind::Depth`]), or one that, with its property list, would
+    /// hold more than is left of [`Limits::marked`]
+    /// ([`ErrorKind::MarkedSize`]): each range is one value, and a list
+    /// written in the content the values reading it built, read under
+    /// what's left, so a list past it is read no further; the error is
+    /// where its operator is.
     pub fn step(&mut self, content: &Concat, op: &Operation) -> Result<Option<MarkedEvent>, Error> {
         let at = op.at();
         let name = op.name();
@@ -207,10 +216,21 @@ impl<'p> MarkedNest<'p> {
                 kind: ErrorKind::Depth,
             });
         }
-        let (tag, props) = match name {
-            b"BDC" => (op.arg(1), op.arg(0).and_then(|p| self.props(&p))),
+        let past = Error {
+            at: at.start,
+            kind: ErrorKind::MarkedSize,
+        };
+        let mut left = self.left.checked_sub(1).ok_or(past)?;
+        let (tag, props) = match (name, op.arg(0)) {
+            (b"BDC", Some(list)) => {
+                let (props, held) = self.props(&list, left).ok_or(past)?;
+                left -= held;
+                (op.arg(1), props)
+            }
+            (b"BDC", None) => (op.arg(1), None),
             _ => (op.arg(0), None),
         };
+        self.left = left;
         let start = op.range().start;
         let index = self.found.len();
         self.found.push(Marked {
@@ -226,15 +246,25 @@ impl<'p> MarkedNest<'p> {
         Ok(Some(MarkedEvent::Opened(index)))
     }
 
-    /// A `BDC`'s list, `operand` as written.
-    fn props(&self, operand: &Operand) -> Option<Props<'p>> {
+    /// A `BDC`'s list, `operand` as written, and the values it holds of
+    /// those `left`: a list written in the content read under them, the
+    /// values reading it built, and None where it's past them. Only what
+    /// opens a dictionary reads as one, so nothing else is read.
+    fn props(&self, operand: &Operand, left: usize) -> Option<(Option<Props<'p>>, usize)> {
         if let Some(name) = operand.name() {
             let list = self.props.get(&name);
-            return Some(Props::Named(name.into_owned(), list));
+            return Some((Some(Props::Named(name.into_owned(), list)), 0));
         }
-        match operand.object(&self.limits)?.into_value() {
-            Value::Dict(dict) => Some(Props::Inline(dict)),
-            _ => None,
+        if !operand.is_dict() {
+            return Some((None, 0));
+        }
+        match operand.object_within(&self.limits, left, true) {
+            Within::Read(Some(object), held) => match object.into_value() {
+                Value::Dict(dict) => Some((Some(Props::Inline(dict)), held)),
+                _ => Some((None, 0)),
+            },
+            Within::Read(None, _) | Within::Values => Some((None, 0)),
+            Within::Cap => None,
         }
     }
 

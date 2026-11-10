@@ -183,7 +183,7 @@ impl<'a> Operand<'a> {
             }
             _ => return None,
         }
-        let mut read = Reading::new(self, limits, sink, true);
+        let mut read = Reading::new(self, limits.values, sink, true);
         walk_from(
             self.bytes,
             first,
@@ -197,6 +197,62 @@ impl<'a> Operand<'a> {
         read.read?
     }
 
+    /// It read as [`object`](Operand::object) reads it, but under a cap of
+    /// `cap` values too, and stopped at the lesser of the two, what's
+    /// read past it not built: what's read and how many values reading it
+    /// counted, or which cap it met, `limits.values` where they're equal.
+    /// Built only if `make`, so that, without, it counts alone, nothing
+    /// kept, and what's read is none.
+    pub(crate) fn object_within(&self, limits: &Limits, cap: usize, make: bool) -> Within {
+        let lesser = limits.values.min(cap);
+        let met = || match limits.values <= cap {
+            true => Within::Values,
+            false => Within::Cap,
+        };
+        // What opens nothing is one value, read where it starts, as
+        // [`object_with`](Operand::object_with) reads it.
+        let mut tokens = tokenizer(self.bytes, 0);
+        let Some(first) = tokens.next_significant() else {
+            return Within::Read(None, 0);
+        };
+        let opens = match first.kind {
+            Kind::ArrayOpen | Kind::DictOpen => true,
+            Kind::LiteralString | Kind::HexString if !first.closed => {
+                return Within::Read(None, 0);
+            }
+            Kind::Integer | Kind::Real | Kind::Name | Kind::LiteralString | Kind::HexString => {
+                false
+            }
+            Kind::Keyword if matches!(first.bytes, b"true" | b"false" | b"null") => false,
+            _ => return Within::Read(None, 0),
+        };
+        if !opens {
+            return match lesser {
+                0 => met(),
+                _ => Within::Read(make.then(|| leaf(first)).flatten(), 1),
+            };
+        }
+        let mut told = ();
+        let mut read = Reading::new(self, lesser, &mut told, make);
+        let walked = walk_from(
+            self.bytes,
+            first,
+            tokens,
+            TOP,
+            limits.depth,
+            false,
+            &mut read,
+        );
+        if read.past {
+            return met();
+        }
+        let counted = lesser - read.values;
+        match walked {
+            Ok(_) => Within::Read(read.read.flatten(), counted),
+            Err(_) => Within::Read(None, counted),
+        }
+    }
+
     /// [`Operand::object_with`] by the walk, whatever it opens: what the
     /// tests and the fuzz body hold its reading of what opens nothing to.
     #[cfg(any(test, fuzzing))]
@@ -205,7 +261,7 @@ impl<'a> Operand<'a> {
         limits: &Limits,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Option<Object> {
-        let mut read = Reading::new(self, limits, sink, true);
+        let mut read = Reading::new(self, limits.values, sink, true);
         walk(self.bytes, 0, TOP, limits.depth, false, &mut read)?.ok()?;
         read.read?
     }
@@ -245,7 +301,7 @@ impl<'a> Operand<'a> {
         if !sink.wants() {
             return;
         }
-        let mut read = Reading::new(self, limits, sink, false);
+        let mut read = Reading::new(self, limits.values, sink, false);
         walk(self.bytes, 0, TOP, limits.depth, false, &mut read);
     }
 
@@ -454,6 +510,28 @@ pub fn object(operand: &[u8], limits: &Limits) -> Option<Object> {
     .object_with(limits, &mut ())
 }
 
+/// What reading an operand as an object under a cap of the caller's gives
+/// ([`Operand::object_within`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Within {
+    /// Read under both caps: what's read, an object or none, and how many
+    /// values reading it counted.
+    Read(Option<Object>, usize),
+    /// Past [`Limits::values`] first, or with the cap: none, as
+    /// [`Operand::object`] reads it.
+    Values,
+    /// Past the cap first: read no further.
+    Cap,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many values readings of operands as objects have built on this
+    /// thread: what the tests hold a read under a cap to, as building none
+    /// past it.
+    pub(crate) static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// An operand being read as an object, built from a [`walk`]'s steps:
 /// where it is in the content, how many more values it may hold, the sink
 /// told where ISO 32000-2 would read what's inside it otherwise, what's
@@ -482,13 +560,13 @@ struct Reading<'a, 's, S: ?Sized> {
 }
 
 impl<'a, 's, S: Sink<'a> + ?Sized> Reading<'a, 's, S> {
-    /// None read yet of `operand`, under `limits`' cap on values, told to
+    /// None read yet of `operand`, under a cap of `values`, told to
     /// `sink`, made if `make`.
-    fn new(operand: &Operand<'a>, limits: &Limits, sink: &'s mut S, make: bool) -> Self {
+    fn new(operand: &Operand<'a>, values: usize, sink: &'s mut S, make: bool) -> Self {
         Reading {
             s: operand.bytes,
             base: operand.at,
-            values: limits.values,
+            values,
             past: false,
             sink,
             open: Vec::new(),
@@ -520,6 +598,10 @@ impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
                     self.read = None;
                     return;
                 }
+            }
+            #[cfg(test)]
+            if self.make {
+                BUILT.with(|built| built.set(built.get() + 1));
             }
         }
         match event {

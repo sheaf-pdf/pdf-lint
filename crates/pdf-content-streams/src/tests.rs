@@ -1110,6 +1110,98 @@ fn image_data<'a>(s: &'a [u8], lim: &Limits) -> &'a [u8] {
     &s[op.inline_image().unwrap().data()]
 }
 
+/// The data of the inline image first in `s`, read with `res` under
+/// `lim`, and whether it's capped.
+fn image_capped<'a>(s: &'a [u8], res: &ResCx, lim: &Limits) -> (&'a [u8], bool) {
+    let op = operations(s, res, lim).next().unwrap().unwrap();
+    let image = op.inline_image().unwrap();
+    (&s[image.data()], image.capped())
+}
+
+/// An image's array is counted before it's read, nothing built: at
+/// [`Limits::space_values`] it's read and counted, and past it, or past
+/// [`Limits::values`], it counts as a space that doesn't load, 3
+/// components, and the image is capped.
+#[test]
+fn an_images_array_past_its_cap_counts_as_none() {
+    // Five values: the array, two names, a number and a string.
+    let s: &[u8] = b"BI /W 1 /H 1 /BPC 8 /CS [/Indexed /DeviceRGB 0 <000000>] ID xyz EI";
+    let none = ResCx::none();
+    let at = |space_values| Limits {
+        space_values,
+        ..Limits::DEFAULT
+    };
+    let built = || crate::operand::BUILT.with(|built| built.replace(0));
+    built();
+    assert_eq!(image_capped(s, &none, &at(5)), (&b"x"[..], false));
+    assert_eq!(built(), 5, "counted, then read");
+    assert_eq!(image_capped(s, &none, &at(4)), (&b"xyz"[..], true));
+    assert_eq!(built(), 0, "counted, nothing built");
+    assert_eq!(image_capped(s, &none, &at(0)), (&b"xyz"[..], true));
+    // Past `values`, the lesser, alike.
+    let values = Limits {
+        values: 4,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(image_capped(s, &none, &values), (&b"xyz"[..], true));
+    // An array as wide as honest ones never are, at the default.
+    let wide = format!(
+        "BI /W 1 /H 1 /BPC 8 /CS [/Indexed /DeviceRGB 0 <000000>{}] ID xyz EI",
+        " 0".repeat(4092)
+    );
+    let wide = wide.as_bytes();
+    assert_eq!(
+        image_capped(wide, &none, &Limits::DEFAULT),
+        (&b"xyz"[..], true)
+    );
+    assert_eq!(built(), 0, "nothing built");
+    assert_eq!(image_capped(wide, &none, &at(4097)), (&b"x"[..], false));
+}
+
+/// An image is capped where its size was counted past a cap, by each of
+/// the three ways: a name the resources counted past one, an array past
+/// [`Limits::space_values`], and an array whose count met a cap of
+/// [`Limits::color`]; never where it wasn't, or for a space no image is
+/// drawn in.
+#[test]
+fn an_image_is_capped_where_a_cap_sized_it() {
+    let mut low = Limits::DEFAULT;
+    low.color.space_depth = 0;
+    let resources = parsed("<< /ColorSpace << /X [/Pattern /DeviceRGB] /Y /DeviceRGB >> >>");
+    let nothing = |_: ObjectId| None;
+    let res = ResCx::read(nothing, Some(&resources), &low).unwrap();
+    assert_eq!(res.capped().collect::<Vec<_>>(), [b"X"]);
+    let by = |cs: &str, lim: &Limits| {
+        let s = format!("BI /W 1 /H 1 /BPC 8 /CS {cs} ID abcd EI");
+        let (data, capped) = image_capped(s.as_bytes(), &res, lim);
+        (data.len(), capped)
+    };
+    // A name the resources counted past a cap; one they didn't, and a
+    // device space.
+    assert_eq!(by("/X", &Limits::DEFAULT), (1, true));
+    assert_eq!(by("/Y", &Limits::DEFAULT), (3, false));
+    assert_eq!(by("/G", &Limits::DEFAULT), (1, false));
+    // An array past `space_values`.
+    let narrow = Limits {
+        space_values: 2,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(by("[/Pattern /DeviceRGB]", &narrow), (3, true));
+    // An array whose count met a cap of `Limits::color`: its underlying
+    // space doesn't load.
+    assert_eq!(by("[/Pattern /DeviceRGB]", &low), (1, true));
+    assert_eq!(by("[/Pattern /DeviceRGB]", &Limits::DEFAULT), (4, false));
+    // Filtered or not: its size decides whether PDFium reads it at all.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /X /F /AHx ID 61> EI";
+    assert_eq!(image_capped(s, &res, &Limits::DEFAULT), (&b"61>"[..], true));
+    // Named in an operator, not an image's: nothing is sized by it.
+    let s: &[u8] = b"/X cs 0 0 1 1 re f BI /W 1 /H 1 /BPC 8 /CS /Y ID abc EI";
+    let images: Vec<bool> = operations(s, &res, &Limits::DEFAULT)
+        .filter_map(|op| Some(op.unwrap().inline_image()?.capped()))
+        .collect();
+    assert_eq!(images, [false]);
+}
+
 #[test]
 fn an_images_array_is_counted_as_the_resources_would_count_it() {
     let rows: [(&str, usize); 20] = [
@@ -5964,6 +6056,128 @@ fn marked_content_stepped_by_hand() {
             marked(&Concat::new(&[s]), &props, &none, lim)
         );
     }
+}
+
+/// Marked content holds no more than [`Limits::marked`] lets a reading's:
+/// each range one value, and a property list written in the content the
+/// values reading it built, at the cap read, past it an error at the
+/// `BMC` or `BDC` that passes it. A named list, or one that's no
+/// dictionary, is its range's alone.
+#[test]
+fn marked_content_holds_no_more_than_its_cap() {
+    let props = Properties::new([(b"P0".to_vec(), dict! { "Subtype" => "Header" })]);
+    let read = |s: &[u8], marked| {
+        let lim = Limits { marked, ..*LIM };
+        let found = crate::marked(&Concat::new(&[s]), &props, &ResCx::none(), &lim);
+        found.map(|found| found.len())
+    };
+    let past = |at| {
+        Err(Error {
+            at,
+            kind: ErrorKind::MarkedSize,
+        })
+    };
+    let three: &[u8] = b"/A BMC EMC /B BMC EMC /C BMC EMC";
+    assert_eq!(read(three, 3), Ok(3));
+    assert_eq!(read(three, 2), past(25));
+    assert_eq!(read(three, 0), past(3));
+    // The list's three values, the dictionary, its key and its value, and
+    // the range's one.
+    let listed: &[u8] = b"/P <</MCID 0>> BDC EMC";
+    assert_eq!(read(listed, 4), Ok(1));
+    assert_eq!(read(listed, 3), past(15));
+    // Each range counts alone: a list ended is still held.
+    let twice = [listed, b" ", listed].concat();
+    assert_eq!(read(&twice, 8), Ok(2));
+    assert_eq!(read(&twice, 7), past(38));
+    // A named list, a list that's no dictionary, and none, the range's.
+    for alone in [&b"/P /P0 BDC EMC"[..], b"/P [1 2 3] BDC EMC", b"/P BMC EMC"] {
+        assert_eq!(read(alone, 1), Ok(1), "{}", alone.escape_ascii());
+        assert!(matches!(read(alone, 0), Err(e) if e.kind == ErrorKind::MarkedSize));
+    }
+    // Under the default, the words.
+    assert_eq!(read(three, LIM.marked), Ok(3));
+    assert_eq!(
+        Error {
+            at: 25,
+            kind: ErrorKind::MarkedSize
+        }
+        .to_string(),
+        "too much marked content at byte 25"
+    );
+}
+
+/// Where a list would pass what's left of [`Limits::marked`], the error
+/// is at its `BDC`, every range before it kept with its list, none
+/// dropped; and the list is read no further than what was left, never
+/// built whole first.
+#[test]
+fn a_list_past_the_cap_is_an_error_at_its_bdc() {
+    let props = Properties::default();
+    let keys: String = (0..100).map(|i| format!("/K{i} []")).collect();
+    let s = [
+        b"/A <</MCID 0>> BDC EMC /B <</MCID 1>> BDC EMC /C <<".as_slice(),
+        keys.as_bytes(),
+        b">> BDC EMC",
+    ]
+    .concat();
+    let page = Concat::new(&[&s]);
+    let none = ResCx::none();
+    // Four for each of the first two; the third's range, and ten left of
+    // the 201 values its list holds.
+    let lim = Limits { marked: 19, ..*LIM };
+    let mut nest = MarkedNest::new(&props, &lim);
+    crate::operand::BUILT.with(|built| built.set(0));
+    let mut error = None;
+    for op in page.operations(&none, &lim) {
+        if let Err(e) = nest.step(&page, &op.unwrap()) {
+            error = Some(e);
+            break;
+        }
+    }
+    let bdc = s.windows(3).rposition(|w| w == b"BDC").unwrap();
+    let past = Error {
+        at: bdc,
+        kind: ErrorKind::MarkedSize,
+    };
+    assert_eq!(error, Some(past));
+    for (i, mcid) in [(0, 0), (1, 1)] {
+        let list = nest.get(i).and_then(|m| m.props.as_ref()?.dict().cloned());
+        assert_eq!(list, Some(dict! { "MCID" => mcid }), "range {i} kept");
+    }
+    // The first two lists' three values each, and ten of the third's.
+    assert_eq!(crate::operand::BUILT.with(|built| built.get()), 3 + 3 + 10);
+    // With room for it, it's read whole, its 201 values, and one less is
+    // past it.
+    let lim = Limits {
+        marked: 210,
+        ..*LIM
+    };
+    crate::operand::BUILT.with(|built| built.set(0));
+    let found = marked(&page, &props, &none, &lim).unwrap();
+    assert_eq!(
+        found[2]
+            .props
+            .as_ref()
+            .and_then(Props::dict)
+            .map(|d| d.len()),
+        Some(100)
+    );
+    assert_eq!(crate::operand::BUILT.with(|built| built.get()), 3 + 3 + 201);
+    let lim = Limits {
+        marked: 209,
+        ..*LIM
+    };
+    assert_eq!(marked(&page, &props, &none, &lim), Err(past));
+    // Past `Limits::values` first, a list reads as none, as an operand does,
+    // and holds nothing.
+    let lim = Limits {
+        values: 200,
+        marked: 210,
+        ..*LIM
+    };
+    let found = marked(&page, &props, &none, &lim).unwrap();
+    assert_eq!(found[2].props, None);
 }
 
 /// `q`/`Q` balance and resource names counted an operation at a time are

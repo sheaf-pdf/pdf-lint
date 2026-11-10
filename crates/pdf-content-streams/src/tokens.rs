@@ -63,7 +63,13 @@ pub enum Tok<'a> {
 ///   whole part, `true` 1, what's no number 0). With no color space, an
 ///   image mask's, one bit of one component; a name `res` doesn't have
 ///   reads as none, as in PDFium. An array is counted as PDFium counts it,
-///   as one the resources named would be ([`ResCx::read`]).
+///   as one the resources named would be ([`ResCx::read`]), once its values
+///   are counted, nothing built, under [`Limits::space_values`]. A space
+///   counted past a cap, that one, [`Limits::values`] or one of
+///   [`Limits::color`], counts as one that doesn't load, or a branch of it
+///   does, and the image says so
+///   ([`InlineImage::capped`](crate::InlineImage::capped)), as does one
+///   drawn in a name [`ResCx::capped`] names.
 /// - `/AHx` to its `>`, `/A85` past the first byte that's none of its
 ///   digits or the white-space it passes over (its `~`, and a `>` after
 ///   it), and `/RL` to its end-of-data byte, as PDFium's decoders end
@@ -170,6 +176,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
         operands: 0,
         images: Images::new(s, res, *limits),
         found: Found::Walk,
+        capped: false,
         done: false,
         ended: false,
         joins: &[],
@@ -194,6 +201,8 @@ pub struct Tokens<'a, 'r, S = ()> {
     images: Images<'a, 'r>,
     /// How the last inline image's data's end was found.
     found: Found,
+    /// Whether the last inline image's size was counted past a cap.
+    capped: bool,
     done: bool,
     /// Whether the end was reached with no error, and the white-space
     /// after the last token not yet looked at for faults.
@@ -283,6 +292,7 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
             operands: self.operands,
             images: self.images,
             found: self.found,
+            capped: self.capped,
             done: self.done,
             ended: self.ended,
             joins: self.joins,
@@ -302,6 +312,12 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// How the last inline image read found its data's end.
     pub(crate) fn found(&self) -> Found {
         self.found
+    }
+
+    /// Whether the last inline image read was sized by a count past a cap
+    /// ([`InlineImage::capped`](crate::InlineImage::capped)).
+    pub(crate) fn capped(&self) -> bool {
+        self.capped
     }
 
     /// The same, the content being a page's streams joined, each of
@@ -375,9 +391,10 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
                 let keyword = match self.lone.last() {
                     Some(&(_, keyword)) => keyword,
                     None => match self.images.read(r.start, &mut self.sink) {
-                        Ok(Image::Read(end, data, found)) => {
+                        Ok(Image::Read(end, data, found, capped)) => {
                             self.at = end;
                             self.found = found;
+                            self.capped = capped;
                             if self.sink.wants() {
                                 self.across(r.start..end, Some(data.clone()));
                             }

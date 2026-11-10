@@ -2,6 +2,8 @@
 //! would change the rest of the page refused; and property lists written
 //! again without some of their keys.
 
+use pdf_objects::{Object, ObjectId, dict};
+
 use super::*;
 use crate::fuzz::KEYS;
 use crate::{Pos, Properties, marked, tokens};
@@ -782,4 +784,148 @@ fn a_range_that_a_decoder_reads_past_is_refused() {
     let range = [span_of(&s, b"/A BMC EMC")];
     let refused = splice(&c, &ResCx::none(), &decoded, &range);
     assert!(matches!(refused, Err(SpliceError::Unsafe(_))));
+}
+
+/// Resources naming `X`, `[/Pattern /DeviceRGB]`, under the caps given:
+/// past `space_depth` 0 its underlying space doesn't load, so it counts 1,
+/// capped, where by default it counts 4.
+fn x_under(space_depth: usize) -> ResCx {
+    let space = Object::from(vec![Object::from("Pattern"), Object::from("DeviceRGB")]);
+    let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space } });
+    let mut lim = Limits::DEFAULT;
+    lim.color.space_depth = space_depth;
+    ResCx::read(|_: ObjectId| None, Some(&resources), &lim).unwrap()
+}
+
+/// Content that holds an inline image sized by a count past a cap is
+/// refused, wherever the ranges are, naming the image, here from one
+/// stream into the next; by `splice_each` too, as the call's refusal,
+/// never a group's; and by a list written again. Its caps raised, it's
+/// taken. A space capped that no image is drawn in refuses nothing.
+#[test]
+fn content_with_an_image_sized_past_a_cap_is_refused() {
+    let capped = x_under(0);
+    assert_eq!(capped.capped().collect::<Vec<_>>(), [b"X"]);
+    let streams: [&[u8]; 2] = [
+        b"/A BMC EMC BI /W 1 /H 1 /BPC 8 /CS /X ID",
+        b"abcd EI /B BMC EMC",
+    ];
+    let c = Concat::new(&streams);
+    let image = span((0, 11), (1, 7));
+    let [a, b] = ranges(&c)[..] else { panic!() };
+    for drop in [vec![a], vec![b], vec![a, b], vec![]] {
+        let refused = splice(&c, &capped, LIM, &drop);
+        assert_eq!(refused, Err(SpliceError::Capped(image)), "{drop:?}");
+    }
+    let each = splice_each(&c, &capped, LIM, &[vec![a], vec![b]]);
+    assert_eq!(each.map(|e| e.taken), Err(SpliceError::Capped(image)));
+    assert_eq!(
+        SpliceError::Capped(image).to_string(),
+        "the inline image at stream 0 byte 11 to stream 1 byte 7 is sized by a color \
+            space counted past a cap"
+    );
+    // Counted under the default caps, it's taken.
+    let whole = x_under(LIM.color.space_depth);
+    assert_eq!(whole.capped().count(), 0);
+    let kept = splice(&c, &whole, LIM, &[a, b]).unwrap();
+    assert_eq!(kept, [&b" BI /W 1 /H 1 /BPC 8 /CS /X ID"[..], b"abcd EI "]);
+    let each = splice_each(&c, &whole, LIM, &[vec![a], vec![b]]).unwrap();
+    assert_eq!(each.taken, [true, true]);
+    // A list written again.
+    let s: &[u8] = b"/A <</MCID 0 /Tool_Gen 1>> BDC EMC BI /W 1 /H 1 /BPC 8 /CS /X ID abcd EI";
+    let c = Concat::new(&[s]);
+    let image = span_of(s, b"BI /W 1 /H 1 /BPC 8 /CS /X ID abcd EI");
+    let list = without_keys(&c, &capped, LIM, ranges(&c)[0], &KEYS);
+    assert_eq!(list, Err(SpliceError::Capped(image)));
+    assert!(matches!(
+        without_keys(&c, &whole, LIM, ranges(&c)[0], &KEYS),
+        Ok(Some(_))
+    ));
+    // Drawn in no image, it sizes nothing.
+    let s: &[u8] = b"/A BMC EMC /X cs 0 0 1 1 re f";
+    let c = Concat::new(&[s]);
+    assert_eq!(
+        splice(&c, &capped, LIM, &ranges(&c)).unwrap(),
+        [&b" /X cs 0 0 1 1 re f"[..]]
+    );
+}
+
+/// `splice_each`'s checks read no more than [`Limits::splice_reads`] in
+/// all: each counted before it's made, the content and what it keeps, so
+/// at the cap it's as with none, and past it refused before the check that
+/// would pass it, never a group left in unchecked; with a cap below the
+/// first check, nothing is read.
+#[test]
+fn splice_each_reads_no_more_than_its_cap() {
+    // The first group sets a color, so together they're refused, and each
+    // is checked alone, then the two taken together.
+    let s: &[u8] = b"/A BMC 1 0 0 rg EMC /B BMC EMC /C BMC EMC 0 0 9 9 re f";
+    let c = Concat::new(&[s]);
+    let groups: Vec<Vec<SpanAcross>> = ranges(&c).into_iter().map(|r| vec![r]).collect();
+    let readings = || READINGS.with(|r| r.take());
+    let none = ResCx::none();
+    let at = |splice_reads| Limits {
+        splice_reads,
+        ..Limits::DEFAULT
+    };
+    readings();
+    let mut spent = 0;
+    let taken = each(&c, &none, LIM, &groups, &mut spent).unwrap().taken;
+    assert_eq!(taken, [false, true, true]);
+    // Five checks, two readings each: the content, and what it keeps.
+    let read = readings();
+    assert_eq!(read.len(), 10);
+    assert_eq!(read.iter().sum::<usize>() as u64, spent);
+    let content_and_kept =
+        |pair: &[usize]| pair.contains(&s.len()) && pair.iter().any(|&n| n < s.len());
+    assert!(read.chunks(2).all(content_and_kept), "{read:?}");
+    let first = (read[0] + read[1]) as u64;
+    // At the cap, as with none.
+    let at_cap = splice_each(&c, &none, &at(spent), &groups).unwrap();
+    assert_eq!(at_cap.taken, taken);
+    readings();
+    // A byte under it, refused before the last check, nothing past it read.
+    let under = splice_each(&c, &none, &at(spent - 1), &groups);
+    assert_eq!(under.map(|e| e.taken), Err(SpliceError::Reads(spent - 1)));
+    let read = readings();
+    assert_eq!(read.len(), 8);
+    assert!((read.iter().sum::<usize>() as u64) < spent);
+    // Below the first check, none is made.
+    for cap in [0, first - 1] {
+        let refused = splice_each(&c, &none, &at(cap), &groups);
+        assert_eq!(refused.map(|e| e.taken), Err(SpliceError::Reads(cap)));
+        assert_eq!(readings(), [], "no reading under {cap}");
+    }
+    assert_eq!(
+        SpliceError::Reads(7).to_string(),
+        "checking what to take out would read more than 7 bytes"
+    );
+    // No groups, no check.
+    assert!(
+        splice_each(&c, &none, &at(0), &[])
+            .unwrap()
+            .taken
+            .is_empty()
+    );
+}
+
+/// A list written again costs three readings at most, however many keys:
+/// to its `BDC`, then the content and what it gives.
+#[test]
+fn a_list_written_again_reads_the_content_three_times_at_most() {
+    let s: &[u8] = b"q /A <</MCID 0 /Tool_Gen 1 /Tool_Block 2>> BDC EMC Q /B BMC EMC";
+    let c = Concat::new(&[s]);
+    READINGS.with(|r| r.take());
+    let list = without_keys(&c, &ResCx::none(), LIM, ranges(&c)[0], &KEYS);
+    assert!(matches!(list, Ok(Some(_))));
+    let read = READINGS.with(|r| r.take());
+    assert_eq!(read.len(), 3);
+    assert!(read.iter().all(|&n| n <= s.len()));
+    // And one, where nothing's to go.
+    let keys: [&[u8]; 1] = [b"None"];
+    assert_eq!(
+        without_keys(&c, &ResCx::none(), LIM, ranges(&c)[0], &keys),
+        Ok(None)
+    );
+    assert_eq!(READINGS.with(|r| r.take()), [s.len()]);
 }

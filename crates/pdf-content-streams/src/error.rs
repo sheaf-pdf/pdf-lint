@@ -10,7 +10,7 @@ pub struct Error {
     /// Where what's wrong starts: a string's, an array's or a
     /// dictionary's first byte, an inline image's `BI`, or the first
     /// operand past the cap; and in marked content ([`marked`](crate::marked)),
-    /// an `EMC` that ends none, a `BMC` or `BDC` past the cap, or the
+    /// an `EMC` that ends none, a `BMC` or `BDC` past a cap, or the
     /// first operand of the first range still open at the end.
     pub at: usize,
     /// What's wrong.
@@ -64,4 +64,9 @@ pub enum ErrorKind {
     /// An `EMC` with no marked content open to end.
     #[error("an EMC that ends no marked content")]
     Emc,
+    /// Marked content holding more than
+    /// [`Limits::marked`](crate::Limits::marked) lets one reading's hold:
+    /// its ranges, and the values of the property lists written in it.
+    #[error("too much marked content")]
+    MarkedSize,
 }

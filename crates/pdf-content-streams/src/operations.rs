@@ -128,7 +128,7 @@ impl<'a, S: Sink<'a>> Iterator for Operations<'a, '_, S> {
                     continue;
                 }
                 Tok::Op(_) => None,
-                Tok::InlineImage(data) => Some((data, self.tokens.found())),
+                Tok::InlineImage(data) => Some((data, self.tokens.found(), self.tokens.capped())),
             };
             return Some(Ok(Operation {
                 content: self.tokens.content(),
@@ -168,8 +168,9 @@ pub struct Operation<'a> {
     content: &'a [u8],
     /// Where the operator is, or the inline image, `BI` to `EI`.
     at: Range<usize>,
-    /// Where an inline image's data is, and how its end was found.
-    image: Option<(Range<usize>, Found)>,
+    /// Where an inline image's data is, how its end was found, and
+    /// whether its size was counted past a cap.
+    image: Option<(Range<usize>, Found, bool)>,
     operands: Ranges,
 }
 
@@ -218,8 +219,14 @@ impl<'a> Operation<'a> {
     /// PDFium reads it ([`tokens`](crate::tokens)): an operation of its
     /// own, with the operands before it, as PDFium clears them after it.
     pub fn inline_image(&self) -> Option<InlineImage<'a>> {
-        let (data, found) = self.image.clone()?;
-        Some(InlineImage::new(self.content, self.at.clone(), data, found))
+        let (data, found, capped) = self.image.clone()?;
+        Some(InlineImage::new(
+            self.content,
+            self.at.clone(),
+            data,
+            found,
+            capped,
+        ))
     }
 
     /// Its operator, by its name ([`Operator::of`]): an inline image's is
@@ -247,7 +254,7 @@ impl fmt::Debug for Operation<'_> {
         f.debug_struct("Operation")
             .field("name", &String::from_utf8_lossy(self.name()))
             .field("at", &self.at)
-            .field("image", &self.image.as_ref().map(|(data, _)| data))
+            .field("image", &self.image.as_ref().map(|(data, ..)| data))
             .field("operands", &self.operands.as_slice())
             .finish()
     }

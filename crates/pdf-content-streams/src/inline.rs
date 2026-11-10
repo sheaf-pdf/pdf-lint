@@ -4,7 +4,7 @@
 //! ([`InlineImage`]).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::ops::Range;
 
@@ -18,7 +18,7 @@ use crate::data::{Places, RunLength, Searched, a85_end, a85_stop, ei_scan, find}
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
 use crate::limits::{CodedEnds, Limits};
-use crate::operand::{Operand, WORD, hex, iso_name, literal, name, object};
+use crate::operand::{Operand, WORD, Within, hex, iso_name, literal, name};
 use crate::scan::{
     Event, Raw, TOP, UNCAPPED, Visit, elements, is_number, is_space, next_raw, walk,
 };
@@ -30,8 +30,10 @@ use crate::scan::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResCx {
     pub(crate) spaces: HashMap<Vec<u8>, u32>,
-    /// The names a cap of `Limits::color` was met for, in the order read.
-    capped: Vec<Vec<u8>>,
+    /// The names a cap of `Limits::color` was met for, in the order of
+    /// their bytes, so an image drawn in one is told in time that grows
+    /// with their count's logarithm, not with it.
+    pub(crate) capped: BTreeSet<Vec<u8>>,
 }
 
 impl ResCx {
@@ -59,9 +61,10 @@ impl ResCx {
     ///
     /// Past a cap of `limits.color` a branch of a space doesn't load, with no
     /// error, so it counts as that makes it, mostly 3, and an unfiltered
-    /// image drawn in it ends by that: [`ResCx::capped`] names them, for a
-    /// caller that acts on where an image ends and would refuse what it can't
-    /// be sure of. The cost has no cap of its own: it's the entries, times
+    /// image drawn in it ends by that: [`ResCx::capped`] names them, an image
+    /// drawn in one says so ([`InlineImage::capped`]), and edits refuse
+    /// content that holds one ([`SpliceError::Capped`](crate::SpliceError::Capped)).
+    /// The cost has no cap of its own: it's the entries, times
     /// [`space_visits`](pdf_color::Limits::space_visits), times what each
     /// visit scans, and a caller reading untrusted files bounds it by its
     /// own means for now.
@@ -94,11 +97,11 @@ impl ResCx {
         // Room for every name at once, as most count: as many as the
         // dictionary's entries.
         let room = named.size_hint().1.unwrap_or_default();
-        let (mut spaces, mut capped) = (HashMap::with_capacity(room), Vec::new());
+        let (mut spaces, mut capped) = (HashMap::with_capacity(room), BTreeSet::new());
         for (space, read) in named {
             let read = read?;
             if read.capped {
-                capped.push(space.key.to_vec());
+                capped.insert(space.key.to_vec());
             }
             if let Some(count) = read.count {
                 spaces.insert(space.key.to_vec(), count);
@@ -107,10 +110,12 @@ impl ResCx {
         Ok(ResCx { spaces, capped })
     }
 
-    /// The names [`ResCx::read`] met a cap of `Limits::color` for, whose
-    /// counts are what a branch not loading makes them, and may not be what
-    /// PDFium counts: empty but for a space nested or spread far past anything
-    /// written honestly, and always of [`ResCx::new`] and [`ResCx::none`].
+    /// The names [`ResCx::read`] met a cap of `Limits::color` for, in the
+    /// order of their bytes, whose counts are what a branch not loading
+    /// makes them, and may not be what PDFium counts: empty but for a space
+    /// nested or spread far past anything written honestly, and always of
+    /// [`ResCx::new`] and [`ResCx::none`]. An inline image drawn in one is
+    /// capped ([`InlineImage::capped`]).
     ///
     /// ```
     /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
@@ -143,7 +148,7 @@ impl ResCx {
     pub fn new(spaces: impl IntoIterator<Item = (Vec<u8>, u32)>) -> ResCx {
         ResCx {
             spaces: spaces.into_iter().collect(),
-            capped: Vec::new(),
+            capped: BTreeSet::new(),
         }
     }
 }
@@ -172,23 +177,62 @@ pub struct InlineImage<'a> {
     at: Range<usize>,
     data: Range<usize>,
     found: Found,
+    capped: bool,
 }
 
 impl<'a> InlineImage<'a> {
     /// The image at `at` in `content`, `BI` to `EI`, its data at `data`,
-    /// its end found as `found` says.
+    /// its end found as `found` says, and whether its size was counted
+    /// past a cap.
     pub(crate) fn new(
         content: &'a [u8],
         at: Range<usize>,
         data: Range<usize>,
         found: Found,
+        capped: bool,
     ) -> InlineImage<'a> {
         InlineImage {
             content,
             at,
             data,
             found,
+            capped,
         }
+    }
+
+    /// Whether its size was counted from a color space past a cap, so that
+    /// where its data ends, and what's read after it, may not be where
+    /// PDFium has them: a name [`ResCx::capped`] names, or an array written
+    /// in its dictionary that holds more values than
+    /// [`Limits::space_values`] (or [`Limits::values`]) or meets a cap of
+    /// [`Limits::color`] as it's counted. Such a space counts as one that
+    /// doesn't load, or a branch of it does, with no error, as a reader may
+    /// read on; an edit refuses content that holds such an image
+    /// ([`SpliceError::Capped`](crate::SpliceError::Capped)). A filtered
+    /// image is capped too, though its data's end is its filter's, as its
+    /// size decides whether PDFium reads its data at all.
+    ///
+    /// ```
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    ///
+    /// let content = b"BI /W 1 /H 1 /BPC 8 /CS [/Indexed /DeviceRGB 0 <000000>] ID xyz EI";
+    /// let res = ResCx::none();
+    /// let image = |limits: &Limits| {
+    ///     let op = operations(content, &res, limits).next().unwrap().unwrap();
+    ///     let image = op.inline_image().unwrap();
+    ///     (image.data().len(), image.capped())
+    /// };
+    /// let mut limits = Limits::DEFAULT;
+    /// // One component, of 8 bits, so a byte.
+    /// assert_eq!(image(&limits), (1, false));
+    /// // Its array holds five values: the array, two names, a number and a
+    /// // string. Past a cap of four, it counts as a space that doesn't load,
+    /// // three components.
+    /// limits.space_values = 4;
+    /// assert_eq!(image(&limits), (3, true));
+    /// ```
+    pub fn capped(&self) -> bool {
+        self.capped
     }
 
     /// Where it is, `BI` to `EI`.
@@ -451,7 +495,8 @@ impl<'a, 'r> Images<'a, 'r> {
         // that end too, for the faults.
         let mut vain = 0;
         let mut iso = None;
-        let end = match (self.size(&dict), self.first_filter(&dict)) {
+        let (size, capped) = self.size(&dict);
+        let end = match (size, self.first_filter(&dict)) {
             (None, _) => End::Walk,
             (Some(size), None) => match usize::try_from(size) {
                 Ok(0) => End::Empty,
@@ -526,7 +571,7 @@ impl<'a, 'r> Images<'a, 'r> {
             let iso = iso.filter(past).unwrap_or(data.end);
             self.faults(&dict, between, &ends, &data, iso, end, sink);
         }
-        Ok(Image::Read(end, data, found))
+        Ok(Image::Read(end, data, found, capped))
     }
 
     /// Where ISO 32000-2 reads an image read otherwise, told to `sink`:
@@ -673,53 +718,71 @@ impl<'a, 'r> Images<'a, 'r> {
     /// on to `EI` from the data's start. (PDFium's chromium/7881 pads a row
     /// by adding 7 to its bits first, so a row of 2^32 − 7 bits or more
     /// overflows there; chromium/8076 and chromium/8125, which this follows,
-    /// divide, rounding up, as here.)
-    fn size(&self, dict: &ImageDict) -> Option<u32> {
+    /// divide, rounding up, as here.) And whether its color space was
+    /// counted past a cap ([`Images::components`]).
+    fn size(&self, dict: &ImageDict) -> (Option<u32>, bool) {
         let s = self.s;
         let value = |key| dict.get(s, key).map_or(0, |r| integer(&s[r]));
-        let (bpc, components) = match dict.get(s, CS).and_then(|cs| self.components(&s[cs])) {
-            Some(n) => (value(BPC) as u32, u32::try_from(n).ok()?),
-            None => (1, 1),
+        let counted = dict.get(s, CS).and_then(|cs| self.components(&s[cs]));
+        let size = || {
+            let (bpc, components) = match counted {
+                Some((n, _)) => (value(BPC) as u32, u32::try_from(n).ok()?),
+                None => (1, 1),
+            };
+            let bits = bpc.checked_mul(components)?;
+            let row = match u32::try_from(value(W)) {
+                Ok(width) => bits.checked_mul(width)?,
+                Err(_) if bits == 0 => 0,
+                Err(_) => return None,
+            };
+            row.div_ceil(8).checked_mul(value(H) as u32)
         };
-        let bits = bpc.checked_mul(components)?;
-        let row = match u32::try_from(value(W)) {
-            Ok(width) => bits.checked_mul(width)?,
-            Err(_) if bits == 0 => 0,
-            Err(_) => return None,
-        };
-        row.div_ceil(8).checked_mul(value(H) as u32)
+        (size(), counted.is_some_and(|(_, capped)| capped))
     }
 
     /// The components of an inline image's color space, as written, a name
     /// read as PDFium's content parser reads it ([`name`]); None for a
     /// name the resources don't have, which PDFium reads as no color space,
     /// an abbreviation looked up by its full name (`/I` as `/Indexed`).
-    /// What it can't make out has 3, as in PDFium.
-    fn components(&self, cs: &[u8]) -> Option<u64> {
+    /// What it can't make out has 3, as in PDFium. And whether that's
+    /// counted past a cap: a name [`ResCx::capped`] names, or an array past
+    /// [`Limits::space_values`] or [`Limits::values`], or one a cap of
+    /// [`Limits::color`] was met for, counting it.
+    fn components(&self, cs: &[u8]) -> Option<(u64, bool)> {
         if let Some(n) = name(cs) {
             return match expanded(&n).unwrap_or(&n) {
-                b"DeviceGray" => Some(1),
-                b"DeviceRGB" => Some(3),
-                b"DeviceCMYK" => Some(4),
-                n => self.res.spaces.get(n).map(|&c| c.into()),
+                b"DeviceGray" => Some((1, false)),
+                b"DeviceRGB" => Some((3, false)),
+                b"DeviceCMYK" => Some((4, false)),
+                n => (self.res.spaces.get(n)).map(|&c| (c.into(), self.res.capped.contains(n))),
             };
         }
         if cs.first() != Some(&b'[') {
-            return Some(3);
+            return Some((3, false));
         }
         // An array is the object PDFium's parser holds ([`object`]), counted
-        // as a resources dictionary's would be. A DeviceN space names its
-        // colorants in an array, which an array here never holds, as PDFium
-        // opens none in an array outside a dictionary: so it's one that
-        // doesn't load. It holds no reference, as content has none to read,
-        // so nothing is ever asked of the resolver, and what that could
+        // as a resources dictionary's would be, once its values are counted,
+        // nothing built, under [`Limits::space_values`]. A DeviceN space
+        // names its colorants in an array, which an array here never holds,
+        // as PDFium opens none in an array outside a dictionary: so it's one
+        // that doesn't load. It holds no reference, as content has none to
+        // read, so nothing is ever asked of the resolver, and what that could
         // answer, none or a failure, can't come.
-        let Some(space) = object(cs, &self.lim) else {
-            return Some(3);
+        //
+        // [`object`]: crate::object
+        let array = Operand::new(cs, 0..cs.len());
+        let space = match array.object_within(&self.lim, self.lim.space_values, false) {
+            Within::Read(..) => array.object_within(&self.lim, self.lim.space_values, true),
+            Within::Values | Within::Cap => return Some((3, true)),
+        };
+        let Within::Read(Some(space), _) = space else {
+            return Some((3, false));
         };
         let nothing = |_: ObjectId| None;
-        let count = pdf_color::components(nothing, &space, &self.lim.color);
-        Some(count.ok().flatten().map_or(3, u64::from))
+        let counted = pdf_color::counted(nothing, &space, &self.lim.color);
+        Some(counted.map_or((3, false), |read| {
+            (read.count.map_or(3, u64::from), read.capped)
+        }))
     }
 
     /// Where an image's Flate or LZW data from `start` ends, as PDFium's
@@ -1360,9 +1423,9 @@ impl Value {
 
 /// What reading an inline image's `BI` gives ([`Images::read`]).
 pub(crate) enum Image {
-    /// An image: where it ends, past its `EI`, where its data is, and how
-    /// that was found.
-    Read(usize, Range<usize>, Found),
+    /// An image: where it ends, past its `EI`, where its data is, how
+    /// that was found, and whether its size was counted past a cap.
+    Read(usize, Range<usize>, Found, bool),
     /// No image, a keyword where its dictionary's key is written: where
     /// that keyword is.
     Lone(Range<usize>),

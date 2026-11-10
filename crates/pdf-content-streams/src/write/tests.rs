@@ -572,7 +572,7 @@ fn names_are_bound_at_the_end() {
 }
 
 /// A resources dictionary, and a category of it, given by reference are
-/// followed, eight references in a row at most by default; a stream is
+/// followed, sixteen references in a row at most by default; a stream is
 /// read as its dictionary.
 #[test]
 fn resources_by_reference_are_followed() {
@@ -581,30 +581,30 @@ fn resources_by_reference_are_followed() {
     let (_, needs) = w.clone().finish(&Reserved::default());
     let name = needs.0[0].name.clone();
     let category = dict! { name.clone() => list("Other") };
-    // Objects 1 to 9 each refer to the next; 10 is the category, 11 the
-    // resources, 12 a stream of the category.
-    let mut objects: BTreeMap<ObjectId, Object> = (1..10)
+    // Objects 1 to 17 each refer to the next; 18 is the category, 19 the
+    // resources, 20 a stream of the category.
+    let mut objects: BTreeMap<ObjectId, Object> = (1..18)
         .map(|n| (ObjectId::new(n, 0), Object::reference(n + 1)))
         .collect();
-    objects.insert(ObjectId::new(10, 0), Object::from(category.clone()));
+    objects.insert(ObjectId::new(18, 0), Object::from(category.clone()));
     objects.insert(
-        ObjectId::new(11, 0),
-        Object::from(dict! { "Properties" => Object::reference(10) }),
+        ObjectId::new(19, 0),
+        Object::from(dict! { "Properties" => Object::reference(18) }),
     );
     let mut stream = Stream::default();
     stream.dict = category;
-    objects.insert(ObjectId::new(12, 0), Object::from(stream));
+    objects.insert(ObjectId::new(20, 0), Object::from(stream));
     let bumped = |resources: Object| {
         let (_, needs) = w.named(&reserved(&objects, &resources));
         needs.0[0].name != name
     };
     let by = |category: Object| Object::from(dict! { "Properties" => category });
-    assert!(bumped(Object::reference(11)), "the resources by reference");
-    assert!(bumped(by(Object::reference(10))));
-    assert!(bumped(by(Object::reference(3))), "eight in a row");
-    assert!(!bumped(by(Object::reference(2))), "nine");
+    assert!(bumped(Object::reference(19)), "the resources by reference");
+    assert!(bumped(by(Object::reference(18))));
+    assert!(bumped(by(Object::reference(3))), "sixteen in a row");
+    assert!(!bumped(by(Object::reference(2))), "seventeen");
     assert!(!bumped(by(Object::reference(99))), "a reference to none");
-    assert!(bumped(by(Object::reference(12))), "a stream's dictionary");
+    assert!(bumped(by(Object::reference(20))), "a stream's dictionary");
     assert!(!bumped(Object::null()));
 }
 

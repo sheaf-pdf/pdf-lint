@@ -58,10 +58,13 @@
 //! - **Caps** ([`Limits`]) **and errors that say where** ([`Error`]): a
 //!   string, array, dictionary or inline image that doesn't end, one past
 //!   a cap, among them what finding inline images' ends may cost in a
-//!   reading, decoding a deflate bomb or reading many images again, or
-//!   arrays and dictionaries nested deeper than PDFium reads. It never
-//!   panics, whatever the bytes, and every token moves it on; what's open
-//!   is kept on the heap, however deep.
+//!   reading, decoding a deflate bomb or reading many images again, and
+//!   what marked content may hold, or arrays and dictionaries nested
+//!   deeper than PDFium reads. Each cap is met before the work it bounds.
+//!   An inline image sized by a color space counted past a cap says so
+//!   ([`InlineImage::capped`]), and the edits refuse content that holds
+//!   one. It never panics, whatever the bytes, and every token moves it on;
+//!   what's open is kept on the heap, however deep.
 //! - **Where ISO 32000-2 reads it otherwise** ([`fault`]): each place its
 //!   rules would read the bytes another way than PDFium's, told with where
 //!   it is to a sink the caller gives ([`Tokens::with_sink`],
@@ -83,9 +86,10 @@
 //!   every other byte as it was, only where that can't change what's drawn
 //!   after them, judged by the reading the caller names, and what's kept
 //!   read again as it was read; as many of several as can be
-//!   ([`splice_each`]); and a marked range's property list written again
-//!   without some of its keys ([`without_keys`]), made with what's taken
-//!   out and read again together ([`Spliced::streams`]).
+//!   ([`splice_each`], its checks' reading capped); and a marked range's
+//!   property list written again without some of its keys
+//!   ([`without_keys`]), made with what's taken out and read again
+//!   together ([`Spliced::streams`]).
 //!
 //! Reading content takes no resolver: what's read from the file, the streams
 //! decoded, the color spaces' components and the property lists, the caller

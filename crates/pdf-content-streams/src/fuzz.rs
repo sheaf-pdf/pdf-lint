@@ -16,6 +16,7 @@ use pdf_tokenizer::decode::{self, NumberError};
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{self, Fault, Sink};
 use crate::inline::{Walks, ei_from};
+use crate::operand::Within;
 use crate::res::{feed, same};
 use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked, tokenizer};
 use crate::{
@@ -90,9 +91,12 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// ([`written_again`]); the writer's calls its bytes choose read back
 /// as written ([`calls`]); resources its bytes choose equal exactly where
 /// their digests' bytes are ([`resources`]); and its marked ranges taken
-/// out, and their lists written again, reading as the splice promises
-/// ([`spliced`]).
-/// An array in it counted alike in an image and in resources ([`spaced`]).
+/// out, and their lists written again, reading as the splice promises,
+/// refused where an image a cap sized is read or its checks would read
+/// past their cap ([`spliced`]).
+/// An array in it counted alike in an image and in resources, and capped
+/// past its cap ([`spaced`]). Its marked content holds no more than its
+/// cap lets it ([`passes`]).
 /// Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
@@ -184,8 +188,9 @@ fn nothing<'o>(id: ObjectId) -> Option<&'o Object> {
 }
 
 /// How much of `row` bytes an image read by `res` under `limits` takes for its
-/// data, drawn in `cs`, and whether `cs` was read whole as its color space.
-fn drawn(cs: &[u8], row: usize, res: &ResCx, limits: &Limits) -> (bool, Option<usize>) {
+/// data, drawn in `cs`, and whether it's capped; and whether `cs` was read
+/// whole as its color space.
+fn drawn(cs: &[u8], row: usize, res: &ResCx, limits: &Limits) -> (bool, Option<(usize, bool)>) {
     let data = vec![b'a'; row];
     let content = [b"BI /W 1 /H 1 /BPC 8 /CS ", cs, b" ID ", &data, b" EI Q"].concat();
     let op = operations(&content, res, limits)
@@ -194,13 +199,19 @@ fn drawn(cs: &[u8], row: usize, res: &ResCx, limits: &Limits) -> (bool, Option<u
     let image = op.as_ref().and_then(Operation::inline_image);
     let whole = (image.as_ref().and_then(|image| image.entry(b"ColorSpace")))
         .is_some_and(|entry| entry.bytes() == cs);
-    (whole, image.map(|image| image.data().len()))
+    (
+        whole,
+        image.map(|image| (image.data().len(), image.capped())),
+    )
 }
 
 /// Checks an array in `data`, its first, as an inline image's color space and
 /// as one a resources dictionary names ([`ResCx::read`]): each counts what
 /// [`pdf_color::components`] counts, so an image drawn in the one ends where
-/// an image drawn in the other does, under any caps on color spaces.
+/// an image drawn in the other does, under any caps on color spaces, and is
+/// capped where its count met one. In the image, at
+/// [`Limits::space_values`] of its values it's counted so, and one under, it
+/// counts as a space that doesn't load, 3, capped.
 fn spaced(data: &[u8], limits: &Limits) {
     let Some(at) = data.iter().position(|&b| b == b'[') else {
         return;
@@ -214,7 +225,7 @@ fn spaced(data: &[u8], limits: &Limits) {
     };
     let read = pdf_color::counted(nothing, &space, &limits.color).expect("nothing to fail");
     let want = read.count.expect("a value that's no reference counts");
-    let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space } });
+    let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space.clone() } });
     let res = ResCx::read(nothing, Some(&resources), limits).expect("nothing to fail");
     let whole = ResCx::new([(b"X".to_vec(), want)]);
     assert_eq!(res.spaces, whole.spaces, "counted alike");
@@ -225,21 +236,56 @@ fn spaced(data: &[u8], limits: &Limits) {
     );
     let row = want as usize;
     let by_name = drawn(b"/X", row, &res, limits);
-    assert_eq!(by_name, (true, Some(row)), "sized by its name");
+    assert_eq!(
+        by_name,
+        (true, Some((row, read.capped))),
+        "sized by its name"
+    );
+    // Its values, as an image's array counts them, nothing built.
+    let Within::Read(_, values) =
+        Operand::new(array, 0..array.len()).object_within(limits, usize::MAX, false)
+    else {
+        panic!("an array read as an object counts its values")
+    };
     // Where the array, written as a key's value, is read as it was alone.
     let in_place = drawn(array, row, &none, limits);
-    if in_place.0 {
+    if in_place.0 && values <= limits.space_values {
         assert_eq!(in_place, by_name, "sized by its array");
+    }
+    // At its values counted so, and one under them as one that doesn't
+    // load, capped, which takes three bytes.
+    let at = |space_values| Limits {
+        space_values,
+        ..*limits
+    };
+    let wide = row.max(3);
+    let in_place = drawn(array, wide, &none, &at(values));
+    if in_place.0 {
+        assert_eq!(in_place.1, Some((row, read.capped)), "at space_values");
+        let past = drawn(array, wide, &none, &at(values - 1));
+        assert_eq!(past, (true, Some((3, true))), "past space_values");
     }
     let mut small = *limits;
     for (depth, visits) in [(0, 0), (1, 1), (2, 8)] {
         small.color.space_depth = depth;
         small.color.space_visits = visits;
         let res = ResCx::read(nothing, Some(&resources), &small).expect("nothing to fail");
+        let capped = res.capped().any(|name| name == b"X");
+        if let (_, Some((_, read))) = drawn(b"/X", wide, &res, &small) {
+            assert_eq!(read, capped, "capped by its name");
+        }
+        let by_name = drawn(b"/X", row, &res, &small);
         let in_place = drawn(array, row, &none, &small);
-        if in_place.0 {
-            let by_name = drawn(b"/X", row, &res, &small);
-            assert_eq!(in_place.1, by_name.1, "alike under small caps");
+        if in_place.0 && values <= small.space_values {
+            let counted = pdf_color::counted(nothing, &space, &small.color);
+            let counted = counted.expect("nothing to fail");
+            assert_eq!(
+                in_place.1.map(|(_, c)| c),
+                Some(counted.capped),
+                "capped in place"
+            );
+            let size = |d: Option<(usize, bool)>| d.map(|(n, _)| n);
+            assert_eq!(size(in_place.1), size(by_name.1), "alike under small caps");
         }
     }
 }
@@ -352,7 +398,9 @@ fn iso_white_space(c: u8) -> bool {
 /// what its stepper gives, driven an operation at a time ([`Balance::take`],
 /// [`stepped_marked`], [`NameSet::take`]), and each name the one its
 /// operator's category says ([`resource_typed`]); its marked ranges again
-/// under a cap of two deep. With its ranges at the top taken out, and
+/// under a cap of two deep, and under small caps on what marked content
+/// holds and the values an operand may build. With its ranges at the top
+/// taken out, and
 /// with every range and ranges across two at the top, in no order and
 /// overlapping, what it keeps is what the operations outside them give,
 /// and the names only those inside use are the rest ([`kept_by_hand`]).
@@ -391,6 +439,21 @@ pub fn passes(data: &[u8]) {
         stepped_marked(&page, &ops_shallow, &props, &shallow),
         "marked under a cap"
     );
+    // What marked content holds under small caps, the values an operand
+    // may build among them.
+    for (cap, values) in [(0, limits.values), (5, 8), (data.len() / 8, limits.values)] {
+        let small = Limits {
+            marked: cap,
+            values,
+            ..*limits
+        };
+        let ops_small: Vec<_> = page.operations(&res, &small).collect();
+        assert_eq!(
+            marked(&page, &props, &res, &small),
+            stepped_marked(&page, &ops_small, &props, &small),
+            "marked under a cap on what it holds"
+        );
+    }
 
     let Ok(found) = found else { return };
     let top: Vec<SpanAcross> = found
@@ -452,9 +515,10 @@ fn kept_by_hand(
 /// range, as deep as those open, its tag and list its operands', spanning
 /// where it starts until the `EMC` that ends it, the last open, spans it
 /// through that; nothing else opens or ends one. An `EMC` with none open,
-/// or a range opened past the cap, is an error where its operator is; a
-/// range open at the end, where the first of those starts; and the
-/// operations' own error is theirs.
+/// a range opened past the cap on depth, or one that holds more than is
+/// left of the cap on what marked content holds ([`holds`]), is an error
+/// where its operator is; a range open at the end, where the first of
+/// those starts; and the operations' own error is theirs.
 fn stepped_marked<'p>(
     page: &Concat,
     ops: &[Result<Operation, Error>],
@@ -464,6 +528,7 @@ fn stepped_marked<'p>(
     let mut nest = MarkedNest::new(props, limits);
     let mut open: Vec<usize> = Vec::new();
     let mut opened = 0;
+    let mut left = limits.marked;
     for op in ops {
         let op = op.as_ref().map_err(|e| *e)?;
         let name = op.name();
@@ -475,6 +540,10 @@ fn stepped_marked<'p>(
                 match e.kind {
                     ErrorKind::Emc => assert!(name == b"EMC" && open.is_empty()),
                     ErrorKind::Depth => assert!(opens && open.len() >= limits.depth),
+                    ErrorKind::MarkedSize => {
+                        assert!(opens && open.len() < limits.depth);
+                        assert_eq!(holds(op, left, limits), None, "past what's left");
+                    }
                     kind => panic!("{kind} stepping"),
                 }
                 return Err(e);
@@ -485,6 +554,7 @@ fn stepped_marked<'p>(
                 assert!(opens, "{name:?} opens none");
                 assert_eq!(i, opened, "the next range");
                 opened += 1;
+                left -= holds(op, left, limits).expect("within what's left");
                 let m = nest.get(i).expect("found");
                 let start = page.pos(op.range().start);
                 assert_eq!((m.span.start, m.span.end), (start, start));
@@ -532,6 +602,27 @@ fn stepped_marked<'p>(
         None => assert_eq!(done.as_ref().map(Vec::len), Ok(opened)),
     }
     done
+}
+
+/// What the range `op` opens holds of the `left` values marked content may
+/// hold yet, by hand: one, and the values reading its list counts, where
+/// it's written in the content and kept, a dictionary; None where that's
+/// past `left`, read under it, or a list past `limits.values`, where
+/// that's not the lesser, which reads as none.
+fn holds(op: &Operation, left: usize, limits: &Limits) -> Option<usize> {
+    let left = left.checked_sub(1)?;
+    let list = op
+        .arg(0)
+        .filter(|list| op.name() == b"BDC" && list.is_dict());
+    let Some(list) = list else {
+        return Some(1);
+    };
+    match list.object_within(limits, usize::MAX, true) {
+        Within::Values | Within::Cap => (limits.values <= left).then_some(1),
+        Within::Read(_, values) if values > left => None,
+        Within::Read(Some(list), values) if list.as_dict().is_some() => Some(1 + values),
+        Within::Read(..) => Some(1),
+    }
 }
 
 /// The resource `op` names is the one its operator's category says, by
@@ -1369,6 +1460,12 @@ const RANGES: usize = 8;
 /// without one of the keys, are refused. And the lists written again made
 /// with what `splice_each` takes out, where they're made: what's kept reads
 /// as it did, each list as it did without the keys ([`assert_made`]).
+/// Under a cap on what `splice_each`'s checks read, at what they read it's
+/// as with none, and a byte under it refused ([`SpliceError::Reads`]).
+/// With a color space of the resources counted past a cap, content that
+/// holds an image drawn in it is refused, naming the first such image,
+/// wherever a check reads as far as it, and never spliced; content that
+/// holds none is spliced as before ([`capped_spliced`]).
 /// Panics on a broken promise; returns how many splices were made and
 /// lists written again alone.
 pub fn spliced(data: &[u8]) -> usize {
@@ -1397,6 +1494,14 @@ pub fn spliced(data: &[u8]) -> usize {
     if top.len() > 1 {
         drops.push(touching(&page, &top));
     }
+    let mut capped = res.clone();
+    capped.capped.insert(b"CS3".to_vec());
+    capped_spliced(&page, &res, &capped, &drops, &groups);
+    // An image counted past a cap of its own, its array's: what's below
+    // holds where there's none.
+    if first_capped(&page, &res, limits).is_some() {
+        return 0;
+    }
     let mut made = 0;
     for drop in &drops {
         if let Ok(kept) = splice(&page, &res, limits, drop) {
@@ -1405,7 +1510,23 @@ pub fn spliced(data: &[u8]) -> usize {
         }
     }
     let read = "content marked reads";
-    let each = splice_each(&page, &res, limits, &groups).expect(read);
+    let mut spent = 0;
+    let each = crate::splice::each(&page, &res, limits, &groups, &mut spent).expect(read);
+    let at = |splice_reads| Limits {
+        splice_reads,
+        ..*limits
+    };
+    let at_cap = splice_each(&page, &res, &at(spent), &groups).expect("read at the cap");
+    assert_eq!(at_cap.taken, each.taken, "at the cap, as with none");
+    if let Some(under) = spent.checked_sub(1) {
+        let refused = splice_each(&page, &res, &at(under), &groups);
+        assert_eq!(
+            refused.map(|e| e.taken),
+            Err(SpliceError::Reads(under)),
+            "past the cap"
+        );
+    }
+    assert_eq!(spent == 0, groups.is_empty(), "each check counted");
     if !groups.is_empty() {
         let takes = |cuts: &[SpanAcross]| splice(&page, &res, limits, cuts).is_ok();
         let alone: Vec<bool> = groups.iter().map(|g| takes(g)).collect();
@@ -1466,6 +1587,63 @@ pub fn spliced(data: &[u8]) -> usize {
     made
 }
 
+/// Where the first inline image `content` holds whose size was counted
+/// past a cap is, read with `res` under `limits`, as far as it reads.
+fn first_capped(content: &Concat, res: &ResCx, limits: &Limits) -> Option<SpanAcross> {
+    let mut read = content.tokens(res, limits);
+    while let Some(Ok((r, tok))) = read.next() {
+        if matches!(tok, Tok::InlineImage(_)) && read.capped() {
+            return Some(content.span(r));
+        }
+    }
+    None
+}
+
+/// `page`, read with `capped`, `res` but for a space counted past a cap:
+/// where it holds no image so sized, read under [`LIMITS`], each of `drops`
+/// is spliced, and `groups` by `splice_each`, as with `res`; where it holds
+/// one, none is: each is refused, naming the first, wherever a check reads
+/// as far as it, where with `res` it reads to the end, a splice made; and
+/// `splice_each` takes none.
+fn capped_spliced(
+    page: &Concat,
+    res: &ResCx,
+    capped: &ResCx,
+    drops: &[Vec<SpanAcross>],
+    groups: &[Vec<SpanAcross>],
+) {
+    let limits = &LIMITS;
+    let first = first_capped(page, capped, limits);
+    for drop in drops {
+        let (now, was) = (
+            splice(page, capped, limits, drop),
+            splice(page, res, limits, drop),
+        );
+        match (first, now) {
+            (Some(image), Err(SpliceError::Capped(at))) => assert_eq!(at, image),
+            (Some(_), Ok(_)) => panic!("an image capped, spliced"),
+            // Refused before the image, as with `res`.
+            (_, now) => assert_eq!(now, was, "as without the cap"),
+        }
+    }
+    let (now, was) = (
+        splice_each(page, capped, limits, groups),
+        splice_each(page, res, limits, groups),
+    );
+    match (first, now) {
+        (Some(image), Err(SpliceError::Capped(at))) => assert_eq!(at, image),
+        (Some(_), Ok(each)) => {
+            assert!(!each.taken.contains(&true), "an image capped, taken");
+            assert_eq!(
+                Ok(each.taken),
+                was.map(|e| e.taken),
+                "each refused before it"
+            );
+        }
+        (_, now) => assert_eq!(now.map(|e| e.taken), was.map(|e| e.taken)),
+    }
+}
+
 /// `spans`, in order and apart, each widened over the white-space either
 /// side of it, white-space between two split at its middle: cuts that
 /// touch, so whether one needs a space in its place depends on bytes its
@@ -1514,7 +1692,13 @@ fn seen<'a>(content: &'a Concat, res: &ResCx, what: &str) -> Vec<(Range<usize>, 
             Tok::Op(op) => Seen::Op(op),
             Tok::Operand(o) => Seen::Operand(o),
             Tok::InlineImage(data) => {
-                let image = crate::InlineImage::new(s, r.clone(), data.clone(), read.found());
+                let image = crate::InlineImage::new(
+                    s,
+                    r.clone(),
+                    data.clone(),
+                    read.found(),
+                    read.capped(),
+                );
                 let inside = |d: Range<usize>| d.start - r.start..d.end - r.start;
                 let stream = match image.stream() {
                     ImageStream::Data(kept) => ImageStream::Data(inside(kept)),
