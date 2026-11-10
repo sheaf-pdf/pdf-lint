@@ -1000,9 +1000,17 @@ fn unclosed_words(id: Option<ObjectId>, start: usize, past: u32) -> String {
         1 => format!(
             "the scan finds no ) closing the string {place} and reads on from just past its ("
         ),
-        n => format!(
-            "the scan finds no ) closing {n} strings, the first {place} and reads on from just past each one's ("
-        ),
+        n => {
+            // The place after "the first" set apart, as "outside any
+            // object," is.
+            let first = match id {
+                Some(_) => format!("{place},"),
+                None => place,
+            };
+            format!(
+                "the scan finds no ) closing {n} strings, the first {first} and reads on from just past each one's ("
+            )
+        }
     }
 }
 
@@ -1442,6 +1450,14 @@ mod tests {
                 Fault::Unclosed {
                     id: Some(id(9)),
                     start: 30,
+                    past: 2,
+                },
+                "the scan finds no ) closing 2 strings, the first at byte 30 in 9 0 R, and reads on from just past each one's (",
+            ),
+            (
+                Fault::Unclosed {
+                    id: Some(id(9)),
+                    start: 30,
                     past: 0,
                 },
                 "the scan finds no ) closing the string at byte 30 in 9 0 R and reads the rest of the file as that string, as PDFium's scan does",
@@ -1456,12 +1472,12 @@ mod tests {
             ),
             (
                 Fault::InString {
-                    id: Some(id(46)),
+                    id: Some(id(9)),
                     start: 30,
                     end: 470,
                     objects: 1,
                 },
-                "the scan reads the string at byte 30 in 46 0 R to a ) at byte 470, past an object whose n g obj starts a line inside it, found nowhere else, and reads that object there",
+                "the scan reads the string at byte 30 in 9 0 R to a ) at byte 470, past an object whose n g obj starts a line inside it, found nowhere else, and reads that object there",
             ),
             (
                 Fault::InString {
