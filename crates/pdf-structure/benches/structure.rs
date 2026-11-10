@@ -17,7 +17,7 @@
 //!   again and again and one `)` (`unclosed/closed-once`); streams, each
 //!   with a `(` in its dictionary (`unclosed/streams`); and `trailer`
 //!   dictionaries, each with a `(` (`unclosed/trailers`), so that the
-//!   reader reads on past each, a string's bytes read no more than twice.
+//!   reader reads on past each, reading each byte at most once more.
 //! - `get`: each of the 2,000 objects of the table's file and the stream's
 //!   read by number from a reading just opened, each as it's first asked
 //!   for, an object stream decoded once for its members (`table/cold`,

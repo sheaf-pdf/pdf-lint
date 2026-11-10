@@ -253,7 +253,7 @@ pub enum Fault {
     /// in: its `n g obj` found, and neither its `stream` nor its `endobj`
     /// yet. It's none where the scan was in no object, between objects or in
     /// a stream's data it read on through. An object's own read of such a
-    /// string doesn't read ([`Unread`](crate::Unread)), and reads to the
+    /// string doesn't read ([`Unread`]), and reads to the
     /// file's end before it fails.
     #[error("{}", unclosed_words(*.id, *.start, *.past))]
     Unclosed {

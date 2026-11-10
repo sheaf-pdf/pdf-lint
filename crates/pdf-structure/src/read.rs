@@ -20,19 +20,20 @@
 //! at `endobj` or found no end to one ([`Fault::StreamEnd`]). Where no
 //! `/Length` ends its data at `endstream`, a stream it ended at `endobj` is
 //! read no further. It reads on from just past the `(` of a literal string
-//! it finds no `)` closing, which would take every byte after it. As
-//! PDFium reads a file, it reads the rest of the file as that string
+//! it finds no `)` closing, which would take every byte after it. Under
+//! [`Recovery::Pdfium`], it reads the rest of the file as that string
 //! instead. It says either ([`Fault::Unclosed`]). An object found again
 //! past such a string stands over the one before only where it reads
-//! ([`Fault::Earlier`]). Under [`Recovery::Verified`], an object whose
-//! `n g obj` starts a line inside a string closed late is read there,
-//! where the scan found its number nowhere else ([`Fault::InString`]). An
-//! object that doesn't read says why ([`Unread`]): it doesn't parse, its
-//! offset holds another, or the object stream it's in doesn't decode
-//! ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where it is
-//! ([`Unindexed`]). One read from an object stream that starts inside the
-//! bytes of another read from it, where the stream's header puts it, is
-//! read all the same, and said.
+//! ([`Fault::Earlier`]). A string closed late can't be told from one that
+//! closes where it should. So under [`Recovery::Verified`], an object whose
+//! `n g obj` starts a line inside any string the scan reads that closes is
+//! read there, where the scan found its number nowhere else
+//! ([`Fault::InString`]). An object that doesn't read says why
+//! ([`Unread`]): it doesn't parse, its offset holds another, or the object
+//! stream it's in doesn't decode ([`Undecoded`], its filters
+//! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
+//! from an object stream that starts inside the bytes of another read from
+//! it, where the stream's header puts it, is read all the same, and said.
 //!
 //! A file is read one way, by a [`Reading`], opened under [`Options`]
 //! ([`Reading::open`], the one way in): its header, cross-reference
@@ -4067,9 +4068,10 @@ impl Reader {
     /// what a scan that read no further reads ([`Fault::Earlier`]). Each
     /// such copy is read once at most, from the last back, as the open
     /// reads, over its own bytes, a `/Length` that's a reference not
-    /// followed, its data then up to `endstream`: so the reads of the
-    /// copies one scan found read no more than the file together, whatever
-    /// they hold.
+    /// followed, its data then as where no `/Length` reads: up to
+    /// `endstream`, or to the `endobj` a scan ended it at
+    /// ([`Reader::ended`]). So the reads of the copies one scan found read
+    /// no more than the file together, whatever they hold.
     fn standing(
         &self,
         file: &[u8],

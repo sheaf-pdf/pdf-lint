@@ -626,7 +626,10 @@ impl<S: ByteSource> Reading<S> {
     /// opening the file left. [`Encryption::Opened`] says, as an open by the
     /// password does, what the file grants. A file read by scanning has
     /// its object streams decoded from the source again, now decrypted, for
-    /// their members, as an open by the password lists them. And under
+    /// their members, as an open by the password lists them. The strings
+    /// whose lines gave its scan objects are then said only of the objects
+    /// that still stand, a member listed now standing over one, as an open
+    /// by the password says them ([`Fault::InString`]). And under
     /// [`Recovery::Pdfium`](super::Recovery::Pdfium), as PDFium opened by
     /// the password would, its catalog and page tree are read from the
     /// source, and where they give no page, the file is opened again and

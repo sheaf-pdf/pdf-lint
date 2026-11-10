@@ -617,10 +617,10 @@ impl Reader {
     /// wherever each is; and a member of a stream found as written stands
     /// over an object found inside such a string, an object stream among
     /// them, which then lists no member, the string then saying only the
-    /// objects that stand ([`Reader::said_late`]).
-    /// Each stream it decodes is kept as the container a member's read
-    /// decodes, so it's decoded once, its faults told once and the budget
-    /// spent once. Where the reader can't decode them, in an encrypted file
+    /// objects that stand ([`Reader::said_late`]). Each stream it decodes
+    /// is kept as the container a member's read decodes, so it's decoded
+    /// once, its faults told once and the budget spent once. Where the
+    /// reader can't decode them, in an encrypted file
     /// no password opened, none is listed, and a password that opens it
     /// later lists them as one given at the open would; what it listed
     /// before is listed anew. What it found, said

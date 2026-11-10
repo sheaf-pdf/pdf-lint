@@ -175,13 +175,13 @@ pub enum Recovery {
     /// is read there where neither scan found its number elsewhere
     /// ([`Fault::InString`](super::Fault::InString)). None stands over an
     /// object, or an object stream's member, found as written, and a
-    /// `trailer` there isn't taken. A table's first
-    /// subsection numbered from 1 that starts with object 0's row is read
-    /// from 0 where each of its rows in use is at its object's `n g obj` so
-    /// numbered, where it's written or at the section's shift
-    /// ([`Fault::Renumbered`](super::Fault::Renumbered)). A later
-    /// section that doesn't read is said, and what the sections before it
-    /// gave is kept.
+    /// `trailer` there isn't taken. A table's first subsection numbered
+    /// from 1 that starts with object 0's row is read from 0 where each of
+    /// its rows in use is at its object's `n g obj` so numbered, where it's
+    /// written or at the section's shift
+    /// ([`Fault::Renumbered`](super::Fault::Renumbered)). A later section
+    /// that doesn't read is said, and what the sections before it gave is
+    /// kept.
     #[default]
     Verified,
     /// As PDFium reads a file, as of chromium/8125: its sections where

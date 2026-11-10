@@ -1943,11 +1943,11 @@ mod tests {
 
     /// A scanned file's stream whose `/Length` doesn't end at `endstream`,
     /// and which has none, its data read to its `endobj`, where the scan
-    /// ended it, the first `endstream` after it a later stream's
-    /// ([`without_endstream`](crate::read::recovery::tests::without_endstream)):
-    /// written whole, checked by qpdf ("No syntax or stream encoding errors
-    /// found"), and read through qpdf alone as the reader reads it, the
-    /// stream's data, through qpdf too, what the scanned reading read.
+    /// ended it, the first `endstream` after it a later stream's (the
+    /// recovery tests' `without_endstream`): written whole, checked by qpdf
+    /// ("No syntax or stream encoding errors found"), and read through qpdf
+    /// alone as the reader reads it, the stream's data, through qpdf too,
+    /// what the scanned reading read.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn a_scanned_stream_read_to_its_endobj_written_whole_reads_through_qpdf_as_through_the_reader()

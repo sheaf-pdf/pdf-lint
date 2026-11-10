@@ -2354,9 +2354,9 @@ fn a_string_that_doesnt_close_in_data_read_on_through_is_read_past() {
 /// just past the string's `(` and meets `endstream` on its own, so the data
 /// ran there: what it found inside, that string among it, is taken back,
 /// and every object and the trailer are found, every way, nothing said of
-/// the scan. Under [`Recovery::Pdfium`] the scan ends the data at that `endobj` and
-/// reads the rest of the file as the string, so the catalog isn't found,
-/// and says both.
+/// the scan. Under [`Recovery::Pdfium`] the scan ends the data at that
+/// `endobj` and reads the rest of the file as the string, so the catalog
+/// isn't found, and says both.
 #[test]
 fn a_string_that_doesnt_close_in_data_the_take_back_drops_is_said_nowhere() {
     let stream = b"9 0 obj\n<< /Length 999 >>\nstream\nq Q\nendobj\n(open\nendstream\nendobj\n";
@@ -3042,9 +3042,8 @@ fn page() -> String {
 /// else: the verified recovery's scan finds page 3's `n g obj` where it
 /// starts a line inside the string, and object 5's, and reads them there,
 /// every way, saying so once, so the page is reached, and 5, closed twice,
-/// doesn't read; under
-/// [`Recovery::Pdfium`] neither is found, as PDFium reads the string as a
-/// dictionary's value, and nothing's said.
+/// doesn't read; under [`Recovery::Pdfium`] neither is found, as PDFium
+/// reads the string as a dictionary's value, and nothing's said.
 #[test]
 fn an_object_starting_a_line_inside_a_string_closed_late_is_read_there() {
     let (file, start, end) = closed_late("", &page(), "");
