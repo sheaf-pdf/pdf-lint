@@ -12,6 +12,7 @@
 //! they are tells nothing of its own: only what's found is said, one fault
 //! a section.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
@@ -21,7 +22,10 @@ use pdf_objects::parse::{self, Parser};
 use pdf_tokenizer::{Kind, Tokenizer, is_delimiter, is_white_space};
 
 use super::window::Bytes;
-use super::{Cx, Fault, Misnumbered, NEAR, Reader, Recovery, Rows, Unended, XrefEntry, scan_of};
+use super::{
+    Cx, Fault, Late, Misnumbered, NEAR, Reader, Recovery, Rows, Unclosed, Unended, XrefEntry,
+    ended_of, scan_of, span,
+};
 use crate::source::Origin;
 
 /// How many bytes from where an `n g obj` starts its three tokens are
@@ -148,28 +152,59 @@ fn past_white_space(bytes: &[u8], base: usize, p: usize) -> Option<usize> {
     Some(p + skip)
 }
 
+/// Where a scan of a file finds each object's `n g obj` ([`scanned`]).
+struct Scanned {
+    /// The last in the file of each, by its id.
+    last: BTreeMap<ObjectId, usize>,
+    /// The earlier ones of each whose last is past a literal string that
+    /// doesn't close the scan read past, in the file's order.
+    earlier: BTreeMap<ObjectId, Vec<usize>>,
+    /// Where those past such a string are and their bytes end, in the
+    /// file's order.
+    past: Vec<(usize, usize)>,
+}
+
 /// Where a scan of `file`, every byte, finds each object's `n g obj`
 /// ([`scan_of`], under `limits`, as the verified recovery scans), exactly
-/// ([`header_exactly`]), by its id: the last in the file, as an update
-/// appends, of those before byte `within` where that's given; and each
-/// stream before there whose data the scan ended at its `endobj`, or found
-/// no end to and read on through, which is said ([`Fault::StreamEnd`]).
+/// ([`header_exactly`]), by its id, of those before byte `within` where
+/// that's given ([`Reader::scanned_at`] reads it); each stream before there
+/// whose data the scan ended at its `endobj`, or found no end to and read
+/// on through, which is said ([`Fault::StreamEnd`]); the strings before
+/// there it found no `)` closing and read past, which are said
+/// ([`Fault::Unclosed`]); and the strings whose lines inside them gave it
+/// objects before there, which are said ([`Fault::InString`]).
 fn scanned(
     file: &[u8],
     within: Option<usize>,
     limits: parse::Limits,
-) -> (BTreeMap<ObjectId, usize>, Vec<Unended>) {
-    let mut found = BTreeMap::new();
-    let scan = scan_of(file, limits, Recovery::Verified);
+) -> (Scanned, Vec<Unended>, Unclosed, Vec<Late>) {
+    let scan = scan_of(file, limits, Recovery::Verified, within);
     let before = |at: usize| within.is_none_or(|within| at < within);
-    for (id, at) in scan.objects {
-        if before(at) && header_exactly(file, 0, at, true) == Some(id) {
-            found.insert(id, at);
+    let exact: Vec<(ObjectId, usize)> = (scan.objects.into_iter())
+        .filter(|&(id, at)| before(at) && header_exactly(file, 0, at, true) == Some(id))
+        .collect();
+    let mut last = BTreeMap::new();
+    for &(id, at) in &exact {
+        last.insert(id, at);
+    }
+    let mut earlier: BTreeMap<ObjectId, Vec<usize>> = BTreeMap::new();
+    if !scan.past.is_empty() {
+        for &(id, at) in &exact {
+            let found = last[&id];
+            let past = (scan.past).binary_search_by_key(&found, |&(at, _)| at);
+            if at != found && past.is_ok() {
+                earlier.entry(id).or_default().push(at);
+            }
         }
     }
     let mut unended = scan.unended;
     unended.retain(|unended| before(unended.start));
-    (found, unended)
+    let scanned = Scanned {
+        last,
+        earlier,
+        past: scan.past,
+    };
+    (scanned, unended, scan.unclosed, scan.late)
 }
 
 impl Reader {
@@ -425,14 +460,23 @@ impl Reader {
     /// number and generation, exactly, the last in the file ([`scan_of`],
     /// as a file whose sections don't read is scanned) before byte
     /// `within` where that's given, as a reading as of a section takes
-    /// nothing later updates wrote; its offset moved there; else where it's
+    /// nothing later updates wrote, but one past a string that doesn't
+    /// close the scan read past only where it reads, which is said
+    /// ([`Reader::scanned_at`]); its offset moved there; else where it's
     /// written. Where the scan is made, each stream before `within` whose
     /// data it ended at its `endobj`, or found no end to and read on
-    /// through, is said to `cx` ([`Fault::StreamEnd`]). None for any
-    /// section where no section has a shift, the file read as written; each
-    /// section `said` to be elsewhere has its move.
+    /// through, is said to `cx` ([`Fault::StreamEnd`]), the strings
+    /// before there it found no `)` closing and read past
+    /// ([`Fault::Unclosed`]), and those whose lines inside them gave it an
+    /// object an entry is moved to, with those alone ([`Fault::InString`]);
+    /// and each stream whose data it ended at its `endobj` is kept, so that
+    /// its object's read reads it so, wherever the entry is read
+    /// ([`Reader::ended`]), as the file is being scanned, while the copies
+    /// it checks are read as that read does. None for any section where no
+    /// section has a shift, the file read as written; each section `said`
+    /// to be elsewhere has its move.
     pub(super) fn shifted<'f, F: Bytes<'f>, T>(
-        &self,
+        &mut self,
         file: F,
         cx: &mut Cx,
         lists: &mut [(Rows, T)],
@@ -449,8 +493,14 @@ impl Reader {
             return Ok(lists.iter().map(|_| None).collect());
         };
         // Where a scan of the file finds each object's `n g obj`, made
-        // where an entry is first found at neither place.
-        let mut scan: Option<BTreeMap<ObjectId, usize>> = None;
+        // where an entry is first found at neither place, with the file's
+        // bytes.
+        let mut scan: Option<(Cow<'f, [u8]>, Scanned)> = None;
+        // Where the entries moved to the scan's places are.
+        let mut recovered = BTreeSet::new();
+        // Where among the faults told the strings whose lines gave the scan
+        // objects go, and those strings.
+        let mut late: (usize, Vec<Late>) = (0, Vec::new());
         let mut shifts = Vec::with_capacity(lists.len());
         for ((rows, _), by) in lists.iter_mut().zip(own) {
             let by = by.unwrap_or(first);
@@ -480,33 +530,97 @@ impl Reader {
                     continue;
                 }
                 if scan.is_none() {
-                    let (found, unended) = scanned(&file.all()?, within, self.limits.parser);
+                    let all = file.all()?;
+                    let (found, unended, unclosed, found_late) =
+                        scanned(&all, within, self.limits.parser);
                     for unended in &unended {
                         cx.tell(None, Some(unended.at()), unended.fault());
                     }
-                    scan = Some(found);
+                    if let Some((at, fault)) = unclosed.fault() {
+                        cx.tell(None, Some(at), fault);
+                    }
+                    late = (cx.faults.len(), found_late);
+                    self.ended = ended_of(&unended).into();
+                    scan = Some((all, found));
                 }
-                match scan.as_ref().and_then(|found| found.get(&id)) {
-                    Some(&at) if at != *offset => {
+                let at = match &mut scan {
+                    Some((all, found)) => self.scanned_at(all, found, id, cx),
+                    None => None,
+                };
+                match at {
+                    Some(at) if at != *offset => {
                         *offset = at;
                         shift.scanned.push(n);
+                        recovered.insert(at);
                     }
                     _ => shift.neither += 1,
                 }
             }
             shifts.push(Some(shift));
         }
+        // The strings whose lines gave the scan an object an entry is moved
+        // to, each with those, said where the scan's other faults are: the
+        // others give the reading nothing.
+        let (at, mut late) = late;
+        late.retain_mut(|late| {
+            late.objects.retain(|(_, at)| recovered.contains(at));
+            !late.objects.is_empty()
+        });
+        if cx.wants {
+            let said = late
+                .iter()
+                .map(|late| (Place::new(None, Some(late.at())), late.fault()));
+            cx.faults.splice(at..at, said);
+        }
         Ok(shifts)
+    }
+
+    /// Where `found`, a scan of `file`, finds object `id`'s `n g obj` to
+    /// read it at: the last in the file, but where that's past a string
+    /// that doesn't close the scan read past and doesn't read, an earlier
+    /// one, as [`Reader::scan`] takes it ([`Reader::standing`]), said to
+    /// `cx` the first time it's looked for ([`Fault::Earlier`]).
+    fn scanned_at(
+        &self,
+        file: &[u8],
+        found: &mut Scanned,
+        id: ObjectId,
+        cx: &mut Cx,
+    ) -> Option<usize> {
+        let &last = found.last.get(&id)?;
+        let Some(earlier) = found.earlier.remove(&id) else {
+            return Some(last);
+        };
+        let copies: Vec<(ObjectId, usize)> = (earlier.into_iter().chain([last]))
+            .map(|at| (id, at))
+            .collect();
+        let Some((_, at, later)) = self.standing(file, &copies, &found.past) else {
+            return Some(last);
+        };
+        found.last.insert(id, at);
+        cx.tell(
+            None,
+            Some(span(later, later + 1)),
+            Fault::Earlier { id, at, later },
+        );
+        Some(at)
     }
 
     /// Each object in the object streams a scan found
     /// ([`Reader::scan`]), listed as their headers give them: by the last
     /// such stream in the file that has it, as an update appends, unless
     /// the scan found its number at an offset, which stands; at generation
-    /// 0, read from the stream ([`Origin::Stream`]).
-    /// Each stream it decodes is kept as the container a member's read
-    /// decodes, so it's decoded once, its faults told once and the budget
-    /// spent once. Where the reader can't decode them, in an encrypted file
+    /// 0, read from the stream ([`Origin::Stream`]). But what a literal
+    /// string closed late holds stands over nothing the scan found as
+    /// written ([`Fault::InString`]): a stream whose `n g obj` starts a
+    /// line inside one lists its members under those of every other,
+    /// wherever each is; and a member of a stream found as written stands
+    /// over an object found inside such a string, an object stream among
+    /// them, which then lists no member, the string then saying only the
+    /// objects that stand ([`Reader::said_late`]). Each stream it decodes
+    /// is kept as the container a member's read decodes, so it's decoded
+    /// once, its faults told once and the budget spent once. Where the
+    /// reader can't decode them, in an encrypted file
     /// no password opened, none is listed, and a password that opens it
     /// later lists them as one given at the open would; what it listed
     /// before is listed anew. What it found, said
@@ -530,10 +644,17 @@ impl Reader {
             self.entries = self.entries.iter().copied().filter(listed).collect();
             self.slots = self.entries.iter().map(|_| OnceLock::new()).collect();
         }
-        // The object streams, in the order their offsets come in the file.
-        let mut streams: Vec<(usize, u32)> = (self.object_streams.iter())
+        // The objects found where a line starts inside a string.
+        let late: BTreeSet<u32> = (self.late.iter())
+            .flat_map(|late| late.objects.iter().map(|(id, _)| id.number))
+            .collect();
+        // The object streams, in the order their offsets come in the file,
+        // those found inside a string first.
+        let mut streams: Vec<(bool, usize, u32)> = (self.object_streams.iter())
             .filter_map(|&s| match self.entry(s) {
-                Some(&(0, XrefEntry::InUse { offset, .. })) => Some((offset, s)),
+                Some(&(0, XrefEntry::InUse { offset, .. })) => {
+                    Some((!late.contains(&s), offset, s))
+                }
                 _ => None,
             })
             .collect();
@@ -543,10 +664,10 @@ impl Reader {
         match self.native_containers() {
             false => unread = streams.len(),
             true => {
-                for &(_, s) in &streams {
+                for &(_, _, s) in &streams {
                     self.containers.entry(s).or_default();
                 }
-                for &(_, s) in &streams {
+                for &(_, _, s) in &streams {
                     match self.container(file, s)?.map(|c| &c.header) {
                         Some(Ok(header)) => {
                             headers.push((s, header.iter().map(|&(n, _)| n).collect()));
@@ -556,15 +677,28 @@ impl Reader {
                 }
             }
         }
+        // The objects found inside a string that a stream found as written
+        // lists, whose members stand over them.
+        let over: BTreeSet<u32> = (headers.iter())
+            .filter(|(s, _)| !late.contains(s))
+            .flat_map(|(_, numbers)| numbers.iter().copied())
+            .filter(|n| late.contains(n))
+            .collect();
+        headers.retain(|(s, _)| !over.contains(s));
         let mut members = BTreeMap::new();
         for (stream, numbers) in &headers {
             for (index, &n) in numbers.iter().enumerate() {
                 let Ok(index) = u32::try_from(index) else {
                     break;
                 };
-                if n != 0 && self.index(n).is_none() {
+                if n != 0 && (self.index(n).is_none() || over.contains(&n)) {
                     members.insert(n, (*stream, index));
                 }
+            }
+        }
+        if !over.is_empty() {
+            for late in &mut self.late {
+                late.objects.retain(|(id, _)| !over.contains(&id.number));
             }
         }
         let from: BTreeSet<u32> = members.values().map(|&(stream, _)| stream).collect();
@@ -608,6 +742,27 @@ impl Reader {
             unread: count(unread),
         };
         (self.scanned && unread > 0).then_some(fault)
+    }
+
+    /// What `faults`, those said as the file was opened, say of the strings
+    /// whose lines inside them gave a scan objects ([`Fault::InString`]),
+    /// said again of the objects that stand once the object streams'
+    /// members are listed ([`Reader::members`]): a string none of whose
+    /// objects stands, said no more.
+    pub(super) fn said_late(&self, faults: &mut Vec<(Place, Fault)>) {
+        if self.late.is_empty() {
+            return;
+        }
+        faults.retain_mut(|(_, fault)| {
+            let Fault::InString { start, objects, .. } = fault else {
+                return true;
+            };
+            let Some(late) = self.late.iter().find(|late| late.start == *start) else {
+                return true;
+            };
+            *objects = count(late.objects.len());
+            !late.objects.is_empty()
+        });
     }
 
     /// What [`Reader::members`] says, `fault`, in place of what it said as

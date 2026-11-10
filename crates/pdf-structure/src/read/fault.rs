@@ -214,11 +214,19 @@ pub enum Fault {
     /// found. `id` is the stream's object, its `n g obj` as the scan found
     /// it before `stream`; none where it found none, which
     /// [`Recovery::Pdfium`](super::Recovery::Pdfium)'s scan doesn't pass
-    /// over, as PDFium's doesn't. The object's own read reads its data as
-    /// any stream's is read ([`Fault::Length`]). Under
-    /// [`Recovery::Verified`](super::Recovery::Verified), not where the
-    /// scan, reading on, meets that `endstream` on its own between objects:
-    /// the data ran there, and what it found inside is taken back.
+    /// over, as PDFium's doesn't. Where its `/Length` doesn't end its data
+    /// at `endstream` ([`Fault::Length`]), the object's own read takes its
+    /// data to that `endobj`, as PDFium's read of the object does. It
+    /// doesn't run on to an `endstream` past it, which may be a later
+    /// stream's. But the data may start on the `stream` keyword's line,
+    /// which the scan, as PDFium's, passes over to start it on the next.
+    /// Then an `endstream` on that line ends it, as this crate reads any
+    /// stream's, where PDFium's read finds no data. Where no end was found,
+    /// it's read as any stream's is. Under
+    /// [`Recovery::Verified`](super::Recovery::Verified), it isn't said
+    /// where the scan, reading on, meets that `endstream` on its own
+    /// between objects. The data ran there, so what the scan found inside
+    /// is taken back, and the object's read takes its data to there.
     #[error("{}", stream_end_words(*.id, *.start, *.end))]
     StreamEnd {
         /// The stream's object.
@@ -227,6 +235,101 @@ pub enum Fault {
         start: usize,
         /// Where it was ended, at its `endobj`; none where no end was found.
         end: Option<usize>,
+    },
+    /// A scan of the file, as a file whose sections don't read is scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
+    /// an object not where its section puts it
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), found no `)`
+    /// closing a literal string whose `(` is at byte `start` (ISO 32000-2,
+    /// 7.3.4.2), which would take every byte after it. Under
+    /// [`Recovery::Verified`](super::Recovery::Verified) it reads on from
+    /// just past that `(`, the bytes the string held read as tokens, so that
+    /// what's after it is found. `past` is how many such strings it read
+    /// past, the first at `start`, each from just past its `(`. Under
+    /// [`Recovery::Pdfium`](super::Recovery::Pdfium) it reads the rest of
+    /// the file as that string, as PDFium's scan does where it reads a
+    /// string. It finds nothing after it, and `past` is 0. One a scan,
+    /// however many such strings it meets. `id` is the object the scan was
+    /// in: its `n g obj` found, and neither its `stream` nor its `endobj`
+    /// yet. It's none where the scan was in no object, between objects or in
+    /// a stream's data it read on through. An object's own read of such a
+    /// string doesn't read ([`Unread`]), and reads to the
+    /// file's end before it fails.
+    #[error("{}", unclosed_words(*.id, *.start, *.past))]
+    Unclosed {
+        /// The object the first string is in.
+        id: Option<ObjectId>,
+        /// Where the first string's `(` is.
+        start: usize,
+        /// How many strings the scan read past, each from just past its
+        /// `(`; 0 where it read the first to the file's end. A `u32`, as
+        /// every count a recovery says.
+        past: u32,
+    },
+    /// A scan of the file, as a file whose sections don't read is scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
+    /// an object not where its section puts it
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), found `id`'s
+    /// number again at byte `later`, past a literal string that doesn't
+    /// close, which it read past ([`Fault::Unclosed`]). The string may be
+    /// in a stream's data the scan ended at its `endobj`, then took back to
+    /// its `endstream` ([`Fault::StreamEnd`]): then no string is said, but
+    /// a scan that read no further than it still doesn't reach what's past
+    /// that `endstream`. That object doesn't read there: a revision cut
+    /// short, say, or bytes the string held. So `id` is read at byte `at`
+    /// instead, where the scan found it before. That's the last of its
+    /// copies past the string that reads. Where none reads, it's the last
+    /// before the string, as a scan that read no further reads it. Where
+    /// there's none before it, it's the first. A
+    /// later `n g obj` of a number stands over an earlier one, as an update
+    /// appends. But one past such a string stands only where it reads, so
+    /// what's read past one takes nothing out of the reading.
+    /// [`Recovery::Verified`](super::Recovery::Verified) alone: under
+    /// [`Recovery::Pdfium`](super::Recovery::Pdfium) the scan reads no
+    /// further than such a string.
+    #[error("{}", earlier_words(*.id, *.at, *.later))]
+    Earlier {
+        /// The object read.
+        id: ObjectId,
+        /// Where its `n g obj` is.
+        at: usize,
+        /// Where the scan found its number again, past such a string,
+        /// where that doesn't read.
+        later: usize,
+    },
+    /// A scan of the file, as a file whose sections don't read is scanned
+    /// ([`Trailer::unwritten`](crate::Trailer::unwritten)), or as one is for
+    /// an object not where its section puts it
+    /// ([`Origin::Recovered`](crate::Origin::Recovered)), read a literal
+    /// string from its `(` at byte `start` to a `)` at byte `end`, and
+    /// reads `objects` objects whose `n g obj` starts a line inside it
+    /// there, of numbers it found nowhere else. A string that lacks its
+    /// own `)` closes late, at a later string's or one in a stream's data.
+    /// What's written up to there is read as its bytes. Each line's first
+    /// three tokens are read as qpdf's reconstruction reads a line's, so
+    /// that an object written there is found. None stands over an object a
+    /// scan found as written, so none is of a number it found elsewhere. A
+    /// member of an object stream it found so stands over one. And such a
+    /// stream's members stand over those of one found inside a string. Of
+    /// a number written so more than once, inside one string or two, the
+    /// last stands, as a later `n g obj` does. `objects` counts those that
+    /// stand, each in the string it's in. A string none of whose objects
+    /// stands isn't said. A `trailer` there isn't taken. One a string. `id`
+    /// is the object the scan was in, as [`Fault::Unclosed`] has it.
+    /// [`Recovery::Verified`](super::Recovery::Verified) alone, and only
+    /// its first scan, which passes over each stream's data as PDFium's
+    /// does.
+    #[error("{}", in_string_words(*.id, *.start, *.end, *.objects))]
+    InString {
+        /// The object the string is in.
+        id: Option<ObjectId>,
+        /// Where its `(` is.
+        start: usize,
+        /// Where the `)` that closes it is.
+        end: usize,
+        /// How many objects it read there. A `u32`, as every count a
+        /// recovery says.
+        objects: u32,
     },
     /// The sections list `past` objects past the first `most`, as many
     /// entries as the reader reads of a file of `len` bytes
@@ -352,20 +455,22 @@ pub enum Fault {
     },
     /// A stream's `/Length`, when one reads (`length`), doesn't end its
     /// data at `endstream`, or none reads: its data is read up to
-    /// `endstream`, found by scanning. A cross-reference stream's that's a
-    /// reference is [`Fault::XrefLength`].
+    /// `endstream`, found by scanning. Where a scan of the file ended it at
+    /// its `endobj`, it's read no further ([`Fault::StreamEnd`]). A
+    /// cross-reference stream's that's a reference is
+    /// [`Fault::XrefLength`].
     #[error("{}", length_words(*.length))]
     Length {
         /// What its `/Length` says, when it reads.
         length: Option<usize>,
     },
     /// A cross-reference stream's `/Length` is a reference, which no read
-    /// follows: its data is read up to `endstream`, found by scanning. Its
-    /// section is read before any object is listed, so the reference
-    /// can't be followed there, and every other read of the stream reads
-    /// it as that one did. ISO 32000-2 has it direct (7.5.8.2, as
-    /// corrected); before PDF 2.0, only `/Filter` and `/DecodeParms` had
-    /// to be, of the entries every stream has.
+    /// follows: its data is read as where no `/Length` reads
+    /// ([`Fault::Length`]). Its section is read before any object is
+    /// listed, so the reference can't be followed there, and every other
+    /// read of the stream reads it as that one did. ISO 32000-2 has it
+    /// direct (7.5.8.2, as corrected); before PDF 2.0, only `/Filter` and
+    /// `/DecodeParms` had to be, of the entries every stream has.
     #[error("its /Length is a reference, which isn't followed in a cross-reference stream")]
     XrefLength,
     /// A stream's data doesn't decode cleanly through its filter `filter`,
@@ -887,6 +992,57 @@ fn stream_end_words(id: Option<ObjectId>, start: usize, end: Option<usize>) -> S
     }
 }
 
+/// [`Fault::Unclosed`]'s words.
+fn unclosed_words(id: Option<ObjectId>, start: usize, past: u32) -> String {
+    let place = match id {
+        Some(id) => format!("at byte {start} in {id} R"),
+        None => format!("at byte {start}, outside any object,"),
+    };
+    match past {
+        0 => format!(
+            "the scan finds no ) closing the string {place} and reads the rest of the file as that string, as PDFium's scan does"
+        ),
+        1 => format!(
+            "the scan finds no ) closing the string {place} and reads on from just past its ("
+        ),
+        n => {
+            // The place after "the first" set apart, as "outside any
+            // object," is.
+            let first = match id {
+                Some(_) => format!("{place},"),
+                None => place,
+            };
+            format!(
+                "the scan finds no ) closing {n} strings, the first {first} and reads on from just past each one's ("
+            )
+        }
+    }
+}
+
+/// [`Fault::Earlier`]'s words.
+fn earlier_words(id: ObjectId, at: usize, later: usize) -> String {
+    format!(
+        "the scan finds object {} again at byte {later}, past a string that doesn't close, where it doesn't read, and reads {id} R at byte {at}, where it found it before",
+        id.number
+    )
+}
+
+/// [`Fault::InString`]'s words.
+fn in_string_words(id: Option<ObjectId>, start: usize, end: usize, objects: u32) -> String {
+    let place = match id {
+        Some(id) => format!("at byte {start} in {id} R"),
+        None => format!("at byte {start}, outside any object,"),
+    };
+    match objects {
+        1 => format!(
+            "the scan reads the string {place} to a ) at byte {end}, past an object whose n g obj starts a line inside it, found nowhere else, and reads that object there"
+        ),
+        n => format!(
+            "the scan reads the string {place} to a ) at byte {end}, past {n} objects whose n g obj starts a line inside it, found nowhere else, and reads those objects there"
+        ),
+    }
+}
+
 /// [`Fault::Strings`]' words.
 fn strings_words(count: usize, fault: &pdf_crypt::Fault) -> String {
     match count {
@@ -965,11 +1121,14 @@ mod tests {
             Fault::XrefLength => 34,
             Fault::StreamEnd { .. } => 35,
             Fault::Renumbered { .. } => 36,
+            Fault::Unclosed { .. } => 37,
+            Fault::Earlier { .. } => 38,
+            Fault::InString { .. } => 39,
         }
     }
 
     /// How many variants [`arm`] names.
-    const ARMS: usize = 37;
+    const ARMS: usize = 40;
 
     /// Each fault, built by a literal, says its words, every variant and
     /// each way its words go; and none is left without a case.
@@ -1275,6 +1434,64 @@ mod tests {
                     end: Some(47),
                 },
                 "the scan ends the data of a stream with no n g obj before it at its endobj, at byte 47, as no endstream comes before it and no /Length ends at one",
+            ),
+            (
+                Fault::Unclosed {
+                    id: Some(id(9)),
+                    start: 30,
+                    past: 1,
+                },
+                "the scan finds no ) closing the string at byte 30 in 9 0 R and reads on from just past its (",
+            ),
+            (
+                Fault::Unclosed {
+                    id: None,
+                    start: 30,
+                    past: 3,
+                },
+                "the scan finds no ) closing 3 strings, the first at byte 30, outside any object, and reads on from just past each one's (",
+            ),
+            (
+                Fault::Unclosed {
+                    id: Some(id(9)),
+                    start: 30,
+                    past: 2,
+                },
+                "the scan finds no ) closing 2 strings, the first at byte 30 in 9 0 R, and reads on from just past each one's (",
+            ),
+            (
+                Fault::Unclosed {
+                    id: Some(id(9)),
+                    start: 30,
+                    past: 0,
+                },
+                "the scan finds no ) closing the string at byte 30 in 9 0 R and reads the rest of the file as that string, as PDFium's scan does",
+            ),
+            (
+                Fault::Earlier {
+                    id: id(9),
+                    at: 30,
+                    later: 470,
+                },
+                "the scan finds object 9 again at byte 470, past a string that doesn't close, where it doesn't read, and reads 9 0 R at byte 30, where it found it before",
+            ),
+            (
+                Fault::InString {
+                    id: Some(id(9)),
+                    start: 30,
+                    end: 470,
+                    objects: 1,
+                },
+                "the scan reads the string at byte 30 in 9 0 R to a ) at byte 470, past an object whose n g obj starts a line inside it, found nowhere else, and reads that object there",
+            ),
+            (
+                Fault::InString {
+                    id: None,
+                    start: 30,
+                    end: 470,
+                    objects: 3,
+                },
+                "the scan reads the string at byte 30, outside any object, to a ) at byte 470, past 3 objects whose n g obj starts a line inside it, found nowhere else, and reads those objects there",
             ),
             (
                 Fault::Shifted {

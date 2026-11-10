@@ -11,7 +11,13 @@
 //!   offsets count from (`prefixed`); and the table's file as a cut left
 //!   it, its section and each of its rows three bytes past where they are,
 //!   so that the reader finds the section and reads each object at that
-//!   shift (`shifted`).
+//!   shift (`shifted`). And scanned files of 1 MiB and 4 MiB (`/1MiB`,
+//!   `/4MiB`) whose literal strings don't close, a catalog first and a
+//!   trailer naming it last: `(` again and again (`unclosed/parens`); `(`
+//!   again and again and one `)` (`unclosed/closed-once`); streams, each
+//!   with a `(` in its dictionary (`unclosed/streams`); and `trailer`
+//!   dictionaries, each with a `(` (`unclosed/trailers`), so that the
+//!   reader reads on past each, reading each byte at most once more.
 //! - `get`: each of the 2,000 objects of the table's file and the stream's
 //!   read by number from a reading just opened, each as it's first asked
 //!   for, an object stream decoded once for its members (`table/cold`,
@@ -148,6 +154,11 @@ mod api {
     /// file says are read where it proves they are: a version of the crate
     /// that doesn't finds the objects of a file cut so by scanning.
     pub const SHIFTS: bool = true;
+
+    /// Whether a scan reads on past a literal string that doesn't close: a
+    /// version of the crate that doesn't reads the rest of the file as
+    /// that string, and finds no trailer after it.
+    pub const READS_PAST: bool = true;
 
     /// Whether `reading` found stream `id`'s data by its `/Length`, as it
     /// read the stream.
@@ -558,6 +569,7 @@ struct Files {
     faulty: Vec<u8>,
     twice: Vec<u8>,
     lengths: Vec<u8>,
+    unclosed: Vec<(String, Vec<u8>)>,
 }
 
 impl Files {
@@ -571,6 +583,7 @@ impl Files {
             faulty: table_file_as(objects, false, false),
             twice: twice_file(),
             lengths: lengths_file(),
+            unclosed: unclosed_files(),
         }
     }
 }
@@ -633,7 +646,73 @@ fn open_group(c: &mut Criterion, files: &Files) {
         group.throughput(Throughput::Bytes(file.len() as u64));
         group.bench_function(name, |b| b.iter(|| api::open(black_box(file))));
     }
+    // Each scanned file of strings that don't close, a reading of it tens
+    // of milliseconds: ten samples.
+    group.sample_size(10);
+    for (name, file) in &files.unclosed {
+        let reading = api::open(file);
+        assert!(api::scanned(&reading), "open/{name}: scanned");
+        assert!(
+            reading.ids().any(|id| id == ObjectId::new(1, 0)),
+            "open/{name}: the catalog"
+        );
+        let root = (reading.trailer().dict().get(b"Root")).and_then(Object::as_reference);
+        let read_past = api::READS_PAST.then_some(ObjectId::new(1, 0));
+        assert_eq!(root, read_past, "open/{name}: the trailer past the strings");
+        group.throughput(Throughput::Bytes(file.len() as u64));
+        group.bench_function(name.as_str(), |b| b.iter(|| api::open(black_box(file))));
+    }
     group.finish();
+}
+
+/// A scanned file of about `size` bytes: a catalog, then `each`, given
+/// its count from 0, again and again, then `last` and a trailer naming the
+/// catalog.
+fn unclosed_file(size: usize, each: Each, last: &str) -> Vec<u8> {
+    let mut out = header();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+    let mut k = 0;
+    while out.len() < size {
+        out.extend_from_slice(each(k).as_bytes());
+        k += 1;
+    }
+    out.extend_from_slice(last.as_bytes());
+    out.extend_from_slice(b"\ntrailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF\n");
+    out
+}
+
+/// What a scanned file of strings that don't close holds again and again,
+/// given its count from 0 ([`unclosed_file`]).
+type Each = fn(usize) -> String;
+
+/// The scanned files of strings that don't close, each by its benchmark's
+/// name, at 1 MiB and 4 MiB.
+fn unclosed_files() -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    for (size, at) in [(1 << 20, "1MiB"), (4 << 20, "4MiB")] {
+        let shapes: [(&str, Each, &str); 4] = [
+            ("parens", |_| "(".repeat(4096), ""),
+            ("closed-once", |_| "(".repeat(4096), ")"),
+            (
+                "streams",
+                |k| {
+                    format!(
+                        "{} 0 obj\n<< /A ( /Length 3 >>\nstream\nabc\nendstream\nendobj\n",
+                        k + 2
+                    )
+                },
+                "",
+            ),
+            ("trailers", |_| "trailer\n<< /A (\n".to_string(), ""),
+        ];
+        for (name, each, last) in shapes {
+            files.push((
+                format!("unclosed/{name}/{at}"),
+                unclosed_file(size, each, last),
+            ));
+        }
+    }
+    files
 }
 
 /// Each object of `ids` got from `reading`, held to its kind: a stream

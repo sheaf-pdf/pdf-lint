@@ -328,6 +328,77 @@ def stream_of_no_object():
     return f.bytes()
 
 
+def data_on_the_stream_line():
+    """No startxref, and object stream 9, page 4 its member, its data and
+    `endstream` on its `stream` keyword's line, `endobj` on the next, its
+    /Length past its data: PDFium starts the data on the next line, finds
+    no `endstream` after it, and reads no member."""
+    f = File()
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    head = b" 4 0 "
+    f.raw(b"9 0 obj\n<< /Type /ObjStm /N 1 /First %d /Length 999 >>\nstream%s%s endstream\nendobj\n"
+          % (len(head), head, page(4)))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
+def unclosed(where):
+    """No startxref, and a literal string that doesn't close before the
+    catalog and its pages: as object 9's dictionary's value, between
+    objects, or where object 9's dictionary has a key. PDFium reads it to
+    the file's end where it reads it as a string, a value or a `(` between
+    objects, and finds no catalog; where a key goes it passes over it."""
+    f = File()
+    if where == "value":
+        f.raw(b"9 0 obj\n<< /Title (open /Producer (x) >>\nendobj\n")
+    elif where == "between":
+        f.obj(9, b"<< /Title (closed) >>")
+        f.raw(b"(open\n")
+    else:
+        f.raw(b"9 0 obj\n<< /Title (closed) ( /Producer (x) >>\nendobj\n")
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.obj(4, page(4))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
+def unclosed_later_copy():
+    """No startxref, and the catalog, its pages and the trailer, then a
+    literal string that doesn't close between objects and page 4 again, its
+    dictionary cut short. PDFium reads the string to the file's end, and
+    page 4 where it's first written."""
+    f = File()
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.obj(4, page(4))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    f.raw(b"(open\n4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 300]\n")
+    return f.bytes()
+
+
+def closed_late():
+    """No startxref, and object 9's /Title opening a literal string that
+    lacks its `)`, so that it closes late, at the second `)` of object 5's
+    /Author, closed twice, past page 4, whose `n g obj` starts a line inside
+    it; then the catalog, its pages and page 3. PDFium reads the string as
+    the dictionary's value, page 4 among its bytes, and doesn't find page
+    4."""
+    f = File()
+    f.raw(b"9 0 obj\n<< /Title (nine >>\nendobj\n")
+    f.obj(4, page(4))
+    f.obj(5, b"<< /Author (five)) >>")
+    f.obj(1, catalog())
+    f.obj(2, pages([3, 4]))
+    f.obj(3, page(3))
+    f.raw(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")
+    return f.bytes()
+
+
 def member_and_object(member_first):
     """No startxref, and page 3 twice: at an offset, 300 high, and in object
     stream 9, 200 high, the stream first where `member_first`."""
@@ -398,6 +469,14 @@ CASES = {
     "stream-with-no-end": stream_with_no_end(),
     "endstream-run-into-endobj": endstream_run_into_endobj(),
     "stream-of-no-object": stream_of_no_object(),
+    "stream-data-on-its-stream-line": data_on_the_stream_line(),
+    # A string that doesn't close, in a file found by scanning.
+    "unclosed-string-value": unclosed("value"),
+    "unclosed-string-between": unclosed("between"),
+    "unclosed-string-key": unclosed("key"),
+    "unclosed-string-later-copy": unclosed_later_copy(),
+    # A string closed late, in a file found by scanning.
+    "string-closed-late": closed_late(),
     # A later section that doesn't read, or comes back on itself.
     "update": updated(),
     "update-prev-past-the-end": updated(prev=999999),

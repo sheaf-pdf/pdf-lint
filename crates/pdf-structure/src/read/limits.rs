@@ -153,14 +153,35 @@ pub enum Recovery {
     /// its `/Length` over one inside it, it scans the file again, each
     /// stream's data to its first `endstream`, and takes from that what it
     /// found nowhere: each object of a number it didn't find, and each
-    /// `trailer`. Each scan says where it ended a stream at `endobj` or found
-    /// no end to one ([`Fault::StreamEnd`](super::Fault::StreamEnd)). A table's first
-    /// subsection numbered from 1 that starts with object 0's row is read
-    /// from 0 where each of its rows in use is at its object's `n g obj` so
-    /// numbered, where it's written or at the section's shift
-    /// ([`Fault::Renumbered`](super::Fault::Renumbered)). A later
-    /// section that doesn't read is said, and what the sections before it
-    /// gave is kept.
+    /// `trailer`. That second scan skips the data the first passed by its
+    /// `/Length` so, which is the stream's (ISO 32000-2, 7.3.8.1). So
+    /// nothing inside it is taken, a document embedded there among it, as
+    /// PDFium takes nothing there. Each scan says where it ended a stream at
+    /// `endobj` or found no end to one
+    /// ([`Fault::StreamEnd`](super::Fault::StreamEnd)). Where no `/Length`
+    /// ends its data at `endstream`, a stream the first scan ended at its
+    /// `endobj` is read no further, as PDFium reads it. A literal string a
+    /// scan finds no `)` closing is read past, from just past its
+    /// `(`, the bytes it held read as tokens, so that what's after it is
+    /// found. The first scan says so, once, with how many
+    /// ([`Fault::Unclosed`](super::Fault::Unclosed)). An object found again
+    /// past such a string stands over the one found before it only where it
+    /// reads ([`Fault::Earlier`](super::Fault::Earlier)). So what's read
+    /// past one takes nothing out of the reading. A literal string that
+    /// lacks its own `)` closes late, at a later one, and holds what's
+    /// written up to there. So the first scan reads each line inside each
+    /// string that closes by its first three tokens, as qpdf's
+    /// reconstruction reads a line's. An object whose `n g obj` starts one
+    /// is read there where neither scan found its number elsewhere
+    /// ([`Fault::InString`](super::Fault::InString)). None stands over an
+    /// object, or an object stream's member, found as written, and a
+    /// `trailer` there isn't taken. A table's first subsection numbered
+    /// from 1 that starts with object 0's row is read from 0 where each of
+    /// its rows in use is at its object's `n g obj` so numbered, where it's
+    /// written or at the section's shift
+    /// ([`Fault::Renumbered`](super::Fault::Renumbered)). A later section
+    /// that doesn't read is said, and what the sections before it gave is
+    /// kept.
     #[default]
     Verified,
     /// As PDFium reads a file, as of chromium/8125: its sections where
@@ -180,13 +201,19 @@ pub enum Recovery {
     /// `/Length` where `endstream` follows that, else to the first
     /// `endstream` or `endobj` that's a word of its own, else nowhere,
     /// reading on through it, and reading on through a stream no `n g obj`
-    /// comes before, as PDFium reads through any words but an object's; its trailer is each `trailer` dictionary and
-    /// cross-reference stream's, a later one's keys over an earlier's; and
-    /// it's merged over what the sections had given, each object the scan
-    /// doesn't find kept where they put it. A file it doesn't scan reads
-    /// as under [`Recovery::Verified`] where that takes no recovery. A file
-    /// it scans is read as one whose sections don't read, whatever they
-    /// gave: it has no revisions and no update
+    /// comes before, as PDFium reads through any words but an object's.
+    /// Where no `/Length` ends its data at `endstream`, a stream it ended at
+    /// its `endobj` is read no further, as PDFium reads the object. A
+    /// literal string it finds no `)` closing it reads to the file's end,
+    /// finding nothing after it, as PDFium reads a string, a dictionary's
+    /// value or one between objects. It says so
+    /// ([`Fault::Unclosed`](super::Fault::Unclosed)). Its trailer is each
+    /// `trailer` dictionary and cross-reference stream's, a later one's keys
+    /// over an earlier's; and it's merged over what the sections had given,
+    /// each object the scan doesn't find kept where they put it. A file it
+    /// doesn't scan reads as under [`Recovery::Verified`] where that takes
+    /// no recovery. A file it scans is read as one whose sections don't
+    /// read, whatever they gave: it has no revisions and no update
     /// ([`Reading::revisions`](super::Reading::revisions),
     /// [`Reading::update`](super::Reading::update)), and no base for an
     /// update after it ([`write::Base::of`](crate::write::Base::of)). Read as
@@ -197,7 +224,12 @@ pub enum Recovery {
     ///
     /// It parts from PDFium in what it parses: each object is read by this
     /// crate's reader, by ISO 32000-2's rules, so a damaged dictionary
-    /// PDFium's parser reads past doesn't read here. And a file PDFium
+    /// PDFium's parser reads past doesn't read here; and the scan reads
+    /// tokens, not objects, so a `(` PDFium passes over where a
+    /// dictionary's key goes is a string here. A stream's data written on
+    /// its `stream` keyword's line, its `endstream` there too, is read to
+    /// that `endstream`, where PDFium starts the data on the next line and
+    /// reads none. And a file PDFium
     /// doesn't open, one without `%PDF-` or an encrypted one no password
     /// given opens, is read all the same, as far as it reads. A few edges
     /// of how PDFium finds and lists sections are read by this crate's

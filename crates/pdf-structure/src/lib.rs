@@ -45,10 +45,12 @@
 //! - **A damaged file read where it proves it is:** a section or an object
 //!   a few bytes off is read where the file shows it is
 //!   ([`read::Recovery::Verified`], the default), each recovery a
-//!   [`Fault`] and each object read elsewhere its [`Origin`]. Or the file
-//!   is read as PDFium reads it ([`read::Recovery::Pdfium`]), for a caller
-//!   that shows it as a viewer would. The choice is
-//!   [`Options::recovery`].
+//!   [`Fault`] and each object read elsewhere its [`Origin`]. A file whose
+//!   sections don't read is scanned for its objects. The scan reads on
+//!   past a stream without `endstream` and, by default, past a literal
+//!   string without its `)`. Or the file is read as PDFium reads it
+//!   ([`read::Recovery::Pdfium`]), for a caller that shows it as a viewer
+//!   would. The choice is [`Options::recovery`].
 //! - **Its phases traced**, with the `tracing` feature: the open, its
 //!   sections and a scan, each object stream decoded, a whole read, an
 //!   earlier revision's open, and each write and the object streams it

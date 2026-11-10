@@ -1941,6 +1941,53 @@ mod tests {
         }
     }
 
+    /// A scanned file's stream whose `/Length` doesn't end at `endstream`,
+    /// and which has none, its data read to its `endobj`, where the scan
+    /// ended it, the first `endstream` after it a later stream's (the
+    /// recovery tests' `without_endstream`): written whole, checked by qpdf
+    /// ("No syntax or stream encoding errors found"), and read through qpdf
+    /// alone as the reader reads it, the stream's data, through qpdf too,
+    /// what the scanned reading read.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn a_scanned_stream_read_to_its_endobj_written_whole_reads_through_qpdf_as_through_the_reader()
+    {
+        use crate::read::recovery::tests::without_endstream;
+        use crate::write;
+
+        let (file, ..) = without_endstream(b"\n", b"\n");
+        let reading = read::Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
+        let doc = reading.to_document().unwrap();
+        let mut data = Vec::new();
+        let options = write::Options::DEFAULT;
+        write::document(&mut data, &doc, None, Some(&reading), &options).unwrap();
+        let dir = scratch("ended");
+        let path = dir.path().join("ended.pdf");
+        std::fs::write(&path, &data).unwrap();
+        let qpdf = qpdf(&path);
+        let check = ["--check", &path.display().to_string()];
+        let (out, _) = qpdf.run(&check.map(String::from)).unwrap();
+        let out = String::from_utf8_lossy(&out);
+        assert!(
+            out.contains("No syntax or stream encoding errors found"),
+            "{out}"
+        );
+        let (alone, heard) = qpdf.heard().unwrap();
+        assert_eq!(alone.trailer.unwritten, None);
+        assert!(heard.is_empty(), "{heard:?}");
+        let back = read::document(&data, &read::Options::DEFAULT);
+        assert_eq!(back.faults(), []);
+        assert_eq!(differences(&back, &alone), []);
+        let show = [
+            "--show-object=9".to_string(),
+            "--filtered-stream-data".to_string(),
+            path.display().to_string(),
+        ];
+        let (shown, _) = qpdf.run(&show).unwrap();
+        assert_eq!(shown, b"q Q\n");
+        assert_eq!(&reading.data(ObjectId::new(9, 0)).unwrap()[..], b"q Q\n");
+    }
+
     /// The files the renumbered files' and updates' tests write from, each
     /// named, and with whether a signature's `/Contents` with no `/Type` is
     /// left in the clear in it, which qpdf decrypts: [`listed`]'s objects
