@@ -1,13 +1,16 @@
 //! What the fuzz target checks, which unit tests check too: the promises
 //! [`decode`](crate::decode), [`decode_into`](crate::decode_into),
-//! [`decode_prefix_into`](crate::decode_prefix_into) and
+//! [`decode_into_as`](crate::decode_into_as),
+//! [`decode_prefix_into`](crate::decode_prefix_into),
+//! [`decode_prefix_into_as`](crate::decode_prefix_into_as) and
 //! [`encode`](crate::encode) make, on any input, any filters and one
-//! encoder or two, on each backend compiled in. It's compiled only for
-//! tests and under cargo-fuzz's `--cfg fuzzing`.
+//! encoder or two, on each backend compiled in, under each reading. It's
+//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use crate::{
     Backend, Encoder, Error, Fault, Faults, Filter, Layout, Level, Prediction, Predictor, Prefix,
-    Row, Unencodable, decode, decode_into, decode_prefix_into, encode,
+    Reading, Row, Unencodable, decode, decode_into, decode_into_as, decode_prefix_into,
+    decode_prefix_into_as, encode,
 };
 
 /// The limit the target decodes to, small, so that a bomb ends quickly.
@@ -27,8 +30,30 @@ pub fn backends() -> Vec<Backend> {
 /// a buffer that holds something already: what it read, what it added and
 /// its faults.
 pub fn prefix(data: &[u8], filter: Filter, backend: Backend) -> (Prefix, Vec<u8>, Vec<Fault>) {
+    let (prefix, added, faults) = prefix_as(data, filter, backend, Reading::Qpdf);
     let mut out = b"held".to_vec();
-    let (prefix, decoded) = decode_prefix_into(data, filter, LIMIT, backend, &mut out);
+    let (without, decoded) = decode_prefix_into(data, filter, LIMIT, backend, &mut out);
+    let listed: Vec<Fault> = decoded.err().map_or_else(Vec::new, |Faults(f)| {
+        f.into_iter().map(|(_, f)| f).collect()
+    });
+    assert_eq!(
+        (without, &out[4..], &listed),
+        (prefix, &added[..], &faults),
+        "qpdf's reading, the function without one"
+    );
+    (prefix, added, faults)
+}
+
+/// `data` decoded by `filter` as [`prefix`] decodes it, read as `reading`
+/// reads it.
+pub fn prefix_as(
+    data: &[u8],
+    filter: Filter,
+    backend: Backend,
+    reading: Reading,
+) -> (Prefix, Vec<u8>, Vec<Fault>) {
+    let mut out = b"held".to_vec();
+    let (prefix, decoded) = decode_prefix_into_as(data, filter, LIMIT, backend, reading, &mut out);
     assert_eq!(&out[..4], b"held", "what the buffer held, kept");
     let faults = match decoded {
         Ok(()) => Vec::new(),
@@ -41,15 +66,46 @@ pub fn prefix(data: &[u8], filter: Filter, backend: Backend) -> (Prefix, Vec<u8>
     (prefix, out.split_off(4), faults)
 }
 
-/// The promises [`decode_prefix_into`] makes of `input` decoded by
-/// `filter` on `backend`: what [`decode_into`] gives by a list of that
-/// filter alone; never past the input; the data up to what it read
-/// decoding alike, with the same faults but a missing end's; where its data
-/// ended, bytes after it changing nothing.
-fn prefixes(input: &[u8], filter: Filter, backend: Backend) {
-    let (read, added, faults) = prefix(input, filter, backend);
+/// The promises [`decode_prefix_into_as`] makes of `input` decoded by
+/// `filter` on `backend`, read as `reading` reads it: what
+/// [`decode_into_as`] gives by a list of that filter alone; never past the
+/// input; the data up to what it read decoding alike, with the same faults
+/// but a missing end's; where its data ended, bytes after it changing
+/// nothing; and what its decoder gave counted, all of it where there's no
+/// predictor and nothing's refused.
+fn prefixes(input: &[u8], filter: Filter, backend: Backend, reading: Reading) {
+    let prefix = |data: &[u8]| prefix_as(data, filter, backend, reading);
+    let (read, added, faults) = prefix(input);
+    let refused = faults.contains(&Fault::Refused);
+    let (Filter::Lzw { predictor, .. } | Filter::Flate { predictor }) = filter else {
+        assert_eq!(read.decoded, added.len(), "what it decoded, added");
+        return prefixes_alike(input, filter, backend, reading, (read, added, faults));
+    };
+    match (refused, predictor) {
+        (true, _) => assert!(added.is_empty(), "refused, nothing added"),
+        (false, Predictor::None) => assert_eq!(read.decoded, added.len(), "what it decoded, added"),
+        (false, _) => {}
+    }
+    assert!(
+        read.decoded <= crate::predictor::before(LIMIT, &filter),
+        "decoded under its limit"
+    );
+    prefixes_alike(input, filter, backend, reading, (read, added, faults));
+}
+
+/// The promises of [`prefixes`] that hold whatever the filter: as
+/// [`decode_into_as`] decodes it, never past the input, what it read
+/// decoding alike, bytes after an end changing nothing.
+fn prefixes_alike(
+    input: &[u8],
+    filter: Filter,
+    backend: Backend,
+    reading: Reading,
+    (read, added, faults): (Prefix, Vec<u8>, Vec<Fault>),
+) {
+    let prefix = |data: &[u8]| prefix_as(data, filter, backend, reading);
     let mut out = Vec::new();
-    let into = decode_into(input, &[filter], LIMIT, backend, &mut out);
+    let into = decode_into_as(input, &[filter], LIMIT, backend, reading, &mut out);
     let listed: Vec<Fault> = match into {
         Ok(()) => Vec::new(),
         Err(Faults(faults)) => faults.into_iter().map(|(_, fault)| fault).collect(),
@@ -80,7 +136,7 @@ fn prefixes(input: &[u8], filter: Filter, backend: Backend) {
         assert!(added.is_empty(), "nothing read, nothing added");
         return;
     }
-    let (again, cut, cut_faults) = prefix(&input[..read.read], filter, backend);
+    let (again, cut, cut_faults) = prefix(&input[..read.read]);
     assert_eq!(cut, added, "what it read decodes alike: {read:?}");
     let lacking = |f: &&Fault| !matches!(f, Fault::NoEnd | Fault::Truncated);
     match read.ended {
@@ -99,7 +155,7 @@ fn prefixes(input: &[u8], filter: Filter, backend: Backend) {
         for tail in [&b" EI Q"[..], input] {
             let longer = [&input[..read.read], tail].concat();
             assert_eq!(
-                prefix(&longer, filter, backend),
+                prefix(&longer),
                 (read, added.clone(), faults.clone()),
                 "ended, bytes after it change nothing"
             );
@@ -109,13 +165,16 @@ fn prefixes(input: &[u8], filter: Filter, backend: Backend) {
 
 /// The filters and predictors `data`'s first bytes choose, over the rest,
 /// decoded twice on each backend, and into a buffer that holds something
-/// already; and by the first of them as data that may run on. Panics on a
-/// broken promise.
+/// already; and by the first of them as data that may run on; each under
+/// both readings, PDFium's held to qpdf's where it reads alike. Panics on
+/// a broken promise.
 pub fn filters(data: &[u8]) {
     let (filters, input) = chosen(data);
     let mut clean: Option<Vec<u8>> = None;
     for backend in backends() {
-        prefixes(input, filters[0], backend);
+        prefixes(input, filters[0], backend, Reading::Qpdf);
+        prefixes(input, filters[0], backend, Reading::Pdfium);
+        readings(input, &filters, backend);
         let decoded = decode(input, &filters, LIMIT, backend);
         assert_eq!(
             decoded,
@@ -170,6 +229,71 @@ pub fn filters(data: &[u8]) {
                 }
             }
         }
+    }
+}
+
+/// What `input` decoded by `filters` on `backend` gives under PDFium's
+/// reading, beside qpdf's: under qpdf's, no fault PDFium's alone says;
+/// under PDFium's, within the limit, one of each kind a filter, in the
+/// filters' order, a place in the input where the first filter's fault
+/// has one; where neither of PDFium's own faults is said, qpdf's answer;
+/// where a code is read as the next entry, by the first filter, as data
+/// that may run on, at least as far read as qpdf's reading reads; where
+/// it refuses, nothing of that filter's given, and that's its last fault.
+fn readings(input: &[u8], filters: &[Filter], backend: Backend) {
+    let pdfiums = |f: &Fault| matches!(f, Fault::AsNext { .. } | Fault::Refused);
+    let answer = |reading| {
+        let mut out = Vec::new();
+        let decoded = decode_into_as(input, filters, LIMIT, backend, reading, &mut out);
+        (out, decoded.err().map_or_else(Vec::new, |Faults(f)| f))
+    };
+    let (qpdf, pdfium) = (answer(Reading::Qpdf), answer(Reading::Pdfium));
+    assert!(
+        !qpdf.1.iter().any(|(_, f)| pdfiums(f)),
+        "qpdf's, none of PDFium's: {qpdf:?}"
+    );
+    let (out, faults) = &pdfium;
+    assert!(out.len() <= LIMIT, "within the limit");
+    assert!(
+        faults.windows(2).all(|w| w[0].0 <= w[1].0),
+        "in the filters' order"
+    );
+    for (i, &(filter, fault)) in faults.iter().enumerate() {
+        assert!(filter < filters.len(), "a filter that's listed");
+        let kind = std::mem::discriminant(&fault);
+        let again = (faults[..i].iter())
+            .any(|&(f, earlier)| f == filter && std::mem::discriminant(&earlier) == kind);
+        assert!(!again, "one of each kind a filter: {faults:?}");
+        if let (0, Fault::AsNext { at } | Fault::Code { at } | Fault::TableFull { at }) =
+            (filter, fault)
+        {
+            assert!(at < input.len(), "{fault:?}");
+        }
+        if fault == Fault::Refused {
+            let last = faults[i + 1..].iter().all(|&(f, _)| f > filter);
+            assert!(last, "refused, its filter's last fault: {faults:?}");
+        }
+    }
+    if !faults.iter().any(|(_, f)| pdfiums(f)) {
+        assert_eq!(pdfium, qpdf, "neither of PDFium's faults, qpdf's answer");
+    }
+    if faults
+        .last()
+        .is_some_and(|&(f, fault)| fault == Fault::Refused && f == filters.len() - 1)
+    {
+        assert!(out.is_empty(), "the last filter refused, nothing given");
+    }
+    // The first filter as data that may run on.
+    let (read, _, first) = prefix_as(input, filters[0], backend, Reading::Pdfium);
+    let (qread, _, _) = prefix(input, filters[0], backend);
+    if first.iter().any(|f| matches!(f, Fault::AsNext { .. })) {
+        assert!(
+            read.read >= qread.read,
+            "read on, at least as far: {read:?}, {qread:?}"
+        );
+    }
+    if !first.iter().any(pdfiums) {
+        assert_eq!(read, qread, "neither of PDFium's faults, what qpdf's read");
     }
 }
 

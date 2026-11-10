@@ -78,6 +78,30 @@ pub(crate) fn undo(predictor: Predictor, cut: bool, out: &mut Out) {
     }
 }
 
+/// Whether PDFium's predictor refuses what its filter decoded, as
+/// [`Reading::Pdfium`](crate::Reading::Pdfium) reads it (its
+/// `ApplyPredictor`, judged on what the decoder gave, before any of it is
+/// undone): TIFF's and PNG's where a row would be no bits, or more than
+/// 2³² − 1, which it can't count; PNG's on `nothing` decoded. Where it
+/// refuses a layout this crate's predictor doesn't take either, that's
+/// said first, as [`undo`] says it ([`Fault::Parameters`]).
+pub(crate) fn pdfium_refuses(predictor: Predictor, nothing: bool, out: &mut Out) -> bool {
+    let (layout, png) = match predictor {
+        Predictor::None => return false,
+        Predictor::Tiff(layout) => (layout, false),
+        Predictor::Png(layout) => (layout, true),
+    };
+    let bits = u64::from(layout.colors)
+        .checked_mul(u64::from(layout.bits_per_component))
+        .and_then(|bits| bits.checked_mul(u64::from(layout.columns)));
+    let uncounted = !bits.is_some_and(|bits| (1..=u64::from(u32::MAX)).contains(&bits));
+    let refused = uncounted || (png && nothing);
+    if refused && Rows::of(layout).is_none() {
+        out.fault(Fault::Parameters);
+    }
+    refused
+}
+
 /// `data`, whole rows of `layout`, each predicted by PNG's `row` filter
 /// and its tag put before it, as [`undo`] undoes.
 pub(crate) fn png(data: &[u8], layout: Layout, row: Row) -> Result<Vec<u8>, Unencodable> {

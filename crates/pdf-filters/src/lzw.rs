@@ -10,6 +10,17 @@
 //! in), and data that ends without a code of 257 is decoded to its end
 //! ([`Fault::NoEnd`]).
 //!
+//! Under [`Reading::Pdfium`], a code past the table's next entry that
+//! isn't the first since a clear code is read as PDFium's decoder reads
+//! it, as of chromium/8125: as that entry, the last code's bytes and
+//! their first byte again ([`Fault::AsNext`]); the entry the code after
+//! it makes then holds that code, not its bytes, read through the table
+//! each time the entry is read, as the table has it then; and a code
+//! from 258 on right after it is the last read. PDFium's table holds each
+//! entry as a code and a byte, read through each time; here an entry's
+//! bytes are where they were decoded, as in the default reading, but for
+//! such an entry, whose bytes can change as the table grows.
+//!
 //! A decoder of its own, not [weezl](https://crates.io/crates/weezl)'s,
 //! though weezl reads both `/EarlyChange` values (as TIFF's LZW and GIF's)
 //! to the same bytes and reads on past a full table alike: weezl says
@@ -22,17 +33,30 @@
 //! bytes the buffer took ahead of them: to the last bit of the last code,
 //! rounded up to a byte, as PDFium's LZW decoder counts what it consumed.
 
-use crate::{Fault, Out, Prefix};
+use crate::{Fault, Out, Prefix, Reading};
 
 const CLEAR: u16 = 256;
 const END: u16 = 257;
 /// The entries a table holds, the 258 codes for bytes, a clear code and an
 /// end among them.
 const FULL: usize = 4096;
+/// The most bytes PDFium's decoder gives for one code read through its
+/// table: of a longer run, through entries that hold codes past the table
+/// as it then was, the last this many.
+const RUN: usize = 4000;
 
 /// `data`'s codes, 9 to 12 bits wide, up to a code of 257; with
-/// `early_change`, codes widen one entry early. What of `data` it read.
-pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) -> Prefix {
+/// `early_change`, codes widen one entry early; read as `reading` reads
+/// them. What of `data` it read.
+pub(crate) fn decode(data: &[u8], early_change: bool, reading: Reading, out: &mut Out) -> Prefix {
+    match reading {
+        Reading::Qpdf => codes(data, early_change, out),
+        Reading::Pdfium => pdfium(data, early_change, out),
+    }
+}
+
+/// `data`'s codes, as [`decode`] reads them under [`Reading::Qpdf`].
+fn codes(data: &[u8], early_change: bool, out: &mut Out) -> Prefix {
     let mut bits = Bits::new(data);
     let mut width = 9;
     // Each entry from 258 on, as where its bytes are in what's decoded.
@@ -88,6 +112,175 @@ pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) -> Prefix {
         }
         last = Some((start, out.data.len() - start));
     }
+}
+
+/// An entry of the table [`pdfium`] reads by.
+#[derive(Clone, Copy)]
+enum Entry {
+    /// Its bytes, where they are in what's decoded: the default reading's
+    /// every entry, which is the same each time it's read.
+    At(usize, usize),
+    /// A code and a byte after it: made after a code past the table, or
+    /// one whose entry is such, its bytes read through the table each time
+    /// it's read, as the code's entry may yet come or change.
+    After(u16, u8),
+}
+
+/// The last code [`pdfium`] read, for the entry the next makes.
+#[derive(Clone, Copy)]
+struct Last {
+    code: u16,
+    /// Where its bytes are, when the table gives them the same each time:
+    /// a byte's, or an entry's held at a place.
+    at: Option<(usize, usize)>,
+    /// The first of the bytes it gave.
+    first: u8,
+}
+
+/// `data`'s codes, as [`decode`] reads them under [`Reading::Pdfium`]: as
+/// [`codes`] reads them but for a code from 258 on that isn't in the table
+/// (module docs). One that's the first since a clear code or the start
+/// stops it ([`Fault::Code`]), as it does [`codes`], for the caller to
+/// refuse the data.
+fn pdfium(data: &[u8], early_change: bool, out: &mut Out) -> Prefix {
+    let mut bits = Bits::new(data);
+    let mut width = 9;
+    let mut table: Vec<Entry> = Vec::with_capacity(FULL - 258);
+    let mut last: Option<Last> = None;
+    // An entry's bytes, read through the table from the last back.
+    let mut walked: Vec<u8> = Vec::new();
+    loop {
+        let at = bits.at();
+        let Some(code) = bits.read(width) else {
+            out.fault(Fault::NoEnd);
+            return Prefix::unended(bits.read_to());
+        };
+        match code {
+            CLEAR => {
+                table.clear();
+                width = 9;
+                last = None;
+                continue;
+            }
+            END => return Prefix::ended(bits.read_to()),
+            _ => {}
+        }
+        let entry = (code > END).then(|| usize::from(code - END - 1));
+        let Some(before) = last else {
+            if entry.is_some() {
+                out.fault(Fault::Code { at });
+                return Prefix::unended(bits.read_to());
+            }
+            let start = out.data.len();
+            if out.extend(&[code as u8]).is_err() {
+                return Prefix::unended(bits.read_to());
+            }
+            last = Some(Last {
+                code,
+                at: Some((start, 1)),
+                first: code as u8,
+            });
+            continue;
+        };
+        let full = 258 + table.len() >= FULL;
+        if full {
+            out.fault(Fault::TableFull { at });
+        }
+        let start = out.data.len();
+        let written = match entry {
+            None => out.extend(&[code as u8]),
+            Some(i) => match table.get(i) {
+                Some(&Entry::At(from, len)) => copy(out, (from, len)),
+                Some(&Entry::After(..)) => {
+                    walked.clear();
+                    walk(&table, code, &out.data, &mut walked);
+                    give(out, &mut walked)
+                }
+                // The next entry, or past it: the last code's bytes and
+                // their first byte again.
+                None => {
+                    if i > table.len() {
+                        out.fault(Fault::AsNext { at });
+                    }
+                    match before.at {
+                        Some((from, len)) => copy(out, (from, len + 1)),
+                        None => {
+                            walked.clear();
+                            walked.push(before.first);
+                            walk(&table, before.code, &out.data, &mut walked);
+                            give(out, &mut walked)
+                        }
+                    }
+                }
+            },
+        };
+        if written.is_err() {
+            return Prefix::unended(bits.read_to());
+        }
+        let first = out.data[start];
+        // After a code past the table, a code from 258 on is the last
+        // read.
+        if entry.is_some() && before.code > END && usize::from(before.code - END - 1) >= table.len()
+        {
+            return Prefix::unended(bits.read_to());
+        }
+        if !full {
+            let index = 258 + table.len();
+            table.push(match before.at {
+                Some((from, len)) => Entry::At(from, len + 1),
+                None => Entry::After(before.code, first),
+            });
+            if matches!(index + usize::from(early_change), 511 | 1023 | 2047) {
+                width += 1;
+            }
+        }
+        // Its bytes are the table's each time it's read where it's a
+        // byte's, or its entry, made now or before, holds a place.
+        let held = match entry {
+            None => true,
+            Some(i) => matches!(table.get(i), Some(Entry::At(..))),
+        };
+        last = Some(Last {
+            code,
+            at: held.then(|| (start, out.data.len() - start)),
+            first,
+        });
+    }
+}
+
+/// The bytes `code` gives read through `table`, from the last back, after
+/// what `walked` holds, until it holds [`RUN`]: a byte's, itself; an
+/// entry's held at a place, its bytes there in `decoded`; an entry's made
+/// after a code, its byte, then that code's; a code past the table, its
+/// low byte, as PDFium's decoder reads each.
+fn walk(table: &[Entry], mut code: u16, decoded: &[u8], walked: &mut Vec<u8>) {
+    while walked.len() < RUN {
+        let entry = code
+            .checked_sub(258)
+            .and_then(|i| table.get(usize::from(i)));
+        match entry {
+            Some(&Entry::After(before, byte)) => {
+                walked.push(byte);
+                code = before;
+            }
+            Some(&Entry::At(start, len)) => {
+                let take = len.min(RUN - walked.len());
+                walked.extend(decoded[start + len - take..start + len].iter().rev());
+                return;
+            }
+            None => {
+                walked.push(code as u8);
+                return;
+            }
+        }
+    }
+}
+
+/// `walked`, bytes from the last back, added in their order, as many as
+/// the limit allows.
+fn give(out: &mut Out, walked: &mut [u8]) -> Result<(), ()> {
+    walked.reverse();
+    out.extend(walked)
 }
 
 /// The `len` bytes decoded from `start` added again, as many as the limit
@@ -181,8 +374,8 @@ impl<'a> Bits<'a> {
 #[cfg(test)]
 mod tests {
     use super::{CLEAR, END};
-    use crate::fuzz::{backends, prefix};
-    use crate::{Fault, Filter, Predictor, decode, decode_prefix_into};
+    use crate::fuzz::{backends, prefix, prefix_as};
+    use crate::{Fault, Filter, Predictor, Reading, decode, decode_into_as, decode_prefix_into};
     use std::collections::HashMap;
 
     /// `data` decoded, by the first backend compiled in, which it doesn't
@@ -506,6 +699,177 @@ mod tests {
                 (5, false, &b"ABA"[..])
             );
             assert_eq!(decoded.unwrap_err().0, [(0, Fault::Limit)]);
+        }
+    }
+
+    const A: u16 = 65;
+    const B: u16 = 66;
+    const C: u16 = 67;
+
+    /// `codes` written, then ` EI`, read under PDFium's reading as data
+    /// that may run on: how far, whether it ended, what it gave and its
+    /// faults.
+    fn as_pdfium(codes: &[u16], early_change: bool) -> (usize, bool, Vec<u8>, Vec<Fault>) {
+        let data = [&Codes::all(early_change, codes.iter().copied())[..], b" EI"].concat();
+        let filter = Filter::Lzw {
+            early_change,
+            predictor: Predictor::None,
+        };
+        let (prefix, out, faults) = prefix_as(&data, filter, backends()[0], Reading::Pdfium);
+        (prefix.read, prefix.ended, out, faults)
+    }
+
+    /// Under PDFium's reading, a code past the table's next entry, but the
+    /// first since a clear code, is read as that entry, the last code's
+    /// bytes and their first byte again, and said; the codes after it read
+    /// on: 257, its end; bytes; a code from 258 on, the last read. After
+    /// 256 65 66 the table's next entry is 259, so 260 is past it by one,
+    /// and 300 and 511 by more; 256 is 9 bits wide, at byte 0, 65 at bit
+    /// 9, 66 at 18 and the code past the table at 27, byte 3.
+    #[test]
+    fn under_pdfiums_reading_a_code_past_the_next_entry_reads_as_it() {
+        let as_next = vec![Fault::AsNext { at: 3 }];
+        for (codes, read, ended, out) in [
+            (&[CLEAR, A, B, 260, END][..], 6, true, &b"ABBB"[..]),
+            (&[CLEAR, A, B, 300, END], 6, true, b"ABBB"),
+            (&[CLEAR, A, B, 511, A, END], 7, true, b"ABBBA"),
+            (&[CLEAR, A, B, 300, A, B, END], 8, true, b"ABBBAB"),
+            // A code from 258 on after it is the last read: an entry's, and
+            // one past the table, which gives the code's low byte (300's is
+            // 44, `,`) and the first byte the last gave.
+            (&[CLEAR, A, B, 300, 258, A, END], 6, false, b"ABBBAB"),
+            (&[CLEAR, A, B, 300, 301, END], 6, false, b"ABBB,B"),
+            // Read on past it twice, bytes between: the second's the next
+            // entry's then, 65 and its first byte.
+            (&[CLEAR, A, B, 300, A, 300, END], 8, true, b"ABBBAAA"),
+        ] {
+            let got = as_pdfium(codes, true);
+            assert_eq!(
+                got,
+                (read, ended, out.to_vec(), as_next.clone()),
+                "{codes:?}"
+            );
+        }
+        // With no clear code first, the start is as one.
+        let got = as_pdfium(&[A, B, 300, A, END], true);
+        let want = (6, true, b"ABBBA".to_vec(), vec![Fault::AsNext { at: 2 }]);
+        assert_eq!(got, want);
+    }
+
+    /// Under PDFium's reading, the entry a code makes after one past the
+    /// table holds that code, read through the table each time the entry
+    /// is read: still past it, the code's low byte, then the byte the entry
+    /// added (300 65 66 300 67, then 260, its entry: `,C`); the code's own
+    /// entry, where the entry is the code's, a run of its byte, the last
+    /// 4,000 of it, as PDFium's decoder keeps (260 67, then 260).
+    #[test]
+    fn under_pdfiums_reading_an_entry_after_a_code_past_the_table_reads_through_it() {
+        let got = as_pdfium(&[CLEAR, A, B, 300, C, 260, END], true);
+        assert_eq!(
+            got,
+            (8, true, b"ABBBC,C".to_vec(), vec![Fault::AsNext { at: 3 }])
+        );
+        let (read, ended, out, faults) = as_pdfium(&[CLEAR, A, B, 260, C, 260, END], true);
+        let want = [&b"ABBBC"[..], &[b'C'; 4000]].concat();
+        assert_eq!(
+            (read, ended, out, faults),
+            (8, true, want, vec![Fault::AsNext { at: 3 }])
+        );
+        // A code past the table after it makes an entry of its own, whose
+        // bytes are where they were decoded: 256 65 66 67 300 65 258, the
+        // second 258 `AB` again.
+        let got = as_pdfium(&[CLEAR, A, B, C, 300, A, 258, END], true);
+        assert_eq!(
+            got,
+            (9, true, b"ABCCCAAB".to_vec(), vec![Fault::AsNext { at: 4 }])
+        );
+        // Under the limit, what the run gives is cut there.
+        let data = Codes::all(true, [CLEAR, A, B, 260, C, 260, END]);
+        let filter = Filter::Lzw {
+            early_change: true,
+            predictor: Predictor::None,
+        };
+        let mut out = Vec::new();
+        let decoded = decode_into_as(
+            &data,
+            &[filter],
+            100,
+            backends()[0],
+            Reading::Pdfium,
+            &mut out,
+        );
+        assert_eq!(out, [&b"ABBBC"[..], &[b'C'; 95]].concat());
+        let faults = [(0, Fault::AsNext { at: 3 }), (0, Fault::Limit)];
+        assert_eq!(decoded.unwrap_err().0, faults);
+    }
+
+    /// Under PDFium's reading, a code past the table makes the table's
+    /// next entry, and the codes widen with it as with any: past it by one
+    /// at 9 bits wide, the table's next entry 510, with early change the
+    /// codes after it are 10 bits wide, without it the code after that.
+    /// And past it after a full table and a clear code.
+    #[test]
+    fn under_pdfiums_reading_codes_widen_past_a_code_past_the_table() {
+        let bytes: Vec<u16> = (0..253u16).map(|i| i * 37 % 251 + 1).collect();
+        let last = *bytes.last().unwrap() as u8;
+        let mut want: Vec<u8> = bytes.iter().map(|&b| b as u8).collect();
+        want.extend([last, last, b'A']);
+        for early_change in [true, false] {
+            let codes = [&[CLEAR][..], &bytes, &[511, A, END]].concat();
+            let written = Codes::all(early_change, codes.iter().copied());
+            assert_eq!(written.len(), 290);
+            let (read, ended, out, faults) = as_pdfium(&codes, early_change);
+            assert_eq!((read, ended, &out), (290, true, &want), "{early_change}");
+            assert_eq!(faults, [Fault::AsNext { at: 285 }], "{early_change}");
+        }
+        let fill = filling();
+        let mut want: Vec<u8> = fill.iter().map(|&b| b as u8).collect();
+        want.extend(b"ABBB");
+        for early_change in [true, false] {
+            let codes = [&fill[..], &[CLEAR, A, B, 300, END]].concat();
+            let read = Codes::all(early_change, codes.iter().copied()).len();
+            let (got, ended, out, faults) = as_pdfium(&codes, early_change);
+            assert_eq!((got, ended, &out), (read, true, &want), "{early_change}");
+            assert!(matches!(faults[..], [Fault::AsNext { .. }]), "{faults:?}");
+        }
+    }
+
+    /// Under PDFium's reading, codes in the table read as under qpdf's:
+    /// the spec's example, codes widening to 12 bits, a full table read
+    /// on, no end, the limit.
+    #[test]
+    fn under_pdfiums_reading_codes_in_the_table_read_as_under_qpdfs() {
+        let mut x = 7u32;
+        let noise: Vec<u8> = (0..20_000)
+            .map(|_| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (x >> 16) as u8
+            })
+            .collect();
+        let fill = filling();
+        for early_change in [true, false] {
+            let full = Codes::all(
+                early_change,
+                fill.iter().copied().chain([A, 300, 4095, END]),
+            );
+            let spec = encode(b"-----A---B", early_change);
+            let encoded = encode(&noise, early_change);
+            for data in [&spec[..], &spec[..5], &encoded, &full, &full[..3000]] {
+                let filter = Filter::Lzw {
+                    early_change,
+                    predictor: Predictor::None,
+                };
+                for backend in backends() {
+                    let qpdf = prefix_as(data, filter, backend, Reading::Qpdf);
+                    let pdfium = prefix_as(data, filter, backend, Reading::Pdfium);
+                    assert_eq!(pdfium, qpdf, "{early_change}, {} bytes", data.len());
+                }
+                let mut out = Vec::new();
+                let pdfium =
+                    decode_into_as(data, &[filter], 9, backends()[0], Reading::Pdfium, &mut out);
+                let qpdf = decode(data, &[filter], 9, backends()[0]).unwrap_err();
+                assert_eq!((out, pdfium.unwrap_err().0), (qpdf.data, qpdf.faults));
+            }
         }
     }
 }

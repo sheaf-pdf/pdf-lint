@@ -63,7 +63,7 @@ pub(super) fn inflate(
     // Its end, and its checksum after it, whether that matched or not.
     let ended = matches!(fault, None | Some(Fault::Checksum));
     let read = state.total_in() as usize;
-    (state.total_out() as usize, fault, Prefix { read, ended })
+    (state.total_out() as usize, fault, Prefix::new(read, ended))
 }
 
 /// `data` deflated at `level` into zlib data in `out` past `start`, which
