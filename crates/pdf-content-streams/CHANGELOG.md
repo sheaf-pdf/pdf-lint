@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0-alpha.1 (unreleased)
 
 - **The fuzz target expects the image-ends budget to be met at the default limits too.** Its check that a read under small caps agrees with the default read held that only the small read could stop at `ImageEnds`; a DCT inline image declaring a frame of tens of thousands of pixels a side with a few bytes of data costs more than the default budget as well, and the two reads give the same error, which the check now takes as agreement.
 - **Tokens.** `tokens(bytes, &ResCx, &Limits)` gives a content stream's tokens in order, a `Tokens` iterator (fused, `Clone`, `Send` and `Sync`) of each token's range and its `Tok`: `Op`, an operator, any word that isn't a number, `true`, `false` or `null`; `Operand`, an operand's bytes as written, a number, a name, a string, an array or a dictionary as far as PDFium reads it (below), or a closing delimiter with nothing to close; or `InlineImage`, `BI` to `EI`, one token, with its data's range. Between them is only white-space and comments, and after an error nothing comes. Tokens end where PDFium's `CPDF_StreamParser` ends them: at white-space and delimiters, a word of digits, signs and points a number, strings nested, and an array or a dictionary one token, ended where PDFium ends it (below).

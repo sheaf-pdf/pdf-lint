@@ -32,7 +32,7 @@ pdf-color.workspace = true
 # pattern's and Type 3 glyph's the walk reaches. With `image-ends`, so that an
 # inline image's DCT and CCITTFax data ends where PDFium's decoders end it,
 # not where the stand-in guesses.
-pdf-content-streams = { path = "../pdf-content-streams", version = "0.1", features = ["image-ends"] }
+pdf-content-streams = { workspace = true, features = ["image-ends"] }
 # Fonts read for text, each the walk reaches, its faults kept. Without its
 # features: no program is read, so neither skrifa nor the code taken from
 # FreeType is compiled in, and no predefined CMap, so nor is hayro-cmap.
