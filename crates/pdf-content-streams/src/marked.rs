@@ -20,6 +20,7 @@ use crate::limits::Limits;
 use crate::operand::{Operand, Within};
 use crate::operations::Operation;
 use crate::page::{Concat, SpanAcross};
+use crate::phases::phase;
 use crate::unprinted::Unprinted;
 
 /// The property lists named marked content names: a page's or a form's
@@ -165,6 +166,12 @@ pub fn marked<'p>(
     res: &ResCx,
     limits: &Limits,
 ) -> Result<Vec<Marked<'p>>, Error> {
+    phase!(
+        DEBUG,
+        "marked",
+        len = content.bytes().len(),
+        streams = content.stream_count(),
+    );
     let mut nest = MarkedNest::new(props, limits);
     for op in content.operations(res, limits) {
         nest.step(content, &op?)?;

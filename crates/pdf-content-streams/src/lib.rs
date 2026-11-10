@@ -6,7 +6,7 @@
 //! every other byte kept, only where that can't change what's drawn after
 //! them.
 //!
-//! - **Tokens** ([`tokens`]): operators, operands as written, and inline
+//! - **Tokens** ([`tokens`](fn@tokens)): operators, operands as written, and inline
 //!   images, `BI` to `EI`, each one token. Tokens end where PDFium's
 //!   `CPDF_StreamParser` ends them, pdf-tokenizer's tokens read by its
 //!   PDFium rules, an array or a dictionary where its `ReadNextObject`
@@ -21,9 +21,9 @@
 //!   [pdf-filters](https://crates.io/crates/pdf-filters) under its PDFium
 //!   reading, Flate on zlib-rs; DCT and CCITTFax data, which PDFium decodes too, by a
 //!   stand-in, or so where a reading asks for it ([`CodedEnds`], with the
-//!   `image-ends` feature, below; [`tokens`] says where). What an operator
+//!   `image-ends` feature, below; [`tokens`](fn@tokens) says where). What an operator
 //!   does is no part of it, so one nobody knows is a token like any other.
-//! - **Operations** ([`operations`]): each operator, or inline image
+//! - **Operations** ([`operations`](fn@operations)): each operator, or inline image
 //!   ([`InlineImage`]), with the operands before it ([`Operation`]), their
 //!   ranges held in the item, so an operation of sixteen operands or fewer
 //!   allocates nothing. Operand `i` is taken from the last, as PDFium takes
@@ -47,9 +47,11 @@
 //!   joined with a space between each, as PDFium joins them, and an
 //!   offset in them mapped back to a stream and a place in it ([`Pos`],
 //!   [`SpanAcross`]); joined as they're decoded ([`Join`]), under a cap,
-//!   each decoded straight into the joined bytes.
-//! - **A page's balance, marked content and names** ([`balance`],
-//!   [`marked`], [`names_used`]): its `q`/`Q` balance, its marked
+//!   each decoded straight into the joined bytes, or given by any reader
+//!   of a file through pdf-objects' [`Streams`](pdf_objects::Streams)
+//!   ([`Join::push_from`]).
+//! - **A page's balance, marked content and names** ([`balance`](fn@balance),
+//!   [`marked`](fn@marked), [`names_used`]): its `q`/`Q` balance, its marked
 //!   content's ranges, each with its tag and property list, and the
 //!   resource names it uses, by category, or what it keeps once ranges of
 //!   it are taken out ([`kept`]). Each is counted an operation at a time
@@ -82,7 +84,7 @@
 //!   resources the content draws with named only when it's finished, by
 //!   their digest, clear of the names the resources dictionary it goes
 //!   with binds to something else ([`Reserved`]).
-//! - **Splicing** ([`splice`]): a page's streams with ranges taken out,
+//! - **Splicing** ([`splice`](fn@splice)): a page's streams with ranges taken out,
 //!   every other byte as it was, only where that can't change what's drawn
 //!   after them, judged by the reading the caller names, and what's kept
 //!   read again as it was read; as many of several as can be
@@ -121,6 +123,16 @@
 //!   `unsafe` code it turns on is theirs: zune-jpeg's SIMD paths hold all
 //!   of its own. memchr's `std` is often on already, turned on by another
 //!   crate built beside this one.
+//! - **`tracing`**, off by default: a span, through
+//!   [tracing](https://crates.io/crates/tracing), over each call that
+//!   reads or writes a whole page, at `debug`: [`ResCx::read`],
+//!   [`balance`](fn@balance), [`marked`](fn@marked), [`names_used`],
+//!   [`kept`], [`splice`](fn@splice), [`splice_each`] and each of its
+//!   checks, at `trace`, [`without_keys`], [`Spliced::streams`],
+//!   [`Reserved::read`] and [`ContentWriter::named`]. Their fields are
+//!   lengths and counts, never content. There's none over the tokens or
+//!   the operations, whose loop is the caller's. Without the feature, none
+//!   is compiled.
 
 mod balance;
 mod data;
@@ -140,6 +152,7 @@ mod operand;
 mod operations;
 mod operator;
 mod page;
+mod phases;
 mod res;
 mod scan;
 mod splice;

@@ -101,7 +101,8 @@ opt-level = 1
 opt-level = 3
 
 # The content streams' tests read operands of 8 MiB, and content of 200,000
-# inline images, each in under two seconds: built lightly optimized, they
-# take a fraction of that.
+# inline images, each held to ten seconds, which a test built unoptimized
+# keeps within too: built lightly optimized here, they take a fraction of
+# a second.
 [profile.dev.package.pdf-content-streams]
 opt-level = 1

@@ -31,6 +31,10 @@ pdf-tokenizer.workspace = true
 thiserror = "2"
 # An operation's operands, sixteen held inline before they spill to the heap.
 tinyvec = { version = "1.13", features = ["alloc"] }
+# The spans of what reads or writes a whole page, with the `tracing`
+# feature: without its default features, so without the proc macros of
+# `attributes` and the `log` bridge; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 # A resource's name by what it is (`ResId`): XXH3-128 of its objects, fast
 # and the same on every build and platform, so equal resources are named
 # alike wherever content is written; its other hashes off. Its `std`, off
@@ -58,10 +62,17 @@ image-ends = ["dep:zune-jpeg", "dep:hayro-ccitt"]
 # `std` to find them). Off by default. It changes nothing that's read or
 # digested, only how fast; the `unsafe` code it turns on is theirs.
 simd = ["memchr/std", "twox-hash/std", "zune-jpeg?/std", "zune-jpeg?/x86", "zune-jpeg?/neon"]
+# Spans over what reads or writes a whole page, through `tracing`: a
+# resources dictionary's color spaces counted, a page's balance, marked
+# content and names, a splice and each of `splice_each`'s checks, a list
+# written again, and the writer's names. Off by default; without it, none
+# is compiled.
+tracing = ["dep:tracing"]
 
-# docs.rs documents what the feature adds, beside the default.
+# docs.rs documents what `image-ends` adds, beside the default, and the
+# spans.
 [package.metadata.docs.rs]
-features = ["image-ends"]
+features = ["image-ends", "tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
 # bench mode too, so criterion's options reach them as given.

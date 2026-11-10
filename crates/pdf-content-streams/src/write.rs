@@ -13,6 +13,7 @@ use crate::Limits;
 use crate::iter;
 use crate::names::ResKind;
 use crate::operator::{FillRule, Paint};
+use crate::phases::phase;
 use crate::res::Res;
 use crate::unprinted::Len;
 
@@ -281,6 +282,7 @@ impl Reserved {
         resources: Option<&'r Object>,
         limits: &Limits,
     ) -> Reserved {
+        phase!(DEBUG, "reserved");
         let hops = limits.hops;
         let mut names = BTreeMap::new();
         let mut told = BTreeMap::new();
@@ -446,7 +448,7 @@ fn told_by_content(object: &Object) -> bool {
 /// to keep from it, a name past 255 bytes, its `/` among them, of which
 /// PDFium reads the first 255, and a string past 32,767 bytes, of which
 /// it reads the first 32,767. Each call's operator and operands read back
-/// through [`operations`](crate::operations) as written: a number as
+/// through [`operations`](fn@crate::operations) as written: a number as
 /// [`Operand::number`](crate::Operand::number) reads it, within its
 /// rounding, and a whole number past 32 bits as itself; a name as
 /// [`name`](crate::name) reads it; a string as [`object`](crate::object)
@@ -718,7 +720,7 @@ impl ContentWriter {
     /// followed: the names it gives are the resources' already, none of
     /// [`ResourceNeeds`].
     ///
-    /// Each operation of content read ([`operations`](crate::operations))
+    /// Each operation of content read ([`operations`](fn@crate::operations))
     /// so written, its operands' and operator's bytes, gives content that
     /// reads as the same tokens, white-space and comments aside, and so as
     /// the same operations; but where its reading looked past a token's
@@ -762,6 +764,12 @@ impl ContentWriter {
     /// what's written once can be named for each page it goes on.
     #[must_use]
     pub fn named(&self, reserved: &Reserved) -> (Vec<u8>, ResourceNeeds) {
+        phase!(
+            DEBUG,
+            "named",
+            len = self.out.len(),
+            needs = self.needs.len(),
+        );
         let mut taken = BTreeSet::new();
         let needs: Vec<Need> = self
             .needs

@@ -14,6 +14,7 @@ use crate::inline::{Found, ImageStream, InlineImage, ResCx};
 use crate::limits::Limits;
 use crate::operand::{Operand, name, object};
 use crate::page::{Concat, SpanAcross};
+use crate::phases::phase;
 use crate::scan::{Event, Raw, TOP, Visit, next_raw, walk};
 use crate::tokens::{Tok, Tokens};
 use crate::unprinted::Len;
@@ -115,7 +116,7 @@ pub enum SpliceError {
 /// and one that isn't in the content ([`SpliceError::OutOfRange`]); an
 /// empty one is no cut.
 ///
-/// The tokens are read as [`tokens`](crate::tokens) reads them, by
+/// The tokens are read as [`tokens`](fn@crate::tokens) reads them, by
 /// PDFium's rules, so a range is judged by where those end each token, an
 /// inline image's among them, by the reading `limits` names: its DCT and
 /// CCITTFax data's end by the stand-in, or decoded
@@ -180,6 +181,12 @@ pub fn splice<'a>(
     limits: &Limits,
     drop: &[SpanAcross],
 ) -> Result<Vec<Cow<'a, [u8]>>, SpliceError> {
+    phase!(
+        DEBUG,
+        "splice",
+        len = content.bytes().len(),
+        ranges = drop.len(),
+    );
     Ok(checked(content, res, limits, drop)?.1)
 }
 
@@ -244,6 +251,13 @@ impl Spliced {
         limits: &Limits,
         rewrites: &[Rewrite],
     ) -> Result<Option<Vec<Cow<'a, [u8]>>>, SpliceError> {
+        phase!(
+            DEBUG,
+            "streams",
+            len = content.bytes().len(),
+            cuts = self.cuts.len(),
+            rewrites = rewrites.len(),
+        );
         let of = content.bytes().len();
         if let Some(cut) = self.cuts.first().filter(|_| self.of != of) {
             return Err(SpliceError::OutOfRange(cut.span));
@@ -295,6 +309,12 @@ pub fn splice_each(
     limits: &Limits,
     groups: &[Vec<SpanAcross>],
 ) -> Result<Spliced, SpliceError> {
+    phase!(
+        DEBUG,
+        "splice_each",
+        len = content.bytes().len(),
+        groups = groups.len(),
+    );
     each(content, res, limits, groups, &mut 0)
 }
 
@@ -313,6 +333,7 @@ pub(crate) fn each(
     // content's error where it can't be read, an image a cap sized and the
     // budget passed are the call's, never a group's.
     let mut check = |drop: &[SpanAcross]| -> Result<Option<Vec<Cut>>, SpliceError> {
+        phase!(TRACE, "check", ranges = drop.len());
         let cuts = match cuts(content, drop) {
             Ok(cuts) => cuts,
             Err(SpliceError::OutOfRange(_) | SpliceError::Overlap(_)) => return Ok(None),
@@ -401,14 +422,14 @@ impl fmt::Debug for Rewrite {
 /// it holds hold among them. None when it has none of them.
 ///
 /// The `BDC`'s operands are the content's tokens, read from its start as
-/// [`tokens`](crate::tokens) reads them, with `res` under `limits`, from
+/// [`tokens`](fn@crate::tokens) reads them, with `res` under `limits`, from
 /// the first at `span`'s start to the `BDC`, its list the last of them, so
 /// the list is a token of the page's, never bytes inside an image's data
 /// or a string; the list's entries are read as PDFium reads a dictionary,
-/// so arrays nest in it, and its keys decoded as [`name`](crate::name)
-/// decodes them. Refused ([`SpliceError::List`]) when the range doesn't
+/// so arrays nest in it, and its keys decoded as [`name`] decodes them.
+/// Refused ([`SpliceError::List`]) when the range doesn't
 /// open with a `BDC` whose list is written in the content, in one stream,
-/// and reads as a dictionary ([`object`](crate::object)); when what's left
+/// and reads as a dictionary ([`object`]); when what's left
 /// of it isn't one operand that reads as the list without those entries
 /// (every entry of a key written twice goes); or when the content with it
 /// written again doesn't read as it did but for the list, read as one
@@ -449,6 +470,12 @@ pub fn without_keys(
     span: SpanAcross,
     keys: &[&[u8]],
 ) -> Result<Option<Rewrite>, SpliceError> {
+    phase!(
+        DEBUG,
+        "without_keys",
+        len = content.bytes().len(),
+        keys = keys.len(),
+    );
     let range = content.offsets(span).ok_or(SpliceError::OutOfRange(span))?;
     let refused = || SpliceError::List(span);
     let s = content.bytes();

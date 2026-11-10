@@ -24,7 +24,7 @@ pub struct Limits {
     /// How deep arrays and dictionaries nest, and marked content: 512 by
     /// default. PDFium reads arrays and dictionaries 64 levels deep, the
     /// outermost at 0, and what's nested deeper as no object, which is an
-    /// error here too ([`tokens`](crate::tokens)), whatever this says; an
+    /// error here too ([`tokens`](fn@crate::tokens)), whatever this says; an
     /// array inside an array, outside any dictionary, opens none, so nests
     /// no deeper. What's open is kept on the heap, however deep.
     pub depth: usize,
@@ -40,7 +40,7 @@ pub struct Limits {
     /// An inline image's data, in bytes: 64 MiB by default.
     pub inline_image: usize,
     /// What finding inline images' data's ends may cost in one reading of
-    /// content ([`tokens`](crate::tokens)), in bytes, in all: 256 MiB by
+    /// content ([`tokens`](fn@crate::tokens)), in bytes, in all: 256 MiB by
     /// default. Where PDFium decodes an image's data to find where it ends
     /// (Flate and LZW), what the decoder gives counts, and the zeros its
     /// predictor pads a short last row with; where DCT and CCITTFax
@@ -98,7 +98,7 @@ pub struct Limits {
     /// CalRGB's or Lab's, so one written honestly holds a few dozen.
     pub space_values: usize,
     /// How many values one reading's marked content may hold
-    /// ([`marked`](crate::marked), [`MarkedNest`](crate::MarkedNest)): each
+    /// ([`marked`](fn@crate::marked), [`MarkedNest`](crate::MarkedNest)): each
     /// range one, and each property list written in the content, kept with
     /// its range, the values reading it built, as [`Limits::values`] counts
     /// them: 2^22 by default, some 300 MB. Each list is read under what's
@@ -115,7 +115,7 @@ pub struct Limits {
     /// it's made; past it, `splice_each` is refused
     /// ([`SpliceError::Reads`](crate::SpliceError::Reads)), never a group
     /// left in unchecked. A `u64`, as it sums many readings, and holds 16
-    /// GiB on a 32-bit target too. [`splice`](crate::splice) and
+    /// GiB on a 32-bit target too. [`splice`](fn@crate::splice) and
     /// [`without_keys`](crate::without_keys) read the content two and three
     /// times a call, whatever this says: a caller calling them in a loop
     /// bounds the loop.
@@ -146,7 +146,7 @@ pub enum CodedEnds {
     StandIn,
     /// Found by decoding the data as PDFium does, DCT data on zune-jpeg
     /// and CCITTFax data on hayro-ccitt, what's decoded not kept
-    /// ([`tokens`](crate::tokens) says where each ends). Only with the
+    /// ([`tokens`](fn@crate::tokens) says where each ends). Only with the
     /// `image-ends` feature.
     #[cfg(feature = "image-ends")]
     Decoded,

@@ -8,11 +8,15 @@
 //!
 //! The streams are the caller's to read and decode: [`Join`] joins them
 //! as they're decoded, under [`Limits::content`], each decoded straight
-//! into the joined bytes when the decoder appends to a buffer.
+//! into the joined bytes when the decoder appends to a buffer, or given by
+//! a reader of the file through pdf-objects' [`Streams`]
+//! ([`Join::push_from`]).
 
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
+
+use pdf_objects::{ObjectId, Streams, Unreadable, Why};
 
 use crate::inline::ResCx;
 use crate::limits::Limits;
@@ -172,7 +176,7 @@ impl<'a> Concat<'a> {
         }
     }
 
-    /// The joined bytes' tokens ([`tokens`](crate::tokens)), at offsets
+    /// The joined bytes' tokens ([`tokens`](fn@crate::tokens)), at offsets
     /// into them. With a sink ([`Tokens::with_sink`]), a string, a
     /// comment or an inline image that runs from one stream into the next
     /// is told too ([`Fault::Across`](crate::fault::Fault::Across)).
@@ -182,7 +186,7 @@ impl<'a> Concat<'a> {
         tokens(&self.bytes, res, limits).joined(joins)
     }
 
-    /// The joined bytes' operations ([`operations`](crate::operations)),
+    /// The joined bytes' operations ([`operations`](fn@crate::operations)),
     /// at offsets into them, which [`pos`](Concat::pos) and
     /// [`span`](Concat::span) map back to the streams. With a sink
     /// ([`Operations::with_sink`]), a string, a comment or an inline image
@@ -328,6 +332,56 @@ impl Join {
         };
         self.bytes.truncate(mark);
         Err(refused)
+    }
+
+    /// Stream `id`'s data added, as `streams` gives it, a reader of a
+    /// file's or any other ([`Streams`]), asked for no more than the room
+    /// left ([`Join::room`]); the space before it written first, and a
+    /// stream of no data a stream, as [`Join::push`] adds them.
+    ///
+    /// ```
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
+    /// use pdf_content_streams::{Join, Limits, Pushed};
+    ///
+    /// // A page's two streams, and a third that doesn't decode.
+    /// let nothing = |_: ObjectId| None::<&Object>;
+    /// let streams = WithStreams::new(nothing, |id: ObjectId, _: usize| match id.number {
+    ///     4 => Ok(b"q 1 0 0 rg".to_vec()),
+    ///     5 => Ok(b"0 0 9 9 re f Q".to_vec()),
+    ///     _ => Err(Unreadable::new(id, Why::Damaged, "it doesn't decode")),
+    /// });
+    /// let mut join = Join::new(&Limits::DEFAULT);
+    /// join.push_from(&streams, ObjectId::new(4, 0)).unwrap();
+    /// join.push_from(&streams, ObjectId::new(5, 0)).unwrap();
+    /// let refused = join.push_from(&streams, ObjectId::new(6, 0));
+    /// assert!(matches!(refused, Err(Pushed::Decode(e)) if e.why == Why::Damaged));
+    /// let page = join.finish();
+    /// assert_eq!(page.bytes(), b"q 1 0 0 rg 0 0 9 9 re f Q");
+    /// assert_eq!(page.stream_count(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Pushed::TooLarge`] past the cap, without asking for the data where
+    /// the space before it is past it; and where `streams` says the data
+    /// is past the room ([`Why::Limit`]), or gives more than it was asked
+    /// for, whatever it says. [`Pushed::Decode`] with any other
+    /// [`Unreadable`] it gives.
+    pub fn push_from<S: Streams + ?Sized>(
+        &mut self,
+        streams: &S,
+        id: ObjectId,
+    ) -> Result<(), Pushed<Unreadable>> {
+        if self.with(0) > self.cap {
+            return Err(Pushed::TooLarge(self.too_large()));
+        }
+        match streams.decoded(id, self.room()) {
+            // Data longer than the room is past the cap, which `push`
+            // refuses, whatever gave it.
+            Ok(data) => self.push(&data).map_err(Pushed::TooLarge),
+            Err(e) if e.why == Why::Limit => Err(Pushed::TooLarge(self.too_large())),
+            Err(e) => Err(Pushed::Decode(e)),
+        }
     }
 
     /// The streams joined.

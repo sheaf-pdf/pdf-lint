@@ -34,8 +34,8 @@ type Ranges = TinyVec<[Range<usize>; 16]>;
 /// has them all.
 ///
 /// Where ISO 32000-2 would read the bytes otherwise, a sink given by
-/// [`Operations::with_sink`] is told ([`fault`](crate::fault)); the
-/// operations are the same.
+/// [`Operations::with_sink`] is told ([`fault`]); the operations are the
+/// same.
 ///
 /// ```
 /// use pdf_content_streams::{Limits, ResCx, operations};
@@ -58,7 +58,7 @@ pub fn operations<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Opera
 
 /// A content stream's operations, in order ([`operations`]), and where
 /// ISO 32000-2 would read them otherwise told to `S`, a
-/// [`Sink`](crate::fault::Sink): none for `()`.
+/// [`Sink`]: none for `()`.
 #[must_use = "operations are lazy: nothing is read until one is asked for"]
 #[derive(Clone)]
 pub struct Operations<'a, 'r, S = ()> {
@@ -72,8 +72,8 @@ impl<'a, 'r, S> Operations<'a, 'r, S> {
     }
 
     /// The same operations, from where these are, with where ISO 32000-2
-    /// would read them otherwise told to `sink` ([`fault`](crate::fault)):
-    /// what [`Tokens::with_sink`] tells, and operands at the end that no
+    /// would read them otherwise told to `sink` ([`fault`]): what
+    /// [`Tokens::with_sink`] tells, and operands at the end that no
     /// operator takes. A sink borrowed, `&mut S`, is one, so it can be read
     /// after.
     ///
@@ -228,7 +228,7 @@ impl<'a> Operation<'a> {
     /// The inline image it is, when it's one: its dictionary's entries,
     /// its data and the length it gives it. None for a `BI` that begins no
     /// image, a keyword written where its dictionary's key should be, as
-    /// PDFium reads it ([`tokens`](crate::tokens)): an operation of its
+    /// PDFium reads it ([`tokens`](fn@crate::tokens)): an operation of its
     /// own, with the operands before it, as PDFium clears them after it.
     #[must_use]
     pub fn inline_image(&self) -> Option<InlineImage<'a>> {

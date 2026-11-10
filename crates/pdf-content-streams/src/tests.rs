@@ -879,7 +879,7 @@ fn deep_operands_read_in_one_pass() {
     s.extend(b"]>>".repeat(32));
     let started = std::time::Instant::now();
     let mut o = object(&s, &Limits::DEFAULT).unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     for _ in 0..32 {
         let Value::Dict(dict) = o.into_value() else {
             panic!("a dictionary")
@@ -896,7 +896,7 @@ fn deep_operands_read_in_one_pass() {
     assert_eq!(toks(&arrays).len(), 500);
     let one = object(&arrays, &Limits::DEFAULT);
     assert_eq!(one, Some(Object::from(vec![1.into()])));
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 /// A string a dictionary's key opens is read as its `(` alone, and what's
@@ -911,7 +911,7 @@ fn strings_keys_open_read_in_one_pass() {
     assert_eq!(toks(&nested[..6 * n]).len(), 2 * n);
     let hex = b"<< <q ".repeat(n);
     assert_eq!(toks(&hex).len(), 2 * n);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert_eq!(toks(b"<< (q"), [Tok::Operand(b"<< ("), Tok::Op(b"q")]);
 }
 
@@ -2511,7 +2511,10 @@ fn unended_images_dont_search_again() {
         assert_eq!(read, 200_000, "{}", String::from_utf8_lossy(unit));
         let took = started.elapsed();
         let unit = String::from_utf8_lossy(unit);
-        assert!(took < std::time::Duration::from_secs(2), "{unit}: {took:?}");
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "{unit}: {took:?}"
+        );
     }
 }
 
@@ -2616,7 +2619,7 @@ fn lone_bis_dont_read_again() {
     let (res, mut kept) = (ResCx::none(), Collected::default());
     let read = tokens(&s, &res, &Limits::DEFAULT).with_sink(&mut kept);
     assert_eq!(read.count(), 100_002);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     let lone: Vec<_> = (0..=50_000)
         .map(|i| {
             let at = 6 * i..s.len();
@@ -2751,23 +2754,39 @@ fn an_end_with_no_ei_after_it_reads_on_from_the_data() {
 
 /// Many inline images whose data shares one end, with no `EI` after it
 /// but a long tail: the tail is walked once, by the first, and each
-/// after stops where that walk began.
+/// after stops where that walk began. What a walk in vain reads is spent
+/// from [`Limits::image_ends`], so the budget counts the walks: the tail
+/// once reads, where one walk each would be 5,000 times it.
 #[test]
 fn images_sharing_an_end_with_no_ei_after_it_walk_once() {
     let mut s = b"BI /F /AHx ID EI ".repeat(5_000);
     s.push(b'>');
-    s.extend_from_slice(&b" 1 2 m".repeat(20_000));
-    let started = std::time::Instant::now();
-    let read: Vec<_> = tokens(&s, &ResCx::none(), &Limits::DEFAULT)
+    let tail = b" 1 2 m".repeat(20_000);
+    s.extend_from_slice(&tail);
+    let twice = Limits {
+        image_ends: 2 * tail.len(),
+        ..Limits::DEFAULT
+    };
+    let read: Vec<_> = tokens(&s, &ResCx::none(), &twice)
         .collect::<Result<_, _>>()
         .unwrap();
-    let took = started.elapsed();
     let images = read
         .iter()
         .filter(|(_, t)| matches!(t, Tok::InlineImage(_)));
     assert_eq!(images.count(), 5_000);
     assert_eq!(read.len(), 5_000 + 1 + 60_000);
-    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    // The walk is spent: under half the tail, the first image's stops it.
+    let half = Limits {
+        image_ends: tail.len() / 2,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(
+        error(&s, &half),
+        Error {
+            at: 0,
+            kind: ErrorKind::ImageEnds
+        }
+    );
 }
 
 /// Walks past images' ends that keep out of step, each from inside a long
@@ -3177,7 +3196,7 @@ fn the_budget_counts_what_decoding_a_jpeg_holds() {
     let s = [&b"BI /F /DCT ID "[..], &huge, b" EI"].concat();
     let started = std::time::Instant::now();
     assert_eq!(error(&s, &DECODED).kind, ErrorKind::ImageEnds);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 /// Decoded, with the `image-ends` feature, fax data hayro-ccitt can't
@@ -3543,6 +3562,67 @@ fn a_stream_decoded_into_the_join() {
     assert_eq!(content.stream(1), b"1 g");
 }
 
+/// A stream's data from what gives it ([`pdf_objects::Streams`]), asked
+/// for no more than the room left: what it says is past it, or gives past
+/// it, refused as past the cap, its other failures as its own, nothing
+/// added either way, and nothing asked for where the space alone is past
+/// the cap.
+#[test]
+fn a_stream_given_by_a_reader_into_the_join() {
+    use std::cell::RefCell;
+
+    use pdf_objects::WithStreams;
+
+    let asked = RefCell::new(Vec::new());
+    let nothing = |_: ObjectId| None::<&Object>;
+    let streams = WithStreams::new(nothing, |id: ObjectId, limit: usize| {
+        asked.borrow_mut().push((id.number, limit));
+        let data = match id.number {
+            1 => b"q 0 g".to_vec(),
+            2 => Vec::new(),
+            // Past the room it's given, said so or not.
+            3 => return Err(Unreadable::new(id, Why::Limit, "past the limit")),
+            4 => vec![b'1'; limit + 1],
+            // Its own failures.
+            5 => return Err(Unreadable::new(id, Why::Damaged, "no stream")),
+            6 => return Err(Unreadable::new(id, Why::Capped, "past a cap")),
+            _ => vec![b'Q'; limit],
+        };
+        Ok(data)
+    });
+    let mut join = Join::new(&Limits {
+        content: 20,
+        ..Limits::DEFAULT
+    });
+    let id = |n| ObjectId::new(n, 0);
+    join.push_from(&streams, id(1)).unwrap();
+    // A stream of no data is a stream, its space and all.
+    join.push_from(&streams, id(2)).unwrap();
+    assert_eq!(join.room(), 13);
+    let past = Err(Pushed::TooLarge(TooLarge { cap: 20 }));
+    assert_eq!(join.push_from(&streams, id(3)), past);
+    assert_eq!(join.push_from(&streams, id(4)), past);
+    let damaged = join.push_from(&streams, id(5));
+    assert!(matches!(damaged, Err(Pushed::Decode(ref e)) if e.why == Why::Damaged));
+    assert_eq!(damaged.unwrap_err().to_string(), "no stream");
+    let capped = join.push_from(&streams, id(6));
+    assert!(matches!(capped, Err(Pushed::Decode(e)) if e.why == Why::Capped));
+    // Nothing added by any of them: each was asked for the same room.
+    assert_eq!(join.room(), 13);
+    let rooms: Vec<_> = asked.borrow().iter().map(|&(_, room)| room).collect();
+    assert_eq!(rooms, [20, 14, 13, 13, 13, 13]);
+    // One that fills the room; then the space alone is past the cap, and
+    // nothing is asked for.
+    join.push_from(&streams, id(7)).unwrap();
+    assert_eq!(join.room(), 0);
+    assert_eq!(join.push_from(&streams, id(7)), past);
+    assert_eq!(asked.borrow().len(), 7);
+    let content = join.finish();
+    assert_eq!(content.bytes(), b"q 0 g  QQQQQQQQQQQQQ");
+    assert_eq!(content.stream_count(), 3);
+    assert_eq!(content.stream(1), b"");
+}
+
 #[test]
 fn the_types_are_send_and_sync() {
     fn both<T: Send + Sync>() {}
@@ -3564,6 +3644,14 @@ fn the_types_are_send_and_sync() {
     both::<MarkedNest>();
     both::<NameSet>();
     both::<Kept>();
+    both::<iter::Operands>();
+    both::<iter::Operators>();
+    both::<iter::Capped>();
+    both::<iter::NamesOf>();
+    both::<iter::Names>();
+    both::<iter::Lists>();
+    both::<iter::Open>();
+    both::<iter::ReservedNames>();
 }
 
 /// `s`'s operations under `lim`, until the end or an error.
@@ -4620,7 +4708,7 @@ fn a_token_across_streams() {
     let page = Concat::new(&streams);
     let started = std::time::Instant::now();
     let found = faults(&page);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     let percent = page.bytes().iter().position(|&c| c == b'%').unwrap();
     let comment = percent..page.bytes().len();
     assert_eq!(found.len(), 1);
@@ -6349,7 +6437,7 @@ fn many_ranges_taken_out_read_in_one_pass() {
     let ranges: Vec<SpanAcross> = found.iter().map(|m| m.span).rev().collect();
     let started = std::time::Instant::now();
     let k = kept(&page, &none, LIM, &ranges).unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert_eq!(k, Kept::default());
 }
 
@@ -6362,7 +6450,7 @@ fn ranges_share_their_named_list() {
     let s = b"/T /P BDC EMC ".repeat(20_000);
     let started = std::time::Instant::now();
     let found = found(&[&s], &props).unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert_eq!(found.len(), 20_000);
     let list = props.get(b"P").unwrap();
     for m in &found {

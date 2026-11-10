@@ -125,15 +125,18 @@ impl<'a> Operand<'a> {
 
     /// It read as [`object`](Operand::object) reads it, and where ISO
     /// 32000-2 would read what's inside it otherwise told to `sink`
-    /// ([`fault`](crate::fault)), at offsets into the content: each
-    /// element's, key's and value's own faults, a word that's no object,
-    /// and, where a dictionary is none as PDFium reads it, a key that's no
-    /// name or a key with no value, as they're read, those before where
-    /// reading stops among them. Its own faults, as a token, are the
-    /// tokens' to tell, or its array's, for an element: among them where
-    /// PDFium ends what it holds before ISO would
-    /// ([`Fault::NestedArray`], [`Fault::NoDict`]). What's read is the
-    /// same, whatever the sink.
+    /// ([`fault`]), at offsets into the content: each element's, key's and
+    /// value's own faults, a word that's no object, and, where a dictionary
+    /// is none as PDFium reads it, a key that's no name or a key with no
+    /// value, as they're read, those before where reading stops among them.
+    /// Its own faults, as a token, are the tokens' to tell, or its array's,
+    /// for an element: among them where PDFium ends what it holds before
+    /// ISO would ([`Fault::NestedArray`], [`Fault::NoDict`]). So a
+    /// dictionary PDFium reads as none is told here by the entry that made
+    /// it so, and whole by the tokens
+    /// ([`Tokens::with_sink`](crate::Tokens::with_sink)): a caller that
+    /// asks both is told of it by each. What's read is the same, whatever
+    /// the sink.
     ///
     /// ```
     /// use pdf_content_streams::fault::{Fault, Sink};

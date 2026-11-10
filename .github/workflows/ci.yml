@@ -422,8 +422,8 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in
       # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
-      # reads, with and without the `image-ends` feature, and with it and
-      # `simd`.
+      # reads, with and without the `image-ends` feature, and with it,
+      # `simd` and `tracing`.
       - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test

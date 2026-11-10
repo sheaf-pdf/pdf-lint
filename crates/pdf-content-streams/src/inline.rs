@@ -20,6 +20,7 @@ use crate::fault::{self, Fault, Sink};
 use crate::iter;
 use crate::limits::{CodedEnds, Limits};
 use crate::operand::{Operand, WORD, Within, hex, iso_name, literal, name};
+use crate::phases::phase;
 use crate::scan::{
     Event, Raw, TOP, UNCAPPED, Visit, elements, is_number, is_space, next_raw, walk,
 };
@@ -27,7 +28,7 @@ use crate::unprinted::Len;
 
 /// What reading content needs of the resources it's drawn with: how many
 /// components each named color space has, which sizes an unfiltered
-/// inline image drawn in one ([`tokens`](crate::tokens)). [`ResCx::read`]
+/// inline image drawn in one ([`tokens`](fn@crate::tokens)). [`ResCx::read`]
 /// counts them from a resources dictionary, as PDFium counts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResCx {
@@ -49,8 +50,8 @@ impl ResCx {
     /// as written, each with its components as PDFium counts them
     /// ([`pdf_color::components`]), under `limits.color`: none where it has no
     /// `/ColorSpace` dictionary as PDFium reaches one
-    /// ([`Spaces`](pdf_color::Spaces)), and no entry for a name whose value is
-    /// a reference to nothing, as PDFium has no space there. An object that's
+    /// ([`Spaces`]), and no entry for a name whose value is a reference to
+    /// nothing, as PDFium has no space there. An object that's
     /// [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and any other
     /// failure to read one is the `Err`, whole. Each name is a key as the
     /// reader of the file read it; [`ResCx::new`] says where that's not
@@ -99,6 +100,7 @@ impl ResCx {
         resources: Option<&'o Object>,
         limits: &Limits,
     ) -> Result<ResCx, Unreadable> {
+        phase!(DEBUG, "spaces");
         let Some(named) = Spaces::read(objects, resources)? else {
             return Ok(ResCx::none());
         };
@@ -153,7 +155,7 @@ impl ResCx {
     /// and is no longer than PDFium reads ([`Fault::Name`],
     /// [`Fault::Long`]). Where it's otherwise, the key's bytes as written
     /// (pdf-objects' `Entry::key_at`, [`pdf_color::Named::key_at`]), read by
-    /// [`name`](crate::name), give PDFium's.
+    /// [`name`], give PDFium's.
     pub fn new(spaces: impl IntoIterator<Item = (Vec<u8>, u32)>) -> ResCx {
         ResCx {
             spaces: spaces.into_iter().collect(),
@@ -253,7 +255,7 @@ impl<'a> InlineImage<'a> {
 
     /// Where its dictionary is: what's between `BI` and `ID`, or, where
     /// an object that's no name is written for a key, `BI` and that
-    /// object, which ends it as PDFium reads it ([`tokens`](crate::tokens)).
+    /// object, which ends it as PDFium reads it ([`tokens`](fn@crate::tokens)).
     #[must_use]
     pub fn dict(&self) -> Range<usize> {
         let start = self.at.start + 2;
@@ -267,7 +269,7 @@ impl<'a> InlineImage<'a> {
         }
     }
 
-    /// Where its data is, as [`tokens`](crate::tokens) found it.
+    /// Where its data is, as [`tokens`](fn@crate::tokens) found it.
     #[must_use]
     pub fn data(&self) -> Range<usize> {
         self.data.clone()
@@ -393,7 +395,7 @@ pub enum ImageStream {
     /// any tokens written between that end and `EI`, the white-space
     /// before `EI` left out, which PDFium keeps too. Where PDFium decodes
     /// the data to find its end (Flate, LZW, CCITTFax, DCT), its end as
-    /// [`tokens`](crate::tokens) finds it.
+    /// [`tokens`](fn@crate::tokens) finds it.
     Data(Range<usize>),
     /// A stream of no bytes: an unfiltered image whose size counts to 0,
     /// whose data, read on to `EI` from its start, PDFium keeps none of.

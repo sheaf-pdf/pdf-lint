@@ -49,7 +49,7 @@ fmt:
 # unified features hide (its other members turn zlib-rs on), and with
 # zlib-rs their only Flate backend; then the content streams without
 # `image-ends`, which pdf-lint turns on in every workspace build, and with
-# it and `simd`, which nothing else turns on; then
+# it, `simd` and its spans (`tracing`), which nothing else turns on; then
 # pdf-semantics without its clock, as pdf-lint takes it; then
 # pdf-linearize's engine, without its adapter, and with lopdf's, which
 # nothing else turns on; then pdf-fonts with Adobe's predefined CMaps,
@@ -61,7 +61,7 @@ clippy:
     cargo clippy --locked -p pdf-filters --all-targets -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-content-streams --features simd,image-ends --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-content-streams --features simd,image-ends,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
@@ -75,7 +75,8 @@ clippy:
 # their default alone, miniz_oxide, the build a dependent that names no
 # feature gets, which the workspace's unified features hide, and with
 # zlib-rs alone; then the content streams' without `image-ends`, and with
-# it and `simd`, the dependencies' SIMD, which nothing else turns on; then
+# it, `simd`, the dependencies' SIMD, and its spans, which nothing else
+# turns on and only its tests read; then
 # pdf-semantics' without its clock; then pdf-linearize's engine, without
 # its adapter, and with lopdf's; then pdf-fonts' with Adobe's predefined
 # CMaps, and with no feature at all; then pdf-structure's with its spans,
@@ -85,7 +86,7 @@ test:
     cargo test --locked -p pdf-filters
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-content-streams
-    cargo test --locked -p pdf-content-streams --features simd,image-ends
+    cargo test --locked -p pdf-content-streams --features simd,image-ends,tracing
     cargo test --locked -p pdf-semantics --no-default-features
     cargo test --locked -p pdf-linearize --no-default-features
     cargo test --locked -p pdf-linearize --features lopdf
@@ -399,11 +400,12 @@ structure-msrv:
     cargo +{{ structure_msrv }} test --locked -p pdf-structure --features tracing
 
 # Test pdf-content-streams on its oldest Rust, then with `image-ends` on
-# that feature's, and with it and `simd`, each of which must be installed.
+# that feature's, and with it, `simd` and `tracing`, each of which must be
+# installed.
 content-msrv:
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends
-    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends,simd
+    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends,simd,tracing
 
 # Test pdf-semantics on its oldest supported Rust, which must be installed.
 semantics-msrv:

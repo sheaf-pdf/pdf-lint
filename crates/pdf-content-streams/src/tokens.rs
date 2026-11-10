@@ -173,8 +173,7 @@ impl fmt::Debug for Tok<'_> {
 /// dictionary or an empty array is none.
 ///
 /// Where ISO 32000-2 would read the bytes otherwise, a sink given by
-/// [`Tokens::with_sink`] is told ([`fault`](crate::fault)); the tokens are
-/// the same.
+/// [`Tokens::with_sink`] is told ([`fault`]); the tokens are the same.
 ///
 /// ```
 /// use pdf_content_streams::{Limits, ResCx, Tok, tokens};
@@ -209,7 +208,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
 
 /// A content stream's tokens, each with where it is ([`tokens`]), and
 /// where ISO 32000-2 would read them otherwise told to `S`, a
-/// [`Sink`](crate::fault::Sink): none for `()`.
+/// [`Sink`]: none for `()`.
 #[must_use = "tokens are lazy: nothing is read until one is asked for"]
 #[derive(Clone)]
 pub struct Tokens<'a, 'r, S = ()> {
@@ -287,11 +286,18 @@ impl<'a, S: Sink<'a>> FusedIterator for Tokens<'a, '_, S> {}
 
 impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// The same tokens, from where these are, with where ISO 32000-2 would
-    /// read them otherwise told to `sink` ([`fault`](crate::fault)): a
-    /// token's own faults, an inline image's, 0x80 and 0xFF read as
-    /// white-space, and, over a page's streams joined, a string, a comment
-    /// or an inline image that runs from one into the next. A sink
-    /// borrowed, `&mut S`, is one, so it can be read after.
+    /// read them otherwise told to `sink` ([`fault`]): a token's own
+    /// faults, an inline image's, 0x80 and 0xFF read as white-space, and,
+    /// over a page's streams joined, a string, a comment or an inline image
+    /// that runs from one into the next. A sink borrowed, `&mut S`, is
+    /// one, so it can be read after.
+    ///
+    /// A dictionary PDFium reads as none is told here whole, as a token
+    /// ([`Fault::NoDict`]). Which of its entries made it none is what's
+    /// inside it, which reading the operand tells
+    /// ([`Operand::object_with`](crate::Operand::object_with): a
+    /// [`Fault::Key`], [`Fault::NoValue`] or [`Fault::Keyword`]). A caller
+    /// that asks both is told of it by each, what each reads.
     ///
     /// ```
     /// use pdf_content_streams::fault::{Fault, Sink};

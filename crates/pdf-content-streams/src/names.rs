@@ -14,6 +14,7 @@ use crate::iter;
 use crate::limits::Limits;
 use crate::operations::Operation;
 use crate::page::{Concat, SpanAcross};
+use crate::phases::phase;
 
 /// A resource category: a key of `/Resources` (7.8.3, Table 34) whose
 /// dictionary maps the names content uses to what they name.
@@ -219,6 +220,13 @@ pub fn names_used(
     limits: &Limits,
     except: &[SpanAcross],
 ) -> Result<NameSet, Error> {
+    phase!(
+        DEBUG,
+        "names_used",
+        len = content.bytes().len(),
+        streams = content.stream_count(),
+        ranges = except.len(),
+    );
     Ok(kept(content, res, limits, except)?.names)
 }
 
@@ -250,6 +258,13 @@ pub fn kept(
     limits: &Limits,
     drop: &[SpanAcross],
 ) -> Result<Kept, Error> {
+    phase!(
+        DEBUG,
+        "kept",
+        len = content.bytes().len(),
+        streams = content.stream_count(),
+        ranges = drop.len(),
+    );
     let drop = Dropped::new(drop.iter().filter_map(|&s| content.offsets(s)));
     let mut kept = Kept::default();
     let mut inside = NameSet::default();
