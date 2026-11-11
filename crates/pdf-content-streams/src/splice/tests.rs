@@ -886,18 +886,21 @@ fn splice_each_reads_no_more_than_its_cap() {
     readings();
     // A byte under it, refused before the last check, nothing past it read.
     let under = splice_each(&c, &none, &at(spent - 1), &groups);
-    assert_eq!(under.map(|e| e.taken), Err(SpliceError::Reads(spent - 1)));
+    assert_eq!(
+        under.map(|e| e.taken),
+        Err(SpliceError::Reads { cap: spent - 1 })
+    );
     let read = readings();
     assert_eq!(read.len(), 8);
     assert!((read.iter().sum::<usize>() as u64) < spent);
     // Below the first check, none is made.
     for cap in [0, first - 1] {
         let refused = splice_each(&c, &none, &at(cap), &groups);
-        assert_eq!(refused.map(|e| e.taken), Err(SpliceError::Reads(cap)));
+        assert_eq!(refused.map(|e| e.taken), Err(SpliceError::Reads { cap }));
         assert_eq!(readings(), [], "no reading under {cap}");
     }
     assert_eq!(
-        SpliceError::Reads(7).to_string(),
+        SpliceError::Reads { cap: 7 }.to_string(),
         "checking what to take out would read more than 7 bytes"
     );
     // No groups, no check.

@@ -25,7 +25,8 @@ use crate::res::Res;
 
 /// An operation's operands, in order, as written: what
 /// [`Operation::operands`](crate::Operation::operands) gives. It knows
-/// how many are left, and walks from either end.
+/// how many are left, and walks from either end. Not
+/// [`crate::Operands`], the operands an operator takes.
 #[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Clone)]
 pub struct Operands<'a, 'o> {
@@ -96,7 +97,7 @@ impl fmt::Debug for Operands<'_, '_> {
 /// The operators of a set, in [`Operator::ALL`]'s order,
 /// [`Other`](Operator::Other) last: what
 /// [`Operators::iter`](crate::Operators::iter) gives. It knows how many
-/// are left.
+/// are left. Not [`crate::Operators`], the set it walks.
 #[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Clone)]
 pub struct Operators {

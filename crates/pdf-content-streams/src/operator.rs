@@ -24,7 +24,9 @@ pub enum Type {
     NameOrDict,
 }
 
-/// The operands an operator takes.
+/// The operands an operator takes: what [`Operator::operands`] gives. Not
+/// [`iter::Operands`](crate::iter::Operands), an operation's operands as
+/// written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Operands {
@@ -534,7 +536,8 @@ pub enum FillRule {
 /// Operators, as a set: of any [`Operator`], [`Other`](Operator::Other)
 /// among them. A reader names those it wants this way, and each category
 /// of 8.2 is one ([`Operators::COLOR`], say), as is what each graphics
-/// object allows ([`State::allowed`](crate::State::allowed)).
+/// object allows ([`State::allowed`](crate::State::allowed)). Its
+/// operators are walked by [`iter::Operators`](crate::iter::Operators).
 ///
 /// ```
 /// use pdf_content_streams::{Operator, Operators};

@@ -30,6 +30,9 @@ const PLACES: usize = u32::MAX as usize;
 
 /// A place in a page's content: a byte in one of its streams. The end of
 /// a stream is the place after its last byte.
+///
+/// Exhaustive on purpose: a stream and a byte are a place, built by a
+/// literal and taken apart by its fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
     /// The stream, by its index among the page's: the order they were
@@ -41,6 +44,9 @@ pub struct Pos {
 
 /// Part of a page's content, which may start in one stream and end in
 /// another: from `start` up to `end`.
+///
+/// Exhaustive on purpose: its two ends are the whole of it, built by a
+/// literal and taken apart by its fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpanAcross {
     /// Where it starts.
@@ -408,6 +414,9 @@ impl Join {
 }
 
 /// Streams joined past [`Limits::content`].
+///
+/// Exhaustive on purpose: the cap is the whole of what it says, taken apart
+/// by its field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("its streams decode to more than {cap} bytes")]
 pub struct TooLarge {

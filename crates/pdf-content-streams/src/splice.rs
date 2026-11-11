@@ -56,9 +56,12 @@ pub enum SpliceError {
     #[error("the inline image at {0} is sized by a color space counted past a cap")]
     Capped(SpanAcross),
     /// [`splice_each`]'s checks would read more than
-    /// [`Limits::splice_reads`] bytes: the cap.
-    #[error("checking what to take out would read more than {0} bytes")]
-    Reads(u64),
+    /// [`Limits::splice_reads`] bytes.
+    #[error("checking what to take out would read more than {cap} bytes")]
+    Reads {
+        /// The cap: the most the checks may read.
+        cap: u64,
+    },
 }
 
 /// `content`'s streams with the ranges `drop` taken out, its tokens read
@@ -342,7 +345,9 @@ pub(crate) fn each(
         let kept = written(content, &cuts, &[]);
         *spent = spent.saturating_add(reads(content, &cuts, &kept));
         if *spent > limits.splice_reads {
-            return Err(SpliceError::Reads(limits.splice_reads));
+            return Err(SpliceError::Reads {
+                cap: limits.splice_reads,
+            });
         }
         match safe(content, res, limits, &cuts, &[], &kept) {
             Ok(()) => Ok(Some(cuts)),
@@ -352,9 +357,9 @@ pub(crate) fn each(
                 | SpliceError::Overlap(_)
                 | SpliceError::List(_),
             ) => Ok(None),
-            Err(e @ (SpliceError::Read(_) | SpliceError::Capped(_) | SpliceError::Reads(_))) => {
-                Err(e)
-            }
+            Err(
+                e @ (SpliceError::Read(_) | SpliceError::Capped(_) | SpliceError::Reads { .. }),
+            ) => Err(e),
         }
     };
     let of = content.bytes().len();

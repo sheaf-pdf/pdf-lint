@@ -4,6 +4,10 @@
 /// offset into the bytes read. Read from a page's streams joined, it's
 /// into the joined bytes, which [`Concat::pos`](crate::Concat::pos) maps
 /// back to a stream and a place in it.
+///
+/// Exhaustive on purpose: a place and a kind are the whole of it, taken
+/// apart by its fields, and what more there is to say joins [`ErrorKind`],
+/// which is `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("{kind} at byte {at}")]
 pub struct Error {

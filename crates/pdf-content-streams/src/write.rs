@@ -110,7 +110,20 @@ impl Blend {
 /// An alpha is written from 0 to 1, one outside that range clamped to it,
 /// and one that isn't finite, NaN or an infinity, written 0, as the
 /// writer's numbers are ([`write_number`]).
+///
+/// `#[non_exhaustive]`, as an ExtGState sets more than this (a line width,
+/// a soft mask), so a field can join it in a minor release. Set fields on
+/// a copy of [`GState::default`]:
+///
+/// ```
+/// use pdf_content_streams::{Blend, GState};
+///
+/// let mut state = GState::default();
+/// state.fill_alpha = Some(0.5);
+/// state.blend = Some(Blend::Multiply);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct GState {
     /// `/ca`, the alpha of what's filled, 0 to 1.
     pub fill_alpha: Option<f32>,
@@ -228,10 +241,17 @@ impl TextMode {
 /// The resources content draws with, each named: what the resources
 /// dictionary it goes with must bind. In the order the content first
 /// draws with them, one entry a resource in each category it's drawn in.
+///
+/// Exhaustive on purpose: a list of needs, built by a caller that gathers
+/// them from more than one writer, as [`Need`] is.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResourceNeeds(pub Vec<Need>);
 
 /// A resource content draws with, under its name in its category.
+///
+/// Exhaustive on purpose: a category, a name and a resource are the whole
+/// of a need, built by a literal by a caller that gathers needs from more
+/// than one writer, and taken apart by its fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Need {
     /// Its category: the key of the resources dictionary it goes under.

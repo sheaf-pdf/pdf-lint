@@ -482,8 +482,8 @@ fn res_group(c: &mut Criterion) {
     let a = Res::of(objects.clone()).expect("res: its data in memory");
     let b = Res::of(font().0).expect("res: its data in memory");
     let clone = a.clone();
-    assert_eq!(ResId::of(&objects), a.id, "res/id: the resource's digest");
-    assert_eq!(a.id, b.id, "res/eq-apart: one digest");
+    assert_eq!(ResId::of(&objects), a.id(), "res/id: the resource's digest");
+    assert_eq!(a.id(), b.id(), "res/eq-apart: one digest");
     assert!(a == b, "res/eq-apart: equal");
     assert!(a == clone, "res/eq-clone: equal");
     let mut group = c.benchmark_group("res");
@@ -537,10 +537,9 @@ fn calls(font: &Res, image: &Res) -> ContentWriter {
         w.show(b"The quick brown fox jumps over the lazy dog.");
         w.end_text();
         w.end_marked();
-        w.gstate(GState {
-            fill_alpha: Some(0.5),
-            ..GState::default()
-        });
+        let mut state = GState::default();
+        state.fill_alpha = Some(0.5);
+        w.gstate(state);
         w.image(image.clone(), 500.0, y, 6.0, 6.0);
         w.restore();
     }

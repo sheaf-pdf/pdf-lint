@@ -74,7 +74,9 @@ impl ResId {
 /// ([`Res::written`]) is that object alone, named by its number, never an
 /// object equal to it.
 ///
-/// Its fields are public. One built by hand with an id that isn't its
+/// Its id and body are read by [`Res::id`] and [`Res::body`], and set by
+/// its constructors alone, so every stream in a resource holds its data in
+/// memory. One named by hand ([`Res::named`]) with an id that isn't its
 /// objects' digest is equal to no resource of other objects: an id names,
 /// and the objects decide.
 ///
@@ -94,13 +96,25 @@ impl ResId {
 /// written.insert(a, ObjectId::new(3, 0));
 /// assert_eq!(written.get(&b), Some(&ObjectId::new(3, 0)));
 /// ```
+///
+/// It isn't built by a literal, which would pass by the check on its data:
+///
+/// ```compile_fail
+/// use pdf_content_streams::pdf_objects::ObjectId;
+/// use pdf_content_streams::{Res, ResBody, ResId};
+///
+/// let res = Res {
+///     id: ResId(7),
+///     body: ResBody::Written(ObjectId::new(7, 0)),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct Res {
     /// Its name by what it is: the digest of its objects, or of a
     /// reference to it, for one already written.
-    pub id: ResId,
+    pub(crate) id: ResId,
     /// What it is.
-    pub body: ResBody,
+    pub(crate) body: ResBody,
 }
 
 /// What a resource is.
@@ -130,8 +144,8 @@ impl fmt::Debug for ResBody {
     }
 }
 
-/// A resource refused by [`Res::of`]: one of its objects holds a stream
-/// whose data isn't in memory.
+/// A resource refused by [`Res::of`] or [`Res::named`]: one of its objects
+/// holds a stream whose data isn't in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("object {object} of the resource holds a stream whose data isn't in memory")]
 #[non_exhaustive]
@@ -178,6 +192,36 @@ impl Res {
             id: ResId::of(&[Object::from(id)]),
             body: ResBody::Written(id),
         }
+    }
+
+    /// `body` named `id`, by a caller that names resources its own way: an
+    /// image by the place it was read from, say. It's equal to a resource
+    /// whose id and body are equal to its own.
+    ///
+    /// # Errors
+    ///
+    /// [`Unheld`] as [`Res::of`] gives it, where `body` holds objects.
+    pub fn named(id: ResId, body: ResBody) -> Result<Res, Unheld> {
+        if let ResBody::Objects(objects) = &body
+            && let Some(object) = objects.iter().position(|o| !in_memory(o))
+        {
+            return Err(Unheld { object });
+        }
+        Ok(Res { id, body })
+    }
+
+    /// Its name by what it is: the digest of its objects, or of a
+    /// reference to it, for one already written; or the id it was
+    /// [`named`](Res::named).
+    #[must_use]
+    pub fn id(&self) -> ResId {
+        self.id
+    }
+
+    /// What it is.
+    #[must_use]
+    pub fn body(&self) -> &ResBody {
+        &self.body
     }
 
     /// The resource `objects` are, each stream in them holding its data in

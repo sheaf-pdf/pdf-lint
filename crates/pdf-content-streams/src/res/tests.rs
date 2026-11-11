@@ -436,7 +436,8 @@ fn a_resource_is_a_key() {
 /// where a reader found it, or neither in memory nor placed, is refused,
 /// at the top of its objects, in a dictionary or an array, or in a
 /// stream's dictionary, naming which of its objects holds it; one in
-/// memory is taken, wherever it is.
+/// memory is taken, wherever it is. A resource named by hand is refused
+/// alike, and one written already never is.
 #[test]
 fn a_resource_holds_its_streams_in_memory() {
     let placed = Data::At(Span::new(None, 10, 20));
@@ -468,6 +469,8 @@ fn a_resource_holds_its_streams_in_memory() {
         }
         let dict = dict! { "Type" => "XObject", "S" => unheld() };
         assert_eq!(Res::dict(dict).unwrap_err(), Unheld { object: 0 });
+        let body = ResBody::Objects(vec![font.clone(), unheld()].into());
+        assert_eq!(Res::named(ResId(7), body), Err(Unheld { object: 1 }));
     }
     let taken = [
         held(),
@@ -476,6 +479,13 @@ fn a_resource_holds_its_streams_in_memory() {
         stream(dict! { "Inner" => held() }, Data::Bytes(Vec::new())),
     ];
     let res = Res::of(taken.to_vec()).unwrap();
-    assert_eq!(res.id, ResId::of(&taken));
+    assert_eq!(res.id(), ResId::of(&taken));
     assert!(Res::dict(dict! { "S" => held() }).is_ok());
+    // Named by hand: equal where the id and the objects are.
+    let named = Res::named(res.id(), res.body().clone()).unwrap();
+    assert_eq!(named, res);
+    assert_ne!(Res::named(ResId(7), res.body().clone()).unwrap(), res);
+    let written = Res::named(ResId(7), ResBody::Written(ObjectId::new(3, 0))).unwrap();
+    assert_eq!(written.id(), ResId(7));
+    assert!(matches!(written.body(), ResBody::Written(id) if *id == ObjectId::new(3, 0)));
 }

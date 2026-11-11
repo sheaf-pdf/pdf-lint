@@ -1522,7 +1522,7 @@ pub fn spliced(data: &[u8]) -> usize {
         let refused = splice_each(&page, &res, &at(under), &groups);
         assert_eq!(
             refused.map(|e| e.taken),
-            Err(SpliceError::Reads(under)),
+            Err(SpliceError::Reads { cap: under }),
             "past the cap"
         );
     }
