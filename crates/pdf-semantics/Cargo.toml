@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-semantics"
 description = "PDF's common structures, read and written: dates, text strings, name and number trees, the page tree by ISO's rules or PDFium's, and what XMP metadata claims"
 keywords = ["pdf", "xmp", "date", "page-tree", "iso-32000"]
 categories = ["parser-implementations", "date-and-time"]
@@ -26,7 +27,16 @@ default = ["clock"]
 # writes dates leaves it out with `default-features = false`.
 clock = ["dep:chrono"]
 
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
+
 [dev-dependencies]
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # The tests' resolvers: a reading in memory, a reading by position, a
 # document. By its path alone, which the package's manifest leaves out, as
 # pdf-structure isn't on crates.io yet (and its tests take this crate by its
@@ -37,6 +47,12 @@ pdf-structure = { path = "../pdf-structure" }
 # the package's manifest leaves out: so the crate's unit tests don't build
 # from its package.
 pdf-fixtures = { path = "../pdf-fixtures" }
+
+# The benchmarks: `cargo bench -p pdf-semantics`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "semantics"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

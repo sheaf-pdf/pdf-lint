@@ -808,6 +808,7 @@ name = "pdf-semantics"
 version = "0.1.0-alpha.1"
 dependencies = [
  "chrono",
+ "criterion",
  "pdf-fixtures",
  "pdf-objects",
  "pdf-structure",
