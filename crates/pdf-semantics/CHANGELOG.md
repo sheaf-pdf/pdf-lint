@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0-alpha.1 (unreleased)
+
+The first release, and an alpha. Its own unit tests don't build from its package, as they read files through pdf-structure, which isn't published yet: a dev-dependency by its path alone, which the package's manifest leaves out, so the crate packages and publishes on pdf-objects alone.
 
 - **Dates.** `date::Date` (ISO 32000-2, 7.9.4), its fields private so that it always writes as a date: `Date::read` reads one, or gives a `date::Error` (`#[non_exhaustive]`, thiserror): `NoPrefix`, `NoYear`, or `OutOfRange` naming its `Field`. A field not written is none (`month`, `day`, `hour`, `minute`, `second`, `offset`), and `month_or_default` and the like give 7.9.4's default for it. `Offset` is `Utc`, `Ahead` or `Behind`. `Date::quirks` says what a reading read past, a `Quirk` (`#[non_exhaustive]`) each: hours without a sign, an offset before the fields it follows (whose fields then take their defaults), `Z` with an offset other than zero, an apostrophe where it doesn't belong or missing, 1.7's terminating apostrophe, a lone digit, what follows the date, and a day its month hasn't.
 - **Ids are pdf-objects' struct.** `Page::id`, `Origin::Ancestor`, `Place::object`, each `Fault`'s id and the maps a resolver is built from hold pdf-objects' `ObjectId`, a struct of `number` and `generation`, where it was the pair `(u32, u16)`: `(1, 0)` is `ObjectId::new(1, 0)`, `id.0` is `id.number`.
