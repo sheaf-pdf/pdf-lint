@@ -78,27 +78,18 @@ impl<'a, 'r, S> Operations<'a, 'r, S> {
     /// after.
     ///
     /// ```
-    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::fault::Fault;
     /// use pdf_content_streams::{Limits, ResCx, operations};
-    /// use std::ops::Range;
-    ///
-    /// #[derive(Default)]
-    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Collected<'a> {
-    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
-    ///         self.0.push((at, fault));
-    ///     }
-    /// }
     ///
     /// let content = b"q 0 0 m 9 9 l S Q 1 2";
-    /// let mut kept = Collected::default();
+    /// let mut kept = Vec::new();
     /// let res = ResCx::none();
     /// let read = operations(content, &res, &Limits::DEFAULT);
     /// let read = read.with_sink(&mut kept);
     /// assert_eq!(read.count(), 5);
-    /// assert_eq!(kept.0, [(18..21, Fault::Trailing { count: 2 })]);
+    /// assert_eq!(kept, [(18..21, Fault::Trailing { count: 2 })]);
     /// assert_eq!(
-    ///     kept.0[0].1.to_string(),
+    ///     kept[0].1.to_string(),
     ///     "2 operands at the end that no operator takes"
     /// );
     /// ```

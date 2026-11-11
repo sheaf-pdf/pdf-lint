@@ -12,7 +12,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - `Concat` and `Join`: a page's streams read as one, each place mapped back to its stream (`Pos`, `SpanAcross`). `Join::push_from` takes them from any reader of a file, through pdf-objects' `Streams`.
 - `Operator`, `Operators` and `State`: each operator of ISO 32000-2's Annex A, with its operands and its category, and where it may be used.
 - `balance`, `marked`, `names_used` and `kept`: a page's `q`/`Q` balance, its marked content and the resource names it uses. `Balance::take`, `MarkedNest::step` and `NameSet::take` count an operation at a time, so one pass can find several.
-- `fault::Fault` and `fault::Sink`: each place ISO 32000-2 reads content otherwise than PDFium, told with where it is. With `()` as the sink, none is looked for.
+- `fault::Fault` and `fault::Sink`: each place ISO 32000-2 reads content otherwise than PDFium, told with where it is. With `()` as the sink, none is looked for. A `Vec` keeps each with its place.
 - `ContentWriter`: content written, the same bytes for the same calls. It names its resources (`Res`) when it's finished, clear of what a page's resources bind (`Reserved::read`). Two resources are one only where they're equal, so a `HashMap<Res, _>` keeps each once.
 - `splice`, `splice_each` and `without_keys`: ranges taken out of a page's content, or keys out of a property list, only where nothing drawn after them can change. What's kept is read again before it's given.
 - `Limits`: caps on what reading and editing may hold or cost, each met before the work it bounds. `InlineImage::capped` says an image was sized by a color space counted past a cap, and the edits refuse content that holds one (`SpliceError::Capped`).

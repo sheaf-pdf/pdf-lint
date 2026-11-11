@@ -124,6 +124,16 @@ impl NameSet {
     }
 }
 
+/// Every name, each in its category, in order, as [`NameSet::iter`].
+impl<'s> IntoIterator for &'s NameSet {
+    type Item = (ResKind, &'s [u8]);
+    type IntoIter = iter::Names<'s>;
+
+    fn into_iter(self) -> iter::Names<'s> {
+        self.iter()
+    }
+}
+
 impl<'a> Operation<'a> {
     /// The resource it names, by category, and its name, decoded as PDFium
     /// decodes it ([`name`](crate::name)), without its `/`: what a
@@ -232,7 +242,7 @@ pub fn names_used(
 
 /// What's left of content once ranges are taken out, read in one pass
 /// ([`kept`]).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Kept {
     /// How its `q`s and `Q`s balance.

@@ -241,7 +241,7 @@ mod tests {
         });
         assert_eq!(named(&made), [("spaces", Level::DEBUG)]);
         let made = spans(|| {
-            Reserved::read(nothing, Some(&resources), &limits);
+            let _ = Reserved::read(nothing, Some(&resources), &limits);
         });
         assert_eq!(named(&made), [("reserved", Level::DEBUG)]);
         let mut w = ContentWriter::new();

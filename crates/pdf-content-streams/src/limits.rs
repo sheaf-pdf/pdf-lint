@@ -2,16 +2,21 @@
 //! inline images end, what a splice's checks may read, and how far the
 //! writer follows references: one value for all of them.
 
-/// The caps on reading content: past one, it can't be read, and reading
-/// stops with an [`Error`](crate::Error) saying which and where, but for
+/// The caps on reading content, and how far its edits and its writer go.
+///
+/// Past most of the caps on reading, content can't be read, and reading
+/// stops with an [`Error`](crate::Error) saying which and where. Past
 /// [`Limits::values`], [`Limits::color`] and [`Limits::space_values`],
-/// whose values read otherwise, and no error says so, an image sized by
-/// such a count told ([`InlineImage::capped`](crate::InlineImage::capped));
-/// how an inline image's DCT and CCITTFax data's end is found
-/// ([`Limits::coded_ends`]); what [`splice_each`](crate::splice_each)'s
-/// checks may read ([`Limits::splice_reads`]); and how many references the
-/// writer follows ([`Limits::hops`]). A caller sets them on a copy of
-/// [`Limits::DEFAULT`] (`limits.operands = 64`, say), as more may come.
+/// values read otherwise and no error says so, but an image sized by such
+/// a count is told ([`InlineImage::capped`](crate::InlineImage::capped)).
+/// Past [`Limits::content`], [`Join`](crate::Join) refuses a stream
+/// ([`TooLarge`](crate::TooLarge)). Past [`Limits::splice_reads`],
+/// [`splice_each`](crate::splice_each) is refused, and past
+/// [`Limits::hops`] the writer binds nothing. [`Limits::coded_ends`] says
+/// how an inline image's DCT and CCITTFax data's end is found.
+///
+/// A caller sets them on a copy of [`Limits::DEFAULT`]
+/// (`limits.operands = 64`, say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -101,9 +106,9 @@ pub struct Limits {
     /// ([`marked`](fn@crate::marked), [`MarkedNest`](crate::MarkedNest)): each
     /// range one, and each property list written in the content, kept with
     /// its range, the values reading it built, as [`Limits::values`] counts
-    /// them: 2^22 by default, some 300 MB. Each list is read under what's
-    /// left, so one past it stops there, never built whole first, and past
-    /// it reading stops with an error at the `BMC` or `BDC`
+    /// them: 2^22 by default, some 400 to 470 MB. Each list is read under
+    /// what's left, so one past it stops there, never built whole first,
+    /// and past it reading stops with an error at the `BMC` or `BDC`
     /// ([`ErrorKind::MarkedSize`](crate::ErrorKind::MarkedSize)), never a
     /// list dropped, as a range whose list is dropped loses what it marks
     /// (its `/MCID`, say). A list past [`Limits::values`] alone, where

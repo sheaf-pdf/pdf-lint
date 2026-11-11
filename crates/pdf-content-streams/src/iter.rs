@@ -7,8 +7,9 @@
 //!
 //! Each is fused, and gives the hints of what it walks, so a loop over
 //! one, or a `count`, `for_each` or `fold`, walks that alone, in one pass.
-//! None prints a byte of content in its `Debug`: an operation's operands
-//! print where they are, and property lists how many are left.
+//! None prints a string's or an image's bytes in its `Debug`. An
+//! operation's operands print where they are, property lists how many are
+//! left, and names as their bytes.
 
 use std::collections::{btree_map, btree_set, hash_map};
 use std::fmt;
@@ -203,9 +204,18 @@ impl FusedIterator for Capped<'_> {}
 /// The names of one category of a [`NameSet`](crate::NameSet), in order:
 /// what [`NameSet::of`](crate::NameSet::of) gives.
 #[must_use = "an iterator is lazy: it gives nothing until asked"]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NamesOf<'s> {
     names: btree_set::Range<'s, (ResKind, Vec<u8>)>,
+}
+
+/// The names left, each in its category, and nothing of the range that
+/// walks them.
+impl fmt::Debug for NamesOf<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<_> = self.names.clone().collect();
+        f.debug_struct("NamesOf").field("names", &names).finish()
+    }
 }
 
 impl<'s> NamesOf<'s> {

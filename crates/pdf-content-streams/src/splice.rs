@@ -439,9 +439,12 @@ impl fmt::Debug for Rewrite {
 /// (every entry of a key written twice goes); or when the content with it
 /// written again doesn't read as it did but for the list, read as one
 /// operand, the list written again, as [`splice`] reads what it gives.
-/// Content that can't be read is refused with its error
-/// ([`SpliceError::Read`]), and content that holds an image sized by a
-/// count past a cap likewise ([`SpliceError::Capped`]). It costs a reading
+/// Content that can't be read to the `BDC` is refused with its error
+/// ([`SpliceError::Read`]). Where it writes the list again, it reads the
+/// content whole, and refuses content past the `BDC` that can't be read
+/// alike, and content that holds an image sized by a count past a cap
+/// ([`SpliceError::Capped`]). A list that holds none of the keys is
+/// `None`, whatever follows it, as nothing is written. It costs a reading
 /// of the content to the `BDC`, and, where it writes the list again, two
 /// more: of the content and of what it gives, three at most, whatever keys
 /// it's given; a caller writing many lists again bounds how many. What it
@@ -466,8 +469,9 @@ impl fmt::Debug for Rewrite {
 ///
 /// [`SpliceError::List`] where the list can't be written again without the
 /// keys, as above; [`SpliceError::OutOfRange`] where `span` isn't in the
-/// content; and [`SpliceError::Capped`] and [`SpliceError::Read`] as [`splice`]
-/// gives them.
+/// content; [`SpliceError::Read`] where the content can't be read to the
+/// `BDC`; and, where it writes the list again, [`SpliceError::Capped`] and
+/// [`SpliceError::Read`] as [`splice`] gives them.
 pub fn without_keys(
     content: &Concat,
     res: &ResCx,

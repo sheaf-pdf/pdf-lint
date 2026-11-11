@@ -139,30 +139,21 @@ impl<'a> Operand<'a> {
     /// the sink.
     ///
     /// ```
-    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::fault::Fault;
     /// use pdf_content_streams::{Limits, ResCx, operations};
     /// use pdf_content_streams::pdf_objects::Object;
-    /// use std::ops::Range;
-    ///
-    /// #[derive(Default)]
-    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Collected<'a> {
-    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
-    ///         self.0.push((at, fault));
-    ///     }
-    /// }
     ///
     /// let content = b"/Span <</MCID 0 /Alt (A) 1 /Lang>> BDC";
     /// let res = ResCx::none();
     /// let limits = Limits::DEFAULT;
     /// let bdc = operations(content, &res, &limits).next().unwrap().unwrap();
-    /// let mut kept = Collected::default();
+    /// let mut kept = Vec::new();
     /// // A key that's no name: PDFium reads no dictionary, and ends the
     /// // operand there, `BDC`'s last operands what follows.
     /// let props = bdc.arg(2).unwrap();
     /// assert_eq!(props.bytes(), b"<</MCID 0 /Alt (A) 1");
     /// assert_eq!(props.object_with(&limits, &mut kept), None);
-    /// assert_eq!(kept.0, [(25..26, Fault::Key { written: b"1" })]);
+    /// assert_eq!(kept, [(25..26, Fault::Key { written: b"1" })]);
     /// assert_eq!(bdc.arg(0).unwrap().bytes(), b">>");
     /// // Without the key that's no name, the list is read.
     /// let read = pdf_content_streams::object(b"<</MCID 0 /Alt (A)>>", &limits);
@@ -283,27 +274,18 @@ impl<'a> Operand<'a> {
     /// escapes decoded, and nothing is kept.
     ///
     /// ```
-    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::fault::Fault;
     /// use pdf_content_streams::{Limits, ResCx, operations};
-    /// use std::ops::Range;
-    ///
-    /// #[derive(Default)]
-    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Collected<'a> {
-    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
-    ///         self.0.push((at, fault));
-    ///     }
-    /// }
     ///
     /// let content = b"[(a) 1.2.3 (b)] TJ";
     /// let res = ResCx::none();
     /// let limits = Limits::DEFAULT;
     /// let tj = operations(content, &res, &limits).next().unwrap().unwrap();
-    /// let (mut told, mut read) = (Collected::default(), Collected::default());
+    /// let (mut told, mut read) = (Vec::new(), Vec::new());
     /// tj.arg(0).unwrap().faults_with(&limits, &mut told);
     /// tj.arg(0).unwrap().object_with(&limits, &mut read);
-    /// assert_eq!(told.0, [(5..10, Fault::Number { written: b"1.2.3" })]);
-    /// assert_eq!(told.0, read.0);
+    /// assert_eq!(told, [(5..10, Fault::Number { written: b"1.2.3" })]);
+    /// assert_eq!(told, read);
     /// ```
     pub fn faults_with(&self, limits: &Limits, sink: &mut (impl Sink<'a> + ?Sized)) {
         // What doesn't want faults is told none.

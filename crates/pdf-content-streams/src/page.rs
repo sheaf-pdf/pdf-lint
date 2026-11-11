@@ -345,6 +345,11 @@ impl Join {
     /// left ([`Join::room`]); the space before it written first, and a
     /// stream of no data a stream, as [`Join::push`] adds them.
     ///
+    /// The data is what `streams` decodes, by its own reading. A reader
+    /// that decodes LZW by qpdf's reading stops at a code past the table,
+    /// where PDFium reads on, so a page read that way may hold less than
+    /// PDFium draws.
+    ///
     /// ```
     /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
     /// use pdf_content_streams::{Join, Limits, Pushed};
@@ -424,7 +429,7 @@ pub struct TooLarge {
     pub cap: usize,
 }
 
-/// Why [`Join::push_with`] added no stream.
+/// Why [`Join::push_with`] or [`Join::push_from`] added no stream.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Pushed<E> {

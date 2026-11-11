@@ -244,7 +244,7 @@ impl TextMode {
 ///
 /// Exhaustive on purpose: a list of needs, built by a caller that gathers
 /// them from more than one writer, as [`Need`] is.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ResourceNeeds(pub Vec<Need>);
 
 /// A resource content draws with, under its name in its category.
@@ -252,7 +252,7 @@ pub struct ResourceNeeds(pub Vec<Need>);
 /// Exhaustive on purpose: a category, a name and a resource are the whole
 /// of a need, built by a literal by a caller that gathers needs from more
 /// than one writer, and taken apart by its fields.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Need {
     /// Its category: the key of the resources dictionary it goes under.
     pub kind: ResKind,
@@ -297,6 +297,7 @@ impl Reserved {
     /// and the copy shared. So it costs what the dictionary and what it
     /// binds hold, in time and in memory: an image's data in memory that a
     /// writer's name binds is copied.
+    #[must_use]
     pub fn read<'r, 'o: 'r, R: Resolve<'o>>(
         objects: R,
         resources: Option<&'r Object>,

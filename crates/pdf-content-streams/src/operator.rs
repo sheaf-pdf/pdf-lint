@@ -548,6 +548,9 @@ pub enum FillRule {
 /// let state = wanted.intersection(Operators::GENERAL_GRAPHICS_STATE);
 /// assert_eq!(state, Operators::of(&[b"q", b"Q"]));
 /// assert_eq!(format!("{state:?}"), "{q, Q}");
+/// for op in state {
+///     assert!(op == Operator::Save || op == Operator::Restore);
+/// }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Operators(u128);
@@ -671,6 +674,16 @@ impl Operators {
 impl FromIterator<Operator> for Operators {
     fn from_iter<I: IntoIterator<Item = Operator>>(ops: I) -> Operators {
         ops.into_iter().fold(Operators::NONE, Operators::with)
+    }
+}
+
+/// What it holds, as [`Operators::iter`].
+impl IntoIterator for Operators {
+    type Item = Operator;
+    type IntoIter = crate::iter::Operators;
+
+    fn into_iter(self) -> crate::iter::Operators {
+        self.iter()
     }
 }
 

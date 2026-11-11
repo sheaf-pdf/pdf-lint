@@ -300,28 +300,19 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// that asks both is told of it by each, what each reads.
     ///
     /// ```
-    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::fault::Fault;
     /// use pdf_content_streams::{Limits, ResCx, tokens};
-    /// use std::ops::Range;
-    ///
-    /// #[derive(Default)]
-    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Collected<'a> {
-    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
-    ///         self.0.push((at, fault));
-    ///     }
-    /// }
     ///
     /// let content = b"q 1.2.3 w <4G> Tj Q";
-    /// let mut kept = Collected::default();
+    /// let mut kept = Vec::new();
     /// let res = ResCx::none();
     /// let read = tokens(content, &res, &Limits::DEFAULT).with_sink(&mut kept);
     /// assert_eq!(read.count(), 6);
     /// let written = &content[2..7];
-    /// assert_eq!(kept.0[0], (2..7, Fault::Number { written }));
-    /// assert_eq!(kept.0[1].0, 10..14);
+    /// assert_eq!(kept[0], (2..7, Fault::Number { written }));
+    /// assert_eq!(kept[1].0, 10..14);
     /// assert_eq!(
-    ///     kept.0[1].1.to_string(),
+    ///     kept[1].1.to_string(),
     ///     "the hex string <4G> has a byte that's no hex digit"
     /// );
     /// ```

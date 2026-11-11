@@ -156,6 +156,7 @@ impl ResCx {
     /// [`Fault::Long`]). Where it's otherwise, the key's bytes as written
     /// (pdf-objects' `Entry::key_at`, [`pdf_color::Named::key_at`]), read by
     /// [`name`], give PDFium's.
+    #[must_use]
     pub fn new(spaces: impl IntoIterator<Item = (Vec<u8>, u32)>) -> ResCx {
         ResCx {
             spaces: spaces.into_iter().collect(),
@@ -380,6 +381,7 @@ impl fmt::Debug for InlineImage<'_> {
             .field("at", &self.at)
             .field("dict", &self.dict())
             .field("data", &self.data)
+            .field("capped", &self.capped)
             .finish()
     }
 }

@@ -3899,7 +3899,7 @@ fn an_inline_image_is_one_operation() {
     );
     assert_eq!(
         format!("{image:?}"),
-        "InlineImage { at: 6..59, dict: 8..49, data: 52..56 }"
+        "InlineImage { at: 6..59, dict: 8..49, data: 52..56, capped: false }"
     );
 
     // Data straight after `ID`'s white-space byte, or after `ID` where a
@@ -6059,6 +6059,17 @@ fn marked_content_takes_the_operands_pdfium_gives_bdc() {
     let names = names_used(&c, &ResCx::none(), LIM, &[]).unwrap();
     let of = |kind| names.of(kind).collect::<Vec<_>>();
     assert_eq!(of(ResKind::Properties), [b"P1"]);
+    // A loop over the set walks every name.
+    let mut walked = Vec::new();
+    for (kind, name) in &names {
+        walked.push((kind, name.to_vec()));
+    }
+    assert_eq!(walked, [(ResKind::Properties, b"P1".to_vec())]);
+    // Its names print, and nothing of the range that walks them.
+    assert_eq!(
+        format!("{:?}", names.of(ResKind::Properties)),
+        "NamesOf { names: [(Properties, [80, 49])] }"
+    );
 }
 
 /// Marked content stepped through an operation at a time: each range

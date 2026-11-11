@@ -800,8 +800,9 @@ fn x_under(space_depth: usize) -> ResCx {
 /// Content that holds an inline image sized by a count past a cap is
 /// refused, wherever the ranges are, naming the image, here from one
 /// stream into the next; by `splice_each` too, as the call's refusal,
-/// never a group's; and by a list written again. Its caps raised, it's
-/// taken. A space capped that no image is drawn in refuses nothing.
+/// never a group's; and by a list written again, but where the list holds
+/// none of the keys, as nothing is written. Its caps raised, it's taken. A
+/// space capped that no image is drawn in refuses nothing.
 #[test]
 fn content_with_an_image_sized_past_a_cap_is_refused() {
     let capped = x_under(0);
@@ -837,6 +838,11 @@ fn content_with_an_image_sized_past_a_cap_is_refused() {
     let image = span_of(s, b"BI /W 1 /H 1 /BPC 8 /CS /X ID abcd EI");
     let list = without_keys(&c, &capped, LIM, ranges(&c)[0], &KEYS);
     assert_eq!(list, Err(SpliceError::Capped(image)));
+    let none: [&[u8]; 1] = [b"Lang"];
+    assert_eq!(
+        without_keys(&c, &capped, LIM, ranges(&c)[0], &none),
+        Ok(None)
+    );
     assert!(matches!(
         without_keys(&c, &whole, LIM, ranges(&c)[0], &KEYS),
         Ok(Some(_))

@@ -35,6 +35,7 @@ pub struct Properties {
 impl Properties {
     /// The lists given, each under its name; of a name given twice, the
     /// last list.
+    #[must_use]
     pub fn new(lists: impl IntoIterator<Item = (Vec<u8>, Dict)>) -> Properties {
         Properties {
             lists: lists.into_iter().collect(),

@@ -65,10 +65,10 @@ use crate::operand::{STRING, WORD};
 use crate::scan::{Event, TOP, UNCAPPED, Visit, is_number, tokenizer, walk};
 use crate::unprinted::Len;
 
-/// Where faults are told: a checker keeps them; `()` drops them, and
-/// wants none, so none is looked for. A fault borrows from `'a`, the
-/// content read, so a sink can keep it as it is. A sink borrowed, `&mut
-/// S` or `&mut dyn Sink`, is a sink too.
+/// Where faults are told: a checker keeps them, as a `Vec` of each with
+/// its place does; `()` drops them, and wants none, so none is looked for.
+/// A fault borrows from `'a`, the content read, so a sink can keep it as
+/// it is. A sink borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
 ///
 /// It's this crate's own, not pdf-objects'
 /// [`fault::Sink`](pdf_objects::fault::Sink), which a reader of a file's
@@ -98,6 +98,13 @@ impl Sink<'_> for () {
     #[inline]
     fn wants(&self) -> bool {
         false
+    }
+}
+
+/// Keeps each fault with its place, in the order they were told.
+impl<'a> Sink<'a> for Vec<(Range<usize>, Fault<'a>)> {
+    fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
+        self.push((at, fault));
     }
 }
 
