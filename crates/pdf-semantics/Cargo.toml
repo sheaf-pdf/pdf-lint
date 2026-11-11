@@ -6,7 +6,7 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-semantics"
-description = "PDF's common structures, read and written: dates, text strings, name and number trees, the page tree by ISO's rules or PDFium's, and what XMP metadata claims"
+description = "PDF's common structures, read and written: dates, name and number trees, the page tree by ISO's rules or PDFium's, and what XMP metadata claims"
 keywords = ["pdf", "xmp", "date", "page-tree", "iso-32000"]
 categories = ["parser-implementations", "date-and-time"]
 # Only what users need, so local tooling files can't end up in the package.

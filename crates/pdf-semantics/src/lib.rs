@@ -6,8 +6,6 @@
 //!   if not, and each departure from the clause said; [`date::Date::write`]
 //!   writes the clause's form. With the `clock` feature, on by default, a
 //!   date is had from the clock or a count of seconds.
-//! - **Text strings** ([`text`]): ISO 32000-2, 7.9.2.2, pdf-objects' module,
-//!   read by ISO's rules or PDFium's and written.
 //! - **Name and number trees** ([`tree`]): ISO 32000-2, 7.9.6 and 7.9.7.
 //!   Walked a key and a value at a time under caps, a loop or a tree too
 //!   deep said, and written.
@@ -30,17 +28,19 @@
 //! so it reads as a reference to nothing. What a walk reads past is a [`Fault`],
 //! told to pdf-objects' [`Sink`](pdf_objects::fault::Sink) with its
 //! [`Place`](pdf_objects::fault::Place), or dropped by `()`; its caps are one
-//! value, [`Limits`]. pdf-objects is re-exported whole, so a sink of one's own
-//! names the trait at the version this crate takes.
+//! value, [`Limits`]. pdf-objects is re-exported whole, none of its items by
+//! name: a sink of one's own names the trait through it, at the version this
+//! crate takes, as the examples name the objects, `dict!` and the rules a
+//! page tree is walked by (`pdf_semantics::pdf_objects::pdf_tokenizer::Rules`).
+//! Text strings (7.9.2.2) are its [`text`](pdf_objects::text) module's, read
+//! by ISO's rules or PDFium's and written.
 
 pub use pdf_objects;
-pub use pdf_objects::pdf_tokenizer::Rules;
-pub use pdf_objects::{
-    Dict, Object, ObjectId, Resolve, Span, Str, Stream, Unreadable, Value, Why, dict, text,
-};
 
 pub use fault::Fault;
 pub use limits::Limits;
+
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Why};
 
 pub mod date;
 mod fault;

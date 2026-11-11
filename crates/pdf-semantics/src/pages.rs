@@ -48,8 +48,10 @@
 //! ```
 //! use std::collections::BTreeMap;
 //!
+//! use pdf_semantics::Limits;
 //! use pdf_semantics::pages::{Origin, Rect, pages};
-//! use pdf_semantics::{Limits, Object, ObjectId, Rules, dict};
+//! use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
+//! use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
 //!
 //! let objects = BTreeMap::from([
 //!     (ObjectId::new(2, 0), Object::from(dict! {

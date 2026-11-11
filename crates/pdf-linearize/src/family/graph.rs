@@ -5,8 +5,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
+use pdf_objects::pdf_tokenizer::Rules;
 use pdf_semantics::pages::{Attribute, Inheritable, Origin, Pages, pages};
-use pdf_semantics::{Limits as TreeLimits, Rules, tree};
+use pdf_semantics::{Limits as TreeLimits, tree};
 use pdf_structure::write::{self, Body, Encryptor};
 use pdf_structure::{Document, Source as _};
 

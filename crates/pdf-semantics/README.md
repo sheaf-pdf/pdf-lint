@@ -7,7 +7,6 @@ It's made for what reads a file's common structures to show them, check them or 
 ## What it does
 
 - **Dates (7.9.4).** `Date::read` reads one, each field saying whether it was written, what stands for it if not by the clause's defaults, and what the reading read past (`Quirk`): the 1.7 form's last apostrophe, hours without a sign, an offset before the fields it follows, a lone digit, what follows the date, a day its month hasn't. A field out of its range makes it no date. `Date::write` writes the clause's form of the fields, never the bytes read, and `Date::new` and the `with_` methods build a date, each field in order and in range.
-- **Text strings (7.9.2.2).** `text` is pdf-objects' module: read by ISO's rules or PDFium's, every departure said, and written, as itself when PDFDocEncoding reads it back so, or in UTF-16BE.
 - **The page tree (7.7.3).** `pages::pages` lists every page in order, by one of two sets of rules, which give the same pages on a well-formed tree. PDFium's, as of chromium/8125, a development snapshot of PDFium that the crate's tests hold them to, number each page as PDFium numbers it: a kid with `/Kids` is a node whatever its `/Type`, one written in place reads as any other, one that names no dictionary has a place with no page at it, and the walk stops at the count PDFium gives, which `Pages::counted` says, and `pages::counted` where no page is under the root, which the walk makes `pages::Error::NoPages`; where PDFium goes on past a node listed inside itself, a `/Parent` chain that loops or a tree past the caps, the walk fails instead, by a typed `pages::Error`. ISO's read on past whatever departs from the clause, each said. Either way what a page inherits comes up its `/Parent` chain: `Page::attribute` gives it as written and followed, `Page::media_box`, `crop_box`, `rotate` and `user_unit` as a value, and each says where it came from, the page, an ancestor or a default (`Origin`). A page object listed twice is two pages, and nothing's copied: what a page holds is borrowed from what the resolver keeps, its `/Contents` and `/Annots` the caller's to read from its dictionary. `pages::write` writes a balanced tree's nodes over a caller's pages, every page at one depth under nodes of at most `pages::FANOUT` kids, or another fanout, numbered by what the caller gives it, as a document's `new_id` does, and read back by either rules with nothing told; what wouldn't read back, as a page given twice, is refused (`pages::WriteError`).
 - **Name and number trees (7.9.6, 7.9.7).** `tree::names` and `tree::numbers` walk one a key and a value at a time, in the order it's written, borrowing from what the resolver keeps and reading nothing it hasn't been asked for, under caps of depth and nodes, each node read once so a loop ends. Each departure is told to a sink, and `whole` says whether anything was left unread. `tree::write_names` and `tree::write_numbers` write one flat, sorted, a key given twice refused.
 - **XMP claims (14.3.2).** `xmp::read` reads what a packet claims it conforms to, PDF/A's part, conformance and revision, PDF/UA's part and revision and PDF/VT's version, on [quick-xml](https://crates.io/crates/quick-xml): an attribute or an element, under any prefix bound to its namespace, so a prefix bound to another, a comment or CDATA holding what looks like one claims nothing. The first value of each counts, as written, so one that says nothing doesn't lose another, and `Claims::conformance` reads PDF/A's and PDF/UA's as a number and a letter. An attribute or a value that doesn't read is told to a sink and passed; XML that stops making sense, or a packet past its caps, ends the read with an `xmp::Error` that holds what was read. No DOCTYPE is read and no entity expanded. `xmp::metadata_stream` says which stream holds a file's packet, and `xmp::read_from` reads it through what gives the file's objects and its streams' data, a packet past the cap not at all. `xmp::write` writes a packet of claims that reads back as they are, and refuses a value that wouldn't.
@@ -15,6 +14,8 @@ It's made for what reads a file's common structures to show them, check them or 
 Whatever walks a file's objects reads them through pdf-objects' `Resolve`, given by value, so `&reading` over pdf-structure's reading in memory or by position, `&document` over its document, or a closure alike. `catalog` finds a file's catalog from its trailer, and `follow` follows a reference. A reader says why it gives no object, and a walk acts on it: an object that's damaged is said and passed; one past a cap the reader reads under, one that takes a password, or bytes the source didn't give end the walk with an `Unreadable`, so that a failed read never looks like an empty tree.
 
 Where a file departs from the standard is a `Fault`, told to a sink with its place: pdf-objects' `fault::Sink<Fault>` and `fault::Place`, which pdf-color's and pdf-fonts' faults are told to as well, so that one sink can take all three. `()` drops them and wants none, so what only a checker wants isn't looked for, and what's read is the same whatever the sink; a `Vec<(Place, Fault)>` keeps each with its place. Caps are one value, `Limits`.
+
+pdf-objects is re-exported whole, none of its items by name: its objects, `dict!`, its sink and the rules a page tree is walked by are named through `pdf_semantics::pdf_objects`, at the version this crate takes, as the examples below name them. Text strings (7.9.2.2) are its `text` module's, read by ISO's rules or PDFium's and written.
 
 ## The `clock` feature
 
@@ -48,8 +49,10 @@ A file's pages, each value saying where it came from:
 ```rust
 use std::collections::BTreeMap;
 
+use pdf_semantics::Limits;
 use pdf_semantics::pages::{Inheritable, Origin, Rect, pages};
-use pdf_semantics::{Limits, Object, ObjectId, Rules, dict};
+use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
+use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
 
 let objects = BTreeMap::from([
     (ObjectId::new(2, 0), Object::from(dict! {
@@ -83,7 +86,9 @@ Over a file, a walk takes the reading or the document by reference, which says w
 
 ```rust
 use pdf_semantics::pages::pages;
-use pdf_semantics::{Limits, ObjectId, Rules, catalog, xmp};
+use pdf_semantics::pdf_objects::ObjectId;
+use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
+use pdf_semantics::{Limits, catalog, xmp};
 use pdf_structure::read::{Options, Reading};
 
 let file = b"%PDF-1.7\n\
@@ -103,9 +108,10 @@ A name tree, over a closure:
 ```rust
 use std::collections::BTreeMap;
 
-use pdf_objects::fault::{Place, Sink};
+use pdf_semantics::pdf_objects::fault::{Place, Sink};
+use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
 use pdf_semantics::tree::names;
-use pdf_semantics::{Fault, Limits, Object, ObjectId, dict};
+use pdf_semantics::{Fault, Limits};
 
 #[derive(Default)]
 struct Faults(Vec<Fault>);

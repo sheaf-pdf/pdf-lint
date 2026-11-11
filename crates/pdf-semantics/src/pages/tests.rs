@@ -141,7 +141,7 @@ fn a_count_or_a_parent_past_a_cap_or_a_password_isn_t_checked() {
         (6, "2"),
         (7, "2 0 R"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for (failed, why) in [
         (ObjectId::new(6, 0), Why::Locked),
         (ObjectId::new(7, 0), Why::Capped),
@@ -221,7 +221,7 @@ fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
         objects.extend(node.map(|node| (3, node)));
         let objects = parsed(&objects);
         let resolve = |id: ObjectId| objects.get(&id);
-        let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+        let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
         let walked = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
         assert_eq!(walked, Err(Error::NoPages), "{root}");
         assert_eq!(
@@ -236,14 +236,14 @@ fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
         (3, "<< /Type /Page /Parent 2 0 R >>"),
     ]);
     let resolve = |id: ObjectId| objects.get(&id);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(
         counted(resolve, &catalog, &Limits::DEFAULT),
         Ok(table.counted())
     );
     assert_eq!(table.counted(), 4);
-    let nowhere = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(9))]);
+    let nowhere = Dict::from_iter([(b"Pages".to_vec(), Object::reference(9))]);
     assert_eq!(counted(resolve, &nowhere, &Limits::DEFAULT), Ok(0));
     // A cap or a password fails it as it fails the walk.
     let resolver = failing(&objects, ObjectId::new(3, 0), Why::Locked);
@@ -452,7 +452,7 @@ fn a_parent_chain_is_read_no_further_than_its_cap() {
     text.extend(parents_of(4, 5000));
     let text: Vec<(u32, &str)> = text.iter().map(|(n, s)| (*n, s.as_str())).collect();
     let objects = parsed(&text);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = asking(&objects, &asked);
     let walked = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
@@ -709,7 +709,7 @@ fn a_page_listed_again_isn_t_read_again() {
         (3, "<< /Type /Page /Resources 9 0 R /MediaBox 9 0 R >>"),
         (9, "[0 0 1 1]"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = asking(&objects, &asked);
     let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
@@ -1310,7 +1310,7 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
     );
     // A /Kids that doesn't read isn't an array, and is said once.
     let objects = parsed(&[(2, "<< /Type /Page /Kids 6 0 R /Count 3 >>")]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let mut kept = Kept::default();
     let resolver = failing(&objects, ObjectId::new(6, 0), Why::Damaged);
     let table = pages(
@@ -1674,7 +1674,7 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
         (4, "<< /Type /Page /Parent 2 0 R >>"),
         (5, "<< >>"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for rules in [Rules::Pdfium, Rules::Iso] {
         for failed in [
             ObjectId::new(3, 0),
@@ -2217,7 +2217,7 @@ fn only_a_sink_that_wants_them_has_its_checks_run() {
         (3, "<< /Type /Page /Parent 2 0 R >>"),
         (8, "1"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = |id: ObjectId| {
         asked.borrow_mut().push(id);
@@ -2244,7 +2244,7 @@ fn a_walk_reads_nothing_past_the_count_or_any_content() {
         (3, "<< /Type /Page /Contents 5 0 R /Annots 6 0 R >>"),
         (4, "<< /Type /Page >>"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = |id: ObjectId| {
         asked.borrow_mut().push(id);
@@ -2461,7 +2461,7 @@ fn what_only_a_sink_reads_fails_no_walk() {
             },
         ),
     ];
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for (root, kid, below, fault) in shapes {
         let mut written = vec![(2, root), (3, kid)];
         written.extend(below.map(|below| (4, below)));
@@ -2584,7 +2584,7 @@ fn a_parent_chain_raised_past_the_stack_goes_along_in_a_loop() {
         Object::from(pdf_objects::dict! { "Type" => "Page", "Parent" => Object::reference(10) }),
     );
     let resolve = |id: ObjectId| objects.get(&id);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let mut limits = Limits::DEFAULT;
     limits.page_depth = 2 * length as usize;
     let table = pages(resolve, &catalog, Rules::Pdfium, &limits, &mut ()).unwrap();

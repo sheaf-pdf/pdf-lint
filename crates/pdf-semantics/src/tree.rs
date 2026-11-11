@@ -26,7 +26,8 @@
 //!
 //! ```
 //! use pdf_semantics::tree::{names, write_names};
-//! use pdf_semantics::{Limits, Object, ObjectId};
+//! use pdf_semantics::Limits;
+//! use pdf_semantics::pdf_objects::{Object, ObjectId};
 //!
 //! let tree = write_names([
 //!     (b"b".to_vec(), Object::reference(5)),

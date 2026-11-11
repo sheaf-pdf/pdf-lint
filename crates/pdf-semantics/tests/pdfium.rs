@@ -21,9 +21,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Object, ObjectId, Value};
 use pdf_semantics::pages::{Error, FANOUT, Origin, Page, Pages, Rect, counted, pages, write};
-use pdf_semantics::{Limits, Rules, catalog};
+use pdf_semantics::{Limits, catalog};
 use pdf_structure::read::{self, Options, Reading};
 
 /// How many pages of a file the oracle asks for, as `oracle/pdfium.py` has it.
