@@ -2,6 +2,7 @@
 //! written. They're the syntax and nothing of what an operator does, so
 //! an operator nobody knows is a token like any other.
 
+use std::fmt;
 use std::iter::FusedIterator;
 use std::ops::Range;
 
@@ -13,9 +14,17 @@ use crate::fault::{self, Fault, Sink};
 use crate::inline::{Found, Image, Images, ResCx};
 use crate::limits::Limits;
 use crate::scan::{Raw, next_raw, tokenizer};
+use crate::unprinted::Len;
 
 /// A token of a content stream.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Exhaustive on purpose: content is operators, operands and inline
+/// images (7.8.2, 8.9.7), so a match on all three is checked by the
+/// compiler; a fourth would be a breaking release.
+///
+/// Its `Debug` gives an operator by its name, as a fault's text shows a
+/// word, and an operand by its length, not its bytes, which are content.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Tok<'a> {
     /// An operator: any word that isn't a number, `true`, `false` or
     /// `null`; `BI` among them where it begins no inline image, a keyword
@@ -29,6 +38,16 @@ pub enum Tok<'a> {
     Operand(&'a [u8]),
     /// An inline image, `BI` to `EI`: where its data is.
     InlineImage(Range<usize>),
+}
+
+impl fmt::Debug for Tok<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Tok::Op(name) => f.debug_tuple("Op").field(&fault::shown(name)).finish(),
+            Tok::Operand(bytes) => f.debug_tuple("Operand").field(&Len(bytes.len())).finish(),
+            Tok::InlineImage(data) => f.debug_tuple("InlineImage").field(data).finish(),
+        }
+    }
 }
 
 /// The tokens of `s`, in order, each with where it is. Between them is
@@ -63,7 +82,13 @@ pub enum Tok<'a> {
 ///   whole part, `true` 1, what's no number 0). With no color space, an
 ///   image mask's, one bit of one component; a name `res` doesn't have
 ///   reads as none, as in PDFium. An array is counted as PDFium counts it,
-///   as one the resources named would be ([`ResCx::read`]).
+///   as one the resources named would be ([`ResCx::read`]), once its values
+///   are counted, nothing built, under [`Limits::space_values`]. A space
+///   counted past a cap, that one, [`Limits::values`] or one of
+///   [`Limits::color`], counts as one that doesn't load, or a branch of it
+///   does, and the image says so
+///   ([`InlineImage::capped`](crate::InlineImage::capped)), as does one
+///   drawn in a name [`ResCx::capped`] names.
 /// - `/AHx` to its `>`, `/A85` past the first byte that's none of its
 ///   digits or the white-space it passes over (its `~`, and a `>` after
 ///   it), and `/RL` to its end-of-data byte, as PDFium's decoders end
@@ -74,14 +99,15 @@ pub enum Tok<'a> {
 ///   or the last whole code before the data's end. The first of an array
 ///   of filters, with the first object of an array of `/DecodeParms`, or
 ///   its one with its dictionary, each parameter as PDFium reads an
-///   integer from it (`/BPC` read as `/BitsPerComponent`). Where PDFium
-///   refuses the parameters (`/Colors`, `/BitsPerComponent` or `/Columns`
-///   negative, or multiplied past 2^31 − 8) or what decoding gives (an
-///   LZW code that isn't in the table yet, LZW data that decodes to
-///   nothing, a predictor whose rows would be no bytes, a PNG predictor
-///   on nothing): none. (Past an LZW code that isn't in its table, but
-///   for the first since a clear code, PDFium's decoder reads on as if it
-///   were the next entry, which isn't followed.)
+///   integer from it (`/BPC` read as `/BitsPerComponent`). Past an LZW
+///   code that isn't in its table, but the first since a clear code,
+///   PDFium's decoder reads on as if it were the next entry, and so does
+///   this. Where PDFium refuses the parameters (`/Colors`,
+///   `/BitsPerComponent` or `/Columns` negative, or multiplied past
+///   2^31 − 8) or what decoding gives (an LZW code past the table that's
+///   the first since a clear code, LZW data that decodes to nothing, a
+///   predictor whose rows would be no bytes, a PNG predictor on nothing):
+///   none.
 /// - `/DCT` and `/CCF`, which PDFium decodes to find their end too: by a
 ///   stand-in, unless the reading asks for them to be decoded
 ///   ([`Limits::coded_ends`], [`CodedEnds`](crate::CodedEnds)'
@@ -147,8 +173,7 @@ pub enum Tok<'a> {
 /// dictionary or an empty array is none.
 ///
 /// Where ISO 32000-2 would read the bytes otherwise, a sink given by
-/// [`Tokens::with_sink`] is told ([`fault`](crate::fault)); the tokens are
-/// the same.
+/// [`Tokens::with_sink`] is told ([`fault`]); the tokens are the same.
 ///
 /// ```
 /// use pdf_content_streams::{Limits, ResCx, Tok, tokens};
@@ -169,6 +194,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
         operands: 0,
         images: Images::new(s, res, *limits),
         found: Found::Walk,
+        capped: false,
         done: false,
         ended: false,
         joins: &[],
@@ -182,8 +208,9 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
 
 /// A content stream's tokens, each with where it is ([`tokens`]), and
 /// where ISO 32000-2 would read them otherwise told to `S`, a
-/// [`Sink`](crate::fault::Sink): none for `()`.
-#[derive(Debug, Clone)]
+/// [`Sink`]: none for `()`.
+#[must_use = "tokens are lazy: nothing is read until one is asked for"]
+#[derive(Clone)]
 pub struct Tokens<'a, 'r, S = ()> {
     s: &'a [u8],
     at: usize,
@@ -193,6 +220,8 @@ pub struct Tokens<'a, 'r, S = ()> {
     images: Images<'a, 'r>,
     /// How the last inline image's data's end was found.
     found: Found,
+    /// Whether the last inline image's size was counted past a cap.
+    capped: bool,
     done: bool,
     /// Whether the end was reached with no error, and the white-space
     /// after the last token not yet looked at for faults.
@@ -226,6 +255,21 @@ pub struct Tokens<'a, 'r, S = ()> {
     sink: S,
 }
 
+impl<S> fmt::Debug for Tokens<'_, '_, S> {
+    /// Where it is in the content, the content's length, and how it reads;
+    /// not the content, nor the sink.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokens")
+            .field("at", &self.at)
+            .field("content", &Len(self.s.len()))
+            .field("joins", &self.joins.len())
+            .field("limits", &self.lim)
+            .field("images", &self.images)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a, S: Sink<'a>> Iterator for Tokens<'a, '_, S> {
     type Item = Result<(Range<usize>, Tok<'a>), Error>;
 
@@ -242,35 +286,33 @@ impl<'a, S: Sink<'a>> FusedIterator for Tokens<'a, '_, S> {}
 
 impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// The same tokens, from where these are, with where ISO 32000-2 would
-    /// read them otherwise told to `sink` ([`fault`](crate::fault)): a
-    /// token's own faults, an inline image's, 0x80 and 0xFF read as
-    /// white-space, and, over a page's streams joined, a string, a comment
-    /// or an inline image that runs from one into the next. A sink
-    /// borrowed, `&mut S`, is one, so it can be read after.
+    /// read them otherwise told to `sink` ([`fault`]): a token's own
+    /// faults, an inline image's, 0x80 and 0xFF read as white-space, and,
+    /// over a page's streams joined, a string, a comment or an inline image
+    /// that runs from one into the next. A sink borrowed, `&mut S`, is
+    /// one, so it can be read after.
+    ///
+    /// A dictionary PDFium reads as none is told here whole, as a token
+    /// ([`Fault::NoDict`]). Which of its entries made it none is what's
+    /// inside it, which reading the operand tells
+    /// ([`Operand::object_with`](crate::Operand::object_with): a
+    /// [`Fault::Key`], [`Fault::NoValue`] or [`Fault::Keyword`]). A caller
+    /// that asks both is told of it by each, what each reads.
     ///
     /// ```
-    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::fault::Fault;
     /// use pdf_content_streams::{Limits, ResCx, tokens};
-    /// use std::ops::Range;
-    ///
-    /// #[derive(Default)]
-    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Collected<'a> {
-    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
-    ///         self.0.push((at, fault));
-    ///     }
-    /// }
     ///
     /// let content = b"q 1.2.3 w <4G> Tj Q";
-    /// let mut kept = Collected::default();
+    /// let mut kept = Vec::new();
     /// let res = ResCx::none();
     /// let read = tokens(content, &res, &Limits::DEFAULT).with_sink(&mut kept);
     /// assert_eq!(read.count(), 6);
     /// let written = &content[2..7];
-    /// assert_eq!(kept.0[0], (2..7, Fault::Number { written }));
-    /// assert_eq!(kept.0[1].0, 10..14);
+    /// assert_eq!(kept[0], (2..7, Fault::Number { written }));
+    /// assert_eq!(kept[1].0, 10..14);
     /// assert_eq!(
-    ///     kept.0[1].1.to_string(),
+    ///     kept[1].1.to_string(),
     ///     "the hex string <4G> has a byte that's no hex digit"
     /// );
     /// ```
@@ -282,6 +324,7 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
             operands: self.operands,
             images: self.images,
             found: self.found,
+            capped: self.capped,
             done: self.done,
             ended: self.ended,
             joins: self.joins,
@@ -301,6 +344,12 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// How the last inline image read found its data's end.
     pub(crate) fn found(&self) -> Found {
         self.found
+    }
+
+    /// Whether the last inline image read was sized by a count past a cap
+    /// ([`InlineImage::capped`](crate::InlineImage::capped)).
+    pub(crate) fn capped(&self) -> bool {
+        self.capped
     }
 
     /// The same, the content being a page's streams joined, each of
@@ -374,9 +423,10 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
                 let keyword = match self.lone.last() {
                     Some(&(_, keyword)) => keyword,
                     None => match self.images.read(r.start, &mut self.sink) {
-                        Ok(Image::Read(end, data, found)) => {
+                        Ok(Image::Read(end, data, found, capped)) => {
                             self.at = end;
                             self.found = found;
+                            self.capped = capped;
                             if self.sink.wants() {
                                 self.across(r.start..end, Some(data.clone()));
                             }

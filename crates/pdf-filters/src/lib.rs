@@ -13,6 +13,11 @@
 //!   read on past as PDFium reads it ([`Fault::TableFull`]); where a fault
 //!   stops a filter, what decoded before it is kept, which qpdf, giving the
 //!   data undecoded, doesn't keep.
+//! - **Or as PDFium reads it, on request.** [`decode_as`],
+//!   [`decode_into_as`] and [`decode_prefix_into_as`] take a [`Reading`].
+//!   Under [`Reading::Pdfium`], an LZW code past the table, and what PDFium
+//!   refuses, read as PDFium reads them. So a reader can decode as PDFium
+//!   does, or find where PDFium ends the data.
 //! - **A limit on what comes out** of each filter, so what a small stream
 //!   decodes into is the caller's to bound: a filter holds its input and
 //!   its output, whose buffer grows by doubling.
@@ -97,6 +102,51 @@ pub enum Backend {
     ZlibRs,
 }
 
+/// How filters read data where ISO 32000-2 leaves a reading open, which
+/// [`decode_as`], [`decode_into_as`] and [`decode_prefix_into_as`] take:
+/// qpdf's, the default, or PDFium's. Only LZW's decoder and the predictors read
+/// otherwise under them; the other filters read alike.
+///
+/// `#[non_exhaustive]`, so another reader's reading can join it in a minor
+/// release.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Reading {
+    /// qpdf's, every fault said, which [`decode`], [`decode_into`] and
+    /// [`decode_prefix_into`] read by, but where it parts from qpdf on
+    /// purpose: an LZW table that fills is read on past, as PDFium, pdf.js
+    /// and poppler read it, where qpdf stops ([`Fault::TableFull`]); and
+    /// where a fault stops a filter, what decoded before it is kept, where
+    /// qpdf gives the data undecoded. An LZW code that isn't in the table
+    /// stops the filter ([`Fault::Code`]).
+    #[default]
+    Qpdf,
+    /// PDFium's, as its LZW decoder and its predictors read data as of
+    /// chromium/8125 (its `FlateOrLZWDecode`), every fault said:
+    /// - an LZW code past the table's next entry that isn't the first
+    ///   since a clear code or the data's start is read as that entry, the
+    ///   last code's bytes and their first byte again ([`Fault::AsNext`]),
+    ///   and the codes after it as PDFium reads them: the entry the next
+    ///   code makes holds that code, read through the table each time
+    ///   it's read, as the table has it then (its low byte where it's
+    ///   still past the table, and of a run longer than 4,000 bytes that
+    ///   this makes, the last 4,000); and a code from 258 on right after it
+    ///   is the last the filter reads;
+    /// - what PDFium refuses is refused ([`Fault::Refused`]), nothing of
+    ///   the filter's output given: an LZW code past the table that's the
+    ///   first since a clear code or the data's start ([`Fault::Code`]),
+    ///   LZW data that decodes to nothing, a TIFF or PNG predictor whose
+    ///   rows would be no bits or more than 2³² − 1, and a PNG predictor on
+    ///   nothing decoded, empty data among it;
+    /// - where it isn't refused, a predictor is undone as under
+    ///   [`Reading::Qpdf`], so its output is this crate's: a layout
+    ///   PDFium's predictor undoes and this crate's doesn't, of bits a
+    ///   sample other than 1, 2, 4, 8 or 16, is [`Fault::Parameters`], with
+    ///   nothing decoded, though where the data ends and what was read are
+    ///   PDFium's.
+    Pdfium,
+}
+
 /// A standard filter for data of any kind, with what its parameters say.
 ///
 /// Exhaustive on purpose: these are ISO 32000-2's filters for data of any
@@ -150,6 +200,34 @@ pub enum Predictor {
     /// which of PNG's filters it's predicted by, whichever of 10 to 15 it
     /// is.
     Png(Layout),
+}
+
+impl Predictor {
+    /// Whether PDFium refuses data its filter decoded to `decoded` bytes,
+    /// judged before any of it is undone (its `ApplyPredictor`). TIFF's and
+    /// PNG's are refused where a row would be no bits, or more than
+    /// 2³² − 1. PNG's is refused on nothing decoded.
+    ///
+    /// Under [`Reading::Pdfium`], decoding with the predictor says this as
+    /// [`Fault::Refused`]. This tells it without undoing the predictor, for
+    /// a reader that wants only where the data ends, which a predictor
+    /// doesn't change.
+    ///
+    /// ```
+    /// use pdf_filters::{Layout, Predictor};
+    ///
+    /// let png = Predictor::Png(Layout::default());
+    /// assert!(png.pdfium_refuses(0));
+    /// assert!(!png.pdfium_refuses(1));
+    ///
+    /// // 16 bits a sample, 2^28 a row: 2^32 bits, which PDFium can't count.
+    /// let wide = Layout { colors: 1, bits_per_component: 16, columns: 1 << 28 };
+    /// assert!(Predictor::Tiff(wide).pdfium_refuses(1));
+    /// ```
+    #[must_use]
+    pub fn pdfium_refuses(self, decoded: usize) -> bool {
+        predictor::refuses(self, decoded == 0)
+    }
 }
 
 /// How the data a predictor works on is laid out in rows.
@@ -229,7 +307,10 @@ pub enum Fault {
         at: usize,
     },
     /// An LZW code at byte `at` that isn't in the table yet. It stopped
-    /// there.
+    /// there. Under [`Reading::Pdfium`], only one that's the first since a
+    /// clear code or the data's start, and the data is then refused
+    /// ([`Fault::Refused`]); a later one is read on past
+    /// ([`Fault::AsNext`]).
     #[error("the code at byte {at} isn't in the table")]
     Code {
         /// The byte the code begins in, in the filter's input.
@@ -295,6 +376,26 @@ pub enum Fault {
     /// caller's.
     #[error("its output is over the limit")]
     Limit,
+    /// An LZW code at byte `at` past the table's next entry, read as that
+    /// entry, the last code's bytes and their first byte again, as PDFium's
+    /// decoder reads it, under [`Reading::Pdfium`] alone ([`Reading`] says
+    /// how the codes after it are read). It didn't stop, but where the
+    /// next code is from 258 on, that's the last read.
+    #[error("the code at byte {at} is past the table's next entry, read as it")]
+    AsNext {
+        /// The byte the code begins in, in the filter's input.
+        at: usize,
+    },
+    /// What the filter decoded is refused, as PDFium refuses it, under
+    /// [`Reading::Pdfium`] alone ([`Reading`] says what it refuses), after
+    /// the fault that says why where there's one: [`Fault::Code`] for an
+    /// LZW code past the table that's the first since a clear code or the
+    /// data's start; [`Fault::Parameters`] for a predictor whose rows would
+    /// be no bits. Nothing of the filter's output is given: what it decoded
+    /// is cut away, the next filter given nothing. What it read is counted
+    /// all the same ([`Prefix`]).
+    #[error("it's refused, as PDFium refuses it")]
+    Refused,
 }
 
 /// Data that didn't decode cleanly: what decoded, and why it's not clean.
@@ -382,8 +483,44 @@ pub fn decode(
     limit: usize,
     backend: Backend,
 ) -> Result<Vec<u8>, Error> {
+    decode_as(data, filters, limit, backend, Reading::Qpdf)
+}
+
+/// `data` decoded as [`decode`] decodes it, read as `reading` reads it.
+/// It's [`decode_into_as`] an empty `Vec`, which is then cut to its length.
+///
+/// ```
+/// use pdf_filters::{Fault, Filter, Predictor, Reading, decode_as};
+/// # #[cfg(feature = "miniz_oxide")]
+/// # let backend = pdf_filters::Backend::MinizOxide;
+/// # #[cfg(not(feature = "miniz_oxide"))]
+/// # let backend = pdf_filters::Backend::ZlibRs;
+///
+/// // LZW codes 256 65 66 300 257: 300 is past the table, read as its next
+/// // entry under PDFium's reading, where qpdf's stops.
+/// let data = [0x80, 0x10, 0x48, 0x52, 0xc8, 0x08];
+/// let lzw = Filter::Lzw { early_change: true, predictor: Predictor::None };
+/// let pdfium = decode_as(&data, &[lzw], 1 << 20, backend, Reading::Pdfium).unwrap_err();
+/// assert_eq!(pdfium.data, b"ABBB");
+/// assert_eq!(pdfium.faults, [(0, Fault::AsNext { at: 3 })]);
+/// let qpdf = decode_as(&data, &[lzw], 1 << 20, backend, Reading::Qpdf).unwrap_err();
+/// assert_eq!(qpdf.data, b"AB");
+/// ```
+///
+/// # Errors
+///
+/// An [`Error`] when the data doesn't decode cleanly, as [`decode`] gives
+/// it, and, under [`Reading::Pdfium`], where PDFium reads it otherwise
+/// ([`Fault::AsNext`]) or refuses it ([`Fault::Refused`]).
+pub fn decode_as(
+    data: &[u8],
+    filters: &[Filter],
+    limit: usize,
+    backend: Backend,
+    reading: Reading,
+) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
-    let decoded = decode_into(data, filters, limit, backend, &mut out);
+    let decoded = decode_into_as(data, filters, limit, backend, reading, &mut out);
     out.shrink_to_fit();
     match decoded {
         Ok(()) => Ok(out),
@@ -410,6 +547,52 @@ pub fn decode_into(
     backend: Backend,
     out: &mut Vec<u8>,
 ) -> Result<(), Faults> {
+    decode_into_as(data, filters, limit, backend, Reading::Qpdf, out)
+}
+
+/// `data` decoded as [`decode_into`] decodes it, appended to `out`, read
+/// as `reading` reads it: [`decode_into`] is this under [`Reading::Qpdf`].
+/// Under [`Reading::Pdfium`], a filter whose output PDFium refuses gives
+/// none, and the next is given nothing, which, LZW's or behind a PNG
+/// predictor, it refuses too; nothing decodes to nothing but where PDFium
+/// refuses it.
+///
+/// ```
+/// use pdf_filters::{Fault, Faults, Filter, Predictor, Reading, decode_into_as};
+/// # #[cfg(feature = "miniz_oxide")]
+/// # let backend = pdf_filters::Backend::MinizOxide;
+/// # #[cfg(not(feature = "miniz_oxide"))]
+/// # let backend = pdf_filters::Backend::ZlibRs;
+///
+/// // LZW codes 256 65 66 300 257, nine bits each: 300 is past the table,
+/// // whose next entry is 259, and read as it, as PDFium reads it.
+/// let data = [0x80, 0x10, 0x48, 0x52, 0xc8, 0x08];
+/// let lzw = Filter::Lzw { early_change: true, predictor: Predictor::None };
+/// let mut out = Vec::new();
+/// let decoded = decode_into_as(&data, &[lzw], 1 << 20, backend, Reading::Pdfium, &mut out);
+/// assert_eq!(out, b"ABBB");
+/// assert_eq!(decoded, Err(Faults(vec![(0, Fault::AsNext { at: 3 })])));
+///
+/// // qpdf's reading stops there, what decoded before it kept.
+/// let mut out = Vec::new();
+/// let decoded = decode_into_as(&data, &[lzw], 1 << 20, backend, Reading::Qpdf, &mut out);
+/// assert_eq!(out, b"AB");
+/// assert_eq!(decoded, Err(Faults(vec![(0, Fault::Code { at: 3 })])));
+/// ```
+///
+/// # Errors
+///
+/// [`Faults`] when the data doesn't decode cleanly, as [`decode_into`]
+/// gives them, and, under [`Reading::Pdfium`], where PDFium reads it
+/// otherwise ([`Fault::AsNext`]) or refuses it ([`Fault::Refused`]).
+pub fn decode_into_as(
+    data: &[u8],
+    filters: &[Filter],
+    limit: usize,
+    backend: Backend,
+    reading: Reading,
+    out: &mut Vec<u8>,
+) -> Result<(), Faults> {
     let Some(last) = filters.len().checked_sub(1) else {
         out.extend_from_slice(data);
         return Ok(());
@@ -423,9 +606,20 @@ pub fn decode_into(
             false => Vec::new(),
         };
         let mut into = Out::new(into, predictor::before(limit, filter));
-        // Nothing decodes to nothing, as in qpdf, whatever the filter.
+        // Nothing decodes to nothing, as in qpdf, whatever the filter, but
+        // where PDFium refuses it.
         if !input.is_empty() {
-            one(input, filter, limit, backend, Room::Given, &mut into);
+            one(
+                input,
+                filter,
+                limit,
+                backend,
+                reading,
+                Room::Given,
+                &mut into,
+            );
+        } else if reading == Reading::Pdfium {
+            refused(filter, 0, &mut into);
         }
         faults.extend(into.faults.into_iter().map(|fault| (i, fault)));
         match i == last {
@@ -464,8 +658,10 @@ pub struct Prefix {
     ///   decoder counts what it consumed: to its code of 257, to the code
     ///   it stopped at, or to the last whole code before the data's end,
     ///   the bits after it too few for one. At a code that isn't in the
-    ///   table, which stops this decoder ([`Fault::Code`]), PDFium's reads
-    ///   on, as if it were the table's next entry, so it counts more.
+    ///   table, which stops it under [`Reading::Qpdf`] ([`Fault::Code`]),
+    ///   PDFium's reads on, as if it were the table's next entry, so it
+    ///   counts more; under [`Reading::Pdfium`] this does too, to the code
+    ///   PDFium's decoder reads last.
     /// - `FlateDecode`'s, the zlib data's bytes the backend took, its
     ///   checksum among them, as zlib's `total_in` counts them: each byte
     ///   any of whose bits it used, those it read ahead and didn't use
@@ -485,18 +681,34 @@ pub struct Prefix {
     /// change nothing the filter gives; when it didn't, a fault or the
     /// limit stopped it, or the data ended without its marker.
     pub ended: bool,
+    /// How many bytes the filter's decoder gave, under the limit, before
+    /// its predictor: what decoding gave, whatever the predictor then made
+    /// of it, and where it's refused ([`Fault::Refused`]) and cut away, so
+    /// a caller can count what decoding cost by it. Without a predictor,
+    /// and not refused, it's what the filter added.
+    pub decoded: usize,
 }
 
 impl Prefix {
+    /// Read to `read`, its data `ended` there or not; what its decoder gave
+    /// is counted once it's decoded ([`one`]).
+    fn new(read: usize, ended: bool) -> Prefix {
+        Prefix {
+            read,
+            ended,
+            decoded: 0,
+        }
+    }
+
     /// Read to `read`, its data ended there.
     fn ended(read: usize) -> Prefix {
-        Prefix { read, ended: true }
+        Prefix::new(read, true)
     }
 
     /// Read to `read`, its data not ended: stopped there, or at the data's
     /// end.
     fn unended(read: usize) -> Prefix {
-        Prefix { read, ended: false }
+        Prefix::new(read, false)
     }
 }
 
@@ -538,11 +750,70 @@ pub fn decode_prefix_into(
     backend: Backend,
     out: &mut Vec<u8>,
 ) -> (Prefix, Result<(), Faults>) {
+    decode_prefix_into_as(data, filter, limit, backend, Reading::Qpdf, out)
+}
+
+/// `data` decoded by one `filter` as [`decode_prefix_into`] decodes it,
+/// read as `reading` reads it, and the [`Prefix`] of it the filter read:
+/// [`decode_prefix_into`] is this under [`Reading::Qpdf`]. Under
+/// [`Reading::Pdfium`], what it read is where PDFium's decoder takes the
+/// data to end, and a refusal is said ([`Fault::Refused`]), what decoded
+/// cut away but counted ([`Prefix::decoded`]), as a reader that finds
+/// where PDFium ends an inline image's data wants.
+///
+/// ```
+/// use pdf_filters::{Fault, Filter, Predictor, Reading, decode_prefix_into_as};
+/// # #[cfg(feature = "miniz_oxide")]
+/// # let backend = pdf_filters::Backend::MinizOxide;
+/// # #[cfg(not(feature = "miniz_oxide"))]
+/// # let backend = pdf_filters::Backend::ZlibRs;
+///
+/// // LZW codes 256 300 65 257, then an inline image's `EI`: 300 is the
+/// // first code since the clear code, and the table has no entry yet, so
+/// // PDFium refuses the data.
+/// let data = b"\x80\x4b\x08\x30\x10 EI";
+/// let lzw = Filter::Lzw { early_change: true, predictor: Predictor::None };
+/// let mut out = Vec::new();
+/// let (prefix, decoded) =
+///     decode_prefix_into_as(data, lzw, 1 << 20, backend, Reading::Pdfium, &mut out);
+/// assert_eq!((prefix.read, prefix.ended, prefix.decoded), (3, false, 0));
+/// let faults = decoded.unwrap_err().0;
+/// assert_eq!(faults, [(0, Fault::Code { at: 1 }), (0, Fault::Refused)]);
+/// assert!(out.is_empty());
+/// ```
+///
+/// # Errors
+///
+/// The second of what it gives is [`Faults`] when the data doesn't decode
+/// cleanly, as [`decode_prefix_into`] gives them, and, under
+/// [`Reading::Pdfium`], where PDFium reads it otherwise ([`Fault::AsNext`])
+/// or refuses it ([`Fault::Refused`]); the [`Prefix`] is given either way.
+pub fn decode_prefix_into_as(
+    data: &[u8],
+    filter: Filter,
+    limit: usize,
+    backend: Backend,
+    reading: Reading,
+    out: &mut Vec<u8>,
+) -> (Prefix, Result<(), Faults>) {
     let mut into = Out::new(std::mem::take(out), predictor::before(limit, &filter));
-    // Nothing decodes to nothing, as `decode_into` has it.
+    // Nothing decodes to nothing, as `decode_into_as` has it.
     let prefix = match data.is_empty() {
-        true => Prefix::unended(0),
-        false => one(data, &filter, limit, backend, Room::RunsOn, &mut into),
+        true => {
+            if reading == Reading::Pdfium {
+                refused(&filter, 0, &mut into);
+            }
+            Prefix::unended(0)
+        }
+        false => one(
+            data,
+            &filter,
+            limit,
+            backend,
+            reading,
+            Room::RunsOn,
+            &mut into,
+        ),
     };
     *out = into.data;
     let decoded = match into.faults.is_empty() {
@@ -552,27 +823,33 @@ pub fn decode_prefix_into(
     (prefix, decoded)
 }
 
-/// `input` decoded by `filter` into `out`, its predictor undone, the
-/// predictor's output no more than `limit` bytes, Flate's output first
-/// given `room`: what of `input` the filter read.
+/// `input` decoded by `filter` into `out`, read as `reading` reads it, its
+/// predictor undone, the predictor's output no more than `limit` bytes,
+/// Flate's output first given `room`: what of `input` the filter read, and
+/// how much its decoder gave.
 fn one(
     input: &[u8],
     filter: &Filter,
     limit: usize,
     backend: Backend,
+    reading: Reading,
     room: Room,
     out: &mut Out,
 ) -> Prefix {
-    let (prefix, predictor) = match *filter {
+    let (mut prefix, predictor) = match *filter {
         Filter::AsciiHex => (hex::decode(input, out), Predictor::None),
         Filter::Ascii85 => (ascii85::decode(input, out), Predictor::None),
         Filter::Lzw {
             early_change,
             predictor,
-        } => (lzw::decode(input, early_change, out), predictor),
+        } => (lzw::decode(input, early_change, reading, out), predictor),
         Filter::Flate { predictor } => (flate::decode(input, backend, room, out), predictor),
         Filter::RunLength => (run_length::decode(input, out), Predictor::None),
     };
+    prefix.decoded = out.data.len() - out.start;
+    if reading == Reading::Pdfium && refused(filter, prefix.decoded, out) {
+        return prefix;
+    }
     if predictor != Predictor::None {
         // Data a fault stopped mid-row ends in a row cut off, not short:
         // it isn't read.
@@ -582,6 +859,33 @@ fn one(
         predictor::undo(predictor, cut, out);
     }
     prefix
+}
+
+/// Whether PDFium refuses what `filter`'s decoder gave into `out`,
+/// `decoded` bytes (its `FlateOrLZWDecode`, and its predictors'
+/// `ApplyPredictor`, judged on the decoder's output, before any is undone):
+/// LZW data whose first code since a clear code or the data's start is
+/// past the table ([`Fault::Code`]), or that decodes to nothing; a
+/// predictor's, as [`predictor::pdfium_refuses`] says, after
+/// [`Fault::Parameters`] where this crate's predictor doesn't take its
+/// layout either. A decoder the limit stopped decoded something. Where
+/// PDFium refuses it, said, and `out` cut back to what it held.
+fn refused(filter: &Filter, decoded: usize, out: &mut Out) -> bool {
+    let nothing = decoded == 0 && !out.faults.contains(&Fault::Limit);
+    let (lzw, predictor) = match *filter {
+        Filter::Lzw { predictor, .. } => {
+            let first = (out.faults.iter()).any(|f| matches!(f, Fault::Code { .. }));
+            (first || nothing, predictor)
+        }
+        Filter::Flate { predictor } => (false, predictor),
+        _ => (false, Predictor::None),
+    };
+    if !lzw && !predictor::pdfium_refuses(predictor, nothing, out) {
+        return false;
+    }
+    out.data.truncate(out.start);
+    out.fault(Fault::Refused);
+    true
 }
 
 /// What a filter does to data as a writer encodes it: the filter, and
@@ -882,10 +1186,398 @@ const fn is_white_space(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Encoder, Error, Fault, Faults, Filter, Layout, Level, Prediction, Predictor, Row,
-        Unencodable, decode, decode_into, decode_prefix_into, encode,
+        Encoder, Error, Fault, Faults, Filter, Layout, Level, Prediction, Predictor, Reading, Row,
+        Unencodable, decode, decode_into, decode_into_as, decode_prefix_into,
+        decode_prefix_into_as, encode,
     };
     use crate::fuzz::{backends, zlib};
+
+    fn layout(colors: u32, bits_per_component: u32, columns: u32) -> Layout {
+        Layout {
+            colors,
+            bits_per_component,
+            columns,
+        }
+    }
+
+    /// LZW codes 256 65 66 300 257, nine bits each: 300 is past the
+    /// table, whose next entry is 259.
+    const PAST: [u8; 6] = [0x80, 0x10, 0x48, 0x52, 0xc8, 0x08];
+
+    /// LZW codes of 3,839 bytes of no pattern that fill the table, then 65
+    /// 66 258 257: the table full, read on, its entry 258 the first two
+    /// bytes, 1 and 38.
+    fn full() -> Vec<u8> {
+        // 3,839 codes of bytes fill the table to 4,095, nine bits wide to
+        // entry 510, ten to 1,022, eleven to 2,046, then twelve.
+        let mut bits: Vec<bool> = Vec::new();
+        let mut put =
+            |code: u16, width: u32| bits.extend((0..width).rev().map(|i| code >> i & 1 == 1));
+        let width = |k: u32| match k + 258 {
+            ..=510 => 9,
+            511..=1022 => 10,
+            1023..=2046 => 11,
+            _ => 12,
+        };
+        for k in 0..3839u32 {
+            // Code k makes entry 257 + k (none for the first), as wide as
+            // the table then is, early change on.
+            put(1 + (k * 37 % 255) as u16, width(k.saturating_sub(1)));
+        }
+        for code in [65, 66, 258, 257] {
+            put(code, 12);
+        }
+        (bits.chunks(8))
+            .map(|b| (0..8).fold(0, |byte, i| byte << 1 | u8::from(b.get(i) == Some(&true))))
+            .collect()
+    }
+
+    /// `data` decoded by `filters` under each reading, into a buffer that
+    /// holds something: what was added and the faults.
+    fn read_as(
+        data: &[u8],
+        filters: &[Filter],
+        limit: usize,
+        reading: Reading,
+    ) -> (Vec<u8>, Result<(), Faults>) {
+        let mut out = b"held".to_vec();
+        let decoded = decode_into_as(data, filters, limit, backends()[0], reading, &mut out);
+        assert_eq!(&out[..4], b"held", "what the buffer held, kept");
+        (out.split_off(4), decoded)
+    }
+
+    /// qpdf's reading is what `decode_into` and `decode_prefix_into` read
+    /// by, on clean data and damaged, by every filter.
+    #[test]
+    fn qpdfs_reading_is_the_functions_without_one() {
+        let png = Predictor::Png(layout(1, 8, 2));
+        let lzw = Filter::Lzw {
+            early_change: true,
+            predictor: Predictor::None,
+        };
+        for backend in backends() {
+            let hello = zlib(b"hello", Level::DEFAULT, backend);
+            let rows = zlib(&[1, 1, 1, 2, 1, 1, 0], Level::DEFAULT, backend);
+            let cases: [(&[u8], Filter); 7] = [
+                (
+                    &hello,
+                    Filter::Flate {
+                        predictor: Predictor::None,
+                    },
+                ),
+                (
+                    &hello[..7],
+                    Filter::Flate {
+                        predictor: Predictor::None,
+                    },
+                ),
+                (&rows, Filter::Flate { predictor: png }),
+                (&PAST, lzw),
+                (&[0x80, 0x4b, 0x08, 0x30, 0x10], lzw),
+                (b"48 69", Filter::AsciiHex),
+                (b"", lzw),
+            ];
+            for (data, filter) in cases {
+                for limit in [3, 100] {
+                    let mut a = b"held".to_vec();
+                    let mut b = a.clone();
+                    let into = decode_into(data, &[filter], limit, backend, &mut a);
+                    let qpdf =
+                        decode_into_as(data, &[filter], limit, backend, Reading::Qpdf, &mut b);
+                    assert_eq!((a, into), (b, qpdf), "{filter:?}, {limit}");
+                    let mut a = b"held".to_vec();
+                    let mut b = a.clone();
+                    let prefix = decode_prefix_into(data, filter, limit, backend, &mut a);
+                    let qpdf =
+                        decode_prefix_into_as(data, filter, limit, backend, Reading::Qpdf, &mut b);
+                    assert_eq!((a, prefix), (b, qpdf), "{filter:?}, {limit}");
+                }
+            }
+            assert_eq!(Reading::default(), Reading::Qpdf);
+        }
+    }
+
+    /// Where qpdf's reading parts from qpdf, as `Reading::Qpdf` says: a
+    /// full LZW table read on past, where qpdf stops; and what decoded
+    /// before a fault that stops a filter kept, where qpdf gives the data
+    /// undecoded.
+    #[test]
+    fn qpdfs_reading_parts_from_qpdf_where_it_says() {
+        let lzw = [Filter::Lzw {
+            early_change: true,
+            predictor: Predictor::None,
+        }];
+        let (out, decoded) = read_as(&full(), &lzw, 1 << 20, Reading::Qpdf);
+        assert_eq!(out.len(), 3839 + 4, "read on past the full table");
+        assert_eq!(out[3839..], [65, 66, 1, 38]);
+        assert!(matches!(
+            &decoded.unwrap_err().0[..],
+            [(0, Fault::TableFull { .. })]
+        ));
+        // A code not in the table stops it, what decoded before kept.
+        let (out, decoded) = read_as(&PAST, &lzw, 1 << 20, Reading::Qpdf);
+        assert_eq!(
+            (out, decoded),
+            (
+                b"AB".to_vec(),
+                Err(Faults(vec![(0, Fault::Code { at: 3 })]))
+            )
+        );
+        for backend in backends() {
+            let hello = zlib(b"hello, hello", Level::DEFAULT, backend);
+            let cut = decode(
+                &hello[..hello.len() - 4],
+                &[Filter::Flate {
+                    predictor: Predictor::None,
+                }],
+                100,
+                backend,
+            );
+            assert_eq!(cut.unwrap_err().data, b"hello, hello", "{backend:?}");
+        }
+    }
+
+    /// `decoded` is what the filter's decoder gave, before its predictor:
+    /// a PNG predictor's tags among it, the rows a layout this crate's
+    /// predictor doesn't take never undone, and what's refused cut away.
+    #[test]
+    fn decoded_is_what_the_decoder_gave_before_its_predictor() {
+        for backend in backends() {
+            let rows = zlib(&[1, 1, 1, 2, 1, 1, 0], Level::DEFAULT, backend);
+            for (predictor, reading, added, decoded) in [
+                (Predictor::None, Reading::Qpdf, 7, 7),
+                (Predictor::Png(layout(1, 8, 2)), Reading::Qpdf, 6, 7),
+                (Predictor::Tiff(layout(1, 8, 2)), Reading::Pdfium, 8, 7),
+                (Predictor::Png(layout(1, 3, 2)), Reading::Pdfium, 0, 7),
+                (Predictor::Tiff(layout(0, 8, 2)), Reading::Pdfium, 0, 7),
+            ] {
+                let mut out = b"held".to_vec();
+                let flate = Filter::Flate { predictor };
+                let (prefix, _) =
+                    decode_prefix_into_as(&rows, flate, 100, backend, reading, &mut out);
+                assert_eq!(
+                    (out.len() - 4, prefix.decoded),
+                    (added, decoded),
+                    "{predictor:?}, {reading:?}"
+                );
+            }
+            // Nothing read, nothing decoded.
+            let mut out = Vec::new();
+            let flate = Filter::Flate {
+                predictor: Predictor::None,
+            };
+            let (prefix, _) =
+                decode_prefix_into_as(b"", flate, 100, backend, Reading::Pdfium, &mut out);
+            assert_eq!(prefix.decoded, 0);
+        }
+    }
+
+    /// PDFium's predictors refuse what its filter decoded, under its
+    /// reading, judged on the decoder's output: TIFF's and PNG's whose rows
+    /// would be no bits (this crate's predictor doesn't take the layout
+    /// either, which is said first) or more than 2³² − 1, PNG's on nothing.
+    /// What's refused is cut away, the buffer as it was, and the next
+    /// filter is given nothing. A layout PDFium's predictor takes and this
+    /// crate's doesn't isn't refused: its parameters are said, as under
+    /// qpdf's reading, with nothing decoded. `Predictor::pdfium_refuses`
+    /// tells each the same from what the decoder gives alone.
+    #[test]
+    fn under_pdfiums_reading_its_predictors_refusals_are_said() {
+        let refused = |why: &[Fault]| {
+            let mut faults: Vec<(usize, Fault)> = why.iter().map(|&f| (0, f)).collect();
+            faults.push((0, Fault::Refused));
+            Err(Faults(faults))
+        };
+        let parameters = Err(Faults(vec![(0, Fault::Parameters)]));
+        for backend in backends() {
+            let six = zlib(b"abcdef", Level::DEFAULT, backend);
+            let nothing = zlib(b"", Level::DEFAULT, backend);
+            let huge = layout(u32::MAX, 16, 2);
+            for (data, predictor, answer) in [
+                (
+                    &six,
+                    Predictor::Png(layout(1, 8, 0)),
+                    refused(&[Fault::Parameters]),
+                ),
+                (
+                    &six,
+                    Predictor::Tiff(layout(0, 8, 1)),
+                    refused(&[Fault::Parameters]),
+                ),
+                (
+                    &six,
+                    Predictor::Tiff(layout(1, 0, 1)),
+                    refused(&[Fault::Parameters]),
+                ),
+                (&six, Predictor::Png(huge), refused(&[])),
+                (&six, Predictor::Tiff(huge), refused(&[])),
+                (&nothing, Predictor::Png(layout(1, 8, 1)), refused(&[])),
+                (
+                    &nothing,
+                    Predictor::Png(layout(1, 3, 1)),
+                    refused(&[Fault::Parameters]),
+                ),
+                (&nothing, Predictor::Tiff(layout(1, 8, 1)), Ok(())),
+                (&six, Predictor::Tiff(layout(1, 3, 1)), parameters.clone()),
+            ] {
+                let flate = [Filter::Flate { predictor }];
+                let alone = Filter::Flate {
+                    predictor: Predictor::None,
+                };
+                let mut out = Vec::new();
+                let (alone, _) =
+                    decode_prefix_into_as(data, alone, 100, backend, Reading::Pdfium, &mut out);
+                let is_refused = matches!(&answer, Err(Faults(f)) if f.iter().any(|(_, f)| *f == Fault::Refused));
+                assert_eq!(
+                    predictor.pdfium_refuses(alone.decoded),
+                    is_refused,
+                    "{predictor:?}"
+                );
+                let mut out = b"held".to_vec();
+                let decoded = decode_into_as(data, &flate, 100, backend, Reading::Pdfium, &mut out);
+                let added = if answer.is_ok() {
+                    b"held".to_vec()
+                } else {
+                    out.clone()
+                };
+                assert_eq!((decoded, &out[..]), (answer, &added[..]), "{predictor:?}");
+                assert_eq!(&out[..4], b"held");
+                assert_eq!(out.len(), 4, "{predictor:?}: nothing given");
+                // Under qpdf's, none is refused.
+                let mut out = Vec::new();
+                let qpdf = decode_into_as(data, &flate, 100, backend, Reading::Qpdf, &mut out);
+                assert!(
+                    !matches!(&qpdf, Err(Faults(f)) if f.iter().any(|(_, f)| *f == Fault::Refused))
+                );
+            }
+            // The next filter given nothing: LZW's refuses it too.
+            let lzw = Filter::Lzw {
+                early_change: true,
+                predictor: Predictor::None,
+            };
+            let chain = [
+                Filter::Flate {
+                    predictor: Predictor::Png(layout(1, 8, 0)),
+                },
+                lzw,
+            ];
+            let mut out = Vec::new();
+            let decoded = decode_into_as(&six, &chain, 100, backend, Reading::Pdfium, &mut out);
+            let faults = vec![
+                (0, Fault::Parameters),
+                (0, Fault::Refused),
+                (1, Fault::Refused),
+            ];
+            assert_eq!((out, decoded), (Vec::new(), Err(Faults(faults))));
+        }
+    }
+
+    /// Under PDFium's reading, nothing decodes to nothing but where PDFium
+    /// refuses it: LZW's, and behind a PNG predictor, or one whose rows
+    /// would be no bits; Flate's alone, and the other filters', give
+    /// nothing, as under qpdf's.
+    #[test]
+    fn under_pdfiums_reading_nothing_is_refused_where_pdfium_refuses_it() {
+        let lzw = |predictor| Filter::Lzw {
+            early_change: true,
+            predictor,
+        };
+        for backend in backends() {
+            for (filter, refused) in [
+                (lzw(Predictor::None), vec![Fault::Refused]),
+                (
+                    Filter::Flate {
+                        predictor: Predictor::Png(layout(1, 8, 1)),
+                    },
+                    vec![Fault::Refused],
+                ),
+                (
+                    Filter::Flate {
+                        predictor: Predictor::Tiff(layout(1, 8, 0)),
+                    },
+                    vec![Fault::Parameters, Fault::Refused],
+                ),
+                (
+                    Filter::Flate {
+                        predictor: Predictor::Tiff(layout(1, 8, 1)),
+                    },
+                    vec![],
+                ),
+                (
+                    Filter::Flate {
+                        predictor: Predictor::None,
+                    },
+                    vec![],
+                ),
+                (Filter::AsciiHex, vec![]),
+                (Filter::RunLength, vec![]),
+            ] {
+                let mut out = b"held".to_vec();
+                let (prefix, decoded) =
+                    decode_prefix_into_as(b"", filter, 100, backend, Reading::Pdfium, &mut out);
+                let faults = decoded
+                    .err()
+                    .map_or_else(Vec::new, |f| f.0.into_iter().map(|(_, f)| f).collect());
+                assert_eq!(
+                    (out, faults),
+                    (b"held".to_vec(), refused.clone()),
+                    "{filter:?}"
+                );
+                assert_eq!((prefix.read, prefix.ended, prefix.decoded), (0, false, 0));
+                let mut out = Vec::new();
+                let listed =
+                    decode_into_as(b"", &[filter], 100, backend, Reading::Pdfium, &mut out);
+                let faults = listed
+                    .err()
+                    .map_or_else(Vec::new, |f| f.0.into_iter().map(|(_, f)| f).collect());
+                assert_eq!(faults, refused, "{filter:?}, listed");
+            }
+        }
+    }
+
+    /// Under PDFium's reading, LZW data PDFium refuses is cut away, what it
+    /// read counted: a code past the table that's the first since a clear
+    /// code, and data that decodes to nothing, its end or not.
+    #[test]
+    fn under_pdfiums_reading_lzw_it_refuses_is_cut_away() {
+        let lzw = Filter::Lzw {
+            early_change: true,
+            predictor: Predictor::Png(layout(1, 8, 1)),
+        };
+        for backend in backends() {
+            for (data, read, why) in [
+                // 256 300 65 257: 300 first since the clear code.
+                (
+                    &[0x80, 0x4b, 0x08, 0x30, 0x10][..],
+                    3,
+                    vec![Fault::Code { at: 1 }],
+                ),
+                // 300 65 257: first at the start.
+                (
+                    &[0x96, 0x10, 0x60, 0x20][..],
+                    2,
+                    vec![Fault::Code { at: 0 }],
+                ),
+                // 256 257: nothing.
+                (&[0x80, 0x40, 0x40][..], 3, vec![]),
+                // 256, and no end: nothing.
+                (&[0x80, 0x00][..], 2, vec![Fault::NoEnd]),
+            ] {
+                let mut out = b"held".to_vec();
+                let (prefix, decoded) =
+                    decode_prefix_into_as(data, lzw, 100, backend, Reading::Pdfium, &mut out);
+                let mut faults = why.clone();
+                faults.push(Fault::Refused);
+                let faults: Vec<_> = faults.into_iter().map(|f| (0, f)).collect();
+                assert_eq!(
+                    (out, decoded),
+                    (b"held".to_vec(), Err(Faults(faults))),
+                    "{data:02x?}"
+                );
+                assert_eq!((prefix.read, prefix.decoded), (read, 0), "{data:02x?}");
+            }
+        }
+    }
 
     #[test]
     fn nothing_decodes_to_nothing_whatever_the_filters() {
@@ -1194,6 +1886,11 @@ mod tests {
                 "its predictor's parameters aren't ones it takes",
             ),
             (Fault::Limit, "its output is over the limit"),
+            (
+                Fault::AsNext { at: 11 },
+                "the code at byte 11 is past the table's next entry, read as it",
+            ),
+            (Fault::Refused, "it's refused, as PDFium refuses it"),
         ];
         for (fault, said) in cases {
             assert_eq!(fault.to_string(), said, "{fault:?}");

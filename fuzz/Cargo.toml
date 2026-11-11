@@ -7,6 +7,11 @@
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
+# With `simd` (`just fuzz content 300 simd`, or `cargo +nightly fuzz run
+# --features simd content`), pdf-content-streams' dependencies pick the
+# CPU's SIMD as they run, as its `simd` feature has them do, so `content`
+# reaches the `unsafe` code that takes it.
+#
 # `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, the tokenizer and its
 # decoders under ISO 32000-2's rules and PDFium's and the two side by side,
 # and its skims, passes and searches against plain walks, which two stable
@@ -14,8 +19,9 @@
 # `random_inputs_keep_every_promise_where_the_rules_part`) run too;
 # `filters` calls `pdf_filters::fuzz::filters` on each backend, the
 # filters and the first of them on data that may run on (what it read
-# held to the input), which two stable unit tests run on random and
-# damaged inputs, and
+# held to the input), each under qpdf's reading and PDFium's (PDFium's
+# held to qpdf's where neither of its own faults is said), which two
+# stable unit tests run on random and damaged inputs, and
 # `pdf_filters::fuzz::encoders`, which a third runs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, on any dictionary and on new files'
 # dictionaries, and `pdf_crypt::fuzz::password`, which three stable unit
@@ -56,10 +62,16 @@
 # alone, together and by splice_each, and their lists written again
 # without a tool's keys, alone and with what's taken out, what's kept
 # reading as it did, and an array in it counted alike as an inline image's
-# color space and as one the resources name, under any caps on either,
-# which two stable unit tests (`mutated_seeds_keep_every_promise`,
-# `random_fragments_keep_every_promise`) run on mutated seeds and random
-# content;
+# color space and as one the resources name, under any caps on either;
+# marked content's cap and an inline color space's held at their edges,
+# and `splice_each`'s reads at its cap and a byte under; content that holds
+# an image a cap sized refused by every edit; and pairs of objects its
+# bytes choose the same as resources exactly where their digests' bytes
+# are, `Res::of` refusing exactly what holds data not in memory; which
+# three stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_fragments_keep_every_promise` and
+# `resources_chosen_are_both_the_same_and_apart`) run on mutated seeds,
+# random content and random pairs;
 # `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
 # each walked the same whatever hears its faults, what a plain walk gives,
 # and written, read back, and its page tree by both rules,
@@ -141,6 +153,10 @@ pdf-objects = { path = "../crates/pdf-objects" }
 pdf-semantics = { path = "../crates/pdf-semantics" }
 pdf-structure = { path = "../crates/pdf-structure", features = ["insecure-test-writer"] }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
+
+[features]
+# pdf-content-streams' dependencies on the CPU's SIMD, found as they run.
+simd = ["pdf-content-streams/simd"]
 
 [[bin]]
 name = "tokenize"

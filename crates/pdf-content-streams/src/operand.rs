@@ -14,6 +14,7 @@ use pdf_tokenizer::{Kind, Token};
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
 use crate::scan::{Event, TOP, Visit, element, is_number, tokenizer, walk, walk_from};
+use crate::unprinted::Len;
 
 /// An operand as written, and where it is in the content read: what an
 /// operation's operands are
@@ -62,17 +63,20 @@ impl<'a> Operand<'a> {
     }
 
     /// Its bytes, as written.
-    pub fn bytes(&self) -> &'a [u8] {
+    #[must_use]
+    pub const fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
     /// Where it is in the content read.
-    pub fn range(&self) -> Range<usize> {
+    #[must_use]
+    pub const fn range(&self) -> Range<usize> {
         self.at..self.at + self.bytes.len()
     }
 
     /// The name it is, its `#` escapes decoded as PDFium decodes them
     /// ([`name`]); None when it isn't one.
+    #[must_use]
     pub fn name(&self) -> Option<Cow<'a, [u8]>> {
         name(self.bytes)
     }
@@ -103,6 +107,7 @@ impl<'a> Operand<'a> {
     /// let numbers: Vec<f32> = re.operands().map(|o| o.number()).collect();
     /// assert_eq!(numbers, [0.0, 1.2, 0.0, 0.0, 0.5, 7.0]);
     /// ```
+    #[must_use]
     pub fn number(&self) -> f32 {
         if !self.is_number() {
             return 0.0;
@@ -113,47 +118,42 @@ impl<'a> Operand<'a> {
     /// It read as a PDF object ([`object`]), under `limits`' caps on how
     /// deep arrays and dictionaries nest and how many values it holds;
     /// None for what isn't one.
+    #[must_use]
     pub fn object(&self, limits: &Limits) -> Option<Object> {
         object(self.bytes, limits)
     }
 
     /// It read as [`object`](Operand::object) reads it, and where ISO
     /// 32000-2 would read what's inside it otherwise told to `sink`
-    /// ([`fault`](crate::fault)), at offsets into the content: each
-    /// element's, key's and value's own faults, a word that's no object,
-    /// and, where a dictionary is none as PDFium reads it, a key that's no
-    /// name or a key with no value, as they're read, those before where
-    /// reading stops among them. Its own faults, as a token, are the
-    /// tokens' to tell, or its array's, for an element: among them where
-    /// PDFium ends what it holds before ISO would
-    /// ([`Fault::NestedArray`], [`Fault::NoDict`]). What's read is the
-    /// same, whatever the sink.
+    /// ([`fault`]), at offsets into the content: each element's, key's and
+    /// value's own faults, a word that's no object, and, where a dictionary
+    /// is none as PDFium reads it, a key that's no name or a key with no
+    /// value, as they're read, those before where reading stops among them.
+    /// Its own faults, as a token, are the tokens' to tell, or its array's,
+    /// for an element: among them where PDFium ends what it holds before
+    /// ISO would ([`Fault::NestedArray`], [`Fault::NoDict`]). So a
+    /// dictionary PDFium reads as none is told here by the entry that made
+    /// it so, and whole by the tokens
+    /// ([`Tokens::with_sink`](crate::Tokens::with_sink)): a caller that
+    /// asks both is told of it by each. What's read is the same, whatever
+    /// the sink.
     ///
     /// ```
-    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::fault::Fault;
     /// use pdf_content_streams::{Limits, ResCx, operations};
     /// use pdf_content_streams::pdf_objects::Object;
-    /// use std::ops::Range;
-    ///
-    /// #[derive(Default)]
-    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Collected<'a> {
-    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
-    ///         self.0.push((at, fault));
-    ///     }
-    /// }
     ///
     /// let content = b"/Span <</MCID 0 /Alt (A) 1 /Lang>> BDC";
     /// let res = ResCx::none();
     /// let limits = Limits::DEFAULT;
     /// let bdc = operations(content, &res, &limits).next().unwrap().unwrap();
-    /// let mut kept = Collected::default();
+    /// let mut kept = Vec::new();
     /// // A key that's no name: PDFium reads no dictionary, and ends the
     /// // operand there, `BDC`'s last operands what follows.
     /// let props = bdc.arg(2).unwrap();
     /// assert_eq!(props.bytes(), b"<</MCID 0 /Alt (A) 1");
     /// assert_eq!(props.object_with(&limits, &mut kept), None);
-    /// assert_eq!(kept.0, [(25..26, Fault::Key { written: b"1" })]);
+    /// assert_eq!(kept, [(25..26, Fault::Key { written: b"1" })]);
     /// assert_eq!(bdc.arg(0).unwrap().bytes(), b">>");
     /// // Without the key that's no name, the list is read.
     /// let read = pdf_content_streams::object(b"<</MCID 0 /Alt (A)>>", &limits);
@@ -183,7 +183,7 @@ impl<'a> Operand<'a> {
             }
             _ => return None,
         }
-        let mut read = Reading::new(self, limits, sink, true);
+        let mut read = Reading::new(self, limits.values, sink, true);
         walk_from(
             self.bytes,
             first,
@@ -197,6 +197,62 @@ impl<'a> Operand<'a> {
         read.read?
     }
 
+    /// It read as [`object`](Operand::object) reads it, but under a cap of
+    /// `cap` values too, and stopped at the lesser of the two, what's
+    /// read past it not built: what's read and how many values reading it
+    /// counted, or which cap it met, `limits.values` where they're equal.
+    /// Built only if `make`, so that, without, it counts alone, nothing
+    /// kept, and what's read is none.
+    pub(crate) fn object_within(&self, limits: &Limits, cap: usize, make: bool) -> Within {
+        let lesser = limits.values.min(cap);
+        let met = || match limits.values <= cap {
+            true => Within::Values,
+            false => Within::Cap,
+        };
+        // What opens nothing is one value, read where it starts, as
+        // [`object_with`](Operand::object_with) reads it.
+        let mut tokens = tokenizer(self.bytes, 0);
+        let Some(first) = tokens.next_significant() else {
+            return Within::Read(None, 0);
+        };
+        let opens = match first.kind {
+            Kind::ArrayOpen | Kind::DictOpen => true,
+            Kind::LiteralString | Kind::HexString if !first.closed => {
+                return Within::Read(None, 0);
+            }
+            Kind::Integer | Kind::Real | Kind::Name | Kind::LiteralString | Kind::HexString => {
+                false
+            }
+            Kind::Keyword if matches!(first.bytes, b"true" | b"false" | b"null") => false,
+            _ => return Within::Read(None, 0),
+        };
+        if !opens {
+            return match lesser {
+                0 => met(),
+                _ => Within::Read(make.then(|| leaf(first)).flatten(), 1),
+            };
+        }
+        let mut told = ();
+        let mut read = Reading::new(self, lesser, &mut told, make);
+        let walked = walk_from(
+            self.bytes,
+            first,
+            tokens,
+            TOP,
+            limits.depth,
+            false,
+            &mut read,
+        );
+        if read.past {
+            return met();
+        }
+        let counted = lesser - read.values;
+        match walked {
+            Ok(_) => Within::Read(read.read.flatten(), counted),
+            Err(_) => Within::Read(None, counted),
+        }
+    }
+
     /// [`Operand::object_with`] by the walk, whatever it opens: what the
     /// tests and the fuzz body hold its reading of what opens nothing to.
     #[cfg(any(test, fuzzing))]
@@ -205,7 +261,7 @@ impl<'a> Operand<'a> {
         limits: &Limits,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Option<Object> {
-        let mut read = Reading::new(self, limits, sink, true);
+        let mut read = Reading::new(self, limits.values, sink, true);
         walk(self.bytes, 0, TOP, limits.depth, false, &mut read)?.ok()?;
         read.read?
     }
@@ -218,34 +274,25 @@ impl<'a> Operand<'a> {
     /// escapes decoded, and nothing is kept.
     ///
     /// ```
-    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::fault::Fault;
     /// use pdf_content_streams::{Limits, ResCx, operations};
-    /// use std::ops::Range;
-    ///
-    /// #[derive(Default)]
-    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Collected<'a> {
-    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
-    ///         self.0.push((at, fault));
-    ///     }
-    /// }
     ///
     /// let content = b"[(a) 1.2.3 (b)] TJ";
     /// let res = ResCx::none();
     /// let limits = Limits::DEFAULT;
     /// let tj = operations(content, &res, &limits).next().unwrap().unwrap();
-    /// let (mut told, mut read) = (Collected::default(), Collected::default());
+    /// let (mut told, mut read) = (Vec::new(), Vec::new());
     /// tj.arg(0).unwrap().faults_with(&limits, &mut told);
     /// tj.arg(0).unwrap().object_with(&limits, &mut read);
-    /// assert_eq!(told.0, [(5..10, Fault::Number { written: b"1.2.3" })]);
-    /// assert_eq!(told.0, read.0);
+    /// assert_eq!(told, [(5..10, Fault::Number { written: b"1.2.3" })]);
+    /// assert_eq!(told, read);
     /// ```
     pub fn faults_with(&self, limits: &Limits, sink: &mut (impl Sink<'a> + ?Sized)) {
         // What doesn't want faults is told none.
         if !sink.wants() {
             return;
         }
-        let mut read = Reading::new(self, limits, sink, false);
+        let mut read = Reading::new(self, limits.values, sink, false);
         walk(self.bytes, 0, TOP, limits.depth, false, &mut read);
     }
 
@@ -259,7 +306,7 @@ impl<'a> Operand<'a> {
     /// array's [`object`](Operand::object) finds it. An array of PDFium's
     /// ends at the first `]` read for an element, so `[[1] 2]` is `[[1]`,
     /// its elements `[` and `1`.
-    pub fn elements(&self) -> Elements<'a> {
+    pub const fn elements(&self) -> Elements<'a> {
         let array = match self.bytes {
             [b'[', ..] => self.bytes,
             _ => &[],
@@ -275,17 +322,20 @@ impl<'a> Operand<'a> {
     /// and points only. It may be none as ISO 32000-2 writes a number, as
     /// `--5` isn't, which PDFium reads as 0 ([`number`](Operand::number),
     /// [`object`]).
+    #[must_use]
     pub fn is_number(&self) -> bool {
         !self.bytes.is_empty() && is_number(self.bytes)
     }
 
     /// Whether it's a name: it starts with `/`.
+    #[must_use]
     pub fn is_name(&self) -> bool {
         self.bytes.first() == Some(&b'/')
     }
 
     /// Whether it's a string: it starts with `(`, or with a `<` that
     /// isn't `<<`.
+    #[must_use]
     pub fn is_string(&self) -> bool {
         match self.bytes {
             [b'(', ..] => true,
@@ -295,6 +345,7 @@ impl<'a> Operand<'a> {
     }
 
     /// Whether it's an array: it starts with `[`.
+    #[must_use]
     pub fn is_array(&self) -> bool {
         self.bytes.first() == Some(&b'[')
     }
@@ -302,15 +353,18 @@ impl<'a> Operand<'a> {
     /// Whether it's a dictionary: it starts with `<<`. It may still read as
     /// none, where PDFium reads it so ([`object`]), such as `<< 1`, read to
     /// a key that's no name.
+    #[must_use]
     pub fn is_dict(&self) -> bool {
         self.bytes.starts_with(b"<<")
     }
 }
 
 impl fmt::Debug for Operand<'_> {
+    /// Its bytes by their length, not the bytes, which are content, and
+    /// where it is.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Operand")
-            .field("bytes", &String::from_utf8_lossy(self.bytes))
+            .field("bytes", &Len(self.bytes.len()))
             .field("range", &self.range())
             .finish()
     }
@@ -318,7 +372,8 @@ impl fmt::Debug for Operand<'_> {
 
 /// An array operand's elements, as written, each where it is
 /// ([`Operand::elements`]).
-#[derive(Debug, Clone)]
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Clone)]
 pub struct Elements<'a> {
     /// The array, from its `[`.
     array: &'a [u8],
@@ -326,6 +381,17 @@ pub struct Elements<'a> {
     base: usize,
     /// Where the next element is looked for in `array`.
     at: usize,
+}
+
+impl fmt::Debug for Elements<'_> {
+    /// Where the array is, and where the next element is looked for; not
+    /// its bytes, which are content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Elements")
+            .field("array", &(self.base..self.base + self.array.len()))
+            .field("at", &(self.base + self.at))
+            .finish()
+    }
 }
 
 impl<'a> Iterator for Elements<'a> {
@@ -360,6 +426,7 @@ impl FusedIterator for Elements<'_> {}
 /// assert_eq!(name(b"/F#3").as_deref(), Some(&b"F#3"[..]));
 /// assert_eq!(name(b"12"), None);
 /// ```
+#[must_use]
 pub fn name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
     if operand.first() != Some(&b'/') {
         return None;
@@ -446,12 +513,35 @@ pub(crate) fn iso_name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
 /// assert_eq!(big.as_ref().and_then(Object::as_integer), Some(0));
 /// assert_eq!(object(b"Tj", &limits), None);
 /// ```
+#[must_use]
 pub fn object(operand: &[u8], limits: &Limits) -> Option<Object> {
     Operand {
         bytes: operand,
         at: 0,
     }
     .object_with(limits, &mut ())
+}
+
+/// What reading an operand as an object under a cap of the caller's gives
+/// ([`Operand::object_within`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Within {
+    /// Read under both caps: what's read, an object or none, and how many
+    /// values reading it counted.
+    Read(Option<Object>, usize),
+    /// Past [`Limits::values`] first, or with the cap: none, as
+    /// [`Operand::object`] reads it.
+    Values,
+    /// Past the cap first: read no further.
+    Cap,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many values readings of operands as objects have built on this
+    /// thread: what the tests hold a read under a cap to, as building none
+    /// past it.
+    pub(crate) static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// An operand being read as an object, built from a [`walk`]'s steps:
@@ -482,13 +572,13 @@ struct Reading<'a, 's, S: ?Sized> {
 }
 
 impl<'a, 's, S: Sink<'a> + ?Sized> Reading<'a, 's, S> {
-    /// None read yet of `operand`, under `limits`' cap on values, told to
+    /// None read yet of `operand`, under a cap of `values`, told to
     /// `sink`, made if `make`.
-    fn new(operand: &Operand<'a>, limits: &Limits, sink: &'s mut S, make: bool) -> Self {
+    fn new(operand: &Operand<'a>, values: usize, sink: &'s mut S, make: bool) -> Self {
         Reading {
             s: operand.bytes,
             base: operand.at,
-            values: limits.values,
+            values,
             past: false,
             sink,
             open: Vec::new(),
@@ -520,6 +610,10 @@ impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
                     self.read = None;
                     return;
                 }
+            }
+            #[cfg(test)]
+            if self.make {
+                BUILT.with(|built| built.set(built.get() + 1));
             }
         }
         match event {

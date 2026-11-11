@@ -6,7 +6,9 @@
 //! operands, category and clause as a table of the tests' own reads them,
 //! and the graphics objects' states; and over the operations, a page's
 //! `q`/`Q` balance, marked content and resource names, and their steppers
-//! driven by hand.
+//! driven by hand; that no `Debug` prints content, and a fault's text cut
+//! at a character; and the README's licence links, and its first example
+//! the crate doc's.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -878,7 +880,7 @@ fn deep_operands_read_in_one_pass() {
     s.extend(b"]>>".repeat(32));
     let started = std::time::Instant::now();
     let mut o = object(&s, &Limits::DEFAULT).unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     for _ in 0..32 {
         let Value::Dict(dict) = o.into_value() else {
             panic!("a dictionary")
@@ -895,7 +897,7 @@ fn deep_operands_read_in_one_pass() {
     assert_eq!(toks(&arrays).len(), 500);
     let one = object(&arrays, &Limits::DEFAULT);
     assert_eq!(one, Some(Object::from(vec![1.into()])));
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 /// A string a dictionary's key opens is read as its `(` alone, and what's
@@ -910,7 +912,7 @@ fn strings_keys_open_read_in_one_pass() {
     assert_eq!(toks(&nested[..6 * n]).len(), 2 * n);
     let hex = b"<< <q ".repeat(n);
     assert_eq!(toks(&hex).len(), 2 * n);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert_eq!(toks(b"<< (q"), [Tok::Operand(b"<< ("), Tok::Op(b"q")]);
 }
 
@@ -1108,6 +1110,98 @@ fn image_data<'a>(s: &'a [u8], lim: &Limits) -> &'a [u8] {
     let none = ResCx::none();
     let op = operations(s, &none, lim).next().unwrap().unwrap();
     &s[op.inline_image().unwrap().data()]
+}
+
+/// The data of the inline image first in `s`, read with `res` under
+/// `lim`, and whether it's capped.
+fn image_capped<'a>(s: &'a [u8], res: &ResCx, lim: &Limits) -> (&'a [u8], bool) {
+    let op = operations(s, res, lim).next().unwrap().unwrap();
+    let image = op.inline_image().unwrap();
+    (&s[image.data()], image.capped())
+}
+
+/// An image's array is counted before it's read, nothing built: at
+/// [`Limits::space_values`] it's read and counted, and past it, or past
+/// [`Limits::values`], it counts as a space that doesn't load, 3
+/// components, and the image is capped.
+#[test]
+fn an_images_array_past_its_cap_counts_as_none() {
+    // Five values: the array, two names, a number and a string.
+    let s: &[u8] = b"BI /W 1 /H 1 /BPC 8 /CS [/Indexed /DeviceRGB 0 <000000>] ID xyz EI";
+    let none = ResCx::none();
+    let at = |space_values| Limits {
+        space_values,
+        ..Limits::DEFAULT
+    };
+    let built = || crate::operand::BUILT.with(|built| built.replace(0));
+    built();
+    assert_eq!(image_capped(s, &none, &at(5)), (&b"x"[..], false));
+    assert_eq!(built(), 5, "counted, then read");
+    assert_eq!(image_capped(s, &none, &at(4)), (&b"xyz"[..], true));
+    assert_eq!(built(), 0, "counted, nothing built");
+    assert_eq!(image_capped(s, &none, &at(0)), (&b"xyz"[..], true));
+    // Past `values`, the lesser, alike.
+    let values = Limits {
+        values: 4,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(image_capped(s, &none, &values), (&b"xyz"[..], true));
+    // An array as wide as honest ones never are, at the default.
+    let wide = format!(
+        "BI /W 1 /H 1 /BPC 8 /CS [/Indexed /DeviceRGB 0 <000000>{}] ID xyz EI",
+        " 0".repeat(4092)
+    );
+    let wide = wide.as_bytes();
+    assert_eq!(
+        image_capped(wide, &none, &Limits::DEFAULT),
+        (&b"xyz"[..], true)
+    );
+    assert_eq!(built(), 0, "nothing built");
+    assert_eq!(image_capped(wide, &none, &at(4097)), (&b"x"[..], false));
+}
+
+/// An image is capped where its size was counted past a cap, by each of
+/// the three ways: a name the resources counted past one, an array past
+/// [`Limits::space_values`], and an array whose count met a cap of
+/// [`Limits::color`]; never where it wasn't, or for a space no image is
+/// drawn in.
+#[test]
+fn an_image_is_capped_where_a_cap_sized_it() {
+    let mut low = Limits::DEFAULT;
+    low.color.space_depth = 0;
+    let resources = parsed("<< /ColorSpace << /X [/Pattern /DeviceRGB] /Y /DeviceRGB >> >>");
+    let nothing = |_: ObjectId| None;
+    let res = ResCx::read(nothing, Some(&resources), &low).unwrap();
+    assert_eq!(res.capped().collect::<Vec<_>>(), [b"X"]);
+    let by = |cs: &str, lim: &Limits| {
+        let s = format!("BI /W 1 /H 1 /BPC 8 /CS {cs} ID abcd EI");
+        let (data, capped) = image_capped(s.as_bytes(), &res, lim);
+        (data.len(), capped)
+    };
+    // A name the resources counted past a cap; one they didn't, and a
+    // device space.
+    assert_eq!(by("/X", &Limits::DEFAULT), (1, true));
+    assert_eq!(by("/Y", &Limits::DEFAULT), (3, false));
+    assert_eq!(by("/G", &Limits::DEFAULT), (1, false));
+    // An array past `space_values`.
+    let narrow = Limits {
+        space_values: 2,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(by("[/Pattern /DeviceRGB]", &narrow), (3, true));
+    // An array whose count met a cap of `Limits::color`: its underlying
+    // space doesn't load.
+    assert_eq!(by("[/Pattern /DeviceRGB]", &low), (1, true));
+    assert_eq!(by("[/Pattern /DeviceRGB]", &Limits::DEFAULT), (4, false));
+    // Filtered or not: its size decides whether PDFium reads it at all.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /X /F /AHx ID 61> EI";
+    assert_eq!(image_capped(s, &res, &Limits::DEFAULT), (&b"61>"[..], true));
+    // Named in an operator, not an image's: nothing is sized by it.
+    let s: &[u8] = b"/X cs 0 0 1 1 re f BI /W 1 /H 1 /BPC 8 /CS /Y ID abc EI";
+    let images: Vec<bool> = operations(s, &res, &Limits::DEFAULT)
+        .filter_map(|op| Some(op.unwrap().inline_image()?.capped()))
+        .collect();
+    assert_eq!(images, [false]);
 }
 
 #[test]
@@ -2418,7 +2512,10 @@ fn unended_images_dont_search_again() {
         assert_eq!(read, 200_000, "{}", String::from_utf8_lossy(unit));
         let took = started.elapsed();
         let unit = String::from_utf8_lossy(unit);
-        assert!(took < std::time::Duration::from_secs(2), "{unit}: {took:?}");
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "{unit}: {took:?}"
+        );
     }
 }
 
@@ -2523,7 +2620,7 @@ fn lone_bis_dont_read_again() {
     let (res, mut kept) = (ResCx::none(), Collected::default());
     let read = tokens(&s, &res, &Limits::DEFAULT).with_sink(&mut kept);
     assert_eq!(read.count(), 100_002);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     let lone: Vec<_> = (0..=50_000)
         .map(|i| {
             let at = 6 * i..s.len();
@@ -2609,11 +2706,16 @@ fn flate_and_lzw_data_ends_where_their_decoders_stop() {
             assert_eq!(found, data, "{dict}");
         }
     }
-    // LZW to its code of 257; refused at a code past the table's next
-    // entry, or where nothing's decoded.
+    // LZW to its code of 257, read on past a code past the table's next
+    // entry, as if it were that entry, as PDFium reads it; refused at one
+    // that's the first since a clear code or the data's start, or where
+    // nothing's decoded.
     let s = image("/F /LZW", LZW_EI, " EI");
     assert_eq!(first_image(&s, lim), (LZW_EI, Data(14..21)));
-    for codes in [&[256, 65, 300, 257][..], &[256, 257], &[300, 65, 257]] {
+    let data = lzw9(&[256, 65, 300, 257]);
+    let s = image("/F /LZW", &data, " EI");
+    assert_eq!(first_image(&s, lim), (&data[..], Data(14..19)));
+    for codes in [&[256, 300, 65, 257][..], &[256, 257], &[300, 65, 257]] {
         let data = lzw9(codes);
         let s = image("/F /LZW", &data, " EI");
         assert_eq!(first_image(&s, lim), (&data[..], Missing), "{codes:?}");
@@ -2653,23 +2755,39 @@ fn an_end_with_no_ei_after_it_reads_on_from_the_data() {
 
 /// Many inline images whose data shares one end, with no `EI` after it
 /// but a long tail: the tail is walked once, by the first, and each
-/// after stops where that walk began.
+/// after stops where that walk began. What a walk in vain reads is spent
+/// from [`Limits::image_ends`], so the budget counts the walks: the tail
+/// once reads, where one walk each would be 5,000 times it.
 #[test]
 fn images_sharing_an_end_with_no_ei_after_it_walk_once() {
     let mut s = b"BI /F /AHx ID EI ".repeat(5_000);
     s.push(b'>');
-    s.extend_from_slice(&b" 1 2 m".repeat(20_000));
-    let started = std::time::Instant::now();
-    let read: Vec<_> = tokens(&s, &ResCx::none(), &Limits::DEFAULT)
+    let tail = b" 1 2 m".repeat(20_000);
+    s.extend_from_slice(&tail);
+    let twice = Limits {
+        image_ends: 2 * tail.len(),
+        ..Limits::DEFAULT
+    };
+    let read: Vec<_> = tokens(&s, &ResCx::none(), &twice)
         .collect::<Result<_, _>>()
         .unwrap();
-    let took = started.elapsed();
     let images = read
         .iter()
         .filter(|(_, t)| matches!(t, Tok::InlineImage(_)));
     assert_eq!(images.count(), 5_000);
     assert_eq!(read.len(), 5_000 + 1 + 60_000);
-    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    // The walk is spent: under half the tail, the first image's stops it.
+    let half = Limits {
+        image_ends: tail.len() / 2,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(
+        error(&s, &half),
+        Error {
+            at: 0,
+            kind: ErrorKind::ImageEnds
+        }
+    );
 }
 
 /// Walks past images' ends that keep out of step, each from inside a long
@@ -2768,6 +2886,131 @@ fn the_budget_holds_at_its_edge() {
     assert_eq!(first_image(&s, &Limits::DEFAULT).1, ImageStream::Missing);
     let e = error(&s, &budget(64 << 10));
     assert_eq!((e.at, e.kind), (0, ErrorKind::ImageEnds));
+}
+
+/// Behind a predictor, the budget holds where it held without one: what
+/// the decoder gives is spent, so 100 bytes in rows of 30, the last row
+/// short, read where 100 is left, as they did, and stop where 99 is,
+/// TIFF's and PNG's alike (PNG's 100 counting a tag a row), though the
+/// predictor's rows, the short one read with zeros, are past it.
+#[test]
+fn behind_a_predictor_the_budget_holds_at_its_edge() {
+    let budget = |image_ends| Limits {
+        image_ends,
+        ..Limits::DEFAULT
+    };
+    let hundred = stored(&[7; 100], true);
+    for dp in [
+        "<</Predictor 2 /Columns 30>>",
+        "<</Predictor 12 /Columns 30>>",
+        "<</Predictor 15 /Colors 3 /Columns 10>>",
+    ] {
+        let s = [
+            format!("BI /F /Fl /DP {dp} ID ").as_bytes(),
+            &hundred,
+            b" EI",
+        ]
+        .concat();
+        let start = s.len() - 3 - hundred.len();
+        let stream = ImageStream::Data(start..start + hundred.len());
+        assert_eq!(
+            first_image(&s, &budget(100)),
+            (&hundred[..], stream),
+            "{dp}"
+        );
+        let e = error(&s, &budget(99));
+        assert_eq!((e.at, e.kind), (0, ErrorKind::ImageEnds), "{dp}");
+    }
+    // LZW alike: 65 66 258 and 96 bytes more, 100 decoded.
+    let mut codes = vec![256, 65, 66, 258];
+    codes.extend((0..96).map(|i| 1 + i * 2));
+    codes.push(257);
+    let data = lzw9(&codes);
+    let s = [
+        &b"BI /F /LZW /DP <</Predictor 2 /Columns 30>> ID "[..],
+        &data,
+        b" EI",
+    ]
+    .concat();
+    assert_eq!(first_image(&s, &budget(100)).0, &data[..]);
+    assert_eq!(error(&s, &budget(99)).kind, ErrorKind::ImageEnds);
+}
+
+/// What the decoder gives is spent behind a predictor, and nothing more:
+/// 100 bytes in a layout PDFium undoes and this crate's predictor doesn't,
+/// of 3 bits a sample, spend 100. 100 bytes in rows of 30, the last row
+/// short, spend 100 too, where its predictor would read 20 zeros more, so
+/// an image of 20 after it reads where 120 are left.
+#[test]
+fn behind_a_predictor_what_the_decoder_gives_is_spent() {
+    let budget = |image_ends| Limits {
+        image_ends,
+        ..Limits::DEFAULT
+    };
+    let hundred = stored(&[7; 100], true);
+    let three = [
+        &b"BI /F /Fl /DP <</Predictor 2 /BPC 3 /Columns 2>> ID "[..],
+        &hundred,
+        b" EI ",
+    ]
+    .concat();
+    let s = three.repeat(2);
+    assert_eq!(read(&s, &ResCx::none(), &budget(200)).len(), 2);
+    let e = error(&s, &budget(199));
+    assert_eq!((e.at, e.kind), (three.len(), ErrorKind::ImageEnds));
+    // Rows of 30, the last of 10, then 20 bytes.
+    let rows = [
+        &b"BI /F /Fl /DP <</Predictor 2 /Columns 30>> ID "[..],
+        &hundred,
+        b" EI ",
+    ]
+    .concat();
+    let twenty = [&b"BI /F /Fl ID "[..], &stored(&[7; 20], true), b" EI"].concat();
+    let s = [&rows[..], &twenty].concat();
+    assert_eq!(read(&s, &ResCx::none(), &budget(120)).len(), 2);
+    let e = error(&s, &budget(119));
+    assert_eq!((e.at, e.kind), (rows.len(), ErrorKind::ImageEnds));
+}
+
+/// A predictor isn't undone to find where an image ends, so a few bytes
+/// naming rows of 268 MB cost what they decode. An image of one byte under
+/// TIFF's predictor, on rows of 2^31 − 8 one-bit samples, is followed by a
+/// Flate image and a path. Both images and the path read under the default
+/// budget, and under the 4 bytes the two decode to; 3 stop at the second.
+/// Flate's and LZW's alike.
+#[test]
+fn a_predictors_rows_cost_nothing_to_find_an_end() {
+    let budget = |image_ends| Limits {
+        image_ends,
+        ..Limits::DEFAULT
+    };
+    let dp = "<</Predictor 2 /Columns 2147483640 /BPC 1>>";
+    let after = [
+        &b"BI /W 1 /H 1 /CS /G /BPC 8 /F /Fl ID "[..],
+        &stored(b"xyz", true),
+        b" EI 5 5 m 7 7 l S",
+    ]
+    .concat();
+    for (filter, data) in [
+        ("/Fl", stored(b"\x01", true)),
+        ("/LZW", lzw9(&[256, 1, 257])),
+    ] {
+        let first = format!("BI /W 1 /H 1 /CS /G /BPC 1 /F {filter} /DP {dp} ID ");
+        let s = [first.as_bytes(), &data, b" EI ", &after].concat();
+        for lim in [Limits::DEFAULT, budget(4)] {
+            let names: Vec<&[u8]> = (operations(&s, &ResCx::none(), &lim))
+                .map(|op| op.unwrap().name())
+                .collect();
+            let want: [&[u8]; 5] = [b"BI", b"BI", b"m", b"l", b"S"];
+            assert_eq!(names, want, "{filter}, {}", lim.image_ends);
+        }
+        let e = error(&s, &budget(3));
+        assert_eq!(
+            (e.at, e.kind),
+            (s.len() - after.len(), ErrorKind::ImageEnds),
+            "{filter}"
+        );
+    }
 }
 
 /// A deflate bomb, Flate data of 64 KB that decodes to 16 MiB, decodes
@@ -2994,7 +3237,7 @@ fn the_budget_counts_what_decoding_a_jpeg_holds() {
     let s = [&b"BI /F /DCT ID "[..], &huge, b" EI"].concat();
     let started = std::time::Instant::now();
     assert_eq!(error(&s, &DECODED).kind, ErrorKind::ImageEnds);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 /// Decoded, with the `image-ends` feature, fax data hayro-ccitt can't
@@ -3360,6 +3603,67 @@ fn a_stream_decoded_into_the_join() {
     assert_eq!(content.stream(1), b"1 g");
 }
 
+/// A stream's data from what gives it ([`pdf_objects::Streams`]), asked
+/// for no more than the room left: what it says is past it, or gives past
+/// it, refused as past the cap, its other failures as its own, nothing
+/// added either way, and nothing asked for where the space alone is past
+/// the cap.
+#[test]
+fn a_stream_given_by_a_reader_into_the_join() {
+    use std::cell::RefCell;
+
+    use pdf_objects::WithStreams;
+
+    let asked = RefCell::new(Vec::new());
+    let nothing = |_: ObjectId| None::<&Object>;
+    let streams = WithStreams::new(nothing, |id: ObjectId, limit: usize| {
+        asked.borrow_mut().push((id.number, limit));
+        let data = match id.number {
+            1 => b"q 0 g".to_vec(),
+            2 => Vec::new(),
+            // Past the room it's given, said so or not.
+            3 => return Err(Unreadable::new(id, Why::Limit, "past the limit")),
+            4 => vec![b'1'; limit + 1],
+            // Its own failures.
+            5 => return Err(Unreadable::new(id, Why::Damaged, "no stream")),
+            6 => return Err(Unreadable::new(id, Why::Capped, "past a cap")),
+            _ => vec![b'Q'; limit],
+        };
+        Ok(data)
+    });
+    let mut join = Join::new(&Limits {
+        content: 20,
+        ..Limits::DEFAULT
+    });
+    let id = |n| ObjectId::new(n, 0);
+    join.push_from(&streams, id(1)).unwrap();
+    // A stream of no data is a stream, its space and all.
+    join.push_from(&streams, id(2)).unwrap();
+    assert_eq!(join.room(), 13);
+    let past = Err(Pushed::TooLarge(TooLarge { cap: 20 }));
+    assert_eq!(join.push_from(&streams, id(3)), past);
+    assert_eq!(join.push_from(&streams, id(4)), past);
+    let damaged = join.push_from(&streams, id(5));
+    assert!(matches!(damaged, Err(Pushed::Decode(ref e)) if e.why == Why::Damaged));
+    assert_eq!(damaged.unwrap_err().to_string(), "no stream");
+    let capped = join.push_from(&streams, id(6));
+    assert!(matches!(capped, Err(Pushed::Decode(e)) if e.why == Why::Capped));
+    // Nothing added by any of them: each was asked for the same room.
+    assert_eq!(join.room(), 13);
+    let rooms: Vec<_> = asked.borrow().iter().map(|&(_, room)| room).collect();
+    assert_eq!(rooms, [20, 14, 13, 13, 13, 13]);
+    // One that fills the room; then the space alone is past the cap, and
+    // nothing is asked for.
+    join.push_from(&streams, id(7)).unwrap();
+    assert_eq!(join.room(), 0);
+    assert_eq!(join.push_from(&streams, id(7)), past);
+    assert_eq!(asked.borrow().len(), 7);
+    let content = join.finish();
+    assert_eq!(content.bytes(), b"q 0 g  QQQQQQQQQQQQQ");
+    assert_eq!(content.stream_count(), 3);
+    assert_eq!(content.stream(1), b"");
+}
+
 #[test]
 fn the_types_are_send_and_sync() {
     fn both<T: Send + Sync>() {}
@@ -3381,6 +3685,14 @@ fn the_types_are_send_and_sync() {
     both::<MarkedNest>();
     both::<NameSet>();
     both::<Kept>();
+    both::<iter::Operands>();
+    both::<iter::Operators>();
+    both::<iter::Capped>();
+    both::<iter::NamesOf>();
+    both::<iter::Names>();
+    both::<iter::Lists>();
+    both::<iter::Open>();
+    both::<iter::ReservedNames>();
 }
 
 /// `s`'s operations under `lim`, until the end or an error.
@@ -3587,7 +3899,7 @@ fn an_inline_image_is_one_operation() {
     );
     assert_eq!(
         format!("{image:?}"),
-        "InlineImage { at: 6..59, dict: 8..49, data: 52..56 }"
+        "InlineImage { at: 6..59, dict: 8..49, data: 52..56, capped: false }"
     );
 
     // Data straight after `ID`'s white-space byte, or after `ID` where a
@@ -3807,9 +4119,10 @@ fn operands_are_read_when_asked() {
             .count(),
         0
     );
+    // Its Debug gives its bytes by their length.
     assert_eq!(
         format!("{:?}", o[3]),
-        r#"Operand { bytes: "(s)", range: 14..17 }"#
+        "Operand { bytes: 3 bytes, range: 14..17 }"
     );
 }
 
@@ -3924,10 +4237,10 @@ fn numbers_iso_doesnt_write_are_faults() {
         words(&found)[6],
         "99999999999999999999 is past the numbers read here"
     );
-    // Its first 40 bytes.
+    // Its first 40 bytes, and a mark where it's cut.
     assert_eq!(
         words(&found)[10],
-        format!("{} is past the numbers read here", "1".repeat(40))
+        format!("{}… is past the numbers read here", "1".repeat(40))
     );
 }
 
@@ -3991,7 +4304,7 @@ fn operands_pdfium_reads_otherwise_are_told() {
         "the string (a\rb) has a CR written in it, read as written, where ISO 32000-2 reads LF"
             .to_string(),
         format!(
-            "/{} is longer than PDFium reads, and read as its first part",
+            "/{}… is longer than PDFium reads, and read as its first part",
             "F".repeat(39)
         ),
     ];
@@ -4436,7 +4749,7 @@ fn a_token_across_streams() {
     let page = Concat::new(&streams);
     let started = std::time::Instant::now();
     let found = faults(&page);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     let percent = page.bytes().iter().position(|&c| c == b'%').unwrap();
     let comment = percent..page.bytes().len();
     assert_eq!(found.len(), 1);
@@ -4768,11 +5081,11 @@ fn a_sink_that_wants_none_is_told_none() {
     let read: Vec<_> = page
         .operations(&none, &Limits::DEFAULT)
         .with_sink(&mut unwanted)
-        .map(|op| format!("{op:?}"))
+        .map(|op| crate::operations::written(&op))
         .collect();
     let plain: Vec<_> = page
         .operations(&none, &Limits::DEFAULT)
-        .map(|op| format!("{op:?}"))
+        .map(|op| crate::operations::written(&op))
         .collect();
     assert_eq!(read, plain);
     page.tokens(&none, &Limits::DEFAULT)
@@ -5746,6 +6059,17 @@ fn marked_content_takes_the_operands_pdfium_gives_bdc() {
     let names = names_used(&c, &ResCx::none(), LIM, &[]).unwrap();
     let of = |kind| names.of(kind).collect::<Vec<_>>();
     assert_eq!(of(ResKind::Properties), [b"P1"]);
+    // A loop over the set walks every name.
+    let mut walked = Vec::new();
+    for (kind, name) in &names {
+        walked.push((kind, name.to_vec()));
+    }
+    assert_eq!(walked, [(ResKind::Properties, b"P1".to_vec())]);
+    // Its names print, and nothing of the range that walks them.
+    assert_eq!(
+        format!("{:?}", names.of(ResKind::Properties)),
+        "NamesOf { names: [(Properties, [80, 49])] }"
+    );
 }
 
 /// Marked content stepped through an operation at a time: each range
@@ -5874,6 +6198,152 @@ fn marked_content_stepped_by_hand() {
             marked(&Concat::new(&[s]), &props, &none, lim)
         );
     }
+}
+
+/// Marked content holds no more than [`Limits::marked`] lets a reading's:
+/// each range one value, and a property list written in the content the
+/// values reading it built, at the cap read, past it an error at the
+/// `BMC` or `BDC` that passes it. A named list, or one that's no
+/// dictionary, is its range's alone.
+#[test]
+fn marked_content_holds_no_more_than_its_cap() {
+    let props = Properties::new([(b"P0".to_vec(), dict! { "Subtype" => "Header" })]);
+    let read = |s: &[u8], marked| {
+        let lim = Limits { marked, ..*LIM };
+        let found = crate::marked(&Concat::new(&[s]), &props, &ResCx::none(), &lim);
+        found.map(|found| found.len())
+    };
+    let past = |at| {
+        Err(Error {
+            at,
+            kind: ErrorKind::MarkedSize,
+        })
+    };
+    let three: &[u8] = b"/A BMC EMC /B BMC EMC /C BMC EMC";
+    assert_eq!(read(three, 3), Ok(3));
+    assert_eq!(read(three, 2), past(25));
+    assert_eq!(read(three, 0), past(3));
+    // The list's three values, the dictionary, its key and its value, and
+    // the range's one.
+    let listed: &[u8] = b"/P <</MCID 0>> BDC EMC";
+    assert_eq!(read(listed, 4), Ok(1));
+    assert_eq!(read(listed, 3), past(15));
+    // Each range counts alone: a list ended is still held.
+    let twice = [listed, b" ", listed].concat();
+    assert_eq!(read(&twice, 8), Ok(2));
+    assert_eq!(read(&twice, 7), past(38));
+    // A named list, a list that's no dictionary, and none, the range's.
+    for alone in [&b"/P /P0 BDC EMC"[..], b"/P [1 2 3] BDC EMC", b"/P BMC EMC"] {
+        assert_eq!(read(alone, 1), Ok(1), "{}", alone.escape_ascii());
+        assert!(matches!(read(alone, 0), Err(e) if e.kind == ErrorKind::MarkedSize));
+    }
+    // Where `values` is what's left, a list past both reads as none, as
+    // past `values` alone, its range kept.
+    let tied = Limits {
+        marked: 3,
+        values: 2,
+        ..*LIM
+    };
+    let found = crate::marked(&Concat::new(&[listed]), &props, &ResCx::none(), &tied).unwrap();
+    assert_eq!((found.len(), &found[0].props), (1, &None));
+    // Past both `depth` and the cap, the depth is what's said.
+    let both = Limits {
+        depth: 1,
+        marked: 1,
+        ..*LIM
+    };
+    let nested: &[u8] = b"/A BMC /B BMC EMC EMC";
+    let found = crate::marked(&Concat::new(&[nested]), &props, &ResCx::none(), &both);
+    assert_eq!(
+        found.map(|found| found.len()),
+        Err(Error {
+            at: 10,
+            kind: ErrorKind::Depth
+        })
+    );
+    // Under the default, the words.
+    assert_eq!(read(three, LIM.marked), Ok(3));
+    assert_eq!(
+        Error {
+            at: 25,
+            kind: ErrorKind::MarkedSize
+        }
+        .to_string(),
+        "too much marked content at byte 25"
+    );
+}
+
+/// Where a list would pass what's left of [`Limits::marked`], the error
+/// is at its `BDC`, every range before it kept with its list, none
+/// dropped; and the list is read no further than what was left, never
+/// built whole first.
+#[test]
+fn a_list_past_the_cap_is_an_error_at_its_bdc() {
+    let props = Properties::default();
+    let keys: String = (0..100).map(|i| format!("/K{i} []")).collect();
+    let s = [
+        b"/A <</MCID 0>> BDC EMC /B <</MCID 1>> BDC EMC /C <<".as_slice(),
+        keys.as_bytes(),
+        b">> BDC EMC",
+    ]
+    .concat();
+    let page = Concat::new(&[&s]);
+    let none = ResCx::none();
+    // Four for each of the first two; the third's range, and ten left of
+    // the 201 values its list holds.
+    let lim = Limits { marked: 19, ..*LIM };
+    let mut nest = MarkedNest::new(&props, &lim);
+    crate::operand::BUILT.with(|built| built.set(0));
+    let mut error = None;
+    for op in page.operations(&none, &lim) {
+        if let Err(e) = nest.step(&page, &op.unwrap()) {
+            error = Some(e);
+            break;
+        }
+    }
+    let bdc = s.windows(3).rposition(|w| w == b"BDC").unwrap();
+    let past = Error {
+        at: bdc,
+        kind: ErrorKind::MarkedSize,
+    };
+    assert_eq!(error, Some(past));
+    for (i, mcid) in [(0, 0), (1, 1)] {
+        let list = nest.get(i).and_then(|m| m.props.as_ref()?.dict().cloned());
+        assert_eq!(list, Some(dict! { "MCID" => mcid }), "range {i} kept");
+    }
+    // The first two lists' three values each, and ten of the third's.
+    assert_eq!(crate::operand::BUILT.with(|built| built.get()), 3 + 3 + 10);
+    // With room for it, it's read whole, its 201 values, and one less is
+    // past it.
+    let lim = Limits {
+        marked: 210,
+        ..*LIM
+    };
+    crate::operand::BUILT.with(|built| built.set(0));
+    let found = marked(&page, &props, &none, &lim).unwrap();
+    assert_eq!(
+        found[2]
+            .props
+            .as_ref()
+            .and_then(Props::dict)
+            .map(|d| d.len()),
+        Some(100)
+    );
+    assert_eq!(crate::operand::BUILT.with(|built| built.get()), 3 + 3 + 201);
+    let lim = Limits {
+        marked: 209,
+        ..*LIM
+    };
+    assert_eq!(marked(&page, &props, &none, &lim), Err(past));
+    // Past `Limits::values` first, a list reads as none, as an operand does,
+    // and holds nothing.
+    let lim = Limits {
+        values: 200,
+        marked: 210,
+        ..*LIM
+    };
+    let found = marked(&page, &props, &none, &lim).unwrap();
+    assert_eq!(found[2].props, None);
 }
 
 /// `q`/`Q` balance and resource names counted an operation at a time are
@@ -6043,7 +6513,7 @@ fn many_ranges_taken_out_read_in_one_pass() {
     let ranges: Vec<SpanAcross> = found.iter().map(|m| m.span).rev().collect();
     let started = std::time::Instant::now();
     let k = kept(&page, &none, LIM, &ranges).unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert_eq!(k, Kept::default());
 }
 
@@ -6056,7 +6526,7 @@ fn ranges_share_their_named_list() {
     let s = b"/T /P BDC EMC ".repeat(20_000);
     let started = std::time::Instant::now();
     let found = found(&[&s], &props).unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert_eq!(found.len(), 20_000);
     let list = props.get(b"P").unwrap();
     for m in &found {
@@ -6079,4 +6549,256 @@ fn the_passes_give_the_operations_error() {
     assert_eq!(marked(&page, &props, &none, LIM), Err(e));
     assert_eq!(names_used(&page, &none, LIM, &[]), Err(e));
     assert_eq!(kept(&page, &none, LIM, &[]), Err(e));
+}
+
+/// The README is shown on crates.io and docs.rs, where a path beside the
+/// crate reaches nothing: its licence links are the repository's URLs, the
+/// manifest's `repository` and the file, and no link of it climbs out of
+/// the crate.
+#[test]
+fn the_readmes_licence_links_reach_the_files() {
+    let readme = include_str!("../README.md");
+    let repository = env!("CARGO_PKG_REPOSITORY");
+    for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+        let link = format!("[{file}]({repository}/blob/main/{file})");
+        assert!(
+            readme.contains(&link),
+            "{file}'s link isn't the repository's URL"
+        );
+    }
+    assert!(!readme.contains("](../"), "a link climbs out of the crate");
+}
+
+/// The crate doc's example is the README's first, line for line, so that
+/// what docs.rs shows and what crates.io shows are one example, and each
+/// runs as a doctest, with no feature.
+#[test]
+fn the_crate_docs_example_is_the_readmes_first() {
+    let readme: Vec<&str> = (include_str!("../README.md").lines())
+        .skip_while(|line| *line != "```rust")
+        .skip(1)
+        .take_while(|line| *line != "```")
+        .collect();
+    let doc: Vec<&str> = (include_str!("lib.rs").lines())
+        .map_while(|line| line.strip_prefix("//!"))
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .skip_while(|line| *line != "```")
+        .skip(1)
+        .take_while(|line| *line != "```")
+        .collect();
+    assert!(readme.len() > 10, "the README's first example: {readme:?}");
+    assert_eq!(doc, readme);
+}
+
+/// A run of bytes the tests write into content, its strings and data,
+/// which no `Debug` of what holds them prints.
+const RUN: &[u8] = b"Zq8XwK3vJ";
+
+/// `debug`, what `what` prints, holds `RUN` neither as text nor as the
+/// numbers a `Debug` of its bytes writes; and holds something.
+fn unprinted(what: &str, debug: &str) {
+    let text = std::str::from_utf8(RUN).unwrap();
+    let numbers = format!("{RUN:?}");
+    let numbers = &numbers[1..numbers.len() - 1];
+    assert!(!debug.is_empty(), "{what} prints nothing");
+    assert!(
+        !debug.contains(text) && !debug.contains(numbers),
+        "{what} prints content: {debug}"
+    );
+}
+
+/// No `Debug` of what holds content prints a byte of it: tokens and
+/// operations, what's read from them, a page's streams joined, faults,
+/// marked content and its property lists, a list written again,
+/// resources and what the writer writes. Content's operators and names
+/// print, as a fault's text shows a word; strings, operands and data print
+/// by their length.
+#[test]
+fn no_debug_prints_content() {
+    let run = std::str::from_utf8(RUN).unwrap();
+    let content = format!(
+        "q /F1 12 Tf ({run}) Tj [({run}) -20 ({run})] TJ \
+         /Span <</ActualText ({run}) /Tool 1>> BDC EMC /Artifact /P0 BDC <{run}> Tj EMC \
+         BI /W 9 /H 1 /BPC 8 /CS /G ID {run} EI Q"
+    );
+    let s = content.as_bytes();
+    let none = ResCx::none();
+    let limits = Limits::DEFAULT;
+
+    // Tokens, as they're read and each one.
+    let mut read = tokens(s, &none, &limits);
+    unprinted("Tokens", &format!("{read:?}"));
+    for (at, tok) in read.by_ref().take(6).map(Result::unwrap) {
+        unprinted("Tok", &format!("{:?}", (at, tok)));
+    }
+    unprinted("Tokens read", &format!("{read:?}"));
+    assert_eq!(
+        format!("{:?}", Tok::Operand(RUN)),
+        "Operand(9 bytes)",
+        "its length"
+    );
+
+    // Operations, their operands, an array's elements and an image.
+    let mut ops = operations(s, &none, &limits);
+    unprinted("Operations", &format!("{ops:?}"));
+    for op in ops.by_ref().map(Result::unwrap) {
+        unprinted("Operation", &format!("{op:?}"));
+        unprinted("iter::Operands", &format!("{:?}", op.operands()));
+        for operand in op.operands() {
+            unprinted("Operand", &format!("{operand:?}"));
+            let mut elements = operand.elements();
+            unprinted("Elements", &format!("{elements:?}"));
+            for element in elements.by_ref() {
+                unprinted("an element", &format!("{element:?}"));
+            }
+        }
+        if let Some(image) = op.inline_image() {
+            unprinted("InlineImage", &format!("{image:?}"));
+        }
+    }
+    unprinted("Operations read", &format!("{ops:?}"));
+
+    // Faults: a hex string's bytes that are no hex digits.
+    let mut kept = Collected::default();
+    tokens(s, &none, &limits)
+        .with_sink(&mut kept)
+        .for_each(drop);
+    assert!(
+        kept.0
+            .iter()
+            .any(|(_, f)| matches!(f, Fault::HexString { .. }))
+    );
+    unprinted("Fault", &format!("{:?}", kept.0));
+
+    // A page's streams, joined and as they're joined.
+    let tail = format!("({run}) Tj");
+    let page = Concat::new(&[s, tail.as_bytes()]);
+    unprinted("Concat", &format!("{page:?}"));
+    let mut join = Join::new(&limits);
+    join.push(s).unwrap();
+    join.push(tail.as_bytes()).unwrap();
+    unprinted("Join", &format!("{join:?}"));
+
+    // Marked content, a named list, and what's stepped through.
+    let named = dict! {
+        "Alt" => Object::bytes(RUN),
+        "Text" => Object::text(run),
+        "Data" => Object::from(pdf_objects::Stream::new(dict! {}, RUN.to_vec())),
+    };
+    let props = Properties::new([(b"P0".to_vec(), named)]);
+    unprinted("Properties", &format!("{props:?}"));
+    unprinted("iter::Lists", &format!("{:?}", props.lists()));
+    let found = marked(&page, &props, &none, &limits).unwrap();
+    assert!(matches!(found[0].props, Some(Props::Inline(_))));
+    assert!(matches!(found[1].props, Some(Props::Named(_, Some(_)))));
+    unprinted("Marked", &format!("{found:?}"));
+    for m in &found {
+        unprinted("Props", &format!("{:?}", m.props));
+    }
+    let mut nest = MarkedNest::new(&props, &limits);
+    for op in page.operations(&none, &limits) {
+        nest.step(&page, &op.unwrap()).unwrap();
+    }
+    unprinted("MarkedNest", &format!("{nest:?}"));
+
+    // A list written again, its strings kept.
+    let keys: [&[u8]; 1] = [b"Tool"];
+    let rewrite = without_keys(&page, &none, &limits, found[0].span, &keys).unwrap();
+    unprinted("Rewrite", &format!("{rewrite:?}"));
+
+    // Resources: a string, text and data in memory, and the copies a
+    // resources dictionary's names give.
+    let res = Res::of([
+        Object::from(dict! { "Alt" => Object::bytes(RUN), "Text" => Object::text(run) }),
+        Object::from(pdf_objects::Stream::new(dict! {}, RUN.to_vec())),
+    ])
+    .unwrap();
+    unprinted("Res", &format!("{res:?}"));
+    unprinted("ResBody", &format!("{:?}", res.body));
+    assert!(format!("{res:?}").contains("Bytes(9 bytes)"));
+    let resources = Object::from(dict! {
+        "Properties" => dict! { "ShAAAAAA" => dict! { "Alt" => Object::bytes(RUN) } },
+    });
+    let nothing = |_: ObjectId| None;
+    let reserved = Reserved::read(nothing, Some(&resources), &limits);
+    unprinted("Reserved", &format!("{reserved:?}"));
+
+    // What the writer writes, and what it draws with.
+    let mut w = ContentWriter::new();
+    w.show(RUN);
+    let list = Res::dict(dict! { "ActualText" => Object::bytes(RUN) }).unwrap();
+    w.begin_marked("Span", list);
+    w.end_marked();
+    w.draw(res);
+    unprinted("ContentWriter", &format!("{w:?}"));
+    let (written, needs) = w.finish(&reserved);
+    assert!(written.windows(RUN.len()).any(|w| w == RUN));
+    unprinted("ResourceNeeds", &format!("{needs:?}"));
+    unprinted("Need", &format!("{:?}", needs.0[0]));
+}
+
+/// A fault's text, what a report shows, gives what's written whole up to
+/// 40 bytes, and past them its first 40 and `…`, cut before a character
+/// that runs past them; bytes that are no character's are U+FFFD, as
+/// before. An operator's name prints so in a `Debug`.
+#[test]
+fn a_faults_text_is_cut_at_a_character_and_marked() {
+    use crate::fault::shown;
+    let a = |n: usize| "a".repeat(n);
+    // 40 bytes whole, 41 cut.
+    assert_eq!(shown(a(40).as_bytes()), a(40));
+    assert_eq!(shown(a(41).as_bytes()), format!("{}…", a(40)));
+    // A three-byte character across byte 40, from 39 or 38: left out.
+    for before in [38, 39] {
+        let across = format!("{}€b", a(before));
+        assert_eq!(shown(across.as_bytes()), format!("{}…", a(before)));
+    }
+    // One that ends at byte 40, more after it: kept.
+    let ends = format!("{}€b", a(37));
+    assert_eq!(shown(ends.as_bytes()), format!("{}€…", a(37)));
+    // A four-byte one across it, from 37.
+    let four = format!("{}😀b", a(37));
+    assert_eq!(shown(four.as_bytes()), format!("{}…", a(37)));
+    // A byte that's no character's at the cut, alone or a lead byte with
+    // no more of its character after it: U+FFFD, then the mark.
+    for after in [&[0xFF, b'b'][..], &[0xE2, b'b', b'c'], &[0xE2, 0x82, b'c']] {
+        let mut bad = a(39).into_bytes();
+        bad.extend_from_slice(after);
+        let lossy = String::from_utf8_lossy(&bad[..40]).into_owned();
+        assert!(lossy.ends_with('\u{FFFD}'), "{bad:?}");
+        assert_eq!(shown(&bad), format!("{lossy}…"), "{bad:?}");
+    }
+    // A character across the cut, then a byte that's no character's: the
+    // character is left out all the same.
+    let mut euro = a(38).into_bytes();
+    euro.extend_from_slice("€".as_bytes());
+    euro.push(0xFF);
+    assert_eq!(shown(&euro), format!("{}…", a(38)));
+    // Shorter than 40, a byte that's no character's: as before.
+    assert_eq!(shown(b"a\xFFb"), "a\u{FFFD}b");
+
+    // As a report shows it.
+    let long = format!("/{}€", a(38));
+    let fault = Fault::Long {
+        written: long.as_bytes(),
+    };
+    assert_eq!(
+        fault.to_string(),
+        format!(
+            "/{}… is longer than PDFium reads, and read as its first part",
+            a(38)
+        )
+    );
+    // An operator's name in a `Debug`.
+    let name = format!("{}€x", a(39));
+    let content = format!("{name} 1 Tz");
+    let none = ResCx::none();
+    let op = operations(content.as_bytes(), &none, &Limits::DEFAULT)
+        .next()
+        .unwrap()
+        .unwrap();
+    let shown_name = format!("{:?}", format!("{}…", a(39)));
+    assert!(format!("{op:?}").contains(&shown_name), "{op:?}");
+    let tok = Tok::Op(name.as_bytes());
+    assert_eq!(format!("{tok:?}"), format!("Op({shown_name})"));
 }

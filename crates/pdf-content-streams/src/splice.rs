@@ -4,6 +4,7 @@
 //! of its keys (14.6.2). [`splice`] has the rules.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::ops::Range;
 
 use pdf_tokenizer::is_white_space;
@@ -13,8 +14,10 @@ use crate::inline::{Found, ImageStream, InlineImage, ResCx};
 use crate::limits::Limits;
 use crate::operand::{Operand, name, object};
 use crate::page::{Concat, SpanAcross};
+use crate::phases::phase;
 use crate::scan::{Event, Raw, TOP, Visit, next_raw, walk};
 use crate::tokens::{Tok, Tokens};
+use crate::unprinted::Len;
 
 /// Why a splice, or a property list written again, was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
@@ -45,6 +48,20 @@ pub enum SpliceError {
     /// ([`Spliced::streams`]).
     #[error("the property list of the range at {0} can't be written again without the keys asked")]
     List(SpanAcross),
+    /// Content that holds an inline image whose size was counted past a
+    /// cap ([`InlineImage::capped`](crate::InlineImage::capped)), so that
+    /// where it ends, and so what's read after it, may not be where PDFium
+    /// has it: the image, from its `BI` to its `EI`. A caller raises the
+    /// caps that sized it and tries again.
+    #[error("the inline image at {0} is sized by a color space counted past a cap")]
+    Capped(SpanAcross),
+    /// [`splice_each`]'s checks would read more than
+    /// [`Limits::splice_reads`] bytes.
+    #[error("checking what to take out would read more than {cap} bytes")]
+    Reads {
+        /// The cap: the most the checks may read.
+        cap: u64,
+    },
 }
 
 /// `content`'s streams with the ranges `drop` taken out, its tokens read
@@ -102,18 +119,22 @@ pub enum SpliceError {
 /// and one that isn't in the content ([`SpliceError::OutOfRange`]); an
 /// empty one is no cut.
 ///
-/// The tokens are read as [`tokens`](crate::tokens) reads them, by
+/// The tokens are read as [`tokens`](fn@crate::tokens) reads them, by
 /// PDFium's rules, so a range is judged by where those end each token, an
 /// inline image's among them, by the reading `limits` names: its DCT and
 /// CCITTFax data's end by the stand-in, or decoded
 /// ([`Limits::coded_ends`]). A splice judged by one reading holds for that
 /// one: a caller that wants what PDFium draws asks for the decoders'
-/// (`CodedEnds::Decoded`, with the `image-ends` feature). So too an image's
-/// size: past a cap of [`Limits::color`] its color space counts as one that
-/// doesn't load, with no error, and it's judged by the end that gives. A
-/// caller that wouldn't splice on that looks at
-/// [`ResCx::capped`](crate::ResCx::capped) first. Content that can't be read
-/// under `limits` is refused with its error ([`SpliceError::Read`]).
+/// (`CodedEnds::Decoded`, with the `image-ends` feature). An image's size
+/// is counted from its color space, which, counted past a cap, a name
+/// [`ResCx::capped`](crate::ResCx::capped) names, or an array in its
+/// dictionary past [`Limits::space_values`] or a cap of [`Limits::color`],
+/// counts as one that doesn't load, with no error to a reader, where
+/// PDFium's count may be another: content that holds such an image is
+/// refused ([`SpliceError::Capped`]), as where it ends can't be sure; a
+/// space capped that no image is drawn in refuses nothing. Content that
+/// can't be read under `limits` is refused with its error
+/// ([`SpliceError::Read`]).
 ///
 /// What's kept must read as it did, as how a token is read may depend on
 /// what's after it: a `BI` with a keyword where its dictionary's key
@@ -128,8 +149,10 @@ pub enum SpliceError {
 /// the first range at or after the first token kept that reads otherwise,
 /// or the last) unless every token kept reads as it did: its kind and
 /// bytes, and an inline image's data and what PDFium keeps of it in the
-/// same places in it. It costs two readings: of `content`, and of what it
-/// gives.
+/// same places in it. It costs two readings, however many ranges it's
+/// given: of `content`, and of what it gives. A caller that splices again
+/// and again bounds how often; [`splice_each`] bounds its own checks
+/// ([`Limits::splice_reads`]).
 ///
 /// ```
 /// use pdf_content_streams::{Concat, Limits, Properties, ResCx, SpliceError, marked, splice};
@@ -146,12 +169,27 @@ pub enum SpliceError {
 /// let refused = splice(&page, &res, &limits, &[found[0].span]);
 /// assert!(matches!(refused, Err(SpliceError::Unsafe(_))));
 /// ```
+///
+/// # Errors
+///
+/// [`SpliceError::Unsafe`] for a range whose taking out could change what's
+/// drawn after it, or leaves what's kept read otherwise;
+/// [`SpliceError::Overlap`] and [`SpliceError::OutOfRange`] for ranges that
+/// overlap or aren't in the content; [`SpliceError::Capped`] for content that
+/// holds an image a cap sized; and [`SpliceError::Read`] for content that can't
+/// be read under `limits`.
 pub fn splice<'a>(
     content: &'a Concat,
     res: &ResCx,
     limits: &Limits,
     drop: &[SpanAcross],
 ) -> Result<Vec<Cow<'a, [u8]>>, SpliceError> {
+    phase!(
+        DEBUG,
+        "splice",
+        len = content.bytes().len(),
+        ranges = drop.len(),
+    );
     Ok(checked(content, res, limits, drop)?.1)
 }
 
@@ -170,6 +208,7 @@ pub struct Spliced {
 
 impl Spliced {
     /// Whether where `span` starts in `content` is taken out.
+    #[must_use]
     pub fn takes(&self, content: &Concat, span: SpanAcross) -> bool {
         let at = content.offset(span.start);
         (self.cuts.iter()).any(|c| at.is_some_and(|at| c.range.contains(&at)))
@@ -196,8 +235,18 @@ impl Spliced {
     /// one list are refused ([`SpliceError::Overlap`]): its keys are taken
     /// out in one [`without_keys`]. A caller refused may make what's taken
     /// out alone, or each rewrite alone. Content that can't be read under
-    /// `limits` is refused with its error ([`SpliceError::Read`]). With
-    /// rewrites, it costs two readings: of `content`, and of what it gives.
+    /// `limits` is refused with its error ([`SpliceError::Read`]), and, with
+    /// rewrites, content that holds an image sized by a count past a cap
+    /// ([`SpliceError::Capped`]). With rewrites, it costs two readings: of
+    /// `content`, and of what it gives.
+    ///
+    /// # Errors
+    ///
+    /// [`SpliceError::OutOfRange`] for another content than the one given
+    /// before; [`SpliceError::Overlap`] for two rewrites of one list; and, with
+    /// rewrites, [`SpliceError::Unsafe`] and [`SpliceError::List`] where what
+    /// it gives reads otherwise, [`SpliceError::Capped`] and
+    /// [`SpliceError::Read`], as above.
     pub fn streams<'a>(
         &self,
         content: &'a Concat,
@@ -205,6 +254,13 @@ impl Spliced {
         limits: &Limits,
         rewrites: &[Rewrite],
     ) -> Result<Option<Vec<Cow<'a, [u8]>>>, SpliceError> {
+        phase!(
+            DEBUG,
+            "streams",
+            len = content.bytes().len(),
+            cuts = self.cuts.len(),
+            rewrites = rewrites.len(),
+        );
         let of = content.bytes().len();
         if let Some(cut) = self.cuts.first().filter(|_| self.of != of) {
             return Err(SpliceError::OutOfRange(cut.span));
@@ -234,24 +290,77 @@ impl Spliced {
 /// those it takes alone, together, or none where it refuses those
 /// together. A group it refuses stays as it is ([`Spliced::taken`]).
 /// Content that can't be read under `limits` is refused with its error
-/// ([`SpliceError::Read`]) where a check reads as far as it, as every
-/// check reads the content alike, never taken for groups refused.
+/// ([`SpliceError::Read`]), and content that holds an image sized by a
+/// count past a cap likewise ([`SpliceError::Capped`]), where a check reads
+/// as far as it, as every check reads the content alike, never taken for
+/// groups refused.
 ///
 /// It costs a check of all of them together, and where that's refused,
 /// one for each group and one for those taken, each two readings
-/// ([`splice`]): a caller bounds how many groups it gives.
+/// ([`splice`]): of the content, and of what it keeps. Each is counted, by
+/// those readings' bytes, before it's made, and past
+/// [`Limits::splice_reads`] in all it's refused ([`SpliceError::Reads`]),
+/// never a group left in unchecked.
+///
+/// # Errors
+///
+/// [`SpliceError::Read`], [`SpliceError::Capped`] and [`SpliceError::Reads`],
+/// each the call's: a group refused otherwise stays, and is no error.
 pub fn splice_each(
     content: &Concat,
     res: &ResCx,
     limits: &Limits,
     groups: &[Vec<SpanAcross>],
 ) -> Result<Spliced, SpliceError> {
-    // The cuts of `drop` where it's taken out, none where it's refused;
-    // the content's error where it can't be read.
-    let check = |drop: &[SpanAcross]| match checked(content, res, limits, drop) {
-        Ok((cuts, _)) => Ok(Some(cuts)),
-        Err(SpliceError::Read(e)) => Err(SpliceError::Read(e)),
-        Err(_) => Ok(None),
+    phase!(
+        DEBUG,
+        "splice_each",
+        len = content.bytes().len(),
+        groups = groups.len(),
+    );
+    each(content, res, limits, groups, &mut 0)
+}
+
+/// [`splice_each`], what its checks read added to `spent`, which the tests
+/// and the fuzz body hold its budget to.
+pub(crate) fn each(
+    content: &Concat,
+    res: &ResCx,
+    limits: &Limits,
+    groups: &[Vec<SpanAcross>],
+    spent: &mut u64,
+) -> Result<Spliced, SpliceError> {
+    // The cuts of `drop` where it's taken out, none where it's refused: a
+    // range outside the content, ranges that overlap, or ones it may not
+    // take out. What a check reads is counted before it's made, and the
+    // content's error where it can't be read, an image a cap sized and the
+    // budget passed are the call's, never a group's.
+    let mut check = |drop: &[SpanAcross]| -> Result<Option<Vec<Cut>>, SpliceError> {
+        phase!(TRACE, "check", ranges = drop.len());
+        let cuts = match cuts(content, drop) {
+            Ok(cuts) => cuts,
+            Err(SpliceError::OutOfRange(_) | SpliceError::Overlap(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let kept = written(content, &cuts, &[]);
+        *spent = spent.saturating_add(reads(content, &cuts, &kept));
+        if *spent > limits.splice_reads {
+            return Err(SpliceError::Reads {
+                cap: limits.splice_reads,
+            });
+        }
+        match safe(content, res, limits, &cuts, &[], &kept) {
+            Ok(()) => Ok(Some(cuts)),
+            Err(
+                SpliceError::Unsafe(_)
+                | SpliceError::OutOfRange(_)
+                | SpliceError::Overlap(_)
+                | SpliceError::List(_),
+            ) => Ok(None),
+            Err(
+                e @ (SpliceError::Read(_) | SpliceError::Capped(_) | SpliceError::Reads { .. }),
+            ) => Err(e),
+        }
     };
     let of = content.bytes().len();
     if groups.is_empty() {
@@ -289,13 +398,26 @@ pub fn splice_each(
 /// the range, where its list is in the joined bytes of the content it was
 /// read from, and what it's now. [`Spliced::streams`] makes it in that
 /// content's streams.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Rewrite {
     span: SpanAcross,
     pub(crate) range: Range<usize>,
     with: Vec<u8>,
     /// The length of the content's joined bytes.
     of: usize,
+}
+
+impl fmt::Debug for Rewrite {
+    /// Where its list is, and what it's now by its length; not the list,
+    /// whose strings may be a page's text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Rewrite")
+            .field("span", &self.span)
+            .field("range", &self.range)
+            .field("with", &Len(self.with.len()))
+            .field("of", &self.of)
+            .finish()
+    }
 }
 
 /// The property list of the `BDC` that opens `span` in `content` (14.6.2),
@@ -305,23 +427,29 @@ pub struct Rewrite {
 /// it holds hold among them. None when it has none of them.
 ///
 /// The `BDC`'s operands are the content's tokens, read from its start as
-/// [`tokens`](crate::tokens) reads them, with `res` under `limits`, from
+/// [`tokens`](fn@crate::tokens) reads them, with `res` under `limits`, from
 /// the first at `span`'s start to the `BDC`, its list the last of them, so
 /// the list is a token of the page's, never bytes inside an image's data
 /// or a string; the list's entries are read as PDFium reads a dictionary,
-/// so arrays nest in it, and its keys decoded as [`name`](crate::name)
-/// decodes them. Refused ([`SpliceError::List`]) when the range doesn't
+/// so arrays nest in it, and its keys decoded as [`name`] decodes them.
+/// Refused ([`SpliceError::List`]) when the range doesn't
 /// open with a `BDC` whose list is written in the content, in one stream,
-/// and reads as a dictionary ([`object`](crate::object)); when what's left
+/// and reads as a dictionary ([`object`]); when what's left
 /// of it isn't one operand that reads as the list without those entries
 /// (every entry of a key written twice goes); or when the content with it
 /// written again doesn't read as it did but for the list, read as one
 /// operand, the list written again, as [`splice`] reads what it gives.
-/// Content that can't be read is refused with its error
-/// ([`SpliceError::Read`]). It costs a reading of the content to the
-/// `BDC`, and, where it writes the list again, two more: of the content
-/// and of what it gives. What it gives is made in `content`'s streams by
-/// [`Spliced::streams`], with what's taken out or with nothing.
+/// Content that can't be read to the `BDC` is refused with its error
+/// ([`SpliceError::Read`]). Where it writes the list again, it reads the
+/// content whole, and refuses content past the `BDC` that can't be read
+/// alike, and content that holds an image sized by a count past a cap
+/// ([`SpliceError::Capped`]). A list that holds none of the keys is
+/// `None`, whatever follows it, as nothing is written. It costs a reading
+/// of the content to the `BDC`, and, where it writes the list again, two
+/// more: of the content and of what it gives, three at most, whatever keys
+/// it's given; a caller writing many lists again bounds how many. What it
+/// gives is made in `content`'s streams by [`Spliced::streams`], with
+/// what's taken out or with nothing.
 ///
 /// ```
 /// use pdf_content_streams::{Concat, Limits, Properties, ResCx, Spliced, marked, without_keys};
@@ -336,6 +464,14 @@ pub struct Rewrite {
 /// let made = nothing.streams(&page, &res, &limits, &[rewrite]).unwrap().unwrap();
 /// assert_eq!(&*made[0], b"/Artifact <</Subtype /Watermark>> BDC q 0 g Q EMC");
 /// ```
+///
+/// # Errors
+///
+/// [`SpliceError::List`] where the list can't be written again without the
+/// keys, as above; [`SpliceError::OutOfRange`] where `span` isn't in the
+/// content; [`SpliceError::Read`] where the content can't be read to the
+/// `BDC`; and, where it writes the list again, [`SpliceError::Capped`] and
+/// [`SpliceError::Read`] as [`splice`] gives them.
 pub fn without_keys(
     content: &Concat,
     res: &ResCx,
@@ -343,12 +479,19 @@ pub fn without_keys(
     span: SpanAcross,
     keys: &[&[u8]],
 ) -> Result<Option<Rewrite>, SpliceError> {
+    phase!(
+        DEBUG,
+        "without_keys",
+        len = content.bytes().len(),
+        keys = keys.len(),
+    );
     let range = content.offsets(span).ok_or(SpliceError::OutOfRange(span))?;
     let refused = || SpliceError::List(span);
     let s = content.bytes();
     // Its operands, the list last, to its `BDC`: the content's tokens from
     // its start, the first at the range's start or after it, inside it.
     let mut list = None;
+    reading(s.len());
     let mut read = content.tokens(res, limits);
     loop {
         match read.next().transpose()? {
@@ -479,6 +622,14 @@ fn checked<'a>(
     limits: &Limits,
     drop: &[SpanAcross],
 ) -> Result<(Vec<Cut>, Streams<'a>), SpliceError> {
+    let cuts = cuts(content, drop)?;
+    let kept = make(content, res, limits, &cuts, &[])?;
+    Ok((cuts, kept))
+}
+
+/// The cuts that take `drop` out of `content`, in order, but none that's
+/// empty: refused where one isn't in it, or two overlap. Nothing is read.
+fn cuts(content: &Concat, drop: &[SpanAcross]) -> Result<Vec<Cut>, SpliceError> {
     let mut cuts = drop
         .iter()
         .map(|&span| {
@@ -494,15 +645,12 @@ fn checked<'a>(
     {
         return Err(SpliceError::Overlap(pair[1].span));
     }
-    let kept = make(content, res, limits, &cuts, &[])?;
-    Ok((cuts, kept))
+    Ok(cuts)
 }
 
 /// `content`'s streams with `cuts` taken out and `lists` written again,
 /// apart and in order, its tokens read with `res` under `limits`, once
-/// they're found safe to make together: each cut by [`splice`]'s rules,
-/// and what they give read again as the tokens they keep, each list as
-/// it's now written.
+/// they're found safe to make together ([`safe`]).
 fn make<'a>(
     content: &'a Concat,
     res: &ResCx,
@@ -511,15 +659,63 @@ fn make<'a>(
     lists: &[&Rewrite],
 ) -> Result<Streams<'a>, SpliceError> {
     let kept = written(content, cuts, lists);
+    safe(content, res, limits, cuts, lists, &kept)?;
+    Ok(kept)
+}
+
+/// Whether `kept`, `content`'s streams with `cuts` taken out and `lists`
+/// written again, its tokens read with `res` under `limits`, may be made:
+/// each cut by [`splice`]'s rules, and what they give read again as the
+/// tokens they keep, each list as it's now written. Two readings, or, with
+/// neither, one, as [`reads`] counts them.
+fn safe(
+    content: &Concat,
+    res: &ResCx,
+    limits: &Limits,
+    cuts: &[Cut],
+    lists: &[&Rewrite],
+    kept: &[Cow<[u8]>],
+) -> Result<(), SpliceError> {
     if cuts.is_empty() && lists.is_empty() {
-        check(content, res, limits, cuts, lists, None)?;
-        return Ok(kept);
+        return check(content, res, limits, cuts, lists, None);
     }
     let streams: Vec<&[u8]> = kept.iter().map(|s| &**s).collect();
     let again = Concat::new(&streams);
+    reading(again.bytes().len());
     let again = Some(Again(again.tokens(res, limits)));
-    check(content, res, limits, cuts, lists, again)?;
-    Ok(kept)
+    check(content, res, limits, cuts, lists, again)
+}
+
+/// What checking `cuts`, which give `kept`, reads of `content`, in bytes:
+/// the content, and, where there are cuts, what they keep, joined as
+/// [`Concat`] joins streams.
+fn reads(content: &Concat, cuts: &[Cut], kept: &[Cow<[u8]>]) -> u64 {
+    let read = content.bytes().len() as u64;
+    if cuts.is_empty() {
+        return read;
+    }
+    let again = (kept.iter()).fold(kept.len().saturating_sub(1) as u64, |sum, stream| {
+        sum.saturating_add(stream.len() as u64)
+    });
+    read.saturating_add(again)
+}
+
+/// A reading of `bytes` of content begun, by a splice or a list written
+/// again: told under test, which holds what's read to its caps.
+#[inline]
+fn reading(bytes: usize) {
+    #[cfg(test)]
+    READINGS.with(|readings| readings.borrow_mut().push(bytes));
+    #[cfg(not(test))]
+    let _ = bytes;
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The readings of content a splice or a list written again has begun
+    /// on this thread, by their bytes, in order ([`reading`]).
+    pub(crate) static READINGS: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// What a splice or a list written again gives, its tokens read again as
@@ -562,7 +758,7 @@ fn placed(
     found: Found,
 ) -> (Range<usize>, ImageStream) {
     let inside = |r: Range<usize>| r.start - at.start..r.end - at.start;
-    let stream = match InlineImage::new(s, at.clone(), data.clone(), found).stream() {
+    let stream = match InlineImage::new(s, at.clone(), data.clone(), found, false).stream() {
         ImageStream::Data(kept) => ImageStream::Data(inside(kept)),
         other => other,
     };
@@ -831,6 +1027,7 @@ fn check(
     let mut operand = false;
     let mut operands: [Option<&[u8]>; 2] = [None, None];
     let unsafe_cut = |i: usize| SpliceError::Unsafe(cuts[i].span);
+    reading(s.len());
     let mut tokens = content.tokens(res, limits);
     loop {
         let token = tokens.next().transpose()?;
@@ -883,6 +1080,11 @@ fn check(
             }
             return Ok(());
         };
+        // An image whose size was counted past a cap, wherever it is: what
+        // it ends, and so where what's after it is read from, can't be sure.
+        if matches!(tok, Tok::InlineImage(_)) && tokens.capped() {
+            return Err(SpliceError::Capped(content.span(r)));
+        }
         // A token across either end of a cut.
         if let Some(i) = (open.as_ref().map(|(i, _)| *i)).filter(|&i| r.end > cuts[i].range.end) {
             return Err(unsafe_cut(i));

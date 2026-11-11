@@ -4,14 +4,19 @@
 /// offset into the bytes read. Read from a page's streams joined, it's
 /// into the joined bytes, which [`Concat::pos`](crate::Concat::pos) maps
 /// back to a stream and a place in it.
+///
+/// Exhaustive on purpose: a place and a kind are the whole of it, taken
+/// apart by its fields, and what more there is to say joins [`ErrorKind`],
+/// which is `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("{kind} at byte {at}")]
 pub struct Error {
     /// Where what's wrong starts: a string's, an array's or a
     /// dictionary's first byte, an inline image's `BI`, or the first
-    /// operand past the cap; and in marked content ([`marked`](crate::marked)),
-    /// an `EMC` that ends none, a `BMC` or `BDC` past the cap, or the
-    /// first operand of the first range still open at the end.
+    /// operand past the cap; and in marked content
+    /// ([`marked`](fn@crate::marked)), an `EMC` that ends none, a `BMC` or
+    /// `BDC` past a cap, or the first operand of the first range still
+    /// open at the end.
     pub at: usize,
     /// What's wrong.
     pub kind: ErrorKind,
@@ -40,7 +45,7 @@ pub enum ErrorKind {
     InlineImage,
     /// Arrays and dictionaries, or marked content, nested past
     /// [`Limits::depth`](crate::Limits::depth); or arrays and dictionaries
-    /// nested deeper than PDFium reads ([`tokens`](crate::tokens)), where
+    /// nested deeper than PDFium reads ([`tokens`](fn@crate::tokens)), where
     /// it's the innermost's first byte.
     #[error("arrays, dictionaries or marked content nested too deep")]
     Depth,
@@ -64,4 +69,9 @@ pub enum ErrorKind {
     /// An `EMC` with no marked content open to end.
     #[error("an EMC that ends no marked content")]
     Emc,
+    /// Marked content holding more than
+    /// [`Limits::marked`](crate::Limits::marked) lets one reading's hold:
+    /// its ranges, and the values of the property lists written in it.
+    #[error("too much marked content")]
+    MarkedSize,
 }

@@ -2,16 +2,22 @@
 //! and a digest of them, so that equal resources are written once and
 //! named alike.
 
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use pdf_objects::{Data, Dict, Object, ObjectId, Span, Str, Stream, Value};
 
-/// A resource's name by what it is: a 128-bit digest of its objects.
+use crate::unprinted::Unprinted;
+
+/// A resource's name by what it is: a 128-bit digest of its objects. It
+/// names a resource and finds it, but doesn't decide what it is: two
+/// resources are one where they're equal ([`Res`]), whatever their ids.
 ///
 /// The digest is XXH3-128, fast and the same on every build and platform,
 /// so a resource is named alike wherever and whenever content naming it is
-/// written. It isn't a security boundary: two resources made to digest
-/// alike are taken as one.
+/// written. It isn't a security boundary, and needn't be: two resources
+/// made to digest alike are two resources, named apart.
 ///
 /// Each value is fed by its kind and what it holds, so that two give the
 /// same bytes only when they're equal:
@@ -37,16 +43,16 @@ use pdf_objects::{Data, Dict, Object, ObjectId, Span, Str, Stream, Value};
 ///
 /// Where a value was written (its span, a key's) isn't fed: a value's
 /// digest is what it is, not where it was. A place tells apart the streams
-/// of one reading, not of two: two files laid out alike hold streams at
-/// the same offsets, so a writer given resources of several readings holds
-/// their data as bytes ([`Stream::set_bytes`]), or two of them may be named
-/// as one.
+/// of one reading, not of two, as two files laid out alike hold streams at
+/// the same offsets. So a resource holds its streams' data in memory
+/// ([`Res::of`] refuses any other).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ResId(pub u128);
 
 impl ResId {
     /// The digest of `objects`, a resource's objects as
     /// [`ResBody::Objects`] holds them, every byte of them read once.
+    #[must_use]
     pub fn of(objects: &[Object]) -> ResId {
         let mut bytes = Vec::new();
         for object in objects {
@@ -60,31 +66,62 @@ impl ResId {
 /// an image or a form, named by what it is ([`ResId`]).
 ///
 /// It's made once and kept: [`Res::of`] reads every byte of its objects,
-/// a stream's data in memory among them, and holds them shared, so a clone
-/// is cheap. Two resources of equal objects are one resource, whoever made
-/// them; one already written ([`Res::written`]) is that object alone,
-/// named by its number, never an object equal to it.
+/// each stream's data in memory, and holds them shared, so a clone is
+/// cheap and compares by pointer. Two resources are one where they're
+/// equal: their ids equal and their objects the same by what they are, as
+/// [`ResId`] feeds them, whoever made them. So a `HashMap<Res, _>`, hashed
+/// by the id, holds each resource once. One already written
+/// ([`Res::written`]) is that object alone, named by its number, never an
+/// object equal to it.
+///
+/// Its id and body are read by [`Res::id`] and [`Res::body`], and set by
+/// its constructors alone, so every stream in a resource holds its data in
+/// memory. One named by hand ([`Res::named`]) with an id that isn't its
+/// objects' digest is equal to no resource of other objects: an id names,
+/// and the objects decide.
 ///
 /// ```
+/// use std::collections::HashMap;
+///
 /// use pdf_content_streams::Res;
 /// use pdf_content_streams::pdf_objects::{ObjectId, dict};
 ///
-/// let a = Res::dict(dict! { "Type" => "ExtGState", "ca" => 0.5 });
-/// let b = Res::dict(dict! { "ca" => 0.5, "Type" => "ExtGState" });
-/// assert_eq!(a.id, b.id);
-/// assert_ne!(a.id, Res::written(ObjectId::new(7, 0)).id);
+/// let a = Res::dict(dict! { "Type" => "ExtGState", "ca" => 0.5 }).unwrap();
+/// let b = Res::dict(dict! { "ca" => 0.5, "Type" => "ExtGState" }).unwrap();
+/// assert_eq!(a, b);
+/// assert_ne!(a, Res::written(ObjectId::new(7, 0)));
+///
+/// // Written once: a map of resources holds equal ones as one.
+/// let mut written = HashMap::new();
+/// written.insert(a, ObjectId::new(3, 0));
+/// assert_eq!(written.get(&b), Some(&ObjectId::new(3, 0)));
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+///
+/// It isn't built by a literal, which would pass by the check on its data:
+///
+/// ```compile_fail
+/// use pdf_content_streams::pdf_objects::ObjectId;
+/// use pdf_content_streams::{Res, ResBody, ResId};
+///
+/// let res = Res {
+///     id: ResId(7),
+///     body: ResBody::Written(ObjectId::new(7, 0)),
+/// };
+/// ```
+#[derive(Debug, Clone)]
 pub struct Res {
     /// Its name by what it is: the digest of its objects, or of a
     /// reference to it, for one already written.
-    pub id: ResId,
+    pub(crate) id: ResId,
     /// What it is.
-    pub body: ResBody,
+    pub(crate) body: ResBody,
 }
 
 /// What a resource is.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Its `Debug` gives its objects' strings and streams' data by their
+/// length, as they may be a file's text or decrypted.
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum ResBody {
     /// Its objects: the resource first, then those it reaches. A reference
@@ -95,36 +132,165 @@ pub enum ResBody {
     Written(ObjectId),
 }
 
+impl fmt::Debug for ResBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResBody::Objects(objects) => {
+                let objects: Vec<_> = objects.iter().map(Unprinted).collect();
+                f.debug_tuple("Objects").field(&objects).finish()
+            }
+            ResBody::Written(id) => f.debug_tuple("Written").field(id).finish(),
+        }
+    }
+}
+
+/// A resource refused by [`Res::of`] or [`Res::named`]: one of its objects
+/// holds a stream whose data isn't in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[error("object {object} of the resource holds a stream whose data isn't in memory")]
+#[non_exhaustive]
+pub struct Unheld {
+    /// Which of the resource's objects holds it, counted from 0.
+    pub object: usize,
+}
+
 impl Res {
     /// The resource `objects` are ([`ResBody::Objects`]), named by them.
-    pub fn of(objects: impl Into<Arc<[Object]>>) -> Res {
+    ///
+    /// # Errors
+    ///
+    /// [`Unheld`] where a stream in one of `objects`, at any depth, holds
+    /// its data anywhere but in memory ([`Data::Bytes`]). Data where a
+    /// reader found it ([`Data::At`]) can't be told from another reading's
+    /// at the same place, and data that's neither can't be told at all. A
+    /// caller holds such data as bytes ([`Stream::set_bytes`]), or names
+    /// an object already written ([`Res::written`]).
+    pub fn of(objects: impl Into<Arc<[Object]>>) -> Result<Res, Unheld> {
         let objects = objects.into();
-        Res {
-            id: ResId::of(&objects),
-            body: ResBody::Objects(objects),
+        if let Some(object) = objects.iter().position(|o| !in_memory(o)) {
+            return Err(Unheld { object });
         }
+        Ok(Res::held(objects))
     }
 
     /// A dictionary that reaches nothing else: an ExtGState or a property
     /// list.
-    pub fn dict(dict: Dict) -> Res {
+    ///
+    /// # Errors
+    ///
+    /// [`Unheld`] as [`Res::of`] gives it: PDF holds a stream by reference
+    /// alone (7.3.8.1), but a [`Dict`] can hold one as a value.
+    pub fn dict(dict: Dict) -> Result<Res, Unheld> {
         Res::of([Object::from(dict)])
     }
 
     /// Object `id`, already written ([`ResBody::Written`]): named by its
     /// number, the digest of a reference to it.
+    #[must_use]
     pub fn written(id: ObjectId) -> Res {
         Res {
             id: ResId::of(&[Object::from(id)]),
             body: ResBody::Written(id),
         }
     }
+
+    /// `body` named `id`, by a caller that names resources its own way: an
+    /// image by the place it was read from, say. It's equal to a resource
+    /// whose id and body are equal to its own.
+    ///
+    /// # Errors
+    ///
+    /// [`Unheld`] as [`Res::of`] gives it, where `body` holds objects.
+    pub fn named(id: ResId, body: ResBody) -> Result<Res, Unheld> {
+        if let ResBody::Objects(objects) = &body
+            && let Some(object) = objects.iter().position(|o| !in_memory(o))
+        {
+            return Err(Unheld { object });
+        }
+        Ok(Res { id, body })
+    }
+
+    /// Its name by what it is: the digest of its objects, or of a
+    /// reference to it, for one already written; or the id it was
+    /// [`named`](Res::named).
+    #[must_use]
+    pub fn id(&self) -> ResId {
+        self.id
+    }
+
+    /// What it is.
+    #[must_use]
+    pub fn body(&self) -> &ResBody {
+        &self.body
+    }
+
+    /// The resource `objects` are, each stream in them holding its data in
+    /// memory, as the caller knows: an ExtGState the writer builds, or a
+    /// copy of what a resources dictionary binds, told by what it is.
+    pub(crate) fn held(objects: impl Into<Arc<[Object]>>) -> Res {
+        let objects = objects.into();
+        debug_assert!(objects.iter().all(in_memory), "held in memory");
+        Res {
+            id: ResId::of(&objects),
+            body: ResBody::Objects(objects),
+        }
+    }
+}
+
+/// Equal where the ids are equal and the bodies the same ([`ResBody`]):
+/// an id names a resource, and its objects decide it.
+impl PartialEq for Res {
+    fn eq(&self, other: &Res) -> bool {
+        self.id == other.id && self.body == other.body
+    }
+}
+
+impl Eq for Res {}
+
+/// Hashed by its id alone, which equal resources share.
+impl Hash for Res {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+/// The same objects, as [`ResId`] feeds them: a clone of one by pointer,
+/// else object by object, a dictionary's entries in any order, a string
+/// literal or hex, where a value was written aside. Or the same object
+/// written already. Never objects beside one written, even where they're
+/// a reference to it.
+impl PartialEq for ResBody {
+    fn eq(&self, other: &ResBody) -> bool {
+        match (self, other) {
+            (ResBody::Objects(a), ResBody::Objects(b)) => {
+                Arc::ptr_eq(a, b)
+                    || (a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| same(a, b)))
+            }
+            (ResBody::Written(a), ResBody::Written(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ResBody {}
+
+/// Whether every stream in `object`, at any depth [`ResId`] reads, holds
+/// its data in memory.
+fn in_memory(object: &Object) -> bool {
+    match object.value() {
+        Value::Array(items) => items.iter().all(in_memory),
+        Value::Dict(dict) => dict.iter().all(|(_, o)| in_memory(o)),
+        Value::Stream(stream) => {
+            matches!(stream.data, Data::Bytes(_)) && stream.dict.iter().all(|(_, o)| in_memory(o))
+        }
+        _ => true,
+    }
 }
 
 /// `object` written into `out` so that two objects write the same bytes
 /// only when they're equal, as [`ResId`] says: each part tagged with its
 /// kind, and each run of bytes and each list with its length.
-fn feed(out: &mut Vec<u8>, object: &Object) {
+pub(crate) fn feed(out: &mut Vec<u8>, object: &Object) {
     match object.value() {
         Value::Null => out.push(b'n'),
         Value::Bool(b) => out.extend([b'b', u8::from(*b)]),
@@ -228,12 +394,81 @@ fn run(out: &mut Vec<u8>, bytes: &[u8]) {
 /// A dictionary's keys in order of their bytes, each once with its last
 /// value, counted first.
 fn dict(out: &mut Vec<u8>, dict: &Dict) {
-    let mut entries: Vec<_> = dict.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let entries = sorted(dict);
     count(out, entries.len());
     for (key, value) in entries {
         run(out, key);
         feed(out, value);
+    }
+}
+
+/// A dictionary's entries in order of their keys' bytes, each key once
+/// with its last value.
+fn sorted(dict: &Dict) -> Vec<(&[u8], &Object)> {
+    let mut entries: Vec<_> = dict.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+}
+
+/// Whether `a` and `b` are the same by what they are: whether [`feed`]
+/// writes them the same bytes, told without writing them.
+pub(crate) fn same(a: &Object, b: &Object) -> bool {
+    match (a.value(), b.value()) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Integer(a), Value::Integer(b)) => a == b,
+        (Value::Real(a), Value::Real(b)) => a.to_bits() == b.to_bits(),
+        (Value::Name(a), Value::Name(b)) => a == b,
+        (Value::String(a, _), Value::String(b, _)) => match (a, b) {
+            (Str::Bytes(a), Str::Bytes(b)) | (Str::Encrypted(a), Str::Encrypted(b)) => a == b,
+            (Str::Text(a), Str::Text(b)) => a == b,
+            _ => false,
+        },
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b))
+        }
+        (Value::Dict(a), Value::Dict(b)) => same_dict(a, b),
+        (Value::Stream(a), Value::Stream(b)) => {
+            same_data(&a.data, &b.data) && same_dict(&a.dict, &b.dict)
+        }
+        (Value::Ref(a), Value::Ref(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether two dictionaries are the same, key by key, as [`dict`] feeds
+/// them. Compared in the order they're written while their keys keep in
+/// step, as most compared are written alike, and sorted where they part.
+fn same_dict(a: &Dict, b: &Dict) -> bool {
+    let (mut x, mut y) = (a.iter(), b.iter());
+    loop {
+        match (x.next(), y.next()) {
+            (None, None) => return true,
+            (Some((k, v)), Some((l, w))) if k == l => {
+                if !same(v, w) {
+                    return false;
+                }
+            }
+            _ => break,
+        }
+    }
+    let (a, b) = (sorted(a), sorted(b));
+    a.len() == b.len()
+        && a.iter()
+            .zip(&b)
+            .all(|((k, v), (l, w))| k == l && same(v, w))
+}
+
+/// Whether two streams' data is the same as [`stream`] feeds it: bytes in
+/// memory by their bytes, data placed by its place, and data neither, or
+/// of a kind this doesn't know, by its kind alone.
+fn same_data(a: &Data, b: &Data) -> bool {
+    match (a, b) {
+        (Data::Bytes(a), Data::Bytes(b)) => a == b,
+        (Data::At(a), Data::At(b)) => (a.stream, a.start, a.end) == (b.stream, b.start, b.end),
+        (Data::Unplaced, Data::Unplaced) => true,
+        (Data::Bytes(_) | Data::At(_) | Data::Unplaced, _) => false,
+        (_, b) => !matches!(b, Data::Bytes(_) | Data::At(_) | Data::Unplaced),
     }
 }
 

@@ -4,17 +4,23 @@
 //! rules.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io::Write as _;
 
-use pdf_objects::{Data, Dict, Object, ObjectId, Resolve, Value, dict, serialize};
+use pdf_objects::{Data, Object, ObjectId, Resolve, Value, dict, serialize};
 
+use crate::Limits;
+use crate::iter;
 use crate::names::ResKind;
 use crate::operator::{FillRule, Paint};
-use crate::res::{Res, ResId};
+use crate::phases::phase;
+use crate::res::Res;
+use crate::unprinted::Len;
 
 /// A color in a device color space, each component from 0 to 1, as the
 /// color operators set it (8.6.8).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Color {
     /// A gray level: `g`, `G`.
     Gray(f32),
@@ -26,13 +32,19 @@ pub enum Color {
 
 impl Color {
     /// An RGB color from components of 0 to 255.
+    #[must_use]
     pub fn rgb8(c: [u8; 3]) -> Color {
         Color::Rgb(c.map(|v| f32::from(v) / 255.0))
     }
 }
 
 /// A blend mode, an ExtGState's `/BM` (11.3.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's blend modes (11.3.5), so
+/// a match on every one is checked by the compiler; another would be a
+/// breaking release. `Compatible`, deprecated, isn't among them: a writer
+/// doesn't write it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Blend {
     /// `Normal`: the source alone.
     Normal,
@@ -98,7 +110,20 @@ impl Blend {
 /// An alpha is written from 0 to 1, one outside that range clamped to it,
 /// and one that isn't finite, NaN or an infinity, written 0, as the
 /// writer's numbers are ([`write_number`]).
+///
+/// `#[non_exhaustive]`, as an ExtGState sets more than this (a line width,
+/// a soft mask), so a field can join it in a minor release. Set fields on
+/// a copy of [`GState::default`]:
+///
+/// ```
+/// use pdf_content_streams::{Blend, GState};
+///
+/// let mut state = GState::default();
+/// state.fill_alpha = Some(0.5);
+/// state.blend = Some(Blend::Multiply);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct GState {
     /// `/ca`, the alpha of what's filled, 0 to 1.
     pub fill_alpha: Option<f32>,
@@ -109,7 +134,7 @@ pub struct GState {
 }
 
 impl GState {
-    /// It as an ExtGState resource.
+    /// It as an ExtGState resource: a dictionary of names and numbers.
     pub(crate) fn res(self) -> Res {
         let mut dict = dict! { "Type" => "ExtGState" };
         if let Some(a) = self.fill_alpha {
@@ -121,7 +146,7 @@ impl GState {
         if let Some(b) = self.blend {
             dict.set("BM", b.name());
         }
-        Res::dict(dict)
+        Res::held([Object::from(dict)])
     }
 }
 
@@ -135,7 +160,10 @@ fn alpha(a: f32) -> f32 {
 }
 
 /// How a line's ends are drawn, `J`'s operand (8.4.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's three styles (8.4.3.3),
+/// so a match on every one is checked by the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineCap {
     /// 0: squared off at the end.
     Butt,
@@ -146,7 +174,10 @@ pub enum LineCap {
 }
 
 /// How a path's corners are drawn, `j`'s operand (8.4.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's three styles (8.4.3.4),
+/// so a match on every one is checked by the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineJoin {
     /// 0: the edges extended to meet.
     Miter,
@@ -157,7 +188,10 @@ pub enum LineJoin {
 }
 
 /// How text is drawn, `Tr`'s operand, the text rendering mode (9.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's eight modes (9.3.6), so a
+/// match on every one is checked by the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextMode {
     /// 0: filled.
     Fill,
@@ -179,7 +213,8 @@ pub enum TextMode {
 
 impl TextMode {
     /// The mode `n Tr` sets; none for a number that's none.
-    pub fn of(n: i32) -> Option<TextMode> {
+    #[must_use]
+    pub const fn of(n: i32) -> Option<TextMode> {
         Some(match n {
             0 => TextMode::Fill,
             1 => TextMode::Stroke,
@@ -194,7 +229,8 @@ impl TextMode {
     }
 
     /// Whether text shown in it is added to the clip (4 to 7).
-    pub fn clips(self) -> bool {
+    #[must_use]
+    pub const fn clips(self) -> bool {
         matches!(
             self,
             TextMode::FillClip | TextMode::StrokeClip | TextMode::FillStrokeClip | TextMode::Clip
@@ -205,11 +241,18 @@ impl TextMode {
 /// The resources content draws with, each named: what the resources
 /// dictionary it goes with must bind. In the order the content first
 /// draws with them, one entry a resource in each category it's drawn in.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// Exhaustive on purpose: a list of needs, built by a caller that gathers
+/// them from more than one writer, as [`Need`] is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ResourceNeeds(pub Vec<Need>);
 
 /// A resource content draws with, under its name in its category.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Exhaustive on purpose: a category, a name and a resource are the whole
+/// of a need, built by a literal by a caller that gathers needs from more
+/// than one writer, and taken apart by its fields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Need {
     /// Its category: the key of the resources dictionary it goes under.
     pub kind: ResKind,
@@ -222,60 +265,67 @@ pub struct Need {
 /// The names a resources dictionary already binds, which
 /// [`ContentWriter::finish`] keeps clear of: each with what it binds, as
 /// far as that can be told by what it is (an object that reaches no other
-/// and holds each stream's data in memory) or by number (a reference). A
-/// name bound to the very resource being named is used again, not bumped,
-/// so content written again for the same resources gets the same names.
+/// and holds each stream's data in memory, kept as a resource of a copy of
+/// it) or by number (a reference). A name bound to the very resource being
+/// named, one equal to it ([`Res`]), is used again, not bumped, so content
+/// written again for the same resources gets the same names.
 #[derive(Debug, Clone, Default)]
 pub struct Reserved {
-    names: BTreeMap<(ResKind, Vec<u8>), Vec<ResId>>,
+    names: BTreeMap<(ResKind, Vec<u8>), Vec<Res>>,
 }
-
-/// How many references in a row [`Reserved::read`] follows to find what a
-/// resources dictionary, a category or a name binds.
-const HOPS: usize = 8;
 
 impl Reserved {
     /// The names `resources`, a resources dictionary, binds in each
     /// category, read through `objects`: the dictionary, or a category of
     /// it, given by reference is followed, as are references to
-    /// references, up to eight in a row; a stream is read as its
-    /// dictionary, as pdf-objects reads one.
+    /// references, up to [`Limits::hops`] in a row; a stream is read as
+    /// its dictionary, as pdf-objects reads one. `objects` is any resolver,
+    /// taken by value: a closure, or a `&dyn Resolve`.
     ///
     /// What a name binds matters only where it's one the writer gives, `Sh`
     /// and six base32 characters, which it may use again: every other name
     /// is kept clear of, whatever it binds. One of the writer's bound by
     /// reference binds that object, as one written already
-    /// ([`Res::written`]); and, where what the name binds, followed so,
-    /// refers to no other object and holds each stream's data in memory, it
-    /// binds a resource of that object ([`Res::of`]) too, told by its digest.
-    /// One that holds a stream's data where a reader found it, or none, is
-    /// told by its reference alone: a place tells apart the streams of one
-    /// reading, not of two ([`ResId`]), so a page's image is never taken
-    /// for another file's at the same place. What the references a name
-    /// follows end at is read and digested once, however many names bind
-    /// it, so it costs what the dictionary and what it binds hold.
-    pub fn read<'r, 'o: 'r>(objects: &impl Resolve<'o>, resources: Option<&'r Object>) -> Reserved {
+    /// ([`Res::written`]). Where what the name binds, followed so, refers
+    /// to no other object and holds each stream's data in memory, it binds
+    /// a resource of a copy of that object too, the same resource as one
+    /// equal to it. One that holds a stream's data where a reader found it,
+    /// or none, is told by its reference alone: a resource holds its data
+    /// in memory ([`Res::of`]), so a page's image is never taken for
+    /// another file's at the same place. What the references a name
+    /// follows end at is read and copied once, however many names bind it,
+    /// and the copy shared. So it costs what the dictionary and what it
+    /// binds hold, in time and in memory: an image's data in memory that a
+    /// writer's name binds is copied.
+    #[must_use]
+    pub fn read<'r, 'o: 'r, R: Resolve<'o>>(
+        objects: R,
+        resources: Option<&'r Object>,
+        limits: &Limits,
+    ) -> Reserved {
+        phase!(DEBUG, "reserved");
+        let hops = limits.hops;
         let mut names = BTreeMap::new();
         let mut told = BTreeMap::new();
         let resources = resources
-            .and_then(|r| direct(objects, r))
+            .and_then(|r| direct(&objects, r, hops))
             .and_then(Object::as_dict);
         for &kind in ResKind::ALL {
             let Some(category) = resources
-                .and_then(|r| direct(objects, r.get(kind.key())?))
+                .and_then(|r| direct(&objects, r.get(kind.key())?, hops))
                 .and_then(Object::as_dict)
             else {
                 continue;
             };
             for (name, bound) in category.iter() {
-                let mut ids = Vec::new();
+                let mut bound_to = Vec::new();
                 if writers(name) {
                     if let Value::Ref(id) = bound.value() {
-                        ids.push(Res::written(*id).id);
+                        bound_to.push(Res::written(*id));
                     }
-                    ids.extend(by_content(objects, bound, &mut told));
+                    bound_to.extend(by_content(&objects, bound, &mut told, hops));
                 }
-                names.insert((kind, name.to_vec()), ids);
+                names.insert((kind, name.to_vec()), bound_to);
             }
         }
         Reserved { names }
@@ -285,12 +335,12 @@ impl Reserved {
     /// these resources goes with it on one page.
     pub fn take(&mut self, needs: &ResourceNeeds) {
         for need in &needs.0 {
-            let ids = self
+            let bound = self
                 .names
                 .entry((need.kind, need.name.clone()))
                 .or_default();
-            if !ids.contains(&need.res.id) {
-                ids.push(need.res.id);
+            if !bound.contains(&need.res) {
+                bound.push(need.res.clone());
             }
         }
     }
@@ -302,15 +352,16 @@ impl Reserved {
     }
 
     /// Every name it keeps, each in its category.
-    pub fn names(&self) -> impl Iterator<Item = (ResKind, &[u8])> {
-        (self.names.keys()).map(|(kind, name)| (*kind, name.as_slice()))
+    pub fn names(&self) -> iter::ReservedNames<'_> {
+        iter::ReservedNames::new(self.names.keys())
     }
 
-    /// Whether `name` may name `id` in `kind`.
-    fn allows(&self, kind: ResKind, name: &[u8], id: ResId) -> bool {
+    /// Whether `name` may name `res` in `kind`: it binds nothing, or a
+    /// resource equal to it.
+    fn allows(&self, kind: ResKind, name: &[u8], res: &Res) -> bool {
         self.names
             .get(&(kind, name.to_vec()))
-            .is_none_or(|bound| bound.contains(&id))
+            .is_none_or(|bound| bound.contains(res))
     }
 }
 
@@ -320,22 +371,23 @@ fn writers(name: &[u8]) -> bool {
     name.len() == 8 && name.starts_with(b"Sh") && name[2..].iter().all(|c| BASE32.contains(c))
 }
 
-/// The digest of what `bound` binds, followed as [`direct`] follows it,
-/// where it's told by what it is ([`told_by_content`]); each object the
-/// references end at read and digested once, kept in `told`.
-fn by_content<'r, 'o: 'r>(
-    objects: &impl Resolve<'o>,
+/// A resource of a copy of what `bound` binds, followed as [`direct`]
+/// follows it, where it's told by what it is ([`told_by_content`]); each
+/// object the references end at read and copied once, kept in `told`.
+fn by_content<'r, 'o: 'r, R: Resolve<'o>>(
+    objects: &R,
     bound: &'r Object,
-    told: &mut BTreeMap<ObjectId, Option<ResId>>,
-) -> Option<ResId> {
+    told: &mut BTreeMap<ObjectId, Option<Res>>,
+    hops: usize,
+) -> Option<Res> {
     let mut object = bound;
     let mut last = None;
-    for _ in 0..HOPS {
+    for _ in 0..hops {
         let Value::Ref(id) = object.value() else {
             break;
         };
-        if let Some(&known) = told.get(id) {
-            return known;
+        if let Some(known) = told.get(id) {
+            return known.clone();
         }
         object = objects.resolve(*id)?;
         last = Some(*id);
@@ -343,18 +395,22 @@ fn by_content<'r, 'o: 'r>(
     if matches!(object.value(), Value::Ref(_)) {
         return None;
     }
-    let id = told_by_content(object).then(|| ResId::of(std::slice::from_ref(object)));
+    let res = told_by_content(object).then(|| Res::held([object.clone()]));
     if let Some(last) = last {
-        told.insert(last, id);
+        told.insert(last, res.clone());
     }
-    id
+    res
 }
 
 /// `object`, or what the references from it lead to, followed through
-/// `objects`, at most [`HOPS`] in a row; none for a reference to no
-/// object, or past that.
-fn direct<'r, 'o: 'r>(objects: &impl Resolve<'o>, mut object: &'r Object) -> Option<&'r Object> {
-    for _ in 0..HOPS {
+/// `objects`, at most `hops` in a row; none for a reference to no object,
+/// or past that.
+fn direct<'r, 'o: 'r, R: Resolve<'o>>(
+    objects: &R,
+    mut object: &'r Object,
+    hops: usize,
+) -> Option<&'r Object> {
+    for _ in 0..hops {
         match object.value() {
             Value::Ref(id) => object = objects.resolve(*id)?,
             _ => return Some(object),
@@ -400,18 +456,20 @@ fn told_by_content(object: &Object) -> bool {
 ///   them, which PDFium reads as white-space.
 /// - **Resources named at the end** (7.8.3): each resource drawn is one
 ///   need ([`ResourceNeeds`]) in each category it's drawn in, in the order
-///   first drawn, however often it's drawn. Its name is `Sh` and six
-///   base32 characters of the top 30 bits of its digest ([`ResId`]),
-///   counted up past a name the resources dictionary binds to another
-///   resource, or one this content named another with already. A name it
-///   binds to the very resource is used again, so content written again
-///   for the same resources gets the same names.
+///   first drawn, however often it's drawn: a resource equal to one drawn
+///   before is that one ([`Res`]). Its name is `Sh` and six base32
+///   characters of the top 30 bits of its digest
+///   ([`ResId`](crate::ResId)), counted up past a name the resources
+///   dictionary binds to another resource, or one this content named
+///   another with already. A name it binds to the very resource is used
+///   again, so content written again for the same resources gets the
+///   same names.
 ///
 /// It refuses nothing: what PDFium would read otherwise is the caller's
 /// to keep from it, a name past 255 bytes, its `/` among them, of which
 /// PDFium reads the first 255, and a string past 32,767 bytes, of which
 /// it reads the first 32,767. Each call's operator and operands read back
-/// through [`operations`](crate::operations) as written: a number as
+/// through [`operations`](fn@crate::operations) as written: a number as
 /// [`Operand::number`](crate::Operand::number) reads it, within its
 /// rounding, and a whole number past 32 bits as itself; a name as
 /// [`name`](crate::name) reads it; a string as [`object`](crate::object)
@@ -427,7 +485,8 @@ fn told_by_content(object: &Object) -> bool {
 /// w.rect(10.0, 10.0, 100.0 / 3.0, 50.0);
 /// w.paint(Paint::Fill);
 /// w.begin_text();
-/// w.font(Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1" }), 12.0);
+/// let font = Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1" }).unwrap();
+/// w.font(font, 12.0);
 /// w.show(b"(Hi)");
 /// w.end_text();
 /// w.restore();
@@ -440,7 +499,7 @@ fn told_by_content(object: &Object) -> bool {
 /// );
 /// assert_eq!(content, want.as_bytes());
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ContentWriter {
     out: Vec<u8>,
     /// Where a resource's name goes in `out`, in order: just past its
@@ -449,8 +508,21 @@ pub struct ContentWriter {
     needs: Vec<(ResKind, Res)>,
 }
 
+impl fmt::Debug for ContentWriter {
+    /// What's written by its length, where its names go, and the resources
+    /// it draws with; not what's written, which may hold a page's text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContentWriter")
+            .field("out", &Len(self.out.len()))
+            .field("slots", &self.slots)
+            .field("needs", &self.needs)
+            .finish()
+    }
+}
+
 impl ContentWriter {
     /// A writer of no content yet.
+    #[must_use]
     pub fn new() -> ContentWriter {
         ContentWriter::default()
     }
@@ -648,13 +720,13 @@ impl ContentWriter {
         self.out.extend_from_slice(b" BMC\n");
     }
 
-    /// `BDC`: content tagged `tag`, with property list `props`, named in
-    /// the resources' `/Properties` at the end (14.6.2): lists are never
-    /// written inline.
-    pub fn begin_marked(&mut self, tag: &str, props: Dict) {
+    /// `BDC`: content tagged `tag`, with property list `props`, a resource
+    /// ([`Res::dict`] makes one of a dictionary), named in the resources'
+    /// `/Properties` at the end (14.6.2): lists are never written inline.
+    pub fn begin_marked(&mut self, tag: &str, props: Res) {
         serialize::name(&mut self.out, tag.as_bytes());
         self.out.push(b' ');
-        self.name(ResKind::Properties, Res::dict(props));
+        self.name(ResKind::Properties, props);
         self.out.extend_from_slice(b" BDC\n");
     }
 
@@ -669,7 +741,7 @@ impl ContentWriter {
     /// followed: the names it gives are the resources' already, none of
     /// [`ResourceNeeds`].
     ///
-    /// Each operation of content read ([`operations`](crate::operations))
+    /// Each operation of content read ([`operations`](fn@crate::operations))
     /// so written, its operands' and operator's bytes, gives content that
     /// reads as the same tokens, white-space and comments aside, and so as
     /// the same operations; but where its reading looked past a token's
@@ -704,20 +776,28 @@ impl ContentWriter {
     /// The content, and the resources it draws with, named: each `Sh` and
     /// its digest's first six base32 characters, the next name up where
     /// `reserved`, or a name made before, has it.
+    #[must_use]
     pub fn finish(self, reserved: &Reserved) -> (Vec<u8>, ResourceNeeds) {
         self.named(reserved)
     }
 
     /// The content as [`finish`](Self::finish) gives it, the writer kept:
     /// what's written once can be named for each page it goes on.
+    #[must_use]
     pub fn named(&self, reserved: &Reserved) -> (Vec<u8>, ResourceNeeds) {
+        phase!(
+            DEBUG,
+            "named",
+            len = self.out.len(),
+            needs = self.needs.len(),
+        );
         let mut taken = BTreeSet::new();
         let needs: Vec<Need> = self
             .needs
             .iter()
             .map(|(kind, res)| {
                 let (kind, res) = (*kind, res.clone());
-                let name = fresh(kind, res.id, reserved, &taken);
+                let name = fresh(kind, &res, reserved, &taken);
                 taken.insert((kind, name.clone()));
                 Need { kind, name, res }
             })
@@ -744,9 +824,10 @@ impl ContentWriter {
     }
 
     /// `/` and the place `res`'s name goes, once it has one: one need for
-    /// a resource in each category it's drawn in.
+    /// a resource in each category it's drawn in, a resource equal to one
+    /// drawn before that one.
     fn name(&mut self, kind: ResKind, res: Res) {
-        let drawn = |(k, r): &(ResKind, Res)| *k == kind && r.id == res.id;
+        let drawn = |(k, r): &(ResKind, Res)| *k == kind && *r == res;
         let need = match self.needs.iter().position(drawn) {
             Some(i) => i,
             None => {
@@ -777,21 +858,21 @@ fn paint_op(paint: Paint) -> &'static str {
 /// The characters of the names [`fresh`] gives after `Sh`.
 const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-/// A name for `id` in `kind`: `Sh` and six base32 characters, its
+/// A name for `res` in `kind`: `Sh` and six base32 characters, its
 /// digest's first thirty bits, counted up past any name `reserved` keeps
 /// for something else or this content has given already.
 fn fresh(
     kind: ResKind,
-    id: ResId,
+    res: &Res,
     reserved: &Reserved,
     taken: &BTreeSet<(ResKind, Vec<u8>)>,
 ) -> Vec<u8> {
     const BITS: u32 = 30;
-    let mut n = (id.0 >> (128 - BITS)) as u32;
+    let mut n = (res.id.0 >> (128 - BITS)) as u32;
     loop {
         let mut name = b"Sh".to_vec();
         name.extend((0..6).rev().map(|i| BASE32[(n >> (5 * i)) as usize & 31]));
-        if !taken.contains(&(kind, name.clone())) && reserved.allows(kind, &name, id) {
+        if !taken.contains(&(kind, name.clone())) && reserved.allows(kind, &name, res) {
             return name;
         }
         n = (n + 1) & ((1 << BITS) - 1);

@@ -1,12 +1,22 @@
-//! The caps content is read under, and how far it decodes to find where
-//! inline images end: one value for all of them.
+//! The caps content is read under, how far it decodes to find where
+//! inline images end, what a splice's checks may read, and how far the
+//! writer follows references: one value for all of them.
 
-/// The caps on reading content: past one, it can't be read, and reading
-/// stops with an [`Error`](crate::Error) saying which and where, but for
-/// [`Limits::values`] and [`Limits::color`], whose values read otherwise,
-/// and no error says so; and how an inline image's DCT and CCITTFax data's
-/// end is found ([`Limits::coded_ends`]). A caller sets them on a copy of
-/// [`Limits::DEFAULT`] (`limits.operands = 64`, say), as more may come.
+/// The caps on reading content, and how far its edits and its writer go.
+///
+/// Past most of the caps on reading, content can't be read, and reading
+/// stops with an [`Error`](crate::Error) saying which and where. Past
+/// [`Limits::values`], [`Limits::color`] and [`Limits::space_values`],
+/// values read otherwise and no error says so, but an image sized by such
+/// a count is told ([`InlineImage::capped`](crate::InlineImage::capped)).
+/// Past [`Limits::content`], [`Join`](crate::Join) refuses a stream
+/// ([`TooLarge`](crate::TooLarge)). Past [`Limits::splice_reads`],
+/// [`splice_each`](crate::splice_each) is refused, and past
+/// [`Limits::hops`] the writer binds nothing. [`Limits::coded_ends`] says
+/// how an inline image's DCT and CCITTFax data's end is found.
+///
+/// A caller sets them on a copy of [`Limits::DEFAULT`]
+/// (`limits.operands = 64`, say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -19,7 +29,7 @@ pub struct Limits {
     /// How deep arrays and dictionaries nest, and marked content: 512 by
     /// default. PDFium reads arrays and dictionaries 64 levels deep, the
     /// outermost at 0, and what's nested deeper as no object, which is an
-    /// error here too ([`tokens`](crate::tokens)), whatever this says; an
+    /// error here too ([`tokens`](fn@crate::tokens)), whatever this says; an
     /// array inside an array, outside any dictionary, opens none, so nests
     /// no deeper. What's open is kept on the heap, however deep.
     pub depth: usize,
@@ -30,15 +40,15 @@ pub struct Limits {
     /// of values more than with its bytes (an empty array is two bytes
     /// written, and tens in memory), so this caps that. 2^25 by default,
     /// as pdf-objects' parser has it. An inline image's color space written
-    /// as an array is read so, and past it counts as one that doesn't load,
-    /// 3 components.
+    /// as an array is read so, under [`Limits::space_values`] too.
     pub values: usize,
     /// An inline image's data, in bytes: 64 MiB by default.
     pub inline_image: usize,
     /// What finding inline images' data's ends may cost in one reading of
-    /// content ([`tokens`](crate::tokens)), in bytes, in all: 256 MiB by
+    /// content ([`tokens`](fn@crate::tokens)), in bytes, in all: 256 MiB by
     /// default. Where PDFium decodes an image's data to find where it ends
-    /// (Flate and LZW), what decoding gives counts; where DCT and CCITTFax
+    /// (Flate and LZW), what the decoder gives counts, its predictor not
+    /// undone; where DCT and CCITTFax
     /// data is decoded too ([`CodedEnds`]' `Decoded`, with the
     /// `image-ends` feature), what decoding a JPEG holds, its output and,
     /// decoding several scans, its coefficients, counted from its header
@@ -78,15 +88,58 @@ pub struct Limits {
     /// doesn't load, as [`pdf_color::Limits`] says, and that's no error, so
     /// the image is sized by that count and may end where PDFium's doesn't.
     /// [`ResCx::capped`](crate::ResCx::capped) names the spaces it was met
-    /// for; of an array in an image, [`pdf_color::counted`] says.
+    /// for, and an image sized by one says so
+    /// ([`InlineImage::capped`](crate::InlineImage::capped)), as edits
+    /// refuse content that holds one
+    /// ([`SpliceError::Capped`](crate::SpliceError::Capped)).
     pub color: pdf_color::Limits,
+    /// How many values an inline image's color space written as an array
+    /// may hold, as [`Limits::values`] counts them: 4,096 by default.
+    /// They're counted before the array is read into an object, nothing
+    /// kept; past it, or past [`Limits::values`], the space counts as one
+    /// that doesn't load, 3 components, and the image is capped, as past a
+    /// cap of [`Limits::color`]. PDFium opens no array in an array outside a
+    /// dictionary, and the dictionaries such a space holds are CalGray's,
+    /// CalRGB's or Lab's, so one written honestly holds a few dozen.
+    pub space_values: usize,
+    /// How many values one reading's marked content may hold
+    /// ([`marked`](fn@crate::marked), [`MarkedNest`](crate::MarkedNest)): each
+    /// range one, and each property list written in the content, kept with
+    /// its range, the values reading it built, as [`Limits::values`] counts
+    /// them: 2^22 by default, some 400 to 470 MB. Each list is read under
+    /// what's left, so one past it stops there, never built whole first,
+    /// and past it reading stops with an error at the `BMC` or `BDC`
+    /// ([`ErrorKind::MarkedSize`](crate::ErrorKind::MarkedSize)), never a
+    /// list dropped, as a range whose list is dropped loses what it marks
+    /// (its `/MCID`, say). A list past [`Limits::values`] alone, where
+    /// that's the lesser, reads as none, as an operand does.
+    pub marked: usize,
+    /// How many bytes one [`splice_each`](crate::splice_each)'s checks may
+    /// read in all: 16 GiB by default. Each check reads the content, and,
+    /// where it takes something out, what that keeps, and is counted before
+    /// it's made; past it, `splice_each` is refused
+    /// ([`SpliceError::Reads`](crate::SpliceError::Reads)), never a group
+    /// left in unchecked. A `u64`, as it sums many readings, and holds 16
+    /// GiB on a 32-bit target too. [`splice`](fn@crate::splice) and
+    /// [`without_keys`](crate::without_keys) read the content two and three
+    /// times a call, whatever this says: a caller calling them in a loop
+    /// bounds the loop.
+    pub splice_reads: u64,
+    /// How many references in a row [`Reserved::read`](crate::Reserved::read)
+    /// follows to find what a resources dictionary, a category of it or a
+    /// name binds: 16 by default. Past it, a dictionary or a category isn't
+    /// read, and a name binds nothing that can be told by what it is, so
+    /// the writer keeps clear of it. These are the only references this
+    /// crate follows itself: a color space's are pdf-color's to follow,
+    /// under [`Limits::color`].
+    pub hops: usize,
 }
 
 /// How an inline image's DCT and CCITTFax data's end is found
 /// ([`Limits::coded_ends`]): PDFium decodes the data to find it, every row,
 /// and ends it where its decoder then stands. Flate's and LZW's ends are
 /// found by decoding them always.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum CodedEnds {
     /// Found in the data's bytes, standing in for PDFium's decoders: a
@@ -98,7 +151,7 @@ pub enum CodedEnds {
     StandIn,
     /// Found by decoding the data as PDFium does, DCT data on zune-jpeg
     /// and CCITTFax data on hayro-ccitt, what's decoded not kept
-    /// ([`tokens`](crate::tokens) says where each ends). Only with the
+    /// ([`tokens`](fn@crate::tokens) says where each ends). Only with the
     /// `image-ends` feature.
     #[cfg(feature = "image-ends")]
     Decoded,
@@ -115,6 +168,10 @@ impl Limits {
         content: 256 << 20,
         coded_ends: CodedEnds::StandIn,
         color: pdf_color::Limits::DEFAULT,
+        space_values: 4096,
+        marked: 1 << 22,
+        splice_reads: 16 << 30,
+        hops: 16,
     };
 }
 

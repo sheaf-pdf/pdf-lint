@@ -55,12 +55,13 @@ crate, 1.89, with and without each one's features. Its `test-pdfium` needs
 Python 3, and fetches the pinned PDFium build from GitHub unless
 `PDF_LINT_PDFIUM` names a library: [oracle/README.md](oracle/README.md)
 says how the crates are held to PDFium. Its `tokenizer-package`,
-`objects-package`, `filters-package`, `crypt-package`, `color-package` and
-`structure-package` package the tokenizer, pdf-objects, the filters,
-pdf-crypt, pdf-color and pdf-structure as a publish would (`cargo publish
---dry-run`), which asks the registry over the network. CI runs
-pdf-structure's tests on Windows too, which no recipe does, as `just ci`
-runs on the platform it's run on.
+`objects-package`, `filters-package`, `crypt-package`, `color-package`,
+`structure-package` and `content-streams-package` package the tokenizer,
+pdf-objects, the filters, pdf-crypt, pdf-color, pdf-structure and
+pdf-content-streams as a publish would (`cargo publish --dry-run`), which
+asks the registry over the network. CI runs pdf-structure's tests on
+Windows too, which no recipe does, as `just ci` runs on the platform it's
+run on.
 `just tokenizer-semver`, `just objects-semver`, `just filters-semver`,
 `just crypt-semver` and `just color-semver`, which `ci` leaves out, check
 the tokenizer's, pdf-objects', the filters', pdf-crypt's and pdf-color's
@@ -87,10 +88,12 @@ of names and of a font and its program, pdf-linearize's plan of any graph, what'
 any bytes, any facts of a file, and any bytes as a file laid out, read back and
 checked, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
-says for how many seconds (60 by default). CI fuzzes each target the same
-way: two minutes on every pull request and push to main, and half an hour
-twice a week, each run starting from the inputs the runs before it kept
-(`.github/workflows/fuzz.yml`).
+says for how many seconds (60 by default), and a third the features they're
+built with: `simd`, pdf-content-streams' dependencies on the CPU's SIMD
+(`just fuzz content 300 simd`). CI fuzzes each target the same way, and
+`content` again with `simd`: two minutes on every pull request and push to
+main, and half an hour twice a week, each run starting from the inputs the
+runs before it kept (`.github/workflows/fuzz.yml`).
 
 ## License
 

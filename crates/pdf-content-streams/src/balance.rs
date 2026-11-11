@@ -8,6 +8,7 @@ use crate::inline::ResCx;
 use crate::limits::Limits;
 use crate::operations::Operation;
 use crate::page::Concat;
+use crate::phases::phase;
 
 /// How content's `q`s and `Q`s balance: the net count, and the lowest the
 /// running count goes from 0 (never above 0). `q … cm` is `{ net: 1,
@@ -59,7 +60,18 @@ impl Balance {
 
 /// How `content`'s `q`s and `Q`s balance, its operations read with `res`
 /// under `limits`; the error that stops them, if one does.
+///
+/// # Errors
+///
+/// The [`Error`] that stops its operations
+/// ([`operations`](fn@crate::operations)).
 pub fn balance(content: &Concat, res: &ResCx, limits: &Limits) -> Result<Balance, Error> {
+    phase!(
+        DEBUG,
+        "balance",
+        len = content.bytes().len(),
+        streams = content.stream_count(),
+    );
     let mut balance = Balance::default();
     for op in content.operations(res, limits) {
         balance.take(&op?);

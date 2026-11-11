@@ -4,12 +4,12 @@
 //! ([`InlineImage`]).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::ops::Range;
 
 use pdf_color::Spaces;
-use pdf_filters::{Backend, Faults, Predictor, decode_prefix_into};
+use pdf_filters::{Backend, Faults, Layout, Predictor, Reading, decode_prefix_into_as};
 use pdf_objects::{Object, ObjectId, Resolve, Unreadable};
 use pdf_tokenizer::decode::{self, NumberError, pdfium};
 use pdf_tokenizer::is_white_space;
@@ -17,25 +17,31 @@ use pdf_tokenizer::is_white_space;
 use crate::data::{Places, RunLength, Searched, a85_end, a85_stop, ei_scan, find};
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
+use crate::iter;
 use crate::limits::{CodedEnds, Limits};
-use crate::operand::{Operand, WORD, hex, iso_name, literal, name, object};
+use crate::operand::{Operand, WORD, Within, hex, iso_name, literal, name};
+use crate::phases::phase;
 use crate::scan::{
     Event, Raw, TOP, UNCAPPED, Visit, elements, is_number, is_space, next_raw, walk,
 };
+use crate::unprinted::Len;
 
 /// What reading content needs of the resources it's drawn with: how many
 /// components each named color space has, which sizes an unfiltered
-/// inline image drawn in one ([`tokens`](crate::tokens)). [`ResCx::read`]
+/// inline image drawn in one ([`tokens`](fn@crate::tokens)). [`ResCx::read`]
 /// counts them from a resources dictionary, as PDFium counts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResCx {
     pub(crate) spaces: HashMap<Vec<u8>, u32>,
-    /// The names a cap of `Limits::color` was met for, in the order read.
-    capped: Vec<Vec<u8>>,
+    /// The names a cap of `Limits::color` was met for, in the order of
+    /// their bytes, so an image drawn in one is told in time that grows
+    /// with their count's logarithm, not with it.
+    pub(crate) capped: BTreeSet<Vec<u8>>,
 }
 
 impl ResCx {
     /// No resources: what an annotation's `/DA` is read with.
+    #[must_use]
     pub fn none() -> ResCx {
         ResCx::default()
     }
@@ -44,8 +50,8 @@ impl ResCx {
     /// as written, each with its components as PDFium counts them
     /// ([`pdf_color::components`]), under `limits.color`: none where it has no
     /// `/ColorSpace` dictionary as PDFium reaches one
-    /// ([`Spaces`](pdf_color::Spaces)), and no entry for a name whose value is
-    /// a reference to nothing, as PDFium has no space there. An object that's
+    /// ([`Spaces`]), and no entry for a name whose value is a reference to
+    /// nothing, as PDFium has no space there. An object that's
     /// [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and any other
     /// failure to read one is the `Err`, whole. Each name is a key as the
     /// reader of the file read it; [`ResCx::new`] says where that's not
@@ -59,9 +65,10 @@ impl ResCx {
     ///
     /// Past a cap of `limits.color` a branch of a space doesn't load, with no
     /// error, so it counts as that makes it, mostly 3, and an unfiltered
-    /// image drawn in it ends by that: [`ResCx::capped`] names them, for a
-    /// caller that acts on where an image ends and would refuse what it can't
-    /// be sure of. The cost has no cap of its own: it's the entries, times
+    /// image drawn in it ends by that: [`ResCx::capped`] names them, an image
+    /// drawn in one says so ([`InlineImage::capped`]), and edits refuse
+    /// content that holds one ([`SpliceError::Capped`](crate::SpliceError::Capped)).
+    /// The cost has no cap of its own: it's the entries, times
     /// [`space_visits`](pdf_color::Limits::space_visits), times what each
     /// visit scans, and a caller reading untrusted files bounds it by its
     /// own means for now.
@@ -82,11 +89,18 @@ impl ResCx {
     /// let image = read.next().unwrap().unwrap().inline_image().unwrap();
     /// assert_eq!(&content[image.data()], b"EI x");
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`] where an object it reads, of the dictionary or a space it
+    /// names, can't be read, but for one that's
+    /// [`Why::Damaged`](pdf_objects::Why::Damaged), which isn't there.
     pub fn read<'o, R: Resolve<'o> + Copy>(
         objects: R,
         resources: Option<&'o Object>,
         limits: &Limits,
     ) -> Result<ResCx, Unreadable> {
+        phase!(DEBUG, "spaces");
         let Some(named) = Spaces::read(objects, resources)? else {
             return Ok(ResCx::none());
         };
@@ -94,11 +108,11 @@ impl ResCx {
         // Room for every name at once, as most count: as many as the
         // dictionary's entries.
         let room = named.size_hint().1.unwrap_or_default();
-        let (mut spaces, mut capped) = (HashMap::with_capacity(room), Vec::new());
+        let (mut spaces, mut capped) = (HashMap::with_capacity(room), BTreeSet::new());
         for (space, read) in named {
             let read = read?;
             if read.capped {
-                capped.push(space.key.to_vec());
+                capped.insert(space.key.to_vec());
             }
             if let Some(count) = read.count {
                 spaces.insert(space.key.to_vec(), count);
@@ -107,10 +121,12 @@ impl ResCx {
         Ok(ResCx { spaces, capped })
     }
 
-    /// The names [`ResCx::read`] met a cap of `Limits::color` for, whose
-    /// counts are what a branch not loading makes them, and may not be what
-    /// PDFium counts: empty but for a space nested or spread far past anything
-    /// written honestly, and always of [`ResCx::new`] and [`ResCx::none`].
+    /// The names [`ResCx::read`] met a cap of `Limits::color` for, in the
+    /// order of their bytes, whose counts are what a branch not loading
+    /// makes them, and may not be what PDFium counts: empty but for a space
+    /// nested or spread far past anything written honestly, and always of
+    /// [`ResCx::new`] and [`ResCx::none`]. An inline image drawn in one is
+    /// capped ([`InlineImage::capped`]).
     ///
     /// ```
     /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
@@ -125,8 +141,8 @@ impl ResCx {
     /// let read = ResCx::read(nothing, Some(&resources), &limits).unwrap();
     /// assert_eq!(read.capped().collect::<Vec<_>>(), [b"CS0"]);
     /// ```
-    pub fn capped(&self) -> impl Iterator<Item = &[u8]> {
-        self.capped.iter().map(Vec::as_slice)
+    pub fn capped(&self) -> iter::Capped<'_> {
+        iter::Capped::new(self.capped.iter())
     }
 
     /// Color spaces by name, each with its components, which
@@ -139,11 +155,12 @@ impl ResCx {
     /// and is no longer than PDFium reads ([`Fault::Name`],
     /// [`Fault::Long`]). Where it's otherwise, the key's bytes as written
     /// (pdf-objects' `Entry::key_at`, [`pdf_color::Named::key_at`]), read by
-    /// [`name`](crate::name), give PDFium's.
+    /// [`name`], give PDFium's.
+    #[must_use]
     pub fn new(spaces: impl IntoIterator<Item = (Vec<u8>, u32)>) -> ResCx {
         ResCx {
             spaces: spaces.into_iter().collect(),
-            capped: Vec::new(),
+            capped: BTreeSet::new(),
         }
     }
 }
@@ -172,33 +189,75 @@ pub struct InlineImage<'a> {
     at: Range<usize>,
     data: Range<usize>,
     found: Found,
+    capped: bool,
 }
 
 impl<'a> InlineImage<'a> {
     /// The image at `at` in `content`, `BI` to `EI`, its data at `data`,
-    /// its end found as `found` says.
+    /// its end found as `found` says, and whether its size was counted
+    /// past a cap.
     pub(crate) fn new(
         content: &'a [u8],
         at: Range<usize>,
         data: Range<usize>,
         found: Found,
+        capped: bool,
     ) -> InlineImage<'a> {
         InlineImage {
             content,
             at,
             data,
             found,
+            capped,
         }
     }
 
+    /// Whether its size was counted from a color space past a cap, so that
+    /// where its data ends, and what's read after it, may not be where
+    /// PDFium has them: a name [`ResCx::capped`] names, or an array written
+    /// in its dictionary that holds more values than
+    /// [`Limits::space_values`] (or [`Limits::values`]) or meets a cap of
+    /// [`Limits::color`] as it's counted. Such a space counts as one that
+    /// doesn't load, or a branch of it does, with no error, as a reader may
+    /// read on; an edit refuses content that holds such an image
+    /// ([`SpliceError::Capped`](crate::SpliceError::Capped)). A filtered
+    /// image is capped too, though its data's end is its filter's, as its
+    /// size decides whether PDFium reads its data at all.
+    ///
+    /// ```
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    ///
+    /// let content = b"BI /W 1 /H 1 /BPC 8 /CS [/Indexed /DeviceRGB 0 <000000>] ID xyz EI";
+    /// let res = ResCx::none();
+    /// let image = |limits: &Limits| {
+    ///     let op = operations(content, &res, limits).next().unwrap().unwrap();
+    ///     let image = op.inline_image().unwrap();
+    ///     (image.data().len(), image.capped())
+    /// };
+    /// let mut limits = Limits::DEFAULT;
+    /// // One component, of 8 bits, so a byte.
+    /// assert_eq!(image(&limits), (1, false));
+    /// // Its array holds five values: the array, two names, a number and a
+    /// // string. Past a cap of four, it counts as a space that doesn't load,
+    /// // three components.
+    /// limits.space_values = 4;
+    /// assert_eq!(image(&limits), (3, true));
+    /// ```
+    #[must_use]
+    pub const fn capped(&self) -> bool {
+        self.capped
+    }
+
     /// Where it is, `BI` to `EI`.
+    #[must_use]
     pub fn at(&self) -> Range<usize> {
         self.at.clone()
     }
 
     /// Where its dictionary is: what's between `BI` and `ID`, or, where
     /// an object that's no name is written for a key, `BI` and that
-    /// object, which ends it as PDFium reads it ([`tokens`](crate::tokens)).
+    /// object, which ends it as PDFium reads it ([`tokens`](fn@crate::tokens)).
+    #[must_use]
     pub fn dict(&self) -> Range<usize> {
         let start = self.at.start + 2;
         // It was read under a cap on depth, so nothing in it is deeper;
@@ -211,7 +270,8 @@ impl<'a> InlineImage<'a> {
         }
     }
 
-    /// Where its data is, as [`tokens`](crate::tokens) found it.
+    /// Where its data is, as [`tokens`](fn@crate::tokens) found it.
+    #[must_use]
     pub fn data(&self) -> Range<usize> {
         self.data.clone()
     }
@@ -236,6 +296,7 @@ impl<'a> InlineImage<'a> {
     /// // No bytes, a size of 0; no stream, a filter PDFium can't decode.
     /// assert_eq!(read[1..], [ImageStream::Empty, ImageStream::Missing]);
     /// ```
+    #[must_use]
     pub fn stream(&self) -> ImageStream {
         match self.found {
             Found::Counted => ImageStream::Data(self.data.clone()),
@@ -267,6 +328,7 @@ impl<'a> InlineImage<'a> {
     /// written twice, the last; and a value PDFium reads as no object (a
     /// keyword, a closer, a brace or a dictionary that's none) takes the
     /// key out, as PDFium takes out a key it reads no value for.
+    #[must_use]
     pub fn entry(&self, key: &[u8]) -> Option<Operand<'a>> {
         let pair = KEYS
             .iter()
@@ -302,6 +364,7 @@ impl<'a> InlineImage<'a> {
     /// `ID` ([`entry`](InlineImage::entry)); and, where an object that's
     /// no name is written for a key, which ends the dictionary as PDFium
     /// reads it, to that object, as ISO 32000-2's keys are names (7.3.7).
+    #[must_use]
     pub fn length(&self) -> Option<u64> {
         let mut dict = ImageDict::default();
         // It was read under a cap on depth, so nothing in it is deeper.
@@ -318,6 +381,7 @@ impl fmt::Debug for InlineImage<'_> {
             .field("at", &self.at)
             .field("dict", &self.dict())
             .field("data", &self.data)
+            .field("capped", &self.capped)
             .finish()
     }
 }
@@ -333,7 +397,7 @@ pub enum ImageStream {
     /// any tokens written between that end and `EI`, the white-space
     /// before `EI` left out, which PDFium keeps too. Where PDFium decodes
     /// the data to find its end (Flate, LZW, CCITTFax, DCT), its end as
-    /// [`tokens`](crate::tokens) finds it.
+    /// [`tokens`](fn@crate::tokens) finds it.
     Data(Range<usize>),
     /// A stream of no bytes: an unfiltered image whose size counts to 0,
     /// whose data, read on to `EI` from its start, PDFium keeps none of.
@@ -366,7 +430,7 @@ pub(crate) enum Found {
 /// end, or whose ends have no `EI` after them, is searched and walked
 /// once, not once for each image; and what finding their ends may cost
 /// yet ([`Limits::image_ends`]), with one buffer for what decoding gives.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Images<'a, 'r> {
     s: &'a [u8],
     res: &'r ResCx,
@@ -389,6 +453,18 @@ pub(crate) struct Images<'a, 'r> {
     budget: usize,
     /// What decoding an image's data gives, emptied after each image.
     decoded: Vec<u8>,
+}
+
+impl fmt::Debug for Images<'_, '_> {
+    /// The content's length, what finding ends may cost yet and what's
+    /// decoded by its length; not the content, nor what's decoded from it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Images")
+            .field("content", &Len(self.s.len()))
+            .field("budget", &self.budget)
+            .field("decoded", &Len(self.decoded.len()))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a, 'r> Images<'a, 'r> {
@@ -451,7 +527,8 @@ impl<'a, 'r> Images<'a, 'r> {
         // that end too, for the faults.
         let mut vain = 0;
         let mut iso = None;
-        let end = match (self.size(&dict), self.first_filter(&dict)) {
+        let (size, capped) = self.size(&dict);
+        let end = match (size, self.first_filter(&dict)) {
             (None, _) => End::Walk,
             (Some(size), None) => match usize::try_from(size) {
                 Ok(0) => End::Empty,
@@ -526,7 +603,7 @@ impl<'a, 'r> Images<'a, 'r> {
             let iso = iso.filter(past).unwrap_or(data.end);
             self.faults(&dict, between, &ends, &data, iso, end, sink);
         }
-        Ok(Image::Read(end, data, found))
+        Ok(Image::Read(end, data, found, capped))
     }
 
     /// Where ISO 32000-2 reads an image read otherwise, told to `sink`:
@@ -673,72 +750,99 @@ impl<'a, 'r> Images<'a, 'r> {
     /// on to `EI` from the data's start. (PDFium's chromium/7881 pads a row
     /// by adding 7 to its bits first, so a row of 2^32 − 7 bits or more
     /// overflows there; chromium/8076 and chromium/8125, which this follows,
-    /// divide, rounding up, as here.)
-    fn size(&self, dict: &ImageDict) -> Option<u32> {
+    /// divide, rounding up, as here.) And whether its color space was
+    /// counted past a cap ([`Images::components`]).
+    fn size(&self, dict: &ImageDict) -> (Option<u32>, bool) {
         let s = self.s;
         let value = |key| dict.get(s, key).map_or(0, |r| integer(&s[r]));
-        let (bpc, components) = match dict.get(s, CS).and_then(|cs| self.components(&s[cs])) {
-            Some(n) => (value(BPC) as u32, u32::try_from(n).ok()?),
-            None => (1, 1),
+        let counted = dict.get(s, CS).and_then(|cs| self.components(&s[cs]));
+        let size = || {
+            let (bpc, components) = match counted {
+                Some((n, _)) => (value(BPC) as u32, u32::try_from(n).ok()?),
+                None => (1, 1),
+            };
+            let bits = bpc.checked_mul(components)?;
+            let row = match u32::try_from(value(W)) {
+                Ok(width) => bits.checked_mul(width)?,
+                Err(_) if bits == 0 => 0,
+                Err(_) => return None,
+            };
+            row.div_ceil(8).checked_mul(value(H) as u32)
         };
-        let bits = bpc.checked_mul(components)?;
-        let row = match u32::try_from(value(W)) {
-            Ok(width) => bits.checked_mul(width)?,
-            Err(_) if bits == 0 => 0,
-            Err(_) => return None,
-        };
-        row.div_ceil(8).checked_mul(value(H) as u32)
+        (size(), counted.is_some_and(|(_, capped)| capped))
     }
 
     /// The components of an inline image's color space, as written, a name
     /// read as PDFium's content parser reads it ([`name`]); None for a
     /// name the resources don't have, which PDFium reads as no color space,
     /// an abbreviation looked up by its full name (`/I` as `/Indexed`).
-    /// What it can't make out has 3, as in PDFium.
-    fn components(&self, cs: &[u8]) -> Option<u64> {
+    /// What it can't make out has 3, as in PDFium. And whether that's
+    /// counted past a cap: a name [`ResCx::capped`] names, or an array past
+    /// [`Limits::space_values`] or [`Limits::values`], or one a cap of
+    /// [`Limits::color`] was met for, counting it.
+    fn components(&self, cs: &[u8]) -> Option<(u64, bool)> {
         if let Some(n) = name(cs) {
             return match expanded(&n).unwrap_or(&n) {
-                b"DeviceGray" => Some(1),
-                b"DeviceRGB" => Some(3),
-                b"DeviceCMYK" => Some(4),
-                n => self.res.spaces.get(n).map(|&c| c.into()),
+                b"DeviceGray" => Some((1, false)),
+                b"DeviceRGB" => Some((3, false)),
+                b"DeviceCMYK" => Some((4, false)),
+                n => (self.res.spaces.get(n)).map(|&c| (c.into(), self.res.capped.contains(n))),
             };
         }
         if cs.first() != Some(&b'[') {
-            return Some(3);
+            return Some((3, false));
         }
         // An array is the object PDFium's parser holds ([`object`]), counted
-        // as a resources dictionary's would be. A DeviceN space names its
-        // colorants in an array, which an array here never holds, as PDFium
-        // opens none in an array outside a dictionary: so it's one that
-        // doesn't load. It holds no reference, as content has none to read,
-        // so nothing is ever asked of the resolver, and what that could
+        // as a resources dictionary's would be, once its values are counted,
+        // nothing built, under [`Limits::space_values`]. A DeviceN space
+        // names its colorants in an array, which an array here never holds,
+        // as PDFium opens none in an array outside a dictionary: so it's one
+        // that doesn't load. It holds no reference, as content has none to
+        // read, so nothing is ever asked of the resolver, and what that could
         // answer, none or a failure, can't come.
-        let Some(space) = object(cs, &self.lim) else {
-            return Some(3);
+        //
+        // [`object`]: crate::object
+        let array = Operand::new(cs, 0..cs.len());
+        let space = match array.object_within(&self.lim, self.lim.space_values, false) {
+            Within::Read(..) => array.object_within(&self.lim, self.lim.space_values, true),
+            Within::Values | Within::Cap => return Some((3, true)),
+        };
+        let Within::Read(Some(space), _) = space else {
+            return Some((3, false));
         };
         let nothing = |_: ObjectId| None;
-        let count = pdf_color::components(nothing, &space, &self.lim.color);
-        Some(count.ok().flatten().map_or(3, u64::from))
+        let counted = pdf_color::counted(nothing, &space, &self.lim.color);
+        Some(counted.map_or((3, false), |read| {
+            (read.count.map_or(3, u64::from), read.capped)
+        }))
     }
 
     /// Where an image's Flate or LZW data from `start` ends, as PDFium's
     /// `DecodeInlineStream` finds it: where its decoder stops reading it
     /// ([`End::Filter`]), its parameters read as PDFium reads them
-    /// ([`Images::params`]), the data decoded by pdf-filters, Flate's on
-    /// zlib-rs, whose count of what it read is zlib's, and so PDFium's
+    /// ([`Images::params`]), the data decoded by pdf-filters as PDFium
+    /// decodes it ([`Reading::Pdfium`]), Flate's on zlib-rs, whose count of
+    /// what it read is zlib's, and so PDFium's
     /// ([`Prefix::read`](pdf_filters::Prefix::read)), given all that
-    /// follows, which costs nothing more than what it reads. None
-    /// ([`End::Walk`]) where PDFium refuses the
-    /// parameters, and none, what was read in vain said
-    /// ([`End::Refused`]), where it refuses what decoding gives: an LZW
-    /// code that isn't in the table, LZW data that decodes to nothing, a
-    /// predictor whose rows would be no bytes, a PNG predictor on nothing
-    /// decoded, or an end past 2^31 − 1 bytes. (Of an LZW code that isn't
-    /// in the table, PDFium refuses one that's the first since a clear
-    /// code or the data's start, and reads on past a later one as if it
-    /// were the table's next entry, which isn't followed here.) What
-    /// decoding gives is spent: past the budget, an error at `bi`.
+    /// follows, which costs nothing more than what it reads. Past an LZW
+    /// code past the table, but the first since a clear code, PDFium's
+    /// decoder reads on as if it were the table's next entry, and so does
+    /// this. None ([`End::Walk`]) where PDFium refuses the parameters, and
+    /// none, what was read in vain said ([`End::Refused`]), where it
+    /// refuses what decoding gives, as pdf-filters says: an LZW code past
+    /// the table that's the first since a clear code or the data's start,
+    /// or LZW data that decodes to nothing
+    /// ([`Refused`](pdf_filters::Fault::Refused)); a predictor whose rows
+    /// would be no bits or past 2^32 − 1, or a PNG predictor on nothing
+    /// decoded ([`Predictor::pdfium_refuses`]); or where the end is past
+    /// 2^31 − 1 bytes.
+    ///
+    /// The predictor isn't undone: it changes no end, but by refusing, and
+    /// a few bytes of data can name rows of hundreds of megabytes. So what
+    /// the decoder gives is what's spent
+    /// ([`Prefix::decoded`](pdf_filters::Prefix::decoded)): past the
+    /// budget, an error at `bi`, told by decoding under the budget and a
+    /// byte more.
     fn decoded_end(
         &mut self,
         bi: usize,
@@ -750,39 +854,35 @@ impl<'a, 'r> Images<'a, 'r> {
             return Ok(End::Walk);
         };
         let data = &self.s[start..];
-        let lzw = matches!(filter, Filter::Lzw);
-        // The decoder alone: a predictor changes no end, but by refusing.
-        let predictor = Predictor::None;
-        let filter = match lzw {
-            true => pdf_filters::Filter::Lzw {
+        let filter = match filter {
+            Filter::Lzw => pdf_filters::Filter::Lzw {
                 early_change: params.early_change,
-                predictor,
+                predictor: Predictor::None,
             },
-            false => pdf_filters::Filter::Flate { predictor },
+            _ => pdf_filters::Filter::Flate {
+                predictor: Predictor::None,
+            },
         };
-        let (prefix, decoded) = decode_prefix_into(
+        let (prefix, decoded) = decode_prefix_into_as(
             data,
             filter,
-            self.budget,
+            self.budget.saturating_add(1),
             Backend::ZlibRs,
+            Reading::Pdfium,
             &mut self.decoded,
         );
-        let made = self.decoded.len();
         self.decoded.clear();
-        let faults = decoded.err().map_or_else(Vec::new, |Faults(faults)| faults);
-        let faulted = |is: fn(&pdf_filters::Fault) -> bool| faults.iter().any(|(_, f)| is(f));
-        if faulted(|f| matches!(f, pdf_filters::Fault::Limit)) {
+        if prefix.decoded > self.budget {
             return Err(Error {
                 at: bi,
                 kind: ErrorKind::ImageEnds,
             });
         }
-        self.spend(bi, made)?;
-        let refused = (lzw
-            && (made == 0 || faulted(|f| matches!(f, pdf_filters::Fault::Code { .. }))))
-            || params.refuses(made)
-            || i32::try_from(prefix.read).is_err();
-        if refused {
+        self.spend(bi, prefix.decoded)?;
+        let faults = decoded.err().map_or_else(Vec::new, |Faults(faults)| faults);
+        let refused = (faults.iter()).any(|(_, f)| *f == pdf_filters::Fault::Refused)
+            || params.predictor().pdfium_refuses(prefix.decoded);
+        if refused || i32::try_from(prefix.read).is_err() {
             return Ok(End::Refused(prefix.read));
         }
         Ok(End::Filter(start + prefix.read, prefix.read))
@@ -1085,7 +1185,8 @@ impl Walks {
 }
 
 /// What an image's `/DecodeParms` say to PDFium's Flate and LZW decoders,
-/// as PDFium reads them ([`Images::params`]).
+/// as PDFium reads them ([`Images::params`]): `/Colors`,
+/// `/BitsPerComponent` and `/Columns` none negative.
 #[derive(Debug, Clone, Copy)]
 struct Params {
     predictor: i32,
@@ -1105,17 +1206,19 @@ impl Params {
         columns: 1,
     };
 
-    /// Whether PDFium's predictor refuses what its decoder gave, `made`
-    /// bytes (`ApplyPredictor`): PNG's (a `/Predictor` of 10 or more) where
-    /// a row would be no bytes, or on nothing; TIFF's (2) where a row would
-    /// be no bytes. Any other predicts nothing.
-    fn refuses(&self, made: usize) -> bool {
-        let row =
-            i64::from(self.columns) * i64::from(self.colors) * i64::from(self.bits_per_component);
+    /// The predictor PDFium's decoder undoes (its `GetPredictor`): PNG's
+    /// for a `/Predictor` of 10 or more, TIFF's for 2, none for any other,
+    /// rows of `/Colors`, `/BitsPerComponent` and `/Columns`.
+    fn predictor(&self) -> Predictor {
+        let layout = Layout {
+            colors: self.colors.unsigned_abs(),
+            bits_per_component: self.bits_per_component.unsigned_abs(),
+            columns: self.columns.unsigned_abs(),
+        };
         match self.predictor {
-            10.. => row == 0 || made == 0,
-            2 => row == 0,
-            _ => false,
+            10.. => Predictor::Png(layout),
+            2 => Predictor::Tiff(layout),
+            _ => Predictor::None,
         }
     }
 }
@@ -1348,9 +1451,9 @@ impl Value {
 
 /// What reading an inline image's `BI` gives ([`Images::read`]).
 pub(crate) enum Image {
-    /// An image: where it ends, past its `EI`, where its data is, and how
-    /// that was found.
-    Read(usize, Range<usize>, Found),
+    /// An image: where it ends, past its `EI`, where its data is, how
+    /// that was found, and whether its size was counted past a cap.
+    Read(usize, Range<usize>, Found, bool),
     /// No image, a keyword where its dictionary's key is written: where
     /// that keyword is.
     Lone(Range<usize>),

@@ -27,7 +27,7 @@ sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
 # The spans of the reader's and the writer's phases, with the `tracing`
 # feature: without its default features, so without the proc macros of
-# `attributes` and the `log` bridge; `std`, for its spans' guards.
+# `attributes`; `std`, for its spans' guards.
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 # A file's identity, by a handle held open (`read::Identity`): its device

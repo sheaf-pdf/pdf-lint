@@ -1,20 +1,23 @@
 //! What the fuzz target checks, which unit tests check too: the promises
 //! the tokens, the operations, the faults and the operator table and its
 //! states make, the balance, marked content and names over them, the
-//! writer's, the splice's and the lists written again, and an image's color
-//! space counted alike in its dictionary and in the resources, on any input.
+//! writer's, resources' equality, the splice's and the lists written again,
+//! and an image's color space counted alike in its dictionary and in the
+//! resources, on any input.
 //! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
-use pdf_objects::{Dict, Object, ObjectId, Str, Value, dict};
+use pdf_objects::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value, dict};
 use pdf_tokenizer::Kind;
 use pdf_tokenizer::decode::{self, NumberError};
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{self, Fault, Sink};
 use crate::inline::{Walks, ei_from};
+use crate::operand::Within;
+use crate::res::{feed, same};
 use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked, tokenizer};
 use crate::{
     Balance, Blend, Color, Concat, ContentWriter, Error, ErrorKind, FillRule, GState, ImageStream,
@@ -86,9 +89,14 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// written again, read as they did, by the stand-in's reading of DCT and
 /// CCITTFax data, which reads no further than an image's token
 /// ([`written_again`]); the writer's calls its bytes choose read back
-/// as written ([`calls`]); and its marked ranges taken out, and their
-/// lists written again, reading as the splice promises ([`spliced`]).
-/// An array in it counted alike in an image and in resources ([`spaced`]).
+/// as written ([`calls`]); resources its bytes choose equal exactly where
+/// their digests' bytes are ([`resources`]); and its marked ranges taken
+/// out, and their lists written again, reading as the splice promises,
+/// refused where an image a cap sized is read or its checks would read
+/// past their cap ([`spliced`]).
+/// An array in it counted alike in an image and in resources, and capped
+/// past its cap ([`spaced`]). Its marked content holds no more than its
+/// cap lets it ([`passes`]).
 /// Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
@@ -168,6 +176,7 @@ pub fn content(data: &[u8]) {
     searched(data);
     written_again(data, &res, &Limits::DEFAULT);
     calls(data);
+    resources(data);
     spliced(data);
     spaced(data, limits);
 }
@@ -179,8 +188,9 @@ fn nothing<'o>(id: ObjectId) -> Option<&'o Object> {
 }
 
 /// How much of `row` bytes an image read by `res` under `limits` takes for its
-/// data, drawn in `cs`, and whether `cs` was read whole as its color space.
-fn drawn(cs: &[u8], row: usize, res: &ResCx, limits: &Limits) -> (bool, Option<usize>) {
+/// data, drawn in `cs`, and whether it's capped; and whether `cs` was read
+/// whole as its color space.
+fn drawn(cs: &[u8], row: usize, res: &ResCx, limits: &Limits) -> (bool, Option<(usize, bool)>) {
     let data = vec![b'a'; row];
     let content = [b"BI /W 1 /H 1 /BPC 8 /CS ", cs, b" ID ", &data, b" EI Q"].concat();
     let op = operations(&content, res, limits)
@@ -189,13 +199,19 @@ fn drawn(cs: &[u8], row: usize, res: &ResCx, limits: &Limits) -> (bool, Option<u
     let image = op.as_ref().and_then(Operation::inline_image);
     let whole = (image.as_ref().and_then(|image| image.entry(b"ColorSpace")))
         .is_some_and(|entry| entry.bytes() == cs);
-    (whole, image.map(|image| image.data().len()))
+    (
+        whole,
+        image.map(|image| (image.data().len(), image.capped())),
+    )
 }
 
 /// Checks an array in `data`, its first, as an inline image's color space and
 /// as one a resources dictionary names ([`ResCx::read`]): each counts what
 /// [`pdf_color::components`] counts, so an image drawn in the one ends where
-/// an image drawn in the other does, under any caps on color spaces.
+/// an image drawn in the other does, under any caps on color spaces, and is
+/// capped where its count met one. In the image, at
+/// [`Limits::space_values`] of its values it's counted so, and one under, it
+/// counts as a space that doesn't load, 3, capped.
 fn spaced(data: &[u8], limits: &Limits) {
     let Some(at) = data.iter().position(|&b| b == b'[') else {
         return;
@@ -209,7 +225,7 @@ fn spaced(data: &[u8], limits: &Limits) {
     };
     let read = pdf_color::counted(nothing, &space, &limits.color).expect("nothing to fail");
     let want = read.count.expect("a value that's no reference counts");
-    let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space } });
+    let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space.clone() } });
     let res = ResCx::read(nothing, Some(&resources), limits).expect("nothing to fail");
     let whole = ResCx::new([(b"X".to_vec(), want)]);
     assert_eq!(res.spaces, whole.spaces, "counted alike");
@@ -220,21 +236,56 @@ fn spaced(data: &[u8], limits: &Limits) {
     );
     let row = want as usize;
     let by_name = drawn(b"/X", row, &res, limits);
-    assert_eq!(by_name, (true, Some(row)), "sized by its name");
+    assert_eq!(
+        by_name,
+        (true, Some((row, read.capped))),
+        "sized by its name"
+    );
+    // Its values, as an image's array counts them, nothing built.
+    let Within::Read(_, values) =
+        Operand::new(array, 0..array.len()).object_within(limits, usize::MAX, false)
+    else {
+        panic!("an array read as an object counts its values")
+    };
     // Where the array, written as a key's value, is read as it was alone.
     let in_place = drawn(array, row, &none, limits);
-    if in_place.0 {
+    if in_place.0 && values <= limits.space_values {
         assert_eq!(in_place, by_name, "sized by its array");
+    }
+    // At its values counted so, and one under them as one that doesn't
+    // load, capped, which takes three bytes.
+    let at = |space_values| Limits {
+        space_values,
+        ..*limits
+    };
+    let wide = row.max(3);
+    let in_place = drawn(array, wide, &none, &at(values));
+    if in_place.0 {
+        assert_eq!(in_place.1, Some((row, read.capped)), "at space_values");
+        let past = drawn(array, wide, &none, &at(values - 1));
+        assert_eq!(past, (true, Some((3, true))), "past space_values");
     }
     let mut small = *limits;
     for (depth, visits) in [(0, 0), (1, 1), (2, 8)] {
         small.color.space_depth = depth;
         small.color.space_visits = visits;
         let res = ResCx::read(nothing, Some(&resources), &small).expect("nothing to fail");
+        let capped = res.capped().any(|name| name == b"X");
+        if let (_, Some((_, read))) = drawn(b"/X", wide, &res, &small) {
+            assert_eq!(read, capped, "capped by its name");
+        }
+        let by_name = drawn(b"/X", row, &res, &small);
         let in_place = drawn(array, row, &none, &small);
-        if in_place.0 {
-            let by_name = drawn(b"/X", row, &res, &small);
-            assert_eq!(in_place.1, by_name.1, "alike under small caps");
+        if in_place.0 && values <= small.space_values {
+            let counted = pdf_color::counted(nothing, &space, &small.color);
+            let counted = counted.expect("nothing to fail");
+            assert_eq!(
+                in_place.1.map(|(_, c)| c),
+                Some(counted.capped),
+                "capped in place"
+            );
+            let size = |d: Option<(usize, bool)>| d.map(|(n, _)| n);
+            assert_eq!(size(in_place.1), size(by_name.1), "alike under small caps");
         }
     }
 }
@@ -347,7 +398,9 @@ fn iso_white_space(c: u8) -> bool {
 /// what its stepper gives, driven an operation at a time ([`Balance::take`],
 /// [`stepped_marked`], [`NameSet::take`]), and each name the one its
 /// operator's category says ([`resource_typed`]); its marked ranges again
-/// under a cap of two deep. With its ranges at the top taken out, and
+/// under a cap of two deep, and under small caps on what marked content
+/// holds and the values an operand may build. With its ranges at the top
+/// taken out, and
 /// with every range and ranges across two at the top, in no order and
 /// overlapping, what it keeps is what the operations outside them give,
 /// and the names only those inside use are the rest ([`kept_by_hand`]).
@@ -386,6 +439,21 @@ pub fn passes(data: &[u8]) {
         stepped_marked(&page, &ops_shallow, &props, &shallow),
         "marked under a cap"
     );
+    // What marked content holds under small caps, the values an operand
+    // may build among them.
+    for (cap, values) in [(0, limits.values), (5, 8), (data.len() / 8, limits.values)] {
+        let small = Limits {
+            marked: cap,
+            values,
+            ..*limits
+        };
+        let ops_small: Vec<_> = page.operations(&res, &small).collect();
+        assert_eq!(
+            marked(&page, &props, &res, &small),
+            stepped_marked(&page, &ops_small, &props, &small),
+            "marked under a cap on what it holds"
+        );
+    }
 
     let Ok(found) = found else { return };
     let top: Vec<SpanAcross> = found
@@ -447,9 +515,10 @@ fn kept_by_hand(
 /// range, as deep as those open, its tag and list its operands', spanning
 /// where it starts until the `EMC` that ends it, the last open, spans it
 /// through that; nothing else opens or ends one. An `EMC` with none open,
-/// or a range opened past the cap, is an error where its operator is; a
-/// range open at the end, where the first of those starts; and the
-/// operations' own error is theirs.
+/// a range opened past the cap on depth, or one that holds more than is
+/// left of the cap on what marked content holds ([`holds`]), is an error
+/// where its operator is; a range open at the end, where the first of
+/// those starts; and the operations' own error is theirs.
 fn stepped_marked<'p>(
     page: &Concat,
     ops: &[Result<Operation, Error>],
@@ -459,6 +528,7 @@ fn stepped_marked<'p>(
     let mut nest = MarkedNest::new(props, limits);
     let mut open: Vec<usize> = Vec::new();
     let mut opened = 0;
+    let mut left = limits.marked;
     for op in ops {
         let op = op.as_ref().map_err(|e| *e)?;
         let name = op.name();
@@ -470,6 +540,10 @@ fn stepped_marked<'p>(
                 match e.kind {
                     ErrorKind::Emc => assert!(name == b"EMC" && open.is_empty()),
                     ErrorKind::Depth => assert!(opens && open.len() >= limits.depth),
+                    ErrorKind::MarkedSize => {
+                        assert!(opens && open.len() < limits.depth);
+                        assert_eq!(holds(op, left, limits), None, "past what's left");
+                    }
                     kind => panic!("{kind} stepping"),
                 }
                 return Err(e);
@@ -480,6 +554,7 @@ fn stepped_marked<'p>(
                 assert!(opens, "{name:?} opens none");
                 assert_eq!(i, opened, "the next range");
                 opened += 1;
+                left -= holds(op, left, limits).expect("within what's left");
                 let m = nest.get(i).expect("found");
                 let start = page.pos(op.range().start);
                 assert_eq!((m.span.start, m.span.end), (start, start));
@@ -527,6 +602,27 @@ fn stepped_marked<'p>(
         None => assert_eq!(done.as_ref().map(Vec::len), Ok(opened)),
     }
     done
+}
+
+/// What the range `op` opens holds of the `left` values marked content may
+/// hold yet, by hand: one, and the values reading its list counts, where
+/// it's written in the content and kept, a dictionary; None where that's
+/// past `left`, read under it, or a list past `limits.values`, where
+/// that's not the lesser, which reads as none.
+fn holds(op: &Operation, left: usize, limits: &Limits) -> Option<usize> {
+    let left = left.checked_sub(1)?;
+    let list = op
+        .arg(0)
+        .filter(|list| op.name() == b"BDC" && list.is_dict());
+    let Some(list) = list else {
+        return Some(1);
+    };
+    match list.object_within(limits, usize::MAX, true) {
+        Within::Values | Within::Cap => (limits.values <= left).then_some(1),
+        Within::Read(_, values) if values > left => None,
+        Within::Read(Some(list), values) if list.as_dict().is_some() => Some(1 + values),
+        Within::Read(..) => Some(1),
+    }
 }
 
 /// The resource `op` names is the one its operator's category says, by
@@ -717,7 +813,7 @@ enum Arg {
     Number(f32),
     Numbers(Vec<f32>),
     Name(Vec<u8>),
-    Res(ResKind, ResId),
+    Res(ResKind, Res),
     Codes(Vec<u8>),
 }
 
@@ -736,9 +832,11 @@ pub fn calls(data: &[u8]) {
     let mut input = Choices(data);
     let fonts = ["Helvetica", "Courier", "Wide"].map(|base| {
         Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base })
+            .expect("a font of names")
     });
-    let lists = ["Header", "Footer", "Watermark"]
-        .map(|subtype| Res::dict(dict! { "Type" => "Pagination", "Subtype" => subtype }));
+    let lists = ["Header", "Footer", "Watermark"].map(|subtype| {
+        Res::dict(dict! { "Type" => "Pagination", "Subtype" => subtype }).expect("a list of names")
+    });
     let alphas = [None, Some(0.0), Some(0.5), Some(1.5), Some(f32::NAN)];
     let blends = [
         None,
@@ -806,7 +904,7 @@ pub fn calls(data: &[u8]) {
                     blend: blends[input.below(blends.len())],
                 };
                 w.gstate(state);
-                want.push((b"gs", vec![Arg::Res(ResKind::ExtGState, state.res().id)]));
+                want.push((b"gs", vec![Arg::Res(ResKind::ExtGState, state.res())]));
             }
             6 => {
                 let x = input.number();
@@ -891,7 +989,7 @@ pub fn calls(data: &[u8]) {
                 let size = input.number();
                 want.push((
                     b"Tf",
-                    vec![Arg::Res(ResKind::Font, font.id), Arg::Number(size)],
+                    vec![Arg::Res(ResKind::Font, font.clone()), Arg::Number(size)],
                 ));
                 w.font(font, size);
             }
@@ -937,7 +1035,7 @@ pub fn calls(data: &[u8]) {
                     u32::from(input.byte().unwrap_or(0) % 4) + 1,
                     0,
                 ));
-                let drawn = Arg::Res(ResKind::XObject, form.id);
+                let drawn = Arg::Res(ResKind::XObject, form.clone());
                 if call % 32 == 27 {
                     w.draw(form);
                     want.push((b"Do", vec![drawn]));
@@ -958,12 +1056,11 @@ pub fn calls(data: &[u8]) {
                     want.push((b"BMC", vec![name]));
                 } else {
                     let list = lists[input.below(lists.len())].clone();
-                    let ResBody::Objects(objects) = &list.body else {
-                        unreachable!("a list is its objects")
-                    };
-                    let props = objects[0].as_dict().expect("a list").clone();
-                    want.push((b"BDC", vec![name, Arg::Res(ResKind::Properties, list.id)]));
-                    w.begin_marked(&tag, props);
+                    want.push((
+                        b"BDC",
+                        vec![name, Arg::Res(ResKind::Properties, list.clone())],
+                    ));
+                    w.begin_marked(&tag, list);
                 }
             }
             _ => {
@@ -976,15 +1073,15 @@ pub fn calls(data: &[u8]) {
     let (content, needs) = w.named(&Reserved::default());
     let shown = String::from_utf8_lossy(&content);
     // One need a resource in each category, in the order first drawn.
-    let mut drawn: Vec<(ResKind, ResId)> = Vec::new();
+    let mut drawn: Vec<(ResKind, &Res)> = Vec::new();
     for arg in want.iter().flat_map(|(_, args)| args) {
-        if let Arg::Res(kind, id) = arg
-            && !drawn.contains(&(*kind, *id))
+        if let Arg::Res(kind, res) = arg
+            && !drawn.contains(&(*kind, res))
         {
-            drawn.push((*kind, *id));
+            drawn.push((*kind, res));
         }
     }
-    let given: Vec<_> = needs.0.iter().map(|n| (n.kind, n.res.id)).collect();
+    let given: Vec<_> = needs.0.iter().map(|n| (n.kind, &n.res)).collect();
     assert_eq!(given, drawn, "a need a resource, first drawn first");
     let mut names: Vec<_> = needs.0.iter().map(|n| (n.kind, n.name.clone())).collect();
     for (_, name) in &names {
@@ -1026,10 +1123,10 @@ pub fn calls(data: &[u8]) {
                         "{read:?} for {codes:?}"
                     );
                 }
-                Arg::Res(kind, id) => {
+                Arg::Res(kind, res) => {
                     let name = operand.name().expect("a resource's name");
                     let need = need_of(*kind, &name).expect("a need's name");
-                    assert_eq!((needs.0[need].kind, needs.0[need].res.id), (*kind, *id));
+                    assert_eq!((needs.0[need].kind, &needs.0[need].res), (*kind, res));
                     assert_eq!(op.resource(), Some((*kind, name.clone())));
                     named_at.push(need);
                 }
@@ -1049,7 +1146,7 @@ pub fn calls(data: &[u8]) {
     let (bumped, again) = w.named(&bound_elsewhere(&needs));
     for (need, was) in again.0.iter().zip(&needs.0) {
         assert_ne!(need.name, was.name, "bumped past a name bound to another");
-        assert_eq!((need.kind, need.res.id), (was.kind, was.res.id));
+        assert_eq!((need.kind, &need.res), (was.kind, &was.res));
     }
     // The places are the operands that name a resource, as above: a
     // marked-content tag the input made a bumped name is none.
@@ -1086,7 +1183,256 @@ fn bound_elsewhere(needs: &ResourceNeeds) -> Reserved {
         category.push(&need.name, Object::null());
     }
     let resources = Object::from(bound);
-    Reserved::read(&|_| None, Some(&resources))
+    Reserved::read(|_| None, Some(&resources), &LIMITS)
+}
+
+/// Pairs of objects `data`'s bytes choose, the second the first written
+/// again as the input picks ([`rewritten`]): by the digest's rules alone,
+/// or with a part changed. Each pair is the same ([`same`]) exactly where
+/// their digests' bytes ([`feed`]) are, both ways, and the same where it
+/// was written again by the rules alone. As resources, [`Res::of`] refuses
+/// exactly what holds a stream whose data isn't in memory, naming the
+/// first object that does; two made by hand of each, their ids their
+/// objects', are equal exactly where the objects are the same, and so is
+/// one given the other's id. Gives how many pairs were the same, and how
+/// many apart.
+pub fn resources(data: &[u8]) -> (usize, usize) {
+    let mut input = Choices(data);
+    let (mut alike, mut apart) = (0, 0);
+    for _ in 0..4 {
+        if input.0.is_empty() {
+            break;
+        }
+        let a = chosen(&mut input, 3);
+        let (b, by_rules) = rewritten(&mut input, &a);
+        let fed_alike = fed(&a) == fed(&b);
+        assert_eq!(same(&a, &b), fed_alike, "{a:?} {b:?}");
+        assert_eq!(same(&b, &a), fed_alike, "{b:?} {a:?}");
+        assert!(same(&a, &a) && same(&b, &b), "{a:?} {b:?}");
+        assert!(
+            !by_rules || fed_alike,
+            "written again by the rules: {a:?} {b:?}"
+        );
+        *(if fed_alike { &mut alike } else { &mut apart }) += 1;
+
+        let objects = [Object::from(1), a.clone(), b.clone()];
+        let unheld = objects.iter().position(|o| !held(o));
+        match Res::of(objects.clone()) {
+            Ok(res) => {
+                assert_eq!(unheld, None, "{objects:?}");
+                assert_eq!(res.id, ResId::of(&objects));
+            }
+            Err(e) => assert_eq!(Some(e.object), unheld, "{objects:?}"),
+        }
+        let by_hand = |object: &Object, id: Option<ResId>| Res {
+            id: id.unwrap_or_else(|| ResId::of(std::slice::from_ref(object))),
+            body: ResBody::Objects(vec![object.clone()].into()),
+        };
+        let (x, y) = (by_hand(&a, None), by_hand(&b, None));
+        assert_eq!(x == y, fed_alike, "{a:?} {b:?}");
+        assert_eq!(by_hand(&b, Some(x.id)) == x, fed_alike, "{a:?} {b:?}");
+        assert_eq!(x, x.clone());
+    }
+    (alike, apart)
+}
+
+/// The bytes [`feed`] writes for `object`.
+fn fed(object: &Object) -> Vec<u8> {
+    let mut out = Vec::new();
+    feed(&mut out, object);
+    out
+}
+
+/// Whether every stream in `object`, at any depth a lookup reaches, holds
+/// its data in memory.
+fn held(object: &Object) -> bool {
+    match object.value() {
+        Value::Array(items) => items.iter().all(held),
+        Value::Dict(dict) => dict.iter().all(|(_, value)| held(value)),
+        Value::Stream(stream) => {
+            stream.data.bytes().is_some() && stream.dict.iter().all(|(_, value)| held(value))
+        }
+        _ => true,
+    }
+}
+
+/// An object `input` chooses, nested `depth` deep at most: a value of each
+/// kind and some of their edges, from a few keys, names and bytes, so that
+/// values chosen apart may be alike; a stream's data in memory, placed or
+/// neither; and some of them with where they were written.
+fn chosen(input: &mut Choices, depth: usize) -> Object {
+    let kinds = if depth == 0 { 9 } else { 12 };
+    let value = match input.below(kinds) {
+        0 => Value::Null,
+        1 => Value::Bool(input.below(2) == 1),
+        2 => Value::Integer(i64::from(input.byte().unwrap_or(0) as i8 % 3)),
+        3 => real(input).into_value(),
+        4 => Value::Name(["A", "B", "Ab"][input.below(3)].into()),
+        5 => {
+            let form = [None, Some(Form::Literal), Some(Form::Hex)][input.below(3)];
+            Value::String(Str::Bytes(input.bytes(2).to_vec()), form)
+        }
+        6 => Value::String(
+            Str::Text(String::from_utf8_lossy(input.bytes(2)).into_owned()),
+            None,
+        ),
+        7 => Value::String(Str::Encrypted(input.bytes(2).to_vec()), None),
+        8 => Value::Ref(ObjectId::new(input.below(3) as u32, input.below(2) as u16)),
+        9 => Value::Array(
+            (0..input.below(4))
+                .map(|_| chosen(input, depth - 1))
+                .collect(),
+        ),
+        10 => Value::Dict(chosen_dict(input, depth - 1)),
+        _ => {
+            let mut stream = Stream::default();
+            stream.dict = chosen_dict(input, depth - 1);
+            stream.data = match input.below(4) {
+                0 => Data::At(Span::new(None, input.below(2), 2)),
+                1 => Data::At(Span::new(Some(ObjectId::new(4, 0)), 0, 2)),
+                2 => Data::Unplaced,
+                _ => Data::Bytes(input.bytes(2).to_vec()),
+            };
+            Value::Stream(Box::new(stream))
+        }
+    };
+    let mut object = Object::new(value);
+    if input.below(4) == 0 {
+        object.at = Some(Span::new(None, 1, 2));
+    }
+    object
+}
+
+/// A real `input` chooses: an edge, an `f32` as pdf-objects holds one (the
+/// `f64` of its shortest decimal), or an `f32`'s exact `f64`.
+fn real(input: &mut Choices) -> Object {
+    match input.below(3) {
+        0 => Object::from([0.0, -0.0, 1.0, 0.3, f64::NAN][input.below(5)]),
+        1 => Object::from(input.number()),
+        _ => Object::from(f64::from(input.number())),
+    }
+}
+
+/// A dictionary of up to three entries `input` chooses, of a few keys, so
+/// that a key may be written twice.
+fn chosen_dict(input: &mut Choices, depth: usize) -> Dict {
+    let mut dict = Dict::new();
+    for _ in 0..input.below(4) {
+        dict.push(["A", "B", "C"][input.below(3)], chosen(input, depth));
+    }
+    dict
+}
+
+/// `object` written again as `input` picks, and whether by the digest's
+/// rules alone: a dictionary's entries reversed, a key written twice (its
+/// first value a stand-in), a string's form turned, where a value was
+/// written set or dropped, a real given as the `f32` it is; or with a part
+/// changed: an integer made its real, a string's bytes made text, a real's
+/// sign turned, a reference's generation, a stream's data placed or
+/// neither, an element or an entry dropped.
+fn rewritten(input: &mut Choices, object: &Object) -> (Object, bool) {
+    let mut by_rules = true;
+    let value = match object.value() {
+        Value::Array(items) => {
+            let mut items: Vec<Object> = (items.iter())
+                .map(|item| {
+                    let (item, rules) = rewritten(input, item);
+                    by_rules &= rules;
+                    item
+                })
+                .collect();
+            if input.below(8) == 0 && items.pop().is_some() {
+                by_rules = false;
+            }
+            Value::Array(items)
+        }
+        Value::Dict(dict) => {
+            let (dict, rules) = rewritten_dict(input, dict);
+            by_rules &= rules;
+            Value::Dict(dict)
+        }
+        Value::Stream(was) => {
+            let mut stream = Stream::default();
+            let (dict, rules) = rewritten_dict(input, &was.dict);
+            by_rules &= rules;
+            stream.dict = dict;
+            stream.data = match input.below(8) {
+                0 => Data::At(Span::new(None, 0, 2)),
+                1 => Data::Unplaced,
+                _ => was.data.clone(),
+            };
+            by_rules &= stream.data == was.data;
+            Value::Stream(Box::new(stream))
+        }
+        Value::String(Str::Bytes(bytes), form) => match input.below(5) {
+            0 => {
+                by_rules = false;
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                Value::String(Str::Text(text), *form)
+            }
+            1 => Value::String(Str::Bytes(bytes.clone()), Some(Form::Hex)),
+            2 => Value::String(Str::Bytes(bytes.clone()), Some(Form::Literal)),
+            3 => Value::String(Str::Bytes(bytes.clone()), None),
+            _ => Value::String(Str::Bytes(bytes.clone()), *form),
+        },
+        Value::Integer(i) if input.below(4) == 0 => {
+            by_rules = false;
+            Value::Real(*i as f64)
+        }
+        Value::Real(r) => match input.below(4) {
+            0 => {
+                by_rules = false;
+                Value::Real(-r)
+            }
+            // As an `f32` gives it: alike where it's an `f32` held so.
+            1 => {
+                let again = Object::from(*r as f32).into_value();
+                by_rules &= matches!(again, Value::Real(x) if x.to_bits() == r.to_bits());
+                again
+            }
+            _ => Value::Real(*r),
+        },
+        Value::Ref(id) if input.below(4) == 0 => {
+            by_rules = false;
+            Value::Ref(ObjectId::new(id.number, id.generation.wrapping_add(1)))
+        }
+        value => value.clone(),
+    };
+    let mut again = Object::new(value);
+    again.at = match input.below(3) {
+        0 => None,
+        1 => Some(Span::new(None, 5, 9)),
+        _ => object.at,
+    };
+    (again, by_rules)
+}
+
+/// `dict` written again as [`rewritten`] writes a value, each of its values
+/// so too, and whether by the digest's rules alone.
+fn rewritten_dict(input: &mut Choices, dict: &Dict) -> (Dict, bool) {
+    let mut by_rules = true;
+    let mut entries: Vec<(Vec<u8>, Object)> = (dict.iter())
+        .map(|(key, value)| {
+            let (value, rules) = rewritten(input, value);
+            by_rules &= rules;
+            (key.to_vec(), value)
+        })
+        .collect();
+    if input.below(2) == 0 {
+        entries.reverse();
+    }
+    if input.below(8) == 0 && entries.pop().is_some() {
+        by_rules = false;
+    }
+    let mut again = Dict::new();
+    for (key, value) in entries {
+        if input.below(4) == 0 {
+            // A stand-in, which the value after it shadows.
+            again.push(&key, chosen(input, 0));
+        }
+        again.push(key, value);
+    }
+    (again, by_rules)
 }
 
 /// What a tool might mark the property lists it writes with, its own keys:
@@ -1114,6 +1460,12 @@ const RANGES: usize = 8;
 /// without one of the keys, are refused. And the lists written again made
 /// with what `splice_each` takes out, where they're made: what's kept reads
 /// as it did, each list as it did without the keys ([`assert_made`]).
+/// Under a cap on what `splice_each`'s checks read, at what they read it's
+/// as with none, and a byte under it refused ([`SpliceError::Reads`]).
+/// With a color space of the resources counted past a cap, content that
+/// holds an image drawn in it is refused, naming the first such image,
+/// wherever a check reads as far as it, and never spliced; content that
+/// holds none is spliced as before ([`capped_spliced`]).
 /// Panics on a broken promise; returns how many splices were made and
 /// lists written again alone.
 pub fn spliced(data: &[u8]) -> usize {
@@ -1142,6 +1494,14 @@ pub fn spliced(data: &[u8]) -> usize {
     if top.len() > 1 {
         drops.push(touching(&page, &top));
     }
+    let mut capped = res.clone();
+    capped.capped.insert(b"CS3".to_vec());
+    capped_spliced(&page, &res, &capped, &drops, &groups);
+    // An image counted past a cap of its own, its array's: what's below
+    // holds where there's none.
+    if first_capped(&page, &res, limits).is_some() {
+        return 0;
+    }
     let mut made = 0;
     for drop in &drops {
         if let Ok(kept) = splice(&page, &res, limits, drop) {
@@ -1150,7 +1510,23 @@ pub fn spliced(data: &[u8]) -> usize {
         }
     }
     let read = "content marked reads";
-    let each = splice_each(&page, &res, limits, &groups).expect(read);
+    let mut spent = 0;
+    let each = crate::splice::each(&page, &res, limits, &groups, &mut spent).expect(read);
+    let at = |splice_reads| Limits {
+        splice_reads,
+        ..*limits
+    };
+    let at_cap = splice_each(&page, &res, &at(spent), &groups).expect("read at the cap");
+    assert_eq!(at_cap.taken, each.taken, "at the cap, as with none");
+    if let Some(under) = spent.checked_sub(1) {
+        let refused = splice_each(&page, &res, &at(under), &groups);
+        assert_eq!(
+            refused.map(|e| e.taken),
+            Err(SpliceError::Reads { cap: under }),
+            "past the cap"
+        );
+    }
+    assert_eq!(spent == 0, groups.is_empty(), "each check counted");
     if !groups.is_empty() {
         let takes = |cuts: &[SpanAcross]| splice(&page, &res, limits, cuts).is_ok();
         let alone: Vec<bool> = groups.iter().map(|g| takes(g)).collect();
@@ -1211,6 +1587,63 @@ pub fn spliced(data: &[u8]) -> usize {
     made
 }
 
+/// Where the first inline image `content` holds whose size was counted
+/// past a cap is, read with `res` under `limits`, as far as it reads.
+fn first_capped(content: &Concat, res: &ResCx, limits: &Limits) -> Option<SpanAcross> {
+    let mut read = content.tokens(res, limits);
+    while let Some(Ok((r, tok))) = read.next() {
+        if matches!(tok, Tok::InlineImage(_)) && read.capped() {
+            return Some(content.span(r));
+        }
+    }
+    None
+}
+
+/// `page`, read with `capped`, `res` but for a space counted past a cap:
+/// where it holds no image so sized, read under [`LIMITS`], each of `drops`
+/// is spliced, and `groups` by `splice_each`, as with `res`; where it holds
+/// one, none is: each is refused, naming the first, wherever a check reads
+/// as far as it, where with `res` it reads to the end, a splice made; and
+/// `splice_each` takes none.
+fn capped_spliced(
+    page: &Concat,
+    res: &ResCx,
+    capped: &ResCx,
+    drops: &[Vec<SpanAcross>],
+    groups: &[Vec<SpanAcross>],
+) {
+    let limits = &LIMITS;
+    let first = first_capped(page, capped, limits);
+    for drop in drops {
+        let (now, was) = (
+            splice(page, capped, limits, drop),
+            splice(page, res, limits, drop),
+        );
+        match (first, now) {
+            (Some(image), Err(SpliceError::Capped(at))) => assert_eq!(at, image),
+            (Some(_), Ok(_)) => panic!("an image capped, spliced"),
+            // Refused before the image, as with `res`.
+            (_, now) => assert_eq!(now, was, "as without the cap"),
+        }
+    }
+    let (now, was) = (
+        splice_each(page, capped, limits, groups),
+        splice_each(page, res, limits, groups),
+    );
+    match (first, now) {
+        (Some(image), Err(SpliceError::Capped(at))) => assert_eq!(at, image),
+        (Some(_), Ok(each)) => {
+            assert!(!each.taken.contains(&true), "an image capped, taken");
+            assert_eq!(
+                Ok(each.taken),
+                was.map(|e| e.taken),
+                "each refused before it"
+            );
+        }
+        (_, now) => assert_eq!(now.map(|e| e.taken), was.map(|e| e.taken)),
+    }
+}
+
 /// `spans`, in order and apart, each widened over the white-space either
 /// side of it, white-space between two split at its middle: cuts that
 /// touch, so whether one needs a space in its place depends on bytes its
@@ -1259,7 +1692,13 @@ fn seen<'a>(content: &'a Concat, res: &ResCx, what: &str) -> Vec<(Range<usize>, 
             Tok::Op(op) => Seen::Op(op),
             Tok::Operand(o) => Seen::Operand(o),
             Tok::InlineImage(data) => {
-                let image = crate::InlineImage::new(s, r.clone(), data.clone(), read.found());
+                let image = crate::InlineImage::new(
+                    s,
+                    r.clone(),
+                    data.clone(),
+                    read.found(),
+                    read.capped(),
+                );
                 let inside = |d: Range<usize>| d.start - r.start..d.end - r.start;
                 let stream = match image.stream() {
                     ImageStream::Data(kept) => ImageStream::Data(inside(kept)),
@@ -1394,7 +1833,7 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
         }
     };
 
-    let shown = |op: &Result<Operation, Error>| format!("{op:?}");
+    let shown = crate::operations::written;
     let plain: Vec<String> = content
         .operations(res, limits)
         .map(|op| shown(&op))
@@ -2463,7 +2902,8 @@ mod tests {
     #[test]
     fn a_tag_named_as_a_bumped_resource_is_none() {
         let font =
-            Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+            Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" })
+                .unwrap();
         let mut w = ContentWriter::new();
         w.font(font, 12.0);
         let (_, needs) = w.named(&Reserved::default());
@@ -2475,6 +2915,26 @@ mod tests {
         data.extend(tag);
         data.extend([19, 0, 1, 12, 0, 0, 0]);
         calls(&data);
+    }
+
+    /// Random bytes choose pairs of objects both the same and apart, so
+    /// the fuzz body's promise on resources is held at each answer: the
+    /// same where the second was written again by the digest's rules
+    /// alone, or changed back, and apart where a part was changed.
+    #[test]
+    fn resources_chosen_are_both_the_same_and_apart() {
+        let mut random = Random(0xbb67_ae85_84ca_a73b);
+        let (mut alike, mut apart) = (0, 0);
+        for _ in 0..20_000 {
+            let data: Vec<u8> = (0..random.below(96)).map(|_| random.next() as u8).collect();
+            let (a, b) = resources(&data);
+            alike += a;
+            apart += b;
+        }
+        assert!(
+            alike > 10_000 && apart > 10_000,
+            "{alike} the same, {apart} apart"
+        );
     }
 
     /// The fuzz target's checks on the seeds, each mutated many times as a

@@ -24,7 +24,9 @@ pub enum Type {
     NameOrDict,
 }
 
-/// The operands an operator takes.
+/// The operands an operator takes: what [`Operator::operands`] gives. Not
+/// [`iter::Operands`](crate::iter::Operands), an operation's operands as
+/// written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Operands {
@@ -85,6 +87,7 @@ pub enum Category {
 impl Category {
     /// The clause of ISO 32000-2 that defines its operators, as
     /// `"8.4.4"`.
+    #[must_use]
     pub const fn clause(self) -> &'static str {
         match self {
             Category::GeneralGraphicsState | Category::SpecialGraphicsState => "8.4.4",
@@ -106,6 +109,7 @@ impl Category {
     }
 
     /// Its operators.
+    #[must_use]
     pub const fn operators(self) -> Operators {
         let mut set = Operators::NONE;
         let mut i = 0;
@@ -195,6 +199,7 @@ macro_rules! operators {
 
             /// The operator named `name`, as written:
             /// [`Other`](Operator::Other) for a word that's none.
+            #[must_use]
             pub const fn of(name: &[u8]) -> Operator {
                 match name {
                     $($name => Operator::$variant,)*
@@ -203,6 +208,7 @@ macro_rules! operators {
             }
 
             /// Its name, as written: none for [`Other`](Operator::Other).
+            #[must_use]
             pub const fn name(self) -> Option<&'static str> {
                 match self {
                     $(Operator::$variant => Some(const { text($name) }),)*
@@ -212,6 +218,7 @@ macro_rules! operators {
 
             /// The operands it takes, their count and types: none for
             /// [`Other`](Operator::Other), whose are unknown.
+            #[must_use]
             pub const fn operands(self) -> Option<Operands> {
                 match self {
                     $(Operator::$variant => Some($operands),)*
@@ -221,6 +228,7 @@ macro_rules! operators {
 
             /// Its category (8.2, Table 50): none for
             /// [`Other`](Operator::Other).
+            #[must_use]
             pub const fn category(self) -> Option<Category> {
                 match self {
                     $(Operator::$variant => Some(Category::$category),)*
@@ -397,6 +405,7 @@ impl Operator {
     /// The clause of ISO 32000-2 that defines it, as `"8.4.4"`: its
     /// category's ([`Category::clause`]), none for
     /// [`Other`](Operator::Other).
+    #[must_use]
     pub const fn clause(self) -> Option<&'static str> {
         match self.category() {
             Some(category) => Some(category.clause()),
@@ -406,6 +415,7 @@ impl Operator {
 
     /// How it paints the path, where it's a path-painting operator: `F`
     /// as `f`.
+    #[must_use]
     pub const fn paint(self) -> Option<Paint> {
         Some(match self {
             Operator::Stroke => Paint::Stroke,
@@ -422,6 +432,7 @@ impl Operator {
     }
 
     /// The rule the path clips by, where it's `W` or `W*`.
+    #[must_use]
     pub const fn clip(self) -> Option<FillRule> {
         match self {
             Operator::Clip => Some(FillRule::NonZero),
@@ -432,6 +443,7 @@ impl Operator {
 
     /// Whether it builds the path a painting operator ends: path
     /// construction, and `W` and `W*`, which make it the clip too.
+    #[must_use]
     pub const fn builds_path(self) -> bool {
         matches!(
             self,
@@ -455,6 +467,10 @@ impl Operator {
 }
 
 /// What ends a path: how it's painted, if it is (8.5.3.1).
+///
+/// Exhaustive on purpose: these are ISO 32000-2's painting operators, so a
+/// match on every one is checked by the compiler; another would be a
+/// breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Paint {
     /// `f`, and `F`.
@@ -479,7 +495,8 @@ pub enum Paint {
 
 impl Paint {
     /// The rule it fills by, where it fills.
-    pub fn fills(self) -> Option<FillRule> {
+    #[must_use]
+    pub const fn fills(self) -> Option<FillRule> {
         match self {
             Paint::Fill | Paint::FillStroke | Paint::CloseFillStroke => Some(FillRule::NonZero),
             Paint::FillEvenOdd | Paint::FillStrokeEvenOdd | Paint::CloseFillStrokeEvenOdd => {
@@ -490,7 +507,8 @@ impl Paint {
     }
 
     /// Whether it strokes.
-    pub fn strokes(self) -> bool {
+    #[must_use]
+    pub const fn strokes(self) -> bool {
         matches!(
             self,
             Paint::Stroke
@@ -504,6 +522,9 @@ impl Paint {
 }
 
 /// Which rule says what's inside a path, filled or a clip (8.5.3.3).
+///
+/// Exhaustive on purpose: ISO 32000-2 has these two rules, so a match on
+/// both is checked by the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FillRule {
     /// The nonzero winding number rule.
@@ -515,7 +536,8 @@ pub enum FillRule {
 /// Operators, as a set: of any [`Operator`], [`Other`](Operator::Other)
 /// among them. A reader names those it wants this way, and each category
 /// of 8.2 is one ([`Operators::COLOR`], say), as is what each graphics
-/// object allows ([`State::allowed`](crate::State::allowed)).
+/// object allows ([`State::allowed`](crate::State::allowed)). Its
+/// operators are walked by [`iter::Operators`](crate::iter::Operators).
 ///
 /// ```
 /// use pdf_content_streams::{Operator, Operators};
@@ -526,6 +548,9 @@ pub enum FillRule {
 /// let state = wanted.intersection(Operators::GENERAL_GRAPHICS_STATE);
 /// assert_eq!(state, Operators::of(&[b"q", b"Q"]));
 /// assert_eq!(format!("{state:?}"), "{q, Q}");
+/// for op in state {
+///     assert!(op == Operator::Save || op == Operator::Restore);
+/// }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Operators(u128);
@@ -570,6 +595,7 @@ impl Operators {
 
     /// The operators named `names`, each as [`Operator::of`] tells it: a
     /// word that's none is [`Other`](Operator::Other).
+    #[must_use]
     pub const fn of(names: &[&[u8]]) -> Operators {
         let mut set = Operators::NONE;
         let mut i = 0;
@@ -581,59 +607,83 @@ impl Operators {
     }
 
     /// Whether it holds `op`.
+    #[must_use]
     pub const fn contains(self, op: Operator) -> bool {
         self.0 & op.bit() != 0
     }
 
     /// It, and `op`.
+    #[must_use]
     pub const fn with(self, op: Operator) -> Operators {
         Operators(self.0 | op.bit())
     }
 
     /// It, but `op`.
+    #[must_use]
     pub const fn without(self, op: Operator) -> Operators {
         Operators(self.0 & !op.bit())
     }
 
     /// What either holds.
+    #[must_use]
     pub const fn union(self, other: Operators) -> Operators {
         Operators(self.0 | other.0)
     }
 
     /// What both hold.
+    #[must_use]
     pub const fn intersection(self, other: Operators) -> Operators {
         Operators(self.0 & other.0)
     }
 
     /// What it holds and `other` doesn't.
+    #[must_use]
     pub const fn difference(self, other: Operators) -> Operators {
         Operators(self.0 & !other.0)
     }
 
     /// Whether it holds none.
+    #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// How many it holds.
+    #[must_use]
     pub const fn len(self) -> usize {
         self.0.count_ones() as usize
     }
 
     /// What it holds, in [`Operator::ALL`]'s order, [`Other`](Operator::Other)
     /// last.
-    pub fn iter(self) -> impl Iterator<Item = Operator> {
-        Operator::ALL
-            .iter()
-            .copied()
-            .chain([Operator::Other])
-            .filter(move |&op| self.contains(op))
+    pub const fn iter(self) -> crate::iter::Operators {
+        crate::iter::Operators::new(self)
+    }
+
+    /// Its operators, each by its bit ([`Operator::bit`]).
+    pub(crate) const fn bits(self) -> u128 {
+        self.0
+    }
+
+    /// The set of the operators whose bits `bits` holds.
+    pub(crate) const fn from_bits(bits: u128) -> Operators {
+        Operators(bits)
     }
 }
 
 impl FromIterator<Operator> for Operators {
     fn from_iter<I: IntoIterator<Item = Operator>>(ops: I) -> Operators {
         ops.into_iter().fold(Operators::NONE, Operators::with)
+    }
+}
+
+/// What it holds, as [`Operators::iter`].
+impl IntoIterator for Operators {
+    type Item = Operator;
+    type IntoIter = crate::iter::Operators;
+
+    fn into_iter(self) -> crate::iter::Operators {
+        self.iter()
     }
 }
 

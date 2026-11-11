@@ -54,6 +54,7 @@
 //! alone, not both.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::ops::Range;
 
 use memchr::memchr2;
@@ -62,11 +63,12 @@ use pdf_tokenizer::{Kind, is_white_space};
 
 use crate::operand::{STRING, WORD};
 use crate::scan::{Event, TOP, UNCAPPED, Visit, is_number, tokenizer, walk};
+use crate::unprinted::Len;
 
-/// Where faults are told: a checker keeps them; `()` drops them, and
-/// wants none, so none is looked for. A fault borrows from `'a`, the
-/// content read, so a sink can keep it as it is. A sink borrowed, `&mut
-/// S` or `&mut dyn Sink`, is a sink too.
+/// Where faults are told: a checker keeps them, as a `Vec` of each with
+/// its place does; `()` drops them, and wants none, so none is looked for.
+/// A fault borrows from `'a`, the content read, so a sink can keep it as
+/// it is. A sink borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
 ///
 /// It's this crate's own, not pdf-objects'
 /// [`fault::Sink`](pdf_objects::fault::Sink), which a reader of a file's
@@ -99,6 +101,13 @@ impl Sink<'_> for () {
     }
 }
 
+/// Keeps each fault with its place, in the order they were told.
+impl<'a> Sink<'a> for Vec<(Range<usize>, Fault<'a>)> {
+    fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
+        self.push((at, fault));
+    }
+}
+
 /// Tells the sink it borrows, and wants what it wants.
 impl<'a, S: Sink<'a> + ?Sized> Sink<'a> for &mut S {
     #[inline]
@@ -116,7 +125,11 @@ impl<'a, S: Sink<'a> + ?Sized> Sink<'a> for &mut S {
 /// by PDFium's rules: what's read is read as before, and the fault says
 /// how ISO's rules part from it. Each names its clause, and whether the
 /// clause's rule is a "shall" or a "should".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+///
+/// Its `Debug` gives what's written by its length, not its bytes, which
+/// are content; its `Display`, what a report shows, gives 40 bytes at most.
+/// A test compares two by `==`.
+#[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault<'a> {
     /// A word of digits, signs and points that isn't a number as ISO
@@ -425,9 +438,101 @@ pub enum Fault<'a> {
     },
 }
 
-/// What's written, its first 40 bytes, for a fault's text.
-fn shown(written: &[u8]) -> Cow<'_, str> {
-    String::from_utf8_lossy(&written[..written.len().min(40)])
+impl fmt::Debug for Fault<'_> {
+    /// Its kind, and what it says but what's written, which it gives by
+    /// its length.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, written) = match *self {
+            Fault::Number { written } => ("Number", written),
+            Fault::OutOfRange { written } => ("OutOfRange", written),
+            Fault::HexString { written } => ("HexString", written),
+            Fault::Name {
+                written,
+                stray,
+                nul,
+            } => {
+                return f
+                    .debug_struct("Name")
+                    .field("written", &Len(written.len()))
+                    .field("stray", &stray)
+                    .field("nul", &nul)
+                    .finish();
+            }
+            Fault::StringCr { written } => ("StringCr", written),
+            Fault::Long { written } => ("Long", written),
+            Fault::Closer { written } => ("Closer", written),
+            Fault::Brace { written } => ("Brace", written),
+            Fault::HighByte { written } => ("HighByte", written),
+            Fault::Keyword { written } => ("Keyword", written),
+            Fault::Key { written } => ("Key", written),
+            Fault::NoValue { written } => ("NoValue", written),
+            Fault::NestedArray { written } => ("NestedArray", written),
+            Fault::NoDict { written } => ("NoDict", written),
+            Fault::Across { written } => ("Across", written),
+            Fault::Trailing { count } => {
+                return f.debug_struct("Trailing").field("count", &count).finish();
+            }
+            Fault::EscapedKey { written } => ("EscapedKey", written),
+            Fault::Abbreviation { written, key } => {
+                return f
+                    .debug_struct("Abbreviation")
+                    .field("written", &Len(written.len()))
+                    .field("key", &key)
+                    .finish();
+            }
+            Fault::ImageLength { given, read } => {
+                return f
+                    .debug_struct("ImageLength")
+                    .field("given", &given)
+                    .field("read", &read)
+                    .finish();
+            }
+            Fault::AfterId => return f.write_str("AfterId"),
+            Fault::BeforeEi { written } => ("BeforeEi", written),
+            Fault::DictEnd { written } => ("DictEnd", written),
+            Fault::LoneBi { written } => ("LoneBi", written),
+        };
+        f.debug_struct(kind)
+            .field("written", &Len(written.len()))
+            .finish()
+    }
+}
+
+/// The most of what's written a fault's text shows ([`shown`]).
+const SHOWN: usize = 40;
+
+/// What's written, for a fault's text: its first 40 bytes, read as UTF-8,
+/// a byte that isn't read as U+FFFD; and where there are more, `…` after
+/// them, a character the cut would split left out before it. So a fault
+/// never shows half a character it was written with, and says where it
+/// was cut.
+pub(crate) fn shown(written: &[u8]) -> Cow<'_, str> {
+    if written.len() <= SHOWN {
+        return String::from_utf8_lossy(written);
+    }
+    let mut text = String::from_utf8_lossy(&written[..cut(written)]).into_owned();
+    text.push('…');
+    Cow::Owned(text)
+}
+
+/// Where [`shown`] cuts what's written, more than [`SHOWN`] bytes: at
+/// [`SHOWN`], or before it, where a character written with a byte past it
+/// starts. Where the bytes at the cut are no character's, it's at
+/// [`SHOWN`], and they're each U+FFFD, as everywhere else.
+fn cut(written: &[u8]) -> usize {
+    // A character the cut splits ends the first 40 bytes unfinished: what
+    // reading them as UTF-8 finds at their end, not a byte that's wrong.
+    let last = written[..SHOWN].utf8_chunks().last();
+    let Some(open) = last.map(|chunk| chunk.invalid()).filter(|i| !i.is_empty()) else {
+        return SHOWN;
+    };
+    let start = SHOWN - open.len();
+    match std::str::from_utf8(&written[start..]) {
+        // The character starts there and ends past the cut.
+        Ok(_) => start,
+        Err(e) if e.valid_up_to() > 0 => start,
+        Err(_) => SHOWN,
+    }
 }
 
 /// A byte in hex, `0x80`, for [`Fault::HighByte`]'s text.

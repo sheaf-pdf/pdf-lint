@@ -9,21 +9,25 @@
 //! be told from the content around it.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use pdf_objects::{Dict, Value};
 
 use crate::error::{Error, ErrorKind};
 use crate::inline::ResCx;
+use crate::iter;
 use crate::limits::Limits;
-use crate::operand::Operand;
+use crate::operand::{Operand, Within};
 use crate::operations::Operation;
 use crate::page::{Concat, SpanAcross};
+use crate::phases::phase;
+use crate::unprinted::Unprinted;
 
 /// The property lists named marked content names: a page's or a form's
 /// `/Resources /Properties` (14.6.2), each list under its name, decoded,
 /// without its `/`. They're the caller's to read, references resolved as
 /// it reads them: no file is read here.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Properties {
     lists: HashMap<Vec<u8>, Dict>,
 }
@@ -31,6 +35,7 @@ pub struct Properties {
 impl Properties {
     /// The lists given, each under its name; of a name given twice, the
     /// last list.
+    #[must_use]
     pub fn new(lists: impl IntoIterator<Item = (Vec<u8>, Dict)>) -> Properties {
         Properties {
             lists: lists.into_iter().collect(),
@@ -38,18 +43,46 @@ impl Properties {
     }
 
     /// The list named `name`.
+    #[must_use]
     pub fn get(&self, name: &[u8]) -> Option<&Dict> {
         self.lists.get(name)
     }
 
     /// Every list, in no order.
-    pub fn lists(&self) -> impl Iterator<Item = &Dict> {
-        self.lists.values()
+    pub fn lists(&self) -> iter::Lists<'_> {
+        iter::Lists::new(self.lists.values())
+    }
+}
+
+/// Each list under its name, its strings and a stream's data in memory by
+/// their length, as they may be a page's text.
+impl fmt::Debug for Properties {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lists = (self.lists.iter()).map(|(name, list)| (name, Unprinted(list)));
+        let lists = DebugMap(lists.collect());
+        f.debug_struct("Properties").field("lists", &lists).finish()
+    }
+}
+
+/// Pairs as a map, in the order given.
+struct DebugMap<K, V>(Vec<(K, V)>);
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for DebugMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.iter().map(|(k, v)| (k, v)))
+            .finish()
     }
 }
 
 /// A marked range's property list.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Exhaustive on purpose: a list is written in the content or named in the
+/// resources (14.6.2), so a match on both is checked by the compiler.
+///
+/// Its `Debug` gives a list's strings and a stream's data in memory by
+/// their length, as they may be a page's text.
+#[derive(Clone, PartialEq)]
 pub enum Props<'p> {
     /// Written in the content: `/Tag << … >> BDC`.
     Inline(Dict),
@@ -59,9 +92,22 @@ pub enum Props<'p> {
     Named(Vec<u8>, Option<&'p Dict>),
 }
 
+impl fmt::Debug for Props<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Props::Inline(dict) => f.debug_tuple("Inline").field(&Unprinted(dict)).finish(),
+            Props::Named(name, dict) => (f.debug_tuple("Named"))
+                .field(name)
+                .field(&dict.map(Unprinted))
+                .finish(),
+        }
+    }
+}
+
 impl Props<'_> {
     /// The list itself, wherever it's written.
-    pub fn dict(&self) -> Option<&Dict> {
+    #[must_use]
+    pub const fn dict(&self) -> Option<&Dict> {
         match self {
             Props::Inline(dict) => Some(dict),
             Props::Named(_, dict) => *dict,
@@ -109,12 +155,24 @@ pub struct Marked<'p> {
 /// assert!(list.get(b"Subtype").is_some());
 /// assert_eq!((&found[1].tag[..], found[1].depth), (&b"Span"[..], 1));
 /// ```
+///
+/// # Errors
+///
+/// The [`Error`] that stops its operations, or that [`MarkedNest::step`] or
+/// [`MarkedNest::done`] gives: an `EMC` that ends none, a range past
+/// [`Limits::depth`] or [`Limits::marked`], or one still open at the end.
 pub fn marked<'p>(
     content: &Concat,
     props: &'p Properties,
     res: &ResCx,
     limits: &Limits,
 ) -> Result<Vec<Marked<'p>>, Error> {
+    phase!(
+        DEBUG,
+        "marked",
+        len = content.bytes().len(),
+        streams = content.stream_count(),
+    );
     let mut nest = MarkedNest::new(props, limits);
     for op in content.operations(res, limits) {
         nest.step(content, &op?)?;
@@ -156,10 +214,15 @@ pub struct MarkedNest<'p> {
     /// Each range open: where it is in `found`, and where it starts.
     open: Vec<(usize, usize)>,
     found: Vec<Marked<'p>>,
+    /// The values those found may hold yet ([`Limits::marked`]).
+    left: usize,
 }
 
 /// What an operation did to marked content: the range it opened or
 /// ended, by its index among those found ([`MarkedNest::get`]).
+///
+/// Exhaustive on purpose: an operation opens a range or ends one, so a
+/// match on both is checked by the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MarkedEvent {
     /// A `BMC` or `BDC` opened it.
@@ -171,13 +234,16 @@ pub enum MarkedEvent {
 impl<'p> MarkedNest<'p> {
     /// None open and none found yet, named lists to be looked up in
     /// `props`, ranges nested up to [`Limits::depth`] deep, and property
-    /// lists read under `limits`.
-    pub fn new(props: &'p Properties, limits: &Limits) -> MarkedNest<'p> {
+    /// lists read under `limits`, those found holding up to
+    /// [`Limits::marked`] values.
+    #[must_use]
+    pub const fn new(props: &'p Properties, limits: &Limits) -> MarkedNest<'p> {
         MarkedNest {
             props,
             limits: *limits,
             open: Vec::new(),
             found: Vec::new(),
+            left: limits.marked,
         }
     }
 
@@ -185,8 +251,18 @@ impl<'p> MarkedNest<'p> {
     /// `content`: a range opened by a `BMC` or `BDC`, its span from its
     /// first operand and, until its `EMC`, empty; or ended by an `EMC`,
     /// its span then through it. An error for an `EMC` with none open
-    /// ([`ErrorKind::Emc`]), or a range opened past [`Limits::depth`]
-    /// ([`ErrorKind::Depth`]), where its operator is.
+    /// ([`ErrorKind::Emc`]), a range opened past [`Limits::depth`]
+    /// ([`ErrorKind::Depth`]), or one that, with its property list, would
+    /// hold more than is left of [`Limits::marked`]
+    /// ([`ErrorKind::MarkedSize`]): each range is one value, and a list
+    /// written in the content the values reading it built, read under
+    /// what's left, so a list past it is read no further; the error is
+    /// where its operator is.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Emc`], [`ErrorKind::Depth`] or [`ErrorKind::MarkedSize`],
+    /// where `op` is, as above.
     pub fn step(&mut self, content: &Concat, op: &Operation) -> Result<Option<MarkedEvent>, Error> {
         let at = op.at();
         let name = op.name();
@@ -207,10 +283,21 @@ impl<'p> MarkedNest<'p> {
                 kind: ErrorKind::Depth,
             });
         }
-        let (tag, props) = match name {
-            b"BDC" => (op.arg(1), op.arg(0).and_then(|p| self.props(&p))),
+        let past = Error {
+            at: at.start,
+            kind: ErrorKind::MarkedSize,
+        };
+        let mut left = self.left.checked_sub(1).ok_or(past)?;
+        let (tag, props) = match (name, op.arg(0)) {
+            (b"BDC", Some(list)) => {
+                let (props, held) = self.props(&list, left).ok_or(past)?;
+                left -= held;
+                (op.arg(1), props)
+            }
+            (b"BDC", None) => (op.arg(1), None),
             _ => (op.arg(0), None),
         };
+        self.left = left;
         let start = op.range().start;
         let index = self.found.len();
         self.found.push(Marked {
@@ -226,20 +313,31 @@ impl<'p> MarkedNest<'p> {
         Ok(Some(MarkedEvent::Opened(index)))
     }
 
-    /// A `BDC`'s list, `operand` as written.
-    fn props(&self, operand: &Operand) -> Option<Props<'p>> {
+    /// A `BDC`'s list, `operand` as written, and the values it holds of
+    /// those `left`: a list written in the content read under them, the
+    /// values reading it built, and None where it's past them. Only what
+    /// opens a dictionary reads as one, so nothing else is read.
+    fn props(&self, operand: &Operand, left: usize) -> Option<(Option<Props<'p>>, usize)> {
         if let Some(name) = operand.name() {
             let list = self.props.get(&name);
-            return Some(Props::Named(name.into_owned(), list));
+            return Some((Some(Props::Named(name.into_owned(), list)), 0));
         }
-        match operand.object(&self.limits)?.into_value() {
-            Value::Dict(dict) => Some(Props::Inline(dict)),
-            _ => None,
+        if !operand.is_dict() {
+            return Some((None, 0));
+        }
+        match operand.object_within(&self.limits, left, true) {
+            Within::Read(Some(object), held) => match object.into_value() {
+                Value::Dict(dict) => Some((Some(Props::Inline(dict)), held)),
+                _ => Some((None, 0)),
+            },
+            Within::Read(None, _) | Within::Values => Some((None, 0)),
+            Within::Cap => None,
         }
     }
 
     /// The range at `index` among those found, in the order they open:
     /// one still open spans its start alone.
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&Marked<'p>> {
         self.found.get(index)
     }
@@ -248,13 +346,18 @@ impl<'p> MarkedNest<'p> {
     /// ([`get`](MarkedNest::get)), the outermost first: at content's end,
     /// those it leaves open, which [`done`](MarkedNest::done) gives the
     /// first of.
-    pub fn open(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
-        self.open.iter().map(|&(index, _)| index)
+    pub fn open(&self) -> iter::Open<'_> {
+        iter::Open::new(&self.open)
     }
 
     /// Every range found, once content has ended; an error when one is
     /// still open ([`ErrorKind::Marked`]), where the first of those
     /// starts.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Marked`] where a range is still open, where the first of
+    /// those starts.
     pub fn done(self) -> Result<Vec<Marked<'p>>, Error> {
         match self.open.first() {
             Some(&(_, start)) => Err(Error {

@@ -5,14 +5,16 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::ops::Range;
+use std::ops::{Bound, Range};
 
 use crate::balance::Balance;
 use crate::error::Error;
 use crate::inline::{ResCx, expanded};
+use crate::iter;
 use crate::limits::Limits;
 use crate::operations::Operation;
 use crate::page::{Concat, SpanAcross};
+use crate::phases::phase;
 
 /// A resource category: a key of `/Resources` (7.8.3, Table 34) whose
 /// dictionary maps the names content uses to what they name.
@@ -48,7 +50,8 @@ impl ResKind {
     ];
 
     /// Its key in `/Resources`.
-    pub fn key(self) -> &'static [u8] {
+    #[must_use]
+    pub const fn key(self) -> &'static [u8] {
         match self {
             ResKind::ColorSpace => b"ColorSpace",
             ResKind::ExtGState => b"ExtGState",
@@ -73,31 +76,36 @@ pub struct NameSet {
 
 impl NameSet {
     /// Whether `name`, decoded, without its `/`, is among those of `kind`.
+    #[must_use]
     pub fn contains(&self, kind: ResKind, name: &[u8]) -> bool {
         self.names.contains(&(kind, name.to_vec()))
     }
 
     /// The names of `kind`, in order.
-    pub fn of(&self, kind: ResKind) -> impl Iterator<Item = &[u8]> {
-        self.names
-            .range((kind, Vec::new())..)
-            .take_while(move |(k, _)| *k == kind)
-            .map(|(_, name)| name.as_slice())
+    pub fn of(&self, kind: ResKind) -> iter::NamesOf<'_> {
+        // From the category's first name to the next category's, which
+        // `ALL` has in order.
+        let start = Bound::Included((kind, Vec::new()));
+        let end = match ResKind::ALL.iter().find(|&&next| next > kind) {
+            Some(&next) => Bound::Excluded((next, Vec::new())),
+            None => Bound::Unbounded,
+        };
+        iter::NamesOf::new(self.names.range((start, end)))
     }
 
     /// Every name, each in its category, in order.
-    pub fn iter(&self) -> impl Iterator<Item = (ResKind, &[u8])> {
-        self.names
-            .iter()
-            .map(|(kind, name)| (*kind, name.as_slice()))
+    pub fn iter(&self) -> iter::Names<'_> {
+        iter::Names::new(self.names.iter())
     }
 
     /// How many names there are, each category's counted.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
     /// Whether there are none.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
@@ -113,6 +121,16 @@ impl NameSet {
         if let Some((kind, name)) = op.resource() {
             self.names.insert((kind, name.into_owned()));
         }
+    }
+}
+
+/// Every name, each in its category, in order, as [`NameSet::iter`].
+impl<'s> IntoIterator for &'s NameSet {
+    type Item = (ResKind, &'s [u8]);
+    type IntoIter = iter::Names<'s>;
+
+    fn into_iter(self) -> iter::Names<'s> {
+        self.iter()
     }
 }
 
@@ -143,6 +161,7 @@ impl<'a> Operation<'a> {
     /// assert_eq!(named[1], None);
     /// assert_eq!(named[2], Some((ResKind::XObject, b"Im 1"[..].into())));
     /// ```
+    #[must_use]
     pub fn resource(&self) -> Option<(ResKind, Cow<'a, [u8]>)> {
         let name = |i| self.arg(i).and_then(|o| o.name());
         let (kind, name) = match self.name() {
@@ -201,18 +220,29 @@ impl<'a> Operation<'a> {
 /// assert_eq!(fonts, [b"F1"]);
 /// assert!(names.contains(ResKind::ExtGState, b"GS0"));
 /// ```
+///
+/// # Errors
+///
+/// The [`Error`] that stops its operations.
 pub fn names_used(
     content: &Concat,
     res: &ResCx,
     limits: &Limits,
     except: &[SpanAcross],
 ) -> Result<NameSet, Error> {
+    phase!(
+        DEBUG,
+        "names_used",
+        len = content.bytes().len(),
+        streams = content.stream_count(),
+        ranges = except.len(),
+    );
     Ok(kept(content, res, limits, except)?.names)
 }
 
 /// What's left of content once ranges are taken out, read in one pass
 /// ([`kept`]).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Kept {
     /// How its `q`s and `Q`s balance.
@@ -228,12 +258,23 @@ pub struct Kept {
 /// once the operations inside `drop` (ranges to be taken out, whole
 /// streams among them) are taken out: an operation is inside a range when
 /// everything from its first operand to its operator is.
+///
+/// # Errors
+///
+/// The [`Error`] that stops its operations.
 pub fn kept(
     content: &Concat,
     res: &ResCx,
     limits: &Limits,
     drop: &[SpanAcross],
 ) -> Result<Kept, Error> {
+    phase!(
+        DEBUG,
+        "kept",
+        len = content.bytes().len(),
+        streams = content.stream_count(),
+        ranges = drop.len(),
+    );
     let drop = Dropped::new(drop.iter().filter_map(|&s| content.offsets(s)));
     let mut kept = Kept::default();
     let mut inside = NameSet::default();

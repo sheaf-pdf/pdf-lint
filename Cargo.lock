@@ -684,8 +684,9 @@ dependencies = [
 
 [[package]]
 name = "pdf-content-streams"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
+ "criterion",
  "hayro-ccitt",
  "memchr",
  "pdf-color",
@@ -694,6 +695,7 @@ dependencies = [
  "pdf-tokenizer",
  "thiserror",
  "tinyvec",
+ "tracing",
  "twox-hash",
  "zune-jpeg",
 ]
@@ -720,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-filters"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "criterion",
  "miniz_oxide",

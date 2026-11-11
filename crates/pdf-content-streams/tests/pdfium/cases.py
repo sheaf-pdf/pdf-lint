@@ -844,6 +844,48 @@ image("lzw-full", LZ, lzw(FILL + [A, 300, 4095, 257]))
 image("lzw-full-0", LZ + b" /DP << /EarlyChange 0 >>", lzw(FILL + [A, 300, 4095, 257], early=False))
 image("lzw-png-columns-0", LZ + b" /DP << /Predictor 12 /Columns 0 >>", lzw([256, A, B, 258, 257]))
 
+# Read on past a code past the table's next entry, but the first since a
+# clear code, as PDFium's decoder reads it, as that entry: past it by one
+# and by many, then 257; twice in a row, where a code from 258 on after
+# one is the last read; twice, bytes between; the entry the code after it
+# makes, which holds it, read while it's still past the table, and while
+# it's that entry's own, a run of 4,000 bytes; at the 9-to-10-bit change,
+# with and without early change; after a full table and a clear code; at
+# the start, no clear code first.
+C = 67
+BYTES = [(i * 37) % 251 + 1 for i in range(253)]
+for name, codes in [
+        ("lzw-past-by-one", [256, A, B, 260, 257]),
+        ("lzw-past-by-many", [256, A, B, 511, A, 257]),
+        ("lzw-past-twice-in-a-row", [256, A, B, 300, 301, 257]),
+        ("lzw-past-twice", [256, A, B, 300, A, 300, 257]),
+        ("lzw-past-entry-after", [256, A, B, 300, C, 260, 257]),
+        ("lzw-past-entry-run", [256, A, B, 260, C, 260, 257]),
+        ("lzw-past-at-10-bits", [256] + BYTES + [511, A, 257]),
+        ("lzw-past-after-full", FILL + [256, A, B, 300, 257]),
+        ("lzw-past-at-start", [A, B, 300, A, 257])]:
+    image(name, LZ, lzw(codes))
+image("lzw-past-at-10-bits-0", LZ + b" /DP << /EarlyChange 0 >>", lzw([256] + BYTES + [511, A, 257], early=False))
+image("lzw-past-after-full-0", LZ + b" /DP << /EarlyChange 0 >>", lzw(FILL + [256, A, B, 300, 257], early=False))
+# Predictors PDFium refuses behind LZW and Flate, rows of no bits: TIFF's
+# with no columns or colors, PNG's of no bits a sample; one it doesn't, of
+# 3 bits a sample, which PDFium undoes and this crate's predictor doesn't,
+# the data's end PDFium's all the same; PNG's behind LZW data that decodes
+# to nothing, which PDFium's decoder refuses first.
+image("lzw-tiff-columns-0", LZ + b" /DP << /Predictor 2 /Columns 0 >>", lzw([256, A, B, 258, 257]))
+image("lzw-png-bpc-0", LZ + b" /DP << /Predictor 12 /BitsPerComponent 0 >>", lzw([256, A, B, 258, 257]))
+image("fl-tiff-colors-0", FL + b" /DP << /Predictor 2 /Colors 0 >>", SIX)
+image("fl-png-bpc-3", FL + b" /DP << /Predictor 12 /BitsPerComponent 3 /Columns 2 >>", SIX)
+image("lzw-tiff-bpc-3", LZ + b" /DP << /Predictor 2 /BitsPerComponent 3 /Columns 2 >>", lzw([256, A, B, 258, 257]))
+image("lzw-png-nothing", LZ + b" /DP << /Predictor 12 >>", lzw([256, 257]))
+# One byte of data under TIFF's predictor on rows of 2^31 - 8 one-bit
+# samples, then a Flate image: both read, and the path after them, the
+# first's end where its decoder stops, whatever its rows would hold.
+WIDE = b" /DP << /Predictor 2 /Columns 2147483640 /BitsPerComponent 1 >>"
+THEN = b" EI BI " + FL + b" ID " + zlib_data(stored(b"xyz"), b"xyz") + b" EI" + P
+image("fl-tiff-wide-then-fl", FL + WIDE, zlib_data(stored(b"\x01"), b"\x01"), THEN)
+image("lzw-tiff-wide-then-fl", LZ + WIDE, lzw([256, 1, 257]), THEN)
+
 # An end with no `EI` after it: no stream, read on from the data's start,
 # for each filter whose end a decoder finds (a JPEG's by its end of image
 # here, PDFium refusing this one).
@@ -854,6 +896,10 @@ image("rl-end-no-EI", G + b" /F /RL", b"\x04 EI 0\x80", P)
 image("dct-end-no-EI", G + b" /F /DCT", b"\xff\xd8 EI 0 0 m 9 9 l S \xff\xd9", P)
 image("fl-end-no-EI", FL, zlib_data(stored(IN), IN), P)
 image("lzw-end-no-EI", LZ, lzw([256, A, B, 257]), P)
+# LZW data whose codes' bits hold ` EI ` (97 97 4 169 72 97 97, nine bits
+# each, after the clear code), its end with no `EI` after it: read on from
+# its start, to that `EI`.
+image("lzw-end-no-EI-in-data", LZ, lzw([256, 97, 97, 4, 169, 72, 97, 97, 257]), P)
 
 
 class Msb:
@@ -1012,6 +1058,11 @@ jpeg_image("dct-cut-at-content-end", G8, jpeg(8, 8, [(5, [3, -2, 1])], before=CO
 J16 = jpeg(16, 16, [(i * 3 - 5, [i, -i, 2]) for i in range(4)], before=COMMENT)
 cut = J16.index(b"\xff\xda") + 10 + 2
 jpeg_image("dct-cut-in-codes-at-content-end", b"/W 16 /H 16 /BPC 8 /CS /G /F /DCT", J16[:cut] + b"\xfe\xfe", b"")
+# The same, its last two bytes a marker's, a table's (FF C4) and a scan's
+# (FF DA), which a decoder reading them reads on into as a segment's: PDFium
+# reads an end of image in their place, and so must the decoder here.
+for name, last in [("ffc4", b"\xff\xc4"), ("ffda", b"\xff\xda")]:
+    jpeg_image("dct-cut-in-codes-at-content-end-" + name, b"/W 16 /H 16 /BPC 8 /CS /G /F /DCT", J16[:cut] + last, b"")
 jpeg_image("dct-cut-header", G8, J8[:40])
 jpeg_image("dct-no-eoi", G8, J8[:-2])
 jpeg_image("dct-no-eoi-long", G8, J8[:-2], T + LONG_TAIL)

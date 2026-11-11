@@ -14,7 +14,7 @@ categories = ["parser-implementations", "text-processing"]
 include = ["/src", "/assets", "/FTL.TXT", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-pdf-content-streams = { path = "../pdf-content-streams", version = "0.1" }
+pdf-content-streams.workspace = true
 pdf-objects.workspace = true
 thiserror = "2"
 # With `predefined-cmaps`: Adobe's predefined CMaps, from its bundle alone,
