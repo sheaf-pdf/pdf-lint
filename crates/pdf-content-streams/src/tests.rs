@@ -6237,6 +6237,30 @@ fn marked_content_holds_no_more_than_its_cap() {
         assert_eq!(read(alone, 1), Ok(1), "{}", alone.escape_ascii());
         assert!(matches!(read(alone, 0), Err(e) if e.kind == ErrorKind::MarkedSize));
     }
+    // Where `values` is what's left, a list past both reads as none, as
+    // past `values` alone, its range kept.
+    let tied = Limits {
+        marked: 3,
+        values: 2,
+        ..*LIM
+    };
+    let found = crate::marked(&Concat::new(&[listed]), &props, &ResCx::none(), &tied).unwrap();
+    assert_eq!((found.len(), &found[0].props), (1, &None));
+    // Past both `depth` and the cap, the depth is what's said.
+    let both = Limits {
+        depth: 1,
+        marked: 1,
+        ..*LIM
+    };
+    let nested: &[u8] = b"/A BMC /B BMC EMC EMC";
+    let found = crate::marked(&Concat::new(&[nested]), &props, &ResCx::none(), &both);
+    assert_eq!(
+        found.map(|found| found.len()),
+        Err(Error {
+            at: 10,
+            kind: ErrorKind::Depth
+        })
+    );
     // Under the default, the words.
     assert_eq!(read(three, LIM.marked), Ok(3));
     assert_eq!(
@@ -6744,6 +6768,12 @@ fn a_faults_text_is_cut_at_a_character_and_marked() {
         assert!(lossy.ends_with('\u{FFFD}'), "{bad:?}");
         assert_eq!(shown(&bad), format!("{lossy}…"), "{bad:?}");
     }
+    // A character across the cut, then a byte that's no character's: the
+    // character is left out all the same.
+    let mut euro = a(38).into_bytes();
+    euro.extend_from_slice("€".as_bytes());
+    euro.push(0xFF);
+    assert_eq!(shown(&euro), format!("{}…", a(38)));
     // Shorter than 40, a byte that's no character's: as before.
     assert_eq!(shown(b"a\xFFb"), "a\u{FFFD}b");
 

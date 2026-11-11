@@ -905,6 +905,21 @@ fn splice_each_reads_no_more_than_its_cap() {
         assert_eq!(refused.map(|e| e.taken), Err(SpliceError::Reads { cap }));
         assert_eq!(readings(), [], "no reading under {cap}");
     }
+    // Across two streams alike, a range among them from one into the next:
+    // what each check reads is what's spent.
+    let streams: [&[u8]; 2] = [
+        b"/A BMC 1 0 0 rg EMC /B BMC",
+        b"EMC /C BMC EMC 0 0 9 9 re f",
+    ];
+    let two = Concat::new(&streams);
+    let groups: Vec<Vec<SpanAcross>> = ranges(&two).into_iter().map(|r| vec![r]).collect();
+    assert_eq!(groups.len(), 3);
+    readings();
+    let mut spent = 0;
+    each(&two, &none, LIM, &groups, &mut spent).unwrap();
+    let read = readings();
+    assert!(!read.is_empty());
+    assert_eq!(read.iter().sum::<usize>() as u64, spent);
     assert_eq!(
         SpliceError::Reads { cap: 7 }.to_string(),
         "checking what to take out would read more than 7 bytes"

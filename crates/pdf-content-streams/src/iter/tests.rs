@@ -1,7 +1,8 @@
 //! Each named iterator walked to its end by `next` and by `fold`, and
 //! from the back by `next_back` and `rfold` where it walks from either
 //! end, alike, its hints holding what it gives; and walked by `next` past
-//! its end, none more.
+//! its end, none more. Those whose walk knows how many are left give it
+//! exactly in their hints.
 
 use std::fmt::Debug;
 use std::iter::FusedIterator;
@@ -38,6 +39,22 @@ where
     assert_eq!(by_next, by_fold, "{iter:?}");
     assert_eq!(iter.count(), by_next.len());
     by_next
+}
+
+/// `iter`'s hints exact at every step, as the walk it forwards knows how
+/// many are left: a hint of its own would be valid, and not exact.
+fn hinted_exactly<I>(iter: I)
+where
+    I: Iterator + Clone + Debug,
+{
+    let mut stepped = iter.clone();
+    loop {
+        let left = stepped.clone().count();
+        assert_eq!(stepped.size_hint(), (left, Some(left)), "{iter:?}");
+        if stepped.next().is_none() {
+            break;
+        }
+    }
 }
 
 /// What `iter` gives from the back, by `next_back` and by `rfold`, alike,
@@ -145,6 +162,7 @@ fn capped_names_walk_alike() {
     let res = ResCx::read(nothing, Some(&resources), &limits).unwrap();
     let names = walked(res.capped());
     assert_eq!(names, [&b"CS0"[..], b"CS2", b"CS3"]);
+    hinted_exactly(res.capped());
     assert_eq!(walked(ResCx::none().capped()), Vec::<&[u8]>::new());
 }
 
@@ -159,6 +177,7 @@ fn names_walk_alike_by_category() {
     let names = names_used(&page, &ResCx::none(), &Limits::DEFAULT, &[]).unwrap();
     let every = walked(names.iter());
     assert_eq!(every.len(), names.len());
+    hinted_exactly(names.iter());
     let mut kinds = 0;
     for &kind in ResKind::ALL {
         let of = walked(names.of(kind));
@@ -178,6 +197,7 @@ fn names_walk_alike_by_category() {
 fn property_lists_walk_alike() {
     let lists = (0..5).map(|i| (format!("P{i}").into_bytes(), dict! { "MCID" => i }));
     let props = Properties::new(lists);
+    hinted_exactly(props.lists());
     let mut given: Vec<_> = (walked(props.lists()).into_iter())
         .map(|d| d.get(b"MCID").and_then(Object::as_integer))
         .collect();
@@ -212,6 +232,7 @@ fn reserved_names_walk_alike() {
     let nothing = |_: ObjectId| None;
     let reserved = Reserved::read(nothing, Some(&resources), &Limits::DEFAULT);
     let names = walked(reserved.names());
+    hinted_exactly(reserved.names());
     let want = [
         (ResKind::ExtGState, &b"GS0"[..]),
         (ResKind::Font, b"F1"),
