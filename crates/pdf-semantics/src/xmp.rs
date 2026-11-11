@@ -38,6 +38,7 @@ use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::name::{LocalName, Namespace, NamespaceError, ResolveResult};
 
+use crate::phases::phase;
 use crate::{Fault, HOPS, Limits, too_long};
 
 #[cfg(test)]
@@ -167,6 +168,12 @@ impl Claims {
     /// letter for a level. A level without a part is no PDF/A claim, though
     /// it's read. Any that says neither is an error here, where `Claims`
     /// still has the others.
+    ///
+    /// # Errors
+    ///
+    /// The first [`ClaimError`] of PDF/A's part, its level and PDF/UA's part,
+    /// in that order: [`ClaimError::Part`] for a part that isn't a number,
+    /// [`ClaimError::Level`] for a level that isn't one letter.
     pub fn conformance(&self) -> Result<Conformance, ClaimError> {
         let number = |claim, value: &Option<String>| {
             (value.as_deref())
@@ -224,6 +231,7 @@ pub struct PdfA {
 
 impl PdfA {
     /// The claim of `part` and `level`, which is taken to upper case.
+    #[must_use]
     pub fn new(part: u32, level: Option<char>) -> PdfA {
         PdfA {
             part,
@@ -253,6 +261,7 @@ pub struct PdfUa {
 
 impl PdfUa {
     /// The claim of `part`.
+    #[must_use]
     pub const fn new(part: u32) -> PdfUa {
         PdfUa { part }
     }
@@ -374,10 +383,18 @@ struct Open {
 /// - [`Fault::XmpMixed`]: a claim's element holding an element beside text
 ///   of its own, from its start tag to its end tag.
 ///
-/// An error ([`Error`]) holds what was read before it. A packet may end
-/// with elements still open, and an element's value counts once it closes:
-/// one left open, at the end or where an error stops the read, is neither
-/// taken nor told.
+/// A packet may end with elements still open, and an element's value counts
+/// once it closes: one left open, at the end or where an error stops the
+/// read, is neither taken nor told.
+///
+/// # Errors
+///
+/// An [`Error`] holding what was read before it and where it stopped:
+/// [`XmpWhy::TooLong`] for a packet past [`Limits::xmp_bytes`], read as far
+/// as that; [`XmpWhy::TooDeep`] for an element below [`Limits::xmp_depth`]
+/// levels; [`XmpWhy::TooManyBindings`] for more namespaces bound at once
+/// than [`Limits::xmp_bindings`]; and [`XmpWhy::Xml`] for what isn't XML,
+/// in the XML reader's words.
 // A packet's read once a file, and its error holds what's read.
 #[allow(clippy::result_large_err)]
 pub fn read<S: Sink<Fault> + ?Sized>(
@@ -386,6 +403,7 @@ pub fn read<S: Sink<Fault> + ?Sized>(
     limits: &Limits,
     sink: &mut S,
 ) -> Result<Claims, Error> {
+    phase!(DEBUG, "read", bytes = xml.len());
     read_as(xml, stream, limits, sink, false)
 }
 
@@ -629,6 +647,11 @@ fn tell<S: Sink<Fault> + ?Sized>(
 /// decoded data is the file's packet: none where there's no `/Metadata`, or it
 /// leads to no stream. An object on the way that doesn't read says why, so a
 /// failed read doesn't look like a file with no metadata.
+///
+/// # Errors
+///
+/// The resolver's [`Unreadable`] for an object on the way that doesn't read,
+/// and one of [`Why::Capped`] for a chain of 32 references or more.
 pub fn metadata_stream<'o, R: Resolve<'o>>(
     objects: R,
     catalog: &'o Dict,
@@ -711,6 +734,7 @@ pub fn read_from<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
     limits: &Limits,
     sink: &mut S,
 ) -> Result<Option<Claims>, Error> {
+    phase!(DEBUG, "read_from");
     let unread = |why| Error {
         read: Claims::default(),
         at: 0,

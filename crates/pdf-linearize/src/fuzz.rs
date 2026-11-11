@@ -1614,12 +1614,7 @@ fn written_back<S: pdf_structure::ByteSource>(
         "{findings:?}"
     );
     for page in &listed {
-        for attribute in [
-            Inheritable::Resources,
-            Inheritable::MediaBox,
-            Inheritable::CropBox,
-            Inheritable::Rotate,
-        ] {
+        for attribute in Inheritable::ALL {
             if let Some(attribute) = page.attribute(attribute) {
                 assert_eq!(attribute.origin, Origin::Own, "it's pushed down");
             }

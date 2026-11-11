@@ -34,6 +34,13 @@
 //! page tree is walked by (`pdf_semantics::pdf_objects::pdf_tokenizer::Rules`).
 //! Text strings (7.9.2.2) are its [`text`](pdf_objects::text) module's, read
 //! by ISO's rules or PDFium's and written.
+//!
+//! With the `tracing` feature, off by default, a page tree walked or counted
+//! ([`pages::pages`], [`pages::counted`]), a packet read ([`xmp::read`], and
+//! [`xmp::read_from`] around it) and a page tree written ([`pages::write`])
+//! each run in a span, at `debug`, its fields numbers alone. A name or number
+//! tree's walk has none, as its loop is the caller's. Without it, none is
+//! compiled.
 
 pub use pdf_objects;
 
@@ -49,6 +56,7 @@ mod fault;
 pub mod fuzz;
 mod limits;
 pub mod pages;
+mod phases;
 pub mod tree;
 pub mod xmp;
 
@@ -56,9 +64,13 @@ pub mod xmp;
 const HOPS: usize = 32;
 
 /// `value` with its references followed: none for null, or for a reference
-/// to an object the file hasn't, which is null (ISO 32000-2, 7.3.10). An
-/// object that doesn't read gives the resolver's [`Unreadable`], and a chain
-/// of 32 references or more, which a loop of them is, one of [`Why::Capped`].
+/// to an object the file hasn't, which is null (ISO 32000-2, 7.3.10).
+///
+/// # Errors
+///
+/// The resolver's [`Unreadable`] for an object that doesn't read, and one of
+/// [`Why::Capped`] for a chain of 32 references or more, which a loop of them
+/// is.
 pub fn follow<'o, R: Resolve<'o>>(
     objects: R,
     value: &'o Object,
@@ -98,6 +110,10 @@ fn too_long(last: ObjectId) -> Unreadable {
 /// none where there's no `/Root`, or it isn't a dictionary. A reading has its
 /// trailer (`reading.trailer().dict()`), and a document too
 /// (`document.trailer.dict()`), and this finds where their walks start.
+///
+/// # Errors
+///
+/// As [`follow`] fails for `/Root`.
 pub fn catalog<'o, R: Resolve<'o>>(
     objects: R,
     trailer: &'o Dict,

@@ -77,6 +77,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::iter::FusedIterator;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -86,6 +87,7 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Value, Why}
 
 use crate::fault::Fault;
 use crate::limits::Limits;
+use crate::phases::phase;
 use crate::{HOPS, too_long};
 
 /// PDFium's cap on what it counts: past this, a file's page count is none.
@@ -105,6 +107,16 @@ const ROOM: usize = 4096;
 /// The pages of the tree at `catalog`'s `/Pages`, by `rules`, as the module
 /// says. What departs from ISO 32000-2 is told to `sink` under ISO's rules;
 /// under PDFium's, only what doesn't read is.
+///
+/// # Errors
+///
+/// An [`Error`], and no table: [`Error::NoPages`] for a catalog with no
+/// `/Pages` that's a dictionary, and by PDFium's rules for no page under it;
+/// [`Error::TooDeep`] and [`Error::TooManyPages`] for a tree past the caps;
+/// by PDFium's rules [`Error::Cycle`] and [`Error::ParentLoop`]; and
+/// [`Error::Unreadable`] for an object on the way past a cap the reader
+/// reads under, that takes a password, or whose bytes the source didn't
+/// give, or a chain of references too long to follow.
 pub fn pages<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     objects: R,
     catalog: &'o Dict,
@@ -112,6 +124,7 @@ pub fn pages<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     limits: &Limits,
     sink: &mut S,
 ) -> Result<Pages<'o>, Error> {
+    phase!(DEBUG, "pages", pdfium = matches!(rules, Rules::Pdfium));
     let walk = walked(objects, catalog, rules, limits, sink)?;
     if walk.pdfium && walk.pages.is_empty() {
         return Err(Error::NoPages);
@@ -129,11 +142,16 @@ pub fn pages<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
 /// gives its count all the same, the root's `/Count` where it goes by one,
 /// and loads no page. 0 where the catalog has no `/Pages` that's a
 /// dictionary; any other error as [`pages`] gives it.
+///
+/// # Errors
+///
+/// As [`pages`] fails by PDFium's rules, but never [`Error::NoPages`].
 pub fn counted<'o, R: Resolve<'o>>(
     objects: R,
     catalog: &'o Dict,
     limits: &Limits,
 ) -> Result<usize, Error> {
+    phase!(DEBUG, "counted");
     match walked(objects, catalog, Rules::Pdfium, limits, &mut ()) {
         Ok(walk) => Ok(walk.count.unwrap_or(walk.pages.len())),
         Err(Error::NoPages) => Ok(0),
@@ -178,18 +196,21 @@ pub struct Pages<'o> {
 
 impl<'o> Pages<'o> {
     /// How many pages the tree lists, as far as the walk went.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.pages.len()
     }
 
     /// Whether it lists none, which only ISO's rules can give: PDFium's make
     /// that [`Error::NoPages`], and [`counted`](fn@counted) says what PDFium
     /// counts then.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.pages.is_empty()
     }
 
     /// Page `index`, from 0; none past the last the tree lists.
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&Page<'o>> {
         self.pages.get(index)
     }
@@ -202,7 +223,8 @@ impl<'o> Pages<'o> {
     /// The count of pages PDFium gives under its rules, which may be more than
     /// the tree lists, as a root's `/Count` past the tree is: past [`len`](Self::len),
     /// PDFium loads no page. Under ISO's rules, [`len`](Self::len).
-    pub fn counted(&self) -> usize {
+    #[must_use]
+    pub const fn counted(&self) -> usize {
         self.counted
     }
 }
@@ -265,16 +287,18 @@ impl<'o> Page<'o> {
 
     /// The numbered nodes on its `/Parent` chain, nearest first. A `/Parent`
     /// written in place has no number, and isn't given.
-    pub fn parents(&self) -> impl Iterator<Item = ObjectId> + '_ {
-        std::iter::successors(self.parent.as_deref(), |parent| parent.up.as_deref())
-            .filter_map(|parent| parent.id)
+    pub fn parents(&self) -> Parents<'_> {
+        Parents {
+            next: self.parent.as_deref(),
+        }
     }
 
     /// An inheritable attribute: its own, else the nearest on its `/Parent`
     /// chain; none where neither has it. By ISO's rules a null is absent; by
     /// PDFium's it stops the climb, so `value` can be null, and can be a
     /// reference, where that named another reference.
-    pub fn attribute(&self, attribute: Inheritable) -> Option<Attribute<'o>> {
+    #[must_use]
+    pub const fn attribute(&self, attribute: Inheritable) -> Option<Attribute<'o>> {
         self.attributes[attribute as usize]
     }
 
@@ -282,30 +306,93 @@ impl<'o> Page<'o> {
     /// that isn't a number is 0, as PDFium reads it. Otherwise Letter, of
     /// [`Origin::Default`]: ISO 32000-2 gives none, requiring one, and it's
     /// what PDFium makes of none. An empty box is given as written.
-    pub fn media_box(&self) -> Sourced<Rect> {
+    #[must_use]
+    pub const fn media_box(&self) -> Sourced<Rect> {
         self.media_box
     }
 
     /// Its `/CropBox`, as [`media_box`](Self::media_box) reads one; otherwise
     /// the media box, of [`Origin::Default`] (7.7.3.3).
-    pub fn crop_box(&self) -> Sourced<Rect> {
+    #[must_use]
+    pub const fn crop_box(&self) -> Sourced<Rect> {
         self.crop_box
     }
 
     /// Its `/Rotate` in degrees, as written: a real's whole part. Otherwise 0,
     /// of [`Origin::Default`] (7.7.3.3).
-    pub fn rotate(&self) -> Sourced<i64> {
+    #[must_use]
+    pub const fn rotate(&self) -> Sourced<i64> {
         self.rotate
     }
 
     /// Its `/UserUnit`, a positive number, which isn't inherited. Otherwise 1,
     /// of [`Origin::Default`] (7.7.3.3).
-    pub fn user_unit(&self) -> Sourced<f64> {
+    #[must_use]
+    pub const fn user_unit(&self) -> Sourced<f64> {
         self.user_unit
     }
 }
 
+/// The numbered nodes on a page's `/Parent` chain, nearest first: what
+/// [`Page::parents`] gives. It's fused, and a `count`, `for_each` or `fold`
+/// over it goes up the chain in one pass. Its `Debug` prints the numbers it
+/// has left to give.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Clone)]
+pub struct Parents<'a> {
+    /// The next node on the chain, numbered or not.
+    next: Option<&'a Parent>,
+}
+
+impl Iterator for Parents<'_> {
+    type Item = ObjectId;
+
+    #[inline]
+    fn next(&mut self) -> Option<ObjectId> {
+        while let Some(parent) = self.next {
+            self.next = parent.up.as_deref();
+            if let Some(id) = parent.id {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// How many are left isn't known until they're walked, as a node written
+    /// in place gives none; once it's walked, none.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.next {
+            Some(_) => (0, None),
+            None => (0, Some(0)),
+        }
+    }
+
+    /// One pass up the chain, as `count`, `for_each` and `last` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, ObjectId) -> B>(self, init: B, mut f: F) -> B {
+        let (mut at, mut acc) = (self.next, init);
+        while let Some(parent) = at {
+            if let Some(id) = parent.id {
+                acc = f(acc, id);
+            }
+            at = parent.up.as_deref();
+        }
+        acc
+    }
+}
+
+impl FusedIterator for Parents<'_> {}
+
+impl fmt::Debug for Parents<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let left: Vec<ObjectId> = self.clone().collect();
+        f.debug_tuple("Parents").field(&left).finish()
+    }
+}
+
 /// The attributes a page inherits (ISO 32000-2, 7.7.3.3 and 7.7.3.4).
+/// Exhaustive on purpose, as the clause's list is closed and a consumer
+/// matches every one; [`Inheritable::ALL`] lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Inheritable {
     /// `/Resources`.
@@ -318,8 +405,26 @@ pub enum Inheritable {
     Rotate,
 }
 
+impl Inheritable {
+    /// Every attribute, in the order they're declared, so a table indexed by
+    /// them needn't write their count.
+    pub const ALL: [Inheritable; 4] = [
+        Inheritable::Resources,
+        Inheritable::MediaBox,
+        Inheritable::CropBox,
+        Inheritable::Rotate,
+    ];
+
+    /// Its key in a page's or a node's dictionary, without the slash:
+    /// `"MediaBox"`.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        KEYS[self as usize]
+    }
+}
+
 /// Each attribute's key, in [`Inheritable`]'s order.
-const KEYS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
+const KEYS: [&str; 4] = ["Resources", "MediaBox", "CropBox", "Rotate"];
 
 /// An inheritable attribute of a page.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -954,7 +1059,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
         let up = up.as_deref();
         let mut attributes = [None; 4];
         for (i, key) in KEYS.iter().enumerate() {
-            attributes[i] = match self.found(dict, key)? {
+            attributes[i] = match self.found(dict, key.as_bytes())? {
                 Some((written, value)) => Some(Attribute {
                     written,
                     value,
@@ -1079,7 +1184,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
             }
             let mut attributes = [None; 4];
             for (i, key) in KEYS.iter().enumerate() {
-                attributes[i] = match self.found(dict, key)? {
+                attributes[i] = match self.found(dict, key.as_bytes())? {
                     Some((written, value)) => Some(Attribute {
                         written,
                         value,
@@ -1317,6 +1422,7 @@ pub fn write(
     limits: &Limits,
     mut ids: impl FnMut() -> ObjectId,
 ) -> Result<Written, WriteError> {
+    phase!(DEBUG, "write", pages = pages.len());
     if pages.is_empty() {
         return Err(WriteError::NoPages);
     }

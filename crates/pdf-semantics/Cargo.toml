@@ -20,12 +20,25 @@ pdf-objects.workspace = true
 # XMP's XML, with namespaces; none of its features.
 quick-xml = "0.41"
 thiserror = "2"
+# The spans of what walks or writes a page tree and reads a packet, with
+# the `tracing` feature: without its default features, so without the proc
+# macros of `attributes`; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 [features]
 default = ["clock"]
 # `Date::now` and `Date::from_unix`, on chrono: a crate that only reads and
 # writes dates leaves it out with `default-features = false`.
 clock = ["dep:chrono"]
+# Spans through `tracing`: a page tree walked or counted, a packet read,
+# from its bytes or through a file's streams, and a page tree written. A
+# name or number tree's walk has none. Off by default; without it, none is
+# compiled.
+tracing = ["dep:tracing"]
+
+# docs.rs documents the clock, the default, and the spans.
+[package.metadata.docs.rs]
+features = ["tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
 # bench mode too, so criterion's options reach them as given.

@@ -41,7 +41,8 @@ pub struct Date {
     quirks: Vec<Quirk>,
 }
 
-/// How a date's local time stands to UT.
+/// How a date's local time stands to UT. Exhaustive on purpose, as 7.9.4's
+/// three forms are all there are and a consumer matches each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Offset {
     /// `Z`: it's equal to UT.
@@ -228,6 +229,13 @@ impl Date {
     /// Anything after that is read past. A field out of its range makes it no
     /// date, wherever it comes; every other departure from 7.9.4's form is one
     /// of its [`quirks`](Self::quirks).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoPrefix`] for text that doesn't begin `D:`,
+    /// [`Error::NoYear`] for no year's four digits after it, and
+    /// [`Error::OutOfRange`] for the first field, the offset's among them,
+    /// outside its range.
     pub fn read(text: &str) -> Result<Date, Error> {
         let text = text.strip_prefix("D:").ok_or(Error::NoPrefix)?;
         let (year, mut rest) = digits(text.as_bytes(), 4).ok_or(Error::NoYear)?;
@@ -308,6 +316,10 @@ impl Date {
     }
 
     /// A date of a year alone, 0 to 9999.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] for a year past 9999.
     pub fn new(year: u16) -> Result<Date, Error> {
         if year > 9999 {
             return Err(Error::OutOfRange { field: Field::Year });
@@ -342,6 +354,11 @@ impl Date {
     /// This date in another month, 1 to 12, which must have its day if it has
     /// one. What reading it read past is left behind, as with each `with_`, but
     /// that a day its month hasn't is still said, if another `with_` kept it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] for a month outside 1 to 12, or naming the day
+    /// where the month hasn't it.
     pub fn with_month(self, month: u8) -> Result<Date, Error> {
         let date = self.with(MONTH, month)?;
         if date.fields[DAY].is_some_and(|day| day > days_in(date.year, month)) {
@@ -351,6 +368,11 @@ impl Date {
     }
 
     /// This date on another day, one its month has; it must have a month.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] for a day outside 1 to 31, or one its month
+    /// hasn't; [`Error::OutOfOrder`] for a date with no month.
     pub fn with_day(self, day: u8) -> Result<Date, Error> {
         let date = self.with(DAY, day)?;
         if date.fields[MONTH].is_some_and(|month| day > days_in(date.year, month)) {
@@ -360,22 +382,42 @@ impl Date {
     }
 
     /// This date at another hour, 0 to 23; it must have a day.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] for an hour outside 0 to 23;
+    /// [`Error::OutOfOrder`] for a date with no day.
     pub fn with_hour(self, hour: u8) -> Result<Date, Error> {
         self.with(HOUR, hour)
     }
 
     /// This date at another minute, 0 to 59; it must have an hour.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] for a minute outside 0 to 59;
+    /// [`Error::OutOfOrder`] for a date with no hour.
     pub fn with_minute(self, minute: u8) -> Result<Date, Error> {
         self.with(MINUTE, minute)
     }
 
     /// This date at another second, 0 to 59; it must have a minute.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] for a second outside 0 to 59;
+    /// [`Error::OutOfOrder`] for a date with no minute.
     pub fn with_second(self, second: u8) -> Result<Date, Error> {
         self.with(SECOND, second)
     }
 
     /// This date at another offset, hours 0 to 23 and minutes 0 to 59; it
     /// must have a second.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] for the offset's hours or minutes outside their
+    /// range; [`Error::OutOfOrder`] for a date with no second.
     pub fn with_offset(mut self, offset: Offset) -> Result<Date, Error> {
         if let Offset::Ahead { hours, minutes } | Offset::Behind { hours, minutes } = offset {
             in_range(hours, 0, 23, Field::OffsetHours)?;
@@ -396,6 +438,7 @@ impl Date {
     /// offset's sign, its hours, an apostrophe and its minutes, or `Z` alone.
     /// So reading it back gives this date's fields, and no quirks but
     /// [`Quirk::ImpossibleDay`].
+    #[must_use]
     pub fn write(&self) -> String {
         use fmt::Write;
         let mut out = format!("D:{:04}", self.year);
@@ -416,37 +459,44 @@ impl Date {
     }
 
     /// The year, 0 to 9999.
-    pub fn year(&self) -> u16 {
+    #[must_use]
+    pub const fn year(&self) -> u16 {
         self.year
     }
 
     /// The month, 1 to 12, if the date writes one.
-    pub fn month(&self) -> Option<u8> {
+    #[must_use]
+    pub const fn month(&self) -> Option<u8> {
         self.fields[MONTH]
     }
 
     /// The day, 1 to 31, if the date writes one.
-    pub fn day(&self) -> Option<u8> {
+    #[must_use]
+    pub const fn day(&self) -> Option<u8> {
         self.fields[DAY]
     }
 
     /// The hour, 0 to 23, if the date writes one.
-    pub fn hour(&self) -> Option<u8> {
+    #[must_use]
+    pub const fn hour(&self) -> Option<u8> {
         self.fields[HOUR]
     }
 
     /// The minute, 0 to 59, if the date writes one.
-    pub fn minute(&self) -> Option<u8> {
+    #[must_use]
+    pub const fn minute(&self) -> Option<u8> {
         self.fields[MINUTE]
     }
 
     /// The second, 0 to 59, if the date writes one.
-    pub fn second(&self) -> Option<u8> {
+    #[must_use]
+    pub const fn second(&self) -> Option<u8> {
         self.fields[SECOND]
     }
 
     /// The offset from UT, if the date writes one.
-    pub fn offset(&self) -> Option<Offset> {
+    #[must_use]
+    pub const fn offset(&self) -> Option<Offset> {
         self.offset
     }
 
@@ -455,37 +505,44 @@ impl Date {
     }
 
     /// The month, or what stands for one not written: 1.
+    #[must_use]
     pub fn month_or_default(&self) -> u8 {
         self.or_default(MONTH)
     }
 
     /// The day, or what stands for one not written: 1.
+    #[must_use]
     pub fn day_or_default(&self) -> u8 {
         self.or_default(DAY)
     }
 
     /// The hour, or what stands for one not written: 0.
+    #[must_use]
     pub fn hour_or_default(&self) -> u8 {
         self.or_default(HOUR)
     }
 
     /// The minute, or what stands for one not written: 0.
+    #[must_use]
     pub fn minute_or_default(&self) -> u8 {
         self.or_default(MINUTE)
     }
 
     /// The second, or what stands for one not written: 0.
+    #[must_use]
     pub fn second_or_default(&self) -> u8 {
         self.or_default(SECOND)
     }
 
     /// The offset, or what stands for one not written: UT's own.
+    #[must_use]
     pub fn offset_or_default(&self) -> Offset {
         self.offset.unwrap_or(Offset::Utc)
     }
 
     /// What reading it read past, in the order it comes; none for a date
     /// built, or set but for a day its month hasn't, which it says still.
+    #[must_use]
     pub fn quirks(&self) -> &[Quirk] {
         &self.quirks
     }
@@ -493,6 +550,7 @@ impl Date {
     /// The date and time by the clock, in UT, to the second, every field
     /// written. A clock before 1970 or past 9999 reads as 1970's start.
     #[cfg(feature = "clock")]
+    #[must_use]
     pub fn now() -> Date {
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -505,6 +563,7 @@ impl Date {
     /// The date and time this many seconds from 1970's start, in UT, every
     /// field written; none before year 0 or past 9999.
     #[cfg(feature = "clock")]
+    #[must_use]
     pub fn from_unix(seconds: i64) -> Option<Date> {
         use chrono::{Datelike, Timelike};
         let at = chrono::DateTime::from_timestamp(seconds, 0)?;

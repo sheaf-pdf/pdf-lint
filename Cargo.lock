@@ -814,6 +814,7 @@ dependencies = [
  "pdf-structure",
  "quick-xml",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

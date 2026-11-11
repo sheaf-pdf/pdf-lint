@@ -17,9 +17,15 @@ Where a file departs from the standard is a `Fault`, told to a sink with its pla
 
 pdf-objects is re-exported whole, none of its items by name: its objects, `dict!`, its sink and the rules a page tree is walked by are named through `pdf_semantics::pdf_objects`, at the version this crate takes, as the examples below name them. Text strings (7.9.2.2) are its `text` module's, read by ISO's rules or PDFium's and written.
 
+`pages::Inheritable` and `date::Offset` are exhaustive on purpose, as their lists are closed and a consumer matches each: `Inheritable::ALL` lists the attributes, each with its key. Every other enum, and every struct with public fields but `pages::Rect`, a value, is `#[non_exhaustive]`.
+
 ## The `clock` feature
 
 On by default. With it, `Date::now` and `Date::from_unix` give a date from the clock or a count of seconds, on [chrono](https://crates.io/crates/chrono) without its default features, so without its time zones. A crate that only reads and writes dates, or walks trees, turns it off with `default-features = false`, and chrono isn't built.
+
+## The `tracing` feature
+
+Off by default. With it, a page tree walked or counted (`pages::pages`, `pages::counted`), a packet read (`xmp::read`, and `xmp::read_from` around it) and a page tree written (`pages::write`) each run in a span of [tracing](https://crates.io/crates/tracing), at `debug`, its fields numbers alone (which rules, a packet's length, how many pages), never a byte of a file or a packet. A name or number tree's walk has none, as its loop is the caller's. Without the feature, nothing of them is compiled, and tracing isn't a dependency.
 
 ## An example
 

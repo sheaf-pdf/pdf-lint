@@ -747,6 +747,101 @@ fn pages_under_one_node_share_its_chain() {
     assert_eq!(parents, [ObjectId::new(3, 0), ObjectId::new(2, 0)]);
 }
 
+// A page's parents are its chain's numbered nodes, nearest first, the same
+// walked by `next` as by `fold`, from its start or part of the way up.
+#[test]
+fn parents_are_walked_alike_by_next_and_by_fold() {
+    // Page 3's /Parent is 5, whose own is written in place, and that one's 2.
+    let objects = parsed(&[
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        (3, "<< /Type /Page /Parent 5 0 R >>"),
+        (
+            5,
+            "<< /Type /Pages /Parent << /Type /Pages /Parent 2 0 R >> >>",
+        ),
+    ]);
+    let resolve = |id: ObjectId| objects.get(&id);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    let page = table.get(0).unwrap();
+    let chain = [ObjectId::new(5, 0), ObjectId::new(2, 0)];
+    let push = |mut ids: Vec<ObjectId>, id| {
+        ids.push(id);
+        ids
+    };
+
+    let mut parents = page.parents();
+    assert_eq!(parents.size_hint(), (0, None));
+    let mut by_next = Vec::new();
+    for id in parents.by_ref() {
+        by_next.push(id);
+    }
+    assert_eq!(by_next, chain);
+    assert_eq!(parents.next(), None, "once walked, it gives none again");
+    assert_eq!(parents.size_hint(), (0, Some(0)));
+    assert_eq!(parents.fold(Vec::new(), push), []);
+
+    assert_eq!(page.parents().fold(Vec::new(), push), chain);
+    assert_eq!(page.parents().count(), 2);
+    assert_eq!(page.parents().last(), Some(chain[1]));
+
+    let mut part = page.parents();
+    assert_eq!(part.next(), Some(chain[0]));
+    assert_eq!(format!("{part:?}"), format!("Parents({:?})", [chain[1]]));
+    assert_eq!(part.clone().fold(Vec::new(), push), [chain[1]]);
+    assert_eq!(part.collect::<Vec<_>>(), [chain[1]]);
+    assert_eq!(
+        format!("{:?}", page.parents()),
+        format!("Parents({chain:?})")
+    );
+}
+
+// Every attribute, in the order it's declared, with the key a page's own is
+// read by; the key's a constant.
+#[test]
+fn every_attribute_is_listed_in_order_with_its_key() {
+    const MEDIA_BOX: &str = Inheritable::MediaBox.key();
+    assert_eq!(MEDIA_BOX, "MediaBox");
+    let listed = Inheritable::ALL.map(|attribute| (attribute as usize, attribute.key()));
+    let keys = [
+        (0, "Resources"),
+        (1, "MediaBox"),
+        (2, "CropBox"),
+        (3, "Rotate"),
+    ];
+    assert_eq!(listed, keys);
+    // Each is listed once, as a match over every one says.
+    let at = |attribute| match attribute {
+        Inheritable::Resources => 0,
+        Inheritable::MediaBox => 1,
+        Inheritable::CropBox => 2,
+        Inheritable::Rotate => 3,
+    };
+    assert!(
+        Inheritable::ALL
+            .iter()
+            .enumerate()
+            .all(|(i, &a)| at(a) == i)
+    );
+    for attribute in Inheritable::ALL {
+        let page = format!("<< /Type /Page /Parent 2 0 R /{} 7 0 R >>", attribute.key());
+        let objects = parsed(&[
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, &page),
+            (7, "90"),
+        ]);
+        let resolve = |id: ObjectId| objects.get(&id);
+        let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+        let table = pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
+        let page = table.get(0).unwrap();
+        for other in Inheritable::ALL {
+            let found = (page.attribute(other)).map(|at| (at.origin, at.written.as_reference()));
+            let own = (other == attribute).then_some((Origin::Own, Some(ObjectId::new(7, 0))));
+            assert_eq!(found, own, "{attribute:?}'s key, {other:?}");
+        }
+    }
+}
+
 #[test]
 fn a_broken_object_every_page_names_is_read_once() {
     // 1,000 pages whose /MediaBox is object 3, an array of 300,000 numbers

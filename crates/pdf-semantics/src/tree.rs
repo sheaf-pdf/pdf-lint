@@ -82,14 +82,19 @@ pub fn numbers<'o, R: Resolve<'o>, S: Sink<Fault>>(
 }
 
 /// A name tree's entries, as [`names`] gives them.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 pub struct Names<'o, R, S>(Walk<'o, R, S, &'o [u8]>);
 
 /// A number tree's entries, as [`numbers`] gives them.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 pub struct Numbers<'o, R, S>(Walk<'o, R, S, i64>);
 
 /// What the two iterators have in common.
 macro_rules! walks {
     ($walk:ident, $key:ty) => {
+        // Each is a walk, not an adapter over another iterator: its `next`
+        // reads the tree, so `fold`'s default, a loop over `next`, is the one
+        // pass there is, and none is written.
         impl<'o, R: Resolve<'o>, S: Sink<Fault>> Iterator for $walk<'o, R, S> {
             type Item = Result<($key, &'o Object), Unreadable>;
 
@@ -106,11 +111,13 @@ macro_rules! walks {
             /// So walked to its end, true means all of it was read. A node
             /// reached a second time leaves it true, as it's been read; an
             /// iterator that gave an error has it false.
-            pub fn whole(&self) -> bool {
+            #[must_use]
+            pub const fn whole(&self) -> bool {
                 self.0.whole
             }
 
             /// The sink given, with what it was told.
+            #[must_use]
             pub fn into_sink(self) -> S {
                 self.0.sink
             }
@@ -512,6 +519,12 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
 /// in the order 7.9.6 has, by their bytes. A value's form is the caller's, a
 /// reference or written in place. Reading it back gives the same entries,
 /// sorted, with no fault.
+///
+/// # Errors
+///
+/// An [`Error`], and nothing written: [`Error::RepeatedName`] for a key given
+/// twice, the first in the tree's order; else [`Error::StreamValue`] for a
+/// value that's a stream or holds one.
 pub fn write_names(entries: impl IntoIterator<Item = (Vec<u8>, Object)>) -> Result<Dict, Error> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -527,6 +540,11 @@ pub fn write_names(entries: impl IntoIterator<Item = (Vec<u8>, Object)>) -> Resu
 
 /// `entries` written as a number tree's root: a dictionary with one `/Nums`,
 /// in ascending order (7.9.7), as [`write_names`] writes a name tree's.
+///
+/// # Errors
+///
+/// As [`write_names`] fails, but a key given twice is
+/// [`Error::RepeatedNumber`].
 pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result<Dict, Error> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by_key(|entry| entry.0);
