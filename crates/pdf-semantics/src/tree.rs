@@ -338,13 +338,23 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
     }
 
     /// Says what's wrong with the shape of a node, and gives its `/Limits`.
+    /// Its `/Kids` and its entries are followed: null, or a reference to
+    /// nothing, is none (7.3.10), and anything else is there, an object that
+    /// doesn't read among it, for the walk's own read of it to say what's
+    /// wrong. Its `/Limits` is there as written, null aside, and read by
+    /// [`bounds`](Self::bounds).
     fn shape(&mut self, node: &'o Dict, at: Option<Span>, root: bool) -> Option<(K, K)> {
-        let has = |key: &str| node.get(key.as_bytes()).is_some_and(|o| !o.is_null());
-        match (has("Kids"), has(K::ENTRIES)) {
+        let objects = &self.objects;
+        let held = |key: &str| {
+            (node.get(key.as_bytes())).is_some_and(|o| !matches!(followed(objects, o), Ok(None)))
+        };
+        let (kids, entries) = (held("Kids"), held(K::ENTRIES));
+        match (kids, entries) {
             (true, true) => self.say(at, Fault::TreeBothEntries),
             (false, false) => self.say(at, Fault::TreeNoEntries),
             _ => {}
         }
+        let has = |key: &str| node.get(key.as_bytes()).is_some_and(|o| !o.is_null());
         match (root, has("Limits")) {
             (true, true) => self.say(at, Fault::TreeRootLimits),
             (false, false) => self.say(at, Fault::TreeNoLimits),

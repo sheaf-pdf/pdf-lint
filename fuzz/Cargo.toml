@@ -74,6 +74,7 @@
 # random content and random pairs;
 # `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
 # each walked the same whatever hears its faults, what a plain walk gives,
+# its nodes with neither `/Kids` nor entries, or both, said as it finds them,
 # and written, read back, and its page tree by both rules,
 # `pdf_semantics::fuzz::dates`, a date read, written and read back,
 # `pdf_semantics::fuzz::xmp`, a packet read the same whatever hears its

@@ -59,20 +59,22 @@
 //! Of what a tree's walk tells, what [`Walk::tree`] doesn't say is a
 //! [`Rule::Tree`] finding: a node reached again, a kid written in place,
 //! `/Limits` that aren't the node's least and greatest keys, a key not past
-//! the one before it or outside a node's `/Limits`, and a node under the
-//! root with neither `/Kids` nor entries (the root's is the walk's own).
-//! Each kind once in each object it's in, at its first place there, its
-//! value the fault's words with how many times; in the object the fault is
-//! in, or, for a root written in place, the object that holds it, held
-//! where that is; its path, table and key those [`Walk::tree`] gives the
-//! root's findings. A kind in a node two trees share is told by the first
-//! alone, as the walk checks the node as the first's. What stops a tree
-//! being read whole that isn't the file's fault (an object that takes a
-//! password or is past a cap, a key whose bytes the reader didn't give, a
-//! tree deeper or with more nodes than is read, and `/Limits` that don't
-//! read for a password or a cap, which aren't checked) is counted as not
-//! checked, once a tree for each, where its root is held; what was read
-//! before it is found all the same.
+//! the one before it or outside a node's `/Limits`, and a node with neither
+//! `/Kids` nor entries, null or a reference to nothing being none (7.3.10):
+//! under the root, or the root where it has one of them written that comes
+//! to nothing, as a root with neither written is the walk's own. Each kind
+//! once in each object it's in, at its first place there, its value the
+//! fault's words with how many times; in the object the fault is in, or, for
+//! a root written in place, the object that holds it, held where that is;
+//! its path, table and key those [`Walk::tree`] gives the root's findings. A
+//! kind in a node two trees share is told by the first alone, as the walk
+//! checks the node as the first's. What stops a tree being read whole that
+//! isn't the file's fault (an object that takes a password or is past a cap,
+//! a key whose bytes the reader didn't give, a tree deeper or with more
+//! nodes than is read, and `/Limits` that don't read for a password or a
+//! cap, which aren't checked) is counted as not checked, once a tree for
+//! each, where its root is held; what was read before it is found all the
+//! same.
 //!
 //! What the packet's read told is a [`Rule::Xmp`] finding, last: an encoding
 //! other than UTF-8, which a mark of UTF-16 or UTF-32 it begins with says,
@@ -1143,6 +1145,8 @@ mod tests {
     const AGAIN: &str = "the tree reaches 11 0 R again";
     const IN_PLACE: &str = "a kid is written in place, not as a reference";
     const EMPTY: &str = "a node has neither /Kids nor entries of its own";
+    /// A node under the root whose `/Names` is a reference to nothing.
+    const NAMES_GONE: &str = "<< /Limits [(a) (a)] /Names 99 0 R >>";
 
     /// Each kind of fault pdf-semantics' walk tells that the walk doesn't
     /// say is found once, in the object it's in, at its bytes there, with
@@ -1153,7 +1157,9 @@ mod tests {
     /// listed twice, in the node that lists it, or by a loop, back to the
     /// root too, which the walk is given by its number; a kid written
     /// in place, in the object it's in; a node under the root with neither
-    /// `/Kids` nor `/Names`; and a number tree's keys out of order.
+    /// `/Kids` nor `/Names`, and one whose `/Names` is a reference to
+    /// nothing, under the root or the root itself, which the walk reads as
+    /// written; and a number tree's keys out of order.
     #[test]
     fn what_a_trees_walk_tells_that_the_walk_doesnt_is_found_once_as_the_walks() {
         let leaf = |limits: &str, names: &str| format!("<< /Limits [{limits}] /Names [{names}] >>");
@@ -1216,6 +1222,14 @@ mod tests {
             (
                 dests("<< /Kids [11 0 R] >>", &[(11, "<< /Limits [(a) (a)] >>")]),
                 dest(11, EMPTY, "<< /Limits [(a) (a)] >>"),
+            ),
+            (
+                dests("<< /Kids [11 0 R] >>", &[(11, NAMES_GONE)]),
+                dest(11, EMPTY, NAMES_GONE),
+            ),
+            (
+                dests("<< /Names 99 0 R >>", &[]),
+                dest(10, EMPTY, "<< /Names 99 0 R >>"),
             ),
         ];
         for (file, expected) in shapes {

@@ -132,6 +132,9 @@ struct Plain<'o, R> {
     depth: usize,
     seen: std::collections::HashSet<ObjectId>,
     out: Walked<'o>,
+    /// How many nodes it read with neither `/Kids` nor entries, and with
+    /// both, each null or a reference to nothing being none.
+    shapes: [usize; 2],
 }
 
 /// What a reference on the way comes to, to [`Plain`].
@@ -249,6 +252,14 @@ impl<'o, R: Resolve<'o> + Copy> Plain<'o, R> {
             Kind::Names => b"Names",
             Kind::Numbers => b"Nums",
         };
+        let held = |key: &[u8]| {
+            (node.get(key)).is_some_and(|o| !matches!(follow(self.objects, o), Ok(None)))
+        };
+        match (held(b"Kids"), held(key)) {
+            (false, false) => self.shapes[0] += 1,
+            (true, true) => self.shapes[1] += 1,
+            _ => {}
+        }
         let Some(items) = self.array(node, key) else {
             return false;
         };
@@ -269,6 +280,17 @@ fn plainly<'o, R: Resolve<'o> + Copy>(
     kind: Kind,
     depth: usize,
 ) -> Walked<'o> {
+    shaped(objects, root, kind, depth).0
+}
+
+/// [`plainly`], and how many nodes it read with neither `/Kids` nor
+/// entries, and with both.
+fn shaped<'o, R: Resolve<'o> + Copy>(
+    objects: R,
+    root: &'o Object,
+    kind: Kind,
+    depth: usize,
+) -> (Walked<'o>, [usize; 2]) {
     let mut plain = Plain {
         objects,
         kind,
@@ -279,9 +301,10 @@ fn plainly<'o, R: Resolve<'o> + Copy>(
             whole: true,
             failed: None,
         },
+        shapes: [0, 0],
     };
     plain.node(root, 0);
-    plain.out
+    (plain.out, plain.shapes)
 }
 
 /// The promises of one walk of the tree at `root`, as `kind`:
@@ -290,6 +313,9 @@ fn plainly<'o, R: Resolve<'o> + Copy>(
 ///   is told none;
 /// - it's what a plain recursive walk gives, under the default caps and under
 ///   small depths, in the same order, as whole;
+/// - where it's read to its end, a node with neither `/Kids` nor entries,
+///   and one with both, are said as many times as the plain walk finds
+///   them, null and a reference to nothing being none;
 /// - less than whole, or failed, it's said: by a fault or by what failed it;
 /// - under a small count of nodes, it's whole only if it's all of it, and
 ///   gives nothing the walk without one doesn't;
@@ -319,7 +345,13 @@ fn a_tree<'o, R: Resolve<'o> + Copy>(objects: R, root: &'o Object, kind: Kind) -
     if kept.0.contains(&Fault::TreeTooManyNodes) {
         return full;
     }
-    assert_eq!(full, plainly(objects, root, kind, 32), "a plain walk's");
+    let (plain, [neither, both]) = shaped(objects, root, kind, 32);
+    assert_eq!(full, plain, "a plain walk's");
+    if full.failed.is_none() {
+        let told = |fault| kept.0.iter().filter(|&&said| said == fault).count();
+        assert_eq!(told(Fault::TreeNoEntries), neither, "{:?}", kept.0);
+        assert_eq!(told(Fault::TreeBothEntries), both, "{:?}", kept.0);
+    }
     for depth in [0, 1, 2] {
         let mut limits = Limits::DEFAULT;
         limits.tree_depth = depth;
@@ -866,6 +898,13 @@ pub fn fixtures() -> Vec<Vec<u8>> {
          << /Names [(b) 0 (a) 0 (a) 0 (c)] >> \
          null \
          5",
+        // A node's /Kids and entries by references to nothing and to null.
+        "<< /Root << /Names << /A 2 0 R /B 3 0 R /C 4 0 R >> >> >> \
+         << /Kids 9 0 R >> \
+         << /Names [(a) 0] /Kids 5 0 R >> \
+         << /Kids [6 0 R] >> \
+         null \
+         << /Limits [(a) (a)] /Names 5 0 R >>",
         // Past the depth a tree is read to, by a chain of its own.
         "<< /Root << /PageLabels 2 0 R >> >> << /Kids [3 0 R] >> << /Kids [4 0 R] >> \
          << /Kids [5 0 R] >> << /Limits [0 1] /Nums [0 0 1 1] >>",

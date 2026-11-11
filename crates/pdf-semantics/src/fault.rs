@@ -68,11 +68,13 @@ pub enum Fault {
     TreeKidDirect,
     /// A node with `/Kids` and `/Names` or `/Nums` too: a root has one of
     /// them and any other node is an intermediate node or a leaf (7.9.6).
-    /// Both are read, its own entries first.
+    /// Both are read, its own entries first. One that's null, or a reference
+    /// to nothing, isn't there (7.3.10).
     #[error("a node has both /Kids and its own entries")]
     TreeBothEntries,
-    /// A node with none of `/Kids`, `/Names` and `/Nums` (7.9.6, Table 36;
-    /// 7.9.7, Table 37).
+    /// A node with none of `/Kids`, `/Names` and `/Nums`, one that's null or
+    /// a reference to nothing being none (7.3.10; 7.9.6, Table 36; 7.9.7,
+    /// Table 37).
     #[error("a node has neither /Kids nor entries of its own")]
     TreeNoEntries,
     /// A root with `/Limits`, which only the nodes under it have (7.9.6,

@@ -687,11 +687,49 @@ fn each_fault_is_said_and_whole_says_what_it_lost() {
             &[],
         ),
         (
-            "/Names by a reference to nothing",
+            "/Names by a reference to nothing, beside /Kids",
             &["<< /Kids [] /Names 9 0 R >>"],
             &[],
             true,
-            &[TreeBothEntries],
+            &[],
+        ),
+        (
+            "/Kids by a reference to nothing, beside /Names",
+            &["<< /Names [(a) 0] /Kids 9 0 R >>"],
+            &["a"],
+            true,
+            &[],
+        ),
+        (
+            "/Names by a reference to nothing",
+            &["<< /Names 9 0 R >>"],
+            &[],
+            true,
+            &[TreeNoEntries],
+        ),
+        (
+            "/Kids by a reference to null, and /Names by a chain to nothing",
+            &["<< /Kids 2 0 R /Names 3 0 R >>", "null", "9 0 R"],
+            &[],
+            true,
+            &[TreeNoEntries],
+        ),
+        (
+            "/Names by a reference to nothing, under the root",
+            &[
+                "<< /Kids [2 0 R] >>",
+                "<< /Limits [(a) (a)] /Names 9 0 R >>",
+            ],
+            &[],
+            true,
+            &[TreeNoEntries],
+        ),
+        (
+            "/Limits by a reference to nothing, as written",
+            &["<< /Kids [2 0 R] >>", "<< /Limits 9 0 R /Names [(a) 0] >>"],
+            &["a"],
+            true,
+            &[TreeBadLimits],
         ),
         // What leaves part of it unread.
         (
@@ -1043,6 +1081,65 @@ fn a_walk_reads_only_what_it_gives() {
     assert_eq!(saying.asked.get(), 4, "the array and the kid");
     assert!(walk.next().is_none());
     assert_eq!(saying.asked.get(), 4);
+}
+
+// A node's `/Kids` or entries by a reference to an object that doesn't read
+// are there, so the walk's own read says what's wrong, and the node isn't
+// said to have neither: one alone is no fault of its shape, and beside the
+// other, it's both, as it was written.
+#[test]
+fn a_node_s_kids_or_entries_that_don_t_read_are_there() {
+    use Fault::TreeBothEntries;
+    type Shape<'s> = (&'s [&'s str], &'s str, &'s [Fault]);
+    let shapes: [Shape; 4] = [
+        (&["<< /Names 2 0 R >>", "[(a) 0]"], "/Names alone", &[]),
+        (&["<< /Kids 2 0 R >>", "[]"], "/Kids alone", &[]),
+        (
+            &["<< /Kids [] /Names 2 0 R >>", "[(a) 0]"],
+            "/Names beside /Kids",
+            &[TreeBothEntries],
+        ),
+        (
+            &["<< /Names [] /Kids 2 0 R >>", "[]"],
+            "/Kids beside /Names",
+            &[TreeBothEntries],
+        ),
+    ];
+    let root = Object::reference(1);
+    for (objects, what, shape) in shapes {
+        let objects = file(objects);
+        let saying = Saying::new(&objects, &[(2, Why::Damaged)]);
+        let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
+        assert_eq!(walk.by_ref().count(), 0, "{what}");
+        assert!(!walk.whole(), "{what}");
+        let damaged = Fault::Damaged {
+            id: ObjectId::new(2, 0),
+        };
+        let faults = [shape, &[damaged]].concat();
+        assert_eq!(walk.into_sink().faults(), faults, "{what}");
+        for why in [Why::Capped, Why::Locked, Why::Source] {
+            let saying = Saying::new(&objects, &[(2, why)]);
+            let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
+            assert_eq!(walk.next().unwrap().unwrap_err().why, why, "{what}");
+            assert!(walk.next().is_none(), "{what}");
+            assert_eq!(walk.into_sink().faults(), shape, "{what}, {why:?}");
+        }
+    }
+    // By a chain to nothing, it's none for a sink that wants faults, and the
+    // walk's the same without one; read only for that sink.
+    let objects = file(&["<< /Kids 2 0 R /Names [(a) 0] >>", "9 0 R"]);
+    let told = Saying::new(&objects, &[]);
+    let mut walk = names(&told, &root, &Limits::DEFAULT, Kept::default());
+    assert_eq!(walk.by_ref().map(Result::unwrap).count(), 1);
+    assert_eq!(walk.into_sink().faults(), []);
+    let quiet = Saying::new(&objects, &[]);
+    let walk = names(&quiet, &root, &Limits::DEFAULT, ());
+    assert_eq!(walk.map(Result::unwrap).count(), 1);
+    assert_eq!(
+        (told.asked.get(), quiet.asked.get()),
+        (5, 3),
+        "the root, and /Kids's chain of two for its shape and for the walk"
+    );
 }
 
 // An object that doesn't read: damaged is said and the walk goes on, with
