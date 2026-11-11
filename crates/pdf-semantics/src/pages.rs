@@ -238,7 +238,45 @@ impl<'a, 'o> IntoIterator for &'a Pages<'o> {
     }
 }
 
-/// A page, as the tree lists it.
+/// A page, as the tree lists it. A page object listed twice is two pages,
+/// the second saying so, and each value is the page's own, inherited, or
+/// what stands for it:
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// use pdf_semantics::Limits;
+/// use pdf_semantics::pages::{Inheritable, Origin, Rect, pages};
+/// use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
+/// use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
+///
+/// let objects = BTreeMap::from([
+///     (ObjectId::new(2, 0), Object::from(dict! {
+///         "Type" => "Pages",
+///         "Kids" => vec![Object::reference(3), Object::reference(3)],
+///         "Count" => 2,
+///         "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(200)],
+///     })),
+///     (ObjectId::new(3, 0), Object::from(dict! { "Type" => "Page", "Parent" => Object::reference(2), "Rotate" => 90 })),
+/// ]);
+/// let resolve = |id: ObjectId| objects.get(&id);
+/// let catalog = dict! { "Pages" => Object::reference(2) };
+///
+/// let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+/// assert_eq!((table.len(), table.counted()), (2, 2));
+///
+/// // Listed twice, it's two pages, the second saying so.
+/// let second = table.get(1).unwrap();
+/// assert_eq!((second.id, second.repeat), (Some(ObjectId::new(3, 0)), 1));
+///
+/// // Its own, inherited, or what stands for it.
+/// assert_eq!(second.rotate().value, 90);
+/// assert_eq!(second.rotate().origin, Origin::Own);
+/// assert_eq!(second.media_box().value, Rect([0.0, 0.0, 100.0, 200.0]));
+/// assert_eq!(second.media_box().origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
+/// assert_eq!(second.crop_box().origin, Origin::Default);
+/// assert!(second.attribute(Inheritable::Resources).is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Page<'o> {

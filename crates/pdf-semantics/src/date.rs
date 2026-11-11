@@ -21,8 +21,12 @@
 //! let date = Date::read("D:2026").unwrap();
 //! assert_eq!((date.month(), date.month_or_default()), (None, 1));
 //!
+//! // Built, each field after the one before it.
 //! let date = Date::new(2026).unwrap().with_month(10).unwrap();
 //! assert_eq!(date.write(), "D:202610");
+//! let date = date.with_day(24).unwrap();
+//! assert_eq!(date.write(), "D:20261024");
+//! assert!(Date::new(2026).unwrap().with_day(24).is_err());
 //! ```
 
 use std::fmt;

@@ -61,6 +61,49 @@ use crate::{HOPS, followed};
 /// each key's bytes and its value. `root` may be a reference, followed as a
 /// node's kids are; null, or a reference to nothing, is a tree with no
 /// entries.
+///
+/// A tree over a closure, a sink of one's own hearing what's read past:
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// use pdf_semantics::pdf_objects::fault::{Place, Sink};
+/// use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
+/// use pdf_semantics::tree::names;
+/// use pdf_semantics::{Fault, Limits};
+///
+/// #[derive(Default)]
+/// struct Faults(Vec<Fault>);
+///
+/// impl Sink<Fault> for Faults {
+///     fn fault(&mut self, _: Place, fault: Fault) {
+///         self.0.push(fault);
+///     }
+/// }
+///
+/// // A root, its kid by reference and one listed again.
+/// let leaf = dict! {
+///     "Limits" => vec![Object::text("a"), Object::text("b")],
+///     "Names" => vec![
+///         Object::text("a"), Object::reference(7),
+///         Object::text("b"), Object::from(2),
+///     ],
+/// };
+/// let objects = BTreeMap::from([(ObjectId::new(2, 0), Object::from(leaf))]);
+/// let resolve = |id: ObjectId| objects.get(&id);
+/// let root = Object::from(dict! { "Kids" => vec![Object::reference(2), Object::reference(2)] });
+///
+/// let mut walk = names(resolve, &root, &Limits::DEFAULT, Faults::default());
+/// let (key, value) = walk.next().unwrap().unwrap();
+/// assert_eq!((key, value.as_reference()), (&b"a"[..], Some(ObjectId::new(7, 0))));
+/// let (key, value) = walk.next().unwrap().unwrap();
+/// assert_eq!((key, value.as_integer()), (&b"b"[..], Some(2)));
+/// assert!(walk.next().is_none());
+///
+/// // Read once, said, and nothing left unread.
+/// assert!(walk.whole());
+/// assert_eq!(walk.into_sink().0, [Fault::TreeRepeated { id: ObjectId::new(2, 0) }]);
+/// ```
 pub fn names<'o, R: Resolve<'o>, S: Sink<Fault>>(
     objects: R,
     root: &'o Object,

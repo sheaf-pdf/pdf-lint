@@ -387,6 +387,27 @@ struct Open {
 /// once it closes: one left open, at the end or where an error stops the
 /// read, is neither taken nor told.
 ///
+/// A claim elsewhere counts past an attribute that doesn't read, and a
+/// comment claims nothing:
+///
+/// ```
+/// use pdf_semantics::Limits;
+/// use pdf_semantics::xmp::{self, PdfA};
+///
+/// let packet = br#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+///     xmlns:a="http://www.aiim.org/pdfa/ns/id/" a:part="2" oops=1>
+///     <a:conformance> b </a:conformance>
+///     <!-- <a:part>3</a:part> -->
+/// </rdf:Description>"#;
+///
+/// let claims = xmp::read(packet, None, &Limits::DEFAULT, &mut ()).unwrap();
+/// assert_eq!(claims.pdfa_part.as_deref(), Some("2"));
+/// assert_eq!(claims.pdfa_conformance.as_deref(), Some("b"));
+///
+/// let pdfa: PdfA = claims.conformance().unwrap().pdfa.unwrap();
+/// assert_eq!(pdfa.to_string(), "PDF/A-2b");
+/// ```
+///
 /// # Errors
 ///
 /// An [`Error`] holding what was read before it and where it stopped:
