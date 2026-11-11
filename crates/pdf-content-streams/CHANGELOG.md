@@ -16,7 +16,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - `ContentWriter`: content written, the same bytes for the same calls. It names its resources (`Res`) when it's finished, clear of what a page's resources bind (`Reserved::read`). Two resources are one only where they're equal, so a `HashMap<Res, _>` keeps each once.
 - `splice`, `splice_each` and `without_keys`: ranges taken out of a page's content, or keys out of a property list, only where nothing drawn after them can change. What's kept is read again before it's given.
 - `Limits`: caps on what reading and editing may hold or cost, each met before the work it bounds. `InlineImage::capped` says an image was sized by a color space counted past a cap, and the edits refuse content that holds one (`SpliceError::Capped`).
-- The `simd` feature: the dependencies' SIMD, picked as they run. The `tracing` feature: a span over each call that reads or writes a whole page. Both are off by default.
+- The `simd` feature: the dependencies' SIMD, picked as they run. The `tracing` feature: a span over each of a page's passes and edits, the writer's names and a resources dictionary's reading. Both are off by default.
 
 ### Notes
 

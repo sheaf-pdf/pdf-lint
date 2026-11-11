@@ -8,9 +8,10 @@
 //!   written, and an [`Operand`]'s value when it's asked for ([`name`],
 //!   [`object`]).
 //! - **Find where an inline image ends** ([`InlineImage`]) as PDFium finds
-//!   it: by its size, from its color space's components ([`ResCx::read`]),
-//!   or by decoding its data, Flate and LZW through pdf-filters, and DCT
-//!   and CCITTFax with the `image-ends` feature where a reading asks
+//!   it. An unfiltered image ends at its size, counted from its color
+//!   space's components ([`ResCx::read`]). Flate and LZW data is decoded
+//!   through pdf-filters to where PDFium's decoders stop. DCT and CCITTFax
+//!   data is decoded with the `image-ends` feature, where a reading asks
 //!   ([`Limits::coded_ends`]).
 //! - **Read a page's streams as one** ([`Concat`], [`Join`],
 //!   [`Join::push_from`]), each place mapped back to its stream ([`Pos`],
@@ -43,8 +44,14 @@
 //! - **`simd`**: the dependencies' SIMD, picked as they run by what the CPU
 //!   has. Nothing read or digested changes. The `unsafe` code it turns on
 //!   is theirs.
-//! - **`tracing`**: a span over each call that reads or writes a whole
-//!   page, its fields lengths and counts, never content.
+//! - **`tracing`**: a span over each of a page's passes ([`balance`],
+//!   [`marked`](fn@marked), [`names_used`], [`kept`]), its edits
+//!   ([`splice`](fn@splice), [`splice_each`] and each of its checks,
+//!   [`without_keys`], [`Spliced::streams`]), the writer's names
+//!   ([`ContentWriter::named`]) and a resources dictionary's reading
+//!   ([`ResCx::read`], [`Reserved::read`]). Reading tokens and operations
+//!   has none, as its loop is the caller's. A span's fields are lengths
+//!   and counts, never content.
 //!
 //! A page's two streams, taken from a reader of the file and read as one:
 //!

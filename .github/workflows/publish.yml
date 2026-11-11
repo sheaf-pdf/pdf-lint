@@ -4,13 +4,13 @@ name: Publish
 # -v and its version: pdf-tokenizer-v0.2.0, pdf-objects-v0.1.0-alpha.1,
 # pdf-filters-v0.1.0-alpha.1, pdf-crypt-v0.1.0-alpha.1,
 # pdf-color-v0.1.0-alpha.1, pdf-structure-v0.1.0-alpha.1,
-# pdf-content-streams-v0.1.0-alpha.1), by trusted
-# publishing: the run's OpenID Connect token is exchanged for a crates.io
-# token that lives for the job and is revoked when it ends, so no secret is
-# kept here. The crates.io side names this repository, this file,
-# publish.yml, and the `release` environment. Before it publishes, the tag
-# is checked against the manifest's version and the CHANGELOG's dated entry
-# for it, and the package is checked as CI checks it on every push.
+# pdf-content-streams-v0.1.0-alpha.1), by trusted publishing: the run's
+# OpenID Connect token is exchanged for a crates.io token that lives for the
+# job and is revoked when it ends, so no secret is kept here. The crates.io
+# side names this repository, this file, publish.yml, and the `release`
+# environment. Before it publishes, the tag is checked against the
+# manifest's version and the CHANGELOG's dated entry for it, and the package
+# is checked as CI checks it on every push.
 
 on:
   push:

@@ -19,10 +19,13 @@
 //! taken out, alone and together, and their lists written again without a
 //! tool's keys, alone and with what's taken out, what's kept reading as it
 //! did; and an image's color space counted alike in its dictionary and in
-//! the resources, under any caps on either. With the `image-ends` feature,
-//! which the fuzz crate turns on, it's read with an inline image's DCT and
-//! CCITTFax data decoded to find where it ends, and its tokens tile it read
-//! by the stand-in too.
+//! the resources, under any caps on either. Marked content's cap and an
+//! inline color space's are held at their edges, and `splice_each`'s reads
+//! at its cap and a byte under; content that holds an image a cap sized is
+//! refused by every edit; and `Res::of` refuses exactly what holds data not
+//! in memory. With the `image-ends` feature, which the fuzz crate turns on,
+//! it's read with an inline image's DCT and CCITTFax data decoded to find
+//! where it ends, and its tokens tile it read by the stand-in too.
 
 #![no_main]
 

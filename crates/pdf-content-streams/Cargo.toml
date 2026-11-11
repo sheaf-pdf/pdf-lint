@@ -33,7 +33,7 @@ thiserror = "2"
 tinyvec = { version = "1.13.1", features = ["alloc"] }
 # The spans of what reads or writes a whole page, with the `tracing`
 # feature: without its default features, so without the proc macros of
-# `attributes` and the `log` bridge; `std`, for its spans' guards.
+# `attributes`; `std`, for its spans' guards.
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 # A resource's name by what it is (`ResId`): XXH3-128 of its objects, fast
 # and the same on every build and platform, so equal resources are named
@@ -62,10 +62,11 @@ image-ends = ["dep:zune-jpeg", "dep:hayro-ccitt"]
 # `std` to find them). Off by default. It changes nothing that's read or
 # digested, only how fast; the `unsafe` code it turns on is theirs.
 simd = ["memchr/std", "twox-hash/std", "zune-jpeg?/std", "zune-jpeg?/x86", "zune-jpeg?/neon"]
-# Spans over what reads or writes a whole page, through `tracing`: a
-# resources dictionary's color spaces counted, a page's balance, marked
-# content and names, a splice and each of `splice_each`'s checks, a list
-# written again, and the writer's names. Off by default; without it, none
+# Spans through `tracing`: a resources dictionary read (its color spaces
+# counted, or the names it binds), a page's balance, marked content and
+# names, a splice, `splice_each` and each of its checks, a list written
+# again, what an edit makes in a page's streams, and the writer's names.
+# Reading tokens and operations has none. Off by default; without it, none
 # is compiled.
 tracing = ["dep:tracing"]
 

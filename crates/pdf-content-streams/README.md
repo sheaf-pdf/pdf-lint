@@ -18,13 +18,13 @@ It's made for what reads content to draw it, check it or edit it, and for what w
 - **Keep each resource once.** A resource is named by a digest of its objects (`ResId`, XXH3-128), the same on every build. Two resources are one only where they're equal, their objects the same, so a `HashMap<Res, _>` keeps each once. A resource holds its streams' data in memory: `Res::of` and `Res::named` refuse data a reader left in the file (`Unheld`).
 - **Take ranges out of a page.** `splice` gives the page's streams with ranges taken out, every other byte as it was. It refuses a range that could change what's drawn after it (`SpliceError`), and reads what it keeps again before it gives it. `splice_each` takes out as many groups of ranges as it can. `without_keys` writes a marked range's property list again without some of its keys.
 - **Read hostile content.** Reading is bounded by `Limits`: operands, nesting, values, what finding images' ends may cost, marked content and what `splice_each`'s checks may read. Each cap is met before the work it bounds. Past most, reading stops with an `Error` that says where. A color space counted past its caps counts as one that doesn't load, and an inline image it sizes says so (`InlineImage::capped`). The edits refuse content that holds such an image. It never panics on content.
-- **Keep content out of logs.** A `Debug` shows where content is and how long, and an operator's name, never a string's or an image's bytes. Reports print a fault's text, which shows 40 bytes at most, cut at a character.
+- **Keep content out of logs.** A `Debug` shows where content is and how long, and an operator's name, never a string's or an image's bytes. A fault's text (its `Display`) shows 40 bytes at most, cut at a character.
 
 ## Features
 
 - **`image-ends`**, off by default. A reading that names `CodedEnds::Decoded` in `Limits::coded_ends` finds DCT and CCITTFax data's ends by decoding it, on [zune-jpeg](https://crates.io/crates/zune-jpeg) and [hayro-ccitt](https://crates.io/crates/hayro-ccitt), as PDFium's decoders do. Otherwise a stand-in finds them in the data's bytes. Turning the feature on changes nothing for a reading that doesn't name it.
 - **`simd`**, off by default. The dependencies pick the SIMD the CPU has as they run: memchr for its searches, twox-hash for its digest and, with `image-ends`, zune-jpeg for its decoding. Nothing read or digested changes. The `unsafe` code it turns on is theirs.
-- **`tracing`**, off by default. Each call that reads or writes a whole page runs in a span, through [tracing](https://crates.io/crates/tracing). A span's fields are lengths and counts, never content.
+- **`tracing`**, off by default. A page's passes, its edits, the writer's names and a resources dictionary's reading each run in a span, through [tracing](https://crates.io/crates/tracing). Reading tokens and operations has none, as its loop is the caller's. A span's fields are lengths and counts, never content.
 
 ## Examples
 

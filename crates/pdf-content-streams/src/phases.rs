@@ -4,7 +4,8 @@
 //! page's content is read, spliced or written in once: a resources
 //! dictionary's color spaces counted, a page's balance, marked content and
 //! names, a splice, `splice_each` and each of its checks, a list written
-//! again, the names a resources dictionary binds, and the writer's names.
+//! again, what an edit makes in a page's streams, the names a resources
+//! dictionary binds, and the writer's names.
 //! No token, operation or image has one, as their loop is the caller's,
 //! and no fault is told as an event: faults are the sink's.
 
