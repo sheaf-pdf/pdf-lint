@@ -213,6 +213,12 @@ pub enum Fault {
     /// isn't read, or bytes that aren't UTF-8. It's as though it weren't written.
     #[error("a value in XMP metadata doesn't read")]
     XmpValue,
+    /// A claim's element in XMP metadata that holds an element and, beside
+    /// it, text of its own other than white space: mixed content, where the
+    /// grammar 14.3.2 has the metadata written in reads a claim's value as
+    /// text alone. It's as though it weren't written.
+    #[error("a value in XMP metadata holds an element beside its text")]
+    XmpMixed,
 }
 
 /// What [`Fault::PageTreeParent`] says: the node that lists it, by its number,

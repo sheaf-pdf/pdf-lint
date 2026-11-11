@@ -7,9 +7,11 @@
 //! hears their faults, within the caps, and alike where ISO's rules say
 //! nothing's wrong; the same bytes read as a date, written and read back, and
 //! as a count of seconds; read as an XMP packet, the same whatever hears its
-//! faults, an error holding what it read, and what smaller caps read what the
-//! default ones read; and read as a file, its trees, pages and metadata stream
-//! over a reading and the document it makes the same.
+//! faults and with its empty elements written open and closed, an error
+//! holding what it read, and what smaller caps read what the default ones
+//! read, and as a claim's text beside an element, never taken; and read as a
+//! file, its trees, pages and metadata stream over a reading and the document
+//! it makes the same.
 
 #![no_main]
 

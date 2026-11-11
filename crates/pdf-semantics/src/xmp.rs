@@ -11,13 +11,14 @@
 //!
 //! A claim is the file's own word, and nothing here holds a file to it.
 //!
-//! The reader goes on past what it can: an attribute that doesn't read, or a
-//! value that doesn't, is a [`Fault`] and the walk goes on, so a claim
-//! elsewhere still counts. Past that, XML that stops making sense or a packet
-//! past its caps ([`Limits::xmp_bytes`], [`Limits::xmp_depth`],
-//! [`Limits::xmp_bindings`]) is an [`Error`], holding what was read before
-//! it. No DOCTYPE is read: an entity it declares isn't expanded, and only the
-//! five XML predefines, and character references, stand for anything.
+//! The reader goes on past what it can: an attribute that doesn't read, a
+//! value that doesn't, or one that holds an element beside its text, is a
+//! [`Fault`] and the walk goes on, so a claim elsewhere still counts. Past
+//! that, XML that stops making sense or a packet past its caps
+//! ([`Limits::xmp_bytes`], [`Limits::xmp_depth`], [`Limits::xmp_bindings`])
+//! is an [`Error`], holding what was read before it. No DOCTYPE is read: an
+//! entity it declares isn't expanded, and only the five XML predefines, and
+//! character references, stand for anything.
 
 use std::fmt;
 
@@ -268,11 +269,35 @@ pub enum XmpWhy {
     Xml(String),
 }
 
-/// A value being read from an element's text.
-type Open = Option<(Claim, String)>;
+/// A claim's element being read, whose value is its text.
+struct Open {
+    claim: Claim,
+    /// How many elements are open in it, its own among them, so its own
+    /// text is what stands at that level.
+    level: usize,
+    /// Its own text, so far.
+    text: String,
+    /// Whether an element is in it.
+    element: bool,
+    /// Whether its value didn't read, which was said: nothing more is.
+    lost: bool,
+    /// Where its start tag begins.
+    start: usize,
+}
 
 /// What `xml`, an XMP packet, claims: each claim's first value, as an
 /// attribute or an element, under any prefix bound to its namespace.
+///
+/// An element's value is its text: what's written at its own level, its
+/// references and CDATA among it, and comments and processing instructions
+/// no part of it. Written as an empty element, `<pdfaid:part/>`, it's as
+/// it is written open and closed, an empty value. An element in it makes it
+/// RDF's other kind of value, not text: with text of its own beside it,
+/// more than white space, its value is mixed, told, and with white space
+/// alone, it's structured, not told; neither is taken, so a value after it
+/// counts. What's in the element in it is no part of its value, but a claim
+/// there is read as its own. A claim's element whose claim has its value,
+/// when the element starts, isn't read.
 ///
 /// `stream` is the stream `xml` is the decoded data of, as [`metadata_stream`]
 /// gives it. `sink` hears what's read past, each [`Place`] naming that stream,
@@ -286,10 +311,15 @@ type Open = Option<(Claim, String)>;
 /// - [`Fault::XmpValue`]: a claim's value that doesn't read, with an entity
 ///   that isn't one of XML's five, an `&` that starts no reference, or that
 ///   isn't UTF-8. It's as though it weren't written, so a value after it
-///   counts. An `&` elsewhere in the packet's text, as in a title, is passed.
+///   counts, and nothing more is told of it. An `&` elsewhere in the
+///   packet's text, as in a title or in an element in a claim's, is passed;
+/// - [`Fault::XmpMixed`]: a claim's element holding an element beside text
+///   of its own, from its start tag to its end tag.
 ///
 /// An error ([`Error`]) holds what was read before it. A packet may end
-/// with elements still open, and an element's value counts once it closes.
+/// with elements still open, and an element's value counts once it closes:
+/// one left open, at the end or where an error stops the read, is neither
+/// taken nor told.
 // A packet's read once a file, and its error holds what's read.
 #[allow(clippy::result_large_err)]
 pub fn read<S: Sink<Fault> + ?Sized>(
@@ -297,6 +327,20 @@ pub fn read<S: Sink<Fault> + ?Sized>(
     stream: Option<ObjectId>,
     limits: &Limits,
     sink: &mut S,
+) -> Result<Claims, Error> {
+    read_as(xml, stream, limits, sink, false)
+}
+
+/// [`read`], and with `expand`, each empty element given by the XML reader
+/// as a start tag and an end tag, which reads the same: the fuzz body's
+/// check that the two forms are read alike.
+#[allow(clippy::result_large_err)]
+pub(crate) fn read_as<S: Sink<Fault> + ?Sized>(
+    xml: &[u8],
+    stream: Option<ObjectId>,
+    limits: &Limits,
+    sink: &mut S,
+    expand: bool,
 ) -> Result<Claims, Error> {
     let mut claims = Claims::default();
     if xml.starts_with(&[0xFE, 0xFF]) || xml.starts_with(&[0xFF, 0xFE]) {
@@ -307,11 +351,13 @@ pub fn read<S: Sink<Fault> + ?Sized>(
     let data = &xml[..xml.len().min(limits.xmp_bytes)];
     let mut reader = NsReader::from_reader(data);
     reader.config_mut().allow_dangling_amp = true;
+    reader.config_mut().expand_empty_elements = expand;
     (reader.resolver_mut()).set_max_declarations_per_element(limits.xmp_bindings);
     let depth = limits.xmp_depth.min(usize::from(u16::MAX) - 1);
     // How many namespaces each element open has bound, and them all.
     let (mut levels, mut bindings): (Vec<usize>, usize) = (Vec::new(), 0);
-    let mut open: Open = None;
+    // The claims' elements open, innermost last: at most one a level.
+    let mut open: Vec<Open> = Vec::new();
     loop {
         let start = reader.buffer_position() as usize;
         let stop = |read: Claims, at, why| Err(Error { read, at, why });
@@ -356,41 +402,72 @@ pub fn read<S: Sink<Fault> + ?Sized>(
                         Err(_) => tell(sink, stream, start, end, Fault::XmpValue),
                     }
                 }
+                // The innermost claim's element holds it; each outside that
+                // holds the innermost's, marked when it started.
+                if let Some(innermost) = open.last_mut() {
+                    innermost.element = true;
+                }
+                let (namespace, name) = reader.resolver().resolve_element(tag.name());
+                let claim =
+                    Claim::of(namespace, name).filter(|claim| claims.slot(*claim).is_none());
                 if matches!(event, Event::Start(_)) {
                     levels.push(bound);
                     bindings += bound;
-                    let (namespace, name) = reader.resolver().resolve_element(tag.name());
-                    open = (Claim::of(namespace, name))
-                        .filter(|claim| claims.slot(*claim).is_none())
-                        .map(|claim| (claim, String::new()));
+                    open.extend(claim.map(|claim| Open {
+                        claim,
+                        level: levels.len(),
+                        text: String::new(),
+                        element: false,
+                        lost: false,
+                        start,
+                    }));
+                } else if let Some(claim) = claim {
+                    // As it's written open and closed: an empty value.
+                    claims.set(claim, "");
                 }
             }
             // Text only starts with `&` where that starts no reference.
-            Event::Text(text) if open.is_some() && text.starts_with(b"&") => {
-                open = None;
-                tell(sink, stream, start, end, Fault::XmpValue);
-            }
-            Event::Text(text) if open.is_some() => {
-                push(&mut open, text.xml10_content(), sink, stream, start..end);
-            }
-            Event::CData(text) if open.is_some() => {
-                push(&mut open, text.xml10_content(), sink, stream, start..end);
-            }
-            Event::GeneralRef(reference) if open.is_some() => match character(reference) {
-                Some(value) => {
-                    if let Some((_, text)) = &mut open {
-                        text.push_str(&value);
+            Event::Text(text) => {
+                if let Some(value) = own(&mut open, levels.len()) {
+                    match text.starts_with(b"&") {
+                        true => lose(value, sink, stream, start..end),
+                        false => push(value, text.xml10_content(), sink, stream, start..end),
                     }
                 }
-                None => {
-                    open = None;
-                    tell(sink, stream, start, end, Fault::XmpValue);
+            }
+            Event::CData(text) => {
+                if let Some(value) = own(&mut open, levels.len()) {
+                    push(value, text.xml10_content(), sink, stream, start..end);
                 }
-            },
+            }
+            Event::GeneralRef(reference) => {
+                if let Some(value) = own(&mut open, levels.len()) {
+                    match character(reference) {
+                        Some(character) => value.text.push_str(&character),
+                        None => lose(value, sink, stream, start..end),
+                    }
+                }
+            }
             Event::End(_) => {
+                let level = levels.len();
                 bindings -= levels.pop().unwrap_or(0);
-                if let Some((claim, text)) = open.take() {
-                    claims.set(claim, &text);
+                if let Some(value) = open.pop_if(|value| value.level == level) {
+                    let Open {
+                        claim,
+                        text,
+                        element,
+                        lost,
+                        start,
+                        ..
+                    } = value;
+                    match (lost, element) {
+                        // Said where it was lost.
+                        (true, _) => {}
+                        // Structured: elements and white space alone.
+                        (false, true) if text.trim_ascii().is_empty() => {}
+                        (false, true) => tell(sink, stream, start, end, Fault::XmpMixed),
+                        (false, false) => claims.set(claim, &text),
+                    }
                 }
             }
             Event::Eof if cut => return stop(claims, data.len(), XmpWhy::TooLong),
@@ -410,22 +487,36 @@ fn bound(tag: &BytesStart) -> usize {
         .count()
 }
 
+/// The innermost claim's element, where what's read at `level` is its own
+/// text and its value isn't lost: none elsewhere.
+fn own(open: &mut [Open], level: usize) -> Option<&mut Open> {
+    (open.last_mut()).filter(|value| value.level == level && !value.lost)
+}
+
 /// Adds `text` to the value being read; if it doesn't read, the value's lost.
 fn push<S: Sink<Fault> + ?Sized>(
-    open: &mut Open,
+    value: &mut Open,
     text: Result<std::borrow::Cow<str>, EncodingError>,
     sink: &mut S,
     stream: Option<ObjectId>,
     at: std::ops::Range<usize>,
 ) {
-    match (text, open.as_mut()) {
-        (Ok(text), Some((_, value))) => value.push_str(&text),
-        (Err(_), _) => {
-            *open = None;
-            tell(sink, stream, at.start, at.end, Fault::XmpValue);
-        }
-        (_, None) => {}
+    match text {
+        Ok(text) => value.text.push_str(&text),
+        Err(_) => lose(value, sink, stream, at),
     }
+}
+
+/// Loses the value being read, at bytes `at` that don't read, and says so.
+fn lose<S: Sink<Fault> + ?Sized>(
+    value: &mut Open,
+    sink: &mut S,
+    stream: Option<ObjectId>,
+    at: std::ops::Range<usize>,
+) {
+    value.lost = true;
+    value.text = String::new();
+    tell(sink, stream, at.start, at.end, Fault::XmpValue);
 }
 
 /// What a reference in an element's text stands for: a character's, or one

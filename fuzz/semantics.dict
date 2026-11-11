@@ -71,6 +71,8 @@
 "v:GTS_PDFVTVersion"
 "<a:part>"
 "</a:part>"
+"<a:part/>"
+"<e/>"
 "<![CDATA["
 "]]>"
 "<!--"

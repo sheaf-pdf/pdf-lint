@@ -227,9 +227,12 @@ fn the_first_value_of_each_counts() {
     let empty = format!("<d {A} pdfaid:part=\"3\"><pdfaid:part></pdfaid:part></d>");
     assert_eq!(part(&empty), some("3"));
     // An element's value is written when it closes, so what's inside it came
-    // first.
+    // first; and this one, holding an element beside its text, is mixed.
     let inside = format!("<d {A}><pdfaid:part>2<e pdfaid:part=\"3\"/></pdfaid:part></d>");
-    assert_eq!(part(&inside), some("3"));
+    assert_eq!(
+        claims_of(&inside),
+        (claims_with_part("3"), vec![Fault::XmpMixed])
+    );
     // One that says nothing is first all the same; `Claims` holds it.
     assert_eq!(
         part(&format!(
@@ -272,8 +275,9 @@ fn an_element_s_value_is_its_text() {
     assert_eq!(reads("<![CDATA[3]]>"), some("3"));
     assert_eq!(reads("<!-- 2 -->3<?pi 2?>"), some("3"));
     assert_eq!(reads("<![CDATA[<3>]]>"), some("<3>"));
-    // An element inside it ends it, unread, as a value isn't markup, and an
-    // element with no text has an empty value.
+    // An element inside it makes it no text, as a value isn't markup, and
+    // what's inside that is no part of it; an element with no text has an
+    // empty value.
     assert_eq!(reads("<e>3</e>"), None);
     assert_eq!(reads(""), some(""));
     // One left open at the end of the packet isn't read.
@@ -289,6 +293,206 @@ fn an_element_s_value_is_its_text() {
         )),
         None
     );
+}
+
+/// An empty element is read as one written open and closed: an empty value,
+/// the first of its claim where none came before it.
+#[test]
+fn a_claim_s_empty_element_is_an_empty_value() {
+    for empty in [
+        "<pdfaid:part/>",
+        "<pdfaid:part />",
+        "<pdfaid:part></pdfaid:part>",
+    ] {
+        // First, so the value after it doesn't count.
+        let xml = format!("<d {A}>{empty}<pdfaid:part>3</pdfaid:part></d>");
+        assert_eq!(claims_of(&xml), (claims_with_part(""), vec![]), "{empty}");
+        // After a value, by an attribute or by an element, it's passed.
+        let xml = format!("<d {A} pdfaid:part=\"3\">{empty}</d>");
+        assert_eq!(claims_of(&xml), (claims_with_part("3"), vec![]), "{empty}");
+        let xml = format!("<d {A}><pdfaid:part>3</pdfaid:part>{empty}</d>");
+        assert_eq!(claims_of(&xml), (claims_with_part("3"), vec![]), "{empty}");
+    }
+    // An attribute of its own is read before it, as on any tag.
+    let xml = format!("<d {A}><pdfaid:part pdfaid:part=\"3\"/></d>");
+    assert_eq!(part(&xml), some("3"));
+    // Under any prefix, by default too, and in each namespace.
+    let default = r#"<part xmlns="http://www.aiim.org/pdfa/ns/id/"/>"#;
+    assert_eq!(part(default), some(""));
+    let all = format!(
+        "<d {A} {UA} {VT}><pdfaid:part/><pdfaid:conformance/><pdfaid:rev/>\
+         <pdfuaid:part/><pdfuaid:rev/><pdfvtid:GTS_PDFVTVersion/></d>"
+    );
+    let empty = Claims {
+        pdfa_part: some(""),
+        pdfa_conformance: some(""),
+        pdfa_rev: some(""),
+        pdfua_part: some(""),
+        pdfua_rev: some(""),
+        pdfvt_version: some(""),
+    };
+    assert_eq!(claims_of(&all), (empty.clone(), vec![]));
+    // A part or a level that says nothing is no part or level.
+    assert!(empty.conformance().is_err());
+    // Bound to nothing, it's no claim.
+    assert_eq!(
+        part("<pdfaid:part/><d><pdfaid:part>3</pdfaid:part></d>"),
+        None
+    );
+}
+
+/// A claim's element holding an element isn't text: with text of its own
+/// beside it, its value is mixed, told from its start tag to its end tag;
+/// with white space alone, or nothing, it's structured, and not told.
+/// Neither is taken, so a value after it counts.
+#[test]
+fn a_claim_s_element_holding_an_element_isn_t_its_value() {
+    let then = "<pdfaid:part>2</pdfaid:part>";
+    let mixed = [
+        "3<e/>",
+        "<e/>3",
+        "3<e/>4",
+        "3<e>4</e>",
+        "<e>4</e>3",
+        " 3 <e/> ",
+        "&#51;<e/>",
+        "<e/>&amp;",
+        "<![CDATA[3]]><e/>",
+        "<e/><![CDATA[3]]>",
+        "<!-- a -->3<?pi b?><e/>",
+        "\u{a0}<e/>",
+    ];
+    for inside in mixed {
+        let claim = format!("<pdfaid:part>{inside}</pdfaid:part>");
+        let xml = format!("<d {A}>{claim}{then}</d>");
+        let mut kept = Kept::default();
+        let claims = read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept).unwrap();
+        assert_eq!(claims, claims_with_part("2"), "{inside}");
+        assert_eq!(kept.faults(), [Fault::XmpMixed], "{inside}");
+        // Where it is: the claim's element, start tag to end tag.
+        let mut kept = Kept::default();
+        read(
+            xml.as_bytes(),
+            Some(ObjectId::new(4, 0)),
+            &Limits::DEFAULT,
+            &mut kept,
+        )
+        .unwrap();
+        let at = kept.0[0].0.at.unwrap();
+        assert_eq!(&xml[at.start..at.end], claim, "{inside}");
+        // Alone, it's no value.
+        let xml = format!("<d {A}>{claim}</d>");
+        assert_eq!(claims_of(&xml), (Claims::default(), vec![Fault::XmpMixed]));
+    }
+    let structured = [
+        "<e/>",
+        "<e></e>",
+        "<e>3</e>",
+        " \r\n\t<e/>\n<e>3</e> ",
+        "<![CDATA[ ]]><e/>",
+        "<!-- 3 --><e/><?pi 3?>",
+        "<e><f>3</f></e>",
+    ];
+    for inside in structured {
+        let xml = format!("<d {A}><pdfaid:part>{inside}</pdfaid:part>{then}</d>");
+        assert_eq!(claims_of(&xml), (claims_with_part("2"), vec![]), "{inside}");
+        let xml = format!("<d {A}><pdfaid:part>{inside}</pdfaid:part></d>");
+        assert_eq!(claims_of(&xml), (Claims::default(), vec![]), "{inside}");
+    }
+    // A comment or a processing instruction is no element.
+    let xml = format!("<d {A}><pdfaid:part>3<!-- 2 --><?pi 2?></pdfaid:part></d>");
+    assert_eq!(claims_of(&xml), (claims_with_part("3"), vec![]));
+}
+
+/// A claim's element in another's is read as its own, and the other holds
+/// an element: mixed beside text, structured beside none.
+#[test]
+fn a_claim_s_element_in_another_s_is_read_as_its_own() {
+    let level = |part: Option<&str>| Claims {
+        pdfa_part: part.map(str::to_string),
+        pdfa_conformance: some("B"),
+        ..Claims::default()
+    };
+    let inner = "<pdfaid:conformance>B</pdfaid:conformance>";
+    let shapes = [
+        (format!("2{inner}"), level(None), vec![Fault::XmpMixed]),
+        (format!("{inner}2"), level(None), vec![Fault::XmpMixed]),
+        (format!(" {inner} "), level(None), vec![]),
+        (format!("<e>{inner}</e>"), level(None), vec![]),
+        (
+            format!("2<e>{inner}</e>"),
+            level(None),
+            vec![Fault::XmpMixed],
+        ),
+    ];
+    for (inside, claims, faults) in shapes {
+        let xml = format!("<d {A}><pdfaid:part>{inside}</pdfaid:part></d>");
+        assert_eq!(claims_of(&xml), (claims, faults), "{inside}");
+    }
+    // The same claim in itself: the innermost's value, first to close.
+    let nested = format!(
+        "<d {A}>{}3{}</d>",
+        "<pdfaid:part>".repeat(3),
+        "</pdfaid:part>".repeat(3)
+    );
+    assert_eq!(claims_of(&nested), (claims_with_part("3"), vec![]));
+    let nested = format!("<d {A}><pdfaid:part>2<pdfaid:part>3</pdfaid:part></pdfaid:part></d>");
+    assert_eq!(
+        claims_of(&nested),
+        (claims_with_part("3"), vec![Fault::XmpMixed])
+    );
+}
+
+/// At the edges: what's in an element in a claim's is no part of its value,
+/// nor read for it; a value that doesn't read is lost, told once, mixed or
+/// not; a claim's element whose claim has its value isn't read; and one
+/// left open isn't taken or told.
+#[test]
+fn a_claim_s_value_is_its_own_level_s_text() {
+    let then = "<pdfaid:part>2</pdfaid:part>";
+    // Inside an element in it, an `&`, or an entity, isn't read, nor told.
+    for inside in [
+        "<e>&</e>",
+        "<e>&x;</e>",
+        "<e>3&4</e>",
+        "<e><![CDATA[3]]></e>",
+    ] {
+        let xml = format!("<d {A}><pdfaid:part>{inside}</pdfaid:part>{then}</d>");
+        assert_eq!(claims_of(&xml), (claims_with_part("2"), vec![]), "{inside}");
+    }
+    // At its own level, before an element or after, the value's lost and
+    // told so, once, and not as mixed too.
+    for inside in [
+        "&x;<e/>",
+        "<e/>&x;",
+        "<e></e>&x;",
+        "3&4<e/>",
+        "<e></e>3&4",
+        "<e>3</e>&x;3&y;",
+        "&x;<e/>&y;",
+    ] {
+        let xml = format!("<d {A}><pdfaid:part>{inside}</pdfaid:part>{then}</d>");
+        assert_eq!(
+            claims_of(&xml),
+            (claims_with_part("2"), vec![Fault::XmpValue]),
+            "{inside}"
+        );
+    }
+    // A value of a claim that has one isn't read: nothing's told of it.
+    for inside in ["2<e/>", "&x;", "<e/>&x;"] {
+        let xml = format!("<d {A} pdfaid:part=\"3\"><pdfaid:part>{inside}</pdfaid:part></d>");
+        assert_eq!(claims_of(&xml), (claims_with_part("3"), vec![]), "{inside}");
+    }
+    // Left open at the end, or where an error stops the read, it isn't
+    // taken, mixed or not, and isn't told.
+    for inside in ["3", "3<e/>", "3<e>4</e>"] {
+        let xml = format!("<d {A}><pdfaid:part>{inside}");
+        assert_eq!(claims_of(&xml), (Claims::default(), vec![]), "{inside}");
+        let xml = format!("<d {A}><pdfaid:part>{inside}</x>{then}");
+        let mut kept = Kept::default();
+        let error = read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept).unwrap_err();
+        assert_eq!((error.read, kept.faults()), (Claims::default(), vec![]));
+    }
 }
 
 #[test]

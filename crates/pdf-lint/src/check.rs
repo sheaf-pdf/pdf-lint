@@ -861,8 +861,9 @@ pub enum Rule {
     /// file declares, where the stream is in plain view, unfiltered and
     /// unencrypted, whatever the file's version, as content is: a mark of
     /// UTF-16 it begins with, where it's to be UTF-8 (with its erratum
-    /// 296), an attribute that doesn't read as XML, and a claim's value
-    /// that doesn't, each kind once, at its first place, its value
+    /// 296), an attribute that doesn't read as XML, a claim's value that
+    /// doesn't, and a claim's value that holds an element beside its text,
+    /// each kind once, at its first place, its value
     /// pdf-semantics' words with how many times; and XML that
     /// stops it being read, at the byte it stops at, its value the XML
     /// reader's words, after which nothing more is read. In the metadata

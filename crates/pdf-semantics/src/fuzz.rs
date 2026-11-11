@@ -708,7 +708,12 @@ fn claim_values(claims: &Claims) -> [&Option<String>; 6] {
 /// - each value trimmed of ASCII's white space;
 /// - [`conformance`](Claims::conformance) what the values say, where it reads;
 /// - under smaller caps, each value it reads is what it reads under the
-///   default ones, as it reads the same up to where it stops.
+///   default ones, as it reads the same up to where it stops;
+/// - read the same, what's told and where among it, with each empty element
+///   given as a start tag and an end tag, as the two forms are read alike;
+/// - a mixed value told at an element's bytes;
+/// - and its text, as a claim's beside an element, never taken, told as
+///   mixed where it's more than white space.
 pub fn xmp(data: &[u8]) {
     const PACKET: ObjectId = ObjectId::new(9, 0);
 
@@ -723,11 +728,38 @@ pub fn xmp(data: &[u8]) {
         }
     }
 
+    /// Keeps what it's told, and where.
+    #[derive(Default)]
+    struct Heard(Vec<(Place, Fault)>);
+    impl Sink<Fault> for Heard {
+        fn fault(&mut self, place: Place, fault: Fault) {
+            self.0.push((place, fault));
+        }
+    }
+
     let limits = Limits::DEFAULT;
     let mut told = Told(0);
     let read = xmp::read(data, Some(PACKET), &limits, &mut told);
     assert_eq!(xmp::read(data, None, &limits, &mut ()), read);
     assert!(told.0 <= data.len());
+    let (mut heard, mut expanded) = (Heard::default(), Heard::default());
+    let read_again = xmp::read(data, Some(PACKET), &limits, &mut heard);
+    let open_close = xmp::read_as(data, Some(PACKET), &limits, &mut expanded, true);
+    assert_eq!(
+        open_close, read_again,
+        "an empty element read as open and closed"
+    );
+    assert_eq!(
+        expanded.0, heard.0,
+        "the same told, an empty element open and closed"
+    );
+    let mixed_at = (heard.0.iter()).filter(|(_, fault)| *fault == Fault::XmpMixed);
+    for (place, _) in mixed_at {
+        let at = place.at.expect("a place in the packet");
+        let bytes = &data[at.start..at.end];
+        assert!(bytes.starts_with(b"<") && bytes.ends_with(b">"), "{at:?}");
+    }
+    mixed(data);
     let claims = match &read {
         Ok(claims) => claims,
         Err(error) => {
@@ -763,6 +795,37 @@ pub fn xmp(data: &[u8]) {
         for (under, all) in claim_values(&under).into_iter().zip(claim_values(claims)) {
             assert!(under.is_none() || under == all, "{under:?} {all:?}");
         }
+    }
+}
+
+/// `data` as text, its `<` and `&` taken out, beside an element in a claim's
+/// element, ahead of the claim's value: the value after it is the one that
+/// counts, and the text is told as mixed once where it's more than white
+/// space. Text in the element in it is no part of it.
+fn mixed(data: &[u8]) {
+    let text: String = (String::from_utf8_lossy(data).chars())
+        .filter(|c| !matches!(c, '<' | '&'))
+        .collect();
+    let white = text.trim_ascii().is_empty();
+    for inside in [
+        format!("{text}<e/>"),
+        format!("<e/>{text}"),
+        format!("<e>{text}</e>{text}"),
+        format!("<e>{text}</e>"),
+    ] {
+        let xml = format!(
+            "<d xmlns:a=\"http://www.aiim.org/pdfa/ns/id/\">\
+             <a:part>{inside}</a:part><a:part>9</a:part></d>"
+        );
+        let mut kept = Kept::default();
+        let claims = xmp::read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept);
+        let claims = claims.expect("text and elements read");
+        assert_eq!(claims.pdfa_part.as_deref(), Some("9"), "{xml}");
+        let told: &[Fault] = match white || inside == format!("<e>{text}</e>") {
+            true => &[],
+            false => &[Fault::XmpMixed],
+        };
+        assert_eq!(kept.0, told, "{xml}");
     }
 }
 
@@ -853,6 +916,9 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         r#"<d xmlns:a="http://www.aiim.org/pdfa/ns/id/" xmlns:u="http://www.aiim.org/pdfua/ns/id/" xmlns:v="http://www.npes.org/pdfvt/ns/id/"><a:part>2</a:part><a:conformance> b </a:conformance><u:part>&#49;</u:part><u:rev><![CDATA[2014]]></u:rev><v:GTS_PDFVTVersion>PDF/VT-2</v:GTS_PDFVTVersion></d>"#,
         r#"<!DOCTYPE d [<!ENTITY a "3">]><d a=1 b xmlns:a="http://www.aiim.org/pdfa/ns/id/" a:part="&a;" a:rev="1" a:rev="2"><a:part>&a;</a:part><a:part>3</a:part><!-- <a:part>2</a:part> --></e><a:conformance>A</a:conformance></d>"#,
         r#"<a xmlns="http://www.aiim.org/pdfa/ns/id/" xmlns:q="u"><part>9<b/></part><q:part q:part=""><c><d><e><f><g/></f></e></d></c></q:part>"#,
+        // XMP: an empty claim, claims holding elements beside text and
+        // white space, and one in another.
+        r#"<d xmlns:a="http://www.aiim.org/pdfa/ns/id/"><a:part/><a:conformance>B<e/></a:conformance><a:rev> <e>1</e> </a:rev><a:conformance><a:part>3</a:part></a:conformance><a:conformance>&#65;</a:conformance></d>"#,
     ];
     let mut seeds: Vec<Vec<u8>> = trees.map(|seed| seed.as_bytes().to_vec()).to_vec();
     seeds.push(1_792_800_000i64.to_le_bytes().to_vec());
