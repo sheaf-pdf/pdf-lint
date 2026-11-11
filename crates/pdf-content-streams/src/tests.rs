@@ -2936,12 +2936,11 @@ fn behind_a_predictor_the_budget_holds_at_its_edge() {
     assert_eq!(error(&s, &budget(99)).kind, ErrorKind::ImageEnds);
 }
 
-/// What the decoder gives is spent behind a predictor whatever it makes
-/// of it: 100 bytes in a layout PDFium undoes and this crate's predictor
-/// doesn't, of 3 bits a sample, give nothing undone, and still spend 100.
-/// The zeros a short last row is read with are spent too, after the image
-/// they end, for the images after it: 20 of them leave 19 for an image of
-/// 20 where 120 more were left.
+/// What the decoder gives is spent behind a predictor, and nothing more:
+/// 100 bytes in a layout PDFium undoes and this crate's predictor doesn't,
+/// of 3 bits a sample, spend 100. 100 bytes in rows of 30, the last row
+/// short, spend 100 too, where its predictor would read 20 zeros more, so
+/// an image of 20 after it reads where 120 are left.
 #[test]
 fn behind_a_predictor_what_the_decoder_gives_is_spent() {
     let budget = |image_ends| Limits {
@@ -2959,7 +2958,7 @@ fn behind_a_predictor_what_the_decoder_gives_is_spent() {
     assert_eq!(read(&s, &ResCx::none(), &budget(200)).len(), 2);
     let e = error(&s, &budget(199));
     assert_eq!((e.at, e.kind), (three.len(), ErrorKind::ImageEnds));
-    // Rows of 30, the last of 10, read with 20 zeros, then 20 bytes.
+    // Rows of 30, the last of 10, then 20 bytes.
     let rows = [
         &b"BI /F /Fl /DP <</Predictor 2 /Columns 30>> ID "[..],
         &hundred,
@@ -2968,9 +2967,50 @@ fn behind_a_predictor_what_the_decoder_gives_is_spent() {
     .concat();
     let twenty = [&b"BI /F /Fl ID "[..], &stored(&[7; 20], true), b" EI"].concat();
     let s = [&rows[..], &twenty].concat();
-    assert_eq!(read(&s, &ResCx::none(), &budget(140)).len(), 2);
-    let e = error(&s, &budget(139));
+    assert_eq!(read(&s, &ResCx::none(), &budget(120)).len(), 2);
+    let e = error(&s, &budget(119));
     assert_eq!((e.at, e.kind), (rows.len(), ErrorKind::ImageEnds));
+}
+
+/// A predictor isn't undone to find where an image ends, so a few bytes
+/// naming rows of 268 MB cost what they decode. An image of one byte under
+/// TIFF's predictor, on rows of 2^31 − 8 one-bit samples, is followed by a
+/// Flate image and a path. Both images and the path read under the default
+/// budget, and under the 4 bytes the two decode to; 3 stop at the second.
+/// Flate's and LZW's alike.
+#[test]
+fn a_predictors_rows_cost_nothing_to_find_an_end() {
+    let budget = |image_ends| Limits {
+        image_ends,
+        ..Limits::DEFAULT
+    };
+    let dp = "<</Predictor 2 /Columns 2147483640 /BPC 1>>";
+    let after = [
+        &b"BI /W 1 /H 1 /CS /G /BPC 8 /F /Fl ID "[..],
+        &stored(b"xyz", true),
+        b" EI 5 5 m 7 7 l S",
+    ]
+    .concat();
+    for (filter, data) in [
+        ("/Fl", stored(b"\x01", true)),
+        ("/LZW", lzw9(&[256, 1, 257])),
+    ] {
+        let first = format!("BI /W 1 /H 1 /CS /G /BPC 1 /F {filter} /DP {dp} ID ");
+        let s = [first.as_bytes(), &data, b" EI ", &after].concat();
+        for lim in [Limits::DEFAULT, budget(4)] {
+            let names: Vec<&[u8]> = (operations(&s, &ResCx::none(), &lim))
+                .map(|op| op.unwrap().name())
+                .collect();
+            let want: [&[u8]; 5] = [b"BI", b"BI", b"m", b"l", b"S"];
+            assert_eq!(names, want, "{filter}, {}", lim.image_ends);
+        }
+        let e = error(&s, &budget(3));
+        assert_eq!(
+            (e.at, e.kind),
+            (s.len() - after.len(), ErrorKind::ImageEnds),
+            "{filter}"
+        );
+    }
 }
 
 /// A deflate bomb, Flate data of 64 KB that decodes to 16 MiB, decodes

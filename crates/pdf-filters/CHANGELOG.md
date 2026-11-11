@@ -11,6 +11,7 @@ Decode as PDFium does where its reading parts from qpdf's, when you ask for it. 
 - `Fault::AsNext { at }`: under `Reading::Pdfium`, an LZW code past the table's next entry read as that entry, and the codes after it read on as PDFium reads them.
 - `Fault::Refused`: under `Reading::Pdfium`, data PDFium refuses, its output cut away. That's LZW data whose first code since a clear code is past the table, LZW data that decodes to nothing, a predictor whose rows would be no bits or more than 2³² − 1, and PNG's predictor on nothing.
 - `Prefix::decoded`: what the decoder gave before its predictor, refused or not, so a caller can count what decoding cost.
+- `Predictor::pdfium_refuses`: whether PDFium refuses what a filter decoded under this predictor, told without undoing it.
 
 ## 0.1.0-alpha.2 (2026-11-07)
 

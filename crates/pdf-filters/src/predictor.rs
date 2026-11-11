@@ -79,13 +79,25 @@ pub(crate) fn undo(predictor: Predictor, cut: bool, out: &mut Out) {
 }
 
 /// Whether PDFium's predictor refuses what its filter decoded, as
-/// [`Reading::Pdfium`](crate::Reading::Pdfium) reads it (its
+/// [`Reading::Pdfium`](crate::Reading::Pdfium) reads it, by [`refuses`].
+/// Where it refuses a layout this crate's predictor doesn't take either,
+/// that's said first, as [`undo`] says it ([`Fault::Parameters`]).
+pub(crate) fn pdfium_refuses(predictor: Predictor, nothing: bool, out: &mut Out) -> bool {
+    let refused = refuses(predictor, nothing);
+    if let Predictor::Tiff(layout) | Predictor::Png(layout) = predictor
+        && refused
+        && Rows::of(layout).is_none()
+    {
+        out.fault(Fault::Parameters);
+    }
+    refused
+}
+
+/// Whether PDFium's predictor refuses what its filter decoded (its
 /// `ApplyPredictor`, judged on what the decoder gave, before any of it is
 /// undone): TIFF's and PNG's where a row would be no bits, or more than
-/// 2³² − 1, which it can't count; PNG's on `nothing` decoded. Where it
-/// refuses a layout this crate's predictor doesn't take either, that's
-/// said first, as [`undo`] says it ([`Fault::Parameters`]).
-pub(crate) fn pdfium_refuses(predictor: Predictor, nothing: bool, out: &mut Out) -> bool {
+/// 2³² − 1, which it can't count; PNG's on `nothing` decoded.
+pub(crate) fn refuses(predictor: Predictor, nothing: bool) -> bool {
     let (layout, png) = match predictor {
         Predictor::None => return false,
         Predictor::Tiff(layout) => (layout, false),
@@ -95,11 +107,7 @@ pub(crate) fn pdfium_refuses(predictor: Predictor, nothing: bool, out: &mut Out)
         .checked_mul(u64::from(layout.bits_per_component))
         .and_then(|bits| bits.checked_mul(u64::from(layout.columns)));
     let uncounted = !bits.is_some_and(|bits| (1..=u64::from(u32::MAX)).contains(&bits));
-    let refused = uncounted || (png && nothing);
-    if refused && Rows::of(layout).is_none() {
-        out.fault(Fault::Parameters);
-    }
-    refused
+    uncounted || (png && nothing)
 }
 
 /// `data`, whole rows of `layout`, each predicted by PNG's `row` filter

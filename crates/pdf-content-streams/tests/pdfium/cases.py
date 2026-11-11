@@ -878,6 +878,13 @@ image("fl-tiff-colors-0", FL + b" /DP << /Predictor 2 /Colors 0 >>", SIX)
 image("fl-png-bpc-3", FL + b" /DP << /Predictor 12 /BitsPerComponent 3 /Columns 2 >>", SIX)
 image("lzw-tiff-bpc-3", LZ + b" /DP << /Predictor 2 /BitsPerComponent 3 /Columns 2 >>", lzw([256, A, B, 258, 257]))
 image("lzw-png-nothing", LZ + b" /DP << /Predictor 12 >>", lzw([256, 257]))
+# One byte of data under TIFF's predictor on rows of 2^31 - 8 one-bit
+# samples, then a Flate image: both read, and the path after them, the
+# first's end where its decoder stops, whatever its rows would hold.
+WIDE = b" /DP << /Predictor 2 /Columns 2147483640 /BitsPerComponent 1 >>"
+THEN = b" EI BI " + FL + b" ID " + zlib_data(stored(b"xyz"), b"xyz") + b" EI" + P
+image("fl-tiff-wide-then-fl", FL + WIDE, zlib_data(stored(b"\x01"), b"\x01"), THEN)
+image("lzw-tiff-wide-then-fl", LZ + WIDE, lzw([256, 1, 257]), THEN)
 
 # An end with no `EI` after it: no stream, read on from the data's start,
 # for each filter whose end a decoder finds (a JPEG's by its end of image

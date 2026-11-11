@@ -202,6 +202,34 @@ pub enum Predictor {
     Png(Layout),
 }
 
+impl Predictor {
+    /// Whether PDFium refuses data its filter decoded to `decoded` bytes,
+    /// judged before any of it is undone (its `ApplyPredictor`). TIFF's and
+    /// PNG's are refused where a row would be no bits, or more than
+    /// 2³² − 1. PNG's is refused on nothing decoded.
+    ///
+    /// Under [`Reading::Pdfium`], decoding with the predictor says this as
+    /// [`Fault::Refused`]. This tells it without undoing the predictor, for
+    /// a reader that wants only where the data ends, which a predictor
+    /// doesn't change.
+    ///
+    /// ```
+    /// use pdf_filters::{Layout, Predictor};
+    ///
+    /// let png = Predictor::Png(Layout::default());
+    /// assert!(png.pdfium_refuses(0));
+    /// assert!(!png.pdfium_refuses(1));
+    ///
+    /// // 16 bits a sample, 2^28 a row: 2^32 bits, which PDFium can't count.
+    /// let wide = Layout { colors: 1, bits_per_component: 16, columns: 1 << 28 };
+    /// assert!(Predictor::Tiff(wide).pdfium_refuses(1));
+    /// ```
+    #[must_use]
+    pub fn pdfium_refuses(self, decoded: usize) -> bool {
+        predictor::refuses(self, decoded == 0)
+    }
+}
+
 /// How the data a predictor works on is laid out in rows.
 ///
 /// Exhaustive on purpose: these are the three parameters a predictor reads
@@ -1315,7 +1343,8 @@ mod tests {
     /// What's refused is cut away, the buffer as it was, and the next
     /// filter is given nothing. A layout PDFium's predictor takes and this
     /// crate's doesn't isn't refused: its parameters are said, as under
-    /// qpdf's reading, with nothing decoded.
+    /// qpdf's reading, with nothing decoded. `Predictor::pdfium_refuses`
+    /// tells each the same from what the decoder gives alone.
     #[test]
     fn under_pdfiums_reading_its_predictors_refusals_are_said() {
         let refused = |why: &[Fault]| {
@@ -1356,6 +1385,18 @@ mod tests {
                 (&six, Predictor::Tiff(layout(1, 3, 1)), parameters.clone()),
             ] {
                 let flate = [Filter::Flate { predictor }];
+                let alone = Filter::Flate {
+                    predictor: Predictor::None,
+                };
+                let mut out = Vec::new();
+                let (alone, _) =
+                    decode_prefix_into_as(data, alone, 100, backend, Reading::Pdfium, &mut out);
+                let is_refused = matches!(&answer, Err(Faults(f)) if f.iter().any(|(_, f)| *f == Fault::Refused));
+                assert_eq!(
+                    predictor.pdfium_refuses(alone.decoded),
+                    is_refused,
+                    "{predictor:?}"
+                );
                 let mut out = b"held".to_vec();
                 let decoded = decode_into_as(data, &flate, 100, backend, Reading::Pdfium, &mut out);
                 let added = if answer.is_ok() {

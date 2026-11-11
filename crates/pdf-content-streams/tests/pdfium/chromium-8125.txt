@@ -656,6 +656,8 @@ fl-tiff-colors-0	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill
 fl-png-bpc-3	image matrix 1 0 0 1 0 0 raw x%01%01%06%00%F9%FFabcdef%08%1E%02V ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 lzw-tiff-bpc-3	image matrix 1 0 0 1 0 0 raw %80%10HP(%08 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 lzw-png-nothing	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+fl-tiff-wide-then-fl	image matrix 1 0 0 1 0 0 raw x%01%01%01%00%FE%FF%01%00%02%00%02 ; image matrix 1 0 0 1 0 0 raw x%01%01%03%00%FC%FFxyz%02%D7%01l ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+lzw-tiff-wide-then-fl	image matrix 1 0 0 1 0 0 raw %80%00`%20 ; image matrix 1 0 0 1 0 0 raw x%01%01%03%00%FC%FFxyz%02%D7%01l ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 ahx-end-no-EI	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
 a85-end-no-EI	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
 rl-end-no-EI	none
