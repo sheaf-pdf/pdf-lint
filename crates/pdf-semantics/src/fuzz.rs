@@ -676,7 +676,8 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
 /// first of them the trailer, over which [`over`] walks what its catalog
 /// holds; and the first of them, whatever they are, each walked as a root of
 /// each kind of tree ([`a_tree`]), and each dictionary as a catalog
-/// ([`both_tables`]).
+/// ([`both_tables`]); and its first bytes as a page tree written
+/// ([`tree_written`]).
 pub fn walks(data: &[u8]) {
     let objects = values(data);
     let resolve = |id: ObjectId| objects.get(&id);
@@ -688,6 +689,190 @@ pub fn walks(data: &[u8]) {
         a_tree(resolve, root, Kind::Numbers);
         if let Some(catalog) = root.as_dict() {
             let _ = both_tables(resolve, catalog);
+        }
+    }
+    tree_written(data);
+}
+
+/// `data`'s first bytes as a page tree to write ([`pages::write`](crate::pages::write)):
+/// as many pages as its first byte says, numbered from its fourth, under
+/// nodes of as many kids as its second, 255 for one node over them all;
+/// its third byte's bits choosing what's refused, a page given again or of
+/// number 0, caps of its fifth and sixth bytes, or an id for its seventh's
+/// node that's 0, a page's or the node's before it. Refused for the first of
+/// what it's refused for, in the order its doc gives, no id asked for but
+/// the one refused; or written, every page at one depth, no node of more than
+/// the fanout, read back by both rules under the same caps with no fault,
+/// every page once and in order, each its `/Parent` chain up to the root.
+fn tree_written(data: &[u8]) {
+    use crate::pages::{WriteError, Written, write};
+
+    let byte = |at: usize| data.get(at).copied().unwrap_or(0);
+    let fanout = match byte(1) {
+        u8::MAX => usize::MAX,
+        fanout => usize::from(fanout),
+    };
+    let how = byte(2);
+    let first = u32::from(byte(3));
+    let mut pages: Vec<ObjectId> = (first..first + u32::from(byte(0)))
+        .map(|n| ObjectId::new(n, 0))
+        .collect();
+    let at = usize::from(byte(4)) % pages.len().max(1);
+    if how & 1 != 0 && pages.len() > 1 {
+        let last = pages.len() - 1;
+        pages[last] = ObjectId::new(pages[at.min(last - 1)].number, u16::from(byte(4)));
+    }
+    if how & 2 != 0 && !pages.is_empty() {
+        pages[at] = ObjectId::new(0, 0);
+    }
+    let mut limits = Limits::DEFAULT;
+    if how & 4 != 0 {
+        limits.pages = usize::from(byte(5));
+    }
+    if how & 8 != 0 {
+        limits.page_depth = usize::from(byte(5) % 8);
+    }
+    // Past every page's number, which is under 512.
+    let node_ids = |k: usize| ObjectId::new(1000 + k as u32, 0);
+    let bad = usize::from(byte(6));
+    let answer = match how >> 4 & 3 {
+        1 => Some(ObjectId::new(0, u16::from(byte(4)))),
+        2 => pages.get(at).filter(|page| page.number != 0).copied(),
+        3 => bad.checked_sub(1).map(node_ids),
+        _ => None,
+    };
+    let mut asked = 0;
+    let ids = || {
+        asked += 1;
+        match answer {
+            Some(answer) if asked - 1 == bad => answer,
+            _ => node_ids(asked - 1),
+        }
+    };
+    let written = write(&pages, fanout, &limits, ids);
+
+    // What's refused before an id is asked for, in the order the doc gives.
+    let refused_first = |error: WriteError| assert_eq!((&written, asked), (&Err(error), 0));
+    if pages.is_empty() {
+        return refused_first(WriteError::NoPages);
+    }
+    if fanout < 2 {
+        return refused_first(WriteError::Fanout { fanout });
+    }
+    if pages.len() > limits.pages {
+        return refused_first(WriteError::TooManyPages { cap: limits.pages });
+    }
+    let reaches = |h: u32| {
+        fanout
+            .checked_pow(h)
+            .is_none_or(|reach| reach >= pages.len())
+    };
+    let height = (1..).find(|&h| reaches(h)).expect("a height") as usize;
+    if height > limits.page_depth {
+        let cap = limits.page_depth;
+        return refused_first(WriteError::TooDeep { cap });
+    }
+    let mut numbers = std::collections::HashSet::new();
+    let page_fault = pages.iter().find_map(|&page| match page.number {
+        0 => Some(WriteError::Zero),
+        n if !numbers.insert(n) => Some(WriteError::Repeated { id: page }),
+        _ => None,
+    });
+    if let Some(error) = page_fault {
+        return refused_first(error);
+    }
+    // Then the nodes under the root, counted under a cap that takes them.
+    let mut roomy = limits;
+    roomy.pages = usize::MAX;
+    let mut next = 1000;
+    let counted = write(&pages, fanout, &roomy, || {
+        next += 1;
+        ObjectId::new(next - 1, 0)
+    });
+    let nodes = counted
+        .expect("written under a cap that takes it")
+        .nodes
+        .len();
+    if nodes - 1 > limits.pages {
+        assert_eq!(fanout, 2, "only nodes of 2 are more than their pages");
+        return refused_first(WriteError::TooManyPages { cap: limits.pages });
+    }
+    // Then each id as it's given.
+    if let Some(answer) = answer.filter(|_| bad < nodes) {
+        let error = match answer.number {
+            0 => WriteError::Zero,
+            _ => WriteError::Taken { id: answer },
+        };
+        assert_eq!((written, asked), (Err(error), bad + 1));
+        return;
+    }
+    let written: Written = written.expect("nothing to refuse");
+    assert_eq!(asked, nodes);
+    tree_read_back(&written, &pages, fanout, height, &limits);
+}
+
+/// A page tree [`tree_written`] wrote over `pages`, `height` levels of nodes
+/// of at most `fanout` kids each, held to its shape and read back by both
+/// rules under `limits`.
+fn tree_read_back(
+    written: &crate::pages::Written,
+    listed: &[ObjectId],
+    fanout: usize,
+    height: usize,
+    limits: &Limits,
+) {
+    let mut objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let mut up = BTreeMap::new();
+    for (id, node) in &written.nodes {
+        assert!(node.has_type(b"Pages"));
+        let kids = node
+            .get(b"Kids")
+            .and_then(Object::as_array)
+            .expect("its kids");
+        assert!(!kids.is_empty() && kids.len() <= fanout, "{}", kids.len());
+        for kid in kids {
+            up.insert(kid.as_reference().expect("a kid by reference"), *id);
+        }
+        assert!(objects.insert(*id, Object::from(node.clone())).is_none());
+    }
+    assert_eq!(up.get(&written.root), None, "the root under none");
+    assert_eq!(written.nodes[0].1.get(b"Parent"), None);
+    for (id, node) in &written.nodes[1..] {
+        let parent = node.get(b"Parent").and_then(Object::as_reference);
+        assert_eq!(parent.as_ref(), up.get(id), "a node's /Parent its lister");
+    }
+    let mut chains = Vec::with_capacity(listed.len());
+    for (&page, &parent) in listed.iter().zip(&written.parents) {
+        assert_eq!(up.get(&page), Some(&parent), "a page's /Parent its lister");
+        // At most one more than the nodes are many, so a loop of them ends.
+        let chain: Vec<ObjectId> =
+            std::iter::successors(Some(parent), |node| up.get(node).copied())
+                .take(written.nodes.len() + 1)
+                .collect();
+        assert_eq!(chain.len(), height, "every page at one depth");
+        chains.push(chain);
+        let media = vec![
+            Object::from(0),
+            Object::from(0),
+            Object::from(page.number),
+            Object::from(200),
+        ];
+        let dict = dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+        assert!(objects.insert(page, Object::from(dict)).is_none());
+    }
+    let resolve = |id: ObjectId| objects.get(&id);
+    let catalog = dict! { "Pages" => written.root };
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let mut kept = Kept::default();
+        let table = pages(resolve, &catalog, rules, limits, &mut kept);
+        assert_eq!(table, pages(resolve, &catalog, rules, limits, &mut ()));
+        let table = table.unwrap_or_else(|error| panic!("{rules:?}: {error}"));
+        assert_eq!(kept.0, [], "{rules:?}");
+        assert_eq!(table.counted(), listed.len());
+        assert_eq!(table.len(), listed.len());
+        for ((page, &id), chain) in table.iter().zip(listed).zip(&chains) {
+            assert_eq!((page.id, page.repeat), (Some(id), 0));
+            assert!(page.parents().eq(chain.iter().copied()));
         }
     }
 }
@@ -1015,7 +1200,7 @@ fn mixed(data: &[u8]) {
 
 /// What the fuzzer begins from: objects as [`walks`] reads them, the first
 /// the trailer, in each of a tree's shapes and a page tree's; dates; XMP
-/// packets; and a count of seconds.
+/// packets; a count of seconds; and page trees to write, each refusal's.
 /// The seeds written for the target are each of these as a file too.
 #[must_use]
 pub fn fixtures() -> Vec<Vec<u8>> {
@@ -1118,6 +1303,27 @@ pub fn fixtures() -> Vec<Vec<u8>> {
     ];
     let mut seeds: Vec<Vec<u8>> = trees.map(|seed| seed.as_bytes().to_vec()).to_vec();
     seeds.push(1_792_800_000i64.to_le_bytes().to_vec());
+    // Page trees to write (`tree_written`): how many pages, the fanout, what's
+    // refused, the first page's number, and what that takes. Written: 33
+    // under 32, 64 under 3, 200 under one node; refused: none, a fanout of
+    // 1, a page again, a page 0, nodes past the cap, a tree past the depth,
+    // a node's id 0, a page's, the node's before it.
+    for tree in [
+        [33, 32, 0, 1, 0, 0, 0],
+        [64, 3, 0, 1, 0, 0, 0],
+        [200, 255, 0, 1, 0, 0, 0],
+        [0, 32, 0, 1, 0, 0, 0],
+        [9, 1, 0, 1, 0, 0, 0],
+        [9, 2, 1, 1, 3, 0, 0],
+        [9, 2, 2, 1, 4, 0, 0],
+        [9, 2, 4, 1, 0, 9, 0],
+        [5, 2, 8, 1, 0, 2, 0],
+        [64, 3, 0x10, 1, 0, 0, 17],
+        [64, 3, 0x20, 1, 5, 0, 39],
+        [64, 3, 0x30, 1, 0, 0, 20],
+    ] {
+        seeds.push(tree.to_vec());
+    }
     seeds
 }
 

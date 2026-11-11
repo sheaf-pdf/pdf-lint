@@ -104,6 +104,56 @@ def linearized():
     return out.replace(b"@@@@@@@@@@", b"%010d" % len(out))
 
 
+def written(count, fanout):
+    """A file of `count` pages, objects 2 on, under a tree laid out as the
+    crate's writer lays one out under nodes of `fanout` kids: every page at
+    one depth, under as few levels of nodes as hold them, each node's kids
+    as even as they can be, the first ones a page more. Its nodes are
+    numbered from `count + 2` in the order the writer asks for their
+    numbers, the root first and each node before those under it, and each
+    is /Type /Pages, /Parent but the root, /Kids and /Count, in that order."""
+    height, reach = 1, fanout
+    while reach < count:
+        height += 1
+        reach *= fanout
+    nodes = []  # [parent, kids, count], a kid ("node", place) or ("page", position)
+    leaf = [None] * count
+
+    def build(first, length, height, parent):
+        me = len(nodes)
+        nodes.append([parent, [], length])
+        if height == 1:
+            kids = [("page", p) for p in range(first, first + length)]
+            for p in range(first, first + length):
+                leaf[p] = me
+        else:
+            under = fanout ** (height - 1)
+            groups = max(-(-length // under), 1)
+            size, more = divmod(length, groups)
+            kids, at = [], 0
+            for g in range(groups):
+                part = size + (1 if g < more else 0)
+                kids.append(("node", build(first + at, part, height - 1, me)))
+                at += part
+        nodes[me][1] = kids
+        return me
+
+    build(0, count, height, None)
+
+    def number(kid):
+        kind, at = kid
+        return count + 2 + at if kind == "node" else 2 + at
+
+    objects = {1: b"<< /Type /Catalog /Pages %d 0 R >>" % number(("node", 0))}
+    for p in range(count):
+        objects[2 + p] = page(2 + p, number(("node", leaf[p])))
+    for at, (parent, kids, length) in enumerate(nodes):
+        up = b"" if parent is None else b" /Parent %d 0 R" % number(("node", parent))
+        listed = b" ".join(b"%d 0 R" % number(kid) for kid in kids)
+        objects[number(("node", at))] = b"<< /Type /Pages%s /Kids [%s] /Count %d >>" % (up, listed, length)
+    return objects
+
+
 ALL = b"/Type /Pages /Kids [3 0 R 4 0 R 5 0 R]"
 FOO = b"<< /Type /Foo /Parent 2 0 R /MediaBox [0 0 3 200] >>"
 BOX = b"/MediaBox [0 0 21 22]"
@@ -351,6 +401,12 @@ CASES = {
     "depth-1024": deep(1024),
     "depth-1025": deep(1025),
     "depth-past-the-count": deep_past_the_count(1100),
+    # Trees as the crate's writer writes them: 33 pages under nodes of 32,
+    # leaves of 17 and 16; 64 under nodes of 3, four levels; and 1,025 under
+    # nodes of 32, three levels, of which the oracle asks for the first 66.
+    "written-33": written(33, 32),
+    "written-64-by-3": written(64, 3),
+    "written-1025": written(1025, 32),
 }
 
 

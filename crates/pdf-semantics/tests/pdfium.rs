@@ -10,14 +10,21 @@
 //! of pages, then each page from the first to two past the last, its width,
 //! height and quarter turns, or `null`. Here the count is [`Pages::counted`],
 //! and a page's size what PDFium makes of its boxes.
+//!
+//! Three cases are trees as [`write()`] writes them, `cases.py` laying them out
+//! in its own code: so PDFium's answer for each is what it makes of the
+//! writer's tree, and a test here holds the writer's nodes to the case's.
+//! PDFium answers for the first 66 places of a tree at most, so of 1,025
+//! pages, it's their count and those.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_semantics::pages::{Error, Origin, Page, Pages, Rect, counted, pages};
+use pdf_objects::{Object, ObjectId, Value};
+use pdf_semantics::pages::{Error, FANOUT, Origin, Page, Pages, Rect, counted, pages, write};
 use pdf_semantics::{Limits, Rules, catalog};
-use pdf_structure::read::{Options, Reading};
+use pdf_structure::read::{self, Options, Reading};
 
 /// How many pages of a file the oracle asks for, as `oracle/pdfium.py` has it.
 const PAGES: usize = 64;
@@ -224,4 +231,65 @@ fn where_no_page_is_under_the_root_the_count_is_pdfiums() {
     }
     assert!(none_under > 0, "a case with no page under its root");
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The cases of trees [`write()`] writes (`cases.py`'s `written`): each its
+/// name, its count of pages, objects 2 on, and the fanout it's written under,
+/// its nodes numbered from past the last page.
+const WRITTEN: [(&str, u32, usize); 3] = [
+    ("pages-written-33", 33, FANOUT),
+    ("pages-written-64-by-3", 64, 3),
+    ("pages-written-1025", 1025, FANOUT),
+];
+
+/// `o` as built: every place it was written left out, a dictionary's keys'
+/// too.
+fn unplaced(o: &Object) -> Object {
+    let mut o = o.clone();
+    let mut stack = vec![&mut o];
+    while let Some(o) = stack.pop() {
+        match o.value_mut() {
+            Value::Array(a) => stack.extend(a.iter_mut()),
+            Value::Dict(d) => {
+                for entry in d.entries_mut() {
+                    entry.key_at = None;
+                    stack.push(&mut entry.value);
+                }
+            }
+            _ => {}
+        }
+    }
+    o
+}
+
+#[test]
+fn the_writer_writes_the_trees_pdfium_is_asked_of() {
+    let cases = rows(&set().join("cases.tsv"));
+    for (name, count, fanout) in WRITTEN {
+        assert!(cases.iter().any(|case| case[0] == name), "{name}: no case");
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let document = read::document(&bytes, &read::Options::DEFAULT);
+        let pages: Vec<ObjectId> = (2..count + 2).map(|n| ObjectId::new(n, 0)).collect();
+        let mut next = count + 2;
+        let ids = || {
+            next += 1;
+            ObjectId::new(next - 1, 0)
+        };
+        let written = write(&pages, fanout, &Limits::DEFAULT, ids).unwrap();
+        let catalog = document.catalog().expect("a catalog");
+        let root = catalog.get(b"Pages").and_then(Object::as_reference);
+        assert_eq!(root, Some(written.root), "{name}");
+        // The catalog, the pages and the nodes, and nothing else.
+        let held: std::collections::BTreeMap<ObjectId, &Object> = document.objects().collect();
+        assert_eq!(held.len(), 1 + pages.len() + written.nodes.len(), "{name}");
+        for (id, node) in &written.nodes {
+            let case = held.get(id).unwrap_or_else(|| panic!("{name}: no {id}"));
+            assert_eq!(unplaced(case), Object::from(node.clone()), "{name}: {id}");
+        }
+        for (page, parent) in pages.iter().zip(&written.parents) {
+            let case = held.get(page).and_then(|page| page.as_dict()).unwrap();
+            let up = case.get(b"Parent").and_then(Object::as_reference);
+            assert_eq!(up, Some(*parent), "{name}: {page}");
+        }
+    }
 }

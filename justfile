@@ -120,12 +120,13 @@ _qpdf:
 
 # The tests of qpdf as the tests run it, pdf-fixtures'; then the tests that
 # set the reader, and what the writer writes, beside qpdf, pdf-structure's,
-# then the checker's in pdf-lint, then what pdf-linearize lays out, which
-# `just test` leaves out as ignored, against the pinned qpdf (the corpus
-# tests aside).
+# then the page trees pdf-semantics writes, then the checker's in pdf-lint,
+# then what pdf-linearize lays out, which `just test` leaves out as
+# ignored, against the pinned qpdf (the corpus tests aside).
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fixtures -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-semantics --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --features lopdf --test qpdf -- --ignored lopdf::

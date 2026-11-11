@@ -14,7 +14,8 @@
 //! - **The page tree** ([`pages`]): ISO 32000-2, 7.7.3. Every page in order,
 //!   by ISO's rules or PDFium's as of chromium/8125, each inherited attribute
 //!   saying which dictionary it came from, a value that's absent saying what
-//!   stands for it.
+//!   stands for it; and a balanced tree's nodes written over a caller's pages,
+//!   numbered by the caller, which either rules read back.
 //! - **XMP claims** ([`xmp`]): ISO 32000-2, 14.3.2. What a packet says a file
 //!   conforms to, PDF/A, PDF/UA or PDF/VT, read as XML under caps, by the
 //!   namespace each is bound to, so a prefix or a comment that merely looks

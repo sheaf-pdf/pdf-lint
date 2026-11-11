@@ -42,6 +42,9 @@
 //! the walk ([`Error::Unreadable`]), as does a chain of references too long to
 //! follow.
 //!
+//! [`write()`] writes a tree's nodes over pages a caller has, balanced, each
+//! numbered by the caller, as [`pages`] reads them back by either rules.
+//!
 //! ```
 //! use std::collections::BTreeMap;
 //!
@@ -1226,6 +1229,304 @@ fn add(total: &mut usize, count: usize) -> Result<(), Error> {
         return Err(Error::TooManyPages);
     }
     Ok(())
+}
+
+/// The most kids a node of a tree [`write()`] writes has, where a caller has
+/// no reason to choose: 32, so 1,024 pages take two levels of nodes, and
+/// 32,768 three.
+pub const FANOUT: usize = 32;
+
+/// A balanced page tree over `pages`, in order (ISO 32000-2, 7.7.3.2): every
+/// page at one depth, under as few levels of nodes as hold them with no node
+/// of more than `fanout` kids, and each node's kids as even as they can be,
+/// so 33 pages under nodes of 32 are two leaves of 17 and 16. [`FANOUT`]
+/// serves where nothing says otherwise, and `usize::MAX` writes one node
+/// over every page.
+///
+/// Its nodes are numbered by `ids`, called once a node, the root first and
+/// each node before those under it, so that a document's own way of handing
+/// out numbers, `|| document.new_id()`, serves. Each node is `/Type /Pages`,
+/// `/Parent` but the root and `/Kids`, by reference, and `/Count`, and has no
+/// inheritable attribute (7.7.3.4): a page carries its own, or a caller sets
+/// one on the root. The pages aren't written: a caller writes each, its
+/// `/Parent` the node [`Written::parents`] names.
+///
+/// With each page `/Type /Page`, that `/Parent` and a `/MediaBox`, its own or
+/// the root's, [`pages`] reads the tree back by either rules under the same
+/// `limits` with no fault, every page once and in order. Ids are told apart
+/// by number, as a file has one object at a number (7.5.4). More pages than
+/// PDFium counts, [`Limits::DEFAULT`]'s cap, are written only under a cap
+/// raised past it, and by PDFium's rules read as too many.
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// use pdf_semantics::Limits;
+/// use pdf_semantics::pages::{self, pages};
+/// use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
+/// use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
+///
+/// // Three pages under nodes of two: a leaf of two and one of one.
+/// let numbered = [ObjectId::new(1, 0), ObjectId::new(2, 0), ObjectId::new(3, 0)];
+/// let mut next = 10;
+/// let ids = || {
+///     next += 1;
+///     ObjectId::new(next - 1, 0)
+/// };
+/// let written = pages::write(&numbered, 2, &Limits::DEFAULT, ids).unwrap();
+/// assert_eq!(written.root, ObjectId::new(10, 0));
+/// let (eleven, twelve) = (ObjectId::new(11, 0), ObjectId::new(12, 0));
+/// assert_eq!(written.parents, [eleven, eleven, twelve]);
+///
+/// let mut objects: BTreeMap<ObjectId, Object> = (written.nodes.into_iter())
+///     .map(|(id, node)| (id, Object::from(node)))
+///     .collect();
+/// for (&page, &parent) in numbered.iter().zip(&written.parents) {
+///     let media = vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)];
+///     let page_dict = dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+///     objects.insert(page, Object::from(page_dict));
+/// }
+/// let resolve = |id: ObjectId| objects.get(&id);
+/// let catalog = dict! { "Pages" => written.root };
+/// let mut faults = Vec::new();
+/// let table = pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut faults).unwrap();
+/// assert!(faults.is_empty());
+/// let listed: Vec<_> = table.iter().map(|page| page.id.unwrap()).collect();
+/// assert_eq!(listed, numbered);
+/// ```
+///
+/// # Errors
+///
+/// A [`WriteError`], with nothing written, checked in this order, `ids`
+/// called for none but the last: no pages ([`WriteError::NoPages`]); a
+/// fanout under 2 ([`WriteError::Fanout`]); more pages than `limits.pages`
+/// ([`WriteError::TooManyPages`]); more levels of nodes than
+/// `limits.page_depth`, which only a small fanout over many pages comes to,
+/// and under the default caps none ([`WriteError::TooDeep`]); the first page
+/// of number 0 ([`WriteError::Zero`]) or of a page's number before it
+/// ([`WriteError::Repeated`]); more nodes under the root than `limits.pages`,
+/// as a walk visits them, which only a fanout of 2 comes to
+/// ([`WriteError::TooManyPages`]); and as `ids` gives each node's id, one of
+/// number 0 ([`WriteError::Zero`]) or of a page's number or a node's before it
+/// ([`WriteError::Taken`]), after which `ids` isn't called again.
+pub fn write(
+    pages: &[ObjectId],
+    fanout: usize,
+    limits: &Limits,
+    mut ids: impl FnMut() -> ObjectId,
+) -> Result<Written, WriteError> {
+    if pages.is_empty() {
+        return Err(WriteError::NoPages);
+    }
+    if fanout < 2 {
+        return Err(WriteError::Fanout { fanout });
+    }
+    let too_many = WriteError::TooManyPages { cap: limits.pages };
+    if pages.len() > limits.pages {
+        return Err(too_many);
+    }
+    let height = height(pages.len(), fanout);
+    if height as usize > limits.page_depth {
+        return Err(WriteError::TooDeep {
+            cap: limits.page_depth,
+        });
+    }
+    let mut numbers = HashSet::with_capacity(pages.len());
+    for &page in pages {
+        if page.number == 0 {
+            return Err(WriteError::Zero);
+        }
+        if !numbers.insert(page.number) {
+            return Err(WriteError::Repeated { id: page });
+        }
+    }
+    let shape = balanced(pages.len(), fanout, height);
+    if shape.nodes.len() - 1 > limits.pages {
+        return Err(too_many);
+    }
+    let mut numbered = Vec::with_capacity(shape.nodes.len());
+    for _ in &shape.nodes {
+        let id = ids();
+        if id.number == 0 {
+            return Err(WriteError::Zero);
+        }
+        if !numbers.insert(id.number) {
+            return Err(WriteError::Taken { id });
+        }
+        numbered.push(id);
+    }
+    let nodes = (shape.nodes.iter().zip(&numbered))
+        .map(|(node, &id)| {
+            let mut dict = Dict::new();
+            dict.push("Type", "Pages");
+            if let Some(parent) = node.parent {
+                dict.push("Parent", numbered[parent]);
+            }
+            let kids: Vec<Object> = (node.kids.iter())
+                .map(|kid| match *kid {
+                    Kid::Node(n) => Object::from(numbered[n]),
+                    Kid::Page(p) => Object::from(pages[p]),
+                })
+                .collect();
+            dict.push("Kids", kids);
+            // A slice is never longer than an i64 counts.
+            dict.push("Count", i64::try_from(node.count).unwrap_or(i64::MAX));
+            (id, dict)
+        })
+        .collect();
+    let parents = shape.leaf.iter().map(|&leaf| numbered[leaf]).collect();
+    Ok(Written {
+        root: numbered[0],
+        nodes,
+        parents,
+    })
+}
+
+/// A page tree [`write()`] wrote.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Written {
+    /// The root node's id, for the catalog's `/Pages`.
+    pub root: ObjectId,
+    /// Each node's id and dictionary, in the order `ids` numbered them: the
+    /// root first, each node before those under it.
+    pub nodes: Vec<(ObjectId, Dict)>,
+    /// The node each page is a kid of, by the page's place among those
+    /// given: its `/Parent`.
+    pub parents: Vec<ObjectId>,
+}
+
+/// Why [`write()`] wrote no page tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum WriteError {
+    /// No pages: a tree lists one at least (ISO 32000-2, 7.7.3.2), and a
+    /// walk finds none in one without.
+    #[error("a page tree lists a page at least, and none is given")]
+    NoPages,
+    /// A fanout under 2, which can't put more than one page under a node
+    /// over others.
+    #[error("a page tree's nodes are given at most {fanout} kids, where it takes 2")]
+    Fanout {
+        /// The fanout given.
+        fanout: usize,
+    },
+    /// A page whose number a page before it has: the tree would list one
+    /// page twice, or one the file can't hold beside the other.
+    #[error("object {} is given as a page twice", id.number)]
+    Repeated {
+        /// The second page of that number.
+        id: ObjectId,
+    },
+    /// A page of number 0, or an id of it for a node: the head of a file's
+    /// list of free numbers (7.5.4), never an object.
+    #[error("object 0 is given as a page or a node, and it's never an object")]
+    Zero,
+    /// An id for a node whose number is a page's, or a node's before it: the
+    /// tree would list itself, or a page where a node is.
+    #[error("object {} is given for a node, and it's a page or a node already", id.number)]
+    Taken {
+        /// The id `ids` gave.
+        id: ObjectId,
+    },
+    /// More pages than [`Limits::pages`], or more nodes under the root, as a
+    /// walk visits them.
+    #[error("the page tree would list more pages, or have more nodes under its root, than {cap}")]
+    TooManyPages {
+        /// The cap.
+        cap: usize,
+    },
+    /// More levels of nodes than [`Limits::page_depth`].
+    #[error("the page tree would have more levels of nodes than {cap}")]
+    TooDeep {
+        /// The cap.
+        cap: usize,
+    },
+}
+
+/// A page tree's nodes, in the order the tree is walked: the root first, each
+/// node before the nodes under it.
+struct Shape {
+    nodes: Vec<PagesNode>,
+    /// The node each page is a kid of, by the page's position.
+    leaf: Vec<usize>,
+}
+
+/// A node of a written page tree.
+struct PagesNode {
+    /// None for the root.
+    parent: Option<usize>,
+    kids: Vec<Kid>,
+    /// The pages under it.
+    count: usize,
+}
+
+/// A kid of a node: a node by its place among the nodes, a page by its
+/// position.
+enum Kid {
+    Node(usize),
+    Page(usize),
+}
+
+/// How many levels of nodes hold `pages` pages, no node with more than
+/// `fanout` kids.
+fn height(pages: usize, fanout: usize) -> u32 {
+    let (mut height, mut reach) = (1, fanout);
+    while reach < pages {
+        height += 1;
+        reach = reach.saturating_mul(fanout);
+    }
+    height
+}
+
+/// The balanced tree over `pages` pages, in order, `height` levels of nodes
+/// deep, no node with more than `fanout` kids.
+fn balanced(pages: usize, fanout: usize, height: u32) -> Shape {
+    let mut shape = Shape {
+        nodes: Vec::new(),
+        leaf: vec![0; pages],
+    };
+    build(&mut shape, 0, pages, fanout, height, None);
+    shape
+}
+
+/// A node over `len` pages, the first at position `first`, `height` levels of
+/// nodes deep: its place among the nodes. Its kids are spread evenly: as many
+/// as `len` takes under nodes of `fanout` to the power of `height - 1`, the
+/// first ones a page more than the rest.
+fn build(
+    shape: &mut Shape,
+    first: usize,
+    len: usize,
+    fanout: usize,
+    height: u32,
+    parent: Option<usize>,
+) -> usize {
+    let me = shape.nodes.len();
+    shape.nodes.push(PagesNode {
+        parent,
+        kids: Vec::new(),
+        count: len,
+    });
+    let kids = if height <= 1 {
+        shape.leaf[first..first + len].fill(me);
+        (first..first + len).map(Kid::Page).collect()
+    } else {
+        let under = fanout.saturating_pow(height - 1);
+        let groups = len.div_ceil(under).max(1);
+        let (size, more) = (len / groups, len % groups);
+        let mut at = 0;
+        let mut kids = Vec::with_capacity(groups);
+        for g in 0..groups {
+            let len = size + usize::from(g < more);
+            let node = build(shape, first + at, len, fanout, height - 1, Some(me));
+            kids.push(Kid::Node(node));
+            at += len;
+        }
+        kids
+    };
+    shape.nodes[me].kids = kids;
+    me
 }
 
 #[cfg(test)]
