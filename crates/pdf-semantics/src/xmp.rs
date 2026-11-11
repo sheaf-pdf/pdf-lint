@@ -304,7 +304,9 @@ struct Open {
 /// as its object and as its `at`'s stream, the offsets being of its decoded
 /// data. Given none, a place has neither, as nothing says what they'd be of:
 ///
-/// - [`Fault::XmpNotUtf8`]: a mark of UTF-16 at its start; nothing's read;
+/// - [`Fault::XmpNotUtf8`]: a packet whose first bytes say it isn't UTF-8,
+///   as XML tells an encoding from them: a mark of UTF-16 or UTF-32, at the
+///   mark, or a zero byte among the first four, at those. Nothing's read;
 /// - [`Fault::XmpAttribute`]: an attribute that doesn't read, with no quotes
 ///   or no value or given twice. The tag's others are read, as XML's reader
 ///   can go on, but a namespace bound after one that doesn't read isn't bound;
@@ -343,8 +345,8 @@ pub(crate) fn read_as<S: Sink<Fault> + ?Sized>(
     expand: bool,
 ) -> Result<Claims, Error> {
     let mut claims = Claims::default();
-    if xml.starts_with(&[0xFE, 0xFF]) || xml.starts_with(&[0xFF, 0xFE]) {
-        tell(sink, stream, 0, 2, Fault::XmpNotUtf8);
+    if let Some(end) = not_utf8(xml) {
+        tell(sink, stream, 0, end, Fault::XmpNotUtf8);
         return Ok(claims);
     }
     let cut = xml.len() > limits.xmp_bytes;
@@ -475,6 +477,26 @@ pub(crate) fn read_as<S: Sink<Fault> + ?Sized>(
             _ => {}
         }
     }
+}
+
+/// Where `xml`'s first bytes say it isn't UTF-8, the end of those bytes, as
+/// XML 1.0's Appendix F tells an encoding from them: a mark of UTF-32 or of
+/// UTF-16, UTF-32LE's tried before UTF-16LE's, which begins it; or a zero
+/// byte among the first four, as a `<` has in UTF-16 or UTF-32 without a
+/// mark, and no UTF-8 XML has, XML having no U+0000. UTF-8's own mark is
+/// read past.
+fn not_utf8(xml: &[u8]) -> Option<usize> {
+    const MARKS: [&[u8]; 4] = [
+        &[0x00, 0x00, 0xFE, 0xFF],
+        &[0xFF, 0xFE, 0x00, 0x00],
+        &[0xFE, 0xFF],
+        &[0xFF, 0xFE],
+    ];
+    if let Some(mark) = MARKS.iter().find(|mark| xml.starts_with(mark)) {
+        return Some(mark.len());
+    }
+    let first = &xml[..xml.len().min(4)];
+    first.contains(&0).then_some(first.len())
 }
 
 /// How many namespaces `tag` binds, as the XML reader counts them: up to its

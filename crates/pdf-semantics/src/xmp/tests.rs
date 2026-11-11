@@ -591,27 +591,84 @@ fn entities_aren_t_expanded() {
 
 #[test]
 fn what_isn_t_utf_8_doesn_t_read() {
-    // A mark of UTF-16, either way round, and nothing's read (14.3.2).
+    // A mark of UTF-16 or UTF-32, either way round, or none, and nothing's
+    // read (14.3.2): told at the mark, or at the first four bytes, where a
+    // zero byte says it isn't UTF-8.
     let text = format!("<d {A} pdfaid:part=\"3\"/>");
-    let be: Vec<u8> = (text.encode_utf16()).flat_map(u16::to_be_bytes).collect();
-    let le: Vec<u8> = (text.encode_utf16()).flat_map(u16::to_le_bytes).collect();
-    for (mark, units) in [([0xFEu8, 0xFF], be), ([0xFF, 0xFE], le)] {
+    let utf16 = |be: bool| -> Vec<u8> {
+        (text.encode_utf16())
+            .flat_map(|unit| {
+                if be {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            })
+            .collect()
+    };
+    let utf32 = |be: bool| -> Vec<u8> {
+        (text.chars())
+            .flat_map(|c| {
+                if be {
+                    u32::from(c).to_be_bytes()
+                } else {
+                    u32::from(c).to_le_bytes()
+                }
+            })
+            .collect()
+    };
+    let shapes: [(&[u8], Vec<u8>, usize); 8] = [
+        (&[0xFE, 0xFF], utf16(true), 2),
+        (&[0xFF, 0xFE], utf16(false), 2),
+        (&[0x00, 0x00, 0xFE, 0xFF], utf32(true), 4),
+        (&[0xFF, 0xFE, 0x00, 0x00], utf32(false), 4),
+        (&[], utf16(true), 4),
+        (&[], utf16(false), 4),
+        (&[], utf32(true), 4),
+        (&[], utf32(false), 4),
+    ];
+    for (mark, units, end) in shapes {
+        let xml = [mark, &units].concat();
         let mut kept = Kept::default();
-        let xml = [&mark[..], &units].concat();
-        assert_eq!(
-            read(&xml, None, &Limits::DEFAULT, &mut kept),
-            Ok(Claims::default())
-        );
-        assert_eq!(kept.faults(), [Fault::XmpNotUtf8]);
+        let stream = Some(ObjectId::new(4, 0));
+        let answer = read(&xml, stream, &Limits::DEFAULT, &mut kept);
+        assert_eq!(answer, Ok(Claims::default()), "{mark:x?}");
+        assert_eq!(kept.faults(), [Fault::XmpNotUtf8], "{mark:x?}");
+        let at = kept.0[0].0.at.unwrap();
+        assert_eq!((at.start, at.end), (0, end), "{mark:x?}");
         // And a mark alone is enough.
+        if !mark.is_empty() {
+            let bare = [mark, text.as_bytes()].concat();
+            let mut kept = Kept::default();
+            let answer = read(&bare, None, &Limits::DEFAULT, &mut kept);
+            assert_eq!(answer, Ok(Claims::default()), "{mark:x?}");
+            assert_eq!(kept.faults(), [Fault::XmpNotUtf8], "{mark:x?}");
+        }
+    }
+    // A zero byte anywhere among the first four, in a packet shorter than
+    // that too, at what there is; past them, it's XML's to say.
+    for (xml, end) in [
+        (&b"\0<d/>"[..], 4),
+        (b"<d\0/>", 4),
+        (b"<d/\0", 4),
+        (b"<\0", 2),
+    ] {
         let mut kept = Kept::default();
-        let bare = [&mark[..], text.as_bytes()].concat();
+        let stream = Some(ObjectId::new(4, 0));
         assert_eq!(
-            read(&bare, None, &Limits::DEFAULT, &mut kept),
+            read(xml, stream, &Limits::DEFAULT, &mut kept),
             Ok(Claims::default())
         );
         assert_eq!(kept.faults(), [Fault::XmpNotUtf8]);
+        let at = kept.0[0].0.at.unwrap();
+        assert_eq!((at.start, at.end), (0, end), "{xml:x?}");
     }
+    let late = format!("<d {A} pdfaid:part=\"3\"/>\0");
+    assert_eq!(part(&late), some("3"));
+    assert_eq!(
+        Fault::XmpNotUtf8.to_string(),
+        "XMP metadata isn't encoded as UTF-8"
+    );
     // UTF-8's, and a packet's own header, are read past.
     assert_eq!(part(&format!("\u{feff}{text}")), some("3"));
     assert_eq!(part(&packet(&text)), some("3"));

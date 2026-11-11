@@ -859,9 +859,11 @@ pub enum Rule {
     /// XMP metadata that breaks ISO 32000-2 14.3.2, as pdf-semantics reads
     /// the packet of the catalog's metadata stream for the extensions a
     /// file declares, where the stream is in plain view, unfiltered and
-    /// unencrypted, whatever the file's version, as content is: a mark of
-    /// UTF-16 it begins with, where it's to be UTF-8 (with its erratum
-    /// 296), an attribute that doesn't read as XML, a claim's value that
+    /// unencrypted, whatever the file's version, as content is: an encoding
+    /// other than UTF-8, where it's to be UTF-8 (with its erratum 296), as a
+    /// mark of UTF-16 or UTF-32 it begins with says, or a zero byte among
+    /// its first four, at those bytes, after which nothing of it is read; an
+    /// attribute that doesn't read as XML, a claim's value that
     /// doesn't, and a claim's value that holds an element beside its text,
     /// each kind once, at its first place, its value
     /// pdf-semantics' words with how many times; and XML that

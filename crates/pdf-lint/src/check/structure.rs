@@ -74,10 +74,11 @@
 //! checked, once a tree for each, where its root is held; what was read
 //! before it is found all the same.
 //!
-//! What the packet's read told is a [`Rule::Xmp`] finding, last: a mark of
-//! UTF-16 it begins with, an attribute and a claim's value that don't read
-//! as XML, and a claim's value that holds an element beside its text, each
-//! kind once, at its first place, with how many times, and
+//! What the packet's read told is a [`Rule::Xmp`] finding, last: an encoding
+//! other than UTF-8, which a mark of UTF-16 or UTF-32 it begins with says,
+//! or a zero byte among its first four, an attribute and a claim's value
+//! that don't read as XML, and a claim's value that holds an element beside
+//! its text, each kind once, at its first place, with how many times, and
 //! XML that stops the read, at the byte it stops at, in the XML reader's
 //! words; in the catalog's metadata stream, at the bytes in its data,
 //! held where it is, its path the stream's where the walk first visited it
@@ -2742,18 +2743,21 @@ mod tests {
     const ATTRIBUTE: &str = "an attribute in XMP metadata doesn't read";
     const VALUE: &str = "a value in XMP metadata doesn't read";
     const MIXED: &str = "a value in XMP metadata holds an element beside its text";
+    const NOT_UTF8: &str = "XMP metadata isn't encoded as UTF-8";
 
     /// What the packet's read tells is found once each, in the metadata
     /// stream, at its bytes in the stream's data, its path the stream's,
-    /// its table `Metadata` and its key `-`: a mark of UTF-16 it begins
-    /// with, at the mark; an attribute with no quotes, at its tag; a
-    /// claim's value with an entity that isn't XML's, at its tag; a claim's
-    /// value holding an element beside its text, at the claim's element;
-    /// and XML that stops the read, at the byte it stops at, in the XML
-    /// reader's words. A packet that reads, and one in a stream that's filtered, so
-    /// not in plain view, have nothing found. Two of a kind are one
-    /// finding, with how many times, and the kinds come in the order first
-    /// told, what stops the read last.
+    /// its table `Metadata` and its key `-`: an encoding other than UTF-8,
+    /// at a mark of UTF-16 or UTF-32 it begins with, or at its first four
+    /// bytes where they hold a zero byte, nothing else told; an attribute
+    /// with no quotes, at its tag; a claim's value with an entity that
+    /// isn't XML's, at its tag; a claim's value holding an element beside
+    /// its text, at the claim's element; and XML that stops the read, at
+    /// the byte it stops at, in the XML reader's words. A packet that
+    /// reads, and one in a stream that's filtered, so not in plain view,
+    /// have nothing found. Two of a kind are one finding, with how many
+    /// times, and the kinds come in the order first told, what stops the
+    /// read last.
     #[test]
     fn what_a_packets_read_tells_is_found_once_a_kind_at_its_bytes() {
         let tag = |xmp: &[u8]| {
@@ -2766,6 +2770,11 @@ mod tests {
             .into_iter()
             .chain(XMP.encode_utf16().flat_map(u16::to_be_bytes))
             .collect();
+        let unmarked: Vec<u8> = XMP.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let utf32: Vec<u8> = [0xFF, 0xFE, 0x00, 0x00]
+            .into_iter()
+            .chain(XMP.chars().flat_map(|c| u32::from(c).to_le_bytes()))
+            .collect();
         let unquoted = xmp_with(r#"pdfaid:conformance="B""#, "pdfaid:conformance=B");
         let entity = xmp_with(r#"pdfaid:part="2""#, r#"pdfaid:part="&two;""#);
         let misnested = xmp_with("</rdf:RDF>", "</rdf:RFD>");
@@ -2775,13 +2784,9 @@ mod tests {
         let element = format!(">{claim}</rdf:Description>");
         let mixed = xmp_with(r#" pdfaid:conformance="B"/>"#, &element);
         let shapes = [
-            (
-                utf16,
-                packet_finding(
-                    "XMP metadata begins with a mark of UTF-16, not as UTF-8",
-                    "\u{FFFD}\u{FFFD}",
-                ),
-            ),
+            (utf16, packet_finding(NOT_UTF8, "\u{FFFD}\u{FFFD}")),
+            (unmarked, packet_finding(NOT_UTF8, "\0<\0x")),
+            (utf32, packet_finding(NOT_UTF8, "\u{FFFD}\u{FFFD}\0\0")),
             (unquoted.clone(), packet_finding(ATTRIBUTE, &tag(&unquoted))),
             (entity.clone(), packet_finding(VALUE, &tag(&entity))),
             (mixed, packet_finding(MIXED, claim)),

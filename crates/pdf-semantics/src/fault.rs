@@ -200,9 +200,11 @@ pub enum Fault {
     /// four (7.7.3.3, Table 31; 7.9.5). Letter stands for it.
     #[error("a page has no /MediaBox")]
     PageNoMediaBox,
-    /// XMP metadata that begins with a mark of UTF-16, where it's encoded as
-    /// UTF-8 (14.3.2, with its erratum 296). Nothing in it is read.
-    #[error("XMP metadata begins with a mark of UTF-16, not as UTF-8")]
+    /// XMP metadata whose first bytes say it isn't encoded as UTF-8, where
+    /// it's to be (14.3.2, with its erratum 296): a mark of UTF-16 or UTF-32,
+    /// or a zero byte among the first four, which UTF-8 XML hasn't. Nothing
+    /// in it is read.
+    #[error("XMP metadata isn't encoded as UTF-8")]
     XmpNotUtf8,
     /// An attribute in XMP metadata that doesn't read as XML, which 14.3.2 has
     /// it written in: no quotes, no value, or given twice. It's passed.
