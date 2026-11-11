@@ -7,7 +7,7 @@ Decode as PDFium does where its reading parts from qpdf's, when you ask for it. 
 ### Added
 
 - `Reading`: how filters read data where the standard leaves a reading open. `Reading::Qpdf` is the default, the reading `decode`, `decode_into` and `decode_prefix_into` keep. `Reading::Pdfium` reads as PDFium's LZW decoder and predictors do, as of chromium/8125.
-- `decode_into_as` and `decode_prefix_into_as`: `decode_into` and `decode_prefix_into` with a `Reading` before the buffer.
+- `decode_as`, `decode_into_as` and `decode_prefix_into_as`: `decode`, `decode_into` and `decode_prefix_into` with a `Reading` after the backend.
 - `Fault::AsNext { at }`: under `Reading::Pdfium`, an LZW code past the table's next entry read as that entry, and the codes after it read on as PDFium reads them.
 - `Fault::Refused`: under `Reading::Pdfium`, data PDFium refuses, its output cut away. That's LZW data whose first code since a clear code is past the table, LZW data that decodes to nothing, a predictor whose rows would be no bits or more than 2³² − 1, and PNG's predictor on nothing.
 - `Prefix::decoded`: what the decoder gave before its predictor, refused or not, so a caller can count what decoding cost.

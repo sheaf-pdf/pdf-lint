@@ -14,7 +14,7 @@ It's made for a checker as much as a reader. Data that breaks a rule still decod
 - **Either Flate backend, named at each call.** `FlateDecode` inflates and deflates through [miniz_oxide](https://crates.io/crates/miniz_oxide) (the `miniz_oxide` feature, on by default) or [zlib-rs](https://crates.io/crates/zlib-rs) (the `zlib-rs` feature), each compiled in by its feature, both if both are on. Each call that decodes or encodes names its `Backend`, which exists only with its feature, so turning a feature on, in this crate or any that depends on it, changes nothing a call gives. There's no precedence between them. Without either, the crate doesn't build.
 - **Into the caller's buffer.** `decode_into` appends what it decodes to a `Vec` the caller gives, keeping what it held (the limit counts only what's added), and `encode` appends what it encodes, so streams join in one buffer and one buffer serves many. `decode` gives a `Vec` of its own.
 - **What a filter read, where its data runs on.** `decode_prefix_into` decodes data that may run on into other bytes, as an inline image's does in a content stream, by one filter, as `decode_into` decodes it, and says how many bytes the filter read and whether its data ended there.
-- **Decode as PDFium does, where you ask.** `decode_into_as` and `decode_prefix_into_as` take a `Reading`. `Reading::Qpdf` is the default. `Reading::Pdfium` reads an LZW code past the table as PDFium does, and refuses what PDFium refuses.
+- **Decode as PDFium does, where you ask.** `decode_as`, `decode_into_as` and `decode_prefix_into_as` take a `Reading`. `Reading::Qpdf` is the default. `Reading::Pdfium` reads an LZW code past the table as PDFium does, and refuses what PDFium refuses.
 
 ## An example
 

@@ -13,11 +13,11 @@
 //!   read on past as PDFium reads it ([`Fault::TableFull`]); where a fault
 //!   stops a filter, what decoded before it is kept, which qpdf, giving the
 //!   data undecoded, doesn't keep.
-//! - **Or as PDFium reads it, on request.** [`decode_into_as`] and
-//!   [`decode_prefix_into_as`] take a [`Reading`]: qpdf's, as above, or
-//!   PDFium's, its LZW decoder's reading of a code past the table and its
-//!   refusals, so a reader can decode data as PDFium does, or find where
-//!   PDFium takes it to end.
+//! - **Or as PDFium reads it, on request.** [`decode_as`],
+//!   [`decode_into_as`] and [`decode_prefix_into_as`] take a [`Reading`].
+//!   Under [`Reading::Pdfium`], an LZW code past the table, and what PDFium
+//!   refuses, read as PDFium reads them. So a reader can decode as PDFium
+//!   does, or find where PDFium ends the data.
 //! - **A limit on what comes out** of each filter, so what a small stream
 //!   decodes into is the caller's to bound: a filter holds its input and
 //!   its output, whose buffer grows by doubling.
@@ -103,8 +103,8 @@ pub enum Backend {
 }
 
 /// How filters read data where ISO 32000-2 leaves a reading open, which
-/// [`decode_into_as`] and [`decode_prefix_into_as`] take: qpdf's, the
-/// default, or PDFium's. Only LZW's decoder and the predictors read
+/// [`decode_as`], [`decode_into_as`] and [`decode_prefix_into_as`] take:
+/// qpdf's, the default, or PDFium's. Only LZW's decoder and the predictors read
 /// otherwise under them; the other filters read alike.
 ///
 /// `#[non_exhaustive]`, so another reader's reading can join it in a minor
@@ -483,8 +483,44 @@ pub fn decode(
     limit: usize,
     backend: Backend,
 ) -> Result<Vec<u8>, Error> {
+    decode_as(data, filters, limit, backend, Reading::Qpdf)
+}
+
+/// `data` decoded as [`decode`] decodes it, read as `reading` reads it.
+/// It's [`decode_into_as`] an empty `Vec`, which is then cut to its length.
+///
+/// ```
+/// use pdf_filters::{Fault, Filter, Predictor, Reading, decode_as};
+/// # #[cfg(feature = "miniz_oxide")]
+/// # let backend = pdf_filters::Backend::MinizOxide;
+/// # #[cfg(not(feature = "miniz_oxide"))]
+/// # let backend = pdf_filters::Backend::ZlibRs;
+///
+/// // LZW codes 256 65 66 300 257: 300 is past the table, read as its next
+/// // entry under PDFium's reading, where qpdf's stops.
+/// let data = [0x80, 0x10, 0x48, 0x52, 0xc8, 0x08];
+/// let lzw = Filter::Lzw { early_change: true, predictor: Predictor::None };
+/// let pdfium = decode_as(&data, &[lzw], 1 << 20, backend, Reading::Pdfium).unwrap_err();
+/// assert_eq!(pdfium.data, b"ABBB");
+/// assert_eq!(pdfium.faults, [(0, Fault::AsNext { at: 3 })]);
+/// let qpdf = decode_as(&data, &[lzw], 1 << 20, backend, Reading::Qpdf).unwrap_err();
+/// assert_eq!(qpdf.data, b"AB");
+/// ```
+///
+/// # Errors
+///
+/// An [`Error`] when the data doesn't decode cleanly, as [`decode`] gives
+/// it, and, under [`Reading::Pdfium`], where PDFium reads it otherwise
+/// ([`Fault::AsNext`]) or refuses it ([`Fault::Refused`]).
+pub fn decode_as(
+    data: &[u8],
+    filters: &[Filter],
+    limit: usize,
+    backend: Backend,
+    reading: Reading,
+) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
-    let decoded = decode_into(data, filters, limit, backend, &mut out);
+    let decoded = decode_into_as(data, filters, limit, backend, reading, &mut out);
     out.shrink_to_fit();
     match decoded {
         Ok(()) => Ok(out),
