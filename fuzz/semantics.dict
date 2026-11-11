@@ -1,7 +1,9 @@
 # What a file's common structures are made of, for libFuzzer's -dict with the
 # semantics target: delimiters and values, references to the first objects, a
 # file's keywords and the keys that lead to trees, a tree's own keys, a page
-# tree's, what a date's made of, and an XMP packet's namespaces and forms.
+# tree's, what a date's made of, an XMP packet's namespaces and forms, what
+# separates the claims written from the input's text, and what a writer
+# escapes or refuses.
 "<<"
 ">>"
 "["
@@ -86,3 +88,8 @@
 "\xff\xfe\x00\x00"
 "\x00<"
 "\xef\xbb\xbf"
+"|"
+"&#13;"
+"&amp;"
+"\x01"
+"\xef\xbf\xbe"

@@ -7,7 +7,13 @@
 //! [`Claims::conformance`] reads PDF/A's and PDF/UA's as what they say.
 //! [`metadata_stream`] says which stream holds a file's packet, for a caller
 //! to decode: a reading's `decoded` gives its data, decrypted if a password
-//! opened the file.
+//! opened the file. [`read_from`] does both and reads the packet, through
+//! what gives the file's objects and its streams' data (pdf-objects'
+//! [`Streams`]).
+//!
+//! [`write()`] writes a packet of claims, which [`read`] reads back as they
+//! are, for a file's `/Metadata` stream, and refuses a value that wouldn't
+//! read back so ([`WriteError`]).
 //!
 //! A claim is the file's own word, and nothing here holds a file to it.
 //!
@@ -21,9 +27,10 @@
 //! character references, stand for anything.
 
 use std::fmt;
+use std::fmt::Write as _;
 
 use pdf_objects::fault::{Place, Sink};
-use pdf_objects::{Dict, ObjectId, Resolve, Span, Unreadable, Value};
+use pdf_objects::{Dict, ObjectId, Resolve, Span, Streams, Unreadable, Value, Why};
 use quick_xml::NsReader;
 use quick_xml::encoding::EncodingError;
 use quick_xml::errors::Error as XmlError;
@@ -36,9 +43,13 @@ use crate::{Fault, HOPS, Limits, too_long};
 #[cfg(test)]
 mod tests;
 
-const PDFA: &[u8] = b"http://www.aiim.org/pdfa/ns/id/";
-const PDFUA: &[u8] = b"http://www.aiim.org/pdfua/ns/id/";
-const PDFVT: &[u8] = b"http://www.npes.org/pdfvt/ns/id/";
+/// PDF/A's namespace, by which its claims are read, and which a packet
+/// written binds.
+const PDFA: &str = "http://www.aiim.org/pdfa/ns/id/";
+/// PDF/UA's.
+const PDFUA: &str = "http://www.aiim.org/pdfua/ns/id/";
+/// PDF/VT's.
+const PDFVT: &str = "http://www.npes.org/pdfvt/ns/id/";
 
 /// What a packet claims: the first value of each, as written but for the
 /// white space round it, and an attribute's value normalized as XML has it.
@@ -62,7 +73,7 @@ pub struct Claims {
 }
 
 /// One of the values [`Claims`] holds.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Claim {
     APart,
     AConformance,
@@ -73,25 +84,63 @@ enum Claim {
 }
 
 impl Claim {
+    /// Every claim, in the order [`Claims`] lists them.
+    const ALL: [Claim; 6] = [
+        Claim::APart,
+        Claim::AConformance,
+        Claim::ARev,
+        Claim::UaPart,
+        Claim::UaRev,
+        Claim::VtVersion,
+    ];
+
     /// The claim a name is, by its namespace; none for any other, or for a
     /// prefix bound to nothing, which isn't in a namespace.
     fn of(namespace: ResolveResult, name: LocalName) -> Option<Claim> {
+        const A: &[u8] = PDFA.as_bytes();
+        const UA: &[u8] = PDFUA.as_bytes();
+        const VT: &[u8] = PDFVT.as_bytes();
         let ResolveResult::Bound(Namespace(namespace)) = namespace else {
             return None;
         };
         match (namespace, name.as_ref()) {
-            (PDFA, b"part") => Some(Claim::APart),
-            (PDFA, b"conformance") => Some(Claim::AConformance),
-            (PDFA, b"rev") => Some(Claim::ARev),
-            (PDFUA, b"part") => Some(Claim::UaPart),
-            (PDFUA, b"rev") => Some(Claim::UaRev),
-            (PDFVT, b"GTS_PDFVTVersion") => Some(Claim::VtVersion),
+            (A, b"part") => Some(Claim::APart),
+            (A, b"conformance") => Some(Claim::AConformance),
+            (A, b"rev") => Some(Claim::ARev),
+            (UA, b"part") => Some(Claim::UaPart),
+            (UA, b"rev") => Some(Claim::UaRev),
+            (VT, b"GTS_PDFVTVersion") => Some(Claim::VtVersion),
             _ => None,
+        }
+    }
+
+    /// Its namespace, and its name as [`write()`] writes it, under the prefix
+    /// it binds that namespace to: what [`Claim::of`] reads, backwards.
+    const fn written(self) -> (&'static str, &'static str) {
+        match self {
+            Claim::APart => (PDFA, "pdfaid:part"),
+            Claim::AConformance => (PDFA, "pdfaid:conformance"),
+            Claim::ARev => (PDFA, "pdfaid:rev"),
+            Claim::UaPart => (PDFUA, "pdfuaid:part"),
+            Claim::UaRev => (PDFUA, "pdfuaid:rev"),
+            Claim::VtVersion => (PDFVT, "pdfvtid:GTS_PDFVTVersion"),
         }
     }
 }
 
 impl Claims {
+    /// `claim`'s value.
+    fn value(&self, claim: Claim) -> Option<&str> {
+        match claim {
+            Claim::APart => self.pdfa_part.as_deref(),
+            Claim::AConformance => self.pdfa_conformance.as_deref(),
+            Claim::ARev => self.pdfa_rev.as_deref(),
+            Claim::UaPart => self.pdfua_part.as_deref(),
+            Claim::UaRev => self.pdfua_rev.as_deref(),
+            Claim::VtVersion => self.pdfvt_version.as_deref(),
+        }
+    }
+
     /// Where `claim`'s value goes.
     fn slot(&mut self, claim: Claim) -> &mut Option<String> {
         match claim {
@@ -255,7 +304,8 @@ pub struct Error {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum XmpWhy {
-    /// It's longer than [`Limits::xmp_bytes`]: the rest isn't read.
+    /// It's longer than [`Limits::xmp_bytes`]: the rest isn't read, or, read
+    /// through a file's streams ([`read_from`]), none of it.
     #[error("it's longer than is read")]
     TooLong,
     /// An element below [`Limits::xmp_depth`] levels.
@@ -267,6 +317,11 @@ pub enum XmpWhy {
     /// What isn't XML, in the XML reader's words.
     #[error("{0}")]
     Xml(String),
+    /// The way to the packet's stream, or the stream's data, doesn't read
+    /// ([`read_from`]): an object on the way as the resolver says, or the
+    /// data as what gives it says, in their words. Nothing is read.
+    #[error("{0}")]
+    Unreadable(Unreadable),
 }
 
 /// A claim's element being read, whose value is its text.
@@ -300,9 +355,10 @@ struct Open {
 /// when the element starts, isn't read.
 ///
 /// `stream` is the stream `xml` is the decoded data of, as [`metadata_stream`]
-/// gives it. `sink` hears what's read past, each [`Place`] naming that stream,
-/// as its object and as its `at`'s stream, the offsets being of its decoded
-/// data. Given none, a place has neither, as nothing says what they'd be of:
+/// gives it and [`read_from`] reads it. `sink` hears what's read past, each
+/// [`Place`] naming that stream, as its object and as its `at`'s stream, the
+/// offsets being of its decoded data. Given none, a place has neither, as
+/// nothing says what they'd be of:
 ///
 /// - [`Fault::XmpNotUtf8`]: a packet whose first bytes say it isn't UTF-8,
 ///   as XML tells an encoding from them: a mark of UTF-16 or UTF-32, at the
@@ -577,6 +633,14 @@ pub fn metadata_stream<'o, R: Resolve<'o>>(
     objects: R,
     catalog: &'o Dict,
 ) -> Result<Option<ObjectId>, Unreadable> {
+    stream_of(&objects, catalog)
+}
+
+/// [`metadata_stream`], through a resolver [`read_from`] holds.
+fn stream_of<'o, R: Resolve<'o>>(
+    objects: &R,
+    catalog: &'o Dict,
+) -> Result<Option<ObjectId>, Unreadable> {
     let Some(mut at) = catalog.get(b"Metadata") else {
         return Ok(None);
     };
@@ -595,4 +659,217 @@ pub fn metadata_stream<'o, R: Resolve<'o>>(
         }
     }
     Err(too_long(last.unwrap_or(ObjectId::new(0, 0))))
+}
+
+/// What a file's packet claims: the stream `catalog`'s `/Metadata` leads to
+/// ([`metadata_stream`]), its data as `objects` give it
+/// ([`Streams::decoded`]), decrypted where a password opened the file and
+/// decoded through its filters, read ([`read`]) as that stream's, so each
+/// fault's [`Place`] names it. None where there's no such stream.
+///
+/// The data is asked for under [`Limits::xmp_bytes`], so a packet longer
+/// than that has nothing read, where [`read`], given its bytes, reads as
+/// far as the cap. Data longer than was asked for, whatever gave it, is
+/// past the cap too. pdf-structure's reading, by reference, gives both the
+/// objects and the data, as its document does where it holds the data or
+/// is read beside its reading; pdf-objects'
+/// [`WithStreams`](pdf_objects::WithStreams) makes one of a resolver and a
+/// function.
+///
+/// ```
+/// use pdf_semantics::Limits;
+/// use pdf_semantics::pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
+/// use pdf_semantics::xmp::{self, Claims};
+///
+/// let packet = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:a="http://www.aiim.org/pdfa/ns/id/"
+///     a:part="4"/>"#;
+/// let stream = Object::stream(dict! { "Type" => "Metadata", "Subtype" => "XML" });
+/// let objects = |id: ObjectId| (id == ObjectId::new(5, 0)).then_some(&stream);
+/// let file = WithStreams::new(objects, |id: ObjectId, _: usize| match id.number {
+///     5 => Ok(packet.to_vec()),
+///     _ => Err(Unreadable::new(id, Why::Damaged, format!("{id} R isn't in the file"))),
+/// });
+/// let catalog = dict! { "Type" => "Catalog", "Metadata" => Object::reference(5) };
+///
+/// let claims = xmp::read_from(file, &catalog, &Limits::DEFAULT, &mut ()).unwrap();
+/// assert_eq!(claims.unwrap().pdfa_part.as_deref(), Some("4"));
+/// ```
+///
+/// # Errors
+///
+/// An [`Error`] at byte 0, holding no claim, where nothing's read:
+/// [`XmpWhy::Unreadable`] where an object on the way to the stream doesn't
+/// read, as `objects` say, or the stream's data doesn't, as they say
+/// ([`Why::Locked`] in a file no password given opens, say);
+/// [`XmpWhy::TooLong`] past the cap. Past those, [`read`]'s, holding what
+/// was read.
+// A packet's read once a file, and its error holds what's read.
+#[allow(clippy::result_large_err)]
+pub fn read_from<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
+    objects: O,
+    catalog: &'o Dict,
+    limits: &Limits,
+    sink: &mut S,
+) -> Result<Option<Claims>, Error> {
+    let unread = |why| Error {
+        read: Claims::default(),
+        at: 0,
+        why,
+    };
+    let found = stream_of(&objects, catalog);
+    let Some(id) = found.map_err(|unreadable| unread(XmpWhy::Unreadable(unreadable)))? else {
+        return Ok(None);
+    };
+    let data = match objects.decoded(id, limits.xmp_bytes) {
+        // What gave it is distrusted: past the cap is past it.
+        Ok(data) if data.len() > limits.xmp_bytes => return Err(unread(XmpWhy::TooLong)),
+        Ok(data) => data,
+        Err(unreadable) if unreadable.why == Why::Limit => return Err(unread(XmpWhy::TooLong)),
+        Err(unreadable) => return Err(unread(XmpWhy::Unreadable(unreadable))),
+    };
+    read(&data, Some(id), limits, sink).map(Some)
+}
+
+/// A packet claiming what `claims` hold, for a file's `/Metadata` stream
+/// (ISO 32000-2, 14.3.2), which [`read`] reads back as the same claims,
+/// under caps that take its length: UTF-8, in XMP's packet wrapper, its
+/// fixed `id`, `end="w"` and no padding; one `rdf:Description` binding the
+/// namespaces of the claims given; each claim that's `Some` an element, in
+/// the order [`Claims`] lists them, an empty value written open and closed.
+/// A value's `&`, `<` and `>` are escaped and a carriage return written as a
+/// reference, so its text reads back as it's given.
+///
+/// The packet holds the claims alone. A PDF/A file's own rules may want
+/// more beside them, as a schema describing a namespace its part doesn't
+/// define, or the document information dictionary's entries mirrored,
+/// which are the caller's to write; so is the stream that holds it, `/Type
+/// /Metadata /Subtype /XML`, unfiltered where a PDF/A part wants it so.
+///
+/// ```
+/// use pdf_semantics::Limits;
+/// use pdf_semantics::xmp::{self, Claims, WriteError};
+///
+/// let mut claims = Claims::default();
+/// claims.pdfa_part = Some("3".into());
+/// claims.pdfa_conformance = Some("B".into());
+/// let packet = xmp::write(&claims).unwrap();
+/// assert!(packet.contains("<pdfaid:conformance>B</pdfaid:conformance>"));
+/// assert_eq!(xmp::read(packet.as_bytes(), None, &Limits::DEFAULT, &mut ()), Ok(claims.clone()));
+///
+/// // Read back, a value is trimmed, so one with white space round it is refused.
+/// claims.pdfua_part = Some(" 1".into());
+/// let refused = WriteError::Spaced { claim: "pdfuaid:part" };
+/// assert_eq!(xmp::write(&claims), Err(refused));
+/// ```
+///
+/// # Errors
+///
+/// A [`WriteError`] where a value wouldn't read back as it is, the first in
+/// the order [`Claims`] lists them, and nothing's written:
+/// [`WriteError::Spaced`] for ASCII's white space at its start or its end,
+/// which reading trims; [`WriteError::Character`] for a character XML 1.0
+/// can't hold, written or by a reference.
+pub fn write(claims: &Claims) -> Result<String, WriteError> {
+    for claim in Claim::ALL {
+        if let Some(value) = claims.value(claim) {
+            refused(claim, value)?;
+        }
+    }
+    let mut packet = String::from(
+        "<?xpacket begin=\"\u{FEFF}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n\
+         <x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+         \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+         \x20 <rdf:Description rdf:about=\"\"",
+    );
+    let given = Claim::ALL.map(|claim| claims.value(claim).map(|value| (claim, value)));
+    let mut bound = None;
+    for (claim, _) in given.iter().flatten() {
+        let (namespace, name) = claim.written();
+        if bound != Some(namespace) {
+            let prefix = name.split_once(':').map_or(name, |(prefix, _)| prefix);
+            let _ = write!(packet, "\n    xmlns:{prefix}=\"{namespace}\"");
+            bound = Some(namespace);
+        }
+    }
+    packet.push_str(">\n");
+    for (claim, value) in given.iter().flatten() {
+        let name = claim.written().1;
+        let _ = write!(packet, "   <{name}>");
+        escaped(&mut packet, value);
+        let _ = writeln!(packet, "</{name}>");
+    }
+    packet.push_str(
+        "  </rdf:Description>\n\
+         \x20</rdf:RDF>\n\
+         </x:xmpmeta>\n\
+         <?xpacket end=\"w\"?>",
+    );
+    Ok(packet)
+}
+
+/// Why `value`, `claim`'s, wouldn't read back as it is, written: white
+/// space round it, or a character XML can't hold.
+fn refused(claim: Claim, value: &str) -> Result<(), WriteError> {
+    let claim = claim.written().1;
+    if value.trim_ascii() != value {
+        return Err(WriteError::Spaced { claim });
+    }
+    match value.char_indices().find(|&(_, c)| !in_xml(c)) {
+        Some((at, character)) => Err(WriteError::Character {
+            claim,
+            at,
+            character,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Whether XML 1.0 can hold `c`, as its `Char` production has it (its 2.2):
+/// no control character but tab, line feed and carriage return, no
+/// surrogate, which no `char` is, and neither U+FFFE nor U+FFFF.
+const fn in_xml(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
+}
+
+/// `value`, written as an element's text that reads back as it: `&`, `<`
+/// and `>` escaped, and a carriage return as a reference, which XML's
+/// reader doesn't take as a line's end.
+fn escaped(packet: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '&' => packet.push_str("&amp;"),
+            '<' => packet.push_str("&lt;"),
+            '>' => packet.push_str("&gt;"),
+            '\r' => packet.push_str("&#13;"),
+            c => packet.push(c),
+        }
+    }
+}
+
+/// A claim [`write()`] refuses, as the packet read back wouldn't give it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum WriteError {
+    /// A value with ASCII's white space at its start or its end, which
+    /// reading trims.
+    #[error("{claim}'s value has white space round it, which reading it back trims")]
+    Spaced {
+        /// Which claim it is, as it's written: `pdfaid:part`, say.
+        claim: &'static str,
+    },
+    /// A value holding a character XML 1.0 can't hold, written or by a
+    /// reference: a control character but tab, line feed and carriage
+    /// return, or U+FFFE or U+FFFF.
+    #[error(
+        "{claim}'s value holds U+{:04X} at byte {at}, which XML can't hold",
+        u32::from(*character)
+    )]
+    Character {
+        /// Which claim it is, as it's written.
+        claim: &'static str,
+        /// Where the character is in the value, in bytes.
+        at: usize,
+        /// The character.
+        character: char,
+    },
 }

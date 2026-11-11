@@ -49,9 +49,14 @@ pdf-structure = { path = "../pdf-structure" }
 pdf-fixtures = { path = "../pdf-fixtures" }
 
 # The benchmarks: `cargo bench -p pdf-semantics`. `benches/` is outside
-# `include`, so the package carries neither them nor this target.
+# `include`, so the package carries neither them nor these targets.
 [[bench]]
 name = "semantics"
+harness = false
+
+# The writers' benchmarks, a target of their own: `--bench write`.
+[[bench]]
+name = "write"
 harness = false
 
 [lints.rust]

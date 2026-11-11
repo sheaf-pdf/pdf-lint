@@ -78,8 +78,10 @@
 # and written, read back, and its page tree by both rules,
 # `pdf_semantics::fuzz::dates`, a date read, written and read back,
 # `pdf_semantics::fuzz::xmp`, a packet read the same whatever hears its
-# faults, under smaller caps and with its empty elements open and closed, and
-# as a claim's text beside an element, never taken, and
+# faults, under smaller caps and with its empty elements open and closed, as
+# a claim's text beside an element, never taken, and through a file's
+# streams' data, the same, and past a cap nothing read, and its claims, and
+# claims made of its text, written and read back, or refused, and
 # `pdf_semantics::fuzz::over`, a file's trees,
 # pages and metadata stream through a reading and the document it makes, which
 # three stable unit tests (`mutated_seeds_keep_every_promise`,

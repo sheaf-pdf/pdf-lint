@@ -18,7 +18,8 @@
 //! - **XMP claims** ([`xmp`]): ISO 32000-2, 14.3.2. What a packet says a file
 //!   conforms to, PDF/A, PDF/UA or PDF/VT, read as XML under caps, by the
 //!   namespace each is bound to, so a prefix or a comment that merely looks
-//!   like one claims nothing.
+//!   like one claims nothing; read from a file's metadata stream through its
+//!   streams' data; and written as a packet that reads back as they are.
 //!
 //! What walks a file's objects reads them through [`Resolve`], given by value,
 //! so `&reading` over pdf-structure's reading, lazily or by position, `&document`

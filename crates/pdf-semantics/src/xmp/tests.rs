@@ -1,10 +1,13 @@
 use pdf_fixtures::fixture::{self, Body, Xref};
-use pdf_objects::dict;
-use pdf_structure::read::{Options, Reading};
+use pdf_objects::{Object, Stream, Version, Why, WithStreams, dict};
+use pdf_structure::pdf_crypt::Password;
+use pdf_structure::pdf_crypt::writer::{Kind, Settings};
+use pdf_structure::read::{Options, Reading, WithReading};
 use pdf_structure::source::Document;
 
 use super::*;
-use crate::{Object, Why, catalog};
+use crate::catalog;
+use crate::tree::tests::ByPosition;
 
 const A: &str = "xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\"";
 const UA: &str = "xmlns:pdfuaid=\"http://www.aiim.org/pdfua/ns/id/\"";
@@ -1100,5 +1103,684 @@ impl<'o, F: Fn(ObjectId) -> Result<Option<&'o Object>, Unreadable>> Resolve<'o> 
 
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         (self.0)(id)
+    }
+}
+
+/// What [`Claim::of`] reads, [`Claim::written`] writes: each claim its own
+/// name, in its namespace, under the one prefix a packet written binds the
+/// namespace to, in the order [`Claims`] lists them.
+#[test]
+fn each_claim_is_written_as_it_s_read() {
+    use quick_xml::name::QName;
+
+    let mut names = Vec::new();
+    let mut prefixes: Vec<(&str, &str)> = Vec::new();
+    for (at, claim) in Claim::ALL.into_iter().enumerate() {
+        let (namespace, name) = claim.written();
+        let (prefix, local) = name.split_once(':').unwrap();
+        let bound = ResolveResult::Bound(Namespace(namespace.as_bytes()));
+        let read = Claim::of(bound, QName(local.as_bytes()).local_name());
+        assert_eq!(read, Some(claim), "{name}");
+        match prefixes.iter().find(|(bound, _)| *bound == namespace) {
+            Some((_, was)) => assert_eq!(*was, prefix, "{name}"),
+            None => prefixes.push((namespace, prefix)),
+        }
+        assert!(!names.contains(&name), "{name}");
+        names.push(name);
+        // Its value is where `Claims` lists it.
+        let mut claims = Claims::default();
+        claims.set(claim, "x");
+        let values = [
+            &claims.pdfa_part,
+            &claims.pdfa_conformance,
+            &claims.pdfa_rev,
+            &claims.pdfua_part,
+            &claims.pdfua_rev,
+            &claims.pdfvt_version,
+        ];
+        let set: Vec<usize> = (values.iter().enumerate())
+            .filter(|(_, value)| value.is_some())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(set, [at], "{name}");
+        assert_eq!(claims.value(claim), Some("x"), "{name}");
+    }
+    assert_eq!(
+        prefixes,
+        [(PDFA, "pdfaid"), (PDFUA, "pdfuaid"), (PDFVT, "pdfvtid")]
+    );
+    // A part's error names it as it's written.
+    let parts = Claims {
+        pdfa_part: some("x"),
+        ..Claims::default()
+    };
+    assert!(matches!(
+        parts.conformance(),
+        Err(ClaimError::Part { claim, .. }) if claim == Claim::APart.written().1
+    ));
+    let parts = Claims {
+        pdfua_part: some("x"),
+        ..Claims::default()
+    };
+    assert!(matches!(
+        parts.conformance(),
+        Err(ClaimError::Part { claim, .. }) if claim == Claim::UaPart.written().1
+    ));
+}
+
+/// Every claim, as [`write`]'s tests give them.
+fn every_claim() -> Claims {
+    Claims {
+        pdfa_part: some("3"),
+        pdfa_conformance: some("B"),
+        pdfa_rev: some("2012"),
+        pdfua_part: some("1"),
+        pdfua_rev: some("2014"),
+        pdfvt_version: some("PDF/VT-2"),
+    }
+}
+
+/// `claims` written, and read back with nothing told: the packet.
+fn written_back(claims: &Claims) -> String {
+    let packet = write(claims).unwrap_or_else(|refused| panic!("{claims:?}: {refused}"));
+    let mut kept = Kept::default();
+    let read_back = read(packet.as_bytes(), None, &Limits::DEFAULT, &mut kept);
+    assert_eq!(read_back.as_ref(), Ok(claims), "{packet}");
+    assert_eq!(kept.faults(), [], "{packet}");
+    // And with each empty element given open and closed, as a reader may.
+    let mut expanded = Kept::default();
+    let read_back = read_as(
+        packet.as_bytes(),
+        None,
+        &Limits::DEFAULT,
+        &mut expanded,
+        true,
+    );
+    assert_eq!(read_back.as_ref(), Ok(claims), "{packet}");
+    packet
+}
+
+/// Each claim alone, every claim together and none: read back as written,
+/// each value an element in its namespace, the namespaces of the claims
+/// given bound and no other.
+#[test]
+fn a_packet_written_reads_back_as_its_claims() {
+    let every = every_claim();
+    let packet = written_back(&every);
+    for claim in Claim::ALL {
+        let (namespace, name) = claim.written();
+        let value = every.value(claim).unwrap();
+        assert!(
+            packet.contains(&format!("<{name}>{value}</{name}>")),
+            "{name}"
+        );
+        assert!(packet.contains(namespace), "{name}");
+        let mut alone = Claims::default();
+        alone.set(claim, value);
+        let packet = written_back(&alone);
+        assert_eq!(packet.matches("xmlns:").count(), 3, "{packet}");
+        for other in [PDFA, PDFUA, PDFVT] {
+            assert_eq!(packet.contains(other), other == namespace, "{packet}");
+        }
+        // An empty value, written open and closed.
+        let mut empty = Claims::default();
+        empty.set(claim, "");
+        let packet = written_back(&empty);
+        assert!(packet.contains(&format!("<{name}></{name}>")), "{packet}");
+    }
+    assert_eq!(packet.matches("xmlns:").count(), 5, "{packet}");
+    let none = written_back(&Claims::default());
+    assert_eq!(none.matches("xmlns:").count(), 2, "{none}");
+    // Every claim empty.
+    let mut empty = Claims::default();
+    for claim in Claim::ALL {
+        empty.set(claim, "");
+    }
+    written_back(&empty);
+}
+
+/// A value's text reads back as it's given: what's markup escaped, a
+/// carriage return by a reference, the rest as it is.
+#[test]
+fn a_value_written_reads_back_as_its_text() {
+    let values = [
+        "a&b",
+        "&amp;",
+        "<pdfaid:part>9</pdfaid:part>",
+        "a<b",
+        "a>b",
+        "]]>",
+        "<![CDATA[3]]>",
+        "<!-- 3 -->",
+        "a\rb",
+        "a\r\nb",
+        "a\n\rb",
+        "a\nb",
+        "a\tb",
+        "\"quoted\" 'and'",
+        "&#51;",
+        "é, \u{a0}, \u{85}, \u{2028}, \u{fffd}, \u{10000}, \u{10ffff}",
+        "\u{a0}3\u{a0}",
+        "PDF/VT-2",
+    ];
+    for value in values {
+        for claim in Claim::ALL {
+            let mut claims = Claims::default();
+            claims.set(claim, value);
+            assert_eq!(claims.value(claim), Some(value));
+            written_back(&claims);
+        }
+    }
+    // Each in the packet as it's escaped.
+    let mut claims = Claims::default();
+    claims.set(Claim::APart, "a&b<c>d\re\r\nf\tg");
+    let packet = written_back(&claims);
+    assert!(
+        packet.contains("<pdfaid:part>a&amp;b&lt;c&gt;d&#13;e&#13;\nf\tg</pdfaid:part>"),
+        "{packet}"
+    );
+}
+
+/// One packet's bytes, as written.
+#[test]
+fn a_packet_written_is_xmp_s_wrapper_round_one_description() {
+    let claims = Claims {
+        pdfa_part: some("3"),
+        pdfa_conformance: some("B"),
+        pdfua_part: some("1"),
+        ..Claims::default()
+    };
+    let packet = written_back(&claims);
+    let expected = "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n\
+        <x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+        <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+        <rdf:Description rdf:about=\"\"\n    \
+        xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\"\n    \
+        xmlns:pdfuaid=\"http://www.aiim.org/pdfua/ns/id/\">\n   \
+        <pdfaid:part>3</pdfaid:part>\n   \
+        <pdfaid:conformance>B</pdfaid:conformance>\n   \
+        <pdfuaid:part>1</pdfuaid:part>\n  \
+        </rdf:Description>\n \
+        </rdf:RDF>\n\
+        </x:xmpmeta>\n\
+        <?xpacket end=\"w\"?>";
+    assert_eq!(packet, expected);
+    // The begin attribute's value is the mark's character, in UTF-8.
+    assert!(
+        packet
+            .as_bytes()
+            .starts_with(b"<?xpacket begin=\"\xEF\xBB\xBF\"")
+    );
+    let none = written_back(&Claims::default());
+    assert!(
+        none.contains("<rdf:Description rdf:about=\"\">\n  </rdf:Description>"),
+        "{none}"
+    );
+}
+
+/// A value that wouldn't read back as it is, the first in `Claims`' order,
+/// is refused, and nothing's written: white space round it, which reading
+/// trims, or a character XML can't hold.
+#[test]
+fn a_value_that_wouldn_t_read_back_is_refused() {
+    // Set as given, not trimmed as a read sets it.
+    let refused = |claim: Claim, value: &str| {
+        let mut claims = Claims::default();
+        *claims.slot(claim) = Some(value.to_string());
+        write(&claims).unwrap_err()
+    };
+    for claim in Claim::ALL {
+        let name = claim.written().1;
+        for value in [
+            " 3", "3 ", "\t3", "3\n", "\r3", "3\r", "\u{c}3", "3\u{c}", " ", "\n",
+        ] {
+            assert_eq!(
+                refused(claim, value),
+                WriteError::Spaced { claim: name },
+                "{value:?}"
+            );
+        }
+        for (value, at, character) in [
+            ("\u{0}", 0, '\u{0}'),
+            ("3\u{1}", 1, '\u{1}'),
+            ("a\u{8}b", 1, '\u{8}'),
+            ("a\u{b}b", 1, '\u{b}'),
+            ("a\u{c}b", 1, '\u{c}'),
+            ("a\u{e}b", 1, '\u{e}'),
+            ("é\u{1f}", 2, '\u{1f}'),
+            ("a\u{fffe}", 1, '\u{fffe}'),
+            ("a\u{ffff}b\u{1}", 1, '\u{ffff}'),
+        ] {
+            assert_eq!(
+                refused(claim, value),
+                WriteError::Character {
+                    claim: name,
+                    at,
+                    character
+                },
+                "{value:?}"
+            );
+        }
+    }
+    // The first refused, as `Claims` lists them.
+    let mut claims = every_claim();
+    claims.pdfua_rev = some("\u{1}");
+    claims.pdfa_rev = some("2012 ");
+    claims.pdfvt_version = some(" PDF/VT-2");
+    assert_eq!(
+        write(&claims),
+        Err(WriteError::Spaced {
+            claim: "pdfaid:rev"
+        })
+    );
+    claims.pdfa_rev = some("2012");
+    assert_eq!(
+        write(&claims),
+        Err(WriteError::Character {
+            claim: "pdfuaid:rev",
+            at: 0,
+            character: '\u{1}'
+        })
+    );
+    // Each said in its words.
+    assert_eq!(
+        refused(Claim::VtVersion, " a").to_string(),
+        "pdfvtid:GTS_PDFVTVersion's value has white space round it, which reading it back trims"
+    );
+    assert_eq!(
+        refused(Claim::AConformance, "b\u{fffe}").to_string(),
+        "pdfaid:conformance's value holds U+FFFE at byte 1, which XML can't hold"
+    );
+    // White space within, and every other character XML has, is written.
+    let claims = Claims {
+        pdfa_part: some("3\t\r\n4"),
+        pdfa_conformance: some("\u{d7ff}\u{e000}\u{fffd}\u{10000}\u{10ffff}\u{20}x"),
+        ..Claims::default()
+    };
+    written_back(&claims);
+    // A value read that XML can't hold, by a reference, isn't written.
+    let read = part(&format!("<d {A}><pdfaid:part>&#1;</pdfaid:part></d>"));
+    assert_eq!(read, some("\u{1}"));
+    assert!(matches!(
+        write(&claims_with_part("\u{1}")),
+        Err(WriteError::Character { at: 0, .. })
+    ));
+}
+
+/// A metadata stream's dictionary.
+fn metadata() -> Dict {
+    dict! { "Type" => "Metadata", "Subtype" => "XML" }
+}
+
+/// A packet claiming PDF/A-2b, an attribute of which doesn't read, so that
+/// it tells a fault with its place.
+fn told_packet() -> String {
+    packet(&format!(
+        "<rdf:Description rdf:about=\"\" {A} pdfaid:part=\"2\" oops=1>\
+         <pdfaid:conformance>B</pdfaid:conformance></rdf:Description>"
+    ))
+}
+
+/// A file of `objects`, its catalog object 1, written with a table.
+fn file_of(objects: &[(u32, Body)]) -> Vec<u8> {
+    fixture::file("1.7", objects, root(), Xref::Table)
+}
+
+/// A trailer whose `/Root` is object 1.
+fn root() -> Dict {
+    dict! { "Root" => Object::reference(1) }
+}
+
+/// A catalog whose `/Metadata` is `metadata`.
+fn catalog_with(metadata: Object) -> Body {
+    Body::from(dict! { "Type" => "Catalog", "Metadata" => metadata })
+}
+
+/// The objects of a file whose catalog's `/Metadata` is stream 4, `xml`,
+/// deflated where `deflate` says.
+fn with_packet(xml: &[u8], deflate: bool) -> Vec<(u32, Body)> {
+    let (mut dict, data) = (metadata(), xml.to_vec());
+    let data = match deflate {
+        true => {
+            dict.set("Filter", "FlateDecode");
+            fixture::zlib(&data)
+        }
+        false => data,
+    };
+    vec![
+        (1, catalog_with(Object::reference(4))),
+        (4, Body::Stream(dict, data)),
+    ]
+}
+
+/// What [`read_from`] gave, and what it told.
+type ReadFrom = (Result<Option<Claims>, Error>, Vec<(Place, Fault)>);
+
+/// What [`read_from`] reads through `objects` from the catalog the
+/// trailer leads to, and what it told; the same with `()`.
+fn read_through<'o, O: Resolve<'o> + Streams + Copy>(
+    objects: O,
+    trailer: &'o Dict,
+    limits: &Limits,
+) -> ReadFrom {
+    let catalog = catalog(objects, trailer).unwrap().unwrap();
+    let mut kept = Kept::default();
+    let read = read_from(objects, catalog, limits, &mut kept);
+    assert_eq!(read_from(objects, catalog, limits, &mut ()), read);
+    (read, kept.0)
+}
+
+/// What [`read_from`] reads of `file`, opened by `passwords`, through a
+/// reading in memory, one by position, and the document read beside its
+/// reading, which all say the same.
+fn read_each(file: &[u8], passwords: &[Password], limits: &Limits) -> ReadFrom {
+    let mut options = Options::DEFAULT;
+    options.passwords = passwords;
+    let reading = Reading::open(file, &options).unwrap();
+    let in_memory = read_through(&reading, reading.trailer().dict(), limits);
+    let source = ByPosition::new(file);
+    let positioned = Reading::open(&source, &options).unwrap();
+    let by_position = read_through(&positioned, positioned.trailer().dict(), limits);
+    assert_eq!(by_position, in_memory, "in memory and by position");
+    let beside = WithReading::new(file, &options).unwrap();
+    let document = beside.document();
+    let with_reading = read_through(&beside, document.trailer().dict(), limits);
+    assert_eq!(with_reading, in_memory, "a reading and its document");
+    in_memory
+}
+
+/// A document in memory of `objects`, each stream's data held as bytes.
+fn document_of(objects: Vec<(u32, Body)>) -> Document {
+    let mut document = Document::new(Version::new(1, 7), root());
+    for (n, body) in objects {
+        match body {
+            Body::Object(object) => document.insert(n, object),
+            Body::Stream(dict, data) => document.insert(n, Stream::new(dict, data)),
+        }
+    }
+    document
+}
+
+/// A file's packet is read through what gives its objects and its
+/// streams' data, plain or deflated, each fault placed in its stream, as
+/// [`read`] reads the stream's data: over a reading in memory, by position
+/// and a document read beside its reading, and over a document holding the
+/// data.
+#[test]
+fn a_file_s_packet_is_read_through_its_streams() {
+    let xml = told_packet();
+    let claims = Claims {
+        pdfa_part: some("2"),
+        pdfa_conformance: some("B"),
+        ..Claims::default()
+    };
+    let stream = ObjectId::new(4, 0);
+    let mut kept = Kept::default();
+    let read_alone = read(xml.as_bytes(), Some(stream), &Limits::DEFAULT, &mut kept);
+    assert_eq!(read_alone, Ok(claims.clone()));
+    let told = kept.0;
+    assert_eq!(told.len(), 1);
+    let (place, fault) = told[0];
+    assert_eq!((place.object, fault), (Some(stream), Fault::XmpAttribute));
+    assert_eq!(place.at.and_then(|at| at.stream), Some(stream));
+    for deflate in [false, true] {
+        let objects = with_packet(xml.as_bytes(), deflate);
+        let (read, faults) = read_each(&file_of(&objects), &[], &Limits::DEFAULT);
+        assert_eq!(read, Ok(Some(claims.clone())), "deflated: {deflate}");
+        assert_eq!(faults, told, "deflated: {deflate}");
+        let document = document_of(objects);
+        let held = read_through(&document, document.trailer().dict(), &Limits::DEFAULT);
+        assert_eq!(held, (Ok(Some(claims.clone())), told.clone()));
+    }
+
+    // A document read whole alone holds no stream's data: it says so.
+    let file = file_of(&with_packet(xml.as_bytes(), false));
+    let alone = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    let alone = alone.to_document().unwrap();
+    let (read, faults) = read_through(&alone, alone.trailer().dict(), &Limits::DEFAULT);
+    let error = read.unwrap_err();
+    assert!(
+        matches!(&error.why, XmpWhy::Unreadable(unread) if unread.why == Why::Detached && unread.id == stream),
+        "{error:?}"
+    );
+    assert_eq!(
+        (error.at, error.read, faults),
+        (0, Claims::default(), vec![])
+    );
+}
+
+/// The way to the stream as [`metadata_stream`] finds it: by a chain, its
+/// faults placed in the stream it comes to; none where there's no
+/// `/Metadata`, or it's a reference to nothing or leads to no stream; and
+/// what doesn't read on the way said, nothing read.
+#[test]
+fn the_way_to_a_file_s_packet_is_metadata_stream_s() {
+    let xml = told_packet();
+    let chain = [
+        (1, catalog_with(Object::reference(4))),
+        (4, Body::from(Object::reference(5))),
+        (5, Body::Stream(metadata(), xml.clone().into_bytes())),
+    ];
+    let (read, faults) = read_each(&file_of(&chain), &[], &Limits::DEFAULT);
+    assert_eq!(read.unwrap().unwrap().pdfa_part, some("2"));
+    assert_eq!(faults.len(), 1);
+    assert_eq!(faults[0].0.object, Some(ObjectId::new(5, 0)));
+    let nothing = |metadata: Option<Object>| {
+        let catalog = match metadata {
+            Some(metadata) => catalog_with(metadata),
+            None => Body::from(dict! { "Type" => "Catalog" }),
+        };
+        let objects = [
+            (1, catalog),
+            (5, Body::from(dict! { "Type" => "Metadata" })),
+        ];
+        read_each(&file_of(&objects), &[], &Limits::DEFAULT)
+    };
+    for metadata in [
+        None,
+        Some(Object::reference(9)),
+        Some(Object::reference(5)),
+        Some(Object::from(3)),
+        Some(Object::null()),
+    ] {
+        assert_eq!(
+            nothing(metadata.clone()),
+            (Ok(None), vec![]),
+            "{metadata:?}"
+        );
+    }
+
+    // A loop of references, past the hops followed.
+    let looped = [
+        (1, catalog_with(Object::reference(4))),
+        (4, Body::from(Object::reference(4))),
+    ];
+    let (read, faults) = read_each(&file_of(&looped), &[], &Limits::DEFAULT);
+    let error = read.unwrap_err();
+    assert!(matches!(&error.why, XmpWhy::Unreadable(unread) if unread.why == Why::Capped));
+    assert_eq!(
+        (error.at, &error.read, faults),
+        (0, &Claims::default(), vec![])
+    );
+    assert!(
+        (error.to_string()).starts_with("XMP metadata reads no further than byte 0: 4 0 R is past"),
+        "{error}"
+    );
+}
+
+/// An encrypted file's packet is read decrypted where a password opened
+/// it, and locked where none did; under `/EncryptMetadata false` it's read
+/// as written either way.
+#[test]
+fn an_encrypted_file_s_packet_is_read_as_its_reader_gives_it() {
+    let xml = told_packet();
+    let objects = with_packet(xml.as_bytes(), false);
+    let user = [Password("user")];
+    for encrypt_metadata in [true, false] {
+        let settings = Settings {
+            kind: Kind::Aes128,
+            user: b"user",
+            owner: b"owner",
+            p: -4,
+            id: b"0123456789abcdef",
+            encrypt_metadata,
+        };
+        let file = fixture::encrypted(&settings, &objects, root());
+        let (read, faults) = read_each(&file, &user, &Limits::DEFAULT);
+        assert_eq!(read.unwrap().unwrap().pdfa_part, some("2"));
+        assert_eq!(faults.len(), 1);
+        let (read, faults) = read_each(&file, &[], &Limits::DEFAULT);
+        match encrypt_metadata {
+            false => {
+                assert_eq!(read.unwrap().unwrap().pdfa_part, some("2"));
+                assert_eq!(faults.len(), 1);
+            }
+            true => {
+                let error = read.unwrap_err();
+                assert!(
+                    matches!(&error.why, XmpWhy::Unreadable(unread) if unread.why == Why::Locked && unread.id == ObjectId::new(4, 0)),
+                    "{error:?}"
+                );
+                assert_eq!(
+                    (error.at, error.read, faults),
+                    (0, Claims::default(), vec![])
+                );
+            }
+        }
+    }
+}
+
+/// The data is asked for under the cap, so a packet as long as the cap is
+/// read and one longer has nothing read, through any reader; and data
+/// longer than was asked for is past the cap too, whatever gave it.
+#[test]
+fn a_packet_past_the_cap_has_nothing_read_through_its_streams() {
+    let xml = told_packet();
+    let len = xml.len();
+    let objects = with_packet(xml.as_bytes(), true);
+    let file = file_of(&objects);
+    let document = document_of(objects);
+    let mut limits = Limits::DEFAULT;
+    let too_long = Error {
+        read: Claims::default(),
+        at: 0,
+        why: XmpWhy::TooLong,
+    };
+    for (cap, past) in [(len, false), (len - 1, true), (0, true)] {
+        limits.xmp_bytes = cap;
+        let read = read_each(&file, &[], &limits);
+        let held = read_through(&document, document.trailer().dict(), &limits);
+        assert_eq!(held, read, "{cap}");
+        match past {
+            true => assert_eq!(read, (Err(too_long.clone()), vec![]), "{cap}"),
+            false => assert_eq!(read.0.unwrap().unwrap().pdfa_part, some("2"), "{cap}"),
+        }
+    }
+    // `read`, given the bytes, reads as far as the cap.
+    limits.xmp_bytes = len - 1;
+    let cut = read(xml.as_bytes(), None, &limits, &mut ()).unwrap_err();
+    assert_eq!(
+        (cut.at, cut.why, cut.read.pdfa_part),
+        (len - 1, XmpWhy::TooLong, some("2"))
+    );
+    assert_eq!(
+        too_long.to_string(),
+        "XMP metadata reads no further than byte 0: it's longer than is read"
+    );
+}
+
+/// Over a resolver and a function as one: the data asked for under the
+/// cap; what the function gives read, more than it was asked for being
+/// past the cap, and why it gives none said as it says it, past the limit
+/// being past the cap; what the resolver can't give on the way, as it says.
+#[test]
+fn a_packet_is_read_through_any_resolver_and_its_streams() {
+    let xml = told_packet();
+    let stream = Object::stream(metadata());
+    let objects = |id: ObjectId| (id == ObjectId::new(4, 0)).then_some(&stream);
+    let catalog = dict! { "Type" => "Catalog", "Metadata" => Object::reference(4) };
+    let len = xml.len();
+    let mut limits = Limits::DEFAULT;
+    let through = |given: &dyn Fn(ObjectId, usize) -> Result<Vec<u8>, Unreadable>,
+                   limits: &Limits| {
+        let with = WithStreams::new(objects, |id: ObjectId, limit: usize| {
+            assert_eq!(limit, limits.xmp_bytes, "asked for under the cap");
+            given(id, limit)
+        });
+        let mut kept = Kept::default();
+        let read = read_from(with, &catalog, limits, &mut kept);
+        (read, kept.0)
+    };
+    let all = |_: ObjectId, _: usize| Ok(xml.clone().into_bytes());
+    let within = |id: ObjectId, limit: usize| match len > limit {
+        true => Err(Unreadable::new(id, Why::Limit, "past the limit")),
+        false => Ok(xml.clone().into_bytes()),
+    };
+    let mut kept = Kept::default();
+    let read_alone = read(
+        xml.as_bytes(),
+        Some(ObjectId::new(4, 0)),
+        &limits,
+        &mut kept,
+    );
+    for given in [&all as &dyn Fn(_, _) -> _, &within] {
+        assert_eq!(
+            through(given, &limits),
+            (read_alone.clone().map(Some), kept.0.clone())
+        );
+    }
+    limits.xmp_bytes = len - 1;
+    let too_long = Error {
+        read: Claims::default(),
+        at: 0,
+        why: XmpWhy::TooLong,
+    };
+    for given in [&all as &dyn Fn(_, _) -> _, &within] {
+        assert_eq!(through(given, &limits), (Err(too_long.clone()), vec![]));
+    }
+    limits = Limits::DEFAULT;
+    for why in [
+        Why::Damaged,
+        Why::Capped,
+        Why::Locked,
+        Why::Filter,
+        Why::Source,
+        Why::Detached,
+    ] {
+        let unread = Unreadable::new(ObjectId::new(4, 0), why, "it doesn't read");
+        let failing = |_: ObjectId, _: usize| Err(unread.clone());
+        let (read, faults) = through(&failing, &limits);
+        let error = read.unwrap_err();
+        assert_eq!(error.why, XmpWhy::Unreadable(unread.clone()), "{why:?}");
+        assert_eq!(
+            (error.at, &error.read, faults),
+            (0, &Claims::default(), vec![])
+        );
+        assert_eq!(
+            error.to_string(),
+            "XMP metadata reads no further than byte 0: it doesn't read"
+        );
+    }
+
+    // A resolver that says why it gives no object, on the way.
+    let locked = |id: ObjectId| -> Result<Option<&Object>, Unreadable> {
+        match id.number {
+            4 => Err(Unreadable::new(id, Why::Locked, "it takes a password")),
+            _ => Ok(None),
+        }
+    };
+    let failing = Failing(locked);
+    let with = WithStreams::new(&failing, all);
+    let error = read_from(with, &catalog, &limits, &mut ()).unwrap_err();
+    assert!(matches!(&error.why, XmpWhy::Unreadable(unread) if unread.why == Why::Locked));
+    // No `/Metadata`, or one to nothing: none, and nothing asked.
+    let asked = |_: ObjectId, _: usize| -> Result<Vec<u8>, Unreadable> { panic!("asked") };
+    let catalogs = [
+        dict! { "Type" => "Catalog" },
+        dict! { "Metadata" => Object::reference(9) },
+    ];
+    for catalog in &catalogs {
+        let with = WithStreams::new(objects, asked);
+        assert_eq!(read_from(with, catalog, &limits, &mut ()), Ok(None));
     }
 }

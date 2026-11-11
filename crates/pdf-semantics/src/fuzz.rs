@@ -8,12 +8,14 @@ use std::collections::BTreeMap;
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, serialize};
+use pdf_objects::{
+    Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, WithStreams, dict, serialize,
+};
 
 use crate::date::{Date, Quirk};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
-use crate::xmp::{self, Claims, metadata_stream};
+use crate::xmp::{self, Claims, WriteError, XmpWhy, metadata_stream};
 use crate::{Fault, HOPS, Limits, catalog, follow};
 
 /// How many values of an input are read as objects.
@@ -107,6 +109,16 @@ struct Kept(Vec<Fault>);
 impl Sink<Fault> for Kept {
     fn fault(&mut self, _: Place, fault: Fault) {
         self.0.push(fault);
+    }
+}
+
+/// Keeps what it's told, and where.
+#[derive(Default)]
+struct Heard(Vec<(Place, Fault)>);
+
+impl Sink<Fault> for Heard {
+    fn fault(&mut self, place: Place, fault: Fault) {
+        self.0.push((place, fault));
     }
 }
 
@@ -744,8 +756,14 @@ fn claim_values(claims: &Claims) -> [&Option<String>; 6] {
 /// - read the same, what's told and where among it, with each empty element
 ///   given as a start tag and an end tag, as the two forms are read alike;
 /// - a mixed value told at an element's bytes;
-/// - and its text, as a claim's beside an element, never taken, told as
-///   mixed where it's more than white space.
+/// - its text, as a claim's beside an element, never taken, told as mixed
+///   where it's more than white space;
+/// - read as a file's packet, through a resolver and its streams' data
+///   ([`xmp::read_from`]), what it reads given its bytes, the same told;
+///   past a cap it's asked for under, nothing read, whatever gave it;
+/// - and what it claims, and claims made of its text, written
+///   ([`xmp::write`]): refused where a value wouldn't read back as it is,
+///   for that, the first such; else read back as they are, nothing told.
 pub fn xmp(data: &[u8]) {
     const PACKET: ObjectId = ObjectId::new(9, 0);
 
@@ -757,15 +775,6 @@ pub fn xmp(data: &[u8]) {
             assert_eq!(at.stream, Some(PACKET));
             assert!(at.start <= at.end);
             self.0 = self.0.max(at.end);
-        }
-    }
-
-    /// Keeps what it's told, and where.
-    #[derive(Default)]
-    struct Heard(Vec<(Place, Fault)>);
-    impl Sink<Fault> for Heard {
-        fn fault(&mut self, place: Place, fault: Fault) {
-            self.0.push((place, fault));
         }
     }
 
@@ -792,6 +801,7 @@ pub fn xmp(data: &[u8]) {
         assert!(bytes.starts_with(b"<") && bytes.ends_with(b">"), "{at:?}");
     }
     mixed(data);
+    from_streams(data, &read_again, &heard.0);
     let claims = match &read {
         Ok(claims) => claims,
         Err(error) => {
@@ -803,6 +813,8 @@ pub fn xmp(data: &[u8]) {
     for value in claim_values(claims).into_iter().flatten() {
         assert_eq!(value.trim_ascii(), value);
     }
+    written(claims);
+    written(&claims_of_text(data));
     if let Ok(said) = claims.conformance() {
         assert_eq!(said.pdfa.is_some(), claims.pdfa_part.is_some());
         assert_eq!(said.pdfua.is_some(), claims.pdfua_part.is_some());
@@ -828,6 +840,146 @@ pub fn xmp(data: &[u8]) {
             assert!(under.is_none() || under == all, "{under:?} {all:?}");
         }
     }
+}
+
+/// `data` as the data of a file's metadata stream, 9 0, read through a
+/// resolver and a function as one ([`WithStreams`]): what [`xmp::read`]
+/// gave, `read`, and told, `heard`, of it as that stream's; under a cap of
+/// its length, the same; under one it's past, nothing read and nothing
+/// told, by a function that keeps to the cap and by one that gives it all;
+/// the function's own failure said as it says it; and none where the
+/// catalog's `/Metadata` leads to no stream, nothing asked of the function.
+fn from_streams(data: &[u8], read: &Result<Claims, xmp::Error>, heard: &[(Place, Fault)]) {
+    const PACKET: ObjectId = ObjectId::new(9, 0);
+    let stream = Object::stream(dict! { "Type" => "Metadata", "Subtype" => "XML" });
+    let objects = |id: ObjectId| (id == PACKET).then_some(&stream);
+    let catalogs = [
+        dict! { "Metadata" => Object::reference(9) },
+        dict! { "Metadata" => Object::reference(8) },
+        dict! {},
+    ];
+    let all = |_: ObjectId, _: usize| Ok(data.to_vec());
+    let within = |id: ObjectId, limit: usize| match data.len() > limit {
+        true => Err(Unreadable::new(id, Why::Limit, "past the limit")),
+        false => Ok(data.to_vec()),
+    };
+    let through = |given: &dyn Fn(ObjectId, usize) -> Result<Vec<u8>, Unreadable>,
+                   catalog,
+                   limits: &Limits| {
+        let with = WithStreams::new(objects, |id: ObjectId, limit: usize| {
+            assert_eq!(id, PACKET, "only the stream it leads to is asked for");
+            assert_eq!(limit, limits.xmp_bytes, "asked for under the cap");
+            given(id, limit)
+        });
+        let mut told = Heard::default();
+        let read = xmp::read_from(with, catalog, limits, &mut told);
+        assert_eq!(xmp::read_from(with, catalog, limits, &mut ()), read);
+        (read, told.0)
+    };
+    let mut at_cap = Limits::DEFAULT;
+    at_cap.xmp_bytes = data.len();
+    let too_long = xmp::Error {
+        read: Claims::default(),
+        at: 0,
+        why: XmpWhy::TooLong,
+    };
+    for given in [&all as &dyn Fn(_, _) -> _, &within] {
+        for limits in [Limits::DEFAULT, at_cap] {
+            let (from, told) = through(given, &catalogs[0], &limits);
+            assert_eq!(from, read.clone().map(Some));
+            assert_eq!(told, heard);
+        }
+        if let Some(less) = data.len().checked_sub(1) {
+            let mut past = Limits::DEFAULT;
+            past.xmp_bytes = less;
+            let (from, told) = through(given, &catalogs[0], &past);
+            assert_eq!(from, Err(too_long.clone()));
+            assert_eq!(told, []);
+        }
+        for catalog in &catalogs[1..] {
+            let (from, told) = through(&|_, _| panic!("asked"), catalog, &Limits::DEFAULT);
+            assert_eq!((from, told), (Ok(None), Vec::new()));
+        }
+    }
+    let unread = Unreadable::new(PACKET, Why::Damaged, String::from_utf8_lossy(data));
+    let (from, told) = through(&|_, _| Err(unread.clone()), &catalogs[0], &Limits::DEFAULT);
+    let failed = from.expect_err("its data doesn't read");
+    assert_eq!((failed.at, &failed.read), (0, &Claims::default()));
+    assert_eq!(failed.why, XmpWhy::Unreadable(unread));
+    assert_eq!(told, []);
+}
+
+/// Each claim's name, as [`xmp::write`] writes it, in [`claim_values`]'
+/// order.
+const CLAIMS: [&str; 6] = [
+    "pdfaid:part",
+    "pdfaid:conformance",
+    "pdfaid:rev",
+    "pdfuaid:part",
+    "pdfuaid:rev",
+    "pdfvtid:GTS_PDFVTVersion",
+];
+
+/// Whether XML 1.0 can hold `c`: its `Char` production.
+fn xml_holds(c: char) -> bool {
+    matches!(u32::from(c), 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x1_0000..)
+}
+
+/// `claims` written: read back as they are, with nothing told; or refused
+/// for the first value, in their order, that has ASCII's white space round
+/// it or a character XML can't hold, at that character, the values before
+/// it each written as they'd read back.
+fn written(claims: &Claims) {
+    let values = claim_values(claims);
+    let spaced = |value: &str| value.trim_ascii() != value;
+    let bad = |value: &str| value.char_indices().find(|&(_, c)| !xml_holds(c));
+    let first = (values.iter().enumerate())
+        .filter_map(|(at, value)| Some((at, value.as_deref()?)))
+        .find(|&(_, value)| spaced(value) || bad(value).is_some());
+    match (xmp::write(claims), first) {
+        (Ok(packet), None) => {
+            let mut kept = Kept::default();
+            let back = xmp::read(packet.as_bytes(), None, &Limits::DEFAULT, &mut kept);
+            assert_eq!(back.as_ref(), Ok(claims), "{packet}");
+            assert_eq!(kept.0, [], "{packet}");
+        }
+        (Err(WriteError::Spaced { claim }), Some((at, value))) => {
+            assert_eq!(claim, CLAIMS[at]);
+            assert!(spaced(value), "{value:?}");
+        }
+        (
+            Err(WriteError::Character {
+                claim,
+                at,
+                character,
+            }),
+            Some((which, value)),
+        ) => {
+            assert_eq!(claim, CLAIMS[which]);
+            assert!(!spaced(value), "{value:?}");
+            assert_eq!(bad(value), Some((at, character)), "{value:?}");
+        }
+        (written, first) => panic!("{claims:?}: {written:?}, where {first:?} is refused"),
+    }
+}
+
+/// Claims made of `data` as text: its pieces between `|`s, each a claim's
+/// value in turn, the first six, as they are, white space and all.
+fn claims_of_text(data: &[u8]) -> Claims {
+    let text = String::from_utf8_lossy(data);
+    let mut pieces = text.split('|').map(str::to_string);
+    let mut claims = Claims::default();
+    for value in [
+        &mut claims.pdfa_part,
+        &mut claims.pdfa_conformance,
+        &mut claims.pdfa_rev,
+        &mut claims.pdfua_part,
+        &mut claims.pdfua_rev,
+        &mut claims.pdfvt_version,
+    ] {
+        *value = pieces.next();
+    }
+    claims
 }
 
 /// `data` as text, its `<` and `&` taken out, beside an element in a claim's
@@ -958,6 +1110,11 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         // XMP: an empty claim, claims holding elements beside text and
         // white space, and one in another.
         r#"<d xmlns:a="http://www.aiim.org/pdfa/ns/id/"><a:part/><a:conformance>B<e/></a:conformance><a:rev> <e>1</e> </a:rev><a:conformance><a:part>3</a:part></a:conformance><a:conformance>&#65;</a:conformance></d>"#,
+        // XMP written: claims of the text between `|`s, what's escaped, and
+        // what's refused.
+        "3|B|2012|1|2014|PDF/VT-2",
+        "a&b<c>d|\r\n|&#13;||]]>|\u{a0}\u{fffd}",
+        " 3|b\u{1}|\u{fffe}",
     ];
     let mut seeds: Vec<Vec<u8>> = trees.map(|seed| seed.as_bytes().to_vec()).to_vec();
     seeds.push(1_792_800_000i64.to_le_bytes().to_vec());
