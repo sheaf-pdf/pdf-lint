@@ -30,7 +30,7 @@ pdf-objects.workspace = true
 pdf-tokenizer.workspace = true
 thiserror = "2"
 # An operation's operands, sixteen held inline before they spill to the heap.
-tinyvec = { version = "1.13", features = ["alloc"] }
+tinyvec = { version = "1.13.1", features = ["alloc"] }
 # The spans of what reads or writes a whole page, with the `tracing`
 # feature: without its default features, so without the proc macros of
 # `attributes` and the `log` bridge; `std`, for its spans' guards.
