@@ -1052,14 +1052,103 @@ fn an_indirect_length_is_no_finding() {
     assert_eq!(findings(&facts), []);
 }
 
+const WHYS: [Unread; 3] = [Unread::Locked, Unread::Capped, Unread::Unfiltered];
+
+/// A hint stream the reader didn't read, for each of its reasons, is said once
+/// and not judged: nothing of its data or tables, and the file holds by the
+/// rest, its hints not read.
 #[test]
-fn a_hint_stream_with_no_key_for_it_says_nothing_and_isnt_read() {
+fn a_hint_stream_the_reader_didnt_read_is_said_and_nothing_of_its_data() {
+    for why in WHYS {
+        let mut facts = table();
+        hint_of(&mut facts).data = HintData::Unread(why);
+        assert_eq!(findings(&facts), [Finding::HintUnread { why }]);
+        let verdict = check(&facts, &Limits::DEFAULT, &mut ());
+        assert!(verdict.linearized && verdict.holds && !verdict.hints_read);
+        assert_eq!(Finding::HintUnread { why }.grade(), Grade::Unjudged);
+        // Of its dictionary, what's there is judged.
+        hint_of(&mut facts).keys.retain(|(key, _)| key != b"S");
+        assert_eq!(
+            findings(&facts),
+            [Finding::HintUnread { why }, Finding::HintNoShared]
+        );
+    }
+    // Its own object unread, its end at its start: nothing's said of its
+    // dictionary, nor of its length beside /H's, which stands.
     let mut facts = table();
-    hint_of(&mut facts).data = HintData::Locked;
+    let hint = hint_of(&mut facts);
+    hint.data = HintData::Unread(Unread::Capped);
+    hint.end = hint.at;
+    hint.keys.clear();
+    let why = Unread::Capped;
+    assert_eq!(findings(&facts), [Finding::HintUnread { why }]);
+    assert_eq!(facts.hint_extent(), table().hint_extent());
+    // The page tree's own say is the facts', not the hint stream's.
+    let mut facts = table();
+    let why = Unread::Locked;
+    hint_of(&mut facts).data = HintData::Unread(why);
     facts.pages.clear();
-    assert_eq!(findings(&facts), []);
-    let verdict = check(&facts, &Limits::DEFAULT, &mut ());
-    assert!(verdict.linearized && verdict.holds && !verdict.hints_read);
+    assert_eq!(
+        findings(&facts),
+        [Finding::HintUnread { why }, Finding::NoPages]
+    );
+    facts.unread.pages = Some(why);
+    assert_eq!(
+        findings(&facts),
+        [Finding::HintUnread { why }, Finding::PagesUnread { why }]
+    );
+}
+
+/// Sections the reader stopped short of the main one, for each of its reasons,
+/// are said once, and nothing they list or place is judged, nor a page tree
+/// that gives no pages, whose objects may be among what they'd list: only
+/// what's of the first section alone, and of the hint stream and its tables.
+#[test]
+fn sections_the_reader_didnt_read_are_said_and_nothing_they_place() {
+    for why in WHYS {
+        let mut facts = table();
+        facts.main = None;
+        facts.unread.sections = Some(why);
+        assert_eq!(findings(&facts), [Finding::SectionsUnread { why }]);
+        let verdict = check(&facts, &Limits::DEFAULT, &mut ());
+        assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+        facts.pages.clear();
+        assert_eq!(findings(&facts), [Finding::SectionsUnread { why }]);
+        facts.first = None;
+        assert_eq!(findings(&facts), [Finding::SectionsUnread { why }]);
+    }
+    // Of what's placed: a first page's length and each position, wrong.
+    let mut facts = table();
+    with_tables(&mut facts, |tables| tables.pages.pages[0].length += 1);
+    first_section(&mut facts).subsections.push((90, 1));
+    dict(&mut facts).e = Raw::Integer(1);
+    let placed = findings(&facts);
+    assert!(placed.len() > 2, "{placed:?}");
+    facts.main = None;
+    facts.unread.sections = Some(Unread::Capped);
+    let why = Unread::Capped;
+    assert_eq!(
+        findings(&facts),
+        [
+            Finding::SectionsUnread { why },
+            Finding::FirstSubsections { count: 2 }
+        ]
+    );
+}
+
+/// A page tree the reader didn't read, for each of its reasons, is said once,
+/// and nothing of its pages or nodes is judged.
+#[test]
+fn a_page_tree_the_reader_didnt_read_is_said_and_nothing_of_its_pages() {
+    for why in WHYS {
+        let mut facts = table();
+        facts.pages.clear();
+        facts.nodes.push((2, Attribute::Rotate));
+        facts.unread.pages = Some(why);
+        assert_eq!(findings(&facts), [Finding::PagesUnread { why }]);
+        let verdict = check(&facts, &Limits::DEFAULT, &mut ());
+        assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+    }
 }
 
 #[test]
@@ -1197,6 +1286,12 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
             },
             Some(Key(DictKey::H)),
         ),
+        (
+            Finding::SectionsUnread {
+                why: Unread::Capped,
+            },
+            None,
+        ),
         (Finding::NoSections, None),
         (Finding::NoMainSection, None),
         (Finding::SectionOrder { first: 77, main: 2 }, Some(Byte(77))),
@@ -1249,6 +1344,12 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
         ),
         (Finding::NumberOutOfOrder { number: 77 }, Some(Object(77))),
         (Finding::HintNotLast { hint: 77, last: 2 }, Some(Object(77))),
+        (
+            Finding::HintUnread {
+                why: Unread::Locked,
+            },
+            None,
+        ),
         (Finding::HintNotAStream, None),
         (Finding::HintUndecodable, None),
         (Finding::HintNoShared, None),
@@ -1305,6 +1406,12 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
                 attribute,
             },
             Some(Object(77)),
+        ),
+        (
+            Finding::PagesUnread {
+                why: Unread::Unfiltered,
+            },
+            None,
         ),
         (Finding::NoPages, None),
         (Finding::FirstPageNotFirst { number: 77 }, Some(Object(77))),

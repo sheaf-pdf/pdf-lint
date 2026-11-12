@@ -2,7 +2,8 @@
 //! makes, on any graph, each held against a plain walk of it; what's assembled
 //! from a plan, its positions against its pieces, its tables against the plan,
 //! and the check of it clean; a hint stream of any bytes, read under small caps
-//! and written again; any facts, judged the same whatever the sink; with
+//! and written again; any facts, judged the same whatever the sink, and of
+//! what they say wasn't read, nothing that depends on it judged; with
 //! `family`, any bytes as a file, laid out and read back, the check of what's
 //! written clean. It's compiled only for tests and under cargo-fuzz's
 //! `--cfg fuzzing`.
@@ -12,7 +13,7 @@ use std::convert::Infallible;
 
 use crate::check::{
     self, Facts, Finding, FirstObject, Grade, HintData, HintFacts, PageFacts, Raw, RowEntry,
-    RowFacts, SectionFacts, Sink,
+    RowFacts, SectionFacts, Sink, Unread,
 };
 use crate::hint::{self, EmbeddedFiles, Extended, Generic, HintKeys, PageOffsets};
 use crate::hint::{SharedObjects, Thumbnails};
@@ -1237,7 +1238,111 @@ fn judged_alike(facts: &Facts, limits: &Limits) -> (check::Verdict, Vec<Finding>
     assert_eq!(check::check(facts, limits, by), verdict);
     let error = kept.iter().any(|finding| finding.grade() == Grade::Error);
     assert_eq!(verdict.holds, verdict.linearized && !error, "{kept:?}");
+    unjudged_alone(facts, verdict, &kept);
     (verdict, kept)
+}
+
+/// Of each part `facts` say the reader didn't read, one finding says so, and
+/// nothing that depends on it is told among `kept`.
+fn unjudged_alone(facts: &Facts, verdict: check::Verdict, kept: &[Finding]) {
+    use Finding::*;
+    if !verdict.linearized {
+        return;
+    }
+    let told = |said: &dyn Fn(&Finding) -> bool| kept.iter().filter(|f| said(f)).count();
+    let none = |of: &str, said: &dyn Fn(&Finding) -> bool| {
+        let found: Vec<&Finding> = kept.iter().filter(|f| said(f)).collect();
+        assert!(found.is_empty(), "{of} isn't read, and {found:?} is said");
+    };
+    let hint = (facts.hint.as_ref()).and_then(|hint| match hint.data {
+        HintData::Unread(why) => Some(why),
+        _ => None,
+    });
+    assert_eq!(
+        told(&|f| matches!(f, HintUnread { .. })),
+        usize::from(hint.is_some())
+    );
+    if let Some(why) = hint {
+        assert!(kept.contains(&HintUnread { why }) && !verdict.hints_read);
+        none("the hint stream", &|f| {
+            matches!(
+                f,
+                HintNotAStream | HintUndecodable | HintTables { .. } | TableOverruns { .. }
+            )
+        });
+    }
+    let sections = facts.unread.sections;
+    assert_eq!(
+        told(&|f| matches!(f, SectionsUnread { .. })),
+        usize::from(sections.is_some())
+    );
+    if let Some(why) = sections {
+        assert!(kept.contains(&SectionsUnread { why }));
+        none("the sections", &|f| {
+            matches!(
+                f,
+                NoSections
+                    | NoMainSection
+                    | SectionOrder { .. }
+                    | FirstSize { .. }
+                    | MainSubsections { .. }
+                    | MainFrom { .. }
+                    | MainZeroInUse
+                    | MainFree { .. }
+                    | MainPrev
+                    | LastStartxref { .. }
+                    | CatalogCompressed { .. }
+                    | CatalogNotFirst { .. }
+                    | UncompressedAfterCompressed { .. }
+                    | Generation { .. }
+                    | GroupsApart { .. }
+                    | NumberOutOfOrder { .. }
+                    | HintNotLast { .. }
+                    | FirstPageEnd { .. }
+                    | MainFirstEntry { .. }
+                    | HintNotListed { .. }
+                    | HintExtent { .. }
+                    | NoPages
+                    | FirstPageAt { .. }
+                    | FirstPageNotFirstObject { .. }
+                    | PageAt { .. }
+                    | PageObjects { .. }
+                    | PageLength { .. }
+                    | SharedFirstAt { .. }
+                    | SharedObjects { .. }
+                    | SharedLength { .. }
+                    | TableObject { .. }
+                    | TableAt { .. }
+                    | TableObjects { .. }
+                    | TableLength { .. }
+                    | GraphRefused { .. }
+                    | FirstPageReaches { .. }
+                    | PageReaches { .. }
+                    | SharedNotListed { .. }
+                    | SharedNotReached { .. }
+            )
+        });
+    }
+    let pages = facts.unread.pages;
+    assert_eq!(
+        told(&|f| matches!(f, PagesUnread { .. })),
+        usize::from(pages.is_some())
+    );
+    if let Some(why) = pages {
+        assert!(kept.contains(&PagesUnread { why }));
+        none("the page tree", &|f| {
+            matches!(
+                f,
+                NoPages
+                    | PageCount { .. }
+                    | FirstPageObject { .. }
+                    | FirstPageNotFirst { .. }
+                    | PageCompressed { .. }
+                    | PageAttribute { .. }
+                    | NodeAttribute { .. }
+            )
+        });
+    }
 }
 
 /// What's assembled holds: the check of it finds nothing but what a plan can't
@@ -1352,9 +1457,18 @@ fn section_from(bytes: &mut Bytes) -> SectionFacts {
     section
 }
 
+/// Why a part isn't read, of the input's.
+fn unread_from(bytes: &mut Bytes) -> Unread {
+    match bytes.below(3) {
+        0 => Unread::Locked,
+        1 => Unread::Capped,
+        _ => Unread::Unfiltered,
+    }
+}
+
 fn hint_from(bytes: &mut Bytes) -> HintFacts {
     let data = match bytes.below(8) {
-        0 => HintData::Locked,
+        0 => HintData::Unread(unread_from(bytes)),
         1 => HintData::NotAStream,
         2 => HintData::Undecodable,
         _ => {
@@ -1445,18 +1559,35 @@ fn made_up(bytes: &mut Bytes) -> Facts {
     facts.nodes = (0..bytes.below(4))
         .map(|_| (bytes.below(64) as u32, check::Attribute::Rotate))
         .collect();
+    facts.unread.sections = bytes.chance(8).then(|| unread_from(bytes));
+    facts.unread.pages = bytes.chance(8).then(|| unread_from(bytes));
     facts
 }
 
 /// What's assembled, with a few of its fields given values of the input's.
 fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
     for _ in 0..1 + bytes.below(4) {
-        match bytes.below(16) {
+        match bytes.below(19) {
             0 => facts.len = number_from(bytes),
             1 => facts.first = Some(section_from(bytes)),
             2 => facts.main = Some(section_from(bytes)),
             3 => facts.hint = Some(hint_from(bytes)),
             4 => facts.pages.truncate(bytes.below(8)),
+            // What a reader didn't read, as its facts would say it: the main
+            // section gone, the pages none, the hint stream as it's written.
+            16 => {
+                facts.unread.sections = Some(unread_from(bytes));
+                facts.main = None;
+            }
+            17 => {
+                facts.unread.pages = Some(unread_from(bytes));
+                facts.pages.clear();
+            }
+            18 => {
+                if let Some(hint) = &mut facts.hint {
+                    hint.data = HintData::Unread(unread_from(bytes));
+                }
+            }
             n => {
                 let Some(first) = &mut facts.first_object else {
                     continue;
@@ -1692,6 +1823,8 @@ fn written_back<S: pdf_structure::ByteSource>(
     assert_eq!(format!("{beside:?}"), format!("{read:?}"));
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
     assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+    // Nothing of it is past a cap or unread, so nothing isn't judged.
+    assert_eq!(read.unread, check::UnreadParts::default());
     assert!(
         (findings.iter()).all(|finding| matches!(finding, Finding::PageAttribute { .. })),
         "{findings:?}"

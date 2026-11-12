@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_linearize::check::{Facts, HintData, Raw};
+use pdf_linearize::check::{Facts, HintData, Raw, Unread};
 use pdf_linearize::hint::{self, HintKeys};
 use pdf_linearize::{Finding, Limits, check, family};
 use pdf_structure::pdf_crypt::Password;
@@ -169,6 +169,10 @@ fn what_holds_is_what_the_cases_are_there_for() {
         let (_, verdict, findings) = checked(name);
         assert!(verdict.linearized && verdict.holds, "{name}: {findings:?}");
         assert!(!verdict.hints_read, "{name}: there's no key for its hints");
+        // Which is said once, and not judged.
+        let why = Unread::Locked;
+        let unread = |f: &&Finding| **f == Finding::HintUnread { why };
+        assert_eq!(findings.iter().filter(unread).count(), 1, "{name}");
     }
     let (_, verdict, findings) = checked("not-linearized");
     assert!(!verdict.linearized);

@@ -20,7 +20,7 @@
 //! - **The check** ([`check()`]): the [`Facts`] of a file as written, as any
 //!   model's reader gives them, held against each other, to a [`Verdict`] and a
 //!   [`Finding`] for each thing wrong, by the clause it departs from and a
-//!   [`Grade`].
+//!   [`Grade`], or for a part the reader didn't read, that it isn't judged.
 #![cfg_attr(
     feature = "family",
     doc = "- **The family's documents** ([`family`], a default feature): a document of"

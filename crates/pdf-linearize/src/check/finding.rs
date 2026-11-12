@@ -1,10 +1,11 @@
 //! What [`check`](super::check) tells: each one thing wrong with a file, by the
 //! clause it departs from.
 
-use super::Attribute;
+use super::{Attribute, Unread};
 use crate::{hint, plan};
 
-/// How much a [`Finding`] matters, for a caller to choose by.
+/// How much a [`Finding`] matters, for a caller to choose by. Ordered as
+/// listed, the most first; nothing in the crate compares grades by order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Grade {
@@ -15,6 +16,10 @@ pub enum Grade {
     /// Not as the standard has it, but every reader goes on, and real writers
     /// do it.
     Departure,
+    /// Not judged: a part of the file the reader didn't read, for a reason of
+    /// its own ([`Unread`]). It says nothing of the file, and never makes it
+    /// not hold.
+    Unjudged,
 }
 
 /// A key of the linearization dictionary (Table F.1).
@@ -245,10 +250,21 @@ pub enum Finding {
         most: u64,
     },
 
-    /// `startxref` gives no section that reads.
+    /// The reader stopped reading the sections short of the main one, for a
+    /// reason of its own, so nothing's said of them, of the numbers they
+    /// list, or of a position they place (F.3.4, F.3.11).
+    #[error(
+        "the sections aren't read as far as the main one, as {why}, so they and what they place aren't judged (ISO 32000-2, F.3.4, F.3.11)"
+    )]
+    SectionsUnread {
+        /// Why.
+        why: Unread,
+    },
+    /// `startxref` gives no section that reads, for what's wrong with it.
     #[error("the sections don't read from the last startxref (ISO 32000-2, 7.5.8.2, F.3.4)")]
     NoSections,
-    /// The first section's `/Prev` gives no section that reads (F.3.4).
+    /// The first section's `/Prev` gives no section that reads, for what's
+    /// wrong with it (F.3.4).
     #[error("no main section reads from the first section's /Prev (ISO 32000-2, F.3.4)")]
     NoMainSection,
     /// The section `startxref` gives comes after the one its `/Prev` gives, as
@@ -398,10 +414,18 @@ pub enum Finding {
         /// The last.
         last: u32,
     },
+    /// The reader didn't read the hint stream, for a reason of its own, so
+    /// nothing's said of its data or its tables (F.4).
+    #[error("the hint stream isn't read, as {why}, so its tables aren't judged (ISO 32000-2, F.4)")]
+    HintUnread {
+        /// Why.
+        why: Unread,
+    },
     /// What's at `/H` isn't a stream.
     #[error("what's at /H isn't a stream (ISO 32000-2, F.3.6)")]
     HintNotAStream,
-    /// The hint stream doesn't decode.
+    /// The hint stream doesn't decode, for what's wrong with it: not where
+    /// the reader didn't read it ([`Finding::HintUnread`]).
     #[error("the hint stream's data doesn't decode (ISO 32000-2, F.3.6)")]
     HintUndecodable,
     /// The hint stream has no `/S` (F.3.6).
@@ -467,8 +491,18 @@ pub enum Finding {
         /// The attribute.
         attribute: Attribute,
     },
-    /// The page tree didn't read, or has no pages, so nothing depending on it
-    /// can be said (F.3.7).
+    /// The reader didn't read the page tree, for a reason of its own, so
+    /// nothing's said of its pages (F.3.7).
+    #[error("the page tree isn't read, as {why}, so its pages aren't judged (ISO 32000-2, F.3.7)")]
+    PagesUnread {
+        /// Why.
+        why: Unread,
+    },
+    /// The page tree didn't read, for what's wrong with it, or has no pages,
+    /// so nothing depending on it can be said (F.3.7): not where the reader
+    /// didn't read it ([`Finding::PagesUnread`]), nor where it stopped the
+    /// sections short ([`Finding::SectionsUnread`]), past which the tree's
+    /// objects may be listed.
     #[error("the page tree gives no pages, or doesn't read (ISO 32000-2, F.3.7)")]
     NoPages,
     /// The first page's object isn't among what the first section lists.
@@ -765,7 +799,10 @@ impl Finding {
         use Finding::*;
         use Place::*;
         Some(match *self {
-            NoSections
+            HintUnread { .. }
+            | SectionsUnread { .. }
+            | PagesUnread { .. }
+            | NoSections
             | NoMainSection
             | FirstSubsections { .. }
             | FirstSize { .. }
@@ -855,6 +892,7 @@ impl Finding {
             Updated { .. } => "G.7",
             Indirect { .. } | DictionaryPast1024 { .. } => "F.3.3",
             NoSections => "7.5.8.2, F.3.4",
+            SectionsUnread { .. } => "F.3.4, F.3.11",
             SectionOrder { .. } => "F.3",
             NoMainSection
             | FirstSubsections { .. }
@@ -884,7 +922,8 @@ impl Finding {
             | HintKeyIndirect { .. }
             | TableOverruns { .. } => "F.3.6",
             HintKeyOther { .. } => "Table F.2",
-            HintTables { .. }
+            HintUnread { .. }
+            | HintTables { .. }
             | TableObject { .. }
             | TableAt { .. }
             | TableObjects { .. }
@@ -892,7 +931,8 @@ impl Finding {
             | TableIdPast { .. } => "F.4",
             PageAttribute { .. } => "F.3.7, F.3.10",
             NodeAttribute { .. } => "F.3.10",
-            NoPages
+            PagesUnread { .. }
+            | NoPages
             | FirstPageNotFirstObject { .. }
             | GraphRefused { .. }
             | FirstPageReaches { .. } => "F.3.7",
@@ -918,10 +958,12 @@ impl Finding {
     /// How much it matters: [`Grade::Error`] by definition for what a reader
     /// acts on (a position, a length, a count, an identifier past its table, a
     /// value it can't read), [`Grade::Departure`] where real files, read by
-    /// real viewers, show that nothing goes wrong by it.
+    /// real viewers, show that nothing goes wrong by it, and
+    /// [`Grade::Unjudged`] for what wasn't judged.
     pub fn grade(&self) -> Grade {
         use Finding::*;
         match self {
+            HintUnread { .. } | SectionsUnread { .. } | PagesUnread { .. } => Grade::Unjudged,
             // A reader goes on: what these leave out it fetches by the
             // sections.
             Updated { .. }

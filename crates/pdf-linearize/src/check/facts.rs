@@ -191,18 +191,52 @@ impl SectionFacts {
     }
 }
 
+/// Why a reader didn't read a part of a file, where that's the reader's and
+/// not the file's: what the part says isn't known, so the check judges
+/// nothing that depends on it, and tells a finding that says so
+/// ([`Grade::Unjudged`](super::Grade::Unjudged)). What the file gets wrong
+/// isn't one of these: a part that doesn't read for that is told as the
+/// file's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Unread {
+    /// No key the reader has opens it: no password it was given opens the
+    /// file, or the file is encrypted by a security handler it can't open.
+    Locked,
+    /// It's past a cap the reader reads under: a stream's data longer than
+    /// it decodes, more filters or sections or rows than it reads, a page
+    /// tree deeper or of more pages than it walks.
+    Capped,
+    /// It's through a `/Filter`, or with `/DecodeParms`, that the reader
+    /// doesn't take.
+    Unfiltered,
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Unread::Locked => "no key the reader has opens it",
+            Unread::Capped => "it's past a cap the reader reads under",
+            Unread::Unfiltered => "it's through filters the reader doesn't take",
+        })
+    }
+}
+
 /// A hint stream's data, or why there isn't any.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HintData {
     /// What it decodes to, an overflow stream's after the primary's.
     Decoded(Vec<u8>),
-    /// A reader has no key for it, so there's nothing to say of what it holds.
-    Locked,
     /// What's at `/H` isn't a stream.
     NotAStream,
     /// It doesn't decode.
     Undecodable,
+    /// The reader didn't read it, and why: nothing's said of what it holds.
+    /// Where the stream's own object didn't read, its keys are none and its
+    /// end is where it starts, and nothing's said of its dictionary or of
+    /// its extent either.
+    Unread(Unread),
 }
 
 /// The primary hint stream.
@@ -300,9 +334,26 @@ impl Extent {
     }
 }
 
+/// What of a file's sections and its page tree the reader didn't read, and
+/// why ([`Unread`]): none of either where it read, or where what didn't is
+/// the file's to answer for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub struct UnreadParts {
+    /// The cross-reference sections, where reading them stopped short of the
+    /// main one: what's listed past where it stopped isn't known, nor where
+    /// anything the sections place is, nor so what the page tree's objects
+    /// are.
+    pub sections: Option<Unread>,
+    /// The page tree: its pages, where it's said, are none, and aren't
+    /// judged.
+    pub pages: Option<Unread>,
+}
+
 /// The facts of a file as written, set on [`Facts::new`]'s: what isn't given
 /// isn't judged, or is said to be missing where a linearized file has to have
-/// it.
+/// it; but what the reader didn't read, for its own reason, is said in
+/// [`Facts::unread`] and [`HintData::Unread`], and isn't judged.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Facts {
@@ -323,6 +374,9 @@ pub struct Facts {
     pub hint: Option<HintFacts>,
     /// Each page, in page order: none where the page tree didn't read.
     pub pages: Vec<PageFacts>,
+    /// What of the sections and the page tree the reader didn't read, for its
+    /// own reason, and why.
+    pub unread: UnreadParts,
     /// Each page tree node's number and what it holds that its pages inherit,
     /// once for each key.
     pub nodes: Vec<(u32, Attribute)>,
@@ -346,6 +400,7 @@ impl Facts {
             update: None,
             hint: None,
             pages: Vec::new(),
+            unread: UnreadParts::default(),
             nodes: Vec::new(),
             objects: Vec::new(),
             graph: None,
@@ -365,9 +420,10 @@ impl Facts {
     /// [`hint::located`](crate::hint::located) gives a position's byte by:
     /// `/H`'s first two items, each 0 where it isn't a non-negative integer,
     /// the first past the header;
-    /// but where the stream listed at that offset takes fewer bytes than
-    /// that length, or more than it may, to where what's listed after it
-    /// starts, the most it may, as the check then tells `/H`'s length once
+    /// but where the stream listed at that offset, its object read, takes
+    /// fewer bytes than that length, or more than it may, to where what's
+    /// listed after it starts, the most it may, as the check then tells
+    /// `/H`'s length once
     /// ([`Finding::HintExtent`](super::Finding::HintExtent)) and places the
     /// rest by the stream that's there.
     pub fn hint_extent(&self) -> (u64, u64) {

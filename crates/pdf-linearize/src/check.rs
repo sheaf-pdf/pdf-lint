@@ -21,6 +21,16 @@
 //!   it says it has read, under [`Limits`]. So a reading with no key for the
 //!   data can hold, as far as anything can say, with this false.
 //!
+//! # What isn't judged
+//!
+//! What the reader didn't read for a reason of its own, and not the file's,
+//! the facts say ([`Unread`]): a hint stream, sections or a page tree no key
+//! opens, past a cap the reader reads under, or through filters it doesn't
+//! take. Of each, one finding says so ([`Grade::Unjudged`]), and nothing
+//! that depends on it is judged: it isn't the file's fault, and a verdict
+//! holds as far as the rest says. A sink that wants no findings learns of the
+//! hint stream's by `hints_read` alone.
+//!
 //! # A caller that ignores findings
 //!
 //! The [`Verdict`] is the same whatever the sink. A sink that doesn't want
@@ -52,7 +62,7 @@ mod tests;
 
 pub use facts::{
     Attribute, Extent, Facts, FirstObject, HintData, HintFacts, PageFacts, Raw, RowEntry, RowFacts,
-    SectionFacts,
+    SectionFacts, Unread, UnreadParts,
 };
 pub use finding::{DictKey, Finding, Grade, KeyName, Place};
 
