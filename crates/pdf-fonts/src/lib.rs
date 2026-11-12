@@ -25,6 +25,13 @@
 //!   ([`FontProgram`]). Without it, in [`Font::read_for_text`] and in
 //!   [`Fonts::for_text`], none's read: a glyph's box from one is none, its heights are
 //!   guessed, and those codes' text by its font's name.
+//! - **Spans,** with the `tracing` feature, off by default: a span at `debug` over a
+//!   font read ([`Font::read`], [`Font::read_for_text`], and [`Fonts`] and
+//!   [`FontScope`] where they read one), its program read and opened, an embedded
+//!   CMap's chain, its `/ToUnicode` and a Type 3 font's CharProcs. A span's fields
+//!   are numbers, never a byte of a file. A code, a width, a string's text and a
+//!   glyph's box have none, as their loop is the caller's, nor has a font looked up
+//!   where it was read before.
 //!
 //! Nothing panics on what a file holds. A pdf-structure `&Reading` gives a font its
 //! objects and streams, and so does anything else that implements pdf-objects'
@@ -91,6 +98,7 @@ mod fonts;
 #[doc(hidden)]
 pub mod fuzz;
 mod limits;
+mod phases;
 mod predefined;
 #[cfg_attr(not(feature = "programs"), path = "no_program.rs")]
 mod program;

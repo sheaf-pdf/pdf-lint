@@ -754,6 +754,7 @@ dependencies = [
  "pdf-structure",
  "skrifa",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

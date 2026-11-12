@@ -12,6 +12,7 @@ use pdf_content_streams::{Operand, Operation, ResCx, operations};
 use pdf_objects::fault::Sink;
 use pdf_objects::{ObjectId, Resolve, Streams};
 
+use crate::phases::phase;
 use crate::predefined::{self, BfString, Collection};
 use crate::reader::Reader;
 use crate::{Error, Fault, Limits, glyph_text};
@@ -186,6 +187,7 @@ impl CidMap {
                 }
             }
         }
+        phase!(DEBUG, "cmap", streams = chain.len());
         let mut map = CidMap::default();
         let mut ranges = Vec::new();
         if let Some(name) = base {

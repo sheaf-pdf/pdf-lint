@@ -51,6 +51,7 @@ use pdf_objects::object::Value;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams};
 
 use crate::cmap::{CMap, CidMap, Ranges, Scheme, number, two_bytes};
+use crate::phases::phase;
 use crate::predefined::{self, BfString, Collection, Split};
 use crate::program::{CidGlyphs, Face};
 use crate::reader::Reader;
@@ -543,6 +544,7 @@ impl Font {
         O: Resolve<'o> + Streams + Copy,
         S: Sink<Fault> + ?Sized,
     {
+        phase!(DEBUG, "read", programs = programs);
         let reader = Reader::new(objects, limits, sink);
         let mut left = *budget;
         let read = read_kind(&reader, font, &mut left, programs);
@@ -1132,6 +1134,7 @@ where
         });
     }
     let data = reader.charged(id, budget)?.unwrap_or_default();
+    phase!(DEBUG, "program", bytes = data.len());
     let face = Face::open(data, named, reader.limits);
     let program = match &face {
         Ok(_) => FontProgram::Read,
@@ -1558,6 +1561,11 @@ where
     // Each code's CharProc, None where it has none: each stream read once however many
     // codes and names draw it.
     let char_procs = reader.dict(font, b"CharProcs");
+    phase!(
+        DEBUG,
+        "char_procs",
+        glyphs = char_procs.map_or(0, Dict::len)
+    );
     let mut read: HashMap<ObjectId, Option<Option<CharProc>>> = HashMap::new();
     let mut procs: [Option<Option<CharProc>>; 256] = [None; 256];
     for (code, slot) in procs.iter_mut().enumerate() {
@@ -2397,7 +2405,10 @@ impl Decoder {
         let cmap = match written.and_then(Object::as_reference) {
             Some(id) => {
                 let read = reader.decompressed(id, budget)?;
-                read.map(|bytes| CMap::parse(&bytes, reader.limits))
+                read.map(|bytes| {
+                    phase!(DEBUG, "to_unicode", bytes = bytes.len());
+                    CMap::parse(&bytes, reader.limits)
+                })
             }
             None => None,
         };

@@ -506,8 +506,9 @@ jobs:
         with:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-fonts/Cargo.toml, which
-      # `just fonts-msrv` and `just fonts-cmaps-msrv` (the `predefined-cmaps`
-      # feature's) read.
+      # `just fonts-msrv` reads, as published, with no feature and with
+      # `tracing`, and `just fonts-cmaps-msrv` (the `predefined-cmaps`
+      # feature's).
       - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test
