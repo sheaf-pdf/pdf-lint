@@ -764,9 +764,18 @@ dependencies = [
  "bitstream-io",
  "chacha20",
  "criterion",
- "lopdf",
  "pdf-objects",
  "pdf-semantics",
+ "pdf-structure",
+ "thiserror",
+]
+
+[[package]]
+name = "pdf-linearize-lopdf"
+version = "0.0.0"
+dependencies = [
+ "lopdf",
+ "pdf-linearize",
  "pdf-structure",
  "thiserror",
 ]

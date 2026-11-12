@@ -1,0 +1,32 @@
+[package]
+name = "pdf-linearize-lopdf"
+version = "0.0.0"
+edition = "2024"
+# lopdf 0.45's.
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "A document of lopdf's written as a linearized file through pdf-linearize's engine, by plain functions over its public objects: never published"
+# The workspace's own: pdf-linearize's published crate holds no lopdf, and
+# nothing here is published.
+publish = false
+
+[dependencies]
+# Without its clock, threads and the like.
+lopdf = { version = "0.45", default-features = false }
+# The engine alone, with no document model: the table has its defaults off,
+# so `family` isn't built for this crate's library.
+pdf-linearize.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+# With `family`, so the tests read what's written back through the family's
+# check, and set it beside what the family's adapter writes of the same
+# bytes.
+pdf-linearize = { workspace = true, features = ["family"] }
+# The tests' files read, written and encrypted.
+pdf-structure.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

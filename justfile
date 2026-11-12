@@ -52,7 +52,9 @@ fmt:
 # it, `simd` and its spans (`tracing`), which nothing else turns on; then
 # pdf-semantics without its clock, as pdf-lint takes it, and with its spans
 # (`tracing`), which nothing else turns on; then pdf-linearize's engine,
-# without its adapter, and with lopdf's, which nothing else turns on; then
+# without its adapter, and with `timing`, which nothing else turns on, and
+# the lopdf adapter's library alone, where pdf-linearize is that engine
+# without `family`, which pdf-lint turns on in every workspace build; then
 # pdf-fonts with Adobe's predefined CMaps and its spans (`tracing`), which
 # nothing else turns on, and with no feature at all; then pdf-structure
 # with its spans (`tracing`), which nothing else turns on.
@@ -66,7 +68,8 @@ clippy:
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-linearize --features timing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-linearize-lopdf --lib -- -D warnings
     cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
@@ -80,7 +83,7 @@ clippy:
 # it, `simd`, the dependencies' SIMD, and its spans, which nothing else
 # turns on and only its tests read; then pdf-semantics' without its clock,
 # and with its spans, which only its tests read; then pdf-linearize's
-# engine, without its adapter, and with lopdf's; then pdf-fonts' with
+# engine, without its adapter; then pdf-fonts' with
 # Adobe's predefined CMaps and its spans, which only its tests read, and
 # with no feature at all; then pdf-structure's with its spans, which only
 # those tests read.
@@ -93,7 +96,6 @@ test:
     cargo test --locked -p pdf-semantics --no-default-features
     cargo test --locked -p pdf-semantics --features tracing
     cargo test --locked -p pdf-linearize --no-default-features
-    cargo test --locked -p pdf-linearize --features lopdf
     cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing
     cargo test --locked -p pdf-fonts --no-default-features
     cargo test --locked -p pdf-structure --features tracing
@@ -125,15 +127,15 @@ _qpdf:
 # The tests of qpdf as the tests run it, pdf-fixtures'; then the tests that
 # set the reader, and what the writer writes, beside qpdf, pdf-structure's,
 # then the page trees pdf-semantics writes, then the checker's in pdf-lint,
-# then what pdf-linearize lays out, which `just test` leaves out as
-# ignored, against the pinned qpdf (the corpus tests aside).
+# then what pdf-linearize lays out, and its lopdf adapter, which `just test`
+# leaves out as ignored, against the pinned qpdf (the corpus tests aside).
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fixtures -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-semantics --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
-    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --features lopdf --test qpdf -- --ignored lopdf::
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize-lopdf --test qpdf -- --ignored
 
 # PDFium, the oracle of the readers that follow PDFium's rules: a
 # development snapshot, PDFium as of chromium/8125, pdfium-binaries' Linux
@@ -474,12 +476,11 @@ fonts-msrv:
 fonts-cmaps-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features predefined-cmaps
 
-# Test pdf-linearize on its oldest supported Rust, with its adapter and without,
-# then with `lopdf` on that feature's, each of which must be installed.
+# Test pdf-linearize on its oldest supported Rust, which must be installed,
+# with its adapter and without.
 linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
-    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features lopdf
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

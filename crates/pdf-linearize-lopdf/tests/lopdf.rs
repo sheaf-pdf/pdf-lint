@@ -3,13 +3,12 @@
 //! family adapter writes of the same bytes, object for object, as the numbers come
 //! from the same walk over a model that shares nothing with it.
 
-#![cfg(all(feature = "lopdf", feature = "family"))]
-
 use lopdf::{Document, Object as LopdfObject, dictionary};
 use pdf_linearize::family::{self, Options};
-use pdf_linearize::lopdf::{self as adapter, Error, PageTree};
+use pdf_linearize::pdf_objects;
 use pdf_linearize::plan::{self, plan};
 use pdf_linearize::{Limits, Verdict};
+use pdf_linearize_lopdf::{self as adapter, Error, PageTree};
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_structure::Source as _;
 use pdf_structure::pdf_crypt::Password;
@@ -17,6 +16,8 @@ use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::read::{self, Reading};
 use pdf_structure::write::{self, Encryptor};
 
+/// The files pdf-linearize's tests write by hand, as one source.
+#[path = "../../pdf-linearize/tests/written/mod.rs"]
 mod written;
 use written::{KEYS, ROOT, built, encrypted_as, file, stream, two_pages};
 

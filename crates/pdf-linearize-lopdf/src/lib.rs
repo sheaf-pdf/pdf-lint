@@ -73,12 +73,15 @@ use std::io::Write as _;
 
 use ::lopdf::{Dictionary, Document, Object, Stream};
 
-use crate::layout::{self, Encoded, Layout, Piece, assemble};
-pub use crate::plan::FirstPage;
-use crate::plan::{self, Graph, Group, Kind, Page, Plan, What, plan};
-use pdf_objects::ObjectId;
+use pdf_linearize::layout::{self, Encoded, Layout, Piece, assemble};
+use pdf_linearize::pdf_objects::ObjectId;
+pub use pdf_linearize::plan::FirstPage;
+use pdf_linearize::plan::{self, Graph, Group, Kind, Page, Plan, What, plan};
 
-use crate::Limits;
+use pdf_linearize::Limits;
+
+#[cfg(test)]
+mod fuzz;
 
 /// The attributes a page inherits (7.7.3.4).
 const INHERITED: [&str; 4] = ["Resources", "MediaBox", "CropBox", "Rotate"];
@@ -1451,6 +1454,9 @@ fn first_page(doc: &Document, catalog: &Dictionary, table: &[Listed<'_>], first:
     let action = match first {
         FirstPage::Index(index) => return index,
         FirstPage::OpenAction => catalog.get(b"OpenAction").ok(),
+        // A way of choosing it that this crate doesn't know, the engine's
+        // being another crate's: as the default does.
+        _ => catalog.get(b"OpenAction").ok(),
     };
     let Some(page) = action.and_then(|action| opens_at(doc, catalog, action)) else {
         return 0;

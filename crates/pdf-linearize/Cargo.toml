@@ -14,8 +14,6 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 bitstream-io = "4"
-# An adapter's, off by default, and without its clock, threads and the like.
-lopdf = { version = "0.45", default-features = false, optional = true }
 pdf-objects.workspace = true
 # The page tree and name trees, and not the clock.
 pdf-semantics = { workspace = true, optional = true }
@@ -28,8 +26,6 @@ default = ["family"]
 # with no document model: an object is pdf-objects' `ObjectId`. The tests take
 # pdf-structure as a dev-dependency (below), so they build it either way.
 family = ["dep:pdf-semantics", "dep:pdf-structure"]
-# `lopdf`: linearize a document of lopdf's, through its public objects alone.
-lopdf = ["dep:lopdf"]
 # pdf-filters' zlib-rs, through pdf-structure, so that `family::Options::deflate` and
 # `read` can name it.
 zlib-rs = ["pdf-structure?/zlib-rs"]
@@ -62,10 +58,6 @@ pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
 [[bench]]
 name = "linearize"
 harness = false
-
-# docs.rs documents what the feature adds, beside the default.
-[package.metadata.docs.rs]
-features = ["lopdf"]
 
 [lints.rust]
 unsafe_code = "forbid"
