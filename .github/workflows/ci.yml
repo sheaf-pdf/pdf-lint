@@ -374,6 +374,28 @@ jobs:
       - name: Package, and check what the package holds
         run: just fonts-package
 
+  # pdf-linearize packaged as a publish would, as the tokenizer, pdf-objects,
+  # the filters, pdf-crypt, pdf-color, pdf-structure, pdf-content-streams,
+  # pdf-semantics and pdf-fonts are: in a fresh target directory, and what
+  # the package holds checked, its sources, README, CHANGELOG, manifest and
+  # lock, nothing else, no benchmark among them. pdf-structure, pdf-semantics
+  # and pdf-filters are packaged beside it, since pdf-linearize names a
+  # version of pdf-structure and of pdf-semantics, and pdf-structure one of
+  # pdf-filters, that may not be on crates.io yet, and cargo verifies the
+  # package against those; every other crate of the family they name is on
+  # crates.io.
+  linearize-package:
+    name: Linearize packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just linearize-package
+
   # pdf-objects', the filters', pdf-crypt's and pdf-color's public API
   # against their version on crates.io, as the tokenizer's job holds its
   # own, with the same pinned tool on the same pinned Rust. Each is an alpha, which the tool takes to

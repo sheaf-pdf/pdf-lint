@@ -36,7 +36,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package linearize-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -373,6 +373,11 @@ semantics-package: (_package "pdf-semantics")
 # beside it while the versions it and they name aren't published; `_package`
 # says what's checked, and lists the data the package holds with its terms.
 fonts-package: (_package "pdf-fonts" "pdf-content-streams" "pdf-filters")
+
+# Package pdf-linearize as a publish would, pdf-structure, pdf-semantics and
+# pdf-filters beside it while the versions it and they name aren't
+# published; `_package` says what's checked.
+linearize-package: (_package "pdf-linearize" "pdf-structure" "pdf-semantics" "pdf-filters")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs

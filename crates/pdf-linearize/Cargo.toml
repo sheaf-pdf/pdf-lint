@@ -37,9 +37,18 @@ zlib-rs = ["pdf-structure?/zlib-rs"]
 # for use.
 timing = ["family"]
 
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
+
 [dev-dependencies]
 # A generator the tests can seed, for a new encryption's draws.
 chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # pdf-structure with its test writer, for the tests' new encryptions from a
 # seeded generator and their IVs derived, so that a file written twice is
 # the same bytes. Beside the optional normal dependency: the library is
@@ -47,6 +56,12 @@ chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
 # the crate depends on pdf-structure anyway, with `family`, so it's
 # published after it, and its package keeps this one.
 pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
+
+# The benchmarks: `cargo bench -p pdf-linearize`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "linearize"
+harness = false
 
 # docs.rs documents what the feature adds, beside the default.
 [package.metadata.docs.rs]

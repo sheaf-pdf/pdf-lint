@@ -763,6 +763,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "bitstream-io",
  "chacha20",
+ "criterion",
  "lopdf",
  "pdf-objects",
  "pdf-semantics",
