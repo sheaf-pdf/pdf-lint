@@ -10,7 +10,11 @@
 # With `simd` (`just fuzz content 300 simd`, or `cargo +nightly fuzz run
 # --features simd content`), pdf-content-streams' dependencies pick the
 # CPU's SIMD as they run, as its `simd` feature has them do, so `content`
-# reaches the `unsafe` code that takes it.
+# reaches the `unsafe` code that takes it. With `predefined-cmaps` (`just
+# fuzz fonts 300 predefined-cmaps`), pdf-fonts reads a predefined CMap from
+# its bundle, as its feature of that name has it, so `fonts` reaches what
+# a name that's one reads; without it, as pdf-lint's binary is built, a
+# name that's one reads as one the build hasn't, as it does in `check`.
 #
 # `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, the tokenizer and its
 # decoders under ISO 32000-2's rules and PDFium's and the two side by side,
@@ -149,8 +153,10 @@ pdf-color = { path = "../crates/pdf-color" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["insecure-test-writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
-# With `predefined-cmaps`, so a name that's a predefined CMap's reaches its bundle.
-pdf-fonts = { path = "../crates/pdf-fonts", features = ["predefined-cmaps"] }
+# Without `predefined-cmaps`, as pdf-lint's binary is built, so `check`
+# reads a font as the binary does; the feature of that name below turns it
+# on.
+pdf-fonts = { path = "../crates/pdf-fonts" }
 pdf-linearize = { path = "../crates/pdf-linearize" }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
@@ -164,6 +170,9 @@ pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 [features]
 # pdf-content-streams' dependencies on the CPU's SIMD, found as they run.
 simd = ["pdf-content-streams/simd"]
+# Adobe's predefined CMaps, from pdf-fonts' bundle, so a name that's one
+# reaches it.
+predefined-cmaps = ["pdf-fonts/predefined-cmaps"]
 
 [[bin]]
 name = "tokenize"

@@ -504,7 +504,10 @@ arlington-msrv:
 # `color`, `fonts` and `linearize` from those their own crates' fuzz modules make. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'
-# SIMD, which `content` reaches (`just fuzz content 300 simd`).
+# SIMD, which `content` reaches (`just fuzz content 300 simd`); and
+# `predefined-cmaps`, Adobe's predefined CMaps from pdf-fonts' bundle,
+# which `fonts` reaches (`just fuzz fonts 300 predefined-cmaps`), and which
+# pdf-lint's binary, as `check` builds it, is without.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60" features="":

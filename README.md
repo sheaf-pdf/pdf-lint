@@ -91,10 +91,13 @@ checked, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default), and a third the features they're
 built with: `simd`, pdf-content-streams' dependencies on the CPU's SIMD
-(`just fuzz content 300 simd`). CI fuzzes each target the same way, and
-`content` again with `simd`: two minutes on every pull request and push to
-main, and half an hour twice a week, each run starting from the inputs the
-runs before it kept (`.github/workflows/fuzz.yml`).
+(`just fuzz content 300 simd`), and `predefined-cmaps`, Adobe's predefined
+CMaps from pdf-fonts' bundle, which pdf-lint's binary is built without
+(`just fuzz fonts 300 predefined-cmaps`). CI fuzzes each target the same
+way, `content` again with `simd` and `fonts` again with `predefined-cmaps`:
+two minutes on every pull request and push to main, and half an hour twice
+a week, each run starting from the inputs the runs before it kept
+(`.github/workflows/fuzz.yml`).
 
 ## License
 

@@ -4,7 +4,9 @@ name: Fuzz
 # On pull requests and pushes to main, two minutes a target, from the
 # corpus the scheduled runs keep. Twice a week, half an hour a target, the
 # corpus minimized and kept in the cache for the next run. `content` runs
-# twice, the second time built with `simd`, the dependencies' SIMD, from the
+# twice, the second time built with `simd`, the dependencies' SIMD, and
+# `fonts` twice, the second time built with `predefined-cmaps`, Adobe's
+# predefined CMaps, which pdf-lint's binary is built without, each from the
 # same corpus, which only the first keeps. CI's `just test` runs each fuzz
 # body too, as stable unit tests on fixed inputs; here is where new inputs
 # are found.
@@ -41,6 +43,8 @@ jobs:
         include:
           - target: content
             features: simd
+          - target: fonts
+            features: predefined-cmaps
     steps:
       - uses: actions/checkout@v7
         with:
