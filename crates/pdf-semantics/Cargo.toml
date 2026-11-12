@@ -1,11 +1,12 @@
 [package]
 name = "pdf-semantics"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's common structures, read and written: dates, text strings, name and number trees, the page tree by ISO's rules or PDFium's, and what XMP metadata claims"
+documentation = "https://docs.rs/pdf-semantics"
+description = "PDF's common structures, each read and written: dates, name and number trees, the page tree, read by ISO's rules or PDFium's and written balanced, and what XMP metadata claims"
 keywords = ["pdf", "xmp", "date", "page-tree", "iso-32000"]
 categories = ["parser-implementations", "date-and-time"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -19,20 +20,57 @@ pdf-objects.workspace = true
 # XMP's XML, with namespaces; none of its features.
 quick-xml = "0.41"
 thiserror = "2"
+# The spans of what walks or writes a page tree and reads a packet, with
+# the `tracing` feature: without its default features, so without the proc
+# macros of `attributes`; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 [features]
 default = ["clock"]
 # `Date::now` and `Date::from_unix`, on chrono: a crate that only reads and
 # writes dates leaves it out with `default-features = false`.
 clock = ["dep:chrono"]
+# Spans through `tracing`: a page tree walked or counted, a packet read,
+# from its bytes or through a file's streams, and a page tree written. A
+# name or number tree's walk has none. Off by default; without it, none is
+# compiled.
+tracing = ["dep:tracing"]
+
+# docs.rs documents the clock, the default, and the spans.
+[package.metadata.docs.rs]
+features = ["tracing"]
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
 
 [dev-dependencies]
-# The tests' resolvers: a reading in memory, a reading by position, a document.
-pdf-structure.workspace = true
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+# The tests' resolvers: a reading in memory, a reading by position, a
+# document. By its path alone, which the package's manifest leaves out, as
+# pdf-structure isn't on crates.io yet (and its tests take this crate by its
+# path alone too): so the crate packages and publishes on pdf-objects alone,
+# and its unit tests don't build from the package.
+pdf-structure = { path = "../pdf-structure" }
 # The tests' file writer. By its path alone, as it's never published, which
 # the package's manifest leaves out: so the crate's unit tests don't build
 # from its package.
 pdf-fixtures = { path = "../pdf-fixtures" }
+
+# The benchmarks: `cargo bench -p pdf-semantics`. `benches/` is outside
+# `include`, so the package carries neither them nor these targets.
+[[bench]]
+name = "semantics"
+harness = false
+
+# The writers' benchmarks, a target of their own: `--bench write`.
+[[bench]]
+name = "write"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

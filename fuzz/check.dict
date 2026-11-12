@@ -1,13 +1,13 @@
 # What PDF files are made of, for libFuzzer's -dict with the check and
 # structure targets: their structure's keywords and the names the checker
 # looks for first, a page's boxes, the tree of named destinations, and the
-# mark of UTF-16 XMP metadata isn't to begin with; what holds content and
-# what content is made of, its operators that open and close what it
-# checks, those that name resources, and a byte PDFium reads as white-space;
-# and what fonts and color spaces are made of, the keys and names their
-# reads and the model's functions of Latin characters and colorants look
-# for; and a linearization dictionary's keys, which say where what's
-# linearized ends, which an update follows.
+# marks of UTF-16 and UTF-32 XMP metadata isn't to begin with; what holds
+# content and what content is made of, its operators that open and close
+# what it checks, those that name resources, and a byte PDFium reads as
+# white-space; and what fonts and color spaces are made of, the keys and
+# names their reads and the model's functions of Latin characters and
+# colorants look for; and a linearization dictionary's keys, which say
+# where what's linearized ends, which an update follows.
 "obj"
 "endobj"
 "stream\x0a"
@@ -83,6 +83,8 @@
 "pdfaid:part=\"3\""
 "xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\""
 "\xfe\xff"
+"\x00\x00\xfe\xff"
+"\xff\xfe\x00\x00"
 "/XObject"
 "/Form"
 "/BBox"

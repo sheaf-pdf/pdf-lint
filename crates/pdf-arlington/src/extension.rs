@@ -240,8 +240,13 @@ mod tests {
             names(&declaring(None, claims(Some("3"), Some("PDF/VT-2")))),
             ["ISO_19005_3", "PDF_VT2"]
         );
-        // Any other part or version isn't them.
-        let others = [claims(Some("2"), None), claims(None, Some("PDF/VT-1"))];
+        // Any other part or version isn't them, nor one that begins as them.
+        let others = [
+            claims(Some("2"), None),
+            claims(Some("3b"), None),
+            claims(None, Some("PDF/VT-1")),
+            claims(None, Some("PDF/VT-2s")),
+        ];
         for claims in others {
             assert_eq!(names(&declaring(None, claims)), Vec::<String>::new());
         }

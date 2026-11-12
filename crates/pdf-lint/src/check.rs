@@ -647,28 +647,29 @@ pub enum Rule {
     /// A reference to an object the file hasn't, or a trailer the file's
     /// newest cross-reference section doesn't give.
     Unresolved,
-    /// A name or number tree's node that breaks ISO 32000-2 7.9.6 or
-    /// 7.9.7. As the walk reads the tree: a root with neither `/Kids` nor
-    /// its entries, or with `/Limits`; a node with both, or under the root
+    /// A name or number tree's node that breaks ISO 32000-2 7.9.6 or 7.9.7.
+    /// As the walk reads the tree: a root with neither `/Kids` nor its
+    /// entries, or with `/Limits`; a node with both, or under the root
     /// without `/Limits`; an odd last key, a key of another type than the
     /// tree's, a value of no table; `/Kids` or the entries not an array, a
     /// kid that isn't a dictionary. And of what pdf-semantics' walk of the
-    /// tree tells, what the walk doesn't say: a node reached again, by a
-    /// loop or from two parents, in the node that lists it; a kid written
-    /// in place, not as a reference; `/Limits` that aren't the node's least
-    /// and greatest keys; a key not past the one before it, or outside the
-    /// `/Limits` of a node over it; and a node under the root with neither
-    /// `/Kids` nor entries. Each of those once in each object it's in, at
-    /// its first place there, its value pdf-semantics' words with how many
-    /// times; what's in a root written in place is in the object that holds
-    /// it, and held where that is. Its table and key the row's whose value
-    /// the root is, its path the root's. A tree pdf-semantics doesn't read
-    /// whole for what isn't the file's fault, an object that takes a
-    /// password or is past a cap, a key whose bytes the reader didn't give,
-    /// a tree deeper or with more nodes than it reads, and one whose
-    /// `/Limits` don't read for a password or a cap, so aren't checked, is
-    /// counted as not checked, once for each, where its root is held; what
-    /// was read of it is found all the same.
+    /// tree tells, what the walk doesn't say: a node reached again, by a loop
+    /// or from two parents, in the node that lists it; a kid written in
+    /// place, not as a reference; `/Limits` that aren't the node's least and
+    /// greatest keys; a key not past the one before it, or outside the
+    /// `/Limits` of a node over it; and a node with neither `/Kids` nor
+    /// entries, null or a reference to nothing being none: under the root, or
+    /// the root where one of them is written but comes to nothing. Each of
+    /// those once in each object it's in, at its first place there, its value
+    /// pdf-semantics' words with how many times; what's in a root written in
+    /// place is in the object that holds it, and held where that is. Its
+    /// table and key the row's whose value the root is, its path the root's.
+    /// A tree pdf-semantics doesn't read whole for what isn't the file's
+    /// fault, an object that takes a password or is past a cap, a key whose
+    /// bytes the reader didn't give, a tree deeper or with more nodes than it
+    /// reads, and one whose `/Limits` don't read for a password or a cap, so
+    /// aren't checked, is counted as not checked, once for each, where its
+    /// root is held; what was read of it is found all the same.
     Tree,
     /// A key or element of a [`Made::Built`] object that the model
     /// doesn't list ([`Unlisted`]), and isn't a second- or third-class
@@ -859,10 +860,13 @@ pub enum Rule {
     /// XMP metadata that breaks ISO 32000-2 14.3.2, as pdf-semantics reads
     /// the packet of the catalog's metadata stream for the extensions a
     /// file declares, where the stream is in plain view, unfiltered and
-    /// unencrypted, whatever the file's version, as content is: a mark of
-    /// UTF-16 it begins with, where it's to be UTF-8 (with its erratum
-    /// 296), an attribute that doesn't read as XML, and a claim's value
-    /// that doesn't, each kind once, at its first place, its value
+    /// unencrypted, whatever the file's version, as content is: an encoding
+    /// other than UTF-8, where it's to be UTF-8 (with its erratum 296), as a
+    /// mark of UTF-16 or UTF-32 it begins with says, or a zero byte among
+    /// its first four, at those bytes, after which nothing of it is read; an
+    /// attribute that doesn't read as XML, a claim's value that
+    /// doesn't, and a claim's value that holds an element beside its text,
+    /// each kind once, at its first place, its value
     /// pdf-semantics' words with how many times; and XML that
     /// stops it being read, at the byte it stops at, its value the XML
     /// reader's words, after which nothing more is read. In the metadata

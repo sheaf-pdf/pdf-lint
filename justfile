@@ -36,7 +36,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -50,11 +50,12 @@ fmt:
 # zlib-rs their only Flate backend; then the content streams without
 # `image-ends`, which pdf-lint turns on in every workspace build, and with
 # it, `simd` and its spans (`tracing`), which nothing else turns on; then
-# pdf-semantics without its clock, as pdf-lint takes it; then
-# pdf-linearize's engine, without its adapter, and with lopdf's, which
-# nothing else turns on; then pdf-fonts with Adobe's predefined CMaps,
-# which nothing else turns on, and with no feature at all; then
-# pdf-structure with its spans (`tracing`), which nothing else turns on.
+# pdf-semantics without its clock, as pdf-lint takes it, and with its spans
+# (`tracing`), which nothing else turns on; then pdf-linearize's engine,
+# without its adapter, and with lopdf's, which nothing else turns on; then
+# pdf-fonts with Adobe's predefined CMaps, which nothing else turns on, and
+# with no feature at all; then pdf-structure with its spans (`tracing`),
+# which nothing else turns on.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -63,6 +64,7 @@ clippy:
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --features simd,image-ends,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-semantics --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --features predefined-cmaps --all-targets -- -D warnings
@@ -76,11 +78,11 @@ clippy:
 # feature gets, which the workspace's unified features hide, and with
 # zlib-rs alone; then the content streams' without `image-ends`, and with
 # it, `simd`, the dependencies' SIMD, and its spans, which nothing else
-# turns on and only its tests read; then
-# pdf-semantics' without its clock; then pdf-linearize's engine, without
-# its adapter, and with lopdf's; then pdf-fonts' with Adobe's predefined
-# CMaps, and with no feature at all; then pdf-structure's with its spans,
-# which only those tests read.
+# turns on and only its tests read; then pdf-semantics' without its clock,
+# and with its spans, which only its tests read; then pdf-linearize's
+# engine, without its adapter, and with lopdf's; then pdf-fonts' with
+# Adobe's predefined CMaps, and with no feature at all; then
+# pdf-structure's with its spans, which only those tests read.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters
@@ -88,6 +90,7 @@ test:
     cargo test --locked -p pdf-content-streams
     cargo test --locked -p pdf-content-streams --features simd,image-ends,tracing
     cargo test --locked -p pdf-semantics --no-default-features
+    cargo test --locked -p pdf-semantics --features tracing
     cargo test --locked -p pdf-linearize --no-default-features
     cargo test --locked -p pdf-linearize --features lopdf
     cargo test --locked -p pdf-fonts --features predefined-cmaps
@@ -120,12 +123,13 @@ _qpdf:
 
 # The tests of qpdf as the tests run it, pdf-fixtures'; then the tests that
 # set the reader, and what the writer writes, beside qpdf, pdf-structure's,
-# then the checker's in pdf-lint, then what pdf-linearize lays out, which
-# `just test` leaves out as ignored, against the pinned qpdf (the corpus
-# tests aside).
+# then the page trees pdf-semantics writes, then the checker's in pdf-lint,
+# then what pdf-linearize lays out, which `just test` leaves out as
+# ignored, against the pinned qpdf (the corpus tests aside).
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fixtures -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-semantics --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --features lopdf --test qpdf -- --ignored lopdf::
@@ -335,6 +339,9 @@ structure-package: (_package "pdf-structure" "pdf-crypt" "pdf-filters")
 # checked.
 content-streams-package: (_package "pdf-content-streams" "pdf-filters")
 
+# Package pdf-semantics as a publish would; `_package` says what's checked.
+semantics-package: (_package "pdf-semantics")
+
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
 # a pinned build): a break the version doesn't allow fails.
@@ -407,9 +414,12 @@ content-msrv:
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends,simd,tracing
 
-# Test pdf-semantics on its oldest supported Rust, which must be installed.
+# Test pdf-semantics on its oldest supported Rust, which must be installed,
+# as it's published, without its clock and with its spans.
 semantics-msrv:
     cargo +{{ semantics_msrv }} test --locked -p pdf-semantics
+    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --no-default-features
+    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --features tracing
 
 # Test pdf-color on its oldest supported Rust, which must be installed.
 color-msrv:
@@ -448,7 +458,8 @@ arlington-msrv:
 # its writer, content written again and the calls, its splices and lists
 # written again, and an image's color space counted alike in its dictionary
 # and in the resources; `semantics`, pdf-semantics' name and number trees,
-# page tree, dates and XMP claims; `color`, pdf-color's count of a space's
+# page tree, dates and XMP claims, each read and written, and a file's packet
+# read through its streams; `color`, pdf-color's count of a space's
 # components, its typed spaces and what a resources dictionary names; `fonts`,
 # pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
 # reading of a font, its program among them, on any parts and in a file;

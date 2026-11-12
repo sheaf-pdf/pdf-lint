@@ -68,11 +68,13 @@ pub enum Fault {
     TreeKidDirect,
     /// A node with `/Kids` and `/Names` or `/Nums` too: a root has one of
     /// them and any other node is an intermediate node or a leaf (7.9.6).
-    /// Both are read, its own entries first.
+    /// Both are read, its own entries first. One that's null, or a reference
+    /// to nothing, isn't there (7.3.10).
     #[error("a node has both /Kids and its own entries")]
     TreeBothEntries,
-    /// A node with none of `/Kids`, `/Names` and `/Nums` (7.9.6, Table 36;
-    /// 7.9.7, Table 37).
+    /// A node with none of `/Kids`, `/Names` and `/Nums`, one that's null or
+    /// a reference to nothing being none (7.3.10; 7.9.6, Table 36; 7.9.7,
+    /// Table 37).
     #[error("a node has neither /Kids nor entries of its own")]
     TreeNoEntries,
     /// A root with `/Limits`, which only the nodes under it have (7.9.6,
@@ -200,9 +202,11 @@ pub enum Fault {
     /// four (7.7.3.3, Table 31; 7.9.5). Letter stands for it.
     #[error("a page has no /MediaBox")]
     PageNoMediaBox,
-    /// XMP metadata that begins with a mark of UTF-16, where it's encoded as
-    /// UTF-8 (14.3.2, with its erratum 296). Nothing in it is read.
-    #[error("XMP metadata begins with a mark of UTF-16, not as UTF-8")]
+    /// XMP metadata whose first bytes say it isn't encoded as UTF-8, where
+    /// it's to be (14.3.2, with its erratum 296): a mark of UTF-16 or UTF-32,
+    /// or a zero byte among the first four, which UTF-8 XML hasn't. Nothing
+    /// in it is read.
+    #[error("XMP metadata isn't encoded as UTF-8")]
     XmpNotUtf8,
     /// An attribute in XMP metadata that doesn't read as XML, which 14.3.2 has
     /// it written in: no quotes, no value, or given twice. It's passed.
@@ -213,6 +217,12 @@ pub enum Fault {
     /// isn't read, or bytes that aren't UTF-8. It's as though it weren't written.
     #[error("a value in XMP metadata doesn't read")]
     XmpValue,
+    /// A claim's element in XMP metadata that holds an element and, beside
+    /// it, text of its own other than white space: mixed content, where the
+    /// grammar 14.3.2 has the metadata written in reads a claim's value as
+    /// text alone. It's as though it weren't written.
+    #[error("a value in XMP metadata holds an element beside its text")]
+    XmpMixed,
 }
 
 /// What [`Fault::PageTreeParent`] says: the node that lists it, by its number,

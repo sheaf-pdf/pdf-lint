@@ -5,21 +5,14 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
+use pdf_objects::pdf_tokenizer::Rules;
 use pdf_semantics::pages::{Attribute, Inheritable, Origin, Pages, pages};
-use pdf_semantics::{Limits as TreeLimits, Rules, tree};
+use pdf_semantics::{Limits as TreeLimits, tree};
 use pdf_structure::write::{self, Body, Encryptor};
 use pdf_structure::{Document, Source as _};
 
 use super::{Error, FirstPage, Options, PageTree};
 use crate::plan::{Graph, Group, Kind, Page};
-
-/// The attributes a page inherits, each with its key.
-const INHERITED: [(Inheritable, &str); 4] = [
-    (Inheritable::Resources, "Resources"),
-    (Inheritable::MediaBox, "MediaBox"),
-    (Inheritable::CropBox, "CropBox"),
-    (Inheritable::Rotate, "Rotate"),
-];
 
 /// How far up a page's `/Parent`s are followed for what it inherits, as
 /// pdf-semantics has it by default.
@@ -495,7 +488,7 @@ fn strays_pushed_down(
             continue;
         };
         let mut pushed = Vec::new();
-        for (_, key) in INHERITED {
+        for key in Inheritable::ALL.map(Inheritable::key) {
             if dict.get(key.as_bytes()).is_some_and(reads) {
                 continue;
             }
@@ -567,11 +560,11 @@ fn pages_agreed<'d>(
         if !seen.insert(id) {
             return refused(PageTree::Repeated { page });
         }
-        for (attribute, key) in INHERITED {
+        for attribute in Inheritable::ALL {
             if !alike(a.attribute(attribute), b.attribute(attribute)) {
                 return refused(PageTree::Attribute {
                     page,
-                    attribute: key,
+                    attribute: attribute.key(),
                 });
             }
         }
@@ -609,9 +602,9 @@ fn kids_agree(doc: &Document, catalog: &Dict, table: &Pages<'_>) -> Result<(), E
             continue;
         }
         let mut held = above;
-        for (slot, (_, key)) in held.iter_mut().zip(INHERITED) {
+        for (slot, attribute) in held.iter_mut().zip(Inheritable::ALL) {
             let value = dict
-                .get(key.as_bytes())
+                .get(attribute.key().as_bytes())
                 .and_then(|value| doc.dereference(value));
             if let Some((_, value)) = value.filter(|(_, value)| !value.is_null()) {
                 *slot = Some(value);
@@ -619,7 +612,7 @@ fn kids_agree(doc: &Document, catalog: &Dict, table: &Pages<'_>) -> Result<(), E
         }
         match id.and_then(|id| places.get(&id)) {
             Some(&page) => {
-                for (&down, (attribute, key)) in held.iter().zip(INHERITED) {
+                for (&down, attribute) in held.iter().zip(Inheritable::ALL) {
                     let up = table.get(page).and_then(|page| page.attribute(attribute));
                     let up = up.map(|up| up.value).filter(|up| !up.is_null());
                     let alike = match (down, up) {
@@ -628,7 +621,7 @@ fn kids_agree(doc: &Document, catalog: &Dict, table: &Pages<'_>) -> Result<(), E
                         _ => false,
                     };
                     if !alike {
-                        let attribute = key;
+                        let attribute = attribute.key();
                         return Err(Error::PageTree(PageTree::Kids { page, attribute }));
                     }
                 }
@@ -673,7 +666,8 @@ fn pushed_down(bodies: &mut [(ObjectId, Body<'_>)], table: &Pages<'_>) -> Result
             continue;
         };
         let mut pushed: Option<Object> = None;
-        for (attribute, key) in INHERITED {
+        for attribute in Inheritable::ALL {
+            let key = attribute.key();
             let Some(inherited) = listed.attribute(attribute) else {
                 continue;
             };
@@ -728,7 +722,8 @@ fn nodes_taken_off(
                 }
             }
             None => {
-                if let Some((_, key)) = INHERITED.iter().find(|(_, key)| dict.has(key.as_bytes())) {
+                let mut keys = Inheritable::ALL.map(Inheritable::key).into_iter();
+                if let Some(key) = keys.find(|key| dict.has(key.as_bytes())) {
                     return Err(Error::PageTree(PageTree::DirectNode { attribute: key }));
                 }
             }
@@ -760,13 +755,16 @@ fn nodes_taken_off(
             continue;
         };
         let object = bodies[at].1.object();
-        let holds = dict_of(object)
-            .is_some_and(|dict| INHERITED.iter().any(|(_, key)| dict.has(key.as_bytes())));
+        let holds = dict_of(object).is_some_and(|dict| {
+            Inheritable::ALL
+                .iter()
+                .any(|a| dict.has(a.key().as_bytes()))
+        });
         if holds {
             let mut object = object.clone();
             if let Some(dict) = dict_of_mut(&mut object) {
-                for (_, key) in INHERITED {
-                    dict.remove(key.as_bytes());
+                for attribute in Inheritable::ALL {
+                    dict.remove(attribute.key().as_bytes());
                 }
             }
             bodies[at].1 = Body::New(Cow::Owned(object));

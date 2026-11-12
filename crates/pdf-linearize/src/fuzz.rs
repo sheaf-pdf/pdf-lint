@@ -1554,7 +1554,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     options: &crate::family::Options<'_>,
 ) {
     use pdf_objects::Value;
-    use pdf_semantics::Rules;
+    use pdf_objects::pdf_tokenizer::Rules;
     use pdf_semantics::pages::{Inheritable, Origin, pages};
     use pdf_structure::Encryption;
     use pdf_structure::read::{self, Reading, WithReading};
@@ -1614,12 +1614,7 @@ fn written_back<S: pdf_structure::ByteSource>(
         "{findings:?}"
     );
     for page in &listed {
-        for attribute in [
-            Inheritable::Resources,
-            Inheritable::MediaBox,
-            Inheritable::CropBox,
-            Inheritable::Rotate,
-        ] {
+        for attribute in Inheritable::ALL {
             if let Some(attribute) = page.attribute(attribute) {
                 assert_eq!(attribute.origin, Origin::Own, "it's pushed down");
             }

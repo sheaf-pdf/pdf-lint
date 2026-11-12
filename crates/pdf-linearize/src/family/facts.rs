@@ -5,8 +5,9 @@
 use std::collections::HashSet;
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
+use pdf_objects::pdf_tokenizer::Rules;
 use pdf_semantics::pages::pages;
-use pdf_semantics::{Limits as TreeLimits, Rules, catalog};
+use pdf_semantics::{Limits as TreeLimits, catalog};
 use pdf_structure::read::{
     self, ByteSource, Reading, SectionRow, SectionRows, WithReading, XrefEntry,
 };

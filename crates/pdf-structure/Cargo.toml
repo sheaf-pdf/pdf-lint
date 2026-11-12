@@ -88,8 +88,8 @@ pdf-fixtures = { path = "../pdf-fixtures" }
 # By its path alone, which the package's manifest leaves out, as
 # pdf-semantics is published after this crate (and `tests/pdfium` is outside
 # the package); its own dependencies are pdf-objects' and others', not this
-# crate's.
-pdf-semantics = { path = "../pdf-semantics" }
+# crate's. Without its clock, as the cases read no date.
+pdf-semantics = { path = "../pdf-semantics", default-features = false }
 # The tests' folders of their own, removed after.
 tempfile = "3"
 # A seeded generator for the tests' new encrypted files.

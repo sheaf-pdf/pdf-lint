@@ -8,12 +8,14 @@ use std::collections::BTreeMap;
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, serialize};
+use pdf_objects::{
+    Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, WithStreams, dict, serialize,
+};
 
 use crate::date::{Date, Quirk};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
-use crate::xmp::{self, Claims, metadata_stream};
+use crate::xmp::{self, Claims, WriteError, XmpWhy, metadata_stream};
 use crate::{Fault, HOPS, Limits, catalog, follow};
 
 /// How many values of an input are read as objects.
@@ -110,6 +112,16 @@ impl Sink<Fault> for Kept {
     }
 }
 
+/// Keeps what it's told, and where.
+#[derive(Default)]
+struct Heard(Vec<(Place, Fault)>);
+
+impl Sink<Fault> for Heard {
+    fn fault(&mut self, place: Place, fault: Fault) {
+        self.0.push((place, fault));
+    }
+}
+
 /// Wants no faults, and fails if it's told one.
 struct Unwanted;
 
@@ -132,6 +144,9 @@ struct Plain<'o, R> {
     depth: usize,
     seen: std::collections::HashSet<ObjectId>,
     out: Walked<'o>,
+    /// How many nodes it read with neither `/Kids` nor entries, and with
+    /// both, each null or a reference to nothing being none.
+    shapes: [usize; 2],
 }
 
 /// What a reference on the way comes to, to [`Plain`].
@@ -249,6 +264,14 @@ impl<'o, R: Resolve<'o> + Copy> Plain<'o, R> {
             Kind::Names => b"Names",
             Kind::Numbers => b"Nums",
         };
+        let held = |key: &[u8]| {
+            (node.get(key)).is_some_and(|o| !matches!(follow(self.objects, o), Ok(None)))
+        };
+        match (held(b"Kids"), held(key)) {
+            (false, false) => self.shapes[0] += 1,
+            (true, true) => self.shapes[1] += 1,
+            _ => {}
+        }
         let Some(items) = self.array(node, key) else {
             return false;
         };
@@ -269,6 +292,17 @@ fn plainly<'o, R: Resolve<'o> + Copy>(
     kind: Kind,
     depth: usize,
 ) -> Walked<'o> {
+    shaped(objects, root, kind, depth).0
+}
+
+/// [`plainly`], and how many nodes it read with neither `/Kids` nor
+/// entries, and with both.
+fn shaped<'o, R: Resolve<'o> + Copy>(
+    objects: R,
+    root: &'o Object,
+    kind: Kind,
+    depth: usize,
+) -> (Walked<'o>, [usize; 2]) {
     let mut plain = Plain {
         objects,
         kind,
@@ -279,9 +313,10 @@ fn plainly<'o, R: Resolve<'o> + Copy>(
             whole: true,
             failed: None,
         },
+        shapes: [0, 0],
     };
     plain.node(root, 0);
-    plain.out
+    (plain.out, plain.shapes)
 }
 
 /// The promises of one walk of the tree at `root`, as `kind`:
@@ -290,6 +325,9 @@ fn plainly<'o, R: Resolve<'o> + Copy>(
 ///   is told none;
 /// - it's what a plain recursive walk gives, under the default caps and under
 ///   small depths, in the same order, as whole;
+/// - where it's read to its end, a node with neither `/Kids` nor entries,
+///   and one with both, are said as many times as the plain walk finds
+///   them, null and a reference to nothing being none;
 /// - less than whole, or failed, it's said: by a fault or by what failed it;
 /// - under a small count of nodes, it's whole only if it's all of it, and
 ///   gives nothing the walk without one doesn't;
@@ -319,7 +357,13 @@ fn a_tree<'o, R: Resolve<'o> + Copy>(objects: R, root: &'o Object, kind: Kind) -
     if kept.0.contains(&Fault::TreeTooManyNodes) {
         return full;
     }
-    assert_eq!(full, plainly(objects, root, kind, 32), "a plain walk's");
+    let (plain, [neither, both]) = shaped(objects, root, kind, 32);
+    assert_eq!(full, plain, "a plain walk's");
+    if full.failed.is_none() {
+        let told = |fault| kept.0.iter().filter(|&&said| said == fault).count();
+        assert_eq!(told(Fault::TreeNoEntries), neither, "{:?}", kept.0);
+        assert_eq!(told(Fault::TreeBothEntries), both, "{:?}", kept.0);
+    }
     for depth in [0, 1, 2] {
         let mut limits = Limits::DEFAULT;
         limits.tree_depth = depth;
@@ -632,7 +676,8 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
 /// first of them the trailer, over which [`over`] walks what its catalog
 /// holds; and the first of them, whatever they are, each walked as a root of
 /// each kind of tree ([`a_tree`]), and each dictionary as a catalog
-/// ([`both_tables`]).
+/// ([`both_tables`]); and its first bytes as a page tree written
+/// ([`tree_written`]).
 pub fn walks(data: &[u8]) {
     let objects = values(data);
     let resolve = |id: ObjectId| objects.get(&id);
@@ -644,6 +689,190 @@ pub fn walks(data: &[u8]) {
         a_tree(resolve, root, Kind::Numbers);
         if let Some(catalog) = root.as_dict() {
             let _ = both_tables(resolve, catalog);
+        }
+    }
+    tree_written(data);
+}
+
+/// `data`'s first bytes as a page tree to write ([`pages::write`](crate::pages::write)):
+/// as many pages as its first byte says, numbered from its fourth, under
+/// nodes of as many kids as its second, 255 for one node over them all;
+/// its third byte's bits choosing what's refused, a page given again or of
+/// number 0, caps of its fifth and sixth bytes, or an id for its seventh's
+/// node that's 0, a page's or the node's before it. Refused for the first of
+/// what it's refused for, in the order its doc gives, no id asked for but
+/// the one refused; or written, every page at one depth, no node of more than
+/// the fanout, read back by both rules under the same caps with no fault,
+/// every page once and in order, each its `/Parent` chain up to the root.
+fn tree_written(data: &[u8]) {
+    use crate::pages::{WriteError, Written, write};
+
+    let byte = |at: usize| data.get(at).copied().unwrap_or(0);
+    let fanout = match byte(1) {
+        u8::MAX => usize::MAX,
+        fanout => usize::from(fanout),
+    };
+    let how = byte(2);
+    let first = u32::from(byte(3));
+    let mut pages: Vec<ObjectId> = (first..first + u32::from(byte(0)))
+        .map(|n| ObjectId::new(n, 0))
+        .collect();
+    let at = usize::from(byte(4)) % pages.len().max(1);
+    if how & 1 != 0 && pages.len() > 1 {
+        let last = pages.len() - 1;
+        pages[last] = ObjectId::new(pages[at.min(last - 1)].number, u16::from(byte(4)));
+    }
+    if how & 2 != 0 && !pages.is_empty() {
+        pages[at] = ObjectId::new(0, 0);
+    }
+    let mut limits = Limits::DEFAULT;
+    if how & 4 != 0 {
+        limits.pages = usize::from(byte(5));
+    }
+    if how & 8 != 0 {
+        limits.page_depth = usize::from(byte(5) % 8);
+    }
+    // Past every page's number, which is under 512.
+    let node_ids = |k: usize| ObjectId::new(1000 + k as u32, 0);
+    let bad = usize::from(byte(6));
+    let answer = match how >> 4 & 3 {
+        1 => Some(ObjectId::new(0, u16::from(byte(4)))),
+        2 => pages.get(at).filter(|page| page.number != 0).copied(),
+        3 => bad.checked_sub(1).map(node_ids),
+        _ => None,
+    };
+    let mut asked = 0;
+    let ids = || {
+        asked += 1;
+        match answer {
+            Some(answer) if asked - 1 == bad => answer,
+            _ => node_ids(asked - 1),
+        }
+    };
+    let written = write(&pages, fanout, &limits, ids);
+
+    // What's refused before an id is asked for, in the order the doc gives.
+    let refused_first = |error: WriteError| assert_eq!((&written, asked), (&Err(error), 0));
+    if pages.is_empty() {
+        return refused_first(WriteError::NoPages);
+    }
+    if fanout < 2 {
+        return refused_first(WriteError::Fanout { fanout });
+    }
+    if pages.len() > limits.pages {
+        return refused_first(WriteError::TooManyPages { cap: limits.pages });
+    }
+    let reaches = |h: u32| {
+        fanout
+            .checked_pow(h)
+            .is_none_or(|reach| reach >= pages.len())
+    };
+    let height = (1..).find(|&h| reaches(h)).expect("a height") as usize;
+    if height > limits.page_depth {
+        let cap = limits.page_depth;
+        return refused_first(WriteError::TooDeep { cap });
+    }
+    let mut numbers = std::collections::HashSet::new();
+    let page_fault = pages.iter().find_map(|&page| match page.number {
+        0 => Some(WriteError::Zero),
+        n if !numbers.insert(n) => Some(WriteError::Repeated { id: page }),
+        _ => None,
+    });
+    if let Some(error) = page_fault {
+        return refused_first(error);
+    }
+    // Then the nodes under the root, counted under a cap that takes them.
+    let mut roomy = limits;
+    roomy.pages = usize::MAX;
+    let mut next = 1000;
+    let counted = write(&pages, fanout, &roomy, || {
+        next += 1;
+        ObjectId::new(next - 1, 0)
+    });
+    let nodes = counted
+        .expect("written under a cap that takes it")
+        .nodes
+        .len();
+    if nodes - 1 > limits.pages {
+        assert_eq!(fanout, 2, "only nodes of 2 are more than their pages");
+        return refused_first(WriteError::TooManyPages { cap: limits.pages });
+    }
+    // Then each id as it's given.
+    if let Some(answer) = answer.filter(|_| bad < nodes) {
+        let error = match answer.number {
+            0 => WriteError::Zero,
+            _ => WriteError::Taken { id: answer },
+        };
+        assert_eq!((written, asked), (Err(error), bad + 1));
+        return;
+    }
+    let written: Written = written.expect("nothing to refuse");
+    assert_eq!(asked, nodes);
+    tree_read_back(&written, &pages, fanout, height, &limits);
+}
+
+/// A page tree [`tree_written`] wrote over `pages`, `height` levels of nodes
+/// of at most `fanout` kids each, held to its shape and read back by both
+/// rules under `limits`.
+fn tree_read_back(
+    written: &crate::pages::Written,
+    listed: &[ObjectId],
+    fanout: usize,
+    height: usize,
+    limits: &Limits,
+) {
+    let mut objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let mut up = BTreeMap::new();
+    for (id, node) in &written.nodes {
+        assert!(node.has_type(b"Pages"));
+        let kids = node
+            .get(b"Kids")
+            .and_then(Object::as_array)
+            .expect("its kids");
+        assert!(!kids.is_empty() && kids.len() <= fanout, "{}", kids.len());
+        for kid in kids {
+            up.insert(kid.as_reference().expect("a kid by reference"), *id);
+        }
+        assert!(objects.insert(*id, Object::from(node.clone())).is_none());
+    }
+    assert_eq!(up.get(&written.root), None, "the root under none");
+    assert_eq!(written.nodes[0].1.get(b"Parent"), None);
+    for (id, node) in &written.nodes[1..] {
+        let parent = node.get(b"Parent").and_then(Object::as_reference);
+        assert_eq!(parent.as_ref(), up.get(id), "a node's /Parent its lister");
+    }
+    let mut chains = Vec::with_capacity(listed.len());
+    for (&page, &parent) in listed.iter().zip(&written.parents) {
+        assert_eq!(up.get(&page), Some(&parent), "a page's /Parent its lister");
+        // At most one more than the nodes are many, so a loop of them ends.
+        let chain: Vec<ObjectId> =
+            std::iter::successors(Some(parent), |node| up.get(node).copied())
+                .take(written.nodes.len() + 1)
+                .collect();
+        assert_eq!(chain.len(), height, "every page at one depth");
+        chains.push(chain);
+        let media = vec![
+            Object::from(0),
+            Object::from(0),
+            Object::from(page.number),
+            Object::from(200),
+        ];
+        let dict = dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+        assert!(objects.insert(page, Object::from(dict)).is_none());
+    }
+    let resolve = |id: ObjectId| objects.get(&id);
+    let catalog = dict! { "Pages" => written.root };
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let mut kept = Kept::default();
+        let table = pages(resolve, &catalog, rules, limits, &mut kept);
+        assert_eq!(table, pages(resolve, &catalog, rules, limits, &mut ()));
+        let table = table.unwrap_or_else(|error| panic!("{rules:?}: {error}"));
+        assert_eq!(kept.0, [], "{rules:?}");
+        assert_eq!(table.counted(), listed.len());
+        assert_eq!(table.len(), listed.len());
+        for ((page, &id), chain) in table.iter().zip(listed).zip(&chains) {
+            assert_eq!((page.id, page.repeat), (Some(id), 0));
+            assert!(page.parents().eq(chain.iter().copied()));
         }
     }
 }
@@ -708,7 +937,18 @@ fn claim_values(claims: &Claims) -> [&Option<String>; 6] {
 /// - each value trimmed of ASCII's white space;
 /// - [`conformance`](Claims::conformance) what the values say, where it reads;
 /// - under smaller caps, each value it reads is what it reads under the
-///   default ones, as it reads the same up to where it stops.
+///   default ones, as it reads the same up to where it stops;
+/// - read the same, what's told and where among it, with each empty element
+///   given as a start tag and an end tag, as the two forms are read alike;
+/// - a mixed value told at an element's bytes;
+/// - its text, as a claim's beside an element, never taken, told as mixed
+///   where it's more than white space;
+/// - read as a file's packet, through a resolver and its streams' data
+///   ([`xmp::read_from`]), what it reads given its bytes, the same told;
+///   past a cap it's asked for under, nothing read, whatever gave it;
+/// - and what it claims, and claims made of its text, written
+///   ([`xmp::write`]): refused where a value wouldn't read back as it is,
+///   for that, the first such; else read back as they are, nothing told.
 pub fn xmp(data: &[u8]) {
     const PACKET: ObjectId = ObjectId::new(9, 0);
 
@@ -728,6 +968,25 @@ pub fn xmp(data: &[u8]) {
     let read = xmp::read(data, Some(PACKET), &limits, &mut told);
     assert_eq!(xmp::read(data, None, &limits, &mut ()), read);
     assert!(told.0 <= data.len());
+    let (mut heard, mut expanded) = (Heard::default(), Heard::default());
+    let read_again = xmp::read(data, Some(PACKET), &limits, &mut heard);
+    let open_close = xmp::read_as(data, Some(PACKET), &limits, &mut expanded, true);
+    assert_eq!(
+        open_close, read_again,
+        "an empty element read as open and closed"
+    );
+    assert_eq!(
+        expanded.0, heard.0,
+        "the same told, an empty element open and closed"
+    );
+    let mixed_at = (heard.0.iter()).filter(|(_, fault)| *fault == Fault::XmpMixed);
+    for (place, _) in mixed_at {
+        let at = place.at.expect("a place in the packet");
+        let bytes = &data[at.start..at.end];
+        assert!(bytes.starts_with(b"<") && bytes.ends_with(b">"), "{at:?}");
+    }
+    mixed(data);
+    from_streams(data, &read_again, &heard.0);
     let claims = match &read {
         Ok(claims) => claims,
         Err(error) => {
@@ -739,6 +998,8 @@ pub fn xmp(data: &[u8]) {
     for value in claim_values(claims).into_iter().flatten() {
         assert_eq!(value.trim_ascii(), value);
     }
+    written(claims);
+    written(&claims_of_text(data));
     if let Ok(said) = claims.conformance() {
         assert_eq!(said.pdfa.is_some(), claims.pdfa_part.is_some());
         assert_eq!(said.pdfua.is_some(), claims.pdfua_part.is_some());
@@ -766,9 +1027,180 @@ pub fn xmp(data: &[u8]) {
     }
 }
 
+/// `data` as the data of a file's metadata stream, 9 0, read through a
+/// resolver and a function as one ([`WithStreams`]): what [`xmp::read`]
+/// gave, `read`, and told, `heard`, of it as that stream's; under a cap of
+/// its length, the same; under one it's past, nothing read and nothing
+/// told, by a function that keeps to the cap and by one that gives it all;
+/// the function's own failure said as it says it; and none where the
+/// catalog's `/Metadata` leads to no stream, nothing asked of the function.
+fn from_streams(data: &[u8], read: &Result<Claims, xmp::Error>, heard: &[(Place, Fault)]) {
+    const PACKET: ObjectId = ObjectId::new(9, 0);
+    let stream = Object::stream(dict! { "Type" => "Metadata", "Subtype" => "XML" });
+    let objects = |id: ObjectId| (id == PACKET).then_some(&stream);
+    let catalogs = [
+        dict! { "Metadata" => Object::reference(9) },
+        dict! { "Metadata" => Object::reference(8) },
+        dict! {},
+    ];
+    let all = |_: ObjectId, _: usize| Ok(data.to_vec());
+    let within = |id: ObjectId, limit: usize| match data.len() > limit {
+        true => Err(Unreadable::new(id, Why::Limit, "past the limit")),
+        false => Ok(data.to_vec()),
+    };
+    let through = |given: &dyn Fn(ObjectId, usize) -> Result<Vec<u8>, Unreadable>,
+                   catalog,
+                   limits: &Limits| {
+        let with = WithStreams::new(objects, |id: ObjectId, limit: usize| {
+            assert_eq!(id, PACKET, "only the stream it leads to is asked for");
+            assert_eq!(limit, limits.xmp_bytes, "asked for under the cap");
+            given(id, limit)
+        });
+        let mut told = Heard::default();
+        let read = xmp::read_from(with, catalog, limits, &mut told);
+        assert_eq!(xmp::read_from(with, catalog, limits, &mut ()), read);
+        (read, told.0)
+    };
+    let mut at_cap = Limits::DEFAULT;
+    at_cap.xmp_bytes = data.len();
+    let too_long = xmp::Error {
+        read: Claims::default(),
+        at: 0,
+        why: XmpWhy::TooLong,
+    };
+    for given in [&all as &dyn Fn(_, _) -> _, &within] {
+        for limits in [Limits::DEFAULT, at_cap] {
+            let (from, told) = through(given, &catalogs[0], &limits);
+            assert_eq!(from, read.clone().map(Some));
+            assert_eq!(told, heard);
+        }
+        if let Some(less) = data.len().checked_sub(1) {
+            let mut past = Limits::DEFAULT;
+            past.xmp_bytes = less;
+            let (from, told) = through(given, &catalogs[0], &past);
+            assert_eq!(from, Err(too_long.clone()));
+            assert_eq!(told, []);
+        }
+        for catalog in &catalogs[1..] {
+            let (from, told) = through(&|_, _| panic!("asked"), catalog, &Limits::DEFAULT);
+            assert_eq!((from, told), (Ok(None), Vec::new()));
+        }
+    }
+    let unread = Unreadable::new(PACKET, Why::Damaged, String::from_utf8_lossy(data));
+    let (from, told) = through(&|_, _| Err(unread.clone()), &catalogs[0], &Limits::DEFAULT);
+    let failed = from.expect_err("its data doesn't read");
+    assert_eq!((failed.at, &failed.read), (0, &Claims::default()));
+    assert_eq!(failed.why, XmpWhy::Unreadable(unread));
+    assert_eq!(told, []);
+}
+
+/// Each claim's name, as [`xmp::write`] writes it, in [`claim_values`]'
+/// order.
+const CLAIMS: [&str; 6] = [
+    "pdfaid:part",
+    "pdfaid:conformance",
+    "pdfaid:rev",
+    "pdfuaid:part",
+    "pdfuaid:rev",
+    "pdfvtid:GTS_PDFVTVersion",
+];
+
+/// Whether XML 1.0 can hold `c`: its `Char` production.
+fn xml_holds(c: char) -> bool {
+    matches!(u32::from(c), 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x1_0000..)
+}
+
+/// `claims` written: read back as they are, with nothing told; or refused
+/// for the first value, in their order, that has ASCII's white space round
+/// it or a character XML can't hold, at that character, the values before
+/// it each written as they'd read back.
+fn written(claims: &Claims) {
+    let values = claim_values(claims);
+    let spaced = |value: &str| value.trim_ascii() != value;
+    let bad = |value: &str| value.char_indices().find(|&(_, c)| !xml_holds(c));
+    let first = (values.iter().enumerate())
+        .filter_map(|(at, value)| Some((at, value.as_deref()?)))
+        .find(|&(_, value)| spaced(value) || bad(value).is_some());
+    match (xmp::write(claims), first) {
+        (Ok(packet), None) => {
+            let mut kept = Kept::default();
+            let back = xmp::read(packet.as_bytes(), None, &Limits::DEFAULT, &mut kept);
+            assert_eq!(back.as_ref(), Ok(claims), "{packet}");
+            assert_eq!(kept.0, [], "{packet}");
+        }
+        (Err(WriteError::Spaced { claim }), Some((at, value))) => {
+            assert_eq!(claim, CLAIMS[at]);
+            assert!(spaced(value), "{value:?}");
+        }
+        (
+            Err(WriteError::Character {
+                claim,
+                at,
+                character,
+            }),
+            Some((which, value)),
+        ) => {
+            assert_eq!(claim, CLAIMS[which]);
+            assert!(!spaced(value), "{value:?}");
+            assert_eq!(bad(value), Some((at, character)), "{value:?}");
+        }
+        (written, first) => panic!("{claims:?}: {written:?}, where {first:?} is refused"),
+    }
+}
+
+/// Claims made of `data` as text: its pieces between `|`s, each a claim's
+/// value in turn, the first six, as they are, white space and all.
+fn claims_of_text(data: &[u8]) -> Claims {
+    let text = String::from_utf8_lossy(data);
+    let mut pieces = text.split('|').map(str::to_string);
+    let mut claims = Claims::default();
+    for value in [
+        &mut claims.pdfa_part,
+        &mut claims.pdfa_conformance,
+        &mut claims.pdfa_rev,
+        &mut claims.pdfua_part,
+        &mut claims.pdfua_rev,
+        &mut claims.pdfvt_version,
+    ] {
+        *value = pieces.next();
+    }
+    claims
+}
+
+/// `data` as text, its `<` and `&` taken out, beside an element in a claim's
+/// element, ahead of the claim's value: the value after it is the one that
+/// counts, and the text is told as mixed once where it's more than white
+/// space. Text in the element in it is no part of it.
+fn mixed(data: &[u8]) {
+    let text: String = (String::from_utf8_lossy(data).chars())
+        .filter(|c| !matches!(c, '<' | '&'))
+        .collect();
+    let white = text.trim_ascii().is_empty();
+    for inside in [
+        format!("{text}<e/>"),
+        format!("<e/>{text}"),
+        format!("<e>{text}</e>{text}"),
+        format!("<e>{text}</e>"),
+    ] {
+        let xml = format!(
+            "<d xmlns:a=\"http://www.aiim.org/pdfa/ns/id/\">\
+             <a:part>{inside}</a:part><a:part>9</a:part></d>"
+        );
+        let mut kept = Kept::default();
+        let claims = xmp::read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept);
+        let claims = claims.expect("text and elements read");
+        assert_eq!(claims.pdfa_part.as_deref(), Some("9"), "{xml}");
+        let told: &[Fault] = match white || inside == format!("<e>{text}</e>") {
+            true => &[],
+            false => &[Fault::XmpMixed],
+        };
+        assert_eq!(kept.0, told, "{xml}");
+    }
+}
+
 /// What the fuzzer begins from: objects as [`walks`] reads them, the first
 /// the trailer, in each of a tree's shapes and a page tree's; dates; XMP
-/// packets; and a count of seconds.
+/// packets; a count of seconds; and page trees to write, each refusal's.
 /// The seeds written for the target are each of these as a file too.
 #[must_use]
 pub fn fixtures() -> Vec<Vec<u8>> {
@@ -803,6 +1235,13 @@ pub fn fixtures() -> Vec<Vec<u8>> {
          << /Names [(b) 0 (a) 0 (a) 0 (c)] >> \
          null \
          5",
+        // A node's /Kids and entries by references to nothing and to null.
+        "<< /Root << /Names << /A 2 0 R /B 3 0 R /C 4 0 R >> >> >> \
+         << /Kids 9 0 R >> \
+         << /Names [(a) 0] /Kids 5 0 R >> \
+         << /Kids [6 0 R] >> \
+         null \
+         << /Limits [(a) (a)] /Names 5 0 R >>",
         // Past the depth a tree is read to, by a chain of its own.
         "<< /Root << /PageLabels 2 0 R >> >> << /Kids [3 0 R] >> << /Kids [4 0 R] >> \
          << /Kids [5 0 R] >> << /Limits [0 1] /Nums [0 0 1 1] >>",
@@ -853,9 +1292,38 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         r#"<d xmlns:a="http://www.aiim.org/pdfa/ns/id/" xmlns:u="http://www.aiim.org/pdfua/ns/id/" xmlns:v="http://www.npes.org/pdfvt/ns/id/"><a:part>2</a:part><a:conformance> b </a:conformance><u:part>&#49;</u:part><u:rev><![CDATA[2014]]></u:rev><v:GTS_PDFVTVersion>PDF/VT-2</v:GTS_PDFVTVersion></d>"#,
         r#"<!DOCTYPE d [<!ENTITY a "3">]><d a=1 b xmlns:a="http://www.aiim.org/pdfa/ns/id/" a:part="&a;" a:rev="1" a:rev="2"><a:part>&a;</a:part><a:part>3</a:part><!-- <a:part>2</a:part> --></e><a:conformance>A</a:conformance></d>"#,
         r#"<a xmlns="http://www.aiim.org/pdfa/ns/id/" xmlns:q="u"><part>9<b/></part><q:part q:part=""><c><d><e><f><g/></f></e></d></c></q:part>"#,
+        // XMP: an empty claim, claims holding elements beside text and
+        // white space, and one in another.
+        r#"<d xmlns:a="http://www.aiim.org/pdfa/ns/id/"><a:part/><a:conformance>B<e/></a:conformance><a:rev> <e>1</e> </a:rev><a:conformance><a:part>3</a:part></a:conformance><a:conformance>&#65;</a:conformance></d>"#,
+        // XMP written: claims of the text between `|`s, what's escaped, and
+        // what's refused.
+        "3|B|2012|1|2014|PDF/VT-2",
+        "a&b<c>d|\r\n|&#13;||]]>|\u{a0}\u{fffd}",
+        " 3|b\u{1}|\u{fffe}",
     ];
     let mut seeds: Vec<Vec<u8>> = trees.map(|seed| seed.as_bytes().to_vec()).to_vec();
     seeds.push(1_792_800_000i64.to_le_bytes().to_vec());
+    // Page trees to write (`tree_written`): how many pages, the fanout, what's
+    // refused, the first page's number, and what that takes. Written: 33
+    // under 32, 64 under 3, 200 under one node; refused: none, a fanout of
+    // 1, a page again, a page 0, nodes past the cap, a tree past the depth,
+    // a node's id 0, a page's, the node's before it.
+    for tree in [
+        [33, 32, 0, 1, 0, 0, 0],
+        [64, 3, 0, 1, 0, 0, 0],
+        [200, 255, 0, 1, 0, 0, 0],
+        [0, 32, 0, 1, 0, 0, 0],
+        [9, 1, 0, 1, 0, 0, 0],
+        [9, 2, 1, 1, 3, 0, 0],
+        [9, 2, 2, 1, 4, 0, 0],
+        [9, 2, 4, 1, 0, 9, 0],
+        [5, 2, 8, 1, 0, 2, 0],
+        [64, 3, 0x10, 1, 0, 0, 17],
+        [64, 3, 0x20, 1, 5, 0, 39],
+        [64, 3, 0x30, 1, 0, 0, 20],
+    ] {
+        seeds.push(tree.to_vec());
+    }
     seeds
 }
 

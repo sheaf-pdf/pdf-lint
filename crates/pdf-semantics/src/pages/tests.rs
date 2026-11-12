@@ -141,7 +141,7 @@ fn a_count_or_a_parent_past_a_cap_or_a_password_isn_t_checked() {
         (6, "2"),
         (7, "2 0 R"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for (failed, why) in [
         (ObjectId::new(6, 0), Why::Locked),
         (ObjectId::new(7, 0), Why::Capped),
@@ -221,7 +221,7 @@ fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
         objects.extend(node.map(|node| (3, node)));
         let objects = parsed(&objects);
         let resolve = |id: ObjectId| objects.get(&id);
-        let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+        let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
         let walked = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
         assert_eq!(walked, Err(Error::NoPages), "{root}");
         assert_eq!(
@@ -236,14 +236,14 @@ fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
         (3, "<< /Type /Page /Parent 2 0 R >>"),
     ]);
     let resolve = |id: ObjectId| objects.get(&id);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(
         counted(resolve, &catalog, &Limits::DEFAULT),
         Ok(table.counted())
     );
     assert_eq!(table.counted(), 4);
-    let nowhere = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(9))]);
+    let nowhere = Dict::from_iter([(b"Pages".to_vec(), Object::reference(9))]);
     assert_eq!(counted(resolve, &nowhere, &Limits::DEFAULT), Ok(0));
     // A cap or a password fails it as it fails the walk.
     let resolver = failing(&objects, ObjectId::new(3, 0), Why::Locked);
@@ -452,7 +452,7 @@ fn a_parent_chain_is_read_no_further_than_its_cap() {
     text.extend(parents_of(4, 5000));
     let text: Vec<(u32, &str)> = text.iter().map(|(n, s)| (*n, s.as_str())).collect();
     let objects = parsed(&text);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = asking(&objects, &asked);
     let walked = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
@@ -709,7 +709,7 @@ fn a_page_listed_again_isn_t_read_again() {
         (3, "<< /Type /Page /Resources 9 0 R /MediaBox 9 0 R >>"),
         (9, "[0 0 1 1]"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = asking(&objects, &asked);
     let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
@@ -745,6 +745,101 @@ fn pages_under_one_node_share_its_chain() {
     assert!(Arc::ptr_eq(chain(0), chain(1)));
     let parents: Vec<ObjectId> = table.get(0).unwrap().parents().collect();
     assert_eq!(parents, [ObjectId::new(3, 0), ObjectId::new(2, 0)]);
+}
+
+// A page's parents are its chain's numbered nodes, nearest first, the same
+// walked by `next` as by `fold`, from its start or part of the way up.
+#[test]
+fn parents_are_walked_alike_by_next_and_by_fold() {
+    // Page 3's /Parent is 5, whose own is written in place, and that one's 2.
+    let objects = parsed(&[
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        (3, "<< /Type /Page /Parent 5 0 R >>"),
+        (
+            5,
+            "<< /Type /Pages /Parent << /Type /Pages /Parent 2 0 R >> >>",
+        ),
+    ]);
+    let resolve = |id: ObjectId| objects.get(&id);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    let page = table.get(0).unwrap();
+    let chain = [ObjectId::new(5, 0), ObjectId::new(2, 0)];
+    let push = |mut ids: Vec<ObjectId>, id| {
+        ids.push(id);
+        ids
+    };
+
+    let mut parents = page.parents();
+    assert_eq!(parents.size_hint(), (0, None));
+    let mut by_next = Vec::new();
+    for id in parents.by_ref() {
+        by_next.push(id);
+    }
+    assert_eq!(by_next, chain);
+    assert_eq!(parents.next(), None, "once walked, it gives none again");
+    assert_eq!(parents.size_hint(), (0, Some(0)));
+    assert_eq!(parents.fold(Vec::new(), push), []);
+
+    assert_eq!(page.parents().fold(Vec::new(), push), chain);
+    assert_eq!(page.parents().count(), 2);
+    assert_eq!(page.parents().last(), Some(chain[1]));
+
+    let mut part = page.parents();
+    assert_eq!(part.next(), Some(chain[0]));
+    assert_eq!(format!("{part:?}"), format!("Parents({:?})", [chain[1]]));
+    assert_eq!(part.clone().fold(Vec::new(), push), [chain[1]]);
+    assert_eq!(part.collect::<Vec<_>>(), [chain[1]]);
+    assert_eq!(
+        format!("{:?}", page.parents()),
+        format!("Parents({chain:?})")
+    );
+}
+
+// Every attribute, in the order it's declared, with the key a page's own is
+// read by; the key's a constant.
+#[test]
+fn every_attribute_is_listed_in_order_with_its_key() {
+    const MEDIA_BOX: &str = Inheritable::MediaBox.key();
+    assert_eq!(MEDIA_BOX, "MediaBox");
+    let listed = Inheritable::ALL.map(|attribute| (attribute as usize, attribute.key()));
+    let keys = [
+        (0, "Resources"),
+        (1, "MediaBox"),
+        (2, "CropBox"),
+        (3, "Rotate"),
+    ];
+    assert_eq!(listed, keys);
+    // Each is listed once, as a match over every one says.
+    let at = |attribute| match attribute {
+        Inheritable::Resources => 0,
+        Inheritable::MediaBox => 1,
+        Inheritable::CropBox => 2,
+        Inheritable::Rotate => 3,
+    };
+    assert!(
+        Inheritable::ALL
+            .iter()
+            .enumerate()
+            .all(|(i, &a)| at(a) == i)
+    );
+    for attribute in Inheritable::ALL {
+        let page = format!("<< /Type /Page /Parent 2 0 R /{} 7 0 R >>", attribute.key());
+        let objects = parsed(&[
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, &page),
+            (7, "90"),
+        ]);
+        let resolve = |id: ObjectId| objects.get(&id);
+        let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+        let table = pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
+        let page = table.get(0).unwrap();
+        for other in Inheritable::ALL {
+            let found = (page.attribute(other)).map(|at| (at.origin, at.written.as_reference()));
+            let own = (other == attribute).then_some((Origin::Own, Some(ObjectId::new(7, 0))));
+            assert_eq!(found, own, "{attribute:?}'s key, {other:?}");
+        }
+    }
 }
 
 #[test]
@@ -1310,7 +1405,7 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
     );
     // A /Kids that doesn't read isn't an array, and is said once.
     let objects = parsed(&[(2, "<< /Type /Page /Kids 6 0 R /Count 3 >>")]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let mut kept = Kept::default();
     let resolver = failing(&objects, ObjectId::new(6, 0), Why::Damaged);
     let table = pages(
@@ -1674,7 +1769,7 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
         (4, "<< /Type /Page /Parent 2 0 R >>"),
         (5, "<< >>"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for rules in [Rules::Pdfium, Rules::Iso] {
         for failed in [
             ObjectId::new(3, 0),
@@ -2217,7 +2312,7 @@ fn only_a_sink_that_wants_them_has_its_checks_run() {
         (3, "<< /Type /Page /Parent 2 0 R >>"),
         (8, "1"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = |id: ObjectId| {
         asked.borrow_mut().push(id);
@@ -2244,7 +2339,7 @@ fn a_walk_reads_nothing_past_the_count_or_any_content() {
         (3, "<< /Type /Page /Contents 5 0 R /Annots 6 0 R >>"),
         (4, "<< /Type /Page >>"),
     ]);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = |id: ObjectId| {
         asked.borrow_mut().push(id);
@@ -2461,7 +2556,7 @@ fn what_only_a_sink_reads_fails_no_walk() {
             },
         ),
     ];
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for (root, kid, below, fault) in shapes {
         let mut written = vec![(2, root), (3, kid)];
         written.extend(below.map(|below| (4, below)));
@@ -2584,7 +2679,7 @@ fn a_parent_chain_raised_past_the_stack_goes_along_in_a_loop() {
         Object::from(pdf_objects::dict! { "Type" => "Page", "Parent" => Object::reference(10) }),
     );
     let resolve = |id: ObjectId| objects.get(&id);
-    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let mut limits = Limits::DEFAULT;
     limits.page_depth = 2 * length as usize;
     let table = pages(resolve, &catalog, Rules::Pdfium, &limits, &mut ()).unwrap();
@@ -2621,4 +2716,531 @@ fn a_parent_chain_is_compared_and_shown_by_what_it_names() {
 fn the_default_caps_are_pdfium_s() {
     assert_eq!(Limits::DEFAULT.page_depth, 1024);
     assert_eq!(Limits::DEFAULT.pages, 1_048_574);
+}
+
+/// `n` pages, numbered from 1.
+fn numbered(n: u32) -> Vec<ObjectId> {
+    (1..=n).map(|n| ObjectId::new(n, 0)).collect()
+}
+
+/// Ids from `first` on, one a call, and how many were asked for.
+fn ids_from(first: u32, asked: &std::cell::Cell<usize>) -> impl FnMut() -> ObjectId + '_ {
+    let mut next = first;
+    move || {
+        asked.set(asked.get() + 1);
+        next += 1;
+        ObjectId::new(next - 1, 0)
+    }
+}
+
+/// `pages` written under `fanout` and the default caps, the nodes numbered
+/// past the pages.
+fn laid(pages: &[ObjectId], fanout: usize) -> Written {
+    let asked = std::cell::Cell::new(0);
+    let past = pages.iter().map(|id| id.number).max().unwrap_or(0) + 1;
+    let written = write(pages, fanout, &Limits::DEFAULT, ids_from(past, &asked)).unwrap();
+    assert_eq!(asked.get(), written.nodes.len(), "an id a node");
+    written
+}
+
+/// Each page's depth, walking down from the root, and every node's kids
+/// within the fanout, its count its pages', and its parent the node that
+/// lists it; the walk meets the nodes in their order, and the pages in
+/// theirs. Each node is `/Type /Pages`, `/Parent` but the root, `/Kids` and
+/// `/Count`, in that order, each kid by reference.
+fn walk(written: &Written, pages: &[ObjectId], fanout: usize) -> Vec<usize> {
+    fn visit(
+        written: &Written,
+        place: &HashMap<ObjectId, usize>,
+        fanout: usize,
+        n: usize,
+        (parent, d): (Option<ObjectId>, usize),
+        seen: &mut Vec<usize>,
+        order: &mut Vec<(ObjectId, usize, ObjectId)>,
+    ) -> i64 {
+        // A walk deeper than the nodes are many is in a loop of them.
+        assert!(d <= written.nodes.len(), "node {n} at depth {d}");
+        seen.push(n);
+        let (id, node) = &written.nodes[n];
+        let keys: Vec<&[u8]> = node.iter().map(|(key, _)| key).collect();
+        let expected: &[&[u8]] = match parent {
+            Some(_) => &[b"Type", b"Parent", b"Kids", b"Count"],
+            None => &[b"Type", b"Kids", b"Count"],
+        };
+        assert_eq!(keys, expected, "node {n}");
+        assert!(node.has_type(b"Pages"), "node {n}");
+        let up = node.get(b"Parent").map(|up| up.as_reference().unwrap());
+        assert_eq!(up, parent, "node {n}");
+        let kids = node.get(b"Kids").and_then(Object::as_array).unwrap();
+        assert!(!kids.is_empty() && kids.len() <= fanout, "node {n}");
+        let mut count = 0;
+        for kid in kids {
+            let kid = kid.as_reference().expect("a kid by reference");
+            count += match place.get(&kid) {
+                Some(&k) => visit(written, place, fanout, k, (Some(*id), d + 1), seen, order),
+                None => {
+                    order.push((kid, d, *id));
+                    1
+                }
+            };
+        }
+        assert_eq!(node.get(b"Count").and_then(Object::as_integer), Some(count));
+        count
+    }
+    let place: HashMap<ObjectId, usize> = (written.nodes.iter().enumerate())
+        .map(|(n, (id, _))| (*id, n))
+        .collect();
+    assert_eq!(place.len(), written.nodes.len(), "each node its own id");
+    assert_eq!(written.root, written.nodes[0].0);
+    let (mut seen, mut order) = (Vec::new(), Vec::new());
+    visit(written, &place, fanout, 0, (None, 1), &mut seen, &mut order);
+    assert_eq!(seen, (0..written.nodes.len()).collect::<Vec<_>>());
+    let met: Vec<ObjectId> = order.iter().map(|&(p, _, _)| p).collect();
+    assert_eq!(met, pages);
+    let leaves: Vec<ObjectId> = order.iter().map(|&(_, _, n)| n).collect();
+    assert_eq!(leaves, written.parents);
+    order.iter().map(|&(_, d, _)| d).collect()
+}
+
+/// The sizes a tree is written at here: around a node's fanout and its
+/// square, and a long document's.
+const SIZES: [u32; 11] = [1, 2, 31, 32, 33, 64, 65, 1000, 1024, 1025, 7000];
+
+/// The fanouts: the least, one that's odd, the default, and a flat tree.
+const FANOUTS: [usize; 4] = [2, 3, FANOUT, usize::MAX];
+
+#[test]
+fn a_tree_is_balanced_within_its_fanout() {
+    for fanout in FANOUTS {
+        for n in SIZES {
+            let pages = numbered(n);
+            let written = laid(&pages, fanout);
+            let depth = walk(&written, &pages, fanout);
+            assert!(depth.iter().all(|&d| d == depth[0]), "{n}: {depth:?}");
+            // As few levels as hold the pages.
+            let holds = |d: u32| {
+                fanout
+                    .checked_pow(d)
+                    .is_none_or(|reach| reach >= n as usize)
+            };
+            let fewest = (1..).find(|&d| holds(d)).unwrap() as usize;
+            assert_eq!(depth[0], fewest, "{n} under {fanout}");
+        }
+    }
+    // Spread evenly: 33 pages are two leaves of 17 and 16.
+    let written = laid(&numbered(33), FANOUT);
+    let sizes: Vec<i64> = (written.nodes[1..].iter())
+        .map(|(_, node)| node.get(b"Count").and_then(Object::as_integer).unwrap())
+        .collect();
+    assert_eq!(sizes, [17, 16]);
+    // 7,000 pages: 7 nodes under the root, each of 1,000 in 32 leaves.
+    let written = laid(&numbered(7000), FANOUT);
+    let root = &written.nodes[0].1;
+    assert_eq!(
+        root.get(b"Kids").and_then(Object::as_array).unwrap().len(),
+        7
+    );
+    assert_eq!(written.nodes.len(), 1 + 7 + 7 * 32);
+    // Flat: one node over every page.
+    let written = laid(&numbered(7000), usize::MAX);
+    assert_eq!(written.nodes.len(), 1);
+    // And under nodes of 3, 64 pages are four levels.
+    let pages = numbered(64);
+    assert_eq!(walk(&laid(&pages, 3), &pages, 3)[0], 4);
+}
+
+/// `written`'s nodes and its pages, each `/Type /Page`, its `/Parent` the one
+/// `written` gives it and a `/MediaBox` of its own, its width its number; and
+/// a catalog naming the root.
+fn objects_of(written: &Written, pages: &[ObjectId]) -> (BTreeMap<ObjectId, Object>, Dict) {
+    let mut objects: BTreeMap<ObjectId, Object> = (written.nodes.iter())
+        .map(|(id, node)| (*id, Object::from(node.clone())))
+        .collect();
+    for (&page, &parent) in pages.iter().zip(&written.parents) {
+        let media = vec![
+            Object::from(0),
+            Object::from(0),
+            Object::from(page.number),
+            Object::from(200),
+        ];
+        let dict = pdf_objects::dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+        assert!(objects.insert(page, Object::from(dict)).is_none(), "{page}");
+    }
+    (objects, pdf_objects::dict! { "Pages" => written.root })
+}
+
+/// Each page's `/Parent` chain as `written` lays it out, nearest first: no
+/// longer than one more than the nodes are many, so that a chain that loops
+/// ends, and differs from what it's set beside.
+fn chains(written: &Written) -> Vec<Vec<ObjectId>> {
+    let up: HashMap<ObjectId, ObjectId> = (written.nodes.iter())
+        .filter_map(|(id, node)| Some((*id, node.get(b"Parent")?.as_reference()?)))
+        .collect();
+    let most = written.nodes.len() + 1;
+    (written.parents.iter())
+        .map(|&leaf| {
+            std::iter::successors(Some(leaf), |node| up.get(node).copied())
+                .take(most)
+                .collect()
+        })
+        .collect()
+}
+
+/// The tree read back from `objects` by both rules under `limits`, through a
+/// sink that keeps what's told and through `()`: no fault, `pages` each once
+/// and in order, counted so, each page's `/Parent` chain as `written` has it.
+fn read_back(
+    objects: &BTreeMap<ObjectId, Object>,
+    catalog: &Dict,
+    written: &Written,
+    pages_given: &[ObjectId],
+    limits: &Limits,
+) {
+    let resolve = |id: ObjectId| objects.get(&id);
+    let chains = chains(written);
+    let listed: Vec<(Option<ObjectId>, u32)> =
+        pages_given.iter().map(|&id| (Some(id), 0)).collect();
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let mut kept = Kept::default();
+        let table = pages(resolve, catalog, rules, limits, &mut kept);
+        let quiet = pages(resolve, catalog, rules, limits, &mut ());
+        assert_eq!(table, quiet, "{rules:?}: the same whatever the sink");
+        let table = table.unwrap_or_else(|e| panic!("{rules:?}, {} pages: {e}", pages_given.len()));
+        assert_eq!(kept.faults(), [], "{rules:?}, {} pages", pages_given.len());
+        let read: Vec<(Option<ObjectId>, u32)> = table.iter().map(|p| (p.id, p.repeat)).collect();
+        assert_eq!(read, listed, "{rules:?}: every page once, in order");
+        assert_eq!(table.counted(), pages_given.len(), "{rules:?}");
+        for (page, chain) in table.iter().zip(&chains) {
+            assert!(page.parents().eq(chain.iter().copied()), "{rules:?}");
+            assert_eq!(page.media_box().origin, Origin::Own);
+        }
+    }
+}
+
+#[test]
+fn a_tree_written_reads_back_by_both_rules() {
+    for fanout in FANOUTS {
+        for n in SIZES {
+            let pages = numbered(n);
+            let written = laid(&pages, fanout);
+            let (objects, catalog) = objects_of(&written, &pages);
+            read_back(&objects, &catalog, &written, &pages, &Limits::DEFAULT);
+        }
+    }
+    // Every small size under the small fanouts, where a node of one kid
+    // comes about: 5 pages under nodes of 2 are a leaf of 2 under a node of
+    // its own.
+    for fanout in [2, 3] {
+        for n in 1..=100 {
+            let pages = numbered(n);
+            let written = laid(&pages, fanout);
+            let (objects, catalog) = objects_of(&written, &pages);
+            read_back(&objects, &catalog, &written, &pages, &Limits::DEFAULT);
+        }
+    }
+    // Numbers in any order, and any generation, nodes before the pages.
+    let pages = [
+        ObjectId::new(90, 0),
+        ObjectId::new(7, 3),
+        ObjectId::new(50, 1),
+        ObjectId::new(8, 0),
+        ObjectId::new(u32::MAX, u16::MAX),
+    ];
+    let asked = std::cell::Cell::new(0);
+    let written = write(&pages, 2, &Limits::DEFAULT, ids_from(1, &asked)).unwrap();
+    assert_eq!(written.root, ObjectId::new(1, 0));
+    assert_eq!(walk(&written, &pages, 2), [3; 5]);
+    let (objects, catalog) = objects_of(&written, &pages);
+    read_back(&objects, &catalog, &written, &pages, &Limits::DEFAULT);
+}
+
+/// A document's pages, given ids by it, the tree written over them with
+/// `|| doc.new_id()`, the file written by pdf-structure's writer and read
+/// back: each page in order, under its node, by either rules with nothing
+/// told.
+#[test]
+fn a_tree_is_written_for_a_document_by_its_ids() {
+    for n in [1, 33, 1025] {
+        let mut doc = pdf_structure::source::Document::new(
+            pdf_objects::Version::new(1, 7),
+            pdf_objects::dict! {},
+        );
+        let pages: Vec<ObjectId> = (0..n).map(|_| doc.new_id()).collect();
+        let written = write(&pages, FANOUT, &Limits::DEFAULT, || doc.new_id()).unwrap();
+        for (id, node) in &written.nodes {
+            doc.set(*id, node.clone());
+        }
+        let media = || {
+            vec![
+                Object::from(0),
+                Object::from(0),
+                Object::from(612),
+                Object::from(792),
+            ]
+        };
+        for (&page, &parent) in pages.iter().zip(&written.parents) {
+            let page_dict =
+                pdf_objects::dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media() };
+            doc.set(page, page_dict);
+        }
+        let catalog = doc.add(pdf_objects::dict! { "Type" => "Catalog", "Pages" => written.root });
+        doc.trailer_mut().dict_mut().set("Root", catalog);
+        let mut file = Vec::new();
+        let options = pdf_structure::write::Options::DEFAULT;
+        pdf_structure::write::document(&mut file, &doc, None, None, &options).unwrap();
+
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let chains = chains(&written);
+        for rules in [Rules::Iso, Rules::Pdfium] {
+            let table = table(&reading, reading.trailer().dict(), rules, &Limits::DEFAULT);
+            assert_eq!(table.faults, [], "{n}, {rules:?}");
+            let held = table.pages.unwrap();
+            let read: Vec<Option<ObjectId>> = held.iter().map(|page| page.id).collect();
+            let given: Vec<Option<ObjectId>> = pages.iter().copied().map(Some).collect();
+            assert_eq!(read, given, "{n}, {rules:?}");
+            let parents: Vec<&Vec<ObjectId>> = held.iter().map(|page| &page.parents).collect();
+            assert_eq!(parents, chains.iter().collect::<Vec<_>>(), "{n}, {rules:?}");
+            assert_eq!(table.counted, n as usize);
+        }
+    }
+}
+
+/// `pages` written under `fanout` and `limits`, and how many ids were
+/// asked for.
+fn refused(
+    pages: &[ObjectId],
+    fanout: usize,
+    limits: &Limits,
+) -> (Result<Written, WriteError>, usize) {
+    let asked = std::cell::Cell::new(0);
+    let written = write(pages, fanout, limits, ids_from(1_000_000, &asked));
+    (written, asked.get())
+}
+
+#[test]
+fn what_wouldn_t_read_back_is_refused_before_an_id_is_asked_for() {
+    let limits = Limits::DEFAULT;
+    let pages = numbered(9);
+    assert_eq!(refused(&[], FANOUT, &limits), (Err(WriteError::NoPages), 0));
+    for fanout in [0, 1] {
+        assert_eq!(
+            refused(&pages, fanout, &limits),
+            (Err(WriteError::Fanout { fanout }), 0)
+        );
+    }
+    assert!(refused(&pages, 2, &limits).0.is_ok());
+
+    // The pages' cap, exactly and one past.
+    let mut capped = limits;
+    capped.pages = 9;
+    let (at_cap, asked) = refused(&pages, 3, &capped);
+    let at_cap = at_cap.unwrap();
+    assert_eq!(asked, at_cap.nodes.len());
+    let (objects, catalog) = objects_of(&at_cap, &pages);
+    read_back(&objects, &catalog, &at_cap, &pages, &capped);
+    capped.pages = 8;
+    let too_many = WriteError::TooManyPages { cap: 8 };
+    assert_eq!(refused(&pages, 3, &capped), (Err(too_many), 0));
+
+    // Nodes past it, which only a fanout of 2 comes to: 9 pages are 10
+    // nodes under the root, which a walk under a cap of 9 visits too many of.
+    capped.pages = 10;
+    let (ten, _) = refused(&pages, 2, &capped);
+    let ten = ten.unwrap();
+    assert_eq!(ten.nodes.len(), 11);
+    let (objects, catalog) = objects_of(&ten, &pages);
+    read_back(&objects, &catalog, &ten, &pages, &capped);
+    capped.pages = 9;
+    let too_many = WriteError::TooManyPages { cap: 9 };
+    assert_eq!(refused(&pages, 2, &capped), (Err(too_many), 0));
+    let resolve = |id: ObjectId| objects.get(&id);
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let read = pages_of(resolve, &catalog, rules, &capped);
+        assert_eq!(read, Err(Error::TooManyPages), "{rules:?}");
+    }
+
+    // The depth's cap, at the edge under a fanout of 2: 5 pages are three
+    // levels of nodes, which a walk under a cap of 2 can't go down.
+    let five = numbered(5);
+    let mut shallow = limits;
+    shallow.page_depth = 3;
+    let (three, _) = refused(&five, 2, &shallow);
+    let three = three.unwrap();
+    assert_eq!(walk(&three, &five, 2)[0], 3);
+    let (objects, catalog) = objects_of(&three, &five);
+    read_back(&objects, &catalog, &three, &five, &shallow);
+    shallow.page_depth = 2;
+    let too_deep = WriteError::TooDeep { cap: 2 };
+    assert_eq!(refused(&five, 2, &shallow), (Err(too_deep), 0));
+    let resolve = |id: ObjectId| objects.get(&id);
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let read = pages_of(resolve, &catalog, rules, &shallow);
+        assert_eq!(read, Err(Error::TooDeep), "{rules:?}");
+    }
+    // Under nodes of 3 they're two levels, within it.
+    assert!(refused(&five, 3, &shallow).0.is_ok());
+
+    // A page given twice, or of a page's number, the first in order.
+    let id = |number, generation| ObjectId::new(number, generation);
+    for (pages, twice) in [
+        (vec![id(1, 0), id(2, 0), id(1, 0)], id(1, 0)),
+        (vec![id(1, 0), id(2, 0), id(2, 1), id(1, 0)], id(2, 1)),
+        (vec![id(5, 0), id(5, 0)], id(5, 0)),
+    ] {
+        let repeated = WriteError::Repeated { id: twice };
+        assert_eq!(refused(&pages, FANOUT, &limits), (Err(repeated), 0));
+    }
+    // A page of number 0, first or among them, whatever its generation.
+    for pages in [
+        vec![id(0, 0), id(1, 0)],
+        vec![id(1, 0), id(0, 7), id(2, 0)],
+        vec![id(0, 0)],
+    ] {
+        assert_eq!(refused(&pages, FANOUT, &limits), (Err(WriteError::Zero), 0));
+    }
+
+    // In the order the doc gives.
+    assert_eq!(refused(&[], 0, &limits).0, Err(WriteError::NoPages));
+    let mut none = limits;
+    (none.pages, none.page_depth) = (0, 0);
+    let zeros = [id(0, 0), id(0, 0)];
+    assert_eq!(
+        refused(&zeros, 1, &none).0,
+        Err(WriteError::Fanout { fanout: 1 })
+    );
+    let too_many = WriteError::TooManyPages { cap: 0 };
+    assert_eq!(refused(&zeros, 2, &none).0, Err(too_many));
+    none.pages = 2;
+    assert_eq!(
+        refused(&zeros, 2, &none).0,
+        Err(WriteError::TooDeep { cap: 0 })
+    );
+    none.page_depth = 1;
+    assert_eq!(refused(&zeros, 2, &none).0, Err(WriteError::Zero));
+    let twice = [id(1, 0), id(1, 0), id(0, 0)];
+    let mut tight = limits;
+    tight.pages = 3;
+    tight.page_depth = 2;
+    let repeated = WriteError::Repeated { id: id(1, 0) };
+    assert_eq!(refused(&twice, 2, &tight).0, Err(repeated));
+    // A page given twice before the nodes are counted.
+    let mut nine = numbered(8);
+    nine.push(id(1, 0));
+    capped.pages = 9;
+    let repeated = WriteError::Repeated { id: id(1, 0) };
+    assert_eq!(refused(&nine, 2, &capped), (Err(repeated), 0));
+}
+
+/// The tree under `catalog` read by `rules` under `limits`, or what failed it.
+fn pages_of<'o>(
+    resolve: impl Resolve<'o>,
+    catalog: &'o Dict,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<usize, Error> {
+    pages(resolve, catalog, rules, limits, &mut ()).map(|table| table.len())
+}
+
+/// Ids answered in turn, how many were asked for kept.
+fn answering<'a>(
+    answers: &'a [ObjectId],
+    asked: &'a std::cell::Cell<usize>,
+) -> impl FnMut() -> ObjectId + 'a {
+    move || {
+        let answer = answers[asked.get()];
+        asked.set(asked.get() + 1);
+        answer
+    }
+}
+
+#[test]
+fn an_id_that_s_a_page_s_or_a_node_s_is_refused_as_it_s_given() {
+    let id = |number| ObjectId::new(number, 0);
+    // 64 pages under nodes of 3: 40 nodes, the root first.
+    let pages = numbered(64);
+    let nodes: Vec<ObjectId> = (100..140).map(id).collect();
+    let asked = std::cell::Cell::new(0);
+    let fine = write(&pages, 3, &Limits::DEFAULT, answering(&nodes, &asked)).unwrap();
+    assert_eq!((fine.nodes.len(), asked.get()), (40, 40));
+    for at in [0, 17, 39] {
+        // A page's number, whatever the generation; a node's; and 0.
+        for (answer, error) in [
+            (
+                ObjectId::new(5, 2),
+                WriteError::Taken {
+                    id: ObjectId::new(5, 2),
+                },
+            ),
+            (id(64), WriteError::Taken { id: id(64) }),
+            (ObjectId::new(0, 0), WriteError::Zero),
+        ] {
+            let mut answers = nodes.clone();
+            answers[at] = answer;
+            let asked = std::cell::Cell::new(0);
+            let written = write(&pages, 3, &Limits::DEFAULT, answering(&answers, &asked));
+            assert_eq!((written, asked.get()), (Err(error), at + 1), "at {at}");
+        }
+        if at > 0 {
+            let mut answers = nodes.clone();
+            answers[at] = ObjectId::new(answers[at - 1].number, 9);
+            let asked = std::cell::Cell::new(0);
+            let written = write(&pages, 3, &Limits::DEFAULT, answering(&answers, &asked));
+            let taken = WriteError::Taken { id: answers[at] };
+            assert_eq!((written, asked.get()), (Err(taken), at + 1), "at {at}");
+        }
+    }
+    // One page: one node, which mustn't be the page.
+    let asked = std::cell::Cell::new(0);
+    let one = write(
+        &[id(1)],
+        FANOUT,
+        &Limits::DEFAULT,
+        answering(&[id(1)], &asked),
+    );
+    assert_eq!(
+        (one, asked.get()),
+        (Err(WriteError::Taken { id: id(1) }), 1)
+    );
+}
+
+#[test]
+fn a_write_error_s_words_are_the_whole_message() {
+    let id = ObjectId::new(12, 3);
+    for (error, words) in [
+        (
+            WriteError::NoPages,
+            "a page tree lists a page at least, and none is given",
+        ),
+        (
+            WriteError::Fanout { fanout: 1 },
+            "a page tree's nodes are given a fanout of 1, where it takes 2 at least",
+        ),
+        (
+            WriteError::Fanout { fanout: 0 },
+            "a page tree's nodes are given a fanout of 0, where it takes 2 at least",
+        ),
+        (
+            WriteError::Repeated { id },
+            "object 12 is given as a page twice",
+        ),
+        (
+            WriteError::Zero,
+            "object 0 is given as a page or a node, and it's never an object",
+        ),
+        (
+            WriteError::Taken { id },
+            "object 12 is given for a node, and it's a page or a node already",
+        ),
+        (
+            WriteError::TooManyPages { cap: 9 },
+            "the page tree would list more pages, or have more nodes under its root, than 9",
+        ),
+        (
+            WriteError::TooDeep { cap: 2 },
+            "the page tree would have more levels of nodes than 2",
+        ),
+    ] {
+        assert_eq!(error.to_string(), words);
+        assert!(std::error::Error::source(&error).is_none());
+    }
 }

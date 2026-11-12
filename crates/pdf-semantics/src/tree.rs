@@ -21,12 +21,12 @@
 //!   again, so a loop ends and everything's been read once.
 //!
 //! [`write_names`] and [`write_numbers`] write a tree flat, one root holding
-//! every entry, sorted. That's a whole tree at any size, and nodes under a
-//! root would each need an object's number.
+//! every entry, sorted. That's a whole tree at any size.
 //!
 //! ```
 //! use pdf_semantics::tree::{names, write_names};
-//! use pdf_semantics::{Limits, Object, ObjectId};
+//! use pdf_semantics::Limits;
+//! use pdf_semantics::pdf_objects::{Object, ObjectId};
 //!
 //! let tree = write_names([
 //!     (b"b".to_vec(), Object::reference(5)),
@@ -60,6 +60,49 @@ use crate::{HOPS, followed};
 /// each key's bytes and its value. `root` may be a reference, followed as a
 /// node's kids are; null, or a reference to nothing, is a tree with no
 /// entries.
+///
+/// A tree over a closure, a sink of one's own hearing what's read past:
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// use pdf_semantics::pdf_objects::fault::{Place, Sink};
+/// use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
+/// use pdf_semantics::tree::names;
+/// use pdf_semantics::{Fault, Limits};
+///
+/// #[derive(Default)]
+/// struct Faults(Vec<Fault>);
+///
+/// impl Sink<Fault> for Faults {
+///     fn fault(&mut self, _: Place, fault: Fault) {
+///         self.0.push(fault);
+///     }
+/// }
+///
+/// // A root, its kid by reference and one listed again.
+/// let leaf = dict! {
+///     "Limits" => vec![Object::text("a"), Object::text("b")],
+///     "Names" => vec![
+///         Object::text("a"), Object::reference(7),
+///         Object::text("b"), Object::from(2),
+///     ],
+/// };
+/// let objects = BTreeMap::from([(ObjectId::new(2, 0), Object::from(leaf))]);
+/// let resolve = |id: ObjectId| objects.get(&id);
+/// let root = Object::from(dict! { "Kids" => vec![Object::reference(2), Object::reference(2)] });
+///
+/// let mut walk = names(resolve, &root, &Limits::DEFAULT, Faults::default());
+/// let (key, value) = walk.next().unwrap().unwrap();
+/// assert_eq!((key, value.as_reference()), (&b"a"[..], Some(ObjectId::new(7, 0))));
+/// let (key, value) = walk.next().unwrap().unwrap();
+/// assert_eq!((key, value.as_integer()), (&b"b"[..], Some(2)));
+/// assert!(walk.next().is_none());
+///
+/// // Read once, said, and nothing left unread.
+/// assert!(walk.whole());
+/// assert_eq!(walk.into_sink().0, [Fault::TreeRepeated { id: ObjectId::new(2, 0) }]);
+/// ```
 pub fn names<'o, R: Resolve<'o>, S: Sink<Fault>>(
     objects: R,
     root: &'o Object,
@@ -81,14 +124,19 @@ pub fn numbers<'o, R: Resolve<'o>, S: Sink<Fault>>(
 }
 
 /// A name tree's entries, as [`names`] gives them.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 pub struct Names<'o, R, S>(Walk<'o, R, S, &'o [u8]>);
 
 /// A number tree's entries, as [`numbers`] gives them.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 pub struct Numbers<'o, R, S>(Walk<'o, R, S, i64>);
 
 /// What the two iterators have in common.
 macro_rules! walks {
     ($walk:ident, $key:ty) => {
+        // Each is a walk, not an adapter over another iterator: its `next`
+        // reads the tree, so `fold`'s default, a loop over `next`, is the one
+        // pass there is, and none is written.
         impl<'o, R: Resolve<'o>, S: Sink<Fault>> Iterator for $walk<'o, R, S> {
             type Item = Result<($key, &'o Object), Unreadable>;
 
@@ -105,11 +153,13 @@ macro_rules! walks {
             /// So walked to its end, true means all of it was read. A node
             /// reached a second time leaves it true, as it's been read; an
             /// iterator that gave an error has it false.
-            pub fn whole(&self) -> bool {
+            #[must_use]
+            pub const fn whole(&self) -> bool {
                 self.0.whole
             }
 
             /// The sink given, with what it was told.
+            #[must_use]
             pub fn into_sink(self) -> S {
                 self.0.sink
             }
@@ -338,13 +388,23 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
     }
 
     /// Says what's wrong with the shape of a node, and gives its `/Limits`.
+    /// Its `/Kids` and its entries are followed: null, or a reference to
+    /// nothing, is none (7.3.10), and anything else is there, an object that
+    /// doesn't read among it, for the walk's own read of it to say what's
+    /// wrong. Its `/Limits` is there as written, null aside, and read by
+    /// [`bounds`](Self::bounds).
     fn shape(&mut self, node: &'o Dict, at: Option<Span>, root: bool) -> Option<(K, K)> {
-        let has = |key: &str| node.get(key.as_bytes()).is_some_and(|o| !o.is_null());
-        match (has("Kids"), has(K::ENTRIES)) {
+        let objects = &self.objects;
+        let held = |key: &str| {
+            (node.get(key.as_bytes())).is_some_and(|o| !matches!(followed(objects, o), Ok(None)))
+        };
+        let (kids, entries) = (held("Kids"), held(K::ENTRIES));
+        match (kids, entries) {
             (true, true) => self.say(at, Fault::TreeBothEntries),
             (false, false) => self.say(at, Fault::TreeNoEntries),
             _ => {}
         }
+        let has = |key: &str| node.get(key.as_bytes()).is_some_and(|o| !o.is_null());
         match (root, has("Limits")) {
             (true, true) => self.say(at, Fault::TreeRootLimits),
             (false, false) => self.say(at, Fault::TreeNoLimits),
@@ -501,12 +561,20 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
 /// in the order 7.9.6 has, by their bytes. A value's form is the caller's, a
 /// reference or written in place. Reading it back gives the same entries,
 /// sorted, with no fault.
-pub fn write_names(entries: impl IntoIterator<Item = (Vec<u8>, Object)>) -> Result<Dict, Error> {
+///
+/// # Errors
+///
+/// A [`WriteError`], and nothing written: [`WriteError::RepeatedName`] for
+/// a key given twice, the first in the tree's order; else
+/// [`WriteError::StreamValue`] for a value that's a stream or holds one.
+pub fn write_names(
+    entries: impl IntoIterator<Item = (Vec<u8>, Object)>,
+) -> Result<Dict, WriteError> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
         let key = pair[0].0.clone();
-        return Err(Error::RepeatedName { key });
+        return Err(WriteError::RepeatedName { key });
     }
     written(
         "Names",
@@ -516,12 +584,17 @@ pub fn write_names(entries: impl IntoIterator<Item = (Vec<u8>, Object)>) -> Resu
 
 /// `entries` written as a number tree's root: a dictionary with one `/Nums`,
 /// in ascending order (7.9.7), as [`write_names`] writes a name tree's.
-pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result<Dict, Error> {
+///
+/// # Errors
+///
+/// As [`write_names`] fails, but a key given twice is
+/// [`WriteError::RepeatedNumber`].
+pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result<Dict, WriteError> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by_key(|entry| entry.0);
     if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
         let key = pair[0].0;
-        return Err(Error::RepeatedNumber { key });
+        return Err(WriteError::RepeatedNumber { key });
     }
     written(
         "Nums",
@@ -530,11 +603,14 @@ pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result
 }
 
 /// A root whose `holder` holds `entries`, in their order.
-fn written(holder: &str, entries: impl Iterator<Item = (Object, Object)>) -> Result<Dict, Error> {
+fn written(
+    holder: &str,
+    entries: impl Iterator<Item = (Object, Object)>,
+) -> Result<Dict, WriteError> {
     let mut array = Vec::with_capacity(entries.size_hint().0.saturating_mul(2));
     for (key, value) in entries {
         if holds_a_stream(&value) {
-            return Err(Error::StreamValue);
+            return Err(WriteError::StreamValue);
         }
         array.push(key);
         array.push(value);
@@ -561,7 +637,7 @@ fn holds_a_stream(value: &Object) -> bool {
 /// Why a tree can't be written.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum WriteError {
     /// A name tree's key given twice, which 7.9.6 doesn't let a tree hold,
     /// nor a reader tell which is meant.
     #[error("the name tree's key {key:?} is given twice")]

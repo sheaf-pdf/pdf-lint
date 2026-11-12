@@ -59,24 +59,28 @@
 //! Of what a tree's walk tells, what [`Walk::tree`] doesn't say is a
 //! [`Rule::Tree`] finding: a node reached again, a kid written in place,
 //! `/Limits` that aren't the node's least and greatest keys, a key not past
-//! the one before it or outside a node's `/Limits`, and a node under the
-//! root with neither `/Kids` nor entries (the root's is the walk's own).
-//! Each kind once in each object it's in, at its first place there, its
-//! value the fault's words with how many times; in the object the fault is
-//! in, or, for a root written in place, the object that holds it, held
-//! where that is; its path, table and key those [`Walk::tree`] gives the
-//! root's findings. A kind in a node two trees share is told by the first
-//! alone, as the walk checks the node as the first's. What stops a tree
-//! being read whole that isn't the file's fault (an object that takes a
-//! password or is past a cap, a key whose bytes the reader didn't give, a
-//! tree deeper or with more nodes than is read, and `/Limits` that don't
-//! read for a password or a cap, which aren't checked) is counted as not
-//! checked, once a tree for each, where its root is held; what was read
-//! before it is found all the same.
+//! the one before it or outside a node's `/Limits`, and a node with neither
+//! `/Kids` nor entries, null or a reference to nothing being none (7.3.10):
+//! under the root, or the root where it has one of them written that comes
+//! to nothing, as a root with neither written is the walk's own. Each kind
+//! once in each object it's in, at its first place there, its value the
+//! fault's words with how many times; in the object the fault is in, or, for
+//! a root written in place, the object that holds it, held where that is;
+//! its path, table and key those [`Walk::tree`] gives the root's findings. A
+//! kind in a node two trees share is told by the first alone, as the walk
+//! checks the node as the first's. What stops a tree being read whole that
+//! isn't the file's fault (an object that takes a password or is past a cap,
+//! a key whose bytes the reader didn't give, a tree deeper or with more
+//! nodes than is read, and `/Limits` that don't read for a password or a
+//! cap, which aren't checked) is counted as not checked, once a tree for
+//! each, where its root is held; what was read before it is found all the
+//! same.
 //!
-//! What the packet's read told is a [`Rule::Xmp`] finding, last: a mark of
-//! UTF-16 it begins with, an attribute and a claim's value that don't read
-//! as XML, each kind once, at its first place, with how many times, and
+//! What the packet's read told is a [`Rule::Xmp`] finding, last: an encoding
+//! other than UTF-8, which a mark of UTF-16 or UTF-32 it begins with says,
+//! or a zero byte among its first four, an attribute and a claim's value
+//! that don't read as XML, and a claim's value that holds an element beside
+//! its text, each kind once, at its first place, with how many times, and
 //! XML that stops the read, at the byte it stops at, in the XML reader's
 //! words; in the catalog's metadata stream, at the bytes in its data,
 //! held where it is, its path the stream's where the walk first visited it
@@ -977,7 +981,7 @@ impl<'a> Walk<'a> {
             .filter(|(_, fault, _)| {
                 matches!(
                     fault,
-                    Fault::XmpNotUtf8 | Fault::XmpAttribute | Fault::XmpValue
+                    Fault::XmpNotUtf8 | Fault::XmpAttribute | Fault::XmpValue | Fault::XmpMixed
                 )
             })
             .map(|(place, fault, n)| (place.at, times(&fault.to_string(), *n)))
@@ -1141,6 +1145,8 @@ mod tests {
     const AGAIN: &str = "the tree reaches 11 0 R again";
     const IN_PLACE: &str = "a kid is written in place, not as a reference";
     const EMPTY: &str = "a node has neither /Kids nor entries of its own";
+    /// A node under the root whose `/Names` is a reference to nothing.
+    const NAMES_GONE: &str = "<< /Limits [(a) (a)] /Names 99 0 R >>";
 
     /// Each kind of fault pdf-semantics' walk tells that the walk doesn't
     /// say is found once, in the object it's in, at its bytes there, with
@@ -1151,7 +1157,9 @@ mod tests {
     /// listed twice, in the node that lists it, or by a loop, back to the
     /// root too, which the walk is given by its number; a kid written
     /// in place, in the object it's in; a node under the root with neither
-    /// `/Kids` nor `/Names`; and a number tree's keys out of order.
+    /// `/Kids` nor `/Names`, and one whose `/Names` is a reference to
+    /// nothing, under the root or the root itself, which the walk reads as
+    /// written; and a number tree's keys out of order.
     #[test]
     fn what_a_trees_walk_tells_that_the_walk_doesnt_is_found_once_as_the_walks() {
         let leaf = |limits: &str, names: &str| format!("<< /Limits [{limits}] /Names [{names}] >>");
@@ -1214,6 +1222,14 @@ mod tests {
             (
                 dests("<< /Kids [11 0 R] >>", &[(11, "<< /Limits [(a) (a)] >>")]),
                 dest(11, EMPTY, "<< /Limits [(a) (a)] >>"),
+            ),
+            (
+                dests("<< /Kids [11 0 R] >>", &[(11, NAMES_GONE)]),
+                dest(11, EMPTY, NAMES_GONE),
+            ),
+            (
+                dests("<< /Names 99 0 R >>", &[]),
+                dest(10, EMPTY, "<< /Names 99 0 R >>"),
             ),
         ];
         for (file, expected) in shapes {
@@ -2740,17 +2756,22 @@ mod tests {
 
     const ATTRIBUTE: &str = "an attribute in XMP metadata doesn't read";
     const VALUE: &str = "a value in XMP metadata doesn't read";
+    const MIXED: &str = "a value in XMP metadata holds an element beside its text";
+    const NOT_UTF8: &str = "XMP metadata isn't encoded as UTF-8";
 
     /// What the packet's read tells is found once each, in the metadata
     /// stream, at its bytes in the stream's data, its path the stream's,
-    /// its table `Metadata` and its key `-`: a mark of UTF-16 it begins
-    /// with, at the mark; an attribute with no quotes, at its tag; a
-    /// claim's value with an entity that isn't XML's, at its tag; and XML
-    /// that stops the read, at the byte it stops at, in the XML reader's
-    /// words. A packet that reads, and one in a stream that's filtered, so
-    /// not in plain view, have nothing found. Two of a kind are one
-    /// finding, with how many times, and the kinds come in the order first
-    /// told, what stops the read last.
+    /// its table `Metadata` and its key `-`: an encoding other than UTF-8,
+    /// at a mark of UTF-16 or UTF-32 it begins with, or at its first four
+    /// bytes where they hold a zero byte, nothing else told; an attribute
+    /// with no quotes, at its tag; a claim's value with an entity that
+    /// isn't XML's, at its tag; a claim's value holding an element beside
+    /// its text, at the claim's element; and XML that stops the read, at
+    /// the byte it stops at, in the XML reader's words. A packet that
+    /// reads, and one in a stream that's filtered, so not in plain view,
+    /// have nothing found. Two of a kind are one finding, with how many
+    /// times, and the kinds come in the order first told, what stops the
+    /// read last.
     #[test]
     fn what_a_packets_read_tells_is_found_once_a_kind_at_its_bytes() {
         let tag = |xmp: &[u8]| {
@@ -2763,21 +2784,26 @@ mod tests {
             .into_iter()
             .chain(XMP.encode_utf16().flat_map(u16::to_be_bytes))
             .collect();
+        let unmarked: Vec<u8> = XMP.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let utf32: Vec<u8> = [0xFF, 0xFE, 0x00, 0x00]
+            .into_iter()
+            .chain(XMP.chars().flat_map(|c| u32::from(c).to_le_bytes()))
+            .collect();
         let unquoted = xmp_with(r#"pdfaid:conformance="B""#, "pdfaid:conformance=B");
         let entity = xmp_with(r#"pdfaid:part="2""#, r#"pdfaid:part="&two;""#);
         let misnested = xmp_with("</rdf:RDF>", "</rdf:RFD>");
         let words = "XMP metadata isn't XML: ill-formed document: expected `</rdf:RDF>`, \
                      but `</rdf:RFD>` was found";
+        let claim = "<pdfaid:conformance>B<e/></pdfaid:conformance>";
+        let element = format!(">{claim}</rdf:Description>");
+        let mixed = xmp_with(r#" pdfaid:conformance="B"/>"#, &element);
         let shapes = [
-            (
-                utf16,
-                packet_finding(
-                    "XMP metadata begins with a mark of UTF-16, not as UTF-8",
-                    "\u{FFFD}\u{FFFD}",
-                ),
-            ),
+            (utf16, packet_finding(NOT_UTF8, "\u{FFFD}\u{FFFD}")),
+            (unmarked, packet_finding(NOT_UTF8, "\0<\0x")),
+            (utf32, packet_finding(NOT_UTF8, "\u{FFFD}\u{FFFD}\0\0")),
             (unquoted.clone(), packet_finding(ATTRIBUTE, &tag(&unquoted))),
             (entity.clone(), packet_finding(VALUE, &tag(&entity))),
+            (mixed, packet_finding(MIXED, claim)),
             (misnested.clone(), packet_finding(words, "<")),
         ];
         for (data, expected) in shapes {
@@ -2935,6 +2961,41 @@ mod tests {
         };
         assert_eq!(a3(r#"pdfaid:part="3" x=y"#), a3(r#"pdfaid:part="3""#));
         assert!(a3(r#"pdfaid:part="3" x=y"#).contains("ISO_19005_3"));
+    }
+
+    /// What a file declares is what pdf-semantics reads its packet to claim:
+    /// PDF/A-3 by `pdfaid:part`, but not after an empty one, which is the
+    /// first value, nor where it holds an element beside its text, which
+    /// isn't one, and is found; one after that counts.
+    #[test]
+    fn a_claim_s_empty_or_mixed_element_is_read_as_pdf_semantics_reads_it() {
+        let a3 = BTreeSet::from(["ISO_19005_3".to_string()]);
+        let claims = |elements: &str| {
+            let data = XMP.replace(
+                r#" pdfaid:part="2" pdfaid:conformance="B"/>"#,
+                &format!(">{elements}</rdf:Description>"),
+            );
+            assert_ne!(data, XMP);
+            let file = metadata(data.as_bytes(), "");
+            let report = checked(&file, &ALL, &Options::default());
+            let found = xmp_found(&file, data.as_bytes(), &ALL);
+            let found: Vec<_> = found.into_iter().map(|f| (f.3, f.4)).collect();
+            (report.extensions, found)
+        };
+        let three = "<pdfaid:part>3</pdfaid:part>";
+        assert_eq!(claims(three), (a3.clone(), vec![]));
+        assert_eq!(
+            claims(&format!("<pdfaid:part/>{three}")),
+            (BTreeSet::new(), vec![])
+        );
+        assert_eq!(
+            claims(&format!("{three}<pdfaid:part/>")),
+            (a3.clone(), vec![])
+        );
+        let mixed = "<pdfaid:part>3<e/></pdfaid:part>";
+        let told = vec![(MIXED.to_string(), mixed.to_string())];
+        assert_eq!(claims(mixed), (BTreeSet::new(), told.clone()));
+        assert_eq!(claims(&format!("{mixed}{three}")), (a3, told));
     }
 
     /// An XMP finding is carried by a like one whatever its numbers and

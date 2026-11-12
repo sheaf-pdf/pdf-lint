@@ -27,8 +27,9 @@
 //! reads other pages than ISO's, or reads their sizes otherwise, is told as
 //! a viewer's reading. The catalog's XMP metadata, read for the extensions
 //! a file declares, is held to ISO 32000-2 too: what isn't UTF-8 or XML as
-//! 14.3.2 has it is told at its bytes in the metadata stream ([`check()`]
-//! says how).
+//! 14.3.2 has it, and a claim's value that holds an element beside its
+//! text, is told at its bytes in the metadata stream ([`check()`] says
+//! how).
 //!
 //! Each color space and font the walk reaches is read again, through
 //! pdf-color and pdf-fonts, the fonts for their text, no program read, and
