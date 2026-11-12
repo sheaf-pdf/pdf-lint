@@ -1709,8 +1709,8 @@ fn each_why_over_a_failing_resolver() {
     }
 }
 
-/// `Fonts` and `FontScope` say what a resolver says too, and keep nothing of it: the
-/// font itself, the resources it's looked up in, the `/Font` dictionary.
+/// `Fonts` and `FontScope` say what a resolver says too: of the font itself, the
+/// resources it's looked up in, the `/Font` dictionary. `Fonts` keeps nothing of it.
 #[test]
 fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
     let mut pdf = Pdf::default();
@@ -1760,6 +1760,49 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
     };
     let got = Fonts::default().get(objects, &by_ref, lim, &mut 100);
     assert!(got.unwrap().is_none());
+}
+
+/// A font that doesn't read for a reason that's the caller's is read once in a scope,
+/// however often it's picked, by its name or another: each pick gives the same `Err`,
+/// and its stream is asked for once. Another scope reads it again, as `Fonts` keeps no
+/// font that didn't read. One past the budget isn't kept, and within more it's read.
+#[test]
+fn a_scope_reads_a_font_that_doesn_t_read_once() {
+    let mut pdf = Pdf::default();
+    let map = b"1 beginbfchar <41> <0041> endbfchar".to_vec();
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
+    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
+    let font = pdf.add_object(font);
+    let named = pdf.add_object(dict! { "F1" => font, "F2" => font });
+    let resources = Object::from(pdf.add_object(dict! { "Font" => named }));
+    let (page, lim) = (ObjectId::new(1000, 0), &Limits::DEFAULT);
+    let asked = Cell::new(0);
+    let capped = WithStreams::new(&pdf, |id, _| {
+        asked.set(asked.get() + 1);
+        Err(Unreadable::new(id, Why::Capped, "no"))
+    });
+    let failed = Error::Unreadable(Unreadable::new(to_unicode, Why::Capped, "no"));
+    let fonts = Fonts::default();
+    let mut scope = fonts.scope();
+    for name in [b"F1", b"F1", b"F2", b"F1", b"F2"] {
+        let mut budget = BUDGET;
+        let picked = scope.font(capped, page, Some(&resources), name, lim, &mut budget);
+        assert_eq!((picked, budget), (Err(failed.clone()), BUDGET));
+    }
+    assert_eq!(asked.get(), 1);
+    let mut budget = BUDGET;
+    let picked = fonts
+        .scope()
+        .font(capped, page, Some(&resources), b"F1", lim, &mut budget);
+    assert_eq!((picked, asked.get()), (Err(failed), 2));
+
+    let mut scope = fonts.scope();
+    let mut budget = 1;
+    let picked = scope.font(&pdf, page, Some(&resources), b"F1", lim, &mut budget);
+    assert_eq!((picked, budget), (Err(Error::TooLarge), 1));
+    let mut budget = BUDGET;
+    let picked = scope.font(&pdf, page, Some(&resources), b"F1", lim, &mut budget);
+    assert!(matches!(picked, Ok(Some(_))), "{picked:?}");
 }
 
 /// A font trusts no `Streams`: what's given past what was asked is too large, the
