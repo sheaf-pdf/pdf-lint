@@ -146,12 +146,9 @@ const CMAPS: &str = "a font with a CMap chain longer than is read";
 /// glyph, is through filters the reader doesn't take ([`decoded`]).
 const UNFILTERED: &str = "a font with a stream through filters the reader doesn't take";
 
-/// Why a font isn't read whole, given what stopped its read, and whether
-/// that was a stream past a cap the reader reads under (`capped`,
-/// [`Asked`]), which a font reads as past its budget.
-fn unread(error: &Error, capped: bool) -> &'static str {
+/// Why a font isn't read whole, given what stopped its read.
+fn unread(error: &Error) -> &'static str {
     match error {
-        Error::TooLarge if capped => CAPPED,
         Error::TooLarge => BUDGET,
         Error::Unreadable(unreadable) => match unreadable.why {
             Why::Locked => LOCKED,
@@ -263,15 +260,11 @@ impl Sink<Fault> for Cut<'_> {
 
 /// What a font's read asked of a source's streams that what it read
 /// rests on ([`decoded`]): whether the source gave no stream's data, and
-/// which streams it gave none of for filters the reader doesn't take; and
-/// whether the last stream past a limit was past a cap the reader reads
-/// under ([`Why::Capped`]), not past the font's budget ([`Why::Limit`]),
-/// both of which a font reads as too large, stopping its read.
+/// which streams it gave none of for filters the reader doesn't take.
 #[derive(Default)]
 struct Asked {
     ungiven: Cell<bool>,
     unfiltered: RefCell<HashSet<ObjectId>>,
-    capped: Cell<bool>,
 }
 
 /// Stream `id`'s data, at most `limit` bytes of it, as `source` gives it
@@ -284,10 +277,7 @@ struct Asked {
 /// notes, so that what's read without it isn't taken for the file's; and a
 /// source that gives no stream's data, as a document alone doesn't
 /// ([`Why::Detached`]), or not these bytes ([`Why::Source`]), is noted too,
-/// as what a font reads then isn't the file's font. Past a cap the reader
-/// reads under ([`Why::Capped`]), not the font's budget ([`Why::Limit`]),
-/// `asked` notes it, so that the font is said to be past a cap, not its
-/// budget.
+/// as what a font reads then isn't the file's font.
 fn decoded(
     source: &dyn Source,
     id: ObjectId,
@@ -300,22 +290,18 @@ fn decoded(
             asked.unfiltered.borrow_mut().insert(id);
         }
         Err(Why::Source | Why::Detached) => asked.ungiven.set(true),
-        Err(Why::Capped) => asked.capped.set(true),
-        Err(Why::Limit) => asked.capped.set(false),
         _ => {}
     }
     decoded
 }
 
-/// A font's read ([`read`]): what it gave, what it told, kept, the
+/// A font's read ([`read`]): what it gave, what it told, kept, and the
 /// streams it asked for whose filters the reader doesn't take, which it
-/// read on without, and whether a stream past a limit was past a cap the
-/// reader reads under ([`Asked`]).
+/// read on without.
 pub(super) struct Taken {
     font: Result<Font, Error>,
     kept: Kept<Fault>,
     unfiltered: HashSet<ObjectId>,
-    capped: bool,
 }
 
 /// `font`, a font dictionary of `source`'s, read for text within what's
@@ -355,7 +341,6 @@ fn read<'a>(source: &'a dyn Source, font: &'a Dict, budget: &mut usize) -> Optio
         font: read,
         kept,
         unfiltered: asked.unfiltered.into_inner(),
-        capped: asked.capped.get(),
     })
 }
 
@@ -594,12 +579,11 @@ impl<'a> Walk<'a> {
                 font: result,
                 kept,
                 unfiltered,
-                capped,
             }) = taken
             else {
                 continue;
             };
-            let stopped = result.err().map(|error| unread(&error, capped));
+            let stopped = result.err().map(|error| unread(&error));
             let mut stops: Vec<&str> = stopped.into_iter().collect();
             if !unfiltered.is_empty() {
                 stops.push(UNFILTERED);
@@ -857,11 +841,11 @@ mod tests {
         let id = ObjectId::new(2, 0);
         let alone = Streams::decoded(read.document(), id, PLAIN.len()).unwrap_err();
         assert_eq!(alone.why, Why::Detached);
-        assert_eq!(unread(&Error::Unreadable(alone), false), UNGIVEN);
+        assert_eq!(unread(&Error::Unreadable(alone)), UNGIVEN);
         let failed = Unreadable::new(id, Why::Source, "no bytes");
-        assert_eq!(unread(&Error::Unreadable(failed), false), UNGIVEN);
+        assert_eq!(unread(&Error::Unreadable(failed)), UNGIVEN);
         let damaged = Unreadable::new(id, Why::Damaged, "damaged");
-        assert_eq!(unread(&Error::Unreadable(damaged), false), UNREAD);
+        assert_eq!(unread(&Error::Unreadable(damaged)), UNREAD);
     }
 
     /// A stream that decodes in part is what decoded; damaged where nothing
@@ -2251,8 +2235,8 @@ mod tests {
         // Within the budget, both read.
         assert_eq!(unread_fonts(&report(&two, &ALL)), []);
 
-        // A /ToUnicode through more filters than the reader takes, which a
-        // font reads as past its budget: past a cap, not the budget.
+        // A /ToUnicode through more filters than the reader takes, past a
+        // cap it reads under: past a cap, not the budget.
         let filters = format!("/Filter [{}]", ["/AHx"; 26].join(" "));
         let to_unicode = stream(&filters, "41>");
         let capped = fonts("1.7", "/F1 4 0 R", &[(4, &font(5)), (5, &to_unicode)]);

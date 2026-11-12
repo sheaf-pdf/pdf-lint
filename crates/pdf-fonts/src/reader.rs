@@ -235,8 +235,10 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
     /// it doesn't decode: its decode fails before it gives a byte, or it isn't there
     /// ([`Why::Damaged`]), or its filters are ones the reader doesn't decode
     /// ([`Why::Filter`]), what the font makes of having none being what's told.
-    /// Too large past `budget` ([`Why::Limit`]), or past a cap of what gives it
-    /// ([`Why::Capped`]), whatever gave it.
+    /// Too large past `budget` ([`Why::Limit`]), whatever gave it. None too where
+    /// it doesn't read for a reason that's the caller's, past a cap of what gives
+    /// it ([`Why::Capped`]) among them, which is the reading's failure, as an object's
+    /// is ([`Reader::failure`]).
     pub(crate) fn charged(
         &self,
         id: ObjectId,
@@ -252,7 +254,7 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
                 Ok(Some(data.into_owned()))
             }
             Err(unreadable) => match unreadable.why {
-                Why::Limit | Why::Capped => Err(Error::TooLarge),
+                Why::Limit => Err(Error::TooLarge),
                 Why::Damaged | Why::Filter => Ok(None),
                 _ => {
                     self.fail(unreadable);

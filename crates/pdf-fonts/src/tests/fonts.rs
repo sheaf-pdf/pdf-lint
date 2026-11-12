@@ -3,7 +3,7 @@
 //! way a stream's data may come to a font.
 
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1542,11 +1542,11 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
 }
 
 /// A font trusts no `Streams`: what's given past what was asked is too large, the
-/// budget as it was, and what's given within it is charged; past a cap of what gives
-/// it (`Why::Capped`) is too large too, as past the budget is; what takes a password or
-/// a source that failed is the `Err`; and a stream that's damaged, or through a filter
-/// the reader doesn't decode, is none, what the font makes of none told and nothing of
-/// the stream's own.
+/// budget as it was, and what's given within it is charged; what's past a cap of what
+/// gives it (`Why::Capped`), takes a password or is of a source that failed is the
+/// `Err`, the caller's to know, as an object past a cap is; and a stream that's
+/// damaged, or through a filter the reader doesn't decode, is none, what the font makes
+/// of none told and nothing of the stream's own.
 #[test]
 fn a_font_holds_a_streams_to_what_it_asked() {
     let mut pdf = Pdf::default();
@@ -1578,12 +1578,10 @@ fn a_font_holds_a_streams_to_what_it_asked() {
 
     let given = |why: Why| move |_: usize| Err(Unreadable::new(to_unicode, why, "no"));
     let mut budget = 100;
-    for why in [Why::Limit, Why::Capped] {
-        let (font, _) = read(&given(why), &mut budget, &mut Vec::new());
-        assert_eq!(font.err(), Some(Error::TooLarge), "{why:?}");
-        assert_eq!(budget, 100);
-    }
-    for why in [Why::Locked, Why::Source] {
+    let (font, _) = read(&given(Why::Limit), &mut budget, &mut Vec::new());
+    assert_eq!(font.err(), Some(Error::TooLarge));
+    assert_eq!(budget, 100);
+    for why in [Why::Capped, Why::Locked, Why::Source] {
         let mut budget = 100;
         let (font, _) = read(&given(why), &mut budget, &mut Vec::new());
         let unreadable = Unreadable::new(to_unicode, why, "no");
@@ -1597,6 +1595,57 @@ fn a_font_holds_a_streams_to_what_it_asked() {
         assert_eq!(budget, 100);
         let faults: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
         assert_eq!(faults, [Fault::ToUnicode], "{why:?}");
+    }
+}
+
+/// A stream past a cap of what gives it (`Why::Capped`) is what the reading comes to, as
+/// a locked one is: the `Err`, naming it, and the budget as it was. The reading goes on
+/// past it as if it weren't there, telling what it makes of that and what's wrong after
+/// it, and decodes no stream after it: here a `/ToUnicode`, then the CMap, cut, then a
+/// `/W` cut short.
+#[test]
+fn a_font_reads_on_past_a_capped_stream() {
+    let mut pdf = Pdf::default();
+    let to_unicode = b"1 beginbfchar <41> <0041> endbfchar".to_vec();
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, to_unicode));
+    let cmap = b"1 begincidrange <00> <FF> 0 endcidrange".to_vec();
+    let cmap = pdf.add_object(Stream::new(dict! {}, cmap));
+    let w = vec![
+        Object::from(1),
+        Object::from(2),
+        vec![Object::from(600)].into(),
+    ];
+    let cid_font = pdf.add_object(dict! { "Subtype" => "CIDFontType2", "W" => w });
+    let font = dict! {
+        "Subtype" => "Type0", "BaseFont" => "Foo", "Encoding" => cmap,
+        "DescendantFonts" => vec![Object::from(cid_font)], "ToUnicode" => to_unicode,
+    };
+    for why in [Why::Capped, Why::Locked] {
+        let asked = RefCell::new(Vec::new());
+        let objects = WithStreams::new(&pdf, |id, limit| {
+            asked.borrow_mut().push(id);
+            match id == to_unicode {
+                true => Err(Unreadable::new(id, why, "no")),
+                false => pdf.decoded_by(id, limit).map(Cow::into_owned),
+            }
+        });
+        let mut budget = BUDGET;
+        let mut told = Vec::new();
+        let read = Font::read(objects, &font, &Limits::DEFAULT, &mut budget, &mut told);
+        let failed = Unreadable::new(to_unicode, why, "no");
+        assert_eq!(read.err(), Some(Error::Unreadable(failed)), "{why:?}");
+        assert_eq!(budget, BUDGET);
+        assert_eq!(asked.into_inner(), [to_unicode]);
+        let told: Vec<(Option<ObjectId>, Fault)> = told
+            .into_iter()
+            .map(|(place, fault)| (place.object, fault))
+            .collect();
+        let expected = [
+            (None, Fault::ToUnicode),
+            (Some(cmap), Fault::UseCMap),
+            (Some(cid_font), Fault::W),
+        ];
+        assert_eq!(told, expected, "{why:?}");
     }
 }
 
@@ -4601,9 +4650,10 @@ mod reading {
 
     /// A `/ToUnicode` whose data decodes to nothing, or is through a filter the reader
     /// doesn't decode, is read as none, what's told of it the font's own; one listing
-    /// more filters than the reader takes is past a cap, and the font too large.
+    /// more filters than the reader takes is past a cap, the caller's to know, and the
+    /// font read on past it, its budget as it was.
     #[test]
-    fn what_doesn_t_decode_is_none_and_past_a_cap_too_large() {
+    fn what_doesn_t_decode_is_none_and_past_a_cap_the_caller_s() {
         let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
         let to_unicode = [
             dict! { "Filter" => "ASCIIHexDecode" },
@@ -4631,8 +4681,19 @@ mod reading {
                 (100, vec![Fault::ToUnicode, Fault::NoWidths])
             );
         }
-        let (text, budget, _) = read(capped, b"41>");
-        assert_eq!((text, budget), (Err(Error::TooLarge), 100));
+        let (text, budget, told) = read(capped, b"41>");
+        let Err(Error::Unreadable(unreadable)) = text else {
+            panic!("{text:?}");
+        };
+        assert_eq!(
+            (unreadable.id, unreadable.why),
+            (ObjectId::new(2, 0), Why::Capped)
+        );
+        // What it makes of none, after it: as for one that doesn't decode.
+        assert_eq!(
+            (budget, told),
+            (100, vec![Fault::ToUnicode, Fault::NoWidths])
+        );
     }
 
     /// A locked file's font isn't made up, and its budget is as it was; opened, it's

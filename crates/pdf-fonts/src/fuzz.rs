@@ -556,9 +556,17 @@ where
                 // decode, is read as none, and so is an object that's damaged.
                 Ok(_) => assert!(!failed.get() || matches!(why, Why::Damaged | Why::Filter)),
             }
-            // A stream past a cap of what gives it is too large, as one past the budget.
-            if streams && matches!(why, Why::Limit | Why::Capped) && failed.get() {
-                assert_eq!(read.err(), Some(Error::TooLarge));
+            // A stream past the budget is too large, and one past a cap of what gives
+            // it the caller's to know, as an object past one is.
+            if streams && failed.get() {
+                match why {
+                    Why::Limit => assert!(matches!(&read, Err(Error::TooLarge)), "{read:?}"),
+                    Why::Capped => assert!(
+                        matches!(&read, Err(Error::Unreadable(u)) if u.why == why),
+                        "{read:?}"
+                    ),
+                    _ => {}
+                }
             }
         }
     }
