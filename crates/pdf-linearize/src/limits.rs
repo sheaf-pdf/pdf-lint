@@ -5,7 +5,7 @@
 /// refused, or a table, with the error that says which
 /// ([`plan::Error`](crate::plan::Error), [`hint::Error`](crate::hint::Error)),
 /// and a check says what it doesn't judge for it
-/// ([`Grade::Unjudged`](crate::Grade::Unjudged)).
+/// ([`Grade::Unjudged`](crate::check::Grade::Unjudged)).
 /// A caller sets them on a copy of [`Limits::DEFAULT`] (`limits.pages = 1000`,
 /// say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

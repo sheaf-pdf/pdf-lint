@@ -9,7 +9,8 @@ use pdf_linearize::check::{
     Raw, RowEntry, RowFacts, SectionFacts, Sink,
 };
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_linearize::{Kind, Limits, Part, check};
+use pdf_linearize::plan::{Kind, Part};
+use pdf_linearize::{Limits, check};
 
 mod cases;
 use cases::{Written, all, two_pages};

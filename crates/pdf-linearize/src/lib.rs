@@ -6,9 +6,9 @@
 //!   refers to, the pages in order, and what a viewer wants at open, becomes
 //!   Annex F's order, the new numbers and the object streams' members, a
 //!   [`Plan`], with what each page's entry in the hint tables needs. Which
-//!   pages use each object is a [`Use`], and [`group`] says which objects share
-//!   an object stream by their uses; a writer that doesn't linearize has them
-//!   with no plan by [`page_uses`].
+//!   pages use each object is a [`plan::Use`], and [`plan::group()`] says which
+//!   objects share an object stream by their uses; a writer that doesn't
+//!   linearize has them with no plan by [`plan::page_uses`].
 //! - **The bytes around the bodies** ([`assemble`]): a caller writes each of
 //!   the plan's bodies, however it holds them, and gives their lengths. A
 //!   [`Layout`] has the padded dictionary, both cross-reference sections and
@@ -17,10 +17,11 @@
 //!   is here.
 //! - **The hint tables** ([`hint`]): all of F.4's as typed values, written to
 //!   bits and read back, [`hint::tables`] reading any bytes under a cap.
-//! - **The check** ([`check()`]): the [`Facts`] of a file as written, as any
-//!   model's reader gives them, held against each other, to a [`Verdict`] and a
-//!   [`Finding`] for each thing wrong, by the clause it departs from and a
-//!   [`Grade`], or for a part the reader didn't read, that it isn't judged.
+//! - **The check** ([`check()`]): the [`check::Facts`] of a file as written, as
+//!   any model's reader gives them, held against each other, to a
+//!   [`check::Verdict`] and a [`check::Finding`] for each thing wrong, by the
+//!   clause it departs from and a [`check::Grade`], or for a part the reader
+//!   didn't read, that it isn't judged.
 #![cfg_attr(
     feature = "family",
     doc = "- **The family's documents** ([`family`], a default feature): a document of"
@@ -45,14 +46,11 @@
 //! numbers, never a byte of a file; an object, a page, a table's entry and a
 //! finding have none. Without it, none is compiled.
 
-pub use check::{Facts, Finding, Grade, Sink, Verdict, check};
-pub use layout::{Encoded, Layout, Piece, Stream, StreamKind, assemble};
+pub use check::check;
+pub use layout::{Layout, assemble};
 pub use limits::Limits;
 pub use pdf_objects;
-pub use plan::{
-    Container, FileGroup, FirstPage, Graph, Group, Kind, MEMBERS, Node, Page, Part, Plan, Use,
-    What, Write, group, page_uses, plan,
-};
+pub use plan::{Graph, Plan, plan};
 #[cfg(feature = "family")]
 pub use {pdf_semantics, pdf_structure};
 

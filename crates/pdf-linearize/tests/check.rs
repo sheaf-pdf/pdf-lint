@@ -8,9 +8,9 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pdf_linearize::check::{Attribute, DictKey, Facts, HintData, Unread};
+use pdf_linearize::check::{Attribute, DictKey, Facts, Finding, Grade, HintData, Unread, Verdict};
 use pdf_linearize::family::{self, Options};
-use pdf_linearize::{Finding, Grade, Limits, Verdict, hint, plan};
+use pdf_linearize::{Limits, hint, plan};
 use pdf_structure::XrefKind;
 use pdf_structure::pdf_crypt::Password;
 use pdf_structure::read::{self, ByteSource, Reading, WithReading, XrefEntry};

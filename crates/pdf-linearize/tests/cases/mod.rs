@@ -7,11 +7,10 @@
 
 use std::convert::Infallible;
 
-use pdf_linearize::layout::Options;
+use pdf_linearize::layout::{Encoded, Options, Piece, Stream};
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_linearize::{
-    Encoded, Graph, Group, Kind, Layout, Limits, Page, Piece, Plan, Stream, What, assemble, plan,
-};
+use pdf_linearize::plan::{Group, Kind, Page, What};
+use pdf_linearize::{Graph, Layout, Limits, Plan, assemble, plan};
 
 /// One object as it's written by hand. In `text`, `{5}` is a reference to object 5
 /// that a walk goes into, and `{!5}` one that it doesn't: a `/Parent`, a `/Thumb`.

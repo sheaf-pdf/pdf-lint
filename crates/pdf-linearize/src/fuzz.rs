@@ -18,10 +18,10 @@ use crate::check::{
 use crate::hint::{self, EmbeddedFiles, Extended, Generic, HintKeys, PageOffsets};
 use crate::hint::{SharedObjects, Thumbnails};
 use crate::layout::{self, Encoded, Layout, Options, Piece, Stream, StreamKind, assemble};
-use crate::plan::{Error, Group, Kind, Page, Part, Plan, Use, What, plan};
+use crate::plan::{Error, Group, Kind, MEMBERS, Page, Part, Plan, Use, What, Write, plan};
 use pdf_objects::ObjectId;
 
-use crate::{Graph, Limits, MEMBERS};
+use crate::{Graph, Limits};
 
 /// The most objects an input describes, past what two object streams hold.
 const OBJECTS: usize = 600;
@@ -398,7 +398,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
 
     // What's late is after the rest of its page's, its page object first.
     for page in 0..plan.page_count() {
-        let late = |write: &crate::Write| match write.what {
+        let late = |write: &Write| match write.what {
             What::Object(id) => plain.objects[&id].late,
             What::Container(_) => false,
         };
@@ -1068,7 +1068,7 @@ pub fn tables(data: &[u8]) {
     );
 }
 
-/// Where [`group`](crate::group) puts what's `used` so among the members of an
+/// Where [`group`](crate::plan::group()) puts what's `used` so among the members of an
 /// object stream: by page, then by number.
 fn rank(used: Use) -> (u32, u32) {
     match used {

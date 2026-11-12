@@ -7,7 +7,7 @@
 //!
 //! PDFium's answer starts: whether it takes the file as linearized, then, where a
 //! document opens, its count of pages and its first page. Here those are the
-//! [`Verdict`](pdf_linearize::Verdict)'s `linearized`, and what the dictionary says.
+//! [`Verdict`](pdf_linearize::check::Verdict)'s `linearized`, and what the dictionary says.
 //! What it took for each page, it took by the hint tables, so where the check says a
 //! file holds, what the page table has a page taking covers what PDFium asked for it.
 
@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_linearize::check::{Facts, HintData, Raw, Unread};
+use pdf_linearize::check::{Facts, Finding, HintData, Raw, Unread, Verdict};
 use pdf_linearize::hint::{self, HintKeys};
-use pdf_linearize::{Finding, Limits, check, family};
+use pdf_linearize::{Limits, check, family};
 use pdf_structure::pdf_crypt::Password;
 use pdf_structure::read::{Options, Reading};
 
@@ -65,7 +65,7 @@ fn case(name: &str) -> (Vec<u8>, Option<String>) {
 }
 
 /// What the check says of the case, and its findings.
-fn checked(name: &str) -> (Facts, pdf_linearize::Verdict, Vec<Finding>) {
+fn checked(name: &str) -> (Facts, Verdict, Vec<Finding>) {
     let (bytes, password) = case(name);
     let given = password.as_deref().map(Password);
     let given: Vec<Password> = given.into_iter().collect();

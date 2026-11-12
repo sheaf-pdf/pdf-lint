@@ -28,11 +28,10 @@ Caps are one value, `Limits`, on the numbers a file uses, its pages, the shared 
 ## An example
 
 ```rust
-use pdf_linearize::layout::Options;
+use pdf_linearize::layout::{Encoded, Options, Piece, Stream};
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_linearize::{
-    Encoded, Graph, Kind, Limits, Page, Part, Piece, Stream, What, assemble, hint, plan,
-};
+use pdf_linearize::plan::{Kind, Page, Part, What};
+use pdf_linearize::{Graph, Limits, assemble, hint, plan};
 
 // A catalog, a tree node and two pages, which share a font.
 let mut graph = Graph::new(ObjectId::new(1, 0), Kind::Table);
@@ -91,9 +90,10 @@ assert_eq!(tables.pages.pages[1].shared, [(1, 0)]);
 And from a file's bytes, with `family`:
 
 ```rust
+use pdf_linearize::Limits;
+use pdf_linearize::check::Finding;
 use pdf_linearize::family::{Options, check, linearize_bytes};
 use pdf_linearize::pdf_structure::{Reading, XrefKind, read};
-use pdf_linearize::{Finding, Limits};
 
 let mut file = b"%PDF-1.7\n".to_vec();
 let mut rows = Vec::new();

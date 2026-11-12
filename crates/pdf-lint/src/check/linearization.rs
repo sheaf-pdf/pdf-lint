@@ -57,9 +57,9 @@
 
 use std::collections::HashMap;
 
-use pdf_linearize::check::{Facts, Grade, Place, Raw, Unread};
+use pdf_linearize::Limits;
+use pdf_linearize::check::{Facts, Finding as Fault, Grade, Place, Raw, Sink, Unread, Verdict};
 use pdf_linearize::hint::located;
-use pdf_linearize::{Finding as Fault, Limits, Verdict};
 
 use super::content::times;
 use super::kept::{Kept, Where};
@@ -413,7 +413,7 @@ struct Faults<'a> {
     object: ObjectId,
 }
 
-impl pdf_linearize::Sink for Faults<'_> {
+impl Sink for Faults<'_> {
     fn finding(&mut self, finding: Fault) {
         let at = self.places.at(self.places.of(&finding));
         let at = Where {

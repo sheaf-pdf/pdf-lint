@@ -4,10 +4,11 @@
 //! from the same walk over a model that shares nothing with it.
 
 use lopdf::{Document, Object as LopdfObject, dictionary};
+use pdf_linearize::Limits;
+use pdf_linearize::check::Verdict;
 use pdf_linearize::family::{self, Options};
 use pdf_linearize::pdf_objects;
 use pdf_linearize::plan::{self, plan};
-use pdf_linearize::{Limits, Verdict};
 use pdf_linearize_lopdf::{self as adapter, Error, PageTree};
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_structure::Source as _;

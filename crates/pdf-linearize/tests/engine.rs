@@ -5,11 +5,10 @@
 use std::convert::Infallible;
 
 use pdf_linearize::hint::{self, Tables, located};
-use pdf_linearize::layout::{Error, Options};
+use pdf_linearize::layout::{Encoded, Error, Options, Piece, Stream, StreamKind};
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_linearize::{
-    Encoded, Graph, Group, Kind, Limits, Page, Part, Stream, StreamKind, What, assemble, plan,
-};
+use pdf_linearize::plan::{Group, Kind, Page, Part, What};
+use pdf_linearize::{Graph, Limits, assemble, plan};
 
 mod cases;
 use cases::{
@@ -450,8 +449,8 @@ fn the_pieces_are_the_file_in_order() {
         let mut bodies = 0;
         for piece in written.layout.pieces() {
             counted += match piece {
-                pdf_linearize::Piece::Bytes(part) => part.len() as u64,
-                pdf_linearize::Piece::Body(at) => {
+                Piece::Bytes(part) => part.len() as u64,
+                Piece::Body(at) => {
                     assert_eq!(at, bodies, "{name}");
                     bodies += 1;
                     written.lengths[at]
