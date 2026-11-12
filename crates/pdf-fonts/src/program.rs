@@ -141,7 +141,8 @@ impl Face {
     /// program is read here, once.
     pub(crate) fn open(mut data: Vec<u8>, named: &[u8], limits: &Limits) -> Result<Face, Refusal> {
         use Refusal::Malformed;
-        // FreeType takes this tag for TrueType's (`tt_face_init`), which read-fonts doesn't.
+        // FreeType takes this tag for TrueType's (`tt_face_init`), which read-fonts
+        // doesn't.
         if data.starts_with(&[0, 2, 0, 0]) {
             data[1] = 1;
         }
@@ -513,8 +514,9 @@ fn normalize(value: i64, upem: u16) -> i32 {
 /// 1 font, plain or PFB; else bare CFF. None for none of them.
 fn format(data: &[u8]) -> Option<Format> {
     if let Some(font) = sfnt(data) {
-        // By its tag, whatever tables it has: `OTTO` asks for a CFF (`cff_face_init`), and
-        // any other that TrueType's reader takes for `glyf` and `loca` (`tt_face_init`).
+        // By its tag, whatever tables it has: `OTTO` asks for a CFF (`cff_face_init`),
+        // and any other that TrueType's reader takes for `glyf` and `loca`
+        // (`tt_face_init`).
         if font.table_directory.sfnt_version() != CFF_SFNT_VERSION {
             return (font.glyf().is_ok() && font.loca(None).is_ok()).then_some(Format::Glyf);
         }
@@ -753,8 +755,9 @@ fn composite_glyphs(
             }
             Some(drawn)
         }
-        // What doesn't parse, contours and no points among it, is counted a point it can't
-        // draw, so a composite of it and empty glyphs isn't taken for one that draws nothing.
+        // What doesn't parse, contours and no points among it, is counted a point it
+        // can't draw, so a composite of it and empty glyphs isn't taken for one that
+        // draws nothing.
         Ok(Some(Glyph::Simple(simple))) => match simple.num_points() as u64 {
             0 if simple.number_of_contours() != 0 => Some((1, 1)),
             points => Some((1, points)),

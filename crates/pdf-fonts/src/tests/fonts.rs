@@ -1250,7 +1250,159 @@ fn fonts_are_send_and_sync() {
     held::<Arc<Font>>();
     held::<Fonts>();
     held::<FontScope<'_>>();
+    held::<Codes<'_>>();
     held::<Error>();
+}
+
+/// Each kind of codes, walked over strings of bytes that lead and that don't, every
+/// prefix and suffix of them: by `next` and by `fold` alike, each code a byte to four of
+/// the string, from its start to its end in order; at every step its `size_hint` holds
+/// what's left, exactly where each code takes as many bytes; and at the end, nothing,
+/// again.
+#[test]
+fn codes_walk_alike_within_their_hints() {
+    let mut pdf = Pdf::default();
+    let embedded = |pdf: &mut Pdf, space: &str| {
+        let program = format!("begincmap {space} endcmap");
+        let id = pdf.add_object(Stream::new(dict! {}, program.into_bytes()));
+        let font = type0(pdf, id.into(), dict! {});
+        font_of(pdf, font)
+    };
+    let space = "3 begincodespacerange <00> <3F> <8000> <BFFF> <C0000000> <FFFFFFFF> \
+                 endcodespacerange";
+    let ranged = {
+        let to_unicode = format!("begincmap {space} endcmap");
+        let to_unicode = pdf.add_object(Stream::new(dict! {}, to_unicode.into_bytes()));
+        let mut font = type0(&mut pdf, Object::from(7), dict! {});
+        font.set("ToUnicode", to_unicode);
+        font_of(&pdf, font)
+    };
+    let named = |pdf: &mut Pdf, name: &str| {
+        let font = type0(pdf, name.into(), dict! {});
+        font_of(pdf, font)
+    };
+    let not_a_name = type0(&mut pdf, Object::from(7), dict! {});
+    let not_a_name = font_of(&pdf, not_a_name);
+    // Each font, and whether each of its codes takes as many bytes, but the last.
+    let fonts = [
+        (
+            "simple",
+            font_of(&pdf, dict! { "Subtype" => "TrueType" }),
+            true,
+        ),
+        ("identity", named(&mut pdf, "Identity-H"), true),
+        (
+            "one byte",
+            embedded(
+                &mut pdf,
+                "1 begincodespacerange <00> <FF> endcodespacerange",
+            ),
+            true,
+        ),
+        (
+            "two bytes",
+            embedded(
+                &mut pdf,
+                "1 begincodespacerange <0000> <FFFF> endcodespacerange",
+            ),
+            true,
+        ),
+        ("mixed", embedded(&mut pdf, space), false),
+        ("no codespace", embedded(&mut pdf, ""), true),
+        // With the feature, codes by PDFium's scheme: a byte or two, and two bytes
+        // each; without, the build hasn't them, and they're split as unknown.
+        (
+            "leading",
+            named(&mut pdf, "90ms-RKSJ-H"),
+            !cfg!(feature = "predefined-cmaps"),
+        ),
+        ("unicode", named(&mut pdf, "UniJIS-UCS2-H"), true),
+        ("unknown", named(&mut pdf, "Adobe-Korea1-2"), true),
+        ("not a name", not_a_name, true),
+        ("by /ToUnicode", ranged, false),
+    ];
+    let bytes = b"\x41\x81\x40\xc3\x20\x00\xff\xe0\x7f\x82\x9f\xfc\x3f\xc0\x00\x00";
+    let strings = (0..=bytes.len()).flat_map(|i| [&bytes[..i], &bytes[i..]]);
+    for s in strings {
+        for (kind, font, exact) in &fonts {
+            let mut walk = font.codes(s);
+            let mut by_next = Vec::new();
+            loop {
+                let left = walk.clone().count();
+                let hint = walk.size_hint();
+                assert!(
+                    hint.0 <= left && hint.1.is_some_and(|most| left <= most),
+                    "{kind}"
+                );
+                if *exact {
+                    assert_eq!(hint, (left, Some(left)), "{kind}: {s:?}");
+                }
+                let Some(code) = walk.next() else {
+                    break;
+                };
+                by_next.push(code);
+            }
+            assert_eq!(
+                (walk.next(), walk.size_hint()),
+                (None, (0, Some(0))),
+                "{kind}"
+            );
+            let by_fold = font.codes(s).fold(Vec::new(), |mut codes, code| {
+                codes.push(code);
+                codes
+            });
+            assert_eq!(by_next, by_fold, "{kind}: {s:?}");
+            let mut at = 0;
+            for (range, _) in &by_next {
+                assert!(
+                    range.start == at && (1..=4).contains(&range.len()),
+                    "{kind}: {s:?}"
+                );
+                at = range.end;
+            }
+            assert_eq!(at, s.len(), "{kind}: {s:?}");
+        }
+    }
+}
+
+/// A font's `Debug` says what it is and how much it holds, never a file's text: a
+/// font whose `/ToUnicode` maps a code to a marker, and whose `/Differences` names a
+/// glyph that's the marker's text, prints neither, nor the glyph's name; and its codes
+/// print where they are, not the string.
+#[test]
+fn a_font_s_debug_holds_no_text_of_its_file() {
+    let mut pdf = Pdf::default();
+    let to_unicode = b"1 begincodespacerange <00> <FF> endcodespacerange \
+        1 beginbfchar <42> <0051005A00580051> endbfchar";
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, to_unicode.to_vec()));
+    let font = font_of(
+        &pdf,
+        dict! {
+            "Subtype" => "TrueType", "BaseFont" => "Foo", "ToUnicode" => to_unicode,
+            "Encoding" => dict! {
+                "Differences" => vec![65.into(), Object::from("uni0051005A00580051")],
+            },
+        },
+    );
+    assert_eq!(font.code_text(0x42).as_deref(), Some("QZXQ"));
+    assert_eq!(font.text(b"A").as_deref(), Some("QZXQ"));
+    let printed = format!("{font:?}");
+    // The marker as text, as its name's, and as the UTF-16 units a CMap holds it in.
+    for marker in ["QZXQ", "0051", "uni0051", "81, 90, 88, 81"] {
+        assert!(!printed.contains(marker), "{marker} in {printed}");
+    }
+    assert!(printed.contains("kind: TrueType") && printed.contains("to_unicode_ranges: 1"));
+    assert_eq!(
+        format!("{:?}", font.codes(b"QZXQ")),
+        "Codes { at: 0, left: 4 }"
+    );
+    let fonts = Fonts::default();
+    let id = pdf.add_object(dict! {
+        "Subtype" => "TrueType", "BaseFont" => "Foo", "ToUnicode" => to_unicode,
+    });
+    let got = fonts.get(&pdf, &Object::from(id), &Limits::DEFAULT, &mut { BUDGET });
+    assert!(got.unwrap().is_some());
+    assert!(!format!("{fonts:?}").contains("QZXQ"));
 }
 
 /// `Tw` is added after a code 32 of a byte, as its CMap sizes it: never in Identity
@@ -3341,7 +3493,7 @@ fn a_cid_font_s_program_is_read_once() {
     let started = std::time::Instant::now();
     assert_eq!(font.char_box(2), Some(rect(0.0, 0.0, 600.0, 761.0)));
     for cid in 0..2000 {
-        font.char_box(cid);
+        let _ = font.char_box(cid);
     }
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }
@@ -3695,8 +3847,8 @@ fn a_program_says_the_text_its_encoding_leaves_to_it() {
     assert_eq!(symbol.char_box(0x41), Some(rect(0.0, 0.0, 600.0, 750.0)));
 }
 
-/// A CID-keyed CFF's glyph for a CID is its charset's: the lowest, of a CID it gives twice,
-/// as FreeType takes it; one it doesn't give draws nothing.
+/// A CID-keyed CFF's glyph for a CID is its charset's: the lowest, of a CID it gives
+/// twice, as FreeType takes it; one it doesn't give draws nothing.
 #[cfg(feature = "programs")]
 #[test]
 fn a_cid_keyed_cff_s_glyphs_are_its_charset_s() {
@@ -3840,7 +3992,8 @@ fn a_lower_case_with_no_glyph_takes_its_capital_s() {
 }
 
 /// Each of a program's bounds is what's in `Limits`: under smaller ones, what's past them
-/// is unknown; and a Type 1 program past `type1_work` is refused before read-fonts has it.
+/// is unknown; and a Type 1 program past `type1_work` is refused before read-fonts has
+/// it.
 #[cfg(feature = "programs")]
 #[test]
 fn a_program_s_bounds_are_the_limits() {
@@ -4118,8 +4271,8 @@ fn a_loca_entry_past_its_table_charges_nothing() {
     }
 }
 
-/// A composite of itself ends at any depth a `Limits` can say, 255 among them: past it its
-/// box is unknown.
+/// A composite of itself ends at any depth a `Limits` can say, 255 among them: past it
+/// its box is unknown.
 #[cfg(feature = "programs")]
 #[test]
 fn a_composite_of_itself_ends_at_any_depth() {
@@ -4145,8 +4298,8 @@ fn a_composite_of_itself_ends_at_any_depth() {
 }
 
 /// A glyph past the program's fails as FreeType fails it, where nothing's a program's
-/// empty glyph: PDFium's box of no glyph, for a code made a glyph where the program has no
-/// charmap.
+/// empty glyph: PDFium's box of no glyph, for a code made a glyph where the program has
+/// no charmap.
 #[cfg(feature = "programs")]
 #[test]
 fn a_glyph_past_the_program_is_none() {
@@ -4216,7 +4369,8 @@ fn what_skrifa_reads_otherwise_is_unknown() {
         p[cmap + 2..cmap + 4].copy_from_slice(&[1, 1]);
     };
     assert_eq!(patched(&records), (true, None, None));
-    // A composite of an empty glyph draws nothing, as an empty glyph does, and isn't unknown.
+    // A composite of an empty glyph draws nothing, as an empty glyph does, and isn't
+    // unknown.
     let mut program = truetype_program();
     let (glyf, len) = sfnt_table(&program, b"glyf");
     program[glyf + len - 7] = 3;
@@ -4297,8 +4451,8 @@ fn a_cmap_s_ranges_past_16_bits_are_apart() {
     assert_eq!(font.cid(0x4_8000), Some(0));
 }
 
-/// Whether PDFium loads a font is said wherever it's read, as what's told says, and through
-/// `Fonts`, which tells nothing.
+/// Whether PDFium loads a font is said wherever it's read, as what's told says, and
+/// through `Fonts`, which tells nothing.
 #[test]
 fn whether_a_font_is_loaded_is_said() {
     let mut pdf = Pdf::default();
@@ -4476,8 +4630,8 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     );
 }
 
-/// What reads a file implements `Streams` on itself and `Resolve` on a reference to it, as
-/// `Resolve` needs to give what it holds, and a font is read over the reference.
+/// What reads a file implements `Streams` on itself and `Resolve` on a reference to it,
+/// as `Resolve` needs to give what it holds, and a font is read over the reference.
 #[test]
 fn streams_go_on_the_type_and_a_font_is_read_over_a_reference() {
     struct Source {
@@ -4559,7 +4713,8 @@ fn programs_folder() -> std::path::PathBuf {
 }
 
 /// An OpenType font's CFF names its glyphs, whatever its `post` says or names, and draws
-/// them where its Unicode charmap has none of them (`cff_face_init`, `cff_get_name_index`).
+/// them where its Unicode charmap has none of them (`cff_face_init`,
+/// `cff_get_name_index`).
 #[cfg(feature = "programs")]
 #[test]
 fn an_opentype_font_s_names_are_its_cff_s() {
@@ -4591,8 +4746,9 @@ fn an_opentype_font_s_names_are_its_cff_s() {
     }
 }
 
-/// An OpenType font's Unicode charmap where it has no `cmap`: of its `post`'s names, where
-/// they're the SFNT's to give, so a code draws what those name, or else of its CFF's.
+/// An OpenType font's Unicode charmap where it has no `cmap`: of its `post`'s names,
+/// where they're the SFNT's to give, so a code draws what those name, or else of its
+/// CFF's.
 #[cfg(feature = "programs")]
 #[test]
 fn an_opentype_font_with_no_cmap_has_one_of_its_names() {
@@ -4647,8 +4803,8 @@ fn an_opentype_font_s_cids_are_its_glyphs() {
     assert_eq!(boxes(cid_cff_program()), [0.0, 0.0, 761.0].map(Some));
 }
 
-/// An SFNT's format is its tag's, as FreeType's readers take them, whatever tables it has:
-/// a CFF under TrueType's tags, or a TrueType under `OTTO`, reads as no program.
+/// An SFNT's format is its tag's, as FreeType's readers take them, whatever tables it
+/// has: a CFF under TrueType's tags, or a TrueType under `OTTO`, reads as no program.
 #[cfg(feature = "programs")]
 #[test]
 fn an_sfnt_s_format_is_its_tag_s() {

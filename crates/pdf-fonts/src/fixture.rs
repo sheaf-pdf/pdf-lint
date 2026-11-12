@@ -122,17 +122,18 @@ fn post_2() -> Vec<u8> {
     .concat()
 }
 
-/// What an OpenType program built by hand is told by: whether its `post` names its glyphs,
-/// the other way about from its CFF, or names none, and whether it has its `cmap`.
+/// What an OpenType program built by hand is told by: whether its `post` names its
+/// glyphs, the other way about from its CFF, or names none, and whether it has its
+/// `cmap`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenType {
     pub post_names: bool,
     pub cmap: bool,
 }
 
-/// An OpenType program of [`cff_program`]'s glyphs, by its charset's names (`post` 3 where
-/// `post_names` is false, as most have) and its standard encoding, its `cmap` (3,1) mapping
-/// only `A`.
+/// An OpenType program of [`cff_program`]'s glyphs, by its charset's names (`post` 3
+/// where `post_names` is false, as most have) and its standard encoding, its `cmap` (3,1)
+/// mapping only `A`.
 pub fn opentype_program(of: OpenType) -> Vec<u8> {
     opentype(cff_program(), of)
 }
@@ -303,7 +304,8 @@ fn cff_g() -> Vec<u8> {
 }
 
 /// A CID-keyed CFF (`/FontFile3 /CIDFontType0C`) of 1000 units an em: glyph 0 `.notdef`,
-/// empty, glyph 1 `A` and glyph 2 `g`, its charset giving both CID 5; glyph 3 `A` as CID 7.
+/// empty, glyph 1 `A` and glyph 2 `g`, its charset giving both CID 5; glyph 3 `A` as
+/// CID 7.
 pub fn cid_cff_program() -> Vec<u8> {
     cid_cff_with(None, None)
 }
@@ -708,8 +710,8 @@ pub fn type1_empty_glyph() -> Vec<u8> {
     [cs(&[0, 500]), vec![13, 14]].concat()
 }
 
-/// A Type 1 program of `n` glyphs, each named by `name`'s number, and an `/Encoding` of `n`
-/// names, none of them a glyph's, each of which read-fonts looks for among them all.
+/// A Type 1 program of `n` glyphs, each named by `name`'s number, and an `/Encoding` of
+/// `n` names, none of them a glyph's, each of which read-fonts looks for among them all.
 pub fn type1_lookups_program(n: usize) -> Vec<u8> {
     let names: Vec<String> = (0..n).map(|g| format!("g{g}")).collect();
     let empty = type1_empty_glyph();

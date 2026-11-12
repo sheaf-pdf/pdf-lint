@@ -9,7 +9,9 @@ use crate::afm::Afm;
 use crate::encoding::Encoding;
 use crate::font::{FontMetrics, Rect};
 
-/// A standard 14 font.
+/// A standard 14 font. Exhaustive on purpose: the standard's 14 are fixed (ISO 32000-2,
+/// 9.6.2.2), and a caller matches every one; [`Std14::ALL`] lists them, in the order
+/// of their discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Std14 {
     /// `Courier`.
@@ -48,7 +50,7 @@ impl Std14 {
     /// from here, with each font's own copyright (`Std14::afm_text`).
     pub const NOTICE: &'static str = "This file and the 14 PostScript(R) AFM files it accompanies may be used, copied, and distributed for any purpose and without charge, with or without modification, provided that all copyright notices are retained; that the AFM files are not distributed without this file; that all modifications to this file or any of the AFM files are prominently noted in the modified file(s); and that this paragraph is not modified. Adobe Systems has no responsibility or obligation to support the use of the AFM files.";
 
-    /// All 14.
+    /// All 14, in the order of their discriminants: `Std14::ALL[f as usize]` is `f`.
     pub const ALL: [Std14; 14] = [
         Std14::Courier,
         Std14::CourierBold,
@@ -67,7 +69,8 @@ impl Std14 {
     ];
 
     /// Its `/BaseFont`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Std14::Courier => "Courier",
             Std14::CourierBold => "Courier-Bold",
@@ -91,6 +94,7 @@ impl Std14 {
     /// mapper): after a subset's tag (`ABCDEF+`), one of the 14 names or an
     /// alternate PDFium takes for one (`Arial,Bold`, `TimesNewRomanPSMT`), in
     /// any case. None for any other name.
+    #[must_use]
     pub fn named(base_font: &[u8]) -> Option<Std14> {
         let name = match base_font.iter().position(|&c| c == b'+') {
             Some(6) => &base_font[7..],
@@ -104,6 +108,7 @@ impl Std14 {
     /// How far its glyphs reach, per 1000 em, from its AFM: its
     /// `Ascender` and `Descender`, or, for Symbol and ZapfDingbats, which
     /// give neither, its `FontBBox`'s top and bottom; and its `FontBBox`.
+    #[must_use]
     pub fn metrics(self) -> FontMetrics {
         let afm = self.afm();
         let [left, bottom, right, top] = afm.bbox.map(f32::from);
@@ -116,12 +121,14 @@ impl Std14 {
 
     /// Glyph `name`'s advance, per 1000 em, from its AFM; None for a glyph
     /// it hasn't.
+    #[must_use]
     pub fn glyph_width(self, name: &str) -> Option<f32> {
         self.afm().width(name).map(f32::from)
     }
 
     /// The box glyph `name`'s outline fits in, from its origin, per 1000
     /// em, from its AFM; None for a glyph it hasn't.
+    #[must_use]
     pub fn glyph_box(self, name: &str) -> Option<Rect> {
         let [left, bottom, right, top] = self.afm().glyph_box(name)?.map(f32::from);
         Some(Rect::new(left, bottom, right, top))
@@ -137,6 +144,7 @@ impl Std14 {
     /// Symbol's and ZapfDingbats' are Adobe's. The Euro isn't among these, though
     /// its faces draw it at widths of their own: Adobe's metrics give it no box,
     /// which says the same of it.
+    #[must_use]
     pub fn drawn_otherwise(self, name: &str) -> bool {
         let own: &[&str] = match self {
             Std14::Helvetica => &["guillemotleft", "guillemotright", "guilsinglright"],
@@ -170,7 +178,8 @@ impl Std14 {
 
     /// Its AFM, as Adobe wrote it but for what its second line says is removed,
     /// with Adobe's notice ([`Std14::NOTICE`]) on its third.
-    pub fn afm_text(self) -> &'static str {
+    #[must_use]
+    pub const fn afm_text(self) -> &'static str {
         match self {
             Std14::Courier => include_str!("../assets/afm/Courier.afm"),
             Std14::CourierBold => include_str!("../assets/afm/Courier-Bold.afm"),

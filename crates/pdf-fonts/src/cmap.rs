@@ -92,6 +92,11 @@ impl<T: Copy> Ranges<T> {
     pub(crate) fn values(&self) -> impl Iterator<Item = &T> {
         self.pieces.iter().map(|(_, value)| value)
     }
+
+    /// How many pieces there are.
+    pub(crate) fn len(&self) -> usize {
+        self.pieces.len()
+    }
 }
 
 /// An embedded CMap: its codespace, how it splits a string into codes, each code's
@@ -233,6 +238,11 @@ impl CidMap {
         self.base?.lookup_cid_code(code, len)
     }
 
+    /// How many ranges of codes it maps to CIDs, for a font's `Debug`.
+    pub(crate) fn ranges(&self) -> usize {
+        self.cids.len() + self.beyond.len()
+    }
+
     /// The code `rest` starts with, by its scheme, and how many bytes it takes of
     /// it.
     pub(crate) fn next(&self, rest: &[u8]) -> (usize, u32) {
@@ -301,9 +311,9 @@ impl CidMap {
     }
 
     /// The predefined CMap `name` used by the stream `by`, under what's mapped after it:
-    /// Identity's codespace and CIDs; another's CIDs, where the build has it, for the codes
-    /// nothing else maps. PDFium maps those to CID 0, so either is guessed (`unknown`),
-    /// as one the build hasn't is.
+    /// Identity's codespace and CIDs; another's CIDs, where the build has it, for the
+    /// codes nothing else maps. PDFium maps those to CID 0, so either is guessed
+    /// (`unknown`), as one the build hasn't is.
     fn uses<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
         &mut self,
         reader: &Reader<'_, O, S>,
@@ -502,9 +512,9 @@ impl CMap {
     /// A `bfrange` block's mappings, where it holds `count` of them and each is one.
     /// PDFium's last code of a range is its first's but for the low byte, and an array
     /// has a destination for each of those. Here a range is read to its last code where
-    /// that's past it, on purpose: writers map `<0000> <FFFF> <0000>`, where PDFium's text
-    /// is the same, by a code's own, and subsets' ranges cross a byte, whose blocks it
-    /// loses. An array shorter than that is read by the low byte, as PDFium's.
+    /// that's past it, on purpose: writers map `<0000> <FFFF> <0000>`, where PDFium's
+    /// text is the same, by a code's own, and subsets' ranges cross a byte, whose blocks
+    /// it loses. An array shorter than that is read by the low byte, as PDFium's.
     fn bfranges(
         &mut self,
         block: &Operation,
@@ -615,6 +625,11 @@ impl CMap {
             return Some(Cow::Owned(text));
         };
         Some(Cow::Owned(decoded(before.iter().copied().chain([last]))))
+    }
+
+    /// How many ranges of codes it maps to text, for a font's `Debug`.
+    pub(crate) fn ranges(&self) -> usize {
+        self.mapped.len()
     }
 
     /// Whether its codespace says how long a code is.

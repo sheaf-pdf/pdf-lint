@@ -376,14 +376,18 @@ pub(crate) fn digest(font: &Font) -> String {
     }
     let mut at = 0;
     let mut split = Vec::new();
+    let (fewest, most) = font.codes(s).size_hint();
     for (range, code) in font.codes(s) {
         assert_eq!(range.start, at);
         assert!(range.end > at && range.end <= s.len(), "{range:?}");
+        assert!(range.len() <= 4, "{range:?}");
         at = range.end;
         out.push_str(&by_code(code));
         split.push((range, code));
     }
     assert_eq!(at, s.len());
+    // Its hint holds how many codes there are.
+    assert!(fewest <= split.len() && most.is_some_and(|most| split.len() <= most));
     assert_eq!(
         font.width_guessed_in(s),
         font.codes(s).any(|(_, code)| font.width_guessed(code))

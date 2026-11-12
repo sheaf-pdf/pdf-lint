@@ -317,7 +317,7 @@ fn glyph_names_read_as_text() {
 fn the_crate_s_names_are_there() {
     #[allow(unused_imports)]
     use crate::{
-        Descendant, Encoding, Error, Fault, Font, FontApprox, FontId, FontKind, FontMetrics,
+        Codes, Descendant, Encoding, Error, Fault, Font, FontApprox, FontId, FontKind, FontMetrics,
         FontProgram, FontScope, Fonts, Limits, Rect, Std14, VerticalMetrics, cp1252, glyph_text,
         name_code_point,
     };
@@ -330,6 +330,44 @@ fn the_crate_s_names_are_there() {
         resolves::<R>();
     }
     let _ = also::<fn(pdf_objects::ObjectId) -> Option<&'static pdf_objects::Object>>;
+}
+
+/// `Std14::ALL` is the 14 in the order of their discriminants, so each is there once,
+/// at its own index.
+#[test]
+fn all_14_are_in_the_order_of_their_discriminants() {
+    for (i, font) in Std14::ALL.into_iter().enumerate() {
+        assert_eq!(font as usize, i, "{font:?}");
+    }
+}
+
+/// What's `const` makes a constant: a rectangle and metrics, whether a font guesses, a
+/// standard font's name, a Windows-1252 character and an encoding by its name.
+#[test]
+fn const_fns_make_constants() {
+    const BOX: Rect = Rect::new(10.0, 5.0, -10.0, -5.0);
+    const METRICS: FontMetrics = FontMetrics::new(800.0, -200.0, Some(BOX));
+    const EXACT: FontApprox = FontApprox {
+        codes: false,
+        widths: false,
+        heights: false,
+        boxes: false,
+    };
+    const WIDTHS: FontApprox = FontApprox {
+        widths: true,
+        ..EXACT
+    };
+    const GUESSED: [bool; 2] = [WIDTHS.any(), EXACT.any()];
+    const NAME: &str = Std14::TimesBoldItalic.name();
+    const EURO: Option<char> = cp1252(0x80);
+    const EMPTY: Option<char> = cp1252(0x81);
+    const WIN_ANSI: Option<Encoding> = Encoding::named(b"WinAnsiEncoding");
+    assert_eq!((BOX.x0, BOX.y0, BOX.x1, BOX.y1), (-10.0, -5.0, 10.0, 5.0));
+    assert_eq!(METRICS.bbox, Some(BOX));
+    assert_eq!(GUESSED, [true, false]);
+    assert_eq!(NAME, "Times-BoldItalic");
+    assert_eq!((EURO, EMPTY), (Some('€'), None));
+    assert_eq!(WIN_ANSI, Some(Encoding::WinAnsi));
 }
 
 /// The README is shown on crates.io and docs.rs, where a path beside the crate
@@ -376,8 +414,8 @@ fn type1_holding(clear: &str) -> Vec<u8> {
 }
 
 /// A Type 1 program's clear text read as read-fonts' parser reads it: by what each of
-/// these holds, it finds `eexec` and the charstrings behind it, or doesn't. Each is what a
-/// parser that reads a procedure by its tokens, or looks past an integer by its tokens,
+/// these holds, it finds `eexec` and the charstrings behind it, or doesn't. Each is what
+/// a parser that reads a procedure by its tokens, or looks past an integer by its tokens,
 /// reads otherwise; `programs` holds it to read-fonts' own reading.
 #[test]
 fn type1_tokens_are_read_as_read_fonts_reads_them() {

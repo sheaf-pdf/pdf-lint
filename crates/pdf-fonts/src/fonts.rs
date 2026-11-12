@@ -57,6 +57,7 @@ impl Fonts {
     /// ([`FontApprox`](crate::FontApprox)). So is the text of a code PDFium's encoding
     /// leaves to a program, by the font's name, as a symbolic font with no `/ToUnicode`
     /// for that code and no encoding of a name comes to.
+    #[must_use]
     pub fn for_text() -> Fonts {
         Fonts {
             for_text: true,
@@ -69,6 +70,12 @@ impl Fonts {
     /// its streams decompress to is charged to `budget` whether it's read now or was
     /// before ([`Font::cost`]), so what it costs is the same whichever page read it
     /// first.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLarge`] where what it costs is past what's left of `budget`, and
+    /// [`Error::Unreadable`] where `font`'s object, or what it reads, doesn't read for a
+    /// reason that's the caller's, as [`Font::read`] says. `budget` is then as it was.
     pub fn get<'o, O>(
         &self,
         objects: O,
@@ -107,6 +114,7 @@ impl Fonts {
 
     /// What PDFium draws text in where the resources have no font by the name `Tf`
     /// gives: its stock Helvetica, in WinAnsiEncoding.
+    #[must_use]
     pub fn stock(&self) -> Arc<Font> {
         let read = || {
             let helvetica: Dict = dict! {
@@ -134,6 +142,7 @@ impl Fonts {
     }
 
     /// The fonts one interpretation of content picks.
+    #[must_use]
     pub fn scope(&self) -> FontScope<'_> {
         FontScope {
             fonts: self,
@@ -178,6 +187,12 @@ impl FontScope<'_> {
     /// such font. What its streams decompress to is charged to `budget` the first
     /// time it's picked, by any name, and a font written in resources as a dictionary
     /// each time it's read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Fonts::get`]'s, and [`Error::Unreadable`] too where `resources`, or its
+    /// `/Font`, doesn't read for a reason that's the caller's. `budget` is then as it
+    /// was.
     pub fn font<'o, O>(
         &mut self,
         objects: O,
@@ -226,6 +241,7 @@ impl FontScope<'_> {
     }
 
     /// PDFium's stock Helvetica ([`Fonts::stock`]), picked.
+    #[must_use]
     pub fn stock(&mut self) -> FontId {
         match self.stock {
             Some(font) => font,
@@ -243,6 +259,7 @@ impl FontScope<'_> {
     ///
     /// Where `font` isn't one of this scope's: another scope's id may panic, or name
     /// another font.
+    #[must_use]
     pub fn get(&self, font: FontId) -> &Font {
         &self.picked[font.0 as usize]
     }

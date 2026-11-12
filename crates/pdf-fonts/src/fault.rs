@@ -17,7 +17,7 @@ use pdf_objects::ObjectId;
 /// on past. Each names its clause, but [`Fault::TooManyCMaps`] and
 /// [`Fault::ProgramCapped`], caps that ISO 32000-2 doesn't set, which say nothing of
 /// the file, and the last, which is of the file rather than its font.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// A `/Subtype` that's no font's (9.5), or no CIDFont's (9.7.4), or none. A
@@ -44,8 +44,8 @@ pub enum Fault {
     /// An `/Encoding` or `/BaseEncoding` that's no base encoding's name, or an
     /// `/Encoding` that's neither that nor a dictionary (9.6.5.1). The font's own
     /// encoding is read. `MacExpertEncoding` is a base encoding, which reads as
-    /// WinAnsiEncoding as PDFium reads it by name, and as `/BaseEncoding` where the program
-    /// is TrueType; anywhere else it's unread.
+    /// WinAnsiEncoding as PDFium reads it by name, and as `/BaseEncoding` where the
+    /// program is TrueType; anywhere else it's unread.
     #[error("an /Encoding that's no encoding")]
     Encoding,
     /// A `/Differences` value that's neither a number nor a name, or a name at a
