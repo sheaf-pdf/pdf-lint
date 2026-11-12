@@ -52,12 +52,13 @@ fmt:
 # it, `simd` and its spans (`tracing`), which nothing else turns on; then
 # pdf-semantics without its clock, as pdf-lint takes it, and with its spans
 # (`tracing`), which nothing else turns on; then pdf-linearize's engine,
-# without its adapter, and with its spans (`tracing`), which nothing else
-# turns on, and the lopdf adapter's library alone, where pdf-linearize is
-# that engine without `family`, which pdf-lint turns on in every workspace
-# build; then pdf-fonts with Adobe's predefined CMaps and its spans
-# (`tracing`), which nothing else turns on, and with no feature at all; then
-# pdf-structure with its spans (`tracing`), which nothing else turns on.
+# without its adapter, and with its spans (`tracing`) and its test writer,
+# which nothing else turns on, and the lopdf adapter's library alone, where
+# pdf-linearize is that engine without `family`, which pdf-lint turns on in
+# every workspace build; then pdf-fonts with Adobe's predefined CMaps and
+# its spans (`tracing`), which nothing else turns on, and with no feature at
+# all; then pdf-structure with its spans (`tracing`), which nothing else
+# turns on.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -68,7 +69,7 @@ clippy:
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-linearize --features tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-linearize --features tracing,insecure-test-writer --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize-lopdf --lib -- -D warnings
     cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
@@ -212,8 +213,9 @@ fixtures: _qpdf
 # fuzzes itself builds them, pdf-lint's among them: the seeds that use the
 # tests' file writer are compiled for the tests alone. Then pdf-crypt,
 # pdf-structure and pdf-linearize alone, without the test writer, which
-# pdf-fixtures turns on in every workspace build: what of their fuzz bodies
-# needs it is compiled with it alone.
+# pdf-fixtures turns on in every workspace build, and pdf-linearize's own
+# feature for it, which fuzz/ turns on: what of their fuzz bodies needs it
+# is compiled with it alone, and what they do without it is linted too.
 fuzzing:
     RUSTFLAGS="--cfg fuzzing" cargo check --locked --manifest-path fuzz/Cargo.toml --target-dir target/fuzzing
     RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --lib --target-dir target/fuzzing -- -D warnings

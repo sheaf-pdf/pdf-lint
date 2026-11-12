@@ -1493,30 +1493,43 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
 /// then, by the input's length, under a new encryption. Where it's written, it
 /// reads linearized by its password, with the same pages, and every object the
 /// plan numbers is the same value at its number under the numbering, a stream's
-/// data the same; on any refusal, `out` as it was. The new encryption's key and
-/// every AES IV are the operating system's, so the bytes written differ from run
-/// to run, and a failure that hangs on them may not come again from its input.
+/// data the same; on any refusal, `out` as it was. It gives each write's `out`,
+/// in the order written.
+///
+/// Built with the test writer (`insecure-test-writer`, which the fuzz target
+/// turns on, and for the crate's tests), the new encryption's key and salts are
+/// drawn from the input's bytes, and every AES IV, the file's own encryption's
+/// too, is derived from its object and data: an input writes the same bytes
+/// each time, so a failure that hangs on them comes again from its input.
+/// Built without it, as a crate that fuzzes itself builds this one under `--cfg
+/// fuzzing`, they're the operating system's, and differ from run to run.
 #[cfg(feature = "family")]
-pub fn over(data: &[u8]) {
+pub fn over(data: &[u8]) -> Vec<Vec<u8>> {
     use pdf_structure::XrefKind;
+    use pdf_structure::pdf_crypt::{Password, Protection};
     use pdf_structure::read::{self, Reading};
     use pdf_structure::write::Encryptor;
 
     use crate::family;
 
     let Ok(reading) = Reading::open(data, &read::Options::DEFAULT) else {
-        return;
+        return Vec::new();
     };
     let Ok(doc) = reading.to_document() else {
-        return;
+        return Vec::new();
     };
-    let own = Encryptor::of(&reading).ok().flatten();
+    let own = Encryptor::of(&reading).ok().flatten().map(derived_ivs);
     let new = data.len().is_multiple_of(8).then(|| {
-        let password = pdf_structure::pdf_crypt::Password(NEW).prepared().ok()?;
-        let mut protection = pdf_structure::pdf_crypt::Protection::new(&password);
+        let password = Password(NEW).prepared().ok()?;
+        let mut protection = Protection::new(&password);
         protection.encrypt_metadata = data.len().is_multiple_of(16);
-        Encryptor::create(&protection).ok()
+        #[cfg(any(test, feature = "insecure-test-writer"))]
+        let new = Encryptor::create_with(&protection, &mut Drawn::over(data));
+        #[cfg(not(any(test, feature = "insecure-test-writer")))]
+        let new = Encryptor::create(&protection);
+        new.ok().map(derived_ivs)
     });
+    let mut written = Vec::new();
     for (kind, stream, pack) in [
         (Kind::Table, XrefKind::Table, false),
         (Kind::Stream, XrefKind::Stream, false),
@@ -1526,15 +1539,84 @@ pub fn over(data: &[u8]) {
         options.kind = stream;
         options.pack = pack;
         options.threads = 1;
-        written_back(&reading, &doc, None, "", kind, &options);
+        written.push(written_back(&reading, &doc, None, "", kind, &options));
         if let Some(own) = &own {
-            written_back(&reading, &doc, Some(own), "", kind, &options);
+            let out = written_back(&reading, &doc, Some(own), "", kind, &options);
+            written.push(out);
         }
         if let Some(Some(new)) = &new {
-            written_back(&reading, &doc, Some(new), NEW, kind, &options);
+            let out = written_back(&reading, &doc, Some(new), NEW, kind, &options);
+            written.push(out);
         }
     }
+    written
 }
+
+/// `encryptor`, its writes' AES IVs derived by the test writer where it's
+/// built (pdf-crypt's `Ivs::derived`), from the object and its data, so that
+/// what [`over`] writes is the input's alone; else as it is, the operating
+/// system's.
+#[cfg(feature = "family")]
+fn derived_ivs(encryptor: pdf_structure::write::Encryptor) -> pdf_structure::write::Encryptor {
+    #[cfg(any(test, feature = "insecure-test-writer"))]
+    let encryptor = encryptor.with_test_ivs(pdf_structure::pdf_crypt::Ivs::derived);
+    encryptor
+}
+
+/// A random number generator for [`over`]'s new encryption alone: the input's
+/// bytes, then a counter's. It's no cryptographic generator, but says it is
+/// (`TryCryptoRng`) so that pdf-crypt's test writer takes it, through
+/// `Encryptor::create_with`, which only a fuzz body and the tests may do: it's
+/// compiled for nothing else, and only with the test writer.
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+struct Drawn<'a> {
+    data: &'a [u8],
+    counter: u8,
+}
+
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+impl Drawn<'_> {
+    /// `data`'s bytes, then a counter's.
+    fn over(data: &[u8]) -> Drawn<'_> {
+        Drawn { data, counter: 0 }
+    }
+}
+
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+impl pdf_structure::pdf_crypt::rand_core::TryRng for Drawn<'_> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        let mut bytes = [0; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        let mut bytes = [0; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+        for byte in dst {
+            *byte = match self.data.split_first() {
+                Some((&first, rest)) => {
+                    self.data = rest;
+                    first
+                }
+                None => {
+                    self.counter = self.counter.wrapping_add(1);
+                    self.counter
+                }
+            };
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+impl pdf_structure::pdf_crypt::rand_core::TryCryptoRng for Drawn<'_> {}
 
 /// The password of what [`over`] writes under a new encryption.
 #[cfg(feature = "family")]
@@ -1542,7 +1624,9 @@ const NEW: &str = "new";
 
 /// What [`over`] holds of `doc`, written under `encryptor` as `options` says,
 /// which `password` opens, or the empty one: among it, that its facts read
-/// whole beside its reading are those of its reading alone.
+/// whole beside its reading are those of its reading alone. It gives `out` as
+/// the write left it: the six bytes it held before, and after them the file,
+/// where one was written.
 #[cfg(feature = "family")]
 fn written_back<S: pdf_structure::ByteSource>(
     reading: &pdf_structure::Reading<S>,
@@ -1551,7 +1635,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     password: &str,
     kind: Kind,
     options: &crate::family::Options<'_>,
-) {
+) -> Vec<u8> {
     use pdf_objects::Value;
     use pdf_objects::pdf_tokenizer::Rules;
     use pdf_semantics::pages::{Inheritable, Origin, pages};
@@ -1565,7 +1649,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     let written = family::linearize(&mut out, doc, encryptor, Some(reading), options);
     let Ok(done) = written else {
         assert_eq!(out, b"before");
-        return;
+        return out;
     };
     assert_eq!(out.len() as u64 - 6, done.layout.len());
     let file = &out[6..];
@@ -1632,6 +1716,7 @@ fn written_back<S: pdf_structure::ByteSource>(
             assert_eq!(before, after, "{id:?}'s data");
         }
     }
+    out
 }
 
 /// Whether `written`, read back, is `value` under `planned`'s numbers: a
@@ -1895,6 +1980,34 @@ mod tests {
                 over(&seed[..cut]);
             }
         }
+    }
+
+    /// What [`over`] writes of an input that encrypts, under the file's own
+    /// AES-128 and under a new encryption, in each kind, is the same bytes each
+    /// time: the test writer draws the new key from the input and derives
+    /// every IV.
+    #[cfg(feature = "family")]
+    #[test]
+    fn what_is_written_of_an_input_is_the_same_bytes_each_time() {
+        let keys = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
+        let key = std::fs::read(keys.join("qpdf-aes-128.pdf")).unwrap();
+        let mut input = encrypted_as(&key, &file_seeds()[0]);
+        // A length a new encryption is drawn for.
+        while !input.len().is_multiple_of(8) {
+            input.push(b'\n');
+        }
+        let written = over(&input);
+        // In the clear, as it's encrypted and under a new encryption, in each
+        // of the three kinds: none refused.
+        assert_eq!(written.len(), 9);
+        for out in &written {
+            assert!(
+                out.starts_with(b"before%PDF-"),
+                "{:?}",
+                &out[..out.len().min(16)]
+            );
+        }
+        assert!(over(&input) == written, "the same input wrote other bytes");
     }
 
     /// Writes [`seeds`] and [`table_seeds`] to the folder

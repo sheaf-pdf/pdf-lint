@@ -39,6 +39,13 @@ zlib-rs = ["pdf-structure?/zlib-rs"]
 # a table's entry and a finding have none. Off by default; without it, none
 # is compiled.
 tracing = ["dep:tracing"]
+# pdf-structure's test writer, with `family`: a new file's encryption from a
+# seeded generator and each write's IVs derived, so that what the fuzz
+# target writes of an input is the same bytes each run and a saved input
+# reruns as it ran. For fuzzing, never for a document's protection; off by
+# default, as pdf-structure's is, and nothing of the crate's API depends on
+# it.
+insecure-test-writer = ["pdf-structure?/insecure-test-writer"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
 # bench mode too, so criterion's options reach them as given.
