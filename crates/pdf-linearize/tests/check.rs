@@ -8,9 +8,9 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pdf_linearize::check::{Attribute, Facts, HintData, Unread};
+use pdf_linearize::check::{Attribute, DictKey, Facts, HintData, Unread};
 use pdf_linearize::family::{self, Options};
-use pdf_linearize::{Finding, Grade, Limits, Verdict};
+use pdf_linearize::{Finding, Grade, Limits, Verdict, hint, plan};
 use pdf_structure::XrefKind;
 use pdf_structure::pdf_crypt::Password;
 use pdf_structure::read::{self, ByteSource, Reading, WithReading, XrefEntry};
@@ -440,6 +440,88 @@ fn sections_past_the_readers_cap_on_how_many_it_reads_arent_judged() {
     assert_eq!(findings, [Finding::SectionsUnread { why }]);
 }
 
+/// Two sections and no hint stream: the first, read first, lists the
+/// dictionary, the catalog, a root node of two pages holding `/Rotate` for
+/// them, and the first page; the main one, by its `/Prev`, the second page.
+fn a_tree_across_the_sections() -> Vec<u8> {
+    let made = |length: usize| {
+        let page = "<< /Type /Page /Parent 3 0 R /MediaBox [0 0 9 9] /Resources << >> >>";
+        let objects = [
+            format!("<< /Linearized 1 /L {length:08} /N 2 /O 4 >>"),
+            "<< /Type /Catalog /Pages 3 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 /Rotate 0 >>".to_string(),
+            page.to_string(),
+            page.to_string(),
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut rows = Vec::new();
+        for (number, object) in (1..).zip(&objects) {
+            rows.push(out.len());
+            out.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
+        }
+        let main = out.len();
+        let row = |at: usize| format!("{at:010} 00000 n \n");
+        out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n5 1\n");
+        out.extend_from_slice(row(rows[4]).as_bytes());
+        out.extend_from_slice(b"trailer\n<< /Size 6 /Root 2 0 R >>\n");
+        let first = out.len();
+        out.extend_from_slice(b"xref\n1 4\n");
+        for &at in &rows[..4] {
+            out.extend_from_slice(row(at).as_bytes());
+        }
+        let trailer = format!("<< /Size 6 /Root 2 0 R /Prev {main} >>");
+        let end = format!("trailer\n{trailer}\nstartxref\n{first}\n%%EOF\n");
+        out.extend_from_slice(end.as_bytes());
+        out
+    };
+    made(made(0).len())
+}
+
+/// A page tree read past where the reader stopped the sections, at its cap on
+/// how many it reads, is read without the page listed past there: neither `/N`
+/// nor which page is first is judged of it, nor a page by its place, and what
+/// its node holds is.
+#[test]
+fn a_page_tree_read_past_where_the_sections_stopped_isnt_counted() {
+    let file = a_tree_across_the_sections();
+    let mut options = read::Options::DEFAULT;
+    let pages = |options: &read::Options<'_>| {
+        let reading = Reading::open(&file[..], options).unwrap();
+        let facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
+        (facts.unread.sections, facts.pages.len())
+    };
+    assert_eq!(pages(&options), (None, 2));
+    let (_, findings) = checked_as(&file, &options);
+    let node = Finding::NodeAttribute {
+        number: 3,
+        attribute: Attribute::Rotate,
+    };
+    assert!(findings.contains(&node), "{findings:?}");
+    assert!(
+        !findings
+            .iter()
+            .any(|f| matches!(f, Finding::PageCount { .. })),
+        "{findings:?}"
+    );
+    options.limits.sections = 1;
+    assert_eq!(pages(&options), (Some(Unread::Capped), 1));
+    let (verdict, findings) = checked_as(&file, &options);
+    // The dictionary's own, as there's no hint stream; the cap; the node.
+    let bad = |key| Finding::BadValue { key };
+    let why = Unread::Capped;
+    assert_eq!(
+        findings,
+        [
+            bad(DictKey::H),
+            bad(DictKey::E),
+            bad(DictKey::T),
+            Finding::SectionsUnread { why },
+            node
+        ]
+    );
+    assert!(verdict.linearized && !verdict.holds);
+}
+
 /// A hint stream through a filter the reader doesn't take, an image's or one
 /// it doesn't know, isn't read, and isn't judged: no key, cap or damage of the
 /// file's is said of it.
@@ -505,6 +587,58 @@ fn what_no_key_opens_isnt_judged() {
         assert!(verdict.linearized && verdict.holds && verdict.hints_read);
         assert_eq!(findings, []);
     }
+}
+
+/// What's past a cap the check reads under, the hint tables past its entries
+/// or pages and the file's graph past a plan's visits, is said, not judged,
+/// and the file holds by the rest; at the cap, it's judged.
+#[test]
+fn what_s_past_the_checks_own_caps_isnt_judged() {
+    let file = laid_out(&plain(), XrefKind::Table, false);
+    let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
+    let under = |limits: &Limits| {
+        let mut findings = Vec::new();
+        let verdict = family::check(&reading, limits, &mut findings).unwrap();
+        assert_eq!(family::check(&reading, limits, &mut ()).unwrap(), verdict);
+        assert!(verdict.linearized && verdict.holds, "{findings:?}");
+        (verdict, findings)
+    };
+    let mut limits = Limits::DEFAULT;
+    limits.hint_entries = 2;
+    let (verdict, findings) = under(&limits);
+    assert!(!verdict.hints_read);
+    let entries = |f: &Finding| {
+        matches!(
+            f,
+            Finding::HintTablesCapped {
+                fault: hint::Error::TooManyEntries { limit: 2, .. }
+            }
+        )
+    };
+    assert!(matches!(&findings[..], [f] if entries(f)), "{findings:?}");
+    let mut limits = Limits::DEFAULT;
+    limits.pages = 2;
+    let (verdict, findings) = under(&limits);
+    assert!(!verdict.hints_read);
+    let fault = hint::Error::TooManyPages { pages: 3, limit: 2 };
+    assert_eq!(findings, [Finding::HintTablesCapped { fault }]);
+    limits.pages = 3;
+    let (verdict, findings) = under(&limits);
+    assert!(verdict.hints_read);
+    assert_eq!(findings, []);
+    let mut limits = Limits::DEFAULT;
+    limits.shared_visits = 1;
+    let (verdict, findings) = under(&limits);
+    assert!(verdict.hints_read);
+    let visits = |f: &Finding| {
+        matches!(
+            f,
+            Finding::GraphCapped {
+                why: plan::Error::TooManyHints { .. }
+            }
+        )
+    };
+    assert!(matches!(&findings[..], [f] if visits(f)), "{findings:?}");
 }
 
 /// A file that says it's linearized, one section and no hint stream, its

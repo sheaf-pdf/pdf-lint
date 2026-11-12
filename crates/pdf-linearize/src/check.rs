@@ -28,15 +28,18 @@
 //! opens, past a cap the reader reads under, or through filters it doesn't
 //! take. Of each, one finding says so ([`Grade::Unjudged`]), and nothing
 //! that depends on it is judged: it isn't the file's fault, and a verdict
-//! holds as far as the rest says. A sink that wants no findings learns of the
-//! hint stream's by `hints_read` alone.
+//! holds as far as the rest says. So is what's past a cap the check itself
+//! reads under ([`Limits`]): hint tables past its pages or entries, the file's
+//! graph past what a plan is made under. A sink that wants no findings learns
+//! of the hint stream's, and its tables', by `hints_read` alone.
 //!
 //! # A caller that ignores findings
 //!
 //! The [`Verdict`] is the same whatever the sink. A sink that doesn't want
 //! findings, `()`, is told none, and once there's an error nothing more is
 //! looked at, as nothing can change the verdict by then. What it still pays for
-//! is the [`Facts`] and the hint tables' reading, which `hints_read` needs.
+//! is the [`Facts`] and the hint tables' reading, which `hints_read` needs, and
+//! not the plan of the file's graph, as nothing said of it moves the verdict.
 //!
 //! # What it holds a position to
 //!

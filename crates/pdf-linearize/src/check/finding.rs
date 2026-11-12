@@ -17,8 +17,9 @@ pub enum Grade {
     /// do it.
     Departure,
     /// Not judged: a part of the file the reader didn't read, for a reason of
-    /// its own ([`Unread`]). It says nothing of the file, and never makes it
-    /// not hold.
+    /// its own ([`Unread`]), or past a cap the check reads under
+    /// ([`Limits`](crate::Limits)). It says nothing of the file, and never
+    /// makes it not hold.
     Unjudged,
 }
 
@@ -252,7 +253,9 @@ pub enum Finding {
 
     /// The reader stopped reading the sections short of the main one, for a
     /// reason of its own, so nothing's said of them, of the numbers they
-    /// list, or of a position they place (F.3.4, F.3.11).
+    /// list, of a position they place, or of how many pages the page tree
+    /// has or where one is in it, as it may be read without what's listed
+    /// past where they stopped (F.3.4, F.3.11).
     #[error(
         "the sections aren't read as far as the main one, as {why}, so they and what they place aren't judged (ISO 32000-2, F.3.4, F.3.11)"
     )]
@@ -453,11 +456,19 @@ pub enum Finding {
         /// The key.
         key: KeyName,
     },
-    /// A hint table doesn't read: past its data, or a width past 32, or past a
-    /// cap.
+    /// A hint table doesn't read: past its data, or a width past 32.
     #[error("the hint tables don't read: {fault} (ISO 32000-2, F.4)")]
     HintTables {
         /// Why.
+        fault: hint::Error,
+    },
+    /// The hint tables are past a cap the check reads them under,
+    /// [`Limits::pages`](crate::Limits::pages) or
+    /// [`Limits::hint_entries`](crate::Limits::hint_entries), so nothing's
+    /// said of them (F.4).
+    #[error("the hint tables aren't judged: {fault} (ISO 32000-2, F.4)")]
+    HintTablesCapped {
+        /// Which, and how far past it.
         fault: hint::Error,
     },
     /// A table's fields run past the position of what's next (F.3.6).
@@ -734,11 +745,19 @@ pub enum Finding {
         pages: u64,
     },
 
-    /// The objects given as the file's graph can't be planned, so what a page
-    /// reaches isn't said.
+    /// The objects given as the file's graph can't be planned, for what they
+    /// hold, so what a page reaches isn't said.
     #[error("what the file's objects reach can't be said (ISO 32000-2, F.3.7): {why}")]
     GraphRefused {
         /// Why.
+        why: plan::Error,
+    },
+    /// The objects given as the file's graph are past a cap a plan is made
+    /// under ([`Limits`](crate::Limits)), so what a page reaches isn't judged
+    /// (F.3.7).
+    #[error("what the file's objects reach isn't judged: {why} (ISO 32000-2, F.3.7)")]
+    GraphCapped {
+        /// Which, and how far past it.
         why: plan::Error,
     },
     /// An object the first page alone or with others reaches isn't in the first
@@ -816,7 +835,9 @@ impl Finding {
             | NoPages
             | FirstPageShared { .. }
             | SharedCounts { .. }
-            | GraphRefused { .. } => return None,
+            | HintTablesCapped { .. }
+            | GraphRefused { .. }
+            | GraphCapped { .. } => return None,
             HintTables { fault } => match fault {
                 hint::Error::PastEnd { bit, .. } => HintBit(bit),
                 hint::Error::TableAt { table, .. } => Table(table),
@@ -924,6 +945,7 @@ impl Finding {
             HintKeyOther { .. } => "Table F.2",
             HintUnread { .. }
             | HintTables { .. }
+            | HintTablesCapped { .. }
             | TableObject { .. }
             | TableAt { .. }
             | TableObjects { .. }
@@ -935,6 +957,7 @@ impl Finding {
             | NoPages
             | FirstPageNotFirstObject { .. }
             | GraphRefused { .. }
+            | GraphCapped { .. }
             | FirstPageReaches { .. } => "F.3.7",
             PageReaches { .. } => "F.3.8",
             FirstPageAt { .. }
@@ -963,7 +986,11 @@ impl Finding {
     pub fn grade(&self) -> Grade {
         use Finding::*;
         match self {
-            HintUnread { .. } | SectionsUnread { .. } | PagesUnread { .. } => Grade::Unjudged,
+            HintUnread { .. }
+            | SectionsUnread { .. }
+            | PagesUnread { .. }
+            | HintTablesCapped { .. }
+            | GraphCapped { .. } => Grade::Unjudged,
             // A reader goes on: what these leave out it fetches by the
             // sections.
             Updated { .. }

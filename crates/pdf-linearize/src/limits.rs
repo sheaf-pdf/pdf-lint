@@ -3,7 +3,9 @@
 
 /// The caps on what a graph may ask for, or a hint stream: past one, a plan is
 /// refused, or a table, with the error that says which
-/// ([`plan::Error`](crate::plan::Error), [`hint::Error`](crate::hint::Error)).
+/// ([`plan::Error`](crate::plan::Error), [`hint::Error`](crate::hint::Error)),
+/// and a check says what it doesn't judge for it
+/// ([`Grade::Unjudged`](crate::Grade::Unjudged)).
 /// A caller sets them on a copy of [`Limits::DEFAULT`] (`limits.pages = 1000`,
 /// say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +21,7 @@ pub struct Limits {
     pub pages: usize,
     /// How many entries all the lists of shared objects hold together, which
     /// is what the hint tables will write of them
-    /// ([`Plan::shared`](crate::Plan::shared)): 2^24 by default.
+    /// ([`Plan::shared`](crate::Plan::shared)): 2^25 by default.
     pub shared_entries: usize,
     /// How many objects and references making those lists may look at:
     /// 2^28 by default. Each list is a walk of what its page reaches, so a
@@ -38,7 +40,7 @@ impl Limits {
     pub const DEFAULT: Limits = Limits {
         objects: 8_388_606,
         pages: 0xFFFFE,
-        shared_entries: 1 << 24,
+        shared_entries: 1 << 25,
         shared_visits: 1 << 28,
         hint_entries: 1 << 24,
     };

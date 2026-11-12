@@ -1136,6 +1136,67 @@ fn sections_the_reader_didnt_read_are_said_and_nothing_they_place() {
     );
 }
 
+/// A page tree read past where the sections stopped may be read without pages
+/// whose objects are listed past there: how many it has and where a page is in
+/// it aren't judged, so nothing's said of `/N`, `/O`, the first page or a page
+/// by its place. What a node holds is.
+#[test]
+fn a_page_tree_read_past_where_the_sections_stopped_is_judged_by_its_nodes() {
+    // The first page read without, the second taken for it, a page short.
+    let mut short = table();
+    let ObjectId { number, .. } = short.pages[1].id.unwrap();
+    short.pages.remove(0);
+    short.pages[0].media_box = false;
+    short.nodes.push((2, Attribute::Rotate));
+    let node = Finding::NodeAttribute {
+        number: 2,
+        attribute: Attribute::Rotate,
+    };
+    // The first page's object packed in the first section.
+    let mut packed = table();
+    let ObjectId {
+        number: first_page, ..
+    } = packed.pages[0].id.unwrap();
+    let row = (first_section(&mut packed).rows.iter_mut())
+        .find(|row| row.number == first_page)
+        .unwrap();
+    row.entry = RowEntry::Compressed {
+        stream: 1,
+        index: 0,
+    };
+    let placed = [findings(&short), findings(&packed)].concat();
+    for told in [
+        Finding::PageCount { n: 4, pages: 3 },
+        Finding::FirstPageNotFirst { number },
+        Finding::PageAttribute {
+            page: 0,
+            attribute: Attribute::MediaBox,
+        },
+        node,
+        Finding::PageCompressed {
+            page: 0,
+            number: first_page,
+        },
+    ] {
+        assert!(placed.contains(&told), "{told:?} among {placed:?}");
+    }
+    assert!(
+        (placed.iter())
+            .any(|f| matches!(f, Finding::FirstPageObject { computed, .. } if *computed == number)),
+        "{placed:?}"
+    );
+    for why in WHYS {
+        for (facts, nodes) in [(&mut short, &[node][..]), (&mut packed, &[])] {
+            facts.main = None;
+            facts.unread.sections = Some(why);
+            let told = [&[Finding::SectionsUnread { why }][..], nodes].concat();
+            assert_eq!(findings(facts), told);
+            let verdict = check(facts, &Limits::DEFAULT, &mut ());
+            assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+        }
+    }
+}
+
 /// A page tree the reader didn't read, for each of its reasons, is said once,
 /// and nothing of its pages or nodes is judged.
 #[test]
@@ -1177,19 +1238,77 @@ fn hint_tables_that_dont_read_are_told_never_a_panic() {
         )),
         "{found:?}"
     );
-    // /N past what the data can hold, past the cap.
-    let mut limits = Limits::DEFAULT;
-    limits.pages = 1;
-    let mut told = Vec::new();
+}
+
+/// Hint tables past a cap the check reads them under, its pages or entries,
+/// aren't read, and aren't judged: that's said, and the file holds by the
+/// rest. At the cap, they're read.
+#[test]
+fn hint_tables_past_the_checks_caps_arent_judged() {
+    use crate::hint::Error as Fault;
     let facts = table();
+    let mut limits = Limits::DEFAULT;
+    limits.pages = 3;
+    let mut told = Vec::new();
     let verdict = check(&facts, &limits, &mut told);
-    assert!(!verdict.hints_read && !verdict.holds);
-    assert!(matches!(
-        told[0],
-        Finding::HintTables {
-            fault: crate::hint::Error::TooManyPages { .. }
-        }
-    ));
+    assert!(verdict.linearized && verdict.holds && !verdict.hints_read);
+    let fault = Fault::TooManyPages { pages: 4, limit: 3 };
+    assert_eq!(told, [Finding::HintTablesCapped { fault }]);
+    assert_eq!(Finding::HintTablesCapped { fault }.grade(), Grade::Unjudged);
+    limits.pages = 4;
+    let verdict = check(&facts, &limits, &mut Vec::new());
+    assert!(verdict.holds && verdict.hints_read);
+    let mut limits = Limits::DEFAULT;
+    limits.hint_entries = 4;
+    let mut told = Vec::new();
+    let verdict = check(&facts, &limits, &mut told);
+    assert!(verdict.linearized && verdict.holds && !verdict.hints_read);
+    let capped = |f: &Finding| {
+        matches!(
+            f,
+            Finding::HintTablesCapped {
+                fault: Fault::TooManyEntries { limit: 4, .. }
+            }
+        )
+    };
+    assert!(matches!(&told[..], [f] if capped(f)), "{told:?}");
+}
+
+/// A graph past a cap a plan is made under, its visits or its objects, isn't
+/// judged: that's said, and nothing of what a page reaches.
+#[test]
+fn a_graph_past_the_checks_caps_isnt_judged() {
+    use crate::plan::Error;
+    let (mut facts, graph) = numbered(Kind::Table);
+    facts.graph = Some(graph);
+    let mut limits = Limits::DEFAULT;
+    limits.shared_visits = 1;
+    let mut told = Vec::new();
+    let verdict = check(&facts, &limits, &mut told);
+    assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+    let visits = |f: &Finding| {
+        matches!(
+            f,
+            Finding::GraphCapped {
+                why: Error::TooManyHints { .. }
+            }
+        )
+    };
+    assert!(matches!(&told[..], [f] if visits(f)), "{told:?}");
+    let mut limits = Limits::DEFAULT;
+    limits.objects = 4;
+    let mut told = Vec::new();
+    check(&facts, &limits, &mut told);
+    let objects = |f: &Finding| {
+        matches!(
+            f,
+            Finding::GraphCapped {
+                why: Error::TooManyObjects { .. }
+            }
+        )
+    };
+    assert!(matches!(&told[..], [f] if objects(f)), "{told:?}");
+    assert_eq!(told[0].grade(), Grade::Unjudged);
 }
 
 #[test]
@@ -1386,6 +1505,15 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
             None,
         ),
         (
+            Finding::HintTablesCapped {
+                fault: Fault::TooManyEntries {
+                    entries: 77,
+                    limit: 2,
+                },
+            },
+            None,
+        ),
+        (
             Finding::TableOverruns {
                 table,
                 end: 77,
@@ -1536,6 +1664,15 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
         (
             Finding::GraphRefused {
                 why: crate::plan::Error::NoPages,
+            },
+            None,
+        ),
+        (
+            Finding::GraphCapped {
+                why: crate::plan::Error::TooManyPages {
+                    pages: 77,
+                    limit: 2,
+                },
             },
             None,
         ),

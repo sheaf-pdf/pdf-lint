@@ -50,9 +50,10 @@
 //! ([`Grade::Unjudged`]), a part of the file the reader didn't read for a
 //! reason of its own, a hint stream whose data is encrypted and not
 //! decrypted among it, sections or a page tree no key opens, past a cap of
-//! the reader's, or through filters it doesn't take, and a file whose bytes
-//! the source didn't give, are counted as not checked, once each, where the
-//! dictionary is held, and never as a finding.
+//! the reader's, or through filters it doesn't take, or past a cap of the
+//! check's own ([`LIMITS`]), and a file whose bytes the source didn't give,
+//! are counted as not checked, once each, where the dictionary is held, and
+//! never as a finding.
 
 use std::collections::HashMap;
 
@@ -84,7 +85,8 @@ const LOCKED: &str = "a linearization whose hint stream's data isn't decrypted";
 /// Why a linearization isn't checked whole, for what pdf-linearize told it
 /// didn't judge, `fault`: [`LOCKED`] for a hint stream no key opens, and
 /// otherwise the part that wasn't read and why, in pdf-linearize's words for
-/// the reason.
+/// the reason, or the part past a cap of its check's ([`LIMITS`]), its count
+/// left out, as each file's would make a row of its own.
 fn unjudged(fault: &Fault) -> String {
     match fault {
         Fault::HintUnread {
@@ -95,6 +97,12 @@ fn unjudged(fault: &Fault) -> String {
             format!("a linearization whose sections aren't read as far as its main one: {why}")
         }
         Fault::PagesUnread { why } => format!("a linearization whose page tree isn't read: {why}"),
+        Fault::HintTablesCapped { .. } => {
+            "a linearization whose hint tables are past a cap of the check's".to_string()
+        }
+        Fault::GraphCapped { .. } => {
+            "a linearization whose objects are past a cap of the check's".to_string()
+        }
         _ => "a linearization not judged whole".to_string(),
     }
 }

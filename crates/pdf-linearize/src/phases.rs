@@ -404,7 +404,7 @@ mod tests {
         /// one within it: its sections, its hint stream, its page tree and its
         /// graph. A file that doesn't say it's linearized has none read. A
         /// check of a reading is its facts', then the check's, its graph's plan
-        /// within it.
+        /// within it where the sink wants findings.
         #[test]
         fn a_file_s_facts_are_a_span_and_each_read_one() {
             let file = file();
@@ -431,10 +431,17 @@ mod tests {
                 let verdict = family::check(&written, &Limits::DEFAULT, &mut ()).unwrap();
                 assert!(verdict.linearized && verdict.holds && verdict.hints_read);
             });
-            // The check plans the file's graph, to hold what each page reaches
-            // to the tables.
+            // A sink that wants no findings isn't charged for the graph.
             let mut checked = reads.to_vec();
             checked.push(debug("check", "check", &[("pages", 2)]));
+            assert_eq!(named(&made), checked);
+            let made = spans(|| {
+                let mut findings = Vec::new();
+                let verdict = family::check(&written, &Limits::DEFAULT, &mut findings).unwrap();
+                assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+            });
+            // One that does has the file's graph planned, to hold what each
+            // page reaches to the tables.
             checked.push(debug("plan", "plan", &[("objects", 6), ("pages", 2)]));
             assert_eq!(named(&made), checked);
 

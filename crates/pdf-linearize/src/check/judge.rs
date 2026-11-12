@@ -663,10 +663,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
 
     /// F.3.7, F.3.10: inheritable attributes pushed down; `/N`, `/O`, a page
     /// packed. Of a page tree the reader didn't read, that's said, and nothing
-    /// else.
+    /// else; of one read past where the sections stopped, what its nodes hold
+    /// alone.
     fn pages(&mut self) -> Go {
         let facts = self.facts;
-        let first = self.first_object;
         if let Some(why) = facts.unread.pages {
             return self.say(Finding::PagesUnread { why });
         }
@@ -678,6 +678,25 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 false => Ok(()),
             };
         }
+        // Where they stopped short, some of its pages' objects may be listed
+        // past there too, and the tree read without them: how many pages it
+        // has, and where one is in it, are known only where the sections are
+        // placed. What a node holds is its own.
+        if self.placed {
+            self.each_page()?;
+        }
+        for &(number, attribute) in &facts.nodes {
+            self.say(Finding::NodeAttribute { number, attribute })?;
+        }
+        Ok(())
+    }
+
+    /// Table F.1, F.3.1, F.3.4, F.3.10: `/N` against how many pages there are,
+    /// `/O` against the first's object, which the first section lists, and
+    /// each page not packed and saying its attributes itself.
+    fn each_page(&mut self) -> Go {
+        let facts = self.facts;
+        let first = self.first_object;
         let pages = facts.pages.len() as u64;
         if let Raw::Integer(n) = first.n
             && u64::try_from(n) != Ok(pages)
@@ -718,9 +737,6 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                     attribute,
                 })?;
             }
-        }
-        for &(number, attribute) in &facts.nodes {
-            self.say(Finding::NodeAttribute { number, attribute })?;
         }
         Ok(())
     }
@@ -1029,11 +1045,21 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
     /// own in its section, the first page's in the first group, and each list
     /// as long as what's shared that it reaches.
     fn graph(&mut self, tables: &Tables) -> Go {
+        // Nothing said here moves the verdict, so a sink that wants none of
+        // it isn't charged for the plan.
+        if !self.sink.wants() {
+            return Ok(());
+        }
         let Some(graph) = self.facts.graph.as_ref().filter(|_| self.placed) else {
             return Ok(());
         };
         let plan = match plan::plan(graph, self.limits) {
             Ok(plan) => plan,
+            Err(
+                why @ (plan::Error::TooManyPages { .. }
+                | plan::Error::TooManyObjects { .. }
+                | plan::Error::TooManyHints { .. }),
+            ) => return self.say(Finding::GraphCapped { why }),
             Err(why) => return self.say(Finding::GraphRefused { why }),
         };
         let writes = plan.writes();
@@ -1194,7 +1220,8 @@ fn hint_keys(facts: &Facts) -> Option<HintKeys> {
     shared.then_some(keys)
 }
 
-/// The hint tables, if they read, told of if they don't.
+/// The hint tables, if they read, told of if they don't: as the file's fault,
+/// or past a cap the check reads them under, which isn't.
 fn read_tables<S: Sink + ?Sized>(
     facts: &Facts,
     first: &FirstObject,
@@ -1210,6 +1237,12 @@ fn read_tables<S: Sink + ?Sized>(
     let pages = number(first.n).and_then(|n| u32::try_from(n).ok())?;
     match hint::tables(data, &keys, pages, limits) {
         Ok(tables) => Some((tables, keys)),
+        Err(fault @ (hint::Error::TooManyPages { .. } | hint::Error::TooManyEntries { .. })) => {
+            if sink.wants() {
+                sink.finding(Finding::HintTablesCapped { fault });
+            }
+            None
+        }
         Err(fault) => {
             *holds = false;
             if sink.wants() {

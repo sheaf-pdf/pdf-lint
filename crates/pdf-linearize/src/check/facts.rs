@@ -343,7 +343,7 @@ pub struct UnreadParts {
     /// The cross-reference sections, where reading them stopped short of the
     /// main one: what's listed past where it stopped isn't known, nor where
     /// anything the sections place is, nor so what the page tree's objects
-    /// are.
+    /// are, nor whether the pages it gives are all it has.
     pub sections: Option<Unread>,
     /// The page tree: its pages, where it's said, are none, and aren't
     /// judged.

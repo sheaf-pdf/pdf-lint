@@ -1303,6 +1303,11 @@ fn unjudged_alone(facts: &Facts, verdict: check::Verdict, kept: &[Finding]) {
                     | HintNotListed { .. }
                     | HintExtent { .. }
                     | NoPages
+                    | PageCount { .. }
+                    | FirstPageObject { .. }
+                    | FirstPageNotFirst { .. }
+                    | PageCompressed { .. }
+                    | PageAttribute { .. }
                     | FirstPageAt { .. }
                     | FirstPageNotFirstObject { .. }
                     | PageAt { .. }
@@ -1316,6 +1321,39 @@ fn unjudged_alone(facts: &Facts, verdict: check::Verdict, kept: &[Finding]) {
                     | TableObjects { .. }
                     | TableLength { .. }
                     | GraphRefused { .. }
+                    | FirstPageReaches { .. }
+                    | PageReaches { .. }
+                    | SharedNotListed { .. }
+                    | SharedNotReached { .. }
+            )
+        });
+    }
+    // Of the check's own caps: tables past one read none, and nothing's said
+    // of what they'd place; a graph past one, nothing of what a page reaches.
+    let tables = told(&|f| matches!(f, HintTablesCapped { .. }));
+    assert!(tables <= 1 && (tables == 0 || !verdict.hints_read));
+    if tables == 1 {
+        none("the hint tables", &|f| {
+            matches!(
+                f,
+                HintTables { .. }
+                    | TableOverruns { .. }
+                    | FirstPageAt { .. }
+                    | PageAt { .. }
+                    | PageObjects { .. }
+                    | SharedCounts { .. }
+                    | GraphRefused { .. }
+                    | GraphCapped { .. }
+                    | PageReaches { .. }
+            )
+        });
+    }
+    if told(&|f| matches!(f, GraphCapped { .. })) > 0 {
+        assert_eq!(told(&|f| matches!(f, GraphCapped { .. })), 1);
+        none("the graph", &|f| {
+            matches!(
+                f,
+                GraphRefused { .. }
                     | FirstPageReaches { .. }
                     | PageReaches { .. }
                     | SharedNotListed { .. }
