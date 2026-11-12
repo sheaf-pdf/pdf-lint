@@ -334,28 +334,28 @@ fn a_tree_written_is_sorted_with_each_key_once() {
 
     assert_eq!(
         write_names([(b"a".to_vec(), one.clone()), (b"a".to_vec(), one.clone())]),
-        Err(Error::RepeatedName { key: b"a".to_vec() })
+        Err(WriteError::RepeatedName { key: b"a".to_vec() })
     );
     assert_eq!(
         write_numbers([(7, one.clone()), (0, one.clone()), (7, one.clone())]),
-        Err(Error::RepeatedNumber { key: 7 })
+        Err(WriteError::RepeatedNumber { key: 7 })
     );
     let stream = Object::stream(Dict::new());
     assert_eq!(
         write_names([(b"a".to_vec(), stream.clone())]),
-        Err(Error::StreamValue)
+        Err(WriteError::StreamValue)
     );
     assert_eq!(
         write_numbers([(1, stream.clone())]),
-        Err(Error::StreamValue)
+        Err(WriteError::StreamValue)
     );
     // One inside a value, at any depth, can't be written either.
     let inside = Object::from(vec![Object::from(1), stream.clone()]);
-    assert_eq!(write_numbers([(1, inside)]), Err(Error::StreamValue));
+    assert_eq!(write_numbers([(1, inside)]), Err(WriteError::StreamValue));
     let deep = Object::from(dict! { "A" => vec![Object::from(dict! { "B" => stream })] });
     assert_eq!(
         write_names([(b"a".to_vec(), deep)]),
-        Err(Error::StreamValue)
+        Err(WriteError::StreamValue)
     );
 
     let empty = write_names([]).unwrap();

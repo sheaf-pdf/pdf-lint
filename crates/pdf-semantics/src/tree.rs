@@ -565,15 +565,17 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
 ///
 /// # Errors
 ///
-/// An [`Error`], and nothing written: [`Error::RepeatedName`] for a key given
-/// twice, the first in the tree's order; else [`Error::StreamValue`] for a
-/// value that's a stream or holds one.
-pub fn write_names(entries: impl IntoIterator<Item = (Vec<u8>, Object)>) -> Result<Dict, Error> {
+/// A [`WriteError`], and nothing written: [`WriteError::RepeatedName`] for
+/// a key given twice, the first in the tree's order; else
+/// [`WriteError::StreamValue`] for a value that's a stream or holds one.
+pub fn write_names(
+    entries: impl IntoIterator<Item = (Vec<u8>, Object)>,
+) -> Result<Dict, WriteError> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
         let key = pair[0].0.clone();
-        return Err(Error::RepeatedName { key });
+        return Err(WriteError::RepeatedName { key });
     }
     written(
         "Names",
@@ -587,13 +589,13 @@ pub fn write_names(entries: impl IntoIterator<Item = (Vec<u8>, Object)>) -> Resu
 /// # Errors
 ///
 /// As [`write_names`] fails, but a key given twice is
-/// [`Error::RepeatedNumber`].
-pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result<Dict, Error> {
+/// [`WriteError::RepeatedNumber`].
+pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result<Dict, WriteError> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by_key(|entry| entry.0);
     if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
         let key = pair[0].0;
-        return Err(Error::RepeatedNumber { key });
+        return Err(WriteError::RepeatedNumber { key });
     }
     written(
         "Nums",
@@ -602,11 +604,14 @@ pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result
 }
 
 /// A root whose `holder` holds `entries`, in their order.
-fn written(holder: &str, entries: impl Iterator<Item = (Object, Object)>) -> Result<Dict, Error> {
+fn written(
+    holder: &str,
+    entries: impl Iterator<Item = (Object, Object)>,
+) -> Result<Dict, WriteError> {
     let mut array = Vec::with_capacity(entries.size_hint().0.saturating_mul(2));
     for (key, value) in entries {
         if holds_a_stream(&value) {
-            return Err(Error::StreamValue);
+            return Err(WriteError::StreamValue);
         }
         array.push(key);
         array.push(value);
@@ -633,7 +638,7 @@ fn holds_a_stream(value: &Object) -> bool {
 /// Why a tree can't be written.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum WriteError {
     /// A name tree's key given twice, which 7.9.6 doesn't let a tree hold,
     /// nor a reader tell which is meant.
     #[error("the name tree's key {key:?} is given twice")]

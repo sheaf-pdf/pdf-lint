@@ -3213,7 +3213,11 @@ fn a_write_error_s_words_are_the_whole_message() {
         ),
         (
             WriteError::Fanout { fanout: 1 },
-            "a page tree's nodes are given at most 1 kids, where it takes 2",
+            "a page tree's nodes are given a fanout of 1, where it takes 2 at least",
+        ),
+        (
+            WriteError::Fanout { fanout: 0 },
+            "a page tree's nodes are given a fanout of 0, where it takes 2 at least",
         ),
         (
             WriteError::Repeated { id },

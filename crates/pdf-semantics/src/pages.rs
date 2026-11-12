@@ -1552,7 +1552,7 @@ pub enum WriteError {
     NoPages,
     /// A fanout under 2, which can't put more than one page under a node
     /// over others.
-    #[error("a page tree's nodes are given at most {fanout} kids, where it takes 2")]
+    #[error("a page tree's nodes are given a fanout of {fanout}, where it takes 2 at least")]
     Fanout {
         /// The fanout given.
         fanout: usize,
