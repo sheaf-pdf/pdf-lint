@@ -722,6 +722,16 @@ pub fn type1_lookups_program(n: usize) -> Vec<u8> {
     )
 }
 
+/// [`type1_program`] whose `/FontBBox` has a number with two signs, `--32768`: a parser
+/// that takes both overflows as it makes the number.
+pub fn doubled_sign_type1_program() -> Vec<u8> {
+    let program = type1_program();
+    let bbox = b"/FontBBox {0 -200 600 750}";
+    let at = program.windows(bbox.len()).position(|w| w == bbox).unwrap();
+    let doubled = b"/FontBBox {5 --32768 989 775}";
+    [&program[..at], doubled, &program[at + bbox.len()..]].concat()
+}
+
 /// A Type 1 program whose `A` rolls two values by the least shift a 32-bit number holds,
 /// `0x80000000`, as a charstring's five-byte number: a parser that negates the shift as
 /// it's written overflows.

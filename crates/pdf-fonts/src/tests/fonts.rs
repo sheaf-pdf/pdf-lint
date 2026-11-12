@@ -3911,23 +3911,12 @@ fn over_program(
 #[cfg(feature = "programs")]
 #[test]
 fn programs_read_where_arithmetic_could_overflow() {
-    use crate::fixture::{rolling_type1_program, type1_program};
-    let bbox = b"/FontBBox {0 -200 600 750}";
-    let program = type1_program();
-    let at = program.windows(bbox.len()).position(|w| w == bbox).unwrap();
-    let doubled = [
-        &program[..at],
-        b"/FontBBox {5 --32768 989 775}",
-        &program[at + bbox.len()..],
-    ];
-    for (key, program) in [
-        ("FontFile", doubled.concat()),
-        ("FontFile", rolling_type1_program()),
-    ] {
+    use crate::fixture::{doubled_sign_type1_program, rolling_type1_program};
+    for program in [doubled_sign_type1_program(), rolling_type1_program()] {
         let mut pdf = Pdf::default();
-        let font = over_program(&mut pdf, "Type1", key, program, 32, None);
+        let font = over_program(&mut pdf, "Type1", "FontFile", program, 32, None);
         let read = Font::read(&pdf, &font, &Limits::DEFAULT, &mut BUDGET.clone(), &mut ());
-        assert_eq!(read.unwrap().program(), FontProgram::Read, "{key}");
+        assert_eq!(read.unwrap().program(), FontProgram::Read);
     }
 }
 

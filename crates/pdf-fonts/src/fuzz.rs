@@ -15,9 +15,10 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dic
 
 use crate::fixture::{
     OpenType, cff_program, cid_cff_program, composite_bomb_program, composite_of_program,
-    heavy_cff_program, loca_past_end_program, long_cff_program, moving_cff_program,
-    opentype_cid_program, opentype_program, truetype_program, type1_accents_program,
-    type1_integers_program, type1_lookups_program, type1_program,
+    doubled_sign_type1_program, heavy_cff_program, loca_past_end_program, long_cff_program,
+    moving_cff_program, opentype_cid_program, opentype_program, rolling_type1_program,
+    truetype_program, type1_accents_program, type1_integers_program, type1_lookups_program,
+    type1_program,
 };
 use crate::predefined::{Collection, scheme};
 use crate::type1::{Refusal, scan};
@@ -743,7 +744,7 @@ fn program_fixtures() -> Vec<Vec<u8>> {
         post_names: true,
         cmap: false,
     };
-    let programs: [(&str, &str, Vec<u8>); 15] = [
+    let programs: [(&str, &str, Vec<u8>); 17] = [
         ("TrueType", "FontFile2", truetype_program()),
         ("Type1", "FontFile3", cff_program()),
         ("Type1", "FontFile3", cid_cff_program()),
@@ -759,6 +760,8 @@ fn program_fixtures() -> Vec<Vec<u8>> {
         ("MMType1", "FontFile", type1_integers_program(8)),
         ("Type1", "FontFile", type1_accents_program(4, 4)),
         ("Type1", "FontFile", type1_lookups_program(16)),
+        ("Type1", "FontFile", doubled_sign_type1_program()),
+        ("Type1", "FontFile", rolling_type1_program()),
     ];
     let mut out = Vec::new();
     for (subtype, key, program) in programs {
