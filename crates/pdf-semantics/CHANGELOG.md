@@ -2,7 +2,7 @@
 
 ## 0.1.0-alpha.1 (unreleased)
 
-First release. It's an alpha: any alpha may change the API, and each entry here says what changed and how to update. Depend on the exact version, `=0.1.0-alpha.1`; a plain `0.1.0-alpha.1` lets cargo take later alphas too. Its unit tests don't build from the package, as they take their files from pdf-fixtures, which is never published, and resolvers from pdf-structure, which isn't on crates.io yet.
+First release. It's an alpha: any alpha may change the API, and each entry here says what changed and how to update. Depend on the exact version, `=0.1.0-alpha.1`; a plain `0.1.0-alpha.1` lets cargo take later alphas too. Its unit tests don't build from the package. They take their files from pdf-fixtures, which is never published, and resolvers from pdf-structure, not yet on crates.io.
 
 ### Added
 

@@ -4,8 +4,8 @@
 /// read, and the walk says so. The page tree's writer refuses a tree past
 /// [`pages`](Limits::pages) or [`page_depth`](Limits::page_depth), as a walk
 /// of it would stop ([`pages::WriteError`](crate::pages::WriteError)). A
-/// caller sets them on a copy of [`Limits::DEFAULT`] (`limits.tree_depth =
-/// 16`, say), as more may come.
+/// caller sets them on a copy of [`Limits::DEFAULT`]
+/// (`limits.tree_depth = 16`, say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
