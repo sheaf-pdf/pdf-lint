@@ -38,6 +38,12 @@
 //! here at all: an object is its [`ObjectId`](pdf_objects::ObjectId),
 //! pdf-objects' pair of a number and a generation, and the plain data a caller
 //! gives of it.
+//!
+//! With the `tracing` feature, off by default, a plan, an assembly and a check
+//! are each a span at `debug`, and with `family` a document's linearizing and a
+//! file's facts, their stages and reads spans within them. A span's fields are
+//! numbers, never a byte of a file; an object, a page, a table's entry and a
+//! finding have none. Without it, none is compiled.
 
 pub use check::{Facts, Finding, Grade, Sink, Verdict, check};
 pub use layout::{Encoded, Layout, Piece, Stream, StreamKind, assemble};
@@ -59,6 +65,7 @@ pub mod fuzz;
 pub mod hint;
 pub mod layout;
 mod limits;
+mod phases;
 pub mod plan;
 
 #[cfg(test)]

@@ -768,6 +768,7 @@ dependencies = [
  "pdf-semantics",
  "pdf-structure",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

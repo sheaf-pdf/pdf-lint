@@ -100,6 +100,7 @@ use pdf_structure::{Encryption, XrefKind};
 
 use crate::Limits;
 use crate::layout::{self, Encoded, Layout, Piece, Stream, StreamKind, assemble};
+use crate::phases::phase;
 pub use crate::plan::FirstPage;
 use crate::plan::{self, Kind, Plan, What, plan};
 
@@ -299,36 +300,9 @@ pub fn linearize(
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
 ) -> Result<Linearized, Error> {
-    lapped(out, doc, encryptor, from, options, &mut |_| {})
-}
-
-/// [`linearize`], `lap` told as each stage ends: `graph`, `plan`, `bodies`,
-/// `assemble` and `whole`, so a timing can say where it went. For a timing's
-/// own build: nothing of a caller's.
-#[cfg(any(test, feature = "timing"))]
-#[doc(hidden)]
-pub fn linearize_timed(
-    out: &mut Vec<u8>,
-    doc: &pdf_structure::Document,
-    encryptor: Option<&Encryptor>,
-    from: Option<&dyn ReadFrom>,
-    options: &Options<'_>,
-    lap: &mut dyn FnMut(&'static str),
-) -> Result<Linearized, Error> {
-    lapped(out, doc, encryptor, from, options, lap)
-}
-
-/// [`linearize`], told as each stage ends.
-fn lapped(
-    out: &mut Vec<u8>,
-    doc: &pdf_structure::Document,
-    encryptor: Option<&Encryptor>,
-    from: Option<&dyn ReadFrom>,
-    options: &Options<'_>,
-    lap: &mut dyn FnMut(&'static str),
-) -> Result<Linearized, Error> {
+    phase!(DEBUG, "linearize");
     let start = out.len();
-    let written = file(out, start, doc, encryptor, from, options, lap);
+    let written = file(out, start, doc, encryptor, from, options);
     if written.is_err() {
         out.truncate(start);
     }
@@ -369,7 +343,11 @@ fn from<S: ByteSource>(reading: &Reading<S>) -> &dyn ReadFrom {
 
 /// [`linearize`]'s file, `out` from `start` on: the bodies first, where they're
 /// then moved up to make room for what goes around them, which they don't
-/// depend on. So the file is never held twice.
+/// depend on. So the file is never held twice. Each stage is a span of its
+/// own, with the `tracing` feature: the graph, made again for each plan after
+/// the first; each plan; each round's object streams; the bodies; the bytes
+/// around them, the trailer's `/ID` and entries among them; and the file laid
+/// out whole.
 fn file(
     out: &mut Vec<u8>,
     start: usize,
@@ -377,7 +355,6 @@ fn file(
     encryptor: Option<&Encryptor>,
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
-    lap: &mut dyn FnMut(&'static str),
 ) -> Result<Linearized, Error> {
     let kind = match (options.kind, options.pack) {
         (XrefKind::Table, true) => return Err(Error::Write(write::Error::PackedTable)),
@@ -394,25 +371,33 @@ fn file(
     // As a whole file's write has it: asked to pack where an encryption
     // doesn't, it's written unpacked.
     let pack = options.pack && encryptor.is_none_or(Encryptor::packs);
-    let prepared = Prepared::of(doc, encryptor, options)?;
+    // An object stream too big for the reader means planning again without its
+    // members, so nothing's numbered as if they were in it: each round takes
+    // some out, and there's no cost to a file without one.
+    let mut alone = HashSet::new();
+    let (prepared, mut graph) = {
+        phase!(DEBUG, "graph");
+        let prepared = Prepared::of(doc, encryptor, options)?;
+        let graph = prepared.graph(kind, pack, &alone);
+        (prepared, graph)
+    };
     let writing = Writing {
         doc,
         prepared: &prepared,
         encryptor,
         from,
     };
-    // An object stream too big for the reader means planning again without its
-    // members, so nothing's numbered as if they were in it: each round takes
-    // some out, and there's no cost to a file without one.
-    let mut alone = HashSet::new();
-    let mut graph = prepared.graph(kind, pack, &alone);
-    lap("graph");
     let (plan, containers) = loop {
-        let plan = plan(&graph, &options.limits).map_err(Error::Plan)?;
-        lap("plan");
-        let built = writing.under(&plan, |parts, _| {
-            containers(&prepared, &plan, parts, options)
-        })?;
+        let plan = {
+            phase!(DEBUG, "plan");
+            plan(&graph, &options.limits).map_err(Error::Plan)?
+        };
+        let built = {
+            phase!(DEBUG, "containers", containers = plan.containers().len());
+            writing.under(&plan, |parts, _| {
+                containers(&prepared, &plan, parts, options)
+            })?
+        };
         let before = alone.len();
         for (container, built) in plan.containers().iter().zip(&built) {
             if built.is_none() {
@@ -422,50 +407,58 @@ fn file(
         if alone.len() == before {
             break (plan, built);
         }
-        graph = prepared.graph(kind, pack, &alone);
+        graph = {
+            phase!(DEBUG, "graph");
+            prepared.graph(kind, pack, &alone)
+        };
     };
     writing.under(&plan, |parts, encrypting| {
-        let lengths = bodies(
-            out, &prepared, &plan, containers, parts, encrypting, options,
-        )?;
-        lap("bodies");
-
-        let given = doc.trailer().dict();
-        let kept = encrypting
-            .and_then(Encrypting::first_id)
-            .map(<[u8]>::to_vec);
-        let kept = kept.or_else(|| write::first_id(given));
-        let id = write::file_id(kept, encrypting.is_some(), &out[start..]);
-        let to = |id: ObjectId| plan.number(id);
-        let mut trailer = write::trailer_entries(given, &to);
-        trailer.remove(b"Root");
-        if let Some(encrypting) = encrypting {
-            match encrypting.at() {
-                Some(at) => trailer.set("Encrypt", Object::from(at)),
-                None => trailer.set("Encrypt", encrypting.dictionary().clone()),
+        let lengths = {
+            phase!(DEBUG, "bodies", writes = plan.writes().len());
+            bodies(
+                out, &prepared, &plan, containers, parts, encrypting, options,
+            )?
+        };
+        let (id, layout) = {
+            phase!(DEBUG, "assemble");
+            let given = doc.trailer().dict();
+            let kept = encrypting
+                .and_then(Encrypting::first_id)
+                .map(<[u8]>::to_vec);
+            let kept = kept.or_else(|| write::first_id(given));
+            let id = write::file_id(kept, encrypting.is_some(), &out[start..]);
+            let to = |id: ObjectId| plan.number(id);
+            let mut trailer = write::trailer_entries(given, &to);
+            trailer.remove(b"Root");
+            if let Some(encrypting) = encrypting {
+                match encrypting.at() {
+                    Some(at) => trailer.set("Encrypt", Object::from(at)),
+                    None => trailer.set("Encrypt", encrypting.dictionary().clone()),
+                }
             }
-        }
-        if let Some(id) = &id {
-            trailer.set("ID", write::id_value(id));
-        }
-        let trailer = written_entries(&trailer)?;
-        let version = options.version.unwrap_or_else(|| {
-            let header = doc.header_version().unwrap_or(Version::new(1, 7));
-            match kind {
-                Kind::Stream => header.max(Version::new(1, 5)),
-                Kind::Table => header,
+            if let Some(id) = &id {
+                trailer.set("ID", write::id_value(id));
             }
-        });
-        let mut around = layout::Options::new((version.major, version.minor));
-        around.trailer = &trailer;
-        let layout = assemble(&plan, &lengths, &around, |stream| {
-            encoded(stream, options.deflate, encrypting)
-        })
-        .map_err(Error::Layout)?;
-        lap("assemble");
-
-        laid_out(out, start, &lengths, &layout);
-        lap("whole");
+            let trailer = written_entries(&trailer)?;
+            let version = options.version.unwrap_or_else(|| {
+                let header = doc.header_version().unwrap_or(Version::new(1, 7));
+                match kind {
+                    Kind::Stream => header.max(Version::new(1, 5)),
+                    Kind::Table => header,
+                }
+            });
+            let mut around = layout::Options::new((version.major, version.minor));
+            around.trailer = &trailer;
+            let layout = assemble(&plan, &lengths, &around, |stream| {
+                encoded(stream, options.deflate, encrypting)
+            })
+            .map_err(Error::Layout)?;
+            (id, layout)
+        };
+        {
+            phase!(DEBUG, "whole", bytes = layout.len());
+            laid_out(out, start, &lengths, &layout);
+        }
         Ok(Linearized { id, layout })
     })
 }
@@ -657,50 +650,4 @@ fn laid_out(out: &mut Vec<u8>, start: usize, lengths: &[u64], layout: &Layout) {
         }
     }
     debug_assert_eq!(to, start);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The stages are told in the order they end, what a timing goes by.
-    #[test]
-    fn a_timing_is_told_each_stage_in_order() {
-        let mut file = b"%PDF-1.7\n".to_vec();
-        let mut rows = Vec::new();
-        for (number, object) in [
-            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
-            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
-            (
-                3,
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /Resources << >> >>",
-            ),
-        ] {
-            rows.push(file.len());
-            file.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
-        }
-        let at = file.len();
-        file.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
-        for row in rows {
-            file.extend_from_slice(format!("{row:010} 00000 n \n").as_bytes());
-        }
-        let tail = format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{at}\n%%EOF\n");
-        file.extend_from_slice(tail.as_bytes());
-        let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
-        let doc = reading.to_document().unwrap();
-        let mut told = Vec::new();
-        let mut out = Vec::new();
-        linearize_timed(
-            &mut out,
-            &doc,
-            None,
-            Some(&reading),
-            &Options::DEFAULT,
-            &mut |stage| {
-                told.push(stage);
-            },
-        )
-        .unwrap();
-        assert_eq!(told, ["graph", "plan", "bodies", "assemble", "whole"]);
-    }
 }

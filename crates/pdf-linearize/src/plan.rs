@@ -57,6 +57,7 @@ pub use uses::page_uses;
 use pdf_objects::ObjectId;
 
 use crate::Limits;
+use crate::phases::phase;
 
 /// What lists a file's objects, which decides the layout's own numbers and
 /// whether anything can be packed.
@@ -630,5 +631,11 @@ impl Plan {
 /// [`first_page`](Graph::first_page) past the pages; under [`Kind::Table`], an
 /// object said to be packable; past a cap of `limits`.
 pub fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
+    phase!(
+        DEBUG,
+        "plan",
+        objects = graph.nodes.len(),
+        pages = graph.pages.len()
+    );
     place::plan(graph, limits)
 }

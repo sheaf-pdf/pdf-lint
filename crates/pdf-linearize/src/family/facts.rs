@@ -20,6 +20,7 @@ use crate::check::{
     self, Attribute, Extent, Facts, FirstObject, HintData, HintFacts, PageFacts, Raw, RowEntry,
     RowFacts, SectionFacts, Sink, Verdict,
 };
+use crate::phases::phase;
 use crate::plan::Kind;
 
 /// `value` as a check takes it: an array as a whole, unless it has a reference
@@ -271,12 +272,15 @@ pub fn facts_with_reading<S: ByteSource>(
 }
 
 /// [`facts`], the graph made of `whole` where it's given, `reading`'s whole
-/// read, else of a whole read made now.
+/// read, else of a whole read made now. Each read is a span of its own, with
+/// the `tracing` feature: the sections, the hint stream, the page tree and the
+/// graph.
 fn facts_of<S: ByteSource>(
     reading: &Reading<S>,
     whole: Option<&Document>,
     limits: &Limits,
 ) -> Result<Facts, Error> {
+    phase!(DEBUG, "facts", bytes = reading.size());
     let mut facts = Facts::new(reading.size() as u64);
     facts.header = reading.facts().header_offset.unwrap_or(0) as u64;
     let first = reading.first_object().map_err(Error::Read)?;
@@ -284,20 +288,33 @@ fn facts_of<S: ByteSource>(
     if reading.update().is_some() {
         facts.update = reading.facts().newest.map(|(at, _)| at as u64);
     }
-    if !check::check(&facts, limits, &mut ()).linearized {
+    if !check::linearized(&facts, limits) {
         return Ok(facts);
     }
-    let read = reading.sections().map_err(Error::Read)?.sections;
-    let mut listed = read.iter();
-    facts.first = listed.next().map(section);
-    facts.main = listed.next().map(section);
+    let read = {
+        phase!(DEBUG, "sections");
+        let read = reading.sections().map_err(Error::Read)?.sections;
+        let mut listed = read.iter();
+        facts.first = listed.next().map(section);
+        facts.main = listed.next().map(section);
+        read
+    };
     let items = facts.first_object.as_ref().map_or(&[][..], |f| &f.h_items);
-    facts.hint = hint(reading, items, &read, facts.header)?;
-    let (pages, nodes) = page_tree(reading, limits);
+    facts.hint = {
+        phase!(DEBUG, "hint");
+        hint(reading, items, &read, facts.header)?
+    };
+    let (pages, nodes) = {
+        phase!(DEBUG, "pages");
+        page_tree(reading, limits)
+    };
     facts.pages = pages;
     facts.nodes = nodes;
     facts.objects = first_group_end(reading, &facts)?;
-    facts.graph = graph(reading, whole, &facts, limits)?;
+    facts.graph = {
+        phase!(DEBUG, "graph");
+        graph(reading, whole, &facts, limits)?
+    };
     Ok(facts)
 }
 

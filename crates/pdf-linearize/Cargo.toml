@@ -19,6 +19,10 @@ pdf-objects.workspace = true
 pdf-semantics = { workspace = true, optional = true }
 pdf-structure = { workspace = true, optional = true }
 thiserror = "2"
+# The spans of a plan, an assembly, a check and the family's writes and
+# reads, with the `tracing` feature: without its default features, so
+# without the proc macros of `attributes`; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 [features]
 default = ["family"]
@@ -29,9 +33,12 @@ family = ["dep:pdf-semantics", "dep:pdf-structure"]
 # pdf-filters' zlib-rs, through pdf-structure, so that `family::Options::deflate` and
 # `read` can name it.
 zlib-rs = ["pdf-structure?/zlib-rs"]
-# The stages of a write told as they end, for a timing's own build; not one to turn on
-# for use.
-timing = ["family"]
+# Spans through `tracing`: a plan, an assembly and each round of its first
+# section, a check, and with `family` a document's linearizing and each of
+# its stages, and a file's facts and each of their reads. An object, a page,
+# a table's entry and a finding have none. Off by default; without it, none
+# is compiled.
+tracing = ["dep:tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
 # bench mode too, so criterion's options reach them as given.
@@ -58,6 +65,10 @@ pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
 [[bench]]
 name = "linearize"
 harness = false
+
+# docs.rs documents what the spans' feature adds, beside the default.
+[package.metadata.docs.rs]
+features = ["tracing"]
 
 [lints.rust]
 unsafe_code = "forbid"

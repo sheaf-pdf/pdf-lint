@@ -44,6 +44,7 @@ use crate::hint::{
     self, EmbeddedFiles, Extended, FileEntry, Generic, GroupEntry, HintKeys, PageEntry,
     PageOffsets, SharedObjects, ThumbEntry, Thumbnails,
 };
+use crate::phases::phase;
 use crate::plan::{Group, Kind, Part, Plan, What};
 
 /// How long the dictionary is, with its padding: every value at its largest
@@ -338,6 +339,7 @@ pub fn assemble<E>(
     mut encode: impl FnMut(Stream<'_>) -> Result<Encoded, E>,
 ) -> Result<Layout, Error<E>> {
     let writes = plan.writes().len();
+    phase!(DEBUG, "assemble", writes = writes);
     if lengths.len() != writes {
         return Err(Error::Lengths {
             lengths: lengths.len(),
@@ -383,6 +385,7 @@ pub fn assemble<E>(
     };
     let mut settled = None;
     for _ in 0..ROUNDS {
+        phase!(DEBUG, "round", room = room);
         places.bodies_at = first_section_at + room;
         places.hint_len = 0;
         if places.without_hint(writes) > LARGEST {

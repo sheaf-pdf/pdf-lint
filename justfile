@@ -52,12 +52,12 @@ fmt:
 # it, `simd` and its spans (`tracing`), which nothing else turns on; then
 # pdf-semantics without its clock, as pdf-lint takes it, and with its spans
 # (`tracing`), which nothing else turns on; then pdf-linearize's engine,
-# without its adapter, and with `timing`, which nothing else turns on, and
-# the lopdf adapter's library alone, where pdf-linearize is that engine
-# without `family`, which pdf-lint turns on in every workspace build; then
-# pdf-fonts with Adobe's predefined CMaps and its spans (`tracing`), which
-# nothing else turns on, and with no feature at all; then pdf-structure
-# with its spans (`tracing`), which nothing else turns on.
+# without its adapter, and with its spans (`tracing`), which nothing else
+# turns on, and the lopdf adapter's library alone, where pdf-linearize is
+# that engine without `family`, which pdf-lint turns on in every workspace
+# build; then pdf-fonts with Adobe's predefined CMaps and its spans
+# (`tracing`), which nothing else turns on, and with no feature at all; then
+# pdf-structure with its spans (`tracing`), which nothing else turns on.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -68,7 +68,7 @@ clippy:
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-linearize --features timing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-linearize --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize-lopdf --lib -- -D warnings
     cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
@@ -83,10 +83,10 @@ clippy:
 # it, `simd`, the dependencies' SIMD, and its spans, which nothing else
 # turns on and only its tests read; then pdf-semantics' without its clock,
 # and with its spans, which only its tests read; then pdf-linearize's
-# engine, without its adapter; then pdf-fonts' with
-# Adobe's predefined CMaps and its spans, which only its tests read, and
-# with no feature at all; then pdf-structure's with its spans, which only
-# those tests read.
+# engine, without its adapter, and with its spans, which only its tests
+# read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
+# only its tests read, and with no feature at all; then pdf-structure's
+# with its spans, which only those tests read.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters
@@ -96,6 +96,7 @@ test:
     cargo test --locked -p pdf-semantics --no-default-features
     cargo test --locked -p pdf-semantics --features tracing
     cargo test --locked -p pdf-linearize --no-default-features
+    cargo test --locked -p pdf-linearize --features tracing
     cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing
     cargo test --locked -p pdf-fonts --no-default-features
     cargo test --locked -p pdf-structure --features tracing
@@ -477,10 +478,11 @@ fonts-cmaps-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features predefined-cmaps
 
 # Test pdf-linearize on its oldest supported Rust, which must be installed,
-# with its adapter and without.
+# with its adapter and without, and with its spans (`tracing`).
 linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features tracing
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

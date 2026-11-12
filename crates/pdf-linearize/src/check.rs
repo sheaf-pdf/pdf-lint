@@ -57,6 +57,7 @@ pub use facts::{
 pub use finding::{DictKey, Finding, Grade, KeyName, Place};
 
 use crate::Limits;
+use crate::phases::phase;
 
 /// Where findings are told: `Vec<Finding>` keeps them; `()` drops them and
 /// wants none, so none is looked for past what the verdict needs. A sink
@@ -127,5 +128,14 @@ pub struct Verdict {
 /// What `facts` say of each other, told to `sink`, under `limits`: the module
 /// says how.
 pub fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut S) -> Verdict {
+    phase!(DEBUG, "check", pages = facts.pages.len());
     judge::check(facts, limits, sink)
+}
+
+/// Whether `facts` say the file is linearized, as [`check`]'s verdict has it,
+/// with no span of its own: what a reader of a file's facts asks before it
+/// reads the rest.
+#[cfg(feature = "family")]
+pub(crate) fn linearized(facts: &Facts, limits: &Limits) -> bool {
+    judge::check(facts, limits, &mut ()).linearized
 }
