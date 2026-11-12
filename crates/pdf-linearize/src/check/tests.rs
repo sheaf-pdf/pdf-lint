@@ -2489,7 +2489,7 @@ fn hint_tables_that_dont_read_settle_it_for_a_sink_that_wants_nothing() {
 fn a_keys_name_past_what_it_holds_is_cut_off() {
     let name = KeyName::new(b"AVeryLongKeyIndeedThatGoesOn");
     assert_eq!(name.as_bytes(), b"AVeryLongKeyInd");
-    assert_eq!(name.to_string(), "/AVeryLongKeyInd");
+    assert_eq!(name.to_string(), "/AVeryLongKeyInd…");
     assert_eq!(KeyName::new(b"P").to_string(), "/P");
 }
 
@@ -2592,4 +2592,165 @@ fn it_never_panics_on_facts_past_any_position() {
     dict(&mut facts).n = Raw::Integer(big);
     findings(&facts);
     let _ = Options::new((1, 7));
+}
+
+/// A hint stream's key, as a finding holds it, is shown whole up to 15
+/// bytes, and past them its first 15 and `…`, cut before a character that
+/// runs past them; bytes that are no character's are U+FFFD, as anywhere.
+#[test]
+fn a_keys_name_is_cut_at_a_character_and_marked() {
+    let a = |n: usize| "a".repeat(n);
+    let shown = |key: &[u8]| KeyName::new(key).to_string();
+    // 15 bytes whole, 16 cut.
+    assert_eq!(shown(a(15).as_bytes()), format!("/{}", a(15)));
+    assert_eq!(shown(a(16).as_bytes()), format!("/{}…", a(15)));
+    assert_eq!(KeyName::new(a(16).as_bytes()).as_bytes(), a(15).as_bytes());
+    // A three-byte character across byte 15, from 14 or 13: left out.
+    for before in [13, 14] {
+        let across = format!("{}€b", a(before));
+        assert_eq!(shown(across.as_bytes()), format!("/{}…", a(before)));
+        let held = KeyName::new(across.as_bytes());
+        assert_eq!(held.as_bytes(), a(before).as_bytes());
+    }
+    // One that ends at byte 15, more after it: kept.
+    let ends = format!("{}€b", a(12));
+    assert_eq!(shown(ends.as_bytes()), format!("/{}€…", a(12)));
+    // A four-byte one across it, from 12.
+    let four = format!("{}😀b", a(12));
+    assert_eq!(shown(four.as_bytes()), format!("/{}…", a(12)));
+    // A byte that's no character's at the cut, alone or a lead byte with no
+    // more of its character after it: U+FFFD, then the mark.
+    for after in [&[0xFF, b'b'][..], &[0xE2, b'b', b'c'], &[0xE2, 0x82, b'c']] {
+        let mut bad = a(14).into_bytes();
+        bad.extend_from_slice(after);
+        let lossy = String::from_utf8_lossy(&bad[..15]).into_owned();
+        assert!(lossy.ends_with('\u{FFFD}'), "{bad:?}");
+        assert_eq!(shown(&bad), format!("/{lossy}…"), "{bad:?}");
+    }
+    // Bytes that continue a character with none started: as they are.
+    let mut loose = a(13).into_bytes();
+    loose.extend_from_slice(&[0x80, 0x80, 0x80]);
+    assert_eq!(KeyName::new(&loose).as_bytes(), &loose[..15]);
+    // A character across the cut, then a byte that's no character's: the
+    // character is left out all the same.
+    let mut euro = a(13).into_bytes();
+    euro.extend_from_slice("€".as_bytes());
+    euro.push(0xFF);
+    assert_eq!(shown(&euro), format!("/{}…", a(13)));
+    // Shorter than 15, a byte that's no character's: as before.
+    assert_eq!(shown(b"a\xFFb"), "/a\u{FFFD}b");
+    // As a finding says it, and its `Debug`.
+    let key = KeyName::new(format!("{}€b", a(14)).as_bytes());
+    let finding = Finding::HintKeyOther { key };
+    assert_eq!(
+        finding.to_string(),
+        format!(
+            "the hint stream has /{}…, which ISO 32000-2's Table F.2 doesn't list, and which isn't read",
+            a(14)
+        )
+    );
+    assert_eq!(format!("{key:?}"), format!("/{}…", a(14)));
+}
+
+/// The attributes are listed in the order they're declared, as a table
+/// indexed by them has them; each says its key, and is shown with its slash,
+/// as a finding of one says it.
+#[test]
+fn every_attribute_is_listed_in_order_and_said_by_its_key() {
+    for (at, attribute) in Attribute::ALL.into_iter().enumerate() {
+        assert_eq!(attribute as usize, at, "{attribute:?}");
+        let shown = [&b"/"[..], attribute.key()].concat();
+        assert_eq!(attribute.to_string().as_bytes(), shown);
+    }
+    let keys: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
+    assert_eq!(Attribute::ALL.map(Attribute::key), keys);
+    let page = Finding::PageAttribute {
+        page: 1,
+        attribute: Attribute::MediaBox,
+    };
+    let words = "page 1 doesn't say its /MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
+    assert_eq!(page.to_string(), words);
+    let node = Finding::NodeAttribute {
+        number: 2,
+        attribute: Attribute::Rotate,
+    };
+    let words =
+        "page tree node 2 holds /Rotate, which is pushed down onto its pages (ISO 32000-2, F.3.10)";
+    assert_eq!(node.to_string(), words);
+}
+
+/// A hint stream's data is by its length alone in a `Debug`, its own, its
+/// facts' or the file's: decrypted, it's plaintext. Its keys are by name.
+#[test]
+fn the_hint_data_is_never_in_a_debug() {
+    const MARKER: &[u8] = b"a marker of the data";
+    let data = HintData::Decoded([b"before ", MARKER, b" after"].concat());
+    let mut hint = HintFacts::new(10, 90, 4, data.clone());
+    hint.keys.push((b"S".to_vec(), Raw::Integer(12)));
+    let mut facts = Facts::new(100);
+    facts.hint = Some(hint.clone());
+    let numbers = format!("{MARKER:?}");
+    let numbers = &numbers[1..numbers.len() - 1];
+    for shown in [
+        format!("{data:?}"),
+        format!("{hint:?}"),
+        format!("{facts:?}"),
+        format!("{facts:#?}"),
+    ] {
+        assert!(!shown.contains("marker"), "{shown}");
+        assert!(!shown.contains(numbers), "{shown}");
+        assert!(shown.contains("33 bytes"), "{shown}");
+    }
+    assert_eq!(format!("{data:?}"), "Decoded(33 bytes)");
+    assert!(format!("{hint:?}").contains("(/S, Integer(12))"));
+    assert_eq!(
+        format!("{:?}", HintData::Unread(Unread::Locked)),
+        "Unread(Locked)"
+    );
+    // Facts compare by their fields, the data among them.
+    let mut other = facts.clone();
+    assert_eq!(other, facts);
+    if let Some(hint) = &mut other.hint {
+        hint.data = HintData::Decoded([b"before ", &MARKER[1..], b"! after"].concat());
+    }
+    assert_ne!(other, facts);
+}
+
+/// What's `const` makes constants: a plan's page, a section's row, an
+/// object's extent, a page's facts, the facts of a file, a hint stream's,
+/// keys and a key's name, positions as a table has them and a width.
+#[test]
+fn what_s_const_makes_constants() {
+    const ROW: RowFacts = RowFacts::new(3, 0, RowEntry::InUse(15));
+    const EXTENT: Extent = Extent::new(3, 15, 40);
+    const PAGE: PageFacts = PageFacts::new(Some(ObjectId::new(3, 0)));
+    const FACTS: Facts = Facts::new(1_000);
+    const HINT: HintFacts = HintFacts::new(10, 90, 4, HintData::NotAStream);
+    const FIRST: FirstObject = FirstObject::new(9, 120, 1, 0);
+    const SECTION: SectionFacts = SectionFacts::new(500, Kind::Table);
+    const KEY: KeyName = KeyName::new(b"S");
+    const KEYS: crate::hint::HintKeys = crate::hint::HintKeys::new(12);
+    const AT: u64 = crate::hint::position(500, 100, 50);
+    const BACK: u64 = crate::hint::located(AT, 100, 50);
+    const WIDTH: u16 = crate::hint::id_width(255);
+    const PLAN_PAGE: Page = Page::new(ObjectId::new(3, 0));
+    const LAYOUT: Options<'static> = Options::new((1, 7));
+    const KEY_OF: &[u8] = Attribute::MediaBox.key();
+    const CLAUSE: &str = Finding::NoPages.clause();
+    const GRADE: Grade = Finding::NoPages.grade();
+    assert_eq!(ROW, RowFacts::new(3, 0, RowEntry::InUse(15)));
+    assert_eq!(EXTENT.end, 40);
+    assert_eq!(PAGE.id, Some(ObjectId::new(3, 0)));
+    assert_eq!(FACTS, Facts::new(1_000));
+    assert_eq!(HINT.keys, []);
+    assert!(!FIRST.version_one());
+    assert_eq!(SECTION.rows, []);
+    assert_eq!(KEY.to_string(), "/S");
+    assert_eq!(KEYS.shared, 12);
+    assert_eq!((AT, BACK), (450, 500));
+    assert_eq!(WIDTH, 8);
+    assert_eq!(PLAN_PAGE.contents, []);
+    assert_eq!(LAYOUT.trailer, b"");
+    assert_eq!(KEY_OF, b"MediaBox");
+    assert_eq!((CLAUSE, GRADE), ("F.3.7", Grade::Error));
 }

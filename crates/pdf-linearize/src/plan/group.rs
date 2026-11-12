@@ -6,8 +6,9 @@
 /// The most objects a container holds: qpdf's default.
 pub const MEMBERS: usize = 100;
 
-/// Which pages use an object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which pages use an object. Exhaustive on purpose: a grouping matches
+/// each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Use {
     /// Only page `i`, from 0.
     Page(u32),

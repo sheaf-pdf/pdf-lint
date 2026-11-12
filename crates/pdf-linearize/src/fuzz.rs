@@ -1068,8 +1068,8 @@ pub fn tables(data: &[u8]) {
     );
 }
 
-/// Where [`group`](crate::plan::group()) puts what's `used` so among the members of an
-/// object stream: by page, then by number.
+/// Where [`group`](crate::plan::group()) puts what's `used` so among the
+/// members of an object stream: by page, then by number.
 fn rank(used: Use) -> (u32, u32) {
     match used {
         Use::Page(page) => (0, page),
@@ -1914,7 +1914,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     // The same facts of it read whole beside its reading.
     let whole = WithReading::new(file, &opened).expect("it reads");
     let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
-    assert_eq!(format!("{beside:?}"), format!("{read:?}"));
+    assert_eq!(beside, read);
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
     assert!(verdict.linearized && verdict.holds && verdict.hints_read);
     // Nothing of it is past a cap or unread, so nothing isn't judged.

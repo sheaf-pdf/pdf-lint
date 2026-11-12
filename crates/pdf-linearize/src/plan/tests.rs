@@ -1027,7 +1027,8 @@ fn page_uses_by_id_is_what_a_plan_says() {
         &[ObjectId::new(3, 0), ObjectId::new(4, 0)],
         &stop,
         |id, to| {
-            // What it stops at it doesn't ask after: that's what the stop is for.
+            // What it stops at it doesn't ask after: that's what the stop is
+            // for.
             assert!(
                 id != ObjectId::new(1, 0) && id != ObjectId::new(2, 0),
                 "asked of {id:?}"

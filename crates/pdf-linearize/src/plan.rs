@@ -7,9 +7,9 @@
 //! come first and take the highest numbers; then each other page with what only
 //! it uses ([`Part::Pages`]), what pages share ([`Part::Shared`]), everything
 //! else ([`Part::Other`]) and the main cross-reference section, numbered
-//! from 1. A [`Graph`] says what a plan needs to know of the objects, and nothing
-//! here sees a body: [`plan()`] gives what a caller serializes, in file order
-//! ([`Plan::writes`]), under the numbers it gives ([`Plan::number`]).
+//! from 1. A [`Graph`] says what a plan needs to know of the objects, and
+//! nothing here sees a body: [`plan()`] gives what a caller serializes, in file
+//! order ([`Plan::writes`]), under the numbers it gives ([`Plan::number`]).
 //!
 //! # Where an object goes
 //!
@@ -61,7 +61,7 @@ use crate::phases::phase;
 
 /// What lists a file's objects, which decides the layout's own numbers and
 /// whether anything can be packed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Kind {
     /// Cross-reference tables: nothing can be packed.
@@ -136,7 +136,7 @@ impl Group {
 
 /// An object as a [`Graph`] holds it, which [`Graph::object`] gives back to say
 /// more of it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     id: ObjectId,
     refs: Range<usize>,
@@ -149,14 +149,14 @@ impl Node {
     /// this says so: not a stream, and not at a generation or under an
     /// encryption that keeps it out. The catalog and a page are never packed,
     /// whatever this says (F.3.1).
-    pub fn packable(&mut self, yes: bool) -> &mut Node {
+    pub const fn packable(&mut self, yes: bool) -> &mut Node {
         self.packable = yes;
         self
     }
 
     /// Whether the object is one a viewer can do without at first, an image or
     /// a font file, so it goes after the rest of its page's (F.3.7, F.3.8).
-    pub fn late(&mut self, yes: bool) -> &mut Node {
+    pub const fn late(&mut self, yes: bool) -> &mut Node {
         self.late = yes;
         self
     }
@@ -178,7 +178,8 @@ pub struct Page {
 
 impl Page {
     /// The page at object `id`, with no content streams or thumbnail said yet.
-    pub fn new(id: ObjectId) -> Page {
+    #[must_use]
+    pub const fn new(id: ObjectId) -> Page {
         Page {
             id,
             contents: Vec::new(),
@@ -189,8 +190,9 @@ impl Page {
 
 /// A document's objects as a plan needs them: flat, one list of references and
 /// a range of it per object. Built up by its methods, which refuse nothing;
-/// [`plan()`] does.
-#[derive(Debug, Clone)]
+/// [`plan()`] does. Two graphs compare by `==`, object by object in the order
+/// given.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Graph {
     catalog: ObjectId,
     kind: Kind,
@@ -207,7 +209,8 @@ pub struct Graph {
 impl Graph {
     /// A graph of nothing yet, with `catalog` as its catalog, to be listed by
     /// `kind`.
-    pub fn new(catalog: ObjectId, kind: Kind) -> Graph {
+    #[must_use]
+    pub const fn new(catalog: ObjectId, kind: Kind) -> Graph {
         Graph {
             catalog,
             kind,
@@ -245,7 +248,7 @@ impl Graph {
     /// Which page opens first, by its place among the pages (0 unless this says
     /// otherwise): it's laid out first and named by the dictionary's `/P`
     /// (F.3.7).
-    pub fn first_page(&mut self, index: u32) {
+    pub const fn first_page(&mut self, index: u32) {
         self.first_page = index;
     }
 
@@ -271,13 +274,13 @@ impl Graph {
 
     /// Whether the catalog's `/PageMode` is `/UseOutlines`, which puts
     /// [`Group::Outlines`] in part 6 (F.3.5, F.3.7).
-    pub fn outlines_first(&mut self, yes: bool) {
+    pub const fn outlines_first(&mut self, yes: bool) {
         self.outlines_first = yes;
     }
 }
 
 /// The parts of a file that hold what a caller writes (F.3), in file order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Part {
     /// Part 4: the catalog and what a viewer wants at open.
@@ -293,7 +296,8 @@ pub enum Part {
     Other,
 }
 
-/// What a [`Write`] writes.
+/// What a [`Write`] writes. Exhaustive on purpose: a writer that wrote
+/// nothing for a kind it didn't know would write a wrong file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum What {
     /// The object with this id in the caller's graph.
@@ -337,7 +341,7 @@ pub struct Container {
 }
 
 /// Why a graph can't be planned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A linearized file names a first page.
@@ -441,12 +445,14 @@ pub struct Plan {
 
 impl Plan {
     /// What lists the file's objects.
-    pub fn kind(&self) -> Kind {
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
         self.kind
     }
 
     /// The number and generation `id` is written at, or none for an id that
     /// names no object, a reference to which a writer writes as null.
+    #[must_use]
     pub fn number(&self, id: ObjectId) -> Option<ObjectId> {
         let at = self.ids.binary_search(&id).ok()?;
         Some(ObjectId::new(self.numbers[at], 0))
@@ -455,22 +461,26 @@ impl Plan {
     /// Which pages use `id`, or none for an id that names no object. The first
     /// page is always `Use::Page(0)`, then the others count from 1 in page
     /// order, so under another first page a page's `Use` isn't its place.
+    #[must_use]
     pub fn used(&self, id: ObjectId) -> Option<Use> {
         let at = self.ids.binary_search(&id).ok()?;
         Some(self.uses[at])
     }
 
     /// What a caller serializes, in file order, part by part.
+    #[must_use]
     pub fn writes(&self) -> &[Write] {
         &self.writes
     }
 
     /// The object streams a caller packs, in file order.
+    #[must_use]
     pub fn containers(&self) -> &[Container] {
         &self.containers
     }
 
     /// `part`'s writes, as a range of [`writes`](Plan::writes).
+    #[must_use]
     pub fn part_writes(&self, part: Part) -> Range<usize> {
         let start = self.writes.partition_point(|w| w.part < part);
         start..start + self.writes[start..].partition_point(|w| w.part == part)
@@ -483,6 +493,7 @@ impl Plan {
     /// # Panics
     ///
     /// Past the pages.
+    #[must_use]
     pub fn page_writes(&self, page: u32) -> Range<usize> {
         self.pages[page as usize].clone()
     }
@@ -495,6 +506,7 @@ impl Plan {
     /// # Panics
     ///
     /// Past the pages.
+    #[must_use]
     pub fn page_contents(&self, page: u32) -> Range<usize> {
         self.contents[page as usize].clone()
     }
@@ -506,24 +518,28 @@ impl Plan {
     /// # Panics
     ///
     /// Past the pages.
+    #[must_use]
     pub fn thumb_writes(&self, page: u32) -> Range<usize> {
         self.thumbs[page as usize].clone()
     }
 
     /// The writes of what several thumbnails reach and nothing before them has
     /// (F.3.10, F.4.4), after the last thumbnail's.
+    #[must_use]
     pub fn thumb_shared_writes(&self) -> Range<usize> {
         self.thumb_shared.clone()
     }
 
     /// The writes of `group`, or none if the graph wasn't given it.
     /// [`Group::Other`]'s is followed by what no group reached.
+    #[must_use]
     pub fn group_writes(&self, group: Group) -> Option<Range<usize>> {
         self.groups[group as usize].clone()
     }
 
     /// Each root of [`Group::EmbeddedFile`] as its own group, in the order
     /// given (F.4.7).
+    #[must_use]
     pub fn files(&self) -> &[FileGroup] {
         &self.files
     }
@@ -532,6 +548,7 @@ impl Plan {
     /// [`writes`](Plan::writes), the first page's then part 8's. In part 6, a
     /// stretch no later page reaches is one entry and each write one reaches is
     /// another; in part 8, each write is one.
+    #[must_use]
     pub fn entries(&self) -> &[Range<usize>] {
         &self.entries
     }
@@ -543,12 +560,14 @@ impl Plan {
     /// # Panics
     ///
     /// Past the pages.
+    #[must_use]
     pub fn shared(&self, page: u32) -> &[u32] {
         &self.listed[self.page_lists[page as usize].clone()]
     }
 
     /// The entries of the shared object table that `group` reaches, in order,
     /// each once: for a group whose table lists them (F.4.6), otherwise none.
+    #[must_use]
     pub fn group_shared(&self, group: Group) -> &[u32] {
         &self.listed[self.group_lists[group as usize].clone()]
     }
@@ -559,66 +578,78 @@ impl Plan {
     /// # Panics
     ///
     /// Past the files.
+    #[must_use]
     pub fn file_shared(&self, file: usize) -> &[u32] {
         &self.listed[self.file_lists[file].clone()]
     }
 
     /// How many pages there are.
-    pub fn page_count(&self) -> u32 {
+    #[must_use]
+    pub const fn page_count(&self) -> u32 {
         self.pages.len() as u32
     }
 
     /// Which page opens first, by its place among the pages: the dictionary's
     /// `/P`.
-    pub fn first_page(&self) -> u32 {
+    #[must_use]
+    pub const fn first_page(&self) -> u32 {
         self.first_page
     }
 
     /// The catalog's number: a section's `/Root`.
+    #[must_use]
     pub fn catalog_number(&self) -> u32 {
         self.writes[0].number
     }
 
     /// The first page object's number: the dictionary's `/O`.
-    pub fn first_page_number(&self) -> u32 {
+    #[must_use]
+    pub const fn first_page_number(&self) -> u32 {
         self.first_page_number
     }
 
     /// The linearization dictionary's number, the first of the first group.
-    pub fn dictionary_number(&self) -> u32 {
+    #[must_use]
+    pub const fn dictionary_number(&self) -> u32 {
         self.dictionary
     }
 
     /// The first-page cross-reference stream's number, under [`Kind::Stream`].
-    pub fn first_xref_number(&self) -> Option<u32> {
+    #[must_use]
+    pub const fn first_xref_number(&self) -> Option<u32> {
         self.first_xref
     }
 
     /// The main cross-reference stream's number, under [`Kind::Stream`].
-    pub fn main_xref_number(&self) -> Option<u32> {
+    #[must_use]
+    pub const fn main_xref_number(&self) -> Option<u32> {
         self.main_xref
     }
 
     /// The hint stream's number, the last the file uses, wherever it's written
     /// (F.3.6).
-    pub fn hint_number(&self) -> u32 {
+    #[must_use]
+    pub const fn hint_number(&self) -> u32 {
         self.hint
     }
 
     /// The file's `/Size`: one past its last number.
-    pub fn size(&self) -> u32 {
+    #[must_use]
+    pub const fn size(&self) -> u32 {
         self.hint + 1
     }
 
     /// How many entries the lists of shared objects hold, against
     /// [`Limits::shared_entries`].
-    pub fn shared_entries(&self) -> usize {
+    #[must_use]
+    pub const fn shared_entries(&self) -> usize {
         self.listed.len()
     }
 
     /// How many objects and references making those lists looked at, against
     /// [`Limits::shared_visits`].
-    pub fn shared_visits(&self) -> u64 {
+    #[must_use]
+    pub const fn shared_visits(&self) -> u64 {
         self.visits
     }
 }
@@ -626,10 +657,17 @@ impl Plan {
 /// `graph` planned: Annex F's order and numbers (F.3), and the lists of shared
 /// objects each later page's entry in the hint tables wants (F.4.2).
 ///
-/// Refused, under an [`Error`]: no pages; a page, or the catalog, not among the
-/// objects; an object or a page given twice; the catalog given as a page; a
-/// [`first_page`](Graph::first_page) past the pages; under [`Kind::Table`], an
-/// object said to be packable; past a cap of `limits`.
+/// # Errors
+///
+/// Refused, under an [`Error`]: no pages ([`Error::NoPages`]); a page, or the
+/// catalog, not among the objects ([`Error::NoPage`], [`Error::NoCatalog`]);
+/// an object or a page given twice ([`Error::ObjectRepeated`],
+/// [`Error::PageRepeated`]); the catalog given as a page
+/// ([`Error::CatalogIsPage`]); a [`first_page`](Graph::first_page) past the
+/// pages ([`Error::FirstPagePast`]); under [`Kind::Table`], an object said to
+/// be packable ([`Error::PackedTable`]); past a cap of `limits`
+/// ([`Error::TooManyPages`], [`Error::TooManyObjects`],
+/// [`Error::TooManyHints`]).
 pub fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
     phase!(
         DEBUG,

@@ -11,8 +11,8 @@ use std::process::Command;
 #[path = "../../pdf-linearize/tests/written/mod.rs"]
 mod written;
 
-/// What qpdf says of `bytes` by `check`, the file opened by `password`: its exit
-/// code and all it wrote, the file's path as `FILE`.
+/// What qpdf says of `bytes` by `check`, the file opened by `password`: its
+/// exit code and all it wrote, the file's path as `FILE`.
 fn asked_by(name: &str, bytes: &[u8], check: &str, password: &str) -> (i32, String) {
     let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
     let folder = Path::new(env!("CARGO_TARGET_TMPDIR"));
@@ -55,8 +55,9 @@ fn classes(text: &str) -> BTreeSet<String> {
 /// isn't what it computes.
 const OBJECT_COUNT: &str = "object count mismatch for page N: hint table = N; computed = N";
 
-/// What the lopdf adapter writes, as qpdf reads it: a table, whatever the file was, each
-/// warning the class the family's table has of the same file, and for the same reason.
+/// What the lopdf adapter writes, as qpdf reads it: a table, whatever the file
+/// was, each warning the class the family's table has of the same file, and for
+/// the same reason.
 mod lopdf {
     use std::collections::BTreeSet;
 
@@ -66,8 +67,8 @@ mod lopdf {
     use super::written::{built, stream, two_pages};
     use super::{OBJECT_COUNT, asked_by, classes};
 
-    /// Both of qpdf's checks on what's written of `bytes`: each warns of `wanted`'s
-    /// classes alone.
+    /// Both of qpdf's checks on what's written of `bytes`: each warns of
+    /// `wanted`'s classes alone.
     fn holds(name: &str, bytes: &[u8], wanted: &[&str]) {
         let doc = Document::load_mem(bytes).unwrap();
         let mut out = Vec::new();

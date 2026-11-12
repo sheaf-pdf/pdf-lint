@@ -12,6 +12,7 @@ use pdf_structure::write::{self, Body, Encryptor};
 use pdf_structure::{Document, Source as _};
 
 use super::{Error, FirstPage, Options, PageTree};
+use crate::check;
 use crate::plan::{Graph, Group, Kind, Page};
 
 /// How far up a page's `/Parent`s are followed for what it inherits, as
@@ -589,7 +590,7 @@ fn pages_agreed<'d>(
     let pdfium = pages(doc, catalog, Rules::Pdfium, limits, &mut ()).map_err(Error::Pages)?;
     let refused = |why| Err(Error::PageTree(why));
     let mut seen = HashSet::with_capacity(iso.len());
-    for (page, (a, b)) in iso.iter().zip(&pdfium).enumerate() {
+    for (page, (a, b)) in (0..).zip(iso.iter().zip(&pdfium)) {
         if a.id != b.id {
             return refused(PageTree::Rules { page });
         }
@@ -606,16 +607,26 @@ fn pages_agreed<'d>(
             if !alike(a.attribute(attribute), b.attribute(attribute)) {
                 return refused(PageTree::Attribute {
                     page,
-                    attribute: attribute.key(),
+                    attribute: named(attribute),
                 });
             }
         }
     }
     if iso.len() != pdfium.len() {
-        let page = iso.len().min(pdfium.len());
+        let page = iso.len().min(pdfium.len()) as u64;
         return refused(PageTree::Rules { page });
     }
     Ok(iso)
+}
+
+/// The check's name for an inheritable attribute, as a refusal gives it.
+fn named(attribute: Inheritable) -> check::Attribute {
+    match attribute {
+        Inheritable::Resources => check::Attribute::Resources,
+        Inheritable::MediaBox => check::Attribute::MediaBox,
+        Inheritable::CropBox => check::Attribute::CropBox,
+        Inheritable::Rotate => check::Attribute::Rotate,
+    }
 }
 
 /// Each page's inheritable attributes read going down `/Kids` from the root, as
@@ -663,7 +674,7 @@ fn kids_agree(doc: &Document, catalog: &Dict, table: &Pages<'_>) -> Result<(), E
                         _ => false,
                     };
                     if !alike {
-                        let attribute = attribute.key();
+                        let (page, attribute) = (page as u64, named(attribute));
                         return Err(Error::PageTree(PageTree::Kids { page, attribute }));
                     }
                 }
@@ -716,7 +727,8 @@ fn pushed_down(bodies: &mut [(ObjectId, Body<'_>)], table: &Pages<'_>) -> Result
             match inherited.origin {
                 Origin::Ancestor(Some(_)) => {}
                 Origin::Ancestor(None) => {
-                    return Err(Error::PageTree(PageTree::DirectNode { attribute: key }));
+                    let attribute = named(attribute);
+                    return Err(Error::PageTree(PageTree::DirectNode { attribute }));
                 }
                 _ => continue,
             }
@@ -764,9 +776,10 @@ fn nodes_taken_off(
                 }
             }
             None => {
-                let mut keys = Inheritable::ALL.map(Inheritable::key).into_iter();
-                if let Some(key) = keys.find(|key| dict.has(key.as_bytes())) {
-                    return Err(Error::PageTree(PageTree::DirectNode { attribute: key }));
+                let mut held = Inheritable::ALL.into_iter();
+                if let Some(held) = held.find(|held| dict.has(held.key().as_bytes())) {
+                    let attribute = named(held);
+                    return Err(Error::PageTree(PageTree::DirectNode { attribute }));
                 }
             }
         }

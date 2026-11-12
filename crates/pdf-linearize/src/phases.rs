@@ -330,8 +330,9 @@ mod tests {
         /// within it, in the order they run: the graph; the plan, the engine's
         /// within it; the object streams, with how many the plan has; the
         /// bodies, with how many writes; the bytes around them, the engine's
-        /// assembly within it, and its rounds; and the file laid out whole, with
-        /// its length. In each kind, with what each is told the plan's own.
+        /// assembly within it, and its rounds; and the file laid out whole,
+        /// with its length. In each kind, with what each is told the plan's
+        /// own.
         #[test]
         fn a_linearize_is_a_span_and_each_stage_one_in_order() {
             let file = file();

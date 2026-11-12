@@ -38,7 +38,9 @@
 //!   function of its data settles: only one giving ever-longer data doesn't,
 //!   and is refused ([`Error::Unsettled`]).
 
+use std::fmt;
 use std::io::Write as _;
+use std::iter::FusedIterator;
 
 use crate::hint::{
     self, EmbeddedFiles, Extended, FileEntry, Generic, GroupEntry, HintKeys, PageEntry,
@@ -88,7 +90,8 @@ pub struct Options<'a> {
 
 impl Options<'static> {
     /// A file of `version` with nothing else in its trailer.
-    pub fn new(version: (u8, u8)) -> Options<'static> {
+    #[must_use]
+    pub const fn new(version: (u8, u8)) -> Options<'static> {
         Options {
             version,
             trailer: b"",
@@ -97,7 +100,7 @@ impl Options<'static> {
 }
 
 /// Which of the streams of its own [`assemble`] is asking to have encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StreamKind {
     /// The primary hint stream.
@@ -108,8 +111,9 @@ pub enum StreamKind {
     MainXref,
 }
 
-/// A stream [`assemble`] wants encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A stream [`assemble`] wants encoded. Its `Debug` gives its data by its
+/// length alone, as a caller's closure may be handed what's then encrypted.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stream<'a> {
     /// Which it is.
@@ -122,8 +126,9 @@ pub struct Stream<'a> {
     pub columns: Option<u32>,
 }
 
-/// A stream as it's to stand.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// A stream as it's to stand. Its `Debug` gives its entries and data by
+/// their length alone.
+#[derive(Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Encoded {
     /// What goes in its dictionary to say so, `/Filter` and the like, as
@@ -135,12 +140,14 @@ pub struct Encoded {
 
 impl Encoded {
     /// `data`, under dictionary entries `entries`.
-    pub fn new(entries: Vec<u8>, data: Vec<u8>) -> Encoded {
+    #[must_use]
+    pub const fn new(entries: Vec<u8>, data: Vec<u8>) -> Encoded {
         Encoded { entries, data }
     }
 
     /// `data`, as it is.
-    pub fn plain(data: Vec<u8>) -> Encoded {
+    #[must_use]
+    pub const fn plain(data: Vec<u8>) -> Encoded {
         Encoded {
             entries: Vec::new(),
             data,
@@ -148,7 +155,33 @@ impl Encoded {
     }
 }
 
-/// What's next in a file: see [`Layout::pieces`].
+impl fmt::Debug for Stream<'_> {
+    /// Which it is, its number and columns, and its data by its length, not
+    /// its bytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stream")
+            .field("what", &self.what)
+            .field("number", &self.number)
+            .field("data", &format_args!("{} bytes", self.data.len()))
+            .field("columns", &self.columns)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Encoded {
+    /// Its entries and data by their length, not their bytes, which may be
+    /// encrypted or hold what's to be.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Encoded")
+            .field("entries", &format_args!("{} bytes", self.entries.len()))
+            .field("data", &format_args!("{} bytes", self.data.len()))
+            .finish()
+    }
+}
+
+/// What's next in a file: see [`Layout::pieces`]. Exhaustive on purpose: a
+/// writer that left out a piece of a kind it didn't know would write a
+/// wrong file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Piece<'l> {
     /// These bytes.
@@ -187,8 +220,10 @@ pub enum Error<E> {
     Hint(hint::Error),
 }
 
-/// What's written around a caller's bodies, and where everything is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What's written around a caller's bodies, and where everything is. Its
+/// `Debug` gives where each thing is and how long, never a byte it holds,
+/// as the trailer's entries a caller gives and the hint data are a file's.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Layout {
     /// The header, the dictionary and the first-page section.
     head: Vec<u8>,
@@ -214,26 +249,28 @@ impl Layout {
     /// What's in the file, in order: its bytes are these, one after another.
     /// Write them, or hand them on; a [`Piece::Body`] is the caller's to fill
     /// in.
-    pub fn pieces(&self) -> impl Iterator<Item = Piece<'_>> {
-        std::iter::once(Piece::Bytes(&self.head))
-            .chain((0..self.before_hint).map(Piece::Body))
-            .chain(std::iter::once(Piece::Bytes(&self.hint)))
-            .chain((self.before_hint..self.writes).map(Piece::Body))
-            .chain(std::iter::once(Piece::Bytes(&self.main)))
+    pub const fn pieces(&self) -> Pieces<'_> {
+        Pieces {
+            layout: self,
+            at: 0,
+        }
     }
 
     /// The file's length: the dictionary's `/L`.
-    pub fn len(&self) -> u64 {
+    #[must_use]
+    pub const fn len(&self) -> u64 {
         self.len
     }
 
     /// Whether the file has no bytes, which it never hasn't.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// Where object `number` is, or none for a number nothing is at, or one in
     /// an object stream.
+    #[must_use]
     pub fn position(&self, number: u32) -> Option<u64> {
         match self.rows.get(number as usize) {
             Some(Row::At(position)) => Some(*position),
@@ -242,40 +279,159 @@ impl Layout {
     }
 
     /// Where the first page ends: the dictionary's `/E`.
-    pub fn first_page_end(&self) -> u64 {
+    #[must_use]
+    pub const fn first_page_end(&self) -> u64 {
         self.first_page_end
     }
 
     /// Where the hint stream's object is, and its length, overhead and all: the
     /// dictionary's `/H`.
-    pub fn hint_extent(&self) -> (u64, u64) {
+    #[must_use]
+    pub const fn hint_extent(&self) -> (u64, u64) {
         (self.hint_at, self.hint.len() as u64)
     }
 
     /// Where the first-page section starts.
-    pub fn first_section(&self) -> u64 {
+    #[must_use]
+    pub const fn first_section(&self) -> u64 {
         self.first_section_at
     }
 
     /// Where the main section starts, the first-page section's `/Prev`.
-    pub fn main_section(&self) -> u64 {
+    #[must_use]
+    pub const fn main_section(&self) -> u64 {
         self.main_section_at
     }
 
     /// Where the main section's first entry is said to be: the dictionary's
     /// `/T`.
-    pub fn main_first_entry(&self) -> u64 {
+    #[must_use]
+    pub const fn main_first_entry(&self) -> u64 {
         self.main_first_entry
     }
 
     /// The hint stream's data before the closure had it.
+    #[must_use]
     pub fn hint_data(&self) -> &[u8] {
         &self.data
     }
 
     /// Where each table is in that data.
-    pub fn hint_keys(&self) -> &HintKeys {
+    #[must_use]
+    pub const fn hint_keys(&self) -> &HintKeys {
         &self.keys
+    }
+}
+
+impl fmt::Debug for Layout {
+    /// Where each thing is and how long, and how many writes there are and
+    /// before the hint stream: never a byte it holds, which are a file's.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Layout")
+            .field("len", &self.len)
+            .field("head", &format_args!("{} bytes", self.head.len()))
+            .field("first_section", &self.first_section_at)
+            .field("writes", &self.writes)
+            .field("before_hint", &self.before_hint)
+            .field("hint", &self.hint_extent())
+            .field("first_page_end", &self.first_page_end)
+            .field("main_section", &self.main_section_at)
+            .field("main_first_entry", &self.main_first_entry)
+            .field("main", &format_args!("{} bytes", self.main.len()))
+            .field("numbers", &self.rows.len())
+            .field("hint_data", &format_args!("{} bytes", self.data.len()))
+            .field("hint_keys", &self.keys)
+            .finish()
+    }
+}
+
+/// A [`Layout`]'s pieces, in file order: what [`Layout::pieces`] gives. Its
+/// `Debug` says how many are left, never a byte of them.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Clone)]
+pub struct Pieces<'l> {
+    layout: &'l Layout,
+    /// The next piece's place among them all: the head, the bodies before the
+    /// hint stream, the hint stream, the bodies after it and the main section.
+    at: usize,
+}
+
+impl<'l> Pieces<'l> {
+    /// How many pieces a layout has: its writes, and the three of its own.
+    fn total(&self) -> usize {
+        self.layout.writes + 3
+    }
+
+    /// The hint stream's place among the pieces, after the head and the bodies
+    /// before it.
+    fn hint(&self) -> usize {
+        self.layout.before_hint + 1
+    }
+}
+
+impl<'l> Iterator for Pieces<'l> {
+    type Item = Piece<'l>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Piece<'l>> {
+        let (at, hint, total) = (self.at, self.hint(), self.total());
+        let layout = self.layout;
+        let piece = match at {
+            0 => Piece::Bytes(&layout.head),
+            _ if at < hint => Piece::Body(at - 1),
+            _ if at == hint => Piece::Bytes(&layout.hint),
+            _ if at + 1 < total => Piece::Body(at - 2),
+            _ if at + 1 == total => Piece::Bytes(&layout.main),
+            _ => return None,
+        };
+        self.at += 1;
+        Some(piece)
+    }
+
+    /// Exact: what's left of the writes and the three of its own.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.total().saturating_sub(self.at);
+        (left, Some(left))
+    }
+
+    /// One pass over what's left: each stretch of bodies a range's own fold,
+    /// as `count`, `for_each` and `sum` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, Piece<'l>) -> B>(self, init: B, mut f: F) -> B {
+        let (at, hint, total) = (self.at, self.hint(), self.total());
+        let layout = self.layout;
+        // What's left of the pieces from `start` to before `end`.
+        let left = |start: usize, end: usize| at.max(start)..end;
+        let mut acc = init;
+        if at == 0 {
+            acc = f(acc, Piece::Bytes(&layout.head));
+        }
+        acc = (left(1, hint).map(|i| Piece::Body(i - 1))).fold(acc, &mut f);
+        if at <= hint {
+            acc = f(acc, Piece::Bytes(&layout.hint));
+        }
+        acc = (left(hint + 1, total - 1).map(|i| Piece::Body(i - 2))).fold(acc, &mut f);
+        if at < total {
+            acc = f(acc, Piece::Bytes(&layout.main));
+        }
+        acc
+    }
+}
+
+impl ExactSizeIterator for Pieces<'_> {}
+
+// `at` only grows, and `next` gives nothing once it's past the main section.
+impl FusedIterator for Pieces<'_> {}
+
+impl fmt::Debug for Pieces<'_> {
+    /// How many pieces are left, and of how many: not their bytes, which are
+    /// a file's.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pieces")
+            .field("left", &self.len())
+            .field("of", &self.total())
+            .finish()
     }
 }
 
@@ -329,9 +485,14 @@ impl Places {
 /// The bytes around a plan's bodies, whose lengths are `lengths`, one per
 /// [`Plan::writes`]: `encode` says how each stream of its own stands.
 ///
-/// Refused, under an [`Error`]: not one length per write; a file past what a
-/// hint table's positions can say, 4 GiB; a refusal of `encode`'s; a first-page
-/// stream that `encode` makes longer each round.
+/// # Errors
+///
+/// Refused, under an [`Error`]: not one length per write ([`Error::Lengths`]);
+/// a file past what a hint table's positions can say, 4 GiB
+/// ([`Error::TooLarge`]); a refusal of `encode`'s ([`Error::Encode`]); a
+/// first-page stream that `encode` makes longer each round
+/// ([`Error::Unsettled`]); and a hint table that can't be written, which a
+/// plan can't cause ([`Error::Hint`]).
 pub fn assemble<E>(
     plan: &Plan,
     lengths: &[u64],

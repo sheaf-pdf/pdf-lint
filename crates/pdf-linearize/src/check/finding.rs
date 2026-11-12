@@ -60,35 +60,92 @@ impl std::fmt::Display for DictKey {
     }
 }
 
+/// How many bytes of a key a [`KeyName`] holds.
+const HELD: usize = 15;
+
 /// A key of a hint stream's dictionary, as a finding owning nothing can hold
-/// it: its first bytes.
+/// it: its first bytes. Its `Display` is the key with its slash, `/S`, a byte
+/// that's no character's U+FFFD, and a key longer than 15 bytes cut before
+/// the character that runs past them, `…` where it's cut.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyName {
-    bytes: [u8; 15],
+    bytes: [u8; HELD],
     len: u8,
+    cut: bool,
 }
 
 impl KeyName {
-    /// `key`'s first 15 bytes.
-    pub fn new(key: &[u8]) -> KeyName {
-        let mut bytes = [0; 15];
-        let len = key.len().min(bytes.len());
-        bytes[..len].copy_from_slice(&key[..len]);
+    /// `key`, or its first bytes: up to 15, cut before a character that runs
+    /// past them.
+    #[must_use]
+    pub const fn new(key: &[u8]) -> KeyName {
+        let len = held(key);
+        let mut bytes = [0; HELD];
+        bytes
+            .split_at_mut(len)
+            .0
+            .copy_from_slice(key.split_at(len).0);
         KeyName {
             bytes,
             len: len as u8,
+            cut: len < key.len(),
         }
     }
 
-    /// The bytes it holds.
+    /// The bytes it holds: the key's, or as many of its first as it holds.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
 }
 
+/// How many of `key`'s bytes a [`KeyName`] holds: all of them up to
+/// [`HELD`], else [`HELD`], or fewer where a character that starts before
+/// byte [`HELD`] runs past it, which is left out whole. Where the bytes at
+/// the cut are no character's, it's at [`HELD`], and they're each U+FFFD, as
+/// everywhere else.
+const fn held(key: &[u8]) -> usize {
+    if key.len() <= HELD {
+        return key.len();
+    }
+    // A byte past the cut that continues a character: back to where that
+    // starts, three bytes at most.
+    if !continues(key[HELD]) {
+        return HELD;
+    }
+    let mut start = HELD - 1;
+    while start > HELD - 4 && continues(key[start]) {
+        start -= 1;
+    }
+    let width = match key[start] {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 0,
+    };
+    // The character it starts, where that's one, runs past the cut.
+    let after = key.split_at(start).1;
+    match start + width > HELD && width <= after.len() {
+        true => match std::str::from_utf8(after.split_at(width).0) {
+            Ok(_) => start,
+            Err(_) => HELD,
+        },
+        false => HELD,
+    }
+}
+
+/// Whether `byte` continues a character in UTF-8, as `10xxxxxx`.
+const fn continues(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
 impl std::fmt::Display for KeyName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "/{}", String::from_utf8_lossy(self.as_bytes()))
+        write!(f, "/{}", String::from_utf8_lossy(self.as_bytes()))?;
+        match self.cut {
+            true => f.write_str("…"),
+            false => Ok(()),
+        }
     }
 }
 
@@ -136,7 +193,7 @@ pub enum Place {
 /// taken past the header; a linearization dictionary's value it quotes is as
 /// written, counted from the header (ISO 32000-2, 7.5.2). In a file whose
 /// header is its first byte, the two are the same.
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Finding {
     /// `/Linearized` isn't a number whose integer part is 1 (Table F.1), so the
@@ -183,8 +240,8 @@ pub enum Finding {
     /// `/H` hasn't two or four items (Table F.1).
     #[error("/H has {items} items, where it has two or four (ISO 32000-2, Table F.1)")]
     HintItems {
-        /// How many it has.
-        items: usize,
+        /// How many it has, or `u32::MAX` where it's more.
+        items: u32,
     },
     /// `/O` isn't the number of the first page's object (Table F.1).
     #[error("/O is {o}, where page {page}'s object is {computed} (ISO 32000-2, Table F.1)")]
@@ -284,8 +341,8 @@ pub enum Finding {
     /// The first section has more than one subsection (F.3.4).
     #[error("the first section has {count} subsections, where it has one (ISO 32000-2, F.3.4)")]
     FirstSubsections {
-        /// How many it has.
-        count: usize,
+        /// How many it has, or `u32::MAX` where it's more.
+        count: u32,
     },
     /// The first section has a free entry (F.3.4).
     #[error("the first section lists {number} free (ISO 32000-2, F.3.4)")]
@@ -319,8 +376,8 @@ pub enum Finding {
     /// The main section has more than one subsection (F.3.11).
     #[error("the main section has {count} subsections, where it has one (ISO 32000-2, F.3.11)")]
     MainSubsections {
-        /// How many it has.
-        count: usize,
+        /// How many it has, or `u32::MAX` where it's more.
+        count: u32,
     },
     /// The main section doesn't begin at 0 (F.3.11).
     #[error("the main section begins at {from}, where it begins at 0 (ISO 32000-2, F.3.11)")]
@@ -485,7 +542,7 @@ pub enum Finding {
     },
 
     /// A page doesn't say an attribute it has to (F.3.7, F.3.10).
-    #[error("page {page} doesn't say its {attribute:?} itself (ISO 32000-2, F.3.7, F.3.10)")]
+    #[error("page {page} doesn't say its {attribute} itself (ISO 32000-2, F.3.7, F.3.10)")]
     PageAttribute {
         /// The page.
         page: u64,
@@ -494,7 +551,7 @@ pub enum Finding {
     },
     /// A page tree node holds an inheritable attribute (F.3.10).
     #[error(
-        "page tree node {number} holds {attribute:?}, which is pushed down onto its pages (ISO 32000-2, F.3.10)"
+        "page tree node {number} holds {attribute}, which is pushed down onto its pages (ISO 32000-2, F.3.10)"
     )]
     NodeAttribute {
         /// Its number.
@@ -814,7 +871,8 @@ fn placed(computed: &Option<u64>) -> String {
 
 impl Finding {
     /// Where it's said of: none for what's of the file as a whole.
-    pub fn place(&self) -> Option<Place> {
+    #[must_use]
+    pub const fn place(&self) -> Option<Place> {
         use Finding::*;
         use Place::*;
         Some(match *self {
@@ -897,7 +955,8 @@ impl Finding {
     }
 
     /// The clause of ISO 32000-2 it departs from, as its message cites it.
-    pub fn clause(&self) -> &'static str {
+    #[must_use]
+    pub const fn clause(&self) -> &'static str {
         use Finding::*;
         match self {
             Version
@@ -983,7 +1042,8 @@ impl Finding {
     /// value it can't read), [`Grade::Departure`] where real files, read by
     /// real viewers, show that nothing goes wrong by it, and
     /// [`Grade::Unjudged`] for what wasn't judged.
-    pub fn grade(&self) -> Grade {
+    #[must_use]
+    pub const fn grade(&self) -> Grade {
         use Finding::*;
         match self {
             HintUnread { .. }

@@ -12,8 +12,8 @@ use cases::Doc;
 #[cfg(feature = "family")]
 mod written;
 
-/// What qpdf says of `bytes` by `check`: its exit code and all it wrote, the file's
-/// path as `FILE`.
+/// What qpdf says of `bytes` by `check`: its exit code and all it wrote, the
+/// file's path as `FILE`.
 fn asked(name: &str, bytes: &[u8], check: &str) -> (i32, String) {
     asked_by(name, bytes, check, "")
 }
@@ -43,29 +43,31 @@ fn answer(name: &str, doc: &Doc) -> (i32, String) {
     asked(name, &doc.written().bytes, "--check-linearization")
 }
 
-/// F.3.6 has the hint stream's number after every other in the first group, those
-/// of what's in its object streams too, so where the group has such members it
-/// follows them, which qpdf's check flags, on any file written to that rule.
+/// F.3.6 has the hint stream's number after every other in the first group,
+/// those of what's in its object streams too, so where the group has such
+/// members it follows them, which qpdf's check flags, on any file written to
+/// that rule.
 const HINT_LAST: &str = "linearized file contains an uncompressed object after a compressed one in a cross-reference stream";
 
 /// What qpdf says of each case. What's not plain has a reason:
 ///
 /// - A packed file with members in its first group, [`HINT_LAST`].
-/// - A form. F.3.5 has only the form's dictionary in part 4, with its fields where
-///   they fall, so the widgets are their pages'. qpdf's categories have all an
-///   `/AcroForm` reaches open-document, in part 4, so it computes those pages as
-///   having a widget fewer, and part 6 as ending before it.
-/// - `/P` other than 0. F.3.7 has the page an `/OpenAction` names first, and qpdf
-///   takes page 0 to be first whatever `/P` says, so the object it expects first
-///   isn't, and what follows from that: where part 6 ends, its first entry's length,
-///   its first object's place. Entries are by page number, so a page's length in the
-///   table is what it computes.
-/// - An outline under packing. qpdf's check fails its own file there; this one names
-///   the object stream that holds the root, and it computes the same, so no warning.
-///   A file is clean of that but for its members in part 6 ([`HINT_LAST`]).
+/// - A form. F.3.5 has only the form's dictionary in part 4, with its fields
+///   where they fall, so the widgets are their pages'. qpdf's categories have
+///   all an `/AcroForm` reaches open-document, in part 4, so it computes those
+///   pages as having a widget fewer, and part 6 as ending before it.
+/// - `/P` other than 0. F.3.7 has the page an `/OpenAction` names first, and
+///   qpdf takes page 0 to be first whatever `/P` says, so the object it expects
+///   first isn't, and what follows from that: where part 6 ends, its first
+///   entry's length, its first object's place. Entries are by page number, so a
+///   page's length in the table is what it computes.
+/// - An outline under packing. qpdf's check fails its own file there; this one
+///   names the object stream that holds the root, and it computes the same, so
+///   no warning. A file is clean of that but for its members in part 6
+///   ([`HINT_LAST`]).
 ///
-/// Nothing else: a warning that isn't here is a fault in the file or a change in
-/// qpdf, to be read.
+/// Nothing else: a warning that isn't here is a fault in the file or a change
+/// in qpdf, to be read.
 const ANSWERS: &[(&str, &[&str])] = &[
     ("two-table", &[]),
     ("two-stream", &[]),
@@ -172,9 +174,9 @@ fn each_files_answer_is_what_it_should_be() {
     assert_eq!(ANSWERS.len(), cases::all().len() - 2);
 }
 
-/// Many pages under another first page: what follows from qpdf taking page 0 as the
-/// first runs on through the pages, each a shape of the short file's, with what
-/// that first page had shared and nothing else.
+/// Many pages under another first page: what follows from qpdf taking page 0 as
+/// the first runs on through the pages, each a shape of the short file's, with
+/// what that first page had shared and nothing else.
 #[test]
 #[ignore = "needs qpdf: just test-qpdf"]
 fn many_pages_under_another_first_page_warn_only_of_that() {
@@ -207,9 +209,9 @@ fn many_pages_under_another_first_page_warn_only_of_that() {
     }
 }
 
-/// What the family adapter writes, as qpdf reads it, each warning its class, its
-/// numbers taken out, as they move with any body: each kind of a file, and what
-/// follows from where F.3.5 and qpdf's categories part, as above.
+/// What the family adapter writes, as qpdf reads it, each warning its class,
+/// its numbers taken out, as they move with any body: each kind of a file, and
+/// what follows from where F.3.5 and qpdf's categories part, as above.
 #[cfg(feature = "family")]
 mod family {
     use std::collections::BTreeSet;

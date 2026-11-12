@@ -77,10 +77,12 @@ use crate::phases::phase;
 /// borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
 ///
 /// It's the check's own, not pdf-objects'
-/// [`fault::Sink`](pdf_objects::fault::Sink), which a reader of a file's
-/// objects tells with the object a fault is in: a finding is of the file's
-/// layout, and carries a place of its own ([`Finding::place`]), a key, a
-/// byte of the file or a hint table's byte or bit, so it's told whole.
+/// [`fault::Sink`](pdf_objects::fault::Sink), the family's one seam for a
+/// reader's faults, by design: that one tells a fault with the object it's
+/// in and the span of it, where a finding is of the file's layout, and its
+/// place is of its own ([`Finding::place`]), a key of the dictionary, a byte
+/// of the file, a hint table's byte or bit, a page or a shared entry, none of
+/// which is an object's span; so it's told whole, its place in it.
 pub trait Sink {
     /// One thing wrong with the file.
     fn finding(&mut self, finding: Finding);
@@ -88,6 +90,7 @@ pub trait Sink {
     /// Whether findings are wanted. A sink that doesn't want them is told none,
     /// and looking stops once the verdict is settled. True unless a sink says
     /// otherwise; asked as a check goes.
+    #[must_use]
     fn wants(&self) -> bool {
         true
     }

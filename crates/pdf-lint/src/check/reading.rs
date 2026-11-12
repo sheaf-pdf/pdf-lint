@@ -233,11 +233,16 @@ impl<S: ByteSource> Reads for Readings<'_, S> {
         let limits = pdf_linearize::Limits::DEFAULT;
         let facts = family::facts_with_reading(self.file, &limits);
         // The facts of a whole read made again, as the document beside the
-        // reading is its whole read: the same, in every test and fuzz input.
+        // reading is its whole read: the same, in every test and fuzz input,
+        // field by field, or the same refusal, by its `Debug`, which holds
+        // no byte of the file.
         #[cfg(any(test, fuzzing))]
         {
             let again = family::facts(self.reading, &limits);
-            assert_eq!(format!("{facts:?}"), format!("{again:?}"));
+            match (&facts, &again) {
+                (Ok(facts), Ok(again)) => assert_eq!(facts, again),
+                _ => assert_eq!(format!("{facts:?}"), format!("{again:?}")),
+            }
         }
         facts
     }

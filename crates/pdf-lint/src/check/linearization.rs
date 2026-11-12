@@ -1030,7 +1030,7 @@ mod tests {
         let read = WithReading::new(&bare[..], &bytes::Options::DEFAULT).unwrap();
         let record = read.document().record(ObjectId::new(page, 0)).map(|r| r.at);
         assert_eq!(record.map(|at| at.start), Some(object));
-        let value = "page 1 doesn't say its MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
+        let value = "page 1 doesn't say its /MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
         assert_eq!(told(&report), [("-", value, record)], "{report}");
     }
 

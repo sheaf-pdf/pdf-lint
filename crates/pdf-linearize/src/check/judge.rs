@@ -69,6 +69,12 @@ fn number(raw: Raw) -> Option<u64> {
     }
 }
 
+/// How many of something there are, as a finding counts them: `u32::MAX`
+/// past it, which facts in memory can't be.
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// Where `offset`, a value the file gives as an offset, which counts from
 /// the header (ISO 32000-2, 7.5.2), puts something in the file: past the
 /// header, as every position the facts give is.
@@ -333,7 +339,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         }
         if first.h == Raw::Array && !matches!(first.h_items.len(), 2 | 4) {
             self.say(Finding::HintItems {
-                items: first.h_items.len(),
+                items: count(first.h_items.len()),
             })?;
         }
         if first.h_items.iter().any(|raw| number(*raw).is_none()) {
@@ -460,7 +466,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         };
         if first.subsections.len() > 1 {
             self.say(Finding::FirstSubsections {
-                count: first.subsections.len(),
+                count: count(first.subsections.len()),
             })?;
         }
         for row in &first.rows {
@@ -502,7 +508,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         }
         if main.subsections.len() > 1 {
             self.say(Finding::MainSubsections {
-                count: main.subsections.len(),
+                count: count(main.subsections.len()),
             })?;
         }
         match main.subsections.first() {

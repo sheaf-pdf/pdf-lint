@@ -1,5 +1,5 @@
-//! `family::check` over what's written and what's been damaged since: the bytes of a
-//! file, read by pdf-structure's reader, the facts said by what's in them.
+//! `family::check` over what's written and what's been damaged since: the bytes
+//! of a file, read by pdf-structure's reader, the facts said by what's in them.
 
 #![cfg(feature = "family")]
 
@@ -19,8 +19,8 @@ use pdf_structure::write::{Deflate, Encryptor};
 mod written;
 use written::{KEYS, encrypted_as, opened};
 
-/// A plain file, not linearized, with an inherited box and resources, a form and an
-/// outline, for the writer to lay out.
+/// A plain file, not linearized, with an inherited box and resources, a form
+/// and an outline, for the writer to lay out.
 fn plain() -> Vec<u8> {
     written::file(
         &[
@@ -66,7 +66,8 @@ fn checked(file: &[u8]) -> (Verdict, Vec<Finding>) {
     (verdict, findings)
 }
 
-/// `file` with its first `from` changed to `to`, of the same length so nothing moves.
+/// `file` with its first `from` changed to `to`, of the same length so nothing
+/// moves.
 fn changed(file: &[u8], from: &str, to: &str) -> Vec<u8> {
     assert_eq!(from.len(), to.len());
     let at = (file.windows(from.len()))
@@ -146,7 +147,8 @@ fn a_length_off_says_it_isnt_and_an_update_is_said() {
         }]
     );
 
-    // An update after it: the reader's rule, its section after the one it follows.
+    // An update after it: the reader's rule, its section after the one it
+    // follows.
     let mut updated = file.clone();
     let at = updated.len();
     updated.extend_from_slice(b"1 0 obj\n<< >>\nendobj\n");
@@ -763,10 +765,10 @@ fn another_first_page_holds_by_what_p_says() {
 }
 
 /// Each linearized file here, read whole beside its reading, has the facts its
-/// reading has: what's written in each kind, one packed into object streams among
-/// them, and encrypted under each key, and the cases PDFium's answers are held at,
-/// each by its password, broken and locked ones among them. Its graph is the
-/// reading's whole read's, not a document like it.
+/// reading has: what's written in each kind, one packed into object streams
+/// among them, and encrypted under each key, and the cases PDFium's answers are
+/// held at, each by its password, broken and locked ones among them. Its graph
+/// is the reading's whole read's, not a document like it.
 #[test]
 fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
     let mut files: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
@@ -813,10 +815,10 @@ fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
         let with = family::facts_with_reading(&read, &Limits::DEFAULT).unwrap();
         let reading = Reading::open(&file[..], &options).unwrap();
         let alone = family::facts(&reading, &Limits::DEFAULT).unwrap();
-        assert_eq!(format!("{with:?}"), format!("{alone:?}"), "{name}");
+        assert_eq!(with, alone, "{name}");
         // And of the reading the document was read beside, asked after it.
         let again = family::facts(read.reading(), &Limits::DEFAULT).unwrap();
-        assert_eq!(format!("{with:?}"), format!("{again:?}"), "{name}");
+        assert_eq!(with, again, "{name}");
         graphs += usize::from(with.graph.is_some());
         let member =
             |(_, _, entry): (u32, u16, XrefEntry)| matches!(entry, XrefEntry::Compressed { .. });
@@ -889,9 +891,9 @@ fn a_source_that_fails_is_an_error_not_a_finding() {
     ));
 }
 
-/// What a page's `/Parent` names is a node to the check as it is to the writer: not a
-/// listed page, nor what has no kids and doesn't say it's one, though either holds an
-/// attribute; a node that holds one is said.
+/// What a page's `/Parent` names is a node to the check as it is to the writer:
+/// not a listed page, nor what has no kids and doesn't say it's one, though
+/// either holds an attribute; a node that holds one is said.
 #[test]
 fn a_node_is_what_the_writer_calls_one() {
     let said = |objects: &[&str]| {

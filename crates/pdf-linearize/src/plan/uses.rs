@@ -78,7 +78,7 @@ fn meet(uses: &mut [Use], stack: &mut Vec<u32>, id: u32, i: u32) {
 }
 
 /// Which of `pages` use each object, by id, for a writer that groups objects by
-/// page ([`group`](super::group)) and has no plan to ask
+/// page ([`group`](super::group())) and has no plan to ask
 /// ([`Plan::used`](super::Plan::used)): `refs` tells each reference an object
 /// holds, and the walk from page `i` goes into what it meets but what `stop`
 /// holds other than the page walked from, so another page's link or a page's

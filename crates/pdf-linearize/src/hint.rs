@@ -28,6 +28,13 @@
 //! not there (F.4.1): [`position`] takes where it is to that and [`located`]
 //! takes it back.
 //!
+//! # Exhaustive on purpose
+//!
+//! Each table's header, entries and table are structs of public fields with
+//! no field held back, as the standard's tables are closed and a checker or
+//! a writer builds them whole: a field more would be a new standard's, and a
+//! breaking release.
+//!
 //! # What isn't here
 //!
 //! A shared object's signature (F.4.3) is a value here, kept as read and
@@ -42,7 +49,7 @@ mod tests;
 use bits::{Reader, Writer, width_of};
 
 /// Why a hint table can't be read, or written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// Reading ran past the data.
@@ -105,7 +112,8 @@ pub enum Error {
 /// Where a thing at `at` in a file reads in a hint table, under a primary hint
 /// stream of `hint_len` bytes at `hint_at`: as if the stream weren't there
 /// (F.4.1). `at` isn't within the stream, which nothing a table names can be.
-pub fn position(at: u64, hint_at: u64, hint_len: u64) -> u64 {
+#[must_use]
+pub const fn position(at: u64, hint_at: u64, hint_len: u64) -> u64 {
     match at >= hint_at.saturating_add(hint_len) {
         true => at - hint_len,
         false => at,
@@ -116,7 +124,8 @@ pub fn position(at: u64, hint_at: u64, hint_len: u64) -> u64 {
 /// primary hint stream of `hint_len` bytes at `hint_at`: [`position`] the other
 /// way. The thing right after the stream reads as `hint_at`, where nothing else
 /// can be.
-pub fn located(position: u64, hint_at: u64, hint_len: u64) -> u64 {
+#[must_use]
+pub const fn located(position: u64, hint_at: u64, hint_len: u64) -> u64 {
     match position >= hint_at {
         true => position.saturating_add(hint_len),
         false => position,
@@ -125,12 +134,16 @@ pub fn located(position: u64, hint_at: u64, hint_len: u64) -> u64 {
 
 /// The width of an identifier when `most` is the greatest of them (F.4.2, Table
 /// F.3's item 11): a bit at least, as in [`PageOffsets::of`].
-pub fn id_width(most: u32) -> u16 {
-    width_of(u64::from(most)).max(1)
+#[must_use]
+pub const fn id_width(most: u32) -> u16 {
+    match width_of(most as u64) {
+        0 => 1,
+        width => width,
+    }
 }
 
 /// The page offset hint table's header (F.4.2, Table F.3): each of its thirteen
-/// items by what it says.
+/// items by what it says. Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PageHeader {
     /// The fewest objects any page has.
@@ -163,6 +176,7 @@ pub struct PageHeader {
 
 /// One page of the page offset hint table (F.4.2, Table F.4), the entries in
 /// the order of the pages' numbers, whichever page is the first page.
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PageEntry {
     /// How many objects the page has.
@@ -178,7 +192,7 @@ pub struct PageEntry {
     pub content_length: u64,
 }
 
-/// The page offset hint table (F.4.2).
+/// The page offset hint table (F.4.2). Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PageOffsets {
     /// Its header.
@@ -198,6 +212,7 @@ impl PageOffsets {
     /// embedded file table has them in this one's width too, so it may need
     /// more than these pages do (F.4.7). A numerator's denominator is
     /// `denominator`.
+    #[must_use]
     pub fn of(first_page_at: u32, pages: Vec<PageEntry>, id_bits: u16, denominator: u16) -> Self {
         let span = |of: &dyn Fn(&PageEntry) -> u64| {
             let values = pages.iter().map(of);
@@ -232,6 +247,13 @@ impl PageOffsets {
     }
 
     /// The table, for `pages` pages, from the start of `data`.
+    ///
+    /// # Errors
+    ///
+    /// More pages than `limits` lets it have ([`Error::TooManyPages`]), data
+    /// that ends before the table ([`Error::PastEnd`]), a width past 32
+    /// ([`Error::Width`]), or more entries than `limits` lets the tables hold
+    /// ([`Error::TooManyEntries`]).
     pub fn read(data: &[u8], pages: u32, limits: &Limits) -> Result<PageOffsets, Error> {
         PageOffsets::read_bits(&mut Reader::new(data, limits), pages, limits)
     }
@@ -324,6 +346,11 @@ impl PageOffsets {
     }
 
     /// The table, added to `out`, from the byte boundary it's at.
+    ///
+    /// # Errors
+    ///
+    /// A value its field's width can't hold, or a width past 32
+    /// ([`Error::Value`]).
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let header = &self.header;
         let mut bits = Writer::new(out);
@@ -371,6 +398,7 @@ impl PageOffsets {
 }
 
 /// The shared object hint table's header (F.4.3, Table F.5).
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SharedHeader {
     /// Part 8's first object's number.
@@ -391,6 +419,7 @@ pub struct SharedHeader {
 }
 
 /// One entry of the shared object table (F.4.3, Table F.6).
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GroupEntry {
     /// The length of its objects.
@@ -402,6 +431,7 @@ pub struct GroupEntry {
 }
 
 /// The shared object hint table (F.4.3).
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SharedObjects {
     /// Its header.
@@ -416,6 +446,7 @@ impl SharedObjects {
     /// a header as narrow as they let it be, but for a bit at least for a
     /// length, as PDFium's reader refuses a width of 0 there as it does in
     /// [`PageOffsets::of`].
+    #[must_use]
     pub fn of(
         first_object: u32,
         first_at: u32,
@@ -438,6 +469,12 @@ impl SharedObjects {
     }
 
     /// The table, from the start of `data`.
+    ///
+    /// # Errors
+    ///
+    /// Data that ends before the table ([`Error::PastEnd`]), a width past 32
+    /// ([`Error::Width`]), or more entries than `limits` lets the tables hold
+    /// ([`Error::TooManyEntries`]).
     pub fn read(data: &[u8], limits: &Limits) -> Result<SharedObjects, Error> {
         SharedObjects::read_bits(&mut Reader::new(data, limits))
     }
@@ -484,6 +521,11 @@ impl SharedObjects {
     }
 
     /// The table, added to `out`, from the byte boundary it's at.
+    ///
+    /// # Errors
+    ///
+    /// A value its field's width can't hold, or a width past 32
+    /// ([`Error::Value`]).
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let header = &self.header;
         let mut bits = Writer::new(out);
@@ -511,6 +553,7 @@ impl SharedObjects {
 
 /// A generic hint table (F.4.5, Table F.9): one group of objects together in
 /// the file. With no objects, every field is 0.
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Generic {
     /// The number of its first object.
@@ -525,6 +568,12 @@ pub struct Generic {
 
 impl Generic {
     /// The table, from the start of `data`.
+    ///
+    /// # Errors
+    ///
+    /// Data that ends before the table ([`Error::PastEnd`]), a width past 32
+    /// ([`Error::Width`]), or more entries than `limits` lets the tables hold
+    /// ([`Error::TooManyEntries`]).
     pub fn read(data: &[u8], limits: &Limits) -> Result<Generic, Error> {
         Generic::read_bits(&mut Reader::new(data, limits))
     }
@@ -539,6 +588,11 @@ impl Generic {
     }
 
     /// The table, added to `out`, from the byte boundary it's at.
+    ///
+    /// # Errors
+    ///
+    /// A value its field's width can't hold, or a width past 32
+    /// ([`Error::Value`]).
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let mut bits = Writer::new(out);
         self.write_bits(&mut bits)?;
@@ -554,7 +608,7 @@ impl Generic {
 }
 
 /// An extended generic hint table (F.4.6, Table F.10): a generic one, and the
-/// shared objects its group refers to.
+/// shared objects its group refers to. Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Extended {
     /// What a generic table says.
@@ -567,6 +621,7 @@ pub struct Extended {
 
 impl Extended {
     /// The table of `generic` and `shared`, as narrow as they let it be.
+    #[must_use]
     pub fn of(generic: Generic, shared: Vec<u32>) -> Extended {
         let most = shared.iter().copied().max().unwrap_or(0);
         Extended {
@@ -577,6 +632,12 @@ impl Extended {
     }
 
     /// The table, from the start of `data`.
+    ///
+    /// # Errors
+    ///
+    /// Data that ends before the table ([`Error::PastEnd`]), a width past 32
+    /// ([`Error::Width`]), or more entries than `limits` lets the tables hold
+    /// ([`Error::TooManyEntries`]).
     pub fn read(data: &[u8], limits: &Limits) -> Result<Extended, Error> {
         Extended::read_bits(&mut Reader::new(data, limits))
     }
@@ -601,6 +662,11 @@ impl Extended {
     }
 
     /// The table, added to `out`, from the byte boundary it's at.
+    ///
+    /// # Errors
+    ///
+    /// A value its field's width can't hold, or a width past 32
+    /// ([`Error::Value`]).
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let mut bits = Writer::new(out);
         self.generic.write_bits(&mut bits)?;
@@ -613,6 +679,7 @@ impl Extended {
 }
 
 /// The thumbnail hint table's header (F.4.4, Table F.7).
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ThumbHeader {
     /// The number of the first thumbnail's first object.
@@ -642,6 +709,7 @@ pub struct ThumbHeader {
 }
 
 /// One thumbnail of the thumbnail hint table (F.4.4, Table F.8).
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ThumbEntry {
     /// How many pages since the last entry's page have none.
@@ -652,7 +720,7 @@ pub struct ThumbEntry {
     pub length: u64,
 }
 
-/// The thumbnail hint table (F.4.4).
+/// The thumbnail hint table (F.4.4). Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Thumbnails {
     /// Its header, the objects thumbnails share in it.
@@ -665,6 +733,7 @@ impl Thumbnails {
     /// The table of `pages`, the first at object `first_object` at `first_at`,
     /// and what thumbnails share as given in `shared`'s fields; a header as
     /// narrow as they let it be.
+    #[must_use]
     pub fn of(
         first_object: u32,
         first_at: u32,
@@ -696,6 +765,12 @@ impl Thumbnails {
     }
 
     /// The table, from the start of `data`.
+    ///
+    /// # Errors
+    ///
+    /// Data that ends before the table ([`Error::PastEnd`]), a width past 32
+    /// ([`Error::Width`]), or more entries than `limits` lets the tables hold
+    /// ([`Error::TooManyEntries`]).
     pub fn read(data: &[u8], limits: &Limits) -> Result<Thumbnails, Error> {
         Thumbnails::read_bits(&mut Reader::new(data, limits))
     }
@@ -740,6 +815,11 @@ impl Thumbnails {
     }
 
     /// The table, added to `out`, from the byte boundary it's at.
+    ///
+    /// # Errors
+    ///
+    /// A value its field's width can't hold, or a width past 32
+    /// ([`Error::Value`]).
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let header = &self.header;
         let mut bits = Writer::new(out);
@@ -769,6 +849,7 @@ impl Thumbnails {
 }
 
 /// The embedded file table's header (F.4.7, Table F.11).
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FileHeader {
     /// The number of the first group's first object.
@@ -788,6 +869,7 @@ pub struct FileHeader {
 }
 
 /// One group of the embedded file table (F.4.7, Table F.12).
+/// Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileEntry {
     /// The number of the stream it's for.
@@ -800,7 +882,7 @@ pub struct FileEntry {
     pub shared: Vec<u32>,
 }
 
-/// The embedded file table (F.4.7).
+/// The embedded file table (F.4.7). Exhaustive, as the standard's table is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EmbeddedFiles {
     /// Its header.
@@ -812,6 +894,7 @@ pub struct EmbeddedFiles {
 impl EmbeddedFiles {
     /// The table of `groups`, the first's first object at `first_object` at
     /// `first_at`, with a header as narrow as they let it be.
+    #[must_use]
     pub fn of(first_object: u32, first_at: u32, groups: Vec<FileEntry>) -> EmbeddedFiles {
         let most = |of: &dyn Fn(&FileEntry) -> u64| groups.iter().map(of).max().unwrap_or(0);
         let header = FileHeader {
@@ -828,6 +911,12 @@ impl EmbeddedFiles {
 
     /// The table, from the start of `data`, its identifiers in the width the
     /// page offset table's header gives them (F.4.7, Table F.12), `id_bits`.
+    ///
+    /// # Errors
+    ///
+    /// Data that ends before the table ([`Error::PastEnd`]), a width past 32
+    /// ([`Error::Width`]), or more entries than `limits` lets the tables hold
+    /// ([`Error::TooManyEntries`]).
     pub fn read(data: &[u8], id_bits: u16, limits: &Limits) -> Result<EmbeddedFiles, Error> {
         EmbeddedFiles::read_bits(&mut Reader::new(data, limits), id_bits)
     }
@@ -892,6 +981,11 @@ impl EmbeddedFiles {
 
     /// The table, added to `out`, from the byte boundary it's at, its
     /// identifiers in `id_bits`, the width the page offset table has them in.
+    ///
+    /// # Errors
+    ///
+    /// A value its field's width can't hold, or a width past 32
+    /// ([`Error::Value`]).
     pub fn write(&self, out: &mut Vec<u8>, id_bits: u16) -> Result<(), Error> {
         let header = &self.header;
         let mut bits = Writer::new(out);
@@ -959,10 +1053,20 @@ pub struct HintKeys {
 impl HintKeys {
     /// The keys of a stream that says only where its shared object table is, at
     /// `shared`.
-    pub fn new(shared: u64) -> HintKeys {
+    #[must_use]
+    pub const fn new(shared: u64) -> HintKeys {
         HintKeys {
             shared,
-            ..HintKeys::default()
+            thumbnails: None,
+            outlines: None,
+            threads: None,
+            dests: None,
+            form: None,
+            info: None,
+            structure: None,
+            labels: None,
+            renditions: None,
+            files: None,
         }
     }
 }
@@ -1000,6 +1104,14 @@ pub struct Tables {
 /// Every table of a hint stream's decoded `data`, primary and any overflow
 /// joined, for a file of `pages` pages, where `keys` says each is, under
 /// `limits`: all of it charged to one count of entries.
+///
+/// # Errors
+///
+/// A table whose key puts it past the data ([`Error::TableAt`]), and each
+/// table's own: more pages than `limits` lets the file have
+/// ([`Error::TooManyPages`]), data that ends before a table
+/// ([`Error::PastEnd`]), a width past 32 ([`Error::Width`]), or more entries
+/// than `limits` lets the tables hold ([`Error::TooManyEntries`]).
 pub fn tables(data: &[u8], keys: &HintKeys, pages: u32, limits: &Limits) -> Result<Tables, Error> {
     let mut at = At {
         data,

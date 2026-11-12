@@ -212,7 +212,7 @@ pub fn lopdf_document(data: &[u8]) -> bool {
     // The same facts of it read whole beside its reading.
     let whole = WithReading::new(file, &read::Options::DEFAULT).expect("it reads");
     let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
-    assert_eq!(format!("{beside:?}"), format!("{read:?}"));
+    assert_eq!(beside, read);
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
     assert!(
         verdict.linearized && verdict.holds && verdict.hints_read,

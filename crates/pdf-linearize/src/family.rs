@@ -82,12 +82,13 @@
 //! the file used is refused ([`Error::Write`] of [`Unencryptable::Keystream`]),
 //! as pdf-structure's writer refuses it, and a file whose strings and streams
 //! all go at keystreams it never used is written. A caller who accepts that
-//! leak tells the encryptor to reuse them ([`Encryptor::reusing_rc4_keystreams`],
-//! or [`Options::rc4`] for [`linearize_bytes`]), and each object so written is
-//! listed ([`Linearized::keystreams_reused`]). AES's IVs are random, each
-//! write's own from the operating system, so nothing leaks that way, and
-//! nothing is refused or listed. A caller who wants neither gives
-//! [`Encryptor::create`] a new password, whose key is new.
+//! leak tells the encryptor to reuse them
+//! ([`Encryptor::reusing_rc4_keystreams`], or [`Options::rc4`] for
+//! [`linearize_bytes`]), and each object so written is listed
+//! ([`Linearized::keystreams_reused`]). AES's IVs are random, each write's own
+//! from the operating system, so nothing leaks that way, and nothing is refused
+//! or listed. A caller who wants neither gives [`Encryptor::create`] a new
+//! password, whose key is new.
 //!
 //! # Where everything goes
 //!
@@ -120,6 +121,7 @@ use pdf_structure::write::{self, Deflate, Encrypting, Encryptor, Parts, ReadFrom
 use pdf_structure::{Encryption, XrefKind};
 
 use crate::Limits;
+use crate::check::Attribute;
 use crate::layout::{self, Encoded, Layout, Piece, Stream, StreamKind, assemble};
 use crate::phases::phase;
 pub use crate::plan::FirstPage;
@@ -253,52 +255,52 @@ pub enum PageTree {
     #[error("page {page} is another page, or none, by PDFium's rules than by ISO 32000-2's")]
     Rules {
         /// The place.
-        page: usize,
+        page: u64,
     },
     /// A place in the tree with no page at it.
     #[error("page {page} is a place with no page at it")]
     NoPage {
         /// The place.
-        page: usize,
+        page: u64,
     },
     /// A page written in place, which can't be numbered.
     #[error("page {page} is written in place, so it has no number")]
     Direct {
         /// The place.
-        page: usize,
+        page: u64,
     },
     /// A page listed before.
     #[error("page {page} is a page listed before")]
     Repeated {
         /// The place.
-        page: usize,
+        page: u64,
     },
     /// An inheritable attribute of a page PDFium's rules read otherwise than
     /// ISO's, as pushing it down would change one reader's page.
-    #[error("/{attribute} of page {page} reads otherwise by PDFium's rules than by ISO 32000-2's")]
+    #[error("{attribute} of page {page} reads otherwise by PDFium's rules than by ISO 32000-2's")]
     Attribute {
         /// The place.
-        page: usize,
-        /// The attribute's key.
-        attribute: &'static str,
+        page: u64,
+        /// The attribute.
+        attribute: Attribute,
     },
     /// An inheritable attribute of a page that reads otherwise going down
     /// `/Kids` from the root than up its `/Parent`s, where a page's `/Parent`
     /// isn't the node that lists it, as pushing it down would change one
     /// reader's page.
-    #[error("/{attribute} of page {page} reads otherwise going down /Kids than up /Parent")]
+    #[error("{attribute} of page {page} reads otherwise going down /Kids than up /Parent")]
     Kids {
         /// The place.
-        page: usize,
-        /// The attribute's key.
-        attribute: &'static str,
+        page: u64,
+        /// The attribute.
+        attribute: Attribute,
     },
     /// A tree node written in place that holds an inheritable attribute, which
     /// can't be taken off it without writing what holds it anew.
-    #[error("a page tree node written in place holds /{attribute}")]
+    #[error("a page tree node written in place holds {attribute}")]
     DirectNode {
-        /// The attribute's key.
-        attribute: &'static str,
+        /// The attribute.
+        attribute: Attribute,
     },
 }
 
@@ -345,15 +347,22 @@ pub enum Error {
 /// file it was read from used is refused, unless it's told to reuse them,
 /// and then listed ([`Linearized::keystreams_reused`]).
 ///
-/// Refused, with `out` as it was given, by an [`Error`]: what the module says;
-/// a table asked to pack; a trailer with no catalog, or a catalog that's a
-/// page; a document past [`Options::limits`], or a file past the 4 GiB a hint
-/// table can describe; an object at the number the encryption dictionary has in
-/// the file an `encryptor` was read from ([`write::Error::EncryptAt`]), as a
-/// whole file's write refuses; what pdf-structure's writer or the encryptor
-/// refuses of a body or of the hint stream's data ([`Error::Write`]), a string
-/// or stream at a keystream used among it ([`Unencryptable::Keystream`]); and
-/// a write stopped.
+/// # Errors
+///
+/// Refused, with `out` as it was given, by an [`Error`]: what the module says,
+/// a page tree that gives a page no place of its own ([`Error::PageTree`]) or
+/// doesn't read ([`Error::Pages`]) and a document no password opened
+/// ([`Error::Locked`]); a trailer with no catalog ([`Error::NoCatalog`]), or a
+/// catalog that's a page, or a document past [`Options::limits`]
+/// ([`Error::Plan`]); a file past the 4 GiB a hint table can describe
+/// ([`Error::Layout`]); and, as [`Error::Write`], a table asked to pack
+/// ([`write::Error::PackedTable`]), an object at the number the encryption
+/// dictionary has in the file an `encryptor` was read from
+/// ([`write::Error::EncryptAt`]), as a whole file's write refuses, what
+/// pdf-structure's writer or the encryptor refuses of a body or of the hint
+/// stream's data, a string or stream at a keystream used among it
+/// ([`Unencryptable::Keystream`]), and a write stopped
+/// ([`write::Error::Stopped`]).
 pub fn linearize(
     out: &mut Vec<u8>,
     doc: &pdf_structure::Document,
@@ -377,10 +386,14 @@ pub fn linearize(
 /// module's "Encrypted"). Under RC4 that's refused unless [`Options::rc4`]
 /// says to reuse the file's keystreams, and then every object it writes at
 /// one leaks, as [`Rc4::ReusingKeystreams`] says: [`linearize`], under the
-/// file's encryptor told to reuse them, lists which. Refused as [`linearize`]
-/// refuses, and where it doesn't read ([`Error::Read`]), no password opens it
-/// ([`Error::Locked`]), or its security handler can't be opened
-/// ([`write::Error::Unsupported`]).
+/// file's encryptor told to reuse them, lists which.
+///
+/// # Errors
+///
+/// Refused as [`linearize`] refuses, and where it doesn't read
+/// ([`Error::Read`]), no password opens it ([`Error::Locked`]), or its
+/// security handler can't be opened ([`Error::Write`] of
+/// [`write::Error::Unsupported`]).
 pub fn linearize_bytes(bytes: &[u8], options: &Options<'_>) -> Result<Vec<u8>, Error> {
     let reading = Reading::open(bytes, &options.read).map_err(Error::Read)?;
     let doc = reading.to_document().map_err(Error::Read)?;

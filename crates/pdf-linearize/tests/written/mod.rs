@@ -11,7 +11,8 @@ use pdf_structure::read::{self, Reading};
 use pdf_structure::write::{self, Encryptor};
 
 /// The keys of a file qpdf encrypted, each with its empty user password: one of
-/// each of the standard handler's revisions, `qpdf --encrypt` on a small clean file.
+/// each of the standard handler's revisions, `qpdf --encrypt` on a small clean
+/// file.
 pub const KEYS: [(&str, &[u8]); 5] = [
     ("RC4-40", include_bytes!("../files/qpdf-rc4-40.pdf")),
     ("RC4-128", include_bytes!("../files/qpdf-rc4-128.pdf")),
@@ -30,8 +31,8 @@ pub fn opened<'b>(bytes: &'b [u8], password: &str) -> Reading<&'b [u8]> {
     Reading::open(bytes, &options).unwrap()
 }
 
-/// `plain`'s objects as a whole file under `key`'s encryption, its dictionary at
-/// 1000, so every number from the last object's to it is listed free.
+/// `plain`'s objects as a whole file under `key`'s encryption, its dictionary
+/// at 1000, so every number from the last object's to it is listed free.
 pub fn encrypted_as(key: &[u8], plain: &[u8]) -> Vec<u8> {
     let key = opened(key, "");
     let encryptor = Encryptor::of(&key).unwrap().unwrap();
@@ -44,8 +45,8 @@ pub fn encrypted_as(key: &[u8], plain: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A file of `objects`, numbered from 1, under a table, with `trailer` beside its
-/// `/Size`.
+/// A file of `objects`, numbered from 1, under a table, with `trailer` beside
+/// its `/Size`.
 pub fn file(objects: &[&str], trailer: &str) -> Vec<u8> {
     let mut out = b"%PDF-1.6\n".to_vec();
     let mut rows = Vec::new();
@@ -90,8 +91,9 @@ pub fn stream(dict: &str, data: &str) -> String {
 
 pub const ROOT: &str = "/Root 1 0 R";
 
-/// A catalog of `more`, a root node, and pages 3 and 4, each with a stream of its
-/// own (5, 6), an object they share (7), and an inherited box and resources.
+/// A catalog of `more`, a root node, and pages 3 and 4, each with a stream of
+/// its own (5, 6), an object they share (7), and an inherited box and
+/// resources.
 pub fn two_pages(more: &str) -> Vec<String> {
     vec![
         format!("<< /Type /Catalog /Pages 2 0 R {more} >>"),

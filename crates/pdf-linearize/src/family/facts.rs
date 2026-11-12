@@ -282,14 +282,6 @@ fn decoded<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<HintData
     })
 }
 
-/// The inheritable attributes a node may hold, with their keys.
-const INHERITED: [(&[u8], Attribute); 4] = [
-    (b"Resources", Attribute::Resources),
-    (b"MediaBox", Attribute::MediaBox),
-    (b"CropBox", Attribute::CropBox),
-    (b"Rotate", Attribute::Rotate),
-];
-
 /// The pages by ISO's rules, and what the nodes on their way hold, set on
 /// `facts`; or none, where the tree didn't read, and why where that's the
 /// reader's own reason (its caps on a tree's depth and pages, and what
@@ -346,8 +338,10 @@ fn page_tree<S: ByteSource>(
             let Some(dict) = dict.filter(node).filter(|_| !page_ids.contains(&parent)) else {
                 continue;
             };
-            let held = INHERITED.iter().filter(|(key, _)| dict.has(key));
-            nodes.extend(held.map(|&(_, attribute)| (parent.number, attribute)));
+            let held = Attribute::ALL
+                .into_iter()
+                .filter(|held| dict.has(held.key()));
+            nodes.extend(held.map(|attribute| (parent.number, attribute)));
         }
     }
     facts.pages = listed;
@@ -360,14 +354,17 @@ fn page_tree<S: ByteSource>(
 /// section's rows, its hint stream's data, decrypted where it's encrypted and a
 /// password opened it, its page tree and the graph of its objects, by a whole
 /// read where the file says it's linearized. A file that doesn't, or whose `/L`
-/// isn't its length, has no more read than it takes to say so. It fails only
-/// when the source doesn't give its bytes ([`Error::Read`]): what's wrong with
-/// a file is a fact. What the reader didn't read for its own reason, its caps
-/// (`read::Limits`, and pdf-semantics' on the page tree), no key, or filters it
-/// doesn't take, is said as that, the hint stream's in its data
+/// isn't its length, has no more read than it takes to say so. What's wrong
+/// with a file is a fact. What the reader didn't read for its own reason, its
+/// caps (`read::Limits`, and pdf-semantics' on the page tree), no key, or
+/// filters it doesn't take, is said as that, the hint stream's in its data
 /// ([`HintData::Unread`]), the sections' and the page tree's in
 /// [`Facts::unread`]. A caller that holds the file read whole beside its
 /// reading gives that ([`facts_with_reading`]), so it isn't read whole again.
+///
+/// # Errors
+///
+/// Only where the source doesn't give its bytes ([`Error::Read`]).
 pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Facts, Error> {
     facts_of(reading, None, limits)
 }
@@ -377,6 +374,10 @@ pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Fac
 /// the document read whole beside it ([`WithReading::document`]) rather than
 /// of a whole read made again: the same facts, as that document is the
 /// reading's whole read.
+///
+/// # Errors
+///
+/// Only where the source doesn't give its bytes ([`Error::Read`]).
 pub fn facts_with_reading<S: ByteSource>(
     read: &WithReading<S>,
     limits: &Limits,
@@ -496,8 +497,12 @@ fn graph<S: ByteSource>(
 }
 
 /// What [`facts`] reads of `reading`, [`check`](crate::check()) judged: a whole
-/// read where the file says it's linearized, so paid only by who asks. It fails
-/// only where [`facts`] does.
+/// read where the file says it's linearized, so paid only by who asks.
+///
+/// # Errors
+///
+/// Only where [`facts`] fails: where the source doesn't give its bytes
+/// ([`Error::Read`]).
 pub fn check<S: ByteSource, K: Sink + ?Sized>(
     reading: &Reading<S>,
     limits: &Limits,

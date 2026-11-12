@@ -7,6 +7,9 @@
 //! its header (ISO 32000-2, 7.5.2), so the check holds each against a position
 //! [`Facts::header`] bytes past it.
 
+use std::fmt;
+
+use super::KeyName;
 use crate::plan::{Graph, Kind};
 use pdf_objects::ObjectId;
 
@@ -68,6 +71,7 @@ impl FirstObject {
     /// version the check takes (Table F.1): where it isn't, the check tells
     /// [`Finding::Version`](super::Finding::Version), and the file isn't
     /// taken as linearized.
+    #[must_use]
     pub fn version_one(&self) -> bool {
         match self.linearized {
             Raw::Integer(version) => version == 1,
@@ -78,7 +82,8 @@ impl FirstObject {
 
     /// An object `number` and `generation` from `at` to `end`, with none of the
     /// keys yet.
-    pub fn new(at: u64, end: u64, number: u32, generation: u16) -> FirstObject {
+    #[must_use]
+    pub const fn new(at: u64, end: u64, number: u32, generation: u16) -> FirstObject {
         FirstObject {
             at,
             end,
@@ -131,7 +136,8 @@ pub struct RowFacts {
 
 impl RowFacts {
     /// A row of `number`, at `generation`, saying `entry`.
-    pub fn new(number: u32, generation: u16, entry: RowEntry) -> RowFacts {
+    #[must_use]
+    pub const fn new(number: u32, generation: u16, entry: RowEntry) -> RowFacts {
         RowFacts {
             number,
             generation,
@@ -174,7 +180,8 @@ pub struct SectionFacts {
 
 impl SectionFacts {
     /// A section at `at`, written as `kind`, of no rows and no keys yet.
-    pub fn new(at: u64, kind: Kind) -> SectionFacts {
+    #[must_use]
+    pub const fn new(at: u64, kind: Kind) -> SectionFacts {
         SectionFacts {
             at,
             kind,
@@ -222,8 +229,9 @@ impl std::fmt::Display for Unread {
     }
 }
 
-/// A hint stream's data, or why there isn't any.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A hint stream's data, or why there isn't any. Its `Debug` gives the data
+/// by its length alone: a hint stream's data decrypted is plaintext.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HintData {
     /// What it decodes to, an overflow stream's after the primary's.
@@ -239,8 +247,23 @@ pub enum HintData {
     Unread(Unread),
 }
 
-/// The primary hint stream.
-#[derive(Debug, Clone, PartialEq)]
+impl fmt::Debug for HintData {
+    /// What it is, and the data by its length, not its bytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HintData::Decoded(data) => (f.debug_tuple("Decoded"))
+                .field(&format_args!("{} bytes", data.len()))
+                .finish(),
+            HintData::NotAStream => f.write_str("NotAStream"),
+            HintData::Undecodable => f.write_str("Undecodable"),
+            HintData::Unread(why) => f.debug_tuple("Unread").field(why).finish(),
+        }
+    }
+}
+
+/// The primary hint stream. Its `Debug` gives each key by its name, as a
+/// [`KeyName`] shows it, and the data as [`HintData`]'s does, by its length.
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct HintFacts {
     /// Where its `n g obj` starts: `/H`'s first offset, past the header, where
@@ -263,7 +286,8 @@ pub struct HintFacts {
 impl HintFacts {
     /// Hint stream `number` from `at` to `end`, holding `data`, with no keys
     /// yet.
-    pub fn new(at: u64, end: u64, number: u32, data: HintData) -> HintFacts {
+    #[must_use]
+    pub const fn new(at: u64, end: u64, number: u32, data: HintData) -> HintFacts {
         HintFacts {
             at,
             end,
@@ -275,9 +299,26 @@ impl HintFacts {
     }
 }
 
+impl fmt::Debug for HintFacts {
+    /// Its fields, each key by its name and its value, and the data by its
+    /// length.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let keys = self.keys.iter().map(|(key, raw)| (KeyName::new(key), raw));
+        f.debug_struct("HintFacts")
+            .field("at", &self.at)
+            .field("end", &self.end)
+            .field("number", &self.number)
+            .field("keys", &keys.collect::<Vec<_>>())
+            .field("overflow", &self.overflow)
+            .field("data", &self.data)
+            .finish()
+    }
+}
+
 /// An attribute a page inherits (7.7.3.4), and which a linearized file has
-/// pushed down onto its pages (F.3.7, F.3.10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// pushed down onto its pages (F.3.7, F.3.10). Its `Display` is its key,
+/// `/MediaBox`; [`Attribute::ALL`] lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Attribute {
     /// `/Resources`.
@@ -288,6 +329,41 @@ pub enum Attribute {
     CropBox,
     /// `/Rotate`.
     Rotate,
+}
+
+impl Attribute {
+    /// Every attribute, in the order they're declared, so a table indexed by
+    /// them can take its length from here (`Attribute::ALL.len()`).
+    pub const ALL: [Attribute; 4] = [
+        Attribute::Resources,
+        Attribute::MediaBox,
+        Attribute::CropBox,
+        Attribute::Rotate,
+    ];
+
+    /// Its key in a page's or a node's dictionary, without the slash:
+    /// `b"MediaBox"`.
+    #[must_use]
+    pub const fn key(self) -> &'static [u8] {
+        match self {
+            Attribute::Resources => b"Resources",
+            Attribute::MediaBox => b"MediaBox",
+            Attribute::CropBox => b"CropBox",
+            Attribute::Rotate => b"Rotate",
+        }
+    }
+}
+
+impl fmt::Display for Attribute {
+    /// Its key, with the slash: `/MediaBox`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Attribute::Resources => "/Resources",
+            Attribute::MediaBox => "/MediaBox",
+            Attribute::CropBox => "/CropBox",
+            Attribute::Rotate => "/Rotate",
+        })
+    }
 }
 
 /// A page, as the page tree gives it.
@@ -304,7 +380,8 @@ pub struct PageFacts {
 
 impl PageFacts {
     /// The page at `id`, saying neither `/Resources` nor `/MediaBox` itself.
-    pub fn new(id: Option<ObjectId>) -> PageFacts {
+    #[must_use]
+    pub const fn new(id: Option<ObjectId>) -> PageFacts {
         PageFacts {
             id,
             resources: false,
@@ -329,7 +406,8 @@ pub struct Extent {
 
 impl Extent {
     /// Object `number`, from `start` to `end`.
-    pub fn new(number: u32, start: u64, end: u64) -> Extent {
+    #[must_use]
+    pub const fn new(number: u32, start: u64, end: u64) -> Extent {
         Extent { number, start, end }
     }
 }
@@ -353,8 +431,10 @@ pub struct UnreadParts {
 /// The facts of a file as written, set on [`Facts::new`]'s: what isn't given
 /// isn't judged, or is said to be missing where a linearized file has to have
 /// it; but what the reader didn't read, for its own reason, is said in
-/// [`Facts::unread`] and [`HintData::Unread`], and isn't judged.
-#[derive(Debug, Clone)]
+/// [`Facts::unread`] and [`HintData::Unread`], and isn't judged. Two
+/// readings' facts compare by `==`, field by field; a `Debug` holds no byte
+/// of the hint data.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Facts {
     /// The file's length.
@@ -390,7 +470,8 @@ pub struct Facts {
 impl Facts {
     /// A file `len` bytes long, its header first, of which nothing else is
     /// known.
-    pub fn new(len: u64) -> Facts {
+    #[must_use]
+    pub const fn new(len: u64) -> Facts {
         Facts {
             len,
             header: 0,
@@ -400,7 +481,10 @@ impl Facts {
             update: None,
             hint: None,
             pages: Vec::new(),
-            unread: UnreadParts::default(),
+            unread: UnreadParts {
+                sections: None,
+                pages: None,
+            },
             nodes: Vec::new(),
             objects: Vec::new(),
             graph: None,
@@ -411,6 +495,7 @@ impl Facts {
     /// takes a claim before it tells anything: a dictionary, not a stream,
     /// with `/Linearized`, starting within 1024 bytes of the header. Of a
     /// file with none, the check tells nothing.
+    #[must_use]
     pub fn claim(&self) -> Option<&FirstObject> {
         super::judge::claim(self)
     }
@@ -426,6 +511,7 @@ impl Facts {
     /// `/H`'s length once
     /// ([`Finding::HintExtent`](super::Finding::HintExtent)) and places the
     /// rest by the stream that's there.
+    #[must_use]
     pub fn hint_extent(&self) -> (u64, u64) {
         super::judge::hint_extent(self)
     }

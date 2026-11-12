@@ -1,8 +1,9 @@
-//! [`Facts`] built from outside the crate, with no document model, an object's id the
-//! one type of the family's it takes (pdf-objects' `ObjectId`), as a caller of any
-//! model builds them: each of the files `tests/engine.rs` writes by hand, read here
-//! from its bytes with a few lines, holds, and a fact of each sort changed says so.
-//! Each part has its constructor, so a way in that's missing doesn't compile.
+//! [`Facts`] built from outside the crate, with no document model, an object's
+//! id the one type of the family's it takes (pdf-objects' `ObjectId`), as a
+//! caller of any model builds them: each of the files `tests/engine.rs` writes
+//! by hand, read here from its bytes with a few lines, holds, and a fact of
+//! each sort changed says so. Each part has its constructor, so a way in that's
+//! missing doesn't compile.
 
 use pdf_linearize::check::{
     Attribute, DictKey, Extent, Facts, Finding, FirstObject, Grade, HintData, HintFacts, PageFacts,
@@ -15,8 +16,8 @@ use pdf_linearize::{Limits, check};
 mod cases;
 use cases::{Written, all, two_pages};
 
-/// The facts of `written`, its positions from its bytes where a reader would have
-/// them from there.
+/// The facts of `written`, its positions from its bytes where a reader would
+/// have them from there.
 fn facts_of(written: &Written) -> Facts {
     let (bytes, plan, layout) = (&written.bytes, &written.plan, &written.layout);
     let mut facts = Facts::new(bytes.len() as u64);

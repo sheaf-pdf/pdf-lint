@@ -1,8 +1,9 @@
-//! What the family adapter writes encrypted, read back with pdf-structure's reader
-//! under its password: where the encryption dictionary and what it refers to go, what
-//! the hint stream's data is under, what's listed, and that nothing's left in the
-//! clear but what's to be. Each kind is written under each of the standard handler's
-//! revisions, by the keys of a file qpdf encrypted.
+//! What the family adapter writes encrypted, read back with pdf-structure's
+//! reader under its password: where the encryption dictionary and what it
+//! refers to go, what the hint stream's data is under, what's listed, and that
+//! nothing's left in the clear but what's to be. Each kind is written under
+//! each of the standard handler's revisions, by the keys of a file qpdf
+//! encrypted.
 
 #![cfg(feature = "family")]
 
@@ -21,12 +22,13 @@ use pdf_structure::{Document, Encryption, XrefKind};
 mod written;
 use written::{KEYS, ROOT, encrypted_as, file, kinds, opened, stream, with_info};
 
-/// What every string and stream of [`secrets`] holds, and nothing else in a file.
+/// What every string and stream of [`secrets`] holds, and nothing else in a
+/// file.
 const SECRET: &[u8] = b"secret";
 
-/// A catalog of `more`, a root node holding what's inherited, two pages, each with a
-/// stream of its own, a font and resources, and an information dictionary: each's
-/// string as long as any other's.
+/// A catalog of `more`, a root node holding what's inherited, two pages, each
+/// with a stream of its own, a font and resources, and an information
+/// dictionary: each's string as long as any other's.
 fn secrets(more: &str) -> Vec<String> {
     vec![
         format!("<< /Type /Catalog /Pages 2 0 R /Mark (secret 01) {more} >>"),
@@ -81,8 +83,8 @@ fn under(
     Ok((out, done))
 }
 
-/// `bytes`, read by `password`, written encrypted as it is, by an encryptor of that
-/// reading, so what may be copied is; under RC4, told to reuse the file's
+/// `bytes`, read by `password`, written encrypted as it is, by an encryptor of
+/// that reading, so what may be copied is; under RC4, told to reuse the file's
 /// keystreams, as this layout puts each object at another's (the module's
 /// "Encrypted"), which under AES changes nothing.
 fn own(
@@ -196,9 +198,9 @@ fn dictionaries(doc: &Document) -> usize {
     doc.objects().filter(|(_, object)| shaped(object)).count()
 }
 
-/// That `out` is [`secrets`] linearized, by `password`, nothing in the clear: every
-/// string and stream reads back, by the number it's written at, and every table of
-/// its hint stream.
+/// That `out` is [`secrets`] linearized, by `password`, nothing in the clear:
+/// every string and stream reads back, by the number it's written at, and every
+/// table of its hint stream.
 fn reads_back(out: &[u8], done: &family::Linearized, password: &str, name: &str) {
     assert!(!holds(out, SECRET), "{name}: something's in the clear");
     let reading = opened(out, password);
@@ -269,8 +271,9 @@ fn the_hint_streams_data_is_encrypted_and_a_section_isnt() {
             let hint = &out[at as usize..(at + length) as usize];
             let clear = deflated(done.layout.hint_data());
             assert!(!holds(hint, &clear), "{name}: the hint's in the clear");
-            // What lists the file is read before there's a key, so its rows are as
-            // any file's: what reads them unwrapped by no filter but Flate's.
+            // What lists the file is read before there's a key, so its rows are
+            // as any file's: what reads them unwrapped by no filter but
+            // Flate's.
             if options.kind == XrefKind::Stream {
                 let reading = opened(&out, "");
                 for at in [done.layout.first_section(), done.layout.main_section()] {
@@ -302,7 +305,8 @@ fn the_encryption_dictionary_is_in_part_four_written_from_the_encryptor() {
                 .as_reference()
                 .unwrap();
             assert_ne!(number, ObjectId::new(1000, 0), "{name}: it's where it was");
-            // Between the first section and the hint stream, which part 6 follows.
+            // Between the first section and the hint stream, which part 6
+            // follows.
             let at = done.layout.position(number.number).unwrap();
             assert!(done.layout.first_section() < at, "{name}");
             assert!(at < done.layout.hint_extent().0, "{name}");
@@ -360,7 +364,8 @@ fn nothing_is_listed_free_and_each_number_is_reused() {
             }
             let last = rows.iter().map(|(n, ..)| *n).max().unwrap();
             assert_eq!(rows.len() as u32, last + 1, "{name}: numbers with gaps");
-            // One the file read listed free holds an object here, read back by it.
+            // One the file read listed free holds an object here, read back by
+            // it.
             if per_object {
                 assert!(free.iter().any(|n| *n <= last), "{name}");
             }
@@ -368,8 +373,8 @@ fn nothing_is_listed_free_and_each_number_is_reused() {
     }
 }
 
-/// The string `/Mark` or `/Title` of the object at number `n` of `file`, as it's
-/// stored: none where it's in an object stream, or has no such string.
+/// The string `/Mark` or `/Title` of the object at number `n` of `file`, as
+/// it's stored: none where it's in an object stream, or has no such string.
 fn stored_mark(file: &[u8], n: u32) -> Option<Vec<u8>> {
     let reading = opened(file, "");
     let (_, _, entry) = reading.entries().find(|(at, ..)| *at == n)?;
@@ -389,11 +394,11 @@ fn stored_mark(file: &[u8], n: u32) -> Option<Vec<u8>> {
 /// Under RC4, told to reuse the file's keystreams, an object laid out at a
 /// number and generation another object of the file read was at is encrypted
 /// with that one's keystream: the XOR of the two ciphertexts is the XOR of the
-/// two marks, which is what a caller who tells it so accepts. The file read is a whole file of
-/// pdf-structure's under the key's encryption, which writes an object at a
-/// number the key's file used at its next generation, under another keystream
-/// than the one laid out there at 0: those don't leak so. Under AES nothing
-/// does.
+/// two marks, which is what a caller who tells it so accepts. The file read is
+/// a whole file of pdf-structure's under the key's encryption, which writes an
+/// object at a number the key's file used at its next generation, under another
+/// keystream than the one laid out there at 0: those don't leak so. Under AES
+/// nothing does.
 #[test]
 fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_doesn_t() {
     let plain = built(&secrets(""));
@@ -472,8 +477,8 @@ fn holds_a_string(object: &Object) -> bool {
 }
 
 /// Each object of `out`, read by `password`, whose strings or stream's data RC4
-/// would encrypt at a keystream `file`, read by the empty password, used, as its
-/// rows say: an object's in use there at that generation or a later one, or
+/// would encrypt at a keystream `file`, read by the empty password, used, as
+/// its rows say: an object's in use there at that generation or a later one, or
 /// below a free entry's generation. What's in the clear isn't among them, the
 /// encryption dictionary and the cross-reference streams, nor what holds no
 /// string and no data, which encrypt to nothing. By number, ascending.
@@ -663,7 +668,8 @@ fn the_first_string_of_the_id_is_kept() {
         }
     }
 
-    // A new encryption keeps a file's, and a file with none has the hash for both.
+    // A new encryption keeps a file's, and a file with none has the hash for
+    // both.
     let encryptor = created("user", true);
     let (out, done) = under(&plain, "", Some(&encryptor), &Options::DEFAULT).unwrap();
     let [first, second] = done.id.unwrap();
@@ -686,8 +692,8 @@ fn under_aes_256_an_object_as_read_is_copied_at_its_new_number() {
     for (name, key) in KEYS {
         let bytes = encrypted_as(key, &plain);
         let reading = opened(&bytes, "");
-        // The font refers to nothing: what follows its header is as it was, ciphertext
-        // and all, or written anew under another key.
+        // The font refers to nothing: what follows its header is as it was,
+        // ciphertext and all, or written anew under another key.
         let before = reading.to_document().unwrap();
         let font = marked(&before, "secret 07");
         let XrefEntry::InUse { offset, .. } = (reading.entries())
@@ -807,10 +813,10 @@ fn a_new_encryption_is_given_a_number_and_part_four() {
 
 #[test]
 fn a_reference_to_no_object_doesnt_come_to_name_a_new_dictionary() {
-    // 10 and 11 are past every object, and nothing's there: what names them, the
-    // catalog and the trailer, reads null. A direct /Info, made an object, is
-    // given a number past them too, and the new dictionary's, so neither names
-    // it, nor the dictionary.
+    // 10 and 11 are past every object, and nothing's there: what names them,
+    // the catalog and the trailer, reads null. A direct /Info, made an object,
+    // is given a number past them too, and the new dictionary's, so neither
+    // names it, nor the dictionary.
     let objects = secrets("/Other 10 0 R");
     let objects: Vec<&str> = objects.iter().map(String::as_str).collect();
     for info in [
@@ -887,8 +893,8 @@ fn what_no_password_opened_is_refused() {
     let done = family::linearize_bytes(&bytes, &opening(&[Password("user")])).unwrap();
     assert!(opened(&done, "user").facts().linearized);
 
-    // Its strings and streams in the clear, as an attachment's may not be: what no
-    // password opened is no surer for that.
+    // Its strings and streams in the clear, as an attachment's may not be: what
+    // no password opened is no surer for that.
     let bytes = hand_made(
         KEYS[2].1,
         false,
@@ -940,10 +946,10 @@ fn a_handler_that_cant_be_opened_is_refused() {
     );
 }
 
-/// A file of a page with no string or stream, encrypted as `key` is: its dictionary
-/// as `edit` leaves it, which leaves its strings in hex ([`in_hex`]), as they go
-/// through [`file`] as text, in the trailer or object 4, and `extra` after: nothing
-/// in it wants a key but what opens it.
+/// A file of a page with no string or stream, encrypted as `key` is: its
+/// dictionary as `edit` leaves it, which leaves its strings in hex
+/// ([`in_hex`]), as they go through [`file`] as text, in the trailer or object
+/// 4, and `extra` after: nothing in it wants a key but what opens it.
 fn hand_made(key: &[u8], direct: bool, edit: impl FnOnce(&mut Dict), extra: &[&str]) -> Vec<u8> {
     hand_made_of("", key, direct, edit, extra)
 }
@@ -1262,9 +1268,10 @@ fn asked_to_pack_under_an_encryption_that_doesnt_it_isnt_packed() {
 
 #[test]
 fn an_object_at_an_earlier_dictionary_s_number_is_encrypted_as_any_is() {
-    // Sections that name two dictionaries: the first's 5, the update's 4, which is
-    // what opens it. So 5, which the catalog names, is read as it's written, and in
-    // the file written, whose one dictionary is another, it's encrypted as any is.
+    // Sections that name two dictionaries: the first's 5, the update's 4, which
+    // is what opens it. So 5, which the catalog names, is read as it's written,
+    // and in the file written, whose one dictionary is another, it's encrypted
+    // as any is.
     let text = "written as it is";
     let earlier = format!("<< /Mine ({text}) >>");
     let mut bytes = hand_made(KEYS[1].1, false, in_hex, &[&earlier]);
@@ -1334,8 +1341,8 @@ fn an_object_at_the_number_an_encryptor_writes_its_dictionary_at_is_refused() {
 
 #[test]
 fn a_file_with_no_id_of_its_own_takes_the_encryptor_s_first_string() {
-    // Another file's encryption, its key made from that file's /ID (RC4, AES-128) or
-    // not, which opens this one only by that string.
+    // Another file's encryption, its key made from that file's /ID (RC4,
+    // AES-128) or not, which opens this one only by that string.
     let page = [
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -1358,8 +1365,8 @@ fn a_file_with_no_id_of_its_own_takes_the_encryptor_s_first_string() {
 
 #[test]
 fn what_names_the_dictionary_of_the_file_read_names_what_s_written_or_nothing() {
-    // The catalog names the encryption dictionary and a value of it, which only an
-    // object can: a reference, as any, that follows them or reads null.
+    // The catalog names the encryption dictionary and a value of it, which only
+    // an object can: a reference, as any, that follows them or reads null.
     let (_, key) = KEYS[1];
     let reading = opened(key, "");
     let o = Encryptor::of(&reading).unwrap().unwrap();
@@ -1464,8 +1471,8 @@ fn a_file_laid_out_encrypted_is_laid_out_again() {
 }
 
 /// Writes what's beside qpdf's own among PDFium's cases, in the folder
-/// `PDF_LINEARIZE_ENCRYPTED` names, `tests/pdfium/encrypted`: each of its files,
-/// password `user`, as this crate lays it out.
+/// `PDF_LINEARIZE_ENCRYPTED` names, `tests/pdfium/encrypted`: each of its
+/// files, password `user`, as this crate lays it out.
 #[test]
 #[ignore = "writes files PDFium's cases read"]
 fn the_files_of_pdfiums_cases_are_written() {
