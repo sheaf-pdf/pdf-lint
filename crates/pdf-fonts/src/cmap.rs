@@ -318,7 +318,7 @@ impl CidMap {
         } else {
             let bundled = predefined::bundled(name);
             if bundled.is_none() {
-                reader.tell(by, None, Fault::PredefinedUnknown);
+                reader.tell_with(by, None, || predefined::missing(name));
             }
             self.base = bundled.or(self.base);
         }

@@ -601,10 +601,13 @@ impl<'a> Walk<'a> {
                 match fault {
                     Fault::TooManyCMaps => stops.push(CMAPS),
                     // The reader's, which the walk says (`unresolved`); a
-                    // predefined CMap the build or PDFium hasn't, of which
-                    // a name that's no CMap's is the model's `value`; a
-                    // program's, which isn't read.
-                    Fault::Damaged { .. } | Fault::PredefinedUnknown | Fault::ProgramMalformed => {}
+                    // predefined CMap the build hasn't, which reads none, or
+                    // that PDFium hasn't, of which a name that's no CMap's
+                    // is the model's `value`; a program's, which isn't read.
+                    Fault::Damaged { .. }
+                    | Fault::PredefinedUnknown
+                    | Fault::PredefinedNotBuilt
+                    | Fault::ProgramMalformed => {}
                     // In what a /UseCMap names: where that's not a stream
                     // the file has, the walk says so at the /UseCMap; where
                     // it's through filters the reader doesn't take, it's
@@ -2246,6 +2249,23 @@ mod tests {
             [(CAPPED, "FontType1", 1)],
             "{checked}"
         );
+    }
+
+    /// A Type 0 font named by a predefined CMap, as its `/Encoding` or as
+    /// what its CMap uses, is found nothing of: this build reads no
+    /// predefined CMap, and pdf-fonts tells each as one it hasn't, or as one
+    /// PDFium hasn't (CNS-EUC-H), neither the font's.
+    #[test]
+    fn a_font_by_a_predefined_cmap_is_found_nothing_of() {
+        for encoding in ["/UniJIS-UCS2-H", "/90ms-RKSJ-V", "/CNS-EUC-H", "8 0 R"] {
+            let mut objects = written_type0(encoding, "");
+            let uses = "1 begincodespacerange <0000> <FFFF> endcodespacerange\n/GBK-EUC-H usecmap";
+            objects.push((8, cmap_of("Eight", "", uses)));
+            let file = fonts("1.7", "/F1 4 0 R", &borrowed(&objects));
+            let checked = report(&file, &ALL);
+            assert_eq!(found_in(&file, &checked), [], "{encoding}");
+            assert_eq!(unread_fonts(&checked), [], "{encoding}");
+        }
     }
 
     /// What two fonts' reads tell in one object is told once, by the first:

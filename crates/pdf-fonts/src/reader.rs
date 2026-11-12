@@ -37,10 +37,21 @@ impl<'c, O, S: Sink<Fault> + ?Sized> Reader<'c, O, S> {
     /// `fault`, in `object` where that's said, at where `value` was written where
     /// there's one.
     pub(crate) fn tell(&self, object: Option<ObjectId>, value: Option<&Object>, fault: Fault) {
+        self.tell_with(object, value, || fault);
+    }
+
+    /// [`Reader::tell`] of what `fault` gives, which is asked only where the sink
+    /// wants faults: for a fault whose kind takes a look-up to pick.
+    pub(crate) fn tell_with(
+        &self,
+        object: Option<ObjectId>,
+        value: Option<&Object>,
+        fault: impl FnOnce() -> Fault,
+    ) {
         let mut sink = self.sink.borrow_mut();
         if sink.wants() {
             let at = value.and_then(|value| value.at);
-            sink.fault(Place::new(object, at), fault);
+            sink.fault(Place::new(object, at), fault());
         }
     }
 

@@ -17,6 +17,8 @@ pub(crate) use hayro_cmap::{BfString, CMap};
 #[cfg(feature = "predefined-cmaps")]
 use hayro_cmap::{CMapName, load_embedded};
 
+use crate::Fault;
+
 /// No CMap, in a build without the feature: nothing can be one, so a font's
 /// reading has no code of its own for which it is.
 #[cfg(not(feature = "predefined-cmaps"))]
@@ -186,8 +188,9 @@ pub(crate) fn scheme(name: &[u8]) -> Option<Scheme> {
     SCHEMES.iter().find(|(n, _)| *n == id).map(|(_, s)| *s)
 }
 
-/// The CMaps hayro-cmap bundles: the 61 ISO 32000-2 names, and Adobe-*-UCS2.
-#[cfg(feature = "predefined-cmaps")]
+/// The CMaps hayro-cmap bundles: the 61 ISO 32000-2 names, and Adobe-*-UCS2. Its
+/// names are had in every build, so that one without the feature tells a CMap it
+/// hasn't from one no build reads ([`missing`]).
 const BUNDLED: [&[u8]; 65] = [
     b"83pv-RKSJ-H",
     b"90ms-RKSJ-H",
@@ -274,6 +277,39 @@ pub(crate) fn bundled(name: &[u8]) -> Option<&'static CMap> {
 #[cfg(not(feature = "predefined-cmaps"))]
 pub(crate) fn bundled(_: &[u8]) -> Option<&'static CMap> {
     None
+}
+
+/// Whether hayro-cmap bundles the CMap `name`, in any build.
+pub(crate) fn bundles(name: &[u8]) -> bool {
+    BUNDLED.contains(&name)
+}
+
+/// What's told of the predefined CMap `name`, asked of the bundle where this build
+/// hasn't it ([`bundled`] is none): [`Fault::PredefinedNotBuilt`] where a build with the
+/// feature reads it, the bundle listing it and this build being without it; else
+/// [`Fault::PredefinedUnknown`], as no build reads it. A build with the feature tells
+/// only the second.
+pub(crate) fn missing(name: &[u8]) -> Fault {
+    match !cfg!(feature = "predefined-cmaps") && bundles(name) {
+        true => Fault::PredefinedNotBuilt,
+        false => Fault::PredefinedUnknown,
+    }
+}
+
+/// Every CMap's name of the bundle and of PDFium's schemes, a scheme's with `-H` and
+/// with `-V`, but H's and V's, each once, in order.
+#[cfg(test)]
+pub(crate) fn names() -> Vec<String> {
+    let schemes = SCHEMES.iter().flat_map(|(id, _)| match *id {
+        b"H" | b"V" => vec![id.to_vec()],
+        _ => vec![[id, &b"-H"[..]].concat(), [id, &b"-V"[..]].concat()],
+    });
+    let bundled = BUNDLED.iter().map(|name| name.to_vec());
+    let mut names: Vec<Vec<u8>> = bundled.chain(schemes).collect();
+    names.sort_unstable();
+    names.dedup();
+    let names = names.into_iter().map(String::from_utf8);
+    names.collect::<Result<_, _>>().unwrap()
 }
 
 #[cfg(test)]

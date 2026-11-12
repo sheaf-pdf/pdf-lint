@@ -1321,6 +1321,75 @@ fn without_the_feature_a_predefined_cmap_is_guessed() {
     assert_eq!(font_of(&pdf, identity).text(b"\x01\x08"), None);
 }
 
+/// Each predefined CMap's name, the bundle's and each PDFium has a scheme for, as a
+/// Type 0 font's `/Encoding`, by `usecmap` and by `/UseCMap`, and the font PDFium reads
+/// as GBK: told as one the build hasn't exactly where a build with `predefined-cmaps`
+/// reads it from its bundle, which tells nothing; and as one no build reads, in every
+/// build, where neither does: a name PDFium knows that the bundle hasn't, and, as an
+/// `/Encoding`, one of the bundle's PDFium doesn't know.
+#[test]
+fn a_predefined_cmap_the_build_hasn_t_is_the_build_s() {
+    // PDFium knows these, which ISO 32000-2 doesn't predefine and the bundle hasn't.
+    const UNBUNDLED: [&str; 5] = [
+        "83pv-RKSJ-V",
+        "90pv-RKSJ-V",
+        "GBK2K-EUC-H",
+        "GBK2K-EUC-V",
+        "KSCpc-EUC-V",
+    ];
+    // The bundle has these, which PDFium doesn't know: ISO 32000-2's CNS-EUC, and
+    // what maps Adobe's CIDs to their text.
+    const UNKNOWN: [&str; 6] = [
+        "Adobe-CNS1-UCS2",
+        "Adobe-GB1-UCS2",
+        "Adobe-Japan1-UCS2",
+        "Adobe-Korea1-UCS2",
+        "CNS-EUC-H",
+        "CNS-EUC-V",
+    ];
+    let not_built = match cfg!(feature = "predefined-cmaps") {
+        true => vec![],
+        false => vec![Fault::PredefinedNotBuilt],
+    };
+    let faults = |pdf: &Pdf, font: &Dict| -> Vec<Fault> {
+        told(pdf, font)
+            .into_iter()
+            .map(|(_, fault)| fault)
+            .collect()
+    };
+    let names = crate::predefined::names();
+    assert_eq!(names.len(), 70);
+    let mut pdf = Pdf::default();
+    for name in &names {
+        let name = name.as_str();
+        let identity = matches!(name, "Identity-H" | "Identity-V");
+        let named = match name {
+            _ if identity => vec![],
+            _ if UNBUNDLED.contains(&name) || UNKNOWN.contains(&name) => {
+                vec![Fault::PredefinedUnknown]
+            }
+            _ => not_built.clone(),
+        };
+        let font = type0(&mut pdf, name.into(), dict! { "Subtype" => "CIDFontType2" });
+        assert_eq!(faults(&pdf, &font), named, "{name} as an /Encoding");
+        let used = match name {
+            _ if identity => vec![],
+            _ if UNBUNDLED.contains(&name) => vec![Fault::PredefinedUnknown],
+            _ => not_built.clone(),
+        };
+        let by_operator = format!("/{name} usecmap").into_bytes();
+        let by_operator = pdf.add_object(Stream::new(dict! {}, by_operator));
+        let by_key = pdf.add_object(Stream::new(dict! { "UseCMap" => name }, Vec::new()));
+        for cmap in [by_operator, by_key] {
+            let font = type0(&mut pdf, cmap.into(), dict! { "Subtype" => "CIDFontType2" });
+            assert_eq!(faults(&pdf, &font), used, "{name} used by {cmap:?}");
+        }
+    }
+    let gbk = pdf_objects::object::Value::Name(b"\xCB\xCE\xCC\xE5".to_vec());
+    let gbk = dict! { "Subtype" => "TrueType", "BaseFont" => Object::new(gbk) };
+    assert_eq!(faults(&pdf, &gbk), not_built, "GBK");
+}
+
 /// A resolver and streams of `pdf`'s that say `why` of `failing`.
 #[derive(Clone, Copy)]
 struct Failing<'o> {

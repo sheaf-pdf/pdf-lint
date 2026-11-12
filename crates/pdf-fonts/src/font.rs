@@ -1300,7 +1300,7 @@ where
             scheme.collection.to_unicode().map(CidText::Cid),
         ),
         None => {
-            reader.tell(None, font.get(b"BaseFont"), Fault::PredefinedUnknown);
+            reader.tell_with(None, font.get(b"BaseFont"), || predefined::missing(name));
             approx.codes = true;
             (Codes::Unknown, None)
         }
@@ -1627,7 +1627,7 @@ where
                 Some(scheme) => match predefined::bundled(n) {
                     Some(map) => Codes::Predefined { map, scheme },
                     None => {
-                        reader.tell(None, encoding, Fault::PredefinedUnknown);
+                        reader.tell_with(None, encoding, || predefined::missing(n));
                         approx.codes = true;
                         Codes::Unknown
                     }

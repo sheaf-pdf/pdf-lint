@@ -109,6 +109,14 @@ fn a_name(name: &[u8]) {
     if let Some(cmap) = crate::predefined::bundled(name) {
         let _ = cmap.metadata();
     }
+    // The bundle's names, had in every build, are what it has; and a CMap the build
+    // hasn't is the build's only where the bundle has it and the build is without it.
+    let bundles = crate::predefined::bundles(name);
+    #[cfg(feature = "predefined-cmaps")]
+    assert_eq!(crate::predefined::bundled(name).is_some(), bundles);
+    if crate::predefined::missing(name) == Fault::PredefinedNotBuilt {
+        assert!(bundles && !cfg!(feature = "predefined-cmaps"));
+    }
 }
 
 /// A code in every encoding: its text is its glyph's, or Windows-1252's where that
@@ -457,6 +465,13 @@ where
     assert_eq!((kept, asked.get()), (budget, work));
     for (_, fault) in &told {
         assert!(!fault.to_string().is_empty());
+    }
+    // A predefined CMap the build hasn't, never in a build that has the bundle, and the
+    // codes it would have read guessed.
+    let not_built = told.iter().any(|(_, f)| *f == Fault::PredefinedNotBuilt);
+    assert!(!not_built || !cfg!(feature = "predefined-cmaps"));
+    if not_built && let Ok(font) = &with_sink {
+        assert!(font.approx().codes);
     }
 
     // Written in the resources, read anew each time and charged each time; by number,

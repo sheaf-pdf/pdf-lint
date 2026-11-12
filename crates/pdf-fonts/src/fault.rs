@@ -1,6 +1,7 @@
 //! Where a font departs from ISO 32000-2, and where its reading meets a cap of
-//! its own. A font's reading goes on past each [`Fault`], told to a sink,
-//! pdf-objects' [`Sink<Fault>`](pdf_objects::fault::Sink), with where it is, a
+//! its own or what its build hasn't. A font's reading goes on past each
+//! [`Fault`], told to a sink, pdf-objects'
+//! [`Sink<Fault>`](pdf_objects::fault::Sink), with where it is, a
 //! [`Place`](pdf_objects::fault::Place): the numbered object it's in, where
 //! that's another than the font dictionary, which a reading is given as a
 //! dictionary (its descriptor, its CIDFont, a CMap's stream, an object that
@@ -12,9 +13,10 @@
 use pdf_objects::ObjectId;
 
 /// A place where a font isn't what ISO 32000-2 says it is, or where its reading
-/// meets a cap of its own, which a reading comes to and goes on past. Each names its
-/// clause, but [`Fault::TooManyCMaps`], a cap that ISO 32000-2 doesn't set, which
-/// says nothing of the file, and the last, which is of the file rather than its font.
+/// meets a cap of its own or what its build hasn't, which a reading comes to and goes
+/// on past. Each names its clause, but [`Fault::TooManyCMaps`], a cap that ISO 32000-2
+/// doesn't set, which says nothing of the file, and the last, which is of the file
+/// rather than its font.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
@@ -83,12 +85,22 @@ pub enum Fault {
     /// is read as with none.
     #[error("a /ToUnicode that's no stream, or doesn't decode")]
     ToUnicode,
-    /// A CMap named that this reading doesn't have: one that isn't predefined
-    /// (9.7.5.2), or one PDFium doesn't know, whose codes are two bytes each, each its
-    /// CID, as PDFium reads them; or one a build without the `predefined-cmaps` feature
-    /// hasn't, whose codes are guessed.
-    #[error("a predefined CMap this reading doesn't have")]
+    /// A CMap named that no build reads as it's named: one that's no predefined CMap
+    /// (9.7.5.2), or, as a Type 0 font's `/Encoding`, CNS-EUC-H or -V, which are, but
+    /// which PDFium doesn't know. As an `/Encoding`, a name PDFium doesn't know is read
+    /// as it reads it, its codes two bytes each, each its CID, and one it knows that
+    /// ISO 32000-2 doesn't predefine (GBK2K-EUC-H, say) has its codes guessed; used by
+    /// another CMap, the codes nothing else maps are guessed. It's the file's, but for
+    /// CNS-EUC-H and -V.
+    #[error("a CMap name that's no predefined CMap, or one PDFium doesn't know")]
     PredefinedUnknown,
+    /// A predefined CMap (9.7.5.2) that a build with the `predefined-cmaps` feature reads
+    /// from Adobe's bundle, and this build, without it, hasn't: of the build, not the
+    /// file. Its codes are guessed, split by the font's `/ToUnicode` codespace and their
+    /// CIDs unknown, or, used by another CMap, the codes nothing else maps; a build with
+    /// the feature never tells it.
+    #[error("a predefined CMap this build doesn't have")]
+    PredefinedNotBuilt,
     /// A program that doesn't read as its format (9.9), or that's past
     /// [`Limits`](crate::Limits). It reads as no program at all, as PDFium reads one
     /// FreeType doesn't load, its glyphs' boxes and its heights guessed.
