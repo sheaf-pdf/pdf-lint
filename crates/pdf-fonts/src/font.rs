@@ -239,9 +239,11 @@ pub enum FontProgram {
     /// refuses reads here, by parsers less strict, and there PDFium reads no program:
     /// a crafted one's boxes and base encoding part from PDFium's, and nothing says so.
     Read,
-    /// One that can't be read: of no format known, or broken. Its boxes and heights
-    /// are guessed, and it's read as without one, as PDFium reads a program FreeType
-    /// doesn't load.
+    /// One that can't be read: of no format known, or broken, or a stream that doesn't
+    /// decode. Its boxes and heights are guessed, and it's read as without one, as PDFium
+    /// reads a program FreeType doesn't load. So is a stream whose filters the reader
+    /// doesn't decode ([`Why::Filter`](pdf_objects::Why::Filter)), which is the reader's
+    /// and not the file's ([`Fault::ProgramMalformed`]).
     Malformed,
     /// A Type 1 program whose reading would cost past
     /// [`Limits::type1_work`](crate::Limits::type1_work), refused before it's read: a cap
@@ -508,10 +510,11 @@ impl Font {
 
     /// [`Font::read`], no program read: what fonts made for text read
     /// ([`Fonts::for_text`](crate::Fonts::for_text)), for who wants its faults too. It's
-    /// the same whatever the build's features, which another crate's turning on
-    /// `programs` can change, so what wants no program asks here. What's left to a
-    /// program is as in a build without the feature: a glyph's box from one is none, its
-    /// heights guessed, and that text guessed by the font's name.
+    /// the same whatever `programs` says, which another crate's turning it on can change,
+    /// so what wants no program asks here. What's left to a program is as in a build
+    /// without the feature: a glyph's box from one is none, its heights guessed, and that
+    /// text guessed by the font's name. `predefined-cmaps` still changes how a predefined
+    /// CMap reads, as in [`Font::read`].
     ///
     /// # Errors
     ///
@@ -799,7 +802,10 @@ impl Font {
     /// Each glyph `s` shows drawn, where it's a CIDFont whose program's outlines are read
     /// as they're asked for ([`Font::char_box`]); and what drawing each cost charged to
     /// `budget` where `first`, given the glyph, says it's its first charge, so what shows
-    /// them pays for the glyphs it shows whichever drew them first.
+    /// them pays for the glyphs it shows whichever drew them first. The glyph is one of
+    /// the font's program, `u32::MAX` where a CID maps to none, so a caller that shares
+    /// a font across pages, as [`Fonts`](crate::Fonts) does, keeps its record of what's
+    /// charged by font and glyph.
     ///
     /// # Errors
     ///

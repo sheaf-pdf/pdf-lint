@@ -1,13 +1,14 @@
 //! The spans a font's reading runs in, with the `tracing` feature: one macro, so
 //! that a phase is a line where it starts, and nothing of it is compiled without the
 //! feature. A phase is a call a font, or a part of one, is read in once: a font read,
-//! its program read and opened, an embedded CMap's chain, its `/ToUnicode` and a
-//! Type 3 font's CharProcs. A part read from a stream has its span once the stream
-//! is decompressed, so that its fields say how much was read, and the decompressing
-//! is its font's span's. A font looked up where it was read before has none, nor has
-//! a code, a width, a string's text or a glyph's box, as their loop is the caller's,
-//! nor a glyph's name or a standard 14 font's, each a lookup; and no fault is told as
-//! an event: faults are the sink's.
+//! its program opened, an embedded CMap's chain, its `/ToUnicode` and a Type 3 font's
+//! CharProcs. A part read from a stream has its span once the stream is decompressed,
+//! so that its fields say how much was read, and the decompressing is its font's
+//! span's. But a Type 3 font's CharProcs are decompressed within their span, whose
+//! field, how many the font has, is known before any is. A font looked up where it was
+//! read before has none, nor has a code, a width, a string's text or a glyph's box, as
+//! their loop is the caller's, nor a glyph's name or a standard 14 font's, each a
+//! lookup; and no fault is told as an event: faults are the sink's.
 
 /// Enters a span at `$level` (`DEBUG`) named `$name`, held to the end of the block
 /// it's in, its fields numbers alone (a length, a count, a flag), each cast to a

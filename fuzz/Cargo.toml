@@ -153,9 +153,10 @@ pdf-color = { path = "../crates/pdf-color" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["insecure-test-writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
-# Without `predefined-cmaps`, as pdf-lint's binary is built, so `check`
-# reads a font as the binary does; the feature of that name below turns it
-# on.
+# With its defaults, `programs` among them, so `fonts` reads programs. Without
+# `predefined-cmaps`, as pdf-lint's binary is built, so `check` reads a font
+# as the binary does: pdf-lint reads fonts for text, which reads no program
+# whatever the features. The feature of that name below turns it on.
 pdf-fonts = { path = "../crates/pdf-fonts" }
 pdf-linearize = { path = "../crates/pdf-linearize" }
 # The library alone, without the command line's crates.

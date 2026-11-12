@@ -76,7 +76,8 @@ pub enum Fault {
     /// of the chain whose filters the reader doesn't decode
     /// ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though that's the
     /// reader's and not the file's: a caller tells the two apart by what its own
-    /// [`Streams`](pdf_objects::Streams) answered.
+    /// [`Streams`](pdf_objects::Streams) answered. A later version may tell it apart
+    /// itself.
     #[error("a CMap's /UseCMap chain can't be read whole")]
     UseCMap,
     /// A CMap's `/UseCMap` chain of more streams than
@@ -89,7 +90,8 @@ pub enum Fault {
     /// is read as with none. One whose filters the reader doesn't decode
     /// ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though that's the
     /// reader's and not the file's: a caller tells the two apart by what its own
-    /// [`Streams`](pdf_objects::Streams) answered.
+    /// [`Streams`](pdf_objects::Streams) answered. A later version may tell it apart
+    /// itself.
     #[error("a /ToUnicode that's no stream, or doesn't decode")]
     ToUnicode,
     /// A CMap named that no build reads as it's named: one that's no predefined CMap
@@ -103,14 +105,19 @@ pub enum Fault {
     PredefinedUnknown,
     /// A predefined CMap (9.7.5.2) that a build with the `predefined-cmaps` feature reads
     /// from Adobe's bundle, and this build, without it, hasn't: of the build, not the
-    /// file. Its codes are guessed, split by the font's `/ToUnicode` codespace and their
-    /// CIDs unknown, or, used by another CMap, the codes nothing else maps; a build with
-    /// the feature never tells it.
+    /// file. Its codes are guessed and their CIDs unknown, split by the font's
+    /// `/ToUnicode` codespace where it has one, else two bytes each. Used by another
+    /// CMap, the codes nothing else maps are guessed. A build with the feature never
+    /// tells it.
     #[error("a predefined CMap this build doesn't have")]
     PredefinedNotBuilt,
-    /// A program that doesn't read as its format (9.9). It reads as no program at all,
-    /// as PDFium reads one FreeType doesn't load, its glyphs' boxes and its heights
-    /// guessed.
+    /// A program that doesn't read as its format, or a program stream that doesn't
+    /// decode (9.9). It reads as no program at all, as PDFium reads one FreeType doesn't
+    /// load, its glyphs' boxes and its heights guessed. A stream whose filters the reader
+    /// doesn't decode ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though
+    /// that's the reader's and not the file's: a caller tells the two apart by what its
+    /// own [`Streams`](pdf_objects::Streams) answered. A later version may tell it apart
+    /// itself.
     #[error("a font program that doesn't read")]
     ProgramMalformed,
     /// A Type 1 program whose reading would cost past
@@ -124,9 +131,10 @@ pub enum Fault {
     /// followed one to. Where it doesn't, what it leads to reads as none.
     #[error("a reference to a reference")]
     Chained,
-    /// An object a font reads doesn't read ([`Why::Damaged`](pdf_objects::Why::Damaged)).
-    /// It's read as not there.
-    #[error("object {} {} doesn't read", .id.number, .id.generation)]
+    /// A reference to an object the file lists but whose bytes aren't that object, or
+    /// that doesn't lead to it ([`Why::Damaged`](pdf_objects::Why::Damaged)): read as no
+    /// object, as 7.3.10 has a reference to nothing, though the file meant one.
+    #[error("{id} R doesn't read")]
     Damaged {
         /// The object.
         id: ObjectId,

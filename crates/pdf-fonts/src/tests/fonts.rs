@@ -3320,7 +3320,7 @@ fn faults_are_told_where_they_are() {
     let said = Fault::Damaged {
         id: ObjectId::new(7, 0),
     };
-    assert_eq!(said.to_string(), "object 7 0 doesn't read");
+    assert_eq!(said.to_string(), "7 0 R doesn't read");
     assert!(std::error::Error::source(&said).is_none());
     let error = Error::Unreadable(Unreadable::new(
         ObjectId::new(7, 0),

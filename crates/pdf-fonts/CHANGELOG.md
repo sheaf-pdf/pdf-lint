@@ -2,7 +2,7 @@
 
 ## 0.1.0-alpha.1 (unreleased)
 
-First release. It's an alpha: any alpha may change the API, and each entry here says what changed and how to update. Depend on the exact version, `=0.1.0-alpha.1`; a plain `0.1.0-alpha.1` lets cargo take later alphas too. Its unit tests don't build from the package. They take their files from pdf-fixtures, which is never published, and read them through pdf-structure, not yet on crates.io.
+First release. It's an alpha: any alpha may change the API, and each entry here says what changed and how to update. Depend on the exact version, `=0.1.0-alpha.1`; a plain `0.1.0-alpha.1` lets cargo take later alphas too. Its unit tests don't build from the package. They take their files from pdf-fixtures, which is never published. They read them through pdf-structure, not yet on crates.io.
 
 ### Added
 
@@ -20,6 +20,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 - It's built on pdf-objects `=0.1.0-alpha.2` and pdf-content-streams `=0.1.0-alpha.1`, both re-exported whole and none of their items by name. `Limits::content` is pdf-content-streams' type. It needs Rust 1.89.
 - Where it reads a case otherwise than PDFium, the repository's `tests/pdfium/differ.tsv` lists it and why.
+- `Fault::UseCMap`, `Fault::ToUnicode` and `Fault::ProgramMalformed` are told too of a stream whose filters the reader doesn't decode, which is the reader's and not the file's. A later alpha may tell that apart.
 - A reading past the caller's budget fails with `Error::TooLarge`. A stream past a cap of what gives it fails it with `Error::Unreadable`, the caller's to know, as one behind a password does. Nothing is told to the sink after that. Either way the budget is as it was.
 - Nothing in this crate panics on what a file holds. A font's program is parsed by skrifa 0.50 and read-fonts 0.47.
 - It's licensed `(MIT OR Apache-2.0) AND FTL`, as `src/program.rs` translates some of FreeType's code, under `FTL.TXT`. The fonts' data keeps its own terms, which the README lists.

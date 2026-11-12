@@ -30,8 +30,9 @@
 //! - **`programs`**, on by default: a font's program read through skrifa, for
 //!   [`Font::char_box`], heights and the text its encoding leaves to it
 //!   ([`FontProgram`]). [`Font::read_for_text`] and [`Fonts::for_text`] read none.
-//! - **`predefined-cmaps`**, off by default: Adobe's predefined CMaps. Without it, one
-//!   reads as a CMap the build hasn't ([`Fault::PredefinedNotBuilt`]).
+//! - **`predefined-cmaps`**, off by default: Adobe's predefined CMaps, from hayro-cmap's
+//!   bundle. Without it, one of the bundle's reads as a CMap the build hasn't
+//!   ([`Fault::PredefinedNotBuilt`]).
 //! - **`tracing`**, off by default: a span at `debug` over a font read, and within it
 //!   over its program's opening, its embedded CMap's and its `/ToUnicode`'s parsing,
 //!   and a Type 3 font's CharProcs. A span's fields are numbers, never a byte of a file.
@@ -129,7 +130,7 @@ mod tests;
 #[cfg_attr(not(feature = "programs"), allow(dead_code))]
 mod type1;
 
-/// The README's examples, run as doctests.
+/// The README's example, run as a doctest.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
