@@ -2,6 +2,7 @@
 //! nothing can be opened, so nothing here is reached.
 
 use crate::font::{Simple, SimpleMap};
+use crate::type1::Refusal;
 use crate::{Limits, Rect};
 
 /// A font's program, open: there's never one.
@@ -9,9 +10,9 @@ use crate::{Limits, Rect};
 pub(crate) struct Face(());
 
 impl Face {
-    /// None, whatever it's given.
-    pub(crate) fn open(_: Vec<u8>, _: &[u8], _: &Limits) -> Option<Face> {
-        None
+    /// Refused, whatever it's given.
+    pub(crate) fn open(_: Vec<u8>, _: &[u8], _: &Limits) -> Result<Face, Refusal> {
+        Err(Refusal::Malformed)
     }
 
     pub(crate) fn heights(&self) -> Option<([f32; 4], f32, f32)> {

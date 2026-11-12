@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use super::afm::Afm;
 use super::fixture;
+use super::type1::Refusal::{Capped, Malformed};
 use super::*;
 
 mod fonts;
@@ -466,6 +467,7 @@ fn a_type1_blob_s_length_is_followed_only_by_whitespace() {
     assert!(type1::scan(&glyph(" "), &limits).is_some());
     assert!(type1::scan(&glyph(" \t\r\n "), &limits).is_some());
     assert!(type1::scan(&glyph(" % a comment\n"), &limits).is_none());
+    assert_eq!(refused(&glyph(" % a comment\n"), &limits), Some(Malformed));
 }
 
 /// A glyph's name that isn't UTF-8 is its bytes as Latin-1, as read-fonts keeps it, and
@@ -501,6 +503,10 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
     let limits = Limits::DEFAULT;
     assert!(type1::scan(&fixture::type1_lookups_program(256), &limits).is_some());
     assert!(type1::scan(&fixture::type1_lookups_program(3000), &limits).is_none());
+    assert_eq!(
+        refused(&fixture::type1_lookups_program(3000), &limits),
+        Some(Capped)
+    );
     let glyphs = 3000;
     let names: Vec<String> = (0..glyphs).map(|g| format!("g{g}")).collect();
     let empty = fixture::type1_empty_glyph();
@@ -518,10 +524,15 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
     };
     assert!(type1::scan(&program(in_a_map(256)), &limits).is_some());
     assert!(type1::scan(&program(in_a_map(glyphs)), &limits).is_none());
+    assert_eq!(refused(&program(in_a_map(glyphs)), &limits), Some(Capped));
     // A map's codes and an array's names come to the same.
     let in_an_array = |n: usize| format!("/Encoding [{}] def", "/nope ".repeat(n));
     assert!(type1::scan(&program(in_an_array(256)), &limits).is_some());
     assert!(type1::scan(&program(in_an_array(glyphs)), &limits).is_none());
+    assert_eq!(
+        refused(&program(in_an_array(glyphs)), &limits),
+        Some(Capped)
+    );
     // What's no name ends an array, and `def` a map.
     let cut = format!("/Encoding [ 1 {}] def", "/nope ".repeat(glyphs));
     assert!(type1::scan(&program(cut), &limits).is_some());
@@ -534,7 +545,8 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
     // Each is counted: two of what one may have aren't read.
     assert!(type1::scan(&program(in_an_array(800)), &limits).is_some());
     let twice = format!("{0} {0}", in_an_array(800));
-    assert!(type1::scan(&program(twice), &limits).is_none());
+    assert!(type1::scan(&program(twice.clone()), &limits).is_none());
+    assert_eq!(refused(&program(twice), &limits), Some(Capped));
     // A glyph is a glyph, whatever its name: read-fonts goes through them all.
     let clear = in_an_array(glyphs);
     let once = fixture::type1_with(
@@ -542,6 +554,7 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
         std::iter::repeat_n(("g", empty.clone()), glyphs),
     );
     assert!(type1::scan(&once, &limits).is_none());
+    assert_eq!(refused(&once, &limits), Some(Capped));
 }
 
 /// What a scan finds: each charstring by name, decrypted and past `lenIV`'s bytes.
@@ -562,6 +575,18 @@ fn type1_charstrings_found() {
         ..limits
     };
     assert!(type1::scan(&fixture::type1_program(), &no_work).is_none());
+    assert_eq!(refused(&fixture::type1_program(), &no_work), Some(Capped));
     assert!(type1::scan(b"", &limits).is_none());
-    assert!(type1::scan(b"%!PS-AdobeFont-1.0: no eexec\n", &limits).is_none());
+    assert_eq!(refused(b"", &limits), Some(Malformed));
+    let no_eexec = b"%!PS-AdobeFont-1.0: no eexec\n";
+    assert!(type1::scan(no_eexec, &limits).is_none());
+    assert_eq!(refused(no_eexec, &limits), Some(Malformed));
+    // Whose fuel's spent before it's found broken, whatever it is: no work to spare.
+    assert_eq!(refused(no_eexec, &no_work), Some(Capped));
+    assert_eq!(refused(b"", &no_work), Some(Malformed));
+}
+
+/// Why [`type1::read`] refuses `program` under `limits`: none where it reads it.
+fn refused(program: &[u8], limits: &Limits) -> Option<type1::Refusal> {
+    type1::read(program, limits).err()
 }

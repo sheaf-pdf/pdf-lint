@@ -20,7 +20,7 @@ use crate::fixture::{
     type1_integers_program, type1_lookups_program, type1_program,
 };
 use crate::predefined::{Collection, scheme};
-use crate::type1::scan;
+use crate::type1::{Refusal, scan};
 use crate::{
     Encoding, Error, Fault, Font, Fonts, Limits, Std14, cp1252, glyph_text, name_code_point,
 };
@@ -33,9 +33,12 @@ const NAMES: usize = 64;
 /// more finds nothing more.
 const CODES: usize = 4;
 
-/// `data` as a Type 1 program: what's held no more than what's given, and under
-/// smaller caps the same or nothing at all, as a cap refuses a program and never
-/// reads it otherwise.
+/// `data` as a Type 1 program: what's held no more than what's given; and a cap
+/// refuses a program and never reads it otherwise, by the scan alone, never read-fonts,
+/// whose work under a larger cap is what the cap bounds. A program read under a cap is
+/// read the same under a larger, one malformed under a cap is malformed under a larger,
+/// and one past a cap is past every smaller: the scan's fuel says when it stops, never
+/// what it reads.
 pub fn type1(data: &[u8]) {
     let limits = Limits::DEFAULT;
     let read = scan(data, &limits);
@@ -45,21 +48,27 @@ pub fn type1(data: &[u8]) {
         // The one `.notdef` a program may have made up for it is 5 bytes.
         assert!(held <= data.len() + 5, "{held} of {}", data.len());
     }
-    for type1_work in [4, 1, 0] {
+    // From the largest cap to none, each what the scan comes to.
+    let caps = [2 * limits.type1_work, limits.type1_work, 4, 1, 0];
+    let scanned = caps.map(|type1_work| {
         let limits = Limits {
             type1_work,
             ..limits
         };
-        if let Some(under) = scan(data, &limits) {
-            assert_eq!(Some(under), read);
+        crate::type1::read(data, &limits).map(|scanned| scanned.charstrings)
+    });
+    assert_eq!(scanned[1].as_ref().ok(), read.as_ref());
+    for (i, smaller) in scanned.iter().enumerate() {
+        for larger in &scanned[..i] {
+            match smaller {
+                Ok(_) => assert_eq!(larger, smaller),
+                Err(Refusal::Malformed) => assert_eq!(larger, smaller),
+                Err(Refusal::Capped) => {}
+            }
+            if larger == &Err(Refusal::Capped) {
+                assert_eq!(smaller, larger);
+            }
         }
-    }
-    let larger = Limits {
-        type1_work: 2 * limits.type1_work,
-        ..limits
-    };
-    if read.is_some() {
-        assert_eq!(scan(data, &larger), read);
     }
 }
 
@@ -410,6 +419,13 @@ pub(crate) fn digest(font: &Font) -> String {
     out
 }
 
+/// Whether `data` is a Type 1 program as FreeType tells one apart: its header, bare or
+/// in a PFB's first segment.
+fn type1_by_its_bytes(data: &[u8]) -> bool {
+    let header = |d: &[u8]| d.starts_with(b"%!PS-AdobeFont") || d.starts_with(b"%!FontType");
+    header(data) || data.starts_with(&[0x80, 0x01]) && data.get(6..).is_some_and(header)
+}
+
 /// What was read, as what can be held the same: a font's digest and its id, or why it
 /// wasn't.
 fn said(read: &Result<Font, Error>) -> Result<String, Error> {
@@ -472,6 +488,20 @@ where
     assert!(!not_built || !cfg!(feature = "predefined-cmaps"));
     if not_built && let Ok(font) = &with_sink {
         assert!(font.approx().codes);
+    }
+    // A program refused for a cap is a Type 1 program, whose scan alone has one that
+    // refuses it, and it's what the font says of its program.
+    let mut capped = false;
+    for (place, _) in told.iter().filter(|(_, f)| *f == Fault::ProgramCapped) {
+        let data = place.object.and_then(|id| objects.decoded(id, BUDGET).ok());
+        assert!(
+            data.is_some_and(|data| type1_by_its_bytes(&data)),
+            "{place:?}"
+        );
+        capped = true;
+    }
+    if let Ok(font) = &with_sink {
+        assert_eq!(capped, font.program() == crate::FontProgram::Capped);
     }
 
     // Written in the resources, read anew each time and charged each time; by number,
@@ -928,6 +958,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A font whose Type 1 program is past `type1_work` keeps every promise, its
+    /// program refused for the cap and told so, and the program itself keeps the scan's.
+    #[cfg(feature = "programs")]
+    #[test]
+    fn a_program_past_its_cap_keeps_every_promise() {
+        let program = type1_lookups_program(3000);
+        let font: &[u8] = b"<< /Subtype /Type1 /BaseFont /Fix /FirstChar 32 /Widths [250 300] \
+            /FontDescriptor << /Flags 32 /FontFile 5 0 R >> >>";
+        let seed = parts(&[font, b"", b"", b"", &program, b""]);
+        assert!(fonts(&seed));
+        type1(&program);
+        let objects = objects_of(&seed);
+        let dict = objects[&ObjectId::new(1, 0)].as_dict().unwrap();
+        let (mut budget, mut told) = (BUDGET, Vec::new());
+        let read = Font::read(
+            Map(&objects),
+            dict,
+            &Limits::DEFAULT,
+            &mut budget,
+            &mut told,
+        );
+        assert_eq!(read.unwrap().program(), crate::FontProgram::Capped);
+        let told: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+        assert_eq!(told, [Fault::ProgramCapped]);
     }
 
     #[test]

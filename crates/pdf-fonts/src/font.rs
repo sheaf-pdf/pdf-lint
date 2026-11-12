@@ -27,7 +27,9 @@
 //! The program a font embeds, with the `programs` feature, is read for what only it
 //! says, as PDFium's FreeType reads it: each glyph's outline box, its heights where its
 //! descriptor lacks them, and the text of the codes PDFium's encoding leaves to it. A
-//! program FreeType wouldn't load reads as PDFium reads it, as no program at all.
+//! program FreeType wouldn't load reads as PDFium reads it, as no program at all, and
+//! so does a Type 1 program whose reading would cost past
+//! [`Limits::type1_work`](crate::Limits::type1_work), refused before it's read.
 //!
 //! Every array is read within its own length: a `/W` range of 2³¹ CIDs is one range,
 //! as it's written, not 2³¹ widths. What a font's streams decompress to (its
@@ -50,6 +52,7 @@ use crate::cmap::{CMap, CidMap, Ranges, Scheme, number, two_bytes};
 use crate::predefined::{self, BfString, Collection, Split};
 use crate::program::{CidGlyphs, Face};
 use crate::reader::Reader;
+use crate::type1::Refusal;
 use crate::{Encoding, Error, Fault, Limits, Std14, glyph_text};
 
 /// A rectangle, in glyph units unless it says otherwise: thousandths of text
@@ -201,9 +204,9 @@ pub struct FontApprox {
     /// Its glyphs' outlines, so a glyph's box may not hold its outline as PDFium's
     /// does: it embeds no program that was read, as for the standard 14, which
     /// PDFium draws in a face of its own or the system's; a program that can't be read
-    /// ([`FontProgram::Malformed`]); or one that can, whose glyphs' boxes aren't known
-    /// to be PDFium's. In a Type 3 font, one of whose glyphs' CharProc's `d1` gives no
-    /// box, and that has no `/FontBBox`.
+    /// ([`FontProgram::Malformed`]) or that's past a cap ([`FontProgram::Capped`]); or
+    /// one that can, whose glyphs' boxes aren't known to be PDFium's. In a Type 3 font,
+    /// one of whose glyphs' CharProc's `d1` gives no box, and that has no `/FontBBox`.
     pub boxes: bool,
 }
 
@@ -229,8 +232,13 @@ pub enum FontProgram {
     Read,
     /// One that can't be read: of no format known, or broken. Its boxes and heights
     /// are guessed, and it's read as without one, as PDFium reads a program FreeType
-    /// doesn't load; one that this alone refuses, past [`Limits`], is read so too.
+    /// doesn't load.
     Malformed,
+    /// A Type 1 program whose reading would cost past
+    /// [`Limits::type1_work`](crate::Limits::type1_work), refused before it's read: a cap
+    /// of this reading's, which says nothing of the program. It's read as
+    /// [`FontProgram::Malformed`] is, as without one.
+    Capped,
 }
 
 /// How a code's glyph is placed when the font writes vertically (ISO 32000-2,
@@ -922,9 +930,10 @@ struct Embedded {
 
 impl Embedded {
     /// Whether it reads as embedded, as PDFium's `font_file_` is there: the stream, but
-    /// where it was read and FreeType wouldn't have loaded it.
+    /// where it was read and FreeType wouldn't have loaded it, or it was refused past a
+    /// cap, which reads as one FreeType wouldn't load.
     fn embedded(&self) -> bool {
-        self.stream && self.program != FontProgram::Malformed
+        self.stream && !matches!(self.program, FontProgram::Malformed | FontProgram::Capped)
     }
 }
 
@@ -962,16 +971,21 @@ where
     }
     let data = reader.charged(id, budget)?.unwrap_or_default();
     let face = Face::open(data, named, reader.limits);
-    if face.is_none() {
-        reader.tell(Some(id), None, Fault::ProgramMalformed);
-    }
+    let program = match &face {
+        Ok(_) => FontProgram::Read,
+        Err(Refusal::Malformed) => {
+            reader.tell(Some(id), None, Fault::ProgramMalformed);
+            FontProgram::Malformed
+        }
+        Err(Refusal::Capped) => {
+            reader.tell(Some(id), None, Fault::ProgramCapped);
+            FontProgram::Capped
+        }
+    };
     Ok(Embedded {
         stream: true,
-        program: match face {
-            Some(_) => FontProgram::Read,
-            None => FontProgram::Malformed,
-        },
-        face,
+        program,
+        face: face.ok(),
     })
 }
 

@@ -21,10 +21,27 @@ use crate::Limits;
 /// name. A program without `.notdef` has the one read-fonts makes up.
 pub(crate) type Charstrings = HashMap<Vec<u8>, Option<Vec<u8>>>;
 
-/// [`read`]'s charstrings alone.
+/// [`read`]'s charstrings alone, none for either refusal.
 #[cfg(any(test, fuzzing))]
 pub(crate) fn scan(data: &[u8], limits: &Limits) -> Option<Charstrings> {
-    read(data, limits).map(|scanned| scanned.charstrings)
+    read(data, limits).ok().map(|scanned| scanned.charstrings)
+}
+
+/// Why [`read`] refuses a program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// It's not one read-fonts reads: no header, no `eexec`, no `/CharStrings`, or
+    /// what's there broken.
+    Malformed,
+    /// Reading it costs past [`Limits::type1_work`]: the scan's fuel was spent before
+    /// it was read, which says nothing of the program.
+    Capped,
+}
+
+impl From<Refused> for Refusal {
+    fn from(_: Refused) -> Refusal {
+        Refusal::Capped
+    }
 }
 
 /// What [`read`] finds of a program.
@@ -38,15 +55,19 @@ pub(crate) struct Scanned {
 }
 
 /// `data`, a Type 1 program, scanned as read-fonts reads it: its charstrings, where
-/// reading it costs within [`Limits::type1_work`]; None where not, or where read-fonts
-/// wouldn't read it either: no header, no `eexec`, no `/CharStrings`.
-pub(crate) fn read(data: &[u8], limits: &Limits) -> Option<Scanned> {
+/// reading it costs within [`Limits::type1_work`]; refused where not
+/// ([`Refusal::Capped`]), or where read-fonts wouldn't read it either
+/// ([`Refusal::Malformed`]): no header, no `eexec`, no `/CharStrings`. The scan reads
+/// the same whatever its fuel, but where it runs out, so a program it reads under a cap
+/// it reads the same under a larger, one it finds malformed it finds so under a
+/// larger, and one past a cap is past every smaller.
+pub(crate) fn read(data: &[u8], limits: &Limits) -> Result<Scanned, Refusal> {
     let fuel = (limits.type1_work).saturating_mul(data.len().max(1 << 14));
     let mut parser = Parser::new(data, fuel);
     let (base, private) = dicts(data, &mut parser)?;
     let mut parser = Parser::new(base, parser.fuel);
     let mut encodings = Vec::new();
-    while let Some(token) = parser.next().ok()? {
+    while let Some(token) = parser.next()? {
         if token == Token::Name(b"Encoding") {
             encodings.push(parser.pos);
         }
@@ -56,29 +77,30 @@ pub(crate) fn read(data: &[u8], limits: &Limits) -> Option<Scanned> {
     let mut found = None;
     let mut build_char_len = 0;
     loop {
-        match parser.next().ok()? {
+        match parser.next()? {
             None => break,
-            Some(Token::Name(b"lenIV")) => match parser.next().ok()? {
+            Some(Token::Name(b"lenIV")) => match parser.next()? {
                 Some(Token::Int(n)) => len_iv = n,
-                _ => return None,
+                _ => return Err(Refusal::Malformed),
             },
             Some(Token::Name(b"CharStrings")) if found.is_none() => {
                 found = Some(parser.charstrings(len_iv)?);
             }
-            Some(Token::Name(b"BuildCharArray")) => build_char_len = parser.array_len().ok()?,
+            Some(Token::Name(b"BuildCharArray")) => build_char_len = parser.array_len()?,
             Some(_) => {}
         }
     }
-    let (found, glyphs) = found?;
+    let (found, glyphs) = found.ok_or(Refusal::Malformed)?;
     // Which of them read-fonts reads rests on what it takes for a value before it: each
     // is counted, as a program has one or two.
     let mut fuel = parser.fuel;
     for at in encodings {
-        let mut parser = Parser::new(base.get(at..)?, fuel);
-        let names = parser.encoding_names().ok()?;
-        fuel = parser.fuel.checked_sub(names.saturating_mul(glyphs))?;
+        let mut parser = Parser::new(base.get(at..).ok_or(Refusal::Malformed)?, fuel);
+        let names = parser.encoding_names()?;
+        let looked_for = names.saturating_mul(glyphs);
+        fuel = parser.fuel.checked_sub(looked_for).ok_or(Refusal::Capped)?;
     }
-    Some(Scanned {
+    Ok(Scanned {
         charstrings: found,
         build_char_len,
     })
@@ -87,12 +109,13 @@ pub(crate) fn read(data: &[u8], limits: &Limits) -> Option<Scanned> {
 /// The program's base dictionary and its private one decrypted, as
 /// read-fonts finds them (`RawDicts::new`): a PFB's segments, or the clear
 /// text and what follows `eexec`, hex or binary.
-fn dicts<'a>(data: &'a [u8], parser: &mut Parser<'a>) -> Option<(&'a [u8], Vec<u8>)> {
+fn dicts<'a>(data: &'a [u8], parser: &mut Parser<'a>) -> Result<(&'a [u8], Vec<u8>), Refusal> {
+    use Refusal::Malformed;
     let header = |d: &[u8]| d.starts_with(b"%!PS-AdobeFont") || d.starts_with(b"%!FontType");
     if let Some((TEXT, size)) = pfb_tag(data, 0) {
-        let data = data.get(6..)?;
-        header(data).then_some(())?;
-        let (base, rest) = data.split_at_checked(size as usize)?;
+        let data = data.get(6..).ok_or(Malformed)?;
+        header(data).then_some(()).ok_or(Malformed)?;
+        let (base, rest) = data.split_at_checked(size as usize).ok_or(Malformed)?;
         let mut binary = Vec::new();
         let mut at = 0;
         // The binary segments that follow, each whole.
@@ -104,16 +127,16 @@ fn dicts<'a>(data: &'a [u8], parser: &mut Parser<'a>) -> Option<(&'a [u8], Vec<u
             binary.extend_from_slice(segment);
             at += 6 + segment.len();
         }
-        return Some((base, decrypt(&binary, EEXEC_SEED, 4)));
+        return Ok((base, decrypt(&binary, EEXEC_SEED, 4)));
     }
-    header(data).then_some(())?;
-    let start = parser.eexec()?;
-    let (base, rest) = data.split_at_checked(start)?;
+    header(data).then_some(()).ok_or(Malformed)?;
+    let start = parser.eexec()?.ok_or(Malformed)?;
+    let (base, rest) = data.split_at_checked(start).ok_or(Malformed)?;
     let private = match rest.len() > 3 && rest[..4].iter().all(u8::is_ascii_hexdigit) {
         true => decrypt(&hex(rest), EEXEC_SEED, 4),
         false => decrypt(rest, EEXEC_SEED, 4),
     };
-    Some((base, private))
+    Ok((base, private))
 }
 
 const TEXT: u16 = 0x8001;
@@ -322,8 +345,8 @@ impl<'a> Parser<'a> {
     /// Where the data after `eexec` starts, as read-fonts finds it
     /// (`find_eexec_data`): past the whitespace after the token, to a
     /// carriage return that no line feed follows before it.
-    fn eexec(&mut self) -> Option<usize> {
-        while let Some(token) = self.next().ok()? {
+    fn eexec(&mut self) -> Result<Option<usize>, Refused> {
+        while let Some(token) = self.next()? {
             if token != Token::Raw(b"eexec") {
                 continue;
             }
@@ -349,32 +372,32 @@ impl<'a> Parser<'a> {
                 }
                 start += 1;
             }
-            return (start < data.len()).then_some(start);
+            return Ok((start < data.len()).then_some(start));
         }
-        None
+        Ok(None)
     }
 
     /// `/CharStrings`' entries, as read-fonts reads them
     /// (`read_charstrings`), decrypted with `len_iv`; and how many it gave, a
     /// name given twice twice.
-    fn charstrings(&mut self, len_iv: i64) -> Option<(Charstrings, usize)> {
-        let Some(Token::Int(count)) = self.next().ok()? else {
-            return None;
+    fn charstrings(&mut self, len_iv: i64) -> Result<(Charstrings, usize), Refusal> {
+        let Some(Token::Int(count)) = self.next()? else {
+            return Err(Refusal::Malformed);
         };
-        usize::try_from(count).ok()?;
+        usize::try_from(count).map_err(|_| Refusal::Malformed)?;
         let mut found = Charstrings::new();
         let mut glyphs = 0usize;
         let ends = |p: &Parser<'_>| {
             p.peek_byte()
                 .is_some_and(|c| is_whitespace(c) || is_special(c))
         };
-        while let Some(token) = self.next().ok()? {
+        while let Some(token) = self.next()? {
             match token {
                 Token::Raw(b"end") if ends(self) => break,
                 Token::Raw(b"def") if ends(self) && !found.is_empty() => break,
                 Token::Name(name) => {
-                    let Some(Token::Binary(data)) = self.next().ok()? else {
-                        return None;
+                    let Some(Token::Binary(data)) = self.next()? else {
+                        return Err(Refusal::Malformed);
                     };
                     glyphs += 1;
                     let plain = match usize::try_from(len_iv) {
@@ -394,7 +417,7 @@ impl<'a> Parser<'a> {
         found
             .entry(b".notdef".to_vec())
             .or_insert(Some(vec![0x8B, 0xF7, 0xE1, 0x0D, 0x0E]));
-        Some((found, glyphs + 1))
+        Ok((found, glyphs + 1))
     }
 
     /// How many tokens an array holds, it being next, to its `]`: 0 for what's no array

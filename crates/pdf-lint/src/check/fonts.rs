@@ -607,7 +607,8 @@ impl<'a> Walk<'a> {
                     Fault::Damaged { .. }
                     | Fault::PredefinedUnknown
                     | Fault::PredefinedNotBuilt
-                    | Fault::ProgramMalformed => {}
+                    | Fault::ProgramMalformed
+                    | Fault::ProgramCapped => {}
                     // In what a /UseCMap names: where that's not a stream
                     // the file has, the walk says so at the /UseCMap; where
                     // it's through filters the reader doesn't take, it's

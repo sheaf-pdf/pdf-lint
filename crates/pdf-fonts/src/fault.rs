@@ -14,9 +14,9 @@ use pdf_objects::ObjectId;
 
 /// A place where a font isn't what ISO 32000-2 says it is, or where its reading
 /// meets a cap of its own or what its build hasn't, which a reading comes to and goes
-/// on past. Each names its clause, but [`Fault::TooManyCMaps`], a cap that ISO 32000-2
-/// doesn't set, which says nothing of the file, and the last, which is of the file
-/// rather than its font.
+/// on past. Each names its clause, but [`Fault::TooManyCMaps`] and
+/// [`Fault::ProgramCapped`], caps that ISO 32000-2 doesn't set, which say nothing of
+/// the file, and the last, which is of the file rather than its font.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
@@ -101,11 +101,17 @@ pub enum Fault {
     /// the feature never tells it.
     #[error("a predefined CMap this build doesn't have")]
     PredefinedNotBuilt,
-    /// A program that doesn't read as its format (9.9), or that's past
-    /// [`Limits`](crate::Limits). It reads as no program at all, as PDFium reads one
-    /// FreeType doesn't load, its glyphs' boxes and its heights guessed.
+    /// A program that doesn't read as its format (9.9). It reads as no program at all,
+    /// as PDFium reads one FreeType doesn't load, its glyphs' boxes and its heights
+    /// guessed.
     #[error("a font program that doesn't read")]
     ProgramMalformed,
+    /// A Type 1 program whose reading would cost past
+    /// [`Limits::type1_work`](crate::Limits::type1_work): a cap of this reading's, which
+    /// ISO 32000-2 doesn't set and which says nothing of the program, told in its stream.
+    /// It reads as no program at all, as [`Fault::ProgramMalformed`]'s does.
+    #[error("a Type 1 font program past what reading one may cost")]
+    ProgramCapped,
     /// A reference to a reference (7.3.10), which ISO 32000-2 allows and PDFium
     /// follows only to a dictionary, or a number or a string in a value it has already
     /// followed one to. Where it doesn't, what it leads to reads as none.

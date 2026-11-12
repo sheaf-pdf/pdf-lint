@@ -3262,24 +3262,34 @@ fn heights_from_the_program_where_the_descriptor_lacks_them() {
     assert!(heights("PN", false).3 && heights("PZ", false).3);
 }
 
-/// A program that doesn't read, cut short, garbage, of no format, or a
-/// Type 1 program whose procedures nest, or whose integers run, past what
-/// read-fonts is handed, is malformed: the font's boxes guessed, its heights as without one;
-/// never a panic.
+/// A program that doesn't read, cut short, garbage or of no format, is malformed, and a
+/// Type 1 program whose reading would cost past `type1_work` is refused for the cap:
+/// either way the font's boxes guessed, its heights as without one; never a panic.
 #[cfg(feature = "programs")]
 #[test]
 fn malformed_programs_fall_back() {
     use crate::fixture::{cff_program, truetype_program, type1_lookups_program, type1_program};
+    use FontProgram::{Capped, Malformed};
     let half = |p: Vec<u8>| p[..p.len() / 2].to_vec();
     let programs = [
-        ("TrueType", "FontFile2", half(truetype_program())),
-        ("TrueType", "FontFile2", b"\0\x01\0\0garbage".to_vec()),
-        ("Type1", "FontFile3", half(cff_program())),
-        ("Type1", "FontFile", half(type1_program())),
-        ("Type1", "FontFile", type1_lookups_program(3000)),
-        ("Type1", "FontFile3", b"\xff\xd8\xff\xe0 a JPEG".to_vec()),
+        ("TrueType", "FontFile2", half(truetype_program()), Malformed),
+        (
+            "TrueType",
+            "FontFile2",
+            b"\0\x01\0\0garbage".to_vec(),
+            Malformed,
+        ),
+        ("Type1", "FontFile3", half(cff_program()), Malformed),
+        ("Type1", "FontFile", half(type1_program()), Malformed),
+        ("Type1", "FontFile", type1_lookups_program(3000), Capped),
+        (
+            "Type1",
+            "FontFile3",
+            b"\xff\xd8\xff\xe0 a JPEG".to_vec(),
+            Malformed,
+        ),
     ];
-    for (subtype, key, program) in programs {
+    for (subtype, key, program, read) in programs {
         let mut pdf = Pdf::default();
         let program = pdf.add_object(Stream::new(dict! {}, program));
         let mut descriptor = dict! {
@@ -3295,7 +3305,7 @@ fn malformed_programs_fall_back() {
                 "FontDescriptor" => descriptor,
             },
         );
-        assert_eq!(font.program(), FontProgram::Malformed, "{subtype} {key}");
+        assert_eq!(font.program(), read, "{subtype} {key}");
         assert!(font.approx().boxes && font.approx().heights);
         assert_eq!(font.char_box(65), None);
         assert_eq!(
@@ -3915,8 +3925,62 @@ fn a_program_s_bounds_are_the_limits() {
     limits.type1_work = 0;
     assert_eq!(
         read("Type1", "FontFile", lookups, limits).program(),
-        FontProgram::Malformed
+        FontProgram::Capped
     );
+}
+
+/// A Type 1 program past `type1_work` is refused for the cap, told so, never as a
+/// program that doesn't read, and read as one that doesn't, but for what it says of
+/// its program; one whose scan finds it broken before the cap's spent is malformed, and
+/// what's no Type 1 program is malformed whatever the cap.
+#[cfg(feature = "programs")]
+#[test]
+fn a_type1_program_past_its_cap_is_told_as_the_cap_s() {
+    let read = |program: Vec<u8>, type1_work: usize| {
+        let mut pdf = Pdf::default();
+        let encoding = Some("WinAnsiEncoding".into());
+        let font = over_program(&mut pdf, "Type1", "FontFile", program, 32, encoding);
+        let limits = Limits {
+            type1_work,
+            ..Limits::DEFAULT
+        };
+        let (mut budget, mut told) = (BUDGET, Vec::new());
+        let read = Font::read(&pdf, &font, &limits, &mut budget, &mut told).unwrap();
+        let faults: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+        (read, faults)
+    };
+    let lookups = crate::fixture::type1_lookups_program(100);
+    let (font, faults) = read(lookups.clone(), Limits::DEFAULT.type1_work);
+    assert_eq!((font.program(), faults), (FontProgram::Read, vec![]));
+    let (capped, faults) = read(lookups, 0);
+    assert_eq!(capped.program(), FontProgram::Capped);
+    assert_eq!(faults, [Fault::ProgramCapped]);
+    let no_eexec = b"%!PS-AdobeFont-1.0: Fix\n/FontName /Fix def\n".to_vec();
+    let (malformed, faults) = read(no_eexec, Limits::DEFAULT.type1_work);
+    assert_eq!(malformed.program(), FontProgram::Malformed);
+    assert_eq!(faults, [Fault::ProgramMalformed]);
+    let said = |font: &Font| {
+        let codes = 0..=255;
+        let boxes: Vec<_> = codes.clone().map(|code| font.char_box(code)).collect();
+        let text: Vec<_> = codes
+            .map(|code| font.code_text(code).map(Cow::into_owned))
+            .collect();
+        let metrics = font.metrics();
+        (
+            font.approx(),
+            font.outlined(),
+            metrics.ascent,
+            metrics.descent,
+            boxes,
+            text,
+        )
+    };
+    assert_eq!(said(&capped), said(&malformed));
+    for type1_work in [0, Limits::DEFAULT.type1_work] {
+        let (font, faults) = read(b"garbage".to_vec(), type1_work);
+        assert_eq!(font.program(), FontProgram::Malformed, "{type1_work}");
+        assert_eq!(faults, [Fault::ProgramMalformed], "{type1_work}");
+    }
 }
 
 /// Drawing a CIDFont's glyphs is charged as what shows them says it's the first to.

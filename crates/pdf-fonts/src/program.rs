@@ -13,7 +13,9 @@
 //! A program is told apart by its bytes, as FreeType tells it, whichever key
 //! names it: an SFNT (TrueType, or OpenType over CFF), a Type 1 font, or a
 //! bare CFF. One that can't be read is
-//! [`FontProgram::Malformed`](crate::FontProgram::Malformed), and the font's boxes and
+//! [`FontProgram::Malformed`](crate::FontProgram::Malformed), and a Type 1 program
+//! whose reading would cost past [`Limits::type1_work`] is
+//! [`FontProgram::Capped`](crate::FontProgram::Capped); either way the font's boxes and
 //! heights are guessed, as without a program. A code is
 //! mapped to its glyph as PDFium maps it (`LoadGlyphMap`,
 //! `GlyphFromCharCode`), through the encoding and FreeType's charmaps, its
@@ -51,6 +53,7 @@ use skrifa::raw::types::{CFF_SFNT_VERSION, Fixed, GlyphId, Tag};
 use skrifa::raw::{FileRef, FontRead, FontRef, TableProvider};
 
 use crate::font::{Base, OwnText, Simple, SimpleMap};
+use crate::type1::Refusal;
 use crate::{Encoding, Limits, Rect, glyph_text, name_code_point, type1};
 
 /// A font's program, read, as FreeType opens it: its format, its units per
@@ -132,14 +135,17 @@ enum Drawn {
 
 impl Face {
     /// `data`, a font's program, read under `limits`, its format told apart as
-    /// FreeType tells it; None where it can't be read. `named` is the font's name in
-    /// the PDF, for FreeType's tricky fonts. A Type 1 program is read here, once.
-    pub(crate) fn open(mut data: Vec<u8>, named: &[u8], limits: &Limits) -> Option<Face> {
+    /// FreeType tells it; refused where it can't be read, or where it's a Type 1
+    /// program whose reading would cost past [`Limits::type1_work`] (`type1::read`).
+    /// `named` is the font's name in the PDF, for FreeType's tricky fonts. A Type 1
+    /// program is read here, once.
+    pub(crate) fn open(mut data: Vec<u8>, named: &[u8], limits: &Limits) -> Result<Face, Refusal> {
+        use Refusal::Malformed;
         // FreeType takes this tag for TrueType's (`tt_face_init`), which read-fonts doesn't.
         if data.starts_with(&[0, 2, 0, 0]) {
             data[1] = 1;
         }
-        let format = format(&data)?;
+        let format = format(&data).ok_or(Malformed)?;
         let mut face = Face {
             data: Box::default(),
             format,
@@ -156,7 +162,7 @@ impl Face {
             cids: None,
         };
         if let Some(font) = sfnt(&data) {
-            face.sfnt(&font, named)?;
+            face.sfnt(&font, named).ok_or(Malformed)?;
         }
         let fuel =
             |glyphs: u32| (limits.glyph_fuel).max(limits.font_fuel / (glyphs.max(1) as usize));
@@ -164,10 +170,10 @@ impl Face {
             Format::Glyf => {}
             Format::Cff { .. } => {
                 let Some(View::Cff { cff, sfnt }) = view(&data, format, face.upem) else {
-                    return None;
+                    return Err(Malformed);
                 };
                 if sfnt.is_none() {
-                    let bbox = cff.metadata()?.bbox();
+                    let bbox = cff.metadata().ok_or(Malformed)?.bbox();
                     face.bbox = rounded_out([bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max]);
                     (face.ascender, face.descender) = (face.bbox[3], face.bbox[1]);
                     // A bare CFF's units are its top dictionary's matrix's,
@@ -189,7 +195,7 @@ impl Face {
             // bounds its operations and not what its accents and subroutines read.
             Format::Type1 => {
                 let scanned = type1::read(&data, limits)?;
-                let font = Type1Font::new(&data).ok()?;
+                let font = Type1Font::new(&data).map_err(|_| Malformed)?;
                 let bbox = font.bbox();
                 face.bbox = rounded_out([bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max]);
                 (face.ascender, face.descender) = (face.bbox[3], face.bbox[1]);
@@ -203,7 +209,7 @@ impl Face {
             }
         }
         face.data = data.into_boxed_slice();
-        Some(face)
+        Ok(face)
     }
 
     /// An SFNT's units per em, box and heights, as FreeType reads them
