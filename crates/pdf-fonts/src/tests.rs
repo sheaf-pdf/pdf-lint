@@ -335,6 +335,42 @@ fn the_crate_s_names_are_there() {
     let _ = also::<fn(crate::ObjectId) -> Option<&'static crate::Object>>;
 }
 
+/// The README is shown on crates.io and docs.rs, where a path beside the crate
+/// reaches nothing: its links to the licences, the root's and the FreeType Project
+/// License, and to Adobe's notice for the metrics are the repository's URLs, the
+/// manifest's `repository` and the file, each file the crate's own where it's in
+/// the crate; and every link it has is a URL.
+#[test]
+fn the_readmes_licence_links_reach_the_files() {
+    let readme = include_str!("../README.md");
+    let repository = env!("CARGO_PKG_REPOSITORY");
+    for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+        let link = format!("[{file}]({repository}/blob/main/{file})");
+        assert!(
+            readme.contains(&link),
+            "{file}'s link isn't the repository's URL"
+        );
+    }
+    let crate_dir = format!("crates/{}", env!("CARGO_PKG_NAME"));
+    for file in ["FTL.TXT", "assets/afm/MustRead.html"] {
+        let link = format!("[`{file}`]({repository}/blob/main/{crate_dir}/{file})");
+        assert!(
+            readme.contains(&link),
+            "{file}'s link isn't the repository's URL"
+        );
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+        assert!(here.is_file(), "{file} isn't in the crate");
+    }
+    for (at, _) in readme.match_indices("](") {
+        let target = &readme[at + 2..];
+        let target = &target[..target.find(')').unwrap_or(target.len())];
+        assert!(
+            target.starts_with("https://"),
+            "a link isn't a URL: {target}"
+        );
+    }
+}
+
 /// [`fixture::type1_program`] with `clear` in its clear text, before `/PaintType`.
 fn type1_holding(clear: &str) -> Vec<u8> {
     let program = fixture::type1_program();

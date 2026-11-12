@@ -36,7 +36,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -280,7 +280,8 @@ tokenizer-core-only:
 # target/<the crate's name without `pdf-`>-package, made fresh each time (a
 # stale one passes or fails falsely), and check what the package holds: its
 # sources, README, CHANGELOG, manifest and lock, and nothing else, no
-# benchmark among them. The benchmarks' target is declared in the manifest
+# benchmark among them, but the files a crate's own list below names, each of
+# which it must hold. The benchmarks' target is declared in the manifest
 # while `benches/` is outside `include`, so cargo drops it from the
 # packaged manifest with a warning, which is expected, as is one for each
 # test outside it; the check reads that manifest. The dry run asks the
@@ -299,8 +300,33 @@ _package crate *beside:
     for b in {{ beside }}; do packages+=(-p "$b"); done
     CARGO_TARGET_DIR="$dir" cargo publish --dry-run --locked "${packages[@]}"
     CARGO_TARGET_DIR="$dir" cargo package --list --locked -p "$crate" > "$dir/files.txt"
-    if grep -v -E '^(src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json)$' "$dir/files.txt"; then
-        echo "the package holds more than its sources, README, CHANGELOG, manifest and lock (above)" >&2
+    # What a crate's package holds beside those, file by file, so that a file
+    # added beside them still fails: pdf-fonts' data, each file with its
+    # terms (Adobe's metrics and their notice, the two glyph lists), and the
+    # FreeType Project License.
+    extra=()
+    case "$crate" in
+    pdf-fonts)
+        extra=(
+            assets/afm/Courier.afm assets/afm/Courier-Bold.afm
+            assets/afm/Courier-BoldOblique.afm assets/afm/Courier-Oblique.afm
+            assets/afm/Helvetica.afm assets/afm/Helvetica-Bold.afm
+            assets/afm/Helvetica-BoldOblique.afm assets/afm/Helvetica-Oblique.afm
+            assets/afm/Symbol.afm assets/afm/Times-Bold.afm
+            assets/afm/Times-BoldItalic.afm assets/afm/Times-Italic.afm
+            assets/afm/Times-Roman.afm assets/afm/ZapfDingbats.afm
+            assets/afm/MustRead.html assets/glyphlist.txt assets/zapfdingbats.txt
+            FTL.TXT
+        ) ;;
+    esac
+    : > "$dir/extra.txt"
+    if [ "${#extra[@]}" -gt 0 ]; then printf '%s\n' "${extra[@]}" > "$dir/extra.txt"; fi
+    if grep -v -E '^(src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json)$' "$dir/files.txt" | grep -v -x -F -f "$dir/extra.txt"; then
+        echo "the package holds more than its sources, README, CHANGELOG, manifest and lock, and the files its list names (above)" >&2
+        exit 1
+    fi
+    if grep -v -x -F -f "$dir/files.txt" "$dir/extra.txt" | grep .; then
+        echo "the package lacks files its list names (above)" >&2
         exit 1
     fi
     manifest=("$dir"/package/"$crate"-*/Cargo.toml)
@@ -341,6 +367,11 @@ content-streams-package: (_package "pdf-content-streams" "pdf-filters")
 
 # Package pdf-semantics as a publish would; `_package` says what's checked.
 semantics-package: (_package "pdf-semantics")
+
+# Package pdf-fonts as a publish would, pdf-content-streams and pdf-filters
+# beside it while the versions it and they name aren't published; `_package`
+# says what's checked, and lists the data the package holds with its terms.
+fonts-package: (_package "pdf-fonts" "pdf-content-streams" "pdf-filters")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs

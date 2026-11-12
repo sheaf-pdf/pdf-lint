@@ -746,6 +746,7 @@ dependencies = [
 name = "pdf-fonts"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "criterion",
  "hayro-cmap",
  "pdf-content-streams",
  "pdf-fixtures",
