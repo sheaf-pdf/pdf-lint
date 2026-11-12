@@ -490,8 +490,8 @@ impl Font {
     /// ([`Why::Capped`](pdf_objects::Why::Capped)), in a locked file
     /// ([`Why::Locked`](pdf_objects::Why::Locked)), from a source that failed
     /// ([`Why::Source`](pdf_objects::Why::Source)), or a stream whose data its reader
-    /// doesn't hold ([`Why::Detached`](pdf_objects::Why::Detached)). Either way
-    /// `budget` is as it was.
+    /// doesn't hold ([`Why::Detached`](pdf_objects::Why::Detached)). Nothing is told to
+    /// `sink` after it. Either way `budget` is as it was.
     pub fn read<'o, O, S>(
         objects: O,
         font: &'o Dict,

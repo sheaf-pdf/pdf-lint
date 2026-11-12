@@ -16,7 +16,9 @@ use crate::{Error, Fault, Limits};
 /// Where something fails to read the reading goes on as if it weren't there, and
 /// its failure is what the reading comes to in the end ([`Reader::failure`]), so
 /// that one path through it does for both, and whatever a reading of the same
-/// objects comes to it comes to by the same steps.
+/// objects comes to it comes to by the same steps. Nothing is told after it: what
+/// would be is of a font without what didn't read, and every stream after it, which
+/// is no font of the file's, and the failure is the whole answer.
 pub(crate) struct Reader<'c, O, S: ?Sized> {
     objects: O,
     pub(crate) limits: &'c Limits,
@@ -41,7 +43,8 @@ impl<'c, O, S: Sink<Fault> + ?Sized> Reader<'c, O, S> {
     }
 
     /// [`Reader::tell`] of what `fault` gives, which is asked only where the sink
-    /// wants faults: for a fault whose kind takes a look-up to pick.
+    /// wants faults: for a fault whose kind takes a look-up to pick. Nothing once
+    /// the reading has failed.
     pub(crate) fn tell_with(
         &self,
         object: Option<ObjectId>,
@@ -49,7 +52,7 @@ impl<'c, O, S: Sink<Fault> + ?Sized> Reader<'c, O, S> {
         fault: impl FnOnce() -> Fault,
     ) {
         let mut sink = self.sink.borrow_mut();
-        if sink.wants() {
+        if sink.wants() && self.failed.borrow().is_none() {
             let at = value.and_then(|value| value.at);
             sink.fault(Place::new(object, at), fault());
         }

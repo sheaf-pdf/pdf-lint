@@ -20,9 +20,8 @@ pub enum Error {
     /// [`Why::Limit`](pdf_objects::Why::Limit), which is [`Error::TooLarge`]. A locked
     /// file, a source that failed or a cap met, an object or a stream past a cap of
     /// what gives it ([`Why::Capped`](pdf_objects::Why::Capped)), is the caller's to
-    /// know, not a font with no widths. It's the first that didn't read: the reading
-    /// goes on past it as if it weren't there, decoding no stream after it, so what's
-    /// told after it is of a font without it.
+    /// know, not a font with no widths. It's the first that didn't read, and the whole
+    /// answer: nothing is told to the sink after it, and no stream after it is decoded.
     #[error("{0}")]
     Unreadable(Unreadable),
 }

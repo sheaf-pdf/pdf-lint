@@ -443,8 +443,8 @@ fn said(read: &Result<Font, Error>) -> Result<String, Error> {
 /// budget never rises, and what's taken off it is the font's cost, or nothing where
 /// it fails; a sink changes nothing; `Fonts` read it the same, twice, charged alike;
 /// smaller caps do no more work; a `Streams` that gives more than it's asked is too
-/// large; and it fails only for what was made to fail, as it was made to. `by_number`
-/// is what refers to it, where the file has one. Whether it read.
+/// large; and it fails only for what was made to fail, as it was made to, telling nothing
+/// after it. `by_number` is what refers to it, where the file has one. Whether it read.
 fn a_font<'o, O>(
     objects: O,
     font: &'o Object,
@@ -588,9 +588,18 @@ where
             failed: &failed,
         };
         let mut budget = BUDGET;
-        let read = Font::read(failing, dict, &limits, &mut budget, &mut ());
+        let mut failing_told: Vec<(Place, Fault)> = Vec::new();
+        let read = Font::read(failing, dict, &limits, &mut budget, &mut failing_told);
         if read.is_err() {
             assert_eq!(budget, BUDGET);
+        }
+        // What fails is the whole answer: up to it the reading is the one that didn't
+        // fail, and it tells nothing after it. Not so where it's read as none.
+        if !matches!(why, Why::Damaged | Why::Filter) {
+            assert!(
+                told.starts_with(&failing_told),
+                "{why:?}: {failing_told:?} against {told:?}"
+            );
         }
         if failing_is_all {
             match &read {

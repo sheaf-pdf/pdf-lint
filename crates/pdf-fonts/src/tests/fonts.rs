@@ -1821,9 +1821,9 @@ fn a_font_holds_a_streams_to_what_it_asked() {
 
 /// A stream past a cap of what gives it (`Why::Capped`) is what the reading comes to, as
 /// a locked one is: the `Err`, naming it, and the budget as it was. The reading goes on
-/// past it as if it weren't there, telling what it makes of that and what's wrong after
-/// it, and decodes no stream after it: here a `/ToUnicode`, then the CMap, cut, then a
-/// `/W` cut short.
+/// past it as if it weren't there, but decodes no stream after it and tells nothing
+/// after it: here a `/ToUnicode`, then the CMap, never asked for, and a `/W` cut short,
+/// none of them told, as what it would tell is of no font of the file's.
 #[test]
 fn a_font_reads_on_past_a_capped_stream() {
     let mut pdf = Pdf::default();
@@ -1857,16 +1857,128 @@ fn a_font_reads_on_past_a_capped_stream() {
         assert_eq!(read.err(), Some(Error::Unreadable(failed)), "{why:?}");
         assert_eq!(budget, BUDGET);
         assert_eq!(asked.into_inner(), [to_unicode]);
-        let told: Vec<(Option<ObjectId>, Fault)> = told
-            .into_iter()
-            .map(|(place, fault)| (place.object, fault))
-            .collect();
-        let expected = [
-            (None, Fault::ToUnicode),
-            (Some(cmap), Fault::UseCMap),
-            (Some(cid_font), Fault::W),
-        ];
-        assert_eq!(told, expected, "{why:?}");
+        assert_eq!(told, [], "{why:?}");
+    }
+    // Read whole, the `/W` is told: of the font the failure hid.
+    let (mut budget, mut told) = (BUDGET, Vec::new());
+    Font::read(&pdf, &font, &Limits::DEFAULT, &mut budget, &mut told).unwrap();
+    let told: Vec<(Option<ObjectId>, Fault)> = told
+        .into_iter()
+        .map(|(place, fault)| (place.object, fault))
+        .collect();
+    assert_eq!(told, [(Some(cid_font), Fault::W)]);
+}
+
+/// What a reading told before it failed is told, and nothing after: here an
+/// `/Encoding` that's no encoding, before a `/ToUnicode` that doesn't read. Read whole,
+/// the font tells its `/Widths` missing after it, and a `/ToUnicode` that doesn't
+/// decode before that.
+#[test]
+fn a_failed_reading_tells_what_it_found_before_it() {
+    let mut pdf = Pdf::default();
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, b"no CMap".to_vec()));
+    let font = dict! {
+        "Subtype" => "Type1", "BaseFont" => "Foo", "Encoding" => "Nope",
+        "ToUnicode" => to_unicode,
+    };
+    let read = |why: Option<Why>| {
+        let objects = WithStreams::new(&pdf, |id, limit| match why {
+            Some(why) => Err(Unreadable::new(id, why, "no")),
+            None => pdf.decoded_by(id, limit).map(Cow::into_owned),
+        });
+        let (mut budget, mut told) = (BUDGET, Vec::new());
+        let read = Font::read(objects, &font, &Limits::DEFAULT, &mut budget, &mut told);
+        let told: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+        (read.err(), told)
+    };
+    let whole = vec![Fault::Encoding, Fault::NoWidths];
+    assert_eq!(read(None), (None, whole));
+    let damaged = vec![Fault::Encoding, Fault::ToUnicode, Fault::NoWidths];
+    assert_eq!(read(Some(Why::Damaged)), (None, damaged));
+    for why in [Why::Capped, Why::Locked, Why::Source, Why::Detached] {
+        let (error, told) = read(Some(why));
+        let failed = Unreadable::new(to_unicode, why, "no");
+        assert_eq!(error, Some(Error::Unreadable(failed)));
+        assert_eq!(told, [Fault::Encoding], "{why:?}");
+    }
+}
+
+/// A font's program stream: one that doesn't decode is the file's, a program that
+/// doesn't read (`ProgramMalformed`); one through filters the reader doesn't decode is
+/// told so too, as the caller tells apart by its own `Streams`; and one, or its object,
+/// that doesn't read for a reason that's the caller's is the `Err` alone, its object
+/// and its data alike, nothing told. Without `programs`, or read for text, no program's
+/// data is asked for, and only its object can fail the reading.
+#[test]
+fn a_program_that_doesn_t_read_is_told_where_it_s_the_file_s() {
+    let mut pdf = Pdf::default();
+    let file = pdf.add_object(Stream::new(dict! {}, b"no program".to_vec()));
+    let descriptor = pdf.add_object(dict! { "Type" => "FontDescriptor", "FontFile2" => file });
+    let font = dict! {
+        "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65,
+        "Widths" => vec![Object::from(600)], "FontDescriptor" => descriptor,
+    };
+    let programs = cfg!(feature = "programs");
+    for text in [false, true] {
+        let read = |objects: Failing, data: Option<Why>| {
+            let streams = WithStreams::new(objects, |id, limit| match data {
+                Some(why) => Err(Unreadable::new(id, why, "no")),
+                None => pdf.decoded_by(id, limit).map(Cow::into_owned),
+            });
+            let (lim, mut budget, mut told) = (&Limits::DEFAULT, BUDGET, Vec::new());
+            let read = match text {
+                true => Font::read_for_text(streams, &font, lim, &mut budget, &mut told),
+                false => Font::read(streams, &font, lim, &mut budget, &mut told),
+            };
+            let told: Vec<(Option<ObjectId>, Fault)> = told
+                .into_iter()
+                .map(|(place, fault)| (place.object, fault))
+                .collect();
+            (read.map(|font| font.program()), budget, told)
+        };
+        let reads = programs && !text;
+        let fine = Failing {
+            pdf: &pdf,
+            failing: ObjectId::new(1000, 0),
+            why: Why::Damaged,
+        };
+        for why in [Why::Damaged, Why::Filter] {
+            let (program, budget, told) = read(fine, Some(why));
+            let malformed = (
+                FontProgram::Malformed,
+                vec![(Some(file), Fault::ProgramMalformed)],
+            );
+            let (expected, faults) = match reads {
+                true => malformed,
+                false => (FontProgram::None, Vec::new()),
+            };
+            assert_eq!(
+                (program, budget, told),
+                (Ok(expected), BUDGET, faults),
+                "{why:?}"
+            );
+        }
+        for why in [Why::Capped, Why::Locked, Why::Source] {
+            let failed = Error::Unreadable(Unreadable::new(file, why, "no"));
+            // Its data past a cap, and its object: alike, nothing told.
+            let (program, budget, told) = read(fine, Some(why));
+            match reads {
+                true => assert_eq!((program, budget, &told), (Err(failed), BUDGET, &vec![])),
+                false => assert_eq!((program, &told), (Ok(FontProgram::None), &vec![])),
+            }
+            let object = Failing {
+                pdf: &pdf,
+                failing: file,
+                why,
+            };
+            let (program, budget, told) = read(object, None);
+            let failed = Error::Unreadable(Unreadable::new(file, why, "it doesn't read"));
+            assert_eq!(
+                (program, budget, told),
+                (Err(failed), BUDGET, vec![]),
+                "{why:?}"
+            );
+        }
     }
 }
 
@@ -4939,8 +5051,8 @@ mod reading {
 
     /// A `/ToUnicode` whose data decodes to nothing, or is through a filter the reader
     /// doesn't decode, is read as none, what's told of it the font's own; one listing
-    /// more filters than the reader takes is past a cap, the caller's to know, and the
-    /// font read on past it, its budget as it was.
+    /// more filters than the reader takes is past a cap, the caller's to know, its
+    /// budget as it was and nothing told after it.
     #[test]
     fn what_doesn_t_decode_is_none_and_past_a_cap_the_caller_s() {
         let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
@@ -4978,11 +5090,8 @@ mod reading {
             (unreadable.id, unreadable.why),
             (ObjectId::new(2, 0), Why::Capped)
         );
-        // What it makes of none, after it: as for one that doesn't decode.
-        assert_eq!(
-            (budget, told),
-            (100, vec![Fault::ToUnicode, Fault::NoWidths])
-        );
+        // Nothing after it: not what it makes of none, nor the `/Widths` it hasn't.
+        assert_eq!((budget, told), (100, vec![]));
     }
 
     /// A locked file's font isn't made up, and its budget is as it was; opened, it's
