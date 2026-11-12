@@ -53,6 +53,9 @@ pub(crate) struct Prepared<'d> {
     /// it as, and what its values refer to. It has no body: it's written from
     /// the encryptor.
     dictionary: Option<(ObjectId, Vec<ObjectId>)>,
+    /// A direct `/Info` written as an object, under an encryption: what the
+    /// graph knows it as, its body the trailer's dictionary.
+    info: Option<ObjectId>,
 }
 
 impl<'d> Prepared<'d> {
@@ -91,6 +94,20 @@ impl<'d> Prepared<'d> {
             Some(encryptor) if !encryptor.direct() => {
                 let id = dictionary_id(encryptor, doc, &bodies)?;
                 Some((id, values.clone()))
+            }
+            _ => None,
+        };
+        // A trailer isn't encrypted (7.6.2), so a direct /Info, whose strings
+        // it would hold in the clear, is written as an object, as a whole file
+        // of the writer's writes it: past every number an object has and every
+        // reference names, and the dictionary's, so that none comes to name it.
+        // Past the rest, it keeps the bodies in order.
+        let info = match (encryptor, trailer.get(b"Info")) {
+            (Some(_), Some(info)) if direct_info(info) => {
+                let named = dictionary.iter().map(|(id, _)| *id);
+                let past = past_every(doc, &bodies, named.chain(values.iter().copied()))?;
+                bodies.push((past, Body::New(Cow::Owned(info.clone()))));
+                Some(past)
             }
             _ => None,
         };
@@ -136,6 +153,7 @@ impl<'d> Prepared<'d> {
             font_files: HashSet::new(),
             kept_out: strays.into_iter().chain(in_the_clear).collect(),
             dictionary,
+            info,
         };
         prepared.document_level(doc, catalog, &limits);
         // The trailer's /Encrypt and all its values (F.3.5).
@@ -202,7 +220,8 @@ impl<'d> Prepared<'d> {
             self.groups.push((Group::Dests, dests));
         }
         if let Some(info) = doc.trailer().dict().get(b"Info") {
-            self.groups.push((Group::Info, roots(info)));
+            let roots = self.info.map_or_else(|| roots(info), |id| vec![id]);
+            self.groups.push((Group::Info, roots));
         }
         let form = catalog
             .get(b"AcroForm")
@@ -250,6 +269,12 @@ impl<'d> Prepared<'d> {
     /// What the graph knows the encryption dictionary as, where it's an object.
     pub(super) fn dictionary(&self) -> Option<ObjectId> {
         self.dictionary.as_ref().map(|(id, _)| *id)
+    }
+
+    /// What the graph knows a direct `/Info` written as an object as, where
+    /// it's one: the trailer names it at its number.
+    pub(super) fn info(&self) -> Option<ObjectId> {
+        self.info
     }
 
     /// The graph of it, listed by `kind`, what may be packed in object streams
@@ -331,13 +356,30 @@ fn dictionary_id(
             None => Ok(at),
         };
     }
+    past_every(doc, bodies, std::iter::empty())
+}
+
+/// Whether a trailer's `/Info` is held in the trailer itself, not as an
+/// object: any value but a reference or null.
+fn direct_info(info: &Object) -> bool {
+    !matches!(info.value(), Value::Ref(_) | Value::Null)
+}
+
+/// One past every number an object of `bodies` has or a reference of it or of
+/// `doc`'s trailer names, and every one of `more`, at generation 0.
+fn past_every(
+    doc: &Document,
+    bodies: &[(ObjectId, Body<'_>)],
+    more: impl Iterator<Item = ObjectId>,
+) -> Result<ObjectId, Error> {
     let trailer =
         (doc.trailer().dict().entries().iter()).flat_map(|entry| entry.value.references());
     let named = bodies.iter().flat_map(|(id, body)| {
         let references = body.object().references();
         std::iter::once(*id).chain(references)
     });
-    let last = named.chain(trailer).map(|id| id.number).max().unwrap_or(0);
+    let last = named.chain(trailer).chain(more);
+    let last = last.map(|id| id.number).max().unwrap_or(0);
     match last.checked_add(1) {
         Some(past) => Ok(ObjectId {
             number: past,

@@ -56,6 +56,18 @@
 //! [`write::document`] writes it; [`linearize_bytes`] keeps a file's
 //! encryption.
 //!
+//! A trailer isn't encrypted (7.6.2), so under an encryptor a direct `/Info`,
+//! whose strings it would hold in the clear, is written as an object, encrypted
+//! as any, in part 9 (F.3.10), the trailer naming it, as a whole file of
+//! pdf-structure's writer writes it; it's given the graph a number past every
+//! one an object has or a reference names, and the encryption dictionary's.
+//! In the clear it stays in the trailer. And only strings and streams are
+//! encrypted, so what a file held only inside an object stream, its
+//! dictionaries' keys, names and numbers, encrypted with the stream's data, is
+//! in the clear once written unpacked, as [`write::document`] writes it; the
+//! catalog and the pages are never packed (F.3.1). A caller who minds packs
+//! ([`Options::pack`]), under an encryption that does.
+//!
 //! **Under keys made per object, every number is reused.** A section of this
 //! layout lists no number free but 0 (F.3.4, F.3.11), its numbers run from 1
 //! without a gap, and every object is at generation 0 (F.3.1), so an object
@@ -474,6 +486,16 @@ fn file(
             let to = |id: ObjectId| plan.number(id);
             let mut trailer = write::trailer_entries(given, &to);
             trailer.remove(b"Root");
+            // A direct /Info written as an object, at its number: never left
+            // in the clear, as every body is numbered.
+            if let Some(info) = prepared.info() {
+                match plan.number(info) {
+                    Some(at) => trailer.set("Info", Object::from(at)),
+                    None => {
+                        trailer.remove(b"Info");
+                    }
+                }
+            }
             if let Some(encrypting) = encrypting {
                 match encrypting.at() {
                     Some(at) => trailer.set("Encrypt", Object::from(at)),

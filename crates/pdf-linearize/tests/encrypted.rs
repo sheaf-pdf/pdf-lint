@@ -19,7 +19,7 @@ use pdf_structure::write::{self, Deflate, Encryptor};
 use pdf_structure::{Document, Encryption, XrefKind};
 
 mod written;
-use written::{KEYS, ROOT, encrypted_as, file, kinds, opened, stream};
+use written::{KEYS, ROOT, encrypted_as, file, kinds, opened, stream, with_info};
 
 /// What every string and stream of [`secrets`] holds, and nothing else in a file.
 const SECRET: &[u8] = b"secret";
@@ -808,21 +808,31 @@ fn a_new_encryption_is_given_a_number_and_part_four() {
 #[test]
 fn a_reference_to_no_object_doesnt_come_to_name_a_new_dictionary() {
     // 10 and 11 are past every object, and nothing's there: what names them, the
-    // catalog and the trailer, reads null.
+    // catalog and the trailer, reads null. A direct /Info, made an object, is
+    // given a number past them too, and the new dictionary's, so neither names
+    // it, nor the dictionary.
     let objects = secrets("/Other 10 0 R");
     let objects: Vec<&str> = objects.iter().map(String::as_str).collect();
-    let bytes = file(&objects, "/Root 1 0 R /Info 9 0 R /Dangling 11 0 R");
-    let encryptor = created("user", true);
-    for options in kinds() {
-        let (out, _) = under(&bytes, "", Some(&encryptor), &options).unwrap();
-        let reading = opened(&out, "user");
-        let doc = reading.to_document().unwrap();
-        let trailer = doc.trailer().dict();
-        let encrypt = trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
-        assert!(trailer.get(b"Dangling").unwrap().is_null());
-        let root = trailer.get(b"Root").unwrap().as_reference().unwrap();
-        let other = doc.get_dict(root).unwrap().get(b"Other").unwrap();
-        assert!(other.is_null(), "{other:?} {encrypt:?}");
+    for info in [
+        "/Info 9 0 R",
+        "/Info << /Title (secret title) /Mark 9 0 R >>",
+    ] {
+        let bytes = file(&objects, &format!("/Root 1 0 R {info} /Dangling 11 0 R"));
+        let encryptor = created("user", true);
+        for options in kinds() {
+            let (out, _) = under(&bytes, "", Some(&encryptor), &options).unwrap();
+            let reading = opened(&out, "user");
+            let doc = reading.to_document().unwrap();
+            let trailer = doc.trailer().dict();
+            let encrypt = trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
+            assert!(trailer.get(b"Dangling").unwrap().is_null());
+            let root = trailer.get(b"Root").unwrap().as_reference().unwrap();
+            let other = doc.get_dict(root).unwrap().get(b"Other").unwrap();
+            assert!(other.is_null(), "{other:?} {encrypt:?}");
+            let info = trailer.get(b"Info").unwrap().as_reference().unwrap();
+            assert_ne!(info, encrypt);
+            assert!(doc.get_dict(info).unwrap().has(b"Mark"), "{info}");
+        }
     }
 }
 
@@ -972,6 +982,161 @@ fn hand_made_of(
     objects.extend(extra.iter().map(|extra| extra.to_string()));
     let objects: Vec<&str> = objects.iter().map(String::as_str).collect();
     file(&objects, &trailer)
+}
+
+/// A direct `/Info` whose strings are secrets, and an object it refers to.
+const INFO: &str = "/Info << /Title (secret title) /Author (secret author) /Mark 5 0 R >>";
+
+/// That `out`, read by `password`, has [`INFO`] as an object in part 9, the
+/// trailer naming it, its strings in the clear nowhere, the object it refers
+/// to reached: its number.
+fn info_moved(out: &[u8], done: &family::Linearized, password: &str, name: &str) -> ObjectId {
+    for secret in [&b"secret title"[..], b"secret author"] {
+        assert!(!holds(out, secret), "{name}: in the clear");
+    }
+    let back = opened(out, password);
+    let trailer = back.trailer().dict();
+    let at = (trailer.get(b"Info").and_then(Object::as_reference))
+        .unwrap_or_else(|| panic!("{name}: /Info isn't an object"));
+    let doc = back.to_document().unwrap();
+    assert!(doc.faults().is_empty(), "{name}: {:?}", doc.faults());
+    let info = doc.get_dict(at).unwrap();
+    let text = |key: &[u8]| info.get(key).and_then(Object::as_bytes).map(<[u8]>::to_vec);
+    assert_eq!(
+        text(b"Title").as_deref(),
+        Some(&b"secret title"[..]),
+        "{name}"
+    );
+    assert_eq!(
+        text(b"Author").as_deref(),
+        Some(&b"secret author"[..]),
+        "{name}"
+    );
+    let mark = info.get(b"Mark").and_then(Object::as_reference).unwrap();
+    assert!(doc.get_dict(mark).unwrap().has(b"Kept"), "{name}");
+    // In part 9: past the first page's section, in an object stream there or
+    // on its own.
+    let written = |n: u32| match back.entries().find(|(at, ..)| *at == n) {
+        Some((_, _, XrefEntry::InUse { offset, .. })) => offset as u64,
+        Some((_, _, XrefEntry::Compressed { stream, .. })) => done.layout.position(stream).unwrap(),
+        entry => panic!("{name}: {n} is {entry:?}"),
+    };
+    assert!(written(at.number) > done.layout.first_page_end(), "{name}");
+    assert!(written(at.number) < done.layout.main_section(), "{name}");
+    at
+}
+
+/// An encrypted file's direct `/Info`, whose strings a trailer holds in the
+/// clear, is written as an object in part 9, encrypted as any, the trailer
+/// naming it: under the file's own encryption, each key and kind, and under a
+/// new one, whose dictionary is another object. Read back, it's the dictionary
+/// it was, and its strings are in the clear nowhere. In the clear it stays in
+/// the trailer, as it was.
+#[test]
+fn a_direct_info_is_written_as_an_object_under_an_encryption() {
+    let kept = ["<< /Kept true >>"];
+    for (name, key) in KEYS {
+        let bytes = with_info(&hand_made(key, false, in_hex, &kept), INFO);
+        assert!(holds(&bytes, b"secret title"), "{name}");
+        let back = opened(&bytes, "");
+        assert!(
+            back.trailer()
+                .dict()
+                .get(b"Info")
+                .unwrap()
+                .as_dict()
+                .is_some()
+        );
+        for (kind, options) in kinds().iter().enumerate() {
+            let name = format!("{name}, kind {kind}");
+            let (out, done) = own(&bytes, "", options).unwrap();
+            info_moved(&out, &done, "", &name);
+            // By its bytes alone too, under RC4 told to reuse the keystreams.
+            let mut options = *options;
+            options.rc4 = Rc4::ReusingKeystreams;
+            let alone = family::linearize_bytes(&bytes, &options).unwrap();
+            assert!(!holds(&alone, b"secret title"), "{name}");
+        }
+    }
+    // In the clear, under a new encryption, and with none.
+    let plain = with_info(&file(&two_pages_of_kept(), ROOT), INFO);
+    let encryptor = created("user", true);
+    for (kind, options) in kinds().iter().enumerate() {
+        let name = format!("new, kind {kind}");
+        let (out, done) = under(&plain, "", Some(&encryptor), options).unwrap();
+        let at = info_moved(&out, &done, "user", &name);
+        let back = opened(&out, "user");
+        let encrypt = back.trailer().dict().get(b"Encrypt").unwrap();
+        assert_ne!(
+            encrypt.as_reference(),
+            Some(at),
+            "{name}: one object for both"
+        );
+        let (out, _) = under(&plain, "", None, options).unwrap();
+        let back = opened(&out, "");
+        let info = back.trailer().dict().get(b"Info").unwrap();
+        let title = info.as_dict().unwrap().get(b"Title").unwrap();
+        assert_eq!(title.as_bytes(), Some(&b"secret title"[..]), "{kind}");
+    }
+}
+
+/// A direct `/Info` made an object may be given the number an earlier section
+/// named its encryption dictionary at, past every number an object has and a
+/// reference names, where no object is: it's encrypted as any, as the file
+/// written names one dictionary alone, which is all that's left in the clear.
+#[test]
+fn a_direct_info_at_an_earlier_dictionary_s_number_is_encrypted() {
+    for (name, key) in KEYS {
+        let first = hand_made(key, false, in_hex, &["<< /Kept true >>"]);
+        // The first section's /Encrypt at 6, past every object, and an update
+        // after whose trailer names 4, as the file's encryption is.
+        let mut bytes = first.clone();
+        let at = bytes
+            .windows(14)
+            .rposition(|w| w == b"/Encrypt 4 0 R")
+            .unwrap();
+        bytes[at..at + 14].copy_from_slice(b"/Encrypt 6 0 R");
+        let id = {
+            let at = first.windows(4).rposition(|w| w == b"/ID ").unwrap();
+            let end = at + first[at..].iter().position(|&b| b == b']').unwrap() + 1;
+            String::from_utf8_lossy(&first[at..end]).into_owned()
+        };
+        let prev = {
+            let at = first.windows(9).rposition(|w| w == b"startxref").unwrap() + 10;
+            let digits = first[at..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            String::from_utf8_lossy(&first[at..at + digits]).into_owned()
+        };
+        let section = bytes.len();
+        bytes.extend_from_slice(
+            format!(
+                "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 6 /Prev {prev} /Root 1 0 R \
+                 {id} /Encrypt 4 0 R {INFO} >>\nstartxref\n{section}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let reading = opened(&bytes, "");
+        let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        assert!(encryptor.dictionary_object(ObjectId::new(6, 0)), "{name}");
+        for (kind, options) in kinds().iter().enumerate() {
+            let name = format!("{name}, kind {kind}");
+            let (out, done) = own(&bytes, "", options).unwrap();
+            info_moved(&out, &done, "", &name);
+        }
+    }
+}
+
+/// [`two_pages`]'s catalog and pages, and at 5 what [`INFO`] refers to.
+fn two_pages_of_kept() -> Vec<&'static str> {
+    vec![
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 1 1] >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Kept true >>",
+    ]
 }
 
 /// `dict` with its strings in hex, so they go through [`file`] as text.

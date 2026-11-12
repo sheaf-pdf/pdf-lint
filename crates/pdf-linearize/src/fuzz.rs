@@ -1945,6 +1945,22 @@ fn written_back<S: pdf_structure::ByteSource>(
     }
     // What's listed is ascending, each once, and written, as an object of
     // its own or an object stream: none in the clear.
+    // A direct /Info is an object under an encryption, the trailer naming
+    // it, and stays in the trailer in the clear: either way what it was under
+    // the numbering.
+    let info = (doc.trailer().dict().get(b"Info"))
+        .filter(|info| !matches!(info.value(), Value::Ref(_) | Value::Null));
+    if let Some(info) = info {
+        let written = again.trailer().dict().get(b"Info").expect("/Info is kept");
+        match (encryptor, written.as_reference()) {
+            (Some(_), Some(at)) => {
+                let object = again.get(at).expect("/Info is written");
+                same_under(info, object, &planned);
+            }
+            (None, None) => same_under(info, written, &planned),
+            _ => panic!("/Info is {written:?}"),
+        }
+    }
     let reused = done.keystreams_reused;
     assert!(reused.is_sorted() && reused.windows(2).all(|w| w[0] != w[1]));
     assert!(encryptor.is_some() || reused.is_empty());
@@ -2107,6 +2123,21 @@ mod tests {
             "3",
         ]);
         let mut seeds = vec![all.clone()];
+        // Its /Info in the trailer, which a new encryption, drawn for a length
+        // that's a multiple of 8, writes as an object.
+        let mut direct = all.clone();
+        let at = direct
+            .windows(12)
+            .rposition(|w| w == b"/Info 13 0 R")
+            .unwrap();
+        direct.splice(
+            at..at + 12,
+            b"/Info << /Title (t) /I 13 0 R >>".iter().copied(),
+        );
+        while !direct.len().is_multiple_of(8) {
+            direct.push(b'\n');
+        }
+        seeds.push(direct);
         // What's only a reference to nothing, a page's /Parent that's a page, a
         // tree whose /Kids and /Parent disagree, and a page no tree lists.
         let root =

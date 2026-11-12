@@ -66,6 +66,22 @@ pub fn file(objects: &[&str], trailer: &str) -> Vec<u8> {
     out
 }
 
+/// `file` with `entries` added to its trailer after its `/Root`, in the clear
+/// as a trailer is: nothing before the trailer moves.
+pub fn with_info(file: &[u8], entries: &str) -> Vec<u8> {
+    let at = file.windows(7).rposition(|w| w == b"trailer").unwrap();
+    let root = at
+        + file[at..]
+            .windows(11)
+            .position(|w| w == b"/Root 1 0 R")
+            .unwrap()
+        + 11;
+    let mut out = file[..root].to_vec();
+    out.extend_from_slice(format!(" {entries}").as_bytes());
+    out.extend_from_slice(&file[root..]);
+    out
+}
+
 /// A stream object of `dict`'s entries and `data`.
 pub fn stream(dict: &str, data: &str) -> String {
     let length = data.len();

@@ -222,7 +222,7 @@ mod family {
     use pdf_structure::pdf_crypt::rand_core::SeedableRng;
     use pdf_structure::write::Encryptor;
 
-    use super::written::{KEYS, built, encrypted_as, kinds, opened, stream, two_pages};
+    use super::written::{KEYS, built, encrypted_as, kinds, opened, stream, two_pages, with_info};
     use super::{HINT_LAST, asked_by};
 
     /// `text`'s warnings, each once, its numbers `N`.
@@ -319,14 +319,17 @@ mod family {
             };
             holds_as(&name, written, "", &[], &[HINT_LAST]);
         }
-        // A new encryption, by its password: over a plain reading, and an RC4 one.
+        // A new encryption, by its password: over a plain reading, an RC4 one,
+        // and a plain one whose /Info is in its trailer, which is written as an
+        // object in part 9.
         let prepared = Password("user").prepared().unwrap();
         let new = Encryptor::create_with(
             &Protection::new(&prepared),
             &mut ChaCha20Rng::seed_from_u64(15),
         )
         .unwrap();
-        let sources = [plain.clone(), encrypted_as(KEYS[1].1, &plain)];
+        let info = with_info(&plain, "/Info << /Title (a title) /Author (an author) >>");
+        let sources = [plain.clone(), encrypted_as(KEYS[1].1, &plain), info];
         for (at, source) in sources.iter().enumerate() {
             let written = |options: &Options<'_>| {
                 let reading = opened(source, "");
