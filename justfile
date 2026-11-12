@@ -458,7 +458,8 @@ arlington-msrv:
 # its writer, content written again and the calls, its splices and lists
 # written again, and an image's color space counted alike in its dictionary
 # and in the resources; `semantics`, pdf-semantics' name and number trees,
-# page tree, dates and XMP claims; `color`, pdf-color's count of a space's
+# page tree, dates and XMP claims, each read and written, and a file's packet
+# read through its streams; `color`, pdf-color's count of a space's
 # components, its typed spaces and what a resources dictionary names; `fonts`,
 # pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
 # reading of a font, its program among them, on any parts and in a file;
