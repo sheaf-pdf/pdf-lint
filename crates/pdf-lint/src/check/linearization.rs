@@ -703,11 +703,13 @@ mod tests {
         deflate
     }
 
-    /// `file` linearized, its hint stream's data stored as it is.
+    /// `file` opened by `passwords` and linearized, its hint stream's data
+    /// stored as it is.
     fn linearized(file: &[u8], passwords: &[crate::pdf_crypt::Password]) -> Vec<u8> {
         let mut options = family::Options::DEFAULT;
         options.deflate = stored();
-        linearize_bytes(file, passwords, &options).unwrap()
+        options.read.passwords = passwords;
+        linearize_bytes(file, &options).unwrap()
     }
 
     /// `file` checked beside its reading under `options`, every object held
@@ -1217,7 +1219,8 @@ mod tests {
         options.deflate = stored();
         options.kind = XrefKind::Stream;
         options.pack = pack;
-        linearize_bytes(file, passwords, &options).unwrap()
+        options.read.passwords = passwords;
+        linearize_bytes(file, &options).unwrap()
     }
 
     /// What's counted as not checked of a linearization, by why: every row

@@ -59,6 +59,14 @@ fn created(password: &str, encrypt_metadata: bool) -> Encryptor {
     created.with_test_ivs(Ivs::derived)
 }
 
+/// [`Options::DEFAULT`], [`family::linearize_bytes`] opening a file by
+/// `passwords`.
+fn opening<'a>(passwords: &'a [Password<'a>]) -> Options<'a> {
+    let mut options = Options::DEFAULT;
+    options.read.passwords = passwords;
+    options
+}
+
 /// `bytes`, read by `password`, written under `encryptor` as `options` says.
 fn under(
     bytes: &[u8],
@@ -238,7 +246,7 @@ fn each_kind_reads_back_under_each_encryption() {
             reads_back(&out, &done, "", &name);
             // By the bytes alone it's the same file: the same document read
             // back, its AES ciphertexts under IVs of their own.
-            let alone = family::linearize_bytes(&bytes, &[], options).unwrap();
+            let alone = family::linearize_bytes(&bytes, options).unwrap();
             assert_eq!(in_the_clear(&alone, ""), in_the_clear(&out, ""), "{name}");
         }
     }
@@ -673,11 +681,11 @@ fn what_no_password_opened_is_refused() {
         assert!(matches!(refused, Error::Locked), "{refused}");
         assert_eq!(out, [7]);
     }
-    let refused = family::linearize_bytes(&bytes, &[], &Options::DEFAULT).unwrap_err();
+    let refused = family::linearize_bytes(&bytes, &Options::DEFAULT).unwrap_err();
     assert!(matches!(refused, Error::Locked));
-    let wrong = family::linearize_bytes(&bytes, &[Password("wrong")], &Options::DEFAULT);
+    let wrong = family::linearize_bytes(&bytes, &opening(&[Password("wrong")]));
     assert!(matches!(wrong.unwrap_err(), Error::Locked));
-    let done = family::linearize_bytes(&bytes, &[Password("user")], &Options::DEFAULT).unwrap();
+    let done = family::linearize_bytes(&bytes, &opening(&[Password("user")])).unwrap();
     assert!(opened(&done, "user").facts().linearized);
 
     // Its strings and streams in the clear, as an attachment's may not be: what no
@@ -700,7 +708,7 @@ fn what_no_password_opened_is_refused() {
         family::linearize(&mut out, &doc, None, Some(&reading), &Options::DEFAULT).unwrap_err();
     assert!(matches!(refused, Error::Locked), "{refused}");
     assert_eq!(out, [7]);
-    let wrong = family::linearize_bytes(&bytes, &[Password("wrong")], &Options::DEFAULT);
+    let wrong = family::linearize_bytes(&bytes, &opening(&[Password("wrong")]));
     assert!(matches!(wrong.unwrap_err(), Error::Locked));
 }
 
@@ -726,7 +734,7 @@ fn a_handler_that_cant_be_opened_is_refused() {
         "{refused}"
     );
     assert_eq!(out, [7]);
-    let refused = family::linearize_bytes(&bytes, &[], &Options::DEFAULT).unwrap_err();
+    let refused = family::linearize_bytes(&bytes, &Options::DEFAULT).unwrap_err();
     assert!(
         matches!(refused, Error::Write(write::Error::Unsupported(_))),
         "{refused}"
@@ -1091,7 +1099,7 @@ fn a_file_laid_out_encrypted_is_laid_out_again() {
     for (name, key) in KEYS {
         let bytes = encrypted_as(key, &plain);
         for options in kinds() {
-            let once = family::linearize_bytes(&bytes, &[], &options).unwrap();
+            let once = family::linearize_bytes(&bytes, &options).unwrap();
             let (twice, done) = own(&once, "", &options).unwrap();
             reads_back(&twice, &done, "", name);
         }
@@ -1109,7 +1117,10 @@ fn the_files_of_pdfiums_cases_are_written() {
     let [table, _, packed] = kinds();
     for (file, kind, options) in [("rc4", "table", table), ("aes-256", "packed", packed)] {
         let bytes = std::fs::read(folder.join(format!("qpdf-{file}.pdf"))).unwrap();
-        let out = family::linearize_bytes(&bytes, &[Password("user")], &options).unwrap();
+        let given = [Password("user")];
+        let mut options = options;
+        options.read.passwords = &given;
+        let out = family::linearize_bytes(&bytes, &options).unwrap();
         std::fs::write(folder.join(format!("written-{file}-{kind}.pdf")), out).unwrap();
     }
 }

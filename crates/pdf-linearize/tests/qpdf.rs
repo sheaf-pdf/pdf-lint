@@ -250,7 +250,7 @@ mod family {
     /// Both of qpdf's checks on each of `kinds`' file of `objects`, each kind's
     /// classes as `table`, `stream` or `packed` says, and no other.
     fn holds(name: &str, bytes: &[u8], table: &[&str], packed: &[&str]) {
-        let out = |options: &Options<'_>| linearize_bytes(bytes, &[], options).unwrap();
+        let out = |options: &Options<'_>| linearize_bytes(bytes, options).unwrap();
         holds_as(name, out, "", table, packed);
     }
 
@@ -376,7 +376,7 @@ mod family {
             let mut options = Options::DEFAULT;
             options.kind = XrefKind::Stream;
             options.pack = true;
-            linearize_bytes(&built(&two_pages("")), &[], &options).unwrap()
+            linearize_bytes(&built(&two_pages("")), &options).unwrap()
         };
         holds("again", &once, &[], &[HINT_LAST]);
     }

@@ -150,7 +150,7 @@ fn same_numbers_as_the_family(bytes: &[u8]) {
 /// That the adapter's file of `bytes` has at each number what the family's has there.
 fn numbers_are_the_family_s(bytes: &[u8]) {
     let ours = laid_out(bytes).unwrap();
-    let theirs = family::linearize_bytes(bytes, &[], &Options::DEFAULT).unwrap();
+    let theirs = family::linearize_bytes(bytes, &Options::DEFAULT).unwrap();
     assert_eq!(hint_keys(&ours), hint_keys(&theirs));
     let (ours, theirs) = (numbers(&ours), numbers(&theirs));
     assert_eq!(ours.len(), theirs.len());
@@ -622,7 +622,7 @@ fn a_file_of_object_streams_loses_them_and_a_cross_reference_stream_s_entries() 
         let mut options = Options::DEFAULT;
         options.kind = pdf_structure::XrefKind::Stream;
         options.pack = true;
-        family::linearize_bytes(&everything(""), &[], &options).unwrap()
+        family::linearize_bytes(&everything(""), &options).unwrap()
     };
     let out = laid_out(&source).unwrap();
     holds(&out);
@@ -754,7 +754,7 @@ fn a_tree_the_two_rules_read_apart_is_refused_as_the_family_s_is() {
             laid_out(&bytes).unwrap_err().to_string(),
             Error::PageTree(wanted).to_string()
         );
-        let family = family::linearize_bytes(&bytes, &[], &Options::DEFAULT);
+        let family = family::linearize_bytes(&bytes, &Options::DEFAULT);
         assert!(
             matches!(
                 family,
@@ -827,7 +827,7 @@ fn a_null_nearer_a_page_than_a_value_is_refused_as_the_family_s_is() {
             laid_out(&tree),
             Err(Error::PageTree(PageTree::Attribute { page: 0, attribute })) if attribute == wanted
         ));
-        let family = family::linearize_bytes(&tree, &[], &Options::DEFAULT);
+        let family = family::linearize_bytes(&tree, &Options::DEFAULT);
         assert!(matches!(
             family,
             Err(family::Error::PageTree(family::PageTree::Attribute { page: 0, attribute }))
@@ -875,7 +875,7 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused_as_the_family_
         }))
     ));
     assert!(matches!(
-        family::linearize_bytes(&apart, &[], &Options::DEFAULT),
+        family::linearize_bytes(&apart, &Options::DEFAULT),
         Err(family::Error::PageTree(family::PageTree::Kids {
             page: 0,
             attribute: "MediaBox"
@@ -979,7 +979,7 @@ fn a_stray_page_that_s_a_node_is_given_nothing() {
 /// `objects` as a file: what lopdf holds of them, the adapter's refusal, `family`'s too.
 fn refused_as_the_family_refuses(objects: &[&str]) -> Error {
     let why = refused(objects);
-    assert!(family::linearize_bytes(&file(objects, ROOT), &[], &Options::DEFAULT).is_err());
+    assert!(family::linearize_bytes(&file(objects, ROOT), &Options::DEFAULT).is_err());
     why
 }
 
@@ -1062,7 +1062,7 @@ fn what_the_options_say_is_gone_by() {
     assert!(checked(&out).0.holds);
     let mut family = Options::DEFAULT;
     family.first_page = family::FirstPage::Index(1);
-    let theirs = family::linearize_bytes(&bytes, &[], &family).unwrap();
+    let theirs = family::linearize_bytes(&bytes, &family).unwrap();
     assert_eq!(numbers(&out).len(), numbers(&theirs).len());
     options.first_page = adapter::FirstPage::Index(2);
     let past = adapter::linearize(&mut Vec::new(), &loaded(&bytes), &options);

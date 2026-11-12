@@ -92,7 +92,6 @@ use pdf_objects::object::{Object, ObjectId};
 use pdf_objects::serialize::{self, Encrypt as _};
 use pdf_objects::version::Version;
 use pdf_semantics::pages;
-use pdf_structure::pdf_crypt::Password;
 use pdf_structure::pdf_filters::{self, Prediction};
 use pdf_structure::read::{self, ByteSource, Reading};
 use pdf_structure::write::{self, Deflate, Encrypting, Encryptor, Parts, ReadFrom};
@@ -136,11 +135,11 @@ pub struct Options<'a> {
     pub first_page: FirstPage,
     /// The plan's caps, the most pages among them.
     pub limits: Limits,
-    /// How [`linearize_bytes`] opens the file it's given: the caps it reads
-    /// under and the backend it inflates with. A caller given a file it doesn't
-    /// trust lowers them here; [`linearize`] takes a document already read.
-    /// Their passwords aren't read: [`linearize_bytes`] opens a file by those
-    /// it's given.
+    /// How [`linearize_bytes`] opens the file it's given: the passwords it
+    /// tries ([`read::Options::passwords`], none for the empty one), the caps
+    /// it reads under and the backend it inflates with. A caller given a file
+    /// it doesn't trust lowers the caps here; [`linearize`] takes a document
+    /// already read.
     pub read: read::Options<'a>,
     /// A flag that, set while it runs, stops it: it's checked before each
     /// object and object stream, and nothing's written
@@ -309,22 +308,15 @@ pub fn linearize(
     written
 }
 
-/// `bytes`, read and written again as a linearized file: `passwords` as
-/// [`Reading::open`] tries them ([`read::Options::passwords`]), in the
-/// place of any `options.read` gives, on any reading that needs one, and an
-/// encrypted file written encrypted as it was ([`Encryptor::of`]), so every
-/// number reused under its keys where they're made per object (the module's
-/// "Encrypted"). Refused as [`linearize`] refuses, and where it doesn't read
-/// ([`Error::Read`]), no password opens it ([`Error::Locked`]), or its security
-/// handler can't be opened ([`write::Error::Unsupported`]).
-pub fn linearize_bytes(
-    bytes: &[u8],
-    passwords: &[Password],
-    options: &Options<'_>,
-) -> Result<Vec<u8>, Error> {
-    let mut read = options.read;
-    read.passwords = passwords;
-    let reading = Reading::open(bytes, &read).map_err(Error::Read)?;
+/// `bytes`, read and written again as a linearized file: opened as
+/// [`Options::read`] says, by its passwords ([`read::Options::passwords`]),
+/// and an encrypted file written encrypted as it was ([`Encryptor::of`]), so
+/// every number reused under its keys where they're made per object (the
+/// module's "Encrypted"). Refused as [`linearize`] refuses, and where it
+/// doesn't read ([`Error::Read`]), no password opens it ([`Error::Locked`]),
+/// or its security handler can't be opened ([`write::Error::Unsupported`]).
+pub fn linearize_bytes(bytes: &[u8], options: &Options<'_>) -> Result<Vec<u8>, Error> {
+    let reading = Reading::open(bytes, &options.read).map_err(Error::Read)?;
     let doc = reading.to_document().map_err(Error::Read)?;
     let encryptor = Encryptor::of(&reading).map_err(|why| match why {
         write::Error::Locked => Error::Locked,

@@ -117,7 +117,7 @@ file.extend_from_slice(
 let mut options = Options::DEFAULT;
 options.kind = XrefKind::Stream;
 options.pack = true;
-let linearized = linearize_bytes(&file, &[], &options).unwrap();
+let linearized = linearize_bytes(&file, &options).unwrap();
 assert!(linearized.windows(11).any(|w| w == b"/Linearized"));
 
 // What's written holds, and nothing else is to be said of it.

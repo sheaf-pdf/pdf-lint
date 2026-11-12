@@ -2092,7 +2092,7 @@ mod tests {
             let mut options = crate::family::Options::DEFAULT;
             options.kind = kind;
             options.pack = pack;
-            seeds.push(crate::family::linearize_bytes(&all, &[], &options).unwrap());
+            seeds.push(crate::family::linearize_bytes(&all, &options).unwrap());
         }
         // Encrypted, by each of the handler's revisions, by the files qpdf
         // encrypted, and as it lays them out.
@@ -2106,7 +2106,7 @@ mod tests {
             let mut options = crate::family::Options::DEFAULT;
             options.kind = pdf_structure::XrefKind::Stream;
             options.pack = true;
-            let laid_out = crate::family::linearize_bytes(&encrypted, &[], &options);
+            let laid_out = crate::family::linearize_bytes(&encrypted, &options);
             seeds.push(std::mem::take(&mut encrypted));
             seeds.push(laid_out.unwrap());
         }

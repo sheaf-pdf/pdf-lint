@@ -2531,7 +2531,7 @@ fn generation_1() -> (Vec<u8>, usize) {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let plain = file(&[CATALOG, PAGES, page]);
     let options = pdf_linearize::family::Options::DEFAULT;
-    let mut out = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+    let mut out = pdf_linearize::family::linearize_bytes(&plain, &options).unwrap();
     let find = |bytes: &[u8], what: &[u8]| (bytes.windows(what.len())).position(|w| w == what);
     let items = find(&out, b"/H [").unwrap() + 4;
     let at = text(&out[items..items + 12]);
@@ -2610,7 +2610,7 @@ fn linearized_wrongly() -> (Vec<u8>, u32, usize) {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let plain = file(&[CATALOG, PAGES, page]);
     let options = pdf_linearize::family::Options::DEFAULT;
-    let mut out = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+    let mut out = pdf_linearize::family::linearize_bytes(&plain, &options).unwrap();
     let find = |bytes: &[u8], what: &[u8]| (bytes.windows(what.len())).position(|w| w == what);
     let e = find(&out, b"/E ").unwrap() + 3;
     let digits = out[e..].iter().take_while(|b| b.is_ascii_digit()).count();

@@ -129,7 +129,7 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused() {
     let root = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
     let catalog = "<< /Type /Catalog /Pages 2 0 R >>";
     let refused = |objects: &[&str], wanted: usize, key: &str| {
-        let got = family::linearize_bytes(&file(objects, ROOT), &[], &table());
+        let got = family::linearize_bytes(&file(objects, ROOT), &table());
         assert!(
             matches!(
                 got,
@@ -1043,10 +1043,10 @@ fn the_same_document_writes_the_same_bytes_on_any_threads() {
 fn linearize_bytes_is_linearize_of_what_it_reads() {
     let bytes = built(&two_pages(""));
     for options in kinds() {
-        let out = family::linearize_bytes(&bytes, &[], &options).unwrap();
+        let out = family::linearize_bytes(&bytes, &options).unwrap();
         assert_eq!(out, written(&bytes, &options));
     }
-    let refused = family::linearize_bytes(b"not a file", &[], &table()).unwrap_err();
+    let refused = family::linearize_bytes(b"not a file", &table()).unwrap_err();
     assert!(
         matches!(refused, Error::NoCatalog | Error::Read(_)),
         "{refused}"
@@ -1057,10 +1057,10 @@ fn linearize_bytes_is_linearize_of_what_it_reads() {
 #[test]
 fn linearize_bytes_opens_a_file_as_it_s_told() {
     let bytes = built(&two_pages(""));
-    assert!(family::linearize_bytes(&bytes, &[], &table()).is_ok());
+    assert!(family::linearize_bytes(&bytes, &table()).is_ok());
     let mut options = table();
     options.read.limits.parser.nesting = 0;
-    let refused = family::linearize_bytes(&bytes, &[], &options);
+    let refused = family::linearize_bytes(&bytes, &options);
     assert!(refused.is_err(), "{:?}", refused.map(|_| ()));
 }
 
