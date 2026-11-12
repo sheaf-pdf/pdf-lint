@@ -40,7 +40,7 @@ pdf-fonts.workspace = true
 # Whether a file that says it's linearized holds, judged from its reading.
 # With its default feature alone: the adapter that reads pdf-structure's
 # readings.
-pdf-linearize = { path = "../pdf-linearize", version = "0.1" }
+pdf-linearize.workspace = true
 pdf-objects.workspace = true
 # Dates and XMP claims, read without its clock, so without chrono.
 pdf-semantics.workspace = true

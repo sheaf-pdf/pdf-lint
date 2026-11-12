@@ -31,17 +31,20 @@ exclude = ["fuzz"]
 # Each crate by its path here and the version its dependents require once
 # published: pdf-tokenizer's by caret; pdf-objects', pdf-filters',
 # pdf-crypt's, pdf-structure's, pdf-color's, pdf-content-streams',
-# pdf-semantics' and pdf-fonts' exactly, as an alpha promises nothing of the
-# next, and a requirement matches a pre-release only where it names one. A
-# crate some member takes without its default features has them off here,
-# as an older cargo (1.85's) refused a member's `default-features = false`
-# over an entry that leaves them on, and every member that takes it names
-# the features it takes: pdf-filters', its Flate backend; pdf-semantics',
-# none, as no member takes its clock; pdf-fonts', none, as pdf-lint reads no
-# program and no predefined CMap. A dev-dependency on a crate here that
-# isn't on crates.io yet is by its path alone, as pdf-color's,
-# pdf-semantics' and pdf-fonts' on pdf-structure are, which the dependent's
-# package then leaves out, so that it can be published first.
+# pdf-semantics', pdf-fonts' and pdf-linearize's exactly, as an alpha
+# promises nothing of the next, and a requirement matches a pre-release only
+# where it names one. A crate some member takes without its default features
+# has them off here, as an older cargo (1.85's) refused a member's
+# `default-features = false` over an entry that leaves them on, and every
+# member that takes it names the features it takes: pdf-filters', its Flate
+# backend; pdf-semantics', none, as no member takes its clock; pdf-fonts',
+# none, as pdf-lint reads no program and no predefined CMap. A
+# dev-dependency on a crate here that isn't on crates.io yet is by its path
+# alone, as pdf-color's, pdf-semantics' and pdf-fonts' on pdf-structure are,
+# which the dependent's package then leaves out, so that it can be published
+# first; pdf-linearize's on pdf-structure is through this table, as it
+# depends on pdf-structure anyway and is published after it, so its package
+# keeps it.
 [workspace.dependencies]
 pdf-tokenizer = { path = "crates/pdf-tokenizer", version = "0.2" }
 pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.2" }
@@ -52,6 +55,7 @@ pdf-color = { path = "crates/pdf-color", version = "=0.1.0-alpha.1" }
 pdf-content-streams = { path = "crates/pdf-content-streams", version = "=0.1.0-alpha.1" }
 pdf-semantics = { path = "crates/pdf-semantics", version = "=0.1.0-alpha.1", default-features = false }
 pdf-fonts = { path = "crates/pdf-fonts", version = "=0.1.0-alpha.1", default-features = false }
+pdf-linearize = { path = "crates/pdf-linearize", version = "=0.1.0-alpha.1" }
 
 # pdf-crypt's revision 6 hash runs thousands of AES blocks and SHA-2
 # digests for a password; it and the RustCrypto crates under it built

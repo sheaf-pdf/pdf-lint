@@ -1,10 +1,11 @@
 [package]
 name = "pdf-linearize"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-linearize"
 description = "PDF files laid out for reading over a network (ISO 32000-2, Annex F): an object graph, of any object model, planned into the order and numbers a linearized file has, the bytes around its bodies, hint tables among them, and whether a file that says it's one holds"
 keywords = ["pdf", "linearized", "fast-web-view", "iso-32000"]
 categories = ["encoding"]
@@ -42,7 +43,9 @@ chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
 # pdf-structure with its test writer, for the tests' new encryptions from a
 # seeded generator and their IVs derived, so that a file written twice is
 # the same bytes. Beside the optional normal dependency: the library is
-# built without it.
+# built without it. Through the workspace's table, not by its path alone:
+# the crate depends on pdf-structure anyway, with `family`, so it's
+# published after it, and its package keeps this one.
 pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
 
 # docs.rs documents what the feature adds, beside the default.

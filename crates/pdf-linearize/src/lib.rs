@@ -71,6 +71,33 @@ mod limits;
 pub mod lopdf;
 pub mod plan;
 
+#[cfg(test)]
+mod tests {
+    /// The README is shown on crates.io and docs.rs, where a path beside the
+    /// crate reaches nothing: its licence links are the repository's URLs, the
+    /// manifest's `repository` and the file, and every link it has is a URL.
+    #[test]
+    fn the_readmes_licence_links_reach_the_files() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            let link = format!("[{file}]({repository}/blob/main/{file})");
+            assert!(
+                readme.contains(&link),
+                "{file}'s link isn't the repository's URL"
+            );
+        }
+        for (at, _) in readme.match_indices("](") {
+            let target = &readme[at + 2..];
+            let target = &target[..target.find(')').unwrap_or(target.len())];
+            assert!(
+                target.starts_with("https://"),
+                "a link isn't a URL: {target}"
+            );
+        }
+    }
+}
+
 /// The README's examples, run as doctests: one of them uses `family`.
 #[cfg(all(doctest, feature = "family"))]
 #[doc = include_str!("../README.md")]
