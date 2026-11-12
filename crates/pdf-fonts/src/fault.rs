@@ -117,7 +117,7 @@ pub enum Fault {
     /// followed one to. Where it doesn't, what it leads to reads as none.
     #[error("a reference to a reference")]
     Chained,
-    /// An object a font reads doesn't read ([`Why::Damaged`](crate::Why::Damaged)).
+    /// An object a font reads doesn't read ([`Why::Damaged`](pdf_objects::Why::Damaged)).
     /// It's read as not there.
     #[error("object {} {} doesn't read", .id.number, .id.generation)]
     Damaged {

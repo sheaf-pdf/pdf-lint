@@ -1,15 +1,15 @@
 //! PDF's fonts (ISO 32000-2, 9), read.
 //!
-//! - **A file's font, as read** ([`Font`]): from its dictionary, over a [`Resolve`] for
-//!   its objects and pdf-objects' [`Streams`](pdf_objects::Streams) for its streams'
-//!   data, the codes a string is in it, each code's CID, width, vertical metrics and
-//!   text, and how high its glyphs reach, each as PDFium reads them, what no real
-//!   writer writes included. What it can't know it guesses, and says ([`FontApprox`]);
-//!   what isn't as ISO 32000-2 has it is told to pdf-objects'
-//!   [`Sink`](pdf_objects::fault::Sink) ([`Fault`]), what's read being the same
-//!   whatever the sink. It fails only where its streams decompress past the budget it's
-//!   read within, or where what it reads doesn't read for a reason that's the caller's
-//!   ([`Error`]).
+//! - **A file's font, as read** ([`Font`]): from its dictionary, over pdf-objects'
+//!   [`Resolve`](pdf_objects::Resolve) for its objects and
+//!   [`Streams`](pdf_objects::Streams) for its streams' data, the codes a string is
+//!   in it, each code's CID, width, vertical metrics and text, and how high its glyphs
+//!   reach, each as PDFium reads them, what no real writer writes included. What it
+//!   can't know it guesses, and says ([`FontApprox`]); what isn't as ISO 32000-2 has
+//!   it is told to pdf-objects' [`Sink`](pdf_objects::fault::Sink) ([`Fault`]),
+//!   what's read being the same whatever the sink. It fails only where its streams
+//!   decompress past the budget it's read within, or where what it reads doesn't read
+//!   for a reason that's the caller's ([`Error`]).
 //! - **Each font read once** ([`Fonts`], [`FontScope`]): those that are objects, by
 //!   number, kept for every page that draws in them, and charged to each.
 //! - **Simple fonts' encodings and glyph names** ([`Encoding`], [`glyph_text`],
@@ -33,27 +33,30 @@
 //! Adobe's, where without it it reads as one the build hasn't.
 //!
 //! ```
-//! use pdf_fonts::{Font, Limits, Object, ObjectId, Unreadable, Why};
-//! use pdf_objects::{WithStreams, dict};
+//! use pdf_fonts::pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
+//! use pdf_fonts::{Font, Limits};
 //!
 //! // A font with no streams, over a resolver of nothing.
 //! let none = |_: ObjectId| -> Option<&Object> { None };
-//! let objects = WithStreams::new(&none, |id, _| Err(Unreadable::new(id, Why::Damaged, "none")));
+//! let objects = WithStreams::new(&none, |id, _| {
+//!     Err(Unreadable::new(id, Why::Damaged, "none"))
+//! });
 //! let font = dict! {
 //!     "Subtype" => "Type1", "BaseFont" => "Arial,Bold", "Encoding" => "WinAnsiEncoding",
 //! };
 //! let mut budget = 1 << 20;
 //! let mut faults = Vec::new();
-//! let read = Font::read(objects, &font, &Limits::DEFAULT, &mut budget, &mut faults).unwrap();
+//! let limits = Limits::DEFAULT;
+//! let read = Font::read(objects, &font, &limits, &mut budget, &mut faults).unwrap();
 //! assert_eq!(read.width(u32::from(b'A')), 722.0);
 //! assert_eq!(read.text(b"A\x80").as_deref(), Some("A€"));
 //! assert!(read.approx().heights && faults.is_empty());
 //! ```
 //!
-//! [`Dict`], [`Object`], [`ObjectId`], [`Resolve`], [`Span`], [`Unreadable`] and
-//! [`Why`] are pdf-objects', re-exported, and so is pdf-objects whole, so a sink or
-//! a `Streams` of one's own names the trait at the version this crate takes; and
-//! pdf-content-streams, whose `Limits` are what a CMap and a CharProc are lexed
+//! pdf-objects is re-exported whole, none of its items by name, so what a font is
+//! read over and told to, a resolver, a `Streams` or a sink of one's own, names
+//! pdf-objects' items at the version this crate takes (`pdf_fonts::pdf_objects::Dict`);
+//! and pdf-content-streams, whose `Limits` are what a CMap and a CharProc are lexed
 //! under, is too.
 //!
 //! The metrics and the glyph lists are Adobe's, each under its own terms, in the
@@ -64,7 +67,6 @@
 
 pub use pdf_content_streams;
 pub use pdf_objects;
-pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Why};
 
 pub use encoding::{Encoding, cp1252, glyph_text, name_code_point};
 pub use error::Error;

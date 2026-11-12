@@ -18,13 +18,13 @@ PDF's fonts (ISO 32000-2, 9), read. It's made for what reads a page's text and f
 - **Under caps.** `Limits` is one value for all of them, and nothing panics on what it's given, a program's parsers being the one thing that rests on others' promises: skrifa and read-fonts forbid `unsafe`, and are fuzzed upstream. What a font's streams decompress to is the budget's; what it holds beyond that is bounded by what it reads, a `/W` range of 2³¹ CIDs being one range. A CMap and a CharProc are lexed by pdf-content-streams, under its caps. An AFM is only ever this crate's own file, so a parser of them has no caps and takes no file's bytes.
 
 ```rust
-use pdf_fonts::{Font, Limits, Object, ObjectId, Unreadable, Why};
-use pdf_objects::WithStreams;
+use pdf_fonts::pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
+use pdf_fonts::{Font, Limits};
 
 // A font with no streams, over a resolver of nothing.
 let none = |_: ObjectId| -> Option<&Object> { None };
 let objects = WithStreams::new(&none, |id, _| Err(Unreadable::new(id, Why::Damaged, "none")));
-let font = pdf_objects::dict! {
+let font = dict! {
     "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65, "Widths" => vec![Object::from(600)],
 };
 let mut budget = 1 << 20;

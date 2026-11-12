@@ -311,8 +311,8 @@ fn glyph_names_read_as_text() {
     assert_eq!(name_code_point(b"\xff"), None);
 }
 
-/// What the crate says it gives, by those names; and pdf-objects' and pdf-content-streams'
-/// own types, what it re-exports of them.
+/// What the crate says it gives, by those names; and pdf-objects and pdf-content-streams,
+/// re-exported whole, each the crate itself.
 #[test]
 fn the_crate_s_names_are_there() {
     #[allow(unused_imports)]
@@ -322,18 +322,14 @@ fn the_crate_s_names_are_there() {
         name_code_point,
     };
     fn same<T>(_: fn(&T) -> &T) {}
-    same::<pdf_objects::Dict>(|d: &crate::Dict| d);
-    same::<pdf_objects::Object>(|d: &crate::Object| d);
-    same::<pdf_objects::ObjectId>(|d: &crate::ObjectId| d);
-    same::<pdf_objects::Span>(|d: &crate::Span| d);
-    same::<pdf_objects::Unreadable>(|d: &crate::Unreadable| d);
-    same::<pdf_objects::Why>(|d: &crate::Why| d);
+    same::<pdf_objects::Dict>(|d: &crate::pdf_objects::Dict| d);
+    same::<pdf_objects::Unreadable>(|d: &crate::pdf_objects::Unreadable| d);
     same::<pdf_content_streams::Limits>(|d: &crate::pdf_content_streams::Limits| d);
     fn resolves<'o, R: pdf_objects::Resolve<'o>>() {}
-    fn also<'o, R: crate::Resolve<'o>>() {
+    fn also<'o, R: crate::pdf_objects::Resolve<'o>>() {
         resolves::<R>();
     }
-    let _ = also::<fn(crate::ObjectId) -> Option<&'static crate::Object>>;
+    let _ = also::<fn(pdf_objects::ObjectId) -> Option<&'static pdf_objects::Object>>;
 }
 
 /// The README is shown on crates.io and docs.rs, where a path beside the crate

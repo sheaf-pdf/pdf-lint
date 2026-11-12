@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::Stream;
-use pdf_objects::{Streams, WithStreams, dict};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, WithStreams, dict};
 
 use super::afm;
 use crate::fuzz::digest;
