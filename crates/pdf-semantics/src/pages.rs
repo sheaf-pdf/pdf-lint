@@ -445,7 +445,7 @@ pub enum Inheritable {
 
 impl Inheritable {
     /// Every attribute, in the order they're declared, so a table indexed by
-    /// them needn't write their count.
+    /// them can take its length from here (`Inheritable::ALL.len()`).
     pub const ALL: [Inheritable; 4] = [
         Inheritable::Resources,
         Inheritable::MediaBox,

@@ -1268,7 +1268,9 @@ fn a_value_written_reads_back_as_its_text() {
             let mut claims = Claims::default();
             claims.set(claim, value);
             assert_eq!(claims.value(claim), Some(value));
-            written_back(&claims);
+            let packet = written_back(&claims);
+            // Text XML 1.0 holds never has `]]>` in it.
+            assert!(!packet.contains("]]>"), "{packet}");
         }
     }
     // Each in the packet as it's escaped.

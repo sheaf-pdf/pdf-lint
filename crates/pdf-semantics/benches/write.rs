@@ -9,7 +9,9 @@
 //! - `pages-write`: `pages::write` of a tree under nodes of `pages::FANOUT`
 //!   over 7,000 pages (`balanced-7000`), and over 1,048,574, the most PDFium
 //!   counts (`balanced-1048574`), its nodes numbered past the pages; each
-//!   tree written dropped in the time.
+//!   tree written dropped in the time. So each write after the first reuses
+//!   memory the one before freed, and takes half the time of a process's
+//!   first write, or less.
 //!
 //! Throughput is in bytes of the packet written, and in pages. Each input is
 //! held to what it gives before it's timed: its packet, read back by

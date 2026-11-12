@@ -371,7 +371,9 @@ struct Open {
 ///
 /// - [`Fault::XmpNotUtf8`]: a packet whose first bytes say it isn't UTF-8,
 ///   as XML tells an encoding from them: a mark of UTF-16 or UTF-32, at the
-///   mark, or a zero byte among the first four, at those. Nothing's read;
+///   mark, or a zero byte among the first four, at those. Nothing's read, so
+///   with `()` as the sink it reads as a packet that claims nothing. A
+///   caller that must tell the two apart passes a sink;
 /// - [`Fault::XmpAttribute`]: an attribute that doesn't read, with no quotes
 ///   or no value or given twice. The tag's others are read, as XML's reader
 ///   can go on, but a namespace bound after one that doesn't read isn't bound;
@@ -719,6 +721,13 @@ fn stream_of<'o, R: Resolve<'o>>(
 /// is read beside its reading; pdf-objects'
 /// [`WithStreams`](pdf_objects::WithStreams) makes one of a resolver and a
 /// function.
+///
+/// A packet that isn't UTF-8 is told and has nothing read, as [`read`] has
+/// it, so with `()` as the sink it reads as one that claims nothing. The
+/// result names neither the stream nor its data's length. A caller that
+/// places what it reports by them takes the parts this is made of:
+/// [`metadata_stream`], its data asked for under the cap
+/// ([`Streams::decoded`]), and [`read`].
 ///
 /// ```
 /// use pdf_semantics::Limits;

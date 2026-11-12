@@ -21,8 +21,7 @@
 //!   again, so a loop ends and everything's been read once.
 //!
 //! [`write_names`] and [`write_numbers`] write a tree flat, one root holding
-//! every entry, sorted. That's a whole tree at any size, and nodes under a
-//! root would each need an object's number.
+//! every entry, sorted. That's a whole tree at any size.
 //!
 //! ```
 //! use pdf_semantics::tree::{names, write_names};

@@ -21,11 +21,12 @@
 //! Where a file departs from the standard is a [`Fault`], told with its
 //! place to pdf-objects' [`Sink`](pdf_objects::fault::Sink). With `()` as
 //! the sink, none is looked for. Each walk is bounded by [`Limits`], and it
-//! never panics on input. An object the reader can't give stops a walk with
-//! an [`Unreadable`], so a failed read never looks like an empty tree.
-//! [`catalog`] finds where a walk starts, and [`follow`] follows a
-//! reference. pdf-objects is re-exported whole, so its types are named
-//! through it at the version this crate is built with.
+//! never panics on input. An object past the reader's own cap or behind a
+//! password stops a walk with an [`Unreadable`], so a failed read never looks
+//! like an empty tree. A damaged one is a [`Fault::Damaged`], and the walk
+//! goes on past it. [`catalog`] finds where a walk starts, and [`follow`]
+//! follows a reference. pdf-objects is re-exported whole, so its types are
+//! named through it at the version this crate is built with.
 //!
 //! # Features
 //!
@@ -165,7 +166,7 @@ fn too_long(last: ObjectId) -> Unreadable {
 /// The catalog a trailer's `/Root` leads to (ISO 32000-2, 7.5.5, 7.7.2):
 /// none where there's no `/Root`, or it isn't a dictionary. A reading has its
 /// trailer (`reading.trailer().dict()`), and a document too
-/// (`document.trailer.dict()`), and this finds where their walks start.
+/// (`document.trailer().dict()`), and this finds where their walks start.
 ///
 /// Over a file, a walk takes the reading or the document by reference, which
 /// says why it gives no object where a closure can't:
@@ -187,6 +188,12 @@ fn too_long(last: ObjectId) -> Unreadable {
 /// let table = pages(&reading, root, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
 /// assert_eq!(table.get(0).unwrap().id, Some(ObjectId::new(3, 0)));
 /// assert_eq!(xmp::metadata_stream(&reading, root), Ok(None));
+///
+/// // The file read whole, as a document, walks the same.
+/// let document = reading.to_document().unwrap();
+/// let root = catalog(&document, document.trailer().dict()).unwrap().unwrap();
+/// let table = pages(&document, root, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
+/// assert_eq!(table.get(0).unwrap().id, Some(ObjectId::new(3, 0)));
 /// ```
 ///
 /// # Errors
