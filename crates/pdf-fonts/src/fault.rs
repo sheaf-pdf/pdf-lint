@@ -72,7 +72,11 @@ pub enum Fault {
     CMap,
     /// A CMap's `/UseCMap` chain that can't be read whole: a stream that doesn't
     /// read, or a loop (9.7.5.3). What's read of it is. A chain past
-    /// [`Limits::cmaps`](crate::Limits::cmaps) is [`Fault::TooManyCMaps`].
+    /// [`Limits::cmaps`](crate::Limits::cmaps) is [`Fault::TooManyCMaps`]. A stream
+    /// of the chain whose filters the reader doesn't decode
+    /// ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though that's the
+    /// reader's and not the file's: a caller tells the two apart by what its own
+    /// [`Streams`](pdf_objects::Streams) answered.
     #[error("a CMap's /UseCMap chain can't be read whole")]
     UseCMap,
     /// A CMap's `/UseCMap` chain of more streams than
@@ -82,7 +86,10 @@ pub enum Fault {
     #[error("a CMap's /UseCMap chain longer than is read")]
     TooManyCMaps,
     /// A `/ToUnicode` that's no stream, or one that doesn't decode (9.10.3). Text
-    /// is read as with none.
+    /// is read as with none. One whose filters the reader doesn't decode
+    /// ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though that's the
+    /// reader's and not the file's: a caller tells the two apart by what its own
+    /// [`Streams`](pdf_objects::Streams) answered.
     #[error("a /ToUnicode that's no stream, or doesn't decode")]
     ToUnicode,
     /// A CMap named that no build reads as it's named: one that's no predefined CMap

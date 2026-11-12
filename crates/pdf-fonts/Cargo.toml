@@ -6,7 +6,7 @@ rust-version = "1.89"
 license = "(MIT OR Apache-2.0) AND FTL"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-fonts"
-description = "PDF fonts read: codes, CIDs, widths, heights and text as PDFium reads them, encodings and glyph names, the standard 14's metrics, predefined CMaps, programs' glyph boxes"
+description = "PDF's fonts read as PDFium reads them: codes, CIDs, widths, heights and text, encodings and glyph names, the standard 14's metrics, predefined CMaps and programs' glyph boxes"
 keywords = ["pdf", "font", "encoding", "cmap", "iso-32000"]
 categories = ["parser-implementations", "text-processing"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -31,16 +31,16 @@ tracing = { version = "0.1.41", default-features = false, features = ["std"], op
 
 [features]
 default = ["programs"]
-# Adobe's predefined CMaps, off by default for the Rust they need: without
+# Adobe's predefined CMaps, from hayro-cmap's bundle, off by default. Without
 # them, a font's predefined CMap reads as one the build hasn't.
 predefined-cmaps = ["dep:hayro-cmap"]
 # A font's program read, for its glyphs' boxes and its heights, and the text of what its
 # encoding leaves to it. Without it, as `Fonts::for_text` reads.
 programs = ["dep:skrifa"]
-# Spans through `tracing`: a font read, its program read and opened, an
-# embedded CMap's chain, a `/ToUnicode` and a Type 3 font's CharProcs. A
-# code, a width, a string's text and a glyph's box have none. Off by
-# default; without it, none is compiled.
+# Spans through `tracing`: a font read, and within it its program's opening,
+# its embedded CMap's and its `/ToUnicode`'s parsing, and a Type 3 font's
+# CharProcs. A code, a width, a string's text and a glyph's box have none.
+# Off by default; without it, none is compiled.
 tracing = ["dep:tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in

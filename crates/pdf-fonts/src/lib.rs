@@ -1,76 +1,97 @@
-//! PDF's fonts (ISO 32000-2, 9), read.
+//! Read PDF's fonts (ISO 32000-2, 9) as PDFium reads them. No file is read here. A
+//! font is read through what gives its objects and its streams' data, pdf-objects'
+//! [`Resolve`](pdf_objects::Resolve) and [`Streams`](pdf_objects::Streams). A
+//! pdf-structure `&Reading` is both, and [`WithStreams`](pdf_objects::WithStreams)
+//! makes both of a resolver and a function.
 //!
-//! - **A file's font, as read** ([`Font`]): from its dictionary, over pdf-objects'
-//!   [`Resolve`](pdf_objects::Resolve) for its objects and
-//!   [`Streams`](pdf_objects::Streams) for its streams' data, the codes a string is
-//!   in it, each code's CID, width, vertical metrics and text, and how high its glyphs
-//!   reach, each as PDFium reads them, what no real writer writes included. What it
-//!   can't know it guesses, and says ([`FontApprox`]); what isn't as ISO 32000-2 has
-//!   it is told to pdf-objects' [`Sink`](pdf_objects::fault::Sink) ([`Fault`]),
-//!   what's read being the same whatever the sink. It fails only where its streams
-//!   decompress past the budget it's read within, or where what it reads doesn't read
-//!   for a reason that's the caller's ([`Error`]).
-//! - **Each font read once** ([`Fonts`], [`FontScope`]): those that are objects, by
-//!   number, kept for every page that draws in them, and charged to each.
-//! - **Simple fonts' encodings and glyph names** ([`Encoding`], [`glyph_text`],
-//!   [`name_code_point`], [`cp1252`]): which glyph a code draws, and the text a
-//!   glyph's name stands for, through the Adobe Glyph List and the ITC Zapf
-//!   Dingbats Glyph List.
-//! - **The standard 14 fonts** ([`Std14`]): the names PDFium takes for each, and
-//!   each one's widths, boxes and heights, from Adobe's metrics.
-//! - **Programs,** with the `programs` feature, on by default, through skrifa: each
-//!   glyph's outline box ([`Font::char_box`]), a font's heights where its descriptor
-//!   lacks them, and the text of the codes PDFium's encoding leaves to its program, as
-//!   PDFium's FreeType gives them, each bounded by [`Limits`] and charged to the budget
-//!   ([`FontProgram`]). Without it, in [`Font::read_for_text`] and in
-//!   [`Fonts::for_text`], none's read: a glyph's box from one is none, its heights are
-//!   guessed, and those codes' text by its font's name.
-//! - **Spans,** with the `tracing` feature, off by default: a span at `debug` over a
-//!   font read ([`Font::read`], [`Font::read_for_text`], and [`Fonts`] and
-//!   [`FontScope`] where they read one), its program read and opened, an embedded
-//!   CMap's chain, its `/ToUnicode` and a Type 3 font's CharProcs. A span's fields
-//!   are numbers, never a byte of a file. A code, a width, a string's text and a
-//!   glyph's box have none, as their loop is the caller's, nor has a font looked up
-//!   where it was read before.
+//! - **Read a file's font** ([`Font::read`]): the codes a string is in it
+//!   ([`Font::codes`]), each code's CID, width, vertical metrics and text, how far its
+//!   glyphs reach and their boxes, each as PDFium (chromium/8125) reads them. What it
+//!   guesses, it says ([`FontApprox`]).
+//! - **Read each font once** ([`Fonts`], [`FontScope`]), kept for every page that draws
+//!   in it, and charged to each page's budget.
+//! - **Look up encodings and glyph names** ([`Encoding`], [`glyph_text`],
+//!   [`name_code_point`], [`cp1252`]).
+//! - **Find a standard 14 font** ([`Std14::named`]) by a name PDFium takes for it, with
+//!   Adobe's metrics.
 //!
-//! Nothing panics on what a file holds. A pdf-structure `&Reading` gives a font its
-//! objects and streams, and so does anything else that implements pdf-objects'
-//! `Resolve` and `Streams`, or [`WithStreams`](pdf_objects::WithStreams), a resolver
-//! and a function as one; with `predefined-cmaps`, a Type 0 font's predefined CMap is
-//! Adobe's, where without it it reads as one the build hasn't.
+//! Where a font departs from the standard is a [`Fault`], told with its place to
+//! pdf-objects' [`Sink`](pdf_objects::fault::Sink), and the reading goes on past it.
+//! With `()` as the sink, none is looked for, and what's read is the same through any
+//! sink. Each reading is bounded by [`Limits`] and charged to the caller's budget. It
+//! fails only past the budget ([`Error::TooLarge`]), or for what doesn't read for a
+//! reason that's the caller's, a cap of what gives a stream among them
+//! ([`Error::Unreadable`]). Nothing in this crate panics on what a file holds. The
+//! README says where read-fonts, which parses programs, does. pdf-objects and
+//! pdf-content-streams are re-exported whole, so their types are named through them at
+//! the versions this crate is built with.
+//!
+//! # Features
+//!
+//! - **`programs`**, on by default: a font's program read through skrifa, for
+//!   [`Font::char_box`], heights and the text its encoding leaves to it
+//!   ([`FontProgram`]). [`Font::read_for_text`] and [`Fonts::for_text`] read none.
+//! - **`predefined-cmaps`**, off by default: Adobe's predefined CMaps. Without it, one
+//!   reads as a CMap the build hasn't ([`Fault::PredefinedNotBuilt`]).
+//! - **`tracing`**, off by default: a span at `debug` over a font read, and within it
+//!   over its program's opening, its embedded CMap's and its `/ToUnicode`'s parsing,
+//!   and a Type 3 font's CharProcs. A span's fields are numbers, never a byte of a file.
+//!
+//! Helvetica-Bold by a name PDFium takes for it, its `/ToUnicode` read through its
+//! streams, and the same font past a cap of what gives them:
 //!
 //! ```
-//! use pdf_fonts::pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
-//! use pdf_fonts::{Font, Limits};
+//! use std::collections::BTreeMap;
 //!
-//! // A font with no streams, over a resolver of nothing.
-//! let none = |_: ObjectId| -> Option<&Object> { None };
-//! let objects = WithStreams::new(&none, |id, _| {
-//!     Err(Unreadable::new(id, Why::Damaged, "none"))
-//! });
+//! use pdf_fonts::pdf_objects::{
+//!     Object, ObjectId, Stream, Unreadable, Why, WithStreams, dict,
+//! };
+//! use pdf_fonts::{Error, Font, Limits};
+//!
+//! // Helvetica-Bold, by a name PDFium takes for it, its /ToUnicode object 1.
 //! let font = dict! {
 //!     "Subtype" => "Type1", "BaseFont" => "Arial,Bold", "Encoding" => "WinAnsiEncoding",
+//!     "ToUnicode" => Object::reference(1),
 //! };
+//! let cmap = b"1 begincodespacerange <00> <FF> endcodespacerange\n\
+//!     1 beginbfchar <01> <FB01> endbfchar";
+//! let stream = Stream::new(dict! {}, cmap.to_vec());
+//! let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(stream))]);
+//!
+//! // Its objects, and its streams' data as they hold it.
+//! let resolve = |id: ObjectId| objects.get(&id);
+//! let streams = WithStreams::new(&resolve, |id, _| {
+//!     let data = objects.get(&id).and_then(Object::as_stream);
+//!     let data = data.and_then(|stream| stream.data.bytes()).map(<[u8]>::to_vec);
+//!     data.ok_or_else(|| Unreadable::new(id, Why::Damaged, "no such stream"))
+//! });
+//! let limits = Limits::DEFAULT;
 //! let mut budget = 1 << 20;
 //! let mut faults = Vec::new();
-//! let limits = Limits::DEFAULT;
-//! let read = Font::read(objects, &font, &limits, &mut budget, &mut faults).unwrap();
+//! let read = Font::read(streams, &font, &limits, &mut budget, &mut faults).unwrap();
+//! assert!(faults.is_empty());
+//! assert_eq!(budget, (1 << 20) - cmap.len());
+//!
+//! // Adobe's widths; the /ToUnicode's text, then WinAnsiEncoding's; heights guessed.
 //! assert_eq!(read.width(u32::from(b'A')), 722.0);
-//! assert_eq!(read.text(b"A\x80").as_deref(), Some("A€"));
-//! assert!(read.approx().heights && faults.is_empty());
+//! assert_eq!(read.codes(b"\x01A\x80").count(), 3);
+//! assert_eq!(read.text(b"\x01A\x80").as_deref(), Some("\u{FB01}A€"));
+//! assert!(read.approx().heights);
+//!
+//! // A stream past a cap of what gives it is the caller's to know, the budget kept.
+//! let capped = WithStreams::new(&resolve, |id, _| {
+//!     Err(Unreadable::new(id, Why::Capped, "past the reader's cap"))
+//! });
+//! let mut budget = 1 << 20;
+//! let error = Font::read(capped, &font, &limits, &mut budget, &mut ()).unwrap_err();
+//! assert!(matches!(error, Error::Unreadable(u) if u.why == Why::Capped));
+//! assert_eq!(budget, 1 << 20);
 //! ```
 //!
-//! pdf-objects is re-exported whole, none of its items by name, so what a font is
-//! read over and told to, a resolver, a `Streams` or a sink of one's own, names
-//! pdf-objects' items at the version this crate takes (`pdf_fonts::pdf_objects::Dict`);
-//! and pdf-content-streams, whose `Limits` are what a CMap and a CharProc are lexed
-//! under, is too.
-//!
-//! The metrics and the glyph lists are Adobe's, each under its own terms, in the
-//! file itself. [`Std14::NOTICE`] is the metrics' notice, for a binary's list of
-//! notices. What's taken from FreeType is under `FTL.TXT`, and the README says
-//! what that is, and what a binary must carry of it and of what the features pull
-//! in too.
+//! The metrics and the glyph lists are Adobe's, each under its own terms, in the file
+//! itself. [`Std14::NOTICE`] is the metrics' notice, for a binary's list of notices.
+//! What's taken from FreeType is under `FTL.TXT`. The README says what that is, and what
+//! a binary must carry of it and of what the features pull in.
 
 pub use pdf_content_streams;
 pub use pdf_objects;

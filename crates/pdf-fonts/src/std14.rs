@@ -94,6 +94,16 @@ impl Std14 {
     /// mapper): after a subset's tag (`ABCDEF+`), one of the 14 names or an
     /// alternate PDFium takes for one (`Arial,Bold`, `TimesNewRomanPSMT`), in
     /// any case. None for any other name.
+    ///
+    /// ```
+    /// use pdf_fonts::{Encoding, Std14, glyph_text};
+    ///
+    /// let font = Std14::named(b"ABCDEF+Arial,Bold").unwrap();
+    /// assert_eq!(font, Std14::HelveticaBold);
+    /// let glyph = Encoding::named(b"StandardEncoding").unwrap().glyph(b'A').unwrap();
+    /// assert_eq!(font.glyph_width(glyph), Some(722.0));
+    /// assert_eq!(glyph_text("f_i.alt", false).as_deref(), Some("fi"));
+    /// ```
     #[must_use]
     pub fn named(base_font: &[u8]) -> Option<Std14> {
         let name = match base_font.iter().position(|&c| c == b'+') {

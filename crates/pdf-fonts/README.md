@@ -1,61 +1,123 @@
 # pdf-fonts
 
-PDF's fonts (ISO 32000-2, 9), read. It's made for what reads a page's text and for what checks a file: a font dictionary's codes, CIDs, widths, heights and text, each as PDFium reads them; a simple font's encodings and the text its glyphs' names stand for, the standard 14's names and metrics, and what a font's program says of its glyphs' boxes, its heights and its text. Nothing here writes a font or paints a glyph.
+Read PDF's fonts (ISO 32000-2, 9) as PDFium reads them: a font's codes, CIDs, widths, heights and text, a simple font's encodings and the text of its glyphs' names, the standard 14's metrics, and its program's glyph boxes.
+
+It's made for what reads a page's text and for what checks a file. It reads no file itself. A font is read through what gives its objects and its streams' data, pdf-objects' `Resolve` and `Streams`: a pdf-structure `&Reading` is both, and pdf-objects' `WithStreams` makes both of a resolver and a function. It's built on [pdf-objects](https://crates.io/crates/pdf-objects) and [pdf-content-streams](https://crates.io/crates/pdf-content-streams) and re-exports both whole, so `pdf_fonts::pdf_objects` and `pdf_fonts::pdf_content_streams` name their types at the versions this crate is built with. Nothing here writes a font or draws a glyph.
 
 ## What it does
 
-- **A file's font, as read.** `Font::read` takes a font dictionary, a resolver of its objects and what gives its streams' data (pdf-objects' `Streams`, which what reads a file implements on itself and a reference to it has): a pdf-structure `&Reading`, or pdf-objects' `WithStreams`, a resolver and a function, for anything else. It gives the codes a string is in the font (`codes`), each code's CID (`cid`), width (`width`), vertical metrics (`vertical`) and text (`code_text`, `text`), how far the font's glyphs reach (`metrics`), a glyph's box where Adobe's metrics or a Type 3 font's CharProc say it (`glyph_box`) and where its program does (`char_box`), each read as PDFium reads it: Type 1, MMType1 and TrueType fonts' `/Widths`, `/FirstChar`, `/MissingWidth`, encodings and `/Differences`, a standard 14 font by its name with no `/Widths`, Type 3 fonts through their `/FontMatrix`, Type 0 fonts' `/W`, `/DW`, `/W2`, `/DW2`, an embedded CMap over those its `/UseCMap` names (the standard's reading: PDFium reads none of them and gives a code past the CMap's own ranges CID 0, so `approx` says what's taken from them), and a `/ToUnicode` CMap.
-- **As PDFium reads it, on what's hostile too.** Each value of a font's dictionary is read by what PDFium's accessor for it does, as of chromium/8125, each held to PDFium's own answers (`tests/pdfium`, by the repository's oracle). A whole number is `true` as 1, what's no number 0, a real cut from its 32-bit float, and past 32 bits 0, and it's held as PDFium holds it: a simple font's widths in 16 bits, a CID font's in 32 and its `/DW` and vertical metrics in 16. A reference is followed once, for a number, an array or a stream, and one to a reference is then none; a dictionary has a reference more, and a stream's will do. `/Differences` has that one reading, for text and for glyphs. A font PDFium doesn't load, a Type 0 font without one CIDFont or an `/Encoding` it can read, is told (`Fault::DescendantFonts`, `Fault::CMap`) and read as far as it reads, as PDFium draws nothing in it, and `Font::loaded` says so, for who has it from `Fonts`, which tells nothing.
-- **A font's program,** with the `programs` feature, on by default, through skrifa. `/FontFile`, `/FontFile2` or `/FontFile3`, told apart by its bytes as FreeType tells it: TrueType, OpenType over CFF, bare CFF, Type 1. `Font::program` says whether it was read, and `char_box` is each glyph's outline box, as PDFium's FreeType gives it: a code is mapped to its glyph as `LoadGlyphMap` maps it, through what's read of the encoding, the program's charmaps and its glyphs' names. A font's heights where its descriptor lacks them are the program's face's, and the text of a code PDFium's encoding leaves to the program is the program's: a symbolic Type 1 font's by its glyph's name, a symbolic TrueType font's by its charmap. A program FreeType wouldn't load reads as PDFium reads it, as no program at all, and is told (`Fault::ProgramMalformed`); but the parsers here are less strict than FreeType, so a crafted program it refuses can read, with boxes and a base encoding PDFium hasn't, and nothing says so. Where skrifa is known to read a program otherwise (a `loca` of a format neither short nor long, long metrics that don't fit `hmtx`, a `cmap` whose records don't fit, a glyph that doesn't parse), a glyph's box is none and `approx` says so. Its work is bounded: a TrueType glyph's composites and points are counted before it's drawn, a CFF or Type 1 glyph's charstrings evaluated within fuel, an accented character's components looked up among all the glyphs charged to it, each of these in `Limits`, and what it decompresses to and what drawing its glyphs costs charged to the budget (a CIDFont's as they're shown, `charge_outlines`). Past a bound, a glyph's box is none. Two bounds are skrifa's and read-fonts' own, that FreeType hasn't, so a crafted glyph PDFium draws has a box none whatever `Limits` says: a composite of more than 2,048 components that aren't empty, and a charstring of more than a million operations. Without the feature, and in `Font::read_for_text` and `Fonts::for_text`, whatever the build's features, no program is read: boxes are none, heights guessed, and that text guessed by the font's name.
-- **Where its text parts from PDFium's, on purpose.** Text isn't layout, and these are the better text: a name of joined parts is the Adobe Glyph List's (`f_i` is `fi`); a Dingbats name is text only in a ZapfDingbats font; WinAnsiEncoding's 0xA0 and 0xAD are Windows-1252's; a Type 3 font's names are read for text as a simple font's are; a CID's text is Adobe's UCS2 CMap's, where PDFium's own table is older; a `/ToUnicode` range is read to its last code, where PDFium stops at its low byte or loses the block; a glyph name there is the list's text and a value of one byte that byte's character, where PDFium has none; a surrogate pair is the one character it means and half of one U+FFFD, where PDFium's are 16-bit units; 0xC1 by a program's Mac charmap is the inverted exclamation mark, where PDFium's table has the pound sign. A predefined CMap's CIDs are Adobe's current ones, so where PDFium's own table has no such code or another CID for it, as in the UTF-16 CMaps it does, ASCII's `|` and `~` in UniJIS-UTF16-H among them, the width differs too. A CMap is lexed as content, not by PDFium's word parser, so a crafted one can read otherwise. MacExpertEncoding reads as WinAnsiEncoding as PDFium reads the name, and as a `/BaseEncoding` where the program is TrueType; anywhere else in an encoding dictionary it isn't read, nor is PDFDocEncoding, so a program's glyph by one has no box. `tests/pdfium/differ.tsv` lists every case of these, and why.
-- **What's guessed is said, and what fails is the caller's.** What can't be known is guessed, and `approx` says which of codes, widths, heights and boxes (`FontApprox`). What's wrong with the dictionary never fails a reading, and is told to a sink with where it is, a `Fault` to pdf-objects' `fault::Sink<Fault>` with its `fault::Place`, as is a CMap chain cut at a cap of the reading's, which says nothing of the file (`Fault::TooManyCMaps`): a `Vec` keeps them, and `()` looks for none, what's read being the same whatever the sink. A reading fails only for what its streams decompress to, past the budget it's read within, which is the caller's (`Error::TooLarge`), or for what doesn't read for a reason that's not the font's, a locked file, a source that failed, a cap met (`Error::Unreadable`). The budget is left as it was. A `Streams` is held to what it's asked for: data past the limit is too large, whatever gave it, and so is a stream past a cap of what gives it (`Why::Capped`); a stream whose decode fails before it gives a byte, or whose filters the reader doesn't decode (`Why::Damaged`, `Why::Filter`), is read as none, and what the font makes of none told.
-- **Each font read once.** `Fonts` keeps a source's fonts by number, for every page that draws in them, charging what each cost to each page's budget, so that what a page costs is the same whichever page read it first; `FontScope`, one interpretation's picks by name. `Fonts::stock` is what PDFium draws text in where the resources have no font by the name given.
-- **Encodings.** `Encoding` is a simple font's encoding, code to glyph name: StandardEncoding, WinAnsiEncoding and MacRomanEncoding (ISO 32000-2, D.2), and Symbol's and ZapfDingbats' own (D.5, D.6). `Encoding::named` takes a font's `/Encoding` or `/BaseEncoding`. MacExpertEncoding isn't read, and is none, as an unknown name is. `Encoding::text` is the text a code draws; WinAnsi's is Windows-1252's where that has one, `cp1252`, so its second space and hyphen are U+00A0 and U+00AD, and the codes above the space it leaves empty draw the bullet. MacRoman's 0xF0 is the Apple logo, as PDFium's table has it.
-- **Glyph names.** `glyph_text` reads a name by the Adobe Glyph List's rules: what follows a period is passed over, the parts an underscore joins are each read, and a part is read from the ITC Zapf Dingbats list, in a font of those, the Adobe Glyph List, `uniXXXX…` or `uXXXX` to `uXXXXXX`. `name_code_point` reads a name as FreeType's glyph name list does, which PDFium copies: `uni` and four digits, `u` and four to six, or the list's code point where it gives exactly one.
-- **The standard 14.** `Std14::named` takes a font's `/BaseFont` as PDFium draws it, as of chromium/8125: after a subset's tag, the 14 names or an alternate of 75 more (`Arial,Bold`, `TimesNewRomanPSMT`), in any case. `metrics`, `glyph_width` and `glyph_box` are Adobe's. `drawn_otherwise` says where PDFium's own faces draw a glyph at another width.
-- **Type 1 programs,** with `programs`, are scanned before they're read, as far as their charstrings by glyph name, for fuel of this crate's. The scan's work is capped (`Limits::type1_work`), past which a program is refused: read-fonts reads a program's tokens in time that grows as the program does, but looks for each name of its `/Encoding` among all its glyphs, one by one, however many it's given, so a program past that isn't handed to it, and reads as no program, where FreeType, which looks up none, would load it.
-- **Predefined CMaps,** behind the `predefined-cmaps` feature, whose bundle is [hayro-cmap](https://crates.io/crates/hayro-cmap).
-- **`tracing`**, off by default. A font read (`Font::read`, `Font::read_for_text`, and `Fonts` and `FontScope` where they read one), its program read and opened, an embedded CMap's chain, its `/ToUnicode` and a Type 3 font's CharProcs each run in a span at `debug`, through [tracing](https://crates.io/crates/tracing). A span's fields are numbers, never a byte of a file. A code, a width, a string's text and a glyph's box have none, as their loop is the caller's, nor has a font looked up where it was read before.
-- **Under caps.** `Limits` is one value for all of them, and nothing panics on what it's given, a program's parsers being the one thing that rests on others' promises: skrifa and read-fonts forbid `unsafe`, and are fuzzed upstream. What a font's streams decompress to is the budget's; what it holds beyond that is bounded by what it reads, a `/W` range of 2³¹ CIDs being one range. A CMap and a CharProc are lexed by pdf-content-streams, under its caps. An AFM is only ever this crate's own file, so a parser of them has no caps and takes no file's bytes.
+- **Read a file's font.** `Font::read` reads a font dictionary as PDFium (chromium/8125) does: Type 1, MMType1, TrueType, Type 3 and Type 0 fonts, their widths, encodings and `/Differences`, their CMaps and their `/ToUnicode`. Each value is read as PDFium's accessor for it reads it, a hostile one too.
+- **Split a string into codes, and read each.** `Font::codes` gives the codes a string is in the font, as a `Codes` iterator. `cid`, `width`, `vertical` and `code_text` give a code's CID, width, vertical metrics and text, and `text` a string's. `metrics` says how far the font's glyphs reach, and `glyph_box` and `char_box` give a glyph's box.
+- **Know what's guessed.** What can't be known is guessed, and `Font::approx` says which of its codes, widths, heights and boxes are guessed (`FontApprox`). `Font::loaded` says whether PDFium loads the font at all.
+- **Read each font once.** `Fonts` keeps a source's fonts by number for every page that draws in them. What each cost is charged to each page's budget, so a page costs the same whichever page read a font first. `FontScope` keeps the fonts one interpretation of content picks, by name. `Fonts::stock` is the font PDFium draws text in where the resources name none.
+- **Measure a glyph by its font's program.** With `programs`, a font's embedded program is read through skrifa. `Font::char_box` is a glyph's outline box as PDFium's FreeType gives it. The font's heights come from the program where its descriptor lacks them, and so does the text of a code PDFium's encoding leaves to it. `Font::program` says what was read (`FontProgram`). `Font::read_for_text` and `Fonts::for_text` read no program, whatever the build's features.
+- **Look up encodings and glyph names.** `Encoding` is a simple font's encoding, code to glyph name: StandardEncoding, WinAnsiEncoding and MacRomanEncoding (D.2), and Symbol's and ZapfDingbats' own (D.5, D.6). `glyph_text` gives the text a glyph's name stands for, by the Adobe Glyph List's rules, and `name_code_point` reads a name as FreeType's glyph name list does. `cp1252` gives Windows-1252's character for a code.
+- **Find a standard 14 font.** `Std14::named` takes a `/BaseFont` as PDFium does: after a subset's tag, one of the 14 names or of 75 alternates (`Arial,Bold`), in any case. `metrics`, `glyph_width` and `glyph_box` are Adobe's. `drawn_otherwise` says where PDFium's own faces draw a glyph at another width.
+- **See where a font departs from the standard.** Each departure is a `Fault`, told with its place to pdf-objects' `fault::Sink`, and the reading goes on past it. A cap of the reading's own (`Fault::TooManyCMaps`, `Fault::ProgramCapped`) and what the build hasn't (`Fault::PredefinedNotBuilt`) are told apart, as they say nothing of the file. With `()` as the sink, no fault is looked for. What's read is the same through any sink. One sink can take pdf-semantics' and pdf-color's faults too.
+- **Read hostile files.** `Limits` caps a CMap's chain, a Type 1 program's scan and a program's glyphs, and holds pdf-content-streams' caps, which a CMap and a CharProc are lexed under. Past a content cap, a CMap or a CharProc is read as far as it lexes. Past a chain's cap, what it would give is guessed and told. Past the scan's, the program reads as none (`Fault::ProgramCapped`). Past a glyph's, its box is none. What a font's streams decompress to is charged to the caller's budget, and so is what drawing its glyphs costs, a CIDFont's as they're shown (`Font::charge_outlines`). Past the budget, a reading fails with `Error::TooLarge`.
+- **Know when a read failed.** An object or a stream may not read for a reason that's the caller's: past a cap of what gives it (`Why::Capped`), behind a password or from a source that failed. That fails the reading with `Error::Unreadable`, never a font with no widths. What's told to the sink after it is of the font without it. Either way, the budget is as it was.
+- **Share a font across threads.** A `Font` owns what it holds. `Font`, `Fonts` and `Codes` are `Send` and `Sync`. A `Font`'s `Debug` says what it is and how much it holds, never a file's text.
+
+Nothing in this crate panics on what a file holds. A program is parsed by skrifa and read-fonts, which forbid `unsafe` and are fuzzed upstream. read-fonts 0.46, which this release takes, panics on a crafted Type 1 or CFF program where overflow checks are on, as in a debug build. Its 0.47 fixes that.
+
+## Features
+
+- **`programs`**, on by default. A font's program is read through [skrifa](https://crates.io/crates/skrifa), as above. Without it, a glyph has no box from a program, the font's heights are guessed, and the text a program would give is guessed by the font's name.
+- **`predefined-cmaps`**, off by default. Adobe's predefined CMaps come from [hayro-cmap](https://crates.io/crates/hayro-cmap)'s bundle. Without it, a predefined CMap reads as one the build hasn't: its codes are guessed, `FontApprox::codes` says so, and `Fault::PredefinedNotBuilt` is told. With `()` as the sink, `approx` alone says it.
+- **`tracing`**, off by default. A font read (`Font::read`, `Font::read_for_text`, and `Fonts` and `FontScope` where they read one) runs in a span at `debug`, through [tracing](https://crates.io/crates/tracing). Within it, so do its program's opening, its embedded CMap's and its `/ToUnicode`'s parsing once each is decompressed, and a Type 3 font's CharProcs. A span's fields are numbers, never a byte of a file. A code, a width, a string's text and a glyph's box have none, as their loop is the caller's, nor has a font looked up where it was read before.
+
+## An example
+
+Helvetica-Bold by a name PDFium takes for it, its `/ToUnicode` read through its streams, and the same font past a cap of what gives them:
 
 ```rust
-use pdf_fonts::pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
-use pdf_fonts::{Font, Limits};
+use std::collections::BTreeMap;
 
-// A font with no streams, over a resolver of nothing.
-let none = |_: ObjectId| -> Option<&Object> { None };
-let objects = WithStreams::new(&none, |id, _| Err(Unreadable::new(id, Why::Damaged, "none")));
-let font = dict! {
-    "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65, "Widths" => vec![Object::from(600)],
+use pdf_fonts::pdf_objects::{
+    Object, ObjectId, Stream, Unreadable, Why, WithStreams, dict,
 };
+use pdf_fonts::{Error, Font, Limits};
+
+// Helvetica-Bold, by a name PDFium takes for it, its /ToUnicode object 1.
+let font = dict! {
+    "Subtype" => "Type1", "BaseFont" => "Arial,Bold", "Encoding" => "WinAnsiEncoding",
+    "ToUnicode" => Object::reference(1),
+};
+let cmap = b"1 begincodespacerange <00> <FF> endcodespacerange\n\
+    1 beginbfchar <01> <FB01> endbfchar";
+let stream = Stream::new(dict! {}, cmap.to_vec());
+let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(stream))]);
+
+// Its objects, and its streams' data as they hold it.
+let resolve = |id: ObjectId| objects.get(&id);
+let streams = WithStreams::new(&resolve, |id, _| {
+    let data = objects.get(&id).and_then(Object::as_stream);
+    let data = data.and_then(|stream| stream.data.bytes()).map(<[u8]>::to_vec);
+    data.ok_or_else(|| Unreadable::new(id, Why::Damaged, "no such stream"))
+});
+let limits = Limits::DEFAULT;
 let mut budget = 1 << 20;
 let mut faults = Vec::new();
-let read = Font::read(objects, &font, &Limits::DEFAULT, &mut budget, &mut faults).unwrap();
-assert_eq!(read.width(65), 600.0);
-assert_eq!(read.codes(b"AB").count(), 2);
-assert!(read.approx().heights);
+let read = Font::read(streams, &font, &limits, &mut budget, &mut faults).unwrap();
 assert!(faults.is_empty());
+assert_eq!(budget, (1 << 20) - cmap.len());
+
+// Adobe's widths; the /ToUnicode's text, then WinAnsiEncoding's; heights guessed.
+assert_eq!(read.width(u32::from(b'A')), 722.0);
+assert_eq!(read.codes(b"\x01A\x80").count(), 3);
+assert_eq!(read.text(b"\x01A\x80").as_deref(), Some("\u{FB01}A€"));
+assert!(read.approx().heights);
+
+// A stream past a cap of what gives it is the caller's to know, the budget kept.
+let capped = WithStreams::new(&resolve, |id, _| {
+    Err(Unreadable::new(id, Why::Capped, "past the reader's cap"))
+});
+let mut budget = 1 << 20;
+let error = Font::read(capped, &font, &limits, &mut budget, &mut ()).unwrap_err();
+assert!(matches!(error, Error::Unreadable(u) if u.why == Why::Capped));
+assert_eq!(budget, 1 << 20);
 ```
 
-```rust
-use pdf_fonts::{Encoding, Std14, glyph_text};
+## How it's held to PDFium
 
-let font = Std14::named(b"ABCDEF+Arial,Bold").unwrap();
-assert_eq!(font, Std14::HelveticaBold);
-let glyph = Encoding::named(b"StandardEncoding").unwrap().glyph(b'A').unwrap();
-assert_eq!(font.glyph_width(glyph), Some(722.0));
-assert_eq!(glyph_text("f_i.alt", false).as_deref(), Some("fi"));
-```
+The reading follows PDFium's behaviour as of chromium/8125, written in this crate's own code but for what the licence below says is FreeType's. Cases in the repository's `tests/pdfium` hold it there, each with PDFium's answer recorded from that build. Where this crate reads a case otherwise, `tests/pdfium/differ.tsv` lists it with why. Those files aren't in the package.
+
+- **Its text is the better text, on purpose,** as text isn't layout. A glyph name of joined parts is the Adobe Glyph List's text (`f_i` is `fi`), and a Dingbats name is text only in a ZapfDingbats font. WinAnsiEncoding's 0xA0 and 0xAD are Windows-1252's. A Type 3 font's names are read for text. A CID's text is Adobe's UCS2 CMap's. A `/ToUnicode` range is read to its last code, and a surrogate pair is the one character it means.
+- **A CMap is read as ISO 32000-2 has it.** An embedded CMap's `/UseCMap` and `usecmap` are read, where PDFium reads neither, and `FontApprox::codes` says what's taken from them. A predefined CMap's CIDs are Adobe's current ones. A CMap is lexed as content, not by PDFium's word parser, so a crafted one can read otherwise.
+- **MacExpertEncoding and PDFDocEncoding have no table here.** Where an encoding dictionary names one, the font's own encoding stands, and a program's glyph by it has no box.
+- **A program is read by skrifa and read-fonts, not FreeType.** Where they're known to read one otherwise, a glyph's box is none, and `FontApprox::boxes` says so. They're less strict than FreeType, so a crafted program it refuses can read here, with boxes PDFium hasn't, and nothing says so. A composite of more than 2,048 components and a charstring of more than a million operations are past their own bounds, so such a glyph's box is none where PDFium draws it.
+
+## Exhaustive on purpose, or not
+
+`Std14`, `Rect` and `VerticalMetrics` are exhaustive: the standard's 14 are fixed, and a rectangle and a glyph's vertical metrics are their parts. `Std14::ALL` lists the 14. Every other enum and every struct with public fields is `#[non_exhaustive]`, so each can grow in a minor release. `Fault`'s variants aren't, so a fault can be built and compared.
+
+## What isn't here
+
+- **Writing a font, or drawing a glyph.** A glyph's box is given, never its outline.
+- **Placing text on a page.** A string's text is its codes' text in order. Where each glyph goes, under the text state, is the caller's.
+- **The faces PDFium draws in.** A font without a program is drawn by PDFium in a face of its own or the system's, which isn't read here: a standard 14 font's widths are Adobe's, and its heights are guessed.
+- **Kerning.** The standard 14's metrics are kept without their kerning pairs.
+- **A font dictionary typed key by key, by ISO 32000-2's tables.** `Font` is a reading, as PDFium's is, and a `Fault` says where a font departs from the standard.
+
+## Stability
+
+This is an alpha: any alpha may change the API, and the CHANGELOG says how to follow. Depend on the exact version, `pdf-fonts = "=0.1.0-alpha.1"`. It needs Rust 1.89 or later.
 
 ## License
 
 Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)) or MIT license ([LICENSE-MIT](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-MIT)) at your option.
 
-The data isn't this crate's, and each part of it has its own terms, in the file that holds it:
+The fonts' data isn't this crate's, and each part of it has its own terms, in the file that holds it:
 
-- **`assets/afm`:** Adobe's Core 14 font metrics. They may be used and distributed for any purpose, with or without modification, on the terms of Adobe's paragraph, which [`assets/afm/MustRead.html`](https://github.com/sheaf-pdf/pdf-lint/blob/main/crates/pdf-fonts/assets/afm/MustRead.html) holds as Adobe distributes it, unmodified, and each file carries too, in a `Comment` on its third line. Each file's second line says what's modified, and all its copyright notices are as Adobe wrote them. They're compiled in whole, so a binary holds them with their notices. `Std14::NOTICE` is the paragraph, and `Std14::afm_text` a font's whole file, for a binary's list of notices.
+- **`assets/afm`:** Adobe's Core 14 font metrics. They may be used and distributed for any purpose, with or without modification, on the terms of Adobe's paragraph. [`assets/afm/MustRead.html`](https://github.com/sheaf-pdf/pdf-lint/blob/main/crates/pdf-fonts/assets/afm/MustRead.html) holds it as Adobe distributes it, unmodified, and each file carries it too, in a `Comment` on its third line. Each file's second line says what's modified, and its copyright notices are as Adobe wrote them. They're compiled in whole, so a binary holds them with their notices. `Std14::NOTICE` is the paragraph, and `Std14::afm_text` a font's whole file, for a binary's list of notices.
 - **`assets/glyphlist.txt` and `assets/zapfdingbats.txt`:** the Adobe Glyph List and the ITC Zapf Dingbats Glyph List, unchanged, under the BSD 3-Clause license, each with the whole of it in its header. A binary's documentation must reproduce it, as for any dependency under that license.
 - **With `predefined-cmaps`,** Adobe's CMaps are hayro-cmap's, under the BSD 3-Clause license (its package's `assets/LICENSE.txt`), not in this package. A binary that turns the feature on carries that notice too.
 - **With `programs`,** on by default, skrifa and what it pulls in carry their own terms, in their packages: MIT OR Apache-2.0 for the most part, Unicode-3.0 for yoke and zerofrom, whose notice a binary keeps, and Zlib for foldhash. A binary's list of notices takes them from there.
 
-Some of `src/program.rs` comes from FreeType's code, copyright David Turner, Robert Wilhelm, and Werner Lemberg, and is under the FreeType Project License, [`FTL.TXT`](https://github.com/sheaf-pdf/pdf-lint/blob/main/crates/pdf-fonts/FTL.TXT), unaltered, not the licenses above; the package's `license` says so. What it takes, written in Rust and changed to fit this crate: its reading of format 4 and format 2 `cmap` subtables translates `tt_cmap4_validate`, `tt_cmap4_char_map_linear`, `tt_cmap4_char_map_binary`, `tt_cmap2_validate`, `tt_cmap2_get_subheader` and `tt_cmap2_char_index` (`ttcmap.c`); its reading of a bare CFF font's encoding translates `cff_encoding_load` (`cffload.c`); and its lists of tricky fonts and of the glyph names it adds to Unicode's are FreeType's (`trick_names`, `ttobjs.c`; `ft_extra_glyph_unicodes`, `psmodule.c`). With `programs`, a binary's documentation must say that it's based in part on the work of the FreeType Team.
+Some of `src/program.rs` comes from FreeType's code, copyright David Turner, Robert Wilhelm, and Werner Lemberg. It's under the FreeType Project License, [`FTL.TXT`](https://github.com/sheaf-pdf/pdf-lint/blob/main/crates/pdf-fonts/FTL.TXT), unaltered, not the licenses above, and the package's `license` says so. It's written in Rust and changed to fit this crate:
+
+- its reading of format 4 and format 2 `cmap` subtables translates `tt_cmap4_validate`, `tt_cmap4_char_map_linear`, `tt_cmap4_char_map_binary`, `tt_cmap2_validate`, `tt_cmap2_get_subheader` and `tt_cmap2_char_index` (`ttcmap.c`)
+- its reading of a bare CFF font's encoding translates `cff_encoding_load` (`cffload.c`)
+- its lists of tricky fonts and of the glyph names it adds to Unicode's are FreeType's (`trick_names`, `ttobjs.c`; `ft_extra_glyph_unicodes`, `psmodule.c`)
+
+With `programs`, a binary's documentation must say that it's based in part on the work of the FreeType Team.
