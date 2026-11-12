@@ -7,7 +7,7 @@
 #![cfg(feature = "family")]
 
 use chacha20::ChaCha20Rng;
-use pdf_linearize::family::{self, Error, Options};
+use pdf_linearize::family::{self, Error, Options, Rc4};
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::parse::Parser;
 use pdf_objects::serialize;
@@ -19,7 +19,7 @@ use pdf_structure::write::{self, Deflate, Encryptor};
 use pdf_structure::{Document, Encryption, XrefKind};
 
 mod written;
-use written::{KEYS, encrypted_as, file, kinds, opened, stream};
+use written::{KEYS, ROOT, encrypted_as, file, kinds, opened, stream};
 
 /// What every string and stream of [`secrets`] holds, and nothing else in a file.
 const SECRET: &[u8] = b"secret";
@@ -82,13 +82,15 @@ fn under(
 }
 
 /// `bytes`, read by `password`, written encrypted as it is, by an encryptor of that
-/// reading, so what may be copied is.
+/// reading, so what may be copied is; under RC4, told to reuse the file's
+/// keystreams, as this layout puts each object at another's (the module's
+/// "Encrypted"), which under AES changes nothing.
 fn own(
     bytes: &[u8],
     password: &str,
     options: &Options<'_>,
 ) -> Result<(Vec<u8>, family::Linearized), Error> {
-    own_by(bytes, password, options, |encryptor| encryptor)
+    own_by(bytes, password, options, Encryptor::reusing_rc4_keystreams)
 }
 
 /// [`own`], each write's IVs the test writer's derived ones, so that a file
@@ -99,7 +101,9 @@ fn own_derived(
     options: &Options<'_>,
 ) -> Result<(Vec<u8>, family::Linearized), Error> {
     own_by(bytes, password, options, |encryptor| {
-        encryptor.with_test_ivs(Ivs::derived)
+        encryptor
+            .reusing_rc4_keystreams()
+            .with_test_ivs(Ivs::derived)
     })
 }
 
@@ -246,7 +250,9 @@ fn each_kind_reads_back_under_each_encryption() {
             reads_back(&out, &done, "", &name);
             // By the bytes alone it's the same file: the same document read
             // back, its AES ciphertexts under IVs of their own.
-            let alone = family::linearize_bytes(&bytes, options).unwrap();
+            let mut options = *options;
+            options.rc4 = Rc4::ReusingKeystreams;
+            let alone = family::linearize_bytes(&bytes, &options).unwrap();
             assert_eq!(in_the_clear(&alone, ""), in_the_clear(&out, ""), "{name}");
         }
     }
@@ -380,9 +386,10 @@ fn stored_mark(file: &[u8], n: u32) -> Option<Vec<u8>> {
     }
 }
 
-/// Under RC4, an object laid out at a number and generation another object of
-/// the file read was at is encrypted with that one's keystream: the XOR of the
-/// two ciphertexts is the XOR of the two marks. The file read is a whole file of
+/// Under RC4, told to reuse the file's keystreams, an object laid out at a
+/// number and generation another object of the file read was at is encrypted
+/// with that one's keystream: the XOR of the two ciphertexts is the XOR of the
+/// two marks, which is what a caller who tells it so accepts. The file read is a whole file of
 /// pdf-structure's under the key's encryption, which writes an object at a
 /// number the key's file used at its next generation, under another keystream
 /// than the one laid out there at 0: those don't leak so. Under AES nothing
@@ -442,6 +449,188 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
         );
         let rc4 = name.starts_with("RC4");
         assert_eq!(leaked, if rc4 { moved } else { 0 }, "{name}");
+    }
+}
+
+/// Whether `object` holds a string that isn't empty, at any depth.
+fn holds_a_string(object: &Object) -> bool {
+    let mut stack = vec![object];
+    while let Some(object) = stack.pop() {
+        match object.value() {
+            Value::String(text, _) => {
+                if text.as_bytes().is_some_and(|text| !text.is_empty()) {
+                    return true;
+                }
+            }
+            Value::Array(items) => stack.extend(items),
+            Value::Dict(dict) => stack.extend(dict.entries().iter().map(|e| &e.value)),
+            Value::Stream(stream) => stack.extend(stream.dict.entries().iter().map(|e| &e.value)),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Each object of `out`, read by `password`, whose strings or stream's data RC4
+/// would encrypt at a keystream `file`, read by the empty password, used, as its
+/// rows say: an object's in use there at that generation or a later one, or
+/// below a free entry's generation. What's in the clear isn't among them, the
+/// encryption dictionary and the cross-reference streams, nor what holds no
+/// string and no data, which encrypt to nothing. By number, ascending.
+fn at_used_keystreams(file: &[u8], out: &[u8], password: &str) -> Vec<ObjectId> {
+    let read = opened(file, "");
+    let rows: Vec<(u32, u16, XrefEntry)> = read.entries().collect();
+    let used = |id: ObjectId| {
+        rows.iter().any(|&(n, generation, entry)| {
+            n == id.number
+                && match entry {
+                    XrefEntry::InUse { .. } => id.generation <= generation,
+                    XrefEntry::Free { .. } => id.generation < generation,
+                    _ => false,
+                }
+        })
+    };
+    let back = opened(out, password);
+    let dictionary = (back.trailer().dict().get(b"Encrypt")).and_then(Object::as_reference);
+    let mut ids = Vec::new();
+    for (n, generation, entry) in back.entries() {
+        let id = ObjectId::new(n, generation);
+        if !matches!(entry, XrefEntry::InUse { .. }) || Some(id) == dictionary || !used(id) {
+            continue;
+        }
+        let object = back.get(id).unwrap();
+        let encrypted = match object.value() {
+            Value::Stream(stream) => {
+                let length = stream.dict.get(b"Length").and_then(Object::as_integer);
+                !stream.dict.has_type(b"XRef") && length.is_some_and(|length| length > 0)
+            }
+            _ => holds_a_string(object),
+        };
+        if encrypted {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    ids
+}
+
+/// Under RC4 the layout puts strings and streams at keystreams the file read
+/// used, which is refused, `out` as it was given, unless the encryptor is told
+/// to reuse them; told so, what's written lists exactly each object it put at
+/// one, the object streams among them, and is otherwise the file it writes;
+/// and [`family::linearize_bytes`] is refused alike unless its options say so.
+/// Under AES nothing is refused, and nothing listed.
+#[test]
+fn under_rc4_a_keystream_the_file_used_is_refused_unless_the_caller_reuses_it() {
+    let plain = built(&secrets(""));
+    for (name, key) in KEYS {
+        let bytes = encrypted_as(key, &plain);
+        let rc4 = name.starts_with("RC4");
+        for (kind, options) in kinds().iter().enumerate() {
+            let name = format!("{name}, kind {kind}");
+            let reading = opened(&bytes, "");
+            let doc = reading.to_document().unwrap();
+            let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+            let mut out = vec![7];
+            let as_given =
+                family::linearize(&mut out, &doc, Some(&encryptor), Some(&reading), options);
+            let (told, done) = own(&bytes, "", options).unwrap();
+            let bytes_alone = family::linearize_bytes(&bytes, options);
+            let mut reusing = *options;
+            reusing.rc4 = Rc4::ReusingKeystreams;
+            let bytes_reusing = family::linearize_bytes(&bytes, &reusing).unwrap();
+            if !rc4 {
+                let as_given = as_given.unwrap();
+                assert!(as_given.keystreams_reused.is_empty(), "{name}");
+                assert!(done.keystreams_reused.is_empty(), "{name}");
+                assert_eq!(
+                    in_the_clear(&out[1..], ""),
+                    in_the_clear(&told, ""),
+                    "{name}"
+                );
+                let alone = bytes_alone.unwrap();
+                assert_eq!(in_the_clear(&alone, ""), in_the_clear(&told, ""), "{name}");
+                continue;
+            }
+            let refused = as_given.unwrap_err();
+            let keystream = |refused: &Error| match refused {
+                Error::Write(write::Error::Encrypt { id, why }) => {
+                    assert_eq!(*why, write::Unencryptable::Keystream, "{name}");
+                    *id
+                }
+                refused => panic!("{name}: {refused}"),
+            };
+            let at = keystream(&refused);
+            assert_eq!(out, [7], "{name}");
+            assert_eq!(keystream(&bytes_alone.unwrap_err()), at, "{name}");
+            // Each object the layout put at a keystream used, by the test's own
+            // count of what's written and what the file's rows say.
+            let counted = at_used_keystreams(&bytes, &told, "");
+            assert_eq!(done.keystreams_reused, counted, "{name}");
+            assert!(counted.contains(&at), "{name}: {at:?}");
+            if options.pack {
+                let back = opened(&told, "");
+                let container = |id: &ObjectId| {
+                    let object = back.get(*id).unwrap();
+                    object
+                        .as_stream()
+                        .is_some_and(|s| s.dict.has_type(b"ObjStm"))
+                };
+                assert!(counted.iter().any(container), "{name}: no object stream");
+            }
+            // RC4's keystreams are the same each write, so by the bytes alone
+            // it's the same file.
+            assert_eq!(bytes_reusing, told, "{name}");
+        }
+    }
+}
+
+/// A file whose strings and streams the layout puts at keystreams the file
+/// never used is written under RC4 whatever the caller says; and one whose only
+/// string or stream at a keystream used is the hint stream's data is refused at
+/// it, by the same error as a body's, or written listing it alone. The file
+/// read is a whole file of pdf-structure's under the key's encryption, which
+/// moved what it wrote past the numbers the key's file used, 1 to 8.
+#[test]
+fn under_rc4_only_what_goes_at_a_keystream_used_is_refused() {
+    let rc4 = KEYS[1].1;
+    // The pages, and objects enough that the hint stream, numbered last, is
+    // past 8; no string or stream in any, so nothing else is encrypted.
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R /More [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R] >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 1 1] >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+    ];
+    objects.extend(["<< /More 1 >>"; 6]);
+    let bytes = encrypted_as(rc4, &file(&objects, ROOT));
+    let used = |number: u32| {
+        let rows = opened(&bytes, "").entries().collect::<Vec<_>>();
+        rows.iter().any(|&(n, generation, entry)| {
+            n == number && (generation > 0 || matches!(entry, XrefEntry::InUse { .. }))
+        })
+    };
+    assert!((1..=8).all(used) && !used(10), "the key's file's numbers");
+    // Packed, the six would go in an object stream, numbered among them.
+    for options in &kinds()[..2] {
+        let (out, done) = own_by(&bytes, "", options, |encryptor| encryptor).unwrap();
+        assert!(done.keystreams_reused.is_empty());
+        assert_eq!(at_used_keystreams(&bytes, &out, ""), []);
+        assert_eq!(family::linearize_bytes(&bytes, options).unwrap(), out);
+    }
+    // The pages alone, so the hint stream is at a number the file used.
+    let bytes = encrypted_as(rc4, &file(&objects[..3], ROOT));
+    for options in kinds() {
+        let refused = own_by(&bytes, "", &options, |encryptor| encryptor).unwrap_err();
+        let Error::Write(write::Error::Encrypt { id, why }) = refused else {
+            panic!("{refused}");
+        };
+        assert_eq!(why, write::Unencryptable::Keystream);
+        let (out, done) = own(&bytes, "", &options).unwrap();
+        let (at, _) = done.layout.hint_extent();
+        let hint = Parser::at(&out, at as usize).header().unwrap();
+        assert_eq!(id, hint);
+        assert_eq!(done.keystreams_reused, [hint]);
+        assert_eq!(at_used_keystreams(&bytes, &out, ""), [hint]);
     }
 }
 
@@ -990,7 +1179,9 @@ fn a_file_with_no_id_of_its_own_takes_the_encryptor_s_first_string() {
     let bytes = file(&page, "/Root 1 0 R");
     for (name, key) in KEYS {
         let key = opened(key, "");
+        // Under RC4, told to reuse the keystreams the key's file used.
         let encryptor = Encryptor::of(&key).unwrap().unwrap();
+        let encryptor = encryptor.reusing_rc4_keystreams();
         let (out, done) = under(&bytes, "", Some(&encryptor), &Options::DEFAULT).unwrap();
         assert!(!holds(&out, SECRET), "{name}");
         let first = encryptor.first_id().unwrap();
@@ -1098,7 +1289,8 @@ fn a_file_laid_out_encrypted_is_laid_out_again() {
     let plain = built(&secrets(""));
     for (name, key) in KEYS {
         let bytes = encrypted_as(key, &plain);
-        for options in kinds() {
+        for mut options in kinds() {
+            options.rc4 = Rc4::ReusingKeystreams;
             let once = family::linearize_bytes(&bytes, &options).unwrap();
             let (twice, done) = own(&once, "", &options).unwrap();
             reads_back(&twice, &done, "", name);
@@ -1120,6 +1312,7 @@ fn the_files_of_pdfiums_cases_are_written() {
         let given = [Password("user")];
         let mut options = options;
         options.read.passwords = &given;
+        options.rc4 = Rc4::ReusingKeystreams;
         let out = family::linearize_bytes(&bytes, &options).unwrap();
         std::fs::write(folder.join(format!("written-{file}-{kind}.pdf")), out).unwrap();
     }

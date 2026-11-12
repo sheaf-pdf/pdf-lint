@@ -215,7 +215,7 @@ mod family {
     use std::collections::BTreeSet;
 
     use chacha20::ChaCha20Rng;
-    use pdf_linearize::family::{Options, linearize, linearize_bytes};
+    use pdf_linearize::family::{Options, Rc4, linearize, linearize_bytes};
     use pdf_structure::XrefKind;
     use pdf_structure::pdf_crypt::Password;
     use pdf_structure::pdf_crypt::Protection;
@@ -310,7 +310,14 @@ mod family {
         let plain = built(&two_pages(""));
         for (name, key) in KEYS {
             let name = name.replace(' ', "-");
-            holds(&name, &encrypted_as(key, &plain), &[], &[HINT_LAST]);
+            let bytes = encrypted_as(key, &plain);
+            // Under RC4, each number's keystream used again, as asked.
+            let written = |options: &Options<'_>| {
+                let mut options = *options;
+                options.rc4 = Rc4::ReusingKeystreams;
+                linearize_bytes(&bytes, &options).unwrap()
+            };
+            holds_as(&name, written, "", &[], &[HINT_LAST]);
         }
         // A new encryption, by its password: over a plain reading, and an RC4 one.
         let prepared = Password("user").prepared().unwrap();

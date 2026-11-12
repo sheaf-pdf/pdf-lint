@@ -37,7 +37,9 @@
 //! differently, or that reads otherwise going down `/Kids` from the root than
 //! up its `/Parent`s, as pushing one value down would change the other's page.
 //! So is a document no password opened ([`Error::Locked`]), whose strings and
-//! streams are still what the file holds, and whose key there's none of.
+//! streams are still what the file holds, and whose key there's none of; and,
+//! under RC4, a string or stream that would go at a keystream the file read
+//! used, unless the caller accepts what that leaks ("Encrypted", below).
 //!
 //! # Encrypted
 //!
@@ -55,17 +57,25 @@
 //! encryption.
 //!
 //! **Under keys made per object, every number is reused.** A section of this
-//! layout lists no number free but 0 (F.3.4, F.3.11), and its numbers run from
-//! 1 without a gap (F.3.1), so what [`Encryptor::of`] says of a file's free
-//! numbers can't hold here: none is listed, and an object may be written at
-//! one. Every object moves, so under RC4 every number's keystream now encrypts
-//! another object's plaintext, as pdf-structure's writer writes only told to
-//! ([`Encryptor::reusing_rc4_keystreams`]). One who holds both the file read
-//! and this one has, for each number, the XOR of the two plaintexts
-//! ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). AES-128's IVs are
-//! random, each write's own from the operating system, so nothing leaks that
-//! way. A caller who doesn't want that gives [`Encryptor::create`] a new
-//! password, whose key is new.
+//! layout lists no number free but 0 (F.3.4, F.3.11), its numbers run from 1
+//! without a gap, and every object is at generation 0 (F.3.1), so an object
+//! can't be moved past the keystreams the file read used, as a whole file of
+//! pdf-structure's writer moves it, and what [`Encryptor::of`] says of a file's
+//! free numbers can't hold here: none is listed, and an object may be written
+//! at one. Every object moves, so under RC4 a number's keystream would encrypt
+//! another object's plaintext, and one who holds both the file read and this
+//! one would have, for each number, the XOR of the two
+//! ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). So under an
+//! encryptor as given, the first string or stream that would go at a keystream
+//! the file used is refused ([`Error::Write`] of [`Unencryptable::Keystream`]),
+//! as pdf-structure's writer refuses it, and a file whose strings and streams
+//! all go at keystreams it never used is written. A caller who accepts that
+//! leak tells the encryptor to reuse them ([`Encryptor::reusing_rc4_keystreams`],
+//! or [`Options::rc4`] for [`linearize_bytes`]), and each object so written is
+//! listed ([`Linearized::keystreams_reused`]). AES's IVs are random, each
+//! write's own from the operating system, so nothing leaks that way, and
+//! nothing is refused or listed. A caller who wants neither gives
+//! [`Encryptor::create`] a new password, whose key is new.
 //!
 //! # Where everything goes
 //!
@@ -94,7 +104,7 @@ use pdf_objects::version::Version;
 use pdf_semantics::pages;
 use pdf_structure::pdf_filters::{self, Prediction};
 use pdf_structure::read::{self, ByteSource, Reading};
-use pdf_structure::write::{self, Deflate, Encrypting, Encryptor, Parts, ReadFrom};
+use pdf_structure::write::{self, Deflate, Encrypting, Encryptor, Parts, ReadFrom, Unencryptable};
 use pdf_structure::{Encryption, XrefKind};
 
 use crate::Limits;
@@ -141,6 +151,13 @@ pub struct Options<'a> {
     /// it doesn't trust lowers the caps here; [`linearize`] takes a document
     /// already read.
     pub read: read::Options<'a>,
+    /// What [`linearize_bytes`] does with a file encrypted with RC4, which
+    /// it writes under the file's own encryption: refused, by default, where
+    /// a string or stream would go at a keystream the file used. [`linearize`]
+    /// writes under the encryptor it's given, which its caller tells to reuse
+    /// them or not ([`Encryptor::reusing_rc4_keystreams`]), so it doesn't read
+    /// this.
+    pub rc4: Rc4,
     /// A flag that, set while it runs, stops it: it's checked before each
     /// object and object stream, and nothing's written
     /// ([`write::Error::Stopped`]).
@@ -151,8 +168,8 @@ impl Options<'static> {
     /// A file with tables, nothing in object streams, deflated as
     /// [`Deflate::DEFAULT`] deflates, on as many threads as the machine runs,
     /// its header the document's, opening where `/OpenAction` says, under
-    /// [`Limits::DEFAULT`], read under [`read::Options::DEFAULT`], nothing to
-    /// stop it.
+    /// [`Limits::DEFAULT`], read under [`read::Options::DEFAULT`], an RC4
+    /// file refused, nothing to stop it.
     pub const DEFAULT: Options<'static> = Options {
         kind: XrefKind::Table,
         pack: false,
@@ -162,6 +179,7 @@ impl Options<'static> {
         first_page: FirstPage::OpenAction,
         limits: Limits::DEFAULT,
         read: read::Options::DEFAULT,
+        rc4: Rc4::Refused,
         stop: None,
     };
 }
@@ -170,6 +188,26 @@ impl Default for Options<'_> {
     fn default() -> Self {
         Options::DEFAULT
     }
+}
+
+/// What [`linearize_bytes`] does with a file encrypted with RC4, under which
+/// this layout puts a string or stream at a keystream the file used where an
+/// object moves to a number another had (the module's "Encrypted").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum Rc4 {
+    /// Refused at the first string or stream that would go at a keystream
+    /// the file used ([`Error::Write`] of [`Unencryptable::Keystream`]), so
+    /// that nothing leaks; a file whose strings and streams all go at
+    /// keystreams it never used is written.
+    #[default]
+    Refused,
+    /// Written, each such string and stream encrypted with the keystream
+    /// the file used, which leaks the XOR of the two plaintexts under it to
+    /// whoever holds both files: the file's encryptor told to reuse them
+    /// ([`Encryptor::reusing_rc4_keystreams`]). [`linearize`] lists each
+    /// object so written ([`Linearized::keystreams_reused`]).
+    ReusingKeystreams,
 }
 
 /// What was written, beside the file's bytes.
@@ -185,6 +223,13 @@ pub struct Linearized {
     /// What's around the bodies, and where everything is, counted from the
     /// file's first byte.
     pub layout: Layout,
+    /// Each object written at a keystream the file read used, by the number
+    /// it's written at, ascending: its strings or its stream's data encrypted
+    /// with that keystream, by RC4, as its encryptor was told to reuse them
+    /// ([`Encryptor::reusing_rc4_keystreams`]); an object stream among them,
+    /// as it's encrypted whole. What leaks, as that says. None in the clear,
+    /// under AES and under a new encryption.
+    pub keystreams_reused: Vec<ObjectId>,
 }
 
 /// Why a page tree can't be laid out, each page by its place in the tree.
@@ -283,7 +328,10 @@ pub enum Error {
 /// ([`Body::Read`](write::Body::Read)). What's written counts its positions
 /// from where it starts in `out`, so `out` may hold other bytes before it.
 /// `encryptor` is how it's encrypted, none for in the clear, whatever `doc`'s
-/// file was (the module's "Encrypted" says what that means for its keys).
+/// file was, and it's written under it as given (the module's "Encrypted" says
+/// what that means for its keys): under RC4, what goes at a keystream the
+/// file it was read from used is refused, unless it's told to reuse them,
+/// and then listed ([`Linearized::keystreams_reused`]).
 ///
 /// Refused, with `out` as it was given, by an [`Error`]: what the module says;
 /// a table asked to pack; a trailer with no catalog, or a catalog that's a
@@ -291,7 +339,9 @@ pub enum Error {
 /// table can describe; an object at the number the encryption dictionary has in
 /// the file an `encryptor` was read from ([`write::Error::EncryptAt`]), as a
 /// whole file's write refuses; what pdf-structure's writer or the encryptor
-/// refuses of a body; and a write stopped.
+/// refuses of a body or of the hint stream's data ([`Error::Write`]), a string
+/// or stream at a keystream used among it ([`Unencryptable::Keystream`]); and
+/// a write stopped.
 pub fn linearize(
     out: &mut Vec<u8>,
     doc: &pdf_structure::Document,
@@ -312,9 +362,13 @@ pub fn linearize(
 /// [`Options::read`] says, by its passwords ([`read::Options::passwords`]),
 /// and an encrypted file written encrypted as it was ([`Encryptor::of`]), so
 /// every number reused under its keys where they're made per object (the
-/// module's "Encrypted"). Refused as [`linearize`] refuses, and where it
-/// doesn't read ([`Error::Read`]), no password opens it ([`Error::Locked`]),
-/// or its security handler can't be opened ([`write::Error::Unsupported`]).
+/// module's "Encrypted"). Under RC4 that's refused unless [`Options::rc4`]
+/// says to reuse the file's keystreams, and then every object it writes at
+/// one leaks, as [`Rc4::ReusingKeystreams`] says: [`linearize`], under the
+/// file's encryptor told to reuse them, lists which. Refused as [`linearize`]
+/// refuses, and where it doesn't read ([`Error::Read`]), no password opens it
+/// ([`Error::Locked`]), or its security handler can't be opened
+/// ([`write::Error::Unsupported`]).
 pub fn linearize_bytes(bytes: &[u8], options: &Options<'_>) -> Result<Vec<u8>, Error> {
     let reading = Reading::open(bytes, &options.read).map_err(Error::Read)?;
     let doc = reading.to_document().map_err(Error::Read)?;
@@ -322,6 +376,10 @@ pub fn linearize_bytes(bytes: &[u8], options: &Options<'_>) -> Result<Vec<u8>, E
         write::Error::Locked => Error::Locked,
         why => Error::Write(why),
     })?;
+    let encryptor = match options.rc4 {
+        Rc4::Refused => encryptor,
+        Rc4::ReusingKeystreams => encryptor.map(Encryptor::reusing_rc4_keystreams),
+    };
     let mut out = Vec::new();
     let from = from(&reading);
     linearize(&mut out, &doc, encryptor.as_ref(), Some(from), options)?;
@@ -379,32 +437,26 @@ fn file(
         encryptor,
         from,
     };
-    let (plan, containers) = loop {
+    let (plan, containers, mut reused) = loop {
         let plan = {
             phase!(DEBUG, "plan");
             plan(&graph, &options.limits).map_err(Error::Plan)?
         };
-        let built = {
+        let (built, reused) = {
             phase!(DEBUG, "containers", containers = plan.containers().len());
-            writing.under(&plan, |parts, _| {
-                containers(&prepared, &plan, parts, options)
-            })?
+            writing.containers(&plan, &alone, options)?
         };
         let before = alone.len();
-        for (container, built) in plan.containers().iter().zip(&built) {
-            if built.is_none() {
-                alone.extend(container.members.iter().map(|(id, _)| *id));
-            }
-        }
+        alone.extend(unfitted(&plan, &built));
         if alone.len() == before {
-            break (plan, built);
+            break (plan, built, reused);
         }
         graph = {
             phase!(DEBUG, "graph");
             prepared.graph(kind, pack, &alone)
         };
     };
-    writing.under(&plan, |parts, encrypting| {
+    let (done, written) = writing.under(&plan, encryptor, |parts, encrypting| {
         let lengths = {
             phase!(DEBUG, "bodies", writes = plan.writes().len());
             bodies(
@@ -444,16 +496,54 @@ fn file(
             let layout = assemble(&plan, &lengths, &around, |stream| {
                 encoded(stream, options.deflate, encrypting)
             })
-            .map_err(Error::Layout)?;
+            .map_err(|why| match why {
+                // What the encryptor refuses of the hint stream's data, as of
+                // a body's.
+                layout::Error::Encode(why @ write::Error::Encrypt { .. }) => Error::Write(why),
+                why => Error::Layout(why),
+            })?;
             (id, layout)
         };
         {
             phase!(DEBUG, "whole", bytes = layout.len());
             laid_out(out, start, &lengths, &layout);
         }
-        Ok(Linearized { id, layout })
+        Ok((id, layout))
+    })?;
+    let (id, layout) = done;
+    // The object streams' and the rest's, each written under an encryption of
+    // its own: no number is in both.
+    reused.extend(written);
+    reused.sort_unstable();
+    reused.dedup();
+    Ok(Linearized {
+        id,
+        layout,
+        keystreams_reused: reused,
     })
 }
+
+/// Whether `why` is RC4's refusal of a string or stream at a keystream the
+/// file used.
+fn at_a_keystream_used(why: &Error) -> bool {
+    let keystream = Unencryptable::Keystream;
+    matches!(why, Error::Write(write::Error::Encrypt { why, .. }) if *why == keystream)
+}
+
+/// The members of `plan`'s object streams of which `built` has none, as they
+/// don't fit.
+fn unfitted<'p>(
+    plan: &'p Plan,
+    built: &'p [Option<Vec<u8>>],
+) -> impl Iterator<Item = ObjectId> + 'p {
+    let containers = plan.containers().iter().zip(built);
+    let left = containers.filter(|(_, built)| built.is_none());
+    left.flat_map(|(container, _)| container.members.iter().map(|(id, _)| *id))
+}
+
+/// A plan's object streams, each as written, in order, or none where it
+/// doesn't fit.
+type Built = Vec<Option<Vec<u8>>>;
 
 /// What's the same however a document is planned.
 struct Writing<'w, 'd> {
@@ -467,21 +557,21 @@ impl Writing<'_, '_> {
     /// `then`, given what writes bodies at `plan`'s numbers, and the encryption
     /// in those numbers, as a whole file has it, where there's one
     /// ([`Encryptor::laid_out`]): its dictionary at the number planned for it,
-    /// and what's encrypted under each object's.
+    /// and what's encrypted under each object's. With what `then` gives, each
+    /// object it wrote at a keystream the file `encryptor` was read from used,
+    /// as `encryptor` is told to reuse them, ascending.
     fn under<R>(
         &self,
         plan: &Plan,
+        encryptor: Option<&Encryptor>,
         then: impl FnOnce(&Parts<'_>, Option<&Encrypting<'_>>) -> Result<R, Error>,
-    ) -> Result<R, Error> {
+    ) -> Result<(R, Vec<ObjectId>), Error> {
         let to = |id: ObjectId| plan.number(id);
         let at = self.prepared.dictionary().and_then(|id| plan.number(id));
         // In the numbers objects are held at, as they're asked of it.
         let doc = self.doc;
         let trailer = doc.trailer().dict();
-        // Under RC4 every number's keystream is reused, as the module says,
-        // which pdf-structure refuses unless it's told so.
-        let reusing = (self.encryptor).map(|e| e.clone().reusing_rc4_keystreams());
-        let encrypting = (reusing.as_ref())
+        let encrypting = encryptor
             .map(|encryptor| encryptor.laid_out(Some(&to), at, trailer, &doc))
             .transpose()
             .map_err(Error::Write)?;
@@ -490,7 +580,44 @@ impl Writing<'_, '_> {
             None => Parts::plain(self.from, Some(&to)),
         };
         let parts = parts.map_err(Error::Write)?;
-        then(&parts, encrypting.as_ref())
+        let done = then(&parts, encrypting.as_ref())?;
+        let reused = encrypting.as_ref().map(Encrypting::keystreams_reused);
+        Ok((done, reused.unwrap_or_default()))
+    }
+
+    /// Each of `plan`'s object streams as written, in order, each none where
+    /// it doesn't fit, under the caller's encryptor, with what [`under`]
+    /// gives beside. Under RC4 one at a keystream the file used is refused,
+    /// unless the encryptor is told to reuse them; but a plan whose object
+    /// streams don't all fit is made again without the members of those that
+    /// don't, and its own aren't written: so a refusal is given only where
+    /// none of the members that don't fit, as a write that refuses nothing
+    /// tells, is left to plan again, `alone` holding those already.
+    ///
+    /// [`under`]: Writing::under
+    fn containers(
+        &self,
+        plan: &Plan,
+        alone: &HashSet<ObjectId>,
+        options: &Options<'_>,
+    ) -> Result<(Built, Vec<ObjectId>), Error> {
+        let built = |encryptor: Option<&Encryptor>| {
+            self.under(plan, encryptor, |parts, _| {
+                containers(self.prepared, plan, parts, options)
+            })
+        };
+        match built(self.encryptor) {
+            Err(refused) if at_a_keystream_used(&refused) => {
+                let reusing = (self.encryptor).map(|e| e.clone().reusing_rc4_keystreams());
+                let (tried, _) = built(reusing.as_ref())?;
+                let again = unfitted(plan, &tried).any(|id| !alone.contains(&id));
+                match again {
+                    true => Ok((tried, Vec::new())),
+                    false => Err(refused),
+                }
+            }
+            built => built,
+        }
     }
 }
 
@@ -501,7 +628,7 @@ fn containers(
     plan: &Plan,
     parts: &Parts<'_>,
     options: &Options<'_>,
-) -> Result<Vec<Option<Vec<u8>>>, Error> {
+) -> Result<Built, Error> {
     let groups: Vec<_> = (plan.containers().iter())
         .map(|container| {
             let members = container.members.iter().filter_map(|&(id, at)| {
@@ -524,7 +651,7 @@ fn bodies(
     out: &mut Vec<u8>,
     prepared: &Prepared<'_>,
     plan: &Plan,
-    mut containers: Vec<Option<Vec<u8>>>,
+    mut containers: Built,
     parts: &Parts<'_>,
     encrypting: Option<&Encrypting<'_>>,
     options: &Options<'_>,

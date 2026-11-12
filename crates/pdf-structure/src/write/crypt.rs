@@ -70,12 +70,13 @@ use crate::source::Encryption;
 /// ([`Unencryptable::Keystream`]), unless it's told to reuse them.
 ///
 /// A caller a layout binds otherwise can't keep those rules: a linearized
-/// file's sections list none free but 0, and its numbers run from 1 without
-/// a gap (ISO 32000-2, F.3.1, F.3.4, F.3.11). It writes objects at those
-/// numbers and lists none. Moving every object, under RC4 it encrypts each
-/// with another object's keystream, as pdf-crypt's `Method::Rc4` says, so
-/// it writes under the encryptor told to reuse them, says so to its own
-/// callers, and points them to [`Encryptor::create`], a new key.
+/// file's sections list none free but 0, its numbers run from 1 without a
+/// gap, and its objects are all at generation 0 (ISO 32000-2, F.3.1, F.3.4,
+/// F.3.11). It writes objects at those numbers and lists none. Moving every
+/// object, under RC4 it would encrypt each with another object's keystream,
+/// as pdf-crypt's `Method::Rc4` says, so it writes under the encryptor its own
+/// caller gives, and is refused, as above, unless that one is told to reuse
+/// them; it points its callers to [`Encryptor::create`], a new key.
 #[derive(Clone)]
 pub struct Encryptor {
     handler: Handler,

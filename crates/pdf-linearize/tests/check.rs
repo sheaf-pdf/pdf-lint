@@ -306,7 +306,10 @@ fn encrypted_it_reads_the_hint_stream_by_the_password_and_holds() {
     for (name, key) in KEYS {
         let file = encrypted_as(key, &plain());
         let reading = opened(&file, "");
+        // Under RC4, told to reuse the file's keystreams, as the layout
+        // puts each object at another's.
         let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        let encryptor = encryptor.reusing_rc4_keystreams();
         let doc = reading.to_document().unwrap();
         for (kind, pack) in kinds() {
             let mut options = Options::DEFAULT;
@@ -777,7 +780,9 @@ fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
     for (name, key) in KEYS {
         let file = encrypted_as(key, &plain());
         let reading = opened(&file, "");
+        // Under RC4, told to reuse the file's keystreams.
         let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        let encryptor = encryptor.reusing_rc4_keystreams();
         let doc = reading.to_document().unwrap();
         for (kind, pack) in kinds() {
             let mut options = Options::DEFAULT;

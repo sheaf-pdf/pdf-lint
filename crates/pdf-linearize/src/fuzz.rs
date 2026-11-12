@@ -1658,12 +1658,17 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
 }
 
 /// Any bytes as a file, read and written again in the three kinds: in the
-/// clear; as it's encrypted, where it is, and a password opens it; and now and
-/// then, by the input's length, under a new encryption. Where it's written, it
-/// reads linearized by its password, with the same pages, and every object the
-/// plan numbers is the same value at its number under the numbering, a stream's
-/// data the same; on any refusal, `out` as it was. It gives each write's `out`,
-/// in the order written.
+/// clear; as it's encrypted, where it is, and a password opens it, under its
+/// encryptor as it is and told to reuse RC4's keystreams; and now and then, by
+/// the input's length, under a new encryption. Where it's written, it reads
+/// linearized by its password, with the same pages, and every object the plan
+/// numbers is the same value at its number under the numbering, a stream's
+/// data the same; on any refusal, `out` as it was. Under its own encryptor,
+/// what's refused as it is but written told to reuse keystreams is refused at
+/// a keystream used, at an object the write told to lists, and what's written
+/// both ways is the same bytes, none listed (see [`own_alike`]). Under a new
+/// encryption nothing is listed. It gives each write's `out`, in the order
+/// written.
 ///
 /// Built with the test writer (`insecure-test-writer`, which the fuzz target
 /// turns on, and for the crate's tests), the new encryption's key and salts are
@@ -1708,17 +1713,64 @@ pub fn over(data: &[u8]) -> Vec<Vec<u8>> {
         options.kind = stream;
         options.pack = pack;
         options.threads = 1;
-        written.push(written_back(&reading, &doc, None, "", kind, &options));
+        let (out, _) = written_back(&reading, &doc, None, "", kind, &options);
+        written.push(out);
         if let Some(own) = &own {
-            let out = written_back(&reading, &doc, Some(own), "", kind, &options);
-            written.push(out);
+            let given = written_back(&reading, &doc, Some(own), "", kind, &options);
+            let reusing = own.clone().reusing_rc4_keystreams();
+            let told = written_back(&reading, &doc, Some(&reusing), "", kind, &options);
+            own_alike(&given, &told);
+            written.push(given.0);
+            written.push(told.0);
         }
         if let Some(Some(new)) = &new {
-            let out = written_back(&reading, &doc, Some(new), NEW, kind, &options);
+            let (out, reused) = written_back(&reading, &doc, Some(new), NEW, kind, &options);
+            // A new key's keystreams are none the file used.
+            if let Ok(reused) = reused {
+                assert!(reused.is_empty(), "{reused:?} under a new key");
+            }
             written.push(out);
         }
     }
     written
+}
+
+/// What [`over`] holds of a file written under its own encryptor as it is,
+/// `given`, and told to reuse RC4's keystreams, `told`, each its `out` and
+/// what [`written_back`] gives of it: where the first is refused at a keystream
+/// the file used, the second is written listing that object, or refused for
+/// another reason later; where both are written, they're the same bytes (where
+/// IVs are derived, as with the test writer), and nothing's listed, as the
+/// second lists only what the first would refuse; and any other refusal is
+/// both's.
+#[cfg(feature = "family")]
+fn own_alike(
+    given: &(Vec<u8>, Result<Vec<ObjectId>, crate::family::Error>),
+    told: &(Vec<u8>, Result<Vec<ObjectId>, crate::family::Error>),
+) {
+    use pdf_structure::write::{self, Unencryptable};
+
+    use crate::family::Error;
+
+    let why = Unencryptable::Keystream;
+    match (&given.1, &told.1) {
+        (Ok(none), Ok(reused)) => {
+            assert!(none.is_empty(), "{none:?}");
+            assert!(reused.is_empty(), "written as it is, yet {reused:?}");
+            #[cfg(any(test, feature = "insecure-test-writer"))]
+            assert!(given.0 == told.0, "telling it to reuse wrote other bytes");
+        }
+        (Err(Error::Write(write::Error::Encrypt { id, why: refused })), Ok(reused))
+            if *refused == why =>
+        {
+            assert!(reused.contains(id), "{id:?} refused, {reused:?} listed");
+        }
+        // Refused at a keystream used, and then for another reason past it.
+        (Err(Error::Write(write::Error::Encrypt { why: refused, .. })), Err(_))
+            if *refused == why => {}
+        (Err(refused), Err(again)) => assert_eq!(refused.to_string(), again.to_string()),
+        (refused, written) => panic!("{refused:?} then {written:?}"),
+    }
 }
 
 /// `encryptor`, its writes' AES IVs derived by the test writer where it's
@@ -1793,9 +1845,10 @@ const NEW: &str = "new";
 
 /// What [`over`] holds of `doc`, written under `encryptor` as `options` says,
 /// which `password` opens, or the empty one: among it, that its facts read
-/// whole beside its reading are those of its reading alone. It gives `out` as
-/// the write left it: the six bytes it held before, and after them the file,
-/// where one was written.
+/// whole beside its reading are those of its reading alone, and that each
+/// object it lists as written at a keystream used is one it wrote. It gives
+/// `out` as the write left it, the six bytes it held before and after them the
+/// file, where one was written; and the objects listed so, or the refusal.
 #[cfg(feature = "family")]
 fn written_back<S: pdf_structure::ByteSource>(
     reading: &pdf_structure::Reading<S>,
@@ -1804,7 +1857,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     password: &str,
     kind: Kind,
     options: &crate::family::Options<'_>,
-) -> Vec<u8> {
+) -> (Vec<u8>, Result<Vec<ObjectId>, crate::family::Error>) {
     use pdf_objects::Value;
     use pdf_objects::pdf_tokenizer::Rules;
     use pdf_semantics::pages::{Inheritable, Origin, pages};
@@ -1816,9 +1869,12 @@ fn written_back<S: pdf_structure::ByteSource>(
 
     let mut out = b"before".to_vec();
     let written = family::linearize(&mut out, doc, encryptor, Some(reading), options);
-    let Ok(done) = written else {
-        assert_eq!(out, b"before");
-        return out;
+    let done = match written {
+        Ok(done) => done,
+        Err(refused) => {
+            assert_eq!(out, b"before");
+            return (out, Err(refused));
+        }
     };
     assert_eq!(out.len() as u64 - 6, done.layout.len());
     let file = &out[6..];
@@ -1887,7 +1943,19 @@ fn written_back<S: pdf_structure::ByteSource>(
             assert_eq!(before, after, "{id:?}'s data");
         }
     }
-    out
+    // What's listed is ascending, each once, and written, as an object of
+    // its own or an object stream: none in the clear.
+    let reused = done.keystreams_reused;
+    assert!(reused.is_sorted() && reused.windows(2).all(|w| w[0] != w[1]));
+    assert!(encryptor.is_some() || reused.is_empty());
+    for id in &reused {
+        let at = again.entries().find(|(n, ..)| *n == id.number);
+        let in_use = |(_, generation, entry): (u32, u16, read::XrefEntry)| {
+            generation == id.generation && matches!(entry, read::XrefEntry::InUse { .. })
+        };
+        assert!(at.is_some_and(in_use), "{id:?} is listed, not written");
+    }
+    (out, Ok(reused))
 }
 
 /// Whether `written`, read back, is `value` under `planned`'s numbers: a
@@ -2106,6 +2174,8 @@ mod tests {
             let mut options = crate::family::Options::DEFAULT;
             options.kind = pdf_structure::XrefKind::Stream;
             options.pack = true;
+            // Under RC4, each number's keystream used again, as asked.
+            options.rc4 = crate::family::Rc4::ReusingKeystreams;
             let laid_out = crate::family::linearize_bytes(&encrypted, &options);
             seeds.push(std::mem::take(&mut encrypted));
             seeds.push(laid_out.unwrap());
@@ -2154,9 +2224,9 @@ mod tests {
     }
 
     /// What [`over`] writes of an input that encrypts, under the file's own
-    /// AES-128 and under a new encryption, in each kind, is the same bytes each
-    /// time: the test writer draws the new key from the input and derives
-    /// every IV.
+    /// AES-128, as it is and told to reuse RC4's keystreams, and under a new
+    /// encryption, in each kind, is the same bytes each time: the test writer
+    /// draws the new key from the input and derives every IV.
     #[cfg(feature = "family")]
     #[test]
     fn what_is_written_of_an_input_is_the_same_bytes_each_time() {
@@ -2168,9 +2238,10 @@ mod tests {
             input.push(b'\n');
         }
         let written = over(&input);
-        // In the clear, as it's encrypted and under a new encryption, in each
-        // of the three kinds: none refused.
-        assert_eq!(written.len(), 9);
+        // In the clear, as it's encrypted (twice: as it is, and told to reuse
+        // RC4's keystreams, which under AES changes nothing) and under a new
+        // encryption, in each of the three kinds: none refused.
+        assert_eq!(written.len(), 12);
         for out in &written {
             assert!(
                 out.starts_with(b"before%PDF-"),
