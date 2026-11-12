@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-fonts"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "hayro-cmap",
  "pdf-content-streams",

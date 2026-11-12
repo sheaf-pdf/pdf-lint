@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0-alpha.1 (unreleased)
+
+The first release, and an alpha. Its unit tests don't build from the package. They take their files from pdf-fixtures, which is never published, and read them through pdf-structure, not yet on crates.io.
 
 - **Licensed `(MIT OR Apache-2.0) AND FTL`,** as `src/program.rs` translates some of FreeType's code: `FTL.TXT`, and the README's list of what's taken.
 - **Ids are pdf-objects' struct.** `Font::id`, each `Fault`'s id, `Place::object` and what `Streams::decoded` is asked are pdf-objects' `ObjectId`, a struct of `number` and `generation`, where it was the pair `(u32, u16)`: `(1, 0)` is `ObjectId::new(1, 0)`, `id.0` is `id.number`.
