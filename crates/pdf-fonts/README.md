@@ -18,7 +18,7 @@ It's made for what reads a page's text and for what checks a file. It reads no f
 - **Know when a read failed.** An object or a stream may not read for a reason that's the caller's: past a cap of what gives it (`Why::Capped`), behind a password or from a source that failed. That fails the reading with `Error::Unreadable`, never a font with no widths, and nothing is told to the sink after it. Either way, `Font::read` leaves the budget as it was.
 - **Share a font across threads.** A `Font` owns what it holds. `Font`, `Fonts` and `Codes` are `Send` and `Sync`. A `Font`'s `Debug` says what it is and how much it holds, never a file's text.
 
-Nothing in this crate panics on what a file holds. A program is parsed by skrifa and read-fonts, which forbid `unsafe` and are fuzzed upstream. read-fonts 0.46, which this release takes, panics on a crafted Type 1 or CFF program where overflow checks are on, as in a debug build. Its 0.47 fixes that.
+Nothing in this crate panics on what a file holds. A program is parsed by skrifa and read-fonts, which forbid `unsafe` and are fuzzed upstream.
 
 ## Features
 
@@ -112,7 +112,7 @@ The fonts' data isn't this crate's, and each part of it has its own terms, in th
 - **`assets/afm`:** Adobe's Core 14 font metrics. They may be used and distributed for any purpose, with or without modification, on the terms of Adobe's paragraph. [`assets/afm/MustRead.html`](https://github.com/sheaf-pdf/pdf-lint/blob/main/crates/pdf-fonts/assets/afm/MustRead.html) holds it as Adobe distributes it, unmodified, and each file carries it too, in a `Comment` on its third line. Each file's second line says what's modified, and its copyright notices are as Adobe wrote them. They're compiled in whole, so a binary holds them with their notices. `Std14::NOTICE` is the paragraph, and `Std14::afm_text` a font's whole file, for a binary's list of notices.
 - **`assets/glyphlist.txt` and `assets/zapfdingbats.txt`:** the Adobe Glyph List and the ITC Zapf Dingbats Glyph List, unchanged, under the BSD 3-Clause license, each with the whole of it in its header. A binary's documentation must reproduce it, as for any dependency under that license.
 - **With `predefined-cmaps`,** Adobe's CMaps are hayro-cmap's, under the BSD 3-Clause license (its package's `assets/LICENSE.txt`), not in this package. A binary that turns the feature on carries that notice too.
-- **With `programs`,** on by default, skrifa and what it pulls in carry their own terms, in their packages: MIT OR Apache-2.0 for the most part, Unicode-3.0 for yoke and zerofrom, whose notice a binary keeps, and Zlib for foldhash. A binary's list of notices takes them from there.
+- **With `programs`,** on by default, skrifa and what it pulls in carry their own terms, in their packages: MIT OR Apache-2.0 for the most part, Unicode-3.0 for yoke and zerofrom, whose notice a binary keeps, and Zlib for foldhash. read-fonts compiles in the Adobe Glyph List too, on the terms above. A binary's list of notices takes them from there.
 
 Some of `src/program.rs` comes from FreeType's code, copyright David Turner, Robert Wilhelm, and Werner Lemberg. It's under the FreeType Project License, [`FTL.TXT`](https://github.com/sheaf-pdf/pdf-lint/blob/main/crates/pdf-fonts/FTL.TXT), unaltered, not the licenses above, and the package's `license` says so. It's written in Rust and changed to fit this crate:
 

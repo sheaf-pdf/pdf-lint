@@ -21,10 +21,9 @@
 //! sink. Each reading is bounded by [`Limits`] and charged to the caller's budget. It
 //! fails only past the budget ([`Error::TooLarge`]), or for what doesn't read for a
 //! reason that's the caller's, a cap of what gives a stream among them
-//! ([`Error::Unreadable`]). Nothing in this crate panics on what a file holds. The
-//! README says where read-fonts, which parses programs, does. pdf-objects and
-//! pdf-content-streams are re-exported whole, so their types are named through them at
-//! the versions this crate is built with.
+//! ([`Error::Unreadable`]). Nothing in this crate panics on what a file holds.
+//! pdf-objects and pdf-content-streams are re-exported whole, so their types are named
+//! through them at the versions this crate is built with.
 //!
 //! # Features
 //!

@@ -22,8 +22,8 @@ thiserror = "2"
 # never a file's bytes.
 hayro-cmap = { version = "0.1", optional = true }
 # With `programs`: a font's program read, TrueType's by skrifa, CFF's and Type 1's by
-# what it has of read-fonts.
-skrifa = { version = "0.49", default-features = false, features = ["std"], optional = true }
+# what it has of read-fonts, Type 1's behind its `type1` feature.
+skrifa = { version = "0.50", default-features = false, features = ["std", "type1"], optional = true }
 # The spans of a font's reading, with the `tracing` feature: without its
 # default features, so without the proc macros of `attributes`; `std`, for
 # its spans' guards.

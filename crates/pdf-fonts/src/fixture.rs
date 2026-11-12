@@ -722,6 +722,18 @@ pub fn type1_lookups_program(n: usize) -> Vec<u8> {
     )
 }
 
+/// A Type 1 program whose `A` rolls two values by the least shift a 32-bit number holds,
+/// `0x80000000`, as a charstring's five-byte number: a parser that negates the shift as
+/// it's written overflows.
+pub fn rolling_type1_program() -> Vec<u8> {
+    let roll = [cs(&[1, 2, 2]), vec![255, 0x80, 0, 0, 0, 12, 30]].concat();
+    let a = [cs(&[0, 500]), vec![13], roll, vec![14]].concat();
+    type1_with(
+        b"/Encoding StandardEncoding def",
+        [(".notdef", type1_empty_glyph()), ("A", a)],
+    )
+}
+
 /// A Type 1 program of `A`, `glyphs` glyphs, `B` and `C`, `A` accented `accents` times
 /// over, by `seac`, of `B` and `C`: each time, read-fonts looks each of them up among all
 /// the glyphs by their names, to the last.

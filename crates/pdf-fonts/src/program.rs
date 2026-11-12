@@ -45,7 +45,7 @@ use skrifa::raw::model::Error as PsError;
 use skrifa::raw::ps::cff::CffFontRef;
 use skrifa::raw::ps::cff::index::Index;
 use skrifa::raw::ps::charstring::{self, CharstringContext, CharstringKind, CommandSink};
-use skrifa::raw::ps::type1::Type1Font;
+use skrifa::raw::ps::type1::{Subfont, Type1Font};
 use skrifa::raw::ps::{FontMatrix, PredefinedEncoding};
 use skrifa::raw::tables::cmap::{CmapSubtable, PlatformId};
 use skrifa::raw::tables::glyf::{Anchor, Glyph};
@@ -1128,7 +1128,10 @@ fn draw_type1(font: &Type1Font, scanned: &type1::Scanned, gid: u32, fuel: usize)
         fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
     };
     let mut sink = Points {
-        matrix: Some(font.matrix()).filter(|&m| m != FontMatrix::IDENTITY),
+        matrix: font
+            .subfont(0)
+            .map(Subfont::matrix)
+            .filter(|&m| m != FontMatrix::IDENTITY),
         ..Points::default()
     };
     evaluated(&context, &context.fuel, charstring, fuel, &mut sink)

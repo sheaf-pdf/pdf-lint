@@ -21,6 +21,6 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - It's built on pdf-objects `=0.1.0-alpha.2` and pdf-content-streams `=0.1.0-alpha.1`, both re-exported whole and none of their items by name. `Limits::content` is pdf-content-streams' type. It needs Rust 1.89.
 - Where it reads a case otherwise than PDFium, the repository's `tests/pdfium/differ.tsv` lists it and why.
 - A reading past the caller's budget fails with `Error::TooLarge`. A stream past a cap of what gives it fails it with `Error::Unreadable`, the caller's to know, as one behind a password does. Nothing is told to the sink after that. Either way the budget is as it was.
-- Nothing in this crate panics on what a file holds. read-fonts 0.46, which parses programs here, panics on a crafted Type 1 or CFF program where overflow checks are on.
+- Nothing in this crate panics on what a file holds. A font's program is parsed by skrifa 0.50 and read-fonts 0.47.
 - It's licensed `(MIT OR Apache-2.0) AND FTL`, as `src/program.rs` translates some of FreeType's code, under `FTL.TXT`. The fonts' data keeps its own terms, which the README lists.
 - `Std14`, `Rect` and `VerticalMetrics` are exhaustive on purpose. Every other enum and every struct with public fields is `#[non_exhaustive]`, so each can grow in a minor release. `Fault`'s variants aren't, so a fault can be built and compared.

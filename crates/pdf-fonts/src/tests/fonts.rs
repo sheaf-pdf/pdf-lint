@@ -3904,6 +3904,33 @@ fn over_program(
     font
 }
 
+/// Programs crafted where a parser's arithmetic can overflow read without a panic in a
+/// build with overflow checks, as this one is: a Type 1 program whose `/FontBBox` has a
+/// number with two signs, and one whose glyph rolls by the least shift a 32-bit number
+/// holds. Each still reads.
+#[cfg(feature = "programs")]
+#[test]
+fn programs_read_where_arithmetic_could_overflow() {
+    use crate::fixture::{rolling_type1_program, type1_program};
+    let bbox = b"/FontBBox {0 -200 600 750}";
+    let program = type1_program();
+    let at = program.windows(bbox.len()).position(|w| w == bbox).unwrap();
+    let doubled = [
+        &program[..at],
+        b"/FontBBox {5 --32768 989 775}",
+        &program[at + bbox.len()..],
+    ];
+    for (key, program) in [
+        ("FontFile", doubled.concat()),
+        ("FontFile", rolling_type1_program()),
+    ] {
+        let mut pdf = Pdf::default();
+        let font = over_program(&mut pdf, "Type1", key, program, 32, None);
+        let read = Font::read(&pdf, &font, &Limits::DEFAULT, &mut BUDGET.clone(), &mut ());
+        assert_eq!(read.unwrap().program(), FontProgram::Read, "{key}");
+    }
+}
+
 /// What PDFium's encoding leaves to a program is its text: a symbolic Type 1 font's code
 /// is the name its program's own encoding gives its glyph; a TrueType font's, by its
 /// charmaps, a Mac one's table or the code itself. Read for text, it's guessed by name.
