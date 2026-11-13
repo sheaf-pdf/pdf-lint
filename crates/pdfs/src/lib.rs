@@ -1,7 +1,73 @@
 //! Read and write PDF files through one dependency: the crates of one
 //! family, each re-exported whole, so that a caller names any of their
 //! types through `pdfs`, at the versions it's built with, and gets one set
-//! that works together.
+//! that works together; and the recipes that span them, with a viewer's
+//! defaults on top.
+//!
+//! - **A file read** ([`open`] by its path, [`from_bytes`] from a source),
+//!   under [`Options`] whose defaults are PDFium's: a [`Pdf`], each object
+//!   read when it's first asked for, from any thread.
+//! - **Its pages** ([`Pdf::pages`]), each with what it inherits and from
+//!   where, and **a page's content** ([`Page::content`]), its streams
+//!   decoded and joined, and its operations.
+//! - **What the file is and says**: its version, its encryption, what its
+//!   document information dictionary says and its XMP claims, whether its
+//!   linearization holds, and any stream's data decoded.
+//! - **One set of caps** ([`Limits`]) nesting each crate's, and **one
+//!   error** ([`Error`]) wrapping each crate's.
+//! - **Each recipe a function** ([`page`](mod@page), [`file`](mod@file))
+//!   over the family's traits, for a caller with a reading of its own, and
+//!   **what else a file holds** through the reading ([`Pdf::reading`]) and
+//!   the crates.
+//!
+//! What a call meets that departs from the standard is told to the sink its
+//! `_with` form is given, each crate's faults to that crate's sink; its plain
+//! form tells nothing, and looks for nothing. Nothing reads past a cap
+//! without saying so, and no file makes it panic.
+//!
+//! A page's content, read from a file in memory:
+//!
+//! ```
+//! let file = b"%PDF-1.7\n\
+//!     1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+//!     2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>\nendobj\n\
+//!     3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n\
+//!     4 0 obj\n<< /Length 27 >>\nstream\n0 0 1 rg 72 72 144 144 re f\nendstream\nendobj\n\
+//!     xref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n\
+//!     0000000139 00000 n \n0000000202 00000 n \n\
+//!     trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n279\n%%EOF\n";
+//!
+//! let pdf = pdfs::from_bytes(&file[..]).unwrap();
+//! let pages = pdf.pages().unwrap();
+//! assert_eq!(pages.len(), 1);
+//! let page = pages.get(0).unwrap();
+//! assert_eq!(page.attributes().media_box().value.0, [0.0, 0.0, 612.0, 792.0]);
+//!
+//! let content = page.content().unwrap();
+//! assert_eq!(content.bytes(), b"0 0 1 rg 72 72 144 144 re f");
+//! let operators: Vec<Vec<u8>> = content
+//!     .operations()
+//!     .map(|operation| operation.unwrap().name().to_vec())
+//!     .collect();
+//! assert_eq!(operators, [&b"rg"[..], b"re", b"f"]);
+//! ```
+
+pub use error::Error;
+pub use limits::Limits;
+#[cfg(any(unix, windows))]
+pub use open::open;
+pub use open::{Options, from_bytes};
+pub use page::Content;
+pub use pdf::{Page, Pages, PagesIter, Pdf};
+
+mod error;
+pub mod file;
+mod limits;
+mod open;
+pub mod page;
+mod pdf;
+mod phases;
+pub mod prelude;
 
 /// The tokenizer: a file's bytes as tokens, by ISO 32000-2's rules or
 /// PDFium's, with no `std` or `alloc` of its own.

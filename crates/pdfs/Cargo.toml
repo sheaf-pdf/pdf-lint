@@ -101,6 +101,12 @@ pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
 # A folder of its own for each test that saves to a path.
 tempfile = "3"
 
+# The benchmarks: `cargo bench -p pdfs`. `benches/` is outside `include`,
+# so the package carries neither them nor this target.
+[[bench]]
+name = "pdfs"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
