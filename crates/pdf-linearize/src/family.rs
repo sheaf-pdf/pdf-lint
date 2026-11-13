@@ -4,12 +4,12 @@
 //!
 //! [`linearize`] is for a caller that holds a document, and [`linearize_bytes`]
 //! for one that holds a file: a whole parse and write again, so a convenience
-//! rather than a way past anything. Either writes every object at a new number,
-//! as Annex F has it, so anything that names one from outside the file, a
-//! signature's byte range above all, doesn't hold afterwards, as under any
-//! rewrite. [`check()`] says whether a file that says it's linearized holds,
-//! and [`facts()`] gives what that's judged from, [`facts_with_reading`] of a
-//! file read whole beside its reading.
+//! rather than a way past anything. Either writes every object at the number
+//! and place a plan gives it, as Annex F has it, so anything that names one
+//! from outside the file, a signature's byte range above all, doesn't hold
+//! afterwards, as under any rewrite. [`check()`] says whether a file that
+//! says it's linearized holds, and [`facts()`] gives what that's judged from,
+//! [`facts_with_reading`] of a file read whole beside its reading.
 //!
 //! # What changes in the document
 //!
@@ -68,15 +68,15 @@
 //! catalog and the pages are never packed (F.3.1). A caller who minds packs
 //! ([`Options::pack`]), under an encryption that does.
 //!
-//! **Under keys made per object, every number is reused.** A section of this
+//! **Under keys made per object, numbers are reused.** A section of this
 //! layout lists no number free but 0 (F.3.4, F.3.11), its numbers run from 1
 //! without a gap, and every object is at generation 0 (F.3.1), so an object
 //! can't be moved past the keystreams the file read used, as a whole file of
 //! pdf-structure's writer moves it, and what [`Encryptor::of`] says of a file's
 //! free numbers can't hold here: none is listed, and an object may be written
-//! at one. Every object moves, so under RC4 a number's keystream would encrypt
-//! another object's plaintext, and one who holds both the file read and this
-//! one would have, for each number, the XOR of the two
+//! at one. Objects move to numbers others had, so under RC4 a number's
+//! keystream would encrypt another object's plaintext, and one who holds both
+//! the file read and this one would have the XOR of the two
 //! ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). So under an
 //! encryptor as given, the first string or stream that would go at a keystream
 //! the file used is refused ([`Error::Write`] of [`Unencryptable::Keystream`]),
@@ -241,8 +241,11 @@ pub struct Linearized {
     /// it's written at, ascending: its strings or its stream's data encrypted
     /// with that keystream, by RC4, as its encryptor was told to reuse them
     /// ([`Encryptor::reusing_rc4_keystreams`]); an object stream among them,
-    /// as it's encrypted whole. What leaks, as that says. None in the clear,
-    /// under AES and under a new encryption.
+    /// as it's encrypted whole. Each leaks the XOR of its plaintexts and what
+    /// the file held under that keystream, as that says. Where the file held
+    /// the same plaintexts there, or ones they start, nothing new leaks, but
+    /// the object is listed all the same, as what the file held isn't read.
+    /// None in the clear, under AES and under a new encryption.
     pub keystreams_reused: Vec<ObjectId>,
 }
 
@@ -381,12 +384,56 @@ pub fn linearize(
 
 /// `bytes`, read and written again as a linearized file: opened as
 /// [`Options::read`] says, by its passwords ([`read::Options::passwords`]),
-/// and an encrypted file written encrypted as it was ([`Encryptor::of`]), so
-/// every number reused under its keys where they're made per object (the
-/// module's "Encrypted"). Under RC4 that's refused unless [`Options::rc4`]
-/// says to reuse the file's keystreams, and then every object it writes at
-/// one leaks, as [`Rc4::ReusingKeystreams`] says: [`linearize`], under the
-/// file's encryptor told to reuse them, lists which.
+/// and an encrypted file written encrypted as it was ([`Encryptor::of`]).
+/// Under RC4, that's refused where a string or stream would go at a
+/// keystream the file used (the module's "Encrypted"), unless
+/// [`Options::rc4`] says to reuse them, and then each such object leaks, as
+/// [`Rc4::ReusingKeystreams`] says: [`linearize`], under the file's
+/// encryptor told to reuse them, lists which.
+///
+/// A file of one page, written with cross-reference and object streams, and
+/// checked as it reads back:
+///
+/// ```
+/// use pdf_linearize::Limits;
+/// use pdf_linearize::check::Finding;
+/// use pdf_linearize::family::{Options, check, linearize_bytes};
+/// use pdf_linearize::pdf_structure::{Reading, XrefKind, read};
+///
+/// let mut file = b"%PDF-1.7\n".to_vec();
+/// let mut rows = Vec::new();
+/// for (number, object) in [
+///     (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+///     (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 \
+///          /MediaBox [0 0 612 792] /Resources << >> >>"),
+///     (3, "<< /Type /Page /Parent 2 0 R >>"),
+/// ] {
+///     rows.push(file.len());
+///     let object = format!("{number} 0 obj\n{object}\nendobj\n");
+///     file.extend_from_slice(object.as_bytes());
+/// }
+/// let at = file.len();
+/// file.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+/// for row in rows {
+///     file.extend_from_slice(format!("{row:010} 00000 n \n").as_bytes());
+/// }
+/// let trailer = "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n";
+/// file.extend_from_slice(format!("{trailer}{at}\n%%EOF\n").as_bytes());
+///
+/// let mut options = Options::DEFAULT;
+/// options.kind = XrefKind::Stream;
+/// options.pack = true;
+/// let linearized = linearize_bytes(&file, &options).unwrap();
+/// assert!(linearized.windows(11).any(|w| w == b"/Linearized"));
+///
+/// // What's written holds, and nothing else is to be said of it.
+/// let opened = Reading::open(&linearized[..], &read::Options::DEFAULT);
+/// let reading = opened.unwrap();
+/// let mut findings: Vec<Finding> = Vec::new();
+/// let verdict = check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
+/// assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+/// assert_eq!(findings, []);
+/// ```
 ///
 /// # Errors
 ///

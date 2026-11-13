@@ -1,141 +1,111 @@
 # pdf-linearize
 
-PDF files laid out for reading over a network (ISO 32000-2, Annex F), in a small Rust crate with no object model of its own and no I/O: a caller describes its objects as plain data, whichever model holds them.
+Lay out PDF files for reading over a network (ISO 32000-2, Annex F), and check a file that says it's laid out so. The engine has no object model and does no I/O. A caller describes its objects as plain data, from whatever model holds them, and writes their bodies itself.
 
-It's made for what writes PDF files a viewer can show a page of before the rest arrives, and for what checks a file that says it's one. It plans a file's layout, assembles what goes around a caller's bodies, the hint tables among it, writes a document of pdf-structure's or of lopdf's through both, and checks a file that says it's one, of any model's reading.
+It's made for what writes PDF files a viewer can show a page of before the rest arrives, and for what checks such a file. It's built on [pdf-objects](https://crates.io/crates/pdf-objects) and re-exports it whole, so `pdf_linearize::pdf_objects` names its types at the version this crate is built with. Its default `family` feature writes and reads files through [pdf-structure](https://crates.io/crates/pdf-structure) and [pdf-semantics](https://crates.io/crates/pdf-semantics), both re-exported whole too.
 
 ## What it does
 
-- **The plan (F.3).** `plan` takes a `Graph`, each object's id and what it refers to, the pages in order, the page tree's nodes, what a viewer wants at open and the groups a hint table names, and gives a `Plan`: what a caller serializes, in file order, each object's new number, and which objects each object stream holds. The first page's objects, shared or not, go first, then each other page with what it alone uses, what later pages share, and the rest, numbered as a linearized file's two groups are, what's in an object stream highest in its group and the hint stream last.
-- **Which pages use an object.** `Use` says whether one page uses it, several or none, from a walk from each page that never goes into another page, a tree node or what's at open, and that goes into an object twice at most, however many pages share it, on a stack of its own.
-- **Object streams.** `group`, a pure function of each object's number and its `Use`, says which objects share one, so a writer that doesn't linearize can use it too, its `Use`s from `page_uses`, the same walk over ids with no plan. A plan calls it once per region, so a stream holds one region's objects; one with several pages' members is one entry of the shared table, not a cost in each page's section. Under `Kind::Table` nothing's packed, and a packable object is refused.
-- **Each page's shared objects (F.4.2).** `Plan::shared` lists each later page's entries of the shared object table: all it reaches, under what's shared too. It's a walk per page, so it costs what the table it fills costs.
+- **Plan a file's order.** `plan` takes a `Graph`: each object's id and what it refers to, the pages in order, the page tree's nodes, what a viewer wants at open, and the groups a hint table names. It gives a `Plan`: what to write in file order, each object's new number, and what each object stream holds (F.3).
+- **Group objects by the pages that use them, with no plan.** `plan::page_uses` says which pages use each object, and `plan::group` which objects share an object stream. A writer that doesn't linearize can pack by page with them too.
+- **Assemble the bytes around your bodies.** Write each of the plan's bodies however you hold them, and give `assemble` their lengths. The `Layout` holds the padded linearization dictionary, both cross-reference sections and the hint stream. `Layout::pieces` says what comes next in the file: its bytes, or one of your bodies. Its own streams go through a closure you give, which filters or encrypts them, so no filter or key is here.
+- **Read and write hint tables.** Each of F.4's tables is a typed value in `hint`, written to bits and read back. `hint::tables` reads all a hint stream says it has, from any bytes.
+- **Check a file's facts.** `check` takes a file's `check::Facts`, as any model's reader gives them, and says whether the file is linearized, whether it holds and whether its hints read (`check::Verdict`). Each thing wrong is a `check::Finding`, told to a `check::Sink` with the clause it departs from and its place. Its `check::Grade` is `Error` for what a reader relying on the file gets wrong, or `Departure` for what real writers do and viewers go past.
+- **Linearize a document.** With `family`, `family::linearize` writes a pdf-structure `Document` as a linearized file, and `family::linearize_bytes` a file's bytes. Either writes cross-reference tables, streams, or streams with object streams. Inherited page attributes are pushed down to each page. A page tree that gives a page no place of its own is refused (`family::PageTree`). On any refusal, `out` is as it was given.
+- **Write encrypted files.** Under a pdf-structure `Encryptor`, the file's own or a new one, every string and stream that ISO 32000-2 (7.6) encrypts is encrypted under the number it's written at, the hint stream's data too. Under RC4, a string or stream that would go at a keystream the file read used is refused, unless the caller accepts what that leaks: an encryptor told to reuse them, or `family::Rc4` for `linearize_bytes`. `family::Linearized::keystreams_reused` then lists each object so written.
+- **Check a file you've read.** `family::check` and `family::facts` read a file's facts from a pdf-structure `Reading`: its sections, its hint data, decrypted where a password opened it, its page tree, and the graph of its objects. `family::facts_with_reading` takes a file already read whole.
+- **Tell what wasn't judged from what's wrong.** What the reader didn't read for its own reason is said in the facts (`check::Unread`): no key, a cap it reads under, or filters it doesn't take. Each such part, and what's past a cap the check reads under, is one finding of `Grade::Unjudged`, and nothing that depends on it is judged. It never makes a file not hold.
+- **Read hostile files.** `Limits` caps the numbers a file uses, its pages, the shared lists' entries and visits, and the entries hint tables can ask for. Past a cap, a plan is refused (`plan::Error`), so is a table (`hint::Error`), and the check says what it didn't judge. Nothing panics on any graph, any hint table's bytes or any facts.
+- **Share what it gives across threads.** `Plan`, `Layout`, `check::Facts` and `family::Linearized` are `Send` and `Sync`. A `Debug` of facts or of a layout holds no byte of the hint data or of the layout's bytes.
 
-- **The bytes around the bodies (F.3).** A caller writes each of the plan's writes, whole, however it holds them, and gives `assemble` their lengths, as nothing in a body depends on an offset. It gives a `Layout`: the header, the dictionary, the first-page section, the hint stream and the main section as bytes, whose `pieces` say what comes next in the file, those or a caller's body. The hint stream and any cross-reference streams go through a closure the caller gives, which filters or encrypts them, so no filter or key is in here. The dictionary is padded to a fixed length; a table's `/Prev` has room for any position; a stream section is given room, and goes round if what it filters to doesn't fit.
-- **The hint tables (F.4), both ways.** The page offset, shared object, thumbnail, generic, extended and embedded file tables as typed values, each `write` to bits and `read` back, and `hint::tables` for all a hint stream's dictionary says it has. Reading any bytes, a width past 32 or a field past the data is a typed `hint::Error`, and a count that wants more bits than there are is refused before there's room made for it. Each table's every item is on the byte boundary every reader and real file puts it on; every position is as if the hint stream weren't there.
+With `()` as the sink, the check looks for nothing the verdict doesn't need, and doesn't plan the file's graph. The verdict is the same whatever the sink. A part not judged is then said by `Verdict::hints_read` alone, false where the hint stream or its tables weren't read. A caller that holds the facts finds the sections and the page tree in `Facts::unread`.
 
-- **A document of the family (`family`, a default feature).** `family::linearize` writes a pdf-structure `Document`, and `family::linearize_bytes` a file's bytes, in any of three kinds: tables, streams, or streams with object streams, deflated by a `write::Deflate`. Inherited page attributes are pushed down to each page, as written, and taken off the tree's nodes. The rest is copied through pdf-structure's writer where it can be, its references renumbered in place, and its bytes otherwise as they were. The catalog's `/OpenAction` says which page goes first, or `FirstPage::Index` does. A tree that doesn't give each page a place of its own is refused by a typed `family::Error`: a page listed twice or written in place, or one that ISO's rules and PDFium's, as of chromium/8125, read differently, since the numbers and tables depend on which pages a viewer finds. On any refusal `out` is as it was given.
-- **Encrypted files.** `family::linearize` under a `write::Encryptor`, the file's own or a new one, and `linearize_bytes` by its passwords: every string and stream encrypted under the number it's written at, the hint stream's data too, a cross-reference stream not; the encryption dictionary and what it refers to in part 4 in the clear. An object as read is copied at its new number only under AES-256. With no encryptor an encrypted document is written in the clear. Under RC4 this layout reuses every number's keystream on another object, as its sections can list none free and every object moves, so one who keeps both files has the XOR of each pair of plaintexts: pdf-crypt's `Method::Rc4` says so, and `Encryptor::create`, a new key, is the way out.
-- **A document of lopdf's (`lopdf`, off by default).** `lopdf::linearize` writes a lopdf `Document`, under its `lopdf::Options`, by plain functions over its public objects, and `lopdf::graph` says what a plan's told of it: as `family` places and pushes down, from the same keys, so a document read from one file has the numbers `family` gives that file where the two read the same objects, in the plainest kind, tables, nothing in object streams and the hint stream unfiltered. lopdf has no public writer of one object, so a small one is here. A document that's encrypted, or was when lopdf read it, is refused, as lopdf takes `/Encrypt` out of a file the empty password opens and its encryption works under each object's own number; so is a tree that gives a page no place of its own, whose pages aren't what `Document::get_pages` lists, or with a kid ISO's rules and PDFium's read as different things.
+## Features
 
-- **The check (F.3, F.4).** `check` takes `Facts`, plain data as raw as a reader can give: the file's first object, each section's rows as written, the hint stream's keys and decoded data, the pages in order, and the graph of its objects if there's one. It says a `Verdict`, whether it's linearized, whether it holds and whether its hints read, and tells each `Finding` to a `Sink`: `Vec<Finding>` keeps them, and `()` wants none and stops looking once the verdict's settled, the `Verdict` the same whatever the sink. A hint table is held to the layout, each page and shared entry where adding up the lengths has it, holding what it counts, and what each page reaches to its section and its list where the graph is given. Each finding has a `grade`: `Error` for what a reader relying on the file gets wrong, a position, a length, a count, `Departure` for what real files do and viewers go on past, which most linearized files by real writers have some of. A caller that tells the findings takes what the check judges by from the facts too, so it needn't repeat its rules: `Facts::claim`, the first object where it says the file is linearized; `FirstObject::version_one`, whether `/Linearized` is the version taken; and `Facts::hint_extent`, the hint stream's offset and length a `Place::Position` is located by (`hint::located`). A finding about one of the dictionary's values is placed at that key.
-- **Of a reading (`family`).** `family::check` and `family::facts` read those facts from a `pdf_structure::Reading`: its sections by `Reading::sections`, its hint data decrypted where a password opened it, its page tree by pdf-semantics, its graph by a whole read; `family::facts_with_reading` takes the file read whole beside its reading (`WithReading`), and its graph from that document, so a caller that holds one doesn't read the file whole again. A file that doesn't say it's linearized has no more read than it takes to say so, and has no findings.
-
-Without default features it's the engine alone, with no document model: an object is pdf-objects' `ObjectId` and the plain data a caller gives of it, and pdf-objects, `thiserror` and `bitstream-io` are all it takes. The `lopdf` feature adds lopdf alone, without its default features. pdf-objects is re-exported at the root, and with `family`, the other crates its API is typed in are too, and the `zlib-rs` feature lets `family::Options`' `deflate` and `read` name that Flate backend, as pdf-structure's does.
-
-Caps are one value, `Limits`, on the numbers a file uses, its pages, the shared lists' entries and visits and the entries hint tables can ask for: past one, a typed error, so that a crafted graph where a million pages reach a million objects is refused, not run, and a hint stream of a hundred bytes can't ask for four billion of anything. Nothing panics on a graph, on a table's bytes or on any facts, and references to no object count for nothing.
+- **`family`**, on by default: the `family` module, over pdf-structure and pdf-semantics. Without it, the engine takes pdf-objects, thiserror and bitstream-io alone.
+- **`zlib-rs`**, off by default: pdf-filters' zlib-rs backend, through pdf-structure, so `family::Options`' `deflate` and `read` can name it.
+- **`tracing`**, off by default: a span at `debug` over a plan, an assembly and each round of its first-page section, and a check, through [tracing](https://crates.io/crates/tracing). With `family`, a document's linearizing and a file's facts are spans too, each stage and read a span within them. A span's fields are numbers, never a byte of a file. An object, a page, a table's entry and a finding have none.
+- **`insecure-test-writer`**, off by default, for fuzzing: it turns on pdf-structure's test writer, which draws a new file's key from a seeded generator and derives every IV, so a fuzz input writes the same bytes each run. It's never for a document's protection, and a build that ships leaves it off.
 
 ## An example
 
+A plan of two pages that share a font, and the bytes around its bodies:
+
 ```rust
+use std::convert::Infallible;
+
 use pdf_linearize::layout::{Encoded, Options, Piece, Stream};
 use pdf_linearize::pdf_objects::ObjectId;
 use pdf_linearize::plan::{Kind, Page, Part, What};
 use pdf_linearize::{Graph, Limits, assemble, hint, plan};
 
-// A catalog, a tree node and two pages, which share a font.
-let mut graph = Graph::new(ObjectId::new(1, 0), Kind::Table);
-graph.object(ObjectId::new(1, 0), [ObjectId::new(2, 0)]);
-graph.object(ObjectId::new(2, 0), [ObjectId::new(3, 0), ObjectId::new(4, 0)]);
-graph.object(ObjectId::new(3, 0), [ObjectId::new(2, 0), ObjectId::new(5, 0), ObjectId::new(7, 0)]);
-graph.object(ObjectId::new(4, 0), [ObjectId::new(2, 0), ObjectId::new(6, 0), ObjectId::new(7, 0)]);
-for content in [ObjectId::new(5, 0), ObjectId::new(6, 0), ObjectId::new(7, 0)] {
-    graph.object(content, []);
+// A catalog (1), a page tree node (2), two pages (3, 4), a content stream
+// each (5, 6), and a font both pages use (7).
+let id = |number| ObjectId::new(number, 0);
+let mut graph = Graph::new(id(1), Kind::Table);
+graph.object(id(1), [id(2)]);
+graph.object(id(2), [id(3), id(4)]);
+graph.object(id(3), [id(2), id(5), id(7)]);
+graph.object(id(4), [id(2), id(6), id(7)]);
+for leaf in [id(5), id(6), id(7)] {
+    graph.object(leaf, []);
 }
-graph.page(Page::new(ObjectId::new(3, 0)));
-graph.page(Page::new(ObjectId::new(4, 0)));
-graph.tree_node(ObjectId::new(2, 0));
-
+graph.page(Page::new(id(3)));
+graph.page(Page::new(id(4)));
+graph.tree_node(id(2));
 let plan = plan(&graph, &Limits::DEFAULT).unwrap();
 
-// The font stays with the first page, though the second uses it too.
+// The font goes with the first page, though the second uses it too. The
+// second page is numbered from 1, and lists the font's shared entry.
 let first = &plan.writes()[plan.part_writes(Part::FirstPage)];
-assert_eq!(first.iter().map(|w| w.what).collect::<Vec<_>>(), [
-    What::Object(ObjectId::new(3, 0)),
-    What::Object(ObjectId::new(5, 0)),
-    What::Object(ObjectId::new(7, 0)),
-]);
-
-// The second page is numbered from 1, and lists the font's entry.
-assert_eq!(plan.number(ObjectId::new(4, 0)), Some(ObjectId::new(1, 0)));
+let first: Vec<What> = first.iter().map(|write| write.what).collect();
+assert_eq!(first, [id(3), id(5), id(7)].map(What::Object));
+assert_eq!(plan.number(id(4)), Some(id(1)));
 assert_eq!(plan.shared(1), [1]);
 
-// The hint stream is numbered last.
-assert_eq!(plan.hint_number(), plan.size() - 1);
+// A body of 40 bytes for each write, however the caller writes it, and
+// the bytes around them, the layout's own streams left as they are.
+let lengths = vec![40; plan.writes().len()];
+let plain = |stream: Stream| {
+    Ok::<_, Infallible>(Encoded::plain(stream.data.to_vec()))
+};
+let layout = assemble(&plan, &lengths, &Options::new((1, 7)), plain);
+let layout = layout.unwrap();
 
-// A body for each write, by whatever means; assembled around their lengths, with
-// its own streams left as they are.
-let lengths: Vec<u64> = plan.writes().iter().map(|_| 40).collect();
-let layout = assemble(&plan, &lengths, &Options::new((1, 7)), |stream: Stream| {
-    Ok::<_, std::convert::Infallible>(Encoded::plain(stream.data.to_vec()))
-})
-.unwrap();
-
-// The pieces are the file, in order, and it says where everything is.
-let written: u64 = layout
-    .pieces()
+// Its pieces are the whole file, in order.
+let written: u64 = (layout.pieces())
     .map(|piece| match piece {
         Piece::Bytes(bytes) => bytes.len() as u64,
         Piece::Body(at) => lengths[at],
     })
     .sum();
 assert_eq!(written, layout.len());
-assert!(layout.position(plan.first_page_number()).unwrap() < layout.first_page_end());
 
-// The tables read back, the second page listing the font's entry.
-let tables = hint::tables(layout.hint_data(), layout.hint_keys(), 2, &Limits::DEFAULT).unwrap();
+// Its hint tables read back: the second page lists the font's entry.
+let (data, keys) = (layout.hint_data(), layout.hint_keys());
+let tables = hint::tables(data, keys, 2, &Limits::DEFAULT).unwrap();
 assert_eq!(tables.pages.pages[1].shared, [(1, 0)]);
 ```
 
-And from a file's bytes, with `family`:
+## How it's held to the standard, qpdf and PDFium
 
-```rust
-use pdf_linearize::Limits;
-use pdf_linearize::check::Finding;
-use pdf_linearize::family::{Options, check, linearize_bytes};
-use pdf_linearize::pdf_structure::{Reading, XrefKind, read};
+It follows ISO 32000-2's Annex F, written in this crate's own code. Each item of a hint table runs across its entries to a byte boundary, as qpdf, PDFium and real files have it, where F.4.1 has the fields run on regardless of bytes. The repository's `tests/qpdf.rs` holds what's written to qpdf's `--check-linearization` (12.4.2). qpdf warns of some files ISO 32000-2 allows, and the tests say why for each. `tests/pdfium` holds the check to PDFium's availability API as of chromium/8125, and `tests/pdfium/differ.tsv` lists where the check reads a case otherwise. Those files aren't in the package.
 
-let mut file = b"%PDF-1.7\n".to_vec();
-let mut rows = Vec::new();
-for (number, object) in [
-    (1, "<< /Type /Catalog /Pages 2 0 R >>"),
-    (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] /Resources << >> >>"),
-    (3, "<< /Type /Page /Parent 2 0 R >>"),
-] {
-    rows.push(file.len());
-    file.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
-}
-let at = file.len();
-file.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
-for row in rows {
-    file.extend_from_slice(format!("{row:010} 00000 n \n").as_bytes());
-}
-file.extend_from_slice(
-    format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{at}\n%%EOF\n").as_bytes(),
-);
+## Exhaustive on purpose, or not
 
-let mut options = Options::DEFAULT;
-options.kind = XrefKind::Stream;
-options.pack = true;
-let linearized = linearize_bytes(&file, &options).unwrap();
-assert!(linearized.windows(11).any(|w| w == b"/Linearized"));
-
-// What's written holds, and nothing else is to be said of it.
-let reading = Reading::open(&linearized[..], &read::Options::DEFAULT).unwrap();
-let mut findings: Vec<Finding> = Vec::new();
-let verdict = check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
-assert!(verdict.linearized && verdict.holds && verdict.hints_read);
-assert_eq!(findings, []);
-```
+`plan::What`, `layout::Piece` and `plan::Use` are exhaustive, as a writer or a grouping must handle every one. So are the hint tables' headers, entries and tables, as the standard's tables are closed. Every other enum and every struct with public fields is `#[non_exhaustive]`, so each can grow in a minor release.
 
 ## What isn't here
 
-- **A command line.** It's a library; a tool or a viewer's Save As is what calls it.
-- **I/O and bodies, in the engine.** It's told lengths, and gives back what goes around them. Writing what the plan says, and filtering or encrypting a stream of its own, is its caller's, or an adapter's.
-- **Repair.** A file that doesn't hold is told so by `check`, not put right; writing it again through an adapter makes a new one. A page tree that gives a page no one place is refused, not rebuilt.
-- **Much of lopdf's own.** The `lopdf` adapter refuses a document that's encrypted or was, and writes the plainest file there is: tables, nothing packed, the hint stream unfiltered.
-- **A page label table written.** Annex F leaves it optional; one in a file read is read.
-- **Signatures.** Every object moves, so a signature's byte range doesn't hold afterwards: whether to rewrite a signed file is its caller's choice.
+- **I/O and bodies, in the engine.** It's told lengths, and gives back what goes around them.
+- **Another model's documents.** The engine takes any model's objects as plain data, and `family` is pdf-structure's adapter. The repository's pdf-linearize-lopdf, never published, is lopdf's.
+- **Repair.** A file that doesn't hold is told so by `check`, not put right. A page tree that gives a page no place of its own is refused, not rebuilt.
+- **A page label table or an overflow hint stream, written.** Annex F leaves both optional. In a file read, both are read.
+- **Signatures.** The file is written anew, so a signature's byte range doesn't hold afterwards. Whether to rewrite a signed file is the caller's choice.
+
+## Stability
+
+This is an alpha: any alpha may change the API, and the CHANGELOG says how to follow. Depend on the exact version, `pdf-linearize = "=0.1.0-alpha.1"`. It needs Rust 1.89 or later.
 
 ## License
 

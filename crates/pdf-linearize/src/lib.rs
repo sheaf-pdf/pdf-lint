@@ -1,50 +1,114 @@
-//! PDF files laid out for reading over a network (ISO 32000-2, Annex F), with
-//! no object model of its own and no I/O: a caller describes its objects as
-//! plain data, whichever model holds them.
+//! Lay out PDF files for reading over a network (ISO 32000-2, Annex F), and
+//! check a file that says it's laid out so. The engine has no object model
+//! and does no I/O: a caller describes its objects as plain data, from
+//! whatever model holds them, and writes their bodies itself.
 //!
-//! - **The plan** ([`plan()`]): a [`Graph`], each object's id and what it
-//!   refers to, the pages in order, and what a viewer wants at open, becomes
-//!   Annex F's order, the new numbers and the object streams' members, a
-//!   [`Plan`], with what each page's entry in the hint tables needs. Which
-//!   pages use each object is a [`plan::Use`], and [`plan::group()`] says which
-//!   objects share an object stream by their uses; a writer that doesn't
-//!   linearize has them with no plan by [`plan::page_uses`].
-//! - **The bytes around the bodies** ([`assemble`]): a caller writes each of
-//!   the plan's bodies, however it holds them, and gives their lengths. A
-//!   [`Layout`] has the padded dictionary, both cross-reference sections and
-//!   the hint stream as bytes, and says what's next in the file. What a stream
-//!   of its own is filtered or encrypted by is a closure, so no filter or key
-//!   is here.
-//! - **The hint tables** ([`hint`]): all of F.4's as typed values, written to
-//!   bits and read back, [`hint::tables`] reading any bytes under a cap.
-//! - **The check** ([`check()`]): the [`check::Facts`] of a file as written, as
-//!   any model's reader gives them, held against each other, to a
-//!   [`check::Verdict`] and a [`check::Finding`] for each thing wrong, by the
-//!   clause it departs from and a [`check::Grade`], or for a part the reader
-//!   didn't read, that it isn't judged.
+//! - **Plan a file's order** ([`plan()`]): a [`Graph`], each object's id and
+//!   what it refers to, the pages and what's wanted at open, becomes a
+//!   [`Plan`], the file's order, its new numbers and its object streams
+//!   (F.3). [`plan::page_uses`] and [`plan::group()`] group objects by the
+//!   pages that use them, with no plan.
+//! - **Assemble the bytes around the bodies** ([`assemble`]): from the
+//!   bodies' lengths, a [`Layout`], whose [`pieces`](Layout::pieces) say what
+//!   comes next in the file. Its own streams go through a closure the caller
+//!   gives, so no filter or key is here.
+//! - **Read and write hint tables** ([`hint`]): each of F.4's as a typed
+//!   value, [`hint::tables`] reading any bytes.
+//! - **Check a file's facts** ([`check()`]): the [`check::Facts`] of a file,
+//!   as any model's reader gives them, to a [`check::Verdict`], each thing
+//!   wrong a [`check::Finding`] with its [`check::Grade`]. What the reader
+//!   didn't read for its own reason ([`check::Unread`]), and what's past a
+//!   cap of the check's own, is told as not judged, never as the file's.
 #![cfg_attr(
     feature = "family",
-    doc = "- **The family's documents** ([`family`], a default feature): a document of"
+    doc = "- **Linearize a document, or check a file read** ([`family`], a default"
 )]
 #![cfg_attr(
     feature = "family",
-    doc = "  pdf-structure's, or a file's bytes, written as a linearized file: the page tree"
+    doc = "  feature): a pdf-structure document or a file's bytes written as a"
 )]
 #![cfg_attr(
     feature = "family",
-    doc = "  by pdf-semantics, each body through pdf-structure's writer, copied where it can be, encrypted as the file was or under a new key."
+    doc = "  linearized file, in the clear or encrypted, and a file's facts read."
 )]
 //!
-//! Its caps are one value, [`Limits`]. With no features there's no document
-//! model here at all: an object is its [`ObjectId`](pdf_objects::ObjectId),
-//! pdf-objects' pair of a number and a generation, and the plain data a caller
-//! gives of it.
+//! Its caps are one value, [`Limits`]: past one, a plan or a table is
+//! refused, and the check says what it didn't judge. Nothing panics on any
+//! graph, any hint table's bytes or any facts. pdf-objects is re-exported
+//! whole, and with `family` pdf-structure and pdf-semantics are too, so
+//! their types are named through them at the versions this crate is built
+//! with.
 //!
-//! With the `tracing` feature, off by default, a plan, an assembly and a check
-//! are each a span at `debug`, and with `family` a document's linearizing and a
-//! file's facts, their stages and reads spans within them. A span's fields are
-//! numbers, never a byte of a file; an object, a page, a table's entry and a
-//! finding have none. Without it, none is compiled.
+//! # Features
+//!
+//! - **`family`**, on by default: pdf-structure's documents and readings.
+//!   Without it, the engine takes pdf-objects, thiserror and bitstream-io
+//!   alone.
+//! - **`zlib-rs`**, off by default: pdf-filters' zlib-rs backend, through
+//!   pdf-structure.
+//! - **`tracing`**, off by default: a span at `debug` over a plan, an
+//!   assembly and each round of its first-page section, and a check; with
+//!   `family`, over a document's linearizing and a file's facts, each stage
+//!   and read a span within them. A span's fields are numbers, never a byte
+//!   of a file. An object, a page, a table's entry and a finding have none.
+//!
+//! A plan of two pages that share a font, and the bytes around its bodies:
+//!
+//! ```
+//! use std::convert::Infallible;
+//!
+//! use pdf_linearize::layout::{Encoded, Options, Piece, Stream};
+//! use pdf_linearize::pdf_objects::ObjectId;
+//! use pdf_linearize::plan::{Kind, Page, Part, What};
+//! use pdf_linearize::{Graph, Limits, assemble, hint, plan};
+//!
+//! // A catalog (1), a page tree node (2), two pages (3, 4), a content stream
+//! // each (5, 6), and a font both pages use (7).
+//! let id = |number| ObjectId::new(number, 0);
+//! let mut graph = Graph::new(id(1), Kind::Table);
+//! graph.object(id(1), [id(2)]);
+//! graph.object(id(2), [id(3), id(4)]);
+//! graph.object(id(3), [id(2), id(5), id(7)]);
+//! graph.object(id(4), [id(2), id(6), id(7)]);
+//! for leaf in [id(5), id(6), id(7)] {
+//!     graph.object(leaf, []);
+//! }
+//! graph.page(Page::new(id(3)));
+//! graph.page(Page::new(id(4)));
+//! graph.tree_node(id(2));
+//! let plan = plan(&graph, &Limits::DEFAULT).unwrap();
+//!
+//! // The font goes with the first page, though the second uses it too. The
+//! // second page is numbered from 1, and lists the font's shared entry.
+//! let first = &plan.writes()[plan.part_writes(Part::FirstPage)];
+//! let first: Vec<What> = first.iter().map(|write| write.what).collect();
+//! assert_eq!(first, [id(3), id(5), id(7)].map(What::Object));
+//! assert_eq!(plan.number(id(4)), Some(id(1)));
+//! assert_eq!(plan.shared(1), [1]);
+//!
+//! // A body of 40 bytes for each write, however the caller writes it, and
+//! // the bytes around them, the layout's own streams left as they are.
+//! let lengths = vec![40; plan.writes().len()];
+//! let plain = |stream: Stream| {
+//!     Ok::<_, Infallible>(Encoded::plain(stream.data.to_vec()))
+//! };
+//! let layout = assemble(&plan, &lengths, &Options::new((1, 7)), plain);
+//! let layout = layout.unwrap();
+//!
+//! // Its pieces are the whole file, in order.
+//! let written: u64 = (layout.pieces())
+//!     .map(|piece| match piece {
+//!         Piece::Bytes(bytes) => bytes.len() as u64,
+//!         Piece::Body(at) => lengths[at],
+//!     })
+//!     .sum();
+//! assert_eq!(written, layout.len());
+//!
+//! // Its hint tables read back: the second page lists the font's entry.
+//! let (data, keys) = (layout.hint_data(), layout.hint_keys());
+//! let tables = hint::tables(data, keys, 2, &Limits::DEFAULT).unwrap();
+//! assert_eq!(tables.pages.pages[1].shared, [(1, 0)]);
+//! ```
 
 pub use check::check;
 pub use layout::{Layout, assemble};
@@ -91,9 +155,54 @@ mod tests {
             );
         }
     }
+
+    /// The crate doc's example is the README's, line for line, so that what
+    /// docs.rs shows and what crates.io shows are one example, and each runs
+    /// as a doctest, in every build. The crate doc's lines with `family` are
+    /// attributes, which this reads past.
+    #[test]
+    fn the_crate_docs_example_is_the_readmes() {
+        let readme: Vec<&str> = (include_str!("../README.md").lines())
+            .skip_while(|line| *line != "```rust")
+            .skip(1)
+            .take_while(|line| *line != "```")
+            .collect();
+        let doc: Vec<&str> = (include_str!("lib.rs").lines())
+            .filter_map(|line| line.strip_prefix("//!"))
+            .map(|line| line.strip_prefix(' ').unwrap_or(line))
+            .skip_while(|line| *line != "```")
+            .skip(1)
+            .take_while(|line| *line != "```")
+            .collect();
+        assert!(readme.len() > 10, "the README's example: {readme:?}");
+        assert_eq!(doc, readme);
+    }
+
+    /// What the crate gives a caller is plain data, sent to and shared by any
+    /// thread: a plan and its graph, a layout and its pieces, a file's facts,
+    /// what's judged of them, and what a document's linearizing gives.
+    #[test]
+    fn what_it_gives_is_sent_and_shared() {
+        fn shared<T: Send + Sync>() {}
+        shared::<crate::Graph>();
+        shared::<crate::Plan>();
+        shared::<crate::plan::Error>();
+        shared::<crate::Layout>();
+        shared::<crate::layout::Pieces<'_>>();
+        shared::<crate::layout::Error<std::convert::Infallible>>();
+        shared::<crate::hint::Tables>();
+        shared::<crate::check::Facts>();
+        shared::<crate::check::Verdict>();
+        shared::<crate::check::Finding>();
+        #[cfg(feature = "family")]
+        {
+            shared::<crate::family::Linearized>();
+            shared::<crate::family::Error>();
+        }
+    }
 }
 
-/// The README's examples, run as doctests: one of them uses `family`.
-#[cfg(all(doctest, feature = "family"))]
+/// The README's example, run as a doctest.
+#[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;

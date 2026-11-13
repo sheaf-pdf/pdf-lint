@@ -39,6 +39,11 @@
 //!   reference that ends at one of those or at nothing, a reference to any of
 //!   which reads the same as one to none.
 //!
+//! What's written is what the [`Document`] holds, which can differ from what
+//! a reader of its file finds: lopdf's reader can keep an object a later
+//! section of the file freed, or an older revision's `/Info`. Each is written
+//! as held where what's written reaches it, as lopdf's own save writes it.
+//!
 //! Every object moves, as Annex F has it, so anything that names one from
 //! outside the file, a signature's byte range above all, doesn't hold
 //! afterwards.
