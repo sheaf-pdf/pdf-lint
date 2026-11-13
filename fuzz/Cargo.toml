@@ -71,11 +71,13 @@
 # and `splice_each`'s reads at its cap and a byte under; content that holds
 # an image a cap sized refused by every edit; and pairs of objects its
 # bytes choose the same as resources exactly where their digests' bytes
-# are, `Res::of` refusing exactly what holds data not in memory; which
-# three stable unit tests (`mutated_seeds_keep_every_promise`,
-# `random_fragments_keep_every_promise` and
-# `resources_chosen_are_both_the_same_and_apart`) run on mutated seeds,
-# random content and random pairs;
+# are, `Res::of` refusing exactly what holds data not in memory; and its
+# bytes as a page's `/Contents` and the objects it names, joined as a plain
+# reading of PDFium's joins them; which four stable unit tests
+# (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`,
+# `resources_chosen_are_both_the_same_and_apart` and
+# `contents_chosen_come_to_each_answer`) run on mutated seeds, random
+# content, random pairs and random files;
 # `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
 # each walked the same whatever hears its faults, what a plain walk gives,
 # its nodes with neither `/Kids` nor entries, or both, said as it finds them,

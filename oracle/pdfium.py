@@ -85,6 +85,30 @@ def pdf(content=None, resources=b"<< >>", mediabox=b"[0 0 200 200]", info=None, 
     return bytes(out)
 
 
+def contents_pdf(contents, objects):
+    """A one-page PDF whose page's /Contents is `contents` as written, and
+    whose objects from 4 on are `objects`: each as written between its
+    `n 0 obj` and `endobj`, each followed by a line `endobj`."""
+    page = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents " + contents
+            + b" /Resources << >> >>")
+    bodies = objects.split(b"\nendobj\n")
+    if bodies[-1] != b"":
+        raise SystemExit("a contents case's objects each end in a line `endobj`")
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", page] + bodies[:-1]
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for o in offsets:
+        out += b"%010d 00000 n \n" % o
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
 class M(ctypes.Structure):
     _fields_ = [(n, ctypes.c_float) for n in "abcdef"]
 
@@ -470,6 +494,8 @@ def answer(pdfium, kind, files):
     how it's asked (README.md)."""
     if kind == "content":
         return content_answer(pdfium.objects(pdf(files["content"], files.get("res", b"<< >>"))))
+    if kind == "contents":
+        return content_answer(pdfium.objects(contents_pdf(files["contents"], files["objects"])))
     if kind in ("number", "hex", "literal", "name"):
         word = files["word"]
         if kind == "number":

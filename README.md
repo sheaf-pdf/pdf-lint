@@ -83,8 +83,9 @@ files' dictionaries and a password's forms, pdf-objects' parser, by ISO
 32000-2's rules and PDFium's, its writer and text strings, pdf-structure's
 reader and writer, pdf-content-streams' tokens, operations, faults, operator
 table, the balance, marked content and names over them, its writer, content
-written again and the calls, its splices and lists written again, and an
+written again and the calls, its splices and lists written again, an
 image's color space counted alike in its dictionary and in the resources,
+and a page's `/Contents` joined,
 pdf-semantics' name and number trees, page tree, dates and XMP claims, each
 read and written, a file's packet read through its streams and its document
 information dictionary read,

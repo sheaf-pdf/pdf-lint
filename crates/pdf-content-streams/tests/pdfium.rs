@@ -1,15 +1,17 @@
 //! Content read as PDFium reads it, held to PDFium's own reading, case by
 //! case. Each case is in `tests/pdfium` (`cases.tsv`, its bytes in
 //! `cases/`, written by `cases.py`): a content stream (`.content`) and the
-//! page's resources (`.res`, `<< >>` where there's none), with PDFium's
-//! answer for it recorded beside it at the pinned build (`chromium-N.txt`,
-//! by the repository's `oracle/pdfium.py`, which `oracle/README.md`
-//! describes): the page objects PDFium makes of it, in order. Here the
-//! same objects are made from the crate's operations by a small
-//! interpreter, and the two must agree, but for the cases `differ.tsv`
-//! names, which must still differ. Each case is read each way the build
-//! can read it: an inline image's DCT and CCITTFax data ended by the
-//! stand-in, and, with the `image-ends` feature, by decoding it.
+//! page's resources (`.res`, `<< >>` where there's none); or, a case of
+//! the `contents` kind, a page's `/Contents` as written (`.contents`) and
+//! the objects it may name (`.objects`), joined by [`Join::push_contents`];
+//! with PDFium's answer for it recorded beside it at the pinned build
+//! (`chromium-N.txt`, by the repository's `oracle/pdfium.py`, which
+//! `oracle/README.md` describes): the page objects PDFium makes of it, in
+//! order. Here the same objects are made from the crate's operations by a
+//! small interpreter, and the two must agree, but for the cases
+//! `differ.tsv` names, which must still differ. Each case is read each way
+//! the build can read it: an inline image's DCT and CCITTFax data ended by
+//! the stand-in, and, with the `image-ends` feature, by decoding it.
 //!
 //! The interpreter makes what PDFium's content parser makes, as far as the
 //! cases need:
@@ -47,14 +49,17 @@
 //! Numbers are compared as `f32`s. Text and data longer than 64 bytes are
 //! compared by their length and hash, as the oracle writes them.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_content_streams::pdf_objects::parse::Parser;
 use pdf_content_streams::pdf_objects::pdf_tokenizer::Rules;
-use pdf_content_streams::pdf_objects::{Dict, Object, ObjectId, Str, Value};
-use pdf_content_streams::{ImageStream, Limits, Operand, ResCx, operations};
+use pdf_content_streams::pdf_objects::{
+    Dict, Object, ObjectId, Resolve, Str, Streams, Unreadable, Value, Why,
+};
+use pdf_content_streams::{ImageStream, Join, Limits, Operand, ResCx, operations};
 
 /// A case's text or data longer than this is written by its length and
 /// FNV-1a 64 hash, as the oracle writes it.
@@ -622,6 +627,95 @@ fn answer(content: &[u8], res: &[u8], lim: Limits) -> String {
     reader.out.join(" ; ")
 }
 
+/// A `contents` case's objects, as its file has them: object `n` from 4, its
+/// value, or a stream's dictionary and its data; none where it doesn't read,
+/// which is damaged.
+struct File {
+    objects: BTreeMap<ObjectId, Option<Object>>,
+    data: BTreeMap<ObjectId, Vec<u8>>,
+}
+
+impl File {
+    /// The objects as `.objects` writes them, each followed by a line
+    /// `endobj`, read as PDFium's parser reads them.
+    fn read(objects: &[u8]) -> File {
+        let mut file = File {
+            objects: BTreeMap::new(),
+            data: BTreeMap::new(),
+        };
+        let mut bodies: Vec<&[u8]> = objects.split_inclusive(|&b| b == b'\n').collect();
+        let mut body = Vec::new();
+        let mut number = 4;
+        for line in bodies.drain(..) {
+            if line != b"endobj\n" {
+                body.extend_from_slice(line);
+                continue;
+            }
+            // The newline before `endobj` is the file's, not the body's.
+            body.pop();
+            let id = ObjectId::new(number, 0);
+            let value = |bytes: &[u8]| {
+                Parser::at(bytes, 0)
+                    .rules(Rules::Pdfium)
+                    .value(&mut ())
+                    .ok()
+            };
+            let read = match body.windows(8).position(|w| w == b"\nstream\n") {
+                Some(at) => value(&body[..at]).map(|dict| {
+                    let data = &body[at + 8..body.len() - b"\nendstream".len()];
+                    file.data.insert(id, data.to_vec());
+                    Object::stream(dict.as_dict().cloned().unwrap_or_default())
+                }),
+                None => value(&body),
+            };
+            file.objects.insert(id, read);
+            body.clear();
+            number += 1;
+        }
+        file
+    }
+}
+
+impl<'o> Resolve<'o> for &'o File {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        self.try_resolve(id).ok().flatten()
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        match self.objects.get(&id) {
+            None => Ok(None),
+            Some(Some(object)) => Ok(Some(object)),
+            Some(None) => Err(Unreadable::new(id, Why::Damaged, "it doesn't read")),
+        }
+    }
+}
+
+impl Streams for &File {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        match self.data.get(&id) {
+            Some(data) if data.len() <= limit => Ok(Cow::Borrowed(data)),
+            Some(_) => Err(Unreadable::new(id, Why::Limit, "past the limit")),
+            None => Err(Unreadable::new(id, Why::Damaged, "no stream")),
+        }
+    }
+}
+
+/// The crate's answer for a `contents` case, read under `lim`: the page's
+/// streams joined as [`Join::push_contents`] joins them, as the page objects
+/// they draw; or what refused them.
+fn contents_answer(contents: &[u8], objects: &[u8], lim: Limits) -> String {
+    let file = File::read(objects);
+    let contents = Parser::at(contents, 0)
+        .rules(Rules::Pdfium)
+        .value(&mut ())
+        .unwrap();
+    let mut join = Join::new(&lim);
+    match join.push_contents(&file, &contents) {
+        Ok(()) => answer(join.finish().bytes(), b"<< >>", lim),
+        Err(refused) => format!("refused {refused}"),
+    }
+}
+
 /// The ways the crate reads the cases: each with how DCT and CCITTFax
 /// data's end is found, by the stand-in, `default`, and, with the
 /// `image-ends` feature, by decoding it, `image-ends`, as differ.tsv names
@@ -661,11 +755,18 @@ fn every_case_reads_as_pdfium_reads_it() {
             .collect();
         for case in &cases {
             let (name, kind) = (&case[0], &case[1]);
-            assert_eq!(kind, "content", "{name}: a kind this test doesn't read");
             let read = |ext: &str| fs::read(set().join("cases").join(format!("{name}.{ext}")));
-            let content = read("content").unwrap();
-            let res = read("res").unwrap_or_else(|_| b"<< >>".to_vec());
-            let ours = answer(&content, &res, lim);
+            let ours = match kind.as_str() {
+                "content" => {
+                    let content = read("content").unwrap();
+                    let res = read("res").unwrap_or_else(|_| b"<< >>".to_vec());
+                    answer(&content, &res, lim)
+                }
+                "contents" => {
+                    contents_answer(&read("contents").unwrap(), &read("objects").unwrap(), lim)
+                }
+                _ => panic!("{name}: a kind this test doesn't read"),
+            };
             let pdfium = recorded
                 .get(name)
                 .unwrap_or_else(|| panic!("{name}: no answer recorded"));

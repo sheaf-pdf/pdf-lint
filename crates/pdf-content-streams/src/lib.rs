@@ -15,7 +15,8 @@
 //!   ([`Limits::coded_ends`]).
 //! - **Read a page's streams as one** ([`Concat`], [`Join`],
 //!   [`Join::push_from`]), each place mapped back to its stream ([`Pos`],
-//!   [`SpanAcross`]).
+//!   [`SpanAcross`]), and a page's `/Contents` whole as PDFium reads it
+//!   ([`Join::push_contents`]).
 //! - **Know what each operator is** ([`Operator`]) and where it may be used
 //!   ([`State`]).
 //! - **Check a page**: its `q`/`Q` balance ([`balance`](fn@balance)), its

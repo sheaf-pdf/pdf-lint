@@ -20,8 +20,8 @@ use pdf_tokenizer::Rules;
 
 use crate::fault::{Fault, Sink};
 use crate::fuzz::{
-    BLOCK, COMMENT_EI, Collected, FLATE_EI, G4, LZW_EI, Unwanted, blank, faulted, fixtures, jpeg,
-    stored,
+    BLOCK, COMMENT_EI, Collected, FLATE_EI, File, G4, LZW_EI, Unwanted, blank, faulted, fixtures,
+    jpeg, stored,
 };
 use crate::*;
 
@@ -3662,6 +3662,145 @@ fn a_stream_given_by_a_reader_into_the_join() {
     assert_eq!(content.bytes(), b"q 0 g  QQQQQQQQQQQQQ");
     assert_eq!(content.stream_count(), 3);
     assert_eq!(content.stream(1), b"");
+}
+
+/// A file's objects and its streams' data, which a page's `/Contents` are
+/// joined from.
+struct Pages(File);
+
+impl Pages {
+    /// Streams 1 to 3, `q`, `0 g` and `Q`; 4 a dictionary; 5 an array of 1
+    /// and 3; 6 a reference to stream 1; 7 an empty array; 8 to 11 objects
+    /// that don't read, damaged, past a cap, locked and not given; 12 a stream
+    /// whose data is locked.
+    fn new() -> Pages {
+        let id = |n| ObjectId::new(n, 0);
+        let stream = || Ok(Object::stream(dict! {}));
+        let mut objects = BTreeMap::from([
+            (id(1), stream()),
+            (id(2), stream()),
+            (id(3), stream()),
+            (id(4), Ok(Object::from(dict! { "A" => 1 }))),
+            (
+                id(5),
+                Ok(Object::from(vec![
+                    Object::reference(1),
+                    Object::reference(3),
+                ])),
+            ),
+            (id(6), Ok(Object::reference(1))),
+            (id(7), Ok(Object::from(Vec::new()))),
+            (id(12), stream()),
+        ]);
+        for (n, why) in [
+            (8, Why::Damaged),
+            (9, Why::Capped),
+            (10, Why::Locked),
+            (11, Why::Source),
+        ] {
+            objects.insert(id(n), Err(why));
+        }
+        let data = BTreeMap::from([
+            (id(1), Ok(b"q".to_vec())),
+            (id(2), Ok(b"0 g".to_vec())),
+            (id(3), Ok(b"Q".to_vec())),
+            (id(12), Err(Why::Locked)),
+        ]);
+        Pages(File { objects, data })
+    }
+
+    /// `contents`, as written, joined: the joined bytes and each stream's,
+    /// or what refused them, and what was joined before.
+    fn joined(&self, contents: &str) -> Result<Vec<String>, (Pushed<Unreadable>, usize)> {
+        let contents = Parser::at(contents.as_bytes(), 0).value(&mut ()).unwrap();
+        let mut join = Join::new(&Limits::DEFAULT);
+        let joined = join.push_contents(&self.0, &contents);
+        let page = join.finish();
+        match joined {
+            Ok(()) => {
+                let streams = (0..page.stream_count()).map(|i| page.stream(i));
+                let streams = streams.map(|s| String::from_utf8_lossy(s).into_owned());
+                Ok(
+                    std::iter::once(String::from_utf8_lossy(page.bytes()).into_owned())
+                        .chain(streams)
+                        .collect(),
+                )
+            }
+            Err(refused) => Err((refused, page.stream_count())),
+        }
+    }
+}
+
+/// A page's `/Contents` joined as PDFium reads it: a stream, or an array of
+/// them by value or by one reference, each element a stream, one that's no
+/// stream an empty one; a reference followed once; what's neither nothing.
+#[test]
+fn a_page_s_contents_joined_as_pdfium_reads_them() {
+    let pages = Pages::new();
+    let joined = |contents: &str| pages.joined(contents).unwrap();
+    assert_eq!(joined("1 0 R"), ["q", "q"]);
+    assert_eq!(joined("[1 0 R 2 0 R 3 0 R]"), ["q 0 g Q", "q", "0 g", "Q"]);
+    assert_eq!(joined("5 0 R"), ["q Q", "q", "Q"]);
+    assert_eq!(joined("[3 0 R 1 0 R 1 0 R]"), ["Q q q", "Q", "q", "q"]);
+    // An element that's no stream: a dictionary, null, a number, an array by
+    // value or by reference, a reference to nothing, to a reference, or to an
+    // object that doesn't read for the file's damage.
+    for element in [
+        "4 0 R", "null", "7", "[2 0 R]", "5 0 R", "99 0 R", "6 0 R", "8 0 R", "7 0 R",
+    ] {
+        let contents = format!("[1 0 R {element} 3 0 R]");
+        assert_eq!(joined(&contents), ["q  Q", "q", "", "Q"], "{element}");
+    }
+    // No content: none of those as /Contents, nor an empty array.
+    for contents in [
+        "4 0 R", "null", "7", "99 0 R", "6 0 R", "8 0 R", "7 0 R", "[]",
+    ] {
+        assert_eq!(joined(contents), [""], "{contents}");
+    }
+    // A stream written in place has no number to ask its data by.
+    let in_place = Object::from(vec![Object::stream(dict! {}), Object::reference(3)]);
+    let mut join = Join::new(&Limits::DEFAULT);
+    join.push_contents(&pages.0, &in_place).unwrap();
+    let page = join.finish();
+    assert_eq!((page.bytes(), page.stream_count()), (&b" Q"[..], 2));
+}
+
+/// What doesn't read for the reader's own reason, past a cap, behind a
+/// password or not given, is an error, never read as no stream, whether it's
+/// `/Contents`, an element or a stream's data; the streams before it stay
+/// joined. Past the cap, the join is refused.
+#[test]
+fn a_page_s_contents_that_do_not_read_for_the_reader_are_an_error() {
+    let pages = Pages::new();
+    for (n, why) in [
+        (9, Why::Capped),
+        (10, Why::Locked),
+        (11, Why::Source),
+        (12, Why::Locked),
+    ] {
+        for (contents, before) in [
+            (format!("{n} 0 R"), 0),
+            (format!("[1 0 R {n} 0 R 3 0 R]"), 1),
+        ] {
+            let (refused, joined) = pages.joined(&contents).unwrap_err();
+            let Pushed::Decode(unreadable) = refused else {
+                panic!("{contents}: {refused:?}");
+            };
+            assert_eq!(
+                (unreadable.id.number, unreadable.why),
+                (n, why),
+                "{contents}"
+            );
+            assert_eq!(joined, before, "{contents}");
+        }
+    }
+    let contents = Parser::at(b"[1 0 R 2 0 R]", 0).value(&mut ()).unwrap();
+    let mut join = Join::new(&Limits {
+        content: 3,
+        ..Limits::DEFAULT
+    });
+    let refused = join.push_contents(&pages.0, &contents);
+    assert_eq!(refused, Err(Pushed::TooLarge(TooLarge { cap: 3 })));
 }
 
 #[test]

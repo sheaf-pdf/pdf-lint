@@ -10,13 +10,14 @@
 //! as they're decoded, under [`Limits::content`], each decoded straight
 //! into the joined bytes when the decoder appends to a buffer, or given by
 //! a reader of the file through pdf-objects' [`Streams`]
-//! ([`Join::push_from`]).
+//! ([`Join::push_from`]), a page's `/Contents` whole as PDFium reads it
+//! ([`Join::push_contents`]).
 
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 
-use pdf_objects::{ObjectId, Streams, Unreadable, Why};
+use pdf_objects::{Object, ObjectId, Resolve, Streams, Unreadable, Value, Why};
 
 use crate::inline::ResCx;
 use crate::limits::Limits;
@@ -395,6 +396,86 @@ impl Join {
         }
     }
 
+    /// A page's `/Contents` added, as PDFium reads it, as of chromium/8125:
+    /// `contents` is its value as written in the page's dictionary, and
+    /// `objects` give the file's objects and its streams' data, a reader of
+    /// the file's or any other. A stream is added as [`Join::push_from`] adds
+    /// it. An array's elements are added in order (ISO 32000-2, 7.7.3.3), each
+    /// a stream of the joined bytes, so a [`Pos`]'s stream is the element's
+    /// index.
+    ///
+    /// What isn't a stream is read as PDFium reads it. A reference is
+    /// followed once, as it names an object, so one that names another
+    /// reference names no stream. A `/Contents` that's neither a stream nor
+    /// an array adds nothing, nor does an empty array: the page has no
+    /// content. An element that's no stream, an array among them, adds an
+    /// empty stream, its place kept. A reference to nothing is null, and so
+    /// is one to an object that doesn't read for the file's own damage
+    /// ([`Why::Damaged`]). A stream written in place, which only a document
+    /// built in memory can hold, has no number to ask its data by, and is no
+    /// stream here.
+    ///
+    /// ```
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why, dict};
+    /// use pdf_content_streams::{Join, Limits};
+    ///
+    /// // Streams 4 and 5, and 6 a dictionary, which is no stream.
+    /// let stream = Object::stream(dict! {});
+    /// let other = Object::from(dict! { "A" => 1 });
+    /// let objects = |id: ObjectId| match id.number {
+    ///     4 | 5 => Some(&stream),
+    ///     6 => Some(&other),
+    ///     _ => None,
+    /// };
+    /// let file = WithStreams::new(objects, |id: ObjectId, _: usize| match id.number {
+    ///     4 => Ok(b"0 0 m 9 9 l".to_vec()),
+    ///     5 => Ok(b"S".to_vec()),
+    ///     _ => Err(Unreadable::new(id, Why::Damaged, "no stream")),
+    /// });
+    /// let contents = Object::from(vec![Object::reference(4), Object::reference(6), Object::reference(5)]);
+    /// let mut join = Join::new(&Limits::DEFAULT);
+    /// join.push_contents(file, &contents).unwrap();
+    /// let page = join.finish();
+    /// assert_eq!(page.bytes(), b"0 0 m 9 9 l  S");
+    /// assert_eq!(page.stream_count(), 3);
+    /// assert_eq!(page.stream(1), b"");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Pushed::Decode`] with the [`Unreadable`] `objects` give where
+    /// `/Contents` or an element doesn't read for the reader's own reason,
+    /// past a cap it reads under, behind a password or not given
+    /// ([`Why::Capped`], [`Why::Locked`], [`Why::Source`]): never read as no
+    /// stream. And for each stream, what [`Join::push_from`] refuses. The
+    /// streams added before it stay joined.
+    pub fn push_contents<'o, O: Resolve<'o> + Streams>(
+        &mut self,
+        objects: O,
+        contents: &'o Object,
+    ) -> Result<(), Pushed<Unreadable>> {
+        let Some((contents, id)) = named(&objects, contents)? else {
+            return Ok(());
+        };
+        match (contents.value(), id) {
+            (Value::Stream(_), Some(id)) => self.push_from(&objects, id),
+            (Value::Array(elements), _) => {
+                for element in elements {
+                    match named(&objects, element)? {
+                        Some((element, Some(id)))
+                            if matches!(element.value(), Value::Stream(_)) =>
+                        {
+                            self.push_from(&objects, id)?;
+                        }
+                        _ => self.push(&[]).map_err(Pushed::TooLarge)?,
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The streams joined.
     #[must_use]
     pub fn finish(self) -> Concat<'static> {
@@ -415,6 +496,25 @@ impl Join {
 
     fn too_large(&self) -> TooLarge {
         TooLarge { cap: self.cap }
+    }
+}
+
+/// What `value`, as written where a stream or an array of them is, names, as
+/// PDFium takes it: a reference followed once, to its object and that number,
+/// else the value itself, written in place; none for a reference to nothing,
+/// or to an object that doesn't read for the file's own damage.
+fn named<'o, O: Resolve<'o>>(
+    objects: &O,
+    value: &'o Object,
+) -> Result<Option<(&'o Object, Option<ObjectId>)>, Pushed<Unreadable>> {
+    let Value::Ref(id) = value.value() else {
+        return Ok(Some((value, None)));
+    };
+    match objects.try_resolve(*id) {
+        Ok(Some(object)) => Ok(Some((object, Some(*id)))),
+        Ok(None) => Ok(None),
+        Err(unreadable) if unreadable.why == Why::Damaged => Ok(None),
+        Err(unreadable) => Err(Pushed::Decode(unreadable)),
     }
 }
 
