@@ -89,7 +89,8 @@
 # streams' data, the same, and past a cap nothing read, and its claims, and
 # claims made of its text, written and read back, or refused, and
 # `pdf_semantics::fuzz::over`, a file's trees,
-# pages and metadata stream through a reading and the document it makes, which
+# pages, metadata stream and `/Info`, read typed by both rules, through a
+# reading and the document it makes, which
 # three stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a

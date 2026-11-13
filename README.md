@@ -86,7 +86,8 @@ table, the balance, marked content and names over them, its writer, content
 written again and the calls, its splices and lists written again, and an
 image's color space counted alike in its dictionary and in the resources,
 pdf-semantics' name and number trees, page tree, dates and XMP claims, each
-read and written, and a file's packet read through its streams,
+read and written, a file's packet read through its streams and its document
+information dictionary read,
 pdf-color's count of a space's components, its typed spaces and what a
 resources dictionary names, pdf-fonts' scan of a Type 1 program under its
 caps, its reading of names, and of a font and its program as parts and as a
