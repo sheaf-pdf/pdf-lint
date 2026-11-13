@@ -18,6 +18,9 @@
 //!   [`name_code_point`], [`cp1252`]).
 //! - **Find a standard 14 font** ([`Std14::named`]) by a name PDFium takes for it, with
 //!   Adobe's metrics.
+//! - **Write text in a standard 14 font**: its dictionary ([`Std14::dict`]), and text in
+//!   its codes ([`Std14::codes`], [`Encoding::code`]), which read back as the text given.
+//!   A character with no code is refused ([`Unencodable`]), never written as another.
 //!
 //! Where a font departs from the standard is a [`Fault`], told with its place to
 //! pdf-objects' [`Sink`](pdf_objects::fault::Sink), and the reading goes on past it.
@@ -110,7 +113,7 @@ pub use font::{
 pub use fonts::{FontId, FontScope, Fonts};
 pub use limits::Limits;
 pub use shown::{Shown, ShownString, Unread, shown};
-pub use std14::Std14;
+pub use std14::{Std14, Unencodable};
 
 mod afm;
 mod cmap;

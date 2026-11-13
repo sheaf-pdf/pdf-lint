@@ -1,13 +1,13 @@
 //! What the fuzz target checks, which unit tests check too: the promises a Type 1
-//! program's scan, a glyph's or a font's name, a font's reading, its program's
-//! included, and the strings content shows make, on any input. It's compiled only for
-//! tests and under cargo-fuzz's `--cfg fuzzing`.
+//! program's scan, a glyph's or a font's name, text written in a standard 14 font, a
+//! font's reading, its program's included, and the strings content shows make, on any
+//! input. It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use pdf_content_streams::{Concat, ResCx};
 use pdf_objects::fault::Place;
@@ -143,6 +143,52 @@ fn codes(code: u8) {
             assert_eq!(text, cp1252(code).map(String::from).or(glyph_s));
         } else {
             assert_eq!(glyph.is_none(), text.is_none(), "{encoding:?} {code:#x}");
+        }
+    }
+}
+
+/// How many of an input's bytes are written as text in each standard 14 font: past
+/// what an encoding has, more finds nothing more.
+const TEXT: usize = 512;
+
+/// `data` as text written in each standard 14 font ([`Std14::codes`]): its bytes as
+/// UTF-8, as Latin-1, and each as the text its code is in the font's encoding. The
+/// codes read back as the text in the font its dictionary is ([`Std14::dict`]), one a
+/// character; or the first character with no code is refused where it is, and what's
+/// before it is written and reads back.
+pub fn written(data: &[u8]) {
+    static READ: OnceLock<Vec<Font>> = OnceLock::new();
+    let read = READ.get_or_init(|| {
+        let read = |font: Std14| {
+            let (dict, none) = (font.dict(), crate::fonts::NoObjects);
+            let read = Font::read(none, &dict, &Limits::DEFAULT, &mut 0, &mut ());
+            read.expect("a font by name alone has no stream to decompress")
+        };
+        Std14::ALL.map(read).into()
+    });
+    let data = &data[..data.len().min(TEXT)];
+    let utf8 = String::from_utf8_lossy(data);
+    let latin1: String = data.iter().copied().map(char::from).collect();
+    for (font, read) in Std14::ALL.into_iter().zip(read) {
+        let encoding = font.written_in();
+        let own = data.iter().filter_map(|&code| encoding.text(code));
+        let own: String = own.collect();
+        for text in [&utf8[..], &latin1, &own] {
+            let codes = match font.codes(text) {
+                Ok(codes) => codes,
+                Err(refused) => {
+                    assert_eq!(refused.font, font);
+                    let at = &text[refused.at..];
+                    assert_eq!(at.chars().next(), Some(refused.character));
+                    assert_eq!(encoding.code(refused.character), None);
+                    let before = &text[..refused.at];
+                    let codes = font.codes(before).expect("what's before it is drawn");
+                    assert_eq!(read.text(&codes).as_deref(), Some(before), "{font:?}");
+                    continue;
+                }
+            };
+            assert_eq!(codes.len(), text.chars().count(), "one a character");
+            assert_eq!(read.text(&codes).as_deref(), Some(text), "{font:?}");
         }
     }
 }
@@ -1044,12 +1090,14 @@ mod tests {
             found += usize::from(scan(&seed, &Limits::DEFAULT).is_some());
             type1(&seed);
             names(&seed);
+            written(&seed);
             fonts(&seed);
             shown(&seed);
             for _ in 0..50 {
                 let data = mutated(&seed, &mut random);
                 type1(&data);
                 names(&data);
+                written(&data);
                 fonts(&data);
                 shown(&data);
             }
@@ -1158,6 +1206,7 @@ mod tests {
             let data: Vec<u8> = (0..random() % 64).map(|_| random() as u8).collect();
             type1(&data);
             names(&data);
+            written(&data);
             fonts(&data);
             shown(&data);
         }

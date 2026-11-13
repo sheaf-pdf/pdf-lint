@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pdf_objects::object::Value;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dict};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why};
 
 use crate::font::Font;
 use crate::reader::{Reader, dict_of};
-use crate::{Error, Limits};
+use crate::{Error, Limits, Std14};
 
 /// A source's fonts, each read once: those that are objects by number, kept for
 /// every page that draws in them. Nothing is told to a
@@ -34,7 +34,7 @@ pub struct Fonts {
 
 /// Nothing: what a font written in code is read over.
 #[derive(Clone, Copy)]
-struct NoObjects;
+pub(crate) struct NoObjects;
 
 impl<'o> Resolve<'o> for NoObjects {
     fn resolve(&self, _: ObjectId) -> Option<&'o Object> {
@@ -120,10 +120,7 @@ impl Fonts {
     #[must_use]
     pub fn stock(&self) -> Arc<Font> {
         let read = || {
-            let helvetica: Dict = dict! {
-                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-                "Encoding" => "WinAnsiEncoding",
-            };
+            let helvetica = Std14::Helvetica.dict();
             let read = Font::read(NoObjects, &helvetica, &Limits::DEFAULT, &mut 0, &mut ());
             Arc::new(read.expect("a font by name alone has no stream to decompress"))
         };

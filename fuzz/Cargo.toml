@@ -112,7 +112,8 @@
 # `fonts` calls `pdf_fonts::fuzz::type1`, any bytes scanned as a Type 1 program,
 # holding no more than it was given, and under other caps the same or refused;
 # `pdf_fonts::fuzz::names`, an input's words read as glyphs' and fonts' names,
-# and its bytes as codes in each encoding; `fonts`, its parts read as a font, a
+# and its bytes as codes in each encoding; `written`, its bytes as text in each
+# standard 14 font, its codes read back as it; `fonts`, its parts read as a font, a
 # program among them; `shown`, the input as a page's content, the strings it shows
 # in those fonts and in forms, the same over fonts kept and less under smaller caps
 # and a smaller budget; and `over`, as a file, each font in it the same; which five

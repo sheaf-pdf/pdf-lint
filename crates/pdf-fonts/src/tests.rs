@@ -158,6 +158,112 @@ fn win_ansi_is_cp1252_both_ways() {
     assert_eq!(Encoding::WinAnsi.text(0xad).as_deref(), Some("\u{ad}"));
 }
 
+/// Each encoding's code for a character reads back as it, and every code whose text
+/// is one character is found by it: that code, or a lower one of the same text. In
+/// WinAnsiEncoding, a code Windows-1252 has a character at, so the bullet is 0x95.
+#[test]
+fn each_character_s_code_reads_back_as_it() {
+    use Encoding::{MacRoman, Standard, Symbol, WinAnsi, ZapfDingbats};
+    for encoding in [Standard, WinAnsi, MacRoman, Symbol, ZapfDingbats] {
+        for code in 0..=255u8 {
+            let Some(text) = encoding.text(code) else {
+                continue;
+            };
+            let mut chars = text.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else {
+                continue;
+            };
+            let found = encoding.code(c);
+            let found = found.unwrap_or_else(|| panic!("{encoding:?} {code:#x} {c:?}"));
+            let windows = encoding != WinAnsi || cp1252(code).is_some();
+            assert!(found <= code || !windows, "{encoding:?} {code:#x}");
+            assert_eq!(encoding.text(found), Some(text), "{encoding:?} {code:#x}");
+        }
+        for c in (0..=0x10_FFFF).filter_map(char::from_u32) {
+            if let Some(code) = encoding.code(c) {
+                assert_eq!(encoding.text(code), Some(String::from(c)), "{c:?}");
+            }
+        }
+    }
+    let drawn = |encoding: Encoding| {
+        let chars = (0..=0x10_FFFF).filter_map(char::from_u32);
+        chars.filter(|&c| encoding.code(c).is_some()).count()
+    };
+    // Windows-1252's 218 characters from the space up; Symbol's 189 glyphs and
+    // ZapfDingbats' 202, each its own character.
+    assert_eq!(
+        [drawn(WinAnsi), drawn(Symbol), drawn(ZapfDingbats)],
+        [218, 189, 202]
+    );
+    assert_eq!(WinAnsi.code('•'), Some(0x95));
+    assert_eq!(WinAnsi.code('\u{a0}'), Some(0xa0));
+    assert_eq!(WinAnsi.code(' '), Some(0x20));
+    assert_eq!(MacRoman.code(' '), Some(0x20));
+    // Symbol's Greek letters whose names the glyph list reads as signs.
+    assert_eq!(Symbol.code('\u{394}'), None);
+    assert_eq!(Symbol.code('\u{2206}'), Some(b'D'));
+}
+
+/// Every code of the encoding a standard 14 font's dictionary names reads, in the
+/// font that dictionary is, as its encoding's text, and that text is written in it;
+/// so text of every character it draws, alone and together, reads back as given.
+#[test]
+fn a_standard_14_font_s_codes_read_back_as_its_text() {
+    for font in Std14::ALL {
+        let dict = font.dict();
+        let read = Font::read(
+            crate::fonts::NoObjects,
+            &dict,
+            &Limits::DEFAULT,
+            &mut 0,
+            &mut (),
+        );
+        let read = read.unwrap();
+        let encoding = font.written_in();
+        let mut all = String::new();
+        for code in 0..=255u8 {
+            let text = encoding.text(code);
+            assert_eq!(read.text(&[code]), text, "{font:?} {code:#x}");
+            let Some(text) = text else {
+                continue;
+            };
+            let codes = font.codes(&text).unwrap();
+            assert_eq!(
+                read.text(&codes).as_ref(),
+                Some(&text),
+                "{font:?} {code:#x}"
+            );
+            if codes == [code] {
+                all.push_str(&text);
+            }
+        }
+        let codes = font.codes(&all).unwrap();
+        assert_eq!(codes.len(), all.chars().count());
+        assert_eq!(read.text(&codes), Some(all), "{font:?}");
+    }
+}
+
+/// A character no code draws is refused where it is, never written as another; so
+/// is a combining accent after its letter, which the letter composed isn't.
+#[test]
+fn a_character_with_no_code_is_refused_never_replaced() {
+    let refused = |font: Std14, text: &str| font.codes(text).unwrap_err();
+    let han = refused(Std14::Helvetica, "a中文b");
+    assert_eq!(
+        (han.at, han.character, han.font),
+        (1, '中', Std14::Helvetica)
+    );
+    let words = "U+4E2D at byte 1 has no code in Helvetica's encoding";
+    assert_eq!(han.to_string(), words);
+    assert_eq!(refused(Std14::TimesRoman, "e\u{301}").at, 1);
+    assert_eq!(Std14::TimesRoman.codes("é"), Ok(vec![0xe9]));
+    assert_eq!(refused(Std14::Symbol, "αx").character, 'x');
+    assert_eq!(Std14::ZapfDingbats.codes("✔✘"), Ok(b"48".to_vec()));
+    assert_eq!(refused(Std14::ZapfDingbats, "✔x").at, 3);
+    assert_eq!(refused(Std14::Courier, "a\nb").character, '\n');
+    assert_eq!(Std14::Courier.codes(""), Ok(Vec::new()));
+}
+
 /// Each name PDFium takes for a font, in any case, after a subset's tag, and no
 /// other.
 #[test]
