@@ -42,6 +42,8 @@ use std::fmt;
 use std::io::Write as _;
 use std::iter::FusedIterator;
 
+use pdf_objects::version::Version;
+
 use crate::hint::{
     self, EmbeddedFiles, Extended, FileEntry, Generic, GroupEntry, HintKeys, PageEntry,
     PageOffsets, SharedObjects, ThumbEntry, Thumbnails,
@@ -76,12 +78,13 @@ const ROUNDS: u32 = 16;
 const LARGEST: u64 = u32::MAX as u64;
 
 /// What [`assemble`] is told that a plan doesn't say. Set on a copy of
-/// [`Options::new`]'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`Options::new`]'s. Its `Debug` gives the trailer's entries by their
+/// length alone, as they're the caller's bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Options<'a> {
     /// The header's version.
-    pub version: (u8, u8),
+    pub version: Version,
     /// The first-page section's trailer's other entries, already written, in
     /// the numbers the plan gives: `/Info`, `/Encrypt`, `/ID` and the like. No
     /// `/Root` or a key the section writes itself.
@@ -91,11 +94,22 @@ pub struct Options<'a> {
 impl Options<'static> {
     /// A file of `version` with nothing else in its trailer.
     #[must_use]
-    pub const fn new(version: (u8, u8)) -> Options<'static> {
+    pub const fn new(version: Version) -> Options<'static> {
         Options {
             version,
             trailer: b"",
         }
+    }
+}
+
+impl fmt::Debug for Options<'_> {
+    /// Its version, and the trailer's entries by their length, not their
+    /// bytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Options")
+            .field("version", &self.version)
+            .field("trailer", &format_args!("{} bytes", self.trailer.len()))
+            .finish()
     }
 }
 
@@ -518,7 +532,7 @@ pub fn assemble<E>(
         starts.push(total);
     }
 
-    let mut head = format!("%PDF-{}.{}\n", options.version.0, options.version.1).into_bytes();
+    let mut head = format!("%PDF-{}\n", options.version).into_bytes();
     head.extend_from_slice(BINARY);
     let dictionary_at = head.len() as u64;
     let first_section_at = dictionary_at + DICTIONARY as u64;

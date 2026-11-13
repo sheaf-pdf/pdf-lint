@@ -241,7 +241,8 @@ struct Places<'a> {
     /// are as if it weren't there from ([`Facts::hint_extent`]).
     stream: (u64, u64),
     /// Where each of the hint stream's tables starts in its data, by its key
-    /// in the stream's dictionary, the page offset table at 0.
+    /// in the stream's dictionary; the page offset table, which has none, is
+    /// at 0.
     tables: Vec<(Vec<u8>, u64)>,
     /// Each number's object, by number, read the first time an object's
     /// place is asked for.
@@ -261,7 +262,7 @@ impl<'a> Places<'a> {
         dict: ObjectId,
     ) -> Places<'a> {
         let hint = facts.hint.as_ref();
-        let mut tables = vec![(b"page offset".to_vec(), 0)];
+        let mut tables = Vec::new();
         for (key, raw) in hint.iter().flat_map(|h| &h.keys) {
             if let Some(at) = number(Some(raw)) {
                 tables.push((key.clone(), at));
@@ -338,7 +339,10 @@ impl<'a> Places<'a> {
             Some(Place::HintByte(at)) => self.data_at(at),
             Some(Place::HintBit(bit)) => self.data_at(bit / 8),
             Some(Place::Table(table)) => {
-                let at = self.table(table.trim_start_matches('/').as_bytes())?;
+                let at = match table.key() {
+                    Some(key) => self.table(key)?,
+                    None => 0,
+                };
                 self.data_at(at)
             }
             Some(Place::Page(_)) => self.data_at(0),
@@ -451,7 +455,7 @@ impl<'a> Walk<'a> {
         let Some(first) = facts.claim() else {
             return;
         };
-        let id = ObjectId::new(first.number, first.generation);
+        let id = first.id;
         let revisions = self.source.revisions();
         // The object at the dictionary's number is the dictionary where its
         // record starts where the first object does, else a later
@@ -1555,7 +1559,7 @@ mod tests {
     #[test]
     fn a_dictionary_written_over_leaves_its_findings_to_the_first_revision() {
         let file = written_as(&linearized(&three_pages(), &[]), "/E 923", "/E 123");
-        let dict = facts(&file).first_object.unwrap().number;
+        let dict = facts(&file).first_object.unwrap().id.number;
         let over = updated_with(
             &file,
             &[(ObjectId::new(dict, 0), dict! { "Foo" => 1 }.into())],

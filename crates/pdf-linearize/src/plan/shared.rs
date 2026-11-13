@@ -102,7 +102,10 @@ impl Walker<'_> {
             let refs = walks.flat.refs(at);
             self.visits = self.visits.saturating_add(1 + refs.len() as u64);
             if self.visits > walks.limits.shared_visits {
-                return Err(self.too_many());
+                return Err(Error::TooManySharedVisits {
+                    visits: self.visits,
+                    limit: walks.limits.shared_visits,
+                });
             }
             let entry = walks.entry[at as usize];
             if entry != NONE {
@@ -110,7 +113,10 @@ impl Walker<'_> {
                 if std::mem::replace(met, self.walk) != self.walk {
                     self.listed.push(entry);
                     if self.listed.len() > walks.limits.shared_entries {
-                        return Err(self.too_many());
+                        return Err(Error::TooManySharedEntries {
+                            entries: self.listed.len(),
+                            limit: walks.limits.shared_entries,
+                        });
                     }
                 }
             }
@@ -129,13 +135,6 @@ impl Walker<'_> {
             if std::mem::replace(met, self.walk) != self.walk {
                 self.stack.push(at);
             }
-        }
-    }
-
-    fn too_many(&self) -> Error {
-        Error::TooManyHints {
-            entries: self.listed.len(),
-            visits: self.visits,
         }
     }
 }

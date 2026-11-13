@@ -40,10 +40,8 @@ pub struct FirstObject {
     pub at: u64,
     /// Where it ends: past its `endobj`.
     pub end: u64,
-    /// Its number.
-    pub number: u32,
-    /// Its generation.
-    pub generation: u16,
+    /// Its number and generation.
+    pub id: ObjectId,
     /// Whether it's a stream, whose dictionary is no linearization dictionary.
     pub stream: bool,
     /// `/Linearized`.
@@ -80,15 +78,13 @@ impl FirstObject {
         }
     }
 
-    /// An object `number` and `generation` from `at` to `end`, with none of the
-    /// keys yet.
+    /// Object `id` from `at` to `end`, with none of the keys yet.
     #[must_use]
-    pub const fn new(at: u64, end: u64, number: u32, generation: u16) -> FirstObject {
+    pub const fn new(at: u64, end: u64, id: ObjectId) -> FirstObject {
         FirstObject {
             at,
             end,
-            number,
-            generation,
+            id,
             stream: false,
             linearized: Raw::Absent,
             l: Raw::Absent,
@@ -158,8 +154,9 @@ pub struct SectionFacts {
     pub subsections: Vec<(u32, u32)>,
     /// Its rows, in the order written.
     pub rows: Vec<RowFacts>,
-    /// Where what it lists first is, a table's first row or its stream's
-    /// object, after where the white-space before that starts.
+    /// Where the white-space before what it lists first starts, and then
+    /// where that is, a table's first row or its stream's `n g obj`, in that
+    /// order.
     pub first_row: Option<(u64, u64)>,
     /// The number of the stream it's written as.
     pub stream: Option<u32>,
@@ -318,9 +315,9 @@ impl fmt::Debug for HintFacts {
 
 /// An attribute a page inherits (7.7.3.4), and which a linearized file has
 /// pushed down onto its pages (F.3.7, F.3.10). Its `Display` is its key,
-/// `/MediaBox`; [`Attribute::ALL`] lists them.
+/// `/MediaBox`; [`Attribute::ALL`] lists them. Exhaustive on purpose, as
+/// 7.7.3.4's list is closed and `ALL`'s length is the count of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum Attribute {
     /// `/Resources`.
     Resources,
@@ -400,16 +397,16 @@ pub struct Extent {
     /// Its number.
     pub number: u32,
     /// Where its `n g obj` starts.
-    pub start: u64,
+    pub at: u64,
     /// Where it ends: past its `endobj`.
     pub end: u64,
 }
 
 impl Extent {
-    /// Object `number`, from `start` to `end`.
+    /// Object `number`, from `at` to `end`.
     #[must_use]
-    pub const fn new(number: u32, start: u64, end: u64) -> Extent {
-        Extent { number, start, end }
+    pub const fn new(number: u32, at: u64, end: u64) -> Extent {
+        Extent { number, at, end }
     }
 }
 

@@ -27,7 +27,7 @@ fn facts_of(written: &Written) -> Facts {
     let text = String::from_utf8_lossy(&bytes[at as usize..at as usize + 200]);
     assert!(text.starts_with(&format!("{dictionary} 0 obj")), "{text}");
     let end = at + (text.find("endobj").unwrap() + 6) as u64;
-    let mut first = FirstObject::new(at, end, dictionary, 0);
+    let mut first = FirstObject::new(at, end, ObjectId::new(dictionary, 0));
     let key = |name: &str| {
         let rest = text.split(&format!("/{name} ")).nth(1)?;
         rest.split_ascii_whitespace().next()?.parse::<i64>().ok()

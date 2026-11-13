@@ -17,7 +17,10 @@ pub struct Limits {
     /// indirect objects a file may hold (ISO 32000-1, Annex C).
     pub objects: usize,
     /// How many pages a file may have, or its hint tables say it has: 1,048,574
-    /// by default, the most PDFium counts.
+    /// by default, the most PDFium counts. With `family`, a page tree's walk
+    /// lists no more pages than this, and visits no more of its nodes, so a
+    /// tree past it isn't walked whole; the walk's other caps, on how deep a
+    /// tree goes, and on a name tree's, are pdf-semantics' defaults.
     pub pages: usize,
     /// How many entries all the lists of shared objects hold together, which
     /// is what the hint tables will write of them

@@ -78,12 +78,12 @@ use std::io::Write as _;
 
 use ::lopdf::{Dictionary, Document, Object, Stream};
 
+use pdf_linearize::Limits;
 use pdf_linearize::layout::{self, Encoded, Layout, Piece, assemble};
 use pdf_linearize::pdf_objects::ObjectId;
+use pdf_linearize::pdf_objects::version::Version;
 pub use pdf_linearize::plan::FirstPage;
 use pdf_linearize::plan::{self, Graph, Group, Kind, Page, Plan, What, plan};
-
-use pdf_linearize::Limits;
 
 #[cfg(test)]
 mod fuzz;
@@ -343,12 +343,12 @@ pub fn linearize(out: &mut Vec<u8>, doc: &Document, options: &Options) -> Result
 }
 
 /// The header's version, as lopdf holds it, or 1.7 where it isn't one.
-fn version(doc: &Document) -> (u8, u8) {
+fn version(doc: &Document) -> Version {
     let parsed = doc.version.split_once('.').and_then(|(major, minor)| {
         let major = major.parse().ok()?;
-        Some((major, minor.parse().ok()?))
+        Some(Version::new(major, minor.parse().ok()?))
     });
-    parsed.unwrap_or((1, 7))
+    parsed.unwrap_or(Version::new(1, 7))
 }
 
 /// The trailer's own entries, in the numbers written, as a section takes them.

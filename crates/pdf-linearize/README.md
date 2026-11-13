@@ -36,6 +36,7 @@ use std::convert::Infallible;
 
 use pdf_linearize::layout::{Encoded, Options, Piece, Stream};
 use pdf_linearize::pdf_objects::ObjectId;
+use pdf_linearize::pdf_objects::version::Version;
 use pdf_linearize::plan::{Kind, Page, Part, What};
 use pdf_linearize::{Graph, Limits, assemble, hint, plan};
 
@@ -69,8 +70,8 @@ let lengths = vec![40; plan.writes().len()];
 let plain = |stream: Stream| {
     Ok::<_, Infallible>(Encoded::plain(stream.data.to_vec()))
 };
-let layout = assemble(&plan, &lengths, &Options::new((1, 7)), plain);
-let layout = layout.unwrap();
+let options = Options::new(Version::new(1, 7));
+let layout = assemble(&plan, &lengths, &options, plain).unwrap();
 
 // Its pieces are the whole file, in order.
 let written: u64 = (layout.pieces())

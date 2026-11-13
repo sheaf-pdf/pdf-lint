@@ -20,6 +20,7 @@ use crate::hint::{SharedObjects, Thumbnails};
 use crate::layout::{self, Encoded, Layout, Options, Piece, Stream, StreamKind, assemble};
 use crate::plan::{Error, Group, Kind, MEMBERS, Page, Part, Plan, Use, What, Write, plan};
 use pdf_objects::ObjectId;
+use pdf_objects::version::Version;
 
 use crate::{Graph, Limits};
 
@@ -685,11 +686,11 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     assert!(matches!(refused, Err(Error::TooManyPages { .. })));
     if plan.shared_visits() > 0 {
         let refused = at_edge(&|l| l.shared_visits = plan.shared_visits() - 1);
-        assert!(matches!(refused, Err(Error::TooManyHints { .. })));
+        assert!(matches!(refused, Err(Error::TooManySharedVisits { .. })));
     }
     if count > 0 {
         let refused = at_edge(&|l| l.shared_entries = count - 1);
-        assert!(matches!(refused, Err(Error::TooManyHints { .. })));
+        assert!(matches!(refused, Err(Error::TooManySharedEntries { .. })));
     }
 }
 
@@ -911,7 +912,7 @@ fn assembles(plan: &Plan, data: &[u8]) {
             .map(|_| lengths.next().unwrap())
             .collect(),
     };
-    let options = Options::new((1, 7));
+    let options = Options::new(Version::new(1, 7));
     let layout = assemble(plan, &lengths, &options, plain).expect("settles");
     assembled(plan, &lengths, &layout);
     clean(plan, &layout);
@@ -1105,7 +1106,8 @@ pub(crate) fn facts_of(plan: &Plan, layout: &Layout) -> Facts {
     let mut facts = Facts::new(layout.len());
     let dictionary = plan.dictionary_number();
     let dictionary_at = layout.position(dictionary).expect("it's written");
-    let mut first = FirstObject::new(dictionary_at, layout.first_section(), dictionary, 0);
+    let id = ObjectId::new(dictionary, 0);
+    let mut first = FirstObject::new(dictionary_at, layout.first_section(), id);
     let (hint_at, hint_len) = layout.hint_extent();
     let int = |n: u64| Raw::Integer(n as i64);
     first.linearized = Raw::Integer(1);
@@ -1407,7 +1409,7 @@ pub fn facts(data: &[u8]) {
     let mut facts = match plan(&described.graph(), &Limits::DEFAULT) {
         Ok(planned) if choice & 1 == 0 && planned.size() < 2000 => {
             let lengths = vec![16 + u64::from(choice); planned.writes().len()];
-            let options = Options::new((1, 7));
+            let options = Options::new(Version::new(1, 7));
             let layout = assemble(&planned, &lengths, &options, plain).expect("settles");
             let mut facts = facts_of(&planned, &layout);
             spoiled(&mut facts, &mut bytes);
@@ -1552,8 +1554,7 @@ fn made_up(bytes: &mut Bytes) -> Facts {
     let mut first = FirstObject::new(
         number_from(bytes),
         number_from(bytes),
-        bytes.below(64) as u32,
-        bytes.below(2) as u16,
+        ObjectId::new(bytes.below(64) as u32, bytes.below(2) as u16),
     );
     first.stream = bytes.chance(16);
     first.linearized = match bytes.chance(8) {
@@ -2067,7 +2068,8 @@ mod tests {
                 continue;
             };
             let lengths = vec![40; planned.writes().len()];
-            let layout = assemble(&planned, &lengths, &Options::new((1, 7)), plain).unwrap();
+            let layout =
+                assemble(&planned, &lengths, &Options::new(Version::new(1, 7)), plain).unwrap();
             let data = layout.hint_data();
             let mut input = vec![3, 0, 0, 0];
             input.resize(16, 0);

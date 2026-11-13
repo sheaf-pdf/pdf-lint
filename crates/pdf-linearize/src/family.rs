@@ -8,8 +8,9 @@
 //! and place a plan gives it, as Annex F has it, so anything that names one
 //! from outside the file, a signature's byte range above all, doesn't hold
 //! afterwards, as under any rewrite. [`check()`] says whether a file that
-//! says it's linearized holds, and [`facts()`] gives what that's judged from,
-//! [`facts_with_reading`] of a file read whole beside its reading.
+//! says it's linearized holds, and [`facts()`] gives what that's judged from;
+//! [`check_with_reading`] and [`facts_with_reading`] do it of a file read
+//! whole beside its reading.
 //!
 //! # What changes in the document
 //!
@@ -130,7 +131,7 @@ use crate::plan::{self, Kind, Plan, What, plan};
 mod facts;
 pub(crate) mod graph;
 
-pub use facts::{check, facts, facts_with_reading};
+pub use facts::{check, check_with_reading, facts, facts_with_reading};
 use graph::Prepared;
 
 /// How a file is laid out. A caller sets the fields on a copy of
@@ -354,7 +355,8 @@ pub enum Error {
 ///
 /// Refused, with `out` as it was given, by an [`Error`]: what the module says,
 /// a page tree that gives a page no place of its own ([`Error::PageTree`]) or
-/// doesn't read ([`Error::Pages`]) and a document no password opened
+/// doesn't read, past [`Limits::pages`](crate::Limits::pages) among it
+/// ([`Error::Pages`]), and a document no password opened
 /// ([`Error::Locked`]); a trailer with no catalog ([`Error::NoCatalog`]), or a
 /// catalog that's a page, or a document past [`Options::limits`]
 /// ([`Error::Plan`]); a file past the 4 GiB a hint table can describe
@@ -573,7 +575,7 @@ fn file(
                     Kind::Table => header,
                 }
             });
-            let mut around = layout::Options::new((version.major, version.minor));
+            let mut around = layout::Options::new(version);
             around.trailer = &trailer;
             let layout = assemble(&plan, &lengths, &around, |stream| {
                 encoded(stream, options.deflate, encrypting)

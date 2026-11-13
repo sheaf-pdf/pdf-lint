@@ -37,6 +37,7 @@ mod tests {
     use std::thread::{self, ThreadId};
 
     use pdf_objects::ObjectId;
+    use pdf_objects::version::Version;
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Level, Metadata, Subscriber};
@@ -216,7 +217,7 @@ mod tests {
     /// written in.
     #[test]
     fn an_assembly_is_a_span_and_each_round_of_its_first_section_one() {
-        let options = layout::Options::new((1, 7));
+        let options = layout::Options::new(Version::new(1, 7));
         for (kind, longer) in [(Kind::Table, 0), (Kind::Stream, 0), (Kind::Stream, 3)] {
             let plan = plan(&small(kind), &Limits::DEFAULT).unwrap();
             let lengths = vec![40; plan.writes().len()];

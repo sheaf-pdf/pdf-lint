@@ -391,16 +391,23 @@ pub enum Error {
         /// The cap.
         limit: usize,
     },
-    /// The lists of shared objects past [`Limits::shared_entries`] or
-    /// [`Limits::shared_visits`].
-    #[error(
-        "the lists of shared objects reached {entries} entries after {visits} visits, past their caps"
-    )]
-    TooManyHints {
+    /// The lists of shared objects past [`Limits::shared_entries`].
+    #[error("{entries} entries in the lists of shared objects, past the cap of {limit}")]
+    TooManySharedEntries {
         /// The entries they'd listed when they stopped.
         entries: usize,
+        /// The cap.
+        limit: usize,
+    },
+    /// Making the lists of shared objects past [`Limits::shared_visits`].
+    #[error(
+        "{visits} objects and references looked at for the lists of shared objects, past the cap of {limit}"
+    )]
+    TooManySharedVisits {
         /// The objects and references they'd looked at when they stopped.
         visits: u64,
+        /// The cap.
+        limit: u64,
     },
 }
 
@@ -667,7 +674,7 @@ impl Plan {
 /// pages ([`Error::FirstPagePast`]); under [`Kind::Table`], an object said to
 /// be packable ([`Error::PackedTable`]); past a cap of `limits`
 /// ([`Error::TooManyPages`], [`Error::TooManyObjects`],
-/// [`Error::TooManyHints`]).
+/// [`Error::TooManySharedEntries`], [`Error::TooManySharedVisits`]).
 pub fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
     phase!(
         DEBUG,

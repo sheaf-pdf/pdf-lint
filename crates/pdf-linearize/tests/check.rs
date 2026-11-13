@@ -596,7 +596,8 @@ fn what_no_key_opens_isnt_judged() {
 
 /// What's past a cap the check reads under, the hint tables past its entries
 /// or pages and the file's graph past a plan's visits, is said, not judged,
-/// and the file holds by the rest; at the cap, it's judged.
+/// and the file holds by the rest; at the cap, it's judged. Past its pages,
+/// the page tree isn't walked whole either, so isn't judged.
 #[test]
 fn what_s_past_the_checks_own_caps_isnt_judged() {
     let file = laid_out(&plain(), XrefKind::Table, false);
@@ -626,10 +627,18 @@ fn what_s_past_the_checks_own_caps_isnt_judged() {
     let (verdict, findings) = under(&limits);
     assert!(!verdict.hints_read);
     let fault = hint::Error::TooManyPages { pages: 3, limit: 2 };
-    assert_eq!(findings, [Finding::HintTablesCapped { fault }]);
+    let why = Unread::Capped;
+    assert_eq!(
+        findings,
+        [
+            Finding::HintTablesCapped { fault },
+            Finding::PagesUnread { why }
+        ]
+    );
+    assert!(!verdict.judged_whole);
     limits.pages = 3;
     let (verdict, findings) = under(&limits);
-    assert!(verdict.hints_read);
+    assert!(verdict.hints_read && verdict.judged_whole);
     assert_eq!(findings, []);
     let mut limits = Limits::DEFAULT;
     limits.shared_visits = 1;
@@ -639,7 +648,7 @@ fn what_s_past_the_checks_own_caps_isnt_judged() {
         matches!(
             f,
             Finding::GraphCapped {
-                why: plan::Error::TooManyHints { .. }
+                why: plan::Error::TooManySharedVisits { .. }
             }
         )
     };

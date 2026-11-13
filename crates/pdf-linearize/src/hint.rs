@@ -73,8 +73,8 @@ pub enum Error {
     /// A table's position in the data is past its end.
     #[error("the {table} table is at byte {at} of {len}")]
     TableAt {
-        /// Which table, by its key in the hint stream's dictionary.
-        table: &'static str,
+        /// Which table.
+        table: Table,
         /// The position its key gives.
         at: u64,
         /// How many bytes the data has.
@@ -107,6 +107,71 @@ pub enum Error {
         /// The width.
         width: u32,
     },
+}
+
+/// A table of a hint stream (F.3.6, F.4): the page offset table, at the start
+/// of the data, or one the stream's dictionary gives the position of by a key.
+/// Its `Display` is how a finding names it, `page offset` or the key with its
+/// slash, `/S`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Table {
+    /// The page offset table (F.4.2).
+    PageOffsets,
+    /// `/S`: the shared object table (F.4.3).
+    Shared,
+    /// `/T`: the thumbnail table (F.4.4).
+    Thumbnails,
+    /// `/O`: the outline table (F.4.5).
+    Outlines,
+    /// `/A`: the thread information table (F.4.5).
+    Threads,
+    /// `/E`: the named destination table (F.4.5).
+    Dests,
+    /// `/V`: the interactive form table (F.4.6).
+    Form,
+    /// `/I`: the information dictionary table (F.4.5).
+    Info,
+    /// `/C`: the logical structure table (F.4.6).
+    Structure,
+    /// `/L`: the page label table (F.4.5).
+    Labels,
+    /// `/R`: the renditions name tree table (F.4.6).
+    Renditions,
+    /// `/B`: the embedded file stream table (F.4.7).
+    Files,
+}
+
+impl Table {
+    /// Its key in the hint stream's dictionary, without the slash: `b"S"`.
+    /// None for the page offset table, whose place is the data's start.
+    #[must_use]
+    pub const fn key(self) -> Option<&'static [u8]> {
+        Some(match self {
+            Table::PageOffsets => return None,
+            Table::Shared => b"S",
+            Table::Thumbnails => b"T",
+            Table::Outlines => b"O",
+            Table::Threads => b"A",
+            Table::Dests => b"E",
+            Table::Form => b"V",
+            Table::Info => b"I",
+            Table::Structure => b"C",
+            Table::Labels => b"L",
+            Table::Renditions => b"R",
+            Table::Files => b"B",
+        })
+    }
+}
+
+impl std::fmt::Display for Table {
+    /// `page offset`, or its key with the slash: `/S`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.key() {
+            None => f.write_str("page offset"),
+            Some(key) => write!(f, "/{}", char::from(key[0])),
+        }
+    }
 }
 
 /// Where a thing at `at` in a file reads in a hint table, under a primary hint
@@ -1118,22 +1183,22 @@ pub fn tables(data: &[u8], keys: &HintKeys, pages: u32, limits: &Limits) -> Resu
         limits,
         charged: 0,
     };
-    let pages = at.read("page offset", 0, |bits| {
+    let pages = at.read(Table::PageOffsets, 0, |bits| {
         PageOffsets::read_bits(bits, pages, limits)
     })?;
     let id_bits = pages.header.id_bits;
     Ok(Tables {
-        shared: at.read("/S", keys.shared, SharedObjects::read_bits)?,
-        thumbnails: at.optional("/T", keys.thumbnails, Thumbnails::read_bits)?,
-        outlines: at.optional("/O", keys.outlines, Generic::read_bits)?,
-        threads: at.optional("/A", keys.threads, Generic::read_bits)?,
-        dests: at.optional("/E", keys.dests, Generic::read_bits)?,
-        form: at.optional("/V", keys.form, Extended::read_bits)?,
-        info: at.optional("/I", keys.info, Generic::read_bits)?,
-        structure: at.optional("/C", keys.structure, Extended::read_bits)?,
-        labels: at.optional("/L", keys.labels, Generic::read_bits)?,
-        renditions: at.optional("/R", keys.renditions, Extended::read_bits)?,
-        files: at.optional("/B", keys.files, |bits| {
+        shared: at.read(Table::Shared, keys.shared, SharedObjects::read_bits)?,
+        thumbnails: at.optional(Table::Thumbnails, keys.thumbnails, Thumbnails::read_bits)?,
+        outlines: at.optional(Table::Outlines, keys.outlines, Generic::read_bits)?,
+        threads: at.optional(Table::Threads, keys.threads, Generic::read_bits)?,
+        dests: at.optional(Table::Dests, keys.dests, Generic::read_bits)?,
+        form: at.optional(Table::Form, keys.form, Extended::read_bits)?,
+        info: at.optional(Table::Info, keys.info, Generic::read_bits)?,
+        structure: at.optional(Table::Structure, keys.structure, Extended::read_bits)?,
+        labels: at.optional(Table::Labels, keys.labels, Generic::read_bits)?,
+        renditions: at.optional(Table::Renditions, keys.renditions, Extended::read_bits)?,
+        files: at.optional(Table::Files, keys.files, |bits| {
             EmbeddedFiles::read_bits(bits, id_bits)
         })?,
         pages,
@@ -1152,7 +1217,7 @@ impl<'a> At<'a> {
     /// The table `read` reads, at byte `key`.
     fn read<T>(
         &mut self,
-        table: &'static str,
+        table: Table,
         key: u64,
         read: impl FnOnce(&mut Reader<'a>) -> Result<T, Error>,
     ) -> Result<T, Error> {
@@ -1174,7 +1239,7 @@ impl<'a> At<'a> {
     /// The table `read` reads, if there's a `key`.
     fn optional<T>(
         &mut self,
-        table: &'static str,
+        table: Table,
         key: Option<u64>,
         read: impl FnOnce(&mut Reader<'a>) -> Result<T, Error>,
     ) -> Result<Option<T>, Error> {

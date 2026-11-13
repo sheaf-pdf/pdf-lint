@@ -20,6 +20,8 @@
 //! - **`hints_read`** is whether the hint stream's data decoded and every table
 //!   it says it has read, under [`Limits`]. So a reading with no key for the
 //!   data can hold, as far as anything can say, with this false.
+//! - **`judged_whole`** is whether every part was judged, below: a file can
+//!   hold as far as it was, with this false.
 //!
 //! # What isn't judged
 //!
@@ -31,7 +33,8 @@
 //! holds as far as the rest says. So is what's past a cap the check itself
 //! reads under ([`Limits`]): hint tables past its pages or entries, the file's
 //! graph past what a plan is made under. A sink that wants no findings learns
-//! of the hint stream's, and its tables', by `hints_read` alone.
+//! of each but the graph's by `judged_whole`, which is false where any wasn't
+//! judged, whatever the sink.
 //!
 //! # A caller that ignores findings
 //!
@@ -139,6 +142,14 @@ pub struct Verdict {
     pub holds: bool,
     /// Whether its hint stream's data decoded and every table it names read.
     pub hints_read: bool,
+    /// Whether it does and every part was judged: false where the reader
+    /// didn't read the hint stream, the sections as far as the main one, or
+    /// the page tree, for its own reason ([`Unread`]), or the hint tables are
+    /// past a cap the check reads them under, each told to a sink that wants
+    /// findings as one of [`Grade::Unjudged`]. The file's graph past what a
+    /// plan is made under isn't counted here: only a sink that wants findings
+    /// has it planned, and is told so ([`Finding::GraphCapped`]).
+    pub judged_whole: bool,
 }
 
 /// What `facts` say of each other, told to `sink`, under `limits`: the module

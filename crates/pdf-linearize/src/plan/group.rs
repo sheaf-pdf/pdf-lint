@@ -26,6 +26,7 @@ pub enum Use {
 /// ascend within each part, and within each page's. Containers fill in
 /// that order, up to [`MEMBERS`] each, and the first part's last container
 /// ends with it, so page 1's objects never share one with a later page's.
+#[must_use]
 pub fn group(objects: impl IntoIterator<Item = (u32, Use)>) -> Vec<Vec<u32>> {
     let mut ordered: Vec<((u8, u32), u32)> = (objects.into_iter())
         .map(|(n, used)| (part(used), n))

@@ -7,6 +7,7 @@ use std::convert::Infallible;
 use pdf_linearize::hint::{self, Tables, located};
 use pdf_linearize::layout::{Encoded, Error, Options, Piece, Pieces, Stream, StreamKind};
 use pdf_linearize::pdf_objects::ObjectId;
+use pdf_linearize::pdf_objects::version::Version;
 use pdf_linearize::plan::{Group, Kind, Page, Part, What};
 use pdf_linearize::{Graph, Limits, assemble, plan};
 
@@ -547,7 +548,7 @@ fn a_layouts_debug_holds_none_of_its_bytes() {
     let plan = plan(&doc.graph(), &Limits::DEFAULT).unwrap();
     let lengths = vec![40; plan.writes().len()];
     let trailer = [&b"/Info << /Title ("[..], MARKER, b") >>"].concat();
-    let mut options = Options::new((1, 7));
+    let mut options = Options::new(Version::new(1, 7));
     options.trailer = &trailer;
     let mut shown = Vec::new();
     let layout = assemble(&plan, &lengths, &options, |stream: Stream<'_>| {
@@ -634,9 +635,12 @@ fn the_shared_tables_first_object_is_never_0() {
     graph.object(ObjectId::new(2, 0), []);
     graph.page(Page::new(ObjectId::new(2, 0)));
     let plan = plan(&graph, &Limits::DEFAULT).unwrap();
-    let layout = assemble(&plan, &[10, 10], &Options::new((1, 7)), |stream| {
-        Ok::<_, Infallible>(plain(stream))
-    })
+    let layout = assemble(
+        &plan,
+        &[10, 10],
+        &Options::new(Version::new(1, 7)),
+        |stream| Ok::<_, Infallible>(plain(stream)),
+    )
     .unwrap();
     let tables = hint::tables(layout.hint_data(), layout.hint_keys(), 1, &Limits::DEFAULT).unwrap();
     assert_eq!(tables.shared.header.first_object, plan.dictionary_number());
@@ -1184,7 +1188,7 @@ fn the_closure_is_told_what_each_stream_is() {
 fn what_cant_be_assembled_is_refused() {
     let doc = two_pages(Kind::Table, false);
     let plan = plan(&doc.graph(), &Limits::DEFAULT).unwrap();
-    let options = Options::new((1, 7));
+    let options = Options::new(Version::new(1, 7));
     let fine = |stream: Stream<'_>| Ok::<_, Infallible>(plain(stream));
     assert_eq!(
         assemble(&plan, &[1], &options, fine),

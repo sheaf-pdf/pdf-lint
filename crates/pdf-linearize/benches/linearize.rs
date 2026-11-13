@@ -50,6 +50,7 @@ use pdf_linearize::check::{
 use pdf_linearize::hint::{self, PageEntry, PageOffsets};
 use pdf_linearize::layout::{self, Encoded, Layout, Piece, assemble};
 use pdf_linearize::pdf_objects::ObjectId;
+use pdf_linearize::pdf_objects::version::Version;
 use pdf_linearize::plan::{self, Graph, Group, Kind, MEMBERS, Page, Part, Plan, Use, What};
 
 /// How many pages the graph has.
@@ -319,7 +320,7 @@ fn plain(stream: layout::Stream<'_>) -> Result<Encoded, Infallible> {
 /// and every body once in order, `name` saying which.
 fn assembled(name: &str, plan: &Plan) -> Layout {
     let lengths = vec![BODY; plan.writes().len()];
-    let options = layout::Options::new((1, 7));
+    let options = layout::Options::new(Version::new(1, 7));
     let layout =
         assemble(plan, &lengths, &options, plain).unwrap_or_else(|e| panic!("{name}: {e}"));
     let (mut len, mut bodies) = (0, Vec::new());
@@ -346,7 +347,7 @@ fn assemble_group(c: &mut Criterion) {
         let plan = planned(&format!("assemble/{name}"), &doc, kind, packed);
         assembled(&format!("assemble/{name}"), &plan);
         let lengths = vec![BODY; plan.writes().len()];
-        let options = layout::Options::new((1, 7));
+        let options = layout::Options::new(Version::new(1, 7));
         group.bench_function(name, |b| {
             b.iter(|| assemble(black_box(&plan), &lengths, &options, plain))
         });
@@ -446,7 +447,7 @@ fn facts_of(plan: &Plan, layout: &Layout, graph: Graph) -> Facts {
     let at = layout.position(dictionary).expect("the dictionary's place");
     let text = String::from_utf8_lossy(&bytes[at as usize..at as usize + 200]);
     let end = at + (text.find("endobj").expect("its end") + 6) as u64;
-    let mut first = FirstObject::new(at, end, dictionary, 0);
+    let mut first = FirstObject::new(at, end, ObjectId::new(dictionary, 0));
     let key = |name: &str| {
         let rest = text.split(&format!("/{name} ")).nth(1)?;
         rest.split_ascii_whitespace().next()?.parse::<i64>().ok()

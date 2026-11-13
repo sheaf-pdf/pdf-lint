@@ -177,8 +177,9 @@ pub enum Place {
     Page(u64),
     /// An entry of the shared object table.
     SharedEntry(u64),
-    /// A table of the hint stream, by its key in the stream's dictionary.
-    Table(&'static str),
+    /// A table of the hint stream: where it starts in the data, the page
+    /// offset table's the data's start, any other's what its key gives.
+    Table(hint::Table),
     /// A key of the linearization dictionary.
     Key(DictKey),
     /// A key of the hint stream's dictionary.
@@ -358,7 +359,7 @@ pub enum Finding {
         /// What it says.
         size: i64,
         /// How many there are.
-        total: u64,
+        total: u32,
     },
     /// The first section's trailer has no `/Root` that's a reference (F.3.4).
     #[error("the first section's trailer has no /Root that names an object (ISO 32000-2, F.3.4)")]
@@ -533,8 +534,8 @@ pub enum Finding {
         "the {table} table ends at byte {end} of the hint data, past the next's at {next} (ISO 32000-2, F.3.6)"
     )]
     TableOverruns {
-        /// Which table, by its key in the hint stream's dictionary.
-        table: &'static str,
+        /// Which table.
+        table: hint::Table,
         /// Where it ends.
         end: u64,
         /// Where the next starts.
@@ -661,7 +662,7 @@ pub enum Finding {
     )]
     FirstPageShared {
         /// How many it gives.
-        entries: u64,
+        entries: u32,
     },
     /// A page's shared object identifier is past the shared object table
     /// (F.4.2).
@@ -737,8 +738,8 @@ pub enum Finding {
     /// A table's first object isn't listed (F.4.4 to F.4.7).
     #[error("the {table} table's first object, {number}, isn't listed (ISO 32000-2, F.4)")]
     TableObject {
-        /// Which table, by its key.
-        table: &'static str,
+        /// Which table.
+        table: hint::Table,
         /// The number.
         number: u32,
     },
@@ -748,7 +749,7 @@ pub enum Finding {
     )]
     TableAt {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// Where it says, from the file's first byte.
         hint: u64,
         /// Where it is.
@@ -760,7 +761,7 @@ pub enum Finding {
     )]
     TableObjects {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// What it says.
         hint: u64,
         /// What's there.
@@ -772,7 +773,7 @@ pub enum Finding {
     )]
     TableLength {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// What it says.
         hint: u64,
         /// What they take.
@@ -785,7 +786,7 @@ pub enum Finding {
     )]
     TableIdPast {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// The identifier.
         id: u32,
         /// How many entries the table has.
@@ -950,7 +951,7 @@ impl Finding {
             TableObjects { table, .. } | TableLength { table, .. } | TableIdPast { table, .. } => {
                 Table(table)
             }
-            ThumbnailPages { .. } => Table("T"),
+            ThumbnailPages { .. } => Table(hint::Table::Thumbnails),
         })
     }
 

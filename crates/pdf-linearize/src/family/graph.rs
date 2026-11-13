@@ -76,8 +76,10 @@ impl<'d> Prepared<'d> {
         let found = root.and_then(|root| doc.dereference(root));
         let catalog_id = found.and_then(|(id, _)| id).ok_or(Error::NoCatalog)?;
         let catalog = doc.get_dict(catalog_id).ok_or(Error::NoCatalog)?;
+        // The walk lists no more pages than a plan takes, nor visits more
+        // nodes, so a tree past that is refused before it's walked whole.
         let mut limits = TreeLimits::DEFAULT;
-        limits.pages = limits.pages.max(options.limits.pages);
+        limits.pages = options.limits.pages;
         let table = pages_agreed(doc, catalog, &limits)?;
 
         let left = write::encryption_objects(doc, encryptor);

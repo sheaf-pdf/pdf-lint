@@ -9,6 +9,7 @@ use std::convert::Infallible;
 
 use pdf_linearize::layout::{Encoded, Options, Piece, Stream};
 use pdf_linearize::pdf_objects::ObjectId;
+use pdf_linearize::pdf_objects::version::Version;
 use pdf_linearize::plan::{Group, Kind, Page, What};
 use pdf_linearize::{Graph, Layout, Limits, Plan, assemble, plan};
 
@@ -272,7 +273,7 @@ impl Doc {
             ),
             None => String::new(),
         };
-        let mut options = Options::new((1, 7));
+        let mut options = Options::new(Version::new(1, 7));
         options.trailer = trailer.as_bytes();
         let layout = assemble(&plan, &lengths, &options, encode)?;
         let mut bytes = Vec::with_capacity(layout.len() as usize);

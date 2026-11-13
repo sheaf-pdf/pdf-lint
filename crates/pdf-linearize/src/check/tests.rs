@@ -7,6 +7,7 @@ use crate::hint::{EmbeddedFiles, FileEntry, Generic, ThumbEntry, Thumbnails};
 use crate::layout::{Encoded, Options, assemble};
 use crate::plan::{Graph, Group, Kind, Page, plan};
 use pdf_objects::ObjectId;
+use pdf_objects::version::Version;
 
 use crate::Limits;
 
@@ -49,9 +50,12 @@ fn laid_out(kind: Kind) -> Facts {
     let lengths: Vec<u64> = (0..planned.writes().len() as u64)
         .map(|at| 40 + at)
         .collect();
-    let layout = assemble(&planned, &lengths, &Options::new((1, 7)), |stream| {
-        Ok::<_, std::convert::Infallible>(Encoded::plain(stream.data.to_vec()))
-    })
+    let layout = assemble(
+        &planned,
+        &lengths,
+        &Options::new(Version::new(1, 7)),
+        |stream| Ok::<_, std::convert::Infallible>(Encoded::plain(stream.data.to_vec())),
+    )
     .unwrap();
     facts_of(&planned, &layout)
 }
@@ -199,7 +203,7 @@ fn past(facts: &Facts, by: u64) -> Facts {
         hint.overflow = (hint.overflow).map(|(at, end)| (at + by, end + by));
     }
     for extent in &mut facts.objects {
-        (extent.start, extent.end) = (extent.start + by, extent.end + by);
+        (extent.at, extent.end) = (extent.at + by, extent.end + by);
     }
     facts.update = facts.update.map(|at| at + by);
     facts
@@ -257,7 +261,7 @@ fn a_file_that_doesnt_say_it_is_has_no_findings() {
     let mut none = Facts::new(100);
     assert_eq!(findings(&none), []);
     assert!(!check(&none, &Limits::DEFAULT, &mut ()).linearized);
-    none.first_object = Some(FirstObject::new(9, 20, 1, 0));
+    none.first_object = Some(FirstObject::new(9, 20, ObjectId::new(1, 0)));
     assert_eq!(findings(&none), []);
     assert!(!check(&none, &Limits::DEFAULT, &mut ()).linearized);
 }
@@ -687,7 +691,7 @@ fn the_hint_extent_is_the_one_the_check_places_positions_by() {
     // A file of 1,000 bytes, its hint stream 2 from 100 to 140, object 5 next,
     // at 300.
     let mut facts = Facts::new(1000);
-    let mut first = FirstObject::new(9, 90, 1, 0);
+    let mut first = FirstObject::new(9, 90, ObjectId::new(1, 0));
     first.linearized = int(1);
     first.l = int(1000);
     first.h = Raw::Array;
@@ -1274,6 +1278,41 @@ fn hint_tables_past_the_checks_caps_arent_judged() {
     assert!(matches!(&told[..], [f] if capped(f)), "{told:?}");
 }
 
+/// Whether every part was judged is the verdict's, whatever the sink: not
+/// where the hint stream, the sections or the page tree weren't read for the
+/// reader's reason, or the hint tables are past the check's caps; so of a file
+/// judged whole, and of one whose faults are its own.
+#[test]
+fn a_verdict_says_whether_every_part_was_judged_whatever_the_sink() {
+    let whole = |facts: &Facts, limits: &Limits| {
+        let quiet = check(facts, limits, &mut ()).judged_whole;
+        assert_eq!(check(facts, limits, &mut Vec::new()).judged_whole, quiet);
+        quiet
+    };
+    let facts = table();
+    assert!(whole(&facts, &Limits::DEFAULT));
+    for why in WHYS {
+        let mut hint = table();
+        hint_of(&mut hint).data = HintData::Unread(why);
+        assert!(!whole(&hint, &Limits::DEFAULT));
+        let mut sections = table();
+        sections.unread.sections = Some(why);
+        assert!(!whole(&sections, &Limits::DEFAULT));
+        let mut pages = table();
+        pages.unread.pages = Some(why);
+        pages.pages.clear();
+        assert!(!whole(&pages, &Limits::DEFAULT));
+    }
+    let mut limits = Limits::DEFAULT;
+    limits.pages = 3;
+    assert!(!whole(&facts, &limits));
+    let mut damaged = table();
+    hint_of(&mut damaged).data = HintData::Undecodable;
+    let verdict = check(&damaged, &Limits::DEFAULT, &mut ());
+    assert!(!verdict.holds && verdict.judged_whole);
+    assert!(!whole(&Facts::new(0), &Limits::DEFAULT));
+}
+
 /// A graph past a cap a plan is made under, its visits or its objects, isn't
 /// judged: that's said, and nothing of what a page reaches.
 #[test]
@@ -1290,7 +1329,7 @@ fn a_graph_past_the_checks_caps_isnt_judged() {
         matches!(
             f,
             Finding::GraphCapped {
-                why: Error::TooManyHints { .. }
+                why: Error::TooManySharedVisits { .. }
             }
         )
     };
@@ -1356,7 +1395,7 @@ fn a_page_without_its_attributes_or_a_node_with_them_is_said() {
 fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
     use crate::check::Place::*;
     use crate::hint::Error as Fault;
-    let table = "O";
+    let table = crate::hint::Table::Outlines;
     let key = KeyName::new(b"X");
     let attribute = Attribute::Rotate;
     let all: Vec<(Finding, Option<Place>)> = vec![
@@ -1659,7 +1698,7 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
         ),
         (
             Finding::ThumbnailPages { said: 1, pages: 2 },
-            Some(Table("T")),
+            Some(Table(crate::hint::Table::Thumbnails)),
         ),
         (
             Finding::GraphRefused {
@@ -1860,7 +1899,7 @@ fn a_shared_entry_past_the_table_is_told() {
         found.iter().any(|f| matches!(
             f,
             Finding::TableIdPast {
-                table: "/V",
+                table: crate::hint::Table::Form,
                 id: 1000,
                 ..
             }
@@ -1990,9 +2029,13 @@ fn a_generic_table_is_held_to_where_its_objects_are() {
     };
     let found = change(|g| g.first_at += 1);
     assert!(
-        found
-            .iter()
-            .any(|f| matches!(f, Finding::TableAt { table: "/V", .. })),
+        found.iter().any(|f| matches!(
+            f,
+            Finding::TableAt {
+                table: crate::hint::Table::Form,
+                ..
+            }
+        )),
         "{found:?}"
     );
     let found = change(|g| g.first_object = 9000);
@@ -2000,7 +2043,7 @@ fn a_generic_table_is_held_to_where_its_objects_are() {
         found.iter().any(|f| matches!(
             f,
             Finding::TableObject {
-                table: "/V",
+                table: crate::hint::Table::Form,
                 number: 9000
             }
         )),
@@ -2011,7 +2054,7 @@ fn a_generic_table_is_held_to_where_its_objects_are() {
         found.iter().any(|f| matches!(
             f,
             Finding::TableObjects {
-                table: "/V",
+                table: crate::hint::Table::Form,
                 hint: 5,
                 ..
             }
@@ -2020,9 +2063,13 @@ fn a_generic_table_is_held_to_where_its_objects_are() {
     );
     let found = change(|g| g.length += 1);
     assert!(
-        found
-            .iter()
-            .any(|f| matches!(f, Finding::TableLength { table: "/V", .. })),
+        found.iter().any(|f| matches!(
+            f,
+            Finding::TableLength {
+                table: crate::hint::Table::Form,
+                ..
+            }
+        )),
         "{found:?}"
     );
     // A table of nothing says nothing.
@@ -2035,7 +2082,7 @@ fn a_generic_table_is_held_to_where_its_objects_are() {
         matches!(
             found[..],
             [Finding::TableObjects {
-                table: "/V",
+                table: crate::hint::Table::Form,
                 hint: 0,
                 computed: 1..,
             }]
@@ -2062,7 +2109,7 @@ fn a_generic_table_is_held_to_where_its_objects_are() {
         matches!(
             found[..],
             [Finding::TableLength {
-                table: "/V",
+                table: crate::hint::Table::Form,
                 hint: 7,
                 computed: 0,
             }]
@@ -2097,7 +2144,7 @@ fn thumbnails_are_held_to_the_pages_and_where_they_are() {
     let found = table_of(vec![entry(0, 1, 9)], 9000, 0);
     assert!(
         found.contains(&Finding::TableObject {
-            table: "/T",
+            table: crate::hint::Table::Thumbnails,
             number: 9000
         }),
         "{found:?}"
@@ -2116,7 +2163,7 @@ fn thumbnails_are_held_to_the_pages_and_where_they_are() {
     let found = findings(&facts);
     assert!(
         found.contains(&Finding::TableObject {
-            table: "/T",
+            table: crate::hint::Table::Thumbnails,
             number: 9001
         }),
         "{found:?}"
@@ -2137,7 +2184,7 @@ fn a_generic_tables_key_in_the_data_is_read_and_held() {
     let found = findings(&facts);
     assert!(
         found.contains(&Finding::TableObject {
-            table: "/O",
+            table: crate::hint::Table::Outlines,
             number: 9000
         }),
         "{found:?}"
@@ -2165,16 +2212,20 @@ fn embedded_files_are_held_to_where_they_are_and_the_shared_table() {
     });
     let found = findings(&facts);
     assert!(
-        found
-            .iter()
-            .any(|f| matches!(f, Finding::TableObject { table: "/B", .. })),
+        found.iter().any(|f| matches!(
+            f,
+            Finding::TableObject {
+                table: crate::hint::Table::Files,
+                ..
+            }
+        )),
         "{found:?}"
     );
     assert!(
         found.iter().any(|f| matches!(
             f,
             Finding::TableIdPast {
-                table: "/B",
+                table: crate::hint::Table::Files,
                 id: 7,
                 ..
             }
@@ -2349,9 +2400,12 @@ fn a_member_of_a_shared_object_stream_is_in_its_entry() {
         "one stream of two pages' members"
     );
     let lengths = vec![50; planned.writes().len()];
-    let layout = assemble(&planned, &lengths, &Options::new((1, 7)), |stream| {
-        Ok::<_, std::convert::Infallible>(Encoded::plain(stream.data.to_vec()))
-    })
+    let layout = assemble(
+        &planned,
+        &lengths,
+        &Options::new(Version::new(1, 7)),
+        |stream| Ok::<_, std::convert::Infallible>(Encoded::plain(stream.data.to_vec())),
+    )
     .unwrap();
     let mut facts = facts_of(&planned, &layout);
     let to = |number: u32| planned.number(id(number)).unwrap();
@@ -2535,7 +2589,7 @@ fn each_finding_says_its_clause_and_each_error_is_what_a_reader_acts_on() {
             computed: 3,
         },
         Finding::TableAt {
-            table: "/O",
+            table: crate::hint::Table::Outlines,
             hint: 2,
             computed: 3,
         },
@@ -2591,7 +2645,7 @@ fn it_never_panics_on_facts_past_any_position() {
     dict(&mut facts).o = Raw::Integer(big);
     dict(&mut facts).n = Raw::Integer(big);
     findings(&facts);
-    let _ = Options::new((1, 7));
+    let _ = Options::new(Version::new(1, 7));
 }
 
 /// A hint stream's key, as a finding holds it, is shown whole up to 15
@@ -2726,7 +2780,7 @@ fn what_s_const_makes_constants() {
     const PAGE: PageFacts = PageFacts::new(Some(ObjectId::new(3, 0)));
     const FACTS: Facts = Facts::new(1_000);
     const HINT: HintFacts = HintFacts::new(10, 90, 4, HintData::NotAStream);
-    const FIRST: FirstObject = FirstObject::new(9, 120, 1, 0);
+    const FIRST: FirstObject = FirstObject::new(9, 120, ObjectId::new(1, 0));
     const SECTION: SectionFacts = SectionFacts::new(500, Kind::Table);
     const KEY: KeyName = KeyName::new(b"S");
     const KEYS: crate::hint::HintKeys = crate::hint::HintKeys::new(12);
@@ -2734,7 +2788,7 @@ fn what_s_const_makes_constants() {
     const BACK: u64 = crate::hint::located(AT, 100, 50);
     const WIDTH: u16 = crate::hint::id_width(255);
     const PLAN_PAGE: Page = Page::new(ObjectId::new(3, 0));
-    const LAYOUT: Options<'static> = Options::new((1, 7));
+    const LAYOUT: Options<'static> = Options::new(Version::new(1, 7));
     const KEY_OF: &[u8] = Attribute::MediaBox.key();
     const CLAUSE: &str = Finding::NoPages.clause();
     const GRADE: Grade = Finding::NoPages.grade();

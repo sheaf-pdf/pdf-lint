@@ -48,7 +48,7 @@ fn raw(value: Option<&Object>) -> Raw {
 /// The dictionary's keys, `/H` being an array whatever's in it.
 fn first_object(read: read::FirstObject) -> FirstObject {
     let (at, end) = (read.at as u64, read.end as u64);
-    let mut first = FirstObject::new(at, end, read.id.number, read.id.generation);
+    let mut first = FirstObject::new(at, end, read.id);
     first.stream = matches!(read.object.value(), Value::Stream(_));
     let Some(dict) = read.object.as_dict() else {
         return first;
@@ -307,8 +307,11 @@ fn page_tree<S: ByteSource>(
     limits: &Limits,
     facts: &mut Facts,
 ) -> Result<(), Error> {
+    // The walk lists no more pages than the check takes, nor visits more
+    // nodes, so a tree past that isn't walked whole first; its other caps
+    // are pdf-semantics' own.
     let mut tree_limits = TreeLimits::DEFAULT;
-    tree_limits.pages = tree_limits.pages.max(limits.pages);
+    tree_limits.pages = limits.pages;
     let trailer = reading.trailer().dict();
     let root = match catalog(reading, trailer) {
         Ok(Some(root)) => root,
@@ -372,11 +375,16 @@ fn page_tree<S: ByteSource>(
 /// read where the file says it's linearized. A file that doesn't, or whose `/L`
 /// isn't its length, has no more read than it takes to say so. What's wrong
 /// with a file is a fact. What the reader didn't read for its own reason, its
-/// caps (`read::Limits`, and pdf-semantics' on the page tree), no key, or
-/// filters it doesn't take, is said as that, the hint stream's in its data
-/// ([`HintData::Unread`]), the sections' and the page tree's in
-/// [`Facts::unread`]. A caller that holds the file read whole beside its
-/// reading gives that ([`facts_with_reading`]), so it isn't read whole again.
+/// caps, no key, or filters it doesn't take, is said as that, the hint
+/// stream's in its data ([`HintData::Unread`]), the sections' and the page
+/// tree's in [`Facts::unread`]. The caps are the reading's (`read::Limits`)
+/// and, on the page tree, [`Limits::pages`] on the pages and the nodes its
+/// walk reads, each, and pdf-semantics' defaults on its depth. A page tree's
+/// node in an object stream the reader doesn't decode, through filters it
+/// doesn't take or cut at its cap, the reader reads as damaged, so the tree
+/// is read without it, as the file's. A caller that holds the file read
+/// whole beside its reading gives that ([`facts_with_reading`]), so it isn't
+/// read whole again.
 ///
 /// # Errors
 ///
@@ -525,6 +533,23 @@ pub fn check<S: ByteSource, K: Sink + ?Sized>(
     sink: &mut K,
 ) -> Result<Verdict, Error> {
     let facts = facts(reading, limits)?;
+    Ok(check::check(&facts, limits, sink))
+}
+
+/// What [`facts_with_reading`] reads of the file `read` holds,
+/// [`check`](crate::check()) judged: [`check`] of its reading, the graph made
+/// of the document read whole beside it, so it isn't read whole again.
+///
+/// # Errors
+///
+/// Only where [`facts_with_reading`] fails: where the source doesn't give its
+/// bytes ([`Error::Read`]).
+pub fn check_with_reading<S: ByteSource, K: Sink + ?Sized>(
+    read: &WithReading<S>,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<Verdict, Error> {
+    let facts = facts_with_reading(read, limits)?;
     Ok(check::check(&facts, limits, sink))
 }
 
