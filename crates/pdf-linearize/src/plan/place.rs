@@ -337,9 +337,9 @@ pub(super) fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
         seal.region(&placing, &packable, start, Use::None);
     }
     let start = placing.list.len();
-    for at in 0..objects {
-        if thumbed.uses[at] == Use::Shared {
-            placing.place(at as u32);
+    for (at, &used) in (0..).zip(&thumbed.uses) {
+        if used == Use::Shared {
+            placing.place(at);
         }
     }
     placing.region(start, Part::Other, Holds::ThumbShared);
