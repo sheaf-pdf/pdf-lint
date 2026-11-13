@@ -351,6 +351,29 @@ jobs:
       - name: Package, and check what the package holds
         run: just semantics-package
 
+  # pdf-fonts packaged as a publish would, as the tokenizer, pdf-objects, the
+  # filters, pdf-crypt, pdf-color, pdf-structure, pdf-content-streams and
+  # pdf-semantics are: in a fresh target directory, and what the package
+  # holds checked, its sources, README, CHANGELOG, manifest and lock, and its
+  # data with its terms, Adobe's metrics and their notice, the glyph lists
+  # and the FreeType Project License, file by file, nothing else, no
+  # benchmark among them. pdf-content-streams and pdf-filters are packaged
+  # beside it, since pdf-fonts names a version of pdf-content-streams, and
+  # that names one of pdf-filters, that may not be on crates.io yet, and
+  # cargo verifies the package against those; every other crate of the
+  # family they name is on crates.io.
+  fonts-package:
+    name: Fonts packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just fonts-package
+
   # pdf-objects', the filters', pdf-crypt's and pdf-color's public API
   # against their version on crates.io, as the tokenizer's job holds its
   # own, with the same pinned tool on the same pinned Rust. Each is an alpha, which the tool takes to
@@ -483,8 +506,9 @@ jobs:
         with:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-fonts/Cargo.toml, which
-      # `just fonts-msrv` and `just fonts-cmaps-msrv` (the `predefined-cmaps`
-      # feature's) read.
+      # `just fonts-msrv` reads, as published, with no feature and with
+      # `tracing`, and `just fonts-cmaps-msrv` (the `predefined-cmaps`
+      # feature's).
       - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test

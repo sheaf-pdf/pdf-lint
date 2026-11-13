@@ -15,12 +15,13 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dic
 
 use crate::fixture::{
     OpenType, cff_program, cid_cff_program, composite_bomb_program, composite_of_program,
-    heavy_cff_program, loca_past_end_program, long_cff_program, moving_cff_program,
-    opentype_cid_program, opentype_program, truetype_program, type1_accents_program,
-    type1_integers_program, type1_lookups_program, type1_program,
+    doubled_sign_type1_program, heavy_cff_program, loca_past_end_program, long_cff_program,
+    moving_cff_program, opentype_cid_program, opentype_program, rolling_type1_program,
+    truetype_program, type1_accents_program, type1_integers_program, type1_lookups_program,
+    type1_program,
 };
 use crate::predefined::{Collection, scheme};
-use crate::type1::scan;
+use crate::type1::{Refusal, scan};
 use crate::{
     Encoding, Error, Fault, Font, Fonts, Limits, Std14, cp1252, glyph_text, name_code_point,
 };
@@ -33,9 +34,12 @@ const NAMES: usize = 64;
 /// more finds nothing more.
 const CODES: usize = 4;
 
-/// `data` as a Type 1 program: what's held no more than what's given, and under
-/// smaller caps the same or nothing at all, as a cap refuses a program and never
-/// reads it otherwise.
+/// `data` as a Type 1 program: what's held no more than what's given; and a cap
+/// refuses a program and never reads it otherwise, by the scan alone, never read-fonts,
+/// whose work under a larger cap is what the cap bounds. A program read under a cap is
+/// read the same under a larger, one malformed under a cap is malformed under a larger,
+/// and one past a cap is past every smaller: the scan's fuel says when it stops, never
+/// what it reads.
 pub fn type1(data: &[u8]) {
     let limits = Limits::DEFAULT;
     let read = scan(data, &limits);
@@ -45,21 +49,27 @@ pub fn type1(data: &[u8]) {
         // The one `.notdef` a program may have made up for it is 5 bytes.
         assert!(held <= data.len() + 5, "{held} of {}", data.len());
     }
-    for type1_work in [4, 1, 0] {
+    // From the largest cap to none, each what the scan comes to.
+    let caps = [2 * limits.type1_work, limits.type1_work, 4, 1, 0];
+    let scanned = caps.map(|type1_work| {
         let limits = Limits {
             type1_work,
             ..limits
         };
-        if let Some(under) = scan(data, &limits) {
-            assert_eq!(Some(under), read);
+        crate::type1::read(data, &limits).map(|scanned| scanned.charstrings)
+    });
+    assert_eq!(scanned[1].as_ref().ok(), read.as_ref());
+    for (i, smaller) in scanned.iter().enumerate() {
+        for larger in &scanned[..i] {
+            match smaller {
+                Ok(_) => assert_eq!(larger, smaller),
+                Err(Refusal::Malformed) => assert_eq!(larger, smaller),
+                Err(Refusal::Capped) => {}
+            }
+            if larger == &Err(Refusal::Capped) {
+                assert_eq!(smaller, larger);
+            }
         }
-    }
-    let larger = Limits {
-        type1_work: 2 * limits.type1_work,
-        ..limits
-    };
-    if read.is_some() {
-        assert_eq!(scan(data, &larger), read);
     }
 }
 
@@ -108,6 +118,14 @@ fn a_name(name: &[u8]) {
     #[cfg(feature = "predefined-cmaps")]
     if let Some(cmap) = crate::predefined::bundled(name) {
         let _ = cmap.metadata();
+    }
+    // The bundle's names, had in every build, are what it has; and a CMap the build
+    // hasn't is the build's only where the bundle has it and the build is without it.
+    let bundles = crate::predefined::bundles(name);
+    #[cfg(feature = "predefined-cmaps")]
+    assert_eq!(crate::predefined::bundled(name).is_some(), bundles);
+    if crate::predefined::missing(name) == Fault::PredefinedNotBuilt {
+        assert!(bundles && !cfg!(feature = "predefined-cmaps"));
     }
 }
 
@@ -359,14 +377,18 @@ pub(crate) fn digest(font: &Font) -> String {
     }
     let mut at = 0;
     let mut split = Vec::new();
+    let (fewest, most) = font.codes(s).size_hint();
     for (range, code) in font.codes(s) {
         assert_eq!(range.start, at);
         assert!(range.end > at && range.end <= s.len(), "{range:?}");
+        assert!(range.len() <= 4, "{range:?}");
         at = range.end;
         out.push_str(&by_code(code));
         split.push((range, code));
     }
     assert_eq!(at, s.len());
+    // Its hint holds how many codes there are.
+    assert!(fewest <= split.len() && most.is_some_and(|most| split.len() <= most));
     assert_eq!(
         font.width_guessed_in(s),
         font.codes(s).any(|(_, code)| font.width_guessed(code))
@@ -402,6 +424,13 @@ pub(crate) fn digest(font: &Font) -> String {
     out
 }
 
+/// Whether `data` is a Type 1 program as FreeType tells one apart: its header, bare or
+/// in a PFB's first segment.
+fn type1_by_its_bytes(data: &[u8]) -> bool {
+    let header = |d: &[u8]| d.starts_with(b"%!PS-AdobeFont") || d.starts_with(b"%!FontType");
+    header(data) || data.starts_with(&[0x80, 0x01]) && data.get(6..).is_some_and(header)
+}
+
 /// What was read, as what can be held the same: a font's digest and its id, or why it
 /// wasn't.
 fn said(read: &Result<Font, Error>) -> Result<String, Error> {
@@ -415,8 +444,8 @@ fn said(read: &Result<Font, Error>) -> Result<String, Error> {
 /// budget never rises, and what's taken off it is the font's cost, or nothing where
 /// it fails; a sink changes nothing; `Fonts` read it the same, twice, charged alike;
 /// smaller caps do no more work; a `Streams` that gives more than it's asked is too
-/// large; and it fails only for what was made to fail, as it was made to. `by_number`
-/// is what refers to it, where the file has one. Whether it read.
+/// large; and it fails only for what was made to fail, as it was made to, telling nothing
+/// after it. `by_number` is what refers to it, where the file has one. Whether it read.
 fn a_font<'o, O>(
     objects: O,
     font: &'o Object,
@@ -457,6 +486,27 @@ where
     assert_eq!((kept, asked.get()), (budget, work));
     for (_, fault) in &told {
         assert!(!fault.to_string().is_empty());
+    }
+    // A predefined CMap the build hasn't, never in a build that has the bundle, and the
+    // codes it would have read guessed.
+    let not_built = told.iter().any(|(_, f)| *f == Fault::PredefinedNotBuilt);
+    assert!(!not_built || !cfg!(feature = "predefined-cmaps"));
+    if not_built && let Ok(font) = &with_sink {
+        assert!(font.approx().codes);
+    }
+    // A program refused for a cap is a Type 1 program, whose scan alone has one that
+    // refuses it, and it's what the font says of its program.
+    let mut capped = false;
+    for (place, _) in told.iter().filter(|(_, f)| *f == Fault::ProgramCapped) {
+        let data = place.object.and_then(|id| objects.decoded(id, BUDGET).ok());
+        assert!(
+            data.is_some_and(|data| type1_by_its_bytes(&data)),
+            "{place:?}"
+        );
+        capped = true;
+    }
+    if let Ok(font) = &with_sink {
+        assert_eq!(capped, font.program() == crate::FontProgram::Capped);
     }
 
     // Written in the resources, read anew each time and charged each time; by number,
@@ -539,9 +589,18 @@ where
             failed: &failed,
         };
         let mut budget = BUDGET;
-        let read = Font::read(failing, dict, &limits, &mut budget, &mut ());
+        let mut failing_told: Vec<(Place, Fault)> = Vec::new();
+        let read = Font::read(failing, dict, &limits, &mut budget, &mut failing_told);
         if read.is_err() {
             assert_eq!(budget, BUDGET);
+        }
+        // What fails is the whole answer: up to it the reading is the one that didn't
+        // fail, and it tells nothing after it. Not so where it's read as none.
+        if !matches!(why, Why::Damaged | Why::Filter) {
+            assert!(
+                told.starts_with(&failing_told),
+                "{why:?}: {failing_told:?} against {told:?}"
+            );
         }
         if failing_is_all {
             match &read {
@@ -556,9 +615,17 @@ where
                 // decode, is read as none, and so is an object that's damaged.
                 Ok(_) => assert!(!failed.get() || matches!(why, Why::Damaged | Why::Filter)),
             }
-            // A stream past a cap of what gives it is too large, as one past the budget.
-            if streams && matches!(why, Why::Limit | Why::Capped) && failed.get() {
-                assert_eq!(read.err(), Some(Error::TooLarge));
+            // A stream past the budget is too large, and one past a cap of what gives
+            // it the caller's to know, as an object past one is.
+            if streams && failed.get() {
+                match why {
+                    Why::Limit => assert!(matches!(&read, Err(Error::TooLarge)), "{read:?}"),
+                    Why::Capped => assert!(
+                        matches!(&read, Err(Error::Unreadable(u)) if u.why == why),
+                        "{read:?}"
+                    ),
+                    _ => {}
+                }
             }
         }
     }
@@ -677,7 +744,7 @@ fn program_fixtures() -> Vec<Vec<u8>> {
         post_names: true,
         cmap: false,
     };
-    let programs: [(&str, &str, Vec<u8>); 15] = [
+    let programs: [(&str, &str, Vec<u8>); 17] = [
         ("TrueType", "FontFile2", truetype_program()),
         ("Type1", "FontFile3", cff_program()),
         ("Type1", "FontFile3", cid_cff_program()),
@@ -693,6 +760,8 @@ fn program_fixtures() -> Vec<Vec<u8>> {
         ("MMType1", "FontFile", type1_integers_program(8)),
         ("Type1", "FontFile", type1_accents_program(4, 4)),
         ("Type1", "FontFile", type1_lookups_program(16)),
+        ("Type1", "FontFile", doubled_sign_type1_program()),
+        ("Type1", "FontFile", rolling_type1_program()),
     ];
     let mut out = Vec::new();
     for (subtype, key, program) in programs {
@@ -905,6 +974,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A font whose Type 1 program is past `type1_work` keeps every promise, its
+    /// program refused for the cap and told so, and the program itself keeps the scan's.
+    #[cfg(feature = "programs")]
+    #[test]
+    fn a_program_past_its_cap_keeps_every_promise() {
+        let program = type1_lookups_program(3000);
+        let font: &[u8] = b"<< /Subtype /Type1 /BaseFont /Fix /FirstChar 32 /Widths [250 300] \
+            /FontDescriptor << /Flags 32 /FontFile 5 0 R >> >>";
+        let seed = parts(&[font, b"", b"", b"", &program, b""]);
+        assert!(fonts(&seed));
+        type1(&program);
+        let objects = objects_of(&seed);
+        let dict = objects[&ObjectId::new(1, 0)].as_dict().unwrap();
+        let (mut budget, mut told) = (BUDGET, Vec::new());
+        let read = Font::read(
+            Map(&objects),
+            dict,
+            &Limits::DEFAULT,
+            &mut budget,
+            &mut told,
+        );
+        assert_eq!(read.unwrap().program(), crate::FontProgram::Capped);
+        let told: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+        assert_eq!(told, [Fault::ProgramCapped]);
     }
 
     #[test]

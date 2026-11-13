@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// A simple font's encoding: which glyph each one-byte code draws.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Encoding {
     /// StandardEncoding, the Latin fonts' own (ISO 32000-2, D.2).
@@ -27,7 +27,8 @@ impl Encoding {
     /// The base encoding a font's `/Encoding` or `/BaseEncoding` names.
     /// `MacExpertEncoding`'s small capitals and old-style figures aren't
     /// read: it's None, as an unknown name is.
-    pub fn named(name: &[u8]) -> Option<Encoding> {
+    #[must_use]
+    pub const fn named(name: &[u8]) -> Option<Encoding> {
         match name {
             b"StandardEncoding" => Some(Encoding::Standard),
             b"WinAnsiEncoding" => Some(Encoding::WinAnsi),
@@ -37,6 +38,7 @@ impl Encoding {
     }
 
     /// The glyph `code` draws.
+    #[must_use]
     pub fn glyph(self, code: u8) -> Option<&'static str> {
         match self {
             Encoding::Standard => tables().standard_names[code as usize],
@@ -50,6 +52,7 @@ impl Encoding {
     /// The text `code` draws. WinAnsi's is Windows-1252's where that has one,
     /// so its second space and hyphen, 0xA0 and 0xAD, are U+00A0 and U+00AD,
     /// and else its glyph's: the bullet of a code it has no other use for.
+    #[must_use]
     pub fn text(self, code: u8) -> Option<String> {
         match (self, cp1252(code)) {
             (Encoding::WinAnsi, Some(c)) => Some(String::from(c)),
@@ -60,10 +63,14 @@ impl Encoding {
 
 /// Windows-1252's character for `code`, where WinAnsiEncoding draws one:
 /// none for the control codes or the five codes it leaves empty.
-pub fn cp1252(code: u8) -> Option<char> {
+#[must_use]
+pub const fn cp1252(code: u8) -> Option<char> {
     match code {
         0x20..=0x7e | 0xa0..=0xff => Some(code as char),
-        0x80..=0x9f => Some(CP1252_HIGH[code as usize - 0x80]).filter(|&c| c != '\0'),
+        0x80..=0x9f => match CP1252_HIGH[code as usize - 0x80] {
+            '\0' => None,
+            c => Some(c),
+        },
         _ => None,
     }
 }
@@ -73,6 +80,7 @@ pub fn cp1252(code: u8) -> Option<char> {
 /// are each read, and a part is read from the ITC Zapf Dingbats list (in
 /// a ZapfDingbats font), the Adobe Glyph List, `uniXXXX…` or `uXXXX` to
 /// `uXXXXXX`. None when no part reads as anything.
+#[must_use]
 pub fn glyph_text(name: &str, dingbats: bool) -> Option<String> {
     let name = name.split('.').next().unwrap_or_default();
     let mut text = String::new();
@@ -96,6 +104,7 @@ pub fn glyph_text(name: &str, dingbats: bool) -> Option<String> {
 /// for what's before a period that isn't the first character, where it
 /// gives exactly one. With whether a period followed, as a variant's name
 /// has one. None where it's none of those.
+#[must_use]
 pub fn name_code_point(name: &[u8]) -> Option<(u32, bool)> {
     // Up to `most` upper-case hex digits after `prefix`, at least `least`
     // of them, and what follows them.

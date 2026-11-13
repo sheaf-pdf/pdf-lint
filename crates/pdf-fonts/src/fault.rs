@@ -1,6 +1,7 @@
 //! Where a font departs from ISO 32000-2, and where its reading meets a cap of
-//! its own. A font's reading goes on past each [`Fault`], told to a sink,
-//! pdf-objects' [`Sink<Fault>`](pdf_objects::fault::Sink), with where it is, a
+//! its own or what its build hasn't. A font's reading goes on past each
+//! [`Fault`], told to a sink, pdf-objects'
+//! [`Sink<Fault>`](pdf_objects::fault::Sink), with where it is, a
 //! [`Place`](pdf_objects::fault::Place): the numbered object it's in, where
 //! that's another than the font dictionary, which a reading is given as a
 //! dictionary (its descriptor, its CIDFont, a CMap's stream, an object that
@@ -12,10 +13,11 @@
 use pdf_objects::ObjectId;
 
 /// A place where a font isn't what ISO 32000-2 says it is, or where its reading
-/// meets a cap of its own, which a reading comes to and goes on past. Each names its
-/// clause, but [`Fault::TooManyCMaps`], a cap that ISO 32000-2 doesn't set, which
-/// says nothing of the file, and the last, which is of the file rather than its font.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// meets a cap of its own or what its build hasn't, which a reading comes to and goes
+/// on past. Each names its clause, but [`Fault::TooManyCMaps`] and
+/// [`Fault::ProgramCapped`], caps that ISO 32000-2 doesn't set, which say nothing of
+/// the file, and the last, which is of the file rather than its font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// A `/Subtype` that's no font's (9.5), or no CIDFont's (9.7.4), or none. A
@@ -42,8 +44,8 @@ pub enum Fault {
     /// An `/Encoding` or `/BaseEncoding` that's no base encoding's name, or an
     /// `/Encoding` that's neither that nor a dictionary (9.6.5.1). The font's own
     /// encoding is read. `MacExpertEncoding` is a base encoding, which reads as
-    /// WinAnsiEncoding as PDFium reads it by name, and as `/BaseEncoding` where the program
-    /// is TrueType; anywhere else it's unread.
+    /// WinAnsiEncoding as PDFium reads it by name, and as `/BaseEncoding` where the
+    /// program is TrueType; anywhere else it's unread.
     #[error("an /Encoding that's no encoding")]
     Encoding,
     /// A `/Differences` value that's neither a number nor a name, or a name at a
@@ -70,7 +72,12 @@ pub enum Fault {
     CMap,
     /// A CMap's `/UseCMap` chain that can't be read whole: a stream that doesn't
     /// read, or a loop (9.7.5.3). What's read of it is. A chain past
-    /// [`Limits::cmaps`](crate::Limits::cmaps) is [`Fault::TooManyCMaps`].
+    /// [`Limits::cmaps`](crate::Limits::cmaps) is [`Fault::TooManyCMaps`]. A stream
+    /// of the chain whose filters the reader doesn't decode
+    /// ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though that's the
+    /// reader's and not the file's: a caller tells the two apart by what its own
+    /// [`Streams`](pdf_objects::Streams) answered. A later version may tell it apart
+    /// itself.
     #[error("a CMap's /UseCMap chain can't be read whole")]
     UseCMap,
     /// A CMap's `/UseCMap` chain of more streams than
@@ -80,28 +87,54 @@ pub enum Fault {
     #[error("a CMap's /UseCMap chain longer than is read")]
     TooManyCMaps,
     /// A `/ToUnicode` that's no stream, or one that doesn't decode (9.10.3). Text
-    /// is read as with none.
+    /// is read as with none. One whose filters the reader doesn't decode
+    /// ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though that's the
+    /// reader's and not the file's: a caller tells the two apart by what its own
+    /// [`Streams`](pdf_objects::Streams) answered. A later version may tell it apart
+    /// itself.
     #[error("a /ToUnicode that's no stream, or doesn't decode")]
     ToUnicode,
-    /// A CMap named that this reading doesn't have: one that isn't predefined
-    /// (9.7.5.2), or one PDFium doesn't know, whose codes are two bytes each, each its
-    /// CID, as PDFium reads them; or one a build without the `predefined-cmaps` feature
-    /// hasn't, whose codes are guessed.
-    #[error("a predefined CMap this reading doesn't have")]
+    /// A CMap named that no build reads as it's named: one that's no predefined CMap
+    /// (9.7.5.2), or, as a Type 0 font's `/Encoding`, CNS-EUC-H or -V, which are, but
+    /// which PDFium doesn't know. As an `/Encoding`, a name PDFium doesn't know is read
+    /// as it reads it, its codes two bytes each, each its CID, and one it knows that
+    /// ISO 32000-2 doesn't predefine (GBK2K-EUC-H, say) has its codes guessed; used by
+    /// another CMap, the codes nothing else maps are guessed. It's the file's, but for
+    /// CNS-EUC-H and -V.
+    #[error("a CMap name that's no predefined CMap, or one PDFium doesn't know")]
     PredefinedUnknown,
-    /// A program that doesn't read as its format (9.9), or that's past
-    /// [`Limits`](crate::Limits). It reads as no program at all, as PDFium reads one
-    /// FreeType doesn't load, its glyphs' boxes and its heights guessed.
+    /// A predefined CMap (9.7.5.2) that a build with the `predefined-cmaps` feature reads
+    /// from Adobe's bundle, and this build, without it, hasn't: of the build, not the
+    /// file. Its codes are guessed and their CIDs unknown, split by the font's
+    /// `/ToUnicode` codespace where it has one, else two bytes each. Used by another
+    /// CMap, the codes nothing else maps are guessed. A build with the feature never
+    /// tells it.
+    #[error("a predefined CMap this build doesn't have")]
+    PredefinedNotBuilt,
+    /// A program that doesn't read as its format, or a program stream that doesn't
+    /// decode (9.9). It reads as no program at all, as PDFium reads one FreeType doesn't
+    /// load, its glyphs' boxes and its heights guessed. A stream whose filters the reader
+    /// doesn't decode ([`Why::Filter`](pdf_objects::Why::Filter)) is told so too, though
+    /// that's the reader's and not the file's: a caller tells the two apart by what its
+    /// own [`Streams`](pdf_objects::Streams) answered. A later version may tell it apart
+    /// itself.
     #[error("a font program that doesn't read")]
     ProgramMalformed,
+    /// A Type 1 program whose reading would cost past
+    /// [`Limits::type1_work`](crate::Limits::type1_work): a cap of this reading's, which
+    /// ISO 32000-2 doesn't set and which says nothing of the program, told in its stream.
+    /// It reads as no program at all, as [`Fault::ProgramMalformed`]'s does.
+    #[error("a Type 1 font program past what reading one may cost")]
+    ProgramCapped,
     /// A reference to a reference (7.3.10), which ISO 32000-2 allows and PDFium
     /// follows only to a dictionary, or a number or a string in a value it has already
     /// followed one to. Where it doesn't, what it leads to reads as none.
     #[error("a reference to a reference")]
     Chained,
-    /// An object a font reads doesn't read ([`Why::Damaged`](crate::Why::Damaged)).
-    /// It's read as not there.
-    #[error("object {} {} doesn't read", .id.number, .id.generation)]
+    /// A reference to an object the file lists but whose bytes aren't that object, or
+    /// that doesn't lead to it ([`Why::Damaged`](pdf_objects::Why::Damaged)): read as no
+    /// object, as 7.3.10 has a reference to nothing, though the file meant one.
+    #[error("{id} R doesn't read")]
     Damaged {
         /// The object.
         id: ObjectId,

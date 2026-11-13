@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use super::afm::Afm;
 use super::fixture;
+use super::type1::Refusal::{Capped, Malformed};
 use super::*;
 
 mod fonts;
@@ -310,29 +311,119 @@ fn glyph_names_read_as_text() {
     assert_eq!(name_code_point(b"\xff"), None);
 }
 
-/// What the crate says it gives, by those names; and pdf-objects' and pdf-content-streams'
-/// own types, what it re-exports of them.
+/// What the crate says it gives, by those names; and pdf-objects and pdf-content-streams,
+/// re-exported whole, each the crate itself.
 #[test]
 fn the_crate_s_names_are_there() {
     #[allow(unused_imports)]
     use crate::{
-        Descendant, Encoding, Error, Fault, Font, FontApprox, FontId, FontKind, FontMetrics,
+        Codes, Descendant, Encoding, Error, Fault, Font, FontApprox, FontId, FontKind, FontMetrics,
         FontProgram, FontScope, Fonts, Limits, Rect, Std14, VerticalMetrics, cp1252, glyph_text,
         name_code_point,
     };
     fn same<T>(_: fn(&T) -> &T) {}
-    same::<pdf_objects::Dict>(|d: &crate::Dict| d);
-    same::<pdf_objects::Object>(|d: &crate::Object| d);
-    same::<pdf_objects::ObjectId>(|d: &crate::ObjectId| d);
-    same::<pdf_objects::Span>(|d: &crate::Span| d);
-    same::<pdf_objects::Unreadable>(|d: &crate::Unreadable| d);
-    same::<pdf_objects::Why>(|d: &crate::Why| d);
+    same::<pdf_objects::Dict>(|d: &crate::pdf_objects::Dict| d);
+    same::<pdf_objects::Unreadable>(|d: &crate::pdf_objects::Unreadable| d);
     same::<pdf_content_streams::Limits>(|d: &crate::pdf_content_streams::Limits| d);
     fn resolves<'o, R: pdf_objects::Resolve<'o>>() {}
-    fn also<'o, R: crate::Resolve<'o>>() {
+    fn also<'o, R: crate::pdf_objects::Resolve<'o>>() {
         resolves::<R>();
     }
-    let _ = also::<fn(crate::ObjectId) -> Option<&'static crate::Object>>;
+    let _ = also::<fn(pdf_objects::ObjectId) -> Option<&'static pdf_objects::Object>>;
+}
+
+/// `Std14::ALL` is the 14 in the order of their discriminants, so each is there once,
+/// at its own index.
+#[test]
+fn all_14_are_in_the_order_of_their_discriminants() {
+    for (i, font) in Std14::ALL.into_iter().enumerate() {
+        assert_eq!(font as usize, i, "{font:?}");
+    }
+}
+
+/// What's `const` makes a constant: a rectangle and metrics, whether a font guesses, a
+/// standard font's name, a Windows-1252 character and an encoding by its name.
+#[test]
+fn const_fns_make_constants() {
+    const BOX: Rect = Rect::new(10.0, 5.0, -10.0, -5.0);
+    const METRICS: FontMetrics = FontMetrics::new(800.0, -200.0, Some(BOX));
+    const EXACT: FontApprox = FontApprox {
+        codes: false,
+        widths: false,
+        heights: false,
+        boxes: false,
+    };
+    const WIDTHS: FontApprox = FontApprox {
+        widths: true,
+        ..EXACT
+    };
+    const GUESSED: [bool; 2] = [WIDTHS.any(), EXACT.any()];
+    const NAME: &str = Std14::TimesBoldItalic.name();
+    const EURO: Option<char> = cp1252(0x80);
+    const EMPTY: Option<char> = cp1252(0x81);
+    const WIN_ANSI: Option<Encoding> = Encoding::named(b"WinAnsiEncoding");
+    assert_eq!((BOX.x0, BOX.y0, BOX.x1, BOX.y1), (-10.0, -5.0, 10.0, 5.0));
+    assert_eq!(METRICS.bbox, Some(BOX));
+    assert_eq!(GUESSED, [true, false]);
+    assert_eq!(NAME, "Times-BoldItalic");
+    assert_eq!((EURO, EMPTY), (Some('€'), None));
+    assert_eq!(WIN_ANSI, Some(Encoding::WinAnsi));
+}
+
+/// The README is shown on crates.io and docs.rs, where a path beside the crate
+/// reaches nothing: its links to the licences, the root's and the FreeType Project
+/// License, and to Adobe's notice for the metrics are the repository's URLs, the
+/// manifest's `repository` and the file, each file the crate's own where it's in
+/// the crate; and every link it has is a URL.
+#[test]
+fn the_readmes_licence_links_reach_the_files() {
+    let readme = include_str!("../README.md");
+    let repository = env!("CARGO_PKG_REPOSITORY");
+    for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+        let link = format!("[{file}]({repository}/blob/main/{file})");
+        assert!(
+            readme.contains(&link),
+            "{file}'s link isn't the repository's URL"
+        );
+    }
+    let crate_dir = format!("crates/{}", env!("CARGO_PKG_NAME"));
+    for file in ["FTL.TXT", "assets/afm/MustRead.html"] {
+        let link = format!("[`{file}`]({repository}/blob/main/{crate_dir}/{file})");
+        assert!(
+            readme.contains(&link),
+            "{file}'s link isn't the repository's URL"
+        );
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+        assert!(here.is_file(), "{file} isn't in the crate");
+    }
+    for (at, _) in readme.match_indices("](") {
+        let target = &readme[at + 2..];
+        let target = &target[..target.find(')').unwrap_or(target.len())];
+        assert!(
+            target.starts_with("https://"),
+            "a link isn't a URL: {target}"
+        );
+    }
+}
+
+/// The crate doc's example is the README's, line for line, so that what docs.rs shows
+/// and what crates.io shows are one example, and each runs as a doctest, in every build.
+#[test]
+fn the_crate_docs_example_is_the_readmes() {
+    let readme: Vec<&str> = (include_str!("../README.md").lines())
+        .skip_while(|line| *line != "```rust")
+        .skip(1)
+        .take_while(|line| *line != "```")
+        .collect();
+    let doc: Vec<&str> = (include_str!("lib.rs").lines())
+        .map_while(|line| line.strip_prefix("//!"))
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .skip_while(|line| *line != "```")
+        .skip(1)
+        .take_while(|line| *line != "```")
+        .collect();
+    assert!(readme.len() > 10, "the README's example: {readme:?}");
+    assert_eq!(doc, readme);
 }
 
 /// [`fixture::type1_program`] with `clear` in its clear text, before `/PaintType`.
@@ -343,8 +434,8 @@ fn type1_holding(clear: &str) -> Vec<u8> {
 }
 
 /// A Type 1 program's clear text read as read-fonts' parser reads it: by what each of
-/// these holds, it finds `eexec` and the charstrings behind it, or doesn't. Each is what a
-/// parser that reads a procedure by its tokens, or looks past an integer by its tokens,
+/// these holds, it finds `eexec` and the charstrings behind it, or doesn't. Each is what
+/// a parser that reads a procedure by its tokens, or looks past an integer by its tokens,
 /// reads otherwise; `programs` holds it to read-fonts' own reading.
 #[test]
 fn type1_tokens_are_read_as_read_fonts_reads_them() {
@@ -430,6 +521,7 @@ fn a_type1_blob_s_length_is_followed_only_by_whitespace() {
     assert!(type1::scan(&glyph(" "), &limits).is_some());
     assert!(type1::scan(&glyph(" \t\r\n "), &limits).is_some());
     assert!(type1::scan(&glyph(" % a comment\n"), &limits).is_none());
+    assert_eq!(refused(&glyph(" % a comment\n"), &limits), Some(Malformed));
 }
 
 /// A glyph's name that isn't UTF-8 is its bytes as Latin-1, as read-fonts keeps it, and
@@ -465,6 +557,10 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
     let limits = Limits::DEFAULT;
     assert!(type1::scan(&fixture::type1_lookups_program(256), &limits).is_some());
     assert!(type1::scan(&fixture::type1_lookups_program(3000), &limits).is_none());
+    assert_eq!(
+        refused(&fixture::type1_lookups_program(3000), &limits),
+        Some(Capped)
+    );
     let glyphs = 3000;
     let names: Vec<String> = (0..glyphs).map(|g| format!("g{g}")).collect();
     let empty = fixture::type1_empty_glyph();
@@ -482,10 +578,15 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
     };
     assert!(type1::scan(&program(in_a_map(256)), &limits).is_some());
     assert!(type1::scan(&program(in_a_map(glyphs)), &limits).is_none());
+    assert_eq!(refused(&program(in_a_map(glyphs)), &limits), Some(Capped));
     // A map's codes and an array's names come to the same.
     let in_an_array = |n: usize| format!("/Encoding [{}] def", "/nope ".repeat(n));
     assert!(type1::scan(&program(in_an_array(256)), &limits).is_some());
     assert!(type1::scan(&program(in_an_array(glyphs)), &limits).is_none());
+    assert_eq!(
+        refused(&program(in_an_array(glyphs)), &limits),
+        Some(Capped)
+    );
     // What's no name ends an array, and `def` a map.
     let cut = format!("/Encoding [ 1 {}] def", "/nope ".repeat(glyphs));
     assert!(type1::scan(&program(cut), &limits).is_some());
@@ -498,7 +599,8 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
     // Each is counted: two of what one may have aren't read.
     assert!(type1::scan(&program(in_an_array(800)), &limits).is_some());
     let twice = format!("{0} {0}", in_an_array(800));
-    assert!(type1::scan(&program(twice), &limits).is_none());
+    assert!(type1::scan(&program(twice.clone()), &limits).is_none());
+    assert_eq!(refused(&program(twice), &limits), Some(Capped));
     // A glyph is a glyph, whatever its name: read-fonts goes through them all.
     let clear = in_an_array(glyphs);
     let once = fixture::type1_with(
@@ -506,6 +608,7 @@ fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
         std::iter::repeat_n(("g", empty.clone()), glyphs),
     );
     assert!(type1::scan(&once, &limits).is_none());
+    assert_eq!(refused(&once, &limits), Some(Capped));
 }
 
 /// What a scan finds: each charstring by name, decrypted and past `lenIV`'s bytes.
@@ -526,6 +629,18 @@ fn type1_charstrings_found() {
         ..limits
     };
     assert!(type1::scan(&fixture::type1_program(), &no_work).is_none());
+    assert_eq!(refused(&fixture::type1_program(), &no_work), Some(Capped));
     assert!(type1::scan(b"", &limits).is_none());
-    assert!(type1::scan(b"%!PS-AdobeFont-1.0: no eexec\n", &limits).is_none());
+    assert_eq!(refused(b"", &limits), Some(Malformed));
+    let no_eexec = b"%!PS-AdobeFont-1.0: no eexec\n";
+    assert!(type1::scan(no_eexec, &limits).is_none());
+    assert_eq!(refused(no_eexec, &limits), Some(Malformed));
+    // Whose fuel's spent before it's found broken, whatever it is: no work to spare.
+    assert_eq!(refused(no_eexec, &no_work), Some(Capped));
+    assert_eq!(refused(b"", &no_work), Some(Malformed));
+}
+
+/// Why [`type1::read`] refuses `program` under `limits`: none where it reads it.
+fn refused(program: &[u8], limits: &Limits) -> Option<type1::Refusal> {
+    type1::read(program, limits).err()
 }

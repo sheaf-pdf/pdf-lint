@@ -3,13 +3,13 @@
 //! way a stream's data may come to a font.
 
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::Stream;
-use pdf_objects::{Streams, WithStreams, dict};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, WithStreams, dict};
 
 use super::afm;
 use crate::fuzz::digest;
@@ -1250,7 +1250,159 @@ fn fonts_are_send_and_sync() {
     held::<Arc<Font>>();
     held::<Fonts>();
     held::<FontScope<'_>>();
+    held::<Codes<'_>>();
     held::<Error>();
+}
+
+/// Each kind of codes, walked over strings of bytes that lead and that don't, every
+/// prefix and suffix of them: by `next` and by `fold` alike, each code a byte to four of
+/// the string, from its start to its end in order; at every step its `size_hint` holds
+/// what's left, exactly where each code takes as many bytes; and at the end, nothing,
+/// again.
+#[test]
+fn codes_walk_alike_within_their_hints() {
+    let mut pdf = Pdf::default();
+    let embedded = |pdf: &mut Pdf, space: &str| {
+        let program = format!("begincmap {space} endcmap");
+        let id = pdf.add_object(Stream::new(dict! {}, program.into_bytes()));
+        let font = type0(pdf, id.into(), dict! {});
+        font_of(pdf, font)
+    };
+    let space = "3 begincodespacerange <00> <3F> <8000> <BFFF> <C0000000> <FFFFFFFF> \
+                 endcodespacerange";
+    let ranged = {
+        let to_unicode = format!("begincmap {space} endcmap");
+        let to_unicode = pdf.add_object(Stream::new(dict! {}, to_unicode.into_bytes()));
+        let mut font = type0(&mut pdf, Object::from(7), dict! {});
+        font.set("ToUnicode", to_unicode);
+        font_of(&pdf, font)
+    };
+    let named = |pdf: &mut Pdf, name: &str| {
+        let font = type0(pdf, name.into(), dict! {});
+        font_of(pdf, font)
+    };
+    let not_a_name = type0(&mut pdf, Object::from(7), dict! {});
+    let not_a_name = font_of(&pdf, not_a_name);
+    // Each font, and whether each of its codes takes as many bytes, but the last.
+    let fonts = [
+        (
+            "simple",
+            font_of(&pdf, dict! { "Subtype" => "TrueType" }),
+            true,
+        ),
+        ("identity", named(&mut pdf, "Identity-H"), true),
+        (
+            "one byte",
+            embedded(
+                &mut pdf,
+                "1 begincodespacerange <00> <FF> endcodespacerange",
+            ),
+            true,
+        ),
+        (
+            "two bytes",
+            embedded(
+                &mut pdf,
+                "1 begincodespacerange <0000> <FFFF> endcodespacerange",
+            ),
+            true,
+        ),
+        ("mixed", embedded(&mut pdf, space), false),
+        ("no codespace", embedded(&mut pdf, ""), true),
+        // With the feature, codes by PDFium's scheme: a byte or two, and two bytes
+        // each; without, the build hasn't them, and they're split as unknown.
+        (
+            "leading",
+            named(&mut pdf, "90ms-RKSJ-H"),
+            !cfg!(feature = "predefined-cmaps"),
+        ),
+        ("unicode", named(&mut pdf, "UniJIS-UCS2-H"), true),
+        ("unknown", named(&mut pdf, "Adobe-Korea1-2"), true),
+        ("not a name", not_a_name, true),
+        ("by /ToUnicode", ranged, false),
+    ];
+    let bytes = b"\x41\x81\x40\xc3\x20\x00\xff\xe0\x7f\x82\x9f\xfc\x3f\xc0\x00\x00";
+    let strings = (0..=bytes.len()).flat_map(|i| [&bytes[..i], &bytes[i..]]);
+    for s in strings {
+        for (kind, font, exact) in &fonts {
+            let mut walk = font.codes(s);
+            let mut by_next = Vec::new();
+            loop {
+                let left = walk.clone().count();
+                let hint = walk.size_hint();
+                assert!(
+                    hint.0 <= left && hint.1.is_some_and(|most| left <= most),
+                    "{kind}"
+                );
+                if *exact {
+                    assert_eq!(hint, (left, Some(left)), "{kind}: {s:?}");
+                }
+                let Some(code) = walk.next() else {
+                    break;
+                };
+                by_next.push(code);
+            }
+            assert_eq!(
+                (walk.next(), walk.size_hint()),
+                (None, (0, Some(0))),
+                "{kind}"
+            );
+            let by_fold = font.codes(s).fold(Vec::new(), |mut codes, code| {
+                codes.push(code);
+                codes
+            });
+            assert_eq!(by_next, by_fold, "{kind}: {s:?}");
+            let mut at = 0;
+            for (range, _) in &by_next {
+                assert!(
+                    range.start == at && (1..=4).contains(&range.len()),
+                    "{kind}: {s:?}"
+                );
+                at = range.end;
+            }
+            assert_eq!(at, s.len(), "{kind}: {s:?}");
+        }
+    }
+}
+
+/// A font's `Debug` says what it is and how much it holds, never a file's text: a
+/// font whose `/ToUnicode` maps a code to a marker, and whose `/Differences` names a
+/// glyph that's the marker's text, prints neither, nor the glyph's name; and its codes
+/// print where they are, not the string.
+#[test]
+fn a_font_s_debug_holds_no_text_of_its_file() {
+    let mut pdf = Pdf::default();
+    let to_unicode = b"1 begincodespacerange <00> <FF> endcodespacerange \
+        1 beginbfchar <42> <0051005A00580051> endbfchar";
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, to_unicode.to_vec()));
+    let font = font_of(
+        &pdf,
+        dict! {
+            "Subtype" => "TrueType", "BaseFont" => "Foo", "ToUnicode" => to_unicode,
+            "Encoding" => dict! {
+                "Differences" => vec![65.into(), Object::from("uni0051005A00580051")],
+            },
+        },
+    );
+    assert_eq!(font.code_text(0x42).as_deref(), Some("QZXQ"));
+    assert_eq!(font.text(b"A").as_deref(), Some("QZXQ"));
+    let printed = format!("{font:?}");
+    // The marker as text, as its name's, and as the UTF-16 units a CMap holds it in.
+    for marker in ["QZXQ", "0051", "uni0051", "81, 90, 88, 81"] {
+        assert!(!printed.contains(marker), "{marker} in {printed}");
+    }
+    assert!(printed.contains("kind: TrueType") && printed.contains("to_unicode_ranges: 1"));
+    assert_eq!(
+        format!("{:?}", font.codes(b"QZXQ")),
+        "Codes { at: 0, left: 4 }"
+    );
+    let fonts = Fonts::default();
+    let id = pdf.add_object(dict! {
+        "Subtype" => "TrueType", "BaseFont" => "Foo", "ToUnicode" => to_unicode,
+    });
+    let got = fonts.get(&pdf, &Object::from(id), &Limits::DEFAULT, &mut { BUDGET });
+    assert!(got.unwrap().is_some());
+    assert!(!format!("{fonts:?}").contains("QZXQ"));
 }
 
 /// `Tw` is added after a code 32 of a byte, as its CMap sizes it: never in Identity
@@ -1319,6 +1471,75 @@ fn without_the_feature_a_predefined_cmap_is_guessed() {
     };
     let identity = type0(&mut pdf, "Identity-H".into(), identity);
     assert_eq!(font_of(&pdf, identity).text(b"\x01\x08"), None);
+}
+
+/// Each predefined CMap's name, the bundle's and each PDFium has a scheme for, as a
+/// Type 0 font's `/Encoding`, by `usecmap` and by `/UseCMap`, and the font PDFium reads
+/// as GBK: told as one the build hasn't exactly where a build with `predefined-cmaps`
+/// reads it from its bundle, which tells nothing; and as one no build reads, in every
+/// build, where neither does: a name PDFium knows that the bundle hasn't, and, as an
+/// `/Encoding`, one of the bundle's PDFium doesn't know.
+#[test]
+fn a_predefined_cmap_the_build_hasn_t_is_the_build_s() {
+    // PDFium knows these, which ISO 32000-2 doesn't predefine and the bundle hasn't.
+    const UNBUNDLED: [&str; 5] = [
+        "83pv-RKSJ-V",
+        "90pv-RKSJ-V",
+        "GBK2K-EUC-H",
+        "GBK2K-EUC-V",
+        "KSCpc-EUC-V",
+    ];
+    // The bundle has these, which PDFium doesn't know: ISO 32000-2's CNS-EUC, and
+    // what maps Adobe's CIDs to their text.
+    const UNKNOWN: [&str; 6] = [
+        "Adobe-CNS1-UCS2",
+        "Adobe-GB1-UCS2",
+        "Adobe-Japan1-UCS2",
+        "Adobe-Korea1-UCS2",
+        "CNS-EUC-H",
+        "CNS-EUC-V",
+    ];
+    let not_built = match cfg!(feature = "predefined-cmaps") {
+        true => vec![],
+        false => vec![Fault::PredefinedNotBuilt],
+    };
+    let faults = |pdf: &Pdf, font: &Dict| -> Vec<Fault> {
+        told(pdf, font)
+            .into_iter()
+            .map(|(_, fault)| fault)
+            .collect()
+    };
+    let names = crate::predefined::names();
+    assert_eq!(names.len(), 70);
+    let mut pdf = Pdf::default();
+    for name in &names {
+        let name = name.as_str();
+        let identity = matches!(name, "Identity-H" | "Identity-V");
+        let named = match name {
+            _ if identity => vec![],
+            _ if UNBUNDLED.contains(&name) || UNKNOWN.contains(&name) => {
+                vec![Fault::PredefinedUnknown]
+            }
+            _ => not_built.clone(),
+        };
+        let font = type0(&mut pdf, name.into(), dict! { "Subtype" => "CIDFontType2" });
+        assert_eq!(faults(&pdf, &font), named, "{name} as an /Encoding");
+        let used = match name {
+            _ if identity => vec![],
+            _ if UNBUNDLED.contains(&name) => vec![Fault::PredefinedUnknown],
+            _ => not_built.clone(),
+        };
+        let by_operator = format!("/{name} usecmap").into_bytes();
+        let by_operator = pdf.add_object(Stream::new(dict! {}, by_operator));
+        let by_key = pdf.add_object(Stream::new(dict! { "UseCMap" => name }, Vec::new()));
+        for cmap in [by_operator, by_key] {
+            let font = type0(&mut pdf, cmap.into(), dict! { "Subtype" => "CIDFontType2" });
+            assert_eq!(faults(&pdf, &font), used, "{name} used by {cmap:?}");
+        }
+    }
+    let gbk = pdf_objects::object::Value::Name(b"\xCB\xCE\xCC\xE5".to_vec());
+    let gbk = dict! { "Subtype" => "TrueType", "BaseFont" => Object::new(gbk) };
+    assert_eq!(faults(&pdf, &gbk), not_built, "GBK");
 }
 
 /// A resolver and streams of `pdf`'s that say `why` of `failing`.
@@ -1488,8 +1709,8 @@ fn each_why_over_a_failing_resolver() {
     }
 }
 
-/// `Fonts` and `FontScope` say what a resolver says too, and keep nothing of it: the
-/// font itself, the resources it's looked up in, the `/Font` dictionary.
+/// `Fonts` and `FontScope` say what a resolver says too: of the font itself, the
+/// resources it's looked up in, the `/Font` dictionary. `Fonts` keeps nothing of it.
 #[test]
 fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
     let mut pdf = Pdf::default();
@@ -1541,12 +1762,55 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
     assert!(got.unwrap().is_none());
 }
 
+/// A font that doesn't read for a reason that's the caller's is read once in a scope,
+/// however often it's picked, by its name or another: each pick gives the same `Err`,
+/// and its stream is asked for once. Another scope reads it again, as `Fonts` keeps no
+/// font that didn't read. One past the budget isn't kept, and within more it's read.
+#[test]
+fn a_scope_reads_a_font_that_doesn_t_read_once() {
+    let mut pdf = Pdf::default();
+    let map = b"1 beginbfchar <41> <0041> endbfchar".to_vec();
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
+    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
+    let font = pdf.add_object(font);
+    let named = pdf.add_object(dict! { "F1" => font, "F2" => font });
+    let resources = Object::from(pdf.add_object(dict! { "Font" => named }));
+    let (page, lim) = (ObjectId::new(1000, 0), &Limits::DEFAULT);
+    let asked = Cell::new(0);
+    let capped = WithStreams::new(&pdf, |id, _| {
+        asked.set(asked.get() + 1);
+        Err(Unreadable::new(id, Why::Capped, "no"))
+    });
+    let failed = Error::Unreadable(Unreadable::new(to_unicode, Why::Capped, "no"));
+    let fonts = Fonts::default();
+    let mut scope = fonts.scope();
+    for name in [b"F1", b"F1", b"F2", b"F1", b"F2"] {
+        let mut budget = BUDGET;
+        let picked = scope.font(capped, page, Some(&resources), name, lim, &mut budget);
+        assert_eq!((picked, budget), (Err(failed.clone()), BUDGET));
+    }
+    assert_eq!(asked.get(), 1);
+    let mut budget = BUDGET;
+    let picked = fonts
+        .scope()
+        .font(capped, page, Some(&resources), b"F1", lim, &mut budget);
+    assert_eq!((picked, asked.get()), (Err(failed), 2));
+
+    let mut scope = fonts.scope();
+    let mut budget = 1;
+    let picked = scope.font(&pdf, page, Some(&resources), b"F1", lim, &mut budget);
+    assert_eq!((picked, budget), (Err(Error::TooLarge), 1));
+    let mut budget = BUDGET;
+    let picked = scope.font(&pdf, page, Some(&resources), b"F1", lim, &mut budget);
+    assert!(matches!(picked, Ok(Some(_))), "{picked:?}");
+}
+
 /// A font trusts no `Streams`: what's given past what was asked is too large, the
-/// budget as it was, and what's given within it is charged; past a cap of what gives
-/// it (`Why::Capped`) is too large too, as past the budget is; what takes a password or
-/// a source that failed is the `Err`; and a stream that's damaged, or through a filter
-/// the reader doesn't decode, is none, what the font makes of none told and nothing of
-/// the stream's own.
+/// budget as it was, and what's given within it is charged; what's past a cap of what
+/// gives it (`Why::Capped`), takes a password or is of a source that failed is the
+/// `Err`, the caller's to know, as an object past a cap is; and a stream that's
+/// damaged, or through a filter the reader doesn't decode, is none, what the font makes
+/// of none told and nothing of the stream's own.
 #[test]
 fn a_font_holds_a_streams_to_what_it_asked() {
     let mut pdf = Pdf::default();
@@ -1578,12 +1842,10 @@ fn a_font_holds_a_streams_to_what_it_asked() {
 
     let given = |why: Why| move |_: usize| Err(Unreadable::new(to_unicode, why, "no"));
     let mut budget = 100;
-    for why in [Why::Limit, Why::Capped] {
-        let (font, _) = read(&given(why), &mut budget, &mut Vec::new());
-        assert_eq!(font.err(), Some(Error::TooLarge), "{why:?}");
-        assert_eq!(budget, 100);
-    }
-    for why in [Why::Locked, Why::Source] {
+    let (font, _) = read(&given(Why::Limit), &mut budget, &mut Vec::new());
+    assert_eq!(font.err(), Some(Error::TooLarge));
+    assert_eq!(budget, 100);
+    for why in [Why::Capped, Why::Locked, Why::Source] {
         let mut budget = 100;
         let (font, _) = read(&given(why), &mut budget, &mut Vec::new());
         let unreadable = Unreadable::new(to_unicode, why, "no");
@@ -1597,6 +1859,169 @@ fn a_font_holds_a_streams_to_what_it_asked() {
         assert_eq!(budget, 100);
         let faults: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
         assert_eq!(faults, [Fault::ToUnicode], "{why:?}");
+    }
+}
+
+/// A stream past a cap of what gives it (`Why::Capped`) is what the reading comes to, as
+/// a locked one is: the `Err`, naming it, and the budget as it was. The reading goes on
+/// past it as if it weren't there, but decodes no stream after it and tells nothing
+/// after it: here a `/ToUnicode`, then the CMap, never asked for, and a `/W` cut short,
+/// none of them told, as what it would tell is of no font of the file's.
+#[test]
+fn a_font_reads_on_past_a_capped_stream() {
+    let mut pdf = Pdf::default();
+    let to_unicode = b"1 beginbfchar <41> <0041> endbfchar".to_vec();
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, to_unicode));
+    let cmap = b"1 begincidrange <00> <FF> 0 endcidrange".to_vec();
+    let cmap = pdf.add_object(Stream::new(dict! {}, cmap));
+    let w = vec![
+        Object::from(1),
+        Object::from(2),
+        vec![Object::from(600)].into(),
+    ];
+    let cid_font = pdf.add_object(dict! { "Subtype" => "CIDFontType2", "W" => w });
+    let font = dict! {
+        "Subtype" => "Type0", "BaseFont" => "Foo", "Encoding" => cmap,
+        "DescendantFonts" => vec![Object::from(cid_font)], "ToUnicode" => to_unicode,
+    };
+    for why in [Why::Capped, Why::Locked] {
+        let asked = RefCell::new(Vec::new());
+        let objects = WithStreams::new(&pdf, |id, limit| {
+            asked.borrow_mut().push(id);
+            match id == to_unicode {
+                true => Err(Unreadable::new(id, why, "no")),
+                false => pdf.decoded_by(id, limit).map(Cow::into_owned),
+            }
+        });
+        let mut budget = BUDGET;
+        let mut told = Vec::new();
+        let read = Font::read(objects, &font, &Limits::DEFAULT, &mut budget, &mut told);
+        let failed = Unreadable::new(to_unicode, why, "no");
+        assert_eq!(read.err(), Some(Error::Unreadable(failed)), "{why:?}");
+        assert_eq!(budget, BUDGET);
+        assert_eq!(asked.into_inner(), [to_unicode]);
+        assert_eq!(told, [], "{why:?}");
+    }
+    // Read whole, the `/W` is told: of the font the failure hid.
+    let (mut budget, mut told) = (BUDGET, Vec::new());
+    Font::read(&pdf, &font, &Limits::DEFAULT, &mut budget, &mut told).unwrap();
+    let told: Vec<(Option<ObjectId>, Fault)> = told
+        .into_iter()
+        .map(|(place, fault)| (place.object, fault))
+        .collect();
+    assert_eq!(told, [(Some(cid_font), Fault::W)]);
+}
+
+/// What a reading told before it failed is told, and nothing after: here an
+/// `/Encoding` that's no encoding, before a `/ToUnicode` that doesn't read. Read whole,
+/// the font tells its `/Widths` missing after it, and a `/ToUnicode` that doesn't
+/// decode before that.
+#[test]
+fn a_failed_reading_tells_what_it_found_before_it() {
+    let mut pdf = Pdf::default();
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, b"no CMap".to_vec()));
+    let font = dict! {
+        "Subtype" => "Type1", "BaseFont" => "Foo", "Encoding" => "Nope",
+        "ToUnicode" => to_unicode,
+    };
+    let read = |why: Option<Why>| {
+        let objects = WithStreams::new(&pdf, |id, limit| match why {
+            Some(why) => Err(Unreadable::new(id, why, "no")),
+            None => pdf.decoded_by(id, limit).map(Cow::into_owned),
+        });
+        let (mut budget, mut told) = (BUDGET, Vec::new());
+        let read = Font::read(objects, &font, &Limits::DEFAULT, &mut budget, &mut told);
+        let told: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+        (read.err(), told)
+    };
+    let whole = vec![Fault::Encoding, Fault::NoWidths];
+    assert_eq!(read(None), (None, whole));
+    let damaged = vec![Fault::Encoding, Fault::ToUnicode, Fault::NoWidths];
+    assert_eq!(read(Some(Why::Damaged)), (None, damaged));
+    for why in [Why::Capped, Why::Locked, Why::Source, Why::Detached] {
+        let (error, told) = read(Some(why));
+        let failed = Unreadable::new(to_unicode, why, "no");
+        assert_eq!(error, Some(Error::Unreadable(failed)));
+        assert_eq!(told, [Fault::Encoding], "{why:?}");
+    }
+}
+
+/// A font's program stream: one that doesn't decode is the file's, a program that
+/// doesn't read (`ProgramMalformed`); one through filters the reader doesn't decode is
+/// told so too, as the caller tells apart by its own `Streams`; and one, or its object,
+/// that doesn't read for a reason that's the caller's is the `Err` alone, its object
+/// and its data alike, nothing told. Without `programs`, or read for text, no program's
+/// data is asked for, and only its object can fail the reading.
+#[test]
+fn a_program_that_doesn_t_read_is_told_where_it_s_the_file_s() {
+    let mut pdf = Pdf::default();
+    let file = pdf.add_object(Stream::new(dict! {}, b"no program".to_vec()));
+    let descriptor = pdf.add_object(dict! { "Type" => "FontDescriptor", "FontFile2" => file });
+    let font = dict! {
+        "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65,
+        "Widths" => vec![Object::from(600)], "FontDescriptor" => descriptor,
+    };
+    let programs = cfg!(feature = "programs");
+    for text in [false, true] {
+        let read = |objects: Failing, data: Option<Why>| {
+            let streams = WithStreams::new(objects, |id, limit| match data {
+                Some(why) => Err(Unreadable::new(id, why, "no")),
+                None => pdf.decoded_by(id, limit).map(Cow::into_owned),
+            });
+            let (lim, mut budget, mut told) = (&Limits::DEFAULT, BUDGET, Vec::new());
+            let read = match text {
+                true => Font::read_for_text(streams, &font, lim, &mut budget, &mut told),
+                false => Font::read(streams, &font, lim, &mut budget, &mut told),
+            };
+            let told: Vec<(Option<ObjectId>, Fault)> = told
+                .into_iter()
+                .map(|(place, fault)| (place.object, fault))
+                .collect();
+            (read.map(|font| font.program()), budget, told)
+        };
+        let reads = programs && !text;
+        let fine = Failing {
+            pdf: &pdf,
+            failing: ObjectId::new(1000, 0),
+            why: Why::Damaged,
+        };
+        for why in [Why::Damaged, Why::Filter] {
+            let (program, budget, told) = read(fine, Some(why));
+            let malformed = (
+                FontProgram::Malformed,
+                vec![(Some(file), Fault::ProgramMalformed)],
+            );
+            let (expected, faults) = match reads {
+                true => malformed,
+                false => (FontProgram::None, Vec::new()),
+            };
+            assert_eq!(
+                (program, budget, told),
+                (Ok(expected), BUDGET, faults),
+                "{why:?}"
+            );
+        }
+        for why in [Why::Capped, Why::Locked, Why::Source] {
+            let failed = Error::Unreadable(Unreadable::new(file, why, "no"));
+            // Its data past a cap, and its object: alike, nothing told.
+            let (program, budget, told) = read(fine, Some(why));
+            match reads {
+                true => assert_eq!((program, budget, &told), (Err(failed), BUDGET, &vec![])),
+                false => assert_eq!((program, &told), (Ok(FontProgram::None), &vec![])),
+            }
+            let object = Failing {
+                pdf: &pdf,
+                failing: file,
+                why,
+            };
+            let (program, budget, told) = read(object, None);
+            let failed = Error::Unreadable(Unreadable::new(file, why, "it doesn't read"));
+            assert_eq!(
+                (program, budget, told),
+                (Err(failed), BUDGET, vec![]),
+                "{why:?}"
+            );
+        }
     }
 }
 
@@ -2895,7 +3320,7 @@ fn faults_are_told_where_they_are() {
     let said = Fault::Damaged {
         id: ObjectId::new(7, 0),
     };
-    assert_eq!(said.to_string(), "object 7 0 doesn't read");
+    assert_eq!(said.to_string(), "7 0 R doesn't read");
     assert!(std::error::Error::source(&said).is_none());
     let error = Error::Unreadable(Unreadable::new(
         ObjectId::new(7, 0),
@@ -3144,24 +3569,34 @@ fn heights_from_the_program_where_the_descriptor_lacks_them() {
     assert!(heights("PN", false).3 && heights("PZ", false).3);
 }
 
-/// A program that doesn't read, cut short, garbage, of no format, or a
-/// Type 1 program whose procedures nest, or whose integers run, past what
-/// read-fonts is handed, is malformed: the font's boxes guessed, its heights as without one;
-/// never a panic.
+/// A program that doesn't read, cut short, garbage or of no format, is malformed, and a
+/// Type 1 program whose reading would cost past `type1_work` is refused for the cap:
+/// either way the font's boxes guessed, its heights as without one; never a panic.
 #[cfg(feature = "programs")]
 #[test]
 fn malformed_programs_fall_back() {
     use crate::fixture::{cff_program, truetype_program, type1_lookups_program, type1_program};
+    use FontProgram::{Capped, Malformed};
     let half = |p: Vec<u8>| p[..p.len() / 2].to_vec();
     let programs = [
-        ("TrueType", "FontFile2", half(truetype_program())),
-        ("TrueType", "FontFile2", b"\0\x01\0\0garbage".to_vec()),
-        ("Type1", "FontFile3", half(cff_program())),
-        ("Type1", "FontFile", half(type1_program())),
-        ("Type1", "FontFile", type1_lookups_program(3000)),
-        ("Type1", "FontFile3", b"\xff\xd8\xff\xe0 a JPEG".to_vec()),
+        ("TrueType", "FontFile2", half(truetype_program()), Malformed),
+        (
+            "TrueType",
+            "FontFile2",
+            b"\0\x01\0\0garbage".to_vec(),
+            Malformed,
+        ),
+        ("Type1", "FontFile3", half(cff_program()), Malformed),
+        ("Type1", "FontFile", half(type1_program()), Malformed),
+        ("Type1", "FontFile", type1_lookups_program(3000), Capped),
+        (
+            "Type1",
+            "FontFile3",
+            b"\xff\xd8\xff\xe0 a JPEG".to_vec(),
+            Malformed,
+        ),
     ];
-    for (subtype, key, program) in programs {
+    for (subtype, key, program, read) in programs {
         let mut pdf = Pdf::default();
         let program = pdf.add_object(Stream::new(dict! {}, program));
         let mut descriptor = dict! {
@@ -3177,7 +3612,7 @@ fn malformed_programs_fall_back() {
                 "FontDescriptor" => descriptor,
             },
         );
-        assert_eq!(font.program(), FontProgram::Malformed, "{subtype} {key}");
+        assert_eq!(font.program(), read, "{subtype} {key}");
         assert!(font.approx().boxes && font.approx().heights);
         assert_eq!(font.char_box(65), None);
         assert_eq!(
@@ -3213,7 +3648,7 @@ fn a_cid_font_s_program_is_read_once() {
     let started = std::time::Instant::now();
     assert_eq!(font.char_box(2), Some(rect(0.0, 0.0, 600.0, 761.0)));
     for cid in 0..2000 {
-        font.char_box(cid);
+        let _ = font.char_box(cid);
     }
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }
@@ -3469,6 +3904,22 @@ fn over_program(
     font
 }
 
+/// Programs crafted where a parser's arithmetic can overflow read without a panic in a
+/// build with overflow checks, as this one is: a Type 1 program whose `/FontBBox` has a
+/// number with two signs, and one whose glyph rolls by the least shift a 32-bit number
+/// holds. Each still reads.
+#[cfg(feature = "programs")]
+#[test]
+fn programs_read_where_arithmetic_could_overflow() {
+    use crate::fixture::{doubled_sign_type1_program, rolling_type1_program};
+    for program in [doubled_sign_type1_program(), rolling_type1_program()] {
+        let mut pdf = Pdf::default();
+        let font = over_program(&mut pdf, "Type1", "FontFile", program, 32, None);
+        let read = Font::read(&pdf, &font, &Limits::DEFAULT, &mut BUDGET.clone(), &mut ());
+        assert_eq!(read.unwrap().program(), FontProgram::Read);
+    }
+}
+
 /// What PDFium's encoding leaves to a program is its text: a symbolic Type 1 font's code
 /// is the name its program's own encoding gives its glyph; a TrueType font's, by its
 /// charmaps, a Mac one's table or the code itself. Read for text, it's guessed by name.
@@ -3567,8 +4018,8 @@ fn a_program_says_the_text_its_encoding_leaves_to_it() {
     assert_eq!(symbol.char_box(0x41), Some(rect(0.0, 0.0, 600.0, 750.0)));
 }
 
-/// A CID-keyed CFF's glyph for a CID is its charset's: the lowest, of a CID it gives twice,
-/// as FreeType takes it; one it doesn't give draws nothing.
+/// A CID-keyed CFF's glyph for a CID is its charset's: the lowest, of a CID it gives
+/// twice, as FreeType takes it; one it doesn't give draws nothing.
 #[cfg(feature = "programs")]
 #[test]
 fn a_cid_keyed_cff_s_glyphs_are_its_charset_s() {
@@ -3712,7 +4163,8 @@ fn a_lower_case_with_no_glyph_takes_its_capital_s() {
 }
 
 /// Each of a program's bounds is what's in `Limits`: under smaller ones, what's past them
-/// is unknown; and a Type 1 program past `type1_work` is refused before read-fonts has it.
+/// is unknown; and a Type 1 program past `type1_work` is refused before read-fonts has
+/// it.
 #[cfg(feature = "programs")]
 #[test]
 fn a_program_s_bounds_are_the_limits() {
@@ -3797,8 +4249,62 @@ fn a_program_s_bounds_are_the_limits() {
     limits.type1_work = 0;
     assert_eq!(
         read("Type1", "FontFile", lookups, limits).program(),
-        FontProgram::Malformed
+        FontProgram::Capped
     );
+}
+
+/// A Type 1 program past `type1_work` is refused for the cap, told so, never as a
+/// program that doesn't read, and read as one that doesn't, but for what it says of
+/// its program; one whose scan finds it broken before the cap's spent is malformed, and
+/// what's no Type 1 program is malformed whatever the cap.
+#[cfg(feature = "programs")]
+#[test]
+fn a_type1_program_past_its_cap_is_told_as_the_cap_s() {
+    let read = |program: Vec<u8>, type1_work: usize| {
+        let mut pdf = Pdf::default();
+        let encoding = Some("WinAnsiEncoding".into());
+        let font = over_program(&mut pdf, "Type1", "FontFile", program, 32, encoding);
+        let limits = Limits {
+            type1_work,
+            ..Limits::DEFAULT
+        };
+        let (mut budget, mut told) = (BUDGET, Vec::new());
+        let read = Font::read(&pdf, &font, &limits, &mut budget, &mut told).unwrap();
+        let faults: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+        (read, faults)
+    };
+    let lookups = crate::fixture::type1_lookups_program(100);
+    let (font, faults) = read(lookups.clone(), Limits::DEFAULT.type1_work);
+    assert_eq!((font.program(), faults), (FontProgram::Read, vec![]));
+    let (capped, faults) = read(lookups, 0);
+    assert_eq!(capped.program(), FontProgram::Capped);
+    assert_eq!(faults, [Fault::ProgramCapped]);
+    let no_eexec = b"%!PS-AdobeFont-1.0: Fix\n/FontName /Fix def\n".to_vec();
+    let (malformed, faults) = read(no_eexec, Limits::DEFAULT.type1_work);
+    assert_eq!(malformed.program(), FontProgram::Malformed);
+    assert_eq!(faults, [Fault::ProgramMalformed]);
+    let said = |font: &Font| {
+        let codes = 0..=255;
+        let boxes: Vec<_> = codes.clone().map(|code| font.char_box(code)).collect();
+        let text: Vec<_> = codes
+            .map(|code| font.code_text(code).map(Cow::into_owned))
+            .collect();
+        let metrics = font.metrics();
+        (
+            font.approx(),
+            font.outlined(),
+            metrics.ascent,
+            metrics.descent,
+            boxes,
+            text,
+        )
+    };
+    assert_eq!(said(&capped), said(&malformed));
+    for type1_work in [0, Limits::DEFAULT.type1_work] {
+        let (font, faults) = read(b"garbage".to_vec(), type1_work);
+        assert_eq!(font.program(), FontProgram::Malformed, "{type1_work}");
+        assert_eq!(faults, [Fault::ProgramMalformed], "{type1_work}");
+    }
 }
 
 /// Drawing a CIDFont's glyphs is charged as what shows them says it's the first to.
@@ -3936,8 +4442,8 @@ fn a_loca_entry_past_its_table_charges_nothing() {
     }
 }
 
-/// A composite of itself ends at any depth a `Limits` can say, 255 among them: past it its
-/// box is unknown.
+/// A composite of itself ends at any depth a `Limits` can say, 255 among them: past it
+/// its box is unknown.
 #[cfg(feature = "programs")]
 #[test]
 fn a_composite_of_itself_ends_at_any_depth() {
@@ -3963,8 +4469,8 @@ fn a_composite_of_itself_ends_at_any_depth() {
 }
 
 /// A glyph past the program's fails as FreeType fails it, where nothing's a program's
-/// empty glyph: PDFium's box of no glyph, for a code made a glyph where the program has no
-/// charmap.
+/// empty glyph: PDFium's box of no glyph, for a code made a glyph where the program has
+/// no charmap.
 #[cfg(feature = "programs")]
 #[test]
 fn a_glyph_past_the_program_is_none() {
@@ -4034,7 +4540,8 @@ fn what_skrifa_reads_otherwise_is_unknown() {
         p[cmap + 2..cmap + 4].copy_from_slice(&[1, 1]);
     };
     assert_eq!(patched(&records), (true, None, None));
-    // A composite of an empty glyph draws nothing, as an empty glyph does, and isn't unknown.
+    // A composite of an empty glyph draws nothing, as an empty glyph does, and isn't
+    // unknown.
     let mut program = truetype_program();
     let (glyf, len) = sfnt_table(&program, b"glyf");
     program[glyf + len - 7] = 3;
@@ -4115,8 +4622,8 @@ fn a_cmap_s_ranges_past_16_bits_are_apart() {
     assert_eq!(font.cid(0x4_8000), Some(0));
 }
 
-/// Whether PDFium loads a font is said wherever it's read, as what's told says, and through
-/// `Fonts`, which tells nothing.
+/// Whether PDFium loads a font is said wherever it's read, as what's told says, and
+/// through `Fonts`, which tells nothing.
 #[test]
 fn whether_a_font_is_loaded_is_said() {
     let mut pdf = Pdf::default();
@@ -4294,8 +4801,8 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     );
 }
 
-/// What reads a file implements `Streams` on itself and `Resolve` on a reference to it, as
-/// `Resolve` needs to give what it holds, and a font is read over the reference.
+/// What reads a file implements `Streams` on itself and `Resolve` on a reference to it,
+/// as `Resolve` needs to give what it holds, and a font is read over the reference.
 #[test]
 fn streams_go_on_the_type_and_a_font_is_read_over_a_reference() {
     struct Source {
@@ -4377,7 +4884,8 @@ fn programs_folder() -> std::path::PathBuf {
 }
 
 /// An OpenType font's CFF names its glyphs, whatever its `post` says or names, and draws
-/// them where its Unicode charmap has none of them (`cff_face_init`, `cff_get_name_index`).
+/// them where its Unicode charmap has none of them (`cff_face_init`,
+/// `cff_get_name_index`).
 #[cfg(feature = "programs")]
 #[test]
 fn an_opentype_font_s_names_are_its_cff_s() {
@@ -4409,8 +4917,9 @@ fn an_opentype_font_s_names_are_its_cff_s() {
     }
 }
 
-/// An OpenType font's Unicode charmap where it has no `cmap`: of its `post`'s names, where
-/// they're the SFNT's to give, so a code draws what those name, or else of its CFF's.
+/// An OpenType font's Unicode charmap where it has no `cmap`: of its `post`'s names,
+/// where they're the SFNT's to give, so a code draws what those name, or else of its
+/// CFF's.
 #[cfg(feature = "programs")]
 #[test]
 fn an_opentype_font_with_no_cmap_has_one_of_its_names() {
@@ -4465,8 +4974,8 @@ fn an_opentype_font_s_cids_are_its_glyphs() {
     assert_eq!(boxes(cid_cff_program()), [0.0, 0.0, 761.0].map(Some));
 }
 
-/// An SFNT's format is its tag's, as FreeType's readers take them, whatever tables it has:
-/// a CFF under TrueType's tags, or a TrueType under `OTTO`, reads as no program.
+/// An SFNT's format is its tag's, as FreeType's readers take them, whatever tables it
+/// has: a CFF under TrueType's tags, or a TrueType under `OTTO`, reads as no program.
 #[cfg(feature = "programs")]
 #[test]
 fn an_sfnt_s_format_is_its_tag_s() {
@@ -4601,9 +5110,10 @@ mod reading {
 
     /// A `/ToUnicode` whose data decodes to nothing, or is through a filter the reader
     /// doesn't decode, is read as none, what's told of it the font's own; one listing
-    /// more filters than the reader takes is past a cap, and the font too large.
+    /// more filters than the reader takes is past a cap, the caller's to know, its
+    /// budget as it was and nothing told after it.
     #[test]
-    fn what_doesn_t_decode_is_none_and_past_a_cap_too_large() {
+    fn what_doesn_t_decode_is_none_and_past_a_cap_the_caller_s() {
         let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
         let to_unicode = [
             dict! { "Filter" => "ASCIIHexDecode" },
@@ -4631,8 +5141,16 @@ mod reading {
                 (100, vec![Fault::ToUnicode, Fault::NoWidths])
             );
         }
-        let (text, budget, _) = read(capped, b"41>");
-        assert_eq!((text, budget), (Err(Error::TooLarge), 100));
+        let (text, budget, told) = read(capped, b"41>");
+        let Err(Error::Unreadable(unreadable)) = text else {
+            panic!("{text:?}");
+        };
+        assert_eq!(
+            (unreadable.id, unreadable.why),
+            (ObjectId::new(2, 0), Why::Capped)
+        );
+        // Nothing after it: not what it makes of none, nor the `/Widths` it hasn't.
+        assert_eq!((budget, told), (100, vec![]));
     }
 
     /// A locked file's font isn't made up, and its budget is as it was; opened, it's

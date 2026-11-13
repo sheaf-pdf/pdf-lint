@@ -36,7 +36,7 @@ pdf-content-streams = { workspace = true, features = ["image-ends"] }
 # Fonts read for text, each the walk reaches, its faults kept. Without its
 # features: no program is read, so neither skrifa nor the code taken from
 # FreeType is compiled in, and no predefined CMap, so nor is hayro-cmap.
-pdf-fonts = { path = "../pdf-fonts", version = "0.1", default-features = false }
+pdf-fonts.workspace = true
 # Whether a file that says it's linearized holds, judged from its reading.
 # With its default feature alone: the adapter that reads pdf-structure's
 # readings.

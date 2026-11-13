@@ -4,7 +4,9 @@
 //! parts and read as one, a program among them, every accessor of every code, the
 //! budget never rising, the same whatever the sink, the same twice, doing no more under
 //! smaller caps, and failing only as it's made to; and read as a file, each font in it
-//! the same.
+//! the same. Built with fuzz/'s `predefined-cmaps`, a predefined CMap is read from
+//! pdf-fonts' bundle; without it, as pdf-lint's binary is built, as one the build
+//! hasn't.
 
 #![no_main]
 

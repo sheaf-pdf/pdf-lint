@@ -1,11 +1,12 @@
 [package]
 name = "pdf-fonts"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
 license = "(MIT OR Apache-2.0) AND FTL"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF fonts read: codes, CIDs, widths, heights and text as PDFium reads them, encodings and glyph names, the standard 14's metrics, predefined CMaps, programs' glyph boxes"
+documentation = "https://docs.rs/pdf-fonts"
+description = "PDF's fonts read as PDFium reads them: codes, CIDs, widths, heights and text, encodings and glyph names, the standard 14's metrics, predefined CMaps and programs' glyph boxes"
 keywords = ["pdf", "font", "encoding", "cmap", "iso-32000"]
 categories = ["parser-implementations", "text-processing"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -21,29 +22,58 @@ thiserror = "2"
 # never a file's bytes.
 hayro-cmap = { version = "0.1", optional = true }
 # With `programs`: a font's program read, TrueType's by skrifa, CFF's and Type 1's by
-# what it has of read-fonts.
-skrifa = { version = "0.49", default-features = false, features = ["std"], optional = true }
+# what it has of read-fonts, Type 1's behind its `type1` feature.
+skrifa = { version = "0.50", default-features = false, features = ["std", "type1"], optional = true }
+# The spans of a font's reading, with the `tracing` feature: without its
+# default features, so without the proc macros of `attributes`; `std`, for
+# its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 [features]
 default = ["programs"]
-# Adobe's predefined CMaps, off by default for the Rust they need: without
+# Adobe's predefined CMaps, from hayro-cmap's bundle, off by default. Without
 # them, a font's predefined CMap reads as one the build hasn't.
 predefined-cmaps = ["dep:hayro-cmap"]
 # A font's program read, for its glyphs' boxes and its heights, and the text of what its
 # encoding leaves to it. Without it, as `Fonts::for_text` reads.
 programs = ["dep:skrifa"]
+# Spans through `tracing`: a font read, and within it its program's opening,
+# its embedded CMap's and its `/ToUnicode`'s parsing, and a Type 3 font's
+# CharProcs. A code, a width, a string's text and a glyph's box have none.
+# Off by default; without it, none is compiled.
+tracing = ["dep:tracing"]
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
 
 [dev-dependencies]
-# A reading of the tests' files, which is pdf-objects' `Streams` itself.
-pdf-structure.workspace = true
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+# A reading of the tests' files, which is pdf-objects' `Streams` itself. By
+# its path alone, which the package's manifest leaves out, as pdf-structure
+# isn't on crates.io yet: so the crate packages and publishes on
+# pdf-objects and pdf-content-streams alone, and its unit tests don't build
+# from the package.
+pdf-structure = { path = "../pdf-structure" }
 # The tests' file writer. By its path alone, as it's never published, which
 # the package's manifest leaves out: so the crate's unit tests don't build
 # from its package.
 pdf-fixtures = { path = "../pdf-fixtures" }
 
-# docs.rs documents what `predefined-cmaps` adds, beside the default.
+# The benchmarks: `cargo bench -p pdf-fonts`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "fonts"
+harness = false
+
+# docs.rs documents what `predefined-cmaps` adds, beside the default, and
+# the spans.
 [package.metadata.docs.rs]
-features = ["predefined-cmaps"]
+features = ["predefined-cmaps", "tracing"]
 
 [lints.rust]
 unsafe_code = "forbid"

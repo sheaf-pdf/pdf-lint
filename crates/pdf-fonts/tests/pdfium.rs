@@ -21,8 +21,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_fonts::pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
-use pdf_fonts::{Fault, Font, FontKind, Limits, Rect, Resolve};
-use pdf_objects::ObjectId;
+use pdf_fonts::{Fault, Font, FontKind, Limits, Rect};
+use pdf_objects::{ObjectId, Resolve};
 use pdf_structure::read::{Options, Reading};
 
 /// The most characters back a text page looks for the same code at the same place

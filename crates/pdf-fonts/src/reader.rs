@@ -16,7 +16,9 @@ use crate::{Error, Fault, Limits};
 /// Where something fails to read the reading goes on as if it weren't there, and
 /// its failure is what the reading comes to in the end ([`Reader::failure`]), so
 /// that one path through it does for both, and whatever a reading of the same
-/// objects comes to it comes to by the same steps.
+/// objects comes to it comes to by the same steps. Nothing is told after it: what
+/// would be is of a font without what didn't read, and every stream after it, which
+/// is no font of the file's, and the failure is the whole answer.
 pub(crate) struct Reader<'c, O, S: ?Sized> {
     objects: O,
     pub(crate) limits: &'c Limits,
@@ -37,10 +39,22 @@ impl<'c, O, S: Sink<Fault> + ?Sized> Reader<'c, O, S> {
     /// `fault`, in `object` where that's said, at where `value` was written where
     /// there's one.
     pub(crate) fn tell(&self, object: Option<ObjectId>, value: Option<&Object>, fault: Fault) {
+        self.tell_with(object, value, || fault);
+    }
+
+    /// [`Reader::tell`] of what `fault` gives, which is asked only where the sink
+    /// wants faults: for a fault whose kind takes a look-up to pick. Nothing once
+    /// the reading has failed.
+    pub(crate) fn tell_with(
+        &self,
+        object: Option<ObjectId>,
+        value: Option<&Object>,
+        fault: impl FnOnce() -> Fault,
+    ) {
         let mut sink = self.sink.borrow_mut();
-        if sink.wants() {
+        if sink.wants() && self.failed.borrow().is_none() {
             let at = value.and_then(|value| value.at);
-            sink.fault(Place::new(object, at), fault);
+            sink.fault(Place::new(object, at), fault());
         }
     }
 
@@ -235,8 +249,10 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
     /// it doesn't decode: its decode fails before it gives a byte, or it isn't there
     /// ([`Why::Damaged`]), or its filters are ones the reader doesn't decode
     /// ([`Why::Filter`]), what the font makes of having none being what's told.
-    /// Too large past `budget` ([`Why::Limit`]), or past a cap of what gives it
-    /// ([`Why::Capped`]), whatever gave it.
+    /// Too large past `budget` ([`Why::Limit`]), whatever gave it. None too where
+    /// it doesn't read for a reason that's the caller's, past a cap of what gives
+    /// it ([`Why::Capped`]) among them, which is the reading's failure, as an object's
+    /// is ([`Reader::failure`]).
     pub(crate) fn charged(
         &self,
         id: ObjectId,
@@ -252,7 +268,7 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
                 Ok(Some(data.into_owned()))
             }
             Err(unreadable) => match unreadable.why {
-                Why::Limit | Why::Capped => Err(Error::TooLarge),
+                Why::Limit => Err(Error::TooLarge),
                 Why::Damaged | Why::Filter => Ok(None),
                 _ => {
                     self.fail(unreadable);

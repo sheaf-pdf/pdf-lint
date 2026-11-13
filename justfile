@@ -36,7 +36,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -53,9 +53,9 @@ fmt:
 # pdf-semantics without its clock, as pdf-lint takes it, and with its spans
 # (`tracing`), which nothing else turns on; then pdf-linearize's engine,
 # without its adapter, and with lopdf's, which nothing else turns on; then
-# pdf-fonts with Adobe's predefined CMaps, which nothing else turns on, and
-# with no feature at all; then pdf-structure with its spans (`tracing`),
-# which nothing else turns on.
+# pdf-fonts with Adobe's predefined CMaps and its spans (`tracing`), which
+# nothing else turns on, and with no feature at all; then pdf-structure
+# with its spans (`tracing`), which nothing else turns on.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -67,7 +67,7 @@ clippy:
     cargo clippy --locked -p pdf-semantics --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-fonts --features predefined-cmaps --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
 
@@ -81,8 +81,9 @@ clippy:
 # turns on and only its tests read; then pdf-semantics' without its clock,
 # and with its spans, which only its tests read; then pdf-linearize's
 # engine, without its adapter, and with lopdf's; then pdf-fonts' with
-# Adobe's predefined CMaps, and with no feature at all; then
-# pdf-structure's with its spans, which only those tests read.
+# Adobe's predefined CMaps and its spans, which only its tests read, and
+# with no feature at all; then pdf-structure's with its spans, which only
+# those tests read.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters
@@ -93,7 +94,7 @@ test:
     cargo test --locked -p pdf-semantics --features tracing
     cargo test --locked -p pdf-linearize --no-default-features
     cargo test --locked -p pdf-linearize --features lopdf
-    cargo test --locked -p pdf-fonts --features predefined-cmaps
+    cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing
     cargo test --locked -p pdf-fonts --no-default-features
     cargo test --locked -p pdf-structure --features tracing
 
@@ -280,7 +281,8 @@ tokenizer-core-only:
 # target/<the crate's name without `pdf-`>-package, made fresh each time (a
 # stale one passes or fails falsely), and check what the package holds: its
 # sources, README, CHANGELOG, manifest and lock, and nothing else, no
-# benchmark among them. The benchmarks' target is declared in the manifest
+# benchmark among them, but the files a crate's own list below names, each of
+# which it must hold. The benchmarks' target is declared in the manifest
 # while `benches/` is outside `include`, so cargo drops it from the
 # packaged manifest with a warning, which is expected, as is one for each
 # test outside it; the check reads that manifest. The dry run asks the
@@ -299,8 +301,33 @@ _package crate *beside:
     for b in {{ beside }}; do packages+=(-p "$b"); done
     CARGO_TARGET_DIR="$dir" cargo publish --dry-run --locked "${packages[@]}"
     CARGO_TARGET_DIR="$dir" cargo package --list --locked -p "$crate" > "$dir/files.txt"
-    if grep -v -E '^(src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json)$' "$dir/files.txt"; then
-        echo "the package holds more than its sources, README, CHANGELOG, manifest and lock (above)" >&2
+    # What a crate's package holds beside those, file by file, so that a file
+    # added beside them still fails: pdf-fonts' data, each file with its
+    # terms (Adobe's metrics and their notice, the two glyph lists), and the
+    # FreeType Project License.
+    extra=()
+    case "$crate" in
+    pdf-fonts)
+        extra=(
+            assets/afm/Courier.afm assets/afm/Courier-Bold.afm
+            assets/afm/Courier-BoldOblique.afm assets/afm/Courier-Oblique.afm
+            assets/afm/Helvetica.afm assets/afm/Helvetica-Bold.afm
+            assets/afm/Helvetica-BoldOblique.afm assets/afm/Helvetica-Oblique.afm
+            assets/afm/Symbol.afm assets/afm/Times-Bold.afm
+            assets/afm/Times-BoldItalic.afm assets/afm/Times-Italic.afm
+            assets/afm/Times-Roman.afm assets/afm/ZapfDingbats.afm
+            assets/afm/MustRead.html assets/glyphlist.txt assets/zapfdingbats.txt
+            FTL.TXT
+        ) ;;
+    esac
+    : > "$dir/extra.txt"
+    if [ "${#extra[@]}" -gt 0 ]; then printf '%s\n' "${extra[@]}" > "$dir/extra.txt"; fi
+    if grep -v -E '^(src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json)$' "$dir/files.txt" | grep -v -x -F -f "$dir/extra.txt"; then
+        echo "the package holds more than its sources, README, CHANGELOG, manifest and lock, and the files its list names (above)" >&2
+        exit 1
+    fi
+    if grep -v -x -F -f "$dir/files.txt" "$dir/extra.txt" | grep .; then
+        echo "the package lacks files its list names (above)" >&2
         exit 1
     fi
     manifest=("$dir"/package/"$crate"-*/Cargo.toml)
@@ -341,6 +368,11 @@ content-streams-package: (_package "pdf-content-streams" "pdf-filters")
 
 # Package pdf-semantics as a publish would; `_package` says what's checked.
 semantics-package: (_package "pdf-semantics")
+
+# Package pdf-fonts as a publish would, pdf-content-streams and pdf-filters
+# beside it while the versions it and they name aren't published; `_package`
+# says what's checked, and lists the data the package holds with its terms.
+fonts-package: (_package "pdf-fonts" "pdf-content-streams" "pdf-filters")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
@@ -425,11 +457,12 @@ semantics-msrv:
 color-msrv:
     cargo +{{ color_msrv }} test --locked -p pdf-color
 
-# Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it, and
-# with no feature, which must be installed.
+# Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it,
+# with no feature, and with its spans, which must be installed.
 fonts-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --no-default-features
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features tracing
 
 # Test pdf-fonts with `predefined-cmaps` on that feature's oldest Rust, which must
 # be installed.
@@ -471,7 +504,10 @@ arlington-msrv:
 # `color`, `fonts` and `linearize` from those their own crates' fuzz modules make. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'
-# SIMD, which `content` reaches (`just fuzz content 300 simd`).
+# SIMD, which `content` reaches (`just fuzz content 300 simd`); and
+# `predefined-cmaps`, Adobe's predefined CMaps from pdf-fonts' bundle,
+# which `fonts` reaches (`just fuzz fonts 300 predefined-cmaps`), and which
+# pdf-lint's binary, as `check` builds it, is without.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60" features="":
