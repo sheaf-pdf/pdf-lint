@@ -58,7 +58,8 @@ fmt:
 # every workspace build; then pdf-fonts with Adobe's predefined CMaps and
 # its spans (`tracing`), which nothing else turns on, and with no feature at
 # all; then pdf-structure with its spans (`tracing`), which nothing else
-# turns on.
+# turns on; then pdfs as a user gets it, with no feature at all, and with
+# every feature it forwards, which nothing else turns on all at once.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -74,6 +75,9 @@ clippy:
     cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on, and the content
@@ -87,7 +91,9 @@ clippy:
 # engine, without its adapter, and with its spans, which only its tests
 # read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
 # only its tests read, and with no feature at all; then pdf-structure's
-# with its spans, which only those tests read.
+# with its spans, which only those tests read; then pdfs's as a user gets
+# it, without `image-ends`, which pdf-lint turns on, with no feature at all,
+# and with every feature it forwards.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters
@@ -101,6 +107,9 @@ test:
     cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing
     cargo test --locked -p pdf-fonts --no-default-features
     cargo test --locked -p pdf-structure --features tracing
+    cargo test --locked -p pdfs
+    cargo test --locked -p pdfs --no-default-features
+    cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -225,7 +234,8 @@ fuzzing:
 # as they're published, then pdf-content-streams without `image-ends`,
 # which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
-# pdf-linearize's engine, without its adapter, then pdf-fonts with no feature.
+# pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
+# then pdfs as it's published.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
@@ -233,6 +243,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
 
 # Build this platform's release archive in dist/, and check it runs as
 # it's unpacked, as the release workflow does each

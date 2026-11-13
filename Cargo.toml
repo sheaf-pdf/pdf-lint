@@ -7,10 +7,11 @@ resolver = "3"
 # the table as its first release is made ready; until then, its dependents
 # name its path and version themselves, or its path alone where it's a
 # dev-dependency of a crate published before it, which that crate's package
-# then leaves out. pdf-fixtures, the tests' file writer and qpdf, is never
-# published: a crate whose tests use it takes it by its path alone, a
-# dev-dependency. Nor is pdf-linearize-lopdf, the lopdf adapter, which no
-# member depends on. Nothing else is inherited from here.
+# then leaves out. pdfs, which takes every crate in the table, is required
+# by none, so it isn't in the table itself. pdf-fixtures, the tests' file
+# writer and qpdf, is never published: a crate whose tests use it takes it
+# by its path alone, a dev-dependency. Nor is pdf-linearize-lopdf, the lopdf
+# adapter, which no member depends on. Nothing else is inherited from here.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
@@ -24,6 +25,7 @@ members = [
     "crates/pdf-fonts",
     "crates/pdf-linearize",
     "crates/pdf-linearize-lopdf",
+    "crates/pdfs",
     "crates/pdf-arlington",
     "crates/pdf-lint",
 ]

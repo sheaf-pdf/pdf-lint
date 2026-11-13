@@ -1,0 +1,108 @@
+[package]
+name = "pdfs"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdfs"
+description = "One crate for reading and writing PDF files: the PDF crates of one family, each re-exported whole at the versions it's built with"
+keywords = ["pdf", "parser", "writer", "text", "fonts"]
+categories = ["encoding", "parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+# The family, each crate through the workspace's table, so that every alpha
+# is the exact version the table names and the tokenizer's 0.2 line is
+# taken by caret, as every crate of the family takes it.
+pdf-tokenizer.workspace = true
+pdf-objects.workspace = true
+# Both Flate backends, so that a reading or a writing names either one.
+pdf-filters = { workspace = true, features = ["miniz_oxide", "zlib-rs"] }
+pdf-crypt.workspace = true
+# pdf-filters' zlib-rs through pdf-structure's own feature, which its
+# reading's and writing's options name.
+pdf-structure = { workspace = true, features = ["zlib-rs"] }
+pdf-color.workspace = true
+pdf-content-streams.workspace = true
+# Without its clock unless `clock` (below) turns it on.
+pdf-semantics.workspace = true
+# Without reading fonts' programs unless `programs` (below) turns it on.
+pdf-fonts.workspace = true
+# A pdf-structure document linearized and a file's linearization checked
+# (`family`), and pdf-filters' zlib-rs through it.
+pdf-linearize = { workspace = true, features = ["family", "zlib-rs"] }
+thiserror = "2"
+# The spans of the `tracing` feature: without its default features, so
+# without the proc macros of `attributes`; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = ["programs", "clock"]
+# pdf-fonts' `programs`: a font's program read, for its glyphs' boxes and
+# its heights, and the text of what its encoding leaves to it.
+programs = ["pdf-fonts/programs"]
+# pdf-semantics' `clock`: `Date::now` and `Date::from_unix`.
+clock = ["pdf-semantics/clock"]
+# pdf-content-streams' `image-ends`: an inline image's DCT and CCITTFax
+# data ended by decoding it, as PDFium's decoders end it, for a reading
+# that asks for that.
+image-ends = ["pdf-content-streams/image-ends"]
+# pdf-fonts' `predefined-cmaps`: Adobe's predefined CMaps, from hayro-cmap's
+# bundle.
+predefined-cmaps = ["pdf-fonts/predefined-cmaps"]
+# pdf-content-streams' `simd`: its dependencies' SIMD, chosen as it runs by
+# what the CPU has.
+simd = ["pdf-content-streams/simd"]
+# The spans of every crate of the family that has them, through `tracing`.
+# Off by default; without it, none is compiled.
+tracing = [
+    "dep:tracing",
+    "pdf-structure/tracing",
+    "pdf-content-streams/tracing",
+    "pdf-semantics/tracing",
+    "pdf-fonts/tracing",
+    "pdf-linearize/tracing",
+]
+# pdf-structure's and pdf-linearize's test writer: a new file's encryption
+# from a seeded generator and each write's IVs derived, so that what a test
+# or the fuzz target writes is the same bytes each run. For tests and
+# fuzzing, never for a document's protection; off by default, and nothing of
+# the crate's API depends on it.
+insecure-test-writer = ["pdf-structure/insecure-test-writer", "pdf-linearize/insecure-test-writer"]
+
+# docs.rs documents the default and the spans.
+[package.metadata.docs.rs]
+features = ["tracing"]
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
+
+[dev-dependencies]
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+# The tests' file writer, for what the crate can't write itself: damaged
+# files, and files encrypted by hand. By its path alone, as it's never
+# published, which the package's manifest leaves out: so the crate's
+# integration tests don't build from its package.
+pdf-fixtures = { path = "../pdf-fixtures" }
+# pdf-structure with its test writer, for the tests' new encryptions from a
+# seeded generator and their IVs derived, so that a file written twice is
+# the same bytes. Beside the normal dependency: the library is built
+# without it. Through the workspace's table, as the crate depends on
+# pdf-structure anyway, so it's published after it, and its package keeps
+# this one.
+pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
+# A folder of its own for each test that saves to a path.
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
