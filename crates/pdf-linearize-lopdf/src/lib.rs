@@ -1,10 +1,11 @@
 //! A [`Document`] of lopdf's written as a linearized file, by plain functions
 //! over its public objects: no lopdf type goes into the engine, and nothing of
-//! the family's crates is used. [`graph`] says what [`plan()`] is told of a
+//! pdf-structure or pdf-semantics is used, only pdf-linearize's engine and the
+//! pdf-objects it re-exports. [`graph`] says what [`plan()`] is told of a
 //! document, and [`linearize`] writes the file.
 //!
 //! The file is the plainest there is: cross-reference tables, nothing in object
-//! streams, the hint stream unfiltered, so nothing but lopdf is pulled in.
+//! streams, the hint stream unfiltered, so no filter is pulled in to write it.
 //! lopdf has no public writer of one object, so a small one is here, in the
 //! plan's numbers: a reference to no object is `null` (7.3.10), a string is
 //! hexadecimal, a stream's `/Length` is direct and its data as lopdf holds it,
@@ -44,9 +45,9 @@
 //! section of the file freed, or an older revision's `/Info`. Each is written
 //! as held where what's written reaches it, as lopdf's own save writes it.
 //!
-//! Every object moves, as Annex F has it, so anything that names one from
-//! outside the file, a signature's byte range above all, doesn't hold
-//! afterwards.
+//! Every object is written at the number and place a plan gives it, as Annex F
+//! has it, so anything that names one from outside the file, a signature's
+//! byte range above all, doesn't hold afterwards, as under any rewrite.
 //!
 //! # What's refused
 //!

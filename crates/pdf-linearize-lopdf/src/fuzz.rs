@@ -225,7 +225,6 @@ pub fn lopdf_document(data: &[u8]) -> bool {
     true
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -51,6 +51,11 @@
 //!   `family`, over a document's linearizing and a file's facts, each stage
 //!   and read a span within them. A span's fields are numbers, never a byte
 //!   of a file. An object, a page, a table's entry and a finding have none.
+//! - **`insecure-test-writer`**, off by default, for fuzzing, with `family`:
+//!   pdf-structure's test writer, which draws a new file's key from a seeded
+//!   generator and derives every IV, so a fuzz input writes the same bytes
+//!   each run. It's never for a document's protection, and a build that
+//!   ships leaves it off.
 //!
 //! A plan of two pages that share a font, and the bytes around its bodies:
 //!

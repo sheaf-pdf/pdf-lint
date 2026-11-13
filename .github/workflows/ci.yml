@@ -543,9 +543,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-linearize/Cargo.toml,
-      # which `just linearize-msrv` reads, with and without `family`, and with
-      # `tracing`.
+      # Keep in step with rust-version in crates/pdf-linearize/Cargo.toml and
+      # crates/pdf-linearize-lopdf/Cargo.toml, which `just linearize-msrv`
+      # reads, with and without `family`, and with `tracing`, and the lopdf
+      # adapter's crate.
       - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test

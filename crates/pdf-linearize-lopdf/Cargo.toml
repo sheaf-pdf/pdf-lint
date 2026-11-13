@@ -2,7 +2,7 @@
 name = "pdf-linearize-lopdf"
 version = "0.0.0"
 edition = "2024"
-# lopdf 0.45's.
+# The workspace's floor; lopdf 0.45 needs 1.88.
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"

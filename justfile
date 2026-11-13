@@ -480,11 +480,13 @@ fonts-cmaps-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features predefined-cmaps
 
 # Test pdf-linearize on its oldest supported Rust, which must be installed,
-# with its adapter and without, and with its spans (`tracing`).
+# with its adapter and without, and with its spans (`tracing`); and the lopdf
+# adapter's crate, never published, on the same Rust, which its manifest names.
 linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features tracing
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize-lopdf
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:
