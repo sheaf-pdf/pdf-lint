@@ -4,7 +4,7 @@
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
 # pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts,
-# pdf-linearize and pdf-arlington support, from their Cargo.toml. Only the libraries promise one:
+# pdf-linearize, pdfs and pdf-arlington support, from their Cargo.toml. Only the libraries promise one:
 # the checker ships as a binary built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
@@ -16,6 +16,7 @@ semantics_msrv := `grep -m1 '^rust-version' crates/pdf-semantics/Cargo.toml | cu
 color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' -f2`
 fonts_msrv := `grep -m1 '^rust-version' crates/pdf-fonts/Cargo.toml | cut -d'"' -f2`
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
+pdfs_msrv := `grep -m1 '^rust-version' crates/pdfs/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 
 # The nightly the fuzz targets build on: `nightly`, or the toolchain
@@ -36,7 +37,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package linearize-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package linearize-package pdfs-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -395,6 +396,12 @@ fonts-package: (_package "pdf-fonts" "pdf-content-streams" "pdf-filters")
 # published; `_package` says what's checked.
 linearize-package: (_package "pdf-linearize" "pdf-structure" "pdf-semantics" "pdf-filters")
 
+# Package pdfs as a publish would, pdf-filters, pdf-structure,
+# pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize beside it
+# while the versions it names aren't published; `_package` says what's
+# checked.
+pdfs-package: (_package "pdfs" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize")
+
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
 # a pinned build): a break the version doesn't allow fails.
@@ -498,6 +505,13 @@ linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features tracing
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize-lopdf
+
+# Test pdfs on its oldest supported Rust, which must be installed, as it's
+# published, with no feature, and with every feature it forwards.
+pdfs-msrv:
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --no-default-features
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

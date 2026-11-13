@@ -59,12 +59,12 @@ Python 3, and fetches the pinned PDFium build from GitHub unless
 says how the crates are held to PDFium. Its `tokenizer-package`,
 `objects-package`, `filters-package`, `crypt-package`, `color-package`,
 `structure-package`, `content-streams-package`, `semantics-package`,
-`fonts-package` and `linearize-package` package the tokenizer, pdf-objects,
-the filters, pdf-crypt, pdf-color, pdf-structure, pdf-content-streams,
-pdf-semantics, pdf-fonts and pdf-linearize as a publish would
-(`cargo publish --dry-run`), which asks the registry over the network. CI
-runs pdf-structure's tests on Windows too, which no recipe does, as
-`just ci` runs on the platform it's run on.
+`fonts-package`, `linearize-package` and `pdfs-package` package the
+tokenizer, pdf-objects, the filters, pdf-crypt, pdf-color, pdf-structure,
+pdf-content-streams, pdf-semantics, pdf-fonts, pdf-linearize and pdfs as a
+publish would (`cargo publish --dry-run`), which asks the registry over the
+network. CI runs pdf-structure's tests on Windows too, which no recipe does,
+as `just ci` runs on the platform it's run on.
 `just tokenizer-semver`, `just objects-semver`, `just filters-semver`,
 `just crypt-semver` and `just color-semver`, which `ci` leaves out, check
 the tokenizer's, pdf-objects', the filters', pdf-crypt's and pdf-color's
