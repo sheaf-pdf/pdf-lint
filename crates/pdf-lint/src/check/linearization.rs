@@ -937,7 +937,7 @@ mod tests {
         let value = "/H's length from byte 473 is 199, where the hint stream takes 165 to 166 (ISO 32000-2, Table F.1)";
         assert_eq!(at(&h), one("H", value, entry(&h, "/H [473 199]")));
         let s = written_as(&file, "/S 48", "/S 47");
-        let value = "the hint tables don't read: a shared entry's count of objects's width is 1024 bits, past 32 (ISO 32000-2, F.4)";
+        let value = "the hint tables don't read: the width of a shared entry's count of objects is 1024 bits, past 32 (ISO 32000-2, F.4)";
         let whole = Some(Span::new(None, 23, 88));
         assert_eq!(at(&s), one("-", value, whole));
         assert_eq!(&s[23..25], b"<<");

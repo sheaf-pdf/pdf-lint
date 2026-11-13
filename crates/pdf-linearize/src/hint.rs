@@ -63,7 +63,7 @@ pub enum Error {
         bits: u64,
     },
     /// A header said a field is wider than a hint table's can be (F.4.2).
-    #[error("{what}'s width is {width} bits, past 32")]
+    #[error("the width of {what} is {width} bits, past 32")]
     Width {
         /// The field.
         what: &'static str,
