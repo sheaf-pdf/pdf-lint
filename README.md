@@ -95,7 +95,7 @@ file, pdf-linearize's plan of any graph, what's assembled from it, hint
 tables from any bytes, any facts of a file, judged alike whatever the sink
 and nothing judged of what they say wasn't read, and any bytes as a file
 laid out in the clear, under its own encryption and under a new one, read
-back and checked, and the reader and checker, on nightly with
+back and checked, and under caps on its trees, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default), and a third the features they're
 built with: `simd`, pdf-content-streams' dependencies on the CPU's SIMD

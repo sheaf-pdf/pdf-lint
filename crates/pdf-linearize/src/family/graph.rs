@@ -77,9 +77,9 @@ impl<'d> Prepared<'d> {
         let catalog_id = found.and_then(|(id, _)| id).ok_or(Error::NoCatalog)?;
         let catalog = doc.get_dict(catalog_id).ok_or(Error::NoCatalog)?;
         // The walk lists no more pages than a plan takes, nor visits more
-        // nodes, so a tree past that is refused before it's walked whole.
-        let mut limits = TreeLimits::DEFAULT;
-        limits.pages = options.limits.pages;
+        // nodes, so a tree past that is refused before it's walked whole, and
+        // it and the name trees go no deeper than the caller's caps.
+        let limits = options.limits.trees();
         let table = pages_agreed(doc, catalog, &limits)?;
 
         let left = write::encryption_objects(doc, encryptor);
@@ -146,7 +146,7 @@ impl<'d> Prepared<'d> {
             bodies,
             pages: pages_said,
             page_ids,
-            first_page: first_page(doc, catalog, &table, options.first_page),
+            first_page: first_page(doc, catalog, &table, options.first_page, &limits),
             tree_nodes,
             open: Vec::new(),
             groups: Vec::new(),
@@ -876,13 +876,20 @@ fn page_references(dict: &Dict, refs: &mut Vec<ObjectId>) {
 }
 
 /// The place of the page that opens first: `first`'s, or where `/OpenAction`
-/// opens, if that's a page of the tree, or 0.
-fn first_page(doc: &Document, catalog: &Dict, table: &Pages<'_>, first: FirstPage) -> u32 {
+/// opens, if that's a page of the tree, or 0. A name tree is read under
+/// `limits`.
+fn first_page(
+    doc: &Document,
+    catalog: &Dict,
+    table: &Pages<'_>,
+    first: FirstPage,
+    limits: &TreeLimits,
+) -> u32 {
     let action = match first {
         FirstPage::Index(index) => return index,
         FirstPage::OpenAction => catalog.get(b"OpenAction"),
     };
-    let Some(page) = action.and_then(|action| opens_at(doc, catalog, action)) else {
+    let Some(page) = action.and_then(|action| opens_at(doc, catalog, action, limits)) else {
         return 0;
     };
     let place = table.iter().position(|listed| listed.id == Some(page));
@@ -891,7 +898,12 @@ fn first_page(doc: &Document, catalog: &Dict, table: &Pages<'_>, first: FirstPag
 
 /// The page object an `/OpenAction` opens at: a destination, or a `/GoTo`
 /// action's.
-fn opens_at(doc: &Document, catalog: &Dict, action: &Object) -> Option<ObjectId> {
+fn opens_at(
+    doc: &Document,
+    catalog: &Dict,
+    action: &Object,
+    limits: &TreeLimits,
+) -> Option<ObjectId> {
     let (_, action) = doc.dereference(action)?;
     let destination = match dict_of(action) {
         Some(dict) => {
@@ -900,13 +912,18 @@ fn opens_at(doc: &Document, catalog: &Dict, action: &Object) -> Option<ObjectId>
         }
         None => action,
     };
-    destination_page(doc, catalog, destination)
+    destination_page(doc, catalog, destination, limits)
 }
 
 /// The page object a destination names: an array's first element, by way of a
-/// name (the catalog's `/Dests`) or a string (the name dictionary's `/Dests`)
-/// where it's named (12.3.2).
-fn destination_page(doc: &Document, catalog: &Dict, destination: &Object) -> Option<ObjectId> {
+/// name (the catalog's `/Dests`) or a string (the name dictionary's `/Dests`,
+/// read under `limits`) where it's named (12.3.2).
+fn destination_page(
+    doc: &Document,
+    catalog: &Dict,
+    destination: &Object,
+    limits: &TreeLimits,
+) -> Option<ObjectId> {
     let (_, destination) = doc.dereference(destination)?;
     let target = match destination.value() {
         Value::Array(array) => return array.first()?.as_reference(),
@@ -919,7 +936,7 @@ fn destination_page(doc: &Document, catalog: &Dict, destination: &Object) -> Opt
             let wanted = text.as_bytes()?;
             let names = catalog.get(b"Names")?;
             let names = dict_of(doc.dereference(names)?.1)?;
-            let walk = tree::names(doc, names.get(b"Dests")?, &TreeLimits::DEFAULT, ());
+            let walk = tree::names(doc, names.get(b"Dests")?, limits, ());
             let found = walk
                 .filter_map(Result::ok)
                 .find(|(key, _)| *key == wanted)?;

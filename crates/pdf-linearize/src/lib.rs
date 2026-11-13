@@ -33,7 +33,8 @@
 )]
 //!
 //! Its caps are one value, [`Limits`]: past one, a plan or a table is
-//! refused, and the check says what it didn't judge. Nothing panics on any
+//! refused, and the check says what it didn't judge. With `family`, the
+//! page tree's and name trees' walks are under it too. Nothing panics on any
 //! graph, any hint table's bytes or any facts. pdf-objects is re-exported
 //! whole, and with `family` pdf-structure and pdf-semantics are too, so
 //! their types are named through them at the versions this crate is built
