@@ -671,13 +671,15 @@ where
 }
 
 /// `data` as a page's content, drawn with the fonts its parts make ([`objects_of`]),
-/// Helvetica, and two forms, one of `data` too, which may draw itself, and one with
-/// no resources of its own: what it shows ([`shown`](crate::shown)),
-/// every promise held. It never panics. The budget never rises. It's the same twice,
-/// the second time over the fonts the first read and kept, and charged alike. Nothing
-/// fails to read for the caller's reason, as nothing is made to. Under a cap of fewer
-/// forms, under the content's caps made small and within a smaller budget, what's
-/// shown is what's shown under the defaults, less some. How many strings it shows.
+/// Helvetica, two forms, one of `data` too, which may draw itself, and one with no
+/// resources of its own, and two graphics states, one picking a font by its name and
+/// one by a reference, which PDFium reads as the stock Helvetica: what it shows
+/// ([`shown`](crate::shown)), every promise held. It never panics. The budget never
+/// rises. It's the same twice, the second time over the fonts the first read and kept,
+/// and charged alike. Nothing fails to read for the caller's reason, as nothing is
+/// made to. Under a cap of fewer forms, under the content's caps made small and within
+/// a smaller budget, what's shown is what's shown under the defaults, less some. How
+/// many strings it shows.
 pub fn shown(data: &[u8]) -> usize {
     let mut objects = objects_of(data);
     let resources = Object::from(dict! {
@@ -686,6 +688,10 @@ pub fn shown(data: &[u8]) -> usize {
             "H" => dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" },
         },
         "XObject" => dict! { "X" => Object::reference(7), "Y" => Object::reference(8) },
+        "ExtGState" => dict! {
+            "G" => dict! { "Font" => vec![Object::from("F2"), Object::from(9)] },
+            "R" => dict! { "Font" => vec![Object::reference(9), Object::from(9)] },
+        },
     });
     let form = |resources: Option<&Object>, content: &[u8]| {
         let mut dict = dict! { "Subtype" => "Form" };
@@ -712,7 +718,9 @@ pub fn shown(data: &[u8]) -> usize {
         assert!(left <= budget);
         for unread in &read.unread {
             let failed = match unread {
-                Unread::Form { error, .. } | Unread::Font { error, .. } => error,
+                Unread::Form { error, .. }
+                | Unread::Font { error, .. }
+                | Unread::State { error, .. } => error,
                 _ => continue,
             };
             assert_eq!(failed, &Error::TooLarge, "nothing was made to fail");
@@ -788,6 +796,7 @@ fn content_fixtures() -> Vec<Vec<u8>> {
         b"BT /F1 12 Tf (Hello) Tj [(W) -20 (orld)] TJ 14 TL (a) ' 1 2 (b) \" ET".to_vec(),
         b"/H 9 Tf q /F2 9 Tf (A) Tj Q (A) Tj Q Q /Y Do /F9 9 Tf (A) Tj".to_vec(),
         b"/H 9 Tf (A) Tj /X Do".to_vec(),
+        b"/G gs (A) Tj q /R gs (A) Tj Q (A) Tj /H 9 Tf (A) Tj /G gs [(A) 9 (B)] TJ".to_vec(),
         parts(&[
             b"<< /Subtype /Type1 /BaseFont /Courier /ToUnicode 3 0 R >>",
             b"",
@@ -1060,7 +1069,7 @@ mod tests {
     #[test]
     fn the_contents_among_the_seeds_show_strings() {
         let shows: Vec<usize> = content_fixtures().iter().map(|seed| shown(seed)).collect();
-        assert_eq!(shows, [5, 5, 41, 3]);
+        assert_eq!(shows, [5, 5, 41, 6, 3]);
     }
 
     /// A seed's objects as a file, each stream's data as it is; a seed that's no such

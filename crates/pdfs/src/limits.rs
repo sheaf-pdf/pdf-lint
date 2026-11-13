@@ -25,7 +25,10 @@ pub struct Limits {
     /// (pdf-semantics'). Its `page_depth`, `tree_depth` and `tree_nodes` are
     /// also the caps of [`linearize`](Limits::linearize)'s walks.
     pub semantics: pdf_semantics::Limits,
-    /// What a font is read under (pdf-fonts').
+    /// What a font is read under, and a page's text, how deep and how often
+    /// its forms are followed among it (pdf-fonts'). Its `content` is taken
+    /// from [`content`](Limits::content) at each call, whatever it's set to
+    /// here.
     pub fonts: pdf_fonts::Limits,
     /// What a file's linearization is checked under (pdf-linearize's): the
     /// graph a plan is made of, and its hint tables. Its `page_depth`,
@@ -33,9 +36,11 @@ pub struct Limits {
     /// [`semantics`](Limits::semantics)' at each call, whatever they're set
     /// to here.
     pub linearize: pdf_linearize::Limits,
-    /// What one call's fonts' streams may decompress to, in bytes, in all:
-    /// 256 MiB by default. A font's cost is charged each time a call reads
-    /// it, kept or not.
+    /// What one call's fonts' streams, and a page's text's forms, may
+    /// decompress to, in bytes, in all: 256 MiB by default. A font's cost is
+    /// charged each time a call reads it, kept or not, and a form's content
+    /// each time a page's text draws it. A page's own content isn't charged:
+    /// [`content`](Limits::content) caps it.
     pub font_budget: usize,
 }
 
@@ -50,6 +55,13 @@ impl Limits {
         linearize: pdf_linearize::Limits::DEFAULT,
         font_budget: 256 << 20,
     };
+
+    /// [`fonts`](Limits::fonts), its `content` [`content`](Limits::content).
+    pub(crate) const fn reading_fonts(&self) -> pdf_fonts::Limits {
+        let mut fonts = self.fonts;
+        fonts.content = self.content;
+        fonts
+    }
 
     /// [`linearize`](Limits::linearize), its walks' caps
     /// [`semantics`](Limits::semantics)'.
@@ -74,7 +86,7 @@ mod tests {
 
     /// The defaults are each crate's own; the walks of a linearization take
     /// the page tree's and a name tree's caps from pdf-semantics', whatever
-    /// pdf-linearize's say.
+    /// pdf-linearize's say, and fonts their content's from the content's.
     #[test]
     fn each_crates_defaults_and_one_value_for_the_walks() {
         let limits = Limits::DEFAULT;
@@ -97,5 +109,11 @@ mod tests {
             (4, 3, 2)
         );
         assert_eq!(walked.pages, 7);
+        let mut limits = Limits::DEFAULT;
+        limits.content.operands = 9;
+        limits.fonts.content.operands = 99;
+        limits.fonts.forms = 3;
+        let fonts = limits.reading_fonts();
+        assert_eq!((fonts.content, fonts.forms), (limits.content, 3));
     }
 }

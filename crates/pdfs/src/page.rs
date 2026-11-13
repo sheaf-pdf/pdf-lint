@@ -4,12 +4,16 @@
 //! [`Page`](crate::Page) calls each with its file's defaults.
 
 use std::fmt;
+use std::sync::Arc;
 
 use pdf_content_streams::{Concat, Join, Limits as ContentLimits, Operations, ResCx};
-use pdf_objects::{Resolve, Streams};
+use pdf_fonts::{Font, Fonts, Shown};
+use pdf_objects::object::Value;
+use pdf_objects::{Dict, Object, Resolve, Streams, Unreadable};
 use pdf_semantics::pages::{self, Inheritable};
 
 use crate::error::Error;
+use crate::limits::Limits;
 use crate::phases::phase;
 
 /// A page's content: its streams decoded and joined as PDFium joins them, and
@@ -138,5 +142,164 @@ where
         concat: join.finish(),
         res,
         limits: *limits,
+    })
+}
+
+/// A font a page's resources name ([`fonts`](fn@fonts)): its name in their
+/// `/Font`, and the font as pdf-fonts reads it, none where what's there is no
+/// font dictionary, or why it wasn't read. Its `Debug` gives the name's length,
+/// not the name, and the font's object.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct NamedFont {
+    /// Its name in the resources' `/Font`.
+    pub name: Vec<u8>,
+    /// The font, read once a file and kept ([`Fonts::get`]); none where the
+    /// name's value is no font dictionary; or why it wasn't read: past what's
+    /// left of the budget, or an object or a stream of it that doesn't read for
+    /// the reader's own reason.
+    pub font: Result<Option<Arc<Font>>, pdf_fonts::Error>,
+}
+
+impl fmt::Debug for NamedFont {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let font = self.font.as_ref().map(|font| font.as_ref().map(|f| f.id()));
+        f.debug_struct("NamedFont")
+            .field("name", &self.name.len())
+            .field("font", &font)
+            .finish()
+    }
+}
+
+/// The fonts `page`'s resources name, its own `/Resources` or what it
+/// inherits, each by its name in their `/Font`, in the order it's written:
+/// each read through `fonts` ([`Fonts::get`]), once a file and kept, under
+/// `limits.fonts`, its `content` taken from `limits.content`, and charged to
+/// `budget`, a font kept too. A font that isn't read says why, and the rest are
+/// read. The dictionaries are reached as PDFium reaches them, each its own or a
+/// stream's, through two references at most.
+///
+/// # Errors
+///
+/// [`Error::Unreadable`] where the resources, or their `/Font`, don't read for
+/// the reader's own reason: past a cap, behind a password, or not given by the
+/// source. One that's damaged isn't there: the page names no font.
+pub fn fonts<'o, O>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    budget: &mut usize,
+) -> Result<Vec<NamedFont>, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    phase!(DEBUG, "fonts");
+    let resources = page.attribute(Inheritable::Resources);
+    let resources = match resources {
+        Some(resources) => dictionary(objects, resources.written)?,
+        None => None,
+    };
+    let named = match resources.and_then(|resources| resources.get(b"Font")) {
+        Some(named) => dictionary(objects, named)?,
+        None => None,
+    };
+    let limits_fonts = limits.reading_fonts();
+    let read = |(name, font): (&[u8], &'o Object)| NamedFont {
+        name: name.to_vec(),
+        font: fonts.get(objects, font, &limits_fonts, budget),
+    };
+    Ok(named.map_or_else(Vec::new, |named| named.iter().map(read).collect()))
+}
+
+/// The strings `page`'s content shows, in order, each in its font, the forms it
+/// draws followed, as PDFium reads them for its text, with no layout
+/// (pdf-fonts' [`shown`](fn@pdf_fonts::shown)): its content joined as
+/// [`content`](fn@content) joins it, under `limits.content`, handed to it with
+/// the page's resources, its fonts read through `fonts` under `limits.fonts`,
+/// its `content` taken from `limits.content`, and what its fonts' streams and
+/// its forms' content decompress to charged to `budget`. What isn't read is in
+/// the answer ([`Shown::unread`]), never guessed.
+///
+/// ```
+/// use pdfs::pdf_fonts::Fonts;
+/// use pdfs::pdf_semantics::pages;
+/// use pdfs::pdf_tokenizer::Rules;
+///
+/// let file = b"%PDF-1.7\n\
+///     1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+///     2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+///     3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 \
+///     << /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>\nendobj\n\
+///     4 0 obj\n<< /Length 35 >>\nstream\nBT /F1 12 Tf [(Hel) -20 (lo)] TJ ET\nendstream\nendobj\n\
+///     trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
+/// let pdf = pdfs::from_bytes(&file[..]).unwrap();
+///
+/// // Over the reading, as any caller with a reading of its own calls it.
+/// let reading = pdf.reading();
+/// let catalog = pdf.catalog().unwrap();
+/// let limits = pdfs::Limits::DEFAULT;
+/// let table = pages::pages(reading, catalog, Rules::Pdfium, &limits.semantics, &mut ()).unwrap();
+/// let fonts = Fonts::default();
+/// let mut budget = limits.font_budget;
+/// let shown = pdfs::page::text(reading, &fonts, table.get(0).unwrap(), &limits, &mut budget).unwrap();
+/// assert_eq!(shown.text(), "Hello");
+/// assert_eq!(shown.strings.len(), 2);
+/// assert!(shown.is_whole());
+/// ```
+///
+/// # Errors
+///
+/// As [`content`](fn@content) fails: [`Error::Content`] where its streams are
+/// past the cap or one doesn't read for the reader's own reason, its
+/// [`Why`](pdf_objects::Why) kept, and [`Error::Unreadable`] where its
+/// resources don't read.
+pub fn text<'o, O>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    budget: &mut usize,
+) -> Result<Shown, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    phase!(DEBUG, "text");
+    let content = content(objects, page, &limits.content)?;
+    let resources = page.attribute(Inheritable::Resources);
+    Ok(pdf_fonts::shown(
+        objects,
+        fonts,
+        resources.map(|resources| resources.written),
+        content.concat(),
+        content.res(),
+        &limits.reading_fonts(),
+        budget,
+    ))
+}
+
+/// The dictionary `value` is, as PDFium reaches one (`GetDict`): its own, or a
+/// stream's, through two references at most; none for anything else, or past
+/// that, or for a reference to nothing or to an object that's damaged.
+fn dictionary<'o, O: Resolve<'o>>(
+    objects: O,
+    value: &'o Object,
+) -> Result<Option<&'o Dict>, Unreadable> {
+    let mut value = value;
+    for _ in 0..2 {
+        let Value::Ref(id) = *value.value() else {
+            break;
+        };
+        value = match objects.try_resolve(id) {
+            Ok(Some(object)) => object,
+            Ok(None) => return Ok(None),
+            Err(unreadable) if unreadable.why == pdf_objects::Why::Damaged => return Ok(None),
+            Err(unreadable) => return Err(unreadable),
+        };
+    }
+    Ok(match value.value() {
+        Value::Dict(dict) => Some(dict),
+        Value::Stream(stream) => Some(&stream.dict),
+        _ => None,
     })
 }

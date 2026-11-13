@@ -114,8 +114,9 @@ impl Fonts {
         ))
     }
 
-    /// What PDFium draws text in where the resources have no font by the name `Tf`
-    /// gives: its stock Helvetica, in WinAnsiEncoding.
+    /// What PDFium draws text in where the resources have no font by the name `Tf`,
+    /// or an ExtGState's `/Font` that `gs` sets, gives: its stock Helvetica, in
+    /// WinAnsiEncoding.
     #[must_use]
     pub fn stock(&self) -> Arc<Font> {
         let read = || {
@@ -161,12 +162,12 @@ impl Fonts {
     }
 }
 
-/// The fonts one interpretation of content picks (`Tf`), by name in the resources
-/// they're picked from: each looked up once however often it's picked, and one
-/// written in the resources as a dictionary read once. So is one that doesn't read for
-/// a reason that's the caller's, whose `Err` is kept. Each is known by its place among
-/// them ([`FontId`]), which a graphics state can keep, so saving the state counts no
-/// reference to it.
+/// The fonts one interpretation of content picks (`Tf`, `gs`), by name in the
+/// resources they're picked from: each looked up once however often it's picked, and
+/// one written in the resources as a dictionary read once. So is one that doesn't read
+/// for a reason that's the caller's, whose `Err` is kept. Each is known by its place
+/// among them ([`FontId`]), which a graphics state can keep, so saving the state
+/// counts no reference to it.
 #[derive(Debug)]
 pub struct FontScope<'f> {
     fonts: &'f Fonts,

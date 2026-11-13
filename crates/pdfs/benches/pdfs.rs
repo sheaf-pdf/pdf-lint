@@ -11,21 +11,27 @@
 //! - `content`: opened, walked, then each page's content joined and its
 //!   color spaces counted, by `Page::content` (`facade`) and by
 //!   pdf-content-streams' `Join::push_contents` and `ResCx::read` (`direct`).
+//! - `text`: opened, walked, then each page's text read, its content joined
+//!   and the strings it shows walked in its fonts, a form among them, by
+//!   `Page::text` (`facade`) and by `Join::push_contents`, `ResCx::read` and
+//!   pdf-fonts' `shown` over fonts read once a file (`direct`).
 //!
 //! The file is written here by pdf-structure's writer: a catalog, a root over
 //! 2,000 pages, each with a `/Contents` of two streams, one deflated, and
 //! resources naming a color space of its own, the page tree's objects in
-//! object streams under a cross-reference stream. Throughput is in pages.
-//! Each side is held to what it gives before it's timed: the same pages, and
-//! each page's content the same bytes. Nothing is read from disk, nothing is
+//! object streams under a cross-reference stream. `text` reads it with a font
+//! in each page's resources, Helvetica with a `/ToUnicode`, and a form each
+//! page draws, all shared. Throughput is in pages. Each side is held to what it
+//! gives before it's timed: the same pages, each page's content the same
+//! bytes, and its text the same. Nothing is read from disk, nothing is
 //! encrypted and no cap is met, so the inputs are the same on every run.
 
 use std::hint::black_box;
 
 use criterion::{Criterion, Throughput};
-use pdfs::Options;
 use pdfs::pdf_content_streams::{Join, Limits as ContentLimits, ResCx};
 use pdfs::pdf_filters::{Backend, Prediction};
+use pdfs::pdf_fonts::Fonts;
 use pdfs::pdf_objects::object::{Stream, Value};
 use pdfs::pdf_objects::pdf_tokenizer::Rules;
 use pdfs::pdf_objects::version::Version;
@@ -35,6 +41,7 @@ use pdfs::pdf_semantics::pages::{self, Inheritable};
 use pdfs::pdf_structure::read::{self, Faults, Reading, Recovery};
 use pdfs::pdf_structure::write::{self, Deflate};
 use pdfs::pdf_structure::{Document, XrefKind};
+use pdfs::{Limits, Options};
 
 /// How many pages the file has.
 const PAGES: u32 = 2_000;
@@ -45,8 +52,12 @@ const DRAWN: &str = "q 0.5 0 0 0.5 72 72 cm /CS0 cs 0.1 0.2 0.3 0.4 scn 0 0 100 
 const TEXT: &str = "BT /F1 12 Tf 72 720 Td (A line of text on the page) Tj 0 -14 Td \
     [(Kerned) -120 (text)] TJ ET";
 
-/// The file the benches read.
-fn file() -> Vec<u8> {
+/// What each page's second stream draws in the file `text` reads: the form.
+const FORM: &str = " /X Do";
+
+/// The file the benches read; with `fonts`, each page's resources naming a font
+/// and a form, both shared, and its text drawing the form.
+fn file(fonts: bool) -> Vec<u8> {
     let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
     doc.insert(
         1,
@@ -62,7 +73,11 @@ fn file() -> Vec<u8> {
     for i in 0..PAGES {
         let (page, drawn, text) = (10 + 3 * i, 11 + 3 * i, 12 + 3 * i);
         let space = vec![Object::from("ICCBased"), Object::reference(3)];
-        let resources = dict! { "ColorSpace" => dict! { "CS0" => space } };
+        let mut resources = dict! { "ColorSpace" => dict! { "CS0" => space } };
+        if fonts {
+            resources.set("Font", dict! { "F1" => Object::reference(4) });
+            resources.set("XObject", dict! { "X" => Object::reference(6) });
+        }
         let contents = vec![Object::reference(drawn), Object::reference(text)];
         let parent = Object::reference(2);
         let dict = dict! {
@@ -71,12 +86,31 @@ fn file() -> Vec<u8> {
         doc.insert(page, dict);
         doc.insert(drawn, stream(dict! {}, DRAWN.as_bytes().to_vec()));
         let mut deflated = Vec::new();
+        let written = match fonts {
+            true => format!("{TEXT}{FORM}"),
+            false => TEXT.to_string(),
+        };
         encoder
-            .encode(TEXT.as_bytes(), Prediction::None, &mut deflated)
+            .encode(written.as_bytes(), Prediction::None, &mut deflated)
             .unwrap();
         doc.insert(text, stream(dict! { "Filter" => "FlateDecode" }, deflated));
     }
     doc.insert(3, stream(dict! { "N" => 4 }, Vec::new()));
+    if fonts {
+        let font = dict! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding", "ToUnicode" => Object::reference(5),
+        };
+        doc.insert(4, font);
+        let map = b"1 begincodespacerange <00> <FF> endcodespacerange \
+            2 beginbfchar <41> <0061> <4B> <006B> endbfchar";
+        doc.insert(5, stream(dict! {}, map.to_vec()));
+        let form = b"q BT /F1 9 Tf 72 72 Td (A form's line) Tj ET Q".to_vec();
+        doc.insert(
+            6,
+            stream(dict! { "Type" => "XObject", "Subtype" => "Form" }, form),
+        );
+    }
     let mut options = write::Options::DEFAULT;
     options.kind = XrefKind::Stream;
     options.pack = Some(write::Pack::DEFAULT);
@@ -132,6 +166,50 @@ fn direct_content(reading: &Reading<&[u8]>) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The direct side's text: each page's content joined and its color spaces
+/// counted, then the strings it shows walked, over fonts read once a file and a
+/// font budget each page, as the facade reads it; each page's text.
+fn direct_text(reading: &Reading<&[u8]>) -> Vec<String> {
+    let catalog = pdfs::pdf_semantics::catalog(reading, reading.trailer().dict());
+    let catalog = catalog.unwrap().unwrap();
+    let limits = Limits::DEFAULT;
+    let table = pages::pages(reading, catalog, Rules::Pdfium, &limits.semantics, &mut ()).unwrap();
+    let fonts = Fonts::default();
+    let mut fonts_limits = limits.fonts;
+    fonts_limits.content = limits.content;
+    (table.iter())
+        .map(|page| {
+            let mut join = Join::new(&limits.content);
+            if let Some(contents) = page.dict.and_then(|dict| dict.get(b"Contents")) {
+                join.push_contents(reading, contents).unwrap();
+            }
+            let resources = page.attribute(Inheritable::Resources).map(|a| a.written);
+            let res = ResCx::read(reading, resources, &limits.content).unwrap();
+            let content = join.finish();
+            let mut budget = limits.font_budget;
+            let shown = pdfs::pdf_fonts::shown(
+                reading,
+                &fonts,
+                resources,
+                &content,
+                &res,
+                &fonts_limits,
+                &mut budget,
+            );
+            shown.text()
+        })
+        .collect()
+}
+
+/// The facade's text: each page's.
+fn facade_text(file: &[u8]) -> Vec<String> {
+    let pdf = pdfs::from_bytes(file).unwrap();
+    let pages = pdf.pages().unwrap();
+    (pages.iter())
+        .map(|page| page.text().unwrap().text())
+        .collect()
+}
+
 /// The facade's content: each page's bytes.
 fn facade_content(file: &[u8]) -> Vec<Vec<u8>> {
     let pdf = pdfs::from_bytes(file).unwrap();
@@ -142,7 +220,7 @@ fn facade_content(file: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn benches(c: &mut Criterion) {
-    let file = file();
+    let file = file(false);
     let file = &file[..];
     let options = direct_options();
     assert_eq!(Options::DEFAULT.flate, options.flate);
@@ -187,6 +265,22 @@ fn benches(c: &mut Criterion) {
     group.bench_function("facade", |b| b.iter(|| facade_content(black_box(file))));
     group.bench_function("direct", |b| {
         b.iter(|| direct_content(&Reading::open(black_box(file), &options).unwrap()))
+    });
+    group.finish();
+
+    let with_fonts = self::file(true);
+    let with_fonts = &with_fonts[..];
+    let facade = facade_text(with_fonts);
+    let direct = direct_text(&Reading::open(with_fonts, &options).unwrap());
+    assert_eq!(facade, direct);
+    // The `/ToUnicode` reads `A` and `K` as `a` and `k`.
+    let line = "a line of text on the page".to_string() + "kernedtext" + "a form's line";
+    assert!(facade.iter().all(|page| *page == line), "{}", facade[0]);
+    let mut group = c.benchmark_group("text");
+    group.throughput(Throughput::Elements(u64::from(PAGES)));
+    group.bench_function("facade", |b| b.iter(|| facade_text(black_box(with_fonts))));
+    group.bench_function("direct", |b| {
+        b.iter(|| direct_text(&Reading::open(black_box(with_fonts), &options).unwrap()))
     });
     group.finish();
 }

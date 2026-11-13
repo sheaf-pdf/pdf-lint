@@ -5,7 +5,7 @@ use std::fmt;
 use std::iter::FusedIterator;
 
 use pdf_crypt::{Encoded, Refused};
-use pdf_fonts::Fonts;
+use pdf_fonts::{Fonts, Shown};
 use pdf_linearize::check::{self, Verdict};
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::pdf_tokenizer::Rules;
@@ -21,7 +21,7 @@ use crate::error::Error;
 use crate::file;
 use crate::limits::Limits;
 use crate::open::Options;
-use crate::page::{self, Content};
+use crate::page::{self, Content, NamedFont};
 use crate::phases::phase;
 
 /// A file being read: opened under [`Options`], then each object read when
@@ -97,8 +97,10 @@ impl<S: ByteSource> Pdf<S> {
         self.rules
     }
 
-    /// Its fonts, each read once and kept for every page that draws in it,
-    /// for pdf-fonts' calls over [`Pdf::reading`].
+    /// Its fonts, each read once and kept for every page that draws in it
+    /// ([`Page::fonts`], [`Page::text`]), its program read where the build has
+    /// the `programs` feature, as PDFium reads one, for the text its encoding
+    /// leaves to it; for pdf-fonts' calls over [`Pdf::reading`] too.
     #[must_use]
     pub const fn fonts(&self) -> &Fonts {
         &self.fonts
@@ -474,8 +476,9 @@ impl<S: ByteSource> ExactSizeIterator for PagesIter<'_, S> {}
 impl<S: ByteSource> FusedIterator for PagesIter<'_, S> {}
 
 /// A page of a file: what its page tree says of it, each inheritable
-/// attribute with where it came from ([`Page::attributes`]), and its content
-/// ([`Page::content`]). Its `Debug` gives its object, how often it was
+/// attribute with where it came from ([`Page::attributes`]), its content
+/// ([`Page::content`]), its fonts ([`Page::fonts`]) and its text
+/// ([`Page::text`]). Its `Debug` gives its object, how often it was
 /// listed before and its boxes, not its dictionary.
 pub struct Page<'a, S: ByteSource> {
     page: &'a pages::Page<'a>,
@@ -523,5 +526,47 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// [`Error::Unreadable`] where its resources don't read.
     pub fn content(&self) -> Result<Content, Error> {
         page::content(&self.pdf.reading, self.page, &self.pdf.limits.content)
+    }
+
+    /// The fonts its resources name, each by its name, read once a file and
+    /// kept, as [`page::fonts`](fn@page::fonts) reads them, within
+    /// [`Limits::font_budget`].
+    ///
+    /// # Errors
+    ///
+    /// As [`page::fonts`](fn@page::fonts) fails: [`Error::Unreadable`] where
+    /// its resources, or their `/Font`, don't read for the reader's own
+    /// reason.
+    pub fn fonts(&self) -> Result<Vec<NamedFont>, Error> {
+        let pdf = self.pdf;
+        let mut budget = pdf.limits.font_budget;
+        page::fonts(
+            &pdf.reading,
+            &pdf.fonts,
+            self.page,
+            &pdf.limits,
+            &mut budget,
+        )
+    }
+
+    /// The strings its content shows, in order, each in its font, the forms
+    /// it draws followed, as PDFium reads them for its text, with no layout,
+    /// as [`page::text`](fn@page::text) reads them, within
+    /// [`Limits::font_budget`]: [`Shown::text`] joins them. What isn't read
+    /// is said in the answer ([`Shown::unread`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::content`] fails.
+    pub fn text(&self) -> Result<Shown, Error> {
+        let pdf = self.pdf;
+        let mut budget = pdf.limits.font_budget;
+        page::text(
+            &pdf.reading,
+            &pdf.fonts,
+            self.page,
+            &pdf.limits,
+            &mut budget,
+        )
     }
 }

@@ -14,7 +14,7 @@ use pdf_objects::{Object, ObjectId, Resolve, Streams, Why};
 
 use crate::fonts::{FontId, FontScope, Fonts};
 use crate::phases::phase;
-use crate::reader::Reader;
+use crate::reader::{Reader, dict_of};
 use crate::{Error, Font, Limits};
 
 /// Whose resources the content given is drawn with, as a [`FontScope`] keys them:
@@ -32,6 +32,12 @@ const GIVEN: ObjectId = ObjectId::new(0, 0);
 /// - `Tf` picks a font by its name in the resources' `/Font`; one the resources
 ///   haven't, as a dictionary, is PDFium's stock Helvetica ([`Fonts::stock`]); one
 ///   PDFium doesn't load ([`Font::loaded`]) leaves the font as it was.
+/// - `gs` picks one too, where the graphics state it sets, a dictionary in the
+///   resources' `/ExtGState`, has a `/Font` array: by the name its first element is
+///   read as, as PDFium reads it (a name's or a string's bytes, a number as PDFium
+///   writes it, each through a reference), so a reference there to a font, as the
+///   standard has it (ISO 32000-2, 8.4.5), is the stock Helvetica, as PDFium draws
+///   it. One PDFium doesn't load is none: nothing's shown in it.
 /// - `q` saves the font and `Q` restores it; a `Q` with nothing saved is passed over.
 ///   `BT` and `ET` change nothing here.
 /// - `Tj`, `'` and `"` show a string, a name or `true` or `false` as written, as
@@ -57,12 +63,14 @@ const GIVEN: ObjectId = ObjectId::new(0, 0);
 /// reads otherwise.
 ///
 /// What isn't read is said ([`Shown::unread`]), never guessed: a form drawn too deep,
-/// or past how many may be drawn; a form or a font past what's left of `budget`, or that doesn't read for a reason
-/// that's the caller's ([`Error`]), whose strings then aren't shown; and content that
-/// doesn't lex past a point, a cap of `limits.content` among it. A form's or font's
-/// damage is the file's, and it's read as PDFium reads it: a form whose stream
-/// doesn't decode shows nothing, a font that doesn't load leaves the one before.
-/// Nothing in it panics on what a file holds.
+/// or past how many may be drawn; a form or a font past what's left of `budget`, or
+/// that doesn't read for a reason that's the caller's ([`Error`]), whose strings then
+/// aren't shown, and a graphics state that doesn't, after which none are until a font
+/// is picked; and content that doesn't lex past a point, a cap of `limits.content`
+/// among it. A form's or font's damage is the file's, and it's read as PDFium reads
+/// it: a form whose stream doesn't decode shows nothing, a font that doesn't load
+/// leaves the one before, or none after `gs`. Nothing in it panics on what a file
+/// holds.
 ///
 /// ```
 /// use std::collections::BTreeMap;
@@ -161,6 +169,12 @@ where
                 frame.current = walk.pick(frame, name);
                 None
             }
+            Step::State(name) => {
+                if let Some(current) = walk.state(frame, name) {
+                    frame.current = current;
+                }
+                None
+            }
             Step::Show { bytes, at } => {
                 if let Current::Font(font) = frame.current {
                     walk.shown.strings.push(ShownString {
@@ -241,8 +255,8 @@ impl fmt::Debug for Shown {
 pub struct ShownString {
     /// Its bytes, as the operator shows them: its codes in [`font`](ShownString::font).
     pub bytes: Vec<u8>,
-    /// The font it's shown in: the one `Tf` picked, or PDFium's stock Helvetica
-    /// ([`Fonts::stock`]) where the resources have no font by its name.
+    /// The font it's shown in: the one `Tf` or `gs` picked, or PDFium's stock
+    /// Helvetica ([`Fonts::stock`]) where the resources have no font by its name.
     pub font: Arc<Font>,
     /// The form whose content shows it, the innermost; none for the content given.
     pub form: Option<ObjectId>,
@@ -311,11 +325,20 @@ pub enum Unread {
         /// Why it isn't drawn.
         error: Error,
     },
-    /// The font `Tf` picks by `name`, past what's left of the budget or not read for
-    /// a reason that's the caller's: what's shown in it isn't read, until a `Tf`
-    /// picks another or `Q` restores one.
+    /// The font `Tf` or `gs` picks by `name`, past what's left of the budget or not
+    /// read for a reason that's the caller's: what's shown in it isn't read, until a
+    /// `Tf` or `gs` picks another or `Q` restores one.
     Font {
         /// Its name in the resources' `/Font`.
+        name: Vec<u8>,
+        /// Why it isn't read.
+        error: Error,
+    },
+    /// The graphics state `gs` sets by `name`, which doesn't read for a reason that's
+    /// the caller's: as it may pick a font, what's shown after it isn't read, until a
+    /// `Tf` or `gs` picks one or `Q` restores one.
+    State {
+        /// Its name in the resources' `/ExtGState`.
         name: Vec<u8>,
         /// Why it isn't read.
         error: Error,
@@ -347,6 +370,11 @@ impl fmt::Debug for Unread {
                 .field("name", &name.len())
                 .field("error", error)
                 .finish(),
+            Unread::State { name, error } => f
+                .debug_struct("State")
+                .field("name", &name.len())
+                .field("error", error)
+                .finish(),
             Unread::Content { form, error } => f
                 .debug_struct("Content")
                 .field("form", form)
@@ -366,6 +394,8 @@ enum Step {
     Restore,
     /// `Tf`, by the name it picks.
     Font(Vec<u8>),
+    /// `gs`, by the name of the graphics state it sets.
+    State(Vec<u8>),
     /// A string shown, not empty, and where it's written.
     Show { bytes: Vec<u8>, at: Range<usize> },
     /// `Do`, by the name it draws.
@@ -391,6 +421,10 @@ fn steps_of(content: &Concat<'_>, res: &ResCx, limits: &pdf_content_streams::Lim
             Operator::Font => {
                 let name = operation.arg(1).and_then(|o| string(o, limits));
                 steps.push(Step::Font(name.unwrap_or_default()));
+            }
+            Operator::ExtGState => {
+                let name = operation.arg(0).and_then(|o| string(o, limits));
+                steps.push(Step::State(name.unwrap_or_default()));
             }
             Operator::Show | Operator::NextLineShow | Operator::NextLineShowSpaced => {
                 if let Some(operand) = operation.arg(0)
@@ -443,7 +477,8 @@ fn string(operand: Operand<'_>, limits: &pdf_content_streams::Limits) -> Option<
 /// The font strings are shown in.
 #[derive(Debug, Clone, Copy)]
 enum Current {
-    /// None picked yet: PDFium shows nothing.
+    /// None picked yet, or one `gs` picked that PDFium doesn't load: PDFium shows
+    /// nothing.
     None,
     Font(FontId),
     /// One that didn't read for the caller's reason, told when it was picked: what's
@@ -535,13 +570,49 @@ impl<'o, O: Resolve<'o> + Streams + Copy> Walk<'_, 'o, O> {
 
     /// The font `Tf` picks by `name` in `frame`: what strings are then shown in.
     fn pick(&mut self, frame: &Frame<'o>, name: &[u8]) -> Current {
+        self.font(frame, name, frame.current)
+    }
+
+    /// The font `gs` picks by the graphics state `name` sets in `frame`, as PDFium's
+    /// `ProcessExtGS` picks one: none where it picks none, as it names no dictionary
+    /// in the resources' `/ExtGState`, or it has no `/Font` that's an array.
+    fn state(&mut self, frame: &Frame<'o>, name: &[u8]) -> Option<Current> {
+        let font = self.holder(frame, b"ExtGState").and_then(|(_, resources)| {
+            let mut none = ();
+            let reader = Reader::new(self.objects, self.limits, &mut none);
+            let font = resources
+                .and_then(|resources| reader.dict_of_value(resources))
+                .and_then(|resources| reader.dict(resources, b"ExtGState"))
+                .and_then(|states| reader.hop(states.get(name)?))
+                .and_then(dict_of)
+                .and_then(|state| reader.array_for(state, b"Font"))
+                .map(|font| reader.byte_string_at(font, 0));
+            match reader.failure() {
+                Some(unreadable) => Err(Error::from(unreadable)),
+                None => Ok(font),
+            }
+        });
+        match font {
+            Ok(font) => Some(self.font(frame, &font?, Current::None)),
+            Err(error) => {
+                let name = name.to_vec();
+                self.shown.unread.push(Unread::State { name, error });
+                Some(Current::Unread)
+            }
+        }
+    }
+
+    /// The font `name` is in `frame`, as PDFium's `FindFont` finds one, picked: the
+    /// stock Helvetica where the resources have none by that name as a dictionary,
+    /// and `unloaded` where it's one PDFium doesn't load.
+    fn font(&mut self, frame: &Frame<'o>, name: &[u8], unloaded: Current) -> Current {
         let picked = self.holder(frame, b"Font").and_then(|(owner, resources)| {
             let limits = self.limits;
             (self.scope).font(self.objects, owner, resources, name, limits, self.budget)
         });
         match picked {
             Ok(Some(font)) if self.scope.get(font).loaded() => Current::Font(font),
-            Ok(Some(_)) => frame.current,
+            Ok(Some(_)) => unloaded,
             Ok(None) => Current::Font(self.scope.stock()),
             Err(error) => {
                 let name = name.to_vec();

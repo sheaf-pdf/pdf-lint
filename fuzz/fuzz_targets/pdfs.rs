@@ -1,7 +1,8 @@
 //! A file read through the facade, on any bytes: opened from memory, its
 //! version, catalog, document information dictionary, claims and page tree,
-//! each page's content joined within its cap and its operations walked, and
-//! its linearization's verdict, holding and judged whole only where it's
+//! each page's content joined within its cap and its operations walked, its
+//! fonts and its text, which fails only as its content does, and its
+//! linearization's verdict, holding and judged whole only where it's
 //! linearized; every answer the same with faults kept as with none looked
 //! for, and under small caps the same promises. And where it isn't
 //! encrypted, its document written in the clear and under a new encryption,

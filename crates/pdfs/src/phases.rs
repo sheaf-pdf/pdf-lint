@@ -2,8 +2,8 @@
 //! macro, so that a phase is a line where it starts, and nothing of it is
 //! compiled without the feature. A phase is a call that reads a part of a
 //! file whole: a file opened, its page tree walked, a page's content joined,
-//! its document information dictionary or its packet read, and its
-//! linearization checked. A lookup has none (the catalog, the version, a
+//! its fonts read and its text, its document information dictionary or its
+//! packet read, and its linearization checked. A lookup has none (the catalog, the version, a
 //! stream's data), and no fault is told as an event: faults are the sink's.
 //! The crates under it make their own spans inside these, where they have
 //! the feature.
@@ -166,8 +166,9 @@ mod tests {
         0000000139 00000 n \n0000000202 00000 n \n\
         trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n279\n%%EOF\n";
 
-    /// A file opened, its pages walked, a page's content joined, what it
-    /// says and claims read and its linearization checked are each a span,
+    /// A file opened, its pages walked, a page's content joined, its fonts
+    /// and its text read (the text's content within it), what it says and
+    /// claims read and its linearization checked are each a span,
     /// at `debug`, their fields numbers; its catalog, version and a stream's
     /// data, each a lookup, are none.
     #[test]
@@ -183,6 +184,19 @@ mod tests {
         });
         let walked = [("pages", DEBUG, vec!["pdfium"]), ("content", DEBUG, vec![])];
         assert_eq!(named(&made), walked);
+        let made = spans(|| {
+            let pages = pdf.pages().unwrap();
+            let page = pages.get(0).unwrap();
+            assert!(page.fonts().unwrap().is_empty());
+            assert!(page.text().unwrap().strings.is_empty());
+        });
+        let read = [
+            ("pages", DEBUG, vec!["pdfium"]),
+            ("fonts", DEBUG, vec![]),
+            ("text", DEBUG, vec![]),
+            ("content", DEBUG, vec![]),
+        ];
+        assert_eq!(named(&made), read);
         let made = spans(|| {
             assert_eq!(pdf.info().unwrap(), None);
             assert_eq!(pdf.claims().unwrap(), None);

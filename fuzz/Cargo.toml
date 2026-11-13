@@ -138,7 +138,8 @@
 # `pdfs` calls `pdfs::fuzz::read`, a file read through the facade under its
 # defaults, with faults kept, the same, and under small caps: its version,
 # catalog, `/Info`, claims, pages, each page's content joined within its cap
-# and its operations walked, and its linearization's verdict, holding only
+# and its operations walked, its fonts and its text, which fails only as its
+# content does, and its linearization's verdict, holding only
 # where it's linearized; and its document written in the clear and under a
 # new encryption, its key drawn from the input, read locked, each page's
 # content refused as locked, and unlocked by its password, read as in the

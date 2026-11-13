@@ -10,6 +10,10 @@
 //! - **Its pages** ([`Pdf::pages`]), each with what it inherits and from
 //!   where, and **a page's content** ([`Page::content`]), its streams
 //!   decoded and joined, and its operations.
+//! - **A page's text** ([`Page::text`]): the strings its content shows, in
+//!   order, each in its font, the forms it draws followed, as PDFium reads
+//!   them, with no layout; and **its fonts** ([`Page::fonts`]), each read once
+//!   a file.
 //! - **What the file is and says**: its version, its encryption, what its
 //!   document information dictionary says and its XMP claims, whether its
 //!   linearization holds, and any stream's data decoded.
@@ -57,7 +61,7 @@ pub use limits::Limits;
 #[cfg(any(unix, windows))]
 pub use open::open;
 pub use open::{Options, from_bytes};
-pub use page::Content;
+pub use page::{Content, NamedFont};
 pub use pdf::{Page, Pages, PagesIter, Pdf};
 
 mod error;

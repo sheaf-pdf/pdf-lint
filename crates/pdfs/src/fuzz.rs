@@ -5,6 +5,8 @@
 #[cfg(any(test, feature = "insecure-test-writer"))]
 use std::convert::Infallible;
 
+use std::ops::Range;
+
 use pdf_crypt::Password;
 use pdf_linearize::check::Verdict;
 use pdf_objects::Why;
@@ -34,14 +36,29 @@ struct Answers {
 }
 
 /// What a page's content gave: its bytes, how many streams, and how many
-/// operations read before the first that didn't, if one didn't.
+/// operations read before the first that didn't, if one didn't; the fonts its
+/// resources name, each whether it read; and its text.
 #[derive(Debug, Clone, PartialEq)]
 struct Content {
     bytes: Vec<u8>,
     streams: usize,
     operations: usize,
     stopped: bool,
+    fonts: Result<Vec<(Vec<u8>, bool)>, String>,
+    text: Text,
 }
+
+/// A page's text: each string shown ([`Said`]); and how many things weren't
+/// read.
+#[derive(Debug, Clone, PartialEq)]
+struct Text {
+    strings: Vec<Said>,
+    unread: usize,
+}
+
+/// A string shown: its bytes, where it's written, its text and whether a form
+/// shows it.
+type Said = (Vec<u8>, Range<usize>, Option<String>, bool);
 
 /// What [`read`] reached of an input, for the tests to say each promise was
 /// met with.
@@ -57,6 +74,8 @@ pub struct Reached {
     /// Inputs written under a new encryption that were unlocked by its
     /// password and read as written in the clear.
     pub unlocked: usize,
+    /// Strings shown by pages read under the default options.
+    pub strings: usize,
 }
 
 /// `pdf`'s answers, each page's content held within `limits`' cap on it and
@@ -66,7 +85,14 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
     let pages = pdf.pages().map_err(words).map(|pages| {
         let cap = pdf.limits().content.content;
         let read = |page: crate::Page<'_, S>| {
-            let content = page.content().map_err(words)?;
+            let text = page.text().map_err(words);
+            let content = page.content().map_err(words);
+            assert_eq!(
+                text.as_ref().err(),
+                content.as_ref().err(),
+                "the text's errors are its content's"
+            );
+            let (content, text) = (content?, text?);
             assert!(content.bytes().len() <= cap, "past the content's cap");
             let mut operations = 0;
             let mut stopped = false;
@@ -79,16 +105,32 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
                     }
                 }
             }
+            let fonts = page.fonts().map_err(words).map(|fonts| {
+                let read = |font: crate::NamedFont| (font.name, font.font.is_ok());
+                fonts.into_iter().map(read).collect()
+            });
+            let strings = text.strings.iter().map(|string| {
+                let form = string.form.is_some();
+                (string.bytes.clone(), string.at.clone(), string.text(), form)
+            });
+            let _ = text.text();
             Ok(Content {
                 bytes: content.bytes().to_vec(),
                 streams: content.concat().stream_count(),
                 operations,
                 stopped,
+                fonts,
+                text: Text {
+                    strings: strings.collect(),
+                    unread: text.unread.len(),
+                },
             })
         };
         let pages: Vec<Result<Content, String>> = pages.iter().map(read).collect();
         reached.pages += pages.len();
         reached.contents += pages.iter().filter(|page| page.is_ok()).count();
+        let shown = pages.iter().flatten().map(|page| page.text.strings.len());
+        reached.strings += shown.sum::<usize>();
         pages
     });
     let verdict = pdf.linearized().map_err(words);
@@ -127,14 +169,18 @@ fn small() -> Limits {
     limits.semantics.tree_nodes = 4;
     limits.semantics.xmp_bytes = 128;
     limits.linearize.pages = 4;
+    limits.fonts.forms = 2;
+    limits.fonts.form_uses = 8;
+    limits.font_budget = 1 << 12;
     limits
 }
 
 /// `data` read as a file by the facade, every answer `Ok` or an error,
 /// never a panic: opened from memory, which always opens; its version,
 /// catalog, document information dictionary, claims, page tree, each page's
-/// content joined within its cap and its operations walked, and its
-/// linearization's verdict, which holds and is judged whole only where it's
+/// content joined within its cap and its operations walked, its fonts and its
+/// text, which fails only as its content does, and its linearization's
+/// verdict, which holds and is judged whole only where it's
 /// linearized. With faults kept, every answer the same as with none looked
 /// for, which finds none; and under small caps, the same promises.
 ///
@@ -370,7 +416,11 @@ mod tests {
             "Type" => "Catalog", "Pages" => r(2), "Version" => "2.0", "Metadata" => r(10),
         };
         doc.insert(1, catalog);
-        let resources = dict! { "ColorSpace" => dict! { "CS0" => "DeviceCMYK" } };
+        let resources = dict! {
+            "ColorSpace" => dict! { "CS0" => "DeviceCMYK" },
+            "Font" => dict! { "F1" => r(11) },
+            "XObject" => dict! { "X" => r(13) },
+        };
         let root = dict! {
             "Type" => "Pages", "Kids" => vec![r(3), r(4), r(5)], "Count" => 3,
             "Resources" => resources,
@@ -388,7 +438,18 @@ mod tests {
         doc.insert(4, page(Some(Object::from(elements))));
         doc.insert(5, page(None));
         doc.insert(6, stream("q BI /W 1 /H 1 /BPC 8 /CS /CS0 ID abcd EI Q"));
-        doc.insert(7, stream("BT (text) Tj ET"));
+        doc.insert(7, stream("BT (text) Tj /F1 9 Tf (Text) Tj ET /X Do"));
+        let font = dict! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding", "ToUnicode" => r(12),
+        };
+        doc.insert(11, font);
+        doc.insert(
+            12,
+            stream("1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <54> <0074> endbfchar"),
+        );
+        let form = Stream::new(dict! { "Subtype" => "Form" }, b"(Form) Tj".to_vec());
+        doc.insert(13, Object::new(Value::Stream(Box::new(form))));
         let info = dict! {
             "Title" => Object::text("A title"),
             "CreationDate" => Object::text("D:20261112093000Z"),
@@ -492,8 +553,9 @@ mod tests {
     }
 
     /// Every seed keeps every promise, and between them each is met: pages
-    /// read and joined, a locked file's content refused as locked, and a file
-    /// written under a new encryption unlocked and read as in the clear.
+    /// read and joined, their strings shown, a locked file's content refused as
+    /// locked, and a file written under a new encryption unlocked and read as
+    /// in the clear.
     #[test]
     fn the_seeds_keep_every_promise_and_reach_each() {
         let mut all = Reached::default();
@@ -503,8 +565,10 @@ mod tests {
             all.contents += reached.contents;
             all.locked += reached.locked;
             all.unlocked += reached.unlocked;
+            all.strings += reached.strings;
         }
         assert!(all.pages >= 10 && all.contents >= 8, "{all:?}");
+        assert!(all.strings >= 6, "{all:?}");
         assert!(all.locked >= 4 && all.unlocked >= 4, "{all:?}");
     }
 

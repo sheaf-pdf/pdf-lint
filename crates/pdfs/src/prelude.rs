@@ -5,9 +5,10 @@
 
 #[cfg(any(unix, windows))]
 pub use crate::open;
-pub use crate::{Content, Error, Limits, Options, Page, Pages, Pdf, from_bytes};
+pub use crate::{Content, Error, Limits, NamedFont, Options, Page, Pages, Pdf, from_bytes};
 
 pub use pdf_crypt::{Encoded, Password};
+pub use pdf_fonts::{Font, Shown, ShownString, Unread};
 pub use pdf_objects::pdf_tokenizer::Rules;
 pub use pdf_objects::version::Version;
 pub use pdf_objects::{Dict, Object, ObjectId, Why};

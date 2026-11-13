@@ -16,11 +16,12 @@ use crate::*;
 const BUDGET: usize = 256 << 20;
 
 /// A file's objects in a map, each stream's data as it is but one's, which doesn't
-/// read for `why`.
+/// read for `why`, and each object as it is but one, which doesn't read for its own.
 #[derive(Default)]
 struct File {
     objects: BTreeMap<ObjectId, Object>,
     failing: Option<(ObjectId, Why)>,
+    unresolved: Option<(ObjectId, Why)>,
 }
 
 impl File {
@@ -43,8 +44,17 @@ impl File {
 
 impl<'o> Resolve<'o> for &'o File {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        self.try_resolve(id).ok().flatten()
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         let file: &'o File = self;
-        file.objects.get(&id)
+        if let Some((unresolved, why)) = file.unresolved
+            && unresolved == id
+        {
+            return Err(Unreadable::new(id, why, "it doesn't read"));
+        }
+        Ok(file.objects.get(&id))
     }
 }
 
@@ -226,6 +236,215 @@ fn a_font_pdfium_doesnt_load_leaves_the_one_before() {
     );
     assert_eq!(read.text(), "BB");
     assert!(read.is_whole());
+}
+
+/// `gs` picks a font as `Tf` does where its ExtGState has a `/Font` array, by the
+/// name its first element is read as: a name or a string picks that font, and a
+/// reference to a font, as the standard has it, the stock Helvetica, as PDFium (the
+/// pin) draws it. A later `Tf` picks again, a `gs` after a `Tf` picks again, and `q`
+/// and `Q` save and restore what it picks.
+#[test]
+fn gs_picks_a_font_by_its_extgstates_font() {
+    let mut file = File::default();
+    let font = file.add(courier_as("D"));
+    let resources = Object::from(dict! {
+        "Font" => dict! { "B" => courier_as("B"), "C" => courier_as("C"), "R" => Object::from(font) },
+        "ExtGState" => dict! {
+            "G" => dict! { "Font" => vec![Object::from("B"), Object::from(12)] },
+            "S" => dict! { "Font" => vec![Object::bytes(*b"B"), Object::from(12)] },
+            "R" => dict! { "Font" => vec![Object::from(font), Object::from(12)] },
+        },
+    });
+    let cases = [
+        ("/G gs (A) Tj", "B"),
+        ("(G) gs (A) Tj", "B"),
+        ("/S gs (A) Tj", "B"),
+        ("/R gs (A) Tj", "A"),
+        ("/G gs (A) Tj /C 9 Tf (A) Tj", "BC"),
+        ("/C 9 Tf (A) Tj /G gs (A) Tj /R gs (A) Tj", "CBA"),
+        ("/C 9 Tf q /G gs (A) Tj Q (A) Tj", "BC"),
+        ("/G gs BT (A) Tj ET", "B"),
+    ];
+    for (content, text) in cases {
+        let read = walk(&file, &resources, content);
+        assert_eq!(read.text(), text, "{content}");
+        assert!(read.is_whole(), "{content}");
+    }
+    let read = walk(&file, &resources, "/R gs (A) Tj");
+    assert_eq!(read.strings[0].font.id(), None, "the stock Helvetica");
+}
+
+/// A `gs` that sets no font changes nothing: one the resources' `/ExtGState` hasn't,
+/// one whose value is a stream, not a dictionary, and one whose `/Font` is no array,
+/// or a reference to nothing. One whose `/Font` names a font PDFium doesn't load
+/// leaves none, where a `Tf` of it leaves the one before, so nothing's shown until a
+/// font is picked again; and one whose `/Font` array is empty names none, the stock
+/// Helvetica. A `gs` of a number names nothing.
+#[test]
+fn a_gs_that_sets_no_font_changes_nothing() {
+    let mut file = File::default();
+    let stream = file.add(Stream::new(
+        dict! { "Font" => vec![Object::from("B"), Object::from(12)] },
+        vec![],
+    ));
+    let array = file.add(vec![Object::from("B"), Object::from(12)]);
+    let unloaded = dict! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H" };
+    let resources = Object::from(dict! {
+        "Font" => dict! { "B" => courier_as("B"), "C" => courier_as("C"), "T" => unloaded },
+        "ExtGState" => dict! {
+            "M" => Object::from(stream),
+            "N" => dict! { "Font" => "B" },
+            "O" => dict! { "Font" => Object::reference(99) },
+            "P" => dict! { "Font" => Object::from(array) },
+            "U" => dict! { "Font" => vec![Object::from("T"), Object::from(12)] },
+            "E" => dict! { "Font" => Vec::<Object>::new() },
+            "1" => dict! { "Font" => vec![Object::from("B"), Object::from(12)] },
+        },
+    });
+    let cases = [
+        (
+            "/C 9 Tf /X gs (A) Tj /M gs (A) Tj /N gs (A) Tj /O gs (A) Tj 1 gs (A) Tj",
+            "CCCCC",
+        ),
+        ("/X gs (A) Tj /M gs (A) Tj /N gs (A) Tj", ""),
+        ("/C 9 Tf /P gs (A) Tj", "B"),
+        ("/C 9 Tf (A) Tj /U gs (A) Tj /C 9 Tf (A) Tj", "CC"),
+        ("/C 9 Tf (A) Tj /T 9 Tf (A) Tj", "CC"),
+        ("/C 9 Tf /E gs (A) Tj", "A"),
+    ];
+    for (content, text) in cases {
+        let read = walk(&file, &resources, content);
+        assert_eq!(read.text(), text, "{content}");
+        assert!(read.is_whole(), "{content}");
+    }
+}
+
+/// The name `gs`'s `/Font` gives is its first element as PDFium reads it as text:
+/// `true` as written, an integer as PDFium holds it, in 32 bits, a real as PDFium
+/// writes it, with no 0 before its point, and a name through a reference once,
+/// but not twice.
+#[test]
+fn gs_names_a_font_as_pdfium_reads_its_first_element() {
+    let mut file = File::default();
+    let name = file.add(Object::from("B"));
+    let twice = file.add(Object::from(name));
+    let font = |first: Object| dict! { "Font" => vec![first, Object::from(12)] };
+    let resources = Object::from(dict! {
+        "Font" => dict! {
+            "B" => courier_as("B"), "true" => courier_as("C"), "-1" => courier_as("D"),
+            ".5" => courier_as("E"), "0" => courier_as("F"), "1.5" => courier_as("G"),
+            "100000" => courier_as("H"),
+        },
+        "ExtGState" => dict! {
+            "Ref" => font(Object::from(name)),
+            "Twice" => font(Object::from(twice)),
+            "True" => font(Object::from(true)),
+            "Wraps" => font(Object::from(4_294_967_295_i64)),
+            "Half" => font(Object::from(0.5)),
+            "Zero" => font(Object::from(-0.0)),
+            "Tenths" => font(Object::from(1.50)),
+            "Whole" => font(Object::from(100_000.0)),
+        },
+    });
+    let cases = [
+        ("/Ref gs (A) Tj", "B"),
+        ("/Twice gs (A) Tj", "A"),
+        ("/True gs (A) Tj", "C"),
+        ("/Wraps gs (A) Tj", "D"),
+        ("/Half gs (A) Tj", "E"),
+        ("/Zero gs (A) Tj", "F"),
+        ("/Tenths gs (A) Tj", "G"),
+        ("/Whole gs (A) Tj", "H"),
+    ];
+    for (content, text) in cases {
+        let read = walk(&file, &resources, content);
+        assert_eq!(read.text(), text, "{content}");
+    }
+}
+
+/// A form's `gs` finds its ExtGState as any resource: in its own resources, else,
+/// where they've no `/ExtGState`, the page's; and its font in its own `/Font`, the
+/// stock Helvetica where that hasn't it. What a form's `gs` picks isn't kept after it.
+#[test]
+fn a_forms_gs_finds_its_extgstate_as_any_resource() {
+    let mut file = File::default();
+    let states = dict! { "G" => dict! { "Font" => vec![Object::from("B"), Object::from(12)] } };
+    let own = file.form(
+        "/G gs (A) Tj",
+        Some(dict! { "Font" => dict! { "B" => courier_as("C") } }.into()),
+    );
+    let lacking = file.form(
+        "/G gs (A) Tj",
+        Some(dict! { "Font" => dict! { "Z" => courier() } }.into()),
+    );
+    let none = file.form("/G gs", None);
+    let resources = Object::from(dict! {
+        "Font" => dict! { "B" => courier_as("B") },
+        "ExtGState" => states,
+        "XObject" => dict! {
+            "Own" => Object::from(own), "Lacking" => Object::from(lacking),
+            "None" => Object::from(none),
+        },
+    });
+    let read = walk(&file, &resources, "/Own Do /Lacking Do");
+    assert_eq!(read.text(), "CA");
+    let read = walk(&file, &resources, "/None Do (A) Tj");
+    assert_eq!(
+        read.text(),
+        "",
+        "nothing picked before the form, nor after it"
+    );
+}
+
+/// A graphics state that doesn't read for a reason that's the caller's is told, and
+/// what's shown after it isn't, as it may pick a font, until one is picked or `Q`
+/// restores one; a font it picks that doesn't read is told as a font.
+#[test]
+fn a_gs_that_doesnt_read_is_told() {
+    let mut file = File::default();
+    let locked = file.add(dict! { "Font" => vec![Object::from("B"), Object::from(12)] });
+    file.unresolved = Some((locked, Why::Locked));
+    let to_unicode = file.add(Stream::new(
+        dict! {},
+        b"1 beginbfchar <41> <0042> endbfchar".to_vec(),
+    ));
+    file.failing = Some((to_unicode, Why::Locked));
+    let mut font = courier().as_dict().unwrap().clone();
+    font.set("ToUnicode", Object::from(to_unicode));
+    let resources = Object::from(dict! {
+        "Font" => dict! { "C" => courier_as("C"), "L" => font },
+        "ExtGState" => dict! {
+            "Locked" => Object::from(locked),
+            "Font" => dict! { "Font" => vec![Object::from("L"), Object::from(12)] },
+        },
+    });
+    let read = walk(
+        &file,
+        &resources,
+        "/C 9 Tf q /Locked gs (A) Tj Q (A) Tj /Locked gs (A) Tj /C 9 Tf (A) Tj /Font gs (A) Tj",
+    );
+    assert_eq!(read.text(), "CC");
+    let told: Vec<_> = (read.unread.iter())
+        .map(|u| match u {
+            Unread::State {
+                name,
+                error: Error::Unreadable(u),
+            } => ("state", name.clone(), u.why),
+            Unread::Font {
+                name,
+                error: Error::Unreadable(u),
+            } => ("font", name.clone(), u.why),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        told,
+        [
+            ("state", b"Locked".to_vec(), Why::Locked),
+            ("state", b"Locked".to_vec(), Why::Locked),
+            ("font", b"L".to_vec(), Why::Locked),
+        ]
+    );
 }
 
 /// A simple font's `/ToUnicode` gives its codes' text; a Type 0 font's codes are
@@ -737,16 +956,20 @@ fn no_debug_holds_a_string_or_a_name() {
     let mut file = File::default();
     let form = file.form("(MARKER) Tj", None);
     file.failing = Some((form, Why::Locked));
+    let state = file.add(dict! { "Font" => vec![Object::from("MARKERFONT"), Object::from(9)] });
+    file.unresolved = Some((state, Why::Locked));
     let resources = Object::from(dict! {
         "Font" => dict! { "MARKERFONT" => courier() },
         "XObject" => dict! { "MARKERFORM" => Object::from(form) },
+        "ExtGState" => dict! { "MARKERSTATE" => Object::from(state) },
     });
     let read = walk(
         &file,
         &resources,
-        "/MARKERFONT 9 Tf (MARKER) Tj /MARKERFORM Do",
+        "/MARKERFONT 9 Tf (MARKER) Tj /MARKERFORM Do /MARKERSTATE gs",
     );
     assert_eq!(read.text(), "MARKER");
+    assert_eq!(read.unread.len(), 2);
     for printed in [
         format!("{read:?}"),
         format!("{:?}", read.strings[0]),
