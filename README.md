@@ -32,7 +32,7 @@ decrypts what's encrypted itself.
 | [pdf-color](crates/pdf-color) | PDF's color spaces read over any resolver: how many components a space has as PDFium counts them, whatever it holds; each space typed as ISO 32000-2 says it, with its family, base or alternate space and colorants, and each departure told; and what a resources dictionary names, under caps |
 | [pdf-fonts](crates/pdf-fonts) | PDF's fonts read as PDFium reads them: a font dictionary's codes, CIDs, widths, heights and text, what's guessed said and every fault told, a cap's and the build's apart from the file's, each font read once and charged to a budget, and a stream past a cap the caller's to know; the strings a page's content shows, in order and in their fonts, forms followed, as PDFium reads them for its text; simple fonts' encodings and the text of glyph names; the standard 14's names as PDFium takes them, with Adobe's metrics, their dictionaries, and text in their codes, a character with none refused; how PDFium reads each predefined CMap, with Adobe's own behind a feature; and what a font's program says of its glyphs' boxes, its heights and its text, through skrifa |
 | [pdf-linearize](crates/pdf-linearize) | PDF files laid out for reading over a network, with no object model of its own: a graph of objects, of any model, planned into Annex F's order, numbers and object streams, and the bytes around a caller's bodies assembled, the padded dictionary, both cross-reference sections and the hint tables, which also read back from any bytes, under caps; a document of pdf-structure's written so, its inherited attributes pushed down, in the clear or encrypted, a direct `/Info` encrypted as an object and an RC4 file's keystreams reused only where the caller accepts the leak; and the facts of any file that says it's one held against each other, each finding graded, and what the reader didn't read or a cap stopped told as not judged, never as the file's |
-| [pdfs](crates/pdfs) | The family in one dependency: pdf-tokenizer, pdf-objects, pdf-filters, pdf-crypt, pdf-structure, pdf-color, pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize, each re-exported whole at the versions it's built with; and a file read through them with a viewer's defaults: its pages, their content, fonts and text, what it says of itself and claims, and whether its linearization holds; and a document written, new or a file edited, its pages drawn, the standard 14 fonts by name and claims as XMP, saved whole, linearized or as an update, in the clear or encrypted |
+| [pdfs](crates/pdfs) | The family in one dependency: pdf-tokenizer, pdf-objects, pdf-filters, pdf-crypt, pdf-structure, pdf-color, pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize, each re-exported whole at the versions it's built with; and a file read through them with a viewer's defaults: its pages, their content, fonts and text, what it says of itself and claims, and whether its linearization holds; and a document written, new or a file edited, its pages drawn, the standard 14 fonts by name and claims as XMP, saved whole, linearized or as an update, in the clear or encrypted; each recipe also a function over the family's traits, for a reading or a document of the caller's own |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 | [pdf-fixtures](crates/pdf-fixtures) | The tests' PDF files, written from pdf-objects' values, whole or by hand and encrypted, and qpdf run as a second reader and decoder: the workspace's own, which the crates' tests take by its path, never published |
 | [pdf-linearize-lopdf](crates/pdf-linearize-lopdf) | A document of lopdf's written as a linearized file through pdf-linearize's engine, in the clear, by plain functions over its public objects, as the family's adapter places and pushes down: the workspace's own, never published |
@@ -77,51 +77,50 @@ installed (CI installs 0.51.0 on a Rust pinned beside it).
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`,
 `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`, `just fuzz
-linearize`, `just fuzz pdfs` and `just fuzz check` fuzz the tokenizer, by ISO
-32000-2's rules and PDFium's, the filters, decoding and encoding, pdf-crypt's handler, new
-files' dictionaries and a password's forms, pdf-objects' parser, by ISO
-32000-2's rules and PDFium's, its writer and text strings, pdf-structure's
-reader and writer, pdf-content-streams' tokens, operations, faults, operator
-table, the balance, marked content and names over them, its writer, content
-written again and the calls, its splices and lists written again, an
-image's color space counted alike in its dictionary and in the resources,
-and a page's `/Contents` joined,
+linearize`, `just fuzz pdfs` and `just fuzz check` fuzz the tokenizer, by
+ISO 32000-2's rules and PDFium's, the filters, decoding and encoding,
+pdf-crypt's handler, new files' dictionaries and a password's forms,
+pdf-objects' parser, by ISO 32000-2's rules and PDFium's, its writer and
+text strings, pdf-structure's reader and writer, pdf-content-streams'
+tokens, operations, faults, operator table, the balance, marked content and
+names over them, its writer, content written again and the calls, its
+splices and lists written again, an image's color space counted alike in its
+dictionary and in the resources, and a page's `/Contents` joined,
 pdf-semantics' name and number trees, page tree, dates and XMP claims, each
 read and written, a file's packet read through its streams and its document
-information dictionary read,
-pdf-color's count of a space's components, its typed spaces and what a
-resources dictionary names, pdf-fonts' scan of a Type 1 program under its
-caps, its reading of names, text written in a standard 14 font and read
-back, a font and its program as parts and as a file, and the strings any
-content shows in those fonts and in forms, under
-smaller caps less, pdf-linearize's plan of any graph, what's assembled from it, hint
-tables from any bytes, any facts of a file, judged alike whatever the sink
-and nothing judged of what they say wasn't read, and any bytes as a file
-laid out in the clear, under its own encryption and under a new one, read
-back and checked, and under caps on its trees, a file read through pdfs, its
-pages' text and fonts among it, and written in the clear and encrypted, read locked and unlocked,
-and a new document of its first pages saved each way and read back, and the reader
-and checker, on nightly with
-[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
-says for how many seconds (60 by default), and a third the features they're
-built with: `simd`, pdf-content-streams' dependencies on the CPU's SIMD
-(`just fuzz content 300 simd`), and `predefined-cmaps`, Adobe's predefined
-CMaps from pdf-fonts' bundle, which pdf-lint's binary is built without
-(`just fuzz fonts 300 predefined-cmaps`). CI fuzzes each target the same
-way, `content` again with `simd` and `fonts` again with `predefined-cmaps`:
-two minutes on every pull request and push to main, and half an hour twice
-a week, each run starting from the inputs the runs before it kept
-(`.github/workflows/fuzz.yml`).
+information dictionary read, pdf-color's count of a space's components, its
+typed spaces and what a resources dictionary names, pdf-fonts' scan of a
+Type 1 program under its caps, its reading of names, text written in a
+standard 14 font and read back, a font and its program as parts and as a
+file, and the strings any content shows in those fonts and in forms, under
+the defaults and smaller caps, pdf-linearize's plan of any graph, what's
+assembled from it, hint tables from any bytes, any facts of a file, judged
+alike whatever the sink and nothing judged of what they say wasn't read, and
+any bytes as a file laid out in the clear, under its own encryption and
+under a new one, read back and checked, and under caps on its trees, a file
+read through pdfs, its pages' text and fonts among it, and written in the
+clear and encrypted, read locked and unlocked, and a new document of its
+first pages saved each way and read back, and the reader and checker, on
+nightly with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second
+argument says for how many seconds (60 by default), and a third the features
+they're built with: `simd`, pdf-content-streams' dependencies on the CPU's
+SIMD (`just fuzz content 300 simd`), and `predefined-cmaps`, Adobe's
+predefined CMaps from pdf-fonts' bundle, which pdf-lint's binary is built
+without (`just fuzz fonts 300 predefined-cmaps`). CI fuzzes each target the
+same way, `content` again with `simd` and `fonts` again with
+`predefined-cmaps`: two minutes on every pull request and push to main, and
+half an hour twice a week, each run starting from the inputs the runs before
+it kept (`.github/workflows/fuzz.yml`).
 
 ## License
 
 pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
 pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts, pdf-linearize,
 pdfs, pdf-fixtures and pdf-linearize-lopdf are licensed under either of
-Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
-([LICENSE-MIT](LICENSE-MIT)) at your option, pdf-fonts' data under the terms
-each of its files carries, and what it takes from FreeType under FreeType's,
-[`FTL.TXT`](crates/pdf-fonts/FTL.TXT)
+Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT
+license ([LICENSE-MIT](LICENSE-MIT)) at your option, pdf-fonts' data under
+the terms each of its files carries, and what it takes from FreeType under
+FreeType's, [`FTL.TXT`](crates/pdf-fonts/FTL.TXT)
 ([its README](crates/pdf-fonts/README.md#license)). pdf-lint and
 pdf-arlington are licensed under the Apache License, Version 2.0, as is the
 Arlington model pdf-arlington embeds.

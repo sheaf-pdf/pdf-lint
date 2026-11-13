@@ -6,8 +6,8 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdfs"
-description = "One crate for reading and writing PDF files: the PDF crates of one family, each re-exported whole at the versions it's built with"
-keywords = ["pdf", "parser", "writer", "text", "fonts"]
+description = "Read and write PDF files through one dependency: pages, content, text and fonts, metadata, encryption and linearization, over a family of PDF crates re-exported whole"
+keywords = ["pdf", "parser", "writer", "text-extraction", "encryption"]
 categories = ["encoding", "parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]

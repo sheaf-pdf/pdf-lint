@@ -173,7 +173,7 @@ impl<'a> Options<'a> {
     }
 
     /// The reading's options: these, the rest pdf-structure's defaults.
-    fn reading(&self) -> read::Options<'a> {
+    const fn reading(&self) -> read::Options<'a> {
         let mut options = read::Options::DEFAULT;
         options.limits = self.limits.read;
         options.flate = self.flate;

@@ -240,8 +240,8 @@ impl<'p> Document<'p> {
     /// extension level 8 to PDF 1.7 defines them. A caller may declare it in
     /// the catalog's `/Extensions` (ISO 32000-2, 7.12), as
     /// `/ADBE << /BaseVersion /1.7 /ExtensionLevel 8 >>`; nothing here does.
-    /// Or it saves the file as PDF 2.0 ([`Document::save_with`]), which then
-    /// asks more ([`Document::save_with_to`]).
+    /// Or a caller saves the file as PDF 2.0 ([`Document::save_with`]), which
+    /// then asks more ([`Document::save_with_to`]).
     ///
     /// # Errors
     ///
@@ -376,9 +376,9 @@ impl<'p> Document<'p> {
     /// written in first, then every object through pdf-structure's
     /// [`write::document`], encrypted as the document is, an edited one's
     /// objects as read copied from its file where they copy. What it wrote
-    /// is said ([`Written`]). Saved under a version of PDF 2.0, a new
-    /// document goes without two things PDF 2.0 asks for and earlier versions
-    /// don't: a standard 14 font's widths
+    /// is said ([`Written`]). Saved under a version of PDF 2.0, it can go
+    /// without two things PDF 2.0 asks for and earlier versions don't: a
+    /// standard 14 font's widths, where a page added draws in one
     /// ([`Std14::dict`](pdf_fonts::Std14::dict) has none), and the trailer's
     /// `/ID` (ISO 32000-2, 7.5.5), which pdf-structure's writer gives a file
     /// only where it's encrypted or had one. Under a new encryption
@@ -666,7 +666,7 @@ impl<'p> Document<'p> {
 
 /// The deflation a save does unless it's told otherwise: zlib-rs at level 6,
 /// as PDFium's zlib inflates what it reads.
-fn deflate() -> Deflate {
+const fn deflate() -> Deflate {
     let mut deflate = Deflate::DEFAULT;
     deflate.backend = Backend::ZlibRs;
     deflate.level = Level::DEFAULT;

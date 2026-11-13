@@ -17,9 +17,10 @@ pub struct Limits {
     /// entries are read, and pdf-objects' parser's caps on each object.
     pub read: pdf_structure::Limits,
     /// What a page's content is read under (pdf-content-streams'): what its
-    /// streams joined come to ([`content`](pdf_content_streams::Limits::content)),
-    /// its operands and nesting, its inline images, and pdf-color's caps on
-    /// a color space its resources name.
+    /// streams joined come to
+    /// ([`content`](pdf_content_streams::Limits::content)), its operands and
+    /// nesting, its inline images, and pdf-color's caps on a color space its
+    /// resources name.
     pub content: pdf_content_streams::Limits,
     /// What a page tree, a name tree and an XMP packet are walked under
     /// (pdf-semantics'). Its `page_depth`, `tree_depth` and `tree_nodes` are

@@ -1,65 +1,74 @@
-//! Read and write PDF files through one dependency: the crates of one
-//! family, each re-exported whole, so that a caller names any of their
-//! types through `pdfs`, at the versions it's built with, and gets one set
-//! that works together; and the recipes that span them, with a viewer's
-//! defaults on top.
+//! Read and write PDF files through one dependency. The crates of one family
+//! are re-exported whole, each at the version this one is built with, so a
+//! caller names any of their types through it ([`pdf_structure`], say), and
+//! they work together. On top of them are the recipes that span them, with a
+//! viewer's defaults.
 //!
-//! - **A file read** ([`open`] by its path, [`from_bytes`] from a source),
-//!   under [`Options`] whose defaults are PDFium's: a [`Pdf`], each object
+//! - **Open a file** ([`open`] by its path, [`from_bytes`] from memory or any
+//!   source) under [`Options`], a viewer's by default: a [`Pdf`], each object
 //!   read when it's first asked for, from any thread.
-//! - **Its pages** ([`Pdf::pages`]), each with what it inherits and from
-//!   where, and **a page's content** ([`Page::content`]), its streams
+//! - **List its pages** ([`Pdf::pages`]), each with what it inherits and from
+//!   where, and **read a page's content** ([`Page::content`]), its streams
 //!   decoded and joined, and its operations.
-//! - **A page's text** ([`Page::text`]): the strings its content shows, in
-//!   order, each in its font, the forms it draws followed, as PDFium reads
-//!   them, with no layout; and **its fonts** ([`Page::fonts`]), each read once
-//!   a file.
-//! - **What the file is and says**: its version, its encryption, what its
-//!   document information dictionary says and its XMP claims, whether its
-//!   linearization holds, and any stream's data decoded.
-//! - **A document written** ([`Document::new`], or a file read and edited,
-//!   [`Pdf::edit`]): its pages added, each drawn by a content writer, what
-//!   they draw with written once a file, the standard 14 fonts by name
-//!   ([`standard_font`]) and claims as XMP; saved whole, linearized or as an
-//!   update appended to the file read, in the clear or encrypted, an edited
-//!   file under its own encryption unless told otherwise.
-//! - **One set of caps** ([`Limits`]) nesting each crate's, and **one
-//!   error** ([`Error`]) wrapping each crate's.
-//! - **Each recipe a function** ([`page`](mod@page), [`file`](mod@file),
-//!   [`build`](mod@build)) over the family's traits, for a caller with a
-//!   reading or a document of its own, and **what else a file holds**
-//!   through the reading ([`Pdf::reading`]) and the crates.
+//! - **Read a page's text and fonts** ([`Page::text`], [`Page::fonts`]): the
+//!   strings its content shows, in order, each in its font, the forms it
+//!   draws followed, as PDFium reads them for its text, with no layout.
+//! - **Read what the file says of itself**: its version, its encryption, its
+//!   document information dictionary and XMP claims, whether its
+//!   linearization holds ([`Pdf::linearized`]), and any stream's data.
+//! - **Write a document** ([`Document::new`], or a file edited,
+//!   [`Pdf::edit`]): pages added, each drawn by a content writer, the
+//!   standard 14 fonts by name ([`standard_font`]) and claims as XMP; saved
+//!   whole, linearized or as an update, in the clear or encrypted.
+//! - **Call a recipe as a function** ([`page`](mod@page), [`file`](mod@file),
+//!   [`build`](mod@build)) over a reading or a document of your own. The
+//!   [`prelude`] names what they take and give.
 //!
-//! What a call meets that departs from the standard is told to the sink its
-//! `_with` form is given, each crate's faults to that crate's sink; its plain
-//! form tells nothing, and looks for nothing. Nothing reads past a cap
-//! without saying so, and no file makes it panic.
+//! One [`Limits`] holds every crate's caps, and one [`Error`] wraps every
+//! crate's error. Past a cap, a call says so, and no file makes it panic. A
+//! call's `_with` form tells a crate's faults to the sink it's given. Its
+//! plain form tells nothing, and looks for nothing.
 //!
-//! A page's content, read from a file in memory:
+//! # Features
+//!
+//! - **`programs`** and **`clock`**, on by default: pdf-fonts reads a font's
+//!   program, and pdf-semantics has `Date::now`.
+//! - **`image-ends`**, **`predefined-cmaps`** and **`simd`**, off by default:
+//!   pdf-content-streams ends an inline image's data by decoding it, pdf-fonts
+//!   reads Adobe's predefined CMaps, and pdf-content-streams' dependencies use
+//!   the CPU's SIMD.
+//! - **`tracing`**, off by default: a span at `debug` over each recipe, and
+//!   each crate's own. A span's fields are numbers, never a byte of a file.
+//! - **`insecure-test-writer`**, off by default, for tests and fuzzing:
+//!   pdf-structure's test writer, a new encryption's key from a seeded
+//!   generator, so a test writes the same bytes each run. It's never for a
+//!   document's protection, and a build that ships leaves it off.
+//!
+//! A page's text, from a file written here first:
 //!
 //! ```
-//! let file = b"%PDF-1.7\n\
-//!     1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
-//!     2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>\nendobj\n\
-//!     3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n\
-//!     4 0 obj\n<< /Length 27 >>\nstream\n0 0 1 rg 72 72 144 144 re f\nendstream\nendobj\n\
-//!     xref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n\
-//!     0000000139 00000 n \n0000000202 00000 n \n\
-//!     trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n279\n%%EOF\n";
+//! use pdfs::prelude::*;
 //!
-//! let pdf = pdfs::from_bytes(&file[..]).unwrap();
+//! // A file of one page, written here so the example runs on its own.
+//! let mut doc = Document::new();
+//! let page = doc.add_page(Rect::LETTER);
+//! page.begin_text();
+//! page.font(standard_font(Std14::Helvetica), 24.0);
+//! page.text_move(72.0, 700.0);
+//! page.show(&Std14::Helvetica.codes("Hello, world").unwrap());
+//! page.end_text();
+//! let file = doc.to_bytes().unwrap();
+//!
+//! // Read it as any file is read.
+//! let pdf = pdfs::from_bytes(file).unwrap();
 //! let pages = pdf.pages().unwrap();
 //! assert_eq!(pages.len(), 1);
-//! let page = pages.get(0).unwrap();
-//! assert_eq!(page.attributes().media_box().value.0, [0.0, 0.0, 612.0, 792.0]);
-//!
-//! let content = page.content().unwrap();
-//! assert_eq!(content.bytes(), b"0 0 1 rg 72 72 144 144 re f");
-//! let operators: Vec<Vec<u8>> = content
-//!     .operations()
-//!     .map(|operation| operation.unwrap().name().to_vec())
-//!     .collect();
-//! assert_eq!(operators, [&b"rg"[..], b"re", b"f"]);
+//! for page in &pages {
+//!     assert_eq!(page.attributes().media_box().value, Rect::LETTER);
+//!     let shown = page.text().unwrap();
+//!     assert_eq!(shown.text(), "Hello, world");
+//!     assert!(shown.is_whole());
+//! }
 //! ```
 
 pub use build::standard_font;
@@ -150,6 +159,50 @@ mod tests {
                 "a link isn't a URL: {target}"
             );
         }
+    }
+
+    /// The crate doc's example is the README's first, line for line, so that
+    /// what docs.rs shows first and what crates.io shows first are one
+    /// example, and each runs as a doctest.
+    #[test]
+    fn the_crate_docs_example_is_the_readmes_first() {
+        let readme: Vec<&str> = (include_str!("../README.md").lines())
+            .skip_while(|line| *line != "```rust")
+            .skip(1)
+            .take_while(|line| *line != "```")
+            .collect();
+        let doc: Vec<&str> = (include_str!("lib.rs").lines())
+            .map_while(|line| line.strip_prefix("//!"))
+            .map(|line| line.strip_prefix(' ').unwrap_or(line))
+            .skip_while(|line| *line != "```")
+            .skip(1)
+            .take_while(|line| *line != "```")
+            .collect();
+        assert!(readme.len() > 10, "the README's first example: {readme:?}");
+        assert_eq!(doc, readme);
+    }
+
+    /// What the crate gives a caller is sent to and shared by any thread: a
+    /// file being read and what's read of it, a page's content and text, a
+    /// document being written, and their options, caps and errors.
+    #[test]
+    fn what_it_gives_is_sent_and_shared() {
+        fn shared<T: Send + Sync>() {}
+        shared::<crate::Pdf>();
+        shared::<crate::Pdf<&[u8]>>();
+        shared::<crate::Pdf<std::sync::Arc<[u8]>>>();
+        #[cfg(any(unix, windows))]
+        shared::<crate::Pdf<pdf_structure::read::FileBytes>>();
+        shared::<crate::Pages<'_, Vec<u8>>>();
+        shared::<crate::Page<'_, Vec<u8>>>();
+        shared::<crate::PagesIter<'_, Vec<u8>>>();
+        shared::<crate::Content>();
+        shared::<crate::NamedFont>();
+        shared::<pdf_fonts::Shown>();
+        shared::<crate::Document<'_>>();
+        shared::<crate::Options<'_>>();
+        shared::<crate::Limits>();
+        shared::<crate::Error>();
     }
 }
 

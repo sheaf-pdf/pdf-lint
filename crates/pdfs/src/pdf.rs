@@ -328,8 +328,9 @@ impl<S: ByteSource> Pdf<S> {
     ///
     /// [`Error::Read`] where the source doesn't give its bytes, and
     /// [`Error::Write`] where it's encrypted and no password opened it
-    /// ([`Locked`](pdf_structure::write::Error::Locked)), or its security handler is one the reader
-    /// can't open: there's nothing to write its strings and streams from.
+    /// ([`Locked`](pdf_structure::write::Error::Locked)), or its security
+    /// handler is one the reader can't open: there's nothing to write its
+    /// strings and streams from.
     pub fn edit(&self) -> Result<Document<'_>, Error> {
         phase!(DEBUG, "edit", bytes = self.reading.size());
         let doc = self.reading.to_document()?;

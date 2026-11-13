@@ -94,7 +94,7 @@ clippy:
 # only its tests read, and with no feature at all; then pdf-structure's
 # with its spans, which only those tests read; then pdfs's as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
-# and with every feature it forwards.
+# and with every feature it forwards but its test writer.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters
@@ -507,7 +507,8 @@ linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize-lopdf
 
 # Test pdfs on its oldest supported Rust, which must be installed, as it's
-# published, with no feature, and with every feature it forwards.
+# published, with no feature, and with every feature it forwards but its test
+# writer.
 pdfs-msrv:
     cargo +{{ pdfs_msrv }} test --locked -p pdfs
     cargo +{{ pdfs_msrv }} test --locked -p pdfs --no-default-features

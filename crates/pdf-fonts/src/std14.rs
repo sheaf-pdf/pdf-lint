@@ -236,7 +236,9 @@ impl Std14 {
     /// encoding that names, WinAnsiEncoding for the twelve Latin ones and their
     /// own for Symbol and ZapfDingbats ([`Encoding::code`]), one byte each. So
     /// the codes read back as `text` in that font
-    /// ([`Font::text`](crate::Font::text)), as PDFium reads its text.
+    /// ([`Font::text`](crate::Font::text)), as PDFium's font reads them.
+    /// PDFium's text page writes two of WinAnsiEncoding's otherwise: a
+    /// no-break space (0xA0) as a space, and a soft hyphen (0xAD) as a hyphen.
     ///
     /// ```
     /// use pdf_fonts::{Std14, Unencodable};

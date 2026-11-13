@@ -581,7 +581,7 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdfs/Cargo.toml, which
       # `just pdfs-msrv` reads, as published, with no feature, and with every
-      # feature it forwards.
+      # feature it forwards but its test writer.
       - uses: dtolnay/rust-toolchain@1.89
       - uses: extractions/setup-just@v4
       - name: Test

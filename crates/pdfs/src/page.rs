@@ -116,9 +116,9 @@ impl fmt::Debug for Content {
 ///
 /// [`Error::Content`] where its streams joined are past `limits.content`, or
 /// a stream, or `/Contents` or an element of it, doesn't read for the
-/// reader's own reason, its [`Why`](pdf_objects::Why) kept (pdf-content-streams'
-/// [`Pushed`](pdf_content_streams::Pushed)); [`Error::Unreadable`] where an
-/// object of its resources doesn't.
+/// reader's own reason, its [`Why`](pdf_objects::Why) kept
+/// (pdf-content-streams' [`Pushed`](pdf_content_streams::Pushed));
+/// [`Error::Unreadable`] where an object of its resources doesn't.
 pub fn content<'o, O>(
     objects: O,
     page: &pages::Page<'o>,
