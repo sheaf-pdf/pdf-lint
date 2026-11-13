@@ -3,7 +3,7 @@
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
 # `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz linearize` or `just fuzz check`, or:
+# `just fuzz linearize`, `just fuzz pdfs` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -132,6 +132,16 @@
 # runs on mutated files, its new encryption drawn from the input and every IV
 # derived, so that an input writes the same bytes each run, which a fourth
 # (`what_is_written_of_an_input_is_the_same_bytes_each_time`) holds.
+# `pdfs` calls `pdfs::fuzz::read`, a file read through the facade under its
+# defaults, with faults kept, the same, and under small caps: its version,
+# catalog, `/Info`, claims, pages, each page's content joined within its cap
+# and its operations walked, and its linearization's verdict, holding only
+# where it's linearized; and its document written in the clear and under a
+# new encryption, its key drawn from the input, read locked, each page's
+# content refused as locked, and unlocked by its password, read as in the
+# clear; which three stable unit tests (`the_seeds_keep_every_promise_and_reach_each`,
+# `mutated_seeds_keep_every_promise` and `random_bytes_keep_every_promise`)
+# run on its seeds, mutated seeds and random bytes.
 # The lopdf adapter's body, in its crate (pdf-linearize-lopdf), which is never
 # published, isn't here: a stable test of that crate
 # (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
@@ -175,6 +185,10 @@ pdf-fonts = { path = "../crates/pdf-fonts" }
 pdf-linearize = { path = "../crates/pdf-linearize", features = ["insecure-test-writer"] }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
+# With its defaults, as a user builds it, and its test writer, so the pdfs
+# target's new encryption is drawn from the input and every IV derived: an
+# input writes the same bytes each run, and a saved one reruns as it ran.
+pdfs = { path = "../crates/pdfs", features = ["insecure-test-writer"] }
 pdf-objects = { path = "../crates/pdf-objects" }
 # With its default features, so the semantics target fuzzes the clock's
 # reading of a count of seconds too.
@@ -262,6 +276,13 @@ bench = false
 [[bin]]
 name = "linearize"
 path = "fuzz_targets/linearize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdfs"
+path = "fuzz_targets/pdfs.rs"
 test = false
 doc = false
 bench = false

@@ -62,6 +62,9 @@ pub use pdf::{Page, Pages, PagesIter, Pdf};
 
 mod error;
 pub mod file;
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz;
 mod limits;
 mod open;
 pub mod page;

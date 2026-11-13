@@ -77,8 +77,8 @@ installed (CI installs 0.51.0 on a Rust pinned beside it).
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`,
 `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`, `just fuzz
-linearize` and `just fuzz check` fuzz the tokenizer, by ISO 32000-2's rules
-and PDFium's, the filters, decoding and encoding, pdf-crypt's handler, new
+linearize`, `just fuzz pdfs` and `just fuzz check` fuzz the tokenizer, by ISO
+32000-2's rules and PDFium's, the filters, decoding and encoding, pdf-crypt's handler, new
 files' dictionaries and a password's forms, pdf-objects' parser, by ISO
 32000-2's rules and PDFium's, its writer and text strings, pdf-structure's
 reader and writer, pdf-content-streams' tokens, operations, faults, operator
@@ -96,7 +96,9 @@ file, pdf-linearize's plan of any graph, what's assembled from it, hint
 tables from any bytes, any facts of a file, judged alike whatever the sink
 and nothing judged of what they say wasn't read, and any bytes as a file
 laid out in the clear, under its own encryption and under a new one, read
-back and checked, and under caps on its trees, and the reader and checker, on nightly with
+back and checked, and under caps on its trees, a file read through pdfs, and
+written in the clear and encrypted, read locked and unlocked, and the reader
+and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default), and a third the features they're
 built with: `simd`, pdf-content-streams' dependencies on the CPU's SIMD

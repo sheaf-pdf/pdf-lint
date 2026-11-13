@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, check]
+        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, pdfs, check]
         # The features fuzz/ is built with: none, for each target. A run
         # given features of its own is a combination of its own, as it sets
         # this key, so it doesn't change the target's run without them.
