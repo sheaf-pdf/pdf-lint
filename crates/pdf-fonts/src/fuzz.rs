@@ -1,13 +1,15 @@
 //! What the fuzz target checks, which unit tests check too: the promises a Type 1
-//! program's scan, a glyph's or a font's name and a font's reading, its program's
-//! included, make, on any input. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`.
+//! program's scan, a glyph's or a font's name, a font's reading, its program's
+//! included, and the strings content shows make, on any input. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 
+use pdf_content_streams::{Concat, ResCx};
 use pdf_objects::fault::Place;
 use pdf_objects::object::Stream;
 use pdf_objects::parse::Parser;
@@ -23,7 +25,8 @@ use crate::fixture::{
 use crate::predefined::{Collection, scheme};
 use crate::type1::{Refusal, scan};
 use crate::{
-    Encoding, Error, Fault, Font, Fonts, Limits, Std14, cp1252, glyph_text, name_code_point,
+    Encoding, Error, Fault, Font, Fonts, Limits, Shown, Std14, Unread, cp1252, glyph_text,
+    name_code_point,
 };
 
 /// How many of an input's words are read as names, as a run of the target
@@ -667,6 +670,133 @@ where
     fonts
 }
 
+/// `data` as a page's content, drawn with the fonts its parts make ([`objects_of`]),
+/// Helvetica, and two forms, one of `data` too, which may draw itself, and one with
+/// no resources of its own: what it shows ([`shown`](crate::shown)),
+/// every promise held. It never panics. The budget never rises. It's the same twice,
+/// the second time over the fonts the first read and kept, and charged alike. Nothing
+/// fails to read for the caller's reason, as nothing is made to. Under a cap of fewer
+/// forms, under the content's caps made small and within a smaller budget, what's
+/// shown is what's shown under the defaults, less some. How many strings it shows.
+pub fn shown(data: &[u8]) -> usize {
+    let mut objects = objects_of(data);
+    let resources = Object::from(dict! {
+        "Font" => dict! {
+            "F1" => Object::reference(9), "F2" => Object::reference(1),
+            "H" => dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+        },
+        "XObject" => dict! { "X" => Object::reference(7), "Y" => Object::reference(8) },
+    });
+    let form = |resources: Option<&Object>, content: &[u8]| {
+        let mut dict = dict! { "Subtype" => "Form" };
+        if let Some(resources) = resources {
+            dict.set("Resources", resources.clone());
+        }
+        Object::from(Stream::new(dict, content.to_vec()))
+    };
+    objects.insert(ObjectId::new(7, 0), form(Some(&resources), data));
+    objects.insert(ObjectId::new(8, 0), form(None, b"(Y) Tj /F2 9 Tf (y) Tj"));
+    let file = Map(&objects);
+    let content = Concat::new(&[data]);
+    let walk = |fonts: &Fonts, limits: &Limits, budget: usize| {
+        let mut left = budget;
+        let read = crate::shown(
+            file,
+            fonts,
+            Some(&resources),
+            &content,
+            &ResCx::none(),
+            limits,
+            &mut left,
+        );
+        assert!(left <= budget);
+        for unread in &read.unread {
+            let failed = match unread {
+                Unread::Form { error, .. } | Unread::Font { error, .. } => error,
+                _ => continue,
+            };
+            assert_eq!(failed, &Error::TooLarge, "nothing was made to fail");
+        }
+        let _ = read.text();
+        (said_of(&read), budget - left)
+    };
+    let limits = Limits::DEFAULT;
+    let fonts = Fonts::default();
+    let (read, spent) = walk(&fonts, &limits, SHOWN_BUDGET);
+    assert_eq!(walk(&fonts, &limits, SHOWN_BUDGET), (read.clone(), spent));
+    assert_eq!(
+        walk(&Fonts::default(), &limits, SHOWN_BUDGET),
+        (read.clone(), spent)
+    );
+    let mut small = Limits::DEFAULT;
+    small.forms = 2;
+    small.form_uses = 8;
+    small.content.operands = 4;
+    small.content.depth = 4;
+    small.content.values = 16;
+    let fewer = [
+        walk(&fonts, &small, SHOWN_BUDGET).0,
+        walk(&fonts, &limits, spent / 2).0,
+    ];
+    for fewer in fewer {
+        assert!(
+            within(&fewer.0, &read.0),
+            "{} of {}",
+            fewer.0.len(),
+            read.0.len()
+        );
+    }
+    read.0.len()
+}
+
+/// What content is read within here ([`shown`]): a form drawn within itself twice is
+/// drawn until this is spent, which a run spends in a few milliseconds.
+const SHOWN_BUDGET: usize = 1 << 16;
+
+/// A string shown, as what can be held the same across fonts read apart: its bytes,
+/// its form, where it's written, its font's object and its text.
+type Said = (
+    Vec<u8>,
+    Option<ObjectId>,
+    Range<usize>,
+    Option<ObjectId>,
+    Option<String>,
+);
+
+/// What's shown, said ([`Said`]), and what wasn't read.
+fn said_of(shown: &Shown) -> (Vec<Said>, Vec<Unread>) {
+    let strings = shown
+        .strings
+        .iter()
+        .map(|s| (s.bytes.clone(), s.form, s.at.clone(), s.font.id(), s.text()));
+    (strings.collect(), shown.unread.clone())
+}
+
+/// Whether `fewer` is `all` with none or some of its strings left out, the rest in
+/// the same order. A string left out isn't shown where something wasn't read, which
+/// shows nothing in its place; a string shown is the same, as each is shown by what
+/// was read before it.
+fn within(fewer: &[Said], all: &[Said]) -> bool {
+    let mut all = all.iter();
+    fewer.iter().all(|said| all.any(|other| other == said))
+}
+
+/// A page's content, as the fuzzer's first inputs: each operator the walk reads, the
+/// forms it draws, and a font's parts after it.
+fn content_fixtures() -> Vec<Vec<u8>> {
+    vec![
+        b"BT /F1 12 Tf (Hello) Tj [(W) -20 (orld)] TJ 14 TL (a) ' 1 2 (b) \" ET".to_vec(),
+        b"/H 9 Tf q /F2 9 Tf (A) Tj Q (A) Tj Q Q /Y Do /F9 9 Tf (A) Tj".to_vec(),
+        b"/H 9 Tf (A) Tj /X Do".to_vec(),
+        parts(&[
+            b"<< /Subtype /Type1 /BaseFont /Courier /ToUnicode 3 0 R >>",
+            b"",
+            b"1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <41> <0042> endbfchar",
+            b"/F2 9 Tf (A) Tj /Y Do",
+        ]),
+    ]
+}
+
 /// A font's parts as one input.
 fn parts(parts: &[&[u8]]) -> Vec<u8> {
     parts.join(FONT_PART)
@@ -826,6 +956,7 @@ pub fn fixtures() -> Vec<Vec<u8>> {
     ]
     .into_iter()
     .chain(font_fixtures())
+    .chain(content_fixtures())
     .collect()
 }
 
@@ -905,11 +1036,13 @@ mod tests {
             type1(&seed);
             names(&seed);
             fonts(&seed);
+            shown(&seed);
             for _ in 0..50 {
                 let data = mutated(&seed, &mut random);
                 type1(&data);
                 names(&data);
                 fonts(&data);
+                shown(&data);
             }
         }
         assert!(found >= 4, "the seeds hold programs that read: {found}");
@@ -921,6 +1054,13 @@ mod tests {
         for seed in font_fixtures() {
             assert!(fonts(&seed), "{}", seed.escape_ascii());
         }
+    }
+
+    /// What each page's content among the seeds shows: strings, in each font.
+    #[test]
+    fn the_contents_among_the_seeds_show_strings() {
+        let shows: Vec<usize> = content_fixtures().iter().map(|seed| shown(seed)).collect();
+        assert_eq!(shows, [5, 5, 41, 3]);
     }
 
     /// A seed's objects as a file, each stream's data as it is; a seed that's no such
@@ -1010,6 +1150,7 @@ mod tests {
             type1(&data);
             names(&data);
             fonts(&data);
+            shown(&data);
         }
     }
 

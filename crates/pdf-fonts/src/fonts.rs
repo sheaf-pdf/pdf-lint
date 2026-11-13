@@ -306,6 +306,11 @@ impl FontScope<'_> {
         &self.picked[font.0 as usize]
     }
 
+    /// [`FontScope::get`], as it's kept: shared.
+    pub(crate) fn shared(&self, font: FontId) -> &Arc<Font> {
+        &self.picked[font.0 as usize]
+    }
+
     /// `font` among those picked. There are fewer than operators interpreted, which
     /// are capped far below 2^32.
     fn add(&mut self, font: Arc<Font>) -> FontId {

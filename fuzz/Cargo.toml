@@ -113,9 +113,12 @@
 # holding no more than it was given, and under other caps the same or refused;
 # `pdf_fonts::fuzz::names`, an input's words read as glyphs' and fonts' names,
 # and its bytes as codes in each encoding; `fonts`, its parts read as a font, a
-# program among them; and `over`, as a file, each font in it the same; which four
+# program among them; `shown`, the input as a page's content, the strings it shows
+# in those fonts and in forms, the same over fonts kept and less under smaller caps
+# and a smaller budget; and `over`, as a file, each font in it the same; which five
 # stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_bytes_keep_every_promise`, `the_fonts_among_the_seeds_read`,
+# `the_contents_among_the_seeds_show_strings`,
 # `files_read_alike_through_a_reading_and_a_map`) run;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks

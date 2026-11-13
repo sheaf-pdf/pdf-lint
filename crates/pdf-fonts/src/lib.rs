@@ -10,6 +10,10 @@
 //!   guesses, it says ([`FontApprox`]).
 //! - **Read each font once** ([`Fonts`], [`FontScope`]), kept for every page that draws
 //!   in it, and charged to each page's budget.
+//! - **Read the strings a page's content shows** ([`shown`]), in order, each in its
+//!   font, the forms it draws followed to [`Limits::forms`] deep, as PDFium reads them
+//!   for its text, with no layout, and drawn [`Limits::form_uses`] times at most. What
+//!   isn't read is said ([`Unread`]).
 //! - **Look up encodings and glyph names** ([`Encoding`], [`glyph_text`],
 //!   [`name_code_point`], [`cp1252`]).
 //! - **Find a standard 14 font** ([`Std14::named`]) by a name PDFium takes for it, with
@@ -35,7 +39,8 @@
 //!   ([`Fault::PredefinedNotBuilt`]).
 //! - **`tracing`**, off by default: a span at `debug` over a font read, and within it
 //!   over its program's opening, its embedded CMap's and its `/ToUnicode`'s parsing,
-//!   and a Type 3 font's CharProcs. A span's fields are numbers, never a byte of a file.
+//!   and a Type 3 font's CharProcs; and over a walk of the strings content shows
+//!   ([`shown`]). A span's fields are numbers, never a byte of a file.
 //!
 //! Helvetica-Bold by a name PDFium takes for it, its `/ToUnicode` read through its
 //! streams, and the same font past a cap of what gives them:
@@ -104,6 +109,7 @@ pub use font::{
 };
 pub use fonts::{FontId, FontScope, Fonts};
 pub use limits::Limits;
+pub use shown::{Shown, ShownString, Unread, shown};
 pub use std14::Std14;
 
 mod afm;
@@ -124,6 +130,7 @@ mod predefined;
 #[cfg_attr(not(feature = "programs"), path = "no_program.rs")]
 mod program;
 mod reader;
+mod shown;
 mod std14;
 #[cfg(test)]
 mod tests;

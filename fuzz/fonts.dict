@@ -1,7 +1,8 @@
 # What fonts are made of, for libFuzzer's -dict with the fonts target: a Type 1
 # program's headers, tokens and keys, the names glyphs, fonts, encodings and
-# predefined CMaps go by, a font dictionary's keys and values, a CMap's words, and
-# what splits an input into a font's parts.
+# predefined CMaps go by, a font dictionary's keys and values, a CMap's words, what
+# splits an input into a font's parts, and what content shows strings and draws
+# forms by.
 "%!PS-AdobeFont-1.0: "
 "%!FontType1"
 "currentfile eexec\x0a"
@@ -109,3 +110,17 @@
 "endbfrange"
 "usecmap"
 "<0041>"
+" Tf"
+" Tj"
+" TJ"
+" Do"
+" q"
+" Q"
+"BT"
+"ET"
+"/F1"
+"/F2"
+"/H"
+"/X"
+"/Y"
+"[(a) -20 (b)]"

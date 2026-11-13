@@ -1,25 +1,32 @@
-//! The caps a font is read under: one value for all of them.
+//! The caps a font is read under, and the strings content shows: one value for all
+//! of them.
 
-/// The caps on reading a font: past one, what's being read isn't read. A caller
-/// sets them on a copy of [`Limits::DEFAULT`] (`limits.glyph_fuel = 1 << 10`, say), as
-/// more may come.
+/// The caps on reading a font, and on the strings content shows ([`shown`]): past
+/// one, what's being read isn't read. A caller sets them on a copy of
+/// [`Limits::DEFAULT`] (`limits.glyph_fuel = 1 << 10`, say), as more may come.
 ///
 /// What a font's streams decompress to isn't capped here: that's the budget
 /// [`Font::read`](crate::Font::read) is given, the caller's, shared with what else
-/// it reads. What a font holds beyond its streams is bounded by what it reads:
-/// its `/W` by the array's length, its encoding at 256 strings, a CMap's mappings
-/// by the CMap's bytes.
+/// it reads, a form's content among it where [`shown`] reads one. What a font holds
+/// beyond its streams is bounded by what it reads: its `/W` by the array's length,
+/// its encoding at 256 strings, a CMap's mappings by the CMap's bytes.
+///
+/// [`shown`]: fn@crate::shown
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
-    /// The caps a CMap and a CharProc are lexed under, as content. A font's content
-    /// is read under eight of them: `operands` and `depth` for its operations,
-    /// `values` and `depth` for each operand read as an object, and `inline_image`,
-    /// `image_ends`, `coded_ends`, `space_values` and `color` for an inline image a
-    /// CharProc holds. Past one, a CMap or a CharProc is read as far as it lexes, and
-    /// an operand past `values` is none. The other four, `content`, `marked`,
-    /// `splice_reads` and `hops`, bound what a font's content never asks (a page's
-    /// streams joined, marked content kept, edits, the writer), and aren't read.
+    /// The caps a CMap and a CharProc are lexed under, as content, and the content
+    /// [`shown`](fn@crate::shown) reads. A font's content is read under eight of them:
+    /// `operands` and `depth` for its operations, `values` and `depth` for each operand
+    /// read as an object, and `inline_image`, `image_ends`, `coded_ends`,
+    /// `space_values` and `color` for an inline image a CharProc holds. Past one, a
+    /// CMap or a CharProc is read as far as it lexes, and an operand past `values` is
+    /// none. `shown` lexes a page's content and its forms' under the same eight, a
+    /// form's own color spaces counted under `color`, and reads them as far as they
+    /// lex. The other four, `content`, `marked`, `splice_reads` and `hops`, bound what
+    /// neither asks (a page's streams joined, which its caller joins, marked content
+    /// kept, edits, the writer), and aren't read: a form's content is bounded by the
+    /// budget `shown` is given.
     pub content: pdf_content_streams::Limits,
     /// How long a CMap's chain by `/UseCMap` may be, past which what's read of it
     /// is guessed, and told as [`Fault::TooManyCMaps`](crate::Fault::TooManyCMaps).
@@ -56,6 +63,19 @@ pub struct Limits {
     /// nothing's told. 32 by default. skrifa draws none nested deeper than 64,
     /// whatever's set here.
     pub composite_depth: u8,
+    /// How deep in forms [`shown`](fn@crate::shown) follows a `Do`: a form the content
+    /// given draws is 1 deep, one that form draws 2. A form deeper isn't followed, and
+    /// that's told ([`Unread::Deep`](crate::Unread::Deep)). 40 by default, as PDFium
+    /// (chromium/8125) draws a form 40 deep and none deeper, a form within itself
+    /// among them: past that, what PDFium shows isn't what's read.
+    pub forms: usize,
+    /// How many times one call of [`shown`](fn@crate::shown) draws a form, in all:
+    /// past it, a form drawn isn't followed, and that's told
+    /// ([`Unread::Many`](crate::Unread::Many)). 65,536 by default. PDFium draws a
+    /// form each time it's drawn, however many times, so forms that each draw
+    /// another twice, 40 deep, are drawn 2 to the 40 times: each is little work,
+    /// but not so many.
+    pub form_uses: usize,
 }
 
 impl Limits {
@@ -68,6 +88,8 @@ impl Limits {
         glyph_fuel: 1 << 14,
         composite_glyphs: 2049,
         composite_depth: 32,
+        forms: 40,
+        form_uses: 1 << 16,
     };
 }
 

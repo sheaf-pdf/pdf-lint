@@ -9,6 +9,7 @@ use super::type1::Refusal::{Capped, Malformed};
 use super::*;
 
 mod fonts;
+mod shown;
 
 /// An AFM's widths and codes, read here as plainly as it can be: each
 /// `C <code> ; WX <width> ; N <name>` line.
