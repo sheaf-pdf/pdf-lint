@@ -20,13 +20,29 @@
 //! - **`hints_read`** is whether the hint stream's data decoded and every table
 //!   it says it has read, under [`Limits`]. So a reading with no key for the
 //!   data can hold, as far as anything can say, with this false.
+//! - **`judged_whole`** is whether every part was judged, below: a file can
+//!   hold as far as it was, with this false.
+//!
+//! # What isn't judged
+//!
+//! What the reader didn't read for a reason of its own, and not the file's,
+//! the facts say ([`Unread`]): a hint stream, sections or a page tree no key
+//! opens, past a cap the reader reads under, or through filters it doesn't
+//! take. Of each, one finding says so ([`Grade::Unjudged`]), and nothing
+//! that depends on it is judged: it isn't the file's fault, and a verdict
+//! holds as far as the rest says. So is what's past a cap the check itself
+//! reads under ([`Limits`]): hint tables past its pages or entries, the file's
+//! graph past what a plan is made under. A sink that wants no findings learns
+//! of each but the graph's by `judged_whole`, which is false where any wasn't
+//! judged, whatever the sink.
 //!
 //! # A caller that ignores findings
 //!
 //! The [`Verdict`] is the same whatever the sink. A sink that doesn't want
 //! findings, `()`, is told none, and once there's an error nothing more is
 //! looked at, as nothing can change the verdict by then. What it still pays for
-//! is the [`Facts`] and the hint tables' reading, which `hints_read` needs.
+//! is the [`Facts`] and the hint tables' reading, which `hints_read` needs, and
+//! not the plan of the file's graph, as nothing said of it moves the verdict.
 //!
 //! # What it holds a position to
 //!
@@ -52,21 +68,24 @@ mod tests;
 
 pub use facts::{
     Attribute, Extent, Facts, FirstObject, HintData, HintFacts, PageFacts, Raw, RowEntry, RowFacts,
-    SectionFacts,
+    SectionFacts, Unread, UnreadParts,
 };
 pub use finding::{DictKey, Finding, Grade, KeyName, Place};
 
 use crate::Limits;
+use crate::phases::phase;
 
 /// Where findings are told: `Vec<Finding>` keeps them; `()` drops them and
 /// wants none, so none is looked for past what the verdict needs. A sink
 /// borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
 ///
 /// It's the check's own, not pdf-objects'
-/// [`fault::Sink`](pdf_objects::fault::Sink), which a reader of a file's
-/// objects tells with the object a fault is in: a finding is of the file's
-/// layout, and carries a place of its own ([`Finding::place`]), a key, a
-/// byte of the file or a hint table's byte or bit, so it's told whole.
+/// [`fault::Sink`](pdf_objects::fault::Sink), the family's one seam for a
+/// reader's faults, by design: that one tells a fault with the object it's
+/// in and the span of it, where a finding is of the file's layout, and its
+/// place is of its own ([`Finding::place`]), a key of the dictionary, a byte
+/// of the file, a hint table's byte or bit, a page or a shared entry, none of
+/// which is an object's span; so it's told whole, its place in it.
 pub trait Sink {
     /// One thing wrong with the file.
     fn finding(&mut self, finding: Finding);
@@ -74,6 +93,7 @@ pub trait Sink {
     /// Whether findings are wanted. A sink that doesn't want them is told none,
     /// and looking stops once the verdict is settled. True unless a sink says
     /// otherwise; asked as a check goes.
+    #[must_use]
     fn wants(&self) -> bool {
         true
     }
@@ -122,10 +142,27 @@ pub struct Verdict {
     pub holds: bool,
     /// Whether its hint stream's data decoded and every table it names read.
     pub hints_read: bool,
+    /// Whether it does and every part was judged: false where the reader
+    /// didn't read the hint stream, the sections as far as the main one, or
+    /// the page tree, for its own reason ([`Unread`]), or the hint tables are
+    /// past a cap the check reads them under, each told to a sink that wants
+    /// findings as one of [`Grade::Unjudged`]. The file's graph past what a
+    /// plan is made under isn't counted here: only a sink that wants findings
+    /// has it planned, and is told so ([`Finding::GraphCapped`]).
+    pub judged_whole: bool,
 }
 
 /// What `facts` say of each other, told to `sink`, under `limits`: the module
 /// says how.
 pub fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut S) -> Verdict {
+    phase!(DEBUG, "check", pages = facts.pages.len());
     judge::check(facts, limits, sink)
+}
+
+/// Whether `facts` say the file is linearized, as [`check`]'s verdict has it,
+/// with no span of its own: what a reader of a file's facts asks before it
+/// reads the rest.
+#[cfg(feature = "family")]
+pub(crate) fn linearized(facts: &Facts, limits: &Limits) -> bool {
+    judge::check(facts, limits, &mut ()).linearized
 }

@@ -3,7 +3,9 @@
 
 /// The caps on what a graph may ask for, or a hint stream: past one, a plan is
 /// refused, or a table, with the error that says which
-/// ([`plan::Error`](crate::plan::Error), [`hint::Error`](crate::hint::Error)).
+/// ([`plan::Error`](crate::plan::Error), [`hint::Error`](crate::hint::Error)),
+/// and a check says what it doesn't judge for it
+/// ([`Grade::Unjudged`](crate::check::Grade::Unjudged)).
 /// A caller sets them on a copy of [`Limits::DEFAULT`] (`limits.pages = 1000`,
 /// say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,11 +17,14 @@ pub struct Limits {
     /// indirect objects a file may hold (ISO 32000-1, Annex C).
     pub objects: usize,
     /// How many pages a file may have, or its hint tables say it has: 1,048,574
-    /// by default, the most PDFium counts.
+    /// by default, the most PDFium counts. With `family`, a page tree's walk
+    /// lists no more pages than this, and visits no more of its nodes, so a
+    /// tree past it isn't walked whole; the walk's other caps, on how deep a
+    /// tree goes, and on a name tree's, are pdf-semantics' defaults.
     pub pages: usize,
     /// How many entries all the lists of shared objects hold together, which
     /// is what the hint tables will write of them
-    /// ([`Plan::shared`](crate::Plan::shared)): 2^24 by default.
+    /// ([`Plan::shared`](crate::Plan::shared)): 2^25 by default.
     pub shared_entries: usize,
     /// How many objects and references making those lists may look at:
     /// 2^28 by default. Each list is a walk of what its page reaches, so a
@@ -38,7 +43,7 @@ impl Limits {
     pub const DEFAULT: Limits = Limits {
         objects: 8_388_606,
         pages: 0xFFFFE,
-        shared_entries: 1 << 24,
+        shared_entries: 1 << 25,
         shared_visits: 1 << 28,
         hint_entries: 1 << 24,
     };

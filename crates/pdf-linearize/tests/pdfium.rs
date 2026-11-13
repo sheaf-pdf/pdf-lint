@@ -1,15 +1,17 @@
-//! `check` held to PDFium's answers, case by case. Each case is in `tests/pdfium`
-//! (`cases.tsv`, its bytes in `cases/`, written by `cases.py`), with PDFium's answer
-//! for it recorded beside it at the pinned build (`chromium-N.txt`, by the
-//! repository's `oracle/pdfium.py`, which `oracle/README.md` describes); here the
-//! same words are made from what the check says of the file, and the two must agree,
-//! but for the cases `differ.tsv` names, which must still differ.
+//! `check` held to PDFium's answers, case by case. Each case is in
+//! `tests/pdfium` (`cases.tsv`, its bytes in `cases/`, written by `cases.py`),
+//! with PDFium's answer for it recorded beside it at the pinned build
+//! (`chromium-N.txt`, by the repository's `oracle/pdfium.py`, which
+//! `oracle/README.md` describes); here the same words are made from what the
+//! check says of the file, and the two must agree, but for the cases
+//! `differ.tsv` names, which must still differ.
 //!
-//! PDFium's answer starts: whether it takes the file as linearized, then, where a
-//! document opens, its count of pages and its first page. Here those are the
-//! [`Verdict`](pdf_linearize::Verdict)'s `linearized`, and what the dictionary says.
-//! What it took for each page, it took by the hint tables, so where the check says a
-//! file holds, what the page table has a page taking covers what PDFium asked for it.
+//! PDFium's answer starts: whether it takes the file as linearized, then, where
+//! a document opens, its count of pages and its first page. Here those are the
+//! [`Verdict`](pdf_linearize::check::Verdict)'s `linearized`, and what the
+//! dictionary says. What it took for each page, it took by the hint tables, so
+//! where the check says a file holds, what the page table has a page taking
+//! covers what PDFium asked for it.
 
 #![cfg(feature = "family")]
 
@@ -17,14 +19,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_linearize::check::{Facts, HintData, Raw};
+use pdf_linearize::check::{Facts, Finding, HintData, Raw, Unread, Verdict};
 use pdf_linearize::hint::{self, HintKeys};
-use pdf_linearize::{Finding, Limits, check, family};
+use pdf_linearize::{Limits, check, family};
 use pdf_structure::pdf_crypt::Password;
 use pdf_structure::read::{Options, Reading};
 
-/// What PDFium reads ahead of what it's asked for, at most: a block on either side
-/// of a read (`kAlignBlockValue`, and its parser's buffer).
+/// What PDFium reads ahead of what it's asked for, at most: a block on either
+/// side of a read (`kAlignBlockValue`, and its parser's buffer).
 const READS_AHEAD: u64 = 4096;
 
 /// The set's folder.
@@ -65,7 +67,7 @@ fn case(name: &str) -> (Vec<u8>, Option<String>) {
 }
 
 /// What the check says of the case, and its findings.
-fn checked(name: &str) -> (Facts, pdf_linearize::Verdict, Vec<Finding>) {
+fn checked(name: &str) -> (Facts, Verdict, Vec<Finding>) {
     let (bytes, password) = case(name);
     let given = password.as_deref().map(Password);
     let given: Vec<Password> = given.into_iter().collect();
@@ -78,8 +80,8 @@ fn checked(name: &str) -> (Facts, pdf_linearize::Verdict, Vec<Finding>) {
     (facts, verdict, findings)
 }
 
-/// The words PDFium's answer starts with, as the check has them: without a count
-/// where no document opens.
+/// The words PDFium's answer starts with, as the check has them: without a
+/// count where no document opens.
 fn ours(name: &str) -> String {
     let (facts, verdict, _) = checked(name);
     let linearized = u8::from(verdict.linearized);
@@ -93,8 +95,8 @@ fn ours(name: &str) -> String {
     format!("linearized {linearized} count {count} first {first_page}")
 }
 
-/// Of PDFium's answer, the same words: none past `linearized` where it opened no
-/// document.
+/// Of PDFium's answer, the same words: none past `linearized` where it opened
+/// no document.
 fn theirs(answer: &str) -> String {
     let words: Vec<&str> = answer.split_whitespace().collect();
     let after = |key: &str| {
@@ -122,8 +124,9 @@ fn every_case_reads_as_pdfium_reads_it() {
             .unwrap_or_else(|| panic!("{name}: no answer"));
         let theirs = theirs(answer);
         let ours = ours(name);
-        // Where no document opens, the first word alone is PDFium's to say; and it's
-        // the check's where the file isn't linearized, nothing past that being read.
+        // Where no document opens, the first word alone is PDFium's to say; and
+        // it's the check's where the file isn't linearized, nothing past that
+        // being read.
         let compared =
             |answer: &str| match theirs.contains("count") && ours.contains("linearized 1") {
                 true => answer.to_string(),
@@ -141,8 +144,8 @@ fn every_case_reads_as_pdfium_reads_it() {
     }
 }
 
-/// What the check says of each case by name: which hold, and what's said of those
-/// that don't.
+/// What the check says of each case by name: which hold, and what's said of
+/// those that don't.
 #[test]
 fn what_holds_is_what_the_cases_are_there_for() {
     let holds_and_reads = [
@@ -169,6 +172,10 @@ fn what_holds_is_what_the_cases_are_there_for() {
         let (_, verdict, findings) = checked(name);
         assert!(verdict.linearized && verdict.holds, "{name}: {findings:?}");
         assert!(!verdict.hints_read, "{name}: there's no key for its hints");
+        // Which is said once, and not judged.
+        let why = Unread::Locked;
+        let unread = |f: &&Finding| **f == Finding::HintUnread { why };
+        assert_eq!(findings.iter().filter(unread).count(), 1, "{name}");
     }
     let (_, verdict, findings) = checked("not-linearized");
     assert!(!verdict.linearized);
@@ -179,7 +186,8 @@ fn what_holds_is_what_the_cases_are_there_for() {
         matches!(findings[..], [Finding::LengthNotFile { .. }]),
         "{findings:?}"
     );
-    // Its width says 0, its columns are as they were, and PDFium drops the hints.
+    // Its width says 0, its columns are as they were, and PDFium drops the
+    // hints.
     let (_, verdict, findings) = checked("broken-width-zero");
     assert!(verdict.linearized && !verdict.holds && verdict.hints_read);
     assert!(
@@ -244,8 +252,8 @@ fn page_lengths(facts: &Facts) -> Vec<u64> {
         .collect()
 }
 
-/// Each page's bytes as PDFium's answer has them: `page N 1 took B`, for each page
-/// that came.
+/// Each page's bytes as PDFium's answer has them: `page N 1 took B`, for each
+/// page that came.
 fn took(answer: &str) -> Vec<(usize, u64)> {
     let mut pages = Vec::new();
     for stage in answer.split(';') {
@@ -264,7 +272,8 @@ fn what_pdfium_took_for_a_page_is_what_the_table_says_it_takes() {
     let mut pages_read = 0;
     for case in cases {
         let name = &case[0];
-        // Its hints it doesn't take: a width of 0, encrypted, or a part of them gone.
+        // Its hints it doesn't take: a width of 0, encrypted, or a part of them
+        // gone.
         if name.starts_with("broken") || name.starts_with("encrypted") || name == "not-linearized" {
             continue;
         }

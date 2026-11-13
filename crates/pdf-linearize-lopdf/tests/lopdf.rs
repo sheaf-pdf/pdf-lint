@@ -1,15 +1,16 @@
-//! What the lopdf adapter writes, read back with pdf-structure's reader and held by
-//! the check: what it changes of a document, what it refuses, and that it's what the
-//! family adapter writes of the same bytes, object for object, as the numbers come
-//! from the same walk over a model that shares nothing with it.
-
-#![cfg(all(feature = "lopdf", feature = "family"))]
+//! What the lopdf adapter writes, read back with pdf-structure's reader and
+//! held by the check: what it changes of a document, what it refuses, and that
+//! it's what the family adapter writes of the same bytes, object for object, as
+//! the numbers come from the same walk over a model that shares nothing with
+//! it.
 
 use lopdf::{Document, Object as LopdfObject, dictionary};
+use pdf_linearize::Limits;
+use pdf_linearize::check::{Attribute, Verdict};
 use pdf_linearize::family::{self, Options};
-use pdf_linearize::lopdf::{self as adapter, Error, PageTree};
+use pdf_linearize::pdf_objects;
 use pdf_linearize::plan::{self, plan};
-use pdf_linearize::{Limits, Verdict};
+use pdf_linearize_lopdf::{self as adapter, Error, PageTree};
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_structure::Source as _;
 use pdf_structure::pdf_crypt::Password;
@@ -17,6 +18,8 @@ use pdf_structure::pdf_crypt::Protection;
 use pdf_structure::read::{self, Reading};
 use pdf_structure::write::{self, Encryptor};
 
+/// The files pdf-linearize's tests write by hand, as one source.
+#[path = "../../pdf-linearize/tests/written/mod.rs"]
 mod written;
 use written::{KEYS, ROOT, built, encrypted_as, file, stream, two_pages};
 
@@ -42,7 +45,8 @@ fn checked(written: &[u8]) -> (Verdict, Vec<String>) {
     (verdict, said)
 }
 
-/// `written` says it's linearized, holds, its hints read and nothing's to be said of it.
+/// `written` says it's linearized, holds, its hints read and nothing's to be
+/// said of it.
 fn holds(written: &[u8]) {
     let (verdict, findings) = checked(written);
     assert!(verdict.linearized, "{findings:?}");
@@ -53,8 +57,9 @@ fn holds(written: &[u8]) {
     assert!(reading.facts().linearized);
 }
 
-/// Whether two objects as read back have the same value, however each was spelled: a
-/// string by its bytes, a real as its `f32`, a stream's dictionary but its `/Length`.
+/// Whether two objects as read back have the same value, however each was
+/// spelled: a string by its bytes, a real as its `f32`, a stream's dictionary
+/// but its `/Length`.
 fn alike(a: &Object, b: &Object) -> bool {
     match (a.value(), b.value()) {
         (Value::Null, Value::Null) => true,
@@ -118,7 +123,8 @@ fn hint_keys(file: &[u8]) -> Vec<Vec<u8>> {
     keys
 }
 
-/// The numbers `file` gives, each its object and a stream's data as `read_back` has it.
+/// The numbers `file` gives, each its object and a stream's data as `read_back`
+/// has it.
 fn numbers(file: &[u8]) -> Vec<(ObjectId, Object, Option<Vec<u8>>)> {
     let (reading, doc) = read_back(file);
     // The hint stream's numbered last, and is as long as what it lists says.
@@ -139,17 +145,18 @@ fn numbers(file: &[u8]) -> Vec<(ObjectId, Object, Option<Vec<u8>>)> {
     all
 }
 
-/// That the adapter's file of `bytes` holds, and has at each number what the family's
-/// has there, as both plans were told the same of the same objects.
+/// That the adapter's file of `bytes` holds, and has at each number what the
+/// family's has there, as both plans were told the same of the same objects.
 fn same_numbers_as_the_family(bytes: &[u8]) {
     holds(&laid_out(bytes).unwrap());
     numbers_are_the_family_s(bytes);
 }
 
-/// That the adapter's file of `bytes` has at each number what the family's has there.
+/// That the adapter's file of `bytes` has at each number what the family's has
+/// there.
 fn numbers_are_the_family_s(bytes: &[u8]) {
     let ours = laid_out(bytes).unwrap();
-    let theirs = family::linearize_bytes(bytes, &[], &Options::DEFAULT).unwrap();
+    let theirs = family::linearize_bytes(bytes, &Options::DEFAULT).unwrap();
     assert_eq!(hint_keys(&ours), hint_keys(&theirs));
     let (ours, theirs) = (numbers(&ours), numbers(&theirs));
     assert_eq!(ours.len(), theirs.len());
@@ -160,10 +167,10 @@ fn numbers_are_the_family_s(bytes: &[u8]) {
     }
 }
 
-/// A file of everything a plan is told of, as the family's own tests lay it out: an
-/// outline with a closed item, thumbnails, threads, a form, named destinations and
-/// files, a structure tree, document parts, images, a font's file, and a page and a
-/// node the tree doesn't list.
+/// A file of everything a plan is told of, as the family's own tests lay it
+/// out: an outline with a closed item, thumbnails, threads, a form, named
+/// destinations and files, a structure tree, document parts, images, a font's
+/// file, and a page and a node the tree doesn't list.
 fn everything(more: &str) -> Vec<u8> {
     let mut objects = two_pages(&format!(
         "/Outlines 9 0 R /AcroForm 13 0 R /Threads 15 0 R /Names 17 0 R /Dests 18 0 R \
@@ -437,7 +444,8 @@ fn what_a_page_says_is_its_parent_isn_t_walked_into_though_it_s_no_node() {
 fn a_parent_is_read_as_the_family_reads_one_though_it_s_a_stream_or_a_reference() {
     let root = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
     let own = "/MediaBox [0 0 9 9] /Resources << >>";
-    // A stream that holds /Kids is a node: nothing walks into it, and it loses what it held.
+    // A stream that holds /Kids is a node: nothing walks into it, and it loses
+    // what it held.
     let page = format!("<< /Type /Page /Parent 4 0 R /Rotate 90 {own} >>");
     let node = stream("/Kids [] /Rotate 90 /Mine 5 0 R", "data");
     let held = "<< /Mark (only the stream names this) >>";
@@ -509,7 +517,8 @@ fn a_kid_of_another_type_with_no_pages_under_it_is_no_place() {
 
 #[test]
 fn a_stream_s_length_by_reference_in_a_document_built_by_hand_isn_t_followed() {
-    // lopdf's reader makes each /Length direct, but its documents are the caller's.
+    // lopdf's reader makes each /Length direct, but its documents are the
+    // caller's.
     let bytes = built(&two_pages(""));
     let mut doc = loaded(&bytes);
     let length = doc.add_object(dictionary! { "Mark" => LopdfObject::string_literal("length") });
@@ -621,7 +630,7 @@ fn a_file_of_object_streams_loses_them_and_a_cross_reference_stream_s_entries() 
         let mut options = Options::DEFAULT;
         options.kind = pdf_structure::XrefKind::Stream;
         options.pack = true;
-        family::linearize_bytes(&everything(""), &[], &options).unwrap()
+        family::linearize_bytes(&everything(""), &options).unwrap()
     };
     let out = laid_out(&source).unwrap();
     holds(&out);
@@ -659,7 +668,8 @@ fn the_id_is_as_the_document_holds_it() {
     assert_eq!(text(&id[1]), [0xCC, 0xDD]);
 }
 
-/// `objects` as a file: the adapter's refusal of it, `out` left as it was given.
+/// `objects` as a file: the adapter's refusal of it, `out` left as it was
+/// given.
 fn refused(objects: &[&str]) -> Error {
     let doc = loaded(&file(objects, ROOT));
     let mut out = b"given".to_vec();
@@ -721,7 +731,8 @@ fn a_tree_that_gives_a_page_no_place_of_its_own_is_refused() {
 
 #[test]
 fn pages_that_aren_t_what_lopdf_lists_are_refused() {
-    // A leaf with no /Type is a page by ISO 32000-2's rules, and no page of lopdf's.
+    // A leaf with no /Type is a page by ISO 32000-2's rules, and no page of
+    // lopdf's.
     let node = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
     let bare = "<< /Parent 2 0 R >>";
     let tree = refused(&[CATALOG, node, PAGE, bare]);
@@ -753,28 +764,32 @@ fn a_tree_the_two_rules_read_apart_is_refused_as_the_family_s_is() {
             laid_out(&bytes).unwrap_err().to_string(),
             Error::PageTree(wanted).to_string()
         );
-        let family = family::linearize_bytes(&bytes, &[], &Options::DEFAULT);
+        let family = family::linearize_bytes(&bytes, &Options::DEFAULT);
         assert!(
             matches!(
                 family,
-                Err(family::Error::PageTree(family::PageTree::Rules { page: at })) if at == page
+                Err(family::Error::PageTree(family::PageTree::Rules { page: at }))
+                    if at == page as u64
             ),
             "{family:?}"
         );
     };
     let own = "/MediaBox [0 0 9 9] /Resources << >>";
     let under = format!("<< /Type /Page /Parent 2 0 R {own} >>");
-    // A root with /Kids that says it's a page: the one page to ISO's, a node to the others.
+    // A root with /Kids that says it's a page: the one page to ISO's, a node to
+    // the others.
     let root = format!("<< /Type /Page /Kids [3 0 R] /Count 1 {own} >>");
     let wanted = PageTree::Listed { page: 0 };
     rules(&[CATALOG, &root, &under], wanted, 0);
-    // A kid with /Kids that says it's a page: a page to ISO's, a node to PDFium's.
+    // A kid with /Kids that says it's a page: a page to ISO's, a node to
+    // PDFium's.
     let root = "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>";
     let kid = format!("<< /Type /Page /Parent 2 0 R /Kids [4 0 R] {own} >>");
     let its = format!("<< /Type /Page /Parent 3 0 R {own} >>");
     let objects = [CATALOG, root, &kid, &its, &under];
     rules(&objects, PageTree::Rules { page: 0 }, 0);
-    // One with no /Kids that says it's a node: no place to ISO's, a place to PDFium's.
+    // One with no /Kids that says it's a node: no place to ISO's, a place to
+    // PDFium's.
     let root = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 1 >>";
     let objects = [CATALOG, root, "<< /Type /Pages /Parent 2 0 R >>", &under];
     rules(&objects, PageTree::Rules { page: 0 }, 0);
@@ -805,7 +820,8 @@ fn a_parent_chain_that_goes_round_or_is_in_place_is_refused() {
         refused(&[CATALOG, node, PAGE]),
         Error::PageTree(PageTree::Parents { page: 0 })
     ));
-    // In place, with nothing to give, it's no matter; giving something it's refused.
+    // In place, with nothing to give, it's no matter; giving something it's
+    // refused.
     let node = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
     let page = "<< /Type /Page /Parent << /MediaBox [0 0 9 9] >> >>";
     assert!(matches!(
@@ -826,11 +842,11 @@ fn a_null_nearer_a_page_than_a_value_is_refused_as_the_family_s_is() {
             laid_out(&tree),
             Err(Error::PageTree(PageTree::Attribute { page: 0, attribute })) if attribute == wanted
         ));
-        let family = family::linearize_bytes(&tree, &[], &Options::DEFAULT);
+        let family = family::linearize_bytes(&tree, &Options::DEFAULT);
         assert!(matches!(
             family,
             Err(family::Error::PageTree(family::PageTree::Attribute { page: 0, attribute }))
-                if attribute == wanted
+                if attribute.key() == wanted.as_bytes()
         ));
     };
     let page = "<< /Type /Page /Parent 2 0 R /Rotate null /Resources << >> >>";
@@ -874,10 +890,10 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused_as_the_family_
         }))
     ));
     assert!(matches!(
-        family::linearize_bytes(&apart, &[], &Options::DEFAULT),
+        family::linearize_bytes(&apart, &Options::DEFAULT),
         Err(family::Error::PageTree(family::PageTree::Kids {
             page: 0,
-            attribute: "MediaBox"
+            attribute: Attribute::MediaBox
         }))
     ));
     // The same value at either place is what it was by either way.
@@ -960,8 +976,8 @@ fn a_page_the_tree_doesn_t_list_gets_what_it_inherited_from_a_node_that_loses_it
     assert!(stray.has(b"Resources"));
 }
 
-/// What says it's a page, isn't listed, and is a listed page's `/Parent` with kids is a
-/// node like any: it's given nothing to hold.
+/// What says it's a page, isn't listed, and is a listed page's `/Parent` with
+/// kids is a node like any: it's given nothing to hold.
 #[test]
 fn a_stray_page_that_s_a_node_is_given_nothing() {
     let objects = [
@@ -975,10 +991,11 @@ fn a_stray_page_that_s_a_node_is_given_nothing() {
     same_numbers_as_the_family(&bytes);
 }
 
-/// `objects` as a file: what lopdf holds of them, the adapter's refusal, `family`'s too.
+/// `objects` as a file: what lopdf holds of them, the adapter's refusal,
+/// `family`'s too.
 fn refused_as_the_family_refuses(objects: &[&str]) -> Error {
     let why = refused(objects);
-    assert!(family::linearize_bytes(&file(objects, ROOT), &[], &Options::DEFAULT).is_err());
+    assert!(family::linearize_bytes(&file(objects, ROOT), &Options::DEFAULT).is_err());
     why
 }
 
@@ -1061,7 +1078,7 @@ fn what_the_options_say_is_gone_by() {
     assert!(checked(&out).0.holds);
     let mut family = Options::DEFAULT;
     family.first_page = family::FirstPage::Index(1);
-    let theirs = family::linearize_bytes(&bytes, &[], &family).unwrap();
+    let theirs = family::linearize_bytes(&bytes, &family).unwrap();
     assert_eq!(numbers(&out).len(), numbers(&theirs).len());
     options.first_page = adapter::FirstPage::Index(2);
     let past = adapter::linearize(&mut Vec::new(), &loaded(&bytes), &options);
@@ -1114,7 +1131,8 @@ fn no_catalog_and_no_pages_are_refused() {
     assert!(matches!(refused(&[CATALOG, node]), Error::Plan(_)));
 }
 
-/// `doc` refused for its encryption, by both the adapter's calls, `out` as given.
+/// `doc` refused for its encryption, by both the adapter's calls, `out` as
+/// given.
 fn refused_as_encrypted(doc: &Document) {
     let mut out = b"given".to_vec();
     assert!(matches!(
@@ -1130,7 +1148,8 @@ fn refused_as_encrypted(doc: &Document) {
 
 #[test]
 fn a_file_lopdf_opened_with_the_empty_password_is_refused() {
-    // Which it decrypts, and takes /Encrypt out of its trailer, so it looks plain.
+    // Which it decrypts, and takes /Encrypt out of its trailer, so it looks
+    // plain.
     let plain = built(&two_pages(""));
     let mut decrypted = 0;
     for (name, key) in KEYS {

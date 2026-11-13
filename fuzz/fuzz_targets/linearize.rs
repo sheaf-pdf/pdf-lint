@@ -7,9 +7,15 @@
 //! tables, read back, what the plan says. And the same bytes as a hint stream, read
 //! under small caps at any positions: an error, or tables that write and read the
 //! same. And the same bytes as the facts of a file: the same verdict whatever the
-//! sink. And the same bytes as a file, read, laid out in the three kinds and read
-//! back: pages and objects the same under the numbering, the check of it clean, or
-//! `out` as it was.
+//! sink, and of what they say wasn't read, one finding that says so and nothing
+//! judged that depends on it. And the same bytes as a file, read and laid out in
+//! the three kinds, in the clear, under its own encryption as it is and told to
+//! reuse RC4's keystreams, and now and then under a new one, then read back:
+//! pages and objects the same under the numbering, a direct `/Info` an object
+//! where it's encrypted, the check of it clean, and each object listed as written
+//! at a keystream used one it wrote, or `out` as it was. Under its own encryption,
+//! what's refused at a keystream used is written when told to reuse them, and
+//! listed, and what both write is the same bytes.
 
 #![no_main]
 

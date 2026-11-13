@@ -11,7 +11,7 @@ use crate::Limits;
 const WIDEST: u32 = 32;
 
 /// How many bits `value` takes: none for 0, as a width of 0 can hold only that.
-pub(super) fn width_of(value: u64) -> u16 {
+pub(super) const fn width_of(value: u64) -> u16 {
     (u64::BITS - value.leading_zeros()) as u16
 }
 

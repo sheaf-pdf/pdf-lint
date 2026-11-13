@@ -12,6 +12,7 @@ use pdf_structure::write::{self, Body, Encryptor};
 use pdf_structure::{Document, Source as _};
 
 use super::{Error, FirstPage, Options, PageTree};
+use crate::check;
 use crate::plan::{Graph, Group, Kind, Page};
 
 /// How far up a page's `/Parent`s are followed for what it inherits, as
@@ -53,6 +54,9 @@ pub(crate) struct Prepared<'d> {
     /// it as, and what its values refer to. It has no body: it's written from
     /// the encryptor.
     dictionary: Option<(ObjectId, Vec<ObjectId>)>,
+    /// A direct `/Info` written as an object, under an encryption: what the
+    /// graph knows it as, its body the trailer's dictionary.
+    info: Option<ObjectId>,
 }
 
 impl<'d> Prepared<'d> {
@@ -72,8 +76,10 @@ impl<'d> Prepared<'d> {
         let found = root.and_then(|root| doc.dereference(root));
         let catalog_id = found.and_then(|(id, _)| id).ok_or(Error::NoCatalog)?;
         let catalog = doc.get_dict(catalog_id).ok_or(Error::NoCatalog)?;
+        // The walk lists no more pages than a plan takes, nor visits more
+        // nodes, so a tree past that is refused before it's walked whole.
         let mut limits = TreeLimits::DEFAULT;
-        limits.pages = limits.pages.max(options.limits.pages);
+        limits.pages = options.limits.pages;
         let table = pages_agreed(doc, catalog, &limits)?;
 
         let left = write::encryption_objects(doc, encryptor);
@@ -91,6 +97,20 @@ impl<'d> Prepared<'d> {
             Some(encryptor) if !encryptor.direct() => {
                 let id = dictionary_id(encryptor, doc, &bodies)?;
                 Some((id, values.clone()))
+            }
+            _ => None,
+        };
+        // A trailer isn't encrypted (7.6.2), so a direct /Info, whose strings
+        // it would hold in the clear, is written as an object, as a whole file
+        // of the writer's writes it: past every number an object has and every
+        // reference names, and the dictionary's, so that none comes to name it.
+        // Past the rest, it keeps the bodies in order.
+        let info = match (encryptor, trailer.get(b"Info")) {
+            (Some(_), Some(info)) if direct_info(info) => {
+                let named = dictionary.iter().map(|(id, _)| *id);
+                let past = past_every(doc, &bodies, named.chain(values.iter().copied()))?;
+                bodies.push((past, Body::New(Cow::Owned(info.clone()))));
+                Some(past)
             }
             _ => None,
         };
@@ -136,6 +156,7 @@ impl<'d> Prepared<'d> {
             font_files: HashSet::new(),
             kept_out: strays.into_iter().chain(in_the_clear).collect(),
             dictionary,
+            info,
         };
         prepared.document_level(doc, catalog, &limits);
         // The trailer's /Encrypt and all its values (F.3.5).
@@ -202,7 +223,8 @@ impl<'d> Prepared<'d> {
             self.groups.push((Group::Dests, dests));
         }
         if let Some(info) = doc.trailer().dict().get(b"Info") {
-            self.groups.push((Group::Info, roots(info)));
+            let roots = self.info.map_or_else(|| roots(info), |id| vec![id]);
+            self.groups.push((Group::Info, roots));
         }
         let form = catalog
             .get(b"AcroForm")
@@ -250,6 +272,12 @@ impl<'d> Prepared<'d> {
     /// What the graph knows the encryption dictionary as, where it's an object.
     pub(super) fn dictionary(&self) -> Option<ObjectId> {
         self.dictionary.as_ref().map(|(id, _)| *id)
+    }
+
+    /// What the graph knows a direct `/Info` written as an object as, where
+    /// it's one: the trailer names it at its number.
+    pub(super) fn info(&self) -> Option<ObjectId> {
+        self.info
     }
 
     /// The graph of it, listed by `kind`, what may be packed in object streams
@@ -331,13 +359,30 @@ fn dictionary_id(
             None => Ok(at),
         };
     }
+    past_every(doc, bodies, std::iter::empty())
+}
+
+/// Whether a trailer's `/Info` is held in the trailer itself, not as an
+/// object: any value but a reference or null.
+fn direct_info(info: &Object) -> bool {
+    !matches!(info.value(), Value::Ref(_) | Value::Null)
+}
+
+/// One past every number an object of `bodies` has or a reference of it or of
+/// `doc`'s trailer names, and every one of `more`, at generation 0.
+fn past_every(
+    doc: &Document,
+    bodies: &[(ObjectId, Body<'_>)],
+    more: impl Iterator<Item = ObjectId>,
+) -> Result<ObjectId, Error> {
     let trailer =
         (doc.trailer().dict().entries().iter()).flat_map(|entry| entry.value.references());
     let named = bodies.iter().flat_map(|(id, body)| {
         let references = body.object().references();
         std::iter::once(*id).chain(references)
     });
-    let last = named.chain(trailer).map(|id| id.number).max().unwrap_or(0);
+    let last = named.chain(trailer).chain(more);
+    let last = last.map(|id| id.number).max().unwrap_or(0);
     match last.checked_add(1) {
         Some(past) => Ok(ObjectId {
             number: past,
@@ -547,7 +592,7 @@ fn pages_agreed<'d>(
     let pdfium = pages(doc, catalog, Rules::Pdfium, limits, &mut ()).map_err(Error::Pages)?;
     let refused = |why| Err(Error::PageTree(why));
     let mut seen = HashSet::with_capacity(iso.len());
-    for (page, (a, b)) in iso.iter().zip(&pdfium).enumerate() {
+    for (page, (a, b)) in (0..).zip(iso.iter().zip(&pdfium)) {
         if a.id != b.id {
             return refused(PageTree::Rules { page });
         }
@@ -564,16 +609,26 @@ fn pages_agreed<'d>(
             if !alike(a.attribute(attribute), b.attribute(attribute)) {
                 return refused(PageTree::Attribute {
                     page,
-                    attribute: attribute.key(),
+                    attribute: named(attribute),
                 });
             }
         }
     }
     if iso.len() != pdfium.len() {
-        let page = iso.len().min(pdfium.len());
+        let page = iso.len().min(pdfium.len()) as u64;
         return refused(PageTree::Rules { page });
     }
     Ok(iso)
+}
+
+/// The check's name for an inheritable attribute, as a refusal gives it.
+fn named(attribute: Inheritable) -> check::Attribute {
+    match attribute {
+        Inheritable::Resources => check::Attribute::Resources,
+        Inheritable::MediaBox => check::Attribute::MediaBox,
+        Inheritable::CropBox => check::Attribute::CropBox,
+        Inheritable::Rotate => check::Attribute::Rotate,
+    }
 }
 
 /// Each page's inheritable attributes read going down `/Kids` from the root, as
@@ -621,7 +676,7 @@ fn kids_agree(doc: &Document, catalog: &Dict, table: &Pages<'_>) -> Result<(), E
                         _ => false,
                     };
                     if !alike {
-                        let attribute = attribute.key();
+                        let (page, attribute) = (page as u64, named(attribute));
                         return Err(Error::PageTree(PageTree::Kids { page, attribute }));
                     }
                 }
@@ -674,7 +729,8 @@ fn pushed_down(bodies: &mut [(ObjectId, Body<'_>)], table: &Pages<'_>) -> Result
             match inherited.origin {
                 Origin::Ancestor(Some(_)) => {}
                 Origin::Ancestor(None) => {
-                    return Err(Error::PageTree(PageTree::DirectNode { attribute: key }));
+                    let attribute = named(attribute);
+                    return Err(Error::PageTree(PageTree::DirectNode { attribute }));
                 }
                 _ => continue,
             }
@@ -722,9 +778,10 @@ fn nodes_taken_off(
                 }
             }
             None => {
-                let mut keys = Inheritable::ALL.map(Inheritable::key).into_iter();
-                if let Some(key) = keys.find(|key| dict.has(key.as_bytes())) {
-                    return Err(Error::PageTree(PageTree::DirectNode { attribute: key }));
+                let mut held = Inheritable::ALL.into_iter();
+                if let Some(held) = held.find(|held| dict.has(held.key().as_bytes())) {
+                    let attribute = named(held);
+                    return Err(Error::PageTree(PageTree::DirectNode { attribute }));
                 }
             }
         }

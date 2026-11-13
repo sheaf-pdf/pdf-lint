@@ -909,14 +909,20 @@ fn each_cap_holds_at_its_edge() {
     limits.shared_entries -= 1;
     assert!(matches!(
         plan_of(&limits),
-        Err(Error::TooManyHints { entries: 6, .. })
+        Err(Error::TooManySharedEntries {
+            entries: 6,
+            limit: 5
+        })
     ));
 
     let mut limits = Limits::DEFAULT;
     limits.shared_visits = whole.shared_visits();
     assert_eq!(plan_of(&limits).as_ref(), Ok(&whole));
     limits.shared_visits -= 1;
-    assert!(matches!(plan_of(&limits), Err(Error::TooManyHints { .. })));
+    assert!(matches!(
+        plan_of(&limits),
+        Err(Error::TooManySharedVisits { .. })
+    ));
 }
 
 /// A graph where every page reaches every object costs the product of them, so
@@ -943,7 +949,10 @@ fn a_graph_that_would_take_hours_is_refused() {
         panic!("the lists' cost is about 10^10 visits");
     };
     // No further past the cap than the object that passed it.
-    assert!(matches!(refused, Error::TooManyHints { visits, .. } if visits <= (1 << 20) + 100_000));
+    assert!(matches!(
+        refused,
+        Error::TooManySharedVisits { visits, limit: 0x10_0000 } if visits <= (1 << 20) + 100_000
+    ));
 }
 
 /// A plan is plain data, read from any thread.
@@ -1027,7 +1036,8 @@ fn page_uses_by_id_is_what_a_plan_says() {
         &[ObjectId::new(3, 0), ObjectId::new(4, 0)],
         &stop,
         |id, to| {
-            // What it stops at it doesn't ask after: that's what the stop is for.
+            // What it stops at it doesn't ask after: that's what the stop is
+            // for.
             assert!(
                 id != ObjectId::new(1, 0) && id != ObjectId::new(2, 0),
                 "asked of {id:?}"

@@ -3,13 +3,17 @@
 //! objects.
 
 use std::collections::HashSet;
+use std::io;
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_semantics::pages::pages;
+use pdf_objects::{Unreadable, Why};
+use pdf_semantics::pages::{self, pages};
 use pdf_semantics::{Limits as TreeLimits, catalog};
+use pdf_structure::pdf_filters::Fault;
 use pdf_structure::read::{
-    self, ByteSource, Reading, SectionRow, SectionRows, WithReading, XrefEntry,
+    self, ByteSource, Reading, SectionFault, SectionRow, SectionRows, Unfiltered, Unwritten,
+    WithReading, XrefEntry,
 };
 use pdf_structure::{Document, Encryption, XrefKind};
 
@@ -18,8 +22,9 @@ use super::{Error, FirstPage, Options};
 use crate::Limits;
 use crate::check::{
     self, Attribute, Extent, Facts, FirstObject, HintData, HintFacts, PageFacts, Raw, RowEntry,
-    RowFacts, SectionFacts, Sink, Verdict,
+    RowFacts, SectionFacts, Sink, Unread, Verdict,
 };
+use crate::phases::phase;
 use crate::plan::Kind;
 
 /// `value` as a check takes it: an array as a whole, unless it has a reference
@@ -43,7 +48,7 @@ fn raw(value: Option<&Object>) -> Raw {
 /// The dictionary's keys, `/H` being an array whatever's in it.
 fn first_object(read: read::FirstObject) -> FirstObject {
     let (at, end) = (read.at as u64, read.end as u64);
-    let mut first = FirstObject::new(at, end, read.id.number, read.id.generation);
+    let mut first = FirstObject::new(at, end, read.id);
     first.stream = matches!(read.object.value(), Value::Stream(_));
     let Some(dict) = read.object.as_dict() else {
         return first;
@@ -119,6 +124,96 @@ fn end_of<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<Option<u6
     }
 }
 
+/// Why object `id`, or its data, didn't read, where `error` says the reader's
+/// reason and not the file's: past a cap it reads under (a decode its cap on a
+/// stream's data stopped, [`Fault::Limit`] among the faults, more filters than
+/// it takes, or an object past a cap it parses under), no key (no password
+/// opened the file, or a handler it can't open), or a filter it doesn't take
+/// ([`unfiltered_by`]); none where it's the file's, damage, a `/Filter` or
+/// `/DecodeParms` that isn't one, or data that doesn't decrypt cleanly among
+/// it. A source that didn't give the bytes is [`Error::Read`].
+fn unread_by(error: read::Error, id: ObjectId) -> Result<Option<Unread>, Error> {
+    Ok(match error {
+        read::Error::Io(why) => return Err(Error::Read(read::Error::Io(why))),
+        read::Error::Decode(decode) => {
+            let limited = (decode.faults.iter()).any(|&(_, fault)| fault == Fault::Limit);
+            limited.then_some(Unread::Capped)
+        }
+        read::Error::Filters(why) => unfiltered_by(&why),
+        read::Error::Locked | read::Error::Encrypted | read::Error::Unsupported => {
+            Some(Unread::Locked)
+        }
+        read::Error::Unread(why) => match why.unreadable(id) {
+            Some(unreadable) => unread_of(unreadable)?,
+            None => None,
+        },
+        _ => None,
+    })
+}
+
+/// Whose it is that the reader doesn't decode a stream by its `/Filter` and
+/// `/DecodeParms`, by what `why` says of them: the reader's where it's a
+/// filter it doesn't decode, a `/Crypt` filter's key it doesn't take, or more
+/// filters than it takes; none where it's the file's, a `/Filter` or
+/// `/DecodeParms` that isn't what ISO 32000-2 has them be (7.3.8.2, 7.4), as
+/// a `/Filter` that's a number, a `/Predictor` of 17 or a `/Columns` that
+/// isn't a count. A reason the reader learns later is the file's until it's
+/// placed here.
+fn unfiltered_by(why: &Unfiltered) -> Option<Unread> {
+    match why {
+        Unfiltered::Unsupported { .. } | Unfiltered::Key { .. } => Some(Unread::Unfiltered),
+        Unfiltered::Filters { .. } => Some(Unread::Capped),
+        Unfiltered::Parameters { why, .. } => unfiltered_by(why),
+        _ => None,
+    }
+}
+
+/// Why an object didn't read, by what kind of failure the reader says
+/// `unreadable` is: its own reason ([`unread_by`]) where it's past a cap or
+/// takes a password, none where it's the file's, and [`Error::Read`] where
+/// the source didn't give the bytes, in the reader's words. A resolver never
+/// says [`Why::Filter`], which is of a stream's data alone, and of the file's
+/// damage too, so it's none: a member of an object stream through filters the
+/// reader doesn't take reads as damaged, and is the file's here.
+fn unread_of(unreadable: Unreadable) -> Result<Option<Unread>, Error> {
+    Ok(match unreadable.why {
+        Why::Capped => Some(Unread::Capped),
+        Why::Locked => Some(Unread::Locked),
+        Why::Source => {
+            let why = io::Error::other(unreadable.message);
+            return Err(Error::Read(read::Error::Io(why)));
+        }
+        _ => None,
+    })
+}
+
+/// Why the reader's sections stopped where `stopped` says, where it's its own
+/// reason ([`unread_by`]): more sections or rows than it reads, a
+/// cross-reference stream whose data its cap cut off, or through filters it
+/// doesn't take ([`unfiltered_by`]); none where it's the file's.
+fn stopped_by(stopped: &SectionFault) -> Option<Unread> {
+    match stopped {
+        SectionFault::TooManySections { .. } | SectionFault::TooManyRows { .. } => {
+            Some(Unread::Capped)
+        }
+        SectionFault::Section { why, .. } => match &**why {
+            Unwritten::NoSection
+            | Unwritten::Decode {
+                fault: Fault::Limit,
+            } => Some(Unread::Capped),
+            Unwritten::Filters(why) => unfiltered_by(why),
+            // The stream's object past a cap the reader parses under: the
+            // number given only words the message, which isn't read.
+            Unwritten::Unread(unread) => {
+                let kind = unread.unreadable(ObjectId::new(0, 0)).map(|u| u.why);
+                (kind == Some(Why::Capped)).then_some(Unread::Capped)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The primary hint stream, by what's listed at `/H`'s first offset, which
 /// counts from the header (ISO 32000-2, 7.5.2), so is `header` bytes into the
 /// file past where it says, as the rows' offsets are.
@@ -138,11 +233,19 @@ fn hint<S: ByteSource>(
     let Some(id) = listed_at(sections, at) else {
         return Ok(None);
     };
-    let Some(mut end) = end_of(reading, id)? else {
+    // What doesn't read for the reader's reason is unread, its end where it
+    // starts; for the file's, it isn't a stream.
+    let primary = match reading.get(id) {
+        Ok(primary) => primary,
+        Err(error) => {
+            let data = unread_by(error, id)?.map_or(HintData::NotAStream, HintData::Unread);
+            return Ok(Some(HintFacts::new(at, at, id.number, data)));
+        }
+    };
+    let Some(mut end) = reading.record(id).map(|record| record.at.end as u64) else {
         let data = HintData::NotAStream;
         return Ok(Some(HintFacts::new(at, at, id.number, data)));
     };
-    let primary = reading.get(id).map_err(Error::Read)?;
     let Value::Stream(stream) = primary.value() else {
         let data = HintData::NotAStream;
         return Ok(Some(HintFacts::new(at, end, id.number, data)));
@@ -178,41 +281,57 @@ fn hint<S: ByteSource>(
     Ok(Some(hint))
 }
 
-/// Stream `id`'s data, as far as it decodes, as any reader would take it.
+/// Stream `id`'s data, as far as it decodes, as any reader would take it; or
+/// unread, where the reader's own reason stopped it ([`unread_by`]): a decode
+/// its cap cut off isn't the data, as what's past the cut isn't known.
 fn decoded<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<HintData, Error> {
+    let limited = |error: &pdf_structure::pdf_filters::Error| {
+        (error.faults.iter()).any(|&(_, fault)| fault == Fault::Limit)
+    };
     Ok(match reading.decoded_within(id, reading.limits().stream) {
         Ok(data) => HintData::Decoded(data),
-        Err(read::Error::Io(why)) => return Err(Error::Read(read::Error::Io(why))),
         Err(read::Error::NotAStream { .. }) => HintData::NotAStream,
-        Err(read::Error::Locked | read::Error::Encrypted | read::Error::Unsupported) => {
-            HintData::Locked
+        Err(read::Error::Decode(error)) if !error.data.is_empty() && !limited(&error) => {
+            HintData::Decoded(error.data)
         }
-        Err(read::Error::Decode(error)) if !error.data.is_empty() => HintData::Decoded(error.data),
-        Err(_) => HintData::Undecodable,
+        Err(error) => unread_by(error, id)?.map_or(HintData::Undecodable, HintData::Unread),
     })
 }
 
-/// The inheritable attributes a node may hold, with their keys.
-const INHERITED: [(&[u8], Attribute); 4] = [
-    (b"Resources", Attribute::Resources),
-    (b"MediaBox", Attribute::MediaBox),
-    (b"CropBox", Attribute::CropBox),
-    (b"Rotate", Attribute::Rotate),
-];
-
-/// The pages by ISO's rules, and what the nodes on their way hold.
+/// The pages by ISO's rules, and what the nodes on their way hold, set on
+/// `facts`; or none, where the tree didn't read, and why where that's the
+/// reader's own reason (its caps on a tree's depth and pages, and what
+/// [`unread_of`] says of an object on the way).
 fn page_tree<S: ByteSource>(
     reading: &Reading<S>,
     limits: &Limits,
-) -> (Vec<PageFacts>, Vec<(u32, Attribute)>) {
+    facts: &mut Facts,
+) -> Result<(), Error> {
+    // The walk lists no more pages than the check takes, nor visits more
+    // nodes, so a tree past that isn't walked whole first; its other caps
+    // are pdf-semantics' own.
     let mut tree_limits = TreeLimits::DEFAULT;
-    tree_limits.pages = tree_limits.pages.max(limits.pages);
+    tree_limits.pages = limits.pages;
     let trailer = reading.trailer().dict();
-    let Ok(Some(root)) = catalog(reading, trailer) else {
-        return Default::default();
+    let root = match catalog(reading, trailer) {
+        Ok(Some(root)) => root,
+        Ok(None) => return Ok(()),
+        Err(unreadable) => {
+            facts.unread.pages = unread_of(unreadable)?;
+            return Ok(());
+        }
     };
-    let Ok(table) = pages(reading, root, Rules::Iso, &tree_limits, &mut ()) else {
-        return Default::default();
+    let table = match pages(reading, root, Rules::Iso, &tree_limits, &mut ()) {
+        Ok(table) => table,
+        Err(pages::Error::TooDeep | pages::Error::TooManyPages) => {
+            facts.unread.pages = Some(Unread::Capped);
+            return Ok(());
+        }
+        Err(pages::Error::Unreadable(unreadable)) => {
+            facts.unread.pages = unread_of(unreadable)?;
+            return Ok(());
+        }
+        Err(_) => return Ok(()),
     };
     let own = |dict: Option<&Dict>, key: &[u8]| dict.is_some_and(|dict| dict.has(key));
     let listed = table.iter().map(|page| {
@@ -238,11 +357,15 @@ fn page_tree<S: ByteSource>(
             let Some(dict) = dict.filter(node).filter(|_| !page_ids.contains(&parent)) else {
                 continue;
             };
-            let held = INHERITED.iter().filter(|(key, _)| dict.has(key));
-            nodes.extend(held.map(|&(_, attribute)| (parent.number, attribute)));
+            let held = Attribute::ALL
+                .into_iter()
+                .filter(|held| dict.has(held.key()));
+            nodes.extend(held.map(|attribute| (parent.number, attribute)));
         }
     }
-    (listed, nodes)
+    facts.pages = listed;
+    facts.nodes = nodes;
+    Ok(())
 }
 
 /// The facts of the file `reading` reads, for [`check`](crate::check()), under
@@ -250,10 +373,22 @@ fn page_tree<S: ByteSource>(
 /// section's rows, its hint stream's data, decrypted where it's encrypted and a
 /// password opened it, its page tree and the graph of its objects, by a whole
 /// read where the file says it's linearized. A file that doesn't, or whose `/L`
-/// isn't its length, has no more read than it takes to say so. It fails only
-/// when the source doesn't give its bytes ([`Error::Read`]): what's wrong with
-/// a file is a fact. A caller that holds the file read whole beside its reading
-/// gives that ([`facts_with_reading`]), so it isn't read whole again.
+/// isn't its length, has no more read than it takes to say so. What's wrong
+/// with a file is a fact. What the reader didn't read for its own reason, its
+/// caps, no key, or filters it doesn't take, is said as that, the hint
+/// stream's in its data ([`HintData::Unread`]), the sections' and the page
+/// tree's in [`Facts::unread`]. The caps are the reading's (`read::Limits`)
+/// and, on the page tree, [`Limits::pages`] on the pages and the nodes its
+/// walk reads, each, and pdf-semantics' defaults on its depth. A page tree's
+/// node in an object stream the reader doesn't decode, through filters it
+/// doesn't take or cut at its cap, the reader reads as damaged, so the tree
+/// is read without it, as the file's. A caller that holds the file read
+/// whole beside its reading gives that ([`facts_with_reading`]), so it isn't
+/// read whole again.
+///
+/// # Errors
+///
+/// Only where the source doesn't give its bytes ([`Error::Read`]).
 pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Facts, Error> {
     facts_of(reading, None, limits)
 }
@@ -263,6 +398,10 @@ pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Fac
 /// the document read whole beside it ([`WithReading::document`]) rather than
 /// of a whole read made again: the same facts, as that document is the
 /// reading's whole read.
+///
+/// # Errors
+///
+/// Only where the source doesn't give its bytes ([`Error::Read`]).
 pub fn facts_with_reading<S: ByteSource>(
     read: &WithReading<S>,
     limits: &Limits,
@@ -271,12 +410,15 @@ pub fn facts_with_reading<S: ByteSource>(
 }
 
 /// [`facts`], the graph made of `whole` where it's given, `reading`'s whole
-/// read, else of a whole read made now.
+/// read, else of a whole read made now. Each read is a span of its own, with
+/// the `tracing` feature: the sections, the hint stream, the page tree and the
+/// graph.
 fn facts_of<S: ByteSource>(
     reading: &Reading<S>,
     whole: Option<&Document>,
     limits: &Limits,
 ) -> Result<Facts, Error> {
+    phase!(DEBUG, "facts", bytes = reading.size());
     let mut facts = Facts::new(reading.size() as u64);
     facts.header = reading.facts().header_offset.unwrap_or(0) as u64;
     let first = reading.first_object().map_err(Error::Read)?;
@@ -284,20 +426,35 @@ fn facts_of<S: ByteSource>(
     if reading.update().is_some() {
         facts.update = reading.facts().newest.map(|(at, _)| at as u64);
     }
-    if !check::check(&facts, limits, &mut ()).linearized {
+    if !check::linearized(&facts, limits) {
         return Ok(facts);
     }
-    let read = reading.sections().map_err(Error::Read)?.sections;
-    let mut listed = read.iter();
-    facts.first = listed.next().map(section);
-    facts.main = listed.next().map(section);
+    let read = {
+        phase!(DEBUG, "sections");
+        let read = reading.sections().map_err(Error::Read)?;
+        let mut listed = read.sections.iter();
+        facts.first = listed.next().map(section);
+        facts.main = listed.next().map(section);
+        // A stop past the main section cuts nothing the check reads.
+        if read.sections.len() < 2 {
+            facts.unread.sections = read.stopped.as_ref().and_then(stopped_by);
+        }
+        read.sections
+    };
     let items = facts.first_object.as_ref().map_or(&[][..], |f| &f.h_items);
-    facts.hint = hint(reading, items, &read, facts.header)?;
-    let (pages, nodes) = page_tree(reading, limits);
-    facts.pages = pages;
-    facts.nodes = nodes;
+    facts.hint = {
+        phase!(DEBUG, "hint");
+        hint(reading, items, &read, facts.header)?
+    };
+    {
+        phase!(DEBUG, "pages");
+        page_tree(reading, limits, &mut facts)?;
+    }
     facts.objects = first_group_end(reading, &facts)?;
-    facts.graph = graph(reading, whole, &facts, limits)?;
+    facts.graph = {
+        phase!(DEBUG, "graph");
+        graph(reading, whole, &facts, limits)?
+    };
     Ok(facts)
 }
 
@@ -364,14 +521,36 @@ fn graph<S: ByteSource>(
 }
 
 /// What [`facts`] reads of `reading`, [`check`](crate::check()) judged: a whole
-/// read where the file says it's linearized, so paid only by who asks. It fails
-/// only where [`facts`] does.
+/// read where the file says it's linearized, so paid only by who asks.
+///
+/// # Errors
+///
+/// Only where [`facts`] fails: where the source doesn't give its bytes
+/// ([`Error::Read`]).
 pub fn check<S: ByteSource, K: Sink + ?Sized>(
     reading: &Reading<S>,
     limits: &Limits,
     sink: &mut K,
 ) -> Result<Verdict, Error> {
     let facts = facts(reading, limits)?;
+    Ok(check::check(&facts, limits, sink))
+}
+
+/// What [`facts_with_reading`] reads of the file `read` holds,
+/// [`check`](crate::check()) judged: [`check`](check()) of its reading, the
+/// graph made of the document read whole beside it, so it isn't read whole
+/// again.
+///
+/// # Errors
+///
+/// Only where [`facts_with_reading`] fails: where the source doesn't give its
+/// bytes ([`Error::Read`]).
+pub fn check_with_reading<S: ByteSource, K: Sink + ?Sized>(
+    read: &WithReading<S>,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<Verdict, Error> {
+    let facts = facts_with_reading(read, limits)?;
     Ok(check::check(&facts, limits, sink))
 }
 
@@ -529,6 +708,265 @@ mod tests {
         source.1.store(true, Ordering::Relaxed);
         assert!(matches!(
             decoded(&reading, ObjectId::new(2, 0)),
+            Err(Error::Read(read::Error::Io(_)))
+        ));
+    }
+
+    /// A file of one stream, `1 0 R`, of `dict`'s entries and `data`, and its
+    /// catalog, `2 0 R`, whose `/Pages` names nothing.
+    fn streamed(dict: &str, data: &str) -> Vec<u8> {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let at = file.len();
+        let length = data.len();
+        let stream =
+            format!("1 0 obj\n<< {dict} /Length {length} >>\nstream\n{data}\nendstream\nendobj\n");
+        file.extend_from_slice(stream.as_bytes());
+        let catalog = file.len();
+        file.extend_from_slice(b"2 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let table = file.len();
+        let text = format!(
+            "xref\n0 3\n0000000000 65535 f \n{at:010} 00000 n \n{catalog:010} 00000 n \ntrailer\n<< /Size 3 /Root 2 0 R >>\nstartxref\n{table}\n%%EOF\n"
+        );
+        file.extend_from_slice(text.as_bytes());
+        file
+    }
+
+    /// Stream 1's data in `file`, as the facts read it, under `limits`.
+    fn data_of(file: &[u8], limits: read::Limits) -> HintData {
+        let mut options = Open::DEFAULT;
+        options.limits = limits;
+        let reading = Reading::open(file, &options).unwrap();
+        decoded(&reading, ObjectId::new(1, 0)).unwrap()
+    }
+
+    /// Past the reader's cap on a stream's data, filtered or not, through more
+    /// filters than it takes, or one it doesn't take, the data isn't read, as
+    /// that's the reader's; damage, what decoded before it or nothing, is the
+    /// file's, and so is a `/Filter` or `/DecodeParms` that isn't one.
+    #[test]
+    fn what_the_reader_doesnt_read_is_told_from_damage() {
+        let mut limits = read::Limits::DEFAULT;
+        let plain = streamed("", "abcdef");
+        assert_eq!(
+            data_of(&plain, limits),
+            HintData::Decoded(b"abcdef".to_vec())
+        );
+        limits.stream = 6;
+        assert_eq!(
+            data_of(&plain, limits),
+            HintData::Decoded(b"abcdef".to_vec())
+        );
+        limits.stream = 5;
+        assert_eq!(data_of(&plain, limits), HintData::Unread(Unread::Capped));
+        let hex = streamed("/Filter /ASCIIHexDecode", "616263646566>");
+        assert_eq!(data_of(&hex, limits), HintData::Unread(Unread::Capped));
+        let limits = read::Limits::DEFAULT;
+        assert_eq!(data_of(&hex, limits), HintData::Decoded(b"abcdef".to_vec()));
+        for filter in ["/DCTDecode", "/XXXDecode"] {
+            let image = streamed(&format!("/Filter {filter}"), "abcdef");
+            assert_eq!(
+                data_of(&image, limits),
+                HintData::Unread(Unread::Unfiltered)
+            );
+        }
+        let many = ["/ASCIIHexDecode"; read::FILTERS + 1].join(" ");
+        let many = streamed(&format!("/Filter [{many}]"), "616263646566>");
+        assert_eq!(data_of(&many, limits), HintData::Unread(Unread::Capped));
+        let damaged = streamed("/Filter /ASCIIHexDecode", "6162zz>");
+        assert_eq!(data_of(&damaged, limits), HintData::Decoded(b"ab".to_vec()));
+        let damaged = streamed("/Filter /ASCIIHexDecode", "zz>");
+        assert_eq!(data_of(&damaged, limits), HintData::Undecodable);
+        // A /Crypt filter's key the reader doesn't take is the reader's.
+        let crypt = streamed("/Filter /Crypt /DecodeParms << /Other 1 >>", "ab");
+        assert_eq!(
+            data_of(&crypt, limits),
+            HintData::Unread(Unread::Unfiltered)
+        );
+        let flate = "/Filter /FlateDecode /DecodeParms";
+        for written in [
+            "/Filter 999999999999".to_string(),
+            "/Filter [1 2 3 4 5]".to_string(),
+            "/Filter /ASCIIHexDecode /DecodeParms << /Columns 1 >>".to_string(),
+            "/Filter [/ASCIIHexDecode] /DecodeParms [null null]".to_string(),
+            format!("{flate} << /Predictor 17 >>"),
+            format!("{flate} << /Predictor 12 /Columns -1 >>"),
+            format!("{flate} << /Predictor 12 /Columns 0 >>"),
+            format!("{flate} << /Predictor 12 /BitsPerComponent 3 >>"),
+            format!("{flate} << /Predictor /Up >>"),
+            "/Filter /LZWDecode /DecodeParms << /EarlyChange 2 >>".to_string(),
+            "/Filter /Crypt /DecodeParms 5".to_string(),
+        ] {
+            let damaged = streamed(&written, "616263646566>");
+            assert_eq!(
+                data_of(&damaged, limits),
+                HintData::Undecodable,
+                "{written}"
+            );
+        }
+    }
+
+    /// The reader's sections stopped by a cap of its own, or at a stream whose
+    /// filters it doesn't take, are unread; by what's wrong with the file, a
+    /// `/Filter` or `/DecodeParms` that isn't one among it, they're the file's.
+    #[test]
+    fn sections_stopped_by_the_reader_are_told_from_damage() {
+        let section = |why: Unwritten| SectionFault::Section {
+            at: 9,
+            why: Box::new(why),
+        };
+        let unsupported = Unfiltered::Unsupported {
+            filter: b"XXXDecode".to_vec(),
+        };
+        let byte = Fault::Byte { at: 4, byte: b'z' };
+        let parameters = |why: Unfiltered| Unfiltered::Parameters {
+            filter: b"FlateDecode".to_vec(),
+            why: Box::new(why),
+        };
+        let key = Unfiltered::Key {
+            key: b"Other".to_vec(),
+        };
+        let predictor = Unfiltered::Predictor { value: 17 };
+        let read: [(SectionFault, Option<Unread>); 16] = [
+            (
+                SectionFault::TooManySections { limit: 1 },
+                Some(Unread::Capped),
+            ),
+            (SectionFault::TooManyRows { limit: 1 }, Some(Unread::Capped)),
+            (
+                section(Unwritten::Decode {
+                    fault: Fault::Limit,
+                }),
+                Some(Unread::Capped),
+            ),
+            (section(Unwritten::NoSection), Some(Unread::Capped)),
+            (
+                section(Unwritten::Filters(Unfiltered::Filters { count: 26 })),
+                Some(Unread::Capped),
+            ),
+            (
+                section(Unwritten::Filters(unsupported)),
+                Some(Unread::Unfiltered),
+            ),
+            (
+                section(Unwritten::Filters(parameters(key))),
+                Some(Unread::Unfiltered),
+            ),
+            (section(Unwritten::Filters(Unfiltered::Filter)), None),
+            (section(Unwritten::Filters(Unfiltered::Reference)), None),
+            (section(Unwritten::Filters(predictor.clone())), None),
+            (section(Unwritten::Filters(parameters(predictor))), None),
+            (
+                section(Unwritten::Filters(Unfiltered::Entries {
+                    entries: 2,
+                    filters: 1,
+                })),
+                None,
+            ),
+            (section(Unwritten::Decode { fault: byte }), None),
+            (section(Unwritten::Subsection { at: 9 }), None),
+            (SectionFault::NoStartxref, None),
+            (SectionFault::Loop { at: 9 }, None),
+        ];
+        for (stopped, unread) in read {
+            assert_eq!(stopped_by(&stopped), unread, "{stopped}");
+        }
+    }
+
+    /// The facts of `file`'s page tree alone.
+    fn tree_of<S: ByteSource>(reading: &Reading<S>) -> Result<Facts, Error> {
+        let mut facts = Facts::new(reading.size() as u64);
+        page_tree(reading, &Limits::DEFAULT, &mut facts).map(|()| facts)
+    }
+
+    /// A catalog past the reader's cap on a chain of references isn't read, nor
+    /// a page tree past its depth; one that's the file's to answer for, as
+    /// /Pages naming nothing, has no pages and nothing unread.
+    #[test]
+    fn a_page_tree_past_the_readers_caps_is_unread() {
+        let no_pages = streamed("", "ab");
+        let reading = Reading::open(&no_pages[..], &Open::DEFAULT).unwrap();
+        let facts = tree_of(&reading).unwrap();
+        assert!(facts.pages.is_empty() && facts.unread.pages.is_none());
+        // /Root through 40 references, each to the next.
+        let mut chain = b"%PDF-1.7\n".to_vec();
+        let mut rows = String::new();
+        for number in 1..=40 {
+            rows.push_str(&format!("{:010} 00000 n \n", chain.len()));
+            let next = number + 1;
+            chain.extend_from_slice(format!("{number} 0 obj\n{next} 0 R\nendobj\n").as_bytes());
+        }
+        rows.push_str(&format!("{:010} 00000 n \n", chain.len()));
+        chain.extend_from_slice(b"41 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let table = chain.len();
+        let text = format!(
+            "xref\n0 42\n0000000000 65535 f \n{rows}trailer\n<< /Size 42 /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n"
+        );
+        chain.extend_from_slice(text.as_bytes());
+        let reading = Reading::open(&chain[..], &Open::DEFAULT).unwrap();
+        let facts = tree_of(&reading).unwrap();
+        assert!(facts.pages.is_empty());
+        assert_eq!(facts.unread.pages, Some(Unread::Capped));
+    }
+
+    /// A file whose page tree's root, `3 0 R`, is in object stream `2 0 R`,
+    /// through `filter`, over one page, `5 0 R`; its sections a stream.
+    fn packed_tree(filter: &str) -> Vec<u8> {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let catalog = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 3 0 R >>\nendobj\n");
+        let stream = file.len();
+        let data = "3 0 << /Type /Pages /Kids [5 0 R] /Count 1 >>";
+        let len = data.len();
+        let head = format!("2 0 obj\n<< /Type /ObjStm /N 1 /First 4 {filter} /Length {len} >>\n");
+        file.extend_from_slice(head.as_bytes());
+        file.extend_from_slice(format!("stream\n{data}\nendstream\nendobj\n").as_bytes());
+        let page = file.len();
+        file.extend_from_slice(b"5 0 obj\n<< /Type /Page /Parent 3 0 R >>\nendobj\n");
+        let sections = file.len();
+        let at = |at: usize| [1, (at >> 8) as u8, at as u8, 0];
+        let rows = [
+            [0, 0, 0, 255],
+            at(catalog),
+            at(stream),
+            [2, 0, 2, 0],
+            at(sections),
+            at(page),
+        ];
+        let head = "4 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Length 24 >>\nstream\n";
+        file.extend_from_slice(head.as_bytes());
+        file.extend_from_slice(&rows.concat());
+        let tail = format!("\nendstream\nendobj\nstartxref\n{sections}\n%%EOF\n");
+        file.extend_from_slice(tail.as_bytes());
+        file
+    }
+
+    /// A page tree's node in an object stream through a filter the reader
+    /// doesn't take reads as the reader's resolver gives it, damaged, so the
+    /// tree is read without it, as the file's, and nothing's said unread:
+    /// where the hint stream through the same filter isn't judged, a page
+    /// tree there is.
+    #[test]
+    fn a_page_tree_node_packed_through_a_filter_not_taken_reads_as_damaged() {
+        let taken = packed_tree("");
+        let reading = Reading::open(&taken[..], &Open::DEFAULT).unwrap();
+        let facts = tree_of(&reading).unwrap();
+        let page = Some(ObjectId::new(5, 0));
+        assert_eq!(facts.pages.iter().map(|p| p.id).collect::<Vec<_>>(), [page]);
+        let unknown = packed_tree("/Filter /XXXDecode");
+        let reading = Reading::open(&unknown[..], &Open::DEFAULT).unwrap();
+        let facts = tree_of(&reading).unwrap();
+        assert!(facts.pages.is_empty());
+        assert_eq!(facts.unread.pages, None);
+    }
+
+    #[test]
+    fn a_source_that_fails_reading_the_page_tree_is_an_error() {
+        let file = streamed("", "ab");
+        let source = Failing(&file, AtomicBool::new(false));
+        let reading = Reading::open(&source, &Open::DEFAULT).unwrap();
+        source.1.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            tree_of(&reading),
             Err(Error::Read(read::Error::Io(_)))
         ));
     }

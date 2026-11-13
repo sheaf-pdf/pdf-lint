@@ -38,9 +38,9 @@ pdf-content-streams = { workspace = true, features = ["image-ends"] }
 # FreeType is compiled in, and no predefined CMap, so nor is hayro-cmap.
 pdf-fonts.workspace = true
 # Whether a file that says it's linearized holds, judged from its reading.
-# With its default feature alone: the adapter that reads pdf-structure's
+# With `family` alone, its default: the adapter that reads pdf-structure's
 # readings.
-pdf-linearize = { path = "../pdf-linearize", version = "0.1" }
+pdf-linearize = { workspace = true, features = ["family"] }
 pdf-objects.workspace = true
 # Dates and XMP claims, read without its clock, so without chrono.
 pdf-semantics.workspace = true

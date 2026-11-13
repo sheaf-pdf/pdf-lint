@@ -1,53 +1,84 @@
 [package]
 name = "pdf-linearize"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF files laid out for reading over a network (ISO 32000-2, Annex F): an object graph, of any object model, planned into the order and numbers a linearized file has, the bytes around its bodies, hint tables among them, and whether a file that says it's one holds"
-keywords = ["pdf", "linearized", "fast-web-view", "iso-32000"]
+documentation = "https://docs.rs/pdf-linearize"
+description = "Linearized PDF files (ISO 32000-2, Annex F) for any object model: a file's order and numbers planned, the bytes around its bodies and its hint tables written, and a file that says it's linearized checked"
+keywords = ["pdf", "linearized", "fast-web-view", "hint-tables", "iso-32000"]
 categories = ["encoding"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-bitstream-io = "4"
-# An adapter's, off by default, and without its clock, threads and the like.
-lopdf = { version = "0.45", default-features = false, optional = true }
+# The hint tables' bits. At least 4.10, the first 4.x without core2, every
+# release of which is yanked, so that its least is one a build can resolve.
+bitstream-io = "4.10"
 pdf-objects.workspace = true
 # The page tree and name trees, and not the clock.
 pdf-semantics = { workspace = true, optional = true }
 pdf-structure = { workspace = true, optional = true }
 thiserror = "2"
+# The spans of a plan, an assembly, a check and the family's writes and
+# reads, with the `tracing` feature: without its default features, so
+# without the proc macros of `attributes`; `std`, for its spans' guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 [features]
 default = ["family"]
-# `family`: linearize a document of pdf-structure's. The engine builds without it,
-# with no document model: an object is pdf-objects' `ObjectId`. The tests take
-# pdf-structure as a dev-dependency (below), so they build it either way.
+# `family`: linearize a document of pdf-structure's, and read a file's facts
+# from its reading. The engine builds without it, with no document model: an
+# object is pdf-objects' `ObjectId`. The tests take pdf-structure as a
+# dev-dependency (below), so they build it either way.
 family = ["dep:pdf-semantics", "dep:pdf-structure"]
-# `lopdf`: linearize a document of lopdf's, through its public objects alone.
-lopdf = ["dep:lopdf"]
 # pdf-filters' zlib-rs, through pdf-structure, so that `family::Options::deflate` and
 # `read` can name it.
 zlib-rs = ["pdf-structure?/zlib-rs"]
-# The stages of a write told as they end, for a timing's own build; not one to turn on
-# for use.
-timing = ["family"]
+# Spans through `tracing`: a plan, an assembly and each round of its
+# first-page section, a check, and with `family` a document's linearizing
+# and each of its stages, and a file's facts and each of their reads. An
+# object, a page, a table's entry and a finding have none. Off by default;
+# without it, none is compiled.
+tracing = ["dep:tracing"]
+# pdf-structure's test writer, with `family`: a new file's encryption from a
+# seeded generator and each write's IVs derived, so that what the fuzz
+# target writes of an input is the same bytes each run and a saved input
+# reruns as it ran. For fuzzing, never for a document's protection; off by
+# default, as pdf-structure's is, and nothing of the crate's API depends on
+# it.
+insecure-test-writer = ["pdf-structure?/insecure-test-writer"]
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
 
 [dev-dependencies]
 # A generator the tests can seed, for a new encryption's draws.
 chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # pdf-structure with its test writer, for the tests' new encryptions from a
 # seeded generator and their IVs derived, so that a file written twice is
 # the same bytes. Beside the optional normal dependency: the library is
-# built without it.
+# built without it. Through the workspace's table, not by its path alone:
+# the crate depends on pdf-structure anyway, with `family`, so it's
+# published after it, and its package keeps this one.
 pdf-structure = { workspace = true, features = ["insecure-test-writer"] }
 
-# docs.rs documents what the feature adds, beside the default.
+# The benchmarks: `cargo bench -p pdf-linearize`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "linearize"
+harness = false
+
+# docs.rs documents what the spans' feature adds, beside the default.
 [package.metadata.docs.rs]
-features = ["lopdf"]
+features = ["tracing"]
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,21 +1,23 @@
-//! [`Facts`] built from outside the crate, with no document model, an object's id the
-//! one type of the family's it takes (pdf-objects' `ObjectId`), as a caller of any
-//! model builds them: each of the files `tests/engine.rs` writes by hand, read here
-//! from its bytes with a few lines, holds, and a fact of each sort changed says so.
-//! Each part has its constructor, so a way in that's missing doesn't compile.
+//! [`Facts`] built from outside the crate, with no document model, an object's
+//! id the one type of the family's it takes (pdf-objects' `ObjectId`), as a
+//! caller of any model builds them: each of the files `tests/engine.rs` writes
+//! by hand, read here from its bytes with a few lines, holds, and a fact of
+//! each sort changed says so. Each part has its constructor, so a way in that's
+//! missing doesn't compile.
 
 use pdf_linearize::check::{
     Attribute, DictKey, Extent, Facts, Finding, FirstObject, Grade, HintData, HintFacts, PageFacts,
     Raw, RowEntry, RowFacts, SectionFacts, Sink,
 };
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_linearize::{Kind, Limits, Part, check};
+use pdf_linearize::plan::{Kind, Part};
+use pdf_linearize::{Limits, check};
 
 mod cases;
 use cases::{Written, all, two_pages};
 
-/// The facts of `written`, its positions from its bytes where a reader would have
-/// them from there.
+/// The facts of `written`, its positions from its bytes where a reader would
+/// have them from there.
 fn facts_of(written: &Written) -> Facts {
     let (bytes, plan, layout) = (&written.bytes, &written.plan, &written.layout);
     let mut facts = Facts::new(bytes.len() as u64);
@@ -25,7 +27,7 @@ fn facts_of(written: &Written) -> Facts {
     let text = String::from_utf8_lossy(&bytes[at as usize..at as usize + 200]);
     assert!(text.starts_with(&format!("{dictionary} 0 obj")), "{text}");
     let end = at + (text.find("endobj").unwrap() + 6) as u64;
-    let mut first = FirstObject::new(at, end, dictionary, 0);
+    let mut first = FirstObject::new(at, end, ObjectId::new(dictionary, 0));
     let key = |name: &str| {
         let rest = text.split(&format!("/{name} ")).nth(1)?;
         rest.split_ascii_whitespace().next()?.parse::<i64>().ok()

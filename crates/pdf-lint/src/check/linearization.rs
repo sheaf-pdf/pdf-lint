@@ -46,15 +46,20 @@
 //! or `/H`'s count of items, is what the model holds the dictionary to too:
 //! it's found only where the walk found nothing by the model's rules in the
 //! dictionary at that key, or for `/H`'s count, at or inside its array
-//! ([`Walk::find_told`]). A hint stream whose data is encrypted and not
-//! decrypted, and a file whose bytes the source didn't give, are counted as
-//! not checked, once, where the dictionary is held.
+//! ([`Walk::find_told`]). What pdf-linearize doesn't judge
+//! ([`Grade::Unjudged`]), a part of the file the reader didn't read for a
+//! reason of its own, a hint stream whose data is encrypted and not
+//! decrypted among it, sections or a page tree no key opens, past a cap of
+//! the reader's, or through filters it doesn't take, or past a cap of the
+//! check's own ([`LIMITS`]), and a file whose bytes the source didn't give,
+//! are counted as not checked, once each, where the dictionary is held, and
+//! never as a finding.
 
 use std::collections::HashMap;
 
-use pdf_linearize::check::{Facts, Grade, HintData, Place, Raw};
+use pdf_linearize::Limits;
+use pdf_linearize::check::{Facts, Finding as Fault, Grade, Place, Raw, Sink, Unread, Verdict};
 use pdf_linearize::hint::located;
-use pdf_linearize::{Finding as Fault, Limits, Verdict};
 
 use super::content::times;
 use super::kept::{Kept, Where};
@@ -76,6 +81,31 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// Why a linearization isn't checked whole: its hint stream's data is
 /// encrypted, and the reader didn't decrypt it.
 const LOCKED: &str = "a linearization whose hint stream's data isn't decrypted";
+
+/// Why a linearization isn't checked whole, for what pdf-linearize told it
+/// didn't judge, `fault`: [`LOCKED`] for a hint stream no key opens, and
+/// otherwise the part that wasn't read and why, in pdf-linearize's words for
+/// the reason, or the part past a cap of its check's ([`LIMITS`]), its count
+/// left out, as each file's would make a row of its own.
+fn unjudged(fault: &Fault) -> String {
+    match fault {
+        Fault::HintUnread {
+            why: Unread::Locked,
+        } => LOCKED.to_string(),
+        Fault::HintUnread { why } => format!("a linearization whose hint stream isn't read: {why}"),
+        Fault::SectionsUnread { why } => {
+            format!("a linearization whose sections aren't read as far as its main one: {why}")
+        }
+        Fault::PagesUnread { why } => format!("a linearization whose page tree isn't read: {why}"),
+        Fault::HintTablesCapped { .. } => {
+            "a linearization whose hint tables are past a cap of the check's".to_string()
+        }
+        Fault::GraphCapped { .. } => {
+            "a linearization whose objects are past a cap of the check's".to_string()
+        }
+        _ => "a linearization not judged whole".to_string(),
+    }
+}
 
 /// Why a linearization isn't checked: the source didn't give the bytes its
 /// facts are read from.
@@ -211,7 +241,8 @@ struct Places<'a> {
     /// are as if it weren't there from ([`Facts::hint_extent`]).
     stream: (u64, u64),
     /// Where each of the hint stream's tables starts in its data, by its key
-    /// in the stream's dictionary, the page offset table at 0.
+    /// in the stream's dictionary; the page offset table, which has none, is
+    /// at 0.
     tables: Vec<(Vec<u8>, u64)>,
     /// Each number's object, by number, read the first time an object's
     /// place is asked for.
@@ -231,7 +262,7 @@ impl<'a> Places<'a> {
         dict: ObjectId,
     ) -> Places<'a> {
         let hint = facts.hint.as_ref();
-        let mut tables = vec![(b"page offset".to_vec(), 0)];
+        let mut tables = Vec::new();
         for (key, raw) in hint.iter().flat_map(|h| &h.keys) {
             if let Some(at) = number(Some(raw)) {
                 tables.push((key.clone(), at));
@@ -308,7 +339,10 @@ impl<'a> Places<'a> {
             Some(Place::HintByte(at)) => self.data_at(at),
             Some(Place::HintBit(bit)) => self.data_at(bit / 8),
             Some(Place::Table(table)) => {
-                let at = self.table(table.trim_start_matches('/').as_bytes())?;
+                let at = match table.key() {
+                    Some(key) => self.table(key)?,
+                    None => 0,
+                };
                 self.data_at(at)
             }
             Some(Place::Page(_)) => self.data_at(0),
@@ -383,7 +417,7 @@ struct Faults<'a> {
     object: ObjectId,
 }
 
-impl pdf_linearize::Sink for Faults<'_> {
+impl Sink for Faults<'_> {
     fn finding(&mut self, finding: Fault) {
         let at = self.places.at(self.places.of(&finding));
         let at = Where {
@@ -421,7 +455,7 @@ impl<'a> Walk<'a> {
         let Some(first) = facts.claim() else {
             return;
         };
-        let id = ObjectId::new(first.number, first.generation);
+        let id = first.id;
         let revisions = self.source.revisions();
         // The object at the dictionary's number is the dictionary where its
         // record starts where the first object does, else a later
@@ -526,13 +560,6 @@ impl<'a> Walk<'a> {
             Whose::Dictionary => (Some(id), None),
             Whose::First => (None, Some(1)),
         };
-        let locked = facts
-            .hint
-            .as_ref()
-            .is_some_and(|h| h.data == HintData::Locked);
-        if verdict.linearized && locked {
-            self.unchecked("-", LOCKED.to_string(), TABLE, "-");
-        }
         // The dictionary as the walk read it, for what the model holds it
         // to: the file's, at its number.
         let dict = self.source.get(id).ok();
@@ -542,6 +569,11 @@ impl<'a> Walk<'a> {
         let mut found: Vec<Result<Finding, usize>> = Vec::new();
         let mut tells = Vec::new();
         for (i, &(at, fault, n)) in faults.kept.told().iter().enumerate() {
+            // What isn't judged is no finding, departures asked for or not.
+            if fault.grade() == Grade::Unjudged {
+                self.unchecked("-", unjudged(&fault), TABLE, "-");
+                continue;
+            }
             let key = key(faults.places.of(&fault));
             if fault.grade() != Grade::Error && !self.departures {
                 let at = (TABLE.to_string(), key);
@@ -600,6 +632,7 @@ mod tests {
     //! pdf-structure's writer.
 
     use pdf_fixtures::fixture::{self, Body, Xref};
+    use pdf_linearize::check::HintData;
     use pdf_linearize::family::{self, linearize_bytes};
     use pdf_linearize::hint::{PageOffsets, SharedObjects};
     use pdf_structure::XrefKind;
@@ -609,7 +642,7 @@ mod tests {
     use crate::bytes::{self, WithReading};
     use std::collections::BTreeMap;
 
-    use crate::check::{Hold, Made, Options, Report, Unchecked, check, check_with_reading};
+    use crate::check::{Hold, Made, Options, Report, check, check_with_reading};
     use crate::dict;
     use crate::pdf_filters::{Level, Prediction};
 
@@ -674,11 +707,13 @@ mod tests {
         deflate
     }
 
-    /// `file` linearized, its hint stream's data stored as it is.
+    /// `file` opened by `passwords` and linearized, its hint stream's data
+    /// stored as it is.
     fn linearized(file: &[u8], passwords: &[crate::pdf_crypt::Password]) -> Vec<u8> {
         let mut options = family::Options::DEFAULT;
         options.deflate = stored();
-        linearize_bytes(file, passwords, &options).unwrap()
+        options.read.passwords = passwords;
+        linearize_bytes(file, &options).unwrap()
     }
 
     /// `file` checked beside its reading under `options`, every object held
@@ -902,7 +937,7 @@ mod tests {
         let value = "/H's length from byte 473 is 199, where the hint stream takes 165 to 166 (ISO 32000-2, Table F.1)";
         assert_eq!(at(&h), one("H", value, entry(&h, "/H [473 199]")));
         let s = written_as(&file, "/S 48", "/S 47");
-        let value = "the hint tables don't read: a shared entry's count of objects's width is 1024 bits, past 32 (ISO 32000-2, F.4)";
+        let value = "the hint tables don't read: the width of a shared entry's count of objects is 1024 bits, past 32 (ISO 32000-2, F.4)";
         let whole = Some(Span::new(None, 23, 88));
         assert_eq!(at(&s), one("-", value, whole));
         assert_eq!(&s[23..25], b"<<");
@@ -999,7 +1034,7 @@ mod tests {
         let read = WithReading::new(&bare[..], &bytes::Options::DEFAULT).unwrap();
         let record = read.document().record(ObjectId::new(page, 0)).map(|r| r.at);
         assert_eq!(record.map(|at| at.start), Some(object));
-        let value = "page 1 doesn't say its MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
+        let value = "page 1 doesn't say its /MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
         assert_eq!(told(&report), [("-", value, record)], "{report}");
     }
 
@@ -1176,10 +1211,41 @@ mod tests {
         }
     }
 
+    /// `file` linearized, its hint stream's data stored as it is, as
+    /// [`linearized`], under its cross-reference streams with what may be
+    /// packed in object streams where `pack` says.
+    fn linearized_packed(
+        file: &[u8],
+        passwords: &[crate::pdf_crypt::Password],
+        pack: bool,
+    ) -> Vec<u8> {
+        let mut options = family::Options::DEFAULT;
+        options.deflate = stored();
+        options.kind = XrefKind::Stream;
+        options.pack = pack;
+        options.read.passwords = passwords;
+        linearize_bytes(file, &options).unwrap()
+    }
+
+    /// What's counted as not checked of a linearization, by why: every row
+    /// in its table, each at the dictionary.
+    fn not_checked(report: &Report) -> BTreeMap<&str, usize> {
+        (report.unchecked.iter())
+            .filter(|(row, _)| row.table == TABLE)
+            .map(|(row, &n)| {
+                assert_eq!((row.column, row.key.as_str()), ("-", "-"), "{row:?}");
+                (row.why.as_str(), n)
+            })
+            .collect()
+    }
+
     /// An encrypted file linearized as encrypted, opened by its user's
     /// password, has its hint stream's data decrypted, and holds; opened by
-    /// none, the data isn't read, which is counted once, and nothing is
-    /// found of its tables.
+    /// none, the data isn't read, which is counted once as not checked, in
+    /// its words, and nothing is found of its tables, nor counted as a
+    /// departure, whether departures are asked for or not. Packed, its page
+    /// tree's nodes are in object streams no key decrypts too, which is
+    /// counted once beside it.
     #[test]
     fn an_encrypted_linearized_files_hint_data_is_decrypted() {
         let id = b"0123456789abcdef";
@@ -1206,17 +1272,103 @@ mod tests {
         let report = check_with_reading(&read, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(told(&report), [], "{report}");
         assert_eq!(report.linearized, Some(Linearized::Holds));
-        assert!(!report.unchecked.keys().any(|u| u.why == LOCKED));
+        assert_eq!(not_checked(&report), BTreeMap::new(), "{report}");
+        let words = "a linearization whose hint stream's data isn't decrypted";
+        assert_eq!(LOCKED, words);
         let locked = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        for departures in [false, true] {
+            let asked = Options {
+                departures,
+                ..Options::default()
+            };
+            let report = check_with_reading(&locked, &Hold::All(Made::Merged), &asked);
+            assert_eq!(told(&report), [], "{report}");
+            assert!(report.departures.is_empty(), "{report}");
+            assert_eq!(report.linearized, Some(Linearized::Holds));
+            let rows = BTreeMap::from([(words, 1)]);
+            assert_eq!(not_checked(&report), rows, "{report}");
+        }
+        // Each page's resources an object of its own, which packs, so that the
+        // page tree's walk meets an object stream.
+        let mut split = Vec::new();
+        for id in doc.ids() {
+            let mut object = doc.get(id).unwrap().clone();
+            let page = object.as_dict_mut().filter(|page| page.has_type(b"Page"));
+            if let Some(resources) = page.and_then(|page| page.get(b"Resources").cloned()) {
+                let own = id.number + 100;
+                object.as_dict_mut().unwrap().set("Resources", r(own));
+                split.push((own, Body::from(resources)));
+            }
+            split.push((id.number, Body::from(object)));
+        }
+        let encrypted = fixture::encrypted(&settings, &split, dict! { "Root" => r(1) });
+        let packed = linearized_packed(&encrypted, &user, true);
+        let locked = WithReading::new(&packed[..], &bytes::Options::DEFAULT).unwrap();
+        let member = |(_, _, entry): (u32, u16, crate::bytes::XrefEntry)| {
+            matches!(entry, crate::bytes::XrefEntry::Compressed { .. })
+        };
+        assert!(locked.reading().entries().any(member), "it's packed");
         let report = check_with_reading(&locked, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(told(&report), [], "{report}");
-        let row = Unchecked {
-            column: "-",
-            why: LOCKED.to_string(),
-            table: TABLE.to_string(),
-            key: "-".to_string(),
+        assert!(report.departures.is_empty(), "{report}");
+        let tree = "a linearization whose page tree isn't read: no key the reader has opens it";
+        let rows = BTreeMap::from([(words, 1), (tree, 1)]);
+        assert_eq!(not_checked(&report), rows, "{report}");
+    }
+
+    /// A linearized file whose hint stream the reader doesn't read, past its
+    /// cap on a stream's data or through a filter it doesn't take, has that
+    /// counted as not checked, once, and nothing found of it, nor counted as
+    /// a departure.
+    #[test]
+    fn a_hint_stream_the_reader_doesnt_read_is_counted_as_not_checked() {
+        let file = linearized(&three_pages(), &[]);
+        let hint = facts(&file).hint.unwrap();
+        let HintData::Decoded(data) = &hint.data else {
+            panic!("decoded");
         };
-        assert_eq!(report.unchecked.get(&row), Some(&1), "{report}");
+        let mut options = bytes::Options::DEFAULT;
+        options.limits.stream = data.len() - 1;
+        let read = WithReading::new(&file[..], &options).unwrap();
+        let report = check_with_reading(&read, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(told(&report), [], "{report}");
+        assert!(report.departures.is_empty(), "{report}");
+        let why =
+            "a linearization whose hint stream isn't read: it's past a cap the reader reads under";
+        assert_eq!(not_checked(&report), BTreeMap::from([(why, 1)]), "{report}");
+        let at = hint.at as usize;
+        let filter = at + find(&file[at..], b"/FlateDecode");
+        let mut unfiltered = file.clone();
+        unfiltered[filter..filter + 12].copy_from_slice(b"/DCTDecode  ");
+        let report = checked(&unfiltered);
+        assert_eq!(told(&report), [], "{report}");
+        assert!(report.departures.is_empty(), "{report}");
+        assert_eq!(report.linearized, Some(Linearized::Holds));
+        let why = "a linearization whose hint stream isn't read: it's through filters the reader doesn't take";
+        assert_eq!(not_checked(&report), BTreeMap::from([(why, 1)]), "{report}");
+    }
+
+    /// A linearized file whose hint stream's `/Filter` isn't one, a number
+    /// where a name or an array goes, has that found as the file's: its data
+    /// doesn't decode, and the linearization fails; nothing's counted as not
+    /// checked.
+    #[test]
+    fn a_hint_stream_whose_filter_isnt_one_is_found() {
+        let file = linearized(&three_pages(), &[]);
+        let hint = facts(&file).hint.unwrap();
+        let at = hint.at as usize;
+        let filter = at + find(&file[at..], b"/FlateDecode");
+        let mut damaged = file.clone();
+        damaged[filter..filter + 12].copy_from_slice(b"5           ");
+        let report = checked(&damaged);
+        let words = "the hint stream's data doesn't decode";
+        let told = told(&report);
+        assert!(
+            told.iter().any(|(_, value, _)| value.starts_with(words)),
+            "{report}"
+        );
+        assert_eq!(report.linearized, Some(Linearized::Fails));
+        assert_eq!(not_checked(&report), BTreeMap::new(), "{report}");
     }
 
     /// `file` with an update after it, by pdf-structure's writer: its
@@ -1407,7 +1559,7 @@ mod tests {
     #[test]
     fn a_dictionary_written_over_leaves_its_findings_to_the_first_revision() {
         let file = written_as(&linearized(&three_pages(), &[]), "/E 923", "/E 123");
-        let dict = facts(&file).first_object.unwrap().number;
+        let dict = facts(&file).first_object.unwrap().id.number;
         let over = updated_with(
             &file,
             &[(ObjectId::new(dict, 0), dict! { "Foo" => 1 }.into())],

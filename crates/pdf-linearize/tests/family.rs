@@ -1,11 +1,12 @@
-//! What the family adapter writes, read back with pdf-structure's reader: what it
-//! changes of a document, where each thing goes, and what it refuses. Files are
-//! written by hand, a marker in an object saying where it landed.
+//! What the family adapter writes, read back with pdf-structure's reader: what
+//! it changes of a document, where each thing goes, and what it refuses. Files
+//! are written by hand, a marker in an object saying where it landed.
 
 #![cfg(feature = "family")]
 
 use std::sync::atomic::AtomicBool;
 
+use pdf_linearize::check::Attribute;
 use pdf_linearize::family::{self, Error, FirstPage, Linearized, Options, PageTree};
 use pdf_linearize::{Limits, hint, plan};
 use pdf_objects::object::{Object, ObjectId, Value};
@@ -128,8 +129,8 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused() {
     let page = |parent: u32| format!("<< /Type /Page /Parent {parent} 0 R {own} >>");
     let root = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
     let catalog = "<< /Type /Catalog /Pages 2 0 R >>";
-    let refused = |objects: &[&str], wanted: usize, key: &str| {
-        let got = family::linearize_bytes(&file(objects, ROOT), &[], &table());
+    let refused = |objects: &[&str], wanted: u64, key: Attribute| {
+        let got = family::linearize_bytes(&file(objects, ROOT), &table());
         assert!(
             matches!(
                 got,
@@ -139,7 +140,8 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused() {
             "{got:?}"
         );
     };
-    // Each node lists the page whose /Parent is the other, whose box then differs.
+    // Each node lists the page whose /Parent is the other, whose box then
+    // differs.
     let apart = [
         catalog,
         root,
@@ -148,7 +150,7 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused() {
         &page(4),
         &page(3),
     ];
-    refused(&apart, 0, "MediaBox");
+    refused(&apart, 0, Attribute::MediaBox);
     // Above the root, where going down starts: by /Parent alone it's inherited.
     let above = [
         catalog,
@@ -156,14 +158,14 @@ fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused() {
         "<< /Type /Page /Parent 2 0 R /Resources << >> >>",
         "<< /Type /Pages /MediaBox [0 0 9 9] >>",
     ];
-    refused(&above, 0, "MediaBox");
+    refused(&above, 0, Attribute::MediaBox);
     // A page that names no /Parent, under a node going down gives something to.
     let no_parent = [
         catalog,
         "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] >>",
         "<< /Type /Page /Resources << >> >>",
     ];
-    refused(&no_parent, 0, "MediaBox");
+    refused(&no_parent, 0, Attribute::MediaBox);
     // Apart, and each reads what it did: the same value, at either place.
     let alike = [
         catalog,
@@ -211,8 +213,8 @@ fn an_object_that_s_only_a_reference_to_nothing_has_no_body_and_no_entry() {
     let first = "<< /Type /Page /Parent 2 0 R >>";
     let later = "<< /Type /Page /Parent 2 0 R /X 6 0 R >>";
     let start = [catalog, root, first, later, later];
-    // To no object; to a null; along a chain to one; round to itself, by way of another; to
-    // what a file leaves out.
+    // To no object; to a null; along a chain to one; round to itself, by way of
+    // another; to what a file leaves out.
     let shapes: [&[&str]; 5] = [
         &["99 0 R"],
         &["7 0 R", "null"],
@@ -287,7 +289,8 @@ fn a_page_the_tree_doesn_t_list_gets_what_it_inherited_from_a_node_that_loses_it
         // Unlisted, with a box of its own, and the rest from the node.
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 3 3] /Mark (stray) >>",
         "<< /Mark (resources) >>",
-        // Unlisted, its parent no node of the tree: what that holds it still holds.
+        // Unlisted, its parent no node of the tree: what that holds it still
+        // holds.
         "<< /Type /Page /Parent 7 0 R /Mark (other) >>",
         "<< /Type /Pages /Rotate 180 /Mark (unlisted node) >>",
     ];
@@ -316,8 +319,8 @@ fn a_page_the_tree_doesn_t_list_gets_what_it_inherited_from_a_node_that_loses_it
     }
 }
 
-/// What says it's a page, isn't listed, and is a listed page's `/Parent` with kids is a
-/// node like any: it's given nothing to hold.
+/// What says it's a page, isn't listed, and is a listed page's `/Parent` with
+/// kids is a node like any: it's given nothing to hold.
 #[test]
 fn a_stray_page_that_s_a_node_is_given_nothing() {
     let objects = [
@@ -585,8 +588,8 @@ fn a_thumbnail_is_part_nine_and_no_part_of_its_page() {
 
 #[test]
 fn a_page_s_parent_and_document_part_are_no_part_of_it() {
-    // The part names the other page, and its sibling part's metadata, which would
-    // come along if a page's walk went in.
+    // The part names the other page, and its sibling part's metadata, which
+    // would come along if a page's walk went in.
     let mut objects = two_pages("/DPartRoot 9 0 R");
     objects[2] = "<< /Type /Page /Parent 2 0 R /Contents 5 0 R /DPart 10 0 R >>".into();
     objects.push("<< /Type /DPartRoot /DPartRootNode 11 0 R >>".into());
@@ -665,8 +668,8 @@ fn what_the_trailer_does_not_reach_is_not_written() {
     assert!(at(&out, "/Mark (information)") > 0);
     let text = String::from_utf8_lossy(&out);
     assert!(!text.contains("no one's"));
-    // A linearization dictionary among what's reached is left out as under a whole
-    // file, and what names it reads null.
+    // A linearization dictionary among what's reached is left out as under a
+    // whole file, and what names it reads null.
     assert!(!text.contains("old linearization"));
     assert!(read(&out).0.facts().linearized);
 }
@@ -686,8 +689,8 @@ fn a_length_or_a_null_only_a_reference_names_goes() {
         Some(5)
     );
     assert_eq!(reading.data(id).unwrap().as_ref(), b"abcde");
-    // Catalog, node, two pages, two contents, font, resources; the dictionary and
-    // the hint stream.
+    // Catalog, node, two pages, two contents, font, resources; the dictionary
+    // and the hint stream.
     assert_eq!(doc.objects().count(), 10);
     let ids = page_ids(&doc);
     let resources = dict_at(&doc, ids[0])
@@ -703,8 +706,8 @@ fn outlines_are_shown_order_in_part_nine_or_part_six_under_use_outlines() {
     let outline = |mode: &str| {
         let mut objects = two_pages(&format!("/Outlines 9 0 R {mode}"));
         objects.push("<< /First 14 0 R /Last 12 0 R /Count 3 /Mark (outlines) >>".into());
-        // Item a is closed over a1; b follows it, and z, whose /Next comes before its
-        // /First as written, comes before them.
+        // Item a is closed over a1; b follows it, and z, whose /Next comes
+        // before its /First as written, comes before them.
         objects.push("<< /Title (a) /Parent 9 0 R /Prev 14 0 R /Next 12 0 R /First 11 0 R /Last 11 0 R /Count -1 /Mark (a) >>".into());
         objects.push("<< /Title (a1) /Parent 10 0 R /Mark (a1) >>".into());
         objects.push("<< /Title (b) /Parent 9 0 R /Prev 10 0 R /First 13 0 R /Last 13 0 R /Count 1 /Mark (b) >>".into());
@@ -851,8 +854,8 @@ fn a_tree_that_gives_a_page_no_place_of_its_own_is_refused() {
         page_tree(tree("3 0 R 99 0 R 4 0 R", "/Count 2")),
         PageTree::Rules { page: 1 }
     );
-    // A kid that's a reference to a page by way of another, which PDFium's rules
-    // don't follow so far.
+    // A kid that's a reference to a page by way of another, which PDFium's
+    // rules don't follow so far.
     let mut objects = two_pages("");
     objects[1] = "<< /Type /Pages /Kids [3 0 R 9 0 R] /Count 2 /MediaBox [0 0 9 9] >>".into();
     objects.push("4 0 R".into());
@@ -873,7 +876,7 @@ fn a_tree_that_gives_a_page_no_place_of_its_own_is_refused() {
         page_tree(built(&objects)),
         PageTree::Attribute {
             page: 1,
-            attribute: "Resources"
+            attribute: Attribute::Resources
         }
     );
     // A node in place holding what would have to come off it.
@@ -883,7 +886,7 @@ fn a_tree_that_gives_a_page_no_place_of_its_own_is_refused() {
     assert_eq!(
         page_tree(built(&objects)),
         PageTree::DirectNode {
-            attribute: "Rotate"
+            attribute: Attribute::Rotate
         }
     );
 }
@@ -1043,24 +1046,25 @@ fn the_same_document_writes_the_same_bytes_on_any_threads() {
 fn linearize_bytes_is_linearize_of_what_it_reads() {
     let bytes = built(&two_pages(""));
     for options in kinds() {
-        let out = family::linearize_bytes(&bytes, &[], &options).unwrap();
+        let out = family::linearize_bytes(&bytes, &options).unwrap();
         assert_eq!(out, written(&bytes, &options));
     }
-    let refused = family::linearize_bytes(b"not a file", &[], &table()).unwrap_err();
+    let refused = family::linearize_bytes(b"not a file", &table()).unwrap_err();
     assert!(
         matches!(refused, Error::NoCatalog | Error::Read(_)),
         "{refused}"
     );
 }
 
-/// What opens a file is the caller's: under caps it can't read under, it's refused.
+/// What opens a file is the caller's: under caps it can't read under, it's
+/// refused.
 #[test]
 fn linearize_bytes_opens_a_file_as_it_s_told() {
     let bytes = built(&two_pages(""));
-    assert!(family::linearize_bytes(&bytes, &[], &table()).is_ok());
+    assert!(family::linearize_bytes(&bytes, &table()).is_ok());
     let mut options = table();
     options.read.limits.parser.nesting = 0;
-    let refused = family::linearize_bytes(&bytes, &[], &options);
+    let refused = family::linearize_bytes(&bytes, &options);
     assert!(refused.is_err(), "{:?}", refused.map(|_| ()));
 }
 

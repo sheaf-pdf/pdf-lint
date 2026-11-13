@@ -2,26 +2,27 @@
 //! makes, on any graph, each held against a plain walk of it; what's assembled
 //! from a plan, its positions against its pieces, its tables against the plan,
 //! and the check of it clean; a hint stream of any bytes, read under small caps
-//! and written again; any facts, judged the same whatever the sink; with
+//! and written again; any facts, judged the same whatever the sink, and of
+//! what they say wasn't read, nothing that depends on it judged; with
 //! `family`, any bytes as a file, laid out and read back, the check of what's
-//! written clean; and with `lopdf` too, any bytes as edits to a document of
-//! lopdf's, the same of what that adapter writes. It's compiled only for tests
-//! and under cargo-fuzz's `--cfg fuzzing`.
+//! written clean. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
 use crate::check::{
     self, Facts, Finding, FirstObject, Grade, HintData, HintFacts, PageFacts, Raw, RowEntry,
-    RowFacts, SectionFacts, Sink,
+    RowFacts, SectionFacts, Sink, Unread,
 };
 use crate::hint::{self, EmbeddedFiles, Extended, Generic, HintKeys, PageOffsets};
 use crate::hint::{SharedObjects, Thumbnails};
 use crate::layout::{self, Encoded, Layout, Options, Piece, Stream, StreamKind, assemble};
-use crate::plan::{Error, Group, Kind, Page, Part, Plan, Use, What, plan};
+use crate::plan::{Error, Group, Kind, MEMBERS, Page, Part, Plan, Use, What, Write, plan};
 use pdf_objects::ObjectId;
+use pdf_objects::version::Version;
 
-use crate::{Graph, Limits, MEMBERS};
+use crate::{Graph, Limits};
 
 /// The most objects an input describes, past what two object streams hold.
 const OBJECTS: usize = 600;
@@ -398,7 +399,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
 
     // What's late is after the rest of its page's, its page object first.
     for page in 0..plan.page_count() {
-        let late = |write: &crate::Write| match write.what {
+        let late = |write: &Write| match write.what {
             What::Object(id) => plain.objects[&id].late,
             What::Container(_) => false,
         };
@@ -685,11 +686,11 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     assert!(matches!(refused, Err(Error::TooManyPages { .. })));
     if plan.shared_visits() > 0 {
         let refused = at_edge(&|l| l.shared_visits = plan.shared_visits() - 1);
-        assert!(matches!(refused, Err(Error::TooManyHints { .. })));
+        assert!(matches!(refused, Err(Error::TooManySharedVisits { .. })));
     }
     if count > 0 {
         let refused = at_edge(&|l| l.shared_entries = count - 1);
-        assert!(matches!(refused, Err(Error::TooManyHints { .. })));
+        assert!(matches!(refused, Err(Error::TooManySharedEntries { .. })));
     }
 }
 
@@ -911,7 +912,7 @@ fn assembles(plan: &Plan, data: &[u8]) {
             .map(|_| lengths.next().unwrap())
             .collect(),
     };
-    let options = Options::new((1, 7));
+    let options = Options::new(Version::new(1, 7));
     let layout = assemble(plan, &lengths, &options, plain).expect("settles");
     assembled(plan, &lengths, &layout);
     clean(plan, &layout);
@@ -1068,8 +1069,8 @@ pub fn tables(data: &[u8]) {
     );
 }
 
-/// Where [`group`](crate::group) puts what's `used` so among the members of an
-/// object stream: by page, then by number.
+/// Where [`group`](crate::plan::group()) puts what's `used` so among the
+/// members of an object stream: by page, then by number.
 fn rank(used: Use) -> (u32, u32) {
     match used {
         Use::Page(page) => (0, page),
@@ -1105,7 +1106,8 @@ pub(crate) fn facts_of(plan: &Plan, layout: &Layout) -> Facts {
     let mut facts = Facts::new(layout.len());
     let dictionary = plan.dictionary_number();
     let dictionary_at = layout.position(dictionary).expect("it's written");
-    let mut first = FirstObject::new(dictionary_at, layout.first_section(), dictionary, 0);
+    let id = ObjectId::new(dictionary, 0);
+    let mut first = FirstObject::new(dictionary_at, layout.first_section(), id);
     let (hint_at, hint_len) = layout.hint_extent();
     let int = |n: u64| Raw::Integer(n as i64);
     first.linearized = Raw::Integer(1);
@@ -1238,7 +1240,149 @@ fn judged_alike(facts: &Facts, limits: &Limits) -> (check::Verdict, Vec<Finding>
     assert_eq!(check::check(facts, limits, by), verdict);
     let error = kept.iter().any(|finding| finding.grade() == Grade::Error);
     assert_eq!(verdict.holds, verdict.linearized && !error, "{kept:?}");
+    unjudged_alone(facts, verdict, &kept);
     (verdict, kept)
+}
+
+/// Of each part `facts` say the reader didn't read, one finding says so, and
+/// nothing that depends on it is told among `kept`.
+fn unjudged_alone(facts: &Facts, verdict: check::Verdict, kept: &[Finding]) {
+    use Finding::*;
+    if !verdict.linearized {
+        return;
+    }
+    let told = |said: &dyn Fn(&Finding) -> bool| kept.iter().filter(|f| said(f)).count();
+    let none = |of: &str, said: &dyn Fn(&Finding) -> bool| {
+        let found: Vec<&Finding> = kept.iter().filter(|f| said(f)).collect();
+        assert!(found.is_empty(), "{of} isn't read, and {found:?} is said");
+    };
+    let hint = (facts.hint.as_ref()).and_then(|hint| match hint.data {
+        HintData::Unread(why) => Some(why),
+        _ => None,
+    });
+    assert_eq!(
+        told(&|f| matches!(f, HintUnread { .. })),
+        usize::from(hint.is_some())
+    );
+    if let Some(why) = hint {
+        assert!(kept.contains(&HintUnread { why }) && !verdict.hints_read);
+        none("the hint stream", &|f| {
+            matches!(
+                f,
+                HintNotAStream | HintUndecodable | HintTables { .. } | TableOverruns { .. }
+            )
+        });
+    }
+    let sections = facts.unread.sections;
+    assert_eq!(
+        told(&|f| matches!(f, SectionsUnread { .. })),
+        usize::from(sections.is_some())
+    );
+    if let Some(why) = sections {
+        assert!(kept.contains(&SectionsUnread { why }));
+        none("the sections", &|f| {
+            matches!(
+                f,
+                NoSections
+                    | NoMainSection
+                    | SectionOrder { .. }
+                    | FirstSize { .. }
+                    | MainSubsections { .. }
+                    | MainFrom { .. }
+                    | MainZeroInUse
+                    | MainFree { .. }
+                    | MainPrev
+                    | LastStartxref { .. }
+                    | CatalogCompressed { .. }
+                    | CatalogNotFirst { .. }
+                    | UncompressedAfterCompressed { .. }
+                    | Generation { .. }
+                    | GroupsApart { .. }
+                    | NumberOutOfOrder { .. }
+                    | HintNotLast { .. }
+                    | FirstPageEnd { .. }
+                    | MainFirstEntry { .. }
+                    | HintNotListed { .. }
+                    | HintExtent { .. }
+                    | NoPages
+                    | PageCount { .. }
+                    | FirstPageObject { .. }
+                    | FirstPageNotFirst { .. }
+                    | PageCompressed { .. }
+                    | PageAttribute { .. }
+                    | FirstPageAt { .. }
+                    | FirstPageNotFirstObject { .. }
+                    | PageAt { .. }
+                    | PageObjects { .. }
+                    | PageLength { .. }
+                    | SharedFirstAt { .. }
+                    | SharedObjects { .. }
+                    | SharedLength { .. }
+                    | TableObject { .. }
+                    | TableAt { .. }
+                    | TableObjects { .. }
+                    | TableLength { .. }
+                    | GraphRefused { .. }
+                    | FirstPageReaches { .. }
+                    | PageReaches { .. }
+                    | SharedNotListed { .. }
+                    | SharedNotReached { .. }
+            )
+        });
+    }
+    // Of the check's own caps: tables past one read none, and nothing's said
+    // of what they'd place; a graph past one, nothing of what a page reaches.
+    let tables = told(&|f| matches!(f, HintTablesCapped { .. }));
+    assert!(tables <= 1 && (tables == 0 || !verdict.hints_read));
+    if tables == 1 {
+        none("the hint tables", &|f| {
+            matches!(
+                f,
+                HintTables { .. }
+                    | TableOverruns { .. }
+                    | FirstPageAt { .. }
+                    | PageAt { .. }
+                    | PageObjects { .. }
+                    | SharedCounts { .. }
+                    | GraphRefused { .. }
+                    | GraphCapped { .. }
+                    | PageReaches { .. }
+            )
+        });
+    }
+    if told(&|f| matches!(f, GraphCapped { .. })) > 0 {
+        assert_eq!(told(&|f| matches!(f, GraphCapped { .. })), 1);
+        none("the graph", &|f| {
+            matches!(
+                f,
+                GraphRefused { .. }
+                    | FirstPageReaches { .. }
+                    | PageReaches { .. }
+                    | SharedNotListed { .. }
+                    | SharedNotReached { .. }
+            )
+        });
+    }
+    let pages = facts.unread.pages;
+    assert_eq!(
+        told(&|f| matches!(f, PagesUnread { .. })),
+        usize::from(pages.is_some())
+    );
+    if let Some(why) = pages {
+        assert!(kept.contains(&PagesUnread { why }));
+        none("the page tree", &|f| {
+            matches!(
+                f,
+                NoPages
+                    | PageCount { .. }
+                    | FirstPageObject { .. }
+                    | FirstPageNotFirst { .. }
+                    | PageCompressed { .. }
+                    | PageAttribute { .. }
+                    | NodeAttribute { .. }
+            )
+        });
+    }
 }
 
 /// What's assembled holds: the check of it finds nothing but what a plan can't
@@ -1265,7 +1409,7 @@ pub fn facts(data: &[u8]) {
     let mut facts = match plan(&described.graph(), &Limits::DEFAULT) {
         Ok(planned) if choice & 1 == 0 && planned.size() < 2000 => {
             let lengths = vec![16 + u64::from(choice); planned.writes().len()];
-            let options = Options::new((1, 7));
+            let options = Options::new(Version::new(1, 7));
             let layout = assemble(&planned, &lengths, &options, plain).expect("settles");
             let mut facts = facts_of(&planned, &layout);
             spoiled(&mut facts, &mut bytes);
@@ -1353,9 +1497,18 @@ fn section_from(bytes: &mut Bytes) -> SectionFacts {
     section
 }
 
+/// Why a part isn't read, of the input's.
+fn unread_from(bytes: &mut Bytes) -> Unread {
+    match bytes.below(3) {
+        0 => Unread::Locked,
+        1 => Unread::Capped,
+        _ => Unread::Unfiltered,
+    }
+}
+
 fn hint_from(bytes: &mut Bytes) -> HintFacts {
     let data = match bytes.below(8) {
-        0 => HintData::Locked,
+        0 => HintData::Unread(unread_from(bytes)),
         1 => HintData::NotAStream,
         2 => HintData::Undecodable,
         _ => {
@@ -1401,8 +1554,7 @@ fn made_up(bytes: &mut Bytes) -> Facts {
     let mut first = FirstObject::new(
         number_from(bytes),
         number_from(bytes),
-        bytes.below(64) as u32,
-        bytes.below(2) as u16,
+        ObjectId::new(bytes.below(64) as u32, bytes.below(2) as u16),
     );
     first.stream = bytes.chance(16);
     first.linearized = match bytes.chance(8) {
@@ -1446,18 +1598,35 @@ fn made_up(bytes: &mut Bytes) -> Facts {
     facts.nodes = (0..bytes.below(4))
         .map(|_| (bytes.below(64) as u32, check::Attribute::Rotate))
         .collect();
+    facts.unread.sections = bytes.chance(8).then(|| unread_from(bytes));
+    facts.unread.pages = bytes.chance(8).then(|| unread_from(bytes));
     facts
 }
 
 /// What's assembled, with a few of its fields given values of the input's.
 fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
     for _ in 0..1 + bytes.below(4) {
-        match bytes.below(16) {
+        match bytes.below(19) {
             0 => facts.len = number_from(bytes),
             1 => facts.first = Some(section_from(bytes)),
             2 => facts.main = Some(section_from(bytes)),
             3 => facts.hint = Some(hint_from(bytes)),
             4 => facts.pages.truncate(bytes.below(8)),
+            // What a reader didn't read, as its facts would say it: the main
+            // section gone, the pages none, the hint stream as it's written.
+            16 => {
+                facts.unread.sections = Some(unread_from(bytes));
+                facts.main = None;
+            }
+            17 => {
+                facts.unread.pages = Some(unread_from(bytes));
+                facts.pages.clear();
+            }
+            18 => {
+                if let Some(hint) = &mut facts.hint {
+                    hint.data = HintData::Unread(unread_from(bytes));
+                }
+            }
             n => {
                 let Some(first) = &mut facts.first_object else {
                     continue;
@@ -1490,34 +1659,52 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
 }
 
 /// Any bytes as a file, read and written again in the three kinds: in the
-/// clear; as it's encrypted, where it is, and a password opens it; and now and
-/// then, by the input's length, under a new encryption. Where it's written, it
-/// reads linearized by its password, with the same pages, and every object the
-/// plan numbers is the same value at its number under the numbering, a stream's
-/// data the same; on any refusal, `out` as it was. The new encryption's key and
-/// every AES IV are the operating system's, so the bytes written differ from run
-/// to run, and a failure that hangs on them may not come again from its input.
+/// clear; as it's encrypted, where it is, and a password opens it, under its
+/// encryptor as it is and told to reuse RC4's keystreams; and now and then, by
+/// the input's length, under a new encryption. Where it's written, it reads
+/// linearized by its password, with the same pages, and every object the plan
+/// numbers is the same value at its number under the numbering, a stream's
+/// data the same; on any refusal, `out` as it was. Under its own encryptor,
+/// what's refused as it is but written told to reuse keystreams is refused at
+/// a keystream used, at an object the write told to lists, and what's written
+/// both ways is the same bytes, none listed (see `own_alike`). Under a new
+/// encryption nothing is listed. It gives each write's `out`, in the order
+/// written.
+///
+/// Built with the test writer (`insecure-test-writer`, which the fuzz target
+/// turns on, and for the crate's tests), the new encryption's key and salts are
+/// drawn from the input's bytes, and every AES IV, the file's own encryption's
+/// too, is derived from its object and data: an input writes the same bytes
+/// each time, so a failure that hangs on them comes again from its input.
+/// Built without it, as a crate that fuzzes itself builds this one under `--cfg
+/// fuzzing`, they're the operating system's, and differ from run to run.
 #[cfg(feature = "family")]
-pub fn over(data: &[u8]) {
+pub fn over(data: &[u8]) -> Vec<Vec<u8>> {
     use pdf_structure::XrefKind;
+    use pdf_structure::pdf_crypt::{Password, Protection};
     use pdf_structure::read::{self, Reading};
     use pdf_structure::write::Encryptor;
 
     use crate::family;
 
     let Ok(reading) = Reading::open(data, &read::Options::DEFAULT) else {
-        return;
+        return Vec::new();
     };
     let Ok(doc) = reading.to_document() else {
-        return;
+        return Vec::new();
     };
-    let own = Encryptor::of(&reading).ok().flatten();
+    let own = Encryptor::of(&reading).ok().flatten().map(derived_ivs);
     let new = data.len().is_multiple_of(8).then(|| {
-        let password = pdf_structure::pdf_crypt::Password(NEW).prepared().ok()?;
-        let mut protection = pdf_structure::pdf_crypt::Protection::new(&password);
+        let password = Password(NEW).prepared().ok()?;
+        let mut protection = Protection::new(&password);
         protection.encrypt_metadata = data.len().is_multiple_of(16);
-        Encryptor::create(&protection).ok()
+        #[cfg(any(test, feature = "insecure-test-writer"))]
+        let new = Encryptor::create_with(&protection, &mut Drawn::over(data));
+        #[cfg(not(any(test, feature = "insecure-test-writer")))]
+        let new = Encryptor::create(&protection);
+        new.ok().map(derived_ivs)
     });
+    let mut written = Vec::new();
     for (kind, stream, pack) in [
         (Kind::Table, XrefKind::Table, false),
         (Kind::Stream, XrefKind::Stream, false),
@@ -1527,15 +1714,131 @@ pub fn over(data: &[u8]) {
         options.kind = stream;
         options.pack = pack;
         options.threads = 1;
-        written_back(&reading, &doc, None, "", kind, &options);
+        let (out, _) = written_back(&reading, &doc, None, "", kind, &options);
+        written.push(out);
         if let Some(own) = &own {
-            written_back(&reading, &doc, Some(own), "", kind, &options);
+            let given = written_back(&reading, &doc, Some(own), "", kind, &options);
+            let reusing = own.clone().reusing_rc4_keystreams();
+            let told = written_back(&reading, &doc, Some(&reusing), "", kind, &options);
+            own_alike(&given, &told);
+            written.push(given.0);
+            written.push(told.0);
         }
         if let Some(Some(new)) = &new {
-            written_back(&reading, &doc, Some(new), NEW, kind, &options);
+            let (out, reused) = written_back(&reading, &doc, Some(new), NEW, kind, &options);
+            // A new key's keystreams are none the file used.
+            if let Ok(reused) = reused {
+                assert!(reused.is_empty(), "{reused:?} under a new key");
+            }
+            written.push(out);
         }
     }
+    written
 }
+
+/// What [`over`] holds of a file written under its own encryptor as it is,
+/// `given`, and told to reuse RC4's keystreams, `told`, each its `out` and
+/// what [`written_back`] gives of it: where the first is refused at a keystream
+/// the file used, the second is written listing that object, or refused for
+/// another reason later; where both are written, they're the same bytes (where
+/// IVs are derived, as with the test writer), and nothing's listed, as the
+/// second lists only what the first would refuse; and any other refusal is
+/// both's.
+#[cfg(feature = "family")]
+fn own_alike(
+    given: &(Vec<u8>, Result<Vec<ObjectId>, crate::family::Error>),
+    told: &(Vec<u8>, Result<Vec<ObjectId>, crate::family::Error>),
+) {
+    use pdf_structure::write::{self, Unencryptable};
+
+    use crate::family::Error;
+
+    let why = Unencryptable::Keystream;
+    match (&given.1, &told.1) {
+        (Ok(none), Ok(reused)) => {
+            assert!(none.is_empty(), "{none:?}");
+            assert!(reused.is_empty(), "written as it is, yet {reused:?}");
+            #[cfg(any(test, feature = "insecure-test-writer"))]
+            assert!(given.0 == told.0, "telling it to reuse wrote other bytes");
+        }
+        (Err(Error::Write(write::Error::Encrypt { id, why: refused })), Ok(reused))
+            if *refused == why =>
+        {
+            assert!(reused.contains(id), "{id:?} refused, {reused:?} listed");
+        }
+        // Refused at a keystream used, and then for another reason past it.
+        (Err(Error::Write(write::Error::Encrypt { why: refused, .. })), Err(_))
+            if *refused == why => {}
+        (Err(refused), Err(again)) => assert_eq!(refused.to_string(), again.to_string()),
+        (refused, written) => panic!("{refused:?} then {written:?}"),
+    }
+}
+
+/// `encryptor`, its writes' AES IVs derived by the test writer where it's
+/// built (pdf-crypt's `Ivs::derived`), from the object and its data, so that
+/// what [`over`] writes is the input's alone; else as it is, the operating
+/// system's.
+#[cfg(feature = "family")]
+fn derived_ivs(encryptor: pdf_structure::write::Encryptor) -> pdf_structure::write::Encryptor {
+    #[cfg(any(test, feature = "insecure-test-writer"))]
+    let encryptor = encryptor.with_test_ivs(pdf_structure::pdf_crypt::Ivs::derived);
+    encryptor
+}
+
+/// A random number generator for [`over`]'s new encryption alone: the input's
+/// bytes, then a counter's. It's no cryptographic generator, but says it is
+/// (`TryCryptoRng`) so that pdf-crypt's test writer takes it, through
+/// `Encryptor::create_with`, which only a fuzz body and the tests may do: it's
+/// compiled for nothing else, and only with the test writer.
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+struct Drawn<'a> {
+    data: &'a [u8],
+    counter: u8,
+}
+
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+impl Drawn<'_> {
+    /// `data`'s bytes, then a counter's.
+    fn over(data: &[u8]) -> Drawn<'_> {
+        Drawn { data, counter: 0 }
+    }
+}
+
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+impl pdf_structure::pdf_crypt::rand_core::TryRng for Drawn<'_> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        let mut bytes = [0; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        let mut bytes = [0; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+        for byte in dst {
+            *byte = match self.data.split_first() {
+                Some((&first, rest)) => {
+                    self.data = rest;
+                    first
+                }
+                None => {
+                    self.counter = self.counter.wrapping_add(1);
+                    self.counter
+                }
+            };
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "family", any(test, feature = "insecure-test-writer")))]
+impl pdf_structure::pdf_crypt::rand_core::TryCryptoRng for Drawn<'_> {}
 
 /// The password of what [`over`] writes under a new encryption.
 #[cfg(feature = "family")]
@@ -1543,7 +1846,10 @@ const NEW: &str = "new";
 
 /// What [`over`] holds of `doc`, written under `encryptor` as `options` says,
 /// which `password` opens, or the empty one: among it, that its facts read
-/// whole beside its reading are those of its reading alone.
+/// whole beside its reading are those of its reading alone, and that each
+/// object it lists as written at a keystream used is one it wrote. It gives
+/// `out` as the write left it, the six bytes it held before and after them the
+/// file, where one was written; and the objects listed so, or the refusal.
 #[cfg(feature = "family")]
 fn written_back<S: pdf_structure::ByteSource>(
     reading: &pdf_structure::Reading<S>,
@@ -1552,7 +1858,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     password: &str,
     kind: Kind,
     options: &crate::family::Options<'_>,
-) {
+) -> (Vec<u8>, Result<Vec<ObjectId>, crate::family::Error>) {
     use pdf_objects::Value;
     use pdf_objects::pdf_tokenizer::Rules;
     use pdf_semantics::pages::{Inheritable, Origin, pages};
@@ -1564,9 +1870,12 @@ fn written_back<S: pdf_structure::ByteSource>(
 
     let mut out = b"before".to_vec();
     let written = family::linearize(&mut out, doc, encryptor, Some(reading), options);
-    let Ok(done) = written else {
-        assert_eq!(out, b"before");
-        return;
+    let done = match written {
+        Ok(done) => done,
+        Err(refused) => {
+            assert_eq!(out, b"before");
+            return (out, Err(refused));
+        }
     };
     assert_eq!(out.len() as u64 - 6, done.layout.len());
     let file = &out[6..];
@@ -1606,9 +1915,11 @@ fn written_back<S: pdf_structure::ByteSource>(
     // The same facts of it read whole beside its reading.
     let whole = WithReading::new(file, &opened).expect("it reads");
     let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
-    assert_eq!(format!("{beside:?}"), format!("{read:?}"));
+    assert_eq!(beside, read);
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
     assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+    // Nothing of it is past a cap or unread, so nothing isn't judged.
+    assert_eq!(read.unread, check::UnreadParts::default());
     assert!(
         (findings.iter()).all(|finding| matches!(finding, Finding::PageAttribute { .. })),
         "{findings:?}"
@@ -1633,6 +1944,35 @@ fn written_back<S: pdf_structure::ByteSource>(
             assert_eq!(before, after, "{id:?}'s data");
         }
     }
+    // What's listed is ascending, each once, and written, as an object of
+    // its own or an object stream: none in the clear.
+    // A direct /Info is an object under an encryption, the trailer naming
+    // it, and stays in the trailer in the clear: either way what it was under
+    // the numbering.
+    let info = (doc.trailer().dict().get(b"Info"))
+        .filter(|info| !matches!(info.value(), Value::Ref(_) | Value::Null));
+    if let Some(info) = info {
+        let written = again.trailer().dict().get(b"Info").expect("/Info is kept");
+        match (encryptor, written.as_reference()) {
+            (Some(_), Some(at)) => {
+                let object = again.get(at).expect("/Info is written");
+                same_under(info, object, &planned);
+            }
+            (None, None) => same_under(info, written, &planned),
+            _ => panic!("/Info is {written:?}"),
+        }
+    }
+    let reused = done.keystreams_reused;
+    assert!(reused.is_sorted() && reused.windows(2).all(|w| w[0] != w[1]));
+    assert!(encryptor.is_some() || reused.is_empty());
+    for id in &reused {
+        let at = again.entries().find(|(n, ..)| *n == id.number);
+        let in_use = |(_, generation, entry): (u32, u16, read::XrefEntry)| {
+            generation == id.generation && matches!(entry, read::XrefEntry::InUse { .. })
+        };
+        assert!(at.is_some_and(in_use), "{id:?} is listed, not written");
+    }
+    (out, Ok(reused))
 }
 
 /// Whether `written`, read back, is `value` under `planned`'s numbers: a
@@ -1682,194 +2022,6 @@ fn same_under(value: &pdf_objects::Object, written: &pdf_objects::Object, planne
     }
 }
 
-/// The objects [`lopdf_document`] starts from: a tree of three pages by two
-/// nodes, what they inherit, share and have alone, and an outline and a page no
-/// tree lists.
-#[cfg(all(feature = "family", feature = "lopdf"))]
-fn lopdf_start() -> ::lopdf::Document {
-    use ::lopdf::{Dictionary, Document, Object, Stream, dictionary};
-
-    let reference = |number: u32| Object::Reference((number, 0));
-    let page = |parent: u32, more: Dictionary| {
-        let mut dict = dictionary! { "Type" => "Page", "Parent" => reference(parent) };
-        dict.extend(&more);
-        Object::Dictionary(dict)
-    };
-    let mut doc = Document::new();
-    doc.version = "1.7".to_string();
-    let objects: [(u32, Object); 13] = [
-        (
-            1,
-            Object::Dictionary(dictionary! {
-                "Type" => "Catalog",
-                "Pages" => reference(2),
-                "Outlines" => reference(9),
-                "Foo" => reference(12),
-                "OpenAction" => vec![reference(4), Object::Name(b"Fit".to_vec())],
-            }),
-        ),
-        (
-            2,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages",
-                "Kids" => vec![reference(3), reference(10)],
-                "Count" => 3,
-                "MediaBox" => vec![0.into(), 0.into(), 100.into(), reference(13)],
-                "Resources" => reference(7),
-                "Rotate" => 90,
-            }),
-        ),
-        (3, page(2, dictionary! { "Contents" => reference(5) })),
-        (
-            4,
-            page(
-                10,
-                dictionary! { "Contents" => reference(6), "X" => reference(8) },
-            ),
-        ),
-        (
-            5,
-            Object::Stream(Stream::new(Dictionary::new(), b"q Q".to_vec())),
-        ),
-        (
-            6,
-            Object::Stream(Stream::new(Dictionary::new(), b"Q q".to_vec())),
-        ),
-        (
-            7,
-            Object::Dictionary(dictionary! { "Font" => Dictionary::new() }),
-        ),
-        (8, Object::Dictionary(dictionary! { "Mine" => true })),
-        (9, Object::Dictionary(dictionary! { "Count" => 0 })),
-        (
-            10,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages",
-                "Parent" => reference(2),
-                "Kids" => vec![reference(4), reference(11)],
-                "Count" => 2,
-            }),
-        ),
-        (11, page(10, dictionary! { "X" => reference(8) })),
-        (12, page(10, dictionary! { "Mine" => true })),
-        (13, Object::Integer(200)),
-    ];
-    doc.objects.extend(
-        objects
-            .into_iter()
-            .map(|(number, object)| ((number, 0), object)),
-    );
-    doc.trailer.set("Root", reference(1));
-    doc
-}
-
-/// The fuzz body for the lopdf adapter: any bytes as edits to the objects of a
-/// document of lopdf's, so its reader isn't what's under test: refused, with
-/// `out` as it was given, or written, its positions counted right, and what's
-/// written saying it's linearized and holding, nothing said but what a page
-/// doesn't have to push, its facts the same read whole beside its reading as of
-/// its reading alone. It gives whether it wrote.
-#[cfg(all(feature = "family", feature = "lopdf"))]
-pub fn lopdf_document(data: &[u8]) -> bool {
-    use ::lopdf::{Dictionary, Object};
-    use pdf_structure::read::{self, Reading, WithReading};
-
-    use crate::family;
-
-    const KEYS: [&str; 16] = [
-        "Parent",
-        "Kids",
-        "Type",
-        "MediaBox",
-        "CropBox",
-        "Resources",
-        "Rotate",
-        "Contents",
-        "X",
-        "Count",
-        "First",
-        "Next",
-        "Foo",
-        "UserUnit",
-        "Pages",
-        "Thumb",
-    ];
-    const OBJECTS: u32 = 16;
-    let id = |byte: u8| (u32::from(byte) % OBJECTS + 1, 0);
-    let value = |of: u8, byte: u8| match of % 11 {
-        0 => Object::Null,
-        1 => Object::Integer(i64::from(byte)),
-        2 | 3 => Object::Reference(id(byte)),
-        4 => Object::Name(if byte.is_multiple_of(2) {
-            b"Page".to_vec()
-        } else {
-            b"Pages".to_vec()
-        }),
-        5 => Object::Array(vec![Object::Reference(id(byte))]),
-        6 => Object::Array(Vec::new()),
-        7 => Object::Array(vec![
-            0.into(),
-            0.into(),
-            9.into(),
-            Object::Reference(id(byte)),
-        ]),
-        8 => Object::Dictionary(Dictionary::new()),
-        9 => Object::Reference((u32::from(byte) + 100, 0)),
-        _ => Object::Real(f32::from(byte)),
-    };
-    let mut doc = lopdf_start();
-    for &[what, at, key, byte] in data.as_chunks::<4>().0 {
-        let at = id(at);
-        let key = KEYS[usize::from(key) % KEYS.len()].as_bytes();
-        match what % 4 {
-            0 | 1 => {
-                let dict = match doc.objects.get_mut(&at) {
-                    Some(Object::Dictionary(dict)) => dict,
-                    Some(Object::Stream(stream)) => &mut stream.dict,
-                    _ => continue,
-                };
-                match what % 8 {
-                    0 | 1 | 4 | 5 => dict.set(key.to_vec(), value(what >> 3, byte)),
-                    _ => {
-                        dict.remove(key);
-                    }
-                }
-            }
-            2 => {
-                doc.objects.insert(at, value(what >> 2, byte));
-            }
-            _ => {
-                doc.objects.remove(&at);
-            }
-        }
-    }
-    let mut out = b"before".to_vec();
-    let options = crate::lopdf::Options::DEFAULT;
-    let Ok(layout) = crate::lopdf::linearize(&mut out, &doc, &options) else {
-        assert_eq!(out, b"before");
-        return false;
-    };
-    assert_eq!(out.len() as u64 - 6, layout.len());
-    let file = &out[6..];
-    let reading = Reading::open(file, &read::Options::DEFAULT).expect("it reads");
-    assert!(reading.facts().linearized);
-    let read = family::facts(&reading, &Limits::DEFAULT).expect("it's in memory");
-    // The same facts of it read whole beside its reading.
-    let whole = WithReading::new(file, &read::Options::DEFAULT).expect("it reads");
-    let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
-    assert_eq!(format!("{beside:?}"), format!("{read:?}"));
-    let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
-    assert!(
-        verdict.linearized && verdict.holds && verdict.hints_read,
-        "{findings:?}"
-    );
-    assert!(
-        (findings.iter()).all(|finding| matches!(finding, Finding::PageAttribute { .. })),
-        "{findings:?}"
-    );
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1916,7 +2068,8 @@ mod tests {
                 continue;
             };
             let lengths = vec![40; planned.writes().len()];
-            let layout = assemble(&planned, &lengths, &Options::new((1, 7)), plain).unwrap();
+            let layout =
+                assemble(&planned, &lengths, &Options::new(Version::new(1, 7)), plain).unwrap();
             let data = layout.hint_data();
             let mut input = vec![3, 0, 0, 0];
             input.resize(16, 0);
@@ -1972,6 +2125,21 @@ mod tests {
             "3",
         ]);
         let mut seeds = vec![all.clone()];
+        // Its /Info in the trailer, which a new encryption, drawn for a length
+        // that's a multiple of 8, writes as an object.
+        let mut direct = all.clone();
+        let at = direct
+            .windows(12)
+            .rposition(|w| w == b"/Info 13 0 R")
+            .unwrap();
+        direct.splice(
+            at..at + 12,
+            b"/Info << /Title (t) /I 13 0 R >>".iter().copied(),
+        );
+        while !direct.len().is_multiple_of(8) {
+            direct.push(b'\n');
+        }
+        seeds.push(direct);
         // What's only a reference to nothing, a page's /Parent that's a page, a
         // tree whose /Kids and /Parent disagree, and a page no tree lists.
         let root =
@@ -2025,7 +2193,7 @@ mod tests {
             let mut options = crate::family::Options::DEFAULT;
             options.kind = kind;
             options.pack = pack;
-            seeds.push(crate::family::linearize_bytes(&all, &[], &options).unwrap());
+            seeds.push(crate::family::linearize_bytes(&all, &options).unwrap());
         }
         // Encrypted, by each of the handler's revisions, by the files qpdf
         // encrypted, and as it lays them out.
@@ -2039,7 +2207,9 @@ mod tests {
             let mut options = crate::family::Options::DEFAULT;
             options.kind = pdf_structure::XrefKind::Stream;
             options.pack = true;
-            let laid_out = crate::family::linearize_bytes(&encrypted, &[], &options);
+            // Under RC4, each number's keystream used again, as asked.
+            options.rc4 = crate::family::Rc4::ReusingKeystreams;
+            let laid_out = crate::family::linearize_bytes(&encrypted, &options);
             seeds.push(std::mem::take(&mut encrypted));
             seeds.push(laid_out.unwrap());
         }
@@ -2065,22 +2235,6 @@ mod tests {
         out
     }
 
-    /// The lopdf adapter's body, on random edits: a good share of them written,
-    /// so that what's held is what's been run.
-    #[cfg(all(feature = "family", feature = "lopdf"))]
-    #[test]
-    fn what_lopdf_s_adapter_writes_of_any_document_holds() {
-        let mut random = generator(0x0F1E_2D3C_4B5A_6978);
-        assert!(lopdf_document(&[]));
-        let mut written = 0;
-        for round in 0..6000 {
-            let edits = 1 + round % 6;
-            let data: Vec<u8> = (0..4 * edits).map(|_| (random() >> 11) as u8).collect();
-            written += usize::from(lopdf_document(&data));
-        }
-        assert!(written > 300, "{written} of 6,000 were written");
-    }
-
     /// The family adapter's body, on files, whole and damaged.
     #[cfg(feature = "family")]
     #[test]
@@ -2100,6 +2254,39 @@ mod tests {
                 over(&seed[..cut]);
             }
         }
+    }
+
+    /// What [`over`] writes of an input that encrypts, under the file's own
+    /// AES-128, as it is and told to reuse RC4's keystreams, and under a new
+    /// encryption, in each kind, is the same bytes each time: the test writer
+    /// draws the new key from the input and derives every IV. The file it's
+    /// encrypted by is the repository's, which a package doesn't hold: there,
+    /// as [`file_seeds`] does, it's left out.
+    #[cfg(feature = "family")]
+    #[test]
+    fn what_is_written_of_an_input_is_the_same_bytes_each_time() {
+        let keys = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
+        let Ok(key) = std::fs::read(keys.join("qpdf-aes-128.pdf")) else {
+            return;
+        };
+        let mut input = encrypted_as(&key, &file_seeds()[0]);
+        // A length a new encryption is drawn for.
+        while !input.len().is_multiple_of(8) {
+            input.push(b'\n');
+        }
+        let written = over(&input);
+        // In the clear, as it's encrypted (twice: as it is, and told to reuse
+        // RC4's keystreams, which under AES changes nothing) and under a new
+        // encryption, in each of the three kinds: none refused.
+        assert_eq!(written.len(), 12);
+        for out in &written {
+            assert!(
+                out.starts_with(b"before%PDF-"),
+                "{:?}",
+                &out[..out.len().min(16)]
+            );
+        }
+        assert!(over(&input) == written, "the same input wrote other bytes");
     }
 
     /// Writes [`seeds`] and [`table_seeds`] to the folder

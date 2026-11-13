@@ -1160,7 +1160,7 @@ fn linearized(objects: &[impl AsRef<[u8]>]) -> (Vec<u8>, Vec<u8>) {
     let (plain, _) = file(objects, "");
     let options = pdf_linearize::family::Options::DEFAULT;
     let linearized =
-        pdf_linearize::family::linearize_bytes(&plain, &[], &options).expect("the seed linearizes");
+        pdf_linearize::family::linearize_bytes(&plain, &options).expect("the seed linearizes");
     let reading = bytes::Reading::open(&linearized[..], &bytes::Options::DEFAULT)
         .expect("a file in memory reads");
     let root = (reading.trailer().dict().get(b"Root"))
@@ -1665,7 +1665,7 @@ mod tests {
         ];
         let (plain, _) = file(&objects, "");
         let options = pdf_linearize::family::Options::DEFAULT;
-        let mut linearized = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+        let mut linearized = pdf_linearize::family::linearize_bytes(&plain, &options).unwrap();
         let e = (linearized.windows(3).position(|w| w == b"/E ")).unwrap() + 3;
         let digits = linearized[e..]
             .iter()

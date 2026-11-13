@@ -93,11 +93,12 @@ case ",$features," in
     fail "pdf-lint's build turns on pdf-fonts' features $features, whose notices (FreeType's, skrifa's, hayro-cmap's) aren't taken" ;;
 esac
 
-# pdf-crypt and pdf-structure as pdf-lint's build compiles them, without
-# `insecure-test-writer`: the test writer (IVs given or derived, a new
-# file's key from a generator given) is for tests, never in the shipped
-# binary, so a build that turns it on stops here.
-for crate in pdf-crypt pdf-structure; do
+# pdf-crypt, pdf-structure and pdf-linearize as pdf-lint's build compiles
+# them, without `insecure-test-writer`: the test writer (IVs given or
+# derived, a new file's key from a generator given) is for tests and
+# fuzzing, never in the shipped binary, so a build that turns it on stops
+# here.
+for crate in pdf-crypt pdf-structure pdf-linearize; do
     features=$(cargo tree --locked -e normal --target "$target" -p pdf-lint -i "$crate" --depth 0 --format '{f}') ||
         fail "$crate isn't in pdf-lint's build"
     case ",$features," in

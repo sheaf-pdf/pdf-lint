@@ -1,15 +1,15 @@
-//! Files written from hand-written bodies with no adapter, and read here with no
-//! reader but a few lines: every promise of [`assemble`] held on each case, from
-//! the file's bytes, then what each case is there for.
+//! Files written from hand-written bodies with no adapter, and read here with
+//! no reader but a few lines: every promise of [`assemble`] held on each case,
+//! from the file's bytes, then what each case is there for.
 
 use std::convert::Infallible;
 
 use pdf_linearize::hint::{self, Tables, located};
-use pdf_linearize::layout::{Error, Options};
+use pdf_linearize::layout::{Encoded, Error, Options, Piece, Pieces, Stream, StreamKind};
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_linearize::{
-    Encoded, Graph, Group, Kind, Limits, Page, Part, Stream, StreamKind, What, assemble, plan,
-};
+use pdf_linearize::pdf_objects::version::Version;
+use pdf_linearize::plan::{Group, Kind, Page, Part, What};
+use pdf_linearize::{Graph, Limits, assemble, plan};
 
 mod cases;
 use cases::{
@@ -60,8 +60,8 @@ fn stream_data(bytes: &[u8], at: usize) -> (String, Vec<u8>) {
     (dictionary, data)
 }
 
-/// The rows at a section at `at`, as many as it says, by their numbers, and what
-/// follows them: its trailer's text, or its stream's dictionary.
+/// The rows at a section at `at`, as many as it says, by their numbers, and
+/// what follows them: its trailer's text, or its stream's dictionary.
 fn section_at(bytes: &[u8], at: usize) -> (Vec<(u64, Row)>, String) {
     if bytes[at..].starts_with(b"xref\n") {
         let header = line_at(bytes, at + 5);
@@ -146,8 +146,8 @@ fn holds(written: &Written) -> Read {
     assert_eq!(layout.len(), bytes.len() as u64);
     assert!(!layout.is_empty());
 
-    // The header, then the dictionary, whole and within the first 1024 bytes, and
-    // a fixed length (F.3.3).
+    // The header, then the dictionary, whole and within the first 1024 bytes,
+    // and a fixed length (F.3.3).
     assert!(bytes.starts_with(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n"));
     let header = 15;
     let dictionary_end =
@@ -223,9 +223,9 @@ fn holds(written: &Written) -> Read {
         "the catalog's right after the section"
     );
 
-    // The main section: from 0, entry 0 free, the rest in use, a `/Size` alone in
-    // a table's trailer, no `/Prev`, and a `startxref` to the first-page section
-    // (F.3.11).
+    // The main section: from 0, entry 0 free, the rest in use, a `/Size` alone
+    // in a table's trailer, no `/Prev`, and a `startxref` to the first-page
+    // section (F.3.11).
     let (main_rows, main_trailer) = section_at(bytes, main_at as usize);
     assert_eq!(main_rows[0], (0, Row::Free(65535)));
     assert!(
@@ -320,8 +320,8 @@ fn holds(written: &Written) -> Read {
     }
     let tables = hint::tables(&data, keys, plan.page_count(), &Limits::DEFAULT).unwrap();
 
-    // The hints: where each page is by adding up lengths and numbers, as Table F.4
-    // has a reader do, each landing on the page's object.
+    // The hints: where each page is by adding up lengths and numbers, as Table
+    // F.4 has a reader do, each landing on the page's object.
     let found = |position: u32| located(u64::from(position), hint_at, hint_len);
     let first_number = plan.first_page_number();
     let first_at_said = found(tables.pages.header.first_page_at);
@@ -350,7 +350,8 @@ fn holds(written: &Written) -> Read {
         "the pages end where what follows starts"
     );
 
-    // The shared table's entries the same way: from the first page, then part 8.
+    // The shared table's entries the same way: from the first page, then part
+    // 8.
     let shared = &tables.shared;
     let in_first = shared.header.first_page_entries as usize;
     assert_eq!(shared.groups.len(), plan.entries().len());
@@ -399,8 +400,8 @@ fn every_file_says_what_it_is() {
     }
 }
 
-/// Where a write is in the file, from the lengths alone, the hint stream's after
-/// part 4.
+/// Where a write is in the file, from the lengths alone, the hint stream's
+/// after part 4.
 fn write_at(written: &Written, at: usize) -> u64 {
     let before: u64 = written.lengths[..at].iter().sum();
     let hint = match at >= written.plan.part_writes(Part::FirstPage).start {
@@ -420,7 +421,8 @@ fn section_room(written: &Written) -> u64 {
 }
 
 /// The pieces are the file: in order, the hint stream after part 4 and before
-/// part 6 (F.3.6), each body whole, each write where the plan and its length say.
+/// part 6 (F.3.6), each body whole, each write where the plan and its length
+/// say.
 #[test]
 fn the_pieces_are_the_file_in_order() {
     for (name, doc) in cases::all() {
@@ -450,8 +452,8 @@ fn the_pieces_are_the_file_in_order() {
         let mut bodies = 0;
         for piece in written.layout.pieces() {
             counted += match piece {
-                pdf_linearize::Piece::Bytes(part) => part.len() as u64,
-                pdf_linearize::Piece::Body(at) => {
+                Piece::Bytes(part) => part.len() as u64,
+                Piece::Body(at) => {
                     assert_eq!(at, bodies, "{name}");
                     bodies += 1;
                     written.lengths[at]
@@ -463,7 +465,123 @@ fn the_pieces_are_the_file_in_order() {
     }
 }
 
-/// `/E` is the end of part 6: where what follows it starts, or the main section.
+/// The pieces walked one by one and folded are the same, from wherever the walk
+/// is: the head, the bodies before the hint stream, the hint stream's object,
+/// the bodies after it and the main section, every body once and in order.
+/// How many are left is exact at every step, a clone goes on from where it's
+/// taken, and past the last there's nothing, however often it's asked.
+#[test]
+fn the_pieces_are_the_same_walked_or_folded_and_count_whats_left() {
+    fn folded(pieces: Pieces<'_>) -> Vec<Piece<'_>> {
+        pieces.fold(Vec::new(), |mut all, piece| {
+            all.push(piece);
+            all
+        })
+    }
+    for (name, doc) in cases::all() {
+        let written = doc.written();
+        let (layout, plan) = (&written.layout, &written.plan);
+        let writes = plan.writes().len();
+        let mut walked = Vec::new();
+        let mut pieces = layout.pieces();
+        for piece in pieces.by_ref() {
+            walked.push(piece);
+        }
+        assert_eq!(walked.len(), writes + 3, "{name}");
+        assert_eq!(pieces.next(), None, "{name}");
+        assert_eq!(pieces.size_hint(), (0, Some(0)), "{name}");
+        assert_eq!(folded(layout.pieces()), walked, "{name}");
+        for at in 0..=walked.len() {
+            let mut pieces = layout.pieces();
+            for _ in 0..at {
+                pieces.next();
+            }
+            let left = walked.len() - at;
+            assert_eq!(pieces.size_hint(), (left, Some(left)), "{name} {at}");
+            assert_eq!(pieces.len(), left, "{name} {at}");
+            assert_eq!(pieces.clone().count(), left, "{name} {at}");
+            assert_eq!(folded(pieces.clone()), walked[at..], "{name} {at}");
+            assert_eq!(pieces.collect::<Vec<_>>(), walked[at..], "{name} {at}");
+        }
+        // Three of the layout's own: the head, the hint stream and the main
+        // section, which ends the file.
+        let own: Vec<usize> = (walked.iter().enumerate())
+            .filter_map(|(at, piece)| matches!(piece, Piece::Bytes(_)).then_some(at))
+            .collect();
+        let before_hint = plan.part_writes(Part::FirstPage).start;
+        assert_eq!(own, [0, before_hint + 1, writes + 2], "{name}");
+        let Piece::Bytes(hint) = walked[before_hint + 1] else {
+            unreachable!()
+        };
+        let object = format!("{} 0 obj", plan.hint_number());
+        assert!(hint.starts_with(object.as_bytes()), "{name}");
+        assert_eq!(hint.len() as u64, layout.hint_extent().1, "{name}");
+        let bodies: Vec<usize> = (walked.iter())
+            .filter_map(|piece| match piece {
+                Piece::Body(at) => Some(*at),
+                Piece::Bytes(_) => None,
+            })
+            .collect();
+        assert_eq!(bodies, (0..writes).collect::<Vec<_>>(), "{name}");
+        assert!(
+            format!("{pieces:?}", pieces = layout.pieces()).contains(&(writes + 3).to_string())
+        );
+    }
+}
+
+/// Whether `shown` holds `marker`, as text or as a `Debug` of its bytes gives
+/// them, a list of numbers.
+fn shows(shown: &str, marker: &[u8]) -> bool {
+    let numbers = format!("{marker:?}");
+    let numbers = &numbers[1..numbers.len() - 1];
+    shown.contains(&*String::from_utf8_lossy(marker)) || shown.contains(numbers)
+}
+
+/// A layout's `Debug` says where everything is and how long, never a byte it
+/// holds: not a trailer entry a caller gives, nor what a stream of its own was
+/// encoded to, nor the hint data. A stream's, an encoded stream's and the
+/// pieces' hold none either.
+#[test]
+fn a_layouts_debug_holds_none_of_its_bytes() {
+    const MARKER: &[u8] = b"a marker of what's written";
+    let doc = cases::two_pages(Kind::Stream, false);
+    let plan = plan(&doc.graph(), &Limits::DEFAULT).unwrap();
+    let lengths = vec![40; plan.writes().len()];
+    let trailer = [&b"/Info << /Title ("[..], MARKER, b") >>"].concat();
+    let mut options = Options::new(Version::new(1, 7));
+    options.trailer = &trailer;
+    let mut shown = Vec::new();
+    let layout = assemble(&plan, &lengths, &options, |stream: Stream<'_>| {
+        let mut data = stream.data.to_vec();
+        data.extend_from_slice(MARKER);
+        let encoded = Encoded::new([b"/Marker (", MARKER, b")"].concat(), data);
+        shown.push(format!("{stream:?}"));
+        shown.push(format!("{encoded:?} {encoded:#?}"));
+        Ok::<_, Infallible>(encoded)
+    })
+    .unwrap();
+    // The marker is in the layout's bytes, the hint data is too, and neither
+    // is in its `Debug`.
+    let pieces = layout.pieces().filter_map(|piece| match piece {
+        Piece::Bytes(bytes) => Some(bytes),
+        Piece::Body(_) => None,
+    });
+    let bytes = pieces.collect::<Vec<_>>().concat();
+    assert!(bytes.windows(MARKER.len()).any(|w| w == MARKER));
+    let data = layout.hint_data();
+    assert!(data.len() >= 8);
+    shown.push(format!("{layout:?} {layout:#?}"));
+    shown.push(format!("{:?}", layout.pieces()));
+    for shown in &shown {
+        assert!(!shows(shown, MARKER), "{shown}");
+        assert!(!shows(shown, data), "{shown}");
+        assert!(!shows(shown, &trailer), "{shown}");
+    }
+    assert!(shown.iter().any(|shown| shown.contains("bytes")));
+}
+
+/// `/E` is the end of part 6: where what follows it starts, or the main
+/// section.
 #[test]
 fn the_first_page_ends_where_part_6_does() {
     for (name, doc) in cases::all() {
@@ -517,9 +635,12 @@ fn the_shared_tables_first_object_is_never_0() {
     graph.object(ObjectId::new(2, 0), []);
     graph.page(Page::new(ObjectId::new(2, 0)));
     let plan = plan(&graph, &Limits::DEFAULT).unwrap();
-    let layout = assemble(&plan, &[10, 10], &Options::new((1, 7)), |stream| {
-        Ok::<_, Infallible>(plain(stream))
-    })
+    let layout = assemble(
+        &plan,
+        &[10, 10],
+        &Options::new(Version::new(1, 7)),
+        |stream| Ok::<_, Infallible>(plain(stream)),
+    )
     .unwrap();
     let tables = hint::tables(layout.hint_data(), layout.hint_keys(), 1, &Limits::DEFAULT).unwrap();
     assert_eq!(tables.shared.header.first_object, plan.dictionary_number());
@@ -529,8 +650,8 @@ fn the_shared_tables_first_object_is_never_0() {
     );
 }
 
-/// What's shared: with the first page, in part 6 and listed by its own entry; by
-/// later pages, in part 8; each page's list what it reaches.
+/// What's shared: with the first page, in part 6 and listed by its own entry;
+/// by later pages, in part 8; each page's list what it reaches.
 #[test]
 fn what_pages_share_is_listed_by_entry() {
     for (kind, packed) in [
@@ -569,8 +690,8 @@ fn what_pages_share_is_listed_by_entry() {
         );
         assert_eq!(ids(0), Vec::<u32>::new());
         if packed {
-            // Its own and the shared font in one object stream of part 8, whose entry
-            // both lists name.
+            // Its own and the shared font in one object stream of part 8, whose
+            // entry both lists name.
             assert_eq!(entry_of(ObjectId::new(9, 0)), Some(font7));
             assert_eq!(ids(1), [font8, font7]);
         } else {
@@ -586,8 +707,8 @@ fn what_pages_share_is_listed_by_entry() {
     }
 }
 
-/// A later page's own content stream: from the page, to its last's end. One in part
-/// 8 isn't its own, and it says none (F.4.2).
+/// A later page's own content stream: from the page, to its last's end. One in
+/// part 8 isn't its own, and it says none (F.4.2).
 #[test]
 fn a_pages_content_items_are_its_own_streams() {
     let mut doc = Doc::new(Kind::Table, false, &[3, 4, 5, 6]);
@@ -627,7 +748,8 @@ fn a_pages_content_items_are_its_own_streams() {
 
 /// Another page opening first: the dictionary's `/P`, its section part 6, its
 /// entry in the table at its place, the rest of part 7 in page order (F.3.7,
-/// F.3.8). Sections are of different lengths, so an entry in the wrong place shows.
+/// F.3.8). Sections are of different lengths, so an entry in the wrong place
+/// shows.
 #[test]
 fn a_first_page_other_than_0_keeps_its_place_in_the_tables() {
     for (kind, packed) in [
@@ -698,8 +820,9 @@ fn a_forms_dictionary_is_at_open_and_its_table_says_where_its_fields_are() {
     }
 }
 
-/// An outline: in part 9, or under `/UseOutlines` in part 6 and in `/E`, the table
-/// saying where either way, the first page's entry counting what's in part 6.
+/// An outline: in part 9, or under `/UseOutlines` in part 6 and in `/E`, the
+/// table saying where either way, the first page's entry counting what's in
+/// part 6.
 #[test]
 fn an_outlines_table_says_where_it_is_in_part_6_or_9() {
     for first in [false, true] {
@@ -732,8 +855,9 @@ fn an_outlines_table_says_where_it_is_in_part_6_or_9() {
     }
 }
 
-/// Thumbnails: by page from page 0, whichever page opens first, each entry saying
-/// how many pages before it have none; what several share counted apart (F.4.4).
+/// Thumbnails: by page from page 0, whichever page opens first, each entry
+/// saying how many pages before it have none; what several share counted apart
+/// (F.4.4).
 #[test]
 fn the_thumbnail_table_counts_pages_without_one() {
     for (kind, packed) in [
@@ -922,9 +1046,9 @@ fn a_tables_prev_has_room_for_any_position() {
 }
 
 /// The embedded file table has its identifiers in the page offset table's width
-/// with none of its own (F.4.7), so that width's as wide as they want, though no
-/// page's lists go so high. Here the first page's last stretch is entry 2, which
-/// no later page reaches, and the file does.
+/// with none of its own (F.4.7), so that width's as wide as they want, though
+/// no page's lists go so high. Here the first page's last stretch is entry 2,
+/// which no later page reaches, and the file does.
 #[test]
 fn a_files_identifiers_widen_the_page_tables() {
     let mut doc = Doc::new(Kind::Table, false, &[3, 4]);
@@ -943,8 +1067,8 @@ fn a_files_identifiers_widen_the_page_tables() {
     assert_eq!(files.groups[1].shared, [2]);
 }
 
-/// A closure's next encoding may be longer than the room the first was given: the
-/// room grows and it goes round, everything then where it says.
+/// A closure's next encoding may be longer than the room the first was given:
+/// the room grows and it goes round, everything then where it says.
 #[test]
 fn a_stream_sections_room_grows_until_it_fits() {
     for grows_for in [0, 1, 2, 5] {
@@ -1005,8 +1129,8 @@ fn a_stream_section_is_padded_after_its_object() {
     assert!(section[object..end - 1].iter().all(|b| *b == b' '));
 }
 
-/// A closure that's longer every time is refused, however long that's been let go:
-/// and the room's what grew, so a table's closure can't do this.
+/// A closure that's longer every time is refused, however long that's been let
+/// go: and the room's what grew, so a table's closure can't do this.
 #[test]
 fn a_stream_section_that_never_fits_is_refused() {
     let mut longer = 0;
@@ -1032,8 +1156,8 @@ fn a_stream_section_that_never_fits_is_refused() {
     assert!(written.layout.hint_extent().1 > longer as u64);
 }
 
-/// Each stream's what and number, a section's bytes per row with it, for the closure
-/// to work from.
+/// Each stream's what and number, a section's bytes per row with it, for the
+/// closure to work from.
 #[test]
 fn the_closure_is_told_what_each_stream_is() {
     let mut seen = Vec::new();
@@ -1058,12 +1182,13 @@ fn the_closure_is_told_what_each_stream_is() {
     );
 }
 
-/// What can't be assembled says why, and a refusal of the closure's is the closure's.
+/// What can't be assembled says why, and a refusal of the closure's is the
+/// closure's.
 #[test]
 fn what_cant_be_assembled_is_refused() {
     let doc = two_pages(Kind::Table, false);
     let plan = plan(&doc.graph(), &Limits::DEFAULT).unwrap();
-    let options = Options::new((1, 7));
+    let options = Options::new(Version::new(1, 7));
     let fine = |stream: Stream<'_>| Ok::<_, Infallible>(plain(stream));
     assert_eq!(
         assemble(&plan, &[1], &options, fine),
@@ -1094,8 +1219,9 @@ fn what_cant_be_assembled_is_refused() {
         "{refused:?}"
     );
 
-    // At the edge exactly: the file's last byte is what's counted, the bodies' sum
-    // before that, and the hint stream's length moves with what they come to.
+    // At the edge exactly: the file's last byte is what's counted, the bodies'
+    // sum before that, and the hint stream's length moves with what they come
+    // to.
     let mut lengths = vec![1; plan.writes().len()];
     lengths[1] += u64::from(u32::MAX) - 2000;
     let largest = loop {
@@ -1137,7 +1263,8 @@ fn what_cant_be_assembled_is_refused() {
     }
 }
 
-/// A long document: what a viewer goes by adds up over many pages and many widths.
+/// A long document: what a viewer goes by adds up over many pages and many
+/// widths.
 #[test]
 fn many_pages_add_up() {
     for first in [0, 5] {

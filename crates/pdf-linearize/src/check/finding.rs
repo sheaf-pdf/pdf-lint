@@ -1,10 +1,11 @@
 //! What [`check`](super::check) tells: each one thing wrong with a file, by the
 //! clause it departs from.
 
-use super::Attribute;
+use super::{Attribute, Unread};
 use crate::{hint, plan};
 
-/// How much a [`Finding`] matters, for a caller to choose by.
+/// How much a [`Finding`] matters, for a caller to choose by. Ordered as
+/// listed, the most first; nothing in the crate compares grades by order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Grade {
@@ -15,6 +16,11 @@ pub enum Grade {
     /// Not as the standard has it, but every reader goes on, and real writers
     /// do it.
     Departure,
+    /// Not judged: a part of the file the reader didn't read, for a reason of
+    /// its own ([`Unread`]), or past a cap the check reads under
+    /// ([`Limits`](crate::Limits)). It says nothing of the file, and never
+    /// makes it not hold.
+    Unjudged,
 }
 
 /// A key of the linearization dictionary (Table F.1).
@@ -54,35 +60,92 @@ impl std::fmt::Display for DictKey {
     }
 }
 
+/// How many bytes of a key a [`KeyName`] holds.
+const HELD: usize = 15;
+
 /// A key of a hint stream's dictionary, as a finding owning nothing can hold
-/// it: its first bytes.
+/// it: its first bytes. Its `Display` is the key with its slash, `/S`, a byte
+/// that's no character's U+FFFD, and a key longer than 15 bytes cut before
+/// the character that runs past them, `…` where it's cut.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyName {
-    bytes: [u8; 15],
+    bytes: [u8; HELD],
     len: u8,
+    cut: bool,
 }
 
 impl KeyName {
-    /// `key`'s first 15 bytes.
-    pub fn new(key: &[u8]) -> KeyName {
-        let mut bytes = [0; 15];
-        let len = key.len().min(bytes.len());
-        bytes[..len].copy_from_slice(&key[..len]);
+    /// `key`, or its first bytes: up to 15, cut before a character that runs
+    /// past them.
+    #[must_use]
+    pub const fn new(key: &[u8]) -> KeyName {
+        let len = held(key);
+        let mut bytes = [0; HELD];
+        bytes
+            .split_at_mut(len)
+            .0
+            .copy_from_slice(key.split_at(len).0);
         KeyName {
             bytes,
             len: len as u8,
+            cut: len < key.len(),
         }
     }
 
-    /// The bytes it holds.
+    /// The bytes it holds: the key's, or as many of its first as it holds.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
 }
 
+/// How many of `key`'s bytes a [`KeyName`] holds: all of them up to
+/// [`HELD`], else [`HELD`], or fewer where a character that starts before
+/// byte [`HELD`] runs past it, which is left out whole. Where the bytes at
+/// the cut are no character's, it's at [`HELD`], and they're each U+FFFD, as
+/// everywhere else.
+const fn held(key: &[u8]) -> usize {
+    if key.len() <= HELD {
+        return key.len();
+    }
+    // A byte past the cut that continues a character: back to where that
+    // starts, three bytes at most.
+    if !continues(key[HELD]) {
+        return HELD;
+    }
+    let mut start = HELD - 1;
+    while start > HELD - 4 && continues(key[start]) {
+        start -= 1;
+    }
+    let width = match key[start] {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 0,
+    };
+    // The character it starts, where that's one, runs past the cut.
+    let after = key.split_at(start).1;
+    match start + width > HELD && width <= after.len() {
+        true => match std::str::from_utf8(after.split_at(width).0) {
+            Ok(_) => start,
+            Err(_) => HELD,
+        },
+        false => HELD,
+    }
+}
+
+/// Whether `byte` continues a character in UTF-8, as `10xxxxxx`.
+const fn continues(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
 impl std::fmt::Display for KeyName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "/{}", String::from_utf8_lossy(self.as_bytes()))
+        write!(f, "/{}", String::from_utf8_lossy(self.as_bytes()))?;
+        match self.cut {
+            true => f.write_str("…"),
+            false => Ok(()),
+        }
     }
 }
 
@@ -114,8 +177,9 @@ pub enum Place {
     Page(u64),
     /// An entry of the shared object table.
     SharedEntry(u64),
-    /// A table of the hint stream, by its key in the stream's dictionary.
-    Table(&'static str),
+    /// A table of the hint stream: where it starts in the data, the page
+    /// offset table's the data's start, any other's what its key gives.
+    Table(hint::Table),
     /// A key of the linearization dictionary.
     Key(DictKey),
     /// A key of the hint stream's dictionary.
@@ -130,7 +194,7 @@ pub enum Place {
 /// taken past the header; a linearization dictionary's value it quotes is as
 /// written, counted from the header (ISO 32000-2, 7.5.2). In a file whose
 /// header is its first byte, the two are the same.
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Finding {
     /// `/Linearized` isn't a number whose integer part is 1 (Table F.1), so the
@@ -177,8 +241,8 @@ pub enum Finding {
     /// `/H` hasn't two or four items (Table F.1).
     #[error("/H has {items} items, where it has two or four (ISO 32000-2, Table F.1)")]
     HintItems {
-        /// How many it has.
-        items: usize,
+        /// How many it has, or `u32::MAX` where it's more.
+        items: u32,
     },
     /// `/O` isn't the number of the first page's object (Table F.1).
     #[error("/O is {o}, where page {page}'s object is {computed} (ISO 32000-2, Table F.1)")]
@@ -245,10 +309,23 @@ pub enum Finding {
         most: u64,
     },
 
-    /// `startxref` gives no section that reads.
+    /// The reader stopped reading the sections short of the main one, for a
+    /// reason of its own, so nothing's said of them, of the numbers they
+    /// list, of a position they place, or of how many pages the page tree
+    /// has or where one is in it, as it may be read without what's listed
+    /// past where they stopped (F.3.4, F.3.11).
+    #[error(
+        "the sections aren't read as far as the main one, as {why}, so they and what they place aren't judged (ISO 32000-2, F.3.4, F.3.11)"
+    )]
+    SectionsUnread {
+        /// Why.
+        why: Unread,
+    },
+    /// `startxref` gives no section that reads, for what's wrong with it.
     #[error("the sections don't read from the last startxref (ISO 32000-2, 7.5.8.2, F.3.4)")]
     NoSections,
-    /// The first section's `/Prev` gives no section that reads (F.3.4).
+    /// The first section's `/Prev` gives no section that reads, for what's
+    /// wrong with it (F.3.4).
     #[error("no main section reads from the first section's /Prev (ISO 32000-2, F.3.4)")]
     NoMainSection,
     /// The section `startxref` gives comes after the one its `/Prev` gives, as
@@ -265,8 +342,8 @@ pub enum Finding {
     /// The first section has more than one subsection (F.3.4).
     #[error("the first section has {count} subsections, where it has one (ISO 32000-2, F.3.4)")]
     FirstSubsections {
-        /// How many it has.
-        count: usize,
+        /// How many it has, or `u32::MAX` where it's more.
+        count: u32,
     },
     /// The first section has a free entry (F.3.4).
     #[error("the first section lists {number} free (ISO 32000-2, F.3.4)")]
@@ -282,7 +359,7 @@ pub enum Finding {
         /// What it says.
         size: i64,
         /// How many there are.
-        total: u64,
+        total: u32,
     },
     /// The first section's trailer has no `/Root` that's a reference (F.3.4).
     #[error("the first section's trailer has no /Root that names an object (ISO 32000-2, F.3.4)")]
@@ -300,8 +377,8 @@ pub enum Finding {
     /// The main section has more than one subsection (F.3.11).
     #[error("the main section has {count} subsections, where it has one (ISO 32000-2, F.3.11)")]
     MainSubsections {
-        /// How many it has.
-        count: usize,
+        /// How many it has, or `u32::MAX` where it's more.
+        count: u32,
     },
     /// The main section doesn't begin at 0 (F.3.11).
     #[error("the main section begins at {from}, where it begins at 0 (ISO 32000-2, F.3.11)")]
@@ -398,10 +475,18 @@ pub enum Finding {
         /// The last.
         last: u32,
     },
+    /// The reader didn't read the hint stream, for a reason of its own, so
+    /// nothing's said of its data or its tables (F.4).
+    #[error("the hint stream isn't read, as {why}, so its tables aren't judged (ISO 32000-2, F.4)")]
+    HintUnread {
+        /// Why.
+        why: Unread,
+    },
     /// What's at `/H` isn't a stream.
     #[error("what's at /H isn't a stream (ISO 32000-2, F.3.6)")]
     HintNotAStream,
-    /// The hint stream doesn't decode.
+    /// The hint stream doesn't decode, for what's wrong with it: not where
+    /// the reader didn't read it ([`Finding::HintUnread`]).
     #[error("the hint stream's data doesn't decode (ISO 32000-2, F.3.6)")]
     HintUndecodable,
     /// The hint stream has no `/S` (F.3.6).
@@ -429,11 +514,19 @@ pub enum Finding {
         /// The key.
         key: KeyName,
     },
-    /// A hint table doesn't read: past its data, or a width past 32, or past a
-    /// cap.
+    /// A hint table doesn't read: past its data, or a width past 32.
     #[error("the hint tables don't read: {fault} (ISO 32000-2, F.4)")]
     HintTables {
         /// Why.
+        fault: hint::Error,
+    },
+    /// The hint tables are past a cap the check reads them under,
+    /// [`Limits::pages`](crate::Limits::pages) or
+    /// [`Limits::hint_entries`](crate::Limits::hint_entries), so nothing's
+    /// said of them (F.4).
+    #[error("the hint tables aren't judged: {fault} (ISO 32000-2, F.4)")]
+    HintTablesCapped {
+        /// Which, and how far past it.
         fault: hint::Error,
     },
     /// A table's fields run past the position of what's next (F.3.6).
@@ -441,8 +534,8 @@ pub enum Finding {
         "the {table} table ends at byte {end} of the hint data, past the next's at {next} (ISO 32000-2, F.3.6)"
     )]
     TableOverruns {
-        /// Which table, by its key in the hint stream's dictionary.
-        table: &'static str,
+        /// Which table.
+        table: hint::Table,
         /// Where it ends.
         end: u64,
         /// Where the next starts.
@@ -450,7 +543,7 @@ pub enum Finding {
     },
 
     /// A page doesn't say an attribute it has to (F.3.7, F.3.10).
-    #[error("page {page} doesn't say its {attribute:?} itself (ISO 32000-2, F.3.7, F.3.10)")]
+    #[error("page {page} doesn't say its {attribute} itself (ISO 32000-2, F.3.7, F.3.10)")]
     PageAttribute {
         /// The page.
         page: u64,
@@ -459,7 +552,7 @@ pub enum Finding {
     },
     /// A page tree node holds an inheritable attribute (F.3.10).
     #[error(
-        "page tree node {number} holds {attribute:?}, which is pushed down onto its pages (ISO 32000-2, F.3.10)"
+        "page tree node {number} holds {attribute}, which is pushed down onto its pages (ISO 32000-2, F.3.10)"
     )]
     NodeAttribute {
         /// Its number.
@@ -467,8 +560,18 @@ pub enum Finding {
         /// The attribute.
         attribute: Attribute,
     },
-    /// The page tree didn't read, or has no pages, so nothing depending on it
-    /// can be said (F.3.7).
+    /// The reader didn't read the page tree, for a reason of its own, so
+    /// nothing's said of its pages (F.3.7).
+    #[error("the page tree isn't read, as {why}, so its pages aren't judged (ISO 32000-2, F.3.7)")]
+    PagesUnread {
+        /// Why.
+        why: Unread,
+    },
+    /// The page tree didn't read, for what's wrong with it, or has no pages,
+    /// so nothing depending on it can be said (F.3.7): not where the reader
+    /// didn't read it ([`Finding::PagesUnread`]), nor where it stopped the
+    /// sections short ([`Finding::SectionsUnread`]), past which the tree's
+    /// objects may be listed.
     #[error("the page tree gives no pages, or doesn't read (ISO 32000-2, F.3.7)")]
     NoPages,
     /// The first page's object isn't among what the first section lists.
@@ -559,7 +662,7 @@ pub enum Finding {
     )]
     FirstPageShared {
         /// How many it gives.
-        entries: u64,
+        entries: u32,
     },
     /// A page's shared object identifier is past the shared object table
     /// (F.4.2).
@@ -635,8 +738,8 @@ pub enum Finding {
     /// A table's first object isn't listed (F.4.4 to F.4.7).
     #[error("the {table} table's first object, {number}, isn't listed (ISO 32000-2, F.4)")]
     TableObject {
-        /// Which table, by its key.
-        table: &'static str,
+        /// Which table.
+        table: hint::Table,
         /// The number.
         number: u32,
     },
@@ -646,7 +749,7 @@ pub enum Finding {
     )]
     TableAt {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// Where it says, from the file's first byte.
         hint: u64,
         /// Where it is.
@@ -658,7 +761,7 @@ pub enum Finding {
     )]
     TableObjects {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// What it says.
         hint: u64,
         /// What's there.
@@ -670,7 +773,7 @@ pub enum Finding {
     )]
     TableLength {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// What it says.
         hint: u64,
         /// What they take.
@@ -683,7 +786,7 @@ pub enum Finding {
     )]
     TableIdPast {
         /// Which table.
-        table: &'static str,
+        table: hint::Table,
         /// The identifier.
         id: u32,
         /// How many entries the table has.
@@ -700,11 +803,19 @@ pub enum Finding {
         pages: u64,
     },
 
-    /// The objects given as the file's graph can't be planned, so what a page
-    /// reaches isn't said.
+    /// The objects given as the file's graph can't be planned, for what they
+    /// hold, so what a page reaches isn't said.
     #[error("what the file's objects reach can't be said (ISO 32000-2, F.3.7): {why}")]
     GraphRefused {
         /// Why.
+        why: plan::Error,
+    },
+    /// The objects given as the file's graph are past a cap a plan is made
+    /// under ([`Limits`](crate::Limits)), so what a page reaches isn't judged
+    /// (F.3.7).
+    #[error("what the file's objects reach isn't judged: {why} (ISO 32000-2, F.3.7)")]
+    GraphCapped {
+        /// Which, and how far past it.
         why: plan::Error,
     },
     /// An object the first page alone or with others reaches isn't in the first
@@ -761,11 +872,15 @@ fn placed(computed: &Option<u64>) -> String {
 
 impl Finding {
     /// Where it's said of: none for what's of the file as a whole.
-    pub fn place(&self) -> Option<Place> {
+    #[must_use]
+    pub const fn place(&self) -> Option<Place> {
         use Finding::*;
         use Place::*;
         Some(match *self {
-            NoSections
+            HintUnread { .. }
+            | SectionsUnread { .. }
+            | PagesUnread { .. }
+            | NoSections
             | NoMainSection
             | FirstSubsections { .. }
             | FirstSize { .. }
@@ -779,7 +894,9 @@ impl Finding {
             | NoPages
             | FirstPageShared { .. }
             | SharedCounts { .. }
-            | GraphRefused { .. } => return None,
+            | HintTablesCapped { .. }
+            | GraphRefused { .. }
+            | GraphCapped { .. } => return None,
             HintTables { fault } => match fault {
                 hint::Error::PastEnd { bit, .. } => HintBit(bit),
                 hint::Error::TableAt { table, .. } => Table(table),
@@ -834,12 +951,13 @@ impl Finding {
             TableObjects { table, .. } | TableLength { table, .. } | TableIdPast { table, .. } => {
                 Table(table)
             }
-            ThumbnailPages { .. } => Table("T"),
+            ThumbnailPages { .. } => Table(hint::Table::Thumbnails),
         })
     }
 
     /// The clause of ISO 32000-2 it departs from, as its message cites it.
-    pub fn clause(&self) -> &'static str {
+    #[must_use]
+    pub const fn clause(&self) -> &'static str {
         use Finding::*;
         match self {
             Version
@@ -855,6 +973,7 @@ impl Finding {
             Updated { .. } => "G.7",
             Indirect { .. } | DictionaryPast1024 { .. } => "F.3.3",
             NoSections => "7.5.8.2, F.3.4",
+            SectionsUnread { .. } => "F.3.4, F.3.11",
             SectionOrder { .. } => "F.3",
             NoMainSection
             | FirstSubsections { .. }
@@ -884,7 +1003,9 @@ impl Finding {
             | HintKeyIndirect { .. }
             | TableOverruns { .. } => "F.3.6",
             HintKeyOther { .. } => "Table F.2",
-            HintTables { .. }
+            HintUnread { .. }
+            | HintTables { .. }
+            | HintTablesCapped { .. }
             | TableObject { .. }
             | TableAt { .. }
             | TableObjects { .. }
@@ -892,9 +1013,11 @@ impl Finding {
             | TableIdPast { .. } => "F.4",
             PageAttribute { .. } => "F.3.7, F.3.10",
             NodeAttribute { .. } => "F.3.10",
-            NoPages
+            PagesUnread { .. }
+            | NoPages
             | FirstPageNotFirstObject { .. }
             | GraphRefused { .. }
+            | GraphCapped { .. }
             | FirstPageReaches { .. } => "F.3.7",
             PageReaches { .. } => "F.3.8",
             FirstPageAt { .. }
@@ -918,10 +1041,17 @@ impl Finding {
     /// How much it matters: [`Grade::Error`] by definition for what a reader
     /// acts on (a position, a length, a count, an identifier past its table, a
     /// value it can't read), [`Grade::Departure`] where real files, read by
-    /// real viewers, show that nothing goes wrong by it.
-    pub fn grade(&self) -> Grade {
+    /// real viewers, show that nothing goes wrong by it, and
+    /// [`Grade::Unjudged`] for what wasn't judged.
+    #[must_use]
+    pub const fn grade(&self) -> Grade {
         use Finding::*;
         match self {
+            HintUnread { .. }
+            | SectionsUnread { .. }
+            | PagesUnread { .. }
+            | HintTablesCapped { .. }
+            | GraphCapped { .. } => Grade::Unjudged,
             // A reader goes on: what these leave out it fetches by the
             // sections.
             Updated { .. }

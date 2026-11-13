@@ -1,20 +1,21 @@
-//! Small files written from hand-written bodies, with no document model: what both
-//! the tests of what's written and the tests against qpdf go through. Each is
-//! built from outside the crate, as a caller of any model builds one, so a way in
-//! that's missing doesn't compile.
+//! Small files written from hand-written bodies, with no document model: what
+//! both the tests of what's written and the tests against qpdf go through. Each
+//! is built from outside the crate, as a caller of any model builds one, so a
+//! way in that's missing doesn't compile.
 
 #![allow(dead_code)]
 
 use std::convert::Infallible;
 
-use pdf_linearize::layout::Options;
+use pdf_linearize::layout::{Encoded, Options, Piece, Stream};
 use pdf_linearize::pdf_objects::ObjectId;
-use pdf_linearize::{
-    Encoded, Graph, Group, Kind, Layout, Limits, Page, Piece, Plan, Stream, What, assemble, plan,
-};
+use pdf_linearize::pdf_objects::version::Version;
+use pdf_linearize::plan::{Group, Kind, Page, What};
+use pdf_linearize::{Graph, Layout, Limits, Plan, assemble, plan};
 
-/// One object as it's written by hand. In `text`, `{5}` is a reference to object 5
-/// that a walk goes into, and `{!5}` one that it doesn't: a `/Parent`, a `/Thumb`.
+/// One object as it's written by hand. In `text`, `{5}` is a reference to
+/// object 5 that a walk goes into, and `{!5}` one that it doesn't: a `/Parent`,
+/// a `/Thumb`.
 #[derive(Debug, Clone)]
 pub struct Object {
     pub number: u32,
@@ -137,8 +138,8 @@ impl Doc {
         self
     }
 
-    /// Page `number`, which has `contents` and `resources`, a dictionary's text,
-    /// and the rest of `extra`.
+    /// Page `number`, which has `contents` and `resources`, a dictionary's
+    /// text, and the rest of `extra`.
     pub fn page(
         &mut self,
         number: u32,
@@ -245,7 +246,8 @@ impl Doc {
         }
     }
 
-    /// The file, planned, serialized and assembled, under the closure `hex` says.
+    /// The file, planned, serialized and assembled, under the closure `hex`
+    /// says.
     pub fn written(&self) -> Written {
         let hex = self.hex;
         self.written_with(move |stream| {
@@ -271,7 +273,7 @@ impl Doc {
             ),
             None => String::new(),
         };
-        let mut options = Options::new((1, 7));
+        let mut options = Options::new(Version::new(1, 7));
         options.trailer = trailer.as_bytes();
         let layout = assemble(&plan, &lengths, &options, encode)?;
         let mut bytes = Vec::with_capacity(layout.len() as usize);
@@ -324,9 +326,9 @@ pub fn two_pages(kind: Kind, packed: bool) -> Doc {
     doc
 }
 
-/// Three pages. Font 8 is the first page's and the second's, so it stays with the
-/// first; font 7 is the second's and the third's, so it's in part 8; the second
-/// has font 9 alone, and image 10 read last.
+/// Three pages. Font 8 is the first page's and the second's, so it stays with
+/// the first; font 7 is the second's and the third's, so it's in part 8; the
+/// second has font 9 alone, and image 10 read last.
 pub fn shared(kind: Kind, packed: bool) -> Doc {
     let mut doc = Doc::new(kind, packed, &[3, 4, 11]);
     let font = |n| format!("<< /Font << /F1 {{{n}}} >> >>");
@@ -355,8 +357,9 @@ pub fn shared(kind: Kind, packed: bool) -> Doc {
     doc
 }
 
-/// Three pages, the second opening first by its `/OpenAction` (F.3.7). The first
-/// page's sections are of different lengths, so an entry in the wrong place shows.
+/// Three pages, the second opening first by its `/OpenAction` (F.3.7). The
+/// first page's sections are of different lengths, so an entry in the wrong
+/// place shows.
 pub fn first_page_other(kind: Kind, packed: bool) -> Doc {
     let mut doc = Doc::new(kind, packed, &[3, 4, 7]);
     doc.page(3, &[5], "<< >>", "");
@@ -370,8 +373,8 @@ pub fn first_page_other(kind: Kind, packed: bool) -> Doc {
     doc
 }
 
-/// A form: its dictionary at open, alone (F.3.5); its field in part 9, with a widget
-/// on each page that's the field's kid.
+/// A form: its dictionary at open, alone (F.3.5); its field in part 9, with a
+/// widget on each page that's the field's kid.
 pub fn form(kind: Kind, packed: bool) -> Doc {
     let mut doc = Doc::new(kind, packed, &[3, 4]);
     doc.page(3, &[5], "<< >>", "/Annots [{7}]");
@@ -406,8 +409,8 @@ pub fn outline(kind: Kind, packed: bool, first: bool) -> Doc {
     doc
 }
 
-/// Thumbnails on the first and third of four pages, sharing a colour space, and on
-/// no others.
+/// Thumbnails on the first and third of four pages, sharing a colour space, and
+/// on no others.
 pub fn thumbnails(kind: Kind, packed: bool) -> Doc {
     let mut doc = Doc::new(kind, packed, &[3, 4, 5, 6]);
     for (page, content, thumb) in [
@@ -433,8 +436,8 @@ pub fn thumbnails(kind: Kind, packed: bool) -> Doc {
     doc
 }
 
-/// Every other group a table names, an embedded file reaching what the first page
-/// has, and an information dictionary.
+/// Every other group a table names, an embedded file reaching what the first
+/// page has, and an information dictionary.
 pub fn all_tables(kind: Kind, packed: bool) -> Doc {
     let mut doc = Doc::new(kind, packed, &[3, 4]);
     doc.page(3, &[5], "<< /Font << /F1 {19} >> >>", "");
@@ -490,9 +493,9 @@ pub fn long(kind: Kind, packed: bool, first: u32) -> Doc {
     doc
 }
 
-/// Many pages all alike, sharing nothing, where every difference in the page table
-/// is 0, so that a width of 0 would do and a reader that refuses one fetches the
-/// file.
+/// Many pages all alike, sharing nothing, where every difference in the page
+/// table is 0, so that a width of 0 would do and a reader that refuses one
+/// fetches the file.
 pub fn uniform(kind: Kind) -> Doc {
     let count = 24;
     let pages: Vec<u32> = (0..count).map(|at| 10 + at * 2).collect();

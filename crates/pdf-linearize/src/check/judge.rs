@@ -10,7 +10,7 @@ use pdf_objects::ObjectId;
 
 use crate::Limits;
 use crate::check::{Grade, KeyName};
-use crate::hint::{self, HintKeys, Tables, position};
+use crate::hint::{self, HintKeys, Table, Tables, position};
 use crate::plan::{self, Kind, Part, What};
 
 /// Looking has stopped, as nothing can change the verdict.
@@ -67,6 +67,12 @@ fn number(raw: Raw) -> Option<u64> {
         Raw::Integer(n) => u64::try_from(n).ok(),
         _ => None,
     }
+}
+
+/// How many of something there are, as a finding counts them: `u32::MAX`
+/// past it, which facts in memory can't be.
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// Where `offset`, a value the file gives as an offset, which counts from
@@ -229,13 +235,22 @@ fn h_extent(first: &FirstObject) -> (u64, u64) {
     (item(0).unwrap_or(0), item(1).unwrap_or(0))
 }
 
+/// Whether the hint stream's own object read, so that its dictionary and
+/// where it ends are known: not where the reader didn't read it, which leaves
+/// its end where it starts ([`HintData::Unread`]).
+fn object_read(hint: &HintFacts) -> bool {
+    !matches!(hint.data, HintData::Unread(_)) || hint.end > hint.at
+}
+
 /// Where the hint stream is and how long, as a table's positions are as if
 /// it weren't there, given `/H`'s offset and length, `h`, and `index` of
-/// where things start: `h`, but where the stream listed at its offset takes
-/// fewer bytes than that length, or more than it may, the most it may.
+/// where things start: `h`, but where the stream listed at its offset, its
+/// object read, takes fewer bytes than that length, or more than it may, the
+/// most it may.
 fn placing(facts: &Facts, h: (u64, u64), index: &Index) -> (u64, u64) {
     let (at, length) = h;
-    let Some(hint) = facts.hint.as_ref().filter(|hint| hint.at == at) else {
+    let listed = |hint: &&HintFacts| hint.at == at && object_read(hint);
+    let Some(hint) = facts.hint.as_ref().filter(listed) else {
         return h;
     };
     let (least, most) = hint_room(index, hint.at, hint.end);
@@ -260,6 +275,10 @@ struct Judge<'a, S: ?Sized> {
     sink: &'a mut S,
     holds: bool,
     index: Index,
+    /// Whether the sections read as far as the main one, or stopped short of
+    /// it for the file's reason: what they place, and the numbers they list,
+    /// are judged only then.
+    placed: bool,
     /// Which page is first, by `/P`.
     first_page: u64,
 }
@@ -320,7 +339,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         }
         if first.h == Raw::Array && !matches!(first.h_items.len(), 2 | 4) {
             self.say(Finding::HintItems {
-                items: first.h_items.len(),
+                items: count(first.h_items.len()),
             })?;
         }
         if first.h_items.iter().any(|raw| number(*raw).is_none()) {
@@ -330,6 +349,9 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 true => Finding::Indirect { key },
                 false => Finding::BadValue { key },
             })?;
+        }
+        if !self.placed {
+            return Ok(());
         }
         self.first_page_end()?;
         self.main_first_entry()?;
@@ -352,7 +374,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let Some((at, number)) = last else {
             return Ok(());
         };
-        let read = (self.facts.objects.iter()).find(|e| e.number == number && e.start == at);
+        let read = (self.facts.objects.iter()).find(|e| e.number == number && e.at == at);
         let least = read.map_or(at.saturating_add(1), |extent| extent.end);
         let most = self.index.next_after(at).max(least);
         let end = in_file(self.facts, e);
@@ -401,6 +423,9 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         if hint.at != in_file(self.facts, at) {
             return self.say(Finding::HintNotListed { at: at as i64 });
         }
+        if !object_read(hint) {
+            return Ok(());
+        }
         // Each stream as `/H` says it, and where it is.
         let overflow = items.get(2).copied().and_then(number);
         let streams = [
@@ -426,14 +451,22 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// F.3.4: the first section; F.3.11: the main one and `startxref`.
+    /// F.3.4: the first section; F.3.11: the main one and `startxref`. Where
+    /// the reader stopped short of the main one, that's said, and only what's
+    /// of the first section alone.
     fn sections(&mut self) -> Go {
+        if let Some(why) = self.facts.unread.sections {
+            self.say(Finding::SectionsUnread { why })?;
+        }
         let Some(first) = &self.facts.first else {
-            return self.say(Finding::NoSections);
+            return match self.placed {
+                true => self.say(Finding::NoSections),
+                false => Ok(()),
+            };
         };
         if first.subsections.len() > 1 {
             self.say(Finding::FirstSubsections {
-                count: first.subsections.len(),
+                count: count(first.subsections.len()),
             })?;
         }
         for row in &first.rows {
@@ -445,12 +478,15 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             self.say(Finding::FirstNoRoot)?;
         }
         if let Some(row) = first.rows.first()
-            && row.number != self.first_object.number
+            && row.number != self.first_object.id.number
         {
             self.say(Finding::FirstNotDictionary {
                 number: row.number,
-                dictionary: self.first_object.number,
+                dictionary: self.first_object.id.number,
             })?;
+        }
+        if !self.placed {
+            return Ok(());
         }
         let Some(main) = &self.facts.main else {
             return self.say(Finding::NoMainSection);
@@ -461,18 +497,19 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 main: main.at,
             })?;
         }
-        let listed = |section: &SectionFacts| section.rows.len() as u64;
-        let total = listed(first) + listed(main);
+        let total = first.rows.len() + main.rows.len();
         if let Raw::Integer(size) = first.size {
-            if u64::try_from(size) != Ok(total) {
+            if usize::try_from(size) != Ok(total) {
+                let total = count(total);
                 self.say(Finding::FirstSize { size, total })?;
             }
         } else {
+            let total = count(total);
             self.say(Finding::FirstSize { size: -1, total })?;
         }
         if main.subsections.len() > 1 {
             self.say(Finding::MainSubsections {
-                count: main.subsections.len(),
+                count: count(main.subsections.len()),
             })?;
         }
         match main.subsections.first() {
@@ -506,6 +543,9 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let (Some(first), Some(main)) = (&self.facts.first, &self.facts.main) else {
             return Ok(());
         };
+        if !self.placed {
+            return Ok(());
+        }
         let hint = self.facts.hint.as_ref().map(|hint| hint.number);
         for section in [first, main] {
             self.one_section(section, hint)?;
@@ -600,9 +640,12 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         match hint.data {
             HintData::NotAStream => self.say(Finding::HintNotAStream)?,
             HintData::Undecodable => self.say(Finding::HintUndecodable)?,
+            HintData::Unread(why) => self.say(Finding::HintUnread { why })?,
             _ => {}
         }
-        if matches!(hint.data, HintData::NotAStream) {
+        // Of what isn't a stream, or a stream whose object didn't read, there's
+        // no dictionary to say anything of.
+        if matches!(hint.data, HintData::NotAStream) || !object_read(hint) {
             return Ok(());
         }
         if !hint.keys.iter().any(|(key, _)| key == b"S") {
@@ -626,19 +669,41 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
     }
 
     /// F.3.7, F.3.10: inheritable attributes pushed down; `/N`, `/O`, a page
-    /// packed.
+    /// packed. Of a page tree the reader didn't read, that's said, and nothing
+    /// else; of one read past where the sections stopped, what its nodes hold
+    /// alone.
     fn pages(&mut self) -> Go {
         let facts = self.facts;
-        let first = self.first_object;
-        // With no key for what the page tree is in, there's nothing to say of
-        // it.
-        let locked = |hint: &HintFacts| hint.data == HintData::Locked;
-        if facts.pages.is_empty() && facts.hint.as_ref().is_some_and(locked) {
-            return Ok(());
+        if let Some(why) = facts.unread.pages {
+            return self.say(Finding::PagesUnread { why });
         }
         if facts.pages.is_empty() {
-            return self.say(Finding::NoPages);
+            // The objects a page tree is of may be listed past where the
+            // sections stopped.
+            return match self.placed {
+                true => self.say(Finding::NoPages),
+                false => Ok(()),
+            };
         }
+        // Where they stopped short, some of its pages' objects may be listed
+        // past there too, and the tree read without them: how many pages it
+        // has, and where one is in it, are known only where the sections are
+        // placed. What a node holds is its own.
+        if self.placed {
+            self.each_page()?;
+        }
+        for &(number, attribute) in &facts.nodes {
+            self.say(Finding::NodeAttribute { number, attribute })?;
+        }
+        Ok(())
+    }
+
+    /// Table F.1, F.3.1, F.3.4, F.3.10: `/N` against how many pages there are,
+    /// `/O` against the first's object, which the first section lists, and
+    /// each page not packed and saying its attributes itself.
+    fn each_page(&mut self) -> Go {
+        let facts = self.facts;
+        let first = self.first_object;
         let pages = facts.pages.len() as u64;
         if let Raw::Integer(n) = first.n
             && u64::try_from(n) != Ok(pages)
@@ -680,9 +745,6 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 })?;
             }
         }
-        for &(number, attribute) in &facts.nodes {
-            self.say(Finding::NodeAttribute { number, attribute })?;
-        }
         Ok(())
     }
 
@@ -701,7 +763,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             .or_else(|| number_of(self.first_page));
         let count = table.pages.len() as u64;
         let first = self.first_page.min(count.saturating_sub(1));
-        if let Some(computed) = first_number.and_then(|number| self.index.placed_at(number)) {
+        let computed = first_number
+            .and_then(|number| self.index.placed_at(number))
+            .filter(|_| self.placed);
+        if let Some(computed) = computed {
             let length = table
                 .pages
                 .get(first as usize)
@@ -721,7 +786,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             // each page after it. The first is where the table says: a writer
             // may have its page object after other objects of the part.
             let own = number_of(page).and_then(|number| self.index.placed_at(number));
-            if let Some(computed) = own.filter(|_| page != first) {
+            if let Some(computed) = own.filter(|_| page != first && self.placed) {
                 if computed != at {
                     self.say(Finding::PageAt {
                         page,
@@ -731,20 +796,22 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 }
                 at = computed;
             }
-            let (held, taken) = self.index.holds(at, entry.length, entry.objects);
-            if held != entry.objects {
-                self.say(Finding::PageObjects {
-                    page,
-                    hint: entry.objects,
-                    computed: held,
-                })?;
-            }
-            if let Some(taken) = taken.filter(|&taken| taken != entry.length) {
-                self.say(Finding::PageLength {
-                    page,
-                    hint: entry.length,
-                    computed: taken,
-                })?;
+            if self.placed {
+                let (held, taken) = self.index.holds(at, entry.length, entry.objects);
+                if held != entry.objects {
+                    self.say(Finding::PageObjects {
+                        page,
+                        hint: entry.objects,
+                        computed: held,
+                    })?;
+                }
+                if let Some(taken) = taken.filter(|&taken| taken != entry.length) {
+                    self.say(Finding::PageLength {
+                        page,
+                        hint: entry.length,
+                        computed: taken,
+                    })?;
+                }
             }
             let end = entry.content_at.saturating_add(entry.content_length);
             if end > entry.length {
@@ -757,7 +824,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             let entries = tables.shared.header.entries;
             if page == first && !entry.shared.is_empty() {
                 self.say(Finding::FirstPageShared {
-                    entries: entry.shared.len() as u64,
+                    entries: u32::try_from(entry.shared.len()).unwrap_or(u32::MAX),
                 })?;
             }
             for &(id, _) in &entry.shared {
@@ -783,33 +850,35 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         }
         let mut at = in_file(self.facts, u64::from(tables.pages.header.first_page_at));
         for (entry, group) in (0u64..).zip(&table.groups) {
-            if entry == u64::from(header.first_page_entries) {
-                at = in_file(self.facts, u64::from(header.first_at));
-                let computed = self.index.placed_at(header.first_object);
-                if computed != Some(at) {
-                    self.say(Finding::SharedFirstAt {
-                        number: header.first_object,
-                        hint: at,
-                        computed,
+            if self.placed {
+                if entry == u64::from(header.first_page_entries) {
+                    at = in_file(self.facts, u64::from(header.first_at));
+                    let computed = self.index.placed_at(header.first_object);
+                    if computed != Some(at) {
+                        self.say(Finding::SharedFirstAt {
+                            number: header.first_object,
+                            hint: at,
+                            computed,
+                        })?;
+                    }
+                    // So one wrong position isn't said of each entry after it.
+                    at = computed.unwrap_or(at);
+                }
+                let (held, taken) = self.index.holds(at, group.length, group.objects);
+                if held != group.objects {
+                    self.say(Finding::SharedObjects {
+                        entry,
+                        hint: group.objects,
+                        computed: held,
                     })?;
                 }
-                // So one wrong position isn't said of each entry after it.
-                at = computed.unwrap_or(at);
-            }
-            let (held, taken) = self.index.holds(at, group.length, group.objects);
-            if held != group.objects {
-                self.say(Finding::SharedObjects {
-                    entry,
-                    hint: group.objects,
-                    computed: held,
-                })?;
-            }
-            if let Some(taken) = taken.filter(|&taken| taken != group.length) {
-                self.say(Finding::SharedLength {
-                    entry,
-                    hint: group.length,
-                    computed: taken,
-                })?;
+                if let Some(taken) = taken.filter(|&taken| taken != group.length) {
+                    self.say(Finding::SharedLength {
+                        entry,
+                        hint: group.length,
+                        computed: taken,
+                    })?;
+                }
             }
             if group.signature.is_some() {
                 self.say(Finding::Signature { entry })?;
@@ -823,14 +892,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
     /// holding what it says and taking what it says. Of none, nothing's to be
     /// where anything says, but a length is a count that's wrong, or a length
     /// that is if nothing's there.
-    fn stretch(
-        &mut self,
-        table: &'static str,
-        first: u32,
-        at: u64,
-        objects: u64,
-        length: u64,
-    ) -> Go {
+    fn stretch(&mut self, table: Table, first: u32, at: u64, objects: u64, length: u64) -> Go {
+        if !self.placed {
+            return Ok(());
+        }
         if objects == 0 {
             if length == 0 {
                 return Ok(());
@@ -885,11 +950,11 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
     fn other_tables(&mut self, tables: &Tables) -> Go {
         let entries = tables.shared.header.entries;
         let generic = [
-            ("/O", &tables.outlines),
-            ("/A", &tables.threads),
-            ("/E", &tables.dests),
-            ("/I", &tables.info),
-            ("/L", &tables.labels),
+            (Table::Outlines, &tables.outlines),
+            (Table::Threads, &tables.threads),
+            (Table::Dests, &tables.dests),
+            (Table::Info, &tables.info),
+            (Table::Labels, &tables.labels),
         ];
         for (table, generic) in generic {
             if let Some(g) = generic {
@@ -898,9 +963,9 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             }
         }
         let extended = [
-            ("/V", &tables.form),
-            ("/C", &tables.structure),
-            ("/R", &tables.renditions),
+            (Table::Form, &tables.form),
+            (Table::Structure, &tables.structure),
+            (Table::Renditions, &tables.renditions),
         ];
         for (table, extended) in extended {
             if let Some(e) = extended {
@@ -919,11 +984,11 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             let objects: u64 = thumbnails.pages.iter().map(|page| page.objects).sum();
             let length: u64 = thumbnails.pages.iter().map(|page| page.length).sum();
             let at = in_file(self.facts, u64::from(h.first_at));
-            self.stretch("/T", h.first_object, at, objects, length)?;
+            self.stretch(Table::Thumbnails, h.first_object, at, objects, length)?;
             let shared = u64::from(h.shared_objects);
             let at = in_file(self.facts, u64::from(h.shared_first_at));
             let long = u64::from(h.shared_length);
-            self.stretch("/T", h.shared_first_object, at, shared, long)?;
+            self.stretch(Table::Thumbnails, h.shared_first_object, at, shared, long)?;
             let gaps = thumbnails.pages.iter().map(|page| u64::from(page.gap));
             let said = gaps.sum::<u64>() + thumbnails.pages.len() as u64;
             let pages = tables.pages.pages.len() as u64;
@@ -943,11 +1008,11 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 if group > 0 {
                     at = self.index.placed_at(entry.number).unwrap_or(at);
                 }
-                self.stretch("/B", first, at, objects, length)?;
+                self.stretch(Table::Files, first, at, objects, length)?;
                 for &id in &entry.shared {
                     if id >= entries {
                         self.say(Finding::TableIdPast {
-                            table: "/B",
+                            table: Table::Files,
                             id,
                             entries,
                         })?;
@@ -967,7 +1032,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             let end = written.len() as u64;
             if end > keys.shared {
                 self.say(Finding::TableOverruns {
-                    table: "page offset",
+                    table: Table::PageOffsets,
                     end,
                     next: keys.shared,
                 })?;
@@ -980,11 +1045,22 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
     /// own in its section, the first page's in the first group, and each list
     /// as long as what's shared that it reaches.
     fn graph(&mut self, tables: &Tables) -> Go {
-        let Some(graph) = &self.facts.graph else {
+        // Nothing said here moves the verdict, so a sink that wants none of
+        // it isn't charged for the plan.
+        if !self.sink.wants() {
+            return Ok(());
+        }
+        let Some(graph) = self.facts.graph.as_ref().filter(|_| self.placed) else {
             return Ok(());
         };
         let plan = match plan::plan(graph, self.limits) {
             Ok(plan) => plan,
+            Err(
+                why @ (plan::Error::TooManyPages { .. }
+                | plan::Error::TooManyObjects { .. }
+                | plan::Error::TooManySharedEntries { .. }
+                | plan::Error::TooManySharedVisits { .. }),
+            ) => return self.say(Finding::GraphCapped { why }),
             Err(why) => return self.say(Finding::GraphRefused { why }),
         };
         let writes = plan.writes();
@@ -1145,13 +1221,16 @@ fn hint_keys(facts: &Facts) -> Option<HintKeys> {
     shared.then_some(keys)
 }
 
-/// The hint tables, if they read, told of if they don't.
+/// The hint tables, if they read, told of if they don't: as the file's fault,
+/// or past a cap the check reads them under, which isn't, and so they're not
+/// `judged`.
 fn read_tables<S: Sink + ?Sized>(
     facts: &Facts,
     first: &FirstObject,
     limits: &Limits,
     sink: &mut S,
     holds: &mut bool,
+    judged: &mut bool,
 ) -> Option<(Tables, HintKeys)> {
     let hint = facts.hint.as_ref()?;
     let HintData::Decoded(data) = &hint.data else {
@@ -1161,6 +1240,13 @@ fn read_tables<S: Sink + ?Sized>(
     let pages = number(first.n).and_then(|n| u32::try_from(n).ok())?;
     match hint::tables(data, &keys, pages, limits) {
         Ok(tables) => Some((tables, keys)),
+        Err(fault @ (hint::Error::TooManyPages { .. } | hint::Error::TooManyEntries { .. })) => {
+            *judged = false;
+            if sink.wants() {
+                sink.finding(Finding::HintTablesCapped { fault });
+            }
+            None
+        }
         Err(fault) => {
             *holds = false;
             if sink.wants() {
@@ -1178,18 +1264,28 @@ pub(super) fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut
             linearized: false,
             holds: false,
             hints_read: false,
+            judged_whole: false,
         };
     }
     let first = facts.first_object.as_ref().expect("it's linearized");
     let mut holds = true;
+    // What the reader didn't read is known before anything's looked at, so
+    // the verdict says it whatever the sink.
+    let unread = matches!(
+        facts.hint.as_ref().map(|hint| &hint.data),
+        Some(HintData::Unread(_))
+    );
+    let mut judged_whole =
+        !unread && facts.unread.sections.is_none() && facts.unread.pages.is_none();
     // Past what any reader needs of it, the verdict is the same: it comes
     // first.
-    let tables = read_tables(facts, first, limits, sink, &mut holds);
+    let tables = read_tables(facts, first, limits, sink, &mut holds, &mut judged_whole);
     let hints_read = tables.is_some();
     let verdict = |holds| Verdict {
         linearized: true,
         holds,
         hints_read,
+        judged_whole,
     };
     if !holds && !sink.wants() {
         return verdict(false);
@@ -1211,6 +1307,7 @@ pub(super) fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut
         sink,
         holds,
         index,
+        placed: facts.unread.sections.is_none(),
         first_page: number(first.p).unwrap_or(0),
     };
     let _ = judged(&mut judge, tables.as_ref());

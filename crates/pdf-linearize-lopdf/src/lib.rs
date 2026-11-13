@@ -1,10 +1,11 @@
 //! A [`Document`] of lopdf's written as a linearized file, by plain functions
 //! over its public objects: no lopdf type goes into the engine, and nothing of
-//! the family's crates is used. [`graph`] says what [`plan()`] is told of a
+//! pdf-structure or pdf-semantics is used, only pdf-linearize's engine and the
+//! pdf-objects it re-exports. [`graph`] says what [`plan()`] is told of a
 //! document, and [`linearize`] writes the file.
 //!
 //! The file is the plainest there is: cross-reference tables, nothing in object
-//! streams, the hint stream unfiltered, so nothing but lopdf is pulled in.
+//! streams, the hint stream unfiltered, so no filter is pulled in to write it.
 //! lopdf has no public writer of one object, so a small one is here, in the
 //! plan's numbers: a reference to no object is `null` (7.3.10), a string is
 //! hexadecimal, a stream's `/Length` is direct and its data as lopdf holds it,
@@ -39,9 +40,14 @@
 //!   reference that ends at one of those or at nothing, a reference to any of
 //!   which reads the same as one to none.
 //!
-//! Every object moves, as Annex F has it, so anything that names one from
-//! outside the file, a signature's byte range above all, doesn't hold
-//! afterwards.
+//! What's written is what the [`Document`] holds, which can differ from what
+//! a reader of its file finds: lopdf's reader can keep an object a later
+//! section of the file freed, or an older revision's `/Info`. Each is written
+//! as held where what's written reaches it, as lopdf's own save writes it.
+//!
+//! Every object is written at the number and place a plan gives it, as Annex F
+//! has it, so anything that names one from outside the file, a signature's
+//! byte range above all, doesn't hold afterwards, as under any rewrite.
 //!
 //! # What's refused
 //!
@@ -73,12 +79,15 @@ use std::io::Write as _;
 
 use ::lopdf::{Dictionary, Document, Object, Stream};
 
-use crate::layout::{self, Encoded, Layout, Piece, assemble};
-pub use crate::plan::FirstPage;
-use crate::plan::{self, Graph, Group, Kind, Page, Plan, What, plan};
-use pdf_objects::ObjectId;
+use pdf_linearize::Limits;
+use pdf_linearize::layout::{self, Encoded, Layout, Piece, assemble};
+use pdf_linearize::pdf_objects::ObjectId;
+use pdf_linearize::pdf_objects::version::Version;
+pub use pdf_linearize::plan::FirstPage;
+use pdf_linearize::plan::{self, Graph, Group, Kind, Page, Plan, What, plan};
 
-use crate::Limits;
+#[cfg(test)]
+mod fuzz;
 
 /// The attributes a page inherits (7.7.3.4).
 const INHERITED: [&str; 4] = ["Resources", "MediaBox", "CropBox", "Rotate"];
@@ -335,12 +344,12 @@ pub fn linearize(out: &mut Vec<u8>, doc: &Document, options: &Options) -> Result
 }
 
 /// The header's version, as lopdf holds it, or 1.7 where it isn't one.
-fn version(doc: &Document) -> (u8, u8) {
+fn version(doc: &Document) -> Version {
     let parsed = doc.version.split_once('.').and_then(|(major, minor)| {
         let major = major.parse().ok()?;
-        Some((major, minor.parse().ok()?))
+        Some(Version::new(major, minor.parse().ok()?))
     });
-    parsed.unwrap_or((1, 7))
+    parsed.unwrap_or(Version::new(1, 7))
 }
 
 /// The trailer's own entries, in the numbers written, as a section takes them.
@@ -1451,6 +1460,9 @@ fn first_page(doc: &Document, catalog: &Dictionary, table: &[Listed<'_>], first:
     let action = match first {
         FirstPage::Index(index) => return index,
         FirstPage::OpenAction => catalog.get(b"OpenAction").ok(),
+        // A way of choosing it that this crate doesn't know, the engine's
+        // being another crate's: as the default does.
+        _ => catalog.get(b"OpenAction").ok(),
     };
     let Some(page) = action.and_then(|action| opens_at(doc, catalog, action)) else {
         return 0;

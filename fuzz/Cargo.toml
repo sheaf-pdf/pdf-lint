@@ -118,12 +118,17 @@
 # for what it has or planned, every promise of the plan held against plain walks
 # of it, and `tables`, the same bytes as a hint stream, which a stable unit test
 # (`fuzz_bodies_run`) runs; `facts`, the same bytes as a file's facts, judged the
-# same whatever the sink, which another
-# (`any_facts_are_judged_alike_whatever_the_sink`) runs; and
-# `pdf_linearize::fuzz::over`, the same bytes as a file, laid out and read back,
-# which a third (`what_is_written_reads_back_the_same`) runs on mutated files.
-# The lopdf adapter's body, `fuzz::lopdf_document`, isn't here, its dependency not
-# being in this lock: a stable test
+# same whatever the sink, nothing judged that depends on what they say wasn't
+# read, which another (`any_facts_are_judged_alike_whatever_the_sink`) runs; and
+# `pdf_linearize::fuzz::over`, the same bytes as a file, laid out in the clear,
+# under its own encryption as it is and told to reuse RC4's keystreams, and
+# under a new one, and read back, what's listed as written at a keystream used
+# held to what it wrote, which a third (`what_is_written_reads_back_the_same`)
+# runs on mutated files, its new encryption drawn from the input and every IV
+# derived, so that an input writes the same bytes each run, which a fourth
+# (`what_is_written_of_an_input_is_the_same_bytes_each_time`) holds.
+# The lopdf adapter's body, in its crate (pdf-linearize-lopdf), which is never
+# published, isn't here: a stable test of that crate
 # (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, what only the
@@ -158,7 +163,11 @@ pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # as the binary does: pdf-lint reads fonts for text, which reads no program
 # whatever the features. The feature of that name below turns it on.
 pdf-fonts = { path = "../crates/pdf-fonts" }
-pdf-linearize = { path = "../crates/pdf-linearize" }
+# With the test writer, so the linearize target's new encryptions are drawn
+# from the input and every write's IVs derived: an input writes the same
+# bytes each run, and a saved one reruns as it ran. `check` reads as the
+# binary does: the feature moves nothing it reads.
+pdf-linearize = { path = "../crates/pdf-linearize", features = ["insecure-test-writer"] }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
 pdf-objects = { path = "../crates/pdf-objects" }

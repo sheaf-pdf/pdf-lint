@@ -565,7 +565,7 @@ fn a_table_past_the_data_is_an_error() {
     assert_eq!(
         tables(&bytes, &keys, 3, &Limits::DEFAULT),
         Err(Error::TableAt {
-            table: "/S",
+            table: Table::Shared,
             at: len,
             len,
         })
@@ -573,7 +573,7 @@ fn a_table_past_the_data_is_an_error() {
     assert!(matches!(
         tables(&[], &keys, 3, &Limits::DEFAULT),
         Err(Error::TableAt {
-            table: "page offset",
+            table: Table::PageOffsets,
             ..
         })
     ));
@@ -584,11 +584,41 @@ fn a_table_past_the_data_is_an_error() {
     assert!(matches!(
         tables(&[0; 200], &keys, 0, &Limits::DEFAULT),
         Err(Error::TableAt {
-            table: "/L",
+            table: Table::Labels,
             at: u64::MAX,
             ..
         })
     ));
+}
+
+/// A table is named by its key in the hint stream's dictionary, with its slash
+/// as a finding says it, and the page offset table, which has none, by that.
+#[test]
+fn a_table_is_named_by_its_key_and_the_page_offset_table_by_its_name() {
+    let named = [
+        (Table::PageOffsets, None, "page offset"),
+        (Table::Shared, Some(&b"S"[..]), "/S"),
+        (Table::Thumbnails, Some(b"T"), "/T"),
+        (Table::Outlines, Some(b"O"), "/O"),
+        (Table::Threads, Some(b"A"), "/A"),
+        (Table::Dests, Some(b"E"), "/E"),
+        (Table::Form, Some(b"V"), "/V"),
+        (Table::Info, Some(b"I"), "/I"),
+        (Table::Structure, Some(b"C"), "/C"),
+        (Table::Labels, Some(b"L"), "/L"),
+        (Table::Renditions, Some(b"R"), "/R"),
+        (Table::Files, Some(b"B"), "/B"),
+    ];
+    for (table, key, shown) in named {
+        assert_eq!(table.key(), key);
+        assert_eq!(table.to_string(), shown);
+    }
+    let fault = Error::TableAt {
+        table: Table::PageOffsets,
+        at: 0,
+        len: 0,
+    };
+    assert_eq!(fault.to_string(), "the page offset table is at byte 0 of 0");
 }
 
 /// A width past 32 is refused where it's read, whichever it is, not used.

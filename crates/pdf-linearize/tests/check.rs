@@ -1,5 +1,5 @@
-//! `family::check` over what's written and what's been damaged since: the bytes of a
-//! file, read by pdf-structure's reader, the facts said by what's in them.
+//! `family::check` over what's written and what's been damaged since: the bytes
+//! of a file, read by pdf-structure's reader, the facts said by what's in them.
 
 #![cfg(feature = "family")]
 
@@ -8,9 +8,9 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pdf_linearize::check::{Attribute, Facts, HintData};
+use pdf_linearize::check::{Attribute, DictKey, Facts, Finding, Grade, HintData, Unread, Verdict};
 use pdf_linearize::family::{self, Options};
-use pdf_linearize::{Finding, Grade, Limits, Verdict};
+use pdf_linearize::{Limits, hint, plan};
 use pdf_structure::XrefKind;
 use pdf_structure::pdf_crypt::Password;
 use pdf_structure::read::{self, ByteSource, Reading, WithReading, XrefEntry};
@@ -19,8 +19,8 @@ use pdf_structure::write::{Deflate, Encryptor};
 mod written;
 use written::{KEYS, encrypted_as, opened};
 
-/// A plain file, not linearized, with an inherited box and resources, a form and an
-/// outline, for the writer to lay out.
+/// A plain file, not linearized, with an inherited box and resources, a form
+/// and an outline, for the writer to lay out.
 fn plain() -> Vec<u8> {
     written::file(
         &[
@@ -66,7 +66,8 @@ fn checked(file: &[u8]) -> (Verdict, Vec<Finding>) {
     (verdict, findings)
 }
 
-/// `file` with its first `from` changed to `to`, of the same length so nothing moves.
+/// `file` with its first `from` changed to `to`, of the same length so nothing
+/// moves.
 fn changed(file: &[u8], from: &str, to: &str) -> Vec<u8> {
     assert_eq!(from.len(), to.len());
     let at = (file.windows(from.len()))
@@ -146,7 +147,8 @@ fn a_length_off_says_it_isnt_and_an_update_is_said() {
         }]
     );
 
-    // An update after it: the reader's rule, its section after the one it follows.
+    // An update after it: the reader's rule, its section after the one it
+    // follows.
     let mut updated = file.clone();
     let at = updated.len();
     updated.extend_from_slice(b"1 0 obj\n<< >>\nendobj\n");
@@ -306,7 +308,10 @@ fn encrypted_it_reads_the_hint_stream_by_the_password_and_holds() {
     for (name, key) in KEYS {
         let file = encrypted_as(key, &plain());
         let reading = opened(&file, "");
+        // Under RC4, told to reuse the file's keystreams, as the layout
+        // puts each object at another's.
         let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        let encryptor = encryptor.reusing_rc4_keystreams();
         let doc = reading.to_document().unwrap();
         for (kind, pack) in kinds() {
             let mut options = Options::DEFAULT;
@@ -343,9 +348,15 @@ fn with_no_key_it_says_what_it_can_and_doesnt_say_it_read_the_tables() {
     let (verdict, findings) = checked(&file);
     assert!(verdict.linearized && verdict.holds, "{findings:?}");
     assert!(!verdict.hints_read);
-    // qpdf numbers what's after it above its hint stream.
+    // qpdf numbers what's after it above its hint stream; and the hint stream
+    // isn't read, which is said once.
+    let why = Unread::Locked;
+    let unread = |f: &&Finding| **f == Finding::HintUnread { why };
+    assert_eq!(findings.iter().filter(unread).count(), 1, "{findings:?}");
     assert!(
-        (findings.iter()).all(|f| f.grade() == Grade::Departure),
+        (findings.iter())
+            .filter(|f| !unread(f))
+            .all(|f| f.grade() == Grade::Departure),
         "{findings:?}"
     );
     let password = [Password("user")];
@@ -356,6 +367,347 @@ fn with_no_key_it_says_what_it_can_and_doesnt_say_it_read_the_tables() {
     let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
     assert!(
         verdict.linearized && verdict.holds && verdict.hints_read,
+        "{findings:?}"
+    );
+}
+
+/// `file` checked as the reader reads it under `options`.
+fn checked_as(file: &[u8], options: &read::Options<'_>) -> (Verdict, Vec<Finding>) {
+    let reading = Reading::open(file, options).unwrap();
+    let mut findings = Vec::new();
+    let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
+    let quiet = family::check(&reading, &Limits::DEFAULT, &mut ()).unwrap();
+    assert_eq!(verdict, quiet);
+    (verdict, findings)
+}
+
+/// The hint stream's decoded data, as the reader gives it by default.
+fn hint_data(file: &[u8]) -> Vec<u8> {
+    let reading = Reading::open(file, &read::Options::DEFAULT).unwrap();
+    let facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
+    match facts.hint.unwrap().data {
+        HintData::Decoded(data) => data,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A hint stream whose data is past the reader's cap on a stream's isn't read,
+/// and isn't judged: what decoded up to the cap isn't its data. At the cap it's
+/// read whole. Its tables aren't read, and the file holds by the rest.
+#[test]
+fn a_hint_stream_past_the_readers_cap_isnt_judged() {
+    let file = laid_out(&plain(), XrefKind::Table, false);
+    let len = hint_data(&file).len();
+    let mut options = read::Options::DEFAULT;
+    options.limits.stream = len;
+    let (verdict, findings) = checked_as(&file, &options);
+    assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+    assert_eq!(findings, []);
+    options.limits.stream = len - 1;
+    let (verdict, findings) = checked_as(&file, &options);
+    assert!(verdict.linearized && verdict.holds && !verdict.hints_read);
+    let why = Unread::Capped;
+    assert_eq!(findings, [Finding::HintUnread { why }]);
+}
+
+/// Cross-reference streams cut at the reader's cap stop its sections short of
+/// the main one, which is said, and nothing they place, or the hint stream they
+/// list, is judged.
+#[test]
+fn sections_cut_at_the_readers_cap_on_a_stream_arent_judged() {
+    let file = laid_out(&plain(), XrefKind::Stream, false);
+    let mut options = read::Options::DEFAULT;
+    options.limits.stream = 16;
+    let reading = Reading::open(&file[..], &options).unwrap();
+    let facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
+    assert_eq!(facts.unread.sections, Some(Unread::Capped));
+    let (verdict, findings) = checked_as(&file, &options);
+    assert!(verdict.linearized && verdict.holds, "{findings:?}");
+    let why = Unread::Capped;
+    assert_eq!(findings, [Finding::SectionsUnread { why }]);
+}
+
+/// Sections past how many the reader reads stop short of the main one, which is
+/// said: of what the first lists, its own shape and the hint stream it lists
+/// are judged, and nothing they'd place.
+#[test]
+fn sections_past_the_readers_cap_on_how_many_it_reads_arent_judged() {
+    let file = laid_out(&plain(), XrefKind::Table, false);
+    let mut options = read::Options::DEFAULT;
+    options.limits.sections = 1;
+    let reading = Reading::open(&file[..], &options).unwrap();
+    let facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
+    assert_eq!(facts.unread.sections, Some(Unread::Capped));
+    assert!(facts.first.is_some() && facts.main.is_none());
+    let (verdict, findings) = checked_as(&file, &options);
+    assert!(verdict.linearized && verdict.holds, "{findings:?}");
+    let why = Unread::Capped;
+    assert_eq!(findings, [Finding::SectionsUnread { why }]);
+}
+
+/// Two sections and no hint stream: the first, read first, lists the
+/// dictionary, the catalog, a root node of two pages holding `/Rotate` for
+/// them, and the first page; the main one, by its `/Prev`, the second page.
+fn a_tree_across_the_sections() -> Vec<u8> {
+    let made = |length: usize| {
+        let page = "<< /Type /Page /Parent 3 0 R /MediaBox [0 0 9 9] /Resources << >> >>";
+        let objects = [
+            format!("<< /Linearized 1 /L {length:08} /N 2 /O 4 >>"),
+            "<< /Type /Catalog /Pages 3 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 /Rotate 0 >>".to_string(),
+            page.to_string(),
+            page.to_string(),
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut rows = Vec::new();
+        for (number, object) in (1..).zip(&objects) {
+            rows.push(out.len());
+            out.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
+        }
+        let main = out.len();
+        let row = |at: usize| format!("{at:010} 00000 n \n");
+        out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n5 1\n");
+        out.extend_from_slice(row(rows[4]).as_bytes());
+        out.extend_from_slice(b"trailer\n<< /Size 6 /Root 2 0 R >>\n");
+        let first = out.len();
+        out.extend_from_slice(b"xref\n1 4\n");
+        for &at in &rows[..4] {
+            out.extend_from_slice(row(at).as_bytes());
+        }
+        let trailer = format!("<< /Size 6 /Root 2 0 R /Prev {main} >>");
+        let end = format!("trailer\n{trailer}\nstartxref\n{first}\n%%EOF\n");
+        out.extend_from_slice(end.as_bytes());
+        out
+    };
+    made(made(0).len())
+}
+
+/// A page tree read past where the reader stopped the sections, at its cap on
+/// how many it reads, is read without the page listed past there: neither `/N`
+/// nor which page is first is judged of it, nor a page by its place, and what
+/// its node holds is.
+#[test]
+fn a_page_tree_read_past_where_the_sections_stopped_isnt_counted() {
+    let file = a_tree_across_the_sections();
+    let mut options = read::Options::DEFAULT;
+    let pages = |options: &read::Options<'_>| {
+        let reading = Reading::open(&file[..], options).unwrap();
+        let facts = family::facts(&reading, &Limits::DEFAULT).unwrap();
+        (facts.unread.sections, facts.pages.len())
+    };
+    assert_eq!(pages(&options), (None, 2));
+    let (_, findings) = checked_as(&file, &options);
+    let node = Finding::NodeAttribute {
+        number: 3,
+        attribute: Attribute::Rotate,
+    };
+    assert!(findings.contains(&node), "{findings:?}");
+    assert!(
+        !findings
+            .iter()
+            .any(|f| matches!(f, Finding::PageCount { .. })),
+        "{findings:?}"
+    );
+    options.limits.sections = 1;
+    assert_eq!(pages(&options), (Some(Unread::Capped), 1));
+    let (verdict, findings) = checked_as(&file, &options);
+    // The dictionary's own, as there's no hint stream; the cap; the node.
+    let bad = |key| Finding::BadValue { key };
+    let why = Unread::Capped;
+    assert_eq!(
+        findings,
+        [
+            bad(DictKey::H),
+            bad(DictKey::E),
+            bad(DictKey::T),
+            Finding::SectionsUnread { why },
+            node
+        ]
+    );
+    assert!(verdict.linearized && !verdict.holds);
+}
+
+/// A hint stream through a filter the reader doesn't take, an image's or one
+/// it doesn't know, isn't read, and isn't judged: no key, cap or damage of the
+/// file's is said of it.
+#[test]
+fn a_hint_stream_through_a_filter_the_reader_doesnt_take_isnt_judged() {
+    let file = laid_out(&plain(), XrefKind::Table, false);
+    let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
+    let hint = family::facts(&reading, &Limits::DEFAULT)
+        .unwrap()
+        .hint
+        .unwrap();
+    for filter in ["/DCTDecode  ", "/XXXDecode  "] {
+        let unfiltered = changed(&file, "/FlateDecode", filter);
+        let at = (unfiltered.windows(filter.len()))
+            .position(|window| window == filter.as_bytes())
+            .unwrap() as u64;
+        assert!(
+            (hint.at..hint.end).contains(&at),
+            "the hint stream's filter"
+        );
+        let (verdict, findings) = checked(&unfiltered);
+        assert!(verdict.linearized && verdict.holds && !verdict.hints_read);
+        let why = Unread::Unfiltered;
+        assert_eq!(findings, [Finding::HintUnread { why }], "{filter}");
+    }
+}
+
+/// An encrypted file read with no password has its hint stream not read, and,
+/// packed, its page tree's nodes in object streams no key decrypts: each said
+/// once, and nothing of either judged.
+#[test]
+fn what_no_key_opens_isnt_judged() {
+    use chacha20::ChaCha20Rng;
+    use pdf_structure::pdf_crypt::Protection;
+    use pdf_structure::pdf_crypt::rand_core::SeedableRng;
+
+    let prepared = Password("user").prepared().unwrap();
+    let protection = Protection::new(&prepared);
+    let mut rng = ChaCha20Rng::seed_from_u64(3);
+    let encryptor = Encryptor::create_with(&protection, &mut rng).unwrap();
+    let plain = plain();
+    let reading = Reading::open(&plain[..], &read::Options::DEFAULT).unwrap();
+    let doc = reading.to_document().unwrap();
+    let why = Unread::Locked;
+    for (kind, pack) in kinds() {
+        let mut options = Options::DEFAULT;
+        options.kind = kind;
+        options.pack = pack;
+        let mut file = Vec::new();
+        family::linearize(&mut file, &doc, Some(&encryptor), Some(&reading), &options).unwrap();
+        let (verdict, findings) = checked(&file);
+        assert!(verdict.linearized && verdict.holds && !verdict.hints_read);
+        let mut unread = vec![Finding::HintUnread { why }];
+        if pack {
+            unread.push(Finding::PagesUnread { why });
+        }
+        assert_eq!(findings, unread, "{kind:?} {pack}");
+        // By its password, all of it is read and holds.
+        let password = [Password("user")];
+        let mut options = read::Options::DEFAULT;
+        options.passwords = &password;
+        let (verdict, findings) = checked_as(&file, &options);
+        assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+        assert_eq!(findings, []);
+    }
+}
+
+/// What's past a cap the check reads under, the hint tables past its entries
+/// or pages and the file's graph past a plan's visits, is said, not judged,
+/// and the file holds by the rest; at the cap, it's judged. Past its pages,
+/// the page tree isn't walked whole either, so isn't judged.
+#[test]
+fn what_s_past_the_checks_own_caps_isnt_judged() {
+    let file = laid_out(&plain(), XrefKind::Table, false);
+    let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
+    let under = |limits: &Limits| {
+        let mut findings = Vec::new();
+        let verdict = family::check(&reading, limits, &mut findings).unwrap();
+        assert_eq!(family::check(&reading, limits, &mut ()).unwrap(), verdict);
+        assert!(verdict.linearized && verdict.holds, "{findings:?}");
+        (verdict, findings)
+    };
+    let mut limits = Limits::DEFAULT;
+    limits.hint_entries = 2;
+    let (verdict, findings) = under(&limits);
+    assert!(!verdict.hints_read);
+    let entries = |f: &Finding| {
+        matches!(
+            f,
+            Finding::HintTablesCapped {
+                fault: hint::Error::TooManyEntries { limit: 2, .. }
+            }
+        )
+    };
+    assert!(matches!(&findings[..], [f] if entries(f)), "{findings:?}");
+    let mut limits = Limits::DEFAULT;
+    limits.pages = 2;
+    let (verdict, findings) = under(&limits);
+    assert!(!verdict.hints_read);
+    let fault = hint::Error::TooManyPages { pages: 3, limit: 2 };
+    let why = Unread::Capped;
+    assert_eq!(
+        findings,
+        [
+            Finding::HintTablesCapped { fault },
+            Finding::PagesUnread { why }
+        ]
+    );
+    assert!(!verdict.judged_whole);
+    limits.pages = 3;
+    let (verdict, findings) = under(&limits);
+    assert!(verdict.hints_read && verdict.judged_whole);
+    assert_eq!(findings, []);
+    let mut limits = Limits::DEFAULT;
+    limits.shared_visits = 1;
+    let (verdict, findings) = under(&limits);
+    assert!(verdict.hints_read);
+    let visits = |f: &Finding| {
+        matches!(
+            f,
+            Finding::GraphCapped {
+                why: plan::Error::TooManySharedVisits { .. }
+            }
+        )
+    };
+    assert!(matches!(&findings[..], [f] if visits(f)), "{findings:?}");
+}
+
+/// A file that says it's linearized, one section and no hint stream, its
+/// page tree a chain of `depth` nodes over one page, its `/N` 7 and its `/O`
+/// 9, which aren't its page's.
+fn deep(depth: u32) -> Vec<u8> {
+    let mut objects = vec!["<< /Type /Catalog /Pages 3 0 R >>".to_string()];
+    for node in 3..3 + depth {
+        let parent = match node {
+            3 => String::new(),
+            _ => format!("/Parent {} 0 R", node - 1),
+        };
+        let kid = node + 1;
+        objects.push(format!(
+            "<< /Type /Pages /Kids [{kid} 0 R] /Count 1 {parent} >>"
+        ));
+    }
+    let last = 2 + depth;
+    objects.push(format!("<< /Type /Page /Parent {last} 0 R >>"));
+    let said = |length: usize| format!("<< /Linearized 1 /L {length:06} /N 7 /O 9 >>");
+    let all = |first: &str| {
+        let mut all = vec![first];
+        all.extend(objects.iter().map(String::as_str));
+        written::file(&all, "/Root 2 0 R")
+    };
+    let length = all(&said(0)).len();
+    all(&said(length))
+}
+
+/// A page tree deeper than pdf-semantics walks isn't read, and isn't judged:
+/// none of its pages, their count or the first page's object is said, though
+/// the rest is; within the depth, they are.
+#[test]
+fn a_page_tree_past_the_readers_depth_isnt_judged() {
+    let of_pages = |f: &&Finding| {
+        matches!(
+            f,
+            Finding::NoPages
+                | Finding::PageCount { .. }
+                | Finding::FirstPageObject { .. }
+                | Finding::PageAttribute { .. }
+                | Finding::NodeAttribute { .. }
+        )
+    };
+    let (verdict, findings) = checked(&deep(1100));
+    assert!(verdict.linearized && !verdict.holds);
+    let why = Unread::Capped;
+    let unread = Finding::PagesUnread { why };
+    assert_eq!(findings.iter().filter(|f| **f == unread).count(), 1);
+    assert_eq!(findings.iter().filter(of_pages).count(), 0, "{findings:?}");
+    assert!(findings.contains(&Finding::NoMainSection), "{findings:?}");
+    let (_, findings) = checked(&deep(10));
+    assert!(!findings.contains(&unread), "{findings:?}");
+    assert!(
+        findings.contains(&Finding::PageCount { n: 7, pages: 1 }),
         "{findings:?}"
     );
 }
@@ -422,10 +774,10 @@ fn another_first_page_holds_by_what_p_says() {
 }
 
 /// Each linearized file here, read whole beside its reading, has the facts its
-/// reading has: what's written in each kind, one packed into object streams among
-/// them, and encrypted under each key, and the cases PDFium's answers are held at,
-/// each by its password, broken and locked ones among them. Its graph is the
-/// reading's whole read's, not a document like it.
+/// reading has: what's written in each kind, one packed into object streams
+/// among them, and encrypted under each key, and the cases PDFium's answers are
+/// held at, each by its password, broken and locked ones among them. Its graph
+/// is the reading's whole read's, not a document like it.
 #[test]
 fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
     let mut files: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
@@ -439,7 +791,9 @@ fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
     for (name, key) in KEYS {
         let file = encrypted_as(key, &plain());
         let reading = opened(&file, "");
+        // Under RC4, told to reuse the file's keystreams.
         let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        let encryptor = encryptor.reusing_rc4_keystreams();
         let doc = reading.to_document().unwrap();
         for (kind, pack) in kinds() {
             let mut options = Options::DEFAULT;
@@ -470,10 +824,10 @@ fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
         let with = family::facts_with_reading(&read, &Limits::DEFAULT).unwrap();
         let reading = Reading::open(&file[..], &options).unwrap();
         let alone = family::facts(&reading, &Limits::DEFAULT).unwrap();
-        assert_eq!(format!("{with:?}"), format!("{alone:?}"), "{name}");
+        assert_eq!(with, alone, "{name}");
         // And of the reading the document was read beside, asked after it.
         let again = family::facts(read.reading(), &Limits::DEFAULT).unwrap();
-        assert_eq!(format!("{with:?}"), format!("{again:?}"), "{name}");
+        assert_eq!(with, again, "{name}");
         graphs += usize::from(with.graph.is_some());
         let member =
             |(_, _, entry): (u32, u16, XrefEntry)| matches!(entry, XrefEntry::Compressed { .. });
@@ -546,9 +900,9 @@ fn a_source_that_fails_is_an_error_not_a_finding() {
     ));
 }
 
-/// What a page's `/Parent` names is a node to the check as it is to the writer: not a
-/// listed page, nor what has no kids and doesn't say it's one, though either holds an
-/// attribute; a node that holds one is said.
+/// What a page's `/Parent` names is a node to the check as it is to the writer:
+/// not a listed page, nor what has no kids and doesn't say it's one, though
+/// either holds an attribute; a node that holds one is said.
 #[test]
 fn a_node_is_what_the_writer_calls_one() {
     let said = |objects: &[&str]| {
