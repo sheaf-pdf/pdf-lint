@@ -1,6 +1,6 @@
 //! What the fuzz target checks, which unit tests check too: the promises the
-//! facade's reading makes, on any input. It's compiled only for tests and
-//! under cargo-fuzz's `--cfg fuzzing`.
+//! facade's reading and writing make, on any input. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`.
 
 #[cfg(any(test, feature = "insecure-test-writer"))]
 use std::convert::Infallible;
@@ -17,7 +17,11 @@ use pdf_structure::Encryption;
 use pdf_structure::read::{ByteSource, Faults};
 use pdf_structure::write::{self, Encryptor};
 
-use crate::{Error, Limits, Options, Pdf};
+use pdf_content_streams::Reserved;
+use pdf_semantics::pages::Rect;
+use pdf_structure::XrefKind;
+
+use crate::{Document, Error, Limits, Options, Pdf};
 
 /// The password of what [`read`] writes under a new encryption.
 const PASSWORD: &str = "fuzz";
@@ -306,6 +310,147 @@ fn encrypted(data: &[u8], pdf: &Pdf<&[u8]>, reached: &mut Reached) {
     reached.unlocked += 1;
 }
 
+/// How many of an input's pages [`write`] writes a document of.
+const WRITTEN: usize = 3;
+
+/// What [`write`] wrote of an input, for the tests to say each kind was met.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Wrote {
+    /// Pages written, of the input's.
+    pub pages: usize,
+    /// Files written of them and read back, of each kind.
+    pub files: usize,
+    /// Of those, written under a new encryption and unlocked by its
+    /// password.
+    pub unlocked: usize,
+    /// Documents of no page, refused.
+    pub refused: usize,
+}
+
+/// A page read back: its box and its text, by its strings' text and how many
+/// things weren't read.
+type Back = (Rect, Result<(String, usize), String>);
+
+/// `data` read as a file by the facade, and a new document written of its
+/// first pages, each of its box, a box not finite Letter's, and its content
+/// written again by [`ContentWriter::operation`], each of its operations as it
+/// reads; saved in each kind, whole as by default, with a table and nothing
+/// packed, linearized, and under a new encryption by a password, and each
+/// read back: its pages those written, each its content as written, and its
+/// box and text the same in every kind; the linearized one holding, judged
+/// whole; the encrypted one locked with no password, and unlocked by the
+/// password as in the clear. A document of no page is refused, nothing
+/// written. The new encryption is as [`read`]'s.
+pub fn write(data: &[u8]) -> Wrote {
+    let mut wrote = Wrote::default();
+    let pdf = Options::DEFAULT
+        .from_bytes(data)
+        .expect("bytes in memory open");
+    let mut doc = Document::new();
+    let mut written = Vec::new();
+    if let Ok(pages) = pdf.pages() {
+        for page in pages.iter().take(WRITTEN) {
+            let Ok(content) = page.content() else {
+                continue;
+            };
+            let media_box = page.attributes().media_box().value;
+            let finite = media_box.0.iter().all(|x| x.is_finite());
+            let media_box = if finite { media_box } else { Rect::LETTER };
+            let writer = doc.add_page(media_box);
+            for operation in content.operations() {
+                let Ok(operation) = operation else {
+                    break;
+                };
+                let operands = operation.operands().map(|operand| operand.bytes());
+                match operation.inline_image() {
+                    Some(image) => writer.operation(operands, &content.bytes()[image.at()]),
+                    None => writer.operation(operands, operation.name()),
+                }
+            }
+            written.push(writer.named(&Reserved::default()).0);
+        }
+    }
+    wrote.pages = written.len();
+    let mut out = b"before".to_vec();
+    if written.is_empty() {
+        let refused = doc.save_to(&mut out);
+        assert!(matches!(refused, Err(Error::PageTree(_))), "{refused:?}");
+        assert_eq!(out, b"before", "nothing written");
+        wrote.refused += 1;
+        return wrote;
+    }
+    let whole = doc.to_bytes().expect("a document of pages is written");
+    let mut options = doc.save_options();
+    options.kind = XrefKind::Table;
+    options.pack = None;
+    options.deflate = write::Deflate::DEFAULT;
+    let mut table = Vec::new();
+    doc.save_with_to(&mut table, &options)
+        .expect("a document of pages is written with a table");
+    let mut linearized = Vec::new();
+    let options = doc.linearize_options();
+    doc.save_linearized_to(&mut linearized, &options)
+        .expect("a document of pages is linearized");
+    let wanted = back(&whole, &written);
+    for file in [&table, &linearized] {
+        assert_eq!(back(file, &written), wanted, "read back otherwise");
+    }
+    let verdict = Options::DEFAULT
+        .from_bytes(&linearized[..])
+        .unwrap()
+        .linearized();
+    let verdict = verdict.expect("bytes in memory give the check its bytes");
+    assert!(verdict.holds && verdict.judged_whole, "{verdict:?}");
+    wrote.files += 3;
+
+    let Ok(password) = Password(PASSWORD).prepared() else {
+        return wrote;
+    };
+    let protection = pdf_crypt::Protection::new(&password);
+    #[cfg(any(test, feature = "insecure-test-writer"))]
+    let encryptor = Encryptor::create_with(&protection, &mut Drawn::over(data))
+        .map(|encryptor| encryptor.with_test_ivs(pdf_crypt::Ivs::derived));
+    #[cfg(not(any(test, feature = "insecure-test-writer")))]
+    let encryptor = Encryptor::create(&protection);
+    let Ok(encryptor) = encryptor else {
+        return wrote;
+    };
+    doc.encrypted_by(encryptor);
+    let encrypted = doc.to_bytes().expect("a document of pages is encrypted");
+    let locked = Options::DEFAULT.from_bytes(&encrypted[..]).unwrap();
+    assert_eq!(*locked.encryption(), Encryption::Locked);
+    let Ok(unlocked) = locked.unlock(&Password(PASSWORD).encodings()) else {
+        panic!("its own password refused");
+    };
+    assert_eq!(read_back(&unlocked, &written), wanted, "unlocked otherwise");
+    wrote.files += 1;
+    wrote.unlocked += 1;
+    wrote
+}
+
+/// `file`'s pages read back, held to have the content `written` is.
+fn back(file: &[u8], written: &[Vec<u8>]) -> Vec<Back> {
+    let pdf = Options::DEFAULT
+        .from_bytes(file)
+        .expect("bytes in memory open");
+    read_back(&pdf, written)
+}
+
+/// `pdf`'s pages read back, held to be as many as `written` and each its
+/// content.
+fn read_back<S: ByteSource>(pdf: &Pdf<S>, written: &[Vec<u8>]) -> Vec<Back> {
+    let pages = pdf.pages().expect("a page tree written reads");
+    assert_eq!(pages.len(), written.len(), "the pages written");
+    let read = |(page, written): (crate::Page<'_, S>, &Vec<u8>)| {
+        let content = page.content().expect("content written reads");
+        assert_eq!(content.bytes(), &written[..], "the content written");
+        let text = page.text().map_err(|error| error.to_string());
+        let text = text.map(|text| (text.text(), text.unread.len()));
+        (page.attributes().media_box().value, text)
+    };
+    pages.iter().zip(written).map(read).collect()
+}
+
 /// A random number generator for [`read`]'s new encryption alone: the
 /// input's bytes, then a counter's. It's no cryptographic generator, but
 /// says it is (`TryCryptoRng`) so that pdf-crypt's test writer takes it,
@@ -572,12 +717,32 @@ mod tests {
         assert!(all.locked >= 4 && all.unlocked >= 4, "{all:?}");
     }
 
+    /// Every seed's first pages are written as a document of each kind and
+    /// read back as written, a document unlocked by its password among them;
+    /// and a file of no page writes a document of none, refused.
+    #[test]
+    fn the_seeds_write_documents_read_back_as_written() {
+        let mut all = Wrote::default();
+        for seed in seeds() {
+            let wrote = write(&seed);
+            all.pages += wrote.pages;
+            all.files += wrote.files;
+            all.unlocked += wrote.unlocked;
+            all.refused += wrote.refused;
+        }
+        assert!(all.pages >= 10 && all.files >= 16, "{all:?}");
+        assert!(all.unlocked >= 4, "{all:?}");
+        assert_eq!(write(b"%PDF-1.7\n%%EOF\n").refused, 1);
+    }
+
     #[test]
     fn mutated_seeds_keep_every_promise() {
         let mut random = generator(0x5EED);
         for seed in seeds() {
             for _ in 0..60 {
-                read(&mutated(&seed, &mut random));
+                let data = mutated(&seed, &mut random);
+                read(&data);
+                write(&data);
             }
         }
     }
@@ -588,6 +753,7 @@ mod tests {
         for _ in 0..500 {
             let data: Vec<u8> = (0..random() % 96).map(|_| random() as u8).collect();
             read(&data);
+            write(&data);
         }
     }
 

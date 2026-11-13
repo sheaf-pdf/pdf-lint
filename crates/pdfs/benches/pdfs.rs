@@ -15,6 +15,12 @@
 //!   and the strings it shows walked in its fonts, a form among them, by
 //!   `Page::text` (`facade`) and by `Join::push_contents`, `ResCx::read` and
 //!   pdf-fonts' `shown` over fonts read once a file (`direct`).
+//! - `save`: a new document of 2,000 pages, each drawing a square and a line
+//!   in Helvetica, the font written once, saved as `Document::save` saves one
+//!   (`facade`), and by the very calls it makes, pdf-content-streams'
+//!   `ContentWriter`, pdf-structure's `Deflate::encode` and document,
+//!   pdf-semantics' `pages::write` and pdf-structure's `write::document`
+//!   (`direct`): the same bytes, held so before they're timed.
 //!
 //! The file is written here by pdf-structure's writer: a catalog, a root over
 //! 2,000 pages, each with a `/Contents` of two streams, one deflated, and
@@ -26,12 +32,16 @@
 //! bytes, and its text the same. Nothing is read from disk, nothing is
 //! encrypted and no cap is met, so the inputs are the same on every run.
 
+use std::collections::HashMap;
 use std::hint::black_box;
 
 use criterion::{Criterion, Throughput};
-use pdfs::pdf_content_streams::{Join, Limits as ContentLimits, ResCx};
+use pdfs::pdf_content_streams::{
+    ContentWriter, Join, Limits as ContentLimits, Paint, Res, ResCx, Reserved,
+};
 use pdfs::pdf_filters::{Backend, Prediction};
 use pdfs::pdf_fonts::Fonts;
+use pdfs::pdf_fonts::Std14;
 use pdfs::pdf_objects::object::{Stream, Value};
 use pdfs::pdf_objects::pdf_tokenizer::Rules;
 use pdfs::pdf_objects::version::Version;
@@ -283,6 +293,104 @@ fn benches(c: &mut Criterion) {
         b.iter(|| direct_text(&Reading::open(black_box(with_fonts), &options).unwrap()))
     });
     group.finish();
+
+    let font = pdfs::standard_font(Std14::Helvetica);
+    let line = Std14::Helvetica
+        .codes("A line of text on the page")
+        .unwrap();
+    let saved = facade_save(&font, &line);
+    assert_eq!(saved, direct_save(&font, &line));
+    assert_eq!(
+        pdfs::from_bytes(&saved[..]).unwrap().pages().unwrap().len(),
+        PAGES as usize
+    );
+    let mut group = c.benchmark_group("save");
+    group.throughput(Throughput::Elements(u64::from(PAGES)));
+    group.bench_function("facade", |b| {
+        b.iter(|| facade_save(&font, black_box(&line)))
+    });
+    group.bench_function("direct", |b| {
+        b.iter(|| direct_save(&font, black_box(&line)))
+    });
+    group.finish();
+}
+
+/// A new document's page `i`: a square filled, and a line in `font`.
+fn draw(page: &mut ContentWriter, i: u32, font: &Res, line: &[u8]) {
+    page.save();
+    page.rect(72.0, 72.0, 144.0 + i as f32, 144.0);
+    page.paint(Paint::Fill);
+    page.restore();
+    page.begin_text();
+    page.font(font.clone(), 12.0);
+    page.text_move(72.0, 700.0);
+    page.show(line);
+    page.end_text();
+}
+
+/// A new document of [`PAGES`] pages saved as the facade saves one.
+fn facade_save(font: &Res, line: &[u8]) -> Vec<u8> {
+    let mut doc = pdfs::Document::new();
+    for i in 0..PAGES {
+        draw(doc.add_page(pages::Rect::LETTER), i, font, line);
+    }
+    doc.to_bytes().unwrap()
+}
+
+/// The same document saved by the very calls the facade makes: each page's
+/// content deflated as a stream of its own, the font written the first time
+/// it's drawn with, the page's dictionary numbered, then a page tree over
+/// them, each page its `/Parent`, and the document written.
+fn direct_save(font: &Res, line: &[u8]) -> Vec<u8> {
+    let trailer = dict! { "Root" => Object::reference(1) };
+    let mut doc = Document::new(Version::new(1, 7), trailer);
+    doc.insert(1, dict! { "Type" => "Catalog" });
+    let mut deflate = Deflate::DEFAULT;
+    deflate.backend = Backend::ZlibRs;
+    let mut written = HashMap::new();
+    let mut placed = Vec::new();
+    for i in 0..PAGES {
+        let mut page = ContentWriter::new();
+        draw(&mut page, i, font, line);
+        let (content, needs) = page.finish(&Reserved::default());
+        let mut deflated = Vec::new();
+        deflate
+            .encode(&content, Prediction::None, &mut deflated)
+            .unwrap();
+        let mut stream = Stream::new(dict! {}, content);
+        stream.dict.set("Filter", "FlateDecode");
+        stream.set_bytes(deflated);
+        let contents = doc.add(Object::new(Value::Stream(Box::new(stream))));
+        let mut fonts = pdfs::pdf_objects::Dict::new();
+        for need in &needs.0 {
+            let id = *written
+                .entry(need.res.clone())
+                .or_insert_with(|| doc.add(Std14::Helvetica.dict()));
+            fonts.set(&need.name, id);
+        }
+        let media = vec![Object::from(0), 0.into(), 612.into(), 792.into()];
+        let dict = dict! {
+            "Type" => "Page", "MediaBox" => media, "Resources" => dict! { "Font" => fonts },
+            "Contents" => contents,
+        };
+        placed.push(doc.add(dict));
+    }
+    let limits = SemanticsLimits::DEFAULT;
+    let tree = pages::write(&placed, pages::FANOUT, &limits, || doc.new_id()).unwrap();
+    for (id, node) in tree.nodes {
+        doc.set(id, node);
+    }
+    for (&page, &parent) in placed.iter().zip(&tree.parents) {
+        doc.get_dict_mut(page).unwrap().set("Parent", parent);
+    }
+    doc.catalog_mut().unwrap().set("Pages", tree.root);
+    let mut options = write::Options::DEFAULT;
+    options.kind = XrefKind::Stream;
+    options.pack = Some(write::Pack::DEFAULT);
+    options.deflate = deflate;
+    let mut out = Vec::new();
+    write::document(&mut out, &doc, None, None, &options).unwrap();
+    out
 }
 
 /// The groups, as one benchmark binary: what `criterion_group!` and

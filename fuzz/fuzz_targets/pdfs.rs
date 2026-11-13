@@ -8,10 +8,14 @@
 //! encrypted, its document written in the clear and under a new encryption,
 //! its key drawn from the input and its IVs derived: read with no password,
 //! each page's content refused as locked or read as in the clear; unlocked by
-//! the password, read as in the clear.
+//! the password, read as in the clear. And a new document of its first pages,
+//! their content written again operation by operation, saved whole, with a
+//! table, linearized and under a new encryption, each read back as written,
+//! the same in every kind; one of no page refused.
 
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     pdfs::fuzz::read(data);
+    pdfs::fuzz::write(data);
 });

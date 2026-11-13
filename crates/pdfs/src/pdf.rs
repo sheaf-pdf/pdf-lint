@@ -16,7 +16,9 @@ use pdf_semantics::pages;
 use pdf_semantics::xmp::Claims;
 use pdf_structure::Encryption;
 use pdf_structure::read::{self, ByteSource, Identity, Reading};
+use pdf_structure::write::{Base, Encryptor, ReadFrom};
 
+use crate::document::Document;
 use crate::error::Error;
 use crate::file;
 use crate::limits::Limits;
@@ -309,6 +311,33 @@ impl<S: ByteSource> Pdf<S> {
     /// As [`Pdf::linearized`] fails.
     pub fn linearized_with<K: check::Sink + ?Sized>(&self, sink: &mut K) -> Result<Verdict, Error> {
         Ok(file::linearized(&self.reading, &self.limits, sink)?)
+    }
+
+    /// Its document, to edit and save ([`Document`]): every object its
+    /// cross-references list read (pdf-structure's
+    /// [`Reading::to_document`]), each as read, to be copied from the file
+    /// where it isn't changed; under the file's own encryption, which the
+    /// password that opened it opened ([`Encryptor::of`]), so an encrypted
+    /// file is saved encrypted as it was unless [`Document::decrypt`] or
+    /// [`Document::encrypt`] says otherwise; and after the file as its last
+    /// section describes it ([`Base::of`]), for an update
+    /// ([`Document::save_update`]). It borrows the reading, which what's as
+    /// read is copied from.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Read`] where the source doesn't give its bytes, and
+    /// [`Error::Write`] where it's encrypted and no password opened it
+    /// ([`Locked`](pdf_structure::write::Error::Locked)), or its security handler is one the reader
+    /// can't open: there's nothing to write its strings and streams from.
+    pub fn edit(&self) -> Result<Document<'_>, Error> {
+        phase!(DEBUG, "edit", bytes = self.reading.size());
+        let doc = self.reading.to_document()?;
+        let encryptor = Encryptor::of(&self.reading)?;
+        let base = Base::of(&self.reading);
+        let from: &dyn ReadFrom = &self.reading;
+        let identity = self.identity.clone();
+        Ok(Document::edited(doc, encryptor, from, base, identity))
     }
 
     /// What the reading found wrong as it read, each at its place, in the

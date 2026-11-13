@@ -17,12 +17,18 @@
 //! - **What the file is and says**: its version, its encryption, what its
 //!   document information dictionary says and its XMP claims, whether its
 //!   linearization holds, and any stream's data decoded.
+//! - **A document written** ([`Document::new`], or a file read and edited,
+//!   [`Pdf::edit`]): its pages added, each drawn by a content writer, what
+//!   they draw with written once a file, the standard 14 fonts by name
+//!   ([`standard_font`]) and claims as XMP; saved whole, linearized or as an
+//!   update appended to the file read, in the clear or encrypted, an edited
+//!   file under its own encryption unless told otherwise.
 //! - **One set of caps** ([`Limits`]) nesting each crate's, and **one
 //!   error** ([`Error`]) wrapping each crate's.
-//! - **Each recipe a function** ([`page`](mod@page), [`file`](mod@file))
-//!   over the family's traits, for a caller with a reading of its own, and
-//!   **what else a file holds** through the reading ([`Pdf::reading`]) and
-//!   the crates.
+//! - **Each recipe a function** ([`page`](mod@page), [`file`](mod@file),
+//!   [`build`](mod@build)) over the family's traits, for a caller with a
+//!   reading or a document of its own, and **what else a file holds**
+//!   through the reading ([`Pdf::reading`]) and the crates.
 //!
 //! What a call meets that departs from the standard is told to the sink its
 //! `_with` form is given, each crate's faults to that crate's sink; its plain
@@ -56,6 +62,8 @@
 //! assert_eq!(operators, [&b"rg"[..], b"re", b"f"]);
 //! ```
 
+pub use build::standard_font;
+pub use document::Document;
 pub use error::Error;
 pub use limits::Limits;
 #[cfg(any(unix, windows))]
@@ -64,6 +72,8 @@ pub use open::{Options, from_bytes};
 pub use page::{Content, NamedFont};
 pub use pdf::{Page, Pages, PagesIter, Pdf};
 
+pub mod build;
+mod document;
 mod error;
 pub mod file;
 #[cfg(any(test, fuzzing))]

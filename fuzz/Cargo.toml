@@ -144,7 +144,11 @@
 # where it's linearized; and its document written in the clear and under a
 # new encryption, its key drawn from the input, read locked, each page's
 # content refused as locked, and unlocked by its password, read as in the
-# clear; which three stable unit tests (`the_seeds_keep_every_promise_and_reach_each`,
+# clear; and `pdfs::fuzz::write`, a new document of its first pages, their
+# content written again, saved whole, with a table, linearized and under a new
+# encryption, each read back as written; which four stable unit tests
+# (`the_seeds_keep_every_promise_and_reach_each`,
+# `the_seeds_write_documents_read_back_as_written`,
 # `mutated_seeds_keep_every_promise` and `random_bytes_keep_every_promise`)
 # run on its seeds, mutated seeds and random bytes.
 # The lopdf adapter's body, in its crate (pdf-linearize-lopdf), which is never

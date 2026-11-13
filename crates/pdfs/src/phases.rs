@@ -3,8 +3,11 @@
 //! compiled without the feature. A phase is a call that reads a part of a
 //! file whole: a file opened, its page tree walked, a page's content joined,
 //! its fonts read and its text, its document information dictionary or its
-//! packet read, and its linearization checked. A lookup has none (the catalog, the version, a
-//! stream's data), and no fault is told as an event: faults are the sink's.
+//! packet read, and its linearization checked; or that writes one: a file read
+//! whole to edit, and a document saved whole, linearized or as an update. A
+//! lookup has none (the catalog, the version, a stream's data), nor has a page
+//! added or a resource written, and no fault is told as an event: faults are
+//! the sink's.
 //! The crates under it make their own spans inside these, where they have
 //! the feature.
 
@@ -168,9 +171,9 @@ mod tests {
 
     /// A file opened, its pages walked, a page's content joined, its fonts
     /// and its text read (the text's content within it), what it says and
-    /// claims read and its linearization checked are each a span,
-    /// at `debug`, their fields numbers; its catalog, version and a stream's
-    /// data, each a lookup, are none.
+    /// claims read, its linearization checked, and its document edited and
+    /// saved each way are each a span, at `debug`, their fields numbers; its
+    /// catalog, version and a stream's data, each a lookup, are none.
     #[test]
     fn each_part_read_whole_is_a_span_and_a_lookup_none() {
         const DEBUG: Level = Level::DEBUG;
@@ -214,5 +217,19 @@ mod tests {
             pdf.stream(ObjectId::new(4, 0)).unwrap();
         });
         assert_eq!(named(&made), []);
+        let made = spans(|| {
+            let mut doc = pdf.edit().unwrap();
+            doc.save_to(&mut Vec::new()).unwrap();
+            let options = doc.linearize_options();
+            doc.save_linearized_to(&mut Vec::new(), &options).unwrap();
+            assert!(doc.save_update_to(&mut Vec::new()).unwrap().is_none());
+        });
+        let saved = [
+            ("edit", DEBUG, vec!["bytes"]),
+            ("save", DEBUG, vec!["pages"]),
+            ("save_linearized", DEBUG, vec!["pages"]),
+            ("save_update", DEBUG, vec!["pages"]),
+        ];
+        assert_eq!(named(&made), saved);
     }
 }

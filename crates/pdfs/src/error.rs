@@ -3,8 +3,10 @@
 use std::io;
 
 use pdf_content_streams::Pushed;
+use pdf_crypt::Unusable;
 use pdf_objects::Unreadable;
 use pdf_semantics::{pages, xmp};
+use pdf_structure::write;
 
 /// Why a call gives nothing: the error of the crate it was given by, as that
 /// crate gives it, or the facade's own. Each wraps the crate's error
@@ -46,9 +48,50 @@ pub enum Error {
     /// as large.
     #[error("{0}")]
     Xmp(Box<xmp::Error>),
-    /// The file's linearization wasn't checked (pdf-linearize's).
+    /// The file's linearization wasn't checked, or a document wasn't written
+    /// linearized (pdf-linearize's).
     #[error("{0}")]
     Linearize(pdf_linearize::family::Error),
+    /// A document wasn't written, whole or as an update (pdf-structure's
+    /// writer's): nothing was written.
+    #[error("{0}")]
+    Write(write::Error),
+    /// A new document's page tree wasn't written (pdf-semantics'): it has no
+    /// page, or more than the tree's caps take.
+    #[error("{0}")]
+    PageTree(pages::WriteError),
+    /// Claims that wouldn't read back as they're given, written as XMP
+    /// (pdf-semantics').
+    #[error("{0}")]
+    Claims(xmp::WriteError),
+    /// A protection pdf-crypt makes no encryption of.
+    #[error("{0}")]
+    Protection(Unusable),
+    /// Claims written into a document whose catalog names a metadata stream
+    /// already, whose packet the claims' alone would replace, and what else
+    /// it says be lost.
+    #[error("the catalog names a metadata stream already, which the claims alone would replace")]
+    HasMetadata,
+    /// A page added to an edited document whose catalog's `/Pages` names no
+    /// page tree node to add it under: none by reference, a page, or one
+    /// whose `/Count` isn't an integer or whose `/Kids` isn't an array.
+    #[error("the catalog's /Pages names no page tree node a page can be added under")]
+    NoPageTree,
+    /// An update of a document no file was read for: it has nothing to go
+    /// after.
+    #[error("the document wasn't read from a file, so there's nothing for an update to go after")]
+    NotRead,
+    /// An update to a file that isn't the file read as it was: another, or
+    /// that one since changed, so nothing was appended to it.
+    #[error(
+        "the file isn't the one the document was read from, as it was, so nothing was appended"
+    )]
+    NotTheBase,
+    /// A save at the path of the file the document's reading reads by
+    /// position, which would read the new bytes at the old places after:
+    /// nothing was written.
+    #[error("the file is the one the document is read from, by position, so it isn't written over")]
+    SameFile,
 }
 
 impl From<io::Error> for Error {
@@ -90,5 +133,17 @@ impl From<xmp::Error> for Error {
 impl From<pdf_linearize::family::Error> for Error {
     fn from(error: pdf_linearize::family::Error) -> Error {
         Error::Linearize(error)
+    }
+}
+
+impl From<write::Error> for Error {
+    fn from(error: write::Error) -> Error {
+        Error::Write(error)
+    }
+}
+
+impl From<pages::WriteError> for Error {
+    fn from(error: pages::WriteError) -> Error {
+        Error::PageTree(error)
     }
 }
