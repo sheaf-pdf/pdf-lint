@@ -537,8 +537,9 @@ pub fn check<S: ByteSource, K: Sink + ?Sized>(
 }
 
 /// What [`facts_with_reading`] reads of the file `read` holds,
-/// [`check`](crate::check()) judged: [`check`] of its reading, the graph made
-/// of the document read whole beside it, so it isn't read whole again.
+/// [`check`](crate::check()) judged: [`check`](check()) of its reading, the
+/// graph made of the document read whole beside it, so it isn't read whole
+/// again.
 ///
 /// # Errors
 ///
