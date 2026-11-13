@@ -1344,6 +1344,29 @@ mod tests {
         assert_eq!(not_checked(&report), BTreeMap::from([(why, 1)]), "{report}");
     }
 
+    /// A linearized file whose hint stream's `/Filter` isn't one, a number
+    /// where a name or an array goes, has that found as the file's: its data
+    /// doesn't decode, and the linearization fails; nothing's counted as not
+    /// checked.
+    #[test]
+    fn a_hint_stream_whose_filter_isnt_one_is_found() {
+        let file = linearized(&three_pages(), &[]);
+        let hint = facts(&file).hint.unwrap();
+        let at = hint.at as usize;
+        let filter = at + find(&file[at..], b"/FlateDecode");
+        let mut damaged = file.clone();
+        damaged[filter..filter + 12].copy_from_slice(b"5           ");
+        let report = checked(&damaged);
+        let words = "the hint stream's data doesn't decode";
+        let told = told(&report);
+        assert!(
+            told.iter().any(|(_, value, _)| value.starts_with(words)),
+            "{report}"
+        );
+        assert_eq!(report.linearized, Some(Linearized::Fails));
+        assert_eq!(not_checked(&report), BTreeMap::new(), "{report}");
+    }
+
     /// `file` with an update after it, by pdf-structure's writer: its
     /// catalog written again with a `/PageLayout`, and `more`, each object
     /// at its number.

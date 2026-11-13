@@ -214,8 +214,9 @@ pub enum Unread {
     /// it decodes, more filters or sections or rows than it reads, a page
     /// tree deeper or of more pages than it walks.
     Capped,
-    /// It's through a `/Filter`, or with `/DecodeParms`, that the reader
-    /// doesn't take.
+    /// It's through a filter the reader doesn't decode, or with a `/Crypt`
+    /// filter's parameter it doesn't take. A `/Filter` or `/DecodeParms` that
+    /// isn't what ISO 32000-2 has them be is the file's, and not this.
     Unfiltered,
 }
 
@@ -424,7 +425,9 @@ pub struct UnreadParts {
     /// are, nor whether the pages it gives are all it has.
     pub sections: Option<Unread>,
     /// The page tree: its pages, where it's said, are none, and aren't
-    /// judged.
+    /// judged. The `family` feature's facts say it of no key and of a cap, not
+    /// of a filter: a node in an object stream the reader doesn't decode reads
+    /// as damaged, as the reader gives it.
     pub pages: Option<Unread>,
 }
 
