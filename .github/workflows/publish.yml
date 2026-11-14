@@ -526,11 +526,11 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdfs/Cargo.toml | head -n 1)
           if [ "$GITHUB_REF_NAME" != "pdfs-v$version" ]; then
-            echo "The tag is $GITHUB_REF_NAME, and pdfs's version $version" >&2
+            echo "The tag is $GITHUB_REF_NAME, and pdfs' version $version" >&2
             exit 1
           fi
           if ! grep -q "^## $version ([0-9]" crates/pdfs/CHANGELOG.md; then
-            echo "pdfs's CHANGELOG has no dated entry for $version" >&2
+            echo "pdfs' CHANGELOG has no dated entry for $version" >&2
             exit 1
           fi
       - name: Package, and check what the package holds

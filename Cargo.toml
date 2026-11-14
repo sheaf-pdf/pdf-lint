@@ -41,8 +41,9 @@ exclude = ["fuzz"]
 # has them off here, as an older cargo (1.85's) refused a member's
 # `default-features = false` over an entry that leaves them on, and every
 # member that takes it names the features it takes: pdf-filters', its Flate
-# backend; pdf-semantics', none, as no member takes its clock; pdf-fonts',
-# none, as pdf-lint reads no program and no predefined CMap; pdf-linearize's,
+# backend; pdf-semantics' and pdf-fonts', none here, as pdf-lint and
+# pdf-linearize take neither the clock nor a font's program nor a predefined
+# CMap, and pdfs turns them on through features of its own; pdf-linearize's,
 # `family`, as the lopdf adapter's crate takes the engine alone. A
 # dev-dependency on a crate here that isn't on crates.io yet is by its path
 # alone, as pdf-color's, pdf-semantics' and pdf-fonts' on pdf-structure are,

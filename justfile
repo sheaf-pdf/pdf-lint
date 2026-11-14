@@ -92,7 +92,7 @@ clippy:
 # engine, without its adapter, and with its spans, which only its tests
 # read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
 # only its tests read, and with no feature at all; then pdf-structure's
-# with its spans, which only those tests read; then pdfs's as a user gets
+# with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
 # and with every feature it forwards but its test writer.
 test:
