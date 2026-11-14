@@ -49,7 +49,7 @@ Only `pdf-structure` (and `pdfs` on top of it) reads or writes files. Domain cra
 ### Strict ISO 32000-2 vs. Viewer (`PDFium`) Reading Modes
 Real-world PDFs often violate ISO 32000-2 while rendering fine in viewers. Several crates support both policies explicitly:
 - **ISO mode (`Rules::Iso`, `Recovery::Verified`)**: Follows ISO 32000-2 syntax and structure rules; used by checkers (`pdf-lint`).
-- **PDFium mode (`Rules::Pdfium`, `Recovery::Pdfium`)**: Emulates PDFium's forgiving behavior (pinned to **`chromium/8125`** and verified against recorded outputs in `tests/pdfium/`); used by viewer-style callers (`pdfs` defaults).
+- **PDFium mode (`Rules::Pdfium`, `Recovery::Pdfium`)**: Emulates PDFium's forgiving behavior (pinned to **`chromium/8152`** and verified against recorded outputs in `tests/pdfium/`); used by viewer-style callers (`pdfs` defaults).
 
 ### Non-Fatal `Fault`s vs. Hard `Error`s (and Zero Panics)
 - **No panics on untrusted input:** Every parser, decoder, tree walker, and font/content reader enforces explicit resource caps (`Limits::DEFAULT`) and returns typed errors when caps or budgets are exceeded.
@@ -73,7 +73,7 @@ Run development checks via [`just`](justfile):
 | `just clippy` | Run Clippy with `-D warnings` across workspace feature combinations. |
 | `just test` | Run unit tests and doctests across default, `--no-default-features`, and extra features. |
 | `just doc` | Build rustdoc with `RUSTDOCFLAGS="-D warnings"` across feature combinations. |
-| `just test-pdfium` | Verify generated cases, doc build pins, and PDFium (`chromium/8125`) answers. |
+| `just test-pdfium` | Verify generated cases, doc build pins, and PDFium (`chromium/8152`) answers. |
 | `just test-qpdf` | Run ignored cross-checks against pinned `qpdf` 12.4.2. |
 | `just fuzz <target>` | Run libFuzzer target on nightly (see `fuzz/Cargo.toml`). |
 | `just ci` | Full local CI suite (requires Rust 1.89, nightly `rust-src`, and cross targets). |
@@ -90,7 +90,7 @@ Several automated tests enforce strict consistency across code and documentation
    Published crates test that `README.md` contains exact GitHub `https://` links to `LICENSE-APACHE` and `LICENSE-MIT` (and in `pdf-fonts`, exact links to `` [`FTL.TXT`](...) `` and `` [`assets/afm/MustRead.html`](...) ``), contains no `](../` relative paths, and in several crates uses `https://` for every Markdown link.
 4. **`pdf-lint` CLI `--help` sync:**
    `crates/pdf-lint/tests/cli.rs` asserts that the ` ```text ` block immediately under `## The command line` in `crates/pdf-lint/README.md` matches `pdf-lint --help` output byte-for-byte (and stays within 80 columns).
-5. **PDFium `chromium/8125` pin check (`oracle/pdfium.py`):**
-   Every crate with a `tests/pdfium/` directory (`pdf-tokenizer`, `pdf-objects`, `pdf-structure`, `pdf-content-streams`, `pdf-semantics`, `pdf-color`, `pdf-fonts`, `pdf-linearize`) must include the exact phrase `as of chromium/8125` in its `README.md`, and any `as of chromium/NNNN` mention in `README.md` or `src/` must match the recorded `chromium-NNNN.txt` file.
+5. **PDFium `chromium/8152` pin check (`oracle/pdfium.py`):**
+   Every crate with a `tests/pdfium/` directory (`pdf-tokenizer`, `pdf-objects`, `pdf-structure`, `pdf-content-streams`, `pdf-semantics`, `pdf-color`, `pdf-fonts`, `pdf-linearize`) must include the exact phrase `as of chromium/8152` in its `README.md`, and any `as of chromium/NNNN` mention in `README.md` or `src/` must match the recorded `chromium-NNNN.txt` file.
 6. **MSRV & Workspace Dependencies:**
    Published library crates target **`rust-version = "1.89"`**. Pre-release crates in `[workspace.dependencies]` use exact version pins (`=0.1.0-alpha.N`), and `just _package` enforces a strict allowlist of packaged files (`src/**/*.rs`, `README.md`, `CHANGELOG.md`, `Cargo.toml`, `Cargo.lock`, plus `pdf-fonts` assets).

@@ -1,4 +1,4 @@
-# PDFium's answer for each case, as chromium/8125 gives it (oracle/pdfium.py record)
+# PDFium's answer for each case, as chromium/8152 gives it (oracle/pdfium.py record)
 name-devicegray	1
 name-devicergb	3
 name-devicecmyk	4

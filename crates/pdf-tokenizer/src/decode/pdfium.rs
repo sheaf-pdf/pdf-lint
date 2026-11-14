@@ -1,4 +1,4 @@
-//! What a token stands for as PDFium reads it, as of chromium/8125, where
+//! What a token stands for as PDFium reads it, as of chromium/8152, where
 //! that's otherwise than ISO 32000-2: a number word's value, a name's
 //! bytes, a literal string's and a hex string's.
 //!

@@ -1,6 +1,6 @@
 //! The strings content shows, built in code: each operator the walk reads, the forms
 //! it follows and how far, the resources each looks fonts up in, and what isn't read,
-//! each as PDFium (chromium/8125) reads it for its text.
+//! each as PDFium (chromium/8152) reads it for its text.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -627,7 +627,7 @@ fn only_a_form_is_followed() {
 /// nothing, and is said each time it's drawn; what's around it is read. PDFium reads
 /// its data as written: a page showing `(AB)` and drawing a form under `/Filter
 /// /Bogus`, or `/FlateDecode` over plain bytes, that shows `(CD)` gives AB and CD in
-/// its text page at chromium/8125, where this reads AB and says the form.
+/// its text page at chromium/8152, where this reads AB and says the form.
 #[test]
 fn a_stream_that_does_not_decode_shows_nothing_and_is_said() {
     for why in [Why::Damaged, Why::Filter] {

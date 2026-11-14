@@ -66,7 +66,7 @@ pub struct Limits {
     /// How deep in forms [`shown`](fn@crate::shown) follows a `Do`: a form the content
     /// given draws is 1 deep, one that form draws 2. A form deeper isn't followed, and
     /// that's told ([`Unread::Deep`](crate::Unread::Deep)). 40 by default, as PDFium
-    /// (chromium/8125) draws a form 40 deep and none deeper, a form within itself
+    /// (chromium/8152) draws a form 40 deep and none deeper, a form within itself
     /// among them: past that, what PDFium shows isn't what's read.
     pub forms: usize,
     /// How many times one call of [`shown`](fn@crate::shown) draws a form, in all:

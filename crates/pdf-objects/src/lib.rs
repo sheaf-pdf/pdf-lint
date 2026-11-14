@@ -20,7 +20,7 @@
 //! - **Strings and text ([`Str`], [`Form`], [`text`]):** [`Str`] stores raw decoded bytes (plus
 //!   whether the literal or hex [`Form`] was used) or marks strings whose encoding/encryption
 //!   state is unknown. [`text`] decodes and encodes PDF text strings (PDFDocEncoding, UTF-16BE,
-//!   and UTF-8 with BOM) under either ISO 32000-2 rules or PDFium's rules as of chromium/8125
+//!   and UTF-8 with BOM) under either ISO 32000-2 rules or PDFium's rules as of chromium/8152
 //!   ([`text::decode_with`], [`text::encode`], [`text::encode_as`], [`Object::text`]).
 //! - **Streams ([`Stream`], [`Data`]):** Stores a stream's dictionary alongside either a byte
 //!   range in the source file (`Data::At`) or owned in-memory bytes (`Data::Bytes`).

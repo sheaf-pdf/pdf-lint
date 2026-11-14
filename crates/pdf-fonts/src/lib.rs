@@ -1,5 +1,5 @@
 //! PDF font reader, text extractor, Standard 14 metrics, CMap interpreter, and glyph bounding-box
-//! reader (ISO 32000-2, §9), matching PDFium's behavior as of chromium/8125.
+//! reader (ISO 32000-2, §9), matching PDFium's behavior as of chromium/8152.
 //!
 //! `pdf-fonts` operates over any [`Resolve`](pdf_objects::Resolve) and
 //! [`Streams`](pdf_objects::Streams) provider (such as a `pdf-structure` `&Reading` or

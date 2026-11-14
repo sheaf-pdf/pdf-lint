@@ -422,7 +422,7 @@ impl Join {
     /// a stream of no data in its place, and why kept
     /// ([`Concat::undecoded`]).
     ///
-    /// PDFium, as of chromium/8125, reads such a stream's data as written
+    /// PDFium, as of chromium/8152, reads such a stream's data as written
     /// instead, or as far as the filters before the one it doesn't take
     /// decode it. A [`Streams`] gives data decoded alone, so what PDFium
     /// draws of it isn't joined here, and the caller is told it isn't.
@@ -469,7 +469,7 @@ impl Join {
         }
     }
 
-    /// A page's `/Contents` added, as PDFium reads it, as of chromium/8125:
+    /// A page's `/Contents` added, as PDFium reads it, as of chromium/8152:
     /// `contents` is its value as written in the page's dictionary, and
     /// `objects` give the file's objects and its streams' data, a reader of
     /// the file's or any other. A stream is added as [`Join::push_or_empty`]

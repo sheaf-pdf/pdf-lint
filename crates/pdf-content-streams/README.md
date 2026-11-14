@@ -1,6 +1,6 @@
 # pdf-content-streams
 
-PDF content stream lexer, operator parser, analyzer, writer, and byte-preserving splicer (ISO 32000-2, §7.8.2), matching PDFium's parsing rules as of chromium/8125.
+PDF content stream lexer, operator parser, analyzer, writer, and byte-preserving splicer (ISO 32000-2, §7.8.2), matching PDFium's parsing rules as of chromium/8152.
 
 `pdf-content-streams` operates on decoded stream bytes and resource dictionaries without performing file I/O directly. Built on [pdf-tokenizer](https://crates.io/crates/pdf-tokenizer), [pdf-objects](https://crates.io/crates/pdf-objects), [pdf-filters](https://crates.io/crates/pdf-filters), and [pdf-color](https://crates.io/crates/pdf-color), it re-exports `pdf-objects` and `pdf-color` for version-matched interop.
 

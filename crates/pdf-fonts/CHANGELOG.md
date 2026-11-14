@@ -6,7 +6,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Added
 
-- `Font::read`: a font dictionary read as PDFium (chromium/8125) reads it, over pdf-objects' `Resolve` and `Streams`. Type 1, MMType1, TrueType, Type 3 and Type 0 fonts, with their embedded CMaps and their `/ToUnicode`.
+- `Font::read`: a font dictionary read as PDFium (chromium/8152) reads it, over pdf-objects' `Resolve` and `Streams`. Type 1, MMType1, TrueType, Type 3 and Type 0 fonts, with their embedded CMaps and their `/ToUnicode`.
 - `Font`'s readings: a string's codes (`Font::codes`, a `Codes` iterator), each code's CID, width, vertical metrics and text, how far the font's glyphs reach, and a glyph's box. `Font::approx` says which of them are guessed.
 - `Fonts` and `FontScope`: each font of a source read once, kept for every page that draws in it and charged to each page's budget, and the fonts one interpretation of content picks, by name.
 - `shown`: the strings a page's content shows, in order, each in its font, as PDFium reads them for its text, with no layout. It reads `Tf`, `gs` where its ExtGState's `/Font` picks a font, `q` and `Q`, `Tj`, `TJ`, `'` and `"`, and follows `Do` of a form in its own state, to `Limits::forms` deep and `Limits::form_uses` times a call. `Shown` holds each string (`ShownString`) and what wasn't read (`Unread`): a form too deep or drawn too often, content past a cap, a form or a font past the budget or behind a password, a graphics state behind one, and a stream whose data doesn't decode, which PDFium reads as written.

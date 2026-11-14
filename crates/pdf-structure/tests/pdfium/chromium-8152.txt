@@ -1,4 +1,4 @@
-# PDFium's answer for each case, as chromium/8125 gives it (oracle/pdfium.py record)
+# PDFium's answer for each case, as chromium/8152 gives it (oracle/pdfium.py record)
 pages-plain	count 3 : 3 200 0 ; 4 200 0 ; 5 200 0 ; null ; null
 pages-startxref-past-its-section	count 3 : 3 200 0 ; 4 200 0 ; 5 200 0 ; null ; null
 pages-cut	count 3 : 3 200 0 ; 4 200 0 ; 5 200 0 ; null ; null

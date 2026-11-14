@@ -83,7 +83,7 @@ just ci           # run the full local CI suite (all checks except cargo-semver-
 
 ### Oracle & Cross-Target Checks
 
-- **PDFium oracle (`just test-pdfium`):** Requires Python 3. Downloads a pinned PDFium build (`chromium/8125` on Linux x86_64, or uses `PDF_LINT_PDFIUM`) and verifies recorded test expectations across crates that emulate PDFium behavior. See [oracle/README.md](oracle/README.md).
+- **PDFium oracle (`just test-pdfium`):** Requires Python 3. Downloads a pinned PDFium build (`chromium/8152` on Linux x86_64, or uses `PDF_LINT_PDFIUM`) and verifies recorded test expectations across crates that emulate PDFium behavior. See [oracle/README.md](oracle/README.md).
 - **qpdf oracle (`just test-qpdf`):** Downloads a pinned `qpdf` binary on Linux x86_64 (or uses `PDF_LINT_QPDF`) to cross-check file reading, writing, encryption, and linearization.
 - **Full `just ci` prerequisites:** Requires Rust **1.89** (workspace MSRV), `nightly` with `rust-src` (for `pdf-tokenizer`'s `core`-only build), and targets `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`, and `wasm32-unknown-unknown`. Note that `*-package` recipes run `cargo publish --dry-run` and require network access.
 - **Semver checks (`just <crate>-semver`):** Uses [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) to check published crates against crates.io.

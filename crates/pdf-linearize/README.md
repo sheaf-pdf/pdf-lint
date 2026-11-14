@@ -14,7 +14,7 @@ Plan, assemble, and validate linearized ("Fast Web View") PDF files (ISO 32000-2
   - **Assemble (`assemble` -> `Layout`):** Serialize your planned object bodies however your model stores them, pass their byte lengths to `assemble`, and iterate `Layout::pieces` to interleave padded linearization dictionaries, cross-reference sections, hint streams, and object bodies.
   - **Hint tables (`hint`):** Encode and decode Annex F.4 bit-packed hint tables (`hint::tables`).
   - **Validate (`check`):** Validate `check::Facts` from any PDF reader into a `check::Verdict` and emit `check::Finding` diagnostics graded as `Error`, `Departure`, or `Unjudged` (when a reader cap, missing password, or unsupported filter prevented inspection). Passing `()` as the sink skips graph-planning checks that do not affect the verdict.
-- **Resource bounds & conformance:** `Limits` bounds object counts, pages, shared-object references, and hint-table sizes without panicking on hostile input. Output is tested against `qpdf --check-linearization`, and validation is tested against PDFium's availability API as of chromium/8125.
+- **Resource bounds & conformance:** `Limits` bounds object counts, pages, shared-object references, and hint-table sizes without panicking on hostile input. Output is tested against `qpdf --check-linearization`, and validation is tested against PDFium's availability API as of chromium/8152.
 
 ## Quickstart
 

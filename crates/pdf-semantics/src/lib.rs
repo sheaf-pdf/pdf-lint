@@ -10,7 +10,7 @@
 //! - **Dates ([`date::Date`]):** Parse and format PDF `D:...` dates, preserving field presence
 //!   and recording legacy syntax [`date::Quirk`]s.
 //! - **Page trees ([`pages::pages`], [`pages::write`]):** Walk `/Pages` trees under ISO 32000-2
-//!   rules or PDFium's rules as of chromium/8125, tracking each inherited attribute's
+//!   rules or PDFium's rules as of chromium/8152, tracking each inherited attribute's
 //!   [`pages::Origin`], or build balanced `/Pages` trees over caller-numbered page IDs.
 //! - **Name and number trees ([`tree::names`], [`tree::numbers`]):** Lazily iterate entries in
 //!   key order with cycle and depth bounds, or serialize flat trees ([`tree::write_names`],

@@ -26,7 +26,7 @@ const UNLOADED: u32 = 3;
 const MOST_UNDERLYING: u32 = 16;
 
 /// The components of a color space as PDFium counts them, as of
-/// chromium/8125. `value` is what a `/ColorSpace` dictionary holds under a
+/// chromium/8152. `value` is what a `/ColorSpace` dictionary holds under a
 /// name, as written, or an inline image's array.
 ///
 /// `Some(n)` is the count, 3 where PDFium loads no space. None is a reference

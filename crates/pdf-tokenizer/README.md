@@ -43,7 +43,7 @@ assert_eq!(joined, input);
 
 ## ISO 32000-2 vs. PDFium Lexical Rules
 
-By default, `Tokenizer` follows ISO 32000-2 (§7.2, §7.3). Switch to PDFium's forgiving lexical rules—tested against PDFium as of chromium/8125—via `with_rules(Pdfium)` (compile-time type state) or `with_rules(Rules::Pdfium)` (runtime enum):
+By default, `Tokenizer` follows ISO 32000-2 (§7.2, §7.3). Switch to PDFium's forgiving lexical rules—tested against PDFium as of chromium/8152—via `with_rules(Pdfium)` (compile-time type state) or `with_rules(Rules::Pdfium)` (runtime enum):
 
 - **Numbers:** Runs consisting solely of digits, `+`, `-`, and `.` (such as `--5` or `1.2.3`) lex as `Integer` or `Real` under PDFium rather than `Keyword`.
 - **Hex strings:** PDFium scans `<...>` to the next `>` across arbitrary bytes, whereas ISO 32000-2 stops before non-hex/non-whitespace bytes.

@@ -551,7 +551,7 @@ fn too_many_pages_or_none_are_typed_errors() {
     assert_eq!(tree_error(&no_tree), Error::NoPages);
 }
 
-// The kids here read as chromium/8125 reads them, unlike the first of these
+// The kids here read as chromium/8152 reads them, unlike the first of these
 // tests' first reading: a direct kid has a place, and its number (the cases'
 // `kid-direct-page`), a leaf of `/Type /Pages` is a place with no page
 // (`leaf-type-pages`), and a /Count of 4 ends the table before object 5.

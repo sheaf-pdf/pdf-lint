@@ -6,7 +6,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Added
 
-- `tokens` and `operations`: a content stream's tokens, and its operations with the operands before each, read as PDFium (chromium/8125) reads them. Each has its range and its bytes as written. An `Operand` is read as a value only when asked, by `name`, `Operand::number` or `object`.
+- `tokens` and `operations`: a content stream's tokens, and its operations with the operands before each, read as PDFium (chromium/8152) reads them. Each has its range and its bytes as written. An `Operand` is read as a value only when asked, by `name`, `Operand::number` or `object`.
 - `InlineImage`: an inline image's dictionary and data, its end found as PDFium finds it, and what PDFium keeps of the data (`InlineImage::stream`). `ResCx::read` counts the color spaces a resources dictionary names, so an image drawn in one is sized by it.
 - The `image-ends` feature: DCT and CCITTFax data's ends found by decoding it, where a reading asks (`Limits::coded_ends`). Without it, a stand-in finds them in the data's bytes.
 - `Concat` and `Join`: a page's streams read as one, each place mapped back to its stream (`Pos`, `SpanAcross`). `Join::push_from` takes them from any reader of a file, through pdf-objects' `Streams`, and `Join::push_contents` a page's `/Contents` whole, as PDFium reads it. A stream whose data doesn't decode for the file's own reason is joined there as one of no data, and said (`Join::push_or_empty`, `Concat::undecoded`), where PDFium reads its data as written.

@@ -14,7 +14,7 @@ PDF file structure reader, editable in-memory document model, and full or increm
 - **In-memory document editing (`Document`):** Build a new document with `Document::new` or edit a parsed one (`add`, `set`, `get_mut`, `remove`, `catalog_mut`, `trailer_mut`), follow reference chains (`dereference`), walk objects reachable from the trailer (`reachable`), and strip unreachable objects (`prune`).
 - **Damaged-file recovery & PDFium compatibility (`Options::recovery`):**
   - `Recovery::Verified` (default) recovers shifted cross-reference sections/entries when the file proves the target objects match, and falls back to full-file scanning when cross-reference sections cannot be read.
-  - `Recovery::Pdfium` mirrors PDFium's cross-reference and full-file fallback scan rules as of chromium/8125 (verified against recorded cases in `tests/pdfium`).
+  - `Recovery::Pdfium` mirrors PDFium's cross-reference and full-file fallback scan rules as of chromium/8152 (verified against recorded cases in `tests/pdfium`).
 - **Encryption & stream decoding:** Pass candidate passwords via `Options::passwords` (or unlock later with `Reading::unlock`) to transparently decrypt strings, object streams, and stream payloads (`Reading::data`, `Reading::decoded_within`, `Streams::decoded`) across Standard Security Handler revisions 2–6. `Document::encryption` reports unlock status, permissions, and cipher metadata.
 - **Revisions:** Inspect incremental-update history via `revisions()`, read a file as of an earlier cross-reference section (`Options::section`), or open an earlier revision's byte prefix as a standalone file (`Reading::prefix`).
 - **Full & incremental writing (`write`):**

@@ -25,7 +25,7 @@ fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 
 # The PDFium build the readers that follow PDFium's rules are held to
 # (`_pdfium`, oracle/README.md).
-pdfium_build := "8125"
+pdfium_build := "8152"
 
 # The crates' PDFium cases, each a crate's tests/pdfium.
 pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-structure/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-fonts/tests/pdfium crates/pdf-linearize/tests/pdfium"
@@ -150,7 +150,7 @@ test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize-lopdf --test qpdf -- --ignored
 
 # PDFium, the oracle of the readers that follow PDFium's rules: a
-# development snapshot, PDFium as of chromium/8125, pdfium-binaries' Linux
+# development snapshot, PDFium as of chromium/8152, pdfium-binaries' Linux
 # x86_64 build at that tag, at a pinned SHA-256 and, where `gh` can,
 # its build provenance attested; kept in target/. To bump it, as
 # oracle/README.md says: verify the new build's attestation, take its
@@ -173,7 +173,7 @@ _pdfium:
         trap 'rm -rf "$work"' EXIT
         curl -fsSL --retry 3 -o "$work/$tgz" \
             "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/$build/$tgz"
-        echo "e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659  $work/$tgz" \
+        echo "384ab5c51882408a143a21f9c14dcd2caf1f75280ae41c554d0489b46c3dba9f  $work/$tgz" \
             | sha256sum --check --quiet
         if gh attestation verify --help >/dev/null 2>&1 \
             && { [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1; }; then

@@ -148,7 +148,7 @@ impl Std14 {
 
     /// Whether glyph `name`'s width, where a file draws the font without
     /// a program or `/Widths`, is the face's PDFium draws it in rather
-    /// than Adobe's. PDFium's own faces (Foxit's, measured as of chromium/8125)
+    /// than Adobe's. PDFium's own faces (Foxit's, measured as of chromium/8152)
     /// haven't the glyphs Adobe's metrics added in their second
     /// version, and draw each as the space, and draw a few
     /// others at widths of their own; a system's face may draw any of
@@ -417,7 +417,7 @@ const ADDED: [&str; 86] = [
 
 /// The names PDFium reads as the standard 14 fonts: the 14 and the
 /// alternates it takes for them, from `cfx_standardfont.cpp`'s
-/// `kAltFontNames` (as of chromium/8125).
+/// `kAltFontNames` (as of chromium/8152).
 const NAMES: [(&str, Std14); 89] = [
     ("Arial", Std14::Helvetica),
     ("Arial,Bold", Std14::HelveticaBold),

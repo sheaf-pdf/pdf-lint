@@ -87,7 +87,7 @@ impl<'o> Spaces<'o> {
     ///
     /// `resources` and its `/ColorSpace` may each be a dictionary or a stream,
     /// each through at most two references: through three, or in a loop, as
-    /// of chromium/8125 there's no dictionary, and that's no error.
+    /// of chromium/8152 there's no dictionary, and that's no error.
     ///
     /// ```
     /// use pdf_color::pdf_objects::{Object, ObjectId, dict};
