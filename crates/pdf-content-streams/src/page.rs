@@ -10,13 +10,16 @@
 //! as they're decoded, under [`Limits::content`], each decoded straight
 //! into the joined bytes when the decoder appends to a buffer, or given by
 //! a reader of the file through pdf-objects' [`Streams`]
-//! ([`Join::push_from`]).
+//! ([`Join::push_from`]), a page's `/Contents` whole as PDFium reads it
+//! ([`Join::push_contents`]). A stream whose data doesn't decode for the
+//! file's own reason may be joined as one of no data, and said
+//! ([`Join::push_or_empty`], [`Concat::undecoded`]).
 
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 
-use pdf_objects::{ObjectId, Streams, Unreadable, Why};
+use pdf_objects::{Object, ObjectId, Resolve, Streams, Unreadable, Value, Why};
 
 use crate::inline::ResCx;
 use crate::limits::Limits;
@@ -79,6 +82,8 @@ pub struct Concat<'a> {
     bytes: Cow<'a, [u8]>,
     /// Where each stream starts.
     starts: Box<[usize]>,
+    /// The streams joined as no data, as their data doesn't decode.
+    undecoded: Vec<Unreadable>,
 }
 
 impl fmt::Debug for Concat<'_> {
@@ -88,6 +93,7 @@ impl fmt::Debug for Concat<'_> {
         f.debug_struct("Concat")
             .field("bytes", &Len(self.bytes.len()))
             .field("starts", &self.starts)
+            .field("undecoded", &self.undecoded.len())
             .finish()
     }
 }
@@ -101,6 +107,7 @@ impl<'a> Concat<'a> {
             return Concat {
                 bytes: Cow::Borrowed(one),
                 starts: Box::new([0]),
+                undecoded: Vec::new(),
             };
         }
         let mut join = Join::uncapped();
@@ -115,6 +122,16 @@ impl<'a> Concat<'a> {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The streams joined as no data, as their data doesn't decode for the
+    /// file's own reason ([`Join::push_or_empty`]), each with why, in the
+    /// order they were joined; none for streams joined as they are. PDFium
+    /// reads such a stream's data as written, so what it draws there isn't
+    /// in the joined bytes.
+    #[must_use]
+    pub fn undecoded(&self) -> &[Unreadable] {
+        &self.undecoded
     }
 
     /// How many streams there are.
@@ -237,6 +254,7 @@ pub struct Join {
     bytes: Vec<u8>,
     starts: Vec<usize>,
     cap: usize,
+    undecoded: Vec<Unreadable>,
 }
 
 impl fmt::Debug for Join {
@@ -247,6 +265,7 @@ impl fmt::Debug for Join {
             .field("bytes", &Len(self.bytes.len()))
             .field("starts", &self.starts)
             .field("cap", &self.cap)
+            .field("undecoded", &self.undecoded.len())
             .finish()
     }
 }
@@ -260,6 +279,7 @@ impl Join {
             bytes: Vec::new(),
             starts: Vec::new(),
             cap: limits.content.min(PLACES),
+            undecoded: Vec::new(),
         }
     }
 
@@ -268,6 +288,7 @@ impl Join {
             bytes: Vec::new(),
             starts: Vec::new(),
             cap: usize::MAX,
+            undecoded: Vec::new(),
         }
     }
 
@@ -395,12 +416,148 @@ impl Join {
         }
     }
 
+    /// Stream `id`'s data added, as [`Join::push_from`] adds it; or, where
+    /// it doesn't decode for the file's own reason, damaged or through
+    /// filters the reader doesn't take ([`Why::Damaged`], [`Why::Filter`]),
+    /// a stream of no data in its place, and why kept
+    /// ([`Concat::undecoded`]).
+    ///
+    /// PDFium, as of chromium/8125, reads such a stream's data as written
+    /// instead, or as far as the filters before the one it doesn't take
+    /// decode it. A [`Streams`] gives data decoded alone, so what PDFium
+    /// draws of it isn't joined here, and the caller is told it isn't.
+    ///
+    /// ```
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
+    /// use pdf_content_streams::{Join, Limits};
+    ///
+    /// // A page's two streams, and between them one whose filter isn't read.
+    /// let nothing = |_: ObjectId| None::<&Object>;
+    /// let streams = WithStreams::new(nothing, |id: ObjectId, _: usize| match id.number {
+    ///     4 => Ok(b"0 0 m".to_vec()),
+    ///     6 => Ok(b"9 9 l S".to_vec()),
+    ///     _ => Err(Unreadable::new(id, Why::Filter, "its filter isn't one the reader decodes")),
+    /// });
+    /// let mut join = Join::new(&Limits::DEFAULT);
+    /// for number in [4, 5, 6] {
+    ///     join.push_or_empty(&streams, ObjectId::new(number, 0)).unwrap();
+    /// }
+    /// let page = join.finish();
+    /// assert_eq!(page.bytes(), b"0 0 m  9 9 l S");
+    /// assert_eq!(page.stream_count(), 3);
+    /// assert_eq!(page.undecoded()[0].id, ObjectId::new(5, 0));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Join::push_from`] refuses, but for a stream that doesn't decode
+    /// for the file's own reason: [`Pushed::TooLarge`] past the cap, the
+    /// space before a stream of no data among it, and [`Pushed::Decode`]
+    /// where its data doesn't read for the reader's own reason.
+    pub fn push_or_empty<S: Streams + ?Sized>(
+        &mut self,
+        streams: &S,
+        id: ObjectId,
+    ) -> Result<(), Pushed<Unreadable>> {
+        match self.push_from(streams, id) {
+            Err(Pushed::Decode(e)) if matches!(e.why, Why::Damaged | Why::Filter) => {
+                self.push(&[]).map_err(Pushed::TooLarge)?;
+                self.undecoded.push(e);
+                Ok(())
+            }
+            pushed => pushed,
+        }
+    }
+
+    /// A page's `/Contents` added, as PDFium reads it, as of chromium/8125:
+    /// `contents` is its value as written in the page's dictionary, and
+    /// `objects` give the file's objects and its streams' data, a reader of
+    /// the file's or any other. A stream is added as [`Join::push_or_empty`]
+    /// adds it: one whose data doesn't decode for the file's own reason is a
+    /// stream of no data, and said ([`Concat::undecoded`]), where PDFium reads
+    /// its data as written, the one way this reads otherwise. An array's
+    /// elements are added in order (ISO 32000-2, 7.7.3.3), each a stream of
+    /// the joined bytes, so a [`Pos`]'s stream is the element's index.
+    ///
+    /// What isn't a stream is read as PDFium reads it. A reference is
+    /// followed once, as it names an object, so one that names another
+    /// reference names no stream. A `/Contents` that's neither a stream nor
+    /// an array adds nothing, nor does an empty array: the page has no
+    /// content. An element that's no stream, an array among them, adds an
+    /// empty stream, its place kept. A reference to nothing is null, and so
+    /// is one to an object that doesn't read for the file's own damage
+    /// ([`Why::Damaged`]). A stream written in place, which only a document
+    /// built in memory can hold, has no number to ask its data by, and is no
+    /// stream here.
+    ///
+    /// ```
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why, dict};
+    /// use pdf_content_streams::{Join, Limits};
+    ///
+    /// // Streams 4 and 5, and 6 a dictionary, which is no stream.
+    /// let stream = Object::stream(dict! {});
+    /// let other = Object::from(dict! { "A" => 1 });
+    /// let objects = |id: ObjectId| match id.number {
+    ///     4 | 5 => Some(&stream),
+    ///     6 => Some(&other),
+    ///     _ => None,
+    /// };
+    /// let file = WithStreams::new(objects, |id: ObjectId, _: usize| match id.number {
+    ///     4 => Ok(b"0 0 m 9 9 l".to_vec()),
+    ///     5 => Ok(b"S".to_vec()),
+    ///     _ => Err(Unreadable::new(id, Why::Damaged, "no stream")),
+    /// });
+    /// let contents = Object::from(vec![Object::reference(4), Object::reference(6), Object::reference(5)]);
+    /// let mut join = Join::new(&Limits::DEFAULT);
+    /// join.push_contents(file, &contents).unwrap();
+    /// let page = join.finish();
+    /// assert_eq!(page.bytes(), b"0 0 m 9 9 l  S");
+    /// assert_eq!(page.stream_count(), 3);
+    /// assert_eq!(page.stream(1), b"");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Pushed::Decode`] with the [`Unreadable`] `objects` give where
+    /// `/Contents` or an element doesn't read for the reader's own reason,
+    /// past a cap it reads under, behind a password or not given
+    /// ([`Why::Capped`], [`Why::Locked`], [`Why::Source`]): never read as no
+    /// stream. And for each stream, what [`Join::push_or_empty`] refuses. The
+    /// streams added before it stay joined.
+    pub fn push_contents<'o, O: Resolve<'o> + Streams>(
+        &mut self,
+        objects: O,
+        contents: &'o Object,
+    ) -> Result<(), Pushed<Unreadable>> {
+        let Some((contents, id)) = named(&objects, contents)? else {
+            return Ok(());
+        };
+        match (contents.value(), id) {
+            (Value::Stream(_), Some(id)) => self.push_or_empty(&objects, id),
+            (Value::Array(elements), _) => {
+                for element in elements {
+                    match named(&objects, element)? {
+                        Some((element, Some(id)))
+                            if matches!(element.value(), Value::Stream(_)) =>
+                        {
+                            self.push_or_empty(&objects, id)?;
+                        }
+                        _ => self.push(&[]).map_err(Pushed::TooLarge)?,
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The streams joined.
     #[must_use]
     pub fn finish(self) -> Concat<'static> {
         Concat {
             bytes: Cow::Owned(self.bytes),
             starts: self.starts.into(),
+            undecoded: self.undecoded,
         }
     }
 
@@ -415,6 +572,25 @@ impl Join {
 
     fn too_large(&self) -> TooLarge {
         TooLarge { cap: self.cap }
+    }
+}
+
+/// What `value`, as written where a stream or an array of them is, names, as
+/// PDFium takes it: a reference followed once, to its object and that number,
+/// else the value itself, written in place; none for a reference to nothing,
+/// or to an object that doesn't read for the file's own damage.
+fn named<'o, O: Resolve<'o>>(
+    objects: &O,
+    value: &'o Object,
+) -> Result<Option<(&'o Object, Option<ObjectId>)>, Pushed<Unreadable>> {
+    let Value::Ref(id) = value.value() else {
+        return Ok(Some((value, None)));
+    };
+    match objects.try_resolve(*id) {
+        Ok(Some(object)) => Ok(Some((object, Some(*id)))),
+        Ok(None) => Ok(None),
+        Err(unreadable) if unreadable.why == Why::Damaged => Ok(None),
+        Err(unreadable) => Err(Pushed::Decode(unreadable)),
     }
 }
 

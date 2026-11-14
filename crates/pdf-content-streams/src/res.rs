@@ -124,7 +124,8 @@ pub struct Res {
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum ResBody {
-    /// Its objects: the resource first, then those it reaches. A reference
+    /// Its objects: the resource first, then those it reaches, so one at
+    /// least ([`Res::of`] and [`Res::named`] refuse none). A reference
     /// `(i, 0)` among them is to the `i`th.
     Objects(Arc<[Object]>),
     /// An object the caller has already written, by its number in the
@@ -144,8 +145,21 @@ impl fmt::Debug for ResBody {
     }
 }
 
-/// A resource refused by [`Res::of`] or [`Res::named`]: one of its objects
-/// holds a stream whose data isn't in memory.
+/// Why [`Res::of`] or [`Res::named`] refuses a resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum ResError {
+    /// It has no objects: a resource is one object at least, the one that's
+    /// named where content draws with it.
+    #[error("the resource has no objects")]
+    Empty,
+    /// One of its objects holds a stream whose data isn't in memory.
+    #[error("{0}")]
+    Unheld(Unheld),
+}
+
+/// A resource one of whose objects holds a stream whose data isn't in
+/// memory ([`ResError::Unheld`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("object {object} of the resource holds a stream whose data isn't in memory")]
 #[non_exhaustive]
@@ -159,17 +173,16 @@ impl Res {
     ///
     /// # Errors
     ///
-    /// [`Unheld`] where a stream in one of `objects`, at any depth, holds
-    /// its data anywhere but in memory ([`Data::Bytes`]). Data where a
-    /// reader found it ([`Data::At`]) can't be told from another reading's
-    /// at the same place, and data that's neither can't be told at all. A
-    /// caller holds such data as bytes ([`Stream::set_bytes`]), or names
-    /// an object already written ([`Res::written`]).
-    pub fn of(objects: impl Into<Arc<[Object]>>) -> Result<Res, Unheld> {
+    /// [`ResError::Empty`] where there are none, as there's no object to
+    /// name. [`ResError::Unheld`] where a stream in one of `objects`, at any
+    /// depth, holds its data anywhere but in memory ([`Data::Bytes`]). Data
+    /// where a reader found it ([`Data::At`]) can't be told from another
+    /// reading's at the same place, and data that's neither can't be told
+    /// at all. A caller holds such data as bytes ([`Stream::set_bytes`]), or
+    /// names an object already written ([`Res::written`]).
+    pub fn of(objects: impl Into<Arc<[Object]>>) -> Result<Res, ResError> {
         let objects = objects.into();
-        if let Some(object) = objects.iter().position(|o| !in_memory(o)) {
-            return Err(Unheld { object });
-        }
+        refused(&objects)?;
         Ok(Res::held(objects))
     }
 
@@ -178,9 +191,9 @@ impl Res {
     ///
     /// # Errors
     ///
-    /// [`Unheld`] as [`Res::of`] gives it: PDF holds a stream by reference
-    /// alone (7.3.8.1), but a [`Dict`] can hold one as a value.
-    pub fn dict(dict: Dict) -> Result<Res, Unheld> {
+    /// [`ResError::Unheld`] as [`Res::of`] gives it: PDF holds a stream by
+    /// reference alone (7.3.8.1), but a [`Dict`] can hold one as a value.
+    pub fn dict(dict: Dict) -> Result<Res, ResError> {
         Res::of([Object::from(dict)])
     }
 
@@ -200,12 +213,11 @@ impl Res {
     ///
     /// # Errors
     ///
-    /// [`Unheld`] as [`Res::of`] gives it, where `body` holds objects.
-    pub fn named(id: ResId, body: ResBody) -> Result<Res, Unheld> {
-        if let ResBody::Objects(objects) = &body
-            && let Some(object) = objects.iter().position(|o| !in_memory(o))
-        {
-            return Err(Unheld { object });
+    /// As [`Res::of`] refuses, where `body` holds objects: none, or a
+    /// stream whose data isn't in memory.
+    pub fn named(id: ResId, body: ResBody) -> Result<Res, ResError> {
+        if let ResBody::Objects(objects) = &body {
+            refused(objects)?;
         }
         Ok(Res { id, body })
     }
@@ -234,6 +246,18 @@ impl Res {
             id: ResId::of(&objects),
             body: ResBody::Objects(objects),
         }
+    }
+}
+
+/// Why `objects` aren't a resource's, if they aren't: none, or one that
+/// holds a stream whose data isn't in memory.
+fn refused(objects: &[Object]) -> Result<(), ResError> {
+    if objects.is_empty() {
+        return Err(ResError::Empty);
+    }
+    match objects.iter().position(|o| !in_memory(o)) {
+        Some(object) => Err(ResError::Unheld(Unheld { object })),
+        None => Ok(()),
     }
 }
 

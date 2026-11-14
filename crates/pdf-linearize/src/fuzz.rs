@@ -5,8 +5,9 @@
 //! and written again; any facts, judged the same whatever the sink, and of
 //! what they say wasn't read, nothing that depends on it judged; with
 //! `family`, any bytes as a file, laid out and read back, the check of what's
-//! written clean. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`.
+//! written clean, and laid out and checked again under caps on its trees, a
+//! page tree past them refused and told as not judged. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -1668,8 +1669,9 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
 /// what's refused as it is but written told to reuse keystreams is refused at
 /// a keystream used, at an object the write told to lists, and what's written
 /// both ways is the same bytes, none listed (see `own_alike`). Under a new
-/// encryption nothing is listed. It gives each write's `out`, in the order
-/// written.
+/// encryption nothing is listed. Then it's laid out and checked under caps on
+/// its trees the input picks ([`under_lowered_caps`]). It gives each write's
+/// `out` under the defaults, in the order written.
 ///
 /// Built with the test writer (`insecure-test-writer`, which the fuzz target
 /// turns on, and for the crate's tests), the new encryption's key and salts are
@@ -1733,7 +1735,76 @@ pub fn over(data: &[u8]) -> Vec<Vec<u8>> {
             written.push(out);
         }
     }
+    under_lowered_caps(data, &reading, &doc, &written[0]);
     written
+}
+
+/// What [`over`] holds of `doc`, read from `reading`, under caps on its trees
+/// that the input picks: a page tree's depth, and a name tree's depth and nodes
+/// (`Limits::page_depth`, `tree_depth` and `tree_nodes`). Laid out under them,
+/// it's refused for its page tree's depth where a walk of it under them stops
+/// there, and is otherwise held as [`written_back`] holds a write. And `out`,
+/// what [`over`] wrote of it in the clear under the defaults, has its facts read
+/// under them: where a walk of its page tree under them stops at its depth, the
+/// page tree is told as not judged, and nothing that depends on it is judged;
+/// where it doesn't, its pages and nodes, and what wasn't read, are what they
+/// are under the defaults.
+#[cfg(feature = "family")]
+fn under_lowered_caps<S: pdf_structure::ByteSource>(
+    data: &[u8],
+    reading: &pdf_structure::Reading<S>,
+    doc: &pdf_structure::Document,
+    out: &[u8],
+) {
+    use pdf_objects::pdf_tokenizer::Rules;
+    use pdf_semantics::{catalog, pages};
+    use pdf_structure::read::{self, Reading};
+
+    use crate::family;
+
+    // By the input's length, which a fuzzer's mutations move most.
+    let mut options = family::Options::DEFAULT;
+    options.threads = 1;
+    options.limits.page_depth = 1 + data.len() % 3;
+    options.limits.tree_depth = data.len() / 3 % 3;
+    options.limits.tree_nodes = 1 + data.len() / 9 % 8;
+    let lowered = options.limits;
+    // Whether ISO's walk of `doc`'s page tree reads under the defaults and
+    // stops at its depth under the lowered caps.
+    let too_deep = |doc: &pdf_structure::Document| {
+        let Ok(Some(root)) = catalog(doc, doc.trailer().dict()) else {
+            return false;
+        };
+        let walk = |limits: &Limits| pages::pages(doc, root, Rules::Iso, &limits.trees(), &mut ());
+        walk(&Limits::DEFAULT).is_ok() && matches!(walk(&lowered), Err(pages::Error::TooDeep))
+    };
+    let (_, written) = written_back(reading, doc, None, "", Kind::Table, &options);
+    if too_deep(doc) {
+        assert!(
+            matches!(written, Err(family::Error::Pages(pages::Error::TooDeep))),
+            "{written:?}"
+        );
+    }
+    let Some(file) = out.get(6..).filter(|file| !file.is_empty()) else {
+        return;
+    };
+    let again = Reading::open(file, &read::Options::DEFAULT).expect("it reads");
+    let back = again.to_document().expect("it reads whole");
+    let full = family::facts(&again, &Limits::DEFAULT).expect("it's in memory");
+    let capped = family::facts(&again, &lowered).expect("it's in memory");
+    let (verdict, findings) = judged_alike(&capped, &lowered);
+    if too_deep(&back) {
+        assert_eq!(capped.unread.pages, Some(Unread::Capped));
+        assert!(verdict.linearized && !verdict.judged_whole, "{verdict:?}");
+        let why = Unread::Capped;
+        assert!(
+            findings.contains(&Finding::PagesUnread { why }),
+            "{findings:?}"
+        );
+    } else {
+        let parts = |facts: &Facts| (facts.pages.clone(), facts.nodes.clone(), facts.unread);
+        assert_eq!(parts(&capped), parts(&full));
+    }
 }
 
 /// What [`over`] holds of a file written under its own encryptor as it is,

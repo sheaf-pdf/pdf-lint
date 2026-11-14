@@ -15,7 +15,9 @@
 //!   ([`Limits::coded_ends`]).
 //! - **Read a page's streams as one** ([`Concat`], [`Join`],
 //!   [`Join::push_from`]), each place mapped back to its stream ([`Pos`],
-//!   [`SpanAcross`]).
+//!   [`SpanAcross`]), and a page's `/Contents` whole as PDFium reads it
+//!   ([`Join::push_contents`]), a stream whose data doesn't decode joined as
+//!   none and said ([`Concat::undecoded`]), where PDFium reads it as written.
 //! - **Know what each operator is** ([`Operator`]) and where it may be used
 //!   ([`State`]).
 //! - **Check a page**: its `q`/`Q` balance ([`balance`](fn@balance)), its
@@ -143,7 +145,7 @@ pub use operand::{Elements, Operand, name, object};
 pub use operations::{Operation, Operations, operations};
 pub use operator::{Category, FillRule, Operands, Operator, Operators, Paint, Type};
 pub use page::{Concat, Join, Pos, Pushed, SpanAcross, TooLarge};
-pub use res::{Res, ResBody, ResId, Unheld};
+pub use res::{Res, ResBody, ResError, ResId, Unheld};
 pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use state::State;
 pub use tokens::{Tok, Tokens, tokens};

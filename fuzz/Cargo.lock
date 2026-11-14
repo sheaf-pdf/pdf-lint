@@ -521,6 +521,24 @@ dependencies = [
  "pdf-semantics",
  "pdf-structure",
  "pdf-tokenizer",
+ "pdfs",
+]
+
+[[package]]
+name = "pdfs"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "pdf-color",
+ "pdf-content-streams",
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-fonts",
+ "pdf-linearize",
+ "pdf-objects",
+ "pdf-semantics",
+ "pdf-structure",
+ "pdf-tokenizer",
+ "thiserror",
 ]
 
 [[package]]

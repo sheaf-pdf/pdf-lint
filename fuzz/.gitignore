@@ -4,6 +4,6 @@ artifacts
 coverage
 
 # What `just fuzz check`, `just fuzz structure`, `just fuzz write`,
-# `just fuzz content`, `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`
-# and `just fuzz linearize` write for the fuzzer to begin from.
+# `just fuzz content`, `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
+# `just fuzz linearize` and `just fuzz pdfs` write for the fuzzer to begin from.
 seeds

@@ -1,6 +1,6 @@
 //! What the fuzz target checks, which unit tests check too: the promises
-//! the walks and the writers of trees make, the page tree's, dates' and XMP's,
-//! on any input. It's compiled only for tests and under cargo-fuzz's
+//! the walks and the writers of trees make, the page tree's, dates', XMP's
+//! and the document information dictionary's, on any input. It's compiled only for tests and under cargo-fuzz's
 //! `--cfg fuzzing`.
 
 use std::collections::BTreeMap;
@@ -13,6 +13,7 @@ use pdf_objects::{
 };
 
 use crate::date::{Date, Quirk};
+use crate::info::{self, Dated, Info};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
 use crate::xmp::{self, Claims, WriteError, XmpWhy, metadata_stream};
@@ -616,6 +617,89 @@ fn both_tables<'o, R: Resolve<'o> + Copy>(objects: R, catalog: &'o Dict) -> [Pag
     [iso, pdfium]
 }
 
+/// What a document information dictionary read as: its entries, or why it
+/// failed.
+pub type Informed = Result<Option<Info>, Why>;
+
+/// The promises of `value` read as a document information dictionary
+/// ([`info::read`]), by each rules:
+///
+/// - what's read is the same whatever the sink, and a sink that wants none
+///   is told none;
+/// - a date kept as its text is one that doesn't read, told at its key, and
+///   a date told is one kept as its text; an entry told as no text string,
+///   and a `/Trapped` told as no name of the three, are none;
+/// - and by PDFium's rules, which decode text otherwise, the same entries
+///   are there, and it fails alike.
+fn an_info<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object) -> [Informed; 2] {
+    let read = |rules| {
+        let mut kept = Kept::default();
+        let read = info::read(objects, value, rules, &mut kept);
+        assert_eq!(info::read(objects, value, rules, &mut ()), read);
+        assert_eq!(info::read(objects, value, rules, &mut Unwanted), read);
+        if let Ok(Some(read)) = &read {
+            for (key, dated) in [("CreationDate", &read.created), ("ModDate", &read.modified)] {
+                let told = (kept.0.iter())
+                    .any(|fault| matches!(fault, Fault::InfoDate { key: k, .. } if *k == key));
+                let text = match dated {
+                    Some(Dated::Text(text)) => Some(text),
+                    _ => None,
+                };
+                assert_eq!(text.is_some(), told, "{key}");
+                if let Some(text) = text {
+                    assert!(Date::read(text).is_err(), "{key}");
+                }
+            }
+            let texts = [
+                ("Title", &read.title),
+                ("Author", &read.author),
+                ("Subject", &read.subject),
+                ("Keywords", &read.keywords),
+                ("Creator", &read.creator),
+                ("Producer", &read.producer),
+            ];
+            for fault in &kept.0 {
+                match fault {
+                    Fault::InfoNotText { key } => {
+                        let field = texts
+                            .iter()
+                            .find(|(k, _)| k == key)
+                            .map(|(_, field)| field.is_none());
+                        let date = match *key {
+                            "CreationDate" => Some(read.created.is_none()),
+                            "ModDate" => Some(read.modified.is_none()),
+                            _ => None,
+                        };
+                        assert_eq!(field.or(date), Some(true), "{key}");
+                    }
+                    Fault::InfoTrapped => assert_eq!(read.trapped, None),
+                    _ => {}
+                }
+            }
+        }
+        read.map_err(|unreadable| unreadable.why)
+    };
+    let [iso, pdfium] = [read(Rules::Iso), read(Rules::Pdfium)];
+    let there = |read: &Informed| {
+        read.clone().map(|info| {
+            info.map(|info| {
+                let texts = [
+                    &info.title,
+                    &info.author,
+                    &info.subject,
+                    &info.keywords,
+                    &info.creator,
+                    &info.producer,
+                ];
+                let dates = [info.created.is_some(), info.modified.is_some()];
+                (texts.map(Option::is_some), dates, info.trapped)
+            })
+        })
+    };
+    assert_eq!(there(&iso), there(&pdfium));
+    [iso, pdfium]
+}
+
 /// What a file's catalog comes to: its trees, and its page tree by each rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Over<'o> {
@@ -625,17 +709,23 @@ pub struct Over<'o> {
     pub pages: Option<[Paged<'o>; 2]>,
     /// Its metadata stream, or why it isn't known.
     pub metadata: Option<Result<Option<ObjectId>, Why>>,
+    /// Its trailer's `/Info` read, by ISO's rules and by PDFium's, where it
+    /// has one.
+    pub info: Option<[Informed; 2]>,
 }
 
 /// Every tree the catalog `trailer` leads to holds, walked and held to its
-/// promises ([`a_tree`]), and its page tree ([`both_tables`]): what each gave,
-/// for a caller to set beside the same file through another resolver.
+/// promises ([`a_tree`]), its page tree ([`both_tables`]), and its `/Info`
+/// ([`an_info`]): what each gave, for a caller to set beside the same file
+/// through another resolver.
 pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Over<'o> {
+    let info = trailer.get(b"Info").map(|info| an_info(objects, info));
     let Ok(Some(catalog)) = catalog(objects, trailer) else {
         return Over {
             trees: Vec::new(),
             pages: None,
             metadata: None,
+            info,
         };
     };
     let roots = roots(objects, catalog);
@@ -646,6 +736,7 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Over<'o
         trees,
         pages: Some(both_tables(objects, catalog)),
         metadata: Some(metadata_stream(objects, catalog).map_err(|unreadable| unreadable.why)),
+        info,
     }
 }
 
@@ -674,8 +765,9 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
 
 /// The fuzz target's body for the walks: `data` as objects ([`values`]), the
 /// first of them the trailer, over which [`over`] walks what its catalog
-/// holds; and the first of them, whatever they are, each walked as a root of
-/// each kind of tree ([`a_tree`]), and each dictionary as a catalog
+/// holds and reads its `/Info`; and the first of them, whatever they are, each
+/// walked as a root of each kind of tree ([`a_tree`]), read as a document
+/// information dictionary ([`an_info`]), and each dictionary as a catalog
 /// ([`both_tables`]); and its first bytes as a page tree written
 /// ([`tree_written`]).
 pub fn walks(data: &[u8]) {
@@ -687,6 +779,7 @@ pub fn walks(data: &[u8]) {
     for root in objects.values().take(ROOTS) {
         a_tree(resolve, root, Kind::Names);
         a_tree(resolve, root, Kind::Numbers);
+        let _ = an_info(resolve, root);
         if let Some(catalog) = root.as_dict() {
             let _ = both_tables(resolve, catalog);
         }
@@ -1280,6 +1373,17 @@ pub fn fixtures() -> Vec<Vec<u8>> {
          5 0 R \
          << /Type /Pages /Parent 5 0 R /Kids [7 0 R] /Count 1 >> \
          << /Type /Page /MediaBox [0 0 1 1] >>",
+        // A document information dictionary: each entry, by reference and in
+        // place, of its type and not, a date that doesn't read, and text
+        // strings in each encoding.
+        "<< /Root 2 0 R /Info 3 0 R >> << /Type /Catalog >> \
+         << /Title (A title) /Author <FEFF00410042> /Subject <EFBBBF41> /Keywords <FFFE4100> \
+         /Creator 4 0 R /Producer 5 /CreationDate (D:20261112093000Z) /ModDate 6 0 R \
+         /Trapped /True >> \
+         (By reference) \
+         (not a date) \
+         7 0 R",
+        "<< /Info << /CreationDate 5 /ModDate (D:2026) /Trapped true /Title /Name >> >>",
         // Dates.
         "D:20261024153000-08'00'",
         "D:20261024153000Z00'00'",
@@ -1337,7 +1441,7 @@ mod tests {
 
     /// A mutation of `seed`, from `random`, as a fuzzer might make it.
     fn mutated(seed: &[u8], random: &mut impl FnMut() -> usize) -> Vec<u8> {
-        const PIECES: [&[u8]; 30] = [
+        const PIECES: [&[u8]; 33] = [
             b"[",
             b"]",
             b"<<",
@@ -1368,6 +1472,9 @@ mod tests {
             b"a:part=\"3\"",
             b"&#51;",
             b"&a;",
+            b"/Info",
+            b"/Trapped",
+            b"(D:2026)",
         ];
         let mut data = seed.to_vec();
         for _ in 0..1 + random() % 4 {
@@ -1421,8 +1528,8 @@ mod tests {
         }
     }
 
-    /// A seed's objects, the first its trailer, as a file; a seed that's no
-    /// such thing as it is.
+    /// A seed's objects, the first its trailer, as a file, its `/Root` and
+    /// `/Info` kept; a seed that's no such thing as it is.
     fn file_of(seed: &[u8]) -> Vec<u8> {
         let objects = values(seed);
         let Some(trailer) = objects.get(&ObjectId::new(1, 0)).and_then(Object::as_dict) else {
@@ -1433,15 +1540,20 @@ mod tests {
             .map(|(id, object)| (id.number, fixture::Body::Object(object.clone())))
             .collect();
         let root = trailer.get(b"Root").cloned().unwrap_or_else(Object::null);
-        fixture::file("1.7", &bodies, dict! { "Root" => root }, Xref::Table)
+        let mut written = dict! { "Root" => root };
+        if let Some(info) = trailer.get(b"Info") {
+            written.set("Info", info.clone());
+        }
+        fixture::file("1.7", &bodies, written, Xref::Table)
     }
 
     /// What the target does with `data` as a file, under the default options
     /// where it has caps of its own: [`over`] through a reading and through the
-    /// document it makes, the same.
-    fn a_file(data: &[u8]) -> usize {
+    /// document it makes, the same; and how many entries and pages it gave, and
+    /// whether it read an `/Info`.
+    fn a_file(data: &[u8]) -> (usize, usize) {
         let Ok(reading) = Reading::open(data, &Options::DEFAULT) else {
-            return 0;
+            return (0, 0);
         };
         let read = over(&reading, reading.trailer().dict());
         let document = reading
@@ -1450,16 +1562,21 @@ mod tests {
         assert_eq!(over(&document, document.trailer().dict()), read);
         let entries: usize = read.trees.iter().map(|walk| walk.entries.len()).sum();
         let pages = read.pages.iter().flatten().flatten().map(Pages::len);
-        entries + pages.sum::<usize>()
+        let info = read
+            .info
+            .iter()
+            .filter(|[iso, _]| matches!(iso, Ok(Some(_))));
+        (entries + pages.sum::<usize>(), info.count())
     }
 
     #[test]
     fn files_read_alike_through_a_reading_and_its_document() {
-        let mut entries = 0;
+        let (mut entries, mut infos) = (0, 0);
         let mut random = generator(0xF11E5);
         for seed in fixtures() {
             let file = file_of(&seed);
-            entries += a_file(&file);
+            let (read, info) = a_file(&file);
+            (entries, infos) = (entries + read, infos + info);
             for _ in 0..50 {
                 a_file(&mutated(&file, &mut random));
             }
@@ -1468,6 +1585,7 @@ mod tests {
             entries > 10,
             "the seeds' files hold trees and pages: {entries}"
         );
+        assert!(infos >= 2, "the seeds' files hold an /Info: {infos}");
     }
 
     /// `PDF_SEMANTICS_FUZZ_SEEDS` names a folder: writes the seeds there, each

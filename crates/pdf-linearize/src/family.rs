@@ -355,7 +355,8 @@ pub enum Error {
 ///
 /// Refused, with `out` as it was given, by an [`Error`]: what the module says,
 /// a page tree that gives a page no place of its own ([`Error::PageTree`]) or
-/// doesn't read, past [`Limits::pages`](crate::Limits::pages) among it
+/// doesn't read, past [`Limits::pages`](crate::Limits::pages) or
+/// [`Limits::page_depth`](crate::Limits::page_depth) among it
 /// ([`Error::Pages`]), and a document no password opened
 /// ([`Error::Locked`]); a trailer with no catalog ([`Error::NoCatalog`]), or a
 /// catalog that's a page, or a document past [`Options::limits`]

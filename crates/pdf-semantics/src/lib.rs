@@ -1,7 +1,8 @@
 //! Read PDF's dates, name and number trees, page tree and XMP claims (ISO
-//! 32000-2, 7.7.3, 7.9 and 14.3.2), and write each of them. No file is read
-//! here. A walk reads a file's objects through the caller's [`Resolve`]:
-//! pdf-structure's reading or document, or a closure over a map.
+//! 32000-2, 7.7.3, 7.9 and 14.3.2), and write each of them. Read a file's
+//! document information dictionary (14.3.3). No file is read here. A walk
+//! reads a file's objects through the caller's [`Resolve`]: pdf-structure's
+//! reading or document, or a closure over a map.
 //!
 //! - **Read and write a date** ([`date::Date`]). Each field says whether it
 //!   was written, and what the reading read past is a [`date::Quirk`].
@@ -17,6 +18,9 @@
 //!   [`xmp::read_from`]): PDF/A, PDF/UA and PDF/VT, found by namespace.
 //! - **Write a packet of claims** ([`xmp::write`]) that reads back as they
 //!   are.
+//! - **Read what a file says of itself** ([`info::read`]): its document
+//!   information dictionary, typed, its text decoded by ISO's rules or
+//!   PDFium's. A date that doesn't read is kept as its text.
 //!
 //! Where a file departs from the standard is a [`Fault`], told with its
 //! place to pdf-objects' [`Sink`](pdf_objects::fault::Sink). With `()` as
@@ -111,6 +115,7 @@ mod fault;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+pub mod info;
 mod limits;
 pub mod pages;
 mod phases;

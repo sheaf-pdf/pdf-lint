@@ -2,7 +2,8 @@
 //! that a phase is a line where it starts, and nothing of it is compiled without the
 //! feature. A phase is a call a font, or a part of one, is read in once: a font read,
 //! its program opened, an embedded CMap's chain, its `/ToUnicode` and a Type 3 font's
-//! CharProcs. A part read from a stream has its span once the stream is decompressed,
+//! CharProcs; and a walk of the strings content shows, within which the fonts it
+//! reads are read. A part read from a stream has its span once the stream is decompressed,
 //! so that its fields say how much was read, and the decompressing is its font's
 //! span's. But a Type 3 font's CharProcs are decompressed within their span, whose
 //! field, how many the font has, is known before any is. A font looked up where it was
@@ -42,7 +43,7 @@ mod tests {
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Level, Metadata, Subscriber};
 
-    use crate::{Encoding, Font, Fonts, Limits, Std14, glyph_text, name_code_point};
+    use crate::{Encoding, Font, Fonts, Limits, Std14, glyph_text, name_code_point, shown};
 
     /// A span as it was made: its name, its level, and each field's name and its
     /// value, where that was a number.
@@ -312,6 +313,50 @@ mod tests {
         assert_eq!(
             named(&made),
             [("read", Level::DEBUG, vec![("programs", 0)])]
+        );
+    }
+
+    /// A walk of the strings content shows is a span, with how many bytes the content
+    /// is, and a font it reads a span within it; a form it follows has none.
+    #[test]
+    fn a_walk_of_what_content_shows_is_a_span() {
+        use pdf_content_streams::{Concat, ResCx};
+
+        let objects = file(vec![
+            Stream::new(dict! { "Subtype" => "Form" }, b"(B) Tj".to_vec()).into(),
+        ]);
+        let resolve = |id: ObjectId| objects.get(&id);
+        let objects = WithStreams::new(&resolve, |id: ObjectId, _: usize| {
+            let data = objects.get(&id).and_then(Object::as_stream);
+            let data = data.and_then(|stream| stream.data.bytes());
+            data.map(<[u8]>::to_vec)
+                .ok_or_else(|| Unreadable::new(id, Why::Damaged, "no such stream"))
+        });
+        let resources = Object::from(dict! {
+            "Font" => dict! { "F1" => dict! { "Subtype" => "Type1", "BaseFont" => "Courier" } },
+            "XObject" => dict! { "X" => Object::reference(1) },
+        });
+        let content = Concat::new(&[b"/F1 9 Tf (A) Tj /X Do"]);
+        let fonts = Fonts::for_text();
+        let made = spans(|| {
+            let mut budget = 1 << 20;
+            let read = shown(
+                objects,
+                &fonts,
+                Some(&resources),
+                &content,
+                &ResCx::none(),
+                &Limits::DEFAULT,
+                &mut budget,
+            );
+            assert_eq!(read.text(), "AB");
+        });
+        assert_eq!(
+            named(&made),
+            [
+                ("shown", Level::DEBUG, vec![("bytes", 21)]),
+                ("read", Level::DEBUG, vec![("programs", 0)]),
+            ]
         );
     }
 

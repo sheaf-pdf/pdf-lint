@@ -29,16 +29,20 @@
 //!   (`std14`).
 //! - `scope`: `FontScope::font` picking 100 fonts by name, 10,000 picks in a
 //!   scope of their own, over fonts read once (`pick`).
+//! - `shown`: `shown` of a page whose content shows 6,000 strings in four fonts,
+//!   two with a `/ToUnicode`, saving and restoring the font, and draws a form of
+//!   ten strings 100 times, over fonts read once (`page`).
 //!
-//! Throughput is in fonts, bytes of a string, codes, names or picks. Each input
-//! is held to what it gives before it's timed: a font to its kind, the faults
-//! told of it (none), what it cost, and its widths, CIDs, boxes and text; a
-//! string to each of its codes and to its text; a name to its text, its code
-//! point or its font; a pick to the font it names. The objects are made here into
-//! a map, which is the resolver and gives each stream's data as it's held, and
-//! the programs are the crate's own (`tests/pdfium/programs`); nothing is read
-//! from disk, and the inputs are the same on every run. None names a predefined
-//! CMap, so a build with `predefined-cmaps` times the same work.
+//! Throughput is in fonts, bytes of a string, codes, names, picks or strings
+//! shown. Each input is held to what it gives before it's timed: a font to its
+//! kind, the faults told of it (none), what it cost, and its widths, CIDs,
+//! boxes and text; a string to each of its codes and to its text; a name to its
+//! text, its code point or its font; a pick to the font it names; a page to the
+//! strings it shows and their text. The objects are made here into a map, which
+//! is the resolver and gives each stream's data as it's held, and the programs
+//! are the crate's own (`tests/pdfium/programs`); nothing is read from disk,
+//! and the inputs are the same on every run. None names a predefined CMap, so a
+//! build with `predefined-cmaps` times the same work.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -46,12 +50,13 @@ use std::hint::black_box;
 use std::ops::Range;
 
 use criterion::{Criterion, Throughput};
+use pdf_fonts::pdf_content_streams::{Concat, ResCx};
 use pdf_fonts::pdf_objects::fault::Place;
 use pdf_fonts::pdf_objects::object::Stream;
 use pdf_fonts::pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dict};
 use pdf_fonts::{
     Descendant, Encoding, Fault, Font, FontKind, Fonts, Limits, Rect, Std14, glyph_text,
-    name_code_point,
+    name_code_point, shown,
 };
 
 /// Each departure a font's reading tells, kept.
@@ -981,6 +986,84 @@ fn scope_group(c: &mut Criterion) {
     group.finish();
 }
 
+/// How many text objects the page `shown` reads draws, each three strings.
+const TEXT_OBJECTS: usize = 2_000;
+
+/// How many times the page draws its form.
+const FORM_USES: usize = 100;
+
+fn shown_group(c: &mut Criterion) {
+    // Four fonts by object, two with a `/ToUnicode` of the codes shown, and a form of
+    // ten strings with no resources of its own.
+    let mut pdf = Pdf::default();
+    let map = to_unicode("<00> <FF>", &[(0x41, 0x61), (0x42, 0x62)]);
+    let mut fonts = Dict::new();
+    for at in 0..4 {
+        let mut font = dict! {
+            "Type" => "Font", "Subtype" => "Type1",
+            "BaseFont" => Std14::ALL[at].name(), "Encoding" => "WinAnsiEncoding",
+        };
+        if at % 2 == 1 {
+            font.set("ToUnicode", pdf.stream(map.clone()));
+        }
+        fonts.set(format!("F{at}").as_str(), pdf.add(font));
+    }
+    let form_content: String = (0..10).map(|i| format!("(Form{i}) Tj ")).collect();
+    let form = pdf.add(Stream::new(
+        dict! { "Subtype" => "Form" },
+        form_content.into_bytes(),
+    ));
+    let resources = Object::from(dict! { "Font" => fonts, "XObject" => dict! { "X" => form } });
+    let mut content = String::new();
+    for at in 0..TEXT_OBJECTS {
+        let font = at % 4;
+        content += &format!(
+            "q BT /F{font} 12 Tf 72 {} Td (AB, a line {at}) Tj [(AB) -20 (C)] TJ ET Q\n",
+            at % 700
+        );
+        if at % (TEXT_OBJECTS / FORM_USES) == 0 {
+            content += "/F0 9 Tf /X Do\n";
+        }
+    }
+    let content = Concat::new(&[content.as_bytes()]);
+    let res = ResCx::none();
+    let strings = 3 * TEXT_OBJECTS + 10 * FORM_USES;
+    let fonts = Fonts::for_text();
+    let walk = |budget: &mut usize| {
+        shown(
+            &pdf,
+            &fonts,
+            Some(&resources),
+            &content,
+            &res,
+            &Limits::DEFAULT,
+            budget,
+        )
+    };
+    let read = walk(&mut BUDGET.clone());
+    assert!(read.is_whole(), "shown/page: all read");
+    assert_eq!(read.strings.len(), strings, "shown/page: its strings");
+    let text = read.text();
+    assert!(
+        text.starts_with("AB, a line 0ABCForm0"),
+        "shown/page: {}",
+        &text[..20]
+    );
+    assert!(
+        text.contains("ab, a line 1abC"),
+        "shown/page: the /ToUnicode's text"
+    );
+    let mut group = c.benchmark_group("shown");
+    group.throughput(Throughput::Elements(strings as u64));
+    group.bench_function("page", |b| {
+        b.iter(|| {
+            let mut budget = BUDGET;
+            black_box(walk(&mut budget).strings.len())
+        })
+    });
+    group.finish();
+}
+
 /// The groups, as one benchmark binary: what `criterion_group!` and
 /// `criterion_main!` would write, without the public function the first
 /// makes.
@@ -992,5 +1075,6 @@ fn main() {
     widths_group(&mut criterion);
     names_group(&mut criterion);
     scope_group(&mut criterion);
+    shown_group(&mut criterion);
     criterion.final_summary();
 }

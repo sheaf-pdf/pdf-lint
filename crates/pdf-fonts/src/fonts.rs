@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pdf_objects::object::Value;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dict};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why};
 
 use crate::font::Font;
 use crate::reader::{Reader, dict_of};
-use crate::{Error, Limits};
+use crate::{Error, Limits, Std14};
 
 /// A source's fonts, each read once: those that are objects by number, kept for
 /// every page that draws in them. Nothing is told to a
@@ -34,7 +34,7 @@ pub struct Fonts {
 
 /// Nothing: what a font written in code is read over.
 #[derive(Clone, Copy)]
-struct NoObjects;
+pub(crate) struct NoObjects;
 
 impl<'o> Resolve<'o> for NoObjects {
     fn resolve(&self, _: ObjectId) -> Option<&'o Object> {
@@ -114,15 +114,13 @@ impl Fonts {
         ))
     }
 
-    /// What PDFium draws text in where the resources have no font by the name `Tf`
-    /// gives: its stock Helvetica, in WinAnsiEncoding.
+    /// What PDFium draws text in where the resources have no font by the name `Tf`,
+    /// or an ExtGState's `/Font` that `gs` sets, gives: its stock Helvetica, in
+    /// WinAnsiEncoding.
     #[must_use]
     pub fn stock(&self) -> Arc<Font> {
         let read = || {
-            let helvetica: Dict = dict! {
-                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-                "Encoding" => "WinAnsiEncoding",
-            };
+            let helvetica = Std14::Helvetica.dict();
             let read = Font::read(NoObjects, &helvetica, &Limits::DEFAULT, &mut 0, &mut ());
             Arc::new(read.expect("a font by name alone has no stream to decompress"))
         };
@@ -161,12 +159,12 @@ impl Fonts {
     }
 }
 
-/// The fonts one interpretation of content picks (`Tf`), by name in the resources
-/// they're picked from: each looked up once however often it's picked, and one
-/// written in the resources as a dictionary read once. So is one that doesn't read for
-/// a reason that's the caller's, whose `Err` is kept. Each is known by its place among
-/// them ([`FontId`]), which a graphics state can keep, so saving the state counts no
-/// reference to it.
+/// The fonts one interpretation of content picks (`Tf`, `gs`), by name in the
+/// resources they're picked from: each looked up once however often it's picked, and
+/// one written in the resources as a dictionary read once. So is one that doesn't read
+/// for a reason that's the caller's, whose `Err` is kept. Each is known by its place
+/// among them ([`FontId`]), which a graphics state can keep, so saving the state
+/// counts no reference to it.
 #[derive(Debug)]
 pub struct FontScope<'f> {
     fonts: &'f Fonts,
@@ -303,6 +301,11 @@ impl FontScope<'_> {
     /// another font.
     #[must_use]
     pub fn get(&self, font: FontId) -> &Font {
+        &self.picked[font.0 as usize]
+    }
+
+    /// [`FontScope::get`], as it's kept: shared.
+    pub(crate) fn shared(&self, font: FontId) -> &Arc<Font> {
         &self.picked[font.0 as usize]
     }
 

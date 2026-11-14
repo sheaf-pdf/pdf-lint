@@ -38,6 +38,7 @@ use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::name::{LocalName, Namespace, NamespaceError, ResolveResult};
 
+use crate::info::{Len, len};
 use crate::phases::phase;
 use crate::{Fault, HOPS, Limits, too_long};
 
@@ -55,8 +56,10 @@ const PDFVT: &str = "http://www.npes.org/pdfvt/ns/id/";
 /// What a packet claims: the first value of each, as written but for the
 /// white space round it, and an attribute's value normalized as XML has it.
 /// A packet's values needn't say anything, as `conformance=""` or `part="9"`,
-/// so a value is held as it is, and [`Claims::conformance`] reads it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// so a value is held as it is, and [`Claims::conformance`] reads it. Its
+/// `Debug` gives each value's length, not the value, which is the file's
+/// metadata and may be decrypted.
+#[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Claims {
     /// `part` in PDF/A's namespace: 3 for PDF/A-3.
@@ -274,8 +277,9 @@ impl fmt::Display for PdfUa {
     }
 }
 
-/// A claim whose value doesn't say what it's for.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// A claim whose value doesn't say what it's for. Its `Debug` gives the
+/// value's length, not the value, as [`Claims`]' does.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClaimError {
     /// A part that isn't a number.
@@ -296,7 +300,8 @@ pub enum ClaimError {
 }
 
 /// Why a packet was read no further. What it read up to there is the error's
-/// [`read`](Error::read), for a caller to take or leave.
+/// [`read`](Error::read), for a caller to take or leave. Its `Debug` holds
+/// none of the packet's text: [`Claims`]' and [`XmpWhy`]'s give lengths.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("XMP metadata reads no further than byte {at}: {why}")]
 #[non_exhaustive]
@@ -309,8 +314,9 @@ pub struct Error {
     pub why: XmpWhy,
 }
 
-/// What stopped a packet being read.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// What stopped a packet being read. Its `Debug` gives the XML reader's
+/// words by their length, not the words, which quote the packet.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum XmpWhy {
     /// It's longer than [`Limits::xmp_bytes`]: the rest isn't read, or, read
@@ -331,6 +337,52 @@ pub enum XmpWhy {
     /// data as what gives it says, in their words. Nothing is read.
     #[error("{0}")]
     Unreadable(Unreadable),
+}
+
+impl fmt::Debug for Claims {
+    /// Each value's length; not the values, which may be decrypted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Claims")
+            .field("pdfa_part", &len(&self.pdfa_part))
+            .field("pdfa_conformance", &len(&self.pdfa_conformance))
+            .field("pdfa_rev", &len(&self.pdfa_rev))
+            .field("pdfua_part", &len(&self.pdfua_part))
+            .field("pdfua_rev", &len(&self.pdfua_rev))
+            .field("pdfvt_version", &len(&self.pdfvt_version))
+            .finish()
+    }
+}
+
+impl fmt::Debug for ClaimError {
+    /// Which claim, and its value's length; not the value.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClaimError::Part { claim, value } => f
+                .debug_struct("Part")
+                .field("claim", claim)
+                .field("value", &Len(value.len()))
+                .finish(),
+            ClaimError::Level { value } => f
+                .debug_struct("Level")
+                .field("value", &Len(value.len()))
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for XmpWhy {
+    /// Which, and the XML reader's words by their length; not the words.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            XmpWhy::TooLong => f.write_str("TooLong"),
+            XmpWhy::TooDeep => f.write_str("TooDeep"),
+            XmpWhy::TooManyBindings => f.write_str("TooManyBindings"),
+            XmpWhy::Xml(words) => f.debug_tuple("Xml").field(&Len(words.len())).finish(),
+            XmpWhy::Unreadable(unreadable) => {
+                f.debug_tuple("Unreadable").field(unreadable).finish()
+            }
+        }
+    }
 }
 
 /// A claim's element being read, whose value is its text.

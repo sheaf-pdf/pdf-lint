@@ -3,7 +3,7 @@
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
 # `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz linearize` or `just fuzz check`, or:
+# `just fuzz linearize`, `just fuzz pdfs` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -71,11 +71,14 @@
 # and `splice_each`'s reads at its cap and a byte under; content that holds
 # an image a cap sized refused by every edit; and pairs of objects its
 # bytes choose the same as resources exactly where their digests' bytes
-# are, `Res::of` refusing exactly what holds data not in memory; which
-# three stable unit tests (`mutated_seeds_keep_every_promise`,
-# `random_fragments_keep_every_promise` and
-# `resources_chosen_are_both_the_same_and_apart`) run on mutated seeds,
-# random content and random pairs;
+# are, `Res::of` refusing of the objects it's given exactly what holds data
+# not in memory; and its bytes as a page's `/Contents` and the objects it
+# names, joined as a plain reading of PDFium's joins them, a stream whose
+# data doesn't decode as none, said; which four stable unit tests
+# (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`,
+# `resources_chosen_are_both_the_same_and_apart` and
+# `contents_chosen_come_to_each_answer`) run on mutated seeds, random
+# content, random pairs and random files;
 # `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
 # each walked the same whatever hears its faults, what a plain walk gives,
 # its nodes with neither `/Kids` nor entries, or both, said as it finds them,
@@ -89,7 +92,8 @@
 # streams' data, the same, and past a cap nothing read, and its claims, and
 # claims made of its text, written and read back, or refused, and
 # `pdf_semantics::fuzz::over`, a file's trees,
-# pages and metadata stream through a reading and the document it makes, which
+# pages, metadata stream and `/Info`, read typed by both rules, through a
+# reading and the document it makes, which
 # three stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a
@@ -109,10 +113,14 @@
 # `fonts` calls `pdf_fonts::fuzz::type1`, any bytes scanned as a Type 1 program,
 # holding no more than it was given, and under other caps the same or refused;
 # `pdf_fonts::fuzz::names`, an input's words read as glyphs' and fonts' names,
-# and its bytes as codes in each encoding; `fonts`, its parts read as a font, a
-# program among them; and `over`, as a file, each font in it the same; which four
+# and its bytes as codes in each encoding; `written`, its bytes as text in each
+# standard 14 font, its codes read back as it; `fonts`, its parts read as a font, a
+# program among them; `shown`, the input as a page's content, the strings it shows
+# in those fonts and in forms, the same over fonts kept and less under smaller caps
+# and a smaller budget; and `over`, as a file, each font in it the same; which five
 # stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_bytes_keep_every_promise`, `the_fonts_among_the_seeds_read`,
+# `the_contents_among_the_seeds_show_strings`,
 # `files_read_alike_through_a_reading_and_a_map`) run;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
@@ -123,10 +131,28 @@
 # `pdf_linearize::fuzz::over`, the same bytes as a file, laid out in the clear,
 # under its own encryption as it is and told to reuse RC4's keystreams, and
 # under a new one, and read back, what's listed as written at a keystream used
-# held to what it wrote, which a third (`what_is_written_reads_back_the_same`)
+# held to what it wrote, and under caps on its trees, refused where its page
+# tree is past them and its check telling it as not judged, which a third
+# (`what_is_written_reads_back_the_same`)
 # runs on mutated files, its new encryption drawn from the input and every IV
 # derived, so that an input writes the same bytes each run, which a fourth
 # (`what_is_written_of_an_input_is_the_same_bytes_each_time`) holds.
+# `pdfs` calls `pdfs::fuzz::read`, a file read through the facade under its
+# defaults, with faults kept, the same, and under small caps: its version,
+# catalog, `/Info`, claims, pages, each page's content joined within its cap
+# and its operations walked, its fonts and its text, which fails only as its
+# content does, and its linearization's verdict, holding only where it's
+# linearized; its file edited, a page added, and saved, written or refused;
+# and its document written in the clear and under a new
+# encryption, its key drawn from the input, read locked, each page's content
+# refused as locked, and unlocked by its password, read as in the clear; and
+# `pdfs::fuzz::write`, a new document of its first pages, their content
+# written again, saved whole, with a table, linearized and under a new
+# encryption, each read back as written; which four stable unit tests
+# (`the_seeds_keep_every_promise_and_reach_each`,
+# `the_seeds_write_documents_read_back_as_written`,
+# `mutated_seeds_keep_every_promise` and `random_bytes_keep_every_promise`)
+# run on its seeds, mutated seeds and random bytes.
 # The lopdf adapter's body, in its crate (pdf-linearize-lopdf), which is never
 # published, isn't here: a stable test of that crate
 # (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
@@ -170,6 +196,10 @@ pdf-fonts = { path = "../crates/pdf-fonts" }
 pdf-linearize = { path = "../crates/pdf-linearize", features = ["insecure-test-writer"] }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
+# With its defaults, as a user builds it, and its test writer, so the pdfs
+# target's new encryption is drawn from the input and every IV derived: an
+# input writes the same bytes each run, and a saved one reruns as it ran.
+pdfs = { path = "../crates/pdfs", features = ["insecure-test-writer"] }
 pdf-objects = { path = "../crates/pdf-objects" }
 # With its default features, so the semantics target fuzzes the clock's
 # reading of a count of seconds too.
@@ -257,6 +287,13 @@ bench = false
 [[bin]]
 name = "linearize"
 path = "fuzz_targets/linearize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdfs"
+path = "fuzz_targets/pdfs.rs"
 test = false
 doc = false
 bench = false

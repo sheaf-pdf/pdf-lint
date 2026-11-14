@@ -100,6 +100,11 @@ asked through a one-page PDF made around the case.
   points (`m`, `l`, `c`, each `h` after where it closes) and its dash
   array; an image's matrix and raw data; a text object's font, size and
   text; and each object's marks' `/MCID`s.
+- `contents`: a page's `/Contents` as written (`.contents`), and the objects
+  from 4 on (`.objects`), each as written between its `n 0 obj` and
+  `endobj`, each followed by a line `endobj`. The answer is the page's
+  objects, as `content`'s: what's drawn says which streams PDFium joined, and
+  in what order.
 - `number`, `hex`, `literal`, `name`: a word (`.word`) in content. A
   `number` is `re`'s second operand, its answer the value PDFium holds, or
   `not-a-number`; a `hex` or `literal` string is shown by `Tj` in Courier,

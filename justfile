@@ -4,7 +4,7 @@
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
 # pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts,
-# pdf-linearize and pdf-arlington support, from their Cargo.toml. Only the libraries promise one:
+# pdf-linearize, pdfs and pdf-arlington support, from their Cargo.toml. Only the libraries promise one:
 # the checker ships as a binary built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
@@ -16,6 +16,7 @@ semantics_msrv := `grep -m1 '^rust-version' crates/pdf-semantics/Cargo.toml | cu
 color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' -f2`
 fonts_msrv := `grep -m1 '^rust-version' crates/pdf-fonts/Cargo.toml | cut -d'"' -f2`
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
+pdfs_msrv := `grep -m1 '^rust-version' crates/pdfs/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 
 # The nightly the fuzz targets build on: `nightly`, or the toolchain
@@ -36,7 +37,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package linearize-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package linearize-package pdfs-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -58,7 +59,8 @@ fmt:
 # every workspace build; then pdf-fonts with Adobe's predefined CMaps and
 # its spans (`tracing`), which nothing else turns on, and with no feature at
 # all; then pdf-structure with its spans (`tracing`), which nothing else
-# turns on.
+# turns on; then pdfs as a user gets it, with no feature at all, and with
+# every feature it forwards, which nothing else turns on all at once.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -74,6 +76,9 @@ clippy:
     cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on, and the content
@@ -87,7 +92,9 @@ clippy:
 # engine, without its adapter, and with its spans, which only its tests
 # read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
 # only its tests read, and with no feature at all; then pdf-structure's
-# with its spans, which only those tests read.
+# with its spans, which only those tests read; then pdfs' as a user gets
+# it, without `image-ends`, which pdf-lint turns on, with no feature at all,
+# and with every feature it forwards but its test writer.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters
@@ -101,6 +108,9 @@ test:
     cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing
     cargo test --locked -p pdf-fonts --no-default-features
     cargo test --locked -p pdf-structure --features tracing
+    cargo test --locked -p pdfs
+    cargo test --locked -p pdfs --no-default-features
+    cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -225,7 +235,8 @@ fuzzing:
 # as they're published, then pdf-content-streams without `image-ends`,
 # which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
-# pdf-linearize's engine, without its adapter, then pdf-fonts with no feature.
+# pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
+# then pdfs as it's published.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
@@ -233,6 +244,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
 
 # Build this platform's release archive in dist/, and check it runs as
 # it's unpacked, as the release workflow does each
@@ -384,6 +396,12 @@ fonts-package: (_package "pdf-fonts" "pdf-content-streams" "pdf-filters")
 # published; `_package` says what's checked.
 linearize-package: (_package "pdf-linearize" "pdf-structure" "pdf-semantics" "pdf-filters")
 
+# Package pdfs as a publish would, pdf-filters, pdf-structure,
+# pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize beside it
+# while the versions it names aren't published; `_package` says what's
+# checked.
+pdfs-package: (_package "pdfs" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize")
+
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
 # a pinned build): a break the version doesn't allow fails.
@@ -488,6 +506,14 @@ linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features tracing
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize-lopdf
 
+# Test pdfs on its oldest supported Rust, which must be installed, as it's
+# published, with no feature, and with every feature it forwards but its test
+# writer.
+pdfs-msrv:
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --no-default-features
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
+
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:
     cargo +{{ arlington_msrv }} test --locked -p pdf-arlington
@@ -509,11 +535,12 @@ arlington-msrv:
 # pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
 # reading of a font, its program among them, on any parts and in a file;
 # `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
-# and any bytes as a file, laid out, read back and checked; or `check`, the reader
-# and the checker.
+# and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
+# through the facade, and written in the clear and encrypted, read locked and
+# unlocked; or `check`, the reader and the checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
-# `color`, `fonts` and `linearize` from those their own crates' fuzz modules make. The
+# `color`, `fonts`, `linearize` and `pdfs` from those their own crates' fuzz modules make. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'
 # SIMD, which `content` reaches (`just fuzz content 300 simd`); and
@@ -576,13 +603,18 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/linearize
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" linearize fuzz/corpus/linearize fuzz/seeds/linearize -- -dict=fuzz/linearize.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    pdfs)
+        PDFS_FUZZ_SEEDS="$PWD/fuzz/seeds/pdfs" cargo test --locked -q -p pdfs --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/pdfs
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" pdfs fuzz/corpus/pdfs fuzz/seeds/pdfs -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, pdfs or check" >&2
         exit 2
         ;;
     esac

@@ -223,6 +223,33 @@ pub enum Fault {
     /// text alone. It's as though it weren't written.
     #[error("a value in XMP metadata holds an element beside its text")]
     XmpMixed,
+    /// A document information dictionary that isn't a dictionary (7.5.5,
+    /// Table 15; 14.3.3): nothing in it is read.
+    #[error("the document information dictionary isn't a dictionary")]
+    InfoNotDictionary,
+    /// An entry of a document information dictionary that isn't a text
+    /// string, where Table 349 (14.3.3) has it one, a date among them
+    /// (7.9.4): it's read as none.
+    #[error("/{key} of the document information dictionary isn't a text string")]
+    InfoNotText {
+        /// Which entry.
+        key: &'static str,
+    },
+    /// A document information dictionary's date that doesn't read as one
+    /// (7.9.4; 14.3.3, Table 349): it's kept as its text
+    /// ([`Dated::Text`](crate::info::Dated::Text)).
+    #[error("/{key} isn't a date: {error}")]
+    InfoDate {
+        /// Which entry: `CreationDate` or `ModDate`.
+        key: &'static str,
+        /// Why it isn't one.
+        error: crate::date::Error,
+    },
+    /// A `/Trapped` that isn't the name `/True`, `/False` or `/Unknown`
+    /// (14.3.3, Table 349), as a boolean, which the table says it isn't:
+    /// it's read as none.
+    #[error("/Trapped isn't /True, /False or /Unknown")]
+    InfoTrapped,
 }
 
 /// What [`Fault::PageTreeParent`] says: the node that lists it, by its number,

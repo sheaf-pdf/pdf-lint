@@ -22,8 +22,13 @@
 //! the resources, under any caps on either. Marked content's cap and an
 //! inline color space's are held at their edges, and `splice_each`'s reads
 //! at its cap and a byte under; content that holds an image a cap sized is
-//! refused by every edit; and `Res::of` refuses exactly what holds data not
-//! in memory. With the `image-ends` feature, which the fuzz crate turns on,
+//! refused by every edit; and `Res::of` refuses of the objects it's given
+//! exactly what holds data not in memory. And its bytes as a page's
+//! `/Contents` and the objects it names, joined under the default cap and a
+//! small one, as a plain reading of PDFium's joins them: the same streams, an
+//! element that's no stream an empty one, and so a stream whose data doesn't
+//! decode, said, or refused by the same object for the same reason, or past
+//! the cap. With the `image-ends` feature, which the fuzz crate turns on,
 //! it's read with an inline image's DCT and CCITTFax data decoded to find
 //! where it ends, and its tokens tile it read by the stand-in too.
 

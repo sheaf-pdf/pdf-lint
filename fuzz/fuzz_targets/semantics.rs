@@ -15,9 +15,12 @@
 //! read, as a claim's text beside an element, never taken, and as a file's
 //! metadata stream through its streams' data, the same, and past a cap, nothing
 //! read; what it claims, and claims made of its text, written and read back as
-//! they are, or refused for a value that wouldn't; and read as a file, its
-//! trees, pages and metadata stream over a reading and the document it makes
-//! the same.
+//! they are, or refused for a value that wouldn't; its trailer's `/Info`, and
+//! each of its first objects, read as a document information dictionary by
+//! both rules, the same whatever hears its faults, a date kept as its text
+//! where one's told, and the same entries there by either; and read as a
+//! file, its trees, pages, metadata stream and `/Info` over a reading and the
+//! document it makes the same.
 
 #![no_main]
 

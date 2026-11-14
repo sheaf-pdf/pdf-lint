@@ -8,8 +8,8 @@ use std::io;
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Unreadable, Why};
+use pdf_semantics::catalog;
 use pdf_semantics::pages::{self, pages};
-use pdf_semantics::{Limits as TreeLimits, catalog};
 use pdf_structure::pdf_filters::Fault;
 use pdf_structure::read::{
     self, ByteSource, Reading, SectionFault, SectionRow, SectionRows, Unfiltered, Unwritten,
@@ -308,10 +308,9 @@ fn page_tree<S: ByteSource>(
     facts: &mut Facts,
 ) -> Result<(), Error> {
     // The walk lists no more pages than the check takes, nor visits more
-    // nodes, so a tree past that isn't walked whole first; its other caps
-    // are pdf-semantics' own.
-    let mut tree_limits = TreeLimits::DEFAULT;
-    tree_limits.pages = limits.pages;
+    // nodes, so a tree past that isn't walked whole first, and goes no deeper
+    // than the caller's cap.
+    let tree_limits = limits.trees();
     let trailer = reading.trailer().dict();
     let root = match catalog(reading, trailer) {
         Ok(Some(root)) => root,
@@ -379,7 +378,7 @@ fn page_tree<S: ByteSource>(
 /// stream's in its data ([`HintData::Unread`]), the sections' and the page
 /// tree's in [`Facts::unread`]. The caps are the reading's (`read::Limits`)
 /// and, on the page tree, [`Limits::pages`] on the pages and the nodes its
-/// walk reads, each, and pdf-semantics' defaults on its depth. A page tree's
+/// walk reads, each, and [`Limits::page_depth`] on its depth. A page tree's
 /// node in an object stream the reader doesn't decode, through filters it
 /// doesn't take or cut at its cap, the reader reads as damaged, so the tree
 /// is read without it, as the file's. A caller that holds the file read

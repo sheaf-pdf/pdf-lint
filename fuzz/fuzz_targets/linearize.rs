@@ -15,7 +15,10 @@
 //! where it's encrypted, the check of it clean, and each object listed as written
 //! at a keystream used one it wrote, or `out` as it was. Under its own encryption,
 //! what's refused at a keystream used is written when told to reuse them, and
-//! listed, and what both write is the same bytes.
+//! listed, and what both write is the same bytes. And the same file under caps
+//! on its trees the input picks: refused where its page tree is past them, and
+//! what it wrote in the clear checked under them, its page tree told as not
+//! judged where it's past them, and read as at the defaults where it isn't.
 
 #![no_main]
 

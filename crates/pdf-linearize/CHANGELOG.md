@@ -12,7 +12,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - `check`: a file's `check::Facts`, from any model's reader, held against each other. It gives a `check::Verdict` and tells each `check::Finding` to a `check::Sink`, with its clause, its place and a `check::Grade`.
 - `check::Grade::Unjudged`: what the reader didn't read for its own reason (`check::Unread`: no key, a cap, a filter it doesn't take), and what's past a cap of the check's own, told as not judged. It never makes a file not hold. `check::Verdict::judged_whole` says whether any part wasn't judged, whatever the sink.
 - With the `family` feature, on by default: `family::linearize` and `family::linearize_bytes`, a pdf-structure document or a file's bytes written as a linearized file, in the clear or encrypted. `family::check`, `family::facts`, `family::check_with_reading` and `family::facts_with_reading` read a file's facts from a pdf-structure reading.
-- `Limits`: caps on the numbers a file uses, its pages, the shared lists' entries and visits, and the entries hint tables can ask for.
+- `Limits`: caps on the numbers a file uses, its pages, the shared lists' entries and visits, and the entries hint tables can ask for. With `family`, `Limits::page_depth`, `tree_depth` and `tree_nodes` cap the page tree's and name trees' walks, pdf-semantics' defaults by default.
 - The `tracing` feature, off by default: a span over a plan, an assembly and each round of its first-page section, and a check, and with `family` over a document's linearizing and a file's facts, each stage and read within them. The `zlib-rs` feature: pdf-filters' zlib-rs backend, for `family::Options`.
 
 ### Security

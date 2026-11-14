@@ -39,8 +39,9 @@ predefined-cmaps = ["dep:hayro-cmap"]
 programs = ["dep:skrifa"]
 # Spans through `tracing`: a font read, and within it its program's opening,
 # its embedded CMap's and its `/ToUnicode`'s parsing, and a Type 3 font's
-# CharProcs. A code, a width, a string's text and a glyph's box have none.
-# Off by default; without it, none is compiled.
+# CharProcs; and a walk of the strings content shows. A code, a width, a
+# string's text and a glyph's box have none. Off by default; without it, none
+# is compiled.
 tracing = ["dep:tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in

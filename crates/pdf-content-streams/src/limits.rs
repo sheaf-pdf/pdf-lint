@@ -130,8 +130,9 @@ pub struct Limits {
     /// name binds: 16 by default. Past it, a dictionary or a category isn't
     /// read, and a name binds nothing that can be told by what it is, so
     /// the writer keeps clear of it. These are the only references this
-    /// crate follows itself: a color space's are pdf-color's to follow,
-    /// under [`Limits::color`].
+    /// crate follows in a row: [`Join::push_contents`](crate::Join::push_contents)
+    /// follows one, as PDFium does, and a color space's are pdf-color's to
+    /// follow, under [`Limits::color`].
     pub hops: usize,
 }
 
