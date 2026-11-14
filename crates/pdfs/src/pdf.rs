@@ -393,10 +393,10 @@ impl<S: ByteSource> Pdf<S> {
     /// What the file permits isn't held to here: opened by its user's
     /// password, a file that withholds changes is edited and saved all the
     /// same, and [`Document::decrypt`] saves it in the clear. The encryption
-    /// itself can't stop that, and ISO 32000-2 leaves honouring permissions
-    /// to what processes a file (7.6.4.1), here the caller, which reads
-    /// [`Pdf::encryption`]'s `permissions`, and which password opened it
-    /// (`by`), first.
+    /// itself can't stop that, and ISO 32000-2 asks what processes a file to
+    /// honour its permissions (7.6.4.1), which here is the caller, which
+    /// reads [`Pdf::encryption`]'s `permissions`, and which password opened
+    /// it (`by`), first.
     ///
     /// # Errors
     ///

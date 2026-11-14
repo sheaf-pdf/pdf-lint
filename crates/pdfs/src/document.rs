@@ -291,9 +291,9 @@ impl<'p> Document<'p> {
     /// file opened by its user's password alone, which withholds changes or
     /// copying ([`Encryption::Opened`](pdf_structure::Encryption::Opened)'s
     /// `permissions`), is edited, saved, and saved in the clear by this: the
-    /// encryption itself can't stop it, and ISO 32000-2 leaves honouring them
-    /// to what processes a file (7.6.4.1), here the caller, which reads them,
-    /// and which password opened the file (`by`), before it edits it.
+    /// encryption itself can't stop it, and ISO 32000-2 asks what processes a
+    /// file to honour them (7.6.4.1), which here is the caller, which reads
+    /// them, and which password opened the file (`by`), before it edits it.
     ///
     /// ```
     /// use pdfs::prelude::*;
