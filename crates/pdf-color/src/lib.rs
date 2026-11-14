@@ -1,45 +1,31 @@
-//! PDF's color spaces (ISO 32000-2, 8.6), read over any resolver of objects.
+//! PDF color space parser and component counter (ISO 32000-2, §8.6).
 //!
-//! - **Components as PDFium counts them** ([`components`]), as of
-//!   chromium/8125: what a reader of content needs of a space, as it sizes an
-//!   unfiltered inline image, so says where that image's data ends. It's the
-//!   count of any value at all, as PDFium makes it, and not of a space that's
-//!   well-formed by ISO's rules; no stream is decoded and no function evaluated.
-//! - **The spaces, typed, as ISO 32000-2 says them** ([`Space`]): a value's
-//!   [`Family`], its components, its base or alternate space and its colorants,
-//!   each departure a [`Fault`] told to pdf-objects'
-//!   [`Sink`](pdf_objects::fault::Sink), and looked for only for one that wants
-//!   them. A space read with a sink that wants faults, none told,
-//!   counts by [`Space::components`] as [`components`] counts it, where
-//!   [`counted`] meets no cap, but for a Pattern space over more than 16
-//!   components, which no clause refuses and PDFium does.
-//! - **What a resources dictionary names** ([`Spaces`], [`Named`]), reached as
-//!   PDFium reaches it, each key as it was read and where it was written, and
-//!   each name counted as [`counted`] counts its value
-//!   ([`Spaces::components`]), as a reader of content counts them. It's
-//!   PDFium's reading and tells nothing: an ISO check of a resources dictionary
-//!   reads the dictionary itself.
-//! - **Caps from one value** ([`Limits`]): how deep a space nests and how many
-//!   objects one is worth looking up, so a hostile file's cost per space has a
-//!   limit, and nothing panics. No cap covers a whole dictionary of them
-//!   ([`Limits::space_visits`] says what that can come to).
+//! `pdf-color` reads color spaces through any [`Resolve`](pdf_objects::Resolve) implementation
+//! (`&reading`, `&document`, or a closure) without decoding ICC profile streams, evaluating
+//! functions, or converting pixel values.
 //!
-//! Nothing here converts a color, opens an ICC profile, evaluates a function or
-//! writes a space: a space is pdf-objects' values, written as they are.
+//! # Core Concepts
 //!
-//! A resolver is given by value, so `&reading`, `&document` or a closure, and a
-//! `&dyn Resolve` too. What's read and what reads it are pdf-objects': its
-//! [`Object`](pdf_objects::Object)s, a [`Resolve`](pdf_objects::Resolve), an
-//! [`Unreadable`](pdf_objects::Unreadable) for a failed read and a
-//! [`Span`](pdf_objects::Span) for where something was written. pdf-objects is
-//! re-exported whole, and none of its items by name, so a caller names them,
-//! [`dict!`](pdf_objects::dict) and a sink of its own
-//! ([`Sink`](pdf_objects::fault::Sink)) through `pdf_color::pdf_objects`, at
-//! the version this crate takes, with no dependency of its own.
+//! - **PDFium-compatible component counts ([`components`], [`counted`]):** Counts components for
+//!   any `/ColorSpace` entry or inline-image color space array using PDFium's rules as of
+//!   chromium/8125, sizing unfiltered inline images in content streams even on malformed inputs.
+//! - **Resource dictionary lookup ([`Spaces`], [`Named`]):** Resolves a page or form's
+//!   `/ColorSpace` resource dictionary as PDFium reaches it and pairs each entry with its
+//!   component count ([`Spaces::components`]).
+//! - **Typed ISO 32000-2 spaces ([`Space`], [`Family`], [`Colorant`]):** Parses color space
+//!   definitions into typed families, component counts ([`Space::components`]), base/alternate
+//!   spaces, lookup tables, and spot/process colorants, reporting spec departures as [`Fault`]s
+//!   to a [`Sink`](pdf_objects::fault::Sink) (skipped when `()` is passed). On fault-free spaces
+//!   within [`Limits`], [`Space::components`] matches [`components`] (except for `Pattern` spaces
+//!   with >16 components).
+//! - **Per-space resource caps ([`Limits`]):** Bounds nesting depth and object visits per space
+//!   (`Limits::space_visits`) so cyclic or shared function graphs cannot cause exponential work.
+//!   Reader caps, locked files, and source I/O errors propagate as [`Unreadable`](pdf_objects::Unreadable).
+//!
+//! `pdf-objects` is re-exported at [`pdf_objects`] (`Object`, `Resolve`, `Span`, [`dict!`](pdf_objects::dict),
+//! and [`Sink`](pdf_objects::fault::Sink)).
 
-/// pdf-objects, whose values this crate reads, through whose resolvers, and
-/// to whose sinks it tells faults: named through it, they're the version
-/// this crate is built with.
+/// Re-export of `pdf-objects` for values, resolvers, spans, and fault sinks.
 pub use pdf_objects;
 
 pub use count::{Counted, components, counted};

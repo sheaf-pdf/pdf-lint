@@ -1,8 +1,8 @@
-//! A document's writing recipes, each a function over pdf-structure's
-//! document, so that a caller building one of its own can call it: what
-//! content draws with written once a file and bound in the resources it
-//! goes with, a page's dictionary, a standard 14 font, and claims as XMP. A
-//! [`Document`](crate::Document) calls each with its defaults.
+//! Standalone document-building helpers over [`pdf_structure::Document`].
+//!
+//! [`Document`](crate::Document) delegates to these functions when deduplicating
+//! resources, assembling page dictionaries, creating Standard 14 font resources,
+//! and writing XMP conformance claims.
 
 use std::collections::HashMap;
 

@@ -1,4 +1,4 @@
-//! How a file is opened: the options, and the two ways in.
+//! Opening PDF files and configuring reader behavior.
 
 use std::fmt;
 #[cfg(any(unix, windows))]
@@ -16,24 +16,19 @@ use crate::limits::Limits;
 use crate::pdf::Pdf;
 use crate::phases::phase;
 
-/// How a file is opened and read: by which passwords where it's encrypted,
-/// under which [`Limits`], by which rules a page tree is walked and text
-/// decoded, how a damaged file is read, which Flate backend its streams
-/// inflate on, and whether its faults are looked for. A caller sets them on a
-/// copy of [`Options::DEFAULT`] (`options.passwords = &given`, say), as more
-/// may come.
+/// Options controlling how a PDF file is opened and read.
 ///
-/// The defaults are a viewer's, PDFium's: a damaged file read as PDFium reads
-/// it, its page tree walked and its text decoded by PDFium's rules, its Flate
-/// streams inflated on zlib-rs as PDFium's are on zlib, so that a damaged
-/// stream decodes as far as PDFium's does, and no fault looked for, so that
-/// none is paid for. A checker's are one field each: `Recovery::Verified`,
-/// `Rules::Iso`, `Faults::Kept`, `Backend::MinizOxide`.
+/// Customize options by mutating a copy of [`Options::DEFAULT`] (for example,
+/// `options.passwords = &passwords;`).
 ///
-/// Its `Debug` gives how many passwords there are, not them; and two are
-/// never compared, as passwords aren't.
+/// By default, `Options::DEFAULT` uses viewer-compatible (PDFium) behavior:
+/// [`Recovery::Pdfium`] for damaged files, [`Rules::Pdfium`] for page trees and
+/// text decoding, [`Backend::ZlibRs`] for Flate decompression, and
+/// [`Faults::Off`] for zero-overhead silent parsing. For strict spec validation,
+/// set `Recovery::Verified`, `Rules::Iso`, `Faults::Kept`, and
+/// `Backend::MinizOxide`.
 ///
-/// A checker's reading, with its faults kept:
+/// `Debug` prints only the password count, never the passwords themselves.
 ///
 /// ```
 /// use pdfs::Options;

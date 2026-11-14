@@ -1,8 +1,8 @@
-//! A file's recipes, each a function over pdf-structure's reading, so that
-//! a caller with a reading of its own, read under its own options, can call
-//! it: what version the file is, what it says of itself and claims, and
-//! whether its linearization holds. A [`Pdf`](crate::Pdf) calls each with its
-//! file's defaults.
+//! Standalone file-level inspection functions over [`pdf_structure::Reading`].
+//!
+//! [`Pdf`](crate::Pdf) methods delegate to these functions using its configured
+//! rules and limits. Call them directly when you manage your own [`Reading`]
+//! (version resolution, `/Info` metadata, XMP claims, and linearization checks).
 
 use pdf_linearize::check::{self, Verdict};
 use pdf_objects::fault::Sink;

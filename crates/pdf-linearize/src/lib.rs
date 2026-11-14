@@ -1,64 +1,53 @@
-//! Lay out PDF files for reading over a network (ISO 32000-2, Annex F), and
-//! check a file that says it's laid out so. The engine has no object model
-//! and does no I/O: a caller describes its objects as plain data, from
-//! whatever model holds them, and writes their bodies itself.
+//! Plan, assemble, and validate linearized ("Fast Web View") PDF files (ISO 32000-2, Annex F).
 //!
-//! - **Plan a file's order** ([`plan()`]): a [`Graph`], each object's id and
-//!   what it refers to, the pages and what's wanted at open, becomes a
-//!   [`Plan`], the file's order, its new numbers and its object streams
-//!   (F.3). [`plan::page_uses`] and [`plan::group()`] group objects by the
-//!   pages that use them, with no plan.
-//! - **Assemble the bytes around the bodies** ([`assemble`]): from the
-//!   bodies' lengths, a [`Layout`], whose [`pieces`](Layout::pieces) say what
-//!   comes next in the file. Its own streams go through a closure the caller
-//!   gives, so no filter or key is here.
-//! - **Read and write hint tables** ([`hint`]): each of F.4's as a typed
-//!   value, [`hint::tables`] reading any bytes.
-//! - **Check a file's facts** ([`check()`]): the [`check::Facts`] of a file,
-//!   as any model's reader gives them, to a [`check::Verdict`], each thing
-//!   wrong a [`check::Finding`] with its [`check::Grade`]. What the reader
-//!   didn't read for its own reason ([`check::Unread`]), and what's past a
-//!   cap of the check's own, is told as not judged, never as the file's.
+//! `pdf-linearize` provides a pure, model-independent layout and validation engine alongside a
+//! turnkey `family` adapter (enabled by default) for `pdf-structure` and `pdf-semantics`.
+//!
+//! # Core Concepts
+//!
+//! - **Plan file order ([`plan()`]):** Describe objects, references, pages, and open-time targets
+//!   in a [`Graph`] to compute a [`Plan`] specifying Annex F.3 file order, renumbered object IDs,
+//!   and object-stream groupings ([`plan::page_uses`] and [`plan::group()`] also group objects by
+//!   page without full linearization).
+//! - **Assemble around serialized bodies ([`assemble`]):** Pass serialized body lengths to build
+//!   a [`Layout`] whose [`pieces`](Layout::pieces) interleave padded linearization dictionaries,
+//!   cross-reference sections, hint streams, and caller-provided bodies. Stream compression and
+//!   encryption run through a caller-supplied closure.
+//! - **Read and write hint tables ([`hint`]):** Encode and decode Annex F.4 bit-packed hint
+//!   tables ([`hint::tables`]).
+//! - **Validate linearized files ([`check()`]):** Check [`check::Facts`] extracted by any reader
+//!   into a [`check::Verdict`], reporting [`check::Finding`] diagnostics graded by
+//!   [`check::Grade`]. Reader caps, missing passwords, or unsupported filters ([`check::Unread`])
+//!   are reported as unjudged rather than file errors.
 #![cfg_attr(
     feature = "family",
-    doc = "- **Linearize a document, or check a file read** ([`family`], a default"
+    doc = "- **Turnkey `pdf-structure` integration ([`family`], enabled by default):**"
 )]
 #![cfg_attr(
     feature = "family",
-    doc = "  feature): a pdf-structure document or a file's bytes written as a"
+    doc = "  Linearize a `Document` or PDF byte slice (plain or encrypted) and extract or"
 )]
 #![cfg_attr(
     feature = "family",
-    doc = "  linearized file, in the clear or encrypted, and a file's facts read."
+    doc = "  validate `Facts` directly from a `Reading`."
 )]
 //!
-//! Its caps are one value, [`Limits`]: past one, a plan or a table is
-//! refused, and the check says what it didn't judge. With `family`, the
-//! page tree's and name trees' walks are under it too. Nothing panics on any
-//! graph, any hint table's bytes or any facts. pdf-objects is re-exported
-//! whole, and with `family` pdf-structure and pdf-semantics are too, so
-//! their types are named through them at the versions this crate is built
-//! with.
+//! Resource usage is bounded by [`Limits`] across planning, hint decoding, validation, and
+//! `family` tree walks without panicking on untrusted input. `pdf-objects` is re-exported at
+//! [`pdf_objects`] (and with `family`, `pdf-structure` and `pdf-semantics` are re-exported too).
 //!
-//! # Features
+//! # Cargo Features
 //!
-//! - **`family`**, on by default: pdf-structure's documents and readings.
-//!   Without it, the engine takes pdf-objects, thiserror and bitstream-io
-//!   alone.
-//! - **`zlib-rs`**, off by default: pdf-filters' zlib-rs backend, through
-//!   pdf-structure.
-//! - **`tracing`**, off by default: a span at `debug` over a plan, an
-//!   assembly and each round of its first-page section, and a check; with
-//!   `family`, over a document's linearizing and a file's facts, each stage
-//!   and read a span within them. A span's fields are numbers, never a byte
-//!   of a file. An object, a page, a table's entry and a finding have none.
-//! - **`insecure-test-writer`**, off by default, for fuzzing, with `family`:
-//!   pdf-structure's test writer, which draws a new file's key from a seeded
-//!   generator and derives every IV, so a fuzz input writes the same bytes
-//!   each run. It's never for a document's protection, and a build that
-//!   ships leaves it off.
+//! - **`family`** *(default)*: Enables integration with `pdf-structure` and `pdf-semantics`.
+//! - **`zlib-rs`** *(optional)*: Enables the `zlib-rs` Flate backend via `pdf-structure`.
+//! - **`tracing`** *(optional)*: Emits numeric `tracing` spans over planning, assembly,
+//!   validation, and `family` reads/writes.
+//! - **`insecure-test-writer`** *(optional)*: Deterministic encryption keys and IVs for fuzzing.
+//!   Never enable in production builds.
 //!
-//! A plan of two pages that share a font, and the bytes around its bodies:
+//! # Example
+//!
+//! Plan two pages sharing a font and assemble the linearized bytes around their bodies:
 //!
 //! ```
 //! use std::convert::Infallible;

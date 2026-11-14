@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "The workspace's tests' PDF files, written from objects, and qpdf run as a second reader: never published"
+description = "Synthetic PDF test-file builders and qpdf oracle helpers for workspace tests (unpublished)"
 # The workspace's own: every crate whose tests use it takes it by its path
 # alone, a dev-dependency, which a published package leaves out.
 publish = false

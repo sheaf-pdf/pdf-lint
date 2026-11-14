@@ -1,61 +1,49 @@
-//! Read PDF content streams (ISO 32000-2, 7.8.2) as PDFium reads them, as
-//! of chromium/8125, write them, and take ranges out of them. No file is
-//! read here: the caller gives a page's streams and what its resources
-//! hold, or a reader of the file to take them from.
+//! PDF content stream lexer, operator parser, page analyzer, writer, and byte-preserving splicer
+//! (ISO 32000-2, §7.8.2), matching PDFium's parsing rules as of chromium/8125.
 //!
-//! - **Read** a stream's tokens ([`tokens`](fn@tokens)) and operations
-//!   ([`operations`](fn@operations)), each with its range and its bytes as
-//!   written, and an [`Operand`]'s value when it's asked for ([`name`],
-//!   [`object`]).
-//! - **Find where an inline image ends** ([`InlineImage`]) as PDFium finds
-//!   it. An unfiltered image ends at its size, counted from its color
-//!   space's components ([`ResCx::read`]). Flate and LZW data is decoded
-//!   through pdf-filters to where PDFium's decoders stop. DCT and CCITTFax
-//!   data is decoded with the `image-ends` feature, where a reading asks
-//!   ([`Limits::coded_ends`]).
-//! - **Read a page's streams as one** ([`Concat`], [`Join`],
-//!   [`Join::push_from`]), each place mapped back to its stream ([`Pos`],
-//!   [`SpanAcross`]), and a page's `/Contents` whole as PDFium reads it
-//!   ([`Join::push_contents`]), a stream whose data doesn't decode joined as
-//!   none and said ([`Concat::undecoded`]), where PDFium reads it as written.
-//! - **Know what each operator is** ([`Operator`]) and where it may be used
-//!   ([`State`]).
-//! - **Check a page**: its `q`/`Q` balance ([`balance`](fn@balance)), its
-//!   marked content ([`marked`](fn@marked)) and the resource names it uses
-//!   ([`names_used`], [`kept`]).
-//! - **See where ISO 32000-2 reads content otherwise** ([`fault`]), told to
-//!   a sink you give.
-//! - **Write content** ([`ContentWriter`]), its resources ([`Res`]) named
-//!   when it's finished, clear of what a resources dictionary binds
-//!   ([`Reserved`]).
-//! - **Take ranges out of a page** ([`splice`](fn@splice), [`splice_each`],
-//!   [`without_keys`]), only where nothing drawn after them can change.
+//! `pdf-content-streams` operates on decoded stream bytes and resource dictionaries (or any
+//! `Streams` / `Resolve` provider) without performing file I/O directly.
 //!
-//! Reading is bounded by [`Limits`], each cap met before the work it
-//! bounds, and it never panics on content. A `Debug` never prints a
-//! string's or an image's bytes. pdf-objects and pdf-color are re-exported
-//! whole, so their types are named at the versions this crate is built
-//! with.
+//! # Core Concepts
 //!
-//! # Features
+//! - **Tokens & operations ([`tokens`](fn@tokens), [`operations`](fn@operations), [`Operand`]):**
+//!   Lexes tokens and operator/operand sequences with byte spans, deferring operand decoding until
+//!   requested ([`name`], [`object`]). [`Operator`] and [`State`] type ISO 32000-2 Annex A
+//!   operators and graphics-object state transitions, while [`fault`] reports ISO 32000-2
+//!   departures to a caller-supplied sink.
+//! - **Inline images ([`InlineImage`], [`ResCx`]):** Sizes unfiltered inline images via resource
+//!   color space component counts ([`ResCx::read`]), decodes Flate and LZW inline images via
+//!   `pdf-filters` to PDFium's stop point, and optionally decodes DCT and CCITTFax ends with the
+//!   `image-ends` feature ([`Limits::coded_ends`]).
+//! - **Multi-stream pages ([`Join`], [`Concat`]):** Joins a page's `/Contents` streams
+//!   ([`Join::push_from`], [`Join::push_contents`]) while mapping spans back to individual streams
+//!   ([`Pos`], [`SpanAcross`]) and recording undecodable streams ([`Concat::undecoded`]).
+//! - **Page analysis ([`balance`](fn@balance), [`marked`](fn@marked), [`names_used`], [`kept`]):**
+//!   Analyzes `q`/`Q` balance, marked-content sequences, and referenced resource names.
+//! - **Writing & splicing ([`ContentWriter`], [`splice`](fn@splice), [`splice_each`], [`without_keys`]):**
+//!   Writes content streams with collision-free deferred resource naming ([`Res`], [`Reserved`]),
+//!   and removes byte ranges from existing streams only when downstream graphics state is
+//!   unaffected.
 //!
-//! All off by default:
+//! All passes enforce [`Limits`] up front without panicking, and `Debug` implementations never
+//! include raw string or image bytes. `pdf-objects` and `pdf-color` are re-exported at
+//! [`pdf_objects`] and [`pdf_color`].
 //!
-//! - **`image-ends`**: DCT and CCITTFax data's ends found by decoding it,
-//!   on zune-jpeg and hayro-ccitt, where a reading asks for it.
-//! - **`simd`**: the dependencies' SIMD, picked as they run by what the CPU
-//!   has. Nothing read or digested changes. The `unsafe` code it turns on
-//!   is theirs.
-//! - **`tracing`**: a span over each of a page's passes ([`balance`],
-//!   [`marked`](fn@marked), [`names_used`], [`kept`]), its edits
-//!   ([`splice`](fn@splice), [`splice_each`] and each of its checks,
-//!   [`without_keys`], [`Spliced::streams`]), the writer's names
-//!   ([`ContentWriter::named`]) and a resources dictionary's reading
-//!   ([`ResCx::read`], [`Reserved::read`]). Reading tokens and operations
-//!   has none, as its loop is the caller's. A span's fields are lengths
-//!   and counts, never content.
+//! # Cargo Features
 //!
-//! A page's two streams, taken from a reader of the file and read as one:
+//! All optional and disabled by default:
+//!
+//! - **`image-ends`**: Decodes DCT (`zune-jpeg`) and CCITTFax (`hayro-ccitt`) inline images when
+//!   requested via [`Limits::coded_ends`].
+//! - **`simd`**: Enables runtime SIMD acceleration in `memchr`, `twox-hash`, and `zune-jpeg`.
+//! - **`tracing`**: Emits numeric `tracing` spans over page passes ([`balance`],
+//!   [`marked`](fn@marked), [`names_used`], [`kept`]), splices ([`splice`](fn@splice),
+//!   [`splice_each`], [`without_keys`], [`Spliced::streams`]), [`ContentWriter::named`], and
+//!   resource reads ([`ResCx::read`], [`Reserved::read`]).
+//!
+//! # Example
+//!
+//! Join two page content streams from a reader and inspect operations, balance, and marked content:
 //!
 //! ```
 //! use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};

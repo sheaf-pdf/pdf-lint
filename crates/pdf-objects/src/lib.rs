@@ -1,87 +1,46 @@
-//! PDF's objects (ISO 32000-2, 7.3), as a reader read them, to edit and
-//! to write: owned, each value with where it was written when the reader
-//! knows, and each dictionary as written, in order and with any key
-//! written twice.
+//! Owned PDF syntax objects, parser, serializer, and cross-crate traits (ISO 32000-2, §7.3).
 //!
-//! - **Where each value was written:** an [`Object`] is a [`Value`] and
-//!   its [`Span`], a run of the file's bytes or of an object stream's
-//!   decoded data, so what reads it can point at the bytes it's about.
-//! - **Dictionaries as written:** a [`Dict`] keeps its entries in order,
-//!   a key written twice and each key's span among them; a lookup takes a
-//!   key's last entry, as readers do, and [`Dict::duplicates`] gives the
-//!   others.
-//! - **Edits that say what they changed:** a value is changed through
-//!   [`Object::value_mut`] or an `as_*_mut` accessor, each an edit, which
-//!   drops its span and the span of each value that holds it, so a value
-//!   that still has a span is still what its bytes say;
-//!   [`Object::as_written_mut`] keeps it, for a reader that turns a value
-//!   into what the same bytes stand for, as decrypting a string does.
-//!   [`Object::renumber`] names a value's references anew, an edit of each
-//!   it changes, and [`Object::unplace`] drops every place in a value, for
-//!   one put among another file's objects.
-//! - **A stream's data** ([`Data`]): where it was written, or its bytes.
-//! - **Strings as their bytes:** a [`Str`] is its bytes, its escapes
-//!   decoded; or text a reader decoded without saying from which encoding,
-//!   or ciphertext it didn't decrypt, where what depends on the bytes
-//!   can't be told. Beside it, a string keeps its [`Form`], literal or
-//!   hex, as written.
-//! - **Text strings decoded by the spec, or by PDFium** ([`text`]): UTF-16BE
-//!   or UTF-8 after their byte order marks, PDFDocEncoding without one, and
-//!   where a string departs from the spec, said. By PDFium's rules, as of
-//!   chromium/8125 ([`text::decode_with`]), language escapes come out, and
-//!   UTF-16LE's mark and bad UTF-8 read as PDFium reads them.
-//! - **Text strings written** ([`text::encode`], [`Object::text`]): as they
-//!   are where PDFDocEncoding reads those bytes back so, else UTF-16BE; or
-//!   in an encoding the caller chooses, or refused ([`text::encode_as`]).
-//! - **Versions** ([`Version`]), read from a header's or a catalog's text,
-//!   in order.
-//! - **A parser** ([`parse`]), on pdf-tokenizer: a value, or an indirect
-//!   object, from a file's bytes, a window of them that says when more of
-//!   the file could change what it read ([`parse::Parser::window`]), or an
-//!   object stream's decoded data, each value placed; what it reads past
-//!   said to a [`parse::Sink`], which `()` drops; a stream's two extents,
-//!   by its `/Length` and up to `endstream`, both given, for the caller to
-//!   choose its data from; and caps on how deeply values nest and how many
-//!   one call reads ([`Limits`]). It reads by ISO 32000-2's lexical rules,
-//!   or by PDFium's ([`Rules`](pdf_tokenizer::Rules),
-//!   [`parse::Parser::rules`]), each token then read as PDFium reads it, and
-//!   a fault said where ISO 32000-2 reads it otherwise.
-//! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
-//!   indirect object, which the parser reads back as the same value,
-//!   under limits that take in its count of values, and a stream as an
-//!   indirect object: a real in its shortest form, names and strings byte
-//!   by byte, a dictionary's every entry; and what it can't write as the
-//!   value refused, with nothing written. An encrypted file's indirect
-//!   objects are written through an encryptor ([`serialize::Encrypt`]),
-//!   which every string and stream's data passes through as it's written,
-//!   given the object's number and generation, but what it leaves in the
-//!   clear; `()` encrypts nothing. Through a renumbering
-//!   ([`serialize::Renumber`]), each reference is written as it names it,
-//!   for a file whose objects are written at numbers other than those
-//!   they're held at, the value unchanged; `()` names each as it is.
-//! - **References resolved** ([`Resolve`]): what gives the indirect object
-//!   a reference names, a reader's or a document in memory, or any closure
-//!   from an [`ObjectId`] to an object, so that what follows references
-//!   reads through any of them, and why it gives none where it can say
-//!   ([`Resolve::try_resolve`], [`Unreadable`]); and walked
-//!   ([`Object::references`]), a value's in the order written, with a stack
-//!   of the walk's own.
-//! - **A stream's data, decoded** ([`Streams`]): what gives it, decrypted
-//!   and decoded through its filters, as a viewer takes it, a reader's or
-//!   a document's, at most a limit the caller asks for, lent where the
-//!   reader holds it, and why it gives none, in the same words as a
-//!   resolver's ([`Why`]); and [`WithStreams`], a resolver and a function
-//!   as one, for what has its streams some other way.
-//! - **Faults, told with where they are** ([`fault`]): one
-//!   [`fault::Sink`] and one [`fault::Place`] for every reader of a file's
-//!   objects, each reader's faults a type of its own, so that one sink can
-//!   take several readers' and `()` drops them and wants none, so none is
-//!   looked for. Three keep a sink of their own, as what they tell isn't
-//!   placed by an object, each saying why: the parser's
-//!   ([`parse::Sink`]), a content stream's reader's, and a linearized
-//!   file's check's.
+//! `pdf-objects` represents PDF values in memory while preserving byte spans and exact
+//! dictionary structure for diagnostics and lossless round-tripping, alongside traits
+//! (`Resolve`, `Streams`, `fault::Sink`) shared across higher-level crates.
 //!
-//! [`dict!`] builds a dictionary from keys and values.
+//! # Core Concepts
+//!
+//! - **Span-aware values ([`Object`], [`Value`], [`Span`]):** Every parsed [`Object`] pairs a
+//!   [`Value`] with an optional [`Span`] pointing to its source bytes in the file or inside a
+//!   decoded object stream. Mutating a value via [`Object::value_mut`] or `as_*_mut` clears the
+//!   span on the modified value and its containers, whereas [`Object::as_written_mut`] updates
+//!   in-place representations (such as decrypting a string) while preserving its span.
+//!   [`Object::renumber`] rewrites indirect references, and [`Object::unplace`] strips all spans
+//!   when moving an object between files.
+//! - **Exact dictionaries ([`Dict`]):** Preserves entry order, key spans, and duplicate keys.
+//!   Standard lookups return the last occurrence of a key (matching PDF viewers), while
+//!   [`Dict::duplicates`] exposes shadowed entries for linting. Use [`dict!`] to construct
+//!   dictionaries ergonomically.
+//! - **Strings and text ([`Str`], [`Form`], [`text`]):** [`Str`] stores raw decoded bytes (plus
+//!   whether the literal or hex [`Form`] was used) or marks strings whose encoding/encryption
+//!   state is unknown. [`text`] decodes and encodes PDF text strings (PDFDocEncoding, UTF-16BE,
+//!   and UTF-8 with BOM) under either ISO 32000-2 rules or PDFium's rules as of chromium/8125
+//!   ([`text::decode_with`], [`text::encode`], [`text::encode_as`], [`Object::text`]).
+//! - **Streams ([`Stream`], [`Data`]):** Stores a stream's dictionary alongside either a byte
+//!   range in the source file (`Data::At`) or owned in-memory bytes (`Data::Bytes`).
+//! - **Parsing and serialization ([`parse`], [`serialize`]):**
+//!   - [`parse`] parses direct objects, indirect objects, and windowed byte slices
+//!     ([`parse::Parser::window`]) under [`Limits`] and either ISO 32000-2 or PDFium lexical
+//!     [`Rules`](pdf_tokenizer::Rules) ([`parse::Parser::rules`]), reporting syntax anomalies to
+//!     a [`parse::Sink`].
+//!   - [`serialize`] formats direct and indirect objects back into canonical PDF syntax, with
+//!     pluggable on-the-fly encryption ([`serialize::Encrypt`]) and reference renumbering
+//!     ([`serialize::Renumber`]).
+//! - **Cross-crate traits ([`Resolve`], [`Streams`], [`fault`]):**
+//!   - [`Resolve`] resolves an [`ObjectId`] to `&Object` (implemented for file readers,
+//!     in-memory documents, and `Fn(ObjectId) -> Option<&Object>` closures), with
+//!     [`Resolve::try_resolve`] distinguishing missing objects (`Ok(None)`) from unreadable ones
+//!     (`Err(Unreadable)`).
+//!   - [`Streams`] decodes and decrypts stream data up to a caller-supplied byte limit
+//!     ([`WithStreams`] pairs a resolver with a stream-decoding closure).
+//!   - [`fault::Sink`] and [`fault::Place`] provide zero-cost when-disabled (`()`) diagnostic
+//!     reporting across domain crates.
 
 pub mod fault;
 #[cfg(any(test, fuzzing))]
@@ -96,35 +55,30 @@ pub mod version;
 
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 pub use parse::Limits;
-/// pdf-tokenizer, whose [`Rules`](pdf_tokenizer::Rules) the parser
-/// ([`parse::Parser::rules`]) and [`text::decode_with`] read by: named
-/// through it, they're the version this crate is built with.
+/// Re-export of `pdf-tokenizer` for lexical [`Rules`](pdf_tokenizer::Rules) selection.
 pub use pdf_tokenizer;
 pub use streams::{Streams, WithStreams};
 pub use version::Version;
 
-/// What gives the indirect objects a value's references name: a file's,
-/// read or in memory. None for an object it hasn't, which a reference to it
-/// reads as: null (ISO 32000-2, 7.3.10).
+/// Resolves indirect [`ObjectId`] references to borrowed [`Object`]s.
 ///
-/// The objects' lifetime is the trait's, not `&self`'s, so that a closure
-/// that gives borrows of its own is one: every `Fn(ObjectId) ->
-/// Option<&Object>` is, a `dyn Fn` and a reference or a box of one among
-/// them. A type that holds the objects implements it for a reference to
-/// itself.
+/// Missing objects return `None`, which PDF treats as the `null` object (ISO 32000-2, §7.3.10).
+/// The returned lifetime `'o` is tied to the trait rather than `&self`, allowing any closure
+/// `Fn(ObjectId) -> Option<&'o Object>` as well as reader/document references to implement
+/// `Resolve<'o>`.
 ///
 /// ```
 /// use std::collections::BTreeMap;
 ///
 /// use pdf_objects::{Object, ObjectId, Resolve};
 ///
-/// // A closure over a file's objects.
+/// // A closure over a map of objects.
 /// let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(7))]);
 /// let resolve = |id: ObjectId| objects.get(&id);
 /// assert_eq!(resolve.resolve(ObjectId::new(1, 0)).and_then(Object::as_integer), Some(7));
 /// assert!(resolve.resolve(ObjectId::new(2, 0)).is_none());
 ///
-/// // A type of its own, by reference.
+/// // A custom container implementing Resolve by reference.
 /// struct File(BTreeMap<ObjectId, Object>);
 /// impl<'o> Resolve<'o> for &'o File {
 ///     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
@@ -135,48 +89,45 @@ pub use version::Version;
 /// assert_eq!((&file).resolve(ObjectId::new(1, 0)), objects.get(&ObjectId::new(1, 0)));
 /// ```
 ///
-/// [`Resolve::resolve`] doesn't say why it gives none, and
-/// [`Resolve::try_resolve`] does, where the resolver knows: a reader's and a
-/// document's do. A closure can't say, so one over a reader loses the reason
-/// and the reader's own should be given where the reason matters.
+/// Use [`Resolve::try_resolve`] when you need to distinguish an absent object (`Ok(None)`) from
+/// an unreadable object (`Err(Unreadable)`). Note that wrapping a reader in a closure erases
+/// error reasons; pass `&reading` or `&document` directly where failure reasons matter.
 pub trait Resolve<'o> {
-    /// Object `id`; none when there's none to give: the file hasn't it, or
-    /// it doesn't read.
+    /// Looks up `id`, returning `None` if the object is absent or unreadable.
     #[must_use]
     fn resolve(&self, id: ObjectId) -> Option<&'o Object>;
 
-    /// Object `id`; none when the file hasn't it; or why it doesn't read.
-    /// By default what [`Resolve::resolve`] gives, for a resolver that can't
-    /// say why.
+    /// Looks up `id`, returning `Ok(None)` if absent or `Err(Unreadable)` if present but
+    /// unreadable.
+    ///
+    /// Defaults to `Ok(self.resolve(id))` for resolvers (such as closures) that do not track
+    /// failure reasons.
     ///
     /// # Errors
     ///
-    /// [`Unreadable`] where the file has object `id` and it doesn't read,
-    /// saying why ([`Why`]), never [`Why::Filter`] or [`Why::Detached`],
-    /// which only a stream's data is ([`Streams::decoded`]); by default,
-    /// never.
+    /// Returns [`Unreadable`] when `id` exists in the source but cannot be read (never with
+    /// [`Why::Filter`] or [`Why::Detached`], which apply only to [`Streams::decoded`]).
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         Ok(self.resolve(id))
     }
 }
 
-/// Why a resolver gives no object for a number the file has
-/// ([`Resolve::try_resolve`]), or what gives a stream's data none of it
-/// ([`Streams::decoded`]).
+/// Error returned when an indirect object or stream exists in the file but cannot be read
+/// ([`Resolve::try_resolve`], [`Streams::decoded`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 #[error("{message}")]
 pub struct Unreadable {
-    /// The object.
+    /// Identifier of the unreadable object or stream.
     pub id: ObjectId,
-    /// What kind of failure it is.
+    /// High-level failure category.
     pub why: Why,
-    /// What the reader said of it, the whole message.
+    /// Human-readable diagnostic message from the underlying reader.
     pub message: String,
 }
 
 impl Unreadable {
-    /// Object `id` doesn't read, for `why`, as `message` says.
+    /// Creates an [`Unreadable`] error for `id` with category `why` and diagnostic `message`.
     #[must_use]
     pub fn new(id: ObjectId, why: Why, message: impl Into<String>) -> Unreadable {
         Unreadable {
@@ -187,45 +138,27 @@ impl Unreadable {
     }
 }
 
-/// What kind of failure an [`Unreadable`] is, so that a caller can decide
-/// what to do without knowing a reader's own errors.
+/// Failure category for [`Unreadable`], allowing callers to handle errors without depending on
+/// a specific reader's error type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Why {
-    /// What's written there isn't that object: it doesn't parse, or the file
-    /// doesn't lead to it, or doesn't hold it as it says.
+    /// Syntax, offset, or container corruption prevented reading the object or stream.
     Damaged,
-    /// It's past the limit the caller asked for, the `limit` of
-    /// [`Streams::decoded`]: data longer than that isn't given, whatever
-    /// the reader's own caps. Only what gives a stream's data says it; a
-    /// resolver never does. Past a cap of the reader's is [`Why::Capped`].
+    /// Decoded stream output exceeded the caller-requested `limit` in [`Streams::decoded`].
     Limit,
-    /// It's past a cap the reader reads under, which no caller asked for in
-    /// this call: nested deeper, or of more values, than the reader parses
-    /// an object; a stream's data longer, or through more filters, than it
-    /// decodes; a chain of references longer than it follows. A resolver
-    /// says it of an object, and what gives a stream's data says it of that.
-    /// Past what the caller asked for is [`Why::Limit`].
+    /// Reading exceeded one of the reader's configured resource caps (nesting depth, object
+    /// value count, filter chain length, stream budget, or reference hop limit).
     Capped,
-    /// It takes a password the reader wasn't given, or doesn't decrypt.
+    /// The file requires a password that was not supplied, or decryption failed.
     Locked,
-    /// The source of the file's bytes didn't give them: it may read if it's
-    /// asked again.
+    /// Underlying byte-source I/O failed; retrying may succeed.
     Source,
-    /// It's a stream whose filters the reader doesn't decode: through a
-    /// filter it doesn't take, as an image's data may be (ISO 32000-2,
-    /// 7.4.1), its data there as written for a decoder that takes that
-    /// filter; or with a `/Filter` or `/DecodeParms` it can't take as
-    /// written, which is the file's to fix. Only what gives a stream's data
-    /// says it ([`Streams::decoded`]); a resolver never does.
+    /// The stream uses an unsupported filter (such as image-specific compression) or malformed
+    /// `/Filter` / `/DecodeParms` entries. Returned only by [`Streams::decoded`].
     Filter,
-    /// It's a stream's data the reader doesn't hold, and it has nothing to
-    /// read it from, as a document read whole alone hasn't the file's bytes,
-    /// holding its objects and not their streams' data: asked again, it
-    /// gives the same; it's read beside what read the file. Unlike
-    /// [`Why::Source`], nothing failed, and nothing will read if asked
-    /// again. Only what gives a stream's data says it
-    /// ([`Streams::decoded`]); a resolver never does.
+    /// The stream's raw bytes are not held in memory (for example, on a standalone `Document`
+    /// after dropping its `Reading`). Returned only by [`Streams::decoded`].
     Detached,
 }
 

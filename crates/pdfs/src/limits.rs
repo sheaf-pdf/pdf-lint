@@ -1,16 +1,15 @@
-//! The caps a file is read under: one value for every crate's.
+//! Unified resource limits across all PDF reading and writing subsystems.
 
-/// The caps a file is read under, so that what a file says can't make a
-/// reader read, or hold in memory, without end: each crate's own, nested, set
-/// on a copy of [`Limits::DEFAULT`] (`limits.content.content = 1 << 20`, say),
-/// as more may come.
+/// Resource caps bounding memory and work across every subsystem when reading or writing a PDF.
 ///
-/// Where one crate's caps hold a cap another's also has, the facade passes
-/// one value: [`linearize`](Limits::linearize)'s walks of the page tree and
-/// a name tree are made under [`semantics`](Limits::semantics)' caps on
-/// them, so a caller sets those once, there. Its own `pages` caps its hint
-/// tables too, so its walk of the page tree lists no more pages than the
-/// lesser of it and `semantics.pages`.
+/// Customize limits by mutating a copy of [`Limits::DEFAULT`] (for example,
+/// `limits.content.content = 1 << 20;`).
+///
+/// Where multiple crates share overlapping tree/content limits, `pdfs` forwards a
+/// single source of truth: [`linearize`](Limits::linearize) inherits `page_depth`,
+/// `tree_depth`, and `tree_nodes` from [`semantics`](Limits::semantics) (and uses
+/// `min(linearize.pages, semantics.pages)`), while [`fonts`](Limits::fonts)
+/// inherits its content-lexing limits from [`content`](Limits::content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {

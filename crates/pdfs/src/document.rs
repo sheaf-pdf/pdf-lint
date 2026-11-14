@@ -1,5 +1,4 @@
-//! A document being written: a new one, or a file read and edited, its pages
-//! added, and saved whole, linearized or as an update.
+//! Creating new PDF documents and editing opened PDFs (`Document`).
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -23,31 +22,28 @@ use crate::error::Error;
 use crate::limits::Limits;
 use crate::phases::phase;
 
-/// The version a new document's header says unless it's told otherwise: 1.7,
-/// which every reader reads, and pdf-structure's writer's default.
+/// Default PDF header version for new documents (PDF 1.7).
 const NEW: Version = Version::new(1, 7);
 
-/// The least version a file's header says where a cross-reference stream
-/// lists it and object streams hold its objects (ISO 32000-2, 7.5.8).
+/// Minimum PDF header version required when writing xref and object streams (PDF 1.5, ISO 32000-2 §7.5.8).
 const STREAMS: Version = Version::new(1, 5);
 
-/// A document being written: a new one ([`Document::new`]), or a file read
-/// and edited ([`Pdf::edit`](crate::Pdf::edit)), which borrows the file's
-/// reading, `'p`, to copy what it doesn't change from. Pages are added to it
-/// ([`Document::add_page`]), each drawn by a content writer, and written into
-/// it at a save, each resource they draw with once a file; and it's saved
-/// whole ([`Document::save`]), linearized ([`Document::save_linearized`]) or,
-/// edited, as an update after the file read ([`Document::save_update`]). What
-/// else it holds is pdf-structure's document ([`Document::structure`]),
-/// whose objects a caller edits as it likes.
+/// A PDF document builder for creating new files or editing existing ones.
 ///
-/// A save writes the file in memory first, so one refused leaves its path as
-/// it was; each has a `_to` form that writes into memory alone. Saved twice in
-/// the clear, nothing changed between, it writes the same bytes. It's `Send`
-/// and `Sync`, and its `Debug` gives how many pages it has and how it's
-/// written, not what it holds.
+/// Create an empty document with [`Document::new`], or open an existing [`Pdf`](crate::Pdf)
+/// for modification with [`Pdf::edit`](crate::Pdf::edit) (which borrows the source
+/// reading `'p` so unchanged objects can be copied directly). Add pages with
+/// [`Document::add_page`]—shared resources such as fonts are automatically
+/// deduplicated across pages—and write output via [`Document::save`],
+/// [`Document::save_linearized`], or [`Document::save_update`]. For direct object
+/// manipulation, access the underlying [`pdf_structure::Document`] via
+/// [`Document::structure`] and [`Document::structure_mut`].
 ///
-/// A page of text in Helvetica, saved and read back:
+/// Saves serialize into memory before writing to disk so a failed save leaves any
+/// target file untouched (use the `_to` methods or [`Document::to_bytes`] to write
+/// into memory directly). Unencrypted saves are deterministic. `Document` is
+/// `Send + Sync`, and its `Debug` output summarizes page count and save settings
+/// without exposing document content.
 ///
 /// ```
 /// use pdfs::pdf_fonts::Std14;

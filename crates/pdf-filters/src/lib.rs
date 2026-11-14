@@ -1,45 +1,33 @@
-//! PDF's standard filters for data of any kind (ISO 32000-2, 7.4), decoded:
-//! `ASCIIHexDecode`, `ASCII85Decode`, `LZWDecode` and `FlateDecode` with
-//! their predictors, and `RunLengthDecode`; and `FlateDecode` encoded, with
-//! PNG's predictors, for a writer. The filters for images (DCT, JPX, JBIG2,
-//! CCITT fax) and `Crypt` aren't here: decrypting is a step before the
-//! filters, the caller's.
+//! Standard PDF stream filter decoders and Flate encoder (ISO 32000-2 §7.4).
 //!
-//! - **Every fault said, what decoded kept.** Data that breaks a rule
-//!   decodes as far as a reader can take it, and [`Error`] has both what
-//!   decoded and each [`Fault`], so a checker can read the data and still
-//!   report what was wrong with it. Where the spec leaves a fault's reading
-//!   open, it's read as qpdf reads it, but for an LZW table that fills,
-//!   read on past as PDFium reads it ([`Fault::TableFull`]); where a fault
-//!   stops a filter, what decoded before it is kept, which qpdf, giving the
-//!   data undecoded, doesn't keep.
-//! - **Or as PDFium reads it, on request.** [`decode_as`],
-//!   [`decode_into_as`] and [`decode_prefix_into_as`] take a [`Reading`].
-//!   Under [`Reading::Pdfium`], an LZW code past the table, and what PDFium
-//!   refuses, read as PDFium reads them. So a reader can decode as PDFium
-//!   does, or find where PDFium ends the data.
-//! - **A limit on what comes out** of each filter, so what a small stream
-//!   decodes into is the caller's to bound: a filter holds its input and
-//!   its output, whose buffer grows by doubling.
-//! - **Parameters, not dictionaries.** A [`Filter`] says what its
-//!   `/DecodeParms` do; reading them from a dictionary is the caller's, so
-//!   it works with any object model.
-//! - **Either Flate backend, named at each call.** `FlateDecode` inflates
-//!   and deflates through [miniz_oxide](https://crates.io/crates/miniz_oxide)
-//!   (the `miniz_oxide` feature, on by default) or
-//!   [zlib-rs](https://crates.io/crates/zlib-rs) (the `zlib-rs` feature),
-//!   each compiled in by its feature, both if both are on. Every call that
-//!   decodes or encodes names its [`Backend`], so a feature another crate
-//!   turns on changes nothing a call gives.
-//! - **Into the caller's buffer.** [`decode_into`] and [`encode`] append to
-//!   a `Vec` the caller gives, so that streams join in one buffer, and one
-//!   buffer serves many; [`decode`] gives a `Vec` of its own.
-//! - **What a filter read, where its data runs on.** [`decode_prefix_into`]
-//!   decodes data that may run on into other bytes, an inline image's in a
-//!   content stream, by one filter, and says how many bytes of it the
-//!   filter read and whether its data ended there ([`Prefix`]): Flate's and
-//!   LZW's counted as zlib and PDFium count them, so a reader can find
-//!   where PDFium takes such data to end.
+//! `pdf-filters` decodes `ASCIIHexDecode`, `ASCII85Decode`, `LZWDecode`,
+//! `FlateDecode` (including TIFF and PNG predictors), and `RunLengthDecode`,
+//! and encodes `FlateDecode` streams with optional PNG prediction. Image-only
+//! codecs (`DCTDecode`, `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode`) and
+//! `/Crypt` decryption live outside this crate.
+//!
+//! # Key Features
+//!
+//! - **Fault-tolerant decoding:** Damaged streams decode as far as possible.
+//!   [`Error`] returns both the partially decoded output (`data`) and every
+//!   [`Fault`] (`faults`) with its filter index.
+//! - **Configurable edge-case rules ([`Reading`]):** Defaults to
+//!   [`Reading::Qpdf`]; pass [`Reading::Pdfium`] to [`decode_as`],
+//!   [`decode_into_as`], or [`decode_prefix_into_as`] to match PDFium's LZW and
+//!   predictor handling.
+//! - **Strict output caps:** Every decode function bounds output size so small
+//!   compressed streams cannot exhaust memory.
+//! - **Object-model agnostic:** [`Filter`] takes typed parameters directly
+//!   rather than parsing PDF dictionaries.
+//! - **Explicit Flate [`Backend`]:** Choose
+//!   [miniz_oxide](https://crates.io/crates/miniz_oxide) (`miniz_oxide`
+//!   feature, on by default) or [zlib-rs](https://crates.io/crates/zlib-rs)
+//!   (`zlib-rs` feature) per call so Cargo feature unification never silently
+//!   alters results.
+//! - **Buffer reuse & inline-image prefixes:** [`decode_into`] and [`encode`]
+//!   append to caller-supplied `Vec<u8>` buffers; [`decode_prefix_into`]
+//!   decodes self-delimiting compressed streams (such as inline images) and
+//!   reports exact consumed byte counts via [`Prefix`].
 //!
 //! ```
 //! use pdf_filters::{Filter, decode};
@@ -51,7 +39,7 @@
 //! let data = decode(b"48 65 6C 6C 6F>", &[Filter::AsciiHex], 1 << 20, backend);
 //! assert_eq!(data.unwrap(), b"Hello");
 //!
-//! // No `>` at the end: the data decodes, and the fault is said.
+//! // Missing trailing `>`: decoded output is preserved alongside Fault::NoEnd.
 //! let error = decode(b"48 69", &[Filter::AsciiHex], 1 << 20, backend).unwrap_err();
 //! assert_eq!(error.data, b"Hi");
 //! assert_eq!(error.faults, [(0, pdf_filters::Fault::NoEnd)]);

@@ -1,76 +1,34 @@
-//! A [`Document`] of lopdf's written as a linearized file, by plain functions
-//! over its public objects: no lopdf type goes into the engine, and nothing of
-//! pdf-structure or pdf-semantics is used, only pdf-linearize's engine and the
-//! pdf-objects it re-exports. [`graph`] says what [`plan()`] is told of a
-//! document, and [`linearize`] writes the file.
+//! Internal adapter that linearizes a `lopdf` [`Document`] using `pdf-linearize`'s
+//! model-independent engine.
 //!
-//! The file is the plainest there is: cross-reference tables, nothing in object
-//! streams, the hint stream unfiltered, so no filter is pulled in to write it.
-//! lopdf has no public writer of one object, so a small one is here, in the
-//! plan's numbers: a reference to no object is `null` (7.3.10), a string is
-//! hexadecimal, a stream's `/Length` is direct and its data as lopdf holds it,
-//! a real as its `f32` prints, with a point. The `/ID` is as the document holds
-//! it, as lopdf's own save leaves it: a caller who changed the document says so
-//! there.
+//! Built without `pdf-structure` or `pdf-semantics` to verify that `pdf-linearize` works cleanly
+//! with third-party PDF object models: [`graph`] extracts an object [`Graph`] from a
+//! `lopdf::Document`, and [`linearize`] serializes the planned file using plain cross-reference
+//! tables and unfiltered hint streams.
 //!
-//! # Where everything goes
+//! # Layout & Transformations
 //!
-//! As the family's adapter has it, from the same keys: part 4 has the catalog
-//! and the values of its `/ViewerPreferences`, `/PageMode`, `/OpenAction`,
-//! `/AcroForm` (that object alone) and `/Threads` with its thread dictionaries
-//! (F.3.5); each page's objects are found by walking from it, in the order
-//! F.3.7 recommends, images and font files last, never through `/Parent` or
-//! `/Thumb`, stopping at the page tree's and the document parts' nodes; part 9
-//! has the groups a hint table names (F.3.10). The first page is where
-//! `/OpenAction` opens (F.3.7), else page 0, unless [`Options::first_page`]
-//! says. So a document read from one file has the numbers the family adapter
-//! gives that file, where the two read the same objects.
+//! - **Annex F placement:** Matches `pdf-linearize`'s `family` adapter—part 4 holds the catalog
+//!   and open-time dictionaries (`/ViewerPreferences`, `/PageMode`, `/OpenAction`, `/AcroForm`,
+//!   `/Threads`), page walks order images and font streams last without traversing `/Parent` or
+//!   `/Thumb`, part 9 holds hint-table groups, and the opening page defaults to `/OpenAction` or
+//!   page 0 unless overridden via [`Options::first_page`].
+//! - **Non-destructive input:** The input [`Document`] is borrowed immutably. In the serialized
+//!   output, inheritable page attributes (`/Resources`, `/MediaBox`, `/CropBox`, `/Rotate`) are
+//!   pushed down onto leaf pages, unreachable objects and stale structural streams are omitted,
+//!   and all reachable objects are renumbered according to the linearization [`Plan`]
+//!   (invalidating byte-range digital signatures, as with any full rewrite).
 //!
-//! # What changes in the document
+//! # Refusals
 //!
-//! Nothing in the [`Document`] given, which is only read. In what's written:
-//!
-//! - **Inheritable attributes are pushed down** (F.3.7, F.3.10): each page gets
-//!   what it inherited, as it was written, a reference staying one, and each
-//!   page tree node loses it, so a page the tree doesn't list gets what it
-//!   inherited from such a node too.
-//! - **What the trailer doesn't reach isn't written**, nor object streams,
-//!   cross-reference streams and a linearization dictionary; nor an object only
-//!   a stream's `/Length` names, nor a null object, nor an object that's only a
-//!   reference that ends at one of those or at nothing, a reference to any of
-//!   which reads the same as one to none.
-//!
-//! What's written is what the [`Document`] holds, which can differ from what
-//! a reader of its file finds: lopdf's reader can keep an object a later
-//! section of the file freed, or an older revision's `/Info`. Each is written
-//! as held where what's written reaches it, as lopdf's own save writes it.
-//!
-//! Every object is written at the number and place a plan gives it, as Annex F
-//! has it, so anything that names one from outside the file, a signature's
-//! byte range above all, doesn't hold afterwards, as under any rewrite.
-//!
-//! # What's refused
-//!
-//! - **A document that's encrypted or was** ([`Error::Encrypted`]), rather than
-//!   write it in the clear or half encrypted: [`Document::was_encrypted`], as
-//!   lopdf's reader decrypts a file the empty password opens and takes
-//!   `/Encrypt` out of its trailer, so that it looks plain, or any `/Encrypt`
-//!   in the trailer. lopdf's encryption works on a whole document under each
-//!   object's own number, where every number here is new.
-//! - **A page tree that gives a page no place of its own**
-//!   ([`Error::PageTree`]), as Annex F gives each page one, and the numbers and
-//!   hint tables depend on which pages a viewer finds: a place with no page at
-//!   it, a page or node written in place or listed twice, a node its own
-//!   ancestor, a tree whose pages by ISO 32000-2's rules aren't what
-//!   [`Document::get_pages`] lists, a kid those rules and PDFium's read as
-//!   different things, a page they read an inheritable attribute of
-//!   differently, or that reads otherwise going down `/Kids` from the root than
-//!   up its `/Parent`s, as pushing one value down would change the other's
-//!   page; a tree past 1,024 levels or too many pages, and a value it's read by
-//!   that's a chain of references past 32 or going round, as a reader stops
-//!   there.
-//! - **What can't be written**: a real that isn't finite, a stream inside
-//!   another object, a stream lopdf didn't read the data of.
+//! - **Encrypted documents ([`Error::Encrypted`]):** Refuses documents that are or were encrypted
+//!   ([`Document::was_encrypted`] or `/Encrypt` in the trailer) rather than writing them
+//!   unencrypted or under mismatched per-object keys.
+//! - **Ambiguous or malformed page trees ([`Error::PageTree`]):** Refuses cyclic, over-deep, or
+//!   inconsistent page trees where ISO 32000-2 and `lopdf` / PDFium disagree on page order or
+//!   inherited attributes.
+//! - **Unserializable values:** Refuses non-finite floats, nested streams, or streams without
+//!   in-memory bytes.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
