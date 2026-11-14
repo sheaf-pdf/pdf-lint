@@ -1,7 +1,9 @@
-//! A page's recipes, each a function over the family's traits, so that any
-//! reader of a file's objects and streams' data can call it: pdf-structure's
-//! reading, its document beside it, or pdf-objects' `WithStreams`. A
-//! [`Page`](crate::Page) calls each with its file's defaults.
+//! Standalone page-reading functions over [`Resolve`] and [`Streams`].
+//!
+//! [`Page`](crate::Page) methods delegate to these functions using its parent
+//! [`Pdf`](crate::Pdf)'s options and limits. Call them directly when working
+//! with a custom [`pdf_structure::Reading`], [`pdf_structure::WithReading`], or
+//! [`pdf_objects::WithStreams`].
 
 use std::fmt;
 use std::sync::Arc;

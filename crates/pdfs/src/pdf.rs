@@ -1,4 +1,4 @@
-//! A file being read, its pages, and a page.
+//! Open PDF handle (`Pdf`) and page inspection (`Pages`, `Page`).
 
 use std::borrow::Cow;
 use std::fmt;
@@ -26,18 +26,16 @@ use crate::open::Options;
 use crate::page::{self, Content, NamedFont};
 use crate::phases::phase;
 
-/// A file being read: opened under [`Options`], then each object read when
-/// it's first asked for, kept, from any thread (pdf-structure's
-/// [`Reading`], lazy); its pages listed, each page's content joined, what it
-/// says of itself and claims, and whether it's linearized, each read under
-/// the [`Limits`] and by the rules it was opened with. Every recipe here is
-/// a function too ([`page`](mod@crate::page), [`file`](mod@crate::file)),
-/// which this calls with them. What it doesn't do, the reading does
-/// ([`Pdf::reading`]).
+/// An open PDF file with lazy, thread-safe object and font caching.
 ///
-/// It's `Send` and `Sync`, so one file can be read on many threads. Its
-/// `Debug` gives its length, its encryption and how it's read, not what it
-/// holds.
+/// Created via [`open`](crate::open), [`from_bytes`](crate::from_bytes), or
+/// [`Options`]. Indirect objects and fonts are parsed on first access and cached
+/// across threads on top of [`pdf_structure::Reading`]. Use [`Pdf::pages`] to
+/// inspect pages and extract text, [`Pdf::edit`] to modify the file, or
+/// [`Pdf::reading`] to access the underlying low-level reader directly.
+///
+/// `Pdf` is `Send + Sync`, and its `Debug` output reports only metadata (byte
+/// length, encryption status, and reader configuration), never document content.
 pub struct Pdf<S: ByteSource = Vec<u8>> {
     reading: Reading<S>,
     limits: Limits,

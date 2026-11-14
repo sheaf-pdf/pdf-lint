@@ -6,7 +6,7 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-color"
-description = "PDF color spaces read: families, components as ISO 32000-2 and PDFium count them, base and alternate spaces, colorants"
+description = "PDF color space parser and component counter for ISO 32000-2 validation and PDFium compatibility"
 keywords = ["pdf", "color", "color-space", "iso-32000", "pdfium"]
 categories = ["graphics", "multimedia::images"]
 # Only what users need, so local tooling files can't end up in the package.

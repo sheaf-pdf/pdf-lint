@@ -1,65 +1,32 @@
-//! A lossless, zero-copy tokenizer for PDF syntax. It splits bytes into
-//! tokens and decides nothing else:
+//! Lossless, zero-copy, `#![no_std]` tokenizer for PDF syntax.
 //!
-//! - **Lossless:** every byte is in exactly one token, white-space and
-//!   comments included, so the tokens join back into the input.
-//! - **Total:** it never rejects and never repairs. A `)` or `>` that
-//!   closes nothing is a [`Kind::Junk`] token, a string that doesn't end is
-//!   a string token with [`Token::closed`] false, and every token moves it
-//!   on.
-//! - **Zero-copy, from any offset:** a [`Token`] is a kind, whether it
-//!   closed, an offset, and its bytes as written, borrowed from the input.
-//! - **No grammar:** `obj`, `R`, `stream`, `xref` and `trailer` are
-//!   keywords like any other. Joining `n g R` or `n g obj` is the next
-//!   layer's work. [`Tokenizer::skim`] passes an array's or a dictionary's
-//!   insides without a token each, giving only the tokens that open or
-//!   close one, but judges nothing: which closes which is the caller's.
-//! - **Data it can't measure:** after `stream` or `ID`, the caller says
-//!   where the data ends, by `/Length` or by scanning for `endstream` or
-//!   `EI` ([`Tokenizer::data`], [`Tokenizer::data_until`]). That's where
-//!   readers differ, so the choice is the caller's.
-//! - **A slice of a file:** the input may be as much of a file as a reader
-//!   has read. The tokenizer never rejects, so it closes whatever token
-//!   the slice ends in, and only a token that reaches the slice's end
-//!   (`token.end() == bytes.len()`) can come out otherwise with more bytes
-//!   after it: `12` of `123`, `>` of `>>`, a string cut short, white-space
-//!   that goes on, data that runs on to its marker. Every other token is
-//!   settled by the bytes inside the slice: it's the whole file's token at
-//!   the same place, as the tokenizer carries nothing from one token to
-//!   the next. A reader that meets a token at the end reads again with
-//!   more.
-//! - **ISO 32000-2's rules, or PDFium's:** it follows ISO 32000-2's
-//!   lexical conventions (7.2, 7.3) unless the caller gives it PDFium's
-//!   ([`Tokenizer::with_rules`], [`Rules`]), as a reader that means to see
-//!   what PDFium sees would. They part on a word of digits, signs and
-//!   points (`--5` and `1.2.3` are numbers to PDFium, keywords to ISO
-//!   32000-2), on where a hex string ends (at its `>`, over any byte, to
-//!   PDFium), and on two bytes, 0x80 and 0xFF, that PDFium reads as
-//!   white-space. Every promise here holds under either. The rules are
-//!   fixed in the tokenizer's type ([`Iso`], the default, or [`Pdfium`]),
-//!   or chosen as it runs (a [`Rules`] value), at a branch a token
-//!   ([`RuleSet`]).
+//! `pdf-tokenizer` splits raw PDF bytes into lexical [`Token`]s and leaves
+//! object grammar, stream filters, and file recovery to higher layers:
 //!
-//! Decoding a token into what it stands for is a separate step, in
-//! [`decode`]: a name's or a string's bytes, as [`Piece`](decode::Piece)s
-//! that say how each was written, or a number, as ISO 32000-2 reads them;
-//! and in [`decode::pdfium`], their values as PDFium reads them.
+//! - **Lossless & zero-copy:** Every input byte belongs to exactly one [`Token`]
+//!   (whitespace and comments included), borrowed directly from the input slice.
+//! - **Total & non-panicking:** Never rejects or repairs malformed syntax.
+//!   Unmatched closing delimiters become [`Kind::Junk`], and unclosed strings
+//!   set [`Token::closed`] to `false`.
+//! - **Stateless & window-friendly:** Start at any byte offset
+//!   ([`Tokenizer::at`]). On a partial file buffer, only a token touching the
+//!   end of the slice (`token.end() == bytes.len()`) can change if more bytes
+//!   follow.
+//! - **Explicit binary spans:** After `stream` or inline-image `ID`, advance
+//!   past the delimiter newline/space ([`Tokenizer::eol`],
+//!   [`Tokenizer::space_byte`]) and consume binary bytes via [`Tokenizer::data`]
+//!   or [`Tokenizer::data_until`].
+//! - **ISO 32000-2 or PDFium rules:** Defaults to ISO 32000-2 (§7.2, §7.3)
+//!   via [`Iso`]; switch to PDFium's forgiving lexical rules via
+//!   [`Tokenizer::with_rules`] ([`Pdfium`] or [`Rules`]).
+//! - **Zero-allocation decoding ([`decode`]):** Decode name/string escapes as
+//!   an iterator of [`Piece`](decode::Piece)s ([`Pieces::bytes`](decode::Pieces::bytes),
+//!   [`Token::verbatim`]) or parse numbers, using either ISO 32000-2 rules or
+//!   [`decode::pdfium`].
 //!
-//! It needs only `core` and never allocates, so whatever the input,
-//! tokenizing and decoding it can't allocate memory or do I/O: a file it
-//! reads, untrusted, can't make it use memory. Its two dependencies are
-//! built without `std`: thiserror, which derives
-//! [`NumberError`](decode::NumberError)'s traits, and memchr, which finds
-//! where a comment or a string ends, and a marker after data, on SIMD where
-//! the target has it. A build against `core` alone, for a target with
-//! neither `std` nor `alloc`, checks it. Without `std`, memchr can't ask the
-//! processor what it has as it runs, so on x86-64 it searches with SSE2; an
-//! application with `std` gets AVX2 where the processor has it by turning
-//! on memchr's `std` feature, which depending on memchr with its default
-//! features does. A value's bytes come as an iterator
-//! ([`Pieces::bytes`](decode::Pieces::bytes)), to collect as the caller
-//! likes, or as written, borrowed, when nothing in it needs decoding
-//! ([`Token::verbatim`]).
+//! Built with `#![no_std]` and zero heap allocation (`core` + `memchr` +
+//! `thiserror`). In `std` applications, enabling `memchr`'s `std` feature
+//! unlocks runtime AVX2 SIMD detection on x86_64.
 //!
 //! ```
 //! use pdf_tokenizer::{Kind, Tokenizer};

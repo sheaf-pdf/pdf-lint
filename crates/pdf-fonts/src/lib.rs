@@ -1,52 +1,47 @@
-//! Read PDF's fonts (ISO 32000-2, 9) as PDFium reads them. No file is read here. A
-//! font is read through what gives its objects and its streams' data, pdf-objects'
-//! [`Resolve`](pdf_objects::Resolve) and [`Streams`](pdf_objects::Streams). A
-//! pdf-structure `&Reading` is both, and [`WithStreams`](pdf_objects::WithStreams)
-//! makes both of a resolver and a function.
+//! PDF font reader, text extractor, Standard 14 metrics, CMap interpreter, and glyph bounding-box
+//! reader (ISO 32000-2, §9), matching PDFium's behavior as of chromium/8125.
 //!
-//! - **Read a file's font** ([`Font::read`]): the codes a string is in it
-//!   ([`Font::codes`]), each code's CID, width, vertical metrics and text, how far its
-//!   glyphs reach and their boxes, each as PDFium (chromium/8125) reads them. What it
-//!   guesses, it says ([`FontApprox`]).
-//! - **Read each font once** ([`Fonts`], [`FontScope`]), kept for every page that draws
-//!   in it, and charged to each page's budget.
-//! - **Read the strings a page's content shows** ([`shown`]), in order, each in its
-//!   font, the forms it draws followed to [`Limits::forms`] deep, as PDFium reads them
-//!   for its text, with no layout, and drawn [`Limits::form_uses`] times at most. What
-//!   isn't read is said ([`Unread`]).
-//! - **Look up encodings and glyph names** ([`Encoding`], [`glyph_text`],
-//!   [`name_code_point`], [`cp1252`]).
-//! - **Find a standard 14 font** ([`Std14::named`]) by a name PDFium takes for it, with
-//!   Adobe's metrics.
-//! - **Write text in a standard 14 font**: its dictionary ([`Std14::dict`]), and text in
-//!   its codes ([`Std14::codes`], [`Encoding::code`]), which read back as the text given.
-//!   A character with no code is refused ([`Unencodable`]), never written as another.
+//! `pdf-fonts` operates over any [`Resolve`](pdf_objects::Resolve) and
+//! [`Streams`](pdf_objects::Streams) provider (such as a `pdf-structure` `&Reading` or
+//! [`WithStreams`](pdf_objects::WithStreams)) without performing file I/O directly.
 //!
-//! Where a font departs from the standard is a [`Fault`], told with its place to
-//! pdf-objects' [`Sink`](pdf_objects::fault::Sink), and the reading goes on past it.
-//! With `()` as the sink, none is looked for, and what's read is the same through any
-//! sink. Each reading is bounded by [`Limits`] and charged to the caller's budget. It
-//! fails only past the budget ([`Error::TooLarge`]), or for what doesn't read for a
-//! reason that's the caller's, a cap of what gives a stream among them
-//! ([`Error::Unreadable`]). Nothing in this crate panics on what a file holds.
-//! pdf-objects and pdf-content-streams are re-exported whole, so their types are named
-//! through them at the versions this crate is built with.
+//! # Core Concepts
 //!
-//! # Features
+//! - **Font parsing & metrics ([`Font::read`]):** Splits strings into character codes
+//!   ([`Font::codes`]) and resolves CIDs, widths, vertical metrics, glyph bounding boxes, and
+//!   Unicode text across Type 1, MMType1, TrueType, Type 3, and Type 0 fonts, tracking estimated
+//!   values in [`FontApprox`].
+//! - **Caching ([`Fonts`], [`FontScope`]):** Shares parsed fonts across pages while charging
+//!   stream and glyph-outline budgets per page.
+//! - **Page text extraction ([`shown`]):** Walks page content streams and nested Form XObjects
+//!   (up to [`Limits::forms`] deep and [`Limits::form_uses`] draws) in content order, reporting
+//!   skipped or undecodable streams in [`Unread`].
+//! - **Encodings & Standard 14 fonts ([`Encoding`], [`Std14`]):** Maps codes and glyph names to
+//!   Unicode ([`glyph_text`], [`name_code_point`], [`cp1252`]), resolves Standard 14 fonts and
+//!   PDFium aliases ([`Std14::named`]) with Adobe metrics, and builds Standard 14 font
+//!   dictionaries ([`Std14::dict`]) and encoded strings ([`Std14::codes`], [`Encoding::code`],
+//!   refusing unmapped characters via [`Unencodable`]).
 //!
-//! - **`programs`**, on by default: a font's program read through skrifa, for
-//!   [`Font::char_box`], heights and the text its encoding leaves to it
-//!   ([`FontProgram`]). [`Font::read_for_text`] and [`Fonts::for_text`] read none.
-//! - **`predefined-cmaps`**, off by default: Adobe's predefined CMaps, from hayro-cmap's
-//!   bundle. Without it, one of the bundle's reads as a CMap the build hasn't
-//!   ([`Fault::PredefinedNotBuilt`]).
-//! - **`tracing`**, off by default: a span at `debug` over a font read, and within it
-//!   over its program's opening, its embedded CMap's and its `/ToUnicode`'s parsing,
-//!   and a Type 3 font's CharProcs; and over a walk of the strings content shows
-//!   ([`shown`]). A span's fields are numbers, never a byte of a file.
+//! Spec departures emit [`Fault`]s to a [`Sink`](pdf_objects::fault::Sink) (skipped when `()` is
+//! passed). Reads enforce [`Limits`] and caller byte budgets without panicking, failing only when
+//! a budget is exceeded ([`Error::TooLarge`]) or the underlying provider fails
+//! ([`Error::Unreadable`]). `pdf-objects` and `pdf-content-streams` are re-exported at
+//! [`pdf_objects`] and [`pdf_content_streams`].
 //!
-//! Helvetica-Bold by a name PDFium takes for it, its `/ToUnicode` read through its
-//! streams, and the same font past a cap of what gives them:
+//! # Cargo Features
+//!
+//! - **`programs`** *(default)*: Parses embedded font programs via `skrifa` for
+//!   [`Font::char_box`], fallback heights, and program character mappings ([`FontProgram`]).
+//!   [`Font::read_for_text`] and [`Fonts::for_text`] skip program parsing.
+//! - **`predefined-cmaps`** *(optional)*: Bundles Adobe's predefined CJK CMaps via `hayro-cmap`
+//!   (otherwise reporting [`Fault::PredefinedNotBuilt`]).
+//! - **`tracing`** *(optional)*: Emits numeric `tracing` spans over font reads, program/CMap/CharProc
+//!   parsing, and [`shown`] walks.
+//!
+//! # Example
+//!
+//! Read `Arial,Bold` (mapped to `Helvetica-Bold`) with a `/ToUnicode` CMap stream and verify
+//! budget accounting on capped streams:
 //!
 //! ```
 //! use std::collections::BTreeMap;

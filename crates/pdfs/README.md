@@ -1,32 +1,17 @@
 # pdfs
 
-Read and write PDF files through one dependency. `pdfs` re-exports the crates of one family whole, each at the version it's built with, so you name any of their types through it and they work together. On top of them it has the recipes that span them, with a viewer's defaults: open a file, list its pages, read a page's content, fonts and text, and write a document, new or a file edited.
+Read, inspect, edit, and write PDF files through a single Rust dependency.
 
-Each recipe is also a function over the family's traits, in `pdfs::page`, `pdfs::file` and `pdfs::build`, so code with a reading or a document of its own calls the same recipes. `pdfs::prelude` names what they take and give in one `use`.
+`pdfs` combines a modular family of PDF crates behind an ergonomic, viewer-compatible API: open files lazily from disk or memory, inspect pages and metadata, extract text and fonts, draw new pages, encrypt with AES-256, linearize for fast web viewing, or append incremental updates. Every underlying crate in the family is also re-exported at the root (`pdfs::pdf_structure`, `pdfs::pdf_objects`, etc.) at matching versions when you need low-level control.
 
-## The family
+## Quickstart: Write and Read Page Text
 
-Drop to a crate, through `pdfs`, for what the recipes don't do.
-
-- **[pdf-tokenizer](https://crates.io/crates/pdf-tokenizer)** reads a file's bytes as tokens, by ISO 32000-2's rules or PDFium's, with no `std` or `alloc`. Use it to scan bytes without parsing objects.
-- **[pdf-objects](https://crates.io/crates/pdf-objects)** has PDF's objects, their parser and writer, and text strings. Use it to build or inspect a dictionary, or to decode a string by hand.
-- **[pdf-filters](https://crates.io/crates/pdf-filters)** decodes the standard filters and encodes Flate. Use it for a stream's data outside a file.
-- **[pdf-crypt](https://crates.io/crates/pdf-crypt)** is the standard security handler. Use it to prepare a password or set what a protection grants.
-- **[pdf-structure](https://crates.io/crates/pdf-structure)** reads a file whole or an object at a time, and writes one whole or as an update. Use it for an object by number, a file's revisions, or a save's every option (`Pdf::reading`, `Document::structure`).
-- **[pdf-color](https://crates.io/crates/pdf-color)** reads color spaces. Use it to count a space's components or type it.
-- **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** reads and writes content. Use it for a page's tokens and operators, its marked content, or content spliced.
-- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** reads and writes dates, name and number trees, the page tree and XMP claims. Use it to walk a name tree or read a date.
-- **[pdf-fonts](https://crates.io/crates/pdf-fonts)** reads fonts as PDFium reads them, and the standard 14. Use it for a code's width, a glyph's box, or a font's encoding.
-- **[pdf-linearize](https://crates.io/crates/pdf-linearize)** writes and checks linearized files. Use it to plan a layout for another object model, or to read the hint tables.
-
-## Read a page's text
-
-`pdfs::open(path)` opens a file on disk, reading it by position, and `pdfs::from_bytes` one in memory. Each object is read when it's first asked for, and kept, from any thread:
+`pdfs::open(path)` opens a file on disk using positional reads (without loading the entire file into memory), and `pdfs::from_bytes` opens an in-memory buffer. Objects are parsed lazily on first access and cached safely across threads:
 
 ```rust
 use pdfs::prelude::*;
 
-// A file of one page, written here so the example runs on its own.
+// Create a one-page PDF in memory so this example runs standalone.
 let mut doc = Document::new();
 let page = doc.add_page(Rect::LETTER);
 page.begin_text();
@@ -36,7 +21,7 @@ page.show(&Std14::Helvetica.codes("Hello, world").unwrap());
 page.end_text();
 let file = doc.to_bytes().unwrap();
 
-// Read it as any file is read.
+// Open the PDF and extract text from each page.
 let pdf = pdfs::from_bytes(file).unwrap();
 let pages = pdf.pages().unwrap();
 assert_eq!(pages.len(), 1);
@@ -48,11 +33,11 @@ for page in &pages {
 }
 ```
 
-`Page::text` gives the strings the content shows, in order, each in its font, the forms it draws followed, as PDFium reads them for its text. There's no layout: strings come as the content shows them, not where they are. `Page::content` gives the page's streams joined, and their operations.
+`Page::text` extracts strings in content-stream drawing order (including nested Form XObjects), matching PDFium's text extraction rules without spatial layout reconstruction. `Page::content` returns the page's decoded, concatenated content streams and parsed operators.
 
-## Write a page in a standard 14 font
+## Drawing Pages with Standard 14 Fonts
 
-`Document::add_page` gives a page's content writer. What it draws with, a font among it, is written once a file however many pages use it. `Std14::codes` puts text in a standard 14 font's codes, and refuses a character the font has no code for:
+`Document::add_page` returns a `ContentWriter` for drawing shapes and text. Shared resources (such as fonts) are automatically deduplicated when saving. `Std14::codes` encodes Unicode strings into a Standard 14 font's single-byte encoding and returns an error if a character cannot be represented:
 
 ```rust
 use pdfs::prelude::*;
@@ -81,11 +66,11 @@ let titles: Vec<String> = (pages.iter())
 assert_eq!(titles, ["Größe", "Café €5"]);
 ```
 
-`Document::save(path)` writes it to a file, and `Document::claim` adds what it claims to conform to, as XMP. A save writes a cross-reference stream and object streams, deflated, under the header 1.7. `Document::save_options` gives those options to change.
+`Document::save(path)` writes compressed PDF 1.7 output (Flate-encoded cross-reference and object streams by default; customizable via `Document::save_options`). `Document::claim` attaches XMP conformance metadata (PDF/A, PDF/UA, PDF/VT).
 
-## Encrypt and linearize
+## Encryption and Linearization
 
-`Document::encrypt` encrypts each save after it with AES-256, under the passwords and permissions a `Protection` says. `Document::save_linearized` lays the file out for a viewer that shows the first page before the rest arrives:
+`Document::encrypt` configures AES-256 encryption with user ("open") and owner ("permissions") passwords via `Protection`. `Document::save_linearized` writes a linearized ("Fast Web View") PDF so viewers can render the first page over HTTP before downloading the whole file:
 
 ```rust
 use pdfs::prelude::*;
@@ -99,7 +84,7 @@ for n in 1..=3 {
     page.show(&Std14::Helvetica.codes(&format!("Page {n}")).unwrap());
     page.end_text();
 }
-// "reader" opens it, but may not print; "owner" may do anything.
+// "reader" can open the document without print permission; "owner" has full access.
 let reader = Password("reader").prepared().unwrap();
 let owner = Password("owner").prepared().unwrap();
 let mut protection = Protection::new(&reader);
@@ -110,11 +95,11 @@ let mut file = Vec::new();
 let options = doc.linearize_options();
 doc.save_linearized_to(&mut file, &options).unwrap();
 
-// Without a password, nothing encrypted reads.
+// Opening without a password leaves encrypted content locked.
 let locked = pdfs::from_bytes(&file[..]).unwrap();
 assert_eq!(*locked.encryption(), Encryption::Locked);
 
-// With one, it reads, and says what it grants.
+// Opening with the user password unlocks content and reports permissions.
 let passwords = [Password("reader")];
 let mut opening = Options::DEFAULT;
 opening.passwords = &passwords;
@@ -129,11 +114,11 @@ let verdict = pdf.linearized().unwrap();
 assert!(verdict.linearized && verdict.holds && verdict.judged_whole);
 ```
 
-`Pdf::unlock` opens a file after it was read without a password. Passwords are borrowed for the open, and nothing keeps them.
+You can also unlock an already-opened locked `Pdf` later with `Pdf::unlock`. Passwords are only borrowed during key derivation and never stored.
 
-## Edit a file, and append an update
+## Editing Existing Files and Incremental Updates
 
-`Pdf::edit` gives a file's document to change. `Document::save_update` appends what changed to the file read, and `Document::save` writes it whole. An edited file is saved under its own encryption unless `Document::decrypt` or `Document::encrypt` says otherwise:
+`Pdf::edit` creates an editable `Document` backed by the original file. `Document::save_update` appends only modified or newly added objects as a PDF incremental update, while `Document::save` writes a clean full file (preserving existing encryption unless changed with `Document::decrypt` or `Document::encrypt`):
 
 ```rust
 use pdfs::prelude::*;
@@ -146,7 +131,7 @@ page.show(&Std14::Helvetica.codes("First").unwrap());
 page.end_text();
 let file = doc.to_bytes().unwrap();
 
-// Add a page, and write what changed as an update after the file.
+// Edit the existing PDF and emit only the incremental update bytes.
 let read = pdfs::from_bytes(&file[..]).unwrap();
 let mut edited = read.edit().unwrap();
 let page = edited.add_page(Rect([0.0, 0.0, 400.0, 300.0]));
@@ -157,7 +142,7 @@ page.end_text();
 let mut update = Vec::new();
 edited.save_update_to(&mut update).unwrap();
 
-// The file as it was, then the update: both pages.
+// Concatenating the original bytes and the update yields a two-page PDF.
 let updated = pdfs::from_bytes([&file[..], &update[..]].concat()).unwrap();
 let pages = updated.pages().unwrap();
 let texts: Vec<String> = (pages.iter())
@@ -166,45 +151,51 @@ let texts: Vec<String> = (pages.iter())
 assert_eq!(texts, ["First", "Second"]);
 ```
 
-`save_update(path)` appends only to a file that holds the file read, as it was, so never to one that changed since. A save never writes over the file a `Pdf` from `pdfs::open` reads by position. To change that file in place, read it into memory first with `pdfs::from_bytes(std::fs::read(path)?)`. Neither save is a durable write.
+`save_update(path)` verifies file identity before appending so it will never corrupt a file modified since it was opened. Full saves refuse to overwrite the same file handle a positional `pdfs::open` is actively reading; to overwrite a file in place, load it into memory first with `pdfs::from_bytes(std::fs::read(path)?)`.
 
-## What it promises
+## Architecture & Re-exported Crates
 
-- **A viewer's defaults.** `Options::DEFAULT` reads a damaged file as PDFium does, walks the page tree and decodes text by PDFium's rules, inflates on zlib-rs, and looks for no fault. A checker's are one field each: `Recovery::Verified`, `Rules::Iso`, `Faults::Kept`, `Backend::MinizOxide`.
-- **Caps in one value.** `Limits` holds each crate's caps, and `font_budget` bounds what one call's fonts and forms decompress to. Past a cap, a call says so, in its error, for a page's text in `Shown::unread`, and for a linearization in `Verdict::judged_whole`. Nothing is guessed past one, and no file makes it panic.
-- **Faults where you ask for them.** `Pdf::pages_with`, `info_with`, `claims_with` and `linearized_with` tell a crate's faults to the sink they're given. The plain forms tell nothing, and look for nothing. With `()`, a metadata packet that isn't UTF-8 reads as one that claims nothing, and `claims_with` tells the two apart.
-- **What's locked reads as locked.** Behind a password, a page's content is an error whose `Why` is `Locked`, never ciphertext read as text. What a file permits once it's open, such as changes or copying, binds the caller, not the facade: an edit and a save take no account of it.
-- **A stream that doesn't decode.** Where a page's or a form's stream is damaged, or through a filter the reader doesn't take, PDFium reads its data as written. Here it's read as none, and said: `Concat::undecoded` for a page's content, `Unread::Undecoded` for its text.
-- **Threads.** `Pdf`, `Content`, `Document` and pdf-fonts' `Shown` are `Send` and `Sync`.
-- **No secrets in a `Debug`.** No `Debug` of the facade's holds a password, a key or a file's content.
+Every high-level method on `Pdf`, `Page`, and `Document` is also available as a standalone function in `pdfs::file`, `pdfs::page`, and `pdfs::build` over lower-level traits. When you need finer control, drop down to the re-exported crates directly through `pdfs`:
 
-Where a reading follows PDFium, it's PDFium as of chromium/8125, written in each crate's own code. Where a crate keeps a `tests/pdfium` in the repository, it records PDFium's answers to its cases, and its `differ.tsv` each it reads otherwise; pdf-filters' cases and those of a page's text are unit tests.
+- **[pdf-tokenizer](https://crates.io/crates/pdf-tokenizer)** — Zero-copy, `no_std` PDF lexer (`Rules::Iso` and `Rules::Pdfium`).
+- **[pdf-objects](https://crates.io/crates/pdf-objects)** — Owned PDF objects with byte spans, object parser/writer, text string codecs, and `Resolve` / `Streams` traits.
+- **[pdf-filters](https://crates.io/crates/pdf-filters)** — Standard stream filter decoders and Flate encoder (`miniz_oxide` and `zlib-rs`).
+- **[pdf-crypt](https://crates.io/crates/pdf-crypt)** — Standard security handler (RC4, AES-128, AES-256), password preparation, and permission flags.
+- **[pdf-structure](https://crates.io/crates/pdf-structure)** — Cross-reference tables/streams, object streams, lazy `Reading`, in-memory `Document`, and full/incremental writers (`Pdf::reading`, `Document::structure`).
+- **[pdf-color](https://crates.io/crates/pdf-color)** — Color space parsing and component counting.
+- **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
+- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, `/Info` dictionaries, and XMP conformance claims.
+- **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, and text extraction.
+- **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — Linearized PDF layout engine, hint tables, and validator.
 
-## Features
+## Key Guarantees
 
-- **`programs`**, on by default: pdf-fonts reads a font's program, for its glyphs' boxes and the text its encoding leaves to it.
-- **`clock`**, on by default: pdf-semantics' `Date::now` and `Date::from_unix`.
-- **`image-ends`**, off by default: pdf-content-streams ends an inline image's DCT and CCITTFax data by decoding it, as PDFium does.
-- **`predefined-cmaps`**, off by default: pdf-fonts reads Adobe's predefined CMaps, from hayro-cmap's bundle, so CJK text with no `/ToUnicode` reads.
-- **`simd`**, off by default: pdf-content-streams' dependencies use the CPU's SIMD, chosen as it runs.
-- **`tracing`**, off by default: a span at `debug` over each recipe that reads a part of a file whole or writes one, not over a lookup or a page added, and each crate's own spans, through [tracing](https://crates.io/crates/tracing). A span's fields are numbers, never a byte of a file.
-- **`insecure-test-writer`**, off by default, for tests and fuzzing: pdf-structure's and pdf-linearize's test writer, which draws a new encryption's key from a seeded generator and derives every IV, so a test writes the same bytes each run. It's never for a document's protection, and a build that ships leaves it off.
+- **Viewer defaults, validator opt-in:** `Options::DEFAULT` uses forgiving PDFium-compatible parsing (as of chromium/8125) and `zlib-rs` with zero-overhead silent fault handling. Switching to strict validation takes four fields on a copy of `Options::DEFAULT`: `Recovery::Verified`, `Rules::Iso`, `Faults::Kept`, and `Backend::MinizOxide`.
+- **Unified resource caps (`Limits`):** One `Limits` struct bounds stream decompression, object nesting, tree depth, and per-call `font_budget`. Untrusted or hostile files return typed errors or partial-read markers (`Shown::unread`, `Verdict::judged_whole`) and never panic.
+- **Opt-in spec diagnostics:** Methods with `_with` suffixes (`pages_with`, `info_with`, `claims_with`, `linearized_with`) stream recoverable spec departures to any `fault::Sink`.
+- **Explicit lock & decode states:** Password-locked streams fail with `Why::Locked` (never returning raw ciphertext as text), and damaged/unsupported content streams are recorded explicitly (`Concat::undecoded`, `Unread::Undecoded`). Document permission flags (`Permissions`) are reported to the caller rather than enforced by `edit` or `save`.
+- **Thread-safe & secret-safe:** `Pdf`, `Content`, `Document`, and `Shown` are `Send + Sync`. `Debug` implementations and `tracing` spans never expose passwords, keys, or document text.
 
-## Exhaustive on purpose, or not
+## Cargo Features
 
-`Options`, `Limits`, `Error` and `NamedFont` are `#[non_exhaustive]`, so each can grow in a minor release. Set an option or a cap on a copy of `Options::DEFAULT` or `Limits::DEFAULT`. The crates' own types keep their own policies.
+- **`programs`** *(default)* — Parse embedded font programs via `skrifa` for glyph bounding boxes, heights, and fallback character mappings.
+- **`clock`** *(default)* — Enable `Date::now` and `Date::from_unix` in `pdf-semantics`.
+- **`image-ends`** — Find inline DCT (JPEG) and CCITTFax image boundaries by decoding image data, matching PDFium.
+- **`predefined-cmaps`** — Bundle Adobe predefined CJK CMaps (via `hayro-cmap`) for CJK fonts without `/ToUnicode`.
+- **`simd`** — Enable runtime SIMD dispatch in `pdf-content-streams` dependencies.
+- **`tracing`** — Emit `debug`-level `tracing` spans (numeric metadata only) around major read/write operations.
+- **`insecure-test-writer`** — Deterministic seeded encryption keys/IVs for reproducible tests and fuzzing only (**never** enable in production builds).
 
-## What isn't here
+## Scope & Limitations
 
-- **Layout.** Text comes as the content shows it, not where it is on the page. A Type 3 font's glyphs and an annotation's appearance aren't read for text.
-- **Images, forms, signatures and font embedding.** No recipe reads an image, fills a form, signs a file or embeds a font. A whole or linearized save writes the file anew, so a signature's byte range no longer holds.
-- **A standard 14 font's widths.** PDF 2.0 asks for them, so a page drawn in one and saved as 2.0 lacks them.
-- **Claims merged into a file's XMP.** `Document::claim` refuses a catalog that has a metadata stream already.
-- **A durable save,** and a command line.
+- **No spatial text layout:** Text is returned in content-stream show order; Type 3 glyph streams and annotation appearances are not walked for text.
+- **No rendering, form filling, signing, or custom font embedding:** Rewriting a signed PDF whole or linearized invalidates existing byte-range signatures (use incremental updates carefully if preserving prior bytes).
+- **Standard 14 `/Widths` in PDF 2.0:** Standard 14 font dictionaries omit `/Widths` (valid in PDF 1.0–1.7; PDF 2.0 requires explicit `/Widths`).
+- **XMP replacement:** `Document::claim` writes a fresh XMP packet and refuses catalogs that already have a `/Metadata` stream.
 
 ## Stability
 
-This is an alpha: any alpha may change the API, and the CHANGELOG says how to follow. Depend on the exact version, `pdfs = "=0.1.0-alpha.1"`. It pins each alpha it re-exports exactly, so a release of any of them comes as a release of pdfs, and takes pdf-tokenizer on its `0.2` line, as every crate of the family takes it. It needs Rust 1.89 or later.
+`pdfs` is currently in alpha (`=0.1.0-alpha.1`). Pin the exact version in `Cargo.toml` (`pdfs = "=0.1.0-alpha.1"`), as alpha releases may introduce breaking API changes documented in `CHANGELOG.md`. Requires Rust **1.89** or later.
 
 ## License
 

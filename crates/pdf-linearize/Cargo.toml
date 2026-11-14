@@ -6,7 +6,7 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-linearize"
-description = "Linearized PDF files (ISO 32000-2, Annex F) for any object model: a file's order and numbers planned, the bytes around its bodies and its hint tables written, and a file that says it's linearized checked"
+description = "Plan, assemble, and validate linearized (Fast Web View) PDF files per ISO 32000-2 Annex F"
 keywords = ["pdf", "linearized", "fast-web-view", "hint-tables", "iso-32000"]
 categories = ["encoding"]
 # Only what users need, so local tooling files can't end up in the package.

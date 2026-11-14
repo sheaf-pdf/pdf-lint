@@ -1,82 +1,35 @@
-//! A reader of a file's bytes, on [`pdf_tokenizer`] and pdf-objects'
-//! [`Parser`]: every value, key and stream's data with where it was
-//! written ([`Span`]), dictionaries as written with any key written twice,
-//! and every choice it had to make a [`Fault`], kept at its place. It reads
-//! the header, `startxref`, the cross-reference tables and streams along
-//! their `/Prev` chain, each revision they make kept with its trailer and
-//! where its bytes end, past the `%%EOF` after its last-written section's
-//! `startxref` ([`Revision`]), and each object at the offset they give, a
-//! stream's data by its `/Length` when that ends at `endstream`. Offsets
-//! count from the header (ISO 32000-2, 7.5.2), past any bytes a writer put
-//! before it, and every position a reading gives is a place in the file's
-//! bytes, the header's offset added ([`Facts::header_offset`]). A section
-//! or an object away from where the file says is read where the file
-//! proves it is, and said ([`Recovery`]); or the file is read as PDFium
-//! reads it ([`Recovery::Pdfium`]). Where the sections don't read, it finds
-//! the objects by scanning the file, and says so. The scan passes over
-//! each stream's data as PDFium's does: by its `/Length` where `endstream`
-//! follows that, else to the first `endstream` or `endobj` after it, else
-//! nowhere, reading on through the data. It says where it ended a stream
-//! at `endobj` or found no end to one ([`Fault::StreamEnd`]). Where no
-//! `/Length` ends its data at `endstream`, a stream it ended at `endobj` is
-//! read no further. It reads on from just past the `(` of a literal string
-//! it finds no `)` closing, which would take every byte after it. Under
-//! [`Recovery::Pdfium`], it reads the rest of the file as that string
-//! instead. It says either ([`Fault::Unclosed`]). An object found again
-//! past such a string stands over the one before only where it reads
-//! ([`Fault::Earlier`]). A string closed late can't be told from one that
-//! closes where it should. So under [`Recovery::Verified`], an object whose
-//! `n g obj` starts a line inside any string the scan reads that closes is
-//! read there, where the scan found its number nowhere else
-//! ([`Fault::InString`]). An object that doesn't read says why
-//! ([`Unread`]): it doesn't parse, its offset holds another, or the object
-//! stream it's in doesn't decode ([`Undecoded`], its filters
-//! [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]). One read
-//! from an object stream that starts inside the bytes of another read from
-//! it, where the stream's header puts it, is read all the same, and said.
+//! Lazy and whole-file PDF structure reader built on [`pdf_tokenizer`] and [`Parser`].
 //!
-//! A file is read one way, by a [`Reading`], opened under [`Options`]
-//! ([`Reading::open`], the one way in): its header, cross-reference
-//! sections and trailer read and its security handler opened, then each
-//! object read when it's first asked for, and each object stream decoded
-//! when an object in it is (but in a file found by scanning, whose object
-//! streams the open decodes to list their objects). Read whole, every
-//! object is read so, in order, into a [`Document`] ([`document`],
-//! [`Reading::into_document`]), or into one beside the reading, which hands
-//! out what the document doesn't hold, a stream's data among it
-//! ([`Reading::to_document`], and [`WithReading`], the two together); read
-//! on demand, on any thread, only what's asked for is. Each object read
-//! records where it was found ([`Record`]). Its bytes are in memory, or a
-//! file is read by position ([`FileBytes`], or any [`ByteSource`] that
-//! doesn't hold its bytes), a window at a time from where each read starts,
-//! larger while what's read runs to the window's end, so that each read
-//! reads what it would of the whole file. The file as an earlier revision
-//! was written is its bytes up to that revision's end ([`Prefix`]), which
-//! a reading opens as a file of their own, by its own security handler
-//! where they're encrypted as its file is ([`Reading::prefix`]).
+//! [`Reading::open`] parses a file's header, `startxref`, cross-reference chain (`xref` tables
+//! and cross-reference streams along `/Prev`), [`Revision`] boundaries, and security handler
+//! under [`Options`]. Indirect objects and object streams are then parsed and decoded on demand
+//! across threads, or materialized all at once into a [`Document`] ([`document`],
+//! [`Reading::into_document`], [`Reading::to_document`], [`WithReading`]).
 //!
-//! It decodes cross-reference streams and object streams from their own
-//! data, through [`pdf_filters`]: a stream up to [`Limits::stream`] bytes,
-//! and a reading's [`Limits::budget`] in all. An encrypted file it opens
-//! with the passwords it's given ([`Options::passwords`]), or the empty
-//! password, or unlocks once it's open ([`Reading::unlock`]),
-//! through [`pdf_crypt`]'s standard security handler: its object streams
-//! decrypted before they're decoded, its strings decrypted where they are,
-//! a signature's `/Contents` left as it is. An encrypted file it doesn't open
-//! ([`Document::encryption`]) has its strings [`Str::Encrypted`], and its
-//! object streams unread, saying why. An object read from an object stream
-//! is placed in the stream's decoded data ([`Span::stream`]), which the
-//! [`Document`] keeps. A reading hands out any stream's data when it's
-//! asked for, decrypted as an object stream's is ([`Reading::data`]), and
-//! decoded through its filters ([`Reading::decoded_within`]).
+//! - **Offsets & spans:** Cross-reference offsets count from `%PDF-` (ISO 32000-2, §7.5.2),
+//!   ignoring leading preamble bytes, while every returned [`Span`], [`Record`], and fault
+//!   offset is an exact byte index in the underlying [`ByteSource`] (see [`Facts::header_offset`]).
+//!   Position-based sources such as [`FileBytes`] read growing byte windows on demand.
+//! - **Recovery ([`Recovery`]):** [`Recovery::Verified`] locates slightly shifted cross-reference
+//!   sections or entries when verified against object headers and falls back to full-file scanning
+//!   (handling missing `endstream` markers via [`Fault::StreamEnd`], unclosed literal strings via
+//!   [`Fault::Unclosed`] / [`Fault::Earlier`], and line-start objects inside strings via
+//!   [`Fault::InString`]). [`Recovery::Pdfium`] follows PDFium's cross-reference and fallback scan
+//!   rules instead. Unreadable objects report structured reasons via [`Unread`] ([`Undecoded`],
+//!   [`Unfiltered`], [`Unindexed`]).
+//! - **Streams, encryption, and revisions:** Cross-reference streams, object streams, and general
+//!   stream payloads ([`Reading::data`], [`Reading::decoded_within`]) are decrypted via
+//!   [`pdf_crypt`] ([`Options::passwords`], [`Reading::unlock`], [`Document::encryption`]) and
+//!   inflated via [`pdf_filters`] within [`Limits::stream`] and [`Limits::budget`]. Objects inside
+//!   object streams carry [`Span::stream`] spans, locked strings remain [`Str::Encrypted`], and
+//!   earlier revisions can be opened as standalone byte prefixes via [`Reading::prefix`]
+//!   ([`Prefix`]).
 //!
-//! **What's encrypted.** In an encrypted file it opens, what the reader
-//! decrypts and what it leaves as written; and, one list both ways, what
-//! the writer encrypts as it writes an encrypted file and what it writes
-//! as it is ([`write::Encrypting`](crate::write::Encrypting)), so that
-//! what it writes reads back by it. Each with the clause of ISO 32000-2
-//! that says so and the tests that hold it, the reader's, then the
-//! writer's (`write::tests`):
+//! # What's Encrypted
+//!
+//! The rules below define which strings and streams are decrypted on read and encrypted on write
+//! ([`write::Encrypting`](crate::write::Encrypting)), along with the ISO 32000-2 clauses and unit
+//! tests that verify symmetry:
 //!
 //! - **Every string of an object read at its offset** is decrypted with
 //!   the object's key, made from its number and generation, and stays

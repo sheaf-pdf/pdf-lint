@@ -1,4 +1,4 @@
-//! Why a call gives nothing: one error over every crate's.
+//! Unified error type (`Error`) wrapping errors from across the crate family.
 
 use std::io;
 
@@ -8,10 +8,12 @@ use pdf_objects::Unreadable;
 use pdf_semantics::{pages, xmp};
 use pdf_structure::write;
 
-/// Why a call gives nothing: the error of the crate it was given by, as that
-/// crate gives it, or the facade's own. Each wraps the crate's error
-/// unchanged, and says what it says.
-/// Not exhaustive, as more calls, and the reasons they give nothing, may come.
+/// Unified error returned by `pdfs` read, edit, and save operations.
+///
+/// Each variant wraps the underlying subsystem crate's typed error unchanged, or
+/// represents a high-level facade error (such as [`Error::Io`] or
+/// [`Error::NoCatalog`]). Marked `#[non_exhaustive]` so new variants may be added
+/// in minor releases.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

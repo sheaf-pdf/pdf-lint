@@ -1,37 +1,33 @@
 # pdf-arlington
 
-The [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model), the PDF Association's machine-readable grammar of ISO 32000-2, embedded in one Rust crate: its tables read, and the predicates in their cells evaluated over [pdf-objects](https://crates.io/crates/pdf-objects)' objects.
+Embedded [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model) grammar and predicate evaluator over [pdf-objects](https://crates.io/crates/pdf-objects).
 
-It's made for a checker. A predicate that can't be told comes to `Unknown`, saying what's in the way, and is never guessed; and where the embedded copy departs from upstream's, it says so, each change with the clause it follows.
+The Arlington PDF Model is the PDF Association's machine-readable TSV specification of ISO 32000-2: one table per PDF object kind, and one row per dictionary key or array element describing allowed types, version availability, requiredness, allowed values, and child table links. `pdf-arlington` embeds a pinned snapshot of those tables, parses their `fn:` predicate expressions, and evaluates them against any `pdf-objects` object graph.
 
-## What it does
+## Key Capabilities
 
-- **The model, embedded.** Upstream's `tsv/latest` at a pinned commit (`COMMIT`; `model/SOURCE.md` says from where), so nothing needs a checkout: a TSV table per object, a row per key or array element, saying its types, the PDF version it came in and any it was deprecated in, whether it's required, the values it may take and the tables its value links to. `Grammar::embedded()` reads it once, the first time it's asked for.
-- **Corrected where it contradicts the spec.** The embedded copy has the cells corrected where the model contradicts ISO 32000-2 or the reference it cites (`model/corrections.tsv`, `grammar::corrections`), and the rows and tables added that a reference defines and the model lacks (`model/additions`, in upstream's format, `grammar::additions`), each with why. The files in `model/tsv/latest` stay upstream's, byte for byte, and the build stops when upstream has changed a corrected cell or has an added row itself.
-- **A checkout instead.** `Grammar::load` reads a `tsv/latest` folder whole, upstream's own or a newer one, an error (`grammar::Error`) naming the file and line of a row that doesn't read; the caller holds the model it gives, as nothing in the crate chooses one. `Grammar::hash` names a model by its tables' bytes (XXH64), so two are alike when it is.
-- **Each row's cells read.** A `Row` has upstream's 12 columns, the Type cell split into its types (`ArlType`), a cell with an item per type into those items, and the version predicates around a type, a value or a link taken off and kept beside it (`Wrapped`).
-- **The predicates evaluated.** `predicate::parse` reads the language in the cells (INTERNAL_GRAMMAR.md's "Validation of predicates"): `fn:` functions, `&&` and `||`, comparisons, arithmetic, and keys, values and paths from the object, its parents or the trailer; an error (`predicate::Error`) says where one doesn't parse. `required`, `holds`, `reference` and the rest evaluate a cell on an object where it sits: a `FileCx` holds what's the same for every row of a file, its trailer and version and what resolves a reference, any of pdf-objects' `Resolve` (a closure, or a reader's or a document's own), so any reader's objects can be checked, and keeps what the predicates read of the file as a whole once read, shared across threads when its resolver is `Sync`; given the model its rows are of (`FileCx::grammar`), it reads their predicates through the model, which parses each the first time any file given it asks and keeps it for every file and thread after, so a checker of many files parses each once, where without it each is parsed every time it's asked, the answers the same; the model keeps every text asked through a `FileCx` given it, first come, the caller's own as well as its rows', up to about as many as it has rows, for as long as the model is (`Grammar::embedded()`'s for the process), so a caller's own texts take room from the rows'; an object the resolver gives none for is null, whatever the reason, so over a reading by position one whose bytes the source failed to give is null in that row, and missing from any tree read then, which pdf-structure's `Reading::failed_resolves` counts; a `Cx` it makes for each row gives the object, its number when it's an indirect object, and the way to it. The 41 functions of `SUPPORTED` are evaluated, `fn:NumberOfPages` and `fn:PageProperty` over the pages a `FileCx` is given (`FileCx::pages`), in order, as a page tree's walk gives them, `fn:FontHasLatinChars` over what it's told of the fonts (`FileCx::latin`, a `Latin`), as only a reader of the fonts can say, and the colorant functions by what a colorant's name says of it, read as [pdf-color](https://crates.io/crates/pdf-color) reads it; any other comes to `Truth::Unknown`, named.
-- **Versions and extensions.** `since` reads when a key came in, and `FileCx::since` under the extensions a file's checked under, `gate` what the version predicates around a type, value or link make of it at a file's version; `extension::declared` gives the extensions a file declares, from its catalog and what its XMP metadata claims, which it's given (`extension::Claims`), as reading XML isn't this crate's, and `Grammar::extensions` every one a model names.
+- **Zero-setup embedded model (`Grammar::embedded()`):** Compiles in upstream's `tsv/latest` tables (at `COMMIT`) alongside audited spec fixes (`grammar::corrections()`) and missing legacy rows (`grammar::additions()`). Build scripts verify that upstream TSV files remain unmodified and that every patch still cleanly applies.
+- **Load custom checkouts (`Grammar::load`):** Parse any local `tsv/latest` directory at runtime, identified by an XXH64 content digest (`Grammar::hash`).
+- **Typed TSV rows (`Table`, `Row`):** Splits multi-type cells (`ArlType`), per-type value/link lists, and version/extension wrapper predicates (`Wrapped`) into structured Rust types.
+- **Three-valued predicate evaluation (`predicate`, `FileCx`, `Cx`, `Truth`):** Evaluates Arlington `fn:` predicates, boolean logic, comparisons, arithmetic, and `@Key` / `parent::` / `trailer::` path lookups over any `pdf_objects::Resolve` implementation. Predicates that cannot be determined (due to missing context or unsupported functions) return `Truth::Unknown` rather than guessing. Attaching `.grammar(model)` to `FileCx` caches parsed ASTs across files and threads.
+- **PDF version & extension gating (`extension`):** Evaluates `fn:SinceVersion`, `fn:Deprecated`, and `fn:Extension` wrappers against declared catalog `/Extensions` and XMP conformance claims (`extension::declared`).
 
-## An example
+## Quickstart
 
 ```rust
 use pdf_arlington::pdf_objects::{Dict, Object, ObjectId, Version, dict};
 use pdf_arlington::predicate;
 use pdf_arlington::{At, FileCx, Grammar, Truth};
 
-// The embedded model's row for a page's /Rotate: an integer since PDF
-// 1.0, whose possible values are the multiples of 90.
+// Look up the Arlington row for a page's /Rotate entry: an integer since
+// PDF 1.0 whose allowed values must be multiples of 90.
 let table = Grammar::embedded().table("PageObject").unwrap();
 let row = table.row(At::Key(b"Rotate")).unwrap();
 assert_eq!((row.r#type[0].item.name(), row.since_version.as_str()), ("integer", "1.0"));
 let multiple = &row.possible_values[0][0].item;
 assert_eq!(multiple, "fn:Eval((@Rotate mod 90)==0)");
 
-// That predicate, evaluated on a page where the row sits. The file the
-// page is in, and what a reference resolves to (here, nothing), are the
-// caller's to give: once a file, every row it has evaluated in it. Given
-// the model, a predicate of its rows is parsed once, for every file after.
+// Evaluate that predicate against two page dictionaries.
 let trailer = Dict::new();
 let resolve = |_: ObjectId| None;
 let file = FileCx::new(&trailer, Version::new(2, 0), &resolve).grammar(Grammar::embedded());
@@ -40,8 +36,6 @@ assert_eq!(holds(&dict! { "Type" => "Page", "Rotate" => 180 }.into()), Truth::Tr
 assert_eq!(holds(&dict! { "Type" => "Page", "Rotate" => 45 }.into()), Truth::False);
 ```
 
-A `FileCx`'s type names its resolver: here the closure's. `FileCx<'a>`, the default, is one over any resolver, a `dyn Resolve`, as a `Cx` reads through it, so a function taking `&FileCx` takes a reference to one over any resolver; one kept is kept by its resolver's type, or boxed (`Box<FileCx>`).
-
 ## License
 
-Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)), as the model is. Upstream's files in `model/` are its tables, `tsv/latest`, and its `LICENSE` and `NOTICE.txt`; `corrections.tsv`, `additions/` and `SOURCE.md` beside them are this crate's, under the same licence.
+Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)), matching the upstream Arlington PDF Model (`model/LICENSE` and `model/NOTICE.txt`).

@@ -1,34 +1,25 @@
 # pdf-content-streams
 
-Read PDF content streams (ISO 32000-2, 7.8.2) as PDFium reads them, write them, and take ranges out of them.
+PDF content stream lexer, operator parser, analyzer, writer, and byte-preserving splicer (ISO 32000-2, §7.8.2), matching PDFium's parsing rules as of chromium/8125.
 
-It's made for what reads content to draw it, check it or edit it, and for what writes it. It reads no file. The caller gives a page's decoded streams and what its resources hold, or a reader of the file to take them from. It's built on [pdf-tokenizer](https://crates.io/crates/pdf-tokenizer), [pdf-objects](https://crates.io/crates/pdf-objects), [pdf-filters](https://crates.io/crates/pdf-filters) and [pdf-color](https://crates.io/crates/pdf-color). It re-exports pdf-objects and pdf-color whole, so their types are named at the versions it's built with.
+`pdf-content-streams` operates on decoded stream bytes and resource dictionaries without performing file I/O directly. Built on [pdf-tokenizer](https://crates.io/crates/pdf-tokenizer), [pdf-objects](https://crates.io/crates/pdf-objects), [pdf-filters](https://crates.io/crates/pdf-filters), and [pdf-color](https://crates.io/crates/pdf-color), it re-exports `pdf-objects` and `pdf-color` for version-matched interop.
 
-## What it does
+## Core Concepts
 
-- **Read a stream's tokens and operations.** `tokens` gives each token with its range and its bytes as written. `operations` gives each operator with the operands before it. Tokens end where PDFium's content parser ends them, an array or a dictionary among them.
-- **Read an operand when you need its value.** An `Operand` is its bytes and where they are. `name`, `Operand::number` and `object` read it as PDFium does, `object` as a pdf-objects `Object`.
-- **Find where an inline image ends.** An unfiltered image ends at its size, counted from its dictionary and its color space's components. Flate and LZW data is decoded through pdf-filters to where PDFium's decoders stop. `InlineImage::stream` says what PDFium keeps of the data.
-- **Count a page's color spaces.** `ResCx::read` counts each space a resources dictionary names, through the caller's resolver, as PDFium counts it. An inline image drawn in one of those names is sized by it.
-- **Read a page's streams as one.** `Concat` joins them with a space between each, as PDFium does, and maps a place in them back to its stream (`Pos`, `SpanAcross`). `Join` joins them as they're decoded, under a cap. `Join::push_from` takes each from any reader of a file, through pdf-objects' `Streams`, as that reader decodes it. `Join::push_contents` takes a page's `/Contents` whole, a stream or an array of them, as PDFium reads it. An element that's no stream is an empty stream there, and so is a stream whose data doesn't decode, damaged or through a filter the reader doesn't take, which `Concat::undecoded` lists, where PDFium reads its data as written. One behind a password, past the reader's cap or not given by its source is an error.
-- **Know what each operator is.** `Operator` types each operator of ISO 32000-2's Annex A, with its operands (`Operands`) and its category (`Category`). `State` says where each may be used among the graphics objects of 8.2, and `State::step` moves content through them.
-- **Check a page's balance, marked content and names.** `balance` counts its `q`s and `Q`s. `marked` finds each marked-content range, with its tag and its property list. `names_used` gives the resource names it uses, by category. `kept` gives the balance and names of what's left once ranges are taken out, and the names it can go without. `Balance::take`, `MarkedNest::step` and `NameSet::take` count an operation at a time, so one pass can find several.
-- **See where ISO 32000-2 reads content otherwise.** Each such place is a `fault::Fault`, which names its clause. It's told with where it is to a `fault::Sink` you give: `Tokens::with_sink`, `Operations::with_sink`, `Operand::object_with`. What's read is the same through any sink. With none, `()`, no fault is looked for.
-- **Write content.** `ContentWriter` writes each call as an operator and its operands, the same bytes for the same calls. It names the resources it draws with (`Res`) only when it's finished (`ContentWriter::named`), clear of the names a page's resources dictionary binds to something else (`Reserved::read`).
-- **Keep each resource once.** A resource is named by a digest of its objects (`ResId`, XXH3-128), the same on every build. Two resources are one only where they're equal, their objects the same, so a `HashMap<Res, _>` keeps each once. A resource is one object at least, and holds its streams' data in memory: `Res::of` and `Res::named` refuse one of no objects, and data a reader left in the file (`ResError`).
-- **Take ranges out of a page.** `splice` gives the page's streams with ranges taken out, every other byte as it was. It refuses a range that could change what's drawn after it (`SpliceError`), and reads what it keeps again before it gives it. `splice_each` takes out as many groups of ranges as it can. `without_keys` writes a marked range's property list again without some of its keys.
-- **Read hostile content.** Reading is bounded by `Limits`: operands, nesting, values, what finding images' ends may cost, marked content and what `splice_each`'s checks may read. Each cap is met before the work it bounds. Past most, reading stops with an `Error` that says where. A color space counted past its caps counts as one that doesn't load, and an inline image it sizes says so (`InlineImage::capped`). The edits refuse content that holds such an image. It never panics on content.
-- **Keep content out of logs.** A `Debug` shows where content is and how long, and an operator's name, never a string's or an image's bytes. A fault's text (its `Display`) shows 40 bytes at most, cut at a character.
+- **Token & operation lexing (`tokens`, `operations`, `Operand`):**
+  - `tokens` yields byte ranges and raw token slices bounded exactly where PDFium's content parser ends them (including arrays, dictionaries, and inline images).
+  - `operations` groups operands with their trailing operator (`Operator` typed per ISO 32000-2 Annex A, alongside `Category` and graphics-object `State` transitions).
+  - `Operand` defers value parsing until requested (`name`, `Operand::number`, `object`), and optional `fault::Sink` hooks report where ISO 32000-2 differs from PDFium at zero cost when `()` is passed.
+- **Inline-image boundary detection (`InlineImage`, `ResCx`):** Unfiltered inline images are sized from their image dictionary and resource color space component counts (`ResCx::read`); Flate and LZW inline images decode via `pdf-filters` to find where PDFium stops, and optional `image-ends` support decodes DCT (JPEG) and CCITTFax streams.
+- **Multi-stream pages (`Join`, `Concat`):** Concatenates a page's `/Contents` stream array with separating spaces (matching PDFium) while mapping byte spans back to individual streams (`Pos`, `SpanAcross`).
+- **Page analysis (`balance`, `marked`, `names_used`, `kept`):** Inspect `q`/`Q` graphics-state balance, marked-content sequences (`BMC`/`BDC`/`EMC`) with resolved property lists, and referenced resource names—either as whole-page passes or single-operation steppers (`Balance::take`, `MarkedNest::step`, `NameSet::take`).
+- **Content writing & deduplicated resources (`ContentWriter`, `Res`, `Reserved`):** Emit canonical PDF content operators while deferring resource naming (`ContentWriter::named`) so generated names avoid collisions with existing `/Resources` bindings (`Reserved::read`). `Res` hashes resource object graphs via XXH3-128 (`ResId`) so identical resources deduplicate cleanly in maps.
+- **Safe byte splicing (`splice`, `splice_each`, `without_keys`):** Remove byte ranges (such as marked-content blocks) from a page's streams while preserving surrounding bytes verbatim, rejecting removals that could alter downstream graphics state and re-verifying spliced output.
+- **Resource bounds & log hygiene (`Limits`):** Bounds operand counts, nesting, inline-image work, and splice checks before allocation, never panics on untrusted content, and omits raw string/image bytes from `Debug` output.
 
-## Features
+## Quickstart
 
-- **`image-ends`**, off by default. A reading that names `CodedEnds::Decoded` in `Limits::coded_ends` finds DCT and CCITTFax data's ends by decoding it, on [zune-jpeg](https://crates.io/crates/zune-jpeg) and [hayro-ccitt](https://crates.io/crates/hayro-ccitt), as PDFium's decoders do. Otherwise a stand-in finds them in the data's bytes. Turning the feature on changes nothing for a reading that doesn't name it.
-- **`simd`**, off by default. The dependencies pick the SIMD the CPU has as they run: memchr for its searches, twox-hash for its digest and, with `image-ends`, zune-jpeg for its decoding. Nothing read or digested changes. The `unsafe` code it turns on is theirs.
-- **`tracing`**, off by default. A page's passes, its edits, the writer's names and a resources dictionary's reading each run in a span, through [tracing](https://crates.io/crates/tracing). Reading tokens and operations has none, as its loop is the caller's. A span's fields are lengths and counts, never content.
-
-## Examples
-
-A page's two streams, taken from a reader of the file and read as one:
+Join two page content streams from a stream provider, iterate operations, and inspect graphics balance and marked content:
 
 ```rust
 use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
@@ -72,7 +63,7 @@ assert_eq!(found[0].tag, b"Span");
 assert_eq!(found[0].span.to_string(), "stream 0 byte 2 to stream 1 byte 13");
 ```
 
-Content written, its font named at the end, clear of a name the page's resources bind to another font:
+Write content and assign collision-free resource names at finalization:
 
 ```rust
 use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
@@ -90,8 +81,7 @@ let name = String::from_utf8_lossy(&needs.0[0].name).into_owned();
 let want = format!("BT\n/{name} 12 Tf\n72 700 Td\n(Hello, \\(world\\)) Tj\nET\n");
 assert_eq!(content, want.as_bytes());
 
-// A page whose resources bind that name to another font, object 1: the
-// next name up.
+// Avoid colliding with an existing `/Resources` binding for a different font:
 let objects = [Object::from(dict! { "Type" => "Font", "BaseFont" => "Courier" })];
 let resolve = |id: ObjectId| objects.get((id.number as usize).checked_sub(1)?);
 let resources = Object::from(dict! { "Font" => dict! { name.as_str() => Object::reference(1) } });
@@ -100,24 +90,11 @@ assert_ne!(renamed.0[0].name, needs.0[0].name);
 assert_eq!(renamed.0[0].res, font);
 ```
 
-## How it's held to PDFium
+## Cargo Features
 
-It follows PDFium's behaviour as of chromium/8125, written in this crate's own code. Cases in the repository's `tests/pdfium` hold it there, each with PDFium's answer recorded from that build. Where this crate reads a case otherwise, `tests/pdfium/differ.tsv` lists it with why. Those files aren't in the package.
-
-## Exhaustive on purpose, or not
-
-The standard's own closed lists are exhaustive, so a match on every value is checked: a token's kinds (`Tok`), a property list's two forms (`Props`), a marked range's opening and end (`MarkedEvent`), how a painting operator paints (`Paint`, `FillRule`), and the writer's line caps, joins, text modes and blend modes. Every other enum is `#[non_exhaustive]`, as are `Limits`, `GState` and what a reading gives (`Balance`, `Marked`, `Kept`), so each can grow in a minor release. The small structs a caller builds or takes apart by their fields, an error, a place or a need, are exhaustive, each doc saying so. A `Res` is built by its constructors alone.
-
-## What isn't here
-
-- **A file.** Finding a page's streams, decoding them and reading its resources are a reader's. This crate takes what the reader gives.
-- **An image's pixels.** Image data is decoded only to find where it ends, and what's decoded isn't kept.
-- **Binding what's written.** Putting the writer's resources into a resources dictionary, and its objects into a file, is the caller's.
-- **Holding content to the standard's rules for operators.** `Operator` and `State` say what each takes and where it may be used. Checking content against them is the caller's.
-
-## Stability
-
-This is an alpha: any alpha may change the API, and the CHANGELOG says how to follow. Depend on the exact version, `pdf-content-streams = "=0.1.0-alpha.1"`. It needs Rust 1.89 or later.
+- **`image-ends`** *(optional)*: Enables exact DCT ([zune-jpeg](https://crates.io/crates/zune-jpeg)) and CCITTFax ([hayro-ccitt](https://crates.io/crates/hayro-ccitt)) inline-image end detection when `Limits::coded_ends` is set to `CodedEnds::Decoded`.
+- **`simd`** *(optional)*: Enables runtime CPU SIMD dispatch in `memchr`, `twox-hash`, and (when enabled) `zune-jpeg`.
+- **`tracing`** *(optional)*: Emits `tracing` spans (byte lengths and counts only, never content) around page passes, splices, resource reads, and `ContentWriter::named`.
 
 ## License
 

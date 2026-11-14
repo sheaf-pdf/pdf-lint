@@ -1,50 +1,41 @@
-//! Read PDF's dates, name and number trees, page tree and XMP claims (ISO
-//! 32000-2, 7.7.3, 7.9 and 14.3.2), and write each of them. Read a file's
-//! document information dictionary (14.3.3). No file is read here. A walk
-//! reads a file's objects through the caller's [`Resolve`]: pdf-structure's
-//! reading or document, or a closure over a map.
+//! Read and write PDF document-level structures: dates, page trees, name and number trees,
+//! `/Info` dictionaries, and XMP conformance packets (ISO 32000-2, §7.7.3, §7.9, §14.3).
 //!
-//! - **Read and write a date** ([`date::Date`]). Each field says whether it
-//!   was written, and what the reading read past is a [`date::Quirk`].
-//! - **List a file's pages** ([`pages::pages`]) by ISO's rules or PDFium's,
-//!   as of chromium/8125. Each inherited attribute says where it came from
-//!   ([`pages::Origin`]).
-//! - **Write a page tree** ([`pages::write`]), balanced, over a caller's
-//!   pages, its nodes numbered by the caller.
-//! - **Walk name and number trees** ([`tree::names`], [`tree::numbers`]) a
-//!   key and a value at a time, and write one flat ([`tree::write_names`],
+//! `pdf-semantics` operates over any [`Resolve`] implementation (`&Reading`, `&Document`, or a
+//! closure) without performing file I/O directly. [`catalog`] locates the document catalog from a
+//! trailer dictionary, and [`follow`] resolves indirect reference chains.
+//!
+//! # Core Concepts
+//!
+//! - **Dates ([`date::Date`]):** Parse and format PDF `D:...` dates, preserving field presence
+//!   and recording legacy syntax [`date::Quirk`]s.
+//! - **Page trees ([`pages::pages`], [`pages::write`]):** Walk `/Pages` trees under ISO 32000-2
+//!   rules or PDFium's rules as of chromium/8125, tracking each inherited attribute's
+//!   [`pages::Origin`], or build balanced `/Pages` trees over caller-numbered page IDs.
+//! - **Name and number trees ([`tree::names`], [`tree::numbers`]):** Lazily iterate entries in
+//!   key order with cycle and depth bounds, or serialize flat trees ([`tree::write_names`],
 //!   [`tree::write_numbers`]).
-//! - **Read what a file claims to conform to** ([`xmp::read`],
-//!   [`xmp::read_from`]): PDF/A, PDF/UA and PDF/VT, found by namespace.
-//! - **Write a packet of claims** ([`xmp::write`]) that reads back as they
-//!   are.
-//! - **Read what a file says of itself** ([`info::read`]): its document
-//!   information dictionary, typed, its text decoded by ISO's rules or
-//!   PDFium's. A date that doesn't read is kept as its text.
+//! - **XMP conformance claims ([`xmp::read`], [`xmp::read_from`], [`xmp::write`]):** Extract and
+//!   write namespace-verified PDF/A, PDF/UA, and PDF/VT conformance claims.
+//! - **Document `/Info` dictionaries ([`info::read`]):** Decode `/Info` text fields (under ISO or
+//!   PDFium rules) and dates.
 //!
-//! Where a file departs from the standard is a [`Fault`], told with its
-//! place to pdf-objects' [`Sink`](pdf_objects::fault::Sink). With `()` as
-//! the sink, none is looked for. Each walk is bounded by [`Limits`], and it
-//! never panics on input. An object past the reader's own cap or behind a
-//! password stops a walk with an [`Unreadable`], so a failed read never looks
-//! like an empty tree. A damaged one is a [`Fault::Damaged`], and the walk
-//! goes on past it. [`catalog`] finds where a walk starts, and [`follow`]
-//! follows a reference. pdf-objects is re-exported whole, so its types are
-//! named through it at the version this crate is built with.
+//! Spec departures are reported as [`Fault`]s to a [`Sink`](pdf_objects::fault::Sink) (skipped
+//! when `()` is passed). All walks enforce [`Limits`] without panicking: reader caps and locked
+//! files return `Err(Unreadable)` so failed reads never masquerade as empty trees, while corrupt
+//! objects emit [`Fault::Damaged`] and allow traversal to continue. `pdf-objects` is re-exported
+//! at [`pdf_objects`].
 //!
-//! # Features
+//! # Cargo Features
 //!
-//! - **`clock`**, on by default: `Date::now` and `Date::from_unix`, on
-//!   chrono.
-//! - **`tracing`**, off by default: a span at `debug` over a page tree
-//!   walked or counted ([`pages::pages`], [`pages::counted`]), a packet read
-//!   ([`xmp::read`], [`xmp::read_from`]) and a page tree written
-//!   ([`pages::write`]). A span's fields are numbers, never a byte of a
-//!   file. A name or number tree's walk has none, as its loop is the
-//!   caller's.
+//! - **`clock`** *(default)*: Enables `Date::now` and `Date::from_unix` via `chrono`.
+//! - **`tracing`** *(optional)*: Emits numeric `tracing` spans over page-tree walks/counts
+//!   ([`pages::pages`], [`pages::counted`]), page-tree writes ([`pages::write`]), and XMP packet
+//!   reads ([`xmp::read`], [`xmp::read_from`]).
 //!
-//! Three pages under a tree written for them, read back; a packet of claims,
-//! written and read back; and a date:
+//! # Example
+//!
+//! Build and read back a balanced page tree, round-trip a PDF/A-2b XMP packet, and normalize a date:
 //!
 //! ```
 //! use std::collections::BTreeMap;

@@ -1,23 +1,15 @@
-//! The workspace's tests' PDF files, and qpdf, their oracle: never
-//! published, a dev-dependency of each crate whose tests use it, by its
-//! path alone.
+//! Internal test-fixture builders and `qpdf` oracle helpers (unpublished).
 //!
-//! - **Files written from objects** ([`fixture`]): pdf-objects' values
-//!   written as PDF syntax, as whole files with a cross-reference table or
-//!   an uncompressed cross-reference stream, encrypted by pdf-crypt's
-//!   writer or as a new file is, or assembled from objects' bytes as
-//!   written by hand; and data written through a filter's encoding, for a
-//!   stream to decode.
-//! - **qpdf as a second reader** ([`qpdf`]): the program `PDF_LINT_QPDF`
-//!   names, else `qpdf` on the `PATH`, run as a process, a file read
-//!   through its JSON alone, and a stream, an object stream's objects or
-//!   an encrypted file's strings decoded by it, to set beside the reader's.
-//!   A stream qpdf decodes alone is handed to it in a file of its own,
-//!   which tempfile makes in the temp folder and removes after.
+//! - **Synthetic PDF builders ([`fixture`]):** Assemble valid or intentionally malformed PDF files
+//!   from `pdf-objects` values or raw byte snippets, with cross-reference tables or streams,
+//!   stream-filter encodings, and deterministic test encryption.
+//! - **`qpdf` oracle runner ([`qpdf`]):** Invokes `PDF_LINT_QPDF` (or `qpdf` on `PATH`) to parse
+//!   files as JSON and decode streams, object streams, or encrypted strings for differential
+//!   testing against workspace crates.
 //!
-//! Its answers are pdf-objects' values, bytes and text, so a crate that
-//! pdf-fixtures depends on (pdf-structure) takes it in its own tests, a
-//! second copy of that crate then linked whose types its tests never meet.
+//! Public return types use only `pdf-objects` values, bytes, and strings so crates that
+//! `pdf-fixtures` depends on (such as `pdf-structure`) can still use `pdf-fixtures` as a path
+//! `dev-dependency` without type-version conflicts.
 
 pub mod fixture;
 mod json;

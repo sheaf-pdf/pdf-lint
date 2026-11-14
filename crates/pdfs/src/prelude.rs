@@ -1,8 +1,9 @@
-//! What reading and writing a file take and give, by name, in one `use`:
-//! `use pdfs::prelude::*;`. The facade's own types and calls, and the
-//! family's items they take and give, each through the crate it's from, at
-//! the versions this one is built with: what a page draws with and in, what
-//! a file says of itself, how it's encrypted, and what's in it.
+//! Convenience re-exports for common PDF reading and writing workflows (`use pdfs::prelude::*;`).
+//!
+//! Includes `pdfs`'s primary entry points (`Pdf`, `Document`, `Page`, `Options`,
+//! `Limits`, `open`, `from_bytes`, `standard_font`) alongside frequently used
+//! types from the re-exported crate family (`Rect`, `Std14`, `Color`, `Paint`,
+//! `Password`, `Protection`, `Permissions`, `Encryption`, `Object`, `Dict`, etc.).
 
 #[cfg(any(unix, windows))]
 pub use crate::open;

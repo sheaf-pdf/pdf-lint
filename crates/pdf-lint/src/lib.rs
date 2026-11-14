@@ -1,58 +1,31 @@
-//! Checks a PDF file's objects against the Arlington PDF Model, the PDF
-//! Association's machine-readable grammar of ISO 32000-2.
+//! Validate PDF files against the Arlington PDF Model and ISO 32000-2.
 //!
-//! The model is pdf-arlington's, embedded there (its `model/`, whose
-//! `SOURCE.md` says from where): a TSV table per object, a row per key or
-//! array element, saying its types, the PDF version it came in and any it
-//! was deprecated in, whether it's required, the values it may take and
-//! the tables its value links to. The tables' layout is upstream's
-//! README.md, "TSV Data Overview"; the rules for each column are
-//! INTERNAL_GRAMMAR.md's "TSV file rules" and "TSV Data Fields", from
-//! "Column 1 - Key" to "Column 11 - Link". [`grammar()`] reads them.
+//! `pdf-lint` combines two layers of validation:
 //!
-//! What the walk reaches that holds content, each page, form XObject,
-//! tiling pattern and Type 3 glyph, has its content read too, where the
-//! source gives streams' data ([`bytes::WithReading`]), as PDFium reads it,
-//! through pdf-content-streams, and held to ISO 32000-2 itself, which the
-//! model doesn't describe: `q` and `Q` balanced, marked content ended,
-//! each operator where the graphics objects allow it and with the operands
-//! it takes, each resource name in the resources, what they hold that
-//! nothing uses, and each place ISO reads the content otherwise than
-//! PDFium ([`check()`] says how).
+//! 1. **Arlington grammar walk ([`pdf_arlington`]):** Walks every object
+//!    reachable from the trailer (plus object streams, linearization
+//!    dictionaries, and earlier incremental-update trailers) and evaluates the
+//!    embedded Arlington TSV tables—checking key types, required keys, version
+//!    gates, allowed values, special-case predicates, broken references, and
+//!    duplicate keys.
+//! 2. **ISO 32000-2 subsystem checks:** Uses [`pdf_content_streams`],
+//!    [`pdf_semantics`], [`pdf_color`], [`pdf_fonts`], and [`pdf_linearize`] to
+//!    validate content streams (`q`/`Q` balance, marked content, operator
+//!    states, operand types, resource bindings), page trees (including viewer
+//!    vs. ISO divergences), name/number trees, XMP metadata, color spaces,
+//!    fonts, object-stream packing rules, and Annex F linearization.
 //!
-//! The page tree, and each name and number tree the walk reaches, are read
-//! through pdf-semantics too, and held to ISO 32000-2 where the model can't
-//! say what's wrong; the pages the page tree's walk reads are what the
-//! model's `fn:NumberOfPages` and `fn:PageProperty` read, and where PDFium
-//! reads other pages than ISO's, or reads their sizes otherwise, is told as
-//! a viewer's reading. The catalog's XMP metadata, read for the extensions
-//! a file declares, is held to ISO 32000-2 too: what isn't UTF-8 or XML as
-//! 14.3.2 has it, and a claim's value that holds an element beside its
-//! text, is told at its bytes in the metadata stream ([`check()`] says
-//! how).
+//! # Entry Points
 //!
-//! Each color space and font the walk reaches is read again, through
-//! pdf-color and pdf-fonts, the fonts for their text, no program read, and
-//! each held to ISO 32000-2 where the model can't say what's wrong
-//! ([`check()`] says how). What the model asks that only they can say is
-//! read through them too: which fonts have Latin characters, read before
-//! the walk, that a descriptor's `/CapHeight` is required of, and what a
-//! DeviceN space's or a halftone's colorants' names say of them.
-//!
-//! Each earlier revision's trailer is checked as an incremental update left
-//! it, and given the file's reading ([`check_with_reading`]), what it
-//! refers to that a later revision wrote over or freed is read as that
-//! revision had it, from the file as the revision was written. Each object
-//! stream, and a linearized file's linearization dictionary, which nothing
-//! in the model links to, is checked from its number.
-//!
-//! Given the file's reading too, a file that says it's linearized is held
-//! to ISO 32000-2's Annex F through pdf-linearize's check: its sections, its
-//! hint tables, its first page and what each page reaches, against what
-//! they say of each other, told as one finding a kind, and whether it holds
-//! ([`Report::linearized`]); one linearized as first written and updated
-//! after has that told, which voids the linearization (F.1), and is held
-//! to the annex as it was first written.
+//! - [`check()`] validates any [`Source`] (such as an in-memory [`Document`]).
+//! - [`check_with_reading`] takes a [`bytes::WithReading`] so it can also
+//!   decode content/font/metadata streams, inspect overwritten objects in
+//!   historical revisions, and verify Annex F linearization.
+//! - [`Report`] holds all [`Finding`]s (with exact byte [`Span`]s) and summary
+//!   counts, and supports baseline diffing via [`Report::since`],
+//!   [`Report::by_path`], and [`Report::beyond`].
+//! - [`grammar()`] returns the active Arlington [`Grammar`] (embedded by
+//!   default, or overridden once at startup via [`use_model`]).
 
 pub mod allowance;
 pub mod check;

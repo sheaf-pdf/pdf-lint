@@ -1,57 +1,58 @@
-//! Read and write PDF files through one dependency. The crates of one family
-//! are re-exported whole, each at the version this one is built with, so a
-//! caller names any of their types through it ([`pdf_structure`], say), and
-//! they work together. On top of them are the recipes that span them, with a
-//! viewer's defaults.
+//! Read, inspect, edit, and write PDF files through one dependency.
 //!
-//! - **Open a file** ([`open`] by its path, [`from_bytes`] from memory or any
-//!   source) under [`Options`], a viewer's by default: a [`Pdf`], each object
-//!   read when it's first asked for, from any thread.
-//! - **List its pages** ([`Pdf::pages`]), each with what it inherits and from
-//!   where, and **read a page's content** ([`Page::content`]), its streams
-//!   decoded and joined, and its operations.
-//! - **Read a page's text and fonts** ([`Page::text`], [`Page::fonts`]): the
-//!   strings its content shows, in order, each in its font, the forms it
-//!   draws followed, as PDFium reads them for its text, with no layout.
-//! - **Read what the file says of itself**: its version, its encryption, its
-//!   document information dictionary and XMP claims, whether its
-//!   linearization holds ([`Pdf::linearized`]), and any stream's data.
-//! - **Write a document** ([`Document::new`], or a file edited,
-//!   [`Pdf::edit`]): pages added, each drawn by a content writer, the
-//!   standard 14 fonts by name ([`standard_font`]) and claims as XMP; saved
-//!   whole, linearized or as an update, in the clear or encrypted.
-//! - **Call a recipe as a function** ([`page`](mod@page), [`file`](mod@file),
-//!   [`build`](mod@build)) over a reading or a document of your own. The
-//!   [`prelude`] names what they take and give.
+//! `pdfs` provides a high-level, viewer-compatible API on top of a modular
+//! family of PDF crates, and re-exports every crate in the family at matching
+//! versions ([`pdf_structure`], [`pdf_objects`], [`pdf_fonts`], etc.) so you
+//! can drop down to lower-level APIs whenever needed.
 //!
-//! One [`Limits`] holds every crate's caps, and one [`Error`] wraps every
-//! crate's error. Past a cap, a call says so, and no file makes it panic. A
-//! call's `_with` form tells a crate's faults to the sink it's given. Its
-//! plain form tells nothing, and looks for nothing.
+//! # Overview
+//!
+//! - **Open files lazily** via [`open`] (positional disk reads on Unix/Windows)
+//!   or [`from_bytes`] (in-memory buffers or custom [`pdf_structure::ByteSource`]s),
+//!   configured with [`Options`]. Objects are parsed on demand and cached
+//!   safely across threads on [`Pdf`].
+//! - **Inspect pages and content** with [`Pdf::pages`] and [`Page::content`]
+//!   (decoded, concatenated content streams and parsed operators).
+//! - **Extract text and fonts** with [`Page::text`] and [`Page::fonts`] in
+//!   content-stream order (following Form XObjects, matching PDFium's text
+//!   extraction without spatial layout).
+//! - **Read document metadata** including version, [`Pdf::encryption`], `/Info`
+//!   dictionary, XMP conformance claims, and linearization validity
+//!   ([`Pdf::linearized`]).
+//! - **Create, edit, encrypt, and linearize** documents via [`Document::new`]
+//!   or [`Pdf::edit`]: draw pages with [`standard_font`], attach XMP claims,
+//!   encrypt with AES-256, and save whole, linearized, or as an incremental
+//!   update.
+//! - **Use standalone trait functions** in [`page`](mod@page),
+//!   [`file`](mod@file), and [`build`](mod@build) over your own
+//!   [`pdf_structure::Reading`] or [`pdf_structure::Document`]. Import common
+//!   types in one line with [`prelude`].
+//!
+//! Resource limits across all subsystems live in [`Limits`], and errors unify
+//! into [`Error`]. Untrusted files never cause panics. Methods ending in
+//! `_with` report recoverable spec departures to a
+//! [`fault::Sink`](pdf_objects::fault::Sink), while plain methods skip fault
+//! collection at zero cost.
 //!
 //! # Features
 //!
-//! - **`programs`** and **`clock`**, on by default: pdf-fonts reads a font's
-//!   program, and pdf-semantics has `Date::now` and `Date::from_unix`.
-//! - **`image-ends`**, **`predefined-cmaps`** and **`simd`**, off by default:
-//!   pdf-content-streams ends an inline image's data by decoding it, pdf-fonts
-//!   reads Adobe's predefined CMaps, and pdf-content-streams' dependencies use
-//!   the CPU's SIMD.
-//! - **`tracing`**, off by default: a span at `debug` over each recipe that
-//!   reads a part of a file whole or writes one, not a lookup, and each
-//!   crate's own. A span's fields are numbers, never a byte of a file.
-//! - **`insecure-test-writer`**, off by default, for tests and fuzzing:
-//!   pdf-structure's and pdf-linearize's test writer, a new encryption's key
-//!   from a seeded generator and every IV derived, so a test writes the same
-//!   bytes each run. It's never for a document's protection, and a build that
-//!   ships leaves it off.
+//! - **`programs`** and **`clock`** *(enabled by default)*: parse embedded font
+//!   programs via `skrifa`, and enable `Date::now` / `Date::from_unix` in
+//!   `pdf-semantics`.
+//! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
+//!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
+//!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
+//! - **`tracing`**: emit `debug`-level `tracing` spans (numeric counts and
+//!   lengths only, never file content).
+//! - **`insecure-test-writer`**: deterministic seeded encryption keys and IVs
+//!   for tests and fuzzing only (never enable in production).
 //!
-//! A page's text, from a file written here first:
+//! # Quickstart
 //!
 //! ```
 //! use pdfs::prelude::*;
 //!
-//! // A file of one page, written here so the example runs on its own.
+//! // Create a one-page PDF in memory so this example runs standalone.
 //! let mut doc = Document::new();
 //! let page = doc.add_page(Rect::LETTER);
 //! page.begin_text();
@@ -61,7 +62,7 @@
 //! page.end_text();
 //! let file = doc.to_bytes().unwrap();
 //!
-//! // Read it as any file is read.
+//! // Open the PDF and extract text from each page.
 //! let pdf = pdfs::from_bytes(file).unwrap();
 //! let pages = pdf.pages().unwrap();
 //! assert_eq!(pages.len(), 1);
@@ -97,44 +98,34 @@ mod pdf;
 mod phases;
 pub mod prelude;
 
-/// The tokenizer: a file's bytes as tokens, by ISO 32000-2's rules or
-/// PDFium's, with no `std` or `alloc` of its own.
+/// Lossless, zero-copy `no_std` PDF lexer supporting ISO 32000-2 and PDFium rules.
 pub use pdf_tokenizer;
 
-/// PDF's objects: values with where each was written, their parser and
-/// their writer, and text strings read and written.
+/// Owned PDF object values with byte spans, object parser/writer, and text string codecs.
 pub use pdf_objects;
 
-/// PDF's standard filters: data decoded, every fault said, and Flate
-/// encoded, on miniz_oxide or zlib-rs.
+/// Standard PDF stream filter decoders and Flate encoder (`miniz_oxide` and `zlib-rs`).
 pub use pdf_filters;
 
-/// PDF's standard security handler: a file decrypted, and a writer's
-/// output encrypted under a password.
+/// Standard PDF security handler for decrypting and password-encrypting files.
 pub use pdf_crypt;
 
-/// PDF's file structure: a file read whole or each object on demand, and a
-/// document written whole or as an incremental update.
+/// PDF file structure: lazy positional reading, in-memory documents, and full/incremental writers.
 pub use pdf_structure;
 
-/// PDF's color spaces: their components as PDFium counts them, each typed,
-/// and what a resources dictionary names.
+/// PDF color space parsing, component counting, and resource lookup.
 pub use pdf_color;
 
-/// Content streams: their tokens and operations as PDFium reads them, a
-/// page's streams joined as one, and content written.
+/// PDF content stream lexing, typed operators, graphics-state checks, splicing, and writing.
 pub use pdf_content_streams;
 
-/// PDF's common structures, read and written: dates, name and number trees,
-/// the page tree and what XMP metadata claims.
+/// Common PDF structures: dates, name/number trees, page trees, `/Info`, and XMP claims.
 pub use pdf_semantics;
 
-/// PDF's fonts as PDFium reads them: codes, widths and text, and the
-/// standard 14 with Adobe's metrics.
+/// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, and text extraction.
 pub use pdf_fonts;
 
-/// Linearized files: a document written for reading over a network, and a
-/// file that says it's linearized checked.
+/// Linearized ("Fast Web View") PDF layout engine, hint tables, and validator.
 pub use pdf_linearize;
 
 #[cfg(test)]

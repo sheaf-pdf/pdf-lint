@@ -6,7 +6,7 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-crypt"
-description = "PDF's standard security handler: decrypting with every fault said, encrypting for a writer, and a new file's passwords and permissions"
+description = "Standard PDF security handler (RC4, AES-128, AES-256) for password decryption, encryption, and permission flags"
 keywords = ["pdf", "decryption", "encryption", "password", "aes"]
 categories = ["cryptography", "encoding"]
 # Only what users need, so local tooling files can't end up in the package.

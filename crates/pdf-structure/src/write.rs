@@ -1,108 +1,37 @@
-//! A writer of a file's structure (ISO 32000-2, 7.5): a whole file
-//! ([`full`], [`document`]) or an incremental update after one
-//! ([`update`]), given numbered objects; and the parts either is laid out
-//! in, for a caller that lays a file out itself: its cross-reference
-//! sections, as a table or a stream, and object streams of the objects
-//! that may go in one, deflated through [`pdf_filters`]. The objects are
-//! written by pdf-objects' writer ([`pdf_objects::serialize`]), each at the
-//! position a section lists it at.
+//! PDF file structure writer (ISO 32000-2, §7.5–7.6): full files ([`full`], [`document`]),
+//! incremental updates ([`update`]), and low-level layout primitives ([`Parts`], [`Section`],
+//! [`container`]).
 //!
-//! - **A whole file** ([`full`]): the header, each object at its number,
-//!   in the order given, the encryption dictionary, the object streams,
-//!   and one cross-reference section, a table or a stream, with no
-//!   `/Prev`; the trailer the caller's but for the keys a section writes
-//!   itself, and an `/ID` whose second string is a hash of what's
-//!   written, so in the clear the same objects write the same bytes. Packed
-//!   ([`Options::pack`]), what may go in an object stream goes in one,
-//!   built on threads. [`document`] writes a [`Document`]'s
-//!   objects so, but those a whole file leaves out.
-//! - **An update** ([`update`]): after a file, each object at its number,
-//!   and a section in the file's kind listing only those, its `/Prev` the
-//!   file's last section (7.5.6); the file's trailer carried, and what it
-//!   writes said ([`Written`]), so a second update goes after it without
-//!   reading it again. What it goes after is a [`Base`]: a reading's
-//!   ([`Base::of`]), or one a caller describes ([`Base::new`]).
-//! - **Copies:** an object as it was read ([`Body::Read`], a document's
-//!   by [`bodies`]) is written as the bytes it was read from, read again
-//!   from the reading given ([`ReadFrom`]), where they're right to copy: at
-//!   its number, under the key it was encrypted with, or none; an object
-//!   stream's member into an object stream of the write's. Its bytes are
-//!   checked first against a hash of them taken as it was read, and the
-//!   reading's source asked whether it changed ([`ByteSource::unchanged`]);
-//!   where they changed, the write is refused. An update passes over what
-//!   its file holds as read, so a document's bodies write what changed.
-//! - **Renumbered** ([`Options::renumber`]): a whole file's or an update's
-//!   objects written at the numbers a caller's renumbering gives them, each
-//!   reference named as it names it, `null` where it names none, the
-//!   trailer's too. What's given stays at its numbers, which a stream's
-//!   data, a copy's record and what the encryptor resolves are found by; an
-//!   encrypted file's objects are encrypted under the numbers they're
-//!   written at, a whole file's by the encryptor in those numbers (as
-//!   [`Encryptor::laid_out`] gives it for a caller's own layout), an
-//!   update's by its file's, whose encryption dictionary and what that
-//!   refers to it doesn't move. An
-//!   object as read is copied as its bytes, its header and each reference
-//!   that moves written anew where its bytes had it; at another number only
-//!   where its key isn't made of its number. An update passes over only
-//!   what doesn't move, nor names what does.
-//! - **For a caller that lays a file out itself** ([`Parts`]): each body and
-//!   object stream written as a whole file's are, at the numbers it gives,
-//!   encrypted by what [`Encryptor::laid_out`] gives for those numbers; with
-//!   what a whole file leaves out ([`left_out`], [`encryption_objects`]), a
-//!   trailer's own entries ([`trailer_entries`]), and `/ID` ([`first_id`],
-//!   [`file_id`], [`id_value`]).
-//! - **Cross-reference sections** ([`Section`]): a whole file's one
-//!   subsection, `[0, /Size)`, every number it doesn't list written as
-//!   free; or an update's, runs of the numbers it lists, which are only
-//!   those it writes (7.5.6). Free entries are linked in a list from entry
-//!   0, each at the generation its number is to be used at next (7.5.4).
-//!   An object in an object stream is listed as its container and its
-//!   place there, which only a stream can say (7.5.8.3). A whole file's
-//!   stream is deflated under PNG's Up predictor, each row less the row
-//!   above it, as qpdf writes its own; an update's is written as it is.
-//! - **Positions counted from the header,** where `%PDF-` starts, which a
-//!   whole file's section has at its start (ISO 32000-2, 7.5.2): past any
-//!   bytes a writer put before the header, as this crate's reader, PDFium,
-//!   pdf.js and qpdf count them. An update of a file with bytes before its
-//!   header counts from there ([`Section::append`], [`Base::header`]).
-//! - **Object streams** (7.5.7): which objects may go in one
-//!   ([`packable`]), by the clause's list of what mustn't ([`KeptOut`]),
-//!   what of it an object alone tells ([`kept_out`]); and a container of
-//!   them ([`container`]), its members direct after a header of where each
-//!   starts, deflated, no bigger than the reader decodes a stream to
-//!   ([`MAX_DATA`]).
-//! - **Deflated** by the backend and at the level a [`Deflate`] says.
-//! - **Encrypted as it's written** (7.6): an encrypted file's every string and
-//!   stream's data, as pdf-objects' writer writes each, by an [`Encryptor`], a
-//!   reading's ([`Encryptor::of`]) or a new file's ([`Encryptor::create`]),
-//!   through what it gives for the file's objects ([`Encrypting`]): with the
-//!   object's key, AES's IV the next of the write's own, 16 bytes from the
-//!   operating system (pdf-crypt's `Ivs`), so no IV serves two plaintexts and
-//!   two saves of one document differ in every AES ciphertext written anew.
-//!   What it leaves in the clear is the list the reader decrypts by, one list
-//!   both ways (see [`read`](crate::read), "What's encrypted"). A trailer isn't
-//!   encrypted, so a whole file's or an update's direct `/Info` is written as
-//!   an object, encrypted as any, as a caller laying a file out writes it
-//!   itself ([`Encryptor::laid_out`]); and only strings and streams are
-//!   (7.6.2), so what a file held only inside an object stream is in the clear
-//!   once written unpacked ([`document`] says so). Under a new encryption that
-//!   encrypts metadata, the document's metadata stream's own `/Crypt` filter
-//!   that would leave it in the clear is taken out as it's written ([`Parts`]),
-//!   and written otherwise it's refused ([`Unencryptable::Metadata`]). Under
-//!   RC4, which encrypts each object's strings and data from the start of a
-//!   keystream its number and generation make, so that two plaintexts under
-//!   one leak their XOR (pdf-crypt's `Method::Rc4`), nothing new goes under a
-//!   keystream the file read shows used: a whole file writes what it writes
-//!   anew at a generation its number hasn't used ([`Written::regenerated`]),
-//!   and an update, and what a caller lays out, refuses what would be new there
-//!   ([`Unencryptable::Keystream`], [`Error::Free`]) unless told otherwise
-//!   ([`Encryptor::reusing_rc4_keystreams`]); see [`Encryptor`], "Under RC4". A whole file under a reading's encryption
-//!   lists each number that file listed and it doesn't write free at its next
-//!   generation (7.5.4). The encryption dictionary of pdf-crypt's values, a
-//!   new file's or one read, as the values say it, is [`encryption`].
+//! # Capabilities
 //!
-//! What it can't write is refused ([`Error`]), and then nothing is
-//! written.
+//! - **Full files ([`full`], [`document`]):** Writes a `%PDF-` header, indirect objects, optional
+//!   object streams ([`Options::pack`], built in parallel across threads), optional encryption
+//!   dictionary, and a single cross-reference table or PNG-Up deflated cross-reference stream
+//!   with a deterministic SHA-256 `/ID[1]` digest.
+//! - **Incremental updates ([`update`]):** Appends modified objects and a chained `/Prev`
+//!   cross-reference section after a [`Base`] ([`Base::of`] or [`Base::new`]), returning
+//!   [`Written`] with an updated `Base` so consecutive updates can be chained without re-parsing.
+//! - **Verified byte copying ([`Body::Read`], [`bodies`]):** Unmodified objects read from a
+//!   [`ReadFrom`] (`Reading`) are copied directly from their source bytes after verifying their
+//!   content hash and [`ByteSource::unchanged`]; incremental updates skip unchanged objects
+//!   automatically.
+//! - **Reference renumbering ([`Options::renumber`]):** Rewrites object numbers and indirect
+//!   references across full writes and updates (converting unmapped references to `null` and
+//!   patching references in copied object bytes when safe).
+//! - **Custom file layout ([`Parts`], [`Section`], [`container`]):** Exposes individual body
+//!   serialization, cross-reference tables/streams ([`Section::full`], [`Section::append`]),
+//!   object-stream eligibility ([`packable`], [`KeptOut`], [`kept_out`], [`MAX_DATA`]),
+//!   compression settings ([`Deflate`]), and trailer/ID helpers ([`left_out`],
+//!   [`encryption_objects`], [`trailer_entries`], [`first_id`], [`file_id`], [`id_value`]).
+//! - **Encryption ([`Encryptor`], [`Encrypting`], [`encryption`]):** Preserves a reading's
+//!   existing encryption ([`Encryptor::of`]) or creates a new revision-6 AES-256 handler
+//!   ([`Encryptor::create`]), drawing fresh OS IVs per AES ciphertext, promoting direct trailer
+//!   `/Info` dictionaries to encrypted indirect objects, stripping `/Identity` metadata crypt
+//!   filters when encrypting metadata ([`Unencryptable::Metadata`]), and preventing RC4 keystream
+//!   reuse across generations ([`Written::regenerated`], [`Unencryptable::Keystream`],
+//!   [`Error::Free`], [`Encryptor::reusing_rc4_keystreams`]).
+//!
+//! Any invalid or unencryptable input fails with [`Error`] without modifying the output buffer.
 
 mod append;
 mod copy;

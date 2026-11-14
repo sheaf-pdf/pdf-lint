@@ -1,106 +1,58 @@
-//! PDF's standard security handler (ISO 32000-2, 7.6.4): a file's key from
-//! its encryption dictionary and a password, and its strings and streams
-//! decrypted with it, or encrypted for a writer; and a new file's key and
-//! dictionary.
+//! PDF standard security handler (ISO 32000-2 §7.6.4) for password-based
+//! decryption, encryption, and permission flags.
 //!
-//! - **Values, not dictionaries.** A [`Dictionary`] is the encryption
-//!   dictionary's values, typed; reading them from the file is the
-//!   caller's, so it works with any object model. One the standard handler
-//!   doesn't take is refused saying why ([`Refused`]): another security
-//!   handler's by its name, a version it isn't by its `/V` and `/R`.
-//! - **Every revision of the standard handler:** 2 to 4 (RC4, and AES-128
-//!   in version 4), 5 (Adobe's Extension Level 3, AES-256) and 6 (ISO
-//!   32000-2, AES-256), the owner's password or the user's.
-//!   [`Handler::revision`] says which a file is.
-//! - **A password as typed, and the bytes tried:** a [`Password`]'s text
-//!   [`encodings`](Password::encodings) are its SASLprep form (RFC 4013)
-//!   as of Unicode 3.2, and by a later Unicode where that's another, and
-//!   UTF-8, which revisions 5 and 6 take, and the single-byte encodings 2
-//!   to 4's may have been set in, each [`Encoded`] tagged with its
-//!   [`Encoding`]; [`Handler::open`] tries those that fit the file's
-//!   revision first, and says which opened it. A new file's password is
-//!   [`prepared`](Password::prepared), strictly: SASLprep's form, the same
-//!   by both Unicodes, or why it can't be one ([`Unusable`]).
-//! - **A new file's encryption:** [`Handler::create`] makes a revision 6
-//!   dictionary (AES-256), and the handler to encrypt under it, protected
-//!   as a [`Protection`] says: an open password (the user's), a
-//!   permissions password (the owner's) or both, each prepared, and what
-//!   one who opens it by the open password may do. Its key and salts are
-//!   drawn from the operating system's random number generator
-//!   (getrandom's).
-//! - **Permissions, said:** a [`Permissions`] set of the eight `/P` has a
-//!   bit for, a security dialog's levels of printing and of changes
-//!   reachable from it ([`Printing`], [`Changes`]), written as a new
-//!   file's `/P` and read from a file's by its revision's meaning of the
-//!   bits ([`Handler::permissions`]). Honouring them is a reader's: one
-//!   who can open a file can decrypt all of it.
-//! - **Every fault said, what decrypted kept,** as a checker wants it: AES
-//!   ciphertext too short, a part block past the whole ones, padding that
-//!   isn't, a crypt filter's method that isn't one, AES that the file's key
-//!   isn't for, `/Perms` that doesn't match or doesn't confirm the key.
-//! - **Encrypting for a writer:** [`Handler::encrypt_string`] and
-//!   [`Handler::encrypt_stream`] encrypt as the handler decrypts. AES's IV
-//!   is the next of a write's [`Ivs`], 16 bytes from the operating system,
-//!   so equal plaintexts encrypt apart and no IV holds anything of the key.
-//!   RC4 takes no IV. A method that isn't one is refused. So is a draw the
-//!   operating system fails ([`Random`]), and nothing is written in the
-//!   clear in its place.
-//! - **Keys kept in, and wiped:** a [`Handler`] decrypts and encrypts with
-//!   the file's key and each object's, and gives out neither, its `Debug`
-//!   included. Each is wiped when it's dropped (RustCrypto's `zeroize`), as
-//!   is every buffer a password or a key passes through on the way to one.
-//!   Whether two handlers have one key is told by a check of it
-//!   ([`KeyCheck`], [`Handler::has_key`]), compared in constant time, which
-//!   gives nothing of the key.
-//! - **RustCrypto's primitives:** MD5 (`md-5`), SHA-256, SHA-384 and
-//!   SHA-512 (`sha2`), HMAC-SHA256 (`hmac`), RC4 (`rc4`), and AES-128 and
-//!   AES-256 (`aes`, in CBC by `cbc`), each built to wipe its own state.
+//! `pdf-crypt` works with plain typed [`Dictionary`] values rather than a
+//! specific PDF object representation, so any reader or writer can use it:
 //!
-//! Decrypting is a step before the filters (pdf-filters decodes those),
-//! and which strings and streams aren't encrypted at all, the encryption
-//! dictionary's own, a cross-reference stream, a signature's `/Contents`,
-//! is the caller's to know: pdf-structure's reader decrypts by one list of
-//! it, and its writer encrypts by the same. Under RC4 a changed object
-//! written again at a number and generation the file used leaks what
-//! changed ([`Method::Rc4`]).
+//! - **Open encrypted files ([`Handler::open`]):** Supports revisions 2–4 (RC4
+//!   40–128 bit and AES-128 crypt filters), revision 5 (Adobe Extension Level 3
+//!   AES-256), and revision 6 (ISO 32000-2 AES-256). [`Password::encodings`]
+//!   derives candidate SASLprep, UTF-8, and single-byte encodings ordered for
+//!   the file's revision.
+//! - **Create AES-256 encryption ([`Handler::create`], [`Protection`]):**
+//!   Builds revision 6 encryption dictionaries with user ("open") and/or owner
+//!   ("permissions") passwords validated via [`Password::prepared`], drawing
+//!   keys and salts from the OS CSPRNG (`getrandom`).
+//! - **Permissions ([`Permissions`], [`Printing`], [`Changes`]):** Reads and
+//!   encodes `/P` permission bitmasks.
+//! - **Decrypt & encrypt strings and streams:** [`Handler::decrypt_string`] and
+//!   [`Handler::decrypt_stream`] report malformed padding/blocks/permissions as
+//!   typed [`Fault`]s alongside partial plaintext. [`Handler::encrypt_string`]
+//!   and [`Handler::encrypt_stream`] draw fresh 16-byte random IVs from [`Ivs`].
+//! - **Secret hygiene:** Keys, password buffers, and RustCrypto cipher states
+//!   are wiped on drop (`zeroize`). [`KeyCheck`] compares handler keys in
+//!   constant time without exposing key bytes, and `Debug` impls never print
+//!   keys, passwords, or decrypted data.
 //!
-//! The `insecure-test-writer` feature, off by default, is for writing test
-//! files: an encryption dictionary of every revision, its salts and keys
-//! given, strings and streams encrypted under IVs given or derived, and a
-//! new file's key and salts drawn from a generator given. It's never for
-//! protecting a document, and its items are hidden from these docs.
+//! Stream decompression happens after decryption (see `pdf-filters`), and file-level
+//! cleartext exemptions (`/Encrypt` strings, xref streams, signature `/Contents`)
+//! are handled by `pdf-structure`.
 //!
-//! A new file's encryption under an open password and a permissions
-//! password, and the file opened by each:
+//! *(The `insecure-test-writer` feature enables hidden deterministic test helpers
+//! and must never be enabled in production builds.)*
 //!
 //! ```
 //! use pdf_crypt::{Changes, Encoding, Handler, Ivs, Password, Permissions, Printing, Protection, Refused};
 //!
-//! // The two passwords prepared: the open password, and the permissions
-//! // password, Ⅸ, whose SASLprep form is `IX`.
+//! // Prepare open (user) and permissions (owner) passwords via RFC 4013 SASLprep.
+//! // U+2168 ('Ⅸ') normalizes to "IX".
 //! let user = Password("sesame").prepared().unwrap();
 //! let owner = Password("\u{2168}").prepared().unwrap();
 //! assert_eq!(owner.as_bytes(), b"IX");
 //!
-//! // One who opens the file by the open password may print it at low
-//! // resolution and fill in its forms (and assemble it, as that level has it),
-//! // but not copy from it.
+//! // Allow low-resolution printing and form filling for the user password.
 //! let mut protection = Protection::new(&user);
 //! protection.owner = Some(&owner);
 //! protection.permissions = Permissions::from(Printing::Low) | Permissions::from(Changes::FillForms);
 //! let (writer, dictionary) = Handler::create(&protection).unwrap();
 //! assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-2108)));
 //!
-//! // A writer encrypts a string of object 5 under it, AES's IV the next of
-//! // the write's, from the operating system: the same string encrypts apart
-//! // each time.
+//! // Encrypt a string in object (5, 0) using OS-random AES IVs.
 //! let ivs = Ivs::new();
 //! let title = writer.encrypt_string((5, 0), b"A title", &ivs).unwrap();
 //! assert_ne!(writer.encrypt_string((5, 0), b"A title", &ivs).unwrap(), title);
 //!
-//! // A reader opens it by the open password as the user's (revision 6 takes
-//! // no /ID), with those permissions and bit 10, which revision 6 always
-//! // sets, and decrypts.
+//! // Open with the user password and inspect granted permissions.
 //! let by_user = Handler::open(&dictionary, b"", &Password("sesame").encodings()).unwrap();
 //! assert!(!by_user.owner());
 //! assert_eq!(by_user.permissions().printing(), Printing::Low);
@@ -108,13 +60,12 @@
 //! assert_eq!(by_user.permissions().to_string(), "print, fill forms, accessibility, assemble");
 //! assert_eq!(by_user.decrypt_string((5, 0), &title).unwrap(), b"A title");
 //!
-//! // The permissions password, as typed, in its SASLprep form, opens it as
-//! // the owner's, whom the permissions don't bind.
+//! // Open with the owner password (normalizes 'Ⅸ' -> "IX" automatically).
 //! let by_owner = Handler::open(&dictionary, b"", &Password("\u{2168}").encodings()).unwrap();
 //! assert!(by_owner.owner());
 //! assert_eq!(by_owner.opened_by(), Some((0, Encoding::Saslprep)));
 //!
-//! // Another password doesn't open it, nor none.
+//! // Wrong or missing passwords fail with Refused::Password.
 //! let wrong = Password("IV").encodings();
 //! assert_eq!(Handler::open(&dictionary, b"", &wrong).unwrap_err(), Refused::Password);
 //! assert_eq!(Handler::open(&dictionary, b"", &[]).unwrap_err(), Refused::Password);

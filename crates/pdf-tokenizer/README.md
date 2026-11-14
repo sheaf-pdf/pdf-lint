@@ -1,30 +1,53 @@
 # pdf-tokenizer
 
-A lossless, zero-copy tokenizer for PDF syntax, in one small Rust crate that needs neither `std` nor `alloc`, and never allocates.
+A lossless, zero-copy PDF syntax tokenizer that requires neither `std` nor `alloc` and never allocates.
 
-It splits bytes into tokens and decides nothing else. What an object is, what's valid, and how to recover a damaged file are left to the layers above it, so a strict validator and a forgiving reader can share it, each with its own policy. Decoding a token into what it stands for is a separate step that hides nothing.
+`pdf-tokenizer` splits raw PDF bytes into lexical tokens without applying grammar rules, normalizing escapes, or repairing malformed input. Higher-level object parsing, stream decompression, and file recovery live in the layers above (`pdf-objects`, `pdf-structure`, or the battery-included [pdfs](https://crates.io/crates/pdfs) crate), allowing strict validators and forgiving PDF viewers to share the exact same lexer.
 
-Every promise below is checked on every token by the tests, a fuzz target, and thousands of real and deliberately malformed PDFs.
+## Core Guarantees
 
-## What it promises
+- **Lossless:** Every input byte belongs to exactly one `Token` (including whitespace and comments). Concatenating token slices reproduces the original byte slice verbatim.
+- **Total & non-panicking:** Never rejects input, repairs syntax, or panics. Unmatched closing delimiters (`)`, `>`) produce `Kind::Junk`; unterminated strings yield `closed: false`; every step advances forward.
+- **Zero-copy & `core`-only:** Each `Token` borrows a slice of the input with its byte offset and `Kind`. Built on `#![no_std]` with zero heap allocation (`-Z build-std=core` verified in CI).
+- **Stateless from any offset:** Carries no cross-token state, so you can start lexing at any xref byte offset or content stream boundary.
+- **Streaming-window friendly:** On a partial file window, only a token touching the end of the slice (`token.end() == window.len()`) could change if more bytes follow; every earlier token is final.
+- **Grammar-free:** Keywords like `obj`, `R`, `stream`, `xref`, `trailer`, `true`, and `null` are emitted as plain `Kind::Keyword` tokens. `skim()` fast-forwards across nested `[` / `<<` delimiters without materializing interior tokens.
 
-- **Lossless.** Every byte is in exactly one token, white-space and comments included. Join the tokens and you have the input back, byte for byte.
-- **Total.** It never rejects input, never repairs it, and never panics. A `)` with no string open, or a `>` that isn't part of `>>`, is a `Junk` token. A string that doesn't end is a string token with `closed` false. Every token moves it forward.
-- **Zero-copy.** A token is a kind, whether it closed, an offset, and its bytes as written, borrowed from your input. Nothing is allocated, copied or decoded.
-- **From any offset.** Start where a cross-reference entry points, in the middle of a file, or at the start of a content stream. The tokenizer carries nothing from one token to the next, so started at any token, it yields that token.
-- **A slice of a file.** Give it as much of a file as you've read, and only the token that reaches the end of it can come out otherwise when more bytes follow: `12` may be `123`, `>` may be `>>`, a string may be cut short, white-space may go on. Every other token is settled by the bytes you gave it, so when the last one reaches the end, read more and tokenize again from where it starts.
-- **No grammar.** `obj`, `R`, `stream`, `xref`, `trailer`, `true` and `null` are keywords like any other, and `3 0 R` is three tokens with spaces between them. Joining tokens into references, objects or cross-reference sections is the next layer's work. `skim()` passes what an array or a dictionary holds without a token for each, giving only the tokens that open or close one, and a string that doesn't close, but which of them closes which, and how deep is too deep, are still the caller's to say.
-- **No allocation, no I/O.** It needs only `core`, so whatever an untrusted file holds, tokenizing and decoding it can't allocate memory or touch the system; its two dependencies are built without `std`: thiserror, which derives its error type's traits, and memchr, whose searches find where a comment or a string ends, and a stream's data, on SIMD where the target has it. CI checks this by building it against `core` alone (`-Z build-std=core`), for a target with neither `std` nor `alloc`. Without `std`, memchr can't ask the processor what it has as it runs, so on x86-64 it searches with SSE2; an application with `std` gets AVX2 where the processor has it by turning on memchr's `std` feature, which depending on memchr with its default features does (many applications do already, through serde_json among others). A value's bytes come as an iterator, to collect however you like, or borrowed as written when there's nothing to decode.
+## Quickstart
 
-## ISO 32000-2's rules, or PDFium's
+```rust
+use pdf_tokenizer::{Kind, Tokenizer};
 
-By default it follows the lexical conventions of ISO 32000-2 (§7.2, §7.3): its white-space characters, its delimiters, and its regular characters. A run of regular characters is a number only when it's written as one, so `1e5` and `--5` are keywords.
+let input = b"/Kids [3 0 R] % ok";
+let tokens: Vec<(Kind, &str)> = Tokenizer::new(input)
+    .map(|t| (t.kind, std::str::from_utf8(t.bytes).unwrap()))
+    .collect();
+assert_eq!(tokens, [
+    (Kind::Name, "/Kids"),
+    (Kind::Space, " "),
+    (Kind::ArrayOpen, "["),
+    (Kind::Integer, "3"),
+    (Kind::Space, " "),
+    (Kind::Integer, "0"),
+    (Kind::Space, " "),
+    (Kind::Keyword, "R"),
+    (Kind::ArrayClose, "]"),
+    (Kind::Space, " "),
+    (Kind::Comment, "% ok"),
+]);
 
-A reader that means to see what PDFium sees can have PDFium's rules instead, from any offset: PDFium's as of chromium/8125, a development snapshot of PDFium that the crate's tests hold them to. They part from ISO 32000-2's in three places, and every promise above holds under either:
+// Lossless: joining token bytes reconstructs the exact input.
+let joined: Vec<u8> = Tokenizer::new(input).flat_map(|t| t.bytes.iter().copied()).collect();
+assert_eq!(joined, input);
+```
 
-- **Numbers.** A run of regular characters that are all digits, signs and points is a number to PDFium: `--5`, `5-3` and `+` are integers, and `1.2.3` and `.` reals. `1e5` is a keyword under both.
-- **Hexadecimal strings.** PDFium's runs from `<` to the next `>` over any byte, where ISO 32000-2's (§7.3.4.3) ends before a byte that's neither a hex digit nor white-space.
-- **White-space.** PDFium reads 0x80 and 0xFF as white-space too, so either ends a name or a word.
+## ISO 32000-2 vs. PDFium Lexical Rules
+
+By default, `Tokenizer` follows ISO 32000-2 (§7.2, §7.3). Switch to PDFium's forgiving lexical rules—tested against PDFium as of chromium/8125—via `with_rules(Pdfium)` (compile-time type state) or `with_rules(Rules::Pdfium)` (runtime enum):
+
+- **Numbers:** Runs consisting solely of digits, `+`, `-`, and `.` (such as `--5` or `1.2.3`) lex as `Integer` or `Real` under PDFium rather than `Keyword`.
+- **Hex strings:** PDFium scans `<...>` to the next `>` across arbitrary bytes, whereas ISO 32000-2 stops before non-hex/non-whitespace bytes.
+- **Whitespace:** PDFium treats `0x80` and `0xFF` as whitespace in addition to the six standard PDF whitespace bytes.
 
 ```rust
 use pdf_tokenizer::{Kind, Rules, Tokenizer};
@@ -53,62 +76,11 @@ assert_eq!(kinds(Rules::Pdfium), [
     Kind::HexString,
     Kind::Keyword,
 ]);
-
-// The hex string ends before the `G` to ISO 32000-2, unclosed, and runs to
-// its `>` to PDFium.
-let hex = |rules| {
-    let mut tokens = Tokenizer::new(input).with_rules(rules);
-    let hex = tokens.find(|t| t.kind == Kind::HexString).unwrap();
-    (hex.closed, hex.bytes)
-};
-assert_eq!(hex(Rules::Iso), (false, &b"<4"[..]));
-assert_eq!(hex(Rules::Pdfium), (true, &b"<4G1>"[..]));
 ```
 
-A `Rules` value, as above, chooses the rules as the tokenizer runs, for a reader that learns only then which it wants, at a branch a token. `Iso` and `Pdfium` fix them in the tokenizer's type instead, with nothing to choose at each token: `Tokenizer<'a>` is `Tokenizer<'a, Iso>`, what `new` and `at` give, and `with_rules(Pdfium)` gives a `Tokenizer<'a, Pdfium>`. The tokens are the same either way.
+## Stream and Inline-Image Binary Data
 
-```rust
-use pdf_tokenizer::{Kind, Pdfium, Tokenizer};
-
-let mut tokens = Tokenizer::new(b"--5 cm").with_rules(Pdfium);
-assert_eq!(tokens.next().map(|t| t.kind), Some(Kind::Integer));
-```
-
-## An example
-
-```rust
-use pdf_tokenizer::{Kind, Tokenizer};
-
-let input = b"/Kids [3 0 R] % ok";
-let tokens: Vec<(Kind, &str)> = Tokenizer::new(input)
-    .map(|t| (t.kind, std::str::from_utf8(t.bytes).unwrap()))
-    .collect();
-assert_eq!(tokens, [
-    (Kind::Name, "/Kids"),
-    (Kind::Space, " "),
-    (Kind::ArrayOpen, "["),
-    (Kind::Integer, "3"),
-    (Kind::Space, " "),
-    (Kind::Integer, "0"),
-    (Kind::Space, " "),
-    (Kind::Keyword, "R"),
-    (Kind::ArrayClose, "]"),
-    (Kind::Space, " "),
-    (Kind::Comment, "% ok"),
-]);
-
-// Lossless: the tokens join back into the input.
-let joined: Vec<u8> = Tokenizer::new(input).flat_map(|t| t.bytes.iter().copied()).collect();
-assert_eq!(joined, input);
-```
-
-Nothing is normalized. `/A#20B` stays `/A#20B`, `(caf\351)` keeps its escape, and `1.50` and `-.5` keep their digits.
-
-## Binary data: the caller decides
-
-After `stream`, the bytes are binary, and how many there are is written elsewhere: in the stream's `/Length`, which may be a reference to an object later in the file, and may be wrong. An inline image's data, after `ID` in a content stream, has no length written at all.
-
-The tokenizer can't know where such data ends, so the caller says. It takes the white-space before the data with `eol()` or `space_byte()`, then the data itself as one `Data` token, with `data(len)` for a length it trusts or `data_until(marker)` to scan for `endstream` or `EI`. Readers differ most right here, so the choice belongs to the reader, not the tokenizer.
+Binary payloads following `stream` or `ID` cannot be delimited by lexical rules alone (since `/Length` may be an indirect reference or inaccurate). After reading `stream` or `ID`, advance past the trailing newline or space with `eol()` or `space_byte()`, then consume the payload with `data(len)` (known length) or `data_until(marker)` (scan for `endstream` or `EI`):
 
 ```rust
 use pdf_tokenizer::{Kind, Tokenizer};
@@ -117,17 +89,14 @@ let input = b"<< /Length 5 >>\nstream\r\nBT ET\nendstream";
 let mut tokens = Tokenizer::new(input);
 assert!(tokens.by_ref().any(|t| t.bytes == b"stream"));
 
-// The end of line after `stream`: CR LF here, which ISO 32000-2 allows.
 assert_eq!(tokens.eol().unwrap().bytes, b"\r\n");
-
-// The data, as `/Length` says. `data_until(b"endstream")` would scan instead.
 let data = tokens.data(5);
 assert_eq!((data.kind, data.bytes), (Kind::Data, &b"BT ET"[..]));
 ```
 
-## Decoding
+## Token Value Decoding (`decode`)
 
-What a token stands for is in `decode`. A name's or a string's bytes come as pieces: every byte of the token is in exactly one, which says what value byte it stands for and how. So each escape, and each place where readers or PDF versions differ, can be seen with where it was written.
+Tokens keep raw bytes as written (`/A#20B`, `(caf\351)`, `-.5`). The `decode` module lazily decodes names, literal/hex strings, and numbers without allocating, reporting escape quirks (`How`, `Quirks`) with byte offsets:
 
 ```rust
 use pdf_tokenizer::Tokenizer;
@@ -141,30 +110,11 @@ assert_eq!(pieces, [
     (2..5, Some(b' '), How::Escape),
     (5..6, Some(b'B'), How::Plain),
 ]);
-
-// Its value, as the pieces' bytes; borrowed as written only when there's
-// nothing to decode, which there is here.
 assert!(name.pieces().unwrap().bytes().eq(*b"A B"));
-assert_eq!(name.verbatim(), None);
-let plain = Tokenizer::new(b"/Type").next().unwrap();
-assert_eq!(plain.verbatim(), Some(&b"Type"[..]));
+assert_eq!(Tokenizer::new(b"/Type").next().unwrap().verbatim(), Some(&b"Type"[..]));
 ```
 
-Where ISO 32000-2 leaves a choice, or a reader departs from it, the decoder still gives a byte, and the piece says which it chose:
-
-| `How` | Written | Read as |
-|---|---|---|
-| `StrayHash` | a `#` in a name without two hex digits after it | `#`, as before PDF 1.2. qpdf reads NUL |
-| `NulEscape` | `#00` in a name | NUL, which a name may not hold. qpdf drops the value |
-| `OctalOverflow` | `\777` | its low eight bits, as ISO 32000-2 says |
-| `IgnoredBackslash` | `\q` | `q`, as ISO 32000-2 says |
-| `EolAsLf` | an unescaped CR, or CR LF, in a string | LF, as ISO 32000-2 says |
-| `OddDigit` | `<414>`'s last digit | as if `0` followed it |
-| `Dangling` | a `\` that an unclosed string ends on | nothing |
-
-Numbers decode too. `integer()` gives an `i64`, or `Overflow` outside it, where qpdf reads the whole object holding the integer as null. `number()` gives an `f64` for an integer or a real, `Overflow` past the largest finite one, and `Underflow` for a real whose digits aren't all zero but reads as zero; `1e5` and `inf` aren't numbers.
-
-The pieces and numbers are ISO 32000-2's reading of a token, whatever rules read it. `decode::pdfium` reads the same bytes as PDFium does, values only: a number as PDFium holds one (an unsigned or signed 32-bit integer, 0 past it, or an `f32`: `--5` is 0, `1.2.3` is 1.2), a name's `#` before any two bytes as an escape, a literal string's unescaped CR as written, and a hex string's digits paired over any other byte.
+`decode::pdfium` provides PDFium-compatible value decoders (`number`, `real`, `name`, `literal`, `hex`) for malformed tokens:
 
 ```rust
 use pdf_tokenizer::decode::pdfium::{self, Number};
@@ -175,35 +125,12 @@ assert!(pdfium::name(b"/F#3G").eq(*b"F0"));
 assert!(pdfium::hex(b"<41 G 42>").eq(*b"AB"));
 ```
 
-Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are a level up: whether a string is text depends on the key it's under.
+## API Map
 
-## What it's for
-
-- **Validators and linters** that report syntax as written: a duplicate dictionary key, `1.0` where an integer belongs, a name's escapes, the end of line after `stream`, a cross-reference offset that misses its object. A parser that normalizes has already thrown these away.
-- **Parsers with different policies** over one lexical layer: a strict one that fails on damage and a forgiving one that recovers, sharing the same tokens.
-- **Editors and incremental writers** that must leave the bytes they don't change exactly as they were.
-- **Recovery and forensics:** scanning a damaged file for `n g obj` headers when its cross-reference table is wrong. One cost to know there: a literal string that never closes runs to the end of the input, so a recovery that tokenizes from many offsets in turn, each inside such a string, pays the rest of the input at each, O(n) an offset. The remedy is a bound: tokenize `&bytes[..limit]` from each offset, and a string that reaches the slice's end is one cut short, as the slice promise says.
-- **Content streams,** which use the same syntax, with operators as keywords.
-
-## What it isn't
-
-- **A parser.** It builds no objects, and reads no cross-reference tables or object streams.
-- **A decoder.** It applies no filters and decrypts nothing.
-- **A repairer.** Damaged input comes out as tokens, not fixed.
-
-## The API
-
-- `Tokenizer::new(bytes)` and `Tokenizer::at(bytes, offset)`: an iterator of `Token`s, by ISO 32000-2's rules. Cloning one is cheap, so a clone can look ahead. `offset()` is where the next token starts, `input()` the whole input and `remaining()` what's left of it from there, so a reader needn't carry the slice beside the tokenizer.
-- `with_rules(Pdfium)` or `with_rules(Rules::Pdfium)`, and `rules()`: the rules it follows from its next token on, fixed in its type (`Iso`, the default, or `Pdfium`) or chosen as it runs (`Rules`). `Rules::is_white_space` and `is_regular` say a byte's class under each.
-- `Token { kind, closed, start, bytes }`: `bytes` is a slice of the input, `range()` says where it is, `closed` is false only for a literal or hexadecimal string whose closing delimiter didn't come, and `is_keyword(word)` says whether it's the keyword `word`, by its kind and its bytes together.
-- `Kind`: the lexical kinds, one byte each, and `Data` for bytes the caller measured; `Kind::ALL` is every kind in the order of their discriminants, for a table indexed by `kind as usize`.
-- `eol()`, `space_byte()`, `data(len)` and `data_until(marker)`: for the data after `stream` and `ID`.
-- `next_significant()`: the next token that's neither white-space nor a comment, with no token made of what it passes. `skim()`: the next that opens or closes an array or a dictionary, or a string that doesn't close, looking only at the bytes that could start one; from an opener, skimming on to the closer that balances it passes all it holds. `significant()` and `skimming()`: each repeated, as an iterator that borrows the tokenizer and advances it, so a loop over one can stop, and the tokenizer go on from there by any step.
-- `is_white_space`, `is_delimiter` and `is_regular`: ISO 32000-2's three classes of byte.
-- `token.pieces()`, `token.verbatim()`, `token.integer()` and `token.number()`: what a token stands for. A value's bytes are `pieces().bytes()`, a `decode::Bytes`, never longer than the token, which their `size_hint` says, so a buffer of its upper bound holds them without growing; `verbatim()` borrows them as written when nothing needs decoding; `pieces().quirks()` is the set of `How`s out of the ordinary among them, a `Quirks`, to ask by `contains`, iterate in `How::ALL`'s order, build from `How`s (in a constant too, from `Quirks::EMPTY`) or join with `|`. `decode::name`, `literal`, `hex`, `integer` and `number` decode bytes from elsewhere; given a name's or a string's bytes without their opener, they read them as the inside of a value already open.
-- `decode::pdfium::number`, `real`, `name`, `literal` and `hex`: what bytes stand for as PDFium reads them.
-
-`Kind`, `NumberError` and `decode::pdfium::Number` are exhaustive on purpose: a match on every kind, every error, or every form of a number PDFium holds, is checked by the compiler, so a new variant of any is a breaking release. `How` and `Rules` are `#[non_exhaustive]`: a quirk is found in files, not designed, and a set of rules is a reader's to ask for, so either may come in a minor release, and a match on them needs a wildcard.
+- **`Tokenizer::new(bytes)` / `Tokenizer::at(bytes, offset)`:** Create an iterator of `Token`s (`offset()`, `input()`, `remaining()`).
+- **`next_significant()` / `significant()`:** Skip whitespace and comments without constructing tokens for them.
+- **`skim()` / `skimming()`:** Jump across `[` / `]` / `<<` / `>>` delimiters and unclosed strings using SIMD-accelerated byte searches (`memchr`). *(Enable `memchr/std` in `std` binaries for runtime AVX2 detection on x86_64.)*
+- **`Token::pieces()`, `verbatim()`, `integer()`, `number()`:** Decode ISO 32000-2 values and inspect `Quirks`.
 
 ## License
 

@@ -1,8 +1,5 @@
-//! A file as a reader read it: a [`Source`], which any reader can
-//! implement, and [`Document`], an owned one that readers fill, tests
-//! build, and a caller builds and edits in memory; and what the bytes
-//! reader records of where it read each object ([`Record`]) and of the
-//! file as written ([`Facts`]), its revisions among it ([`Revision`]).
+//! Common file-source abstraction ([`Source`]), owned in-memory [`Document`] model, and
+//! structural metadata ([`Record`], [`Facts`], [`Revision`], [`Trailer`], [`Encryption`]).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map};
@@ -21,20 +18,17 @@ use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use crate::read::{Error, Fault, SourceId, Undecoded, Unfiltered, Unindexed, Unwritten};
 
-/// A file, as a reader read it: its objects, and its streams' data as a
-/// viewer takes it ([`Streams`]), which a reader without the file's bytes,
-/// as a document alone is, gives only of what it holds ([`Why::Detached`]
-/// of the rest). A [`Document`]
-/// is one, and so are a [`Reading`](crate::Reading), which answers of what
-/// it has read so far, and a document read beside its reading
-/// ([`WithReading`](crate::read::WithReading)).
+/// Read-only interface over a parsed PDF file's objects, trailer, faults, and decoded streams
+/// ([`Streams`]).
 ///
-/// A `Reading`'s and a `Document`'s own methods of the trait's names give
-/// the same answers in a plainer or richer form (an iterator for a `Vec`,
-/// the reading's [`Error`] for an [`Unread`], no `Option` where it always
-/// knows, a borrow for a `Cow`), and a call on one names them first; the
-/// trait's are reached by its name (`Source::facts(&doc)`) or through a
-/// `&dyn Source`.
+/// Implemented by [`Document`] (which holds objects in memory and returns [`Why::Detached`] for
+/// unheld raw file streams), [`Reading`](crate::Reading) (which reflects objects read so far and
+/// decodes streams from the source), and [`WithReading`](crate::read::WithReading) (which pairs
+/// both).
+///
+/// Inherent methods on `Reading` and `Document` with matching names return more specific types
+/// (such as iterators instead of `Vec`, or borrowed slices instead of `Cow`); invoke trait
+/// methods explicitly (`Source::facts(&doc)`) or via `&dyn Source` when generic access is needed.
 pub trait Source: Streams {
     /// Every object its cross-references list.
     #[must_use]

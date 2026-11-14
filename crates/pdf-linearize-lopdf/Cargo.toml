@@ -6,7 +6,7 @@ edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "A document of lopdf's written as a linearized file through pdf-linearize's engine, by plain functions over its public objects: never published"
+description = "Internal adapter demonstrating pdf-linearize's model-independent engine on lopdf::Document (unpublished)"
 # The workspace's own: pdf-linearize's published crate holds no lopdf, and
 # nothing here is published.
 publish = false
