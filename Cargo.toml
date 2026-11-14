@@ -7,11 +7,12 @@ resolver = "3"
 # the table as its first release is made ready; until then, its dependents
 # name its path and version themselves, or its path alone where it's a
 # dev-dependency of a crate published before it, which that crate's package
-# then leaves out. pdfs, which takes every crate in the table, is required
-# by none, so it isn't in the table itself. pdf-fixtures, the tests' file
-# writer and qpdf, is never published: a crate whose tests use it takes it
-# by its path alone, a dev-dependency. Nor is pdf-linearize-lopdf, the lopdf
-# adapter, which no member depends on. Nothing else is inherited from here.
+# then leaves out. pdfs, which takes every crate in the table but
+# pdf-arlington, is required by none, so it isn't in the table itself.
+# pdf-fixtures, the tests' file writer and qpdf, is never published: a crate
+# whose tests use it takes it by its path alone, a dev-dependency. Nor is
+# pdf-linearize-lopdf, the lopdf adapter, which no member depends on.
+# Nothing else is inherited from here.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
@@ -35,13 +36,13 @@ exclude = ["fuzz"]
 # Each crate by its path here and the version its dependents require once
 # published: pdf-tokenizer's by caret; pdf-objects', pdf-filters',
 # pdf-crypt's, pdf-structure's, pdf-color's, pdf-content-streams',
-# pdf-semantics', pdf-fonts' and pdf-linearize's exactly, as an alpha
-# promises nothing of the next, and a requirement matches a pre-release only
-# where it names one. A crate some member takes without its default features
-# has them off here, as an older cargo (1.85's) refused a member's
-# `default-features = false` over an entry that leaves them on, and every
-# member that takes it names the features it takes: pdf-filters', its Flate
-# backend; pdf-semantics' and pdf-fonts', none here, as pdf-lint and
+# pdf-semantics', pdf-fonts', pdf-linearize's and pdf-arlington's exactly,
+# as an alpha promises nothing of the next, and a requirement matches a
+# pre-release only where it names one. A crate some member takes without its
+# default features has them off here, as an older cargo (1.85's) refused a
+# member's `default-features = false` over an entry that leaves them on, and
+# every member that takes it names the features it takes: pdf-filters', its
+# Flate backend; pdf-semantics' and pdf-fonts', none here, as pdf-lint and
 # pdf-linearize take neither the clock nor a font's program nor a predefined
 # CMap, and pdfs turns them on through features of its own; pdf-linearize's,
 # `family`, as the lopdf adapter's crate takes the engine alone. A
@@ -62,6 +63,7 @@ pdf-content-streams = { path = "crates/pdf-content-streams", version = "=0.1.0-a
 pdf-semantics = { path = "crates/pdf-semantics", version = "=0.1.0-alpha.1", default-features = false }
 pdf-fonts = { path = "crates/pdf-fonts", version = "=0.1.0-alpha.1", default-features = false }
 pdf-linearize = { path = "crates/pdf-linearize", version = "=0.1.0-alpha.1", default-features = false }
+pdf-arlington = { path = "crates/pdf-arlington", version = "=0.1.0-alpha.1" }
 
 # pdf-crypt's revision 6 hash runs thousands of AES blocks and SHA-2
 # digests for a password; it and the RustCrypto crates under it built

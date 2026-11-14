@@ -87,7 +87,7 @@ Several automated tests enforce strict consistency across code and documentation
 2. **README doctests & `lib.rs` first-example parity:**
    Each library crate compiles its `README.md` via `#[cfg(doctest)] #[doc = include_str!("../README.md")]`. In `pdfs`, `pdf-fonts`, `pdf-crypt`, `pdf-linearize`, `pdf-semantics`, and `pdf-content-streams`, a unit test asserts that the **first** ` ```rust ` block in `README.md` matches the **first** ` ``` ` block in `src/lib.rs` (`//!`) line-for-line.
 3. **README URLs & license links:**
-   Published crates test that `README.md` contains exact GitHub `https://` links to `LICENSE-APACHE` and `LICENSE-MIT` (and in `pdf-fonts`, exact links to `` [`FTL.TXT`](...) `` and `` [`assets/afm/MustRead.html`](...) ``), contains no `](../` relative paths, and in several crates uses `https://` for every Markdown link.
+   Published crates test that `README.md` contains exact GitHub `https://` links to `LICENSE-APACHE` and `LICENSE-MIT` (`LICENSE-APACHE` alone in the Apache-2.0 crates; and in `pdf-fonts`, exact links to `` [`FTL.TXT`](...) `` and `` [`assets/afm/MustRead.html`](...) ``), contains no `](../` relative paths, and in several crates uses `https://` for every Markdown link.
 4. **`pdf-lint` CLI `--help` sync:**
    `crates/pdf-lint/tests/cli.rs` asserts that the ` ```text ` block immediately under `## The command line` in `crates/pdf-lint/README.md` matches `pdf-lint --help` output byte-for-byte (and stays within 80 columns).
 5. **PDFium `chromium/8152` pin check (`oracle/pdfium.py`):**

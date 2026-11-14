@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0-alpha.1 (unreleased)
 
 - **The model.** The Arlington PDF Model's `tsv/latest` at `d148fee` (`COMMIT`), embedded by `build.rs`, with the cells corrected where it contradicts ISO 32000-2 or the reference it cites (`model/corrections.tsv`, `grammar::corrections`) and the rows and tables added that a reference defines and it lacks (`model/additions`, `grammar::additions`); the build stops when upstream has changed a corrected cell or has an added row itself. `Grammar::embedded()` reads it once, the first time it's asked for, and gives it as a `&'static Grammar`; `Grammar::load` reads a checkout whole, a model its caller holds, as the crate chooses none. `Grammar::hash` is the XXH64 of a model's tables, computed by twox-hash.
 - **Ids are pdf-objects' struct.** What a resolver is asked, `ObjectId`, is pdf-objects' struct of `number` and `generation`, where it was the pair `(u32, u16)`: `(1, 0)` is `ObjectId::new(1, 0)`, `id.0` is `id.number`.

@@ -24,7 +24,7 @@ anyhow = { version = "1", optional = true }
 # the argument errors are clap's words and layout as the lock has it, so a
 # newer clap in the lock means taking them again.
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"], optional = true }
-pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
+pdf-arlington.workspace = true
 # Color spaces read as ISO 32000-2 has them: each the walk reaches, its
 # faults kept. pdf-content-streams depends on it too, for its own reading.
 pdf-color.workspace = true
