@@ -7,8 +7,10 @@
 ///
 /// Where one crate's caps hold a cap another's also has, the facade passes
 /// one value: [`linearize`](Limits::linearize)'s walks of the page tree and
-/// a name tree are made under [`semantics`](Limits::semantics)' caps on them,
-/// so a caller sets those once, there.
+/// a name tree are made under [`semantics`](Limits::semantics)' caps on
+/// them, so a caller sets those once, there. Its own `pages` caps its hint
+/// tables too, so its walk of the page tree lists no more pages than the
+/// lesser of it and `semantics.pages`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -31,11 +33,13 @@ pub struct Limits {
     /// from [`content`](Limits::content) at each call, whatever it's set to
     /// here.
     pub fonts: pdf_fonts::Limits,
-    /// What a file's linearization is checked under (pdf-linearize's): the
-    /// graph a plan is made of, and its hint tables. Its `page_depth`,
-    /// `tree_depth` and `tree_nodes` are taken from
-    /// [`semantics`](Limits::semantics)' at each call, whatever they're set
-    /// to here.
+    /// What a file's linearization is checked under, and a document is
+    /// linearized under (pdf-linearize's): the graph a plan is made of, and
+    /// its hint tables. Its `page_depth`, `tree_depth` and `tree_nodes` are
+    /// taken from [`semantics`](Limits::semantics)' at each call, whatever
+    /// they're set to here, and its `pages` is the lesser of its own and
+    /// `semantics.pages`, as it caps the page tree's walk and the pages its
+    /// hint tables may say.
     pub linearize: pdf_linearize::Limits,
     /// What one call's fonts' streams, and a page's text's forms, may
     /// decompress to, in bytes, in all: 256 MiB by default. A font's cost is
@@ -65,9 +69,12 @@ impl Limits {
     }
 
     /// [`linearize`](Limits::linearize), its walks' caps
-    /// [`semantics`](Limits::semantics)'.
+    /// [`semantics`](Limits::semantics)', its pages the lesser of the two.
     pub(crate) const fn linearizing(&self) -> pdf_linearize::Limits {
         let mut linearize = self.linearize;
+        if self.semantics.pages < linearize.pages {
+            linearize.pages = self.semantics.pages;
+        }
         linearize.page_depth = self.semantics.page_depth;
         linearize.tree_depth = self.semantics.tree_depth;
         linearize.tree_nodes = self.semantics.tree_nodes;
@@ -87,7 +94,8 @@ mod tests {
 
     /// The defaults are each crate's own; the walks of a linearization take
     /// the page tree's and a name tree's caps from pdf-semantics', whatever
-    /// pdf-linearize's say, and fonts their content's from the content's.
+    /// pdf-linearize's say, and the lesser of the two crates' pages; and
+    /// fonts their content's from the content's.
     #[test]
     fn each_crates_defaults_and_one_value_for_the_walks() {
         let limits = Limits::DEFAULT;
@@ -110,6 +118,8 @@ mod tests {
             (4, 3, 2)
         );
         assert_eq!(walked.pages, 7);
+        limits.semantics.pages = 5;
+        assert_eq!(limits.linearizing().pages, 5);
         let mut limits = Limits::DEFAULT;
         limits.content.operands = 9;
         limits.fonts.content.operands = 99;

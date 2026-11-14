@@ -135,6 +135,26 @@ impl<'a> Options<'a> {
     /// `from_bytes(std::fs::read(path)?)`, whose `Pdf` holds its own bytes.
     /// Only on Unix and Windows, where a file is read by position.
     ///
+    /// ```
+    /// use pdfs::pdf_structure::read::{Faults, Recovery};
+    /// use pdfs::prelude::*;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("one.pdf");
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// doc.save(&path).unwrap();
+    ///
+    /// // Read as a checker reads it: no recovery past what's written, every
+    /// // fault kept.
+    /// let mut options = Options::DEFAULT;
+    /// options.recovery = Recovery::Verified;
+    /// options.faults = Faults::Kept;
+    /// let pdf = options.open(&path).unwrap();
+    /// assert_eq!(pdf.pages().unwrap().len(), 1);
+    /// assert!(pdf.faults().is_empty());
+    /// ```
+    ///
     /// # Errors
     ///
     /// [`Error::Io`] where the file doesn't open, or what identifies it
@@ -185,6 +205,19 @@ impl<'a> Options<'a> {
 }
 
 /// The file at `path`, opened under [`Options::DEFAULT`]: [`Options::open`].
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("one.pdf");
+/// let mut doc = pdfs::Document::new();
+/// doc.add_page(pdfs::prelude::Rect::LETTER);
+/// doc.save(&path).unwrap();
+///
+/// let pdf = pdfs::open(&path).unwrap();
+/// assert_eq!(pdf.pages().unwrap().len(), 1);
+/// // It knows the file it reads, so a save over it is refused.
+/// assert!(pdf.identity().is_some());
+/// ```
 ///
 /// # Errors
 ///

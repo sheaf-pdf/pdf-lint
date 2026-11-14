@@ -32,17 +32,19 @@
 //! # Features
 //!
 //! - **`programs`** and **`clock`**, on by default: pdf-fonts reads a font's
-//!   program, and pdf-semantics has `Date::now`.
+//!   program, and pdf-semantics has `Date::now` and `Date::from_unix`.
 //! - **`image-ends`**, **`predefined-cmaps`** and **`simd`**, off by default:
 //!   pdf-content-streams ends an inline image's data by decoding it, pdf-fonts
 //!   reads Adobe's predefined CMaps, and pdf-content-streams' dependencies use
 //!   the CPU's SIMD.
-//! - **`tracing`**, off by default: a span at `debug` over each recipe, and
-//!   each crate's own. A span's fields are numbers, never a byte of a file.
+//! - **`tracing`**, off by default: a span at `debug` over each recipe that
+//!   reads a part of a file whole or writes one, not a lookup, and each
+//!   crate's own. A span's fields are numbers, never a byte of a file.
 //! - **`insecure-test-writer`**, off by default, for tests and fuzzing:
-//!   pdf-structure's test writer, a new encryption's key from a seeded
-//!   generator, so a test writes the same bytes each run. It's never for a
-//!   document's protection, and a build that ships leaves it off.
+//!   pdf-structure's and pdf-linearize's test writer, a new encryption's key
+//!   from a seeded generator and every IV derived, so a test writes the same
+//!   bytes each run. It's never for a document's protection, and a build that
+//!   ships leaves it off.
 //!
 //! A page's text, from a file written here first:
 //!

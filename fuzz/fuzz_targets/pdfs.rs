@@ -4,7 +4,8 @@
 //! fonts and its text, which fails only as its content does, and its
 //! linearization's verdict, holding and judged whole only where it's
 //! linearized; every answer the same with faults kept as with none looked
-//! for, and under small caps the same promises. And where it isn't
+//! for, and under small caps the same promises; its file edited, a page
+//! added, and saved whole, written or refused. And where it isn't
 //! encrypted, its document written in the clear and under a new encryption,
 //! its key drawn from the input and its IVs derived: read with no password,
 //! each page's content refused as locked or read as in the clear; unlocked by

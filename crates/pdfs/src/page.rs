@@ -18,8 +18,9 @@ use crate::phases::phase;
 
 /// A page's content: its streams decoded and joined as PDFium joins them, and
 /// what reading it needs of the resources it's drawn with
-/// ([`content`](fn@content)). Its `Debug` gives the joined bytes' length and
-/// how many streams there are, not the bytes, which are content.
+/// ([`content`](fn@content)). Its `Debug` gives the joined bytes' length, how
+/// many streams there are and how many were joined as none, not the bytes,
+/// which are content.
 #[derive(Clone)]
 pub struct Content {
     concat: Concat<'static>,
@@ -68,6 +69,7 @@ impl fmt::Debug for Content {
         f.debug_struct("Content")
             .field("bytes", &self.concat.bytes().len())
             .field("streams", &self.concat.stream_count())
+            .field("undecoded", &self.concat.undecoded().len())
             .finish_non_exhaustive()
     }
 }
@@ -78,7 +80,11 @@ impl fmt::Debug for Content {
 /// [`Join::push_contents`]), and the color spaces its resources name, its
 /// own `/Resources` or what it inherits, counted under `limits.color`
 /// ([`ResCx::read`]). A place where the tree has no page, or a page with no
-/// `/Contents`, has none: no stream.
+/// `/Contents`, has none: no stream. A stream whose data doesn't decode for
+/// the file's own reason, damaged or through a filter the reader doesn't
+/// take, is joined as one of no data, its place kept, and said
+/// ([`Concat::undecoded`]), where PDFium reads its data as written: the one
+/// way this joins them otherwise than PDFium.
 ///
 /// Over any reader of a file's objects and streams' data, such as
 /// pdf-objects' `WithStreams` of a map and a function:
@@ -115,10 +121,14 @@ impl fmt::Debug for Content {
 /// # Errors
 ///
 /// [`Error::Content`] where its streams joined are past `limits.content`, or
-/// a stream, or `/Contents` or an element of it, doesn't read for the
-/// reader's own reason, its [`Why`](pdf_objects::Why) kept
-/// (pdf-content-streams' [`Pushed`](pdf_content_streams::Pushed));
-/// [`Error::Unreadable`] where an object of its resources doesn't.
+/// a stream's data, or `/Contents` or an element of it, doesn't read for the
+/// reader's own reason, past a cap, behind a password or not given by the
+/// source ([`Why::Capped`](pdf_objects::Why::Capped),
+/// [`Why::Locked`](pdf_objects::Why::Locked),
+/// [`Why::Source`](pdf_objects::Why::Source), as the reader says it), its
+/// `Why` kept (pdf-content-streams' [`Pushed`](pdf_content_streams::Pushed));
+/// never for the file's own damage. [`Error::Unreadable`] where an object of
+/// its resources doesn't read for the reader's own reason.
 pub fn content<'o, O>(
     objects: O,
     page: &pages::Page<'o>,
@@ -179,6 +189,31 @@ impl fmt::Debug for NamedFont {
 /// read. The dictionaries are reached as PDFium reaches them, each its own or a
 /// stream's, through two references at most.
 ///
+/// ```
+/// use pdfs::pdf_fonts::Fonts;
+/// use pdfs::pdf_semantics::pages;
+/// use pdfs::prelude::*;
+///
+/// // A page that shows a string in Times.
+/// let mut doc = Document::new();
+/// let page = doc.add_page(Rect::LETTER);
+/// page.begin_text();
+/// page.font(standard_font(Std14::TimesRoman), 12.0);
+/// page.show(&Std14::TimesRoman.codes("Hi").unwrap());
+/// page.end_text();
+/// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+///
+/// // Over the reading, as any caller with a reading of its own calls it.
+/// let (reading, limits) = (pdf.reading(), pdfs::Limits::DEFAULT);
+/// let catalog = pdf.catalog().unwrap();
+/// let table = pages::pages(reading, catalog, Rules::Pdfium, &limits.semantics, &mut ()).unwrap();
+/// let fonts = Fonts::default();
+/// let mut budget = limits.font_budget;
+/// let named = pdfs::page::fonts(reading, &fonts, table.get(0).unwrap(), &limits, &mut budget).unwrap();
+/// assert_eq!(named.len(), 1);
+/// assert!(named[0].font.as_ref().is_ok_and(Option::is_some));
+/// ```
+///
 /// # Errors
 ///
 /// [`Error::Unreadable`] where the resources, or their `/Font`, don't read for
@@ -219,7 +254,9 @@ where
 /// the page's resources, its fonts read through `fonts` under `limits.fonts`,
 /// its `content` taken from `limits.content`, and what its fonts' streams and
 /// its forms' content decompress to charged to `budget`. What isn't read is in
-/// the answer ([`Shown::unread`]), never guessed.
+/// the answer ([`Shown::unread`]), never guessed: a stream of the page's or a
+/// form's whose data doesn't decode among it, which PDFium reads as written
+/// ([`Unread::Undecoded`](pdf_fonts::Unread::Undecoded)).
 ///
 /// ```
 /// use pdfs::pdf_fonts::Fonts;
@@ -251,9 +288,9 @@ where
 /// # Errors
 ///
 /// As [`content`](fn@content) fails: [`Error::Content`] where its streams are
-/// past the cap or one doesn't read for the reader's own reason, its
-/// [`Why`](pdf_objects::Why) kept, and [`Error::Unreadable`] where its
-/// resources don't read.
+/// past the cap or one doesn't read for the reader's own reason (past a cap,
+/// behind a password or not given), its [`Why`](pdf_objects::Why) kept, and
+/// [`Error::Unreadable`] where its resources don't read for it.
 pub fn text<'o, O>(
     objects: O,
     fonts: &Fonts,

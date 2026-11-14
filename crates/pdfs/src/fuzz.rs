@@ -80,6 +80,8 @@ pub struct Reached {
     pub unlocked: usize,
     /// Strings shown by pages read under the default options.
     pub strings: usize,
+    /// Inputs edited, a page added, and saved whole.
+    pub edited: usize,
 }
 
 /// `pdf`'s answers, each page's content held within `limits`' cap on it and
@@ -186,7 +188,9 @@ fn small() -> Limits {
 /// text, which fails only as its content does, and its linearization's
 /// verdict, which holds and is judged whole only where it's
 /// linearized. With faults kept, every answer the same as with none looked
-/// for, which finds none; and under small caps, the same promises.
+/// for, which finds none; and under small caps, the same promises. Its file
+/// edited, a page added to its page tree's root, and saved whole: written or
+/// refused, and what's written opens.
 ///
 /// Then, where it isn't encrypted, its document written whole in the clear
 /// and under a new encryption by a password: read with no password, each
@@ -221,11 +225,28 @@ pub fn read(data: &[u8]) -> Reached {
     capped.limits = small();
     let pdf_capped = capped.from_bytes(data).expect("bytes in memory open");
     answers(&pdf_capped, &mut Reached::default());
+    edited(&pdf, &mut reached);
 
     if *pdf.encryption() == Encryption::None {
         encrypted(data, &pdf, &mut reached);
     }
     reached
+}
+
+/// The arm of [`read`] that edits `pdf`'s file, adds a page to it and saves it
+/// whole, its pages counted onto its page tree's: written or refused, never a
+/// panic, and what's written opens.
+fn edited<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) {
+    let Ok(mut doc) = pdf.edit() else {
+        return;
+    };
+    doc.add_page(Rect::LETTER);
+    if let Ok(file) = doc.to_bytes() {
+        let saved = Options::DEFAULT.from_bytes(&file[..]);
+        let saved = saved.expect("bytes in memory open");
+        let _ = saved.pages();
+        reached.edited += 1;
+    }
 }
 
 /// The arm of [`read`] that writes `pdf`'s document, `data`'s, in the clear
@@ -711,8 +732,10 @@ mod tests {
             all.locked += reached.locked;
             all.unlocked += reached.unlocked;
             all.strings += reached.strings;
+            all.edited += reached.edited;
         }
         assert!(all.pages >= 10 && all.contents >= 8, "{all:?}");
+        assert!(all.edited >= 4, "{all:?}");
         assert!(all.strings >= 6, "{all:?}");
         assert!(all.locked >= 4 && all.unlocked >= 4, "{all:?}");
     }

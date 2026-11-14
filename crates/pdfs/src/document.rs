@@ -9,7 +9,7 @@ use std::path::Path;
 use pdf_content_streams::{ContentWriter, Res};
 use pdf_crypt::Protection;
 use pdf_filters::{Backend, Level};
-use pdf_linearize::family::{self, Linearized, Rc4};
+use pdf_linearize::family::{self, Linearized};
 use pdf_objects::version::Version;
 use pdf_objects::{Object, ObjectId, dict};
 use pdf_semantics::pages::{self, Rect};
@@ -20,6 +20,7 @@ use pdf_structure::write::{self, Base, Deflate, Encryptor, Pack, ReadFrom, Writt
 
 use crate::build;
 use crate::error::Error;
+use crate::limits::Limits;
 use crate::phases::phase;
 
 /// The version a new document's header says unless it's told otherwise: 1.7,
@@ -84,6 +85,9 @@ pub struct Document<'p> {
     encryptor: Option<Encryptor>,
     /// The file it was read from, where it was.
     read: Option<Read<'p>>,
+    /// The caps the file it was read from was read under, which a linearized
+    /// save walks its trees under; each crate's defaults for a new one.
+    limits: Limits,
 }
 
 /// A page added: its box, and its content's writer.
@@ -134,16 +138,18 @@ impl Document<'static> {
         let trailer = dict! { "Root" => ObjectId::new(1, 0) };
         let mut doc = pdf_structure::Document::new(NEW, trailer);
         doc.insert(1, dict! { "Type" => "Catalog" });
-        Document::of(doc, None, None)
+        Document::of(doc, None, None, Limits::DEFAULT)
     }
 }
 
 impl<'p> Document<'p> {
-    /// `doc`, encrypted by `encryptor`, and edited from the file `read` is of.
+    /// `doc`, encrypted by `encryptor`, edited from the file `read` is of,
+    /// which was read under `limits`.
     fn of(
         doc: pdf_structure::Document,
         encryptor: Option<Encryptor>,
         read: Option<Read<'p>>,
+        limits: Limits,
     ) -> Document<'p> {
         Document {
             doc,
@@ -154,25 +160,27 @@ impl<'p> Document<'p> {
             written: HashMap::new(),
             encryptor,
             read,
+            limits,
         }
     }
 
-    /// `doc`, read from the file `from` reads, to write under `encryptor`,
-    /// its encryption, after `base`, the file read, which `identity` names
-    /// where that reading reads it by position.
+    /// `doc`, read under `limits` from the file `from` reads, to write under
+    /// `encryptor`, its encryption, after `base`, the file read, which
+    /// `identity` names where that reading reads it by position.
     pub(crate) fn edited(
         doc: pdf_structure::Document,
         encryptor: Option<Encryptor>,
         from: &'p dyn ReadFrom,
         base: Result<Base, write::Error>,
         identity: Option<Identity>,
+        limits: Limits,
     ) -> Document<'p> {
         let read = Read {
             from,
             base,
             identity,
         };
-        Document::of(doc, encryptor, Some(read))
+        Document::of(doc, encryptor, Some(read), limits)
     }
 
     /// pdf-structure's document, which is written: its objects, its trailer
@@ -204,6 +212,13 @@ impl<'p> Document<'p> {
     /// page tree; to an edited one, a kid of its page tree's root, with every
     /// attribute a page inherits its own (`/MediaBox`, `/CropBox` the same
     /// box, `/Rotate 0`, `/Resources`), so nothing above it changes it.
+    ///
+    /// The box is written as the content writer writes a number: a whole one
+    /// within 32 bits as an integer, else a real, and one that isn't finite,
+    /// NaN or an infinity, as 0, which no file can hold. Its numbers are
+    /// pdf-semantics' `f64`, where the writer's are `f32`
+    /// ([`ContentWriter::rect`], say), so a layout reckoned in one is cast to
+    /// the other.
     pub fn add_page(&mut self, media_box: Rect) -> &mut ContentWriter {
         let at = self.added.len();
         self.added.push_back(Added {
@@ -215,6 +230,20 @@ impl<'p> Document<'p> {
 
     /// What `claims` says written as its catalog's metadata stream, an XMP
     /// packet, as [`build::claim`] writes it.
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// let mut claims = Claims::default();
+    /// claims.pdfua_part = Some("1".into());
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// doc.claim(&claims).unwrap();
+    /// // A second packet would replace the first: refused.
+    /// assert!(matches!(doc.claim(&claims), Err(pdfs::Error::HasMetadata)));
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    /// assert_eq!(pdf.claims().unwrap(), Some(claims));
+    /// ```
     ///
     /// # Errors
     ///
@@ -257,6 +286,32 @@ impl<'p> Document<'p> {
     /// Each save after this in the clear, whatever it was encrypted by: an
     /// edited document is saved under its file's own encryption unless this
     /// says otherwise.
+    ///
+    /// Nothing here holds a caller to what the file permits: an encrypted
+    /// file opened by its user's password alone, which withholds changes or
+    /// copying ([`Encryption::Opened`](pdf_structure::Encryption::Opened)'s
+    /// `permissions`), is edited, saved, and saved in the clear by this: the
+    /// encryption itself can't stop it, and ISO 32000-2 leaves honouring them
+    /// to what processes a file (7.6.4.1), here the caller, which reads them,
+    /// and which password opened the file (`by`), before it edits it.
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// // A file encrypted by a password, opened by it and saved in the clear.
+    /// let password = Password("secret").prepared().unwrap();
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// doc.encrypt(&Protection::new(&password)).unwrap();
+    /// let file = doc.to_bytes().unwrap();
+    /// let mut options = Options::DEFAULT;
+    /// options.passwords = &[Password("secret")];
+    /// let pdf = options.from_bytes(file).unwrap();
+    /// let mut edited = pdf.edit().unwrap();
+    /// edited.decrypt();
+    /// let clear = pdfs::from_bytes(edited.to_bytes().unwrap()).unwrap();
+    /// assert_eq!(*clear.encryption(), Encryption::None);
+    /// ```
     pub fn decrypt(&mut self) {
         self.encryptor = None;
     }
@@ -271,8 +326,10 @@ impl<'p> Document<'p> {
     /// or in the clear, it changes nothing. A whole file needs none of it, as
     /// it writes each object it writes anew at a fresh generation, but of a
     /// file whose later sections don't read, which this lets it write too,
-    /// listed. [`Document::save_linearized`] reuses them where its options say
-    /// so too ([`family::Options::rc4`]).
+    /// listed. It's how [`Document::save_linearized`] is told to reuse them
+    /// too: it writes under the document's encryptor, as pdf-linearize's
+    /// [`family::linearize`] writes under the one it's given, so neither
+    /// reads [`family::Options::rc4`].
     pub fn reuse_rc4_keystreams(&mut self) {
         self.encryptor = self.encryptor.take().map(Encryptor::reusing_rc4_keystreams);
     }
@@ -286,6 +343,21 @@ impl<'p> Document<'p> {
     /// 2.0 is written 2.0. A new encryption doesn't raise it
     /// ([`Document::encrypt`] says what that means). The rest as
     /// pdf-structure's [`write::Options::DEFAULT`].
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// // Saved as PDF 2.0, with every object at the top level.
+    /// let mut options = doc.save_options();
+    /// options.version = Version::new(2, 0);
+    /// options.pack = None;
+    /// let mut file = Vec::new();
+    /// doc.save_with_to(&mut file, &options).unwrap();
+    /// assert!(file.starts_with(b"%PDF-2.0"));
+    /// assert_eq!(pdfs::from_bytes(file).unwrap().pages().unwrap().len(), 1);
+    /// ```
     #[must_use]
     pub fn save_options(&self) -> write::Options<'static> {
         let mut options = write::Options::DEFAULT;
@@ -299,15 +371,19 @@ impl<'p> Document<'p> {
     /// How [`Document::save_linearized`] lays it out, for a caller to change:
     /// as [`Document::save_options`] writes it, cross-reference streams,
     /// object streams and zlib-rs, its header the document's version, at
-    /// least 1.5; the first page where `/OpenAction` says; an RC4 file's
-    /// reuse of keystreams refused. The rest as pdf-linearize's
-    /// [`family::Options::DEFAULT`].
+    /// least 1.5; the first page where `/OpenAction` says; and under the
+    /// caps an edited document's file was read under
+    /// ([`Pdf::limits`](crate::Pdf::limits)), its page tree and name trees
+    /// walked as [`Limits::linearize`] says, or each crate's defaults for a
+    /// new one. The rest as pdf-linearize's [`family::Options::DEFAULT`].
+    /// Its `rc4` isn't read: [`Document::reuse_rc4_keystreams`] says it.
     #[must_use]
     pub fn linearize_options(&self) -> family::Options<'static> {
         let mut options = family::Options::DEFAULT;
         options.kind = XrefKind::Stream;
         options.pack = true;
         options.deflate = deflate();
+        options.limits = self.limits.linearizing();
         options
     }
 
@@ -332,6 +408,22 @@ impl<'p> Document<'p> {
     /// places. To change a file in place, read it into memory first,
     /// `pdfs::from_bytes(std::fs::read(path)?)`, whose `Pdf` holds its own
     /// bytes, or append an update to it ([`Document::save_update`]).
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("table.pdf");
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// // Listed by a cross-reference table, nothing in an object stream.
+    /// let mut options = doc.save_options();
+    /// options.kind = pdfs::pdf_structure::XrefKind::Table;
+    /// options.pack = None;
+    /// doc.save_with(&path, &options).unwrap();
+    /// let pdf = pdfs::open(&path).unwrap();
+    /// assert!(pdf.reading().trailer().stream.is_none());
+    /// ```
     ///
     /// # Errors
     ///
@@ -391,7 +483,8 @@ impl<'p> Document<'p> {
     /// Refused, with nothing written: [`Error::PageTree`] where a new
     /// document has no page, or more than pdf-semantics' default cap on a
     /// tree; [`Error::NoCatalog`] and [`Error::NoPageTree`] where an edited
-    /// one has no page tree to add a page to; and [`Error::Write`] where
+    /// one has no page tree to add a page to, or one whose `/Count` can't
+    /// count the pages added; and [`Error::Write`] where
     /// pdf-structure's writer refuses, its file changed since it was read
     /// among it ([`write::Error::Changed`]).
     pub fn save_with_to(
@@ -435,9 +528,10 @@ impl<'p> Document<'p> {
     /// first, then every object it reaches laid out for reading over a
     /// network, encrypted as the document is. An edited RC4 file's own
     /// encryption puts no new plaintext under a keystream the file used
-    /// unless `options.rc4` says [`Rc4::ReusingKeystreams`] (or
-    /// [`Document::reuse_rc4_keystreams`] did), and then lists what it so
-    /// wrote ([`Linearized::keystreams_reused`]).
+    /// unless [`Document::reuse_rc4_keystreams`] said so, and then lists
+    /// what it so wrote ([`Linearized::keystreams_reused`]); as
+    /// [`family::linearize`] writes under the encryptor it's given, it
+    /// doesn't read `options.rc4`, which is [`family::linearize_bytes`]'.
     ///
     /// # Errors
     ///
@@ -452,15 +546,8 @@ impl<'p> Document<'p> {
     ) -> Result<Linearized, Error> {
         phase!(DEBUG, "save_linearized", pages = self.added.len());
         self.place(options.deflate)?;
-        let reusing = (options.rc4 == Rc4::ReusingKeystreams)
-            .then(|| {
-                self.encryptor
-                    .clone()
-                    .map(Encryptor::reusing_rc4_keystreams)
-            })
-            .flatten();
-        let encryptor = reusing.as_ref().or(self.encryptor.as_ref());
         let from = self.from();
+        let encryptor = self.encryptor.as_ref();
         Ok(family::linearize(out, &self.doc, encryptor, from, options)?)
     }
 
@@ -637,12 +724,17 @@ impl<'p> Document<'p> {
 
     /// An edited document's pages written in, each a kid of its page tree's
     /// root after those it has, its `/Count` one more each, and with every
-    /// attribute a page inherits its own.
+    /// attribute a page inherits its own. A `/Count` that can't count them
+    /// all is refused before any is written in.
     fn place_edited(&mut self, deflate: Deflate) -> Result<(), Error> {
         if self.added.is_empty() {
             return Ok(());
         }
         let (root, mut count, kids) = root(&self.doc)?;
+        let added = i64::try_from(self.added.len()).ok();
+        if added.and_then(|added| count.checked_add(added)).is_none() {
+            return Err(Error::NoPageTree);
+        }
         let node = self.doc.get_dict_mut(root).ok_or(Error::NoPageTree)?;
         node.set("Kids", kids);
         while let Some(added) = self.added.front() {
@@ -677,7 +769,8 @@ const fn deflate() -> Deflate {
 /// its kids, each read through a reference where it's one. Its catalog's
 /// `/Pages` names it by reference, as a page's `/Parent` must (ISO 32000-2,
 /// 7.7.3.3), a dictionary that isn't a page, whose `/Count` is an integer and
-/// whose `/Kids`, where it has one, an array.
+/// whose `/Kids`, where it has one, an array. Its `/Count` is any integer the
+/// file holds, so the pages added are counted onto it checked.
 fn root(doc: &pdf_structure::Document) -> Result<(ObjectId, i64, Vec<Object>), Error> {
     let catalog = doc.catalog().ok_or(Error::NoCatalog)?;
     let named = catalog

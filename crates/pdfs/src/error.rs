@@ -15,8 +15,13 @@ use pdf_structure::write;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The file didn't open: its path ([`open`](crate::open)), or what
-    /// identifies it, didn't read.
+    /// A path didn't take what was asked of it: a file to read didn't open,
+    /// or what identifies it didn't read ([`open`](crate::open)); a path to
+    /// save at didn't say whether it's the file read, or didn't take what's
+    /// written ([`Document::save`](crate::Document::save) and the other saves
+    /// to a path); a file an update goes after didn't open for appending, or
+    /// didn't take what's appended
+    /// ([`Document::save_update`](crate::Document::save_update)).
     #[error("{0}")]
     Io(io::Error),
     /// The reading's (pdf-structure's): its source didn't give the bytes
@@ -45,15 +50,19 @@ pub enum Error {
     Content(Pushed<Unreadable>),
     /// The metadata stream's packet wasn't read (pdf-semantics'). Boxed, as
     /// it holds what was read, which would make every result of the facade's
-    /// as large.
+    /// as large. Its `Debug` gives the claims read and the XML reader's words
+    /// by their length, not the packet's text.
     #[error("{0}")]
     Xmp(Box<xmp::Error>),
     /// The file's linearization wasn't checked, or a document wasn't written
     /// linearized (pdf-linearize's).
     #[error("{0}")]
     Linearize(pdf_linearize::family::Error),
-    /// A document wasn't written, whole or as an update (pdf-structure's
-    /// writer's): nothing was written.
+    /// A document wasn't written, whole or as an update, by pdf-structure's
+    /// writer, which refused it with nothing written; or a file wasn't edited
+    /// ([`Pdf::edit`](crate::Pdf::edit)), as no password opened it or its
+    /// security handler is one the reader can't open, so there's nothing to
+    /// write its strings and streams from.
     #[error("{0}")]
     Write(write::Error),
     /// A new document's page tree wasn't written (pdf-semantics'): it has no
@@ -74,7 +83,8 @@ pub enum Error {
     HasMetadata,
     /// A page added to an edited document whose catalog's `/Pages` names no
     /// page tree node to add it under: none by reference, a page, or one
-    /// whose `/Count` isn't an integer or whose `/Kids` isn't an array.
+    /// whose `/Count` isn't an integer, or can't count the pages added
+    /// within 64 bits, or whose `/Kids` isn't an array.
     #[error("the catalog's /Pages names no page tree node a page can be added under")]
     NoPageTree,
     /// An update of a document no file was read for: it has nothing to go

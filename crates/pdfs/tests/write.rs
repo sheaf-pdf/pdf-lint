@@ -669,7 +669,13 @@ fn rc4_keystreams_are_reused_only_when_asked() {
     };
     assert!(refused.as_ref().is_err_and(keystream), "{refused:?}");
     assert!(out.is_empty());
+    // The options' `rc4` is pdf-linearize's for a file's bytes, and isn't
+    // read here: the document's encryptor is told.
     options.rc4 = Rc4::ReusingKeystreams;
+    let refused = doc.save_linearized_to(&mut out, &options);
+    assert!(refused.as_ref().is_err_and(keystream), "{refused:?}");
+    assert!(out.is_empty());
+    doc.reuse_rc4_keystreams();
     let linearized = doc.save_linearized_to(&mut out, &options).unwrap();
     assert!(!linearized.keystreams_reused.is_empty());
     assert_eq!(read_back(&opened_by(&out, "user")).len(), 2);
@@ -822,6 +828,113 @@ fn a_page_needs_a_page_tree_to_go_under() {
     let mut out = Vec::new();
     assert!(matches!(doc.save_to(&mut out), Err(Error::NoPageTree)));
     assert!(out.is_empty());
+}
+
+/// A file whose root's `/Count` can't count a page more within 64 bits:
+/// refused before anything is written in, never wrapped; one less, and the
+/// page is counted onto it.
+#[test]
+fn a_count_that_cant_count_another_page_is_refused() {
+    let file = |count: i64| {
+        let objects = objects_of(&[dict! {}], dict! { "Count" => count }, &[]);
+        fixture::file("1.7", &objects, dict! { "Root" => r(1) }, Xref::Table)
+    };
+    let full = file(i64::MAX);
+    let pdf = pdfs::from_bytes(&full[..]).unwrap();
+    let mut doc = pdf.edit().unwrap();
+    doc.add_page(LETTER);
+    let mut out = Vec::new();
+    assert!(matches!(doc.save_to(&mut out), Err(Error::NoPageTree)));
+    assert!(out.is_empty());
+    let root = doc.structure().get_dict(ObjectId::new(2, 0)).unwrap();
+    assert_eq!(
+        root.get(b"Count").and_then(Object::as_integer),
+        Some(i64::MAX)
+    );
+    assert_eq!(
+        root.get(b"Kids").and_then(Object::as_array).map(<[_]>::len),
+        Some(1)
+    );
+
+    let room = file(i64::MAX - 1);
+    let pdf = pdfs::from_bytes(&room[..]).unwrap();
+    let mut doc = pdf.edit().unwrap();
+    doc.add_page(LETTER);
+    doc.save_to(&mut out).unwrap();
+    let root = doc.structure().get_dict(ObjectId::new(2, 0)).unwrap();
+    assert_eq!(
+        root.get(b"Count").and_then(Object::as_integer),
+        Some(i64::MAX)
+    );
+}
+
+/// An edited file's linearized save walks its trees under the caps the file
+/// was read under: a page tree deeper than they let is refused, as its own
+/// pages are, and under the defaults it's written.
+#[test]
+fn a_linearized_save_walks_under_the_files_caps() {
+    // A page under five nodes, each the only kid of the one above it.
+    let mut objects = vec![(
+        1,
+        Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+    )];
+    for n in 2..=6u32 {
+        let node = dict! { "Type" => "Pages", "Kids" => vec![r(n + 1)], "Count" => 1 };
+        let mut node = node;
+        if n > 2 {
+            node.set("Parent", r(n - 1));
+        }
+        objects.push((n, Body::from(node)));
+    }
+    let page = dict! { "Type" => "Page", "Parent" => r(6), "MediaBox" => vec![Object::from(0), 0.into(), 9.into(), 9.into()] };
+    objects.push((7, Body::from(page)));
+    let file = fixture::file("1.7", &objects, dict! { "Root" => r(1) }, Xref::Table);
+
+    let mut options = pdfs::Options::DEFAULT;
+    options.limits.semantics.page_depth = 2;
+    let shallow = options.from_bytes(&file[..]).unwrap();
+    assert!(matches!(shallow.pages(), Err(Error::Pages(_))));
+    let mut doc = shallow.edit().unwrap();
+    let linearize = doc.linearize_options();
+    assert_eq!(linearize.limits.page_depth, 2);
+    let mut out = Vec::new();
+    let refused = doc.save_linearized_to(&mut out, &linearize);
+    assert!(
+        matches!(refused, Err(Error::Linearize(family::Error::Pages(_)))),
+        "{refused:?}"
+    );
+    assert!(out.is_empty());
+
+    let pdf = pdfs::from_bytes(&file[..]).unwrap();
+    let mut doc = pdf.edit().unwrap();
+    let linearize = doc.linearize_options();
+    assert_eq!(linearize.limits, pdfs::pdf_linearize::Limits::DEFAULT);
+    doc.save_linearized_to(&mut out, &linearize).unwrap();
+    assert_eq!(read_texts(&out).len(), 1);
+}
+
+/// A page's box that isn't finite is written as the content writer writes
+/// such a number, 0, so every save writes; and a resource of no objects is
+/// never made, as no object would be its own.
+#[test]
+fn a_box_that_isnt_finite_is_written_as_0() {
+    let mut doc = Document::new();
+    doc.add_page(Rect([0.0, f64::NAN, f64::INFINITY, 792.0]));
+    let file = doc.to_bytes().unwrap();
+    assert_eq!(doc.to_bytes().unwrap(), file);
+    let pdf = pdfs::from_bytes(&file[..]).unwrap();
+    let pages = pdf.pages().unwrap();
+    let page = pages.get(0).unwrap().attributes().dict.unwrap();
+    let written: Vec<_> = (page
+        .get(b"MediaBox")
+        .and_then(Object::as_array)
+        .unwrap()
+        .iter())
+    .map(Object::as_integer)
+    .collect();
+    assert_eq!(written, [Some(0), Some(0), Some(0), Some(792)]);
+    let none = pdfs::pdf_content_streams::Res::of(Vec::new());
+    assert_eq!(none, Err(pdfs::pdf_content_streams::ResError::Empty));
 }
 
 /// No `Debug` holds a page's text or what a document holds.

@@ -648,8 +648,10 @@ fn no_debug_holds_a_files_text_or_a_password() {
         "Type" => "Page", "Parent" => r(2), "Contents" => r(10),
         "PieceInfo" => Object::text(MARKER),
     };
+    let mut root = catalog();
+    root.set("Metadata", r(12));
     let objects = [
-        (1, Body::from(catalog())),
+        (1, Body::from(root)),
         (
             2,
             Body::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }),
@@ -657,6 +659,19 @@ fn no_debug_holds_a_files_text_or_a_password() {
         (3, Body::from(page)),
         (10, content_stream(&format!("({MARKER}) Tj"))),
         (11, Body::from(dict! { "Title" => Object::text(MARKER) })),
+        (
+            12,
+            Body::stream(
+                dict! { "Type" => "Metadata", "Subtype" => "XML" },
+                format!(
+                    "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                     xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                     <rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
+                     pdfaid:part=\"{MARKER}\"/><{MARKER}></rdf:RDF></x:xmpmeta>"
+                )
+                .as_bytes(),
+            ),
+        ),
     ];
     let trailer = dict! { "Root" => r(1), "Info" => r(11), "Marker" => Object::text(MARKER) };
     let file = fixture::file("1.7", &objects, trailer, Xref::Table);
@@ -675,6 +690,13 @@ fn no_debug_holds_a_files_text_or_a_password() {
     );
     let info = pdf.info().unwrap().unwrap();
     assert_eq!(info.title.as_deref(), Some(MARKER));
+    // The packet claims the marker, then stops being XML at a tag that names it.
+    let xmp = pdf.claims().unwrap_err();
+    let Error::Xmp(stopped) = &xmp else {
+        panic!("{xmp}");
+    };
+    assert_eq!(stopped.read.pdfa_part.as_deref(), Some(MARKER));
+    assert!(xmp.to_string().contains(MARKER));
     let error = Error::Content(Pushed::TooLarge(TooLarge { cap: 1 }));
     let debugs = [
         format!("{options:?}"),
@@ -685,6 +707,7 @@ fn no_debug_holds_a_files_text_or_a_password() {
         format!("{content:?}"),
         format!("{info:?}"),
         format!("{error:?}"),
+        format!("{xmp:?}"),
         format!("{:?}", pdf.limits()),
     ];
     for debug in debugs {

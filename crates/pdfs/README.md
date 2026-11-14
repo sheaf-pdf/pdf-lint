@@ -171,13 +171,14 @@ assert_eq!(texts, ["First", "Second"]);
 ## What it promises
 
 - **A viewer's defaults.** `Options::DEFAULT` reads a damaged file as PDFium does, walks the page tree and decodes text by PDFium's rules, inflates on zlib-rs, and looks for no fault. A checker's are one field each: `Recovery::Verified`, `Rules::Iso`, `Faults::Kept`, `Backend::MinizOxide`.
-- **Caps in one value.** `Limits` holds each crate's caps, and `font_budget` bounds what one call's fonts and forms decompress to. Past a cap, a call says so, in its error or, for a page's text, in `Shown::unread`. Nothing is guessed past one, and no file makes it panic.
+- **Caps in one value.** `Limits` holds each crate's caps, and `font_budget` bounds what one call's fonts and forms decompress to. Past a cap, a call says so, in its error, for a page's text in `Shown::unread`, and for a linearization in `Verdict::judged_whole`. Nothing is guessed past one, and no file makes it panic.
 - **Faults where you ask for them.** `Pdf::pages_with`, `info_with`, `claims_with` and `linearized_with` tell a crate's faults to the sink they're given. The plain forms tell nothing, and look for nothing. With `()`, a metadata packet that isn't UTF-8 reads as one that claims nothing, and `claims_with` tells the two apart.
-- **What's locked reads as locked.** Behind a password, a page's content is an error whose `Why` is `Locked`, never ciphertext read as text.
+- **What's locked reads as locked.** Behind a password, a page's content is an error whose `Why` is `Locked`, never ciphertext read as text. What a file permits once it's open, such as changes or copying, binds the caller, not the facade: an edit and a save take no account of it.
+- **A stream that doesn't decode.** Where a page's or a form's stream is damaged, or through a filter the reader doesn't take, PDFium reads its data as written. Here it's read as none, and said: `Concat::undecoded` for a page's content, `Unread::Undecoded` for its text.
 - **Threads.** `Pdf`, `Content`, `Document` and pdf-fonts' `Shown` are `Send` and `Sync`.
 - **No secrets in a `Debug`.** No `Debug` of the facade's holds a password, a key or a file's content.
 
-Where a reading follows PDFium, it's PDFium as of chromium/8125, written in each crate's own code. Each crate's `tests/pdfium` in the repository records its cases, and its `differ.tsv` where it reads one otherwise.
+Where a reading follows PDFium, it's PDFium as of chromium/8125, written in each crate's own code. Where a crate keeps a `tests/pdfium` in the repository, it records PDFium's answers to its cases, and its `differ.tsv` each it reads otherwise; pdf-filters' cases and those of a page's text are unit tests.
 
 ## Features
 
@@ -186,7 +187,7 @@ Where a reading follows PDFium, it's PDFium as of chromium/8125, written in each
 - **`image-ends`**, off by default: pdf-content-streams ends an inline image's DCT and CCITTFax data by decoding it, as PDFium does.
 - **`predefined-cmaps`**, off by default: pdf-fonts reads Adobe's predefined CMaps, from hayro-cmap's bundle, so CJK text with no `/ToUnicode` reads.
 - **`simd`**, off by default: pdf-content-streams' dependencies use the CPU's SIMD, chosen as it runs.
-- **`tracing`**, off by default: a span at `debug` over each recipe, and each crate's own spans, through [tracing](https://crates.io/crates/tracing). A span's fields are numbers, never a byte of a file.
+- **`tracing`**, off by default: a span at `debug` over each recipe that reads a part of a file whole or writes one, not over a lookup or a page added, and each crate's own spans, through [tracing](https://crates.io/crates/tracing). A span's fields are numbers, never a byte of a file.
 - **`insecure-test-writer`**, off by default, for tests and fuzzing: pdf-structure's and pdf-linearize's test writer, which draws a new encryption's key from a seeded generator and derives every IV, so a test writes the same bytes each run. It's never for a document's protection, and a build that ships leaves it off.
 
 ## Exhaustive on purpose, or not
@@ -203,7 +204,7 @@ Where a reading follows PDFium, it's PDFium as of chromium/8125, written in each
 
 ## Stability
 
-This is an alpha: any alpha may change the API, and the CHANGELOG says how to follow. Depend on the exact version, `pdfs = "=0.1.0-alpha.1"`. It pins each crate it re-exports exactly, so a release of any of them comes as a release of pdfs. It needs Rust 1.89 or later.
+This is an alpha: any alpha may change the API, and the CHANGELOG says how to follow. Depend on the exact version, `pdfs = "=0.1.0-alpha.1"`. It pins each alpha it re-exports exactly, so a release of any of them comes as a release of pdfs, and takes pdf-tokenizer on its `0.2` line, as every crate of the family takes it. It needs Rust 1.89 or later.
 
 ## License
 

@@ -47,6 +47,29 @@ pub fn standard_font(font: Std14) -> Res {
 /// reads (ISO 32000-2, 7.3.10), and each stream's data in memory that names
 /// no filter deflated by `deflate`. `written` is for one document only.
 ///
+/// ```
+/// use std::collections::HashMap;
+///
+/// use pdfs::pdf_content_streams::Res;
+/// use pdfs::pdf_objects::{Object, ObjectId, dict, version::Version};
+/// use pdfs::pdf_structure::{Document, write::Deflate};
+///
+/// let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
+/// let mut written = HashMap::new();
+/// // A font and its widths, which it reaches as object 1 of the two.
+/// let font = Res::of(vec![
+///     Object::from(dict! { "Type" => "Font", "Widths" => Object::reference(1) }),
+///     Object::from(vec![Object::from(500)]),
+/// ])
+/// .unwrap();
+/// let id = pdfs::build::resource(&mut doc, &mut written, &font, Deflate::DEFAULT).unwrap();
+/// // Asked again, it's the same object: written once.
+/// let again = pdfs::build::resource(&mut doc, &mut written, &font, Deflate::DEFAULT).unwrap();
+/// assert_eq!(id, again);
+/// let widths = doc.get_dict(id).unwrap().get(b"Widths").unwrap();
+/// assert_eq!(widths.as_reference(), Some(ObjectId::new(id.number + 1, 0)));
+/// ```
+///
 /// # Errors
 ///
 /// [`write::Error::Unencodable`] where a stream's data doesn't deflate,
@@ -83,6 +106,8 @@ pub fn resource(
         });
         doc.set(id, object);
     }
+    // A resource is one object at least: pdf-content-streams refuses one of
+    // none.
     written.insert(res.clone(), ids[0]);
     Ok(ids[0])
 }
@@ -156,7 +181,31 @@ pub fn bind(
 /// them ([`Reserved::default`]); the writer is kept, so the same content can
 /// be written again. Its `/Parent` is the caller's to set, as is any other
 /// attribute: one a page tree's node gives every page under it is given by
-/// this page's own value.
+/// this page's own value. Its box is written as the content writer writes a
+/// number, one that isn't finite as 0.
+///
+/// ```
+/// use std::collections::HashMap;
+///
+/// use pdfs::pdf_content_streams::{ContentWriter, Paint};
+/// use pdfs::pdf_objects::{Object, dict, version::Version};
+/// use pdfs::pdf_semantics::pages::Rect;
+/// use pdfs::pdf_structure::{Document, write::Deflate};
+///
+/// let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
+/// let mut content = ContentWriter::new();
+/// content.rect(72.0, 72.0, 100.0, 50.0);
+/// content.paint(Paint::Fill);
+/// let mut written = HashMap::new();
+/// let page = pdfs::build::page(&mut doc, &mut written, Rect::LETTER, &content, Deflate::DEFAULT).unwrap();
+/// assert_eq!(page.get(b"Type").and_then(Object::as_name), Some(&b"Page"[..]));
+/// let media_box = page.get(b"MediaBox").unwrap().as_array().unwrap();
+/// assert_eq!(media_box[2].as_integer(), Some(612));
+/// // Its content is a stream of its own, deflated.
+/// let (_, contents) = doc.dereference(page.get(b"Contents").unwrap()).unwrap();
+/// let filter = contents.as_stream().unwrap().dict.get(b"Filter");
+/// assert_eq!(filter.and_then(Object::as_name), Some(&b"FlateDecode"[..]));
+/// ```
 ///
 /// # Errors
 ///
@@ -188,6 +237,23 @@ pub fn page(
 /// that names a `/Metadata` already, whose packet would be replaced by it
 /// and the rest of what it says lost, is refused; a caller that means to
 /// replace it sets `/Metadata` itself.
+///
+/// ```
+/// use pdfs::pdf_objects::{Object, ObjectId, dict, version::Version};
+/// use pdfs::pdf_semantics::xmp::Claims;
+/// use pdfs::pdf_structure::Document;
+///
+/// let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
+/// doc.insert(1, dict! { "Type" => "Catalog" });
+/// let mut claims = Claims::default();
+/// claims.pdfa_part = Some("2".into());
+/// claims.pdfa_conformance = Some("B".into());
+/// let id = pdfs::build::claim(&mut doc, &claims).unwrap();
+/// let catalog = doc.get_dict(ObjectId::new(1, 0)).unwrap();
+/// assert_eq!(catalog.get(b"Metadata").and_then(Object::as_reference), Some(id));
+/// // Claimed again, the catalog names a packet already: refused.
+/// assert!(matches!(pdfs::build::claim(&mut doc, &claims), Err(pdfs::Error::HasMetadata)));
+/// ```
 ///
 /// # Errors
 ///
@@ -239,9 +305,12 @@ fn owned(doc: &Document, value: Option<&Object>) -> Dict {
 }
 
 /// `rect` as written: each number an integer where it's whole and within 32
-/// bits, as a reader reads it either way, else a real.
+/// bits, as a reader reads it either way, else a real; and one that isn't
+/// finite, which no file can hold, 0, as pdf-content-streams' writer writes
+/// one.
 pub(crate) fn rect(rect: Rect) -> Object {
     let number = |x: f64| {
+        let x = if x.is_finite() { x } else { 0.0 };
         let whole = x.fract() == 0.0 && (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&x);
         match whole {
             true => Object::from(x as i64),

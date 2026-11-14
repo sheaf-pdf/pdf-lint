@@ -62,6 +62,24 @@ pub fn version<S: ByteSource>(reading: &Reading<S>) -> Result<Option<Version>, U
 /// where the trailer has none, or it isn't a dictionary. What departs from
 /// the clause is told to `sink`.
 ///
+/// ```
+/// use pdfs::pdf_objects::dict;
+/// use pdfs::prelude::*;
+///
+/// // A file of one page whose trailer names an author.
+/// let mut doc = Document::new();
+/// doc.add_page(Rect::LETTER);
+/// let info = doc.structure_mut().add(dict! { "Author" => Object::text("Ada") });
+/// doc.structure_mut().trailer_mut().dict_mut().set("Info", info);
+/// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+///
+/// // Over the reading, its text decoded by ISO's rules, every fault told.
+/// let mut faults = Vec::new();
+/// let info = pdfs::file::info(pdf.reading(), Rules::Iso, &mut faults).unwrap().unwrap();
+/// assert_eq!(info.author.as_deref(), Some("Ada"));
+/// assert!(faults.is_empty());
+/// ```
+///
 /// # Errors
 ///
 /// As [`info::read`] fails: the [`Unreadable`] of an object on the way that
@@ -87,6 +105,21 @@ pub fn info<S: ByteSource, K: Sink<Fault> + ?Sized>(
 /// told and has nothing read, so with `()` as the sink it reads as one that
 /// claims nothing.
 ///
+/// ```
+/// use pdfs::prelude::*;
+///
+/// let mut claims = Claims::default();
+/// claims.pdfvt_version = Some("PDF/VT-2".into());
+/// let mut doc = Document::new();
+/// doc.add_page(Rect::LETTER);
+/// doc.claim(&claims).unwrap();
+/// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+///
+/// let semantics = pdfs::Limits::DEFAULT.semantics;
+/// let read = pdfs::file::claims(pdf.reading(), &semantics, &mut ()).unwrap();
+/// assert_eq!(read, Some(claims));
+/// ```
+///
 /// # Errors
 ///
 /// [`Error::NoCatalog`] where there's no catalog, [`Error::Unreadable`]
@@ -106,10 +139,30 @@ pub fn claims<S: ByteSource, K: Sink<Fault> + ?Sized>(
 /// Whether the file `reading` reads is linearized and its linearization
 /// holds (pdf-linearize's [`check`](pdf_linearize::family::check())), under
 /// `limits.linearize` with the walks of its page tree and name trees under
-/// `limits.semantics`' caps on them: a whole read only where the file says
+/// `limits.semantics`' caps on them, its pages under the lesser of the two
+/// crates' ([`Limits::linearize`]): a whole read only where the file says
 /// it's linearized. What's wrong with it is told to `sink`, and what the
 /// reader didn't read, for a cap, a password or filters it doesn't take, is
 /// said as not judged ([`Verdict::judged_whole`]), never as the file's.
+///
+/// ```
+/// use pdfs::prelude::*;
+///
+/// // A file of two pages, laid out for reading over a network.
+/// let mut doc = Document::new();
+/// doc.add_page(Rect::LETTER);
+/// doc.add_page(Rect([0.0, 0.0, 595.0, 842.0]));
+/// let mut file = Vec::new();
+/// let options = doc.linearize_options();
+/// doc.save_linearized_to(&mut file, &options).unwrap();
+/// let pdf = pdfs::from_bytes(file).unwrap();
+///
+/// // Over the reading, every finding told: none.
+/// let mut findings = Vec::new();
+/// let verdict = pdfs::file::linearized(pdf.reading(), pdf.limits(), &mut findings).unwrap();
+/// assert!(verdict.linearized && verdict.holds && verdict.judged_whole);
+/// assert!(findings.is_empty());
+/// ```
 ///
 /// # Errors
 ///

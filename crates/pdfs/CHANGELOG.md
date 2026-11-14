@@ -2,7 +2,7 @@
 
 ## 0.1.0-alpha.1 (unreleased)
 
-First release. It's an alpha: any alpha may change the API, and each entry here says what changed and how to update. Depend on the exact version, `=0.1.0-alpha.1`; a plain `0.1.0-alpha.1` lets cargo take later alphas too. It pins each crate it re-exports exactly, so a release of any of them comes as a release of pdfs.
+First release. It's an alpha: any alpha may change the API, and each entry here says what changed and how to update. Depend on the exact version, `=0.1.0-alpha.1`; a plain `0.1.0-alpha.1` lets cargo take later alphas too. It pins each alpha it re-exports exactly, so a release of any of them comes as a release of pdfs, and takes pdf-tokenizer on its `0.2` line.
 
 ### Added
 
@@ -21,13 +21,16 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 ### Security
 
 - `Document::encrypt` is AES-256, revision 6, its key and salts from the operating system. It's written under the document's own version, 1.7 for a new one, and `encrypt`'s docs say what a checker by version finds. An edited encrypted file is saved under its own encryption unless `decrypt` or `encrypt` says otherwise. A locked file isn't edited.
-- Under an edited RC4 file's own encryption, new plaintext at a keystream the file used is refused unless the caller asks (`Document::reuse_rc4_keystreams`, or `rc4` in `save_linearized`'s options), and what's so written is listed.
+- Under an edited RC4 file's own encryption, new plaintext at a keystream the file used is refused unless the caller asks (`Document::reuse_rc4_keystreams`, for an update and a linearized save alike), and what's so written is listed.
 - A save never writes over the file a `Pdf` reads by position (`Error::SameFile`), and an update is appended only to the file read, as it was (`Error::NotTheBase`). Neither is a durable write.
 - What's behind a password reads as locked, never as ciphertext. No `Debug` holds a password, a key or a file's content, and a span's fields are numbers.
+- What a file permits once a password opens it binds the caller, not the facade: opened by its user's password, a file that withholds changes is edited and saved, and `decrypt` saves it in the clear. `Pdf::encryption` gives the permissions and which password opened it.
 - The `insecure-test-writer` feature, for tests and fuzzing, turns on pdf-structure's and pdf-linearize's test writer, which draws a new encryption's key from a seeded generator. A build that ships leaves it off.
 
 ### Notes
 
 - It needs Rust 1.89. Nothing panics on any file, and past a cap a call says so.
+- A page's or a form's stream that doesn't decode, damaged or through a filter the reader doesn't take, is read as none and said (`Concat::undecoded`, `Unread::Undecoded`), where PDFium reads its data as written.
+- A page's box is written as the content writer writes a number, one that isn't finite as 0.
 - `Options`, `Limits`, `Error` and `NamedFont` are `#[non_exhaustive]`, so each can grow in a minor release. The crates' own types keep their own policies.
 - What isn't here: layout, images, forms, signatures, font embedding, claims merged into a file's XMP, and a durable save.

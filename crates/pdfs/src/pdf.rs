@@ -133,6 +133,23 @@ impl<S: ByteSource> Pdf<S> {
     /// the one that opened it. Nothing keeps them. What was read before is
     /// read again, decrypted, the fonts among it.
     ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// // A file of one page, encrypted by a password.
+    /// let password = Password("secret").prepared().unwrap();
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// doc.encrypt(&Protection::new(&password)).unwrap();
+    /// let file = doc.to_bytes().unwrap();
+    ///
+    /// let pdf = pdfs::from_bytes(file).unwrap();
+    /// assert_eq!(*pdf.encryption(), Encryption::Locked);
+    /// let pdf = pdf.unlock(&Password("secret").encodings()).unwrap();
+    /// assert!(matches!(pdf.encryption(), Encryption::Opened { .. }));
+    /// assert_eq!(pdf.pages().unwrap().len(), 1);
+    /// ```
+    ///
     /// # Errors
     ///
     /// Given back as it was, with why, where none of `passwords` opens it or
@@ -192,6 +209,22 @@ impl<S: ByteSource> Pdf<S> {
     /// none where its trailer has none. Nothing departing from the clause is
     /// told: [`Pdf::info_with`] tells it.
     ///
+    /// ```
+    /// use pdfs::pdf_objects::dict;
+    /// use pdfs::prelude::*;
+    ///
+    /// // A file of one page whose trailer names a title.
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// let info = doc.structure_mut().add(dict! { "Title" => Object::text("Minutes") });
+    /// doc.structure_mut().trailer_mut().dict_mut().set("Info", info);
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    ///
+    /// let info = pdf.info().unwrap().unwrap();
+    /// assert_eq!(info.title.as_deref(), Some("Minutes"));
+    /// assert_eq!(info.author, None);
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`file::info`] fails, an [`Error::Unreadable`].
@@ -217,6 +250,21 @@ impl<S: ByteSource> Pdf<S> {
     /// where its catalog has no metadata stream. A packet that isn't UTF-8 is
     /// read as one that claims nothing: [`Pdf::claims_with`] is told it
     /// isn't.
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// // A file of one page that claims PDF/A-2b.
+    /// let mut claims = Claims::default();
+    /// claims.pdfa_part = Some("2".into());
+    /// claims.pdfa_conformance = Some("B".into());
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// doc.claim(&claims).unwrap();
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    ///
+    /// assert_eq!(pdf.claims().unwrap(), Some(claims));
+    /// ```
     ///
     /// # Errors
     ///
@@ -282,6 +330,22 @@ impl<S: ByteSource> Pdf<S> {
     /// viewer takes it (pdf-objects' [`Streams`]): what decodes of a stream
     /// that decodes only in part, up to [`Limits::read`]'s cap on a stream.
     ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// // A page that fills a square, its content written deflated.
+    /// let mut doc = Document::new();
+    /// let page = doc.add_page(Rect::LETTER);
+    /// page.rect(0.0, 0.0, 10.0, 10.0);
+    /// page.paint(Paint::Fill);
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    ///
+    /// let pages = pdf.pages().unwrap();
+    /// let page = pages.get(0).unwrap().attributes().dict.unwrap();
+    /// let contents = page.get(b"Contents").and_then(Object::as_reference).unwrap();
+    /// assert!(pdf.stream(contents).unwrap().starts_with(b"0 0 10 10 re"));
+    /// ```
+    ///
     /// # Errors
     ///
     /// [`Error::Unreadable`], its [`Why`](pdf_objects::Why) saying why: past
@@ -321,8 +385,18 @@ impl<S: ByteSource> Pdf<S> {
     /// file is saved encrypted as it was unless [`Document::decrypt`] or
     /// [`Document::encrypt`] says otherwise; and after the file as its last
     /// section describes it ([`Base::of`]), for an update
-    /// ([`Document::save_update`]). It borrows the reading, which what's as
-    /// read is copied from.
+    /// ([`Document::save_update`]); and under the caps it's read under, which
+    /// a linearized save's walks of its trees are made under
+    /// ([`Document::linearize_options`]). It borrows the reading, which what's
+    /// as read is copied from.
+    ///
+    /// What the file permits isn't held to here: opened by its user's
+    /// password, a file that withholds changes is edited and saved all the
+    /// same, and [`Document::decrypt`] saves it in the clear. The encryption
+    /// itself can't stop that, and ISO 32000-2 leaves honouring permissions
+    /// to what processes a file (7.6.4.1), here the caller, which reads
+    /// [`Pdf::encryption`]'s `permissions`, and which password opened it
+    /// (`by`), first.
     ///
     /// # Errors
     ///
@@ -338,7 +412,10 @@ impl<S: ByteSource> Pdf<S> {
         let base = Base::of(&self.reading);
         let from: &dyn ReadFrom = &self.reading;
         let identity = self.identity.clone();
-        Ok(Document::edited(doc, encryptor, from, base, identity))
+        let limits = self.limits;
+        Ok(Document::edited(
+            doc, encryptor, from, base, identity, limits,
+        ))
     }
 
     /// What the reading found wrong as it read, each at its place, in the
@@ -546,14 +623,18 @@ impl<'a, S: ByteSource> Page<'a, S> {
 
     /// Its content: its streams decoded and joined under
     /// [`Limits::content`], as [`page::content`](fn@page::content) joins
-    /// them, and the color spaces its resources name.
+    /// them, and the color spaces its resources name. A stream whose data
+    /// doesn't decode for the file's own reason is joined as none and said
+    /// ([`Concat::undecoded`](pdf_content_streams::Concat::undecoded)), where
+    /// PDFium reads its data as written.
     ///
     /// # Errors
     ///
     /// As [`page::content`](fn@page::content) fails: [`Error::Content`]
     /// where its streams are past the cap or one doesn't read for the
-    /// reader's own reason, its [`Why`](pdf_objects::Why) kept, and
-    /// [`Error::Unreadable`] where its resources don't read.
+    /// reader's own reason (past a cap, behind a password or not given), its
+    /// [`Why`](pdf_objects::Why) kept, never for the file's own damage; and
+    /// [`Error::Unreadable`] where its resources don't read for it.
     pub fn content(&self) -> Result<Content, Error> {
         page::content(&self.pdf.reading, self.page, &self.pdf.limits.content)
     }
@@ -561,6 +642,24 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// The fonts its resources name, each by its name, read once a file and
     /// kept, as [`page::fonts`](fn@page::fonts) reads them, within
     /// [`Limits::font_budget`].
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// // A page that shows a string in Courier.
+    /// let mut doc = Document::new();
+    /// let page = doc.add_page(Rect::LETTER);
+    /// page.begin_text();
+    /// page.font(standard_font(Std14::Courier), 12.0);
+    /// page.show(&Std14::Courier.codes("Hi").unwrap());
+    /// page.end_text();
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    ///
+    /// let pages = pdf.pages().unwrap();
+    /// let fonts = pages.get(0).unwrap().fonts().unwrap();
+    /// assert_eq!(fonts.len(), 1);
+    /// assert!(fonts[0].font.as_ref().is_ok_and(Option::is_some));
+    /// ```
     ///
     /// # Errors
     ///
@@ -583,7 +682,8 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// it draws followed, as PDFium reads them for its text, with no layout,
     /// as [`page::text`](fn@page::text) reads them, within
     /// [`Limits::font_budget`]: [`Shown::text`] joins them. What isn't read
-    /// is said in the answer ([`Shown::unread`]).
+    /// is said in the answer ([`Shown::unread`]), a stream whose data doesn't
+    /// decode among it.
     ///
     /// # Errors
     ///

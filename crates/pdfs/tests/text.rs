@@ -283,3 +283,57 @@ fn no_debug_holds_a_name_or_a_string() {
         assert!(!printed.contains("MARKER"), "{printed}");
     }
 }
+
+/// A page's stream, or a form's, whose data doesn't decode for the file's own
+/// reason, damaged or through a filter the reader doesn't take, is read as none
+/// and said, and the rest of the page is read: its content joined, its other
+/// streams' strings shown. PDFium reads such a stream's data as written.
+#[test]
+fn a_stream_that_does_not_decode_is_read_as_none_and_said() {
+    let fonts = dict! { "Font" => dict! { "F1" => r(20) } };
+    for filter in ["Bogus", "FlateDecode", "DCTDecode"] {
+        let undecoded = |data: &str| {
+            let dict = dict! { "Filter" => filter };
+            Body::stream(dict, data.as_bytes())
+        };
+        let page = dict! {
+            "Contents" => vec![r(10), r(11), r(12)],
+            "Resources" => dict! {
+                "Font" => dict! { "F1" => r(20) },
+                "XObject" => dict! { "X" => r(13) },
+            },
+        };
+        let mut form = dict! { "Subtype" => "Form", "Filter" => filter };
+        form.set("Resources", fonts.clone());
+        let more = [
+            (10, content_stream("BT /F1 9 Tf (AB) Tj ET")),
+            (11, undecoded("BT /F1 9 Tf (CD) Tj ET")),
+            (12, content_stream("BT /F1 9 Tf (EF) Tj ET /X Do")),
+            (13, Body::stream(form, b"BT /F1 9 Tf (GH) Tj ET")),
+            (20, courier(None)),
+        ];
+        let pdf = pdfs::from_bytes(file_of(&[page], &more)).unwrap();
+        let pages = pdf.pages().unwrap();
+        let page = pages.get(0).unwrap();
+
+        let content = page.content().unwrap();
+        assert_eq!(content.concat().stream_count(), 3, "{filter}");
+        assert_eq!(content.concat().stream(1), b"", "{filter}");
+        let undecoded: Vec<_> = (content.concat().undecoded().iter())
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(undecoded, [ObjectId::new(11, 0)], "{filter}");
+
+        let text = page.text().unwrap();
+        assert_eq!(text.text(), "ABEF", "{filter}");
+        let said: Vec<_> = (text.unread.iter())
+            .map(|unread| match unread {
+                Unread::Undecoded { form, error } => (*form, error.id),
+                other => panic!("{filter}: {other:?}"),
+            })
+            .collect();
+        let (page_stream, form) = (ObjectId::new(11, 0), ObjectId::new(13, 0));
+        assert_eq!(said, [(None, page_stream), (Some(form), form)], "{filter}");
+        assert!(!text.is_whole());
+    }
+}

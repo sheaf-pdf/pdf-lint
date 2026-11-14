@@ -98,10 +98,11 @@ assembled from it, hint tables from any bytes, any facts of a file, judged
 alike whatever the sink and nothing judged of what they say wasn't read, and
 any bytes as a file laid out in the clear, under its own encryption and
 under a new one, read back and checked, and under caps on its trees, a file
-read through pdfs, its pages' text and fonts among it, and written in the
-clear and encrypted, read locked and unlocked, and a new document of its
-first pages saved each way and read back, and the reader and checker, on
-nightly with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second
+read through pdfs, its pages' text and fonts among it, edited with a page
+added, and written in the clear and encrypted, read locked and unlocked, and
+a new document of its first pages saved each way and read back, and the
+reader and checker, on nightly with
+[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second
 argument says for how many seconds (60 by default), and a third the features
 they're built with: `simd`, pdf-content-streams' dependencies on the CPU's
 SIMD (`just fuzz content 300 simd`), and `predefined-cmaps`, Adobe's
