@@ -761,3 +761,9 @@ contents-number	contents	contents-number.contents,contents-number.objects
 contents-chain	contents	contents-chain.contents,contents-chain.objects
 contents-chain-array	contents	contents-chain-array.contents,contents-chain-array.objects
 contents-element-chain	contents	contents-element-chain.contents,contents-element-chain.objects
+contents-undecoded-bogus	contents	contents-undecoded-bogus.contents,contents-undecoded-bogus.objects
+contents-undecoded-bogus-alone	contents	contents-undecoded-bogus-alone.contents,contents-undecoded-bogus-alone.objects
+contents-undecoded-flate	contents	contents-undecoded-flate.contents,contents-undecoded-flate.objects
+contents-undecoded-flate-alone	contents	contents-undecoded-flate-alone.contents,contents-undecoded-flate-alone.objects
+contents-undecoded-dct	contents	contents-undecoded-dct.contents,contents-undecoded-dct.objects
+contents-undecoded-dct-alone	contents	contents-undecoded-dct-alone.contents,contents-undecoded-dct-alone.objects

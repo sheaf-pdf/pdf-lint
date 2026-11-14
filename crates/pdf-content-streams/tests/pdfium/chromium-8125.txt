@@ -761,3 +761,9 @@ contents-number	none
 contents-chain	none
 contents-chain-array	none
 contents-element-chain	none
+contents-undecoded-bogus	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-undecoded-bogus-alone	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3
+contents-undecoded-flate	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-undecoded-flate-alone	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3
+contents-undecoded-dct	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-undecoded-dct-alone	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3

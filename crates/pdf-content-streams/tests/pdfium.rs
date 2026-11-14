@@ -629,7 +629,8 @@ fn answer(content: &[u8], res: &[u8], lim: Limits) -> String {
 
 /// A `contents` case's objects, as its file has them: object `n` from 4, its
 /// value, or a stream's dictionary and its data; none where it doesn't read,
-/// which is damaged.
+/// which is damaged. It decodes no filter: a stream that names one doesn't
+/// decode ([`Why::Filter`]), as a reader's whose filters fail doesn't.
 struct File {
     objects: BTreeMap<ObjectId, Option<Object>>,
     data: BTreeMap<ObjectId, Vec<u8>>,
@@ -692,6 +693,11 @@ impl<'o> Resolve<'o> for &'o File {
 
 impl Streams for &File {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        let stream = self.objects.get(&id).and_then(Option::as_ref);
+        let stream = stream.and_then(Object::as_stream);
+        if stream.is_some_and(|stream| stream.dict.has(b"Filter")) {
+            return Err(Unreadable::new(id, Why::Filter, "no filter is decoded"));
+        }
         match self.data.get(&id) {
             Some(data) if data.len() <= limit => Ok(Cow::Borrowed(data)),
             Some(_) => Err(Unreadable::new(id, Why::Limit, "past the limit")),

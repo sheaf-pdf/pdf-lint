@@ -30,3 +30,9 @@ dct-comment-after-scan	default	A JPEG of one scan with a comment holding `(` bet
 dct-app-after-scan	default	As dct-comment-after-scan, with an application segment holding `(` in the comment's place.
 dct-restarts-comment-after-scan	default	As dct-comment-after-scan, with a restart after each block, which PDFium's decoder reads past.
 cs-white-point-y-rounds-up-from-half	all	An Object holds a real as an f64, so 1.00000005960464478, just past halfway between two 32-bit floats, reaches the f64 of that half, which rounds to even, 1, and the white point holds; PDFium parses the bytes straight to a 32-bit float, the one above 1, and it doesn't. So an image in an array of it is 1 component here and 3 there.
+contents-undecoded-bogus	all	A stream whose filter no reader takes, before one that's plain: PDFium reads its data as written, so the path in it is drawn; it's joined here as a stream of no data, its place kept and said (`Concat::undecoded`), as a reader through pdf-objects' `Streams` gives decoded data alone.
+contents-undecoded-bogus-alone	all	As contents-undecoded-bogus, the stream alone: PDFium draws the path in its data as written, and nothing is drawn here.
+contents-undecoded-flate	all	As contents-undecoded-bogus, through Flate over data that isn't Flate's, which PDFium reads as written where its decoder fails.
+contents-undecoded-flate-alone	all	As contents-undecoded-flate, the stream alone.
+contents-undecoded-dct	all	As contents-undecoded-bogus, through DCTDecode, an image's filter, which PDFium doesn't decode for content and reads past, its data as written.
+contents-undecoded-dct-alone	all	As contents-undecoded-dct, the stream alone.

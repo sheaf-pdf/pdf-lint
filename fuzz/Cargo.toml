@@ -71,9 +71,10 @@
 # and `splice_each`'s reads at its cap and a byte under; content that holds
 # an image a cap sized refused by every edit; and pairs of objects its
 # bytes choose the same as resources exactly where their digests' bytes
-# are, `Res::of` refusing exactly what holds data not in memory; and its
-# bytes as a page's `/Contents` and the objects it names, joined as a plain
-# reading of PDFium's joins them; which four stable unit tests
+# are, `Res::of` refusing of the objects it's given exactly what holds data
+# not in memory; and its bytes as a page's `/Contents` and the objects it
+# names, joined as a plain reading of PDFium's joins them, a stream whose
+# data doesn't decode as none, said; which four stable unit tests
 # (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`,
 # `resources_chosen_are_both_the_same_and_apart` and
 # `contents_chosen_come_to_each_answer`) run on mutated seeds, random

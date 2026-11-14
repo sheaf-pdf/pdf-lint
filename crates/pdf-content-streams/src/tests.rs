@@ -3672,7 +3672,8 @@ impl Pages {
     /// Streams 1 to 3, `q`, `0 g` and `Q`; 4 a dictionary; 5 an array of 1
     /// and 3; 6 a reference to stream 1; 7 an empty array; 8 to 11 objects
     /// that don't read, damaged, past a cap, locked and not given; 12 a stream
-    /// whose data is locked.
+    /// whose data is locked; 13 and 14 streams whose data doesn't decode,
+    /// damaged and through a filter the reader doesn't take.
     fn new() -> Pages {
         let id = |n| ObjectId::new(n, 0);
         let stream = || Ok(Object::stream(dict! {}));
@@ -3691,6 +3692,8 @@ impl Pages {
             (id(6), Ok(Object::reference(1))),
             (id(7), Ok(Object::from(Vec::new()))),
             (id(12), stream()),
+            (id(13), stream()),
+            (id(14), stream()),
         ]);
         for (n, why) in [
             (8, Why::Damaged),
@@ -3705,6 +3708,8 @@ impl Pages {
             (id(2), Ok(b"0 g".to_vec())),
             (id(3), Ok(b"Q".to_vec())),
             (id(12), Err(Why::Locked)),
+            (id(13), Err(Why::Damaged)),
+            (id(14), Err(Why::Filter)),
         ]);
         Pages(File { objects, data })
     }
@@ -3801,6 +3806,47 @@ fn a_page_s_contents_that_do_not_read_for_the_reader_are_an_error() {
     });
     let refused = join.push_contents(&pages.0, &contents);
     assert_eq!(refused, Err(Pushed::TooLarge(TooLarge { cap: 3 })));
+}
+
+/// A stream whose data doesn't decode for the file's own reason, damaged or
+/// through a filter the reader doesn't take, is joined as one of no data,
+/// its place kept, and said: the streams after it are joined, alone or in an
+/// array, as PDFium joins them, where PDFium reads its data as written.
+#[test]
+fn a_page_s_stream_that_does_not_decode_is_joined_as_none_and_said() {
+    let pages = Pages::new();
+    for (n, why) in [(13, Why::Damaged), (14, Why::Filter)] {
+        for (contents, bytes, streams, said) in [
+            (format!("[1 0 R {n} 0 R 3 0 R]"), &b"q  Q"[..], 3, 1),
+            (format!("{n} 0 R"), b"", 1, 1),
+            (format!("[{n} 0 R {n} 0 R]"), b" ", 2, 2),
+        ] {
+            let written = Parser::at(contents.as_bytes(), 0).value(&mut ()).unwrap();
+            let mut join = Join::new(&Limits::DEFAULT);
+            join.push_contents(&pages.0, &written).unwrap();
+            let page = join.finish();
+            let joined = (page.bytes(), page.stream_count());
+            assert_eq!(joined, (bytes, streams), "{contents}");
+            let undecoded: Vec<_> = (page.undecoded().iter())
+                .map(|e| (e.id.number, e.why))
+                .collect();
+            assert_eq!(undecoded, vec![(n, why); said], "{contents}");
+        }
+    }
+    // Joined as they are, none is said.
+    let contents = Parser::at(b"[1 0 R 2 0 R]", 0).value(&mut ()).unwrap();
+    let mut join = Join::new(&Limits::DEFAULT);
+    join.push_contents(&pages.0, &contents).unwrap();
+    assert!(join.finish().undecoded().is_empty());
+    // One of no data is still past the cap, its space and all.
+    let contents = Parser::at(b"[1 0 R 13 0 R]", 0).value(&mut ()).unwrap();
+    let mut join = Join::new(&Limits {
+        content: 1,
+        ..Limits::DEFAULT
+    });
+    let refused = join.push_contents(&pages.0, &contents);
+    assert_eq!(refused, Err(Pushed::TooLarge(TooLarge { cap: 1 })));
+    assert!(join.finish().undecoded().is_empty());
 }
 
 #[test]

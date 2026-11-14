@@ -9,7 +9,9 @@ use pdf_objects::{Data, Dict, Object, ObjectId, Span, Str, Stream, Value, dict};
 
 use super::*;
 use crate::fuzz::read_as_written as close;
-use crate::{Limits, Operation, ResBody, ResCx, ResId, Tok, Unheld, object, operations, tokens};
+use crate::{
+    Limits, Operation, ResBody, ResCx, ResError, ResId, Tok, Unheld, object, operations, tokens,
+};
 
 /// The text of what `w` wrote, with no resources reserved or given.
 fn written(w: ContentWriter) -> (String, ResourceNeeds) {
@@ -649,7 +651,11 @@ fn a_placed_stream_is_told_by_its_reference_alone() {
         let res = match Res::of([object.clone()]) {
             Ok(res) => res,
             Err(refused) => {
-                assert_eq!(refused, Unheld { object: 0 }, "{object:?}");
+                assert_eq!(
+                    refused,
+                    ResError::Unheld(Unheld { object: 0 }),
+                    "{object:?}"
+                );
                 Res {
                     id: ResId::of(std::slice::from_ref(&object)),
                     body: ResBody::Objects(Arc::from([object.clone()])),

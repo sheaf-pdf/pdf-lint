@@ -457,20 +457,23 @@ fn a_resource_holds_its_streams_in_memory() {
             objects.push(bad.clone());
             objects.push(held());
             let refused = Res::of(objects).unwrap_err();
-            assert_eq!(refused, Unheld { object: at }, "{bad:?}");
+            assert_eq!(refused, ResError::Unheld(Unheld { object: at }), "{bad:?}");
             assert_eq!(
                 refused.to_string(),
                 format!("object {at} of the resource holds a stream whose data isn't in memory")
             );
             match Res::of([bad.clone()]) {
-                Err(Unheld { object, .. }) => assert_eq!(object, 0),
+                Err(ResError::Unheld(Unheld { object, .. })) => assert_eq!(object, 0),
+                Err(refused) => panic!("{refused:?}"),
                 Ok(res) => panic!("{res:?}"),
             }
         }
         let dict = dict! { "Type" => "XObject", "S" => unheld() };
-        assert_eq!(Res::dict(dict).unwrap_err(), Unheld { object: 0 });
+        let refused = ResError::Unheld(Unheld { object: 0 });
+        assert_eq!(Res::dict(dict).unwrap_err(), refused);
         let body = ResBody::Objects(vec![font.clone(), unheld()].into());
-        assert_eq!(Res::named(ResId(7), body), Err(Unheld { object: 1 }));
+        let refused = ResError::Unheld(Unheld { object: 1 });
+        assert_eq!(Res::named(ResId(7), body), Err(refused));
     }
     let taken = [
         held(),
@@ -488,4 +491,17 @@ fn a_resource_holds_its_streams_in_memory() {
     let written = Res::named(ResId(7), ResBody::Written(ObjectId::new(3, 0))).unwrap();
     assert_eq!(written.id(), ResId(7));
     assert!(matches!(written.body(), ResBody::Written(id) if *id == ObjectId::new(3, 0)));
+}
+
+/// No objects are no resource, made or named by hand, as a writer has no
+/// object to name where content draws with it.
+#[test]
+fn a_resource_is_one_object_at_least() {
+    assert_eq!(Res::of(Vec::new()), Err(ResError::Empty));
+    let none = ResBody::Objects(Arc::from(Vec::new()));
+    assert_eq!(Res::named(ResId(7), none), Err(ResError::Empty));
+    assert_eq!(ResError::Empty.to_string(), "the resource has no objects");
+    let unheld = ResError::Unheld(Unheld { object: 2 });
+    let words = "object 2 of the resource holds a stream whose data isn't in memory";
+    assert_eq!(unheld.to_string(), words);
 }

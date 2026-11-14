@@ -1356,5 +1356,19 @@ contents("contents-chain-array", b"6 0 R", BEGUN, STROKED, b"7 0 R", b"[4 0 R 5 
 contents("contents-element-chain", b"[6 0 R 5 0 R]", BEGUN, STROKED, b"4 0 R")
 
 
+def filtered(name, data):
+    return b"<< /Length %d /Filter /%s >>\nstream\n" % (len(data), name) + data + b"\nendstream"
+
+
+# A stream whose data doesn't decode before one that does, and alone: through
+# a filter no reader takes, through Flate over data that isn't Flate's, and
+# through an image's filter. PDFium reads its data as written; the crate
+# joins it as a stream of no data (differ.tsv).
+for kind, filter_name in [("bogus", b"Bogus"), ("flate", b"FlateDecode"), ("dct", b"DCTDecode")]:
+    undecoded = filtered(filter_name, b"1 1 m 3 3 l S")
+    contents("contents-undecoded-" + kind, b"[4 0 R 5 0 R]", undecoded, WHOLE)
+    contents("contents-undecoded-" + kind + "-alone", b"4 0 R", undecoded)
+
+
 def cases():
     return CASES
