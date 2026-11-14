@@ -42,7 +42,9 @@ To update: fetch a newer commit the same way, into a scratch directory;
 replace `LICENSE`, `NOTICE.txt` and `tsv/latest` with its own; build, and
 for each correction or addition the build stops on, drop it if upstream
 fixed the model, or redo it if upstream changed it otherwise; update the
-commit here and in `pdf_arlington::COMMIT`, and the two hashes in
+commit here and in `pdf_arlington::COMMIT`, the two hashes in
 `grammar.rs`'s `the_models_hashes_are_the_references`, upstream's tables'
-and the embedded ones' (`Grammar::hash` says how to work them out); rerun
-`just test`; and record in the changelog what moved.
+and the embedded ones' (`Grammar::hash` says how to work them out), and
+the tables' count, here and in the justfile's `_package`, which holds the
+package to it; rerun `just test` and `just arlington-package`; and record
+in the changelog what moved.

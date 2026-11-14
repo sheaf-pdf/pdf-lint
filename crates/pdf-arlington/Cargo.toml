@@ -26,9 +26,24 @@ thiserror = "2"
 # hashes, its random seeds or std.
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
 
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
+
 [dev-dependencies]
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # The tests' folders of their own, removed after.
 tempfile = "3"
+
+# The benchmarks: `cargo bench -p pdf-arlington`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "arlington"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
