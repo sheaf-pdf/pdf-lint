@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use pdf_content_streams::{Concat, ResCx};
+use pdf_content_streams::{Concat, Join, ResCx};
 use pdf_objects::object::Stream;
 use pdf_objects::{Object, ObjectId, Resolve, Streams, Unreadable, Why, dict};
 
@@ -590,7 +590,7 @@ fn a_forms_resources_are_its_own_else_its_callers_else_the_pages() {
 
 /// `Do` follows a form, by its `/Subtype`, as PDFium does: an image, another
 /// subtype, none, a stream written in place and what's no stream show nothing, and
-/// aren't told; nor is a form whose stream doesn't decode, which is the file's.
+/// aren't told.
 #[test]
 fn only_a_form_is_followed() {
     let mut file = File::default();
@@ -606,22 +606,70 @@ fn only_a_form_is_followed() {
     let ps = file.add(with(Some("PS")));
     let none = file.add(with(None));
     let not_a_stream = file.add(dict! { "Subtype" => "Form" });
-    let damaged = file.form("(A) Tj", None);
-    file.failing = Some((damaged, Why::Damaged));
     let resources = Object::from(dict! {
         "Font" => dict! { "F1" => courier() },
         "XObject" => dict! {
             "I" => Object::from(image), "P" => Object::from(ps), "N" => Object::from(none),
             "D" => Object::from(not_a_stream), "W" => Object::from(with(Some("Form"))),
-            "Z" => Object::from(damaged), "R" => Object::reference(99),
+            "R" => Object::reference(99),
         },
     });
     let read = walk(
         &file,
         &resources,
-        "/F1 9 Tf /I Do /P Do /N Do /D Do /W Do /Z Do /R Do /Q Do",
+        "/F1 9 Tf /I Do /P Do /N Do /D Do /W Do /R Do /Q Do",
     );
     assert!(read.strings.is_empty() && read.is_whole(), "{read:?}");
+}
+
+/// A stream whose data doesn't decode for the file's own reason, damaged or through
+/// a filter the reader doesn't take, a form's or one of the content given's, shows
+/// nothing, and is said each time it's drawn; what's around it is read. PDFium reads
+/// its data as written: a page showing `(AB)` and drawing a form under `/Filter
+/// /Bogus`, or `/FlateDecode` over plain bytes, that shows `(CD)` gives AB and CD in
+/// its text page at chromium/8125, where this reads AB and says the form.
+#[test]
+fn a_stream_that_does_not_decode_shows_nothing_and_is_said() {
+    for why in [Why::Damaged, Why::Filter] {
+        let mut file = File::default();
+        let form = file.form("(CD) Tj", None);
+        file.failing = Some((form, why));
+        let resources = Object::from(dict! {
+            "Font" => dict! { "F1" => courier() },
+            "XObject" => dict! { "X" => Object::from(form) },
+        });
+        let read = walk(&file, &resources, "/F1 9 Tf (AB) Tj /X Do (EF) Tj /X Do");
+        assert_eq!(read.text(), "ABEF");
+        let said = |form| Unread::Undecoded {
+            form,
+            error: Unreadable::new(form.unwrap(), why, "it doesn't read"),
+        };
+        assert_eq!(read.unread, [said(Some(form)), said(Some(form))]);
+        assert!(!read.is_whole());
+
+        // One of the content given's streams, joined as none, is said first.
+        let page = file.add(Stream::new(dict! {}, b"/F1 9 Tf (GH) Tj".to_vec()));
+        let mut join = Join::new(&Limits::DEFAULT.content);
+        for stream in [page, form, page] {
+            join.push_or_empty(&&file, stream).unwrap();
+        }
+        let content = join.finish();
+        let read = shown(
+            &file,
+            &Fonts::default(),
+            Some(&resources),
+            &content,
+            &ResCx::none(),
+            &Limits::DEFAULT,
+            &mut BUDGET.clone(),
+        );
+        let undecoded = Unread::Undecoded {
+            form: None,
+            error: Unreadable::new(form, why, "it doesn't read"),
+        };
+        assert_eq!(read.unread, [undecoded]);
+        assert_eq!(read.text(), "GHGH");
+    }
 }
 
 /// Forms are followed `forms` deep and no deeper, the next told as not followed; a

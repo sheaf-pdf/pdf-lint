@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use pdf_content_streams::{Concat, Join, Operand, Operator, Pushed, ResCx};
 use pdf_objects::object::Stream;
-use pdf_objects::{Object, ObjectId, Resolve, Streams, Why};
+use pdf_objects::{Object, ObjectId, Resolve, Streams, Unreadable};
 
 use crate::fonts::{FontId, FontScope, Fonts};
 use crate::phases::phase;
@@ -66,11 +66,13 @@ const GIVEN: ObjectId = ObjectId::new(0, 0);
 /// or past how many may be drawn; a form or a font past what's left of `budget`, or
 /// that doesn't read for a reason that's the caller's ([`Error`]), whose strings then
 /// aren't shown, and a graphics state that doesn't, after which none are until a font
-/// is picked; and content that doesn't lex past a point, a cap of `limits.content`
-/// among it. A form's or font's damage is the file's, and it's read as PDFium reads
-/// it: a form whose stream doesn't decode shows nothing, a font that doesn't load
-/// leaves the one before, or none after `gs`. Nothing in it panics on what a file
-/// holds.
+/// is picked; content that doesn't lex past a point, a cap of `limits.content` among
+/// it; and a stream whose data doesn't decode, damaged or through a filter the reader
+/// doesn't take, one of `content`'s ([`Concat::undecoded`]) or a form's, which shows
+/// nothing here, where PDFium reads its data as written, which a [`Streams`] doesn't
+/// give. A font's damage is the file's, and it's read as PDFium reads it: a font that
+/// doesn't load leaves the one before, or none after `gs`. Nothing in it panics on
+/// what a file holds.
 ///
 /// ```
 /// use std::collections::BTreeMap;
@@ -142,6 +144,10 @@ where
         uses: 0,
         shown: Shown::default(),
     };
+    for error in content.undecoded() {
+        let (form, error) = (None, error.clone());
+        walk.shown.unread.push(Unread::Undecoded { form, error });
+    }
     let mut frames = vec![page];
     loop {
         let depth = frames.len();
@@ -352,6 +358,18 @@ pub enum Unread {
         /// Where and why its reading stopped (pdf-content-streams').
         error: pdf_content_streams::Error,
     },
+    /// A stream of the content given, or of a form's content, whose data doesn't
+    /// decode for the file's own reason, damaged or through a filter the reader
+    /// doesn't take ([`Why::Damaged`](pdf_objects::Why::Damaged),
+    /// [`Why::Filter`](pdf_objects::Why::Filter)), and is read as one of no
+    /// data (pdf-content-streams' [`Concat::undecoded`]). PDFium, as of chromium/8125,
+    /// reads its data as written, so what it shows there isn't read here.
+    Undecoded {
+        /// The form it's of; none for the content given.
+        form: Option<ObjectId>,
+        /// The stream, and why its data doesn't decode.
+        error: Unreadable,
+    },
 }
 
 impl fmt::Debug for Unread {
@@ -377,6 +395,11 @@ impl fmt::Debug for Unread {
                 .finish(),
             Unread::Content { form, error } => f
                 .debug_struct("Content")
+                .field("form", form)
+                .field("error", error)
+                .finish(),
+            Unread::Undecoded { form, error } => f
+                .debug_struct("Undecoded")
                 .field("form", form)
                 .field("error", error)
                 .finish(),
@@ -662,6 +685,10 @@ impl<'o, O: Resolve<'o> + Streams + Copy> Walk<'_, 'o, O> {
         };
         *self.budget = left;
         self.uses += 1;
+        for error in read.content.undecoded() {
+            let (form, error) = (Some(id), error.clone());
+            self.shown.unread.push(Unread::Undecoded { form, error });
+        }
         let (owner, resources, res) = match read.own {
             Some((own, res)) => (id, Some(own), res),
             None => (caller.owner, caller.resources, caller.res),
@@ -717,8 +744,9 @@ impl<'o, O: Resolve<'o> + Streams + Copy> Walk<'_, 'o, O> {
     }
 
     /// Form `id`'s content and its own resources, read once a call: its content
-    /// decoded within what's left of the budget, as a form whose stream doesn't decode
-    /// is empty, and its own color spaces counted.
+    /// decoded within what's left of the budget, a stream whose data doesn't decode for
+    /// the file's own reason read as none and said ([`Join::push_or_empty`]), and its
+    /// own color spaces counted.
     fn read(&mut self, id: ObjectId, stream: &'o Stream) -> Result<Rc<FormRead<'o>>, Error> {
         if let Some(read) = self.forms.get(&id) {
             return read.clone();
@@ -746,10 +774,8 @@ impl<'o, O: Resolve<'o> + Streams + Copy> Walk<'_, 'o, O> {
         let mut limits = self.limits.content;
         limits.content = *self.budget;
         let mut join = Join::new(&limits);
-        match join.push_from(&self.objects, id) {
+        match join.push_or_empty(&self.objects, id) {
             Ok(()) => {}
-            Err(Pushed::Decode(unreadable))
-                if matches!(unreadable.why, Why::Damaged | Why::Filter) => {}
             Err(Pushed::Decode(unreadable)) => return Err(unreadable.into()),
             // Past the room, which is what's left of the budget (`TooLarge`); and any
             // other refusal, which leaves the form unread as that does.

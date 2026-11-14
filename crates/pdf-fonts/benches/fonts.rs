@@ -34,16 +34,15 @@
 //!   ten strings 100 times, over fonts read once (`page`).
 //!
 //! Throughput is in fonts, bytes of a string, codes, names, picks or strings
-//! shown. Each input
-//! is held to what it gives before it's timed: a font to its kind, the faults
-//! told of it (none), what it cost, and its widths, CIDs, boxes and text; a
-//! string to each of its codes and to its text; a name to its text, its code
-//! point or its font; a pick to the font it names; a page to the strings it shows
-//! and their text. The objects are made here into
-//! a map, which is the resolver and gives each stream's data as it's held, and
-//! the programs are the crate's own (`tests/pdfium/programs`); nothing is read
-//! from disk, and the inputs are the same on every run. None names a predefined
-//! CMap, so a build with `predefined-cmaps` times the same work.
+//! shown. Each input is held to what it gives before it's timed: a font to its
+//! kind, the faults told of it (none), what it cost, and its widths, CIDs,
+//! boxes and text; a string to each of its codes and to its text; a name to its
+//! text, its code point or its font; a pick to the font it names; a page to the
+//! strings it shows and their text. The objects are made here into a map, which
+//! is the resolver and gives each stream's data as it's held, and the programs
+//! are the crate's own (`tests/pdfium/programs`); nothing is read from disk,
+//! and the inputs are the same on every run. None names a predefined CMap, so a
+//! build with `predefined-cmaps` times the same work.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
