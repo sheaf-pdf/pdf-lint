@@ -317,7 +317,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Read<'_, R, S> {
 }
 
 /// A text's length, which a `Debug` gives for it.
-struct Len(usize);
+pub(crate) struct Len(pub(crate) usize);
 
 impl fmt::Debug for Len {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -326,7 +326,7 @@ impl fmt::Debug for Len {
 }
 
 /// A text, by its length, where there's one.
-fn len(text: &Option<String>) -> Option<Len> {
+pub(crate) fn len(text: &Option<String>) -> Option<Len> {
     text.as_ref().map(|text| Len(text.len()))
 }
 

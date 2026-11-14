@@ -1786,3 +1786,38 @@ fn a_packet_is_read_through_any_resolver_and_its_streams() {
         assert_eq!(read_from(with, catalog, &limits, &mut ()), Ok(None));
     }
 }
+
+/// What a packet says is never in a `Debug`, read or refused: the claims'
+/// values by their length, and the XML reader's words, which quote the
+/// packet, by theirs.
+#[test]
+fn a_debug_holds_no_text() {
+    const MARK: &str = "Zebrafish";
+    let packet = format!(
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+         xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+         <rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
+         pdfaid:part=\"{MARK}\" pdfaid:conformance=\"{MARK}\"/><{MARK}>\
+         </rdf:RDF></x:xmpmeta>"
+    );
+    let error = read(packet.as_bytes(), None, &Limits::DEFAULT, &mut ()).unwrap_err();
+    assert_eq!(error.read.pdfa_part.as_deref(), Some(MARK));
+    assert!(matches!(&error.why, XmpWhy::Xml(words) if words.contains(MARK)));
+    let claims = error.read.clone();
+    let refused = claims.conformance().unwrap_err();
+    let shown = format!(
+        "{error:?} {claims:?} {:?} {refused:?} {error:#?}",
+        error.why
+    );
+    assert!(!shown.contains(MARK), "{shown}");
+    assert!(shown.contains("9 bytes"), "{shown}");
+    let mut deep = Limits::DEFAULT;
+    deep.xmp_depth = 2;
+    let error = read(packet.as_bytes(), None, &deep, &mut ()).unwrap_err();
+    assert_eq!(error.why, XmpWhy::TooDeep);
+    let shown = format!("{error:?}");
+    assert!(
+        !shown.contains(MARK) && shown.contains("TooDeep"),
+        "{shown}"
+    );
+}
