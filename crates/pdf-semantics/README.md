@@ -1,6 +1,6 @@
 # pdf-semantics
 
-Read PDF's dates, name and number trees, page tree and XMP claims (ISO 32000-2, 7.7.3, 7.9 and 14.3.2), and write each of them.
+Read PDF's dates, name and number trees, page tree and XMP claims (ISO 32000-2, 7.7.3, 7.9 and 14.3.2), and write each of them. Read a file's document information dictionary (14.3.3).
 
 It's made for what reads a file's common structures to show them, check them or edit them, and for what writes them. It reads no file itself. A walk reads a file's objects through the caller's resolver, pdf-objects' `Resolve`. pdf-structure's reading and document are resolvers, and so is a closure over a map. It's built on [pdf-objects](https://crates.io/crates/pdf-objects) and re-exports it whole, so `pdf_semantics::pdf_objects` names its types at the version this crate is built with. pdf-tokenizer's `Rules` is `pdf_semantics::pdf_objects::pdf_tokenizer::Rules`.
 
@@ -13,6 +13,7 @@ It's made for what reads a file's common structures to show them, check them or 
 - **Walk name and number trees.** `tree::names` and `tree::numbers` give a tree's entries a key and a value at a time, in the order they're written (7.9.6, 7.9.7). A walk reads nothing it isn't asked for, and each node once, so a loop ends. `whole` says whether anything was left unread. `tree::write_names` and `tree::write_numbers` write a tree flat, and refuse a key given twice (`tree::WriteError`).
 - **Read what a file claims to conform to.** `xmp::read` reads an XMP packet's claims of PDF/A, PDF/UA and PDF/VT (14.3.2). A claim is an attribute or an element, found by its namespace, so a prefix bound elsewhere or a comment claims nothing. The first value of each counts. `Claims::conformance` reads PDF/A's and PDF/UA's as `PdfA` and `PdfUa`. `xmp::metadata_stream` says which stream holds a file's packet, for a caller that decodes it. `xmp::read_from` reads a file's packet through what gives its objects and its streams' data, pdf-objects' `Streams`.
 - **Write a packet of claims.** `xmp::write` writes an XMP packet that `xmp::read` reads back as the same claims. It refuses a value that wouldn't read back so (`xmp::WriteError`).
+- **Read what a file says of itself.** `info::read` reads a document information dictionary (14.3.3) as `info::Info`. Its title, author and the like are text, decoded by ISO's rules or PDFium's. Its dates are `Date`s, and one that doesn't read is kept as its text (`info::Dated`) and told. An entry of another type is told and read as none.
 - **See where a file departs from the standard.** Each departure is a `Fault`, told with its place to pdf-objects' `fault::Sink`. One sink can take pdf-color's and pdf-fonts' faults too. With `()` as the sink, no fault is looked for. What's read is the same through any sink.
 - **Read hostile files.** `Limits` caps a tree's depth and nodes, a page tree's levels and pages, and a packet's bytes, levels and namespaces. Past a cap, a tree's walk tells it and leaves the rest unread, and a page tree's walk or a packet's read stops with an error. An object past the reader's own cap or behind a password stops a walk with pdf-objects' `Unreadable`, so a failed read never looks like an empty tree. A damaged one is a `Fault`, and the walk goes on past it. No DOCTYPE is read and no entity expanded. It never panics on input.
 
@@ -88,7 +89,7 @@ The page walk by PDFium's rules follows PDFium's behaviour as of chromium/8125, 
 
 ## Exhaustive on purpose, or not
 
-`pages::Inheritable` and `date::Offset` are exhaustive, as their lists are closed and a match on every value is checked. `Inheritable::ALL` lists the attributes, and `Inheritable::key` gives each one's key. Every other enum and every struct with public fields but `pages::Rect` is `#[non_exhaustive]`, so each can grow in a minor release. `Fault`'s variants aren't, so a fault can be built and compared.
+`pages::Inheritable`, `date::Offset`, `info::Dated` and `info::Trapped` are exhaustive, as their lists are closed and a match on every value is checked. `Inheritable::ALL` lists the attributes, and `Inheritable::key` gives each one's key. Every other enum and every struct with public fields but `pages::Rect` is `#[non_exhaustive]`, so each can grow in a minor release. `Fault`'s variants aren't, so a fault can be built and compared.
 
 ## What isn't here
 
@@ -97,6 +98,7 @@ The page walk by PDFium's rules follows PDFium's behaviour as of chromium/8125, 
 - **A lookup by `/Limits`.** A walk's `find` serves, reading what comes before the key.
 - **XMP not in UTF-8.** 14.3.2 has a packet in UTF-8, so one in UTF-16 or UTF-32 is told (`Fault::XmpNotUtf8`) and not read. With `()` as the sink, it reads as a packet that claims nothing, so a caller that must tell the two apart passes a sink.
 - **Holding a file to its claims.** A claim is the file's own word, and XMP's other properties aren't read. A packet written holds the claims alone. What a PDF/A part wants beside them, as a schema for a namespace or the document information dictionary mirrored, is the caller's.
+- **A document information dictionary written.** `info::read` reads one. PDF 2.0 deprecates all of it but its dates, and writing one is the caller's. Entries other than 14.3.3's own are left in the dictionary.
 - **A name or number tree written in nodes.** `tree::write_names` and `write_numbers` write a tree flat. A tree in nodes, numbered by the caller as `pages::write` numbers its own, isn't written.
 
 ## Stability

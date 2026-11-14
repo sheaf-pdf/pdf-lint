@@ -1303,5 +1303,72 @@ case("splice-a85-one-list-made", A85_LISTS % (b"", b"/Tool_Gen (~%)"))
 case("splice-a85-two-lists-made", A85_LISTS % (b"", b""))
 
 
+# A page's /Contents (the `contents` kind): its value as written, and the
+# objects from 4 on, each written between its `n 0 obj` and `endobj`. A
+# path begun in one stream (BEGUN) and stroked in another (STROKED) is drawn
+# only where both are joined, in that order; what's drawn says which streams
+# PDFium joined.
+def contents(name, value, *objects):
+    CASES.append((name, "contents", {
+        "contents": value,
+        "objects": b"".join(o + b"\nendobj\n" for o in objects),
+    }))
+
+
+def stream(data):
+    return b"<< /Length %d >>\nstream\n" % len(data) + data + b"\nendstream"
+
+
+BEGUN = stream(b"0 0 m 9 9 l")
+STROKED = stream(b"S")
+WHOLE = stream(b"5 5 m 7 7 l S")
+OTHER = stream(b"1 1 m 3 3 l S")
+
+# A stream, and an array of them, in order, one again.
+contents("contents-stream", b"4 0 R", WHOLE)
+contents("contents-array", b"[4 0 R 5 0 R]", BEGUN, STROKED)
+contents("contents-array-one", b"[4 0 R]", WHOLE)
+contents("contents-array-order", b"[5 0 R 4 0 R]", WHOLE, OTHER)
+contents("contents-array-again", b"[4 0 R 4 0 R]", WHOLE)
+# An element that isn't a stream, between two that are: no stream of its own.
+contents("contents-element-dict", b"[4 0 R 6 0 R 5 0 R]", BEGUN, STROKED, b"<< /A 1 >>")
+contents("contents-element-nothing", b"[4 0 R 9 0 R 5 0 R]", BEGUN, STROKED)
+contents("contents-element-null", b"[4 0 R null 5 0 R]", BEGUN, STROKED)
+contents("contents-element-number", b"[4 0 R 7 5 0 R]", BEGUN, STROKED)
+contents("contents-element-in-place", b"[4 0 R << /Length 0 >> 5 0 R]", BEGUN, STROKED)
+contents("contents-element-null-object", b"[4 0 R 6 0 R 5 0 R]", BEGUN, STROKED, b"null")
+# An array in the array, its stream not joined.
+contents("contents-nested-array", b"[4 0 R [6 0 R] 5 0 R]", BEGUN, STROKED, WHOLE)
+contents("contents-nested-array-alone", b"[[4 0 R 5 0 R]]", BEGUN, STROKED)
+contents("contents-element-array-by-reference", b"[4 0 R 6 0 R 5 0 R]", BEGUN, STROKED, b"[7 0 R]", WHOLE)
+# The array by reference.
+contents("contents-array-by-reference", b"6 0 R", BEGUN, STROKED, b"[4 0 R 5 0 R]")
+# Nothing to join: no content.
+contents("contents-empty-array", b"[]", WHOLE)
+contents("contents-empty-array-by-reference", b"5 0 R", WHOLE, b"[]")
+contents("contents-dict", b"5 0 R", WHOLE, b"<< /A 1 >>")
+contents("contents-nothing", b"9 0 R", WHOLE)
+contents("contents-null", b"null", WHOLE)
+contents("contents-number", b"4", WHOLE)
+# A reference to a reference: to a stream, to an array, and as an element.
+contents("contents-chain", b"5 0 R", WHOLE, b"4 0 R")
+contents("contents-chain-array", b"6 0 R", BEGUN, STROKED, b"7 0 R", b"[4 0 R 5 0 R]")
+contents("contents-element-chain", b"[6 0 R 5 0 R]", BEGUN, STROKED, b"4 0 R")
+
+
+def filtered(name, data):
+    return b"<< /Length %d /Filter /%s >>\nstream\n" % (len(data), name) + data + b"\nendstream"
+
+
+# A stream whose data doesn't decode before one that does, and alone: through
+# a filter no reader takes, through Flate over data that isn't Flate's, and
+# through an image's filter. PDFium reads its data as written; the crate
+# joins it as a stream of no data (differ.tsv).
+for kind, filter_name in [("bogus", b"Bogus"), ("flate", b"FlateDecode"), ("dct", b"DCTDecode")]:
+    undecoded = filtered(filter_name, b"1 1 m 3 3 l S")
+    contents("contents-undecoded-" + kind, b"[4 0 R 5 0 R]", undecoded, WHOLE)
+    contents("contents-undecoded-" + kind + "-alone", b"4 0 R", undecoded)
+
+
 def cases():
     return CASES

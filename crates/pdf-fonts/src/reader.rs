@@ -186,6 +186,24 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
         seen.as_name().or_else(|| seen.as_bytes())
     }
 
+    /// The bytes PDFium's `GetByteStringAt` reads of `array`'s element `i`: a name's
+    /// or a string's, `true` or `false`, a number as PDFium writes it, each through a
+    /// reference once and no further; none of anything else, or past its end.
+    pub(crate) fn byte_string_at(&self, array: &'o [Object], i: usize) -> Vec<u8> {
+        let Some(seen) = array.get(i).and_then(|value| self.seen(value)) else {
+            return Vec::new();
+        };
+        match seen.value() {
+            Value::Bool(true) => b"true".to_vec(),
+            Value::Bool(false) => b"false".to_vec(),
+            Value::Integer(_) => integer_of(seen).to_string().into_bytes(),
+            Value::Real(_) => real_text(float_of(seen)).into_bytes(),
+            _ => (seen.as_name().or_else(|| seen.as_bytes()))
+                .unwrap_or_default()
+                .to_vec(),
+        }
+    }
+
     /// The dictionary `value` is, as PDFium's `GetDict` of a value's direct object: a
     /// stream's among them, its reference followed, and one more where that's to a
     /// reference.
@@ -345,5 +363,25 @@ pub(crate) fn float_of(object: &Object) -> f32 {
         },
         Value::Real(real) => *real as f32,
         _ => 0.0,
+    }
+}
+
+/// A 32-bit float as PDFium writes one (`WriteFloat`): the shortest decimal that
+/// reads back to it, with no exponent and no 0 before its point (`.5`); `0` for
+/// either zero and for no number, and an infinity as the largest float of its sign.
+fn real_text(value: f32) -> String {
+    if value.is_nan() || value == 0.0 {
+        return "0".into();
+    }
+    let value = match value.is_infinite() {
+        true => f32::MAX.copysign(value),
+        false => value,
+    };
+    // Rust's `Display` writes the same shortest digits, with no exponent either.
+    let text = value.abs().to_string();
+    let digits = text.strip_prefix('0').unwrap_or(&text);
+    match value < 0.0 {
+        true => format!("-{digits}"),
+        false => digits.to_string(),
     }
 }

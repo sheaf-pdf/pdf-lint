@@ -59,6 +59,84 @@ impl Encoding {
             _ => glyph_text(self.glyph(code)?, self == Encoding::ZapfDingbats),
         }
     }
+
+    /// The code that draws `c`, for text written in a font of this encoding:
+    /// the code whose text ([`Encoding::text`]) is `c` alone, so a code given
+    /// reads back as `c`. Where two codes' text is `c`, the lower; in
+    /// WinAnsiEncoding, among the codes Windows-1252 has a character at, so
+    /// the bullet is 0x95, not a code above the space that it leaves empty and
+    /// that draws the bullet too (ISO 32000-2, D.2). None where no code's text
+    /// is `c`: a character the encoding hasn't, and one it has only as part of
+    /// another, as a combining accent is, which a caller composes with its
+    /// letter first (`e` and U+0301 as `é`, which WinAnsiEncoding has). In
+    /// Symbol's encoding, the Greek capital delta and omega and the small mu
+    /// draw the glyphs whose names the Adobe Glyph List reads as the signs
+    /// ∆ (U+2206), Ω (U+2126) and µ (U+00B5), as PDFium reads their text, so
+    /// those signs are their characters here.
+    ///
+    /// ```
+    /// use pdf_fonts::Encoding;
+    ///
+    /// assert_eq!(Encoding::WinAnsi.code('é'), Some(0xE9));
+    /// assert_eq!(Encoding::WinAnsi.code('•'), Some(0x95));
+    /// assert_eq!(Encoding::WinAnsi.code('α'), None);
+    /// assert_eq!(Encoding::Symbol.code('α'), Some(b'a'));
+    /// assert_eq!(Encoding::Symbol.code('\u{2206}'), Some(b'D'));
+    /// assert_eq!(Encoding::ZapfDingbats.code('✔'), Some(0x34));
+    /// ```
+    #[must_use]
+    pub fn code(self, c: char) -> Option<u8> {
+        let codes = codes();
+        let table = match self {
+            Encoding::Standard => &codes.standard,
+            Encoding::WinAnsi => &codes.win_ansi,
+            Encoding::MacRoman => &codes.mac_roman,
+            Encoding::Symbol => &codes.symbol,
+            Encoding::ZapfDingbats => &codes.zapf_dingbats,
+        };
+        table.get(&c).copied()
+    }
+}
+
+/// Each encoding's codes by the character each draws ([`Encoding::code`]).
+struct Codes {
+    standard: HashMap<char, u8>,
+    win_ansi: HashMap<char, u8>,
+    mac_roman: HashMap<char, u8>,
+    symbol: HashMap<char, u8>,
+    zapf_dingbats: HashMap<char, u8>,
+}
+
+/// The encodings' codes by character, made once from their text.
+fn codes() -> &'static Codes {
+    static CODES: OnceLock<Codes> = OnceLock::new();
+    CODES.get_or_init(|| {
+        let of = |encoding: Encoding| {
+            let mut codes = HashMap::new();
+            // From the top, so where two codes draw one character the lower
+            // stays.
+            for code in (0..=255u8).rev() {
+                if encoding == Encoding::WinAnsi && cp1252(code).is_none() {
+                    continue;
+                }
+                let Some(text) = encoding.text(code) else {
+                    continue;
+                };
+                let mut chars = text.chars();
+                if let (Some(c), None) = (chars.next(), chars.next()) {
+                    codes.insert(c, code);
+                }
+            }
+            codes
+        };
+        Codes {
+            standard: of(Encoding::Standard),
+            win_ansi: of(Encoding::WinAnsi),
+            mac_roman: of(Encoding::MacRoman),
+            symbol: of(Encoding::Symbol),
+            zapf_dingbats: of(Encoding::ZapfDingbats),
+        }
+    })
 }
 
 /// Windows-1252's character for `code`, where WinAnsiEncoding draws one:

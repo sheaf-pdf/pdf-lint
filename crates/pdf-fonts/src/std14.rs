@@ -5,6 +5,8 @@
 
 use std::sync::OnceLock;
 
+use pdf_objects::{Dict, dict};
+
 use crate::afm::Afm;
 use crate::encoding::Encoding;
 use crate::font::{FontMetrics, Rect};
@@ -186,6 +188,88 @@ impl Std14 {
         }
     }
 
+    /// The encoding text is written in it in ([`Std14::dict`], [`Std14::codes`]):
+    /// WinAnsiEncoding for the twelve Latin ones, which has their glyphs for
+    /// Windows-1252's characters, and Symbol's and ZapfDingbats' their own.
+    pub(crate) const fn written_in(self) -> Encoding {
+        match self {
+            Std14::Symbol => Encoding::Symbol,
+            Std14::ZapfDingbats => Encoding::ZapfDingbats,
+            _ => Encoding::WinAnsi,
+        }
+    }
+
+    /// Its font dictionary, for a file that draws text in it without embedding
+    /// it (ISO 32000-2, 9.6.2.2): `/Type /Font`, `/Subtype /Type1`, its
+    /// `/BaseFont`, and for the twelve Latin ones `/Encoding /WinAnsiEncoding`;
+    /// Symbol and ZapfDingbats in their own encodings, which a font of their
+    /// name is read in where it names none. It has no `/FirstChar`,
+    /// `/LastChar`, `/Widths` or `/FontDescriptor`, which a file of PDF 1.0 to
+    /// 1.7 may leave out of a standard 14 font's dictionary, its reader having
+    /// the font's metrics, and which PDF 2.0 asks for (9.6.2.1). Text in it is
+    /// written in its codes by [`Std14::codes`], and reads back as it was
+    /// given ([`Font::text`](crate::Font::text)).
+    ///
+    /// ```
+    /// use pdf_fonts::pdf_objects::dict;
+    /// use pdf_fonts::Std14;
+    ///
+    /// let helvetica = dict! {
+    ///     "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    ///     "Encoding" => "WinAnsiEncoding",
+    /// };
+    /// assert_eq!(Std14::Helvetica.dict(), helvetica);
+    /// let symbol = dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Symbol" };
+    /// assert_eq!(Std14::Symbol.dict(), symbol);
+    /// ```
+    #[must_use]
+    pub fn dict(self) -> Dict {
+        let mut dict = dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => self.name() };
+        if self.written_in() == Encoding::WinAnsi {
+            dict.push("Encoding", "WinAnsiEncoding");
+        }
+        dict
+    }
+
+    /// `text` in its codes, to show in a font of its dictionary
+    /// ([`Std14::dict`]): each character the code that draws it in the
+    /// encoding that names, WinAnsiEncoding for the twelve Latin ones and their
+    /// own for Symbol and ZapfDingbats ([`Encoding::code`]), one byte each. So
+    /// the codes read back as `text` in that font
+    /// ([`Font::text`](crate::Font::text)), as PDFium's font reads them.
+    /// PDFium's text page writes two of WinAnsiEncoding's otherwise: a
+    /// no-break space (0xA0) as a space, and a soft hyphen (0xAD) as a hyphen.
+    ///
+    /// ```
+    /// use pdf_fonts::{Std14, Unencodable};
+    ///
+    /// assert_eq!(Std14::Helvetica.codes("Größe €5"), Ok(b"Gr\xF6\xDFe \x805".to_vec()));
+    /// assert_eq!(Std14::Symbol.codes("αβ"), Ok(b"ab".to_vec()));
+    ///
+    /// // A character the encoding hasn't is refused, never written as another.
+    /// let refused = Std14::Helvetica.codes("a中b").unwrap_err();
+    /// assert_eq!((refused.at, refused.character), (1, '中'));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Unencodable`] for the first character no code draws, with where it is:
+    /// nothing is written in its place, as a `?` or another character would
+    /// read as text the caller didn't give.
+    pub fn codes(self, text: &str) -> Result<Vec<u8>, Unencodable> {
+        let encoding = self.written_in();
+        let mut codes = Vec::with_capacity(text.len());
+        for (at, character) in text.char_indices() {
+            let code = encoding.code(character).ok_or(Unencodable {
+                at,
+                character,
+                font: self,
+            })?;
+            codes.push(code);
+        }
+        Ok(codes)
+    }
+
     /// Its AFM, as Adobe wrote it but for what its second line says is removed,
     /// with Adobe's notice ([`Std14::NOTICE`]) on its third.
     #[must_use]
@@ -217,6 +301,25 @@ impl Std14 {
         static AFMS: [OnceLock<Afm>; 14] = [const { OnceLock::new() }; 14];
         AFMS[self as usize].get_or_init(|| Afm::parse(self.afm_text()))
     }
+}
+
+/// A character text written in a standard 14 font has that its encoding has no
+/// code for ([`Std14::codes`]). Nothing was written.
+/// Not exhaustive, so that it can come to say more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "U+{:04X} at byte {at} has no code in {}'s encoding",
+    u32::from(*character),
+    font.name()
+)]
+#[non_exhaustive]
+pub struct Unencodable {
+    /// Where the character is in the text, in bytes.
+    pub at: usize,
+    /// The character.
+    pub character: char,
+    /// The font.
+    pub font: Std14,
 }
 
 /// The glyphs Adobe's metrics for the Helvetica and Times fonts added in

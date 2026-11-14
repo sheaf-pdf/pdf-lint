@@ -737,3 +737,33 @@ splice-ahx-reach-taken	image matrix 1 0 0 1 0 0 raw 41%20EI%20%200%200%209%209%2
 splice-a85-two-lists	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9 0 l 9 9 l 0 9 l 0 0 h
 splice-a85-one-list-made	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9 0 l 9 9 l 0 9 l 0 0 h
 splice-a85-two-lists-made	image matrix 1 0 0 1 0 0 raw 9jqo^%20EI%20/A%20<<>>%20BDC%20EMC%20/C%20<<>>%20BDC%20EMC%200%200%209%209%20re%20f%20~>
+contents-stream	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-array	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-array-one	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-array-order	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-array-again	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-element-dict	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-element-nothing	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-element-null	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-element-number	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-element-in-place	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-element-null-object	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-nested-array	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-nested-array-alone	none
+contents-element-array-by-reference	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-array-by-reference	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+contents-empty-array	none
+contents-empty-array-by-reference	none
+contents-dict	none
+contents-nothing	none
+contents-null	none
+contents-number	none
+contents-chain	none
+contents-chain-array	none
+contents-element-chain	none
+contents-undecoded-bogus	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-undecoded-bogus-alone	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3
+contents-undecoded-flate	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-undecoded-flate-alone	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3
+contents-undecoded-dct	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+contents-undecoded-dct-alone	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 3 3

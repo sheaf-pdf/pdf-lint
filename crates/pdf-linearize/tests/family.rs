@@ -6,13 +6,13 @@
 
 use std::sync::atomic::AtomicBool;
 
-use pdf_linearize::check::Attribute;
+use pdf_linearize::check::{self, Attribute};
 use pdf_linearize::family::{self, Error, FirstPage, Linearized, Options, PageTree};
 use pdf_linearize::{Limits, hint, plan};
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::version::Version;
-use pdf_semantics::pages::{Inheritable, Origin, pages};
+use pdf_semantics::pages::{self, Inheritable, Origin, pages};
 use pdf_structure::read::{self, Reading};
 use pdf_structure::{Document, Source as _, XrefKind, write};
 
@@ -1181,5 +1181,87 @@ fn an_object_stream_too_large_for_a_reader_is_written_as_its_members() {
             pdf_structure::Origin::File,
             "it's on its own"
         );
+    }
+}
+
+/// The page tree is walked under the caller's depth, `Limits::page_depth`: one
+/// past it isn't laid out, and in a linearized file its pages aren't judged.
+#[test]
+fn a_page_tree_past_the_callers_depth_is_refused_and_not_judged() {
+    // Pages 3 and 4 under a node of their own, 9, under the root.
+    let mut objects = two_pages("");
+    objects[1] =
+        "<< /Type /Pages /Kids [9 0 R] /Count 2 /MediaBox [0 0 100 200] /Resources 8 0 R >>".into();
+    objects[2] = "<< /Type /Page /Parent 9 0 R /Contents 5 0 R >>".into();
+    objects[3] = "<< /Type /Page /Parent 9 0 R /Contents 6 0 R >>".into();
+    objects.push("<< /Type /Pages /Parent 2 0 R /Kids [3 0 R 4 0 R] /Count 2 >>".into());
+    let bytes = built(&objects);
+    let mut options = table();
+    let out = written(&bytes, &options);
+    options.limits.page_depth = 1;
+    let refused = linearized(&bytes, &options).unwrap_err();
+    assert!(
+        matches!(refused, Error::Pages(pages::Error::TooDeep)),
+        "{refused:?}"
+    );
+    assert_eq!(refused.to_string(), "the page tree is too deep");
+
+    // Checked under the default depth, and under one it's past.
+    let reading = Reading::open(&out[..], &read::Options::DEFAULT).unwrap();
+    let mut findings = Vec::new();
+    let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
+    assert!(verdict.holds && verdict.judged_whole, "{findings:?}");
+    let mut limits = Limits::DEFAULT;
+    limits.page_depth = 1;
+    let facts = family::facts(&reading, &limits).unwrap();
+    assert_eq!(facts.unread.pages, Some(check::Unread::Capped));
+    assert!(facts.pages.is_empty());
+    let mut findings = Vec::new();
+    let verdict = family::check(&reading, &limits, &mut findings).unwrap();
+    assert!(verdict.linearized && !verdict.judged_whole, "{verdict:?}");
+    let why = check::Unread::Capped;
+    assert!(
+        findings.contains(&check::Finding::PagesUnread { why }),
+        "{findings:?}"
+    );
+    limits.page_depth = 2;
+    assert_eq!(
+        family::facts(&reading, &limits).unwrap(),
+        family::facts(&reading, &Limits::DEFAULT).unwrap()
+    );
+}
+
+/// The name dictionary's `/Dests` is read under the caller's caps on a name
+/// tree, `Limits::tree_depth` and `tree_nodes`: a destination past them opens
+/// no page, so the first page is the first.
+#[test]
+fn a_named_destination_past_the_callers_caps_opens_no_page() {
+    // A /Dests tree of three nodes, its destination two levels below its root.
+    let mut objects = two_pages("/OpenAction (there) /Names << /Dests 9 0 R >>");
+    objects.push("<< /Kids [10 0 R] >>".into());
+    objects.push("<< /Limits [(there) (there)] /Kids [11 0 R] >>".into());
+    objects.push("<< /Limits [(there) (there)] /Names [(there) [4 0 R /Fit]] >>".into());
+    let bytes = built(&objects);
+    for (depth, nodes, second) in [
+        (32, 100_000, true),
+        (2, 3, true),
+        (1, 100_000, false),
+        (32, 2, false),
+    ] {
+        let mut options = table();
+        options.limits.tree_depth = depth;
+        options.limits.tree_nodes = nodes;
+        let (out, done) = linearized(&bytes, &options).unwrap();
+        let e = done.layout.first_page_end();
+        match second {
+            true => {
+                assert_eq!(p_of(&out).as_deref(), Some("1"), "{depth} {nodes}");
+                assert!(at(&out, "/Mark (second content)") < e);
+            }
+            false => {
+                assert_eq!(p_of(&out), None, "{depth} {nodes}");
+                assert!(at(&out, "/Mark (first content)") < e);
+            }
+        }
     }
 }

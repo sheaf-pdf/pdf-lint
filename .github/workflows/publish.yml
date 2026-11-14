@@ -5,18 +5,18 @@ name: Publish
 # pdf-filters-v0.1.0-alpha.1, pdf-crypt-v0.1.0-alpha.1,
 # pdf-color-v0.1.0-alpha.1, pdf-structure-v0.1.0-alpha.1,
 # pdf-content-streams-v0.1.0-alpha.1, pdf-semantics-v0.1.0-alpha.1,
-# pdf-fonts-v0.1.0-alpha.1, pdf-linearize-v0.1.0-alpha.1), by trusted
-# publishing: the run's OpenID Connect token is exchanged for a crates.io
-# token that lives for the job and is revoked when it ends, so no secret is
-# kept here. The crates.io side names this repository, this file,
-# publish.yml, and the `release` environment.
+# pdf-fonts-v0.1.0-alpha.1, pdf-linearize-v0.1.0-alpha.1,
+# pdfs-v0.1.0-alpha.1), by trusted publishing: the run's OpenID Connect token
+# is exchanged for a crates.io token that lives for the job and is revoked
+# when it ends, so no secret is kept here. The crates.io side names this
+# repository, this file, publish.yml, and the `release` environment.
 # Before it publishes, the tag is checked against the manifest's version and
 # the CHANGELOG's dated entry for it, and the package is checked as CI checks
 # it on every push.
 
 on:
   push:
-    tags: ["pdf-tokenizer-v*", "pdf-objects-v*", "pdf-filters-v*", "pdf-crypt-v*", "pdf-color-v*", "pdf-structure-v*", "pdf-content-streams-v*", "pdf-semantics-v*", "pdf-fonts-v*", "pdf-linearize-v*"]
+    tags: ["pdf-tokenizer-v*", "pdf-objects-v*", "pdf-filters-v*", "pdf-crypt-v*", "pdf-color-v*", "pdf-structure-v*", "pdf-content-streams-v*", "pdf-semantics-v*", "pdf-fonts-v*", "pdf-linearize-v*", "pdfs-v*"]
 
 permissions:
   contents: read
@@ -502,5 +502,54 @@ jobs:
       - name: Publish
         if: steps.there.outputs.published != 'true'
         run: cargo publish --locked -p pdf-linearize
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  pdfs:
+    name: Publish pdfs
+    if: startsWith(github.ref, 'refs/tags/pdfs-v')
+    runs-on: ubuntu-latest
+    # As pdf-objects' job: the environment pdf-tokenizer's job names, and a
+    # first version perhaps published by hand, which the look at crates.io
+    # says, and doesn't publish again.
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Check the tag is the crate's version, and the CHANGELOG dates it
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdfs/Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "pdfs-v$version" ]; then
+            echo "The tag is $GITHUB_REF_NAME, and pdfs' version $version" >&2
+            exit 1
+          fi
+          if ! grep -q "^## $version ([0-9]" crates/pdfs/CHANGELOG.md; then
+            echo "pdfs' CHANGELOG has no dated entry for $version" >&2
+            exit 1
+          fi
+      - name: Package, and check what the package holds
+        run: just pdfs-package
+      - name: Look for the version on crates.io
+        id: there
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdfs/Cargo.toml | head -n 1)
+          index=$(curl -fs https://index.crates.io/pd/fs/pdfs || true)
+          if grep -qF "\"vers\":\"$version\"" <<< "$index"; then
+            echo "::notice::pdfs $version is on crates.io already: nothing to publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Get a crates.io token for this run
+        if: steps.there.outputs.published != 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish
+        if: steps.there.outputs.published != 'true'
+        run: cargo publish --locked -p pdfs
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

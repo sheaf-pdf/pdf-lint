@@ -2,14 +2,18 @@
 //! the tokens, the operations, the faults and the operator table and its
 //! states make, the balance, marked content and names over them, the
 //! writer's, resources' equality, the splice's and the lists written again,
-//! and an image's color space counted alike in its dictionary and in the
-//! resources, on any input.
+//! an image's color space counted alike in its dictionary and in the
+//! resources, and a page's `/Contents` joined, on any input.
 //! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
-use pdf_objects::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value, dict};
+use pdf_objects::{
+    Data, Dict, Form, Object, ObjectId, Resolve, Span, Str, Stream, Streams, Unreadable, Value,
+    Why, dict,
+};
 use pdf_tokenizer::Kind;
 use pdf_tokenizer::decode::{self, NumberError};
 
@@ -22,9 +26,10 @@ use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked, tokenizer};
 use crate::{
     Balance, Blend, Color, Concat, ContentWriter, Error, ErrorKind, FillRule, GState, ImageStream,
     Join, Limits, LineCap, LineJoin, MarkedEvent, MarkedNest, NameSet, Operand, Operation,
-    Operations, Operator, Paint, Properties, Props, Res, ResBody, ResCx, ResId, ResKind, Reserved,
-    ResourceNeeds, Rewrite, SpanAcross, SpliceError, Spliced, State, TextMode, Tok, balance, kept,
-    marked, name, names_used, object, operations, splice, splice_each, tokens, without_keys,
+    Operations, Operator, Paint, Properties, Props, Pushed, Res, ResBody, ResCx, ResError, ResId,
+    ResKind, Reserved, ResourceNeeds, Rewrite, SpanAcross, SpliceError, Spliced, State, TextMode,
+    Tok, balance, kept, marked, name, names_used, object, operations, splice, splice_each, tokens,
+    without_keys,
 };
 
 /// A sink that keeps every fault it's told, in order, where it is.
@@ -96,7 +101,8 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// past their cap ([`spliced`]).
 /// An array in it counted alike in an image and in resources, and capped
 /// past its cap ([`spaced`]). Its marked content holds no more than its
-/// cap lets it ([`passes`]).
+/// cap lets it ([`passes`]). And its bytes as a page's `/Contents` and the
+/// objects it names, joined as PDFium reads them ([`page_contents`]).
 /// Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
@@ -179,6 +185,201 @@ pub fn content(data: &[u8]) {
     resources(data);
     spliced(data);
     spaced(data, limits);
+    let _ = page_contents(data);
+}
+
+/// A file's objects, some that don't read, and its streams' data, some that
+/// doesn't: what gives a page's `/Contents` ([`Join::push_contents`]).
+#[derive(Debug, Default)]
+pub(crate) struct File {
+    pub(crate) objects: BTreeMap<ObjectId, Result<Object, Why>>,
+    pub(crate) data: BTreeMap<ObjectId, Result<Vec<u8>, Why>>,
+}
+
+impl<'o> Resolve<'o> for &'o File {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        self.try_resolve(id).ok().flatten()
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        match self.objects.get(&id) {
+            None => Ok(None),
+            Some(Ok(object)) => Ok(Some(object)),
+            Some(Err(why)) => Err(Unreadable::new(id, *why, "it doesn't read")),
+        }
+    }
+}
+
+impl Streams for File {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        match self.data.get(&id) {
+            Some(Ok(data)) if data.len() > limit => {
+                Err(Unreadable::new(id, Why::Limit, "past the limit"))
+            }
+            Some(Ok(data)) => Ok(Cow::Borrowed(data)),
+            Some(Err(why)) => Err(Unreadable::new(id, *why, "its data doesn't read")),
+            None => Err(Unreadable::new(id, Why::Damaged, "no stream")),
+        }
+    }
+}
+
+/// What a page's `/Contents` come to: each stream joined, and each joined as
+/// no data as it doesn't decode for the file's own reason, with why; or the
+/// object or stream that doesn't read for the reader's own reason, or the cap.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Contents {
+    Joined(Vec<Vec<u8>>, Vec<(ObjectId, Why)>),
+    Unread(ObjectId, Why),
+    Capped,
+}
+
+/// `contents` joined from `file` under `cap`, as PDFium's reading of a page's
+/// `/Contents` says, written plainly: a reference followed once; a stream, or
+/// an array of elements each a stream or, if not, an empty one; anything
+/// else nothing. A stream's data that doesn't decode for the file's own
+/// reason, damaged or through a filter not taken, is an empty one, said. An
+/// object on the way that doesn't read for the reader's own reason, or a
+/// stream's data that doesn't read for it, stops it there, as does the cap,
+/// the space before a stream counted first.
+pub(crate) fn plainly(file: &File, contents: &Object, cap: usize) -> Contents {
+    let named = |value: &Object| match value.value() {
+        Value::Ref(id) => match file.objects.get(id) {
+            None | Some(Err(Why::Damaged)) => Ok(None),
+            Some(Err(why)) => Err(Contents::Unread(*id, *why)),
+            Some(Ok(object)) => Ok(Some((object.clone(), Some(*id)))),
+        },
+        _ => Ok(Some((value.clone(), None))),
+    };
+    let stream = |named: &Option<(Object, Option<ObjectId>)>| match named {
+        Some((object, Some(id))) if matches!(object.value(), Value::Stream(_)) => Some(*id),
+        _ => None,
+    };
+    let mut joined: Vec<Vec<u8>> = Vec::new();
+    let mut said = Vec::new();
+    let mut add = |id: Option<ObjectId>| {
+        let with_space = joined.iter().map(Vec::len).sum::<usize>() + joined.len();
+        let space = with_space.saturating_sub(usize::from(joined.is_empty()));
+        if space > cap {
+            return Err(Contents::Capped);
+        }
+        let data = match id.map(|id| (id, file.data.get(&id))) {
+            None => Vec::new(),
+            Some((_, Some(Ok(data)))) => data.clone(),
+            Some((id, Some(Err(why @ (Why::Damaged | Why::Filter))))) => {
+                said.push((id, *why));
+                Vec::new()
+            }
+            Some((id, Some(Err(why)))) => return Err(Contents::Unread(id, *why)),
+            Some((id, None)) => {
+                said.push((id, Why::Damaged));
+                Vec::new()
+            }
+        };
+        if space + data.len() > cap {
+            return Err(Contents::Capped);
+        }
+        joined.push(data);
+        Ok(())
+    };
+    let read = (|| {
+        let top = named(contents)?;
+        if let Some(id) = stream(&top) {
+            return add(Some(id));
+        }
+        if let Some((object, _)) = &top
+            && let Value::Array(elements) = object.value()
+        {
+            for element in elements {
+                let element = named(element)?;
+                add(stream(&element))?;
+            }
+        }
+        Ok(())
+    })();
+    match read {
+        Ok(()) => Contents::Joined(joined, said),
+        Err(stopped) => stopped,
+    }
+}
+
+/// `data` as a page's `/Contents` and the objects 1 to 6 it may name, as its
+/// bytes choose: each a stream whose data is the input's or doesn't read, an
+/// array of elements, a dictionary, a reference, null, a number, or an
+/// object that doesn't read, for the file's damage or the reader's own
+/// reason; 7 and 8 are none. Joined ([`Join::push_contents`]) under the
+/// default cap and under one of a few bytes, each stream its element's, it's
+/// what a plain reading of PDFium's says ([`plainly`]): the same streams, one
+/// whose data doesn't decode for the file's own reason joined as none and
+/// said, or refused by the same object for the same reason, or past the cap.
+/// Gives what it came to under each cap.
+pub(crate) fn page_contents(data: &[u8]) -> [Contents; 2] {
+    fn reference(input: &mut Choices) -> Object {
+        Object::reference(1 + input.below(8) as u32)
+    }
+    fn elements(input: &mut Choices) -> Object {
+        let items = (0..input.below(5)).map(|_| match input.below(8) {
+            0 => Object::null(),
+            1 => Object::from(7),
+            2 => Object::from(vec![reference(input)]),
+            3 => Object::stream(dict! {}),
+            _ => reference(input),
+        });
+        Object::from(items.collect::<Vec<_>>())
+    }
+    let mut input = Choices(data);
+    let mut file = File::default();
+    for n in 1..=6 {
+        let id = ObjectId::new(n, 0);
+        let object = match input.below(10) {
+            0..=2 => {
+                let data = match input.below(5) {
+                    0 => Err([Why::Damaged, Why::Locked, Why::Capped, Why::Filter][input.below(4)]),
+                    _ => Ok(input.bytes(8).to_vec()),
+                };
+                file.data.insert(id, data);
+                Ok(Object::stream(dict! {}))
+            }
+            3 => Ok(elements(&mut input)),
+            4 => Ok(Object::from(dict! { "A" => 1 })),
+            5 => Ok(reference(&mut input)),
+            6 => Ok(Object::null()),
+            7 => Ok(Object::from(1)),
+            _ => Err([Why::Damaged, Why::Capped, Why::Locked, Why::Source][input.below(4)]),
+        };
+        file.objects.insert(id, object);
+    }
+    let contents = match input.below(4) {
+        0 => elements(&mut input),
+        1 => Object::null(),
+        _ => reference(&mut input),
+    };
+    [LIMITS.content, input.below(24)].map(|cap| {
+        let limits = Limits {
+            content: cap,
+            ..LIMITS
+        };
+        let mut join = Join::new(&limits);
+        let pushed = join.push_contents(&file, &contents);
+        let page = join.finish();
+        let read = match pushed {
+            Ok(()) => {
+                let streams = (0..page.stream_count()).map(|i| page.stream(i).to_vec());
+                let said = page.undecoded().iter().map(|e| (e.id, e.why));
+                Contents::Joined(streams.collect(), said.collect())
+            }
+            Err(Pushed::Decode(unreadable)) => Contents::Unread(unreadable.id, unreadable.why),
+            Err(Pushed::TooLarge(too_large)) => {
+                assert_eq!(too_large.cap, cap);
+                Contents::Capped
+            }
+        };
+        assert_eq!(
+            read,
+            plainly(&file, &contents, cap),
+            "{contents:?} {file:?}"
+        );
+        read
+    })
 }
 
 /// A resolver of nothing, for what holds no reference: content has none, so
@@ -1186,16 +1387,15 @@ fn bound_elsewhere(needs: &ResourceNeeds) -> Reserved {
     Reserved::read(|_| None, Some(&resources), &LIMITS)
 }
 
-/// Pairs of objects `data`'s bytes choose, the second the first written
-/// again as the input picks ([`rewritten`]): by the digest's rules alone,
-/// or with a part changed. Each pair is the same ([`same`]) exactly where
-/// their digests' bytes ([`feed`]) are, both ways, and the same where it
-/// was written again by the rules alone. As resources, [`Res::of`] refuses
-/// exactly what holds a stream whose data isn't in memory, naming the
-/// first object that does; two made by hand of each, their ids their
-/// objects', are equal exactly where the objects are the same, and so is
-/// one given the other's id. Gives how many pairs were the same, and how
-/// many apart.
+/// Pairs of objects `data`'s bytes choose, the second the first written again
+/// as the input picks ([`rewritten`]): by the digest's rules alone, or with a
+/// part changed. Each pair is the same ([`same`]) exactly where their digests'
+/// bytes ([`feed`]) are, both ways, and the same where it was written again by
+/// the rules alone. As resources, [`Res::of`] refuses, of three objects,
+/// exactly what holds a stream whose data isn't in memory, naming the first
+/// object that does; two made by hand of each, their ids their objects', are
+/// equal exactly where the objects are the same, and so is one given the
+/// other's id. Gives how many pairs were the same, and how many apart.
 pub fn resources(data: &[u8]) -> (usize, usize) {
     let mut input = Choices(data);
     let (mut alike, mut apart) = (0, 0);
@@ -1222,7 +1422,8 @@ pub fn resources(data: &[u8]) -> (usize, usize) {
                 assert_eq!(unheld, None, "{objects:?}");
                 assert_eq!(res.id, ResId::of(&objects));
             }
-            Err(e) => assert_eq!(Some(e.object), unheld, "{objects:?}"),
+            Err(ResError::Unheld(e)) => assert_eq!(Some(e.object), unheld, "{objects:?}"),
+            Err(e) => panic!("{e}: {objects:?}"),
         }
         let by_hand = |object: &Object, id: Option<ResId>| Res {
             id: id.unwrap_or_else(|| ResId::of(std::slice::from_ref(object))),
@@ -2935,6 +3136,44 @@ mod tests {
             alike > 10_000 && apart > 10_000,
             "{alike} the same, {apart} apart"
         );
+    }
+
+    /// Random bytes choose a page's `/Contents` of every kind the fuzz body
+    /// holds to its plain reading: joined, with an element that's no stream
+    /// among them, with a stream that doesn't decode joined as none for each
+    /// reason that's the file's, refused for each reason that's the
+    /// reader's, and past the cap.
+    #[test]
+    fn contents_chosen_come_to_each_answer() {
+        let mut random = Random(0x3c6e_f372_fe94_f82b);
+        let (mut joined, mut empty, mut capped) = (0, 0, 0);
+        let mut unread = std::collections::BTreeSet::new();
+        let mut said = std::collections::BTreeSet::new();
+        for _ in 0..20_000 {
+            let data: Vec<u8> = (0..random.below(64)).map(|_| random.next() as u8).collect();
+            let [default, small] = page_contents(&data);
+            match default {
+                Contents::Joined(streams, undecoded) => {
+                    joined += 1;
+                    empty += usize::from(streams.iter().any(Vec::is_empty));
+                    said.extend(undecoded.iter().map(|(_, why)| format!("{why:?}")));
+                }
+                Contents::Unread(_, why) => {
+                    unread.insert(format!("{why:?}"));
+                }
+                Contents::Capped => panic!("nothing chosen is past the default cap"),
+            }
+            capped += usize::from(small == Contents::Capped);
+        }
+        assert!(
+            joined > 1000 && empty > 100,
+            "{joined} joined, {empty} with an empty one"
+        );
+        assert!(capped > 500, "{capped} past a small cap");
+        let whys = ["Capped", "Locked", "Source"];
+        assert_eq!(unread, whys.map(String::from).into(), "each reason");
+        let whys = ["Damaged", "Filter"];
+        assert_eq!(said, whys.map(String::from).into(), "each reason said");
     }
 
     /// The fuzz target's checks on the seeds, each mutated many times as a
