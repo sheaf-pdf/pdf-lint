@@ -110,7 +110,7 @@ pub enum Reading {
     #[default]
     Qpdf,
     /// PDFium's, as its LZW decoder and its predictors read data as of
-    /// chromium/8125 (its `FlateOrLZWDecode`), every fault said:
+    /// chromium/8152 (its `FlateOrLZWDecode`), every fault said:
     /// - an LZW code past the table's next entry that isn't the first
     ///   since a clear code or the data's start is read as that entry, the
     ///   last code's bytes and their first byte again ([`Fault::AsNext`]),

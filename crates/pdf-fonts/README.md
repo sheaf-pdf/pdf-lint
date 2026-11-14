@@ -1,6 +1,6 @@
 # pdf-fonts
 
-PDF font reader, page text extractor, Standard 14 font metrics, CMap interpreter, and glyph bounding-box reader (ISO 32000-2, §9), matching PDFium's behavior as of chromium/8125.
+PDF font reader, page text extractor, Standard 14 font metrics, CMap interpreter, and glyph bounding-box reader (ISO 32000-2, §9), matching PDFium's behavior as of chromium/8152.
 
 `pdf-fonts` reads fonts through any [pdf-objects](https://crates.io/crates/pdf-objects) `Resolve` and `Streams` provider (such as a `pdf-structure` `&Reading` or `WithStreams`) without performing file I/O or rasterizing glyphs. Both [pdf-objects](https://crates.io/crates/pdf-objects) and [pdf-content-streams](https://crates.io/crates/pdf-content-streams) are re-exported at the crate root.
 

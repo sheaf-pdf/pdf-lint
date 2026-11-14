@@ -285,6 +285,10 @@ impl<S: ByteSource> Placing for Reading<S> {
         Reading::record(self, id).map(|record| record.at)
     }
 
+    fn held(&self, stream: ObjectId) -> Option<&[u8]> {
+        Source::held(self, stream)
+    }
+
     fn decoded(&self, id: ObjectId) -> Option<Vec<u8>> {
         self.decoded_within(id, usize::MAX).ok()
     }

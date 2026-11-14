@@ -1031,8 +1031,9 @@ pub enum Rule {
     /// ([`Report::departures`]). Of a file linearized as first written and
     /// updated after ([`Rule::Updated`]), the same of the file as first
     /// written, its bytes up to `/L`, read as a file of their own, where a
-    /// place in a stream's data whose number a later revision lists has no
-    /// bytes, as the file's stream there is another; and where a later
+    /// place in a stream's data has bytes only where no later revision lists
+    /// its number and the file still decodes or holds it to the same bytes;
+    /// and where a later
     /// revision wrote the dictionary's number again, so that the object
     /// there is another, the first revision's, in no object
     /// ([`Finding::revision`] 1), held where every object is, as merged. Of

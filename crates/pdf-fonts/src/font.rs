@@ -10,7 +10,7 @@
 //! `/FontMatrix`.
 //!
 //! Each value of a dictionary is read by what PDFium's accessor for it does, as of
-//! chromium/8125, however far that is from ISO 32000-2. A whole number is `true` as
+//! chromium/8152, however far that is from ISO 32000-2. A whole number is `true` as
 //! 1, what's no number 0, a real cut from its 32-bit float, and past 32 bits 0, and
 //! it's held as PDFium holds it: a simple font's widths in 16 bits, a CID font's in
 //! 32 and its `/DW` and vertical metrics in 16. A reference is followed once, for a

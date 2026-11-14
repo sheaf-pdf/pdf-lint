@@ -7,7 +7,7 @@ PDF color space parser and component counter (ISO 32000-2, §8.6), built on [pdf
 ## Core Concepts
 
 - **PDFium-compatible component counting (`components`, `counted`, `Spaces`):**
-  - `components` and `counted` compute the number of color components for any `/ColorSpace` entry or inline-image color space array using PDFium's rules as of chromium/8125 (falling back to 3 components when PDFium fails to load a space, or `None` for dangling references).
+  - `components` and `counted` compute the number of color components for any `/ColorSpace` entry or inline-image color space array using PDFium's rules as of chromium/8152 (falling back to 3 components when PDFium fails to load a space, or `None` for dangling references).
   - `Spaces::read` locates a page or form XObject's `/ColorSpace` resource dictionary (following PDFium's reference-depth rules) and `Spaces::components` yields each named color space alongside its component count.
 - **Typed ISO 32000-2 inspection (`Space`, `Family`, `Colorant`):**
   - `Space::read` parses a color space into its typed `Family` (`DeviceGray`, `DeviceRGB`, `DeviceCMYK`, `CalGray`, `CalRGB`, `Lab`, `ICCBased`, `Indexed`, `Pattern`, `Separation`, `DeviceN`), exposing component counts (`Space::components`), base/alternate spaces, white points, lookup tables, tint transforms, and `Colorant` names (`Colorant::of`).

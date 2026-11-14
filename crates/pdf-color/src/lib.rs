@@ -8,7 +8,7 @@
 //!
 //! - **PDFium-compatible component counts ([`components`], [`counted`]):** Counts components for
 //!   any `/ColorSpace` entry or inline-image color space array using PDFium's rules as of
-//!   chromium/8125, sizing unfiltered inline images in content streams even on malformed inputs.
+//!   chromium/8152, sizing unfiltered inline images in content streams even on malformed inputs.
 //! - **Resource dictionary lookup ([`Spaces`], [`Named`]):** Resolves a page or form's
 //!   `/ColorSpace` resource dictionary as PDFium reaches it and pairs each entry with its
 //!   component count ([`Spaces::components`]).

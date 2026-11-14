@@ -12,7 +12,7 @@
 //!
 //! Under [`Reading::Pdfium`], a code past the table's next entry that
 //! isn't the first since a clear code is read as PDFium's decoder reads
-//! it, as of chromium/8125: as that entry, the last code's bytes and
+//! it, as of chromium/8152: as that entry, the last code's bytes and
 //! their first byte again ([`Fault::AsNext`]); the entry the code after
 //! it makes then holds that code, not its bytes, read through the table
 //! each time the entry is read, as the table has it then; and a code

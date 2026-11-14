@@ -1,5 +1,5 @@
 //! PDF content stream lexer, operator parser, page analyzer, writer, and byte-preserving splicer
-//! (ISO 32000-2, §7.8.2), matching PDFium's parsing rules as of chromium/8125.
+//! (ISO 32000-2, §7.8.2), matching PDFium's parsing rules as of chromium/8152.
 //!
 //! `pdf-content-streams` operates on decoded stream bytes and resource dictionaries (or any
 //! `Streams` / `Resolve` provider) without performing file I/O directly.

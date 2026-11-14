@@ -138,7 +138,7 @@ pub fn decode(bytes: &[u8]) -> Text {
 }
 
 /// `bytes`, a text string, decoded by `rules`: by ISO 32000-2's, as
-/// [`decode`] does; or by PDFium's, as of chromium/8125, each departure from
+/// [`decode`] does; or by PDFium's, as of chromium/8152, each departure from
 /// the spec said as `decode` says it, where it differs from `decode` as
 /// follows.
 ///
@@ -518,7 +518,7 @@ mod tests {
     }
 
     /// Each shape PDFium's UTF-8 reading was asked about, its answer at
-    /// chromium/8125 beside it.
+    /// chromium/8152 beside it.
     #[test]
     fn pdfium_s_rules_on_bad_utf_8() {
         for (bytes, text) in [

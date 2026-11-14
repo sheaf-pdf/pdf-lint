@@ -564,7 +564,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The parser, reading by `rules`: ISO 32000-2's lexical rules, the
-    /// default, or PDFium's, as of chromium/8125 ([`Rules::Pdfium`]). Any
+    /// default, or PDFium's, as of chromium/8152 ([`Rules::Pdfium`]). Any
     /// other rules are read as ISO 32000-2's.
     ///
     /// By PDFium's rules, its tokens are cut where PDFium cuts them (0x80

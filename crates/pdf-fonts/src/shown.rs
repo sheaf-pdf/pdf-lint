@@ -23,7 +23,7 @@ const GIVEN: ObjectId = ObjectId::new(0, 0);
 
 /// The strings `content` shows, in the order it shows them, each in the font it's
 /// shown in, decoded through it, and the forms it draws followed, as PDFium
-/// (chromium/8125) reads them for its text: what a page's text is, with no layout.
+/// (chromium/8152) reads them for its text: what a page's text is, with no layout.
 /// `content` is a page's content, its streams joined (pdf-content-streams'
 /// [`Concat`]), drawn with `resources`, its `/Resources` as written, and `res` what
 /// lexing it needs of them ([`ResCx::read`]). Each font is picked from `fonts`, read
@@ -362,7 +362,7 @@ pub enum Unread {
     /// decode for the file's own reason, damaged or through a filter the reader
     /// doesn't take ([`Why::Damaged`](pdf_objects::Why::Damaged),
     /// [`Why::Filter`](pdf_objects::Why::Filter)), and is read as one of no
-    /// data (pdf-content-streams' [`Concat::undecoded`]). PDFium, as of chromium/8125,
+    /// data (pdf-content-streams' [`Concat::undecoded`]). PDFium, as of chromium/8152,
     /// reads its data as written, so what it shows there isn't read here.
     Undecoded {
         /// The form it's of; none for the content given.

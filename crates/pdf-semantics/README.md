@@ -7,7 +7,7 @@ Read and write PDF document-level data structures—dates, page trees, name and 
 ## Core Concepts
 
 - **Page trees (`pages`):**
-  - `pages::pages` walks a document's `/Pages` tree in page order under either strict ISO 32000-2 rules or PDFium's rules as of chromium/8125 (`Rules::Iso` vs. `Rules::Pdfium`).
+  - `pages::pages` walks a document's `/Pages` tree in page order under either strict ISO 32000-2 rules or PDFium's rules as of chromium/8152 (`Rules::Iso` vs. `Rules::Pdfium`).
   - `Page` resolves inherited attributes (`media_box`, `crop_box`, `rotate`, `user_unit`, `attribute`) and reports their `Origin` (direct on the page, inherited from an ancestor, or default).
   - `pages::write` constructs balanced `/Pages` node hierarchies with configurable fanout (`pages::FANOUT`).
 - **Name & number trees (`tree`):** `tree::names` and `tree::numbers` lazily iterate `(key, value)` entries in tree order with cycle and depth protection; `tree::write_names` and `tree::write_numbers` serialize sorted entries into flat trees.

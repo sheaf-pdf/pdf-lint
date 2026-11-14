@@ -1,5 +1,5 @@
 //! A file read as PDFium reads it where its sections don't give it
-//! ([`Recovery::Pdfium`]), as `cpdf_parser.cpp` has it as of chromium/8125:
+//! ([`Recovery::Pdfium`]), as `cpdf_parser.cpp` has it as of chromium/8152:
 //! what sends a file whose sections read to a scan of its every byte, what
 //! that scan lists, and what of the sections it keeps. Read for what it does
 //! and written here in this crate's terms: the scan is this crate's
@@ -246,7 +246,7 @@ fn integer_of(o: &Object) -> i64 {
 
 /// Where a scan goes on past a stream whose `stream` keyword ends at
 /// `keyword`, its object's `n g obj` at `object`, as PDFium reads a stream
-/// as it scans (`FindStreamEndPos` as of chromium/8125): its data from the
+/// as it scans (`FindStreamEndPos` as of chromium/8152): its data from the
 /// line after `stream` as long as its `/Length` says, a direct number,
 /// where `endstream` follows that past an end of line, white-space and
 /// comments; else up to the first `endstream` or `endobj`, a word of its

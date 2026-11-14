@@ -184,7 +184,7 @@ pub enum Recovery {
     /// kept.
     #[default]
     Verified,
-    /// As PDFium reads a file, as of chromium/8125: its sections where
+    /// As PDFium reads a file, as of chromium/8152: its sections where
     /// they're said, none looked for near, a `/Prev` or `/XRefStm` of 0
     /// taken for none, and the file scanned for its objects where
     /// `startxref` gives no section that reads, a section along the `/Prev`

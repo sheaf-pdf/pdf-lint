@@ -7,7 +7,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 ### Added
 
 - `date::Date`: a date read (`Date::read`) and written (`Date::write`) as ISO 32000-2 (7.9.4) has it. Each field says whether it was written, and `Date::quirks` what the reading read past. `Date::new` and the `with_` methods build one.
-- `pages::pages`: every page of a page tree in order, by ISO's rules or PDFium's (chromium/8125), over any resolver. `pages::counted` gives PDFium's count, also where its rules find no page under the root.
+- `pages::pages`: every page of a page tree in order, by ISO's rules or PDFium's (chromium/8152), over any resolver. `pages::counted` gives PDFium's count, also where its rules find no page under the root.
 - `pages::Page`: a page's inherited attributes as written (`Page::attribute`), and its boxes, rotation and user unit as values (`media_box`, `crop_box`, `rotate`, `user_unit`), each saying where it came from (`Origin`). `Page::parents` walks its `/Parent` chain.
 - `pages::write`: a balanced page tree's nodes over a caller's pages, numbered by the caller, which `pages::pages` reads back by either rules.
 - `tree::names` and `tree::numbers`: a name or number tree's entries, a key and a value at a time, in the order they're written. `tree::write_names` and `tree::write_numbers` write one flat.

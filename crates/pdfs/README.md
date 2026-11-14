@@ -170,7 +170,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 
 ## Key Guarantees
 
-- **Viewer defaults, validator opt-in:** `Options::DEFAULT` uses forgiving PDFium-compatible parsing (as of chromium/8125) and `zlib-rs` with zero-overhead silent fault handling. Switching to strict validation takes four fields on a copy of `Options::DEFAULT`: `Recovery::Verified`, `Rules::Iso`, `Faults::Kept`, and `Backend::MinizOxide`.
+- **Viewer defaults, validator opt-in:** `Options::DEFAULT` uses forgiving PDFium-compatible parsing (as of chromium/8152) and `zlib-rs` with zero-overhead silent fault handling. Switching to strict validation takes four fields on a copy of `Options::DEFAULT`: `Recovery::Verified`, `Rules::Iso`, `Faults::Kept`, and `Backend::MinizOxide`.
 - **Unified resource caps (`Limits`):** One `Limits` struct bounds stream decompression, object nesting, tree depth, and per-call `font_budget`. Untrusted or hostile files return typed errors or partial-read markers (`Shown::unread`, `Verdict::judged_whole`) and never panic.
 - **Opt-in spec diagnostics:** Methods with `_with` suffixes (`pages_with`, `info_with`, `claims_with`, `linearized_with`) stream recoverable spec departures to any `fault::Sink`.
 - **Explicit lock & decode states:** Password-locked streams fail with `Why::Locked` (never returning raw ciphertext as text), and damaged/unsupported content streams are recorded explicitly (`Concat::undecoded`, `Unread::Undecoded`). Document permission flags (`Permissions`) are reported to the caller rather than enforced by `edit` or `save`.

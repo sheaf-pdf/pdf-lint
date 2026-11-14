@@ -8,7 +8,7 @@
 //! the same values: a `/MediaBox null` is one that's absent to ISO's, which
 //! inherit one, and one that's there to PDFium's, which take it for none:
 //!
-//! - **PDFium's** ([`Rules::Pdfium`]), as of chromium/8125, a development
+//! - **PDFium's** ([`Rules::Pdfium`]), as of chromium/8152, a development
 //!   snapshot of PDFium that the crate's tests hold them to, so that a page's
 //!   number is PDFium's number for it. Depth first through `/Kids`, a kid
 //!   with `/Kids` a node whatever its `/Type`; any other dictionary or stream
