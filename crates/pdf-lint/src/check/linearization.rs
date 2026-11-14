@@ -22,8 +22,9 @@
 //! their own
 //! ([`Reads::first_written`](super::reading::Reads::first_written)), found
 //! as a linearized file's is, of what's held, where a place in a stream's
-//! data whose number a later revision lists has no bytes; its verdict, that
-//! it's updated. What pdf-linearize says of the whole, that `/L` isn't its
+//! data has bytes only where no later revision lists its number and the file
+//! still decodes or holds it to the same bytes; its verdict, that it's
+//! updated. What pdf-linearize says of the whole, that `/L` isn't its
 //! length and an update follows, isn't found, as that's what `updated` says.
 //! One that isn't taken for linearized otherwise has what the check tells of
 //! it found, what's wrong with `/Linearized` or `/L` as a value, an `/L`
@@ -184,6 +185,9 @@ pub(super) trait Placing {
     /// Where object `id` was read from, its bytes.
     fn record(&self, id: ObjectId) -> Option<Span>;
 
+    /// Object stream `stream`'s decoded data, where it holds it.
+    fn held(&self, stream: ObjectId) -> Option<&[u8]>;
+
     /// Stream `id`'s data, decoded, where it decodes cleanly.
     fn decoded(&self, id: ObjectId) -> Option<Vec<u8>>;
 }
@@ -208,8 +212,15 @@ impl Placing for Checked<'_> {
         self.0.record(id).map(|record| record.at)
     }
 
+    fn held(&self, stream: ObjectId) -> Option<&[u8]> {
+        self.0.held(stream)
+    }
+
     fn decoded(&self, id: ObjectId) -> Option<Vec<u8>> {
-        self.0.decoded_within(id, usize::MAX)?.ok()
+        let data = self.0.decoded_within(id, usize::MAX)?.ok()?;
+        (self.0.held(id))
+            .is_none_or(|held| held == data.as_slice())
+            .then_some(data)
     }
 }
 
@@ -220,22 +231,31 @@ fn listed_in(later: &[Revision], n: u32) -> bool {
         .any(|r| (r.numbers.as_ref()).is_none_or(|numbers| numbers.binary_search(&n).is_ok()))
 }
 
+/// What follows the revision a linearization's facts are of, when it isn't
+/// the file's newest: the file checked, and the revisions after that one.
+type After<'a> = (&'a dyn Source, &'a [Revision]);
+
 /// Where each place pdf-linearize gives a finding is in the file, as a
 /// finding has its bytes ([`Places::at`]).
 struct Places<'a> {
     source: &'a dyn Placing,
-    /// The revisions after the one the facts are of: a place in a stream's
-    /// data whose number one of them lists has no bytes, as the file's
-    /// stream at that number is another.
-    later: &'a [Revision],
+    /// What follows the revision the facts are of, when `source` is the file
+    /// as first written: a place in a stream's data has bytes only where no
+    /// later revision lists its number and the file checked still decodes or
+    /// holds it to the same bytes.
+    after: Option<After<'a>>,
+    /// For each object stream asked about under `after`, whether its data
+    /// stands in the file checked.
+    streams: HashMap<ObjectId, bool>,
     /// The linearization dictionary, as the file the facts are of has it
     /// at its number.
     dict: Option<&'a Object>,
     /// The hint stream's number, where something's listed at `/H`.
     hint: Option<u32>,
     /// The hint stream and how many bytes its data decodes to, as the source
-    /// decodes it again: none where it doesn't decode cleanly. Read the
-    /// first time a place in it is asked for.
+    /// decodes it again: none where it doesn't decode cleanly, or where
+    /// `after` doesn't keep it so. Read the first time a place in it is
+    /// asked for.
     data: Option<Option<(ObjectId, usize)>>,
     /// Where the hint stream is and how long, as a hint table's positions
     /// are as if it weren't there from ([`Facts::hint_extent`]).
@@ -253,11 +273,11 @@ struct Places<'a> {
 
 impl<'a> Places<'a> {
     /// The places of what `facts`, of the file `source` reads, say, its
-    /// linearization dictionary the object at `dict`, `later` the
-    /// revisions after it.
+    /// linearization dictionary the object at `dict`, `after` what follows
+    /// that revision when it isn't the file's newest.
     fn new(
         source: &'a dyn Placing,
-        later: &'a [Revision],
+        after: Option<After<'a>>,
         facts: &Facts,
         dict: ObjectId,
     ) -> Places<'a> {
@@ -270,7 +290,8 @@ impl<'a> Places<'a> {
         }
         Places {
             source,
-            later,
+            after,
+            streams: HashMap::new(),
             dict: source.object(dict),
             hint: hint.map(|h| h.number),
             data: None,
@@ -310,15 +331,33 @@ impl<'a> Places<'a> {
     }
 
     /// The bytes `place` gives, as the module says: none where there are
-    /// none, they're past what was read, or they're in the data of a
-    /// stream whose number a later revision lists.
+    /// none, they're past what was read, or they're in a stream's data that
+    /// an update didn't keep as it was.
     fn at(&mut self, place: Option<Place>) -> Option<Span> {
-        let at = self.placed(place)?;
-        let later = |id: ObjectId| listed_in(self.later, id.number);
-        (!at.stream.is_some_and(later)).then_some(at)
+        match place {
+            Some(Place::HintByte(at)) => self.data_at(at),
+            Some(Place::HintBit(bit)) => self.data_at(bit / 8),
+            Some(Place::Table(table)) => {
+                let at = match table.key() {
+                    Some(key) => self.table(key)?,
+                    None => 0,
+                };
+                self.data_at(at)
+            }
+            Some(Place::Page(_)) => self.data_at(0),
+            Some(Place::SharedEntry(_)) => {
+                let at = self.table(b"S")?;
+                self.data_at(at)
+            }
+            place => {
+                let at = self.placed(place)?;
+                self.stood(at)
+            }
+        }
     }
 
-    /// The bytes `place` gives in the file the facts are of.
+    /// The bytes `place`, not in the hint stream's data, gives in the file
+    /// the facts are of.
     fn placed(&mut self, place: Option<Place>) -> Option<Span> {
         let len = self.source.size();
         let byte = |at: u64| {
@@ -335,20 +374,6 @@ impl<'a> Places<'a> {
                     (d.entries().iter()).find(|e| &e.key[..] == name)
                 });
                 entry.and_then(entry_at).or(dict)
-            }
-            Some(Place::HintByte(at)) => self.data_at(at),
-            Some(Place::HintBit(bit)) => self.data_at(bit / 8),
-            Some(Place::Table(table)) => {
-                let at = match table.key() {
-                    Some(key) => self.table(key)?,
-                    None => 0,
-                };
-                self.data_at(at)
-            }
-            Some(Place::Page(_)) => self.data_at(0),
-            Some(Place::SharedEntry(_)) => {
-                let at = self.table(b"S")?;
-                self.data_at(at)
             }
             Some(Place::HintKey(key)) => {
                 let id = self.id(self.hint?)?;
@@ -373,6 +398,26 @@ impl<'a> Places<'a> {
         }
     }
 
+    /// `at`, where it's in the file's own bytes, or in an object stream that,
+    /// after an update, no later revision lists and the file checked still
+    /// holds to the same bytes.
+    fn stood(&mut self, at: Span) -> Option<Span> {
+        let Some(stream) = at.stream else {
+            return Some(at);
+        };
+        let Some((checked, later)) = self.after else {
+            return Some(at);
+        };
+        let source = self.source;
+        let same = *self.streams.entry(stream).or_insert_with(|| {
+            !listed_in(later, stream.number)
+                && source
+                    .held(stream)
+                    .is_some_and(|first| checked.held(stream) == Some(first))
+        });
+        same.then_some(at)
+    }
+
     /// Where the hint stream's table of `key` starts in its data.
     fn table(&self, key: &[u8]) -> Option<u64> {
         (self.tables.iter())
@@ -380,17 +425,35 @@ impl<'a> Places<'a> {
             .map(|&(_, at)| at)
     }
 
-    /// The byte `at` of the hint stream's data, where it decodes cleanly to
-    /// that many bytes, as the reading decodes it for a finding's bytes.
+    /// The byte `at` of the hint stream's data, where [`Places::hint_data`]
+    /// keeps it.
     fn data_at(&mut self, at: u64) -> Option<Span> {
         if self.data.is_none() {
-            let id = self.hint.and_then(|n| self.id(n));
-            let source = self.source;
-            self.data = Some(id.and_then(|id| Some((id, source.decoded(id)?.len()))));
+            self.data = Some(self.hint_data());
         }
         let (id, len) = self.data.flatten()?;
         let at = usize::try_from(at).ok().filter(|&at| at < len)?;
         Some(Span::new(Some(id), at, at + 1))
+    }
+
+    /// The hint stream and how many bytes its data decodes to, where it
+    /// decodes cleanly, as the reading decodes it for a finding's bytes,
+    /// and, after an update, no later revision lists its number and the file
+    /// checked still decodes it to the same bytes.
+    fn hint_data(&mut self) -> Option<(ObjectId, usize)> {
+        let id = self.id(self.hint?)?;
+        if let Some((_, later)) = self.after
+            && listed_in(later, id.number)
+        {
+            return None;
+        }
+        let data = self.source.decoded(id)?;
+        if let Some((checked, _)) = self.after
+            && Checked(checked).decoded(id).as_ref() != Some(&data)
+        {
+            return None;
+        }
+        Some((id, data.len()))
     }
 }
 
@@ -470,7 +533,8 @@ impl<'a> Walk<'a> {
             self.updated(len, revisions);
             let held = match reads.first_written(len) {
                 Ok((facts, file)) => {
-                    let places = Places::new(file, &revisions[1..], &facts, id);
+                    let after = Some((self.source, &revisions[1..]));
+                    let places = Places::new(file, after, &facts, id);
                     let verdict = self.judged(&facts, places, id, whose);
                     verdict.linearized && verdict.holds
                 }
@@ -483,7 +547,7 @@ impl<'a> Walk<'a> {
             return;
         }
         let newest = Checked(self.source);
-        let places = Places::new(&newest, &[], &facts, id);
+        let places = Places::new(&newest, None, &facts, id);
         let verdict = self.judged(&facts, places, id, whose);
         self.report.linearized = Some(match (verdict.linearized, verdict.holds) {
             (false, _) => Linearized::NotTaken,
@@ -1781,5 +1845,177 @@ mod tests {
         let after = checked_with(&over, &asked);
         assert_eq!(generation(&after), record, "{after}");
         assert_eq!(after.linearized, Some(Linearized::Updated { held: true }));
+    }
+
+    /// A hint table's error as first written has no bytes after an update
+    /// that leaves the hint stream's own number alone while changing what its
+    /// decode gives: rewriting its indirect `/Filter` to one that fails, or
+    /// to none, so that the file checked decodes it to its compressed bytes
+    /// instead.
+    #[test]
+    fn a_hint_streams_data_changed_without_listing_it_leaves_its_errors_unplaced() {
+        let plain = updated_with(
+            &three_pages(),
+            &[
+                (
+                    ObjectId::new(2, 0),
+                    dict! {
+                        "Type" => "Pages",
+                        "Kids" => vec![r(3), r(4), r(5)],
+                        "Count" => 3,
+                        "XX_Filter" => r(11),
+                    }
+                    .into(),
+                ),
+                (ObjectId::new(11, 0), Object::from("FlateDecode")),
+            ],
+        );
+        let file = linearized(&plain, &[]);
+        let mut file = with_hint_data(&file, |facts, data| {
+            shared_changed(facts, data, |table| {
+                let entry = table.groups.iter_mut().max_by_key(|g| g.length).unwrap();
+                entry.length -= 1;
+            });
+        });
+        let hint = facts(&file).hint.unwrap();
+        let reading = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let filter = (reading.ids())
+            .find(|&id| reading.get(id).unwrap().as_name() == Some(b"FlateDecode"))
+            .unwrap();
+        let at = hint.at as usize + find(&file[hint.at as usize..], b"/FlateDecode");
+        let reference = format!("{:<12}", format!("{filter} R"));
+        assert_eq!(reference.len(), 12);
+        file[at..at + 12].copy_from_slice(reference.as_bytes());
+
+        let before = checked(&file);
+        assert_eq!(told(&before).len(), 1, "{before}");
+        assert_eq!(
+            told(&before)[0].2,
+            hint_byte(&file, shared_at(&facts(&file)))
+        );
+        assert_eq!(told(&checked(&updated(&file))), told(&before));
+        let unplaced: Vec<_> = (told(&before).into_iter())
+            .map(|(key, value, _)| (key, value, None))
+            .collect();
+        for replacement in [Object::from("ASCIIHexDecode"), Vec::<Object>::new().into()] {
+            let changed = updated_with(&file, &[(filter, replacement)]);
+            let opened = bytes::Reading::open(&changed[..], &bytes::Options::DEFAULT).unwrap();
+            assert!(!listed_in(&opened.revisions()[1..], hint.number));
+            let report = checked(&changed);
+            assert_eq!(told(&report), unplaced, "{report}");
+            for choice in [0u16, u16::MAX] {
+                let [a, b] = choice.to_le_bytes();
+                crate::fuzz::check_file(&[&[a, b], &changed[..]].concat());
+            }
+        }
+    }
+
+    /// What's of an object packed in an object stream as first written keeps
+    /// its bytes in that stream's data after an update that leaves the stream
+    /// held to the same bytes, and has none where the update writes every
+    /// member of the stream anew without listing the stream itself, so that
+    /// the file checked no longer holds it.
+    #[test]
+    fn an_object_in_an_object_stream_as_first_written_is_placed_while_its_stream_stands() {
+        let plain = three_pages();
+        let read = bytes::Reading::open(&plain[..], &bytes::Options::DEFAULT).unwrap();
+        let doc = read.to_document().unwrap();
+        let mut split = Vec::new();
+        for id in doc.ids() {
+            let mut object = doc.get(id).unwrap().clone();
+            let page = object.as_dict_mut().filter(|page| page.has_type(b"Page"));
+            if let Some(resources) = page.and_then(|page| page.get(b"Resources").cloned()) {
+                let own = id.number + 100;
+                object.as_dict_mut().unwrap().set("Resources", r(own));
+                split.push((own, Body::from(resources)));
+            }
+            split.push((id.number, Body::from(object)));
+        }
+        let plain = fixture::file("1.7", &split, dict! { "Root" => r(1) }, Xref::Table);
+        let mut file = linearized_packed(&plain, &[], true);
+        let opened = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let first_section: std::collections::BTreeSet<u32> = facts(&file)
+            .first
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.number)
+            .collect();
+        let (member, container) = (opened.entries())
+            .find_map(|(n, g, entry)| match entry {
+                crate::bytes::XrefEntry::Compressed { stream, .. }
+                    if !first_section.contains(&n) =>
+                {
+                    Some((ObjectId::new(n, g), ObjectId::new(stream, 0)))
+                }
+                _ => None,
+            })
+            .expect("a packed object in the main section");
+        // Damage the object stream's checksum: an object stream's read keeps
+        // what decompressed, while a plain stream decode refuses it.
+        let Value::Stream(stream) = opened.get(container).unwrap().value() else {
+            panic!("an object stream");
+        };
+        let span = stream.data.at().unwrap();
+        let first_page = facts(&file).pages[0].id.unwrap();
+        let page_span = opened.get(first_page).unwrap().at.unwrap();
+        assert!(page_span.stream.is_none());
+        file[span.end - 1] ^= 1;
+        // Have the first page reach `member`, which isn't in the first
+        // section.
+        let needle = b"/Resources ";
+        let at = page_span.start + find(&file[page_span.start..page_span.end], needle);
+        let old_ref = &file[at + needle.len()..page_span.end];
+        let old_end = find(old_ref, b"R") + 1;
+        let new_ref = format!("{member} R");
+        assert!(new_ref.len() <= old_end);
+        let padded = format!("{new_ref:<old_end$}");
+        file[at + needle.len()..at + needle.len() + old_end].copy_from_slice(padded.as_bytes());
+
+        let asked = Options {
+            departures: true,
+            ..Options::default()
+        };
+        let words = format!("{}, which the first page reaches", member.number);
+        let placed = |report: &Report| -> Vec<Option<Span>> {
+            (report.findings.iter())
+                .filter(|f| f.value.starts_with(&words))
+                .map(|f| f.at)
+                .collect()
+        };
+        let before = checked_with(&file, &asked);
+        let at = placed(&before);
+        assert_eq!(at.len(), 1, "{before}");
+        assert_eq!(at[0].and_then(|s| s.stream), Some(container));
+
+        let kept = updated(&file);
+        assert_eq!(placed(&checked_with(&kept, &asked)), at);
+
+        let opened = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let members: Vec<(ObjectId, Object)> = (opened.entries())
+            .filter_map(|(n, g, entry)| match entry {
+                crate::bytes::XrefEntry::Compressed { stream, .. }
+                    if stream == container.number =>
+                {
+                    let id = ObjectId::new(n, g);
+                    Some((id, opened.get(id).unwrap().clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let unheld = updated_with(&file, &members);
+        let reread = WithReading::new(&unheld[..], &bytes::Options::DEFAULT).unwrap();
+        assert!(!listed_in(
+            &reread.document().revisions()[1..],
+            container.number
+        ));
+        assert!(reread.document().held(container).is_none());
+        assert_eq!(placed(&checked_with(&unheld, &asked)), [None]);
+        for candidate in [&kept, &unheld] {
+            for choice in [0u16, u16::MAX] {
+                let [a, b] = choice.to_le_bytes();
+                crate::fuzz::check_file(&[&[a, b], &candidate[..]].concat());
+            }
+        }
     }
 }
