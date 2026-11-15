@@ -1862,9 +1862,10 @@ fn walk<'c>(p: &Path, keys: &[String], cx: &Cx<'c, '_>) -> Result<Option<&'c Obj
 /// key, not an index: an array holds no keys, and what a key means there
 /// is what holds the array. An object reference in a structure element's
 /// `/K` array has the array as its parent, but its `parent::Pg` is the
-/// element's (ISO 32000-2, 14.7.5.3: "the page on which the object is
-/// shown, if not the structure element's /Pg"), while a DeviceN
-/// colourspace's attributes' `parent::1` indexes the array itself.
+/// element's (ISO 32000-2, 14.7.5.3: an object reference's own `/Pg`,
+/// where it has one, says the page its object is on, and the element's
+/// says it where it hasn't), while a DeviceN colourspace's attributes'
+/// `parent::1` indexes the array itself.
 fn parent<'c>(n: usize, keys: &[String], cx: &Cx<'c, '_>) -> Option<&'c Object> {
     let mut at = n.checked_sub(1)?;
     let by_key = keys
@@ -2539,8 +2540,8 @@ fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
 
 /// Whether the string at `p` is the fully qualified name of a field of
 /// the file's interactive form (`fn:IsFullyQualifiedFieldName`, which
-/// this crate defines for a hide action's `/T`, ISO 32000-2 12.6.4: "the
-/// fully qualified field name of an interactive form field"), as text,
+/// this crate defines for a hide action's `/T`, a string of which names a
+/// field by its fully qualified name: ISO 32000-2, 12.6.4.11), as text,
 /// however each is encoded. A value that isn't a string isn't what the
 /// function asks of, and can't be told; nor can one whose text the
 /// reader didn't give, or one the form's readable fields don't name when
@@ -2573,9 +2574,9 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
 /// The fully qualified names of the fields of the catalog's `/AcroForm`
 /// (ISO 32000-2, 12.7.4.2): from each field in its `/Fields` down through
 /// `/Kids`, each one's partial name, `/T`, after its parent's and a
-/// period; one without `/T` has its parent's ("different representations
-/// of the same underlying field"), and one at the top without it, none.
-/// Each node once, as deep and as many as its file's [`Limits`] let
+/// period; one without `/T` has its parent's, as it's another way the same
+/// field is shown, not a field of its own, and one at the top without it,
+/// none. Each node once, as deep and as many as its file's [`Limits`] let
 /// (`tree_depth`, `tree_nodes`).
 fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
     let mut names = Names {
