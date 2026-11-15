@@ -41,7 +41,7 @@ fn a_streams_filters_are_the_readers() {
             let Ok(data) = reading.data(id) else {
                 continue;
             };
-            let resolve = |id| (&doc).resolve(id);
+            let resolve = pdf_objects::resolve_fn(|id| (&doc).resolve(id));
             let given = match crate::crypt::is_xref(&stream.dict) {
                 true => filters(&stream.dict, None),
                 false => filters(&stream.dict, Some(&resolve)),
@@ -64,15 +64,15 @@ fn a_streams_filters_are_the_readers() {
 #[test]
 fn a_streams_filters_follow_references_by_the_resolver_given() {
     let mut dict = Dict::new();
-    dict.set("Filter", vec![Object::from("AHx"), Object::reference(7)]);
+    dict.set("Filter", vec![Object::name("AHx"), Object::reference(7)]);
     dict.set("DecodeParms", vec![Object::null(), Object::reference(8)]);
-    let flate = Object::from("FlateDecode");
+    let flate = Object::name("FlateDecode");
     let parms: Object = dict! { "Predictor" => 12, "Columns" => 4 }.into();
-    let resolve = |id: ObjectId| match id.number {
+    let resolve = pdf_objects::resolve_fn(|id: ObjectId| match id.number {
         7 => Some(&flate),
         8 => Some(&parms),
         _ => None,
-    };
+    });
     let given = filters(&dict, Some(&resolve)).unwrap();
     assert!(
         matches!(
@@ -88,7 +88,7 @@ fn a_streams_filters_follow_references_by_the_resolver_given() {
     );
     assert_eq!(filters(&dict, None), Err(Unfiltered::Reference));
     // A reference to no object is null: no filter.
-    let none = |_: ObjectId| None;
+    let none = pdf_objects::resolve_fn(|_: ObjectId| None);
     let mut one = Dict::new();
     one.set("Filter", Object::reference(9));
     assert_eq!(filters(&one, Some(&none)), Ok(Vec::new()));
@@ -192,7 +192,7 @@ fn what_a_viewer_takes_of_a_decode_is_by_its_kind() {
     assert_eq!(why(Err(Error::NotAStream { id }), false), Err(Why::Damaged));
     let missing = Unread::Missing { id };
     assert_eq!(why(Err(Error::Unread(missing)), false), Err(Why::Damaged));
-    let unread = Unread::Parse(parse::Error::Short { at: 7 });
+    let unread = Unread::Parse(parse::ErrorKind::Short { at: 7 }.into());
     let said = viewed(id, Err(Error::Unread(unread.clone())), false).unwrap_err();
     assert_eq!(Some(said), unread.unreadable(id));
 }
@@ -202,10 +202,13 @@ fn what_a_viewer_takes_of_a_decode_is_by_its_kind() {
 /// value by reference.
 fn held(dict: Dict, data: &[u8]) -> Document {
     let mut doc = Document::new(Version::new(1, 7), root());
-    doc.set(ObjectId::new(1, 0), dict! { "Type" => "Catalog" });
+    doc.set(
+        ObjectId::new(1, 0),
+        dict! { "Type" => Object::name("Catalog") },
+    );
     let stream = pdf_objects::object::Stream::new(dict, data.to_vec());
     doc.set(ObjectId::new(2, 0), Object::from(stream));
-    doc.set(ObjectId::new(3, 0), Object::from("FlateDecode"));
+    doc.set(ObjectId::new(3, 0), Object::name("FlateDecode"));
     doc
 }
 
@@ -234,16 +237,16 @@ fn given(doc: &Document, limit: usize) -> Result<Vec<u8>, Why> {
 fn a_documents_stream_held_as_bytes_is_decoded_as_a_reading_decodes_it() {
     let text = b"BT /F1 12 Tf (held as bytes) Tj ET".repeat(4);
     let zlib = fixture::zlib(&text);
-    let flate = dict! { "Filter" => "FlateDecode" };
+    let flate = dict! { "Filter" => Object::name("FlateDecode") };
     let by_reference = dict! { "Filter" => Object::reference(3) };
-    let unknown = dict! { "Filter" => "JBIG2Decode" };
+    let unknown = dict! { "Filter" => Object::name("JBIG2Decode") };
     let crypt = |name: Option<&str>| {
         let mut parms = Dict::new();
         if let Some(name) = name {
-            parms.set("Name", Object::from(name));
+            parms.set("Name", Object::name(name));
         }
         dict! {
-            "Filter" => vec![Object::from("Crypt"), Object::from("FlateDecode")],
+            "Filter" => vec![Object::name("Crypt"), Object::name("FlateDecode")],
             "DecodeParms" => vec![Object::from(parms), Object::null()],
         }
     };

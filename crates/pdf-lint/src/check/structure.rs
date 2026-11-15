@@ -440,14 +440,14 @@ fn parted<'a>(
         Some((id, root)) => (id, Some(root)),
         None => (None, None),
     };
-    let root_at = written.and_then(|root| root.at);
+    let root_at = written.and_then(|root| root.at());
     // Where a finding of a page is: at its key, else the page, where it
     // has a number; else the root.
     let at_page = |page: &Page<'a>, key: Option<&[u8]>| match page.id {
         Some(id) => {
             let own = (key.zip(page.dict)).and_then(|(key, dict)| dict.entry(key));
             let at = own.and_then(entry_at);
-            let at = at.or_else(|| source.get(id).ok().and_then(|page| page.at));
+            let at = at.or_else(|| source.get(id).ok().and_then(|page| page.at()));
             Place::new(Some(id), at)
         }
         None => Place::new(root, root_at),
@@ -864,15 +864,15 @@ impl<'a> Walk<'a> {
             None => Some(self.trailer),
         };
         let holds = |value: Span, at: Span| {
-            value.stream == at.stream && value.start <= at.start && at.end <= value.end
+            value.stream() == at.stream() && value.start() <= at.start() && at.end() <= value.end()
         };
         let Some(at) = at else {
             return "-".to_string();
         };
         let key = |dict: &Dict| {
             (dict.entries().iter())
-                .find(|entry| entry.value.at.is_some_and(|value| holds(value, at)))
-                .map(|entry| String::from_utf8_lossy(&entry.key).into_owned())
+                .find(|entry| entry.value().at().is_some_and(|value| holds(value, at)))
+                .map(|entry| String::from_utf8_lossy(entry.key()).into_owned())
         };
         (within.and_then(key))
             .or_else(|| dict.and_then(key))
@@ -1110,7 +1110,9 @@ mod tests {
         (report.findings.iter())
             .filter(|f| f.rule == rule)
             .map(|f| {
-                let at = f.at.map(|at| &file[at.start..at.end]).unwrap_or_default();
+                let at =
+                    f.at.map(|at| &file[at.start()..at.end()])
+                        .unwrap_or_default();
                 (
                     f.object.map(|id| id.number),
                     f.path.clone(),
@@ -2730,13 +2732,13 @@ mod tests {
             .filter(|f| f.rule == Rule::Xmp)
             .map(|f| {
                 let at = f.at.expect("an XMP finding is at bytes");
-                assert_eq!(at.stream, Some(ObjectId::new(4, 0)), "{report}");
+                assert_eq!(at.stream(), Some(ObjectId::new(4, 0)), "{report}");
                 (
                     f.object.map(|id| id.number),
                     f.path.clone(),
                     format!("{}/{}", f.table, f.key),
                     f.value.clone(),
-                    String::from_utf8_lossy(&data[at.start..at.end]).into_owned(),
+                    String::from_utf8_lossy(&data[at.start()..at.end()]).into_owned(),
                     f.made,
                 )
             })
@@ -2906,12 +2908,22 @@ mod tests {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
         doc.insert(
             1,
-            dict! { "Type" => "Catalog", "Pages" => Object::reference(2) },
+            dict! {
+                "Type" => Object::name("Catalog"),
+                "Pages" => Object::reference(2),
+            },
         );
         let kids = vec![Object::reference(3)];
-        doc.insert(2, dict! { "Type" => "Pages", "Kids" => kids, "Count" => 1 });
+        doc.insert(
+            2,
+            dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => kids,
+                "Count" => 1,
+            },
+        );
         let page = dict! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => Object::reference(2),
             "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
             "Resources" => dict! {},

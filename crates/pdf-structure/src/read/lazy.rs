@@ -665,7 +665,7 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
             );
             if doc.encryption == Encryption::None {
                 let at = at.unwrap();
-                assert_eq!(data.unwrap(), &file[at.start..at.end], "{name}: {id:?}");
+                assert_eq!(data.unwrap(), &file[at.range()], "{name}: {id:?}");
             }
             streams += 1;
         }
@@ -932,11 +932,11 @@ fn a_records_hash_is_of_the_bytes_it_names_however_the_file_is_read() {
                         let held = doc
                             .held(ObjectId::new(stream, 0))
                             .expect("its stream's data");
-                        &held[at.start..at.end]
+                        &held[at.range()]
                     }
                     _ => {
                         at_offsets += 1;
-                        &file[at.start..at.end]
+                        &file[at.range()]
                     }
                 };
                 assert_eq!(record.hash, Record::hash_of(bytes), "{name}, {how}: {id}");
@@ -963,7 +963,7 @@ fn a_length_by_references_faults_are_said_with_the_stream_until_its_own_object_i
         panic!("not a stream");
     };
     let at = stream.data.at().unwrap();
-    assert_eq!(&file[at.start..at.end], b"abc");
+    assert_eq!(&file[at.range()], b"abc");
     let warnings = reading.faults();
     assert!(warnings.len() == 1 && stray(&warnings[0]), "{warnings:?}");
     let told = warnings[0].clone();
@@ -980,14 +980,14 @@ fn an_object_in_an_object_stream_is_read_before_the_others_in_it() {
     let (file, _) = compressed(false);
     let reading = open(&file, &[], &Options::DEFAULT);
     let page = reading.get(ObjectId::new(3, 0)).unwrap();
-    assert_eq!(page.at.unwrap().stream, Some(ObjectId::new(4, 0)));
+    assert_eq!(page.at().unwrap().stream(), Some(ObjectId::new(4, 0)));
     let record = reading.record(ObjectId::new(3, 0)).unwrap();
     let origin = Origin::Stream {
         stream: 4,
         index: 1,
     };
     assert_eq!(record.origin, origin);
-    assert_eq!(Some(record.at), page.at);
+    assert_eq!(Some(record.at), page.at());
     assert!(!record.endobj && record.data.is_none());
     assert!(
         reading.record(ObjectId::new(4, 0)).is_some(),
@@ -1086,7 +1086,7 @@ fn an_objects_record_says_whether_endobj_follows_it() {
     let doc = document(&file, &Options::DEFAULT);
     let extent = |n: u32| {
         let at = doc.record(ObjectId::new(n, 0)).unwrap().at;
-        &file[at.start..at.end]
+        &file[at.range()]
     };
     assert!(doc.record(ObjectId::new(1, 0)).unwrap().endobj);
     assert_eq!(extent(1), b"1 0 obj\n<< /Type /Catalog >>\nendobj");
@@ -1098,9 +1098,9 @@ fn an_objects_record_says_whether_endobj_follows_it() {
     );
     let data = |n: u32| doc.record(ObjectId::new(n, 0)).unwrap().data.unwrap();
     assert!(data(3).declared && data(3).indirect_length);
-    assert_eq!(&file[data(3).at.start..data(3).at.end], b"abc");
+    assert_eq!(&file[data(3).at.range()], b"abc");
     assert!(!data(5).declared && !data(5).indirect_length);
-    assert_eq!(&file[data(5).at.start..data(5).at.end], b"abcdef\n");
+    assert_eq!(&file[data(5).at.range()], b"abcdef");
     assert!(extent(5).ends_with(b"endstream\nendobj"));
     assert_eq!(doc.record(ObjectId::new(4, 0)).unwrap().data, None);
 
@@ -1373,12 +1373,9 @@ fn an_undefined_crypt_filter_reads_on_demand_as_whole() {
 fn an_encrypted_readings_bytes_are_refused_but_its_object_streams() {
     let file = encrypted_objects(" /Filter /FlateDecode", None);
     let reading = open(&file, &[Password("user")], &Options::DEFAULT);
-    let pages = reading.get(ObjectId::new(2, 0)).unwrap().at.unwrap();
+    let pages = reading.get(ObjectId::new(2, 0)).unwrap().at().unwrap();
     let (objects, _) = objects_2_and_3();
-    assert_eq!(
-        reading.bytes(pages).unwrap(),
-        &objects[pages.start..pages.end]
-    );
+    assert_eq!(reading.bytes(pages).unwrap(), &objects[pages.range()]);
     assert!(matches!(reading.bytes(span(0, 8)), Err(Error::Encrypted)));
     let past = Span::new(Some(ObjectId::new(4, 0)), 0, objects.len() + 1);
     assert!(matches!(reading.bytes(past), Err(Error::Outside { .. })));

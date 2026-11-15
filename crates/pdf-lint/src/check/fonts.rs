@@ -400,7 +400,7 @@ pub(super) fn latin(source: &dyn Source, budget: &mut usize) -> (Latin, Read) {
                             && unfiltered.is_empty()
                             && let Some(has) = latin_in(source, d, font, composite)
                         {
-                            latin.insert(descriptor_id, descriptor.at, has);
+                            latin.insert(descriptor_id, descriptor.at(), has);
                         }
                     }
                     d
@@ -696,7 +696,7 @@ impl<'a> Walk<'a> {
         };
         let whole = object.filter(|_| {
             held.as_ref()
-                .is_some_and(|(held, written, at)| held.is_none() && written.at == Some(*at))
+                .is_some_and(|(held, written, at)| held.is_none() && written.at() == Some(*at))
         });
         let first = object.and_then(|id| self.fonts_at.get(&id));
         let (path, table) = self.path_and_table(object, written, at, keyed, first, font);
@@ -775,13 +775,20 @@ mod tests {
         vec![
             (
                 1,
-                dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => Object::reference(2) }
-                    .into(),
+                dict! {
+                    "Subtype" => Object::name("Type1"),
+                    "BaseFont" => Object::name("Helvetica"),
+                    "ToUnicode" => Object::reference(2),
+                }
+                .into(),
             ),
             (2, Body::stream(dict! {}, PLAIN)),
             (
                 3,
-                Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(PLAIN)),
+                Body::stream(
+                    dict! { "Filter" => Object::name("FlateDecode") },
+                    &fixture::zlib(PLAIN),
+                ),
             ),
         ]
     }
@@ -831,7 +838,10 @@ mod tests {
         assert_eq!(too_large.font.err(), Some(Error::TooLarge));
         let mut budget = PLAIN.len();
         assert!(super::read(read.document(), font, &mut budget).is_none());
-        let plain = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+        let plain = dict! {
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+        };
         assert!(super::read(read.document(), &plain, &mut budget).is_some());
     }
 
@@ -857,19 +867,22 @@ mod tests {
     /// past the reader's cap on filters, a cap's, each saying so.
     #[test]
     fn a_stream_that_doesn_t_decode_whole() {
-        let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
+        let many: Vec<Object> = (0..26).map(|_| Object::name("ASCIIHexDecode")).collect();
         let objects = vec![
             (
                 1,
-                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"4142 zz"),
+                Body::stream(
+                    dict! { "Filter" => Object::name("ASCIIHexDecode") },
+                    b"4142 zz",
+                ),
             ),
             (
                 2,
-                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"zz"),
+                Body::stream(dict! { "Filter" => Object::name("ASCIIHexDecode") }, b"zz"),
             ),
             (
                 3,
-                Body::stream(dict! { "Filter" => "JBIG2Decode" }, b"data"),
+                Body::stream(dict! { "Filter" => Object::name("JBIG2Decode") }, b"data"),
             ),
             (5, Body::stream(dict! { "Filter" => many }, b"41>")),
         ];
@@ -982,16 +995,24 @@ mod tests {
     /// resources' fonts are `fonts`; and `more`.
     fn on_a_page(fonts: Dict, more: Vec<(u32, Body)>) -> Vec<(u32, Body)> {
         let page = dict! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => r(2),
             "MediaBox" => numbers(&[0, 0, 612, 792]),
             "Resources" => dict! { "Font" => fonts },
         };
         let mut objects = vec![
-            (1, dict! { "Type" => "Catalog", "Pages" => r(2) }.into()),
+            (
+                1,
+                dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }.into(),
+            ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }.into(),
+                dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![r(3)],
+                    "Count" => 1,
+                }
+                .into(),
             ),
             (3, page.into()),
         ];
@@ -1003,8 +1024,8 @@ mod tests {
     /// `/CapHeight` where `cap_height`.
     fn descriptor(flags: i64, cap_height: bool) -> Dict {
         let mut descriptor = dict! {
-            "Type" => "FontDescriptor",
-            "FontName" => "Arial",
+            "Type" => Object::name("FontDescriptor"),
+            "FontName" => Object::name("Arial"),
             "Flags" => flags,
             "FontBBox" => numbers(&[-200, -200, 1000, 900]),
             "ItalicAngle" => 0,
@@ -1022,9 +1043,9 @@ mod tests {
     /// code `first`, its descriptor `descriptor`.
     fn truetype(encoding: Option<Object>, first: i64, widths: &[i64], descriptor: Object) -> Dict {
         let mut font = dict! {
-            "Type" => "Font",
-            "Subtype" => "TrueType",
-            "BaseFont" => "Arial",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("Arial"),
             "FirstChar" => first,
             "LastChar" => first + widths.len() as i64 - 1,
             "Widths" => numbers(widths),
@@ -1040,7 +1061,7 @@ mod tests {
     /// to `~`, its descriptor `descriptor`: Latin letters among them.
     fn win_ansi(descriptor: Object) -> Dict {
         truetype(
-            Some(Object::from("WinAnsiEncoding")),
+            Some(Object::name("WinAnsiEncoding")),
             32,
             &[500; 95],
             descriptor,
@@ -1051,10 +1072,13 @@ mod tests {
     /// `uni4E01` and `uni4E02` in its `/Differences`, all Han: the letters
     /// its base encoding names at other codes it gives no width.
     fn han(descriptor: Object) -> Dict {
-        let names = ["uni4E00", "uni4E01", "uni4E02"].map(Object::from);
+        let names = ["uni4E00", "uni4E01", "uni4E02"].map(Object::name);
         let mut differences = vec![Object::from(123)];
         differences.extend(names);
-        let encoding = dict! { "Type" => "Encoding", "Differences" => differences };
+        let encoding = dict! {
+            "Type" => Object::name("Encoding"),
+            "Differences" => differences,
+        };
         truetype(Some(encoding.into()), 123, &[1000; 3], descriptor)
     }
 
@@ -1062,10 +1086,10 @@ mod tests {
     /// `/ToUnicode` where it has one.
     fn type0(cid_font: u32, to_unicode: Option<Object>) -> Dict {
         let mut font = dict! {
-            "Type" => "Font",
-            "Subtype" => "Type0",
-            "BaseFont" => "Batang",
-            "Encoding" => "Identity-H",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type0"),
+            "BaseFont" => Object::name("Batang"),
+            "Encoding" => Object::name("Identity-H"),
             "DescendantFonts" => vec![r(cid_font)],
         };
         if let Some(to_unicode) = to_unicode {
@@ -1082,12 +1106,12 @@ mod tests {
             "Supplement" => 0,
         };
         dict! {
-            "Type" => "Font",
-            "Subtype" => "CIDFontType2",
-            "BaseFont" => "Batang",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("CIDFontType2"),
+            "BaseFont" => Object::name("Batang"),
             "CIDSystemInfo" => info,
             "FontDescriptor" => r(descriptor),
-            "CIDToGIDMap" => "Identity",
+            "CIDToGIDMap" => Object::name("Identity"),
         }
     }
 
@@ -1207,7 +1231,7 @@ mod tests {
                 false => 500,
             })
             .collect();
-        let no_letters = truetype(Some(Object::from("WinAnsiEncoding")), 32, &widths, r(5));
+        let no_letters = truetype(Some(Object::name("WinAnsiEncoding")), 32, &widths, r(5));
         assert_eq!(a_font(no_letters, 32, false), made());
         // A /CapHeight of null is absent (ISO 32000-2, 7.3.7).
         let mut null = descriptor(32, false);
@@ -1226,7 +1250,7 @@ mod tests {
         assert_eq!(a_font(no_widths, 32, false), missing(5, truetype_table));
         // A /FirstChar the least of 64 bits, no /LastChar, and no width in
         // its /Widths: no code drawn, so it can't be told.
-        let mut least = truetype(Some(Object::from("WinAnsiEncoding")), 0, &[], r(5));
+        let mut least = truetype(Some(Object::name("WinAnsiEncoding")), 0, &[], r(5));
         least.set("FirstChar", i64::MIN);
         least.remove(b"LastChar");
         assert_eq!(a_font(least, 32, false), unmade(truetype_table));
@@ -1241,7 +1265,7 @@ mod tests {
                 (5, descriptor(32, false).into()),
                 (
                     6,
-                    Body::stream(dict! { "Filter" => "JBIG2Decode" }, b"data"),
+                    Body::stream(dict! { "Filter" => Object::name("JBIG2Decode") }, b"data"),
                 ),
             ],
         );
@@ -1278,15 +1302,18 @@ mod tests {
     #[test]
     fn a_type_3_font_s_descriptor_is_asked_nothing_of() {
         let font = dict! {
-            "Type" => "Font",
-            "Subtype" => "Type3",
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type3"),
             "FontBBox" => numbers(&[0, 0, 1000, 1000]),
             "FontMatrix" => vec![
                 Object::from(0.001), Object::from(0), Object::from(0),
                 Object::from(0.001), Object::from(0), Object::from(0),
             ],
             "CharProcs" => dict! { "a" => r(6) },
-            "Encoding" => dict! { "Type" => "Encoding", "Differences" => vec![Object::from(97), Object::from("a")] },
+            "Encoding" => dict! {
+                "Type" => Object::name("Encoding"),
+                "Differences" => vec![Object::from(97), Object::name("a")],
+            },
             "FirstChar" => 97,
             "LastChar" => 97,
             "Widths" => numbers(&[1000]),
@@ -1448,8 +1475,8 @@ mod tests {
             .filter(|f| f.rule == Rule::Font)
             .map(|f| {
                 let at = match f.at {
-                    Some(at) if at.stream.is_none() => {
-                        String::from_utf8_lossy(&file[at.start..at.end]).into_owned()
+                    Some(at) if at.stream().is_none() => {
+                        String::from_utf8_lossy(&file[at.start()..at.end()]).into_owned()
                     }
                     Some(_) => "-".to_string(),
                     None => String::new(),

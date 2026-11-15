@@ -83,9 +83,9 @@ fn files() -> Vec<(String, Vec<u8>, Vec<Password<'static>>)> {
 /// `span` in a file `by` bytes longer before its header: the same where
 /// it's in an object stream's decoded data.
 fn shifted(span: Span, by: usize) -> Span {
-    match span.stream {
+    match span.stream() {
         Some(_) => span,
-        None => Span::new(None, span.start + by, span.end + by),
+        None => Span::new(None, span.start() + by, span.end() + by),
     }
 }
 

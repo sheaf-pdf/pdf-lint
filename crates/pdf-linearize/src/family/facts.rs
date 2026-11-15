@@ -118,7 +118,7 @@ fn listed_at(sections: &[SectionRows], at: u64) -> Option<ObjectId> {
 /// Where object `id` ends, past its `endobj`.
 fn end_of<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<Option<u64>, Error> {
     match reading.get(id) {
-        Ok(_) => Ok(reading.record(id).map(|record| record.at.end as u64)),
+        Ok(_) => Ok(reading.record(id).map(|record| record.at.end() as u64)),
         Err(read::Error::Io(why)) => Err(Error::Read(read::Error::Io(why))),
         Err(_) => Ok(None),
     }
@@ -180,7 +180,7 @@ fn unread_of(unreadable: Unreadable) -> Result<Option<Unread>, Error> {
         Why::Capped => Some(Unread::Capped),
         Why::Locked => Some(Unread::Locked),
         Why::Source => {
-            let why = io::Error::other(unreadable.message);
+            let why = io::Error::other(unreadable);
             return Err(Error::Read(read::Error::Io(why)));
         }
         _ => None,
@@ -242,7 +242,7 @@ fn hint<S: ByteSource>(
             return Ok(Some(HintFacts::new(at, at, id.number, data)));
         }
     };
-    let Some(mut end) = reading.record(id).map(|record| record.at.end as u64) else {
+    let Some(mut end) = reading.record(id).map(|record| record.at.end() as u64) else {
         let data = HintData::NotAStream;
         return Ok(Some(HintFacts::new(at, at, id.number, data)));
     };
@@ -276,7 +276,7 @@ fn hint<S: ByteSource>(
     let mut hint = HintFacts::new(at, end, id.number, data);
     hint.overflow = overflow;
     hint.keys = (stream.dict.entries().iter())
-        .map(|entry| (entry.key.to_vec(), raw(Some(&entry.value))))
+        .map(|entry| (entry.key().to_vec(), raw(Some(entry.value()))))
         .collect();
     Ok(Some(hint))
 }

@@ -156,7 +156,11 @@ fn a_resources_objects_are_numbered_as_added() {
     let mut doc = pdfs::pdf_structure::Document::new(Version::new(1, 7), dict! {});
     doc.insert(1, dict! {});
     let form = pdfs::pdf_objects::object::Stream::new(
-        dict! { "Subtype" => "Form", "Resources" => dict! { "Font" => dict! { "F" => ObjectId::new(1, 0) } }, "Gone" => ObjectId::new(7, 0) },
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "Resources" => dict! { "Font" => dict! { "F" => ObjectId::new(1, 0) } },
+            "Gone" => ObjectId::new(7, 0),
+        },
         b"BT /F 9 Tf (a) Tj ET".to_vec(),
     );
     let objects: Arc<[Object]> = Arc::new([Object::from(form), Object::from(Std14::Symbol.dict())]);
@@ -192,7 +196,10 @@ fn a_resources_objects_are_numbered_as_added() {
 #[test]
 fn a_shared_resources_dictionary_is_copied_never_changed() {
     let mut doc = pdfs::pdf_structure::Document::new(Version::new(1, 7), dict! {});
-    let shared = dict! { "Font" => r(6), "ColorSpace" => dict! { "CS0" => "DeviceRGB" } };
+    let shared = dict! {
+        "Font" => r(6),
+        "ColorSpace" => dict! { "CS0" => Object::name("DeviceRGB") },
+    };
     doc.insert(5, shared.clone());
     doc.insert(6, dict! { "F1" => r(7) });
     let mut page = ContentWriter::new();
@@ -316,20 +323,24 @@ fn a_document_of_no_page_is_refused() {
 /// pages from 3.
 fn objects_of(pages: &[Dict], root: Dict, more: &[(u32, Body)]) -> Vec<(u32, Body)> {
     let kids: Vec<Object> = (0..pages.len() as u32).map(|i| r(3 + i)).collect();
-    let mut node = dict! { "Type" => "Pages", "Kids" => kids, "Count" => pages.len() as i64 };
+    let mut node = dict! {
+        "Type" => Object::name("Pages"),
+        "Kids" => kids,
+        "Count" => pages.len() as i64,
+    };
     for (key, value) in root.iter() {
         node.set(key, value.clone());
     }
     let mut objects = vec![
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (2, Body::from(node)),
     ];
     for (i, page) in pages.iter().enumerate() {
         let mut page = page.clone();
-        page.set("Type", "Page");
+        page.set("Type", Object::name("Page"));
         page.set("Parent", r(2));
         objects.push((3 + i as u32, Body::from(page)));
     }
@@ -811,13 +822,20 @@ fn a_page_needs_a_page_tree_to_go_under() {
         &[
             (
                 1,
-                Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+                Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
             ),
             (
                 2,
-                Body::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => "one" }),
+                Body::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![r(3)],
+                    "Count" => Object::name("one"),
+                }),
             ),
-            (3, Body::from(dict! { "Type" => "Page", "Parent" => r(2) })),
+            (
+                3,
+                Body::from(dict! { "Type" => Object::name("Page"), "Parent" => r(2) }),
+            ),
         ],
         dict! { "Root" => r(1) },
         Xref::Table,
@@ -876,17 +894,22 @@ fn a_linearized_save_walks_under_the_files_caps() {
     // A page under five nodes, each the only kid of the one above it.
     let mut objects = vec![(
         1,
-        Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+        Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
     )];
     for n in 2..=6u32 {
-        let node = dict! { "Type" => "Pages", "Kids" => vec![r(n + 1)], "Count" => 1 };
+        let node =
+            dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(n + 1)], "Count" => 1 };
         let mut node = node;
         if n > 2 {
             node.set("Parent", r(n - 1));
         }
         objects.push((n, Body::from(node)));
     }
-    let page = dict! { "Type" => "Page", "Parent" => r(6), "MediaBox" => vec![Object::from(0), 0.into(), 9.into(), 9.into()] };
+    let page = dict! {
+        "Type" => Object::name("Page"),
+        "Parent" => r(6),
+        "MediaBox" => vec![Object::from(0), 0.into(), 9.into(), 9.into()],
+    };
     objects.push((7, Body::from(page)));
     let file = fixture::file("1.7", &objects, dict! { "Root" => r(1) }, Xref::Table);
 

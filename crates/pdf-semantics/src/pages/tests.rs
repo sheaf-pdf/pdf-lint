@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use pdf_fixtures::fixture;
 use pdf_objects::parse::Parser;
+use pdf_objects::resolve_fn;
 use pdf_structure::read::{self, Options, Reading};
 
 use super::*;
@@ -220,7 +221,7 @@ fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
         let mut objects = vec![(2, root)];
         objects.extend(node.map(|node| (3, node)));
         let objects = parsed(&objects);
-        let resolve = |id: ObjectId| objects.get(&id);
+        let resolve = &objects;
         let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
         let walked = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
         assert_eq!(walked, Err(Error::NoPages), "{root}");
@@ -235,7 +236,7 @@ fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
         (2, "<< /Type /Pages /Kids [3 0 R] /Count 4 >>"),
         (3, "<< /Type /Page /Parent 2 0 R >>"),
     ]);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(
@@ -418,14 +419,14 @@ fn a_tree_too_deep_past_where_the_count_ends_the_walk_isn_t_met() {
 fn asking<'o, 'a>(
     objects: &'o BTreeMap<ObjectId, Object>,
     asked: &'a std::cell::RefCell<Vec<ObjectId>>,
-) -> impl Fn(ObjectId) -> Option<&'o Object> + 'a
+) -> impl Resolve<'o> + Copy + 'a
 where
     'o: 'a,
 {
-    move |id| {
+    resolve_fn(move |id| {
         asked.borrow_mut().push(id);
         objects.get(&id)
-    }
+    })
 }
 
 /// `count` objects as a /Parent chain from object `first` up, ending at a node
@@ -760,7 +761,7 @@ fn parents_are_walked_alike_by_next_and_by_fold() {
             "<< /Type /Pages /Parent << /Type /Pages /Parent 2 0 R >> >>",
         ),
     ]);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     let page = table.get(0).unwrap();
@@ -830,7 +831,7 @@ fn every_attribute_is_listed_in_order_with_its_key() {
             (3, &page),
             (7, "90"),
         ]);
-        let resolve = |id: ObjectId| objects.get(&id);
+        let resolve = &objects;
         let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
         let table = pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
         let page = table.get(0).unwrap();
@@ -2314,10 +2315,10 @@ fn only_a_sink_that_wants_them_has_its_checks_run() {
     ]);
     let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
-    let resolve = |id: ObjectId| {
+    let resolve = resolve_fn(|id: ObjectId| {
         asked.borrow_mut().push(id);
         objects.get(&id)
-    };
+    });
     pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
     // `()` doesn't want the /Count held to anything.
     assert!(
@@ -2341,10 +2342,10 @@ fn a_walk_reads_nothing_past_the_count_or_any_content() {
     ]);
     let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
-    let resolve = |id: ObjectId| {
+    let resolve = resolve_fn(|id: ObjectId| {
         asked.borrow_mut().push(id);
         objects.get(&id)
-    };
+    });
     pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(*asked.borrow(), [ObjectId::new(2, 0), ObjectId::new(3, 0)]);
 }
@@ -2676,9 +2677,11 @@ fn a_parent_chain_raised_past_the_stack_goes_along_in_a_loop() {
     );
     objects.insert(
         ObjectId::new(3, 0),
-        Object::from(pdf_objects::dict! { "Type" => "Page", "Parent" => Object::reference(10) }),
+        Object::from(
+            pdf_objects::dict! { "Type" => Object::name("Page"), "Parent" => Object::reference(10) },
+        ),
     );
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let catalog = Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let mut limits = Limits::DEFAULT;
     limits.page_depth = 2 * length as usize;
@@ -2863,7 +2866,7 @@ fn objects_of(written: &Written, pages: &[ObjectId]) -> (BTreeMap<ObjectId, Obje
             Object::from(page.number),
             Object::from(200),
         ];
-        let dict = pdf_objects::dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+        let dict = pdf_objects::dict! { "Type" => Object::name("Page"), "Parent" => parent, "MediaBox" => media };
         assert!(objects.insert(page, Object::from(dict)).is_none(), "{page}");
     }
     (objects, pdf_objects::dict! { "Pages" => written.root })
@@ -2896,7 +2899,7 @@ fn read_back(
     pages_given: &[ObjectId],
     limits: &Limits,
 ) {
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = objects;
     let chains = chains(written);
     let listed: Vec<(Option<ObjectId>, u32)> =
         pages_given.iter().map(|&id| (Some(id), 0)).collect();
@@ -2979,11 +2982,11 @@ fn a_tree_is_written_for_a_document_by_its_ids() {
             ]
         };
         for (&page, &parent) in pages.iter().zip(&written.parents) {
-            let page_dict =
-                pdf_objects::dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media() };
+            let page_dict = pdf_objects::dict! { "Type" => Object::name("Page"), "Parent" => parent, "MediaBox" => media() };
             doc.set(page, page_dict);
         }
-        let catalog = doc.add(pdf_objects::dict! { "Type" => "Catalog", "Pages" => written.root });
+        let catalog = doc
+            .add(pdf_objects::dict! { "Type" => Object::name("Catalog"), "Pages" => written.root });
         doc.trailer_mut().dict_mut().set("Root", catalog);
         let mut file = Vec::new();
         let options = pdf_structure::write::Options::DEFAULT;
@@ -3053,7 +3056,7 @@ fn what_wouldn_t_read_back_is_refused_before_an_id_is_asked_for() {
     capped.pages = 9;
     let too_many = WriteError::TooManyPages { cap: 9 };
     assert_eq!(refused(&pages, 2, &capped), (Err(too_many), 0));
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     for rules in [Rules::Iso, Rules::Pdfium] {
         let read = pages_of(resolve, &catalog, rules, &capped);
         assert_eq!(read, Err(Error::TooManyPages), "{rules:?}");
@@ -3072,7 +3075,7 @@ fn what_wouldn_t_read_back_is_refused_before_an_id_is_asked_for() {
     shallow.page_depth = 2;
     let too_deep = WriteError::TooDeep { cap: 2 };
     assert_eq!(refused(&five, 2, &shallow), (Err(too_deep), 0));
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     for rules in [Rules::Iso, Rules::Pdfium] {
         let read = pages_of(resolve, &catalog, rules, &shallow);
         assert_eq!(read, Err(Error::TooDeep), "{rules:?}");

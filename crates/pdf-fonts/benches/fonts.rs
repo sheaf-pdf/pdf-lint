@@ -130,7 +130,7 @@ fn numbers<T: Into<Object> + Copy>(numbers: &[T]) -> Object {
 /// A font's descriptor, its heights and its box given, nonsymbolic.
 fn descriptor(name: &str) -> Dict {
     dict! {
-        "Type" => "FontDescriptor", "FontName" => name, "Flags" => 32,
+        "Type" => Object::name("FontDescriptor"), "FontName" => Object::name(name), "Flags" => 32,
         "FontBBox" => numbers(&[-100, -250, 1000, 900]), "Ascent" => 900,
         "Descent" => -250, "CapHeight" => 700, "ItalicAngle" => 0, "StemV" => 80,
     }
@@ -196,7 +196,8 @@ fn to_unicode(codespace: &str, mappings: &[(u32, u32)]) -> Vec<u8> {
 fn type0(pdf: &mut Pdf, encoding: Object, cid_font: Dict) -> Dict {
     let cid_font = pdf.add(cid_font);
     dict! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "BenchCJK",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("BenchCJK"),
         "Encoding" => encoding, "DescendantFonts" => vec![cid_font.into()],
     }
 }
@@ -205,7 +206,8 @@ fn type0(pdf: &mut Pdf, encoding: Object, cid_font: Dict) -> Dict {
 fn cid_font(pdf: &mut Pdf, w: Object) -> Dict {
     let descriptor = pdf.add(descriptor("BenchCJK"));
     dict! {
-        "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "BenchCJK",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("CIDFontType2"),
+        "BaseFont" => Object::name("BenchCJK"),
         "CIDSystemInfo" => dict! {
             "Registry" => Object::bytes("Adobe"), "Ordering" => Object::bytes("Identity"),
             "Supplement" => 0,
@@ -217,8 +219,9 @@ fn cid_font(pdf: &mut Pdf, w: Object) -> Dict {
 fn inputs() -> Inputs {
     let mut pdf = Pdf::default();
     let helvetica = dict! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     };
     let std14 = (Pdf::default(), helvetica);
 
@@ -226,13 +229,14 @@ fn inputs() -> Inputs {
     // WinAnsiEncoding, 100 glyphs of Latin Extended-A by name from 128.
     let widths: Vec<f32> = (32..256).map(width_of).collect();
     let mut differences: Vec<Object> = vec![128.into()];
-    differences.extend((0..100).map(|i| Object::from(format!("uni{:04X}", 0x100 + i))));
+    differences.extend((0..100).map(|i| Object::name(format!("uni{:04X}", 0x100 + i))));
     let descriptor_id = pdf.add(descriptor("BenchSans"));
     let simple = dict! {
-        "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "BenchSans",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("BenchSans"),
         "FirstChar" => 32, "LastChar" => 255, "Widths" => numbers(&widths),
         "Encoding" => dict! {
-            "Type" => "Encoding", "BaseEncoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Encoding"), "BaseEncoding" => Object::name("WinAnsiEncoding"),
             "Differences" => differences,
         },
         "FontDescriptor" => descriptor_id,
@@ -251,7 +255,7 @@ fn inputs() -> Inputs {
     let mappings: Vec<(u32, u32)> = (1..=CIDS).map(|code| (code, 0x4dff + code)).collect();
     let to_unicode_id = pdf.stream(to_unicode("<0000> <FFFF>", &mappings));
     let cid_font_dict = cid_font(&mut pdf, Object::from(w));
-    let mut identity = type0(&mut pdf, "Identity-H".into(), cid_font_dict);
+    let mut identity = type0(&mut pdf, Object::name("Identity-H"), cid_font_dict);
     identity.set("ToUnicode", to_unicode_id);
     let identity = (pdf, identity, cid_widths);
 
@@ -278,7 +282,7 @@ fn inputs() -> Inputs {
     }
     program.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
     let cmap_id = pdf.add(Stream::new(
-        dict! { "Type" => "CMap", "CMapName" => "Bench-H" },
+        dict! { "Type" => Object::name("CMap"), "CMapName" => Object::name("Bench-H") },
         program.into_bytes(),
     ));
     let cid_font_dict = cid_font(&mut pdf, Object::from(Vec::<Object>::new()));
@@ -289,7 +293,7 @@ fn inputs() -> Inputs {
     // bytes from 0x8000.
     let mut pdf = Pdf::default();
     let mixed_cmap = pdf.add(Stream::new(
-        dict! { "Type" => "CMap", "CMapName" => "Bench-Mixed-H" },
+        dict! { "Type" => Object::name("CMap"), "CMapName" => Object::name("Bench-Mixed-H") },
         b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
           /CMapName /Bench-Mixed-H def\n\
           2 begincodespacerange\n<00> <7F>\n<8000> <FFFF>\nendcodespacerange\n\
@@ -309,7 +313,7 @@ fn inputs() -> Inputs {
         &[(0x41, 0x41), (0x8001, 0x4e00)],
     ));
     let cid_font_dict = cid_font(&mut pdf, Object::from(Vec::<Object>::new()));
-    let encoding = dict! { "CMapName" => "Bench-H" };
+    let encoding = dict! { "CMapName" => Object::name("Bench-H") };
     let mut unknown = type0(&mut pdf, encoding.into(), cid_font_dict);
     unknown.set("ToUnicode", to_unicode_id);
     let unknown = (pdf, unknown);
@@ -334,16 +338,16 @@ fn inputs() -> Inputs {
         );
         let name = format!("g{code}");
         procs.set(name.as_str(), pdf.stream(proc));
-        names.push(Object::from(name.as_str()));
+        names.push(Object::name(name.as_str()));
         boxes.push(Rect::new(x0 as f32, y0 as f32, x1 as f32, y1 as f32));
     }
     let type3_widths: Vec<f32> = (0..256).map(width_of).collect();
     let type3 = dict! {
-        "Type" => "Font", "Subtype" => "Type3",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type3"),
         "FontBBox" => numbers(&[0, -100, 600, 800]),
         "FontMatrix" => numbers(&[0.001, 0.0, 0.0, 0.001, 0.0, 0.0]),
         "CharProcs" => procs,
-        "Encoding" => dict! { "Type" => "Encoding", "Differences" => names },
+        "Encoding" => dict! { "Type" => Object::name("Encoding"), "Differences" => names },
         "FirstChar" => 0, "LastChar" => 255, "Widths" => numbers(&type3_widths),
         "Resources" => Dict::new(),
     };
@@ -561,15 +565,17 @@ fn programs() -> Vec<(&'static str, Pdf, Dict, Rect)> {
             let mut pdf = Pdf::default();
             let program = pdf.stream(program);
             let mut descriptor = dict! {
-                "Type" => "FontDescriptor", "FontName" => "Fix", "Flags" => 32,
+                "Type" => Object::name("FontDescriptor"), "FontName" => Object::name("Fix"),
+                "Flags" => 32,
                 "FontBBox" => numbers(&[0, -200, 700, 800]), "Ascent" => 800, "Descent" => -200,
             };
             descriptor.set(key, program);
             let descriptor = pdf.add(descriptor);
             let font = dict! {
-                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Fix",
+                "Type" => Object::name("Font"), "Subtype" => Object::name(subtype),
+                "BaseFont" => Object::name("Fix"),
                 "FirstChar" => 32, "LastChar" => 103, "Widths" => numbers(&widths),
-                "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+                "Encoding" => Object::name("WinAnsiEncoding"), "FontDescriptor" => descriptor,
             };
             (name, pdf, font, a)
         })
@@ -928,8 +934,9 @@ fn scope_group(c: &mut Criterion) {
     let mut ids = Vec::new();
     for at in 0..PICKED {
         let font = dict! {
-            "Type" => "Font", "Subtype" => "Type1",
-            "BaseFont" => Std14::ALL[at % 14].name(), "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(Std14::ALL[at % 14].name()),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         };
         let id = pdf.add(font);
         named.set(format!("F{at}").as_str(), id);
@@ -1000,8 +1007,9 @@ fn shown_group(c: &mut Criterion) {
     let mut fonts = Dict::new();
     for at in 0..4 {
         let mut font = dict! {
-            "Type" => "Font", "Subtype" => "Type1",
-            "BaseFont" => Std14::ALL[at].name(), "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(Std14::ALL[at].name()),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         };
         if at % 2 == 1 {
             font.set("ToUnicode", pdf.stream(map.clone()));
@@ -1010,7 +1018,7 @@ fn shown_group(c: &mut Criterion) {
     }
     let form_content: String = (0..10).map(|i| format!("(Form{i}) Tj ")).collect();
     let form = pdf.add(Stream::new(
-        dict! { "Subtype" => "Form" },
+        dict! { "Subtype" => Object::name("Form") },
         form_content.into_bytes(),
     ));
     let resources = Object::from(dict! { "Font" => fonts, "XObject" => dict! { "X" => form } });

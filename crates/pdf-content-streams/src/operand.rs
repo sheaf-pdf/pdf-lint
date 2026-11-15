@@ -7,7 +7,7 @@ use std::fmt;
 use std::iter::FusedIterator;
 use std::ops::Range;
 
-use pdf_objects::{Dict, Form, Object, Str, Value};
+use pdf_objects::{Dict, Form, Name, Object, Str, Value};
 use pdf_tokenizer::decode::pdfium::{self, Number};
 use pdf_tokenizer::{Kind, Token};
 
@@ -592,7 +592,7 @@ impl<'a, 's, S: Sink<'a> + ?Sized> Reading<'a, 's, S> {
 /// dictionary's key read, with where it is, waiting for its value.
 enum Partial {
     Array(Vec<Object>),
-    Dict(Dict, Option<(Vec<u8>, Range<usize>)>),
+    Dict(Dict, Option<(Name, Range<usize>)>),
 }
 
 impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
@@ -643,8 +643,8 @@ impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
             Event::Key(token) => {
                 self.inside(token);
                 let key = match self.make {
-                    true => name(token.bytes).map_or_else(Vec::new, Cow::into_owned),
-                    false => Vec::new(),
+                    true => name(token.bytes).map_or(Name::EMPTY, Name::new),
+                    false => Name::EMPTY,
                 };
                 let place = token.range();
                 if let Some(Partial::Dict(_, pending)) = self.open.last_mut() {
@@ -725,9 +725,9 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
 /// or `null` ([`word`]).
 fn leaf(token: Token) -> Option<Object> {
     let value = match token.kind {
-        Kind::LiteralString => Value::String(Str::Bytes(literal(token.bytes)), Some(Form::Literal)),
-        Kind::HexString => Value::String(Str::Bytes(hex(token.bytes)), Some(Form::Hex)),
-        Kind::Name => Value::Name(name(token.bytes)?.into_owned()),
+        Kind::LiteralString => Value::String(Str::bytes(literal(token.bytes)), Some(Form::Literal)),
+        Kind::HexString => Value::String(Str::bytes(hex(token.bytes)), Some(Form::Hex)),
+        Kind::Name => Value::Name(Name::new(name(token.bytes)?)),
         _ => word(token.bytes)?,
     };
     Some(Object::new(value))

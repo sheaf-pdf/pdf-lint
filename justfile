@@ -373,34 +373,36 @@ crypt-package: (_package "pdf-crypt")
 # version it names isn't published; `_package` says what's checked.
 color-package: (_package "pdf-color" "pdf-objects")
 
-# Package pdf-structure as a publish would, pdf-crypt and pdf-filters beside
-# it while the versions it names aren't published; `_package` says what's
-# checked.
-structure-package: (_package "pdf-structure" "pdf-crypt" "pdf-filters")
+# Package pdf-structure as a publish would, pdf-objects, pdf-crypt and
+# pdf-filters beside it while the versions it names aren't published;
+# `_package` says what's checked.
+structure-package: (_package "pdf-structure" "pdf-objects" "pdf-crypt" "pdf-filters")
 
-# Package the content streams as a publish would, pdf-filters beside them
-# while the version they name isn't published; `_package` says what's
-# checked.
-content-streams-package: (_package "pdf-content-streams" "pdf-filters")
+# Package the content streams as a publish would, pdf-objects, pdf-color and
+# pdf-filters beside them while the versions they name aren't published;
+# `_package` says what's checked.
+content-streams-package: (_package "pdf-content-streams" "pdf-objects" "pdf-color" "pdf-filters")
 
-# Package pdf-semantics as a publish would; `_package` says what's checked.
-semantics-package: (_package "pdf-semantics")
+# Package pdf-semantics as a publish would, pdf-objects beside it while the
+# version it names isn't published; `_package` says what's checked.
+semantics-package: (_package "pdf-semantics" "pdf-objects")
 
-# Package pdf-fonts as a publish would, pdf-content-streams and pdf-filters
-# beside it while the versions it and they name aren't published; `_package`
-# says what's checked, and lists the data the package holds with its terms.
-fonts-package: (_package "pdf-fonts" "pdf-content-streams" "pdf-filters")
+# Package pdf-fonts as a publish would, pdf-objects, pdf-color,
+# pdf-content-streams and pdf-filters beside it while the versions it and they
+# name aren't published; `_package` says what's checked, and lists the data
+# the package holds with its terms.
+fonts-package: (_package "pdf-fonts" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-filters")
 
-# Package pdf-linearize as a publish would, pdf-structure, pdf-semantics and
-# pdf-filters beside it while the versions it and they name aren't
-# published; `_package` says what's checked.
-linearize-package: (_package "pdf-linearize" "pdf-structure" "pdf-semantics" "pdf-filters")
+# Package pdf-linearize as a publish would, pdf-objects, pdf-structure,
+# pdf-semantics and pdf-filters beside it while the versions it and they name
+# aren't published; `_package` says what's checked.
+linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-structure" "pdf-semantics" "pdf-filters")
 
-# Package pdfs as a publish would, pdf-filters, pdf-structure,
-# pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize beside it
-# while the versions it names aren't published; `_package` says what's
-# checked.
-pdfs-package: (_package "pdfs" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize")
+# Package pdfs as a publish would, pdf-objects, pdf-color, pdf-filters,
+# pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts and
+# pdf-linearize beside it while the versions it names aren't published;
+# `_package` says what's checked.
+pdfs-package: (_package "pdfs" "pdf-objects" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs

@@ -1367,8 +1367,8 @@ impl Encrypt for Encrypting<'_> {
 
     /// A signature's `/Contents`, in a dictionary with `/ByteRange` and a
     /// string `/Contents`, of `/Type /Sig`, `/DocTimeStamp` or none (7.6.2).
-    fn clear_key(&self, _: ObjectId, dict: &Dict) -> Option<&'static [u8]> {
-        crypt::signature(dict).then_some(b"Contents")
+    fn is_clear_key(&self, _: ObjectId, dict: &Dict, key: &[u8]) -> bool {
+        key == b"Contents" && crypt::signature(dict)
     }
 
     /// Encrypted with the object's key as the handler's strings are, but
@@ -1527,8 +1527,8 @@ impl Encrypt for Plaintexts<'_, '_> {
         clear(self.list, id, dict, stream)
     }
 
-    fn clear_key(&self, _: ObjectId, dict: &Dict) -> Option<&'static [u8]> {
-        crypt::signature(dict).then_some(b"Contents")
+    fn is_clear_key(&self, _: ObjectId, dict: &Dict, key: &[u8]) -> bool {
+        key == b"Contents" && crypt::signature(dict)
     }
 
     fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Infallible> {
@@ -1605,8 +1605,8 @@ fn any_method(handler: &Handler, dict: &Dict, is: impl Fn(&Method) -> bool) -> b
 /// [`read::encryption`]: crate::read::encryption
 #[must_use]
 pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
-    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
-    let name = |bytes: &[u8]| Object::new(Value::Name(bytes.to_vec()));
+    let s = |bytes: &[u8]| Object::new(Value::String(Str::bytes(bytes), None));
+    let name = |bytes: &[u8]| Object::name(bytes);
     let mut dict = Dict::new();
     if !values.filter.is_empty() {
         dict.set("Filter", name(&values.filter));
@@ -1644,7 +1644,7 @@ pub fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
             if let Some(method) = &filter.method {
                 cf.set("CFM", name(method));
             }
-            cf.set("AuthEvent", "DocOpen");
+            cf.set("AuthEvent", Object::name("DocOpen"));
             if let Some(length) = length {
                 cf.set("Length", length);
             }

@@ -46,11 +46,13 @@
 //! Join two page content streams from a reader and inspect operations, balance, and marked content:
 //!
 //! ```
-//! use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
+//! use pdf_content_streams::pdf_objects::{
+//!     Object, ObjectId, Unreadable, Why, WithStreams, resolve_fn,
+//! };
 //! use pdf_content_streams::{Join, Limits, Operator, Pos, Properties, ResCx, balance, marked};
 //!
 //! // A reader that gives streams 4 and 5, decoded.
-//! let nothing = |_: ObjectId| None::<&Object>;
+//! let nothing = resolve_fn(|_: ObjectId| None::<&Object>);
 //! let streams = WithStreams::new(nothing, |id: ObjectId, _limit: usize| match id.number {
 //!     4 => Ok(b"q /Span <</MCID 0>> BDC BT (Hel".to_vec()),
 //!     5 => Ok(b"lo) Tj ET EMC Q".to_vec()),

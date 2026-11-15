@@ -372,11 +372,13 @@ impl Join {
     /// PDFium draws.
     ///
     /// ```
-    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
+    /// use pdf_content_streams::pdf_objects::{
+    ///     Object, ObjectId, Unreadable, Why, WithStreams, resolve_fn,
+    /// };
     /// use pdf_content_streams::{Join, Limits, Pushed};
     ///
     /// // A page's two streams, and a third that doesn't decode.
-    /// let nothing = |_: ObjectId| None::<&Object>;
+    /// let nothing = resolve_fn(|_: ObjectId| None::<&Object>);
     /// let streams = WithStreams::new(nothing, |id: ObjectId, _: usize| match id.number {
     ///     4 => Ok(b"q 1 0 0 rg".to_vec()),
     ///     5 => Ok(b"0 0 9 9 re f Q".to_vec()),
@@ -428,11 +430,13 @@ impl Join {
     /// draws of it isn't joined here, and the caller is told it isn't.
     ///
     /// ```
-    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
+    /// use pdf_content_streams::pdf_objects::{
+    ///     Object, ObjectId, Unreadable, Why, WithStreams, resolve_fn,
+    /// };
     /// use pdf_content_streams::{Join, Limits};
     ///
     /// // A page's two streams, and between them one whose filter isn't read.
-    /// let nothing = |_: ObjectId| None::<&Object>;
+    /// let nothing = resolve_fn(|_: ObjectId| None::<&Object>);
     /// let streams = WithStreams::new(nothing, |id: ObjectId, _: usize| match id.number {
     ///     4 => Ok(b"0 0 m".to_vec()),
     ///     6 => Ok(b"9 9 l S".to_vec()),
@@ -491,17 +495,19 @@ impl Join {
     /// stream here.
     ///
     /// ```
-    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why, dict};
+    /// use pdf_content_streams::pdf_objects::{
+    ///     Object, ObjectId, Unreadable, Why, WithStreams, dict, resolve_fn,
+    /// };
     /// use pdf_content_streams::{Join, Limits};
     ///
     /// // Streams 4 and 5, and 6 a dictionary, which is no stream.
     /// let stream = Object::stream(dict! {});
     /// let other = Object::from(dict! { "A" => 1 });
-    /// let objects = |id: ObjectId| match id.number {
+    /// let objects = resolve_fn(|id: ObjectId| match id.number {
     ///     4 | 5 => Some(&stream),
     ///     6 => Some(&other),
     ///     _ => None,
-    /// };
+    /// });
     /// let file = WithStreams::new(objects, |id: ObjectId, _: usize| match id.number {
     ///     4 => Ok(b"0 0 m 9 9 l".to_vec()),
     ///     5 => Ok(b"S".to_vec()),

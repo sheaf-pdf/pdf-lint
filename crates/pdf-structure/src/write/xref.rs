@@ -261,7 +261,7 @@ impl Section {
                 data.extend_from_slice(&row.generation.to_be_bytes());
             }
         }
-        trailer.set("Type", "XRef");
+        trailer.set("Type", Object::name("XRef"));
         trailer.set("Size", i64::from(self.size));
         trailer.set(
             "W",
@@ -276,7 +276,7 @@ impl Section {
             let up = Prediction::Png(layout, pdf_filters::Row::Up);
             let rows = std::mem::take(&mut data);
             deflate.encode(&rows, up, &mut data)?;
-            trailer.set("Filter", "FlateDecode");
+            trailer.set("Filter", Object::name("FlateDecode"));
             trailer.set(
                 "DecodeParms",
                 dict! { "Predictor" => i64::from(up.predictor()), "Columns" => columns as i64 },

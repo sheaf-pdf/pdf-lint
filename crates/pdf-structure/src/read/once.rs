@@ -208,11 +208,16 @@ fn objects() -> Vec<(u32, fixture::Body)> {
     vec![
         (
             1,
-            dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into(),
+            dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) }.into(),
         ),
         (
             2,
-            dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 }.into(),
+            dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => Vec::<Object>::new(),
+                "Count" => 0,
+            }
+            .into(),
         ),
         (3, dict! { "A" => 1 }.into()),
     ]
@@ -287,7 +292,7 @@ fn a_fault_in_a_streams_indirect_length_is_said_once_at_its_own_place() {
             .unwrap()
             .declared
     );
-    assert_eq!(stream.data.at().map(|at| at.end - at.start), Some(4));
+    assert_eq!(stream.data.at().map(|at| at.len()), Some(4));
     said_once_at_its_own_place(&file, 3, 4, Some(2), "/Length");
 }
 

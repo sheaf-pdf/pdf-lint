@@ -1073,8 +1073,8 @@ fn changed(id: Option<ObjectId>) -> String {
 /// What [`Error::Gone`] says of object `id`'s bytes at `at`.
 fn gone(id: ObjectId, at: Span) -> String {
     let (n, g) = (id.number, id.generation);
-    let (start, end) = (at.start, at.end);
-    let place = match at.stream {
+    let (start, end) = (at.start(), at.end());
+    let place = match at.stream() {
         None => "the file".to_string(),
         Some(stream) => format!("object stream {}'s decoded data", stream.number),
     };
@@ -1306,7 +1306,7 @@ fn dangling(
     };
     let mut stack: Vec<&Object> = Vec::new();
     let objects = bodies.iter().map(|(_, body)| body.object());
-    for object in objects.chain(trailer.entries().iter().map(|entry| &entry.value)) {
+    for object in objects.chain(trailer.entries().iter().map(pdf_objects::Entry::value)) {
         if see(object).is_some() {
             stack.push(object);
         }
@@ -1325,8 +1325,8 @@ fn dangling(
                 _ => continue,
             };
             for entry in entries {
-                if see(&entry.value).is_some() {
-                    stack.push(&entry.value);
+                if see(entry.value()).is_some() {
+                    stack.push(entry.value());
                 }
             }
         }

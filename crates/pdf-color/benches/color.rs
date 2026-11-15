@@ -209,7 +209,7 @@ fn spaces() -> Vec<Object> {
 
 fn count_group(c: &mut Criterion) {
     let (objects, spaces) = (objects(), spaces());
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let mut group = c.benchmark_group("count");
     group.throughput(Throughput::Elements(1));
     for (case, space) in SPACES.iter().zip(&spaces) {
@@ -259,7 +259,7 @@ fn held<'o>(objects: impl Resolve<'o> + Copy, space: &'o Object, case: &Case) {
 
 fn read_group(c: &mut Criterion) {
     let (objects, spaces) = (objects(), spaces());
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let mut group = c.benchmark_group("read");
     group.throughput(Throughput::Elements(1));
     for (case, space) in SPACES.iter().zip(&spaces) {
@@ -322,7 +322,7 @@ fn kept<'o>(objects: impl Resolve<'o> + Copy, resources: &'o Object) -> Result<K
 fn resources_group(c: &mut Criterion) {
     let objects = objects();
     let all: Vec<Object> = NAMES.iter().map(|&names| resources(names)).collect();
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let mut group = c.benchmark_group("resources");
     for (&names, resources) in NAMES.iter().zip(&all) {
         let (counts, capped) =
@@ -372,7 +372,7 @@ fn kept_by_components<'o>(
 fn resources_components_group(c: &mut Criterion) {
     let objects = objects();
     let all: Vec<Object> = NAMES.iter().map(|&names| resources(names)).collect();
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let mut group = c.benchmark_group("resources-components");
     for (&names, resources) in NAMES.iter().zip(&all) {
         let (counts, capped) = kept_by_components(resolve, resources)
@@ -445,7 +445,7 @@ fn colorants_group(c: &mut Criterion) {
     let (ink_set, tint) = ink_set();
     let mut objects = objects();
     objects.insert(ObjectId::new(INK_TINT, 0), tint);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let mut faults = Faults::new();
     let read = Space::read(resolve, &ink_set, &Limits::DEFAULT, &mut faults);
     let read = read.unwrap_or_else(|e| panic!("colorants/device-n-32: {e}"));

@@ -562,10 +562,18 @@ pub enum ParseKind {
     RealUnderflow,
     /// [`parse::Fault::Name`].
     Name,
+    /// [`parse::Fault::ZeroObjectNumber`].
+    ZeroObjectNumber,
+    /// [`parse::Fault::SignedObjectId`].
+    SignedObjectId,
     /// [`parse::Fault::NoEol`].
     NoEol,
+    /// [`parse::Fault::StreamSpace`].
+    StreamSpace,
     /// [`parse::Fault::LoneCr`].
     LoneCr,
+    /// [`parse::Fault::BeforeEndstream`].
+    BeforeEndstream,
     /// [`parse::Fault::NoEndobj`].
     NoEndobj,
     /// [`parse::Fault::Number`].
@@ -592,8 +600,12 @@ impl ParseKind {
             parse::Fault::RealOverflow => ParseKind::RealOverflow,
             parse::Fault::RealUnderflow => ParseKind::RealUnderflow,
             parse::Fault::Name { .. } => ParseKind::Name,
+            parse::Fault::ZeroObjectNumber => ParseKind::ZeroObjectNumber,
+            parse::Fault::SignedObjectId { .. } => ParseKind::SignedObjectId,
             parse::Fault::NoEol => ParseKind::NoEol,
+            parse::Fault::StreamSpace => ParseKind::StreamSpace,
             parse::Fault::LoneCr => ParseKind::LoneCr,
+            parse::Fault::BeforeEndstream => ParseKind::BeforeEndstream,
             parse::Fault::NoEndobj { .. } => ParseKind::NoEndobj,
             parse::Fault::Number { .. } => ParseKind::Number,
             parse::Fault::OutOfRange { .. } => ParseKind::OutOfRange,
@@ -1640,7 +1652,7 @@ mod tests {
                 "the table at byte 7 has no trailer",
             ),
             (
-                Unwritten::Trailer(parse::Error::Nested { limit: 2, at: 0 }),
+                Unwritten::Trailer(parse::ErrorKind::Nested { limit: 2, at: 0 }.into()),
                 "arrays and dictionaries nested deeper than 2",
             ),
             (
@@ -1831,13 +1843,20 @@ mod tests {
             (parse::Fault::StringCr { written }, ParseKind::StringCr),
             (parse::Fault::Long { written }, ParseKind::Long),
             (parse::Fault::HighByte { written }, ParseKind::HighByte),
+            (parse::Fault::ZeroObjectNumber, ParseKind::ZeroObjectNumber),
+            (
+                parse::Fault::SignedObjectId { written },
+                ParseKind::SignedObjectId,
+            ),
+            (parse::Fault::StreamSpace, ParseKind::StreamSpace),
+            (parse::Fault::BeforeEndstream, ParseKind::BeforeEndstream),
         ];
         let mut kinds = BTreeSet::new();
         for (fault, kind) in cases {
             assert_eq!(ParseKind::of(&fault), kind, "{fault:?}");
             kinds.insert(format!("{kind:?}"));
         }
-        assert_eq!(kinds.len(), 13, "each kind once");
+        assert_eq!(kinds.len(), 17, "each kind once");
     }
 
     /// What a reading keeps of a fault, it and its place, is no larger than

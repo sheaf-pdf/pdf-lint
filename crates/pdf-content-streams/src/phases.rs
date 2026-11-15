@@ -35,7 +35,7 @@ mod tests {
     use std::sync::{Mutex, Once};
     use std::thread::{self, ThreadId};
 
-    use pdf_objects::{Object, ObjectId, dict};
+    use pdf_objects::{Object, ObjectId, dict, resolve_fn};
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Level, Metadata, Subscriber};
@@ -233,10 +233,10 @@ mod tests {
     fn resources_and_the_writers_names_are_spans() {
         let limits = Limits::DEFAULT;
         let resources = Object::from(dict! {
-            "ColorSpace" => dict! { "CS0" => "DeviceRGB" },
+            "ColorSpace" => dict! { "CS0" => Object::name("DeviceRGB") },
             "Font" => dict! { "F1" => Object::reference(1) },
         });
-        let nothing = |_: ObjectId| None;
+        let nothing = resolve_fn(|_: ObjectId| None);
         let made = spans(|| {
             ResCx::read(nothing, Some(&resources), &limits).unwrap();
         });
@@ -246,7 +246,7 @@ mod tests {
         });
         assert_eq!(named(&made), [("reserved", Level::DEBUG)]);
         let mut w = ContentWriter::new();
-        let font = Res::dict(dict! { "Type" => "Font" }).unwrap();
+        let font = Res::dict(dict! { "Type" => Object::name("Font") }).unwrap();
         w.font(font, 12.0);
         let made = spans(|| {
             let (_, needs) = w.finish(&Reserved::default());

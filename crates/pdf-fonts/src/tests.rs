@@ -436,7 +436,9 @@ fn the_crate_s_names_are_there() {
     fn also<'o, R: crate::pdf_objects::Resolve<'o>>() {
         resolves::<R>();
     }
-    let _ = also::<fn(pdf_objects::ObjectId) -> Option<&'static pdf_objects::Object>>;
+    let _ = also::<
+        pdf_objects::ResolveFn<fn(pdf_objects::ObjectId) -> Option<&'static pdf_objects::Object>>,
+    >;
 }
 
 /// `Std14::ALL` is the 14 in the order of their discriminants, so each is there once,

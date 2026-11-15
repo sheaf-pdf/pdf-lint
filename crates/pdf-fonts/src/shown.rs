@@ -82,17 +82,18 @@ const GIVEN: ObjectId = ObjectId::new(0, 0);
 /// use pdf_fonts::{Fonts, Limits, shown};
 ///
 /// // A form, object 1, that shows a string in the font of what draws it.
-/// let form = Stream::new(dict! { "Subtype" => "Form" }, b"(Hi) Tj".to_vec());
+/// let form = Stream::new(dict! { "Subtype" => Object::name("Form") }, b"(Hi) Tj".to_vec());
 /// let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(form))]);
-/// let resolve = |id: ObjectId| objects.get(&id);
-/// let file = WithStreams::new(&resolve, |id, _| {
+/// let file = WithStreams::new(&objects, |id, _| {
 ///     let data = objects.get(&id).and_then(Object::as_stream);
 ///     let data = data.and_then(|stream| stream.data.bytes()).map(<[u8]>::to_vec);
 ///     data.ok_or_else(|| Unreadable::new(id, Why::Damaged, "no such stream"))
 /// });
 ///
 /// // A page that picks Helvetica, shows a string and draws the form.
-/// let helvetica = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+/// let helvetica = dict! {
+///     "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
+/// };
 /// let resources = Object::from(dict! {
 ///     "Font" => dict! { "F1" => helvetica },
 ///     "XObject" => dict! { "X" => Object::reference(1) },

@@ -203,10 +203,10 @@ pub fn container<B: AsRef<[u8]>>(
         data.push(b'\n');
     }
     let dict = dict! {
-        "Type" => "ObjStm",
+        "Type" => Object::name("ObjStm"),
         "N" => members.len() as i64,
         "First" => first as i64,
-        "Filter" => "FlateDecode",
+        "Filter" => Object::name("FlateDecode"),
     };
     let mut deflated = Vec::new();
     deflate.encode(&data, Prediction::None, &mut deflated)?;

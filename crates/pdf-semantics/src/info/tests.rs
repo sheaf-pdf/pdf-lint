@@ -40,10 +40,7 @@ impl Sink<Fault> for Unwanted {
 
 /// A string of `bytes`, as a reader of a file gives it.
 fn bytes(bytes: &[u8]) -> Object {
-    Object::new(Value::String(
-        Str::Bytes(bytes.to_vec()),
-        Some(Form::Literal),
-    ))
+    Object::new(Value::String(Str::bytes(bytes), Some(Form::Literal)))
 }
 
 fn id(number: u32) -> ObjectId {
@@ -56,11 +53,10 @@ type Told = (Result<Option<Info>, Unreadable>, Vec<(Place, Fault)>);
 /// What `info` reads as through `objects`, by `rules`, and what it told; read
 /// alike with no sink and with one that wants none.
 fn read_by<'o>(objects: &'o BTreeMap<ObjectId, Object>, info: &'o Object, rules: Rules) -> Told {
-    let resolve = |id: ObjectId| objects.get(&id);
     let mut kept = Kept::default();
-    let read = read(resolve, info, rules, &mut kept);
-    assert_eq!(super::read(resolve, info, rules, &mut ()), read);
-    assert_eq!(super::read(resolve, info, rules, &mut Unwanted), read);
+    let read = read(objects, info, rules, &mut kept);
+    assert_eq!(super::read(objects, info, rules, &mut ()), read);
+    assert_eq!(super::read(objects, info, rules, &mut Unwanted), read);
     (read, kept.0)
 }
 
@@ -93,7 +89,7 @@ fn every_entry_is_read() {
         "Producer" => Object::text("A PDF writer"),
         "CreationDate" => Object::text("D:20261112093000+01'00"),
         "ModDate" => Object::text("D:2026"),
-        "Trapped" => "Unknown",
+        "Trapped" => Object::name("Unknown"),
         "Other" => Object::text("not read"),
     };
     let objects = held([(4, info.into())]);
@@ -141,7 +137,7 @@ fn a_reference_is_followed() {
     let objects = held([
         (4, info.into()),
         (5, Object::reference(8)),
-        (6, "True".into()),
+        (6, Object::name("True")),
         (7, Object::text("D:202613")),
         (8, Object::text("By way of two")),
     ]);
@@ -212,7 +208,7 @@ fn a_text_string_is_decoded_by_the_rules() {
         for rules in [Rules::Iso, Rules::Pdfium] {
             let (read, told) = read_by(&objects, &Object::reference(4), rules);
             let title = read.unwrap().unwrap().title.unwrap();
-            assert_eq!(title, text::decode_with(string, rules).text, "{string:?}");
+            assert_eq!(title, text::decode_str(string, rules), "{string:?}");
             assert_eq!(told, [], "{string:?}");
         }
     }
@@ -225,12 +221,10 @@ fn a_text_string_is_decoded_by_the_rules() {
             .title
     };
     assert_eq!(title(Rules::Pdfium).as_deref(), Some("Café"));
-    assert_eq!(title(Rules::Iso).as_deref(), Some("ÿþC\0a\0f\0é\0"));
-    // A string a reader gave as text is that text.
-    let given = Object::new(Value::String(Str::Text("Café".into()), None));
-    let objects = held([(4, dict! { "Title" => given }.into())]);
-    let (read, _) = read_iso(&objects, &Object::reference(4));
-    assert_eq!(read.unwrap().title.as_deref(), Some("Café"));
+    assert_eq!(
+        title(Rules::Iso).as_deref(),
+        Some("ÿþC\u{fffd}a\u{fffd}f\u{fffd}é\u{fffd}")
+    );
 }
 
 /// An entry of another type is told and read as none; so is a `/Trapped`
@@ -238,7 +232,7 @@ fn a_text_string_is_decoded_by_the_rules() {
 #[test]
 fn what_is_not_its_type_is_told() {
     let info = dict! {
-        "Title" => "ANameNotAString",
+        "Title" => Object::name("ANameNotAString"),
         "Author" => 5,
         "CreationDate" => Object::from(Dict::new()),
         "Trapped" => true,
@@ -264,11 +258,11 @@ fn what_is_not_its_type_is_told() {
         "/Trapped isn't /True, /False or /Unknown"
     );
     for (name, trapped) in [("True", Trapped::True), ("False", Trapped::False)] {
-        let objects = held([(4, dict! { "Trapped" => name }.into())]);
+        let objects = held([(4, dict! { "Trapped" => Object::name(name) }.into())]);
         let (read, told) = read_iso(&objects, &Object::reference(4));
         assert_eq!((read.unwrap().trapped, told), (Some(trapped), vec![]));
     }
-    let objects = held([(4, dict! { "Trapped" => "Partly" }.into())]);
+    let objects = held([(4, dict! { "Trapped" => Object::name("Partly") }.into())]);
     let (read, told) = read_iso(&objects, &Object::reference(4));
     assert_eq!(
         (read.unwrap().trapped, told),
@@ -337,13 +331,13 @@ fn what_does_not_read_for_the_reader_fails_the_read() {
     let (read, _) = read_by(&objects, &Object::reference(4), Rules::Iso);
     assert_eq!(read.unwrap_err().why, Why::Capped);
     // Ciphertext, in a file no password opened.
-    let encrypted = Object::new(Value::String(Str::Encrypted(b"x".to_vec()), None));
+    let encrypted = Object::new(Value::String(Str::encrypted(b"x"), None));
     let objects = held([(4, dict! { "Producer" => encrypted }.into())]);
     let (read, told) = read_by(&objects, &Object::reference(4), Rules::Iso);
     let error = read.unwrap_err();
     assert_eq!((error.id, error.why), (id(4), Why::Locked));
     assert_eq!(
-        error.message,
+        &*error.message,
         "4 0 R holds /Producer as ciphertext: it takes a password"
     );
     assert_eq!(told, []);
@@ -361,7 +355,7 @@ fn a_file_s_info_is_read_as_its_reader_gives_it() {
         "CreationDate" => Object::text("D:20261112"),
     };
     let objects = vec![
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (4, Body::from(info)),
     ];
     let trailer = dict! { "Root" => Object::reference(1), "Info" => Object::reference(4) };
@@ -412,7 +406,7 @@ fn a_debug_holds_no_text() {
         "Producer" => Object::text(MARK),
         "CreationDate" => Object::text(MARK),
         "ModDate" => Object::text("D:2026"),
-        "Trapped" => "True",
+        "Trapped" => Object::name("True"),
     };
     let objects = held([(4, info.into())]);
     let read = read_iso(&objects, &Object::reference(4)).0.unwrap();

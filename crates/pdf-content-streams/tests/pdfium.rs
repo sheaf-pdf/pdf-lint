@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 use pdf_content_streams::pdf_objects::parse::Parser;
 use pdf_content_streams::pdf_objects::pdf_tokenizer::Rules;
 use pdf_content_streams::pdf_objects::{
-    Dict, Object, ObjectId, Resolve, Str, Streams, Unreadable, Value, Why,
+    Dict, Object, ObjectId, Resolve, Str, Streams, Unreadable, Value, Why, resolve_fn,
 };
 use pdf_content_streams::{ImageStream, Join, Limits, Operand, ResCx, operations};
 
@@ -217,7 +217,7 @@ impl Res {
             })
             .collect();
         // The resources are written in place, with no objects of their own.
-        let nothing = |_: ObjectId| None;
+        let nothing = resolve_fn(|_: ObjectId| None);
         let spaces = ResCx::read(nothing, read.as_ref(), &Limits::DEFAULT).unwrap();
         Res { fonts, spaces }
     }
@@ -244,7 +244,7 @@ struct Reader<'r> {
 /// them.
 fn shown(o: Option<Operand>) -> Option<Vec<u8>> {
     match o?.object(&Limits::DEFAULT)?.into_value() {
-        Value::String(Str::Bytes(b), _) => Some(b),
+        Value::String(Str::Bytes(b), _) => Some(b.into_vec()),
         _ => None,
     }
 }

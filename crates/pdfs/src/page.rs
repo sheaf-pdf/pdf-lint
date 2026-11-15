@@ -100,15 +100,15 @@ impl fmt::Debug for Content {
 /// use pdfs::pdf_tokenizer::Rules;
 ///
 /// let objects = BTreeMap::from([
-///     (ObjectId::new(2, 0), Object::from(dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 })),
+///     (ObjectId::new(2, 0), Object::from(dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::reference(3)], "Count" => 1 })),
 ///     (ObjectId::new(3, 0), Object::from(dict! {
-///         "Type" => "Page", "Parent" => Object::reference(2),
+///         "Type" => Object::name("Page"), "Parent" => Object::reference(2),
 ///         "Contents" => vec![Object::reference(4), Object::reference(5)],
 ///     })),
 ///     (ObjectId::new(4, 0), Object::stream(dict! {})),
 ///     (ObjectId::new(5, 0), Object::stream(dict! {})),
 /// ]);
-/// let file = WithStreams::new(|id: ObjectId| objects.get(&id), |id: ObjectId, _: usize| match id.number {
+/// let file = WithStreams::new(&objects, |id: ObjectId, _: usize| match id.number {
 ///     4 => Ok(b"0 0 m".to_vec()),
 ///     5 => Ok(b"9 9 l S".to_vec()),
 ///     _ => Err(Unreadable::new(id, Why::Damaged, "no stream")),

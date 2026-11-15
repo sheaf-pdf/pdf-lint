@@ -119,7 +119,7 @@ fn each_object_at(doc: &Document, places: &[(u32, usize)], origin: &dyn Fn(u32) 
         let id = ObjectId::new(n, 0);
         assert!(doc.get(id).is_ok(), "{id}");
         let record = doc.record(id).unwrap();
-        assert_eq!(record.at.start, at, "{id}");
+        assert_eq!(record.at.start(), at, "{id}");
         assert_eq!(record.origin, origin(n), "{id}");
         assert!(record.endobj, "{id}");
     }
@@ -569,14 +569,14 @@ fn a_shift_onto_another_objects_header_isnt_taken() {
     for n in [1, 2, 4] {
         let record = doc.record(ObjectId::new(n, 0)).unwrap();
         assert_eq!(record.origin, Origin::Shifted { by: -2 }, "{n}");
-        assert_eq!(record.at.start, at(n), "{n}");
+        assert_eq!(record.at.start(), at(n), "{n}");
     }
     // Not object 4's bytes as 3, nor 6 or 7 past the white-space their
     // shift lands on: each where its own `n g obj` is.
     for n in [3, 6, 7] {
         let record = doc.record(ObjectId::new(n, 0)).unwrap();
         assert_eq!(record.origin, Origin::Recovered, "{n}");
-        assert_eq!(record.at.start, at(n), "{n}");
+        assert_eq!(record.at.start(), at(n), "{n}");
     }
     // Nor 5 1 obj as 5 0.
     assert!(doc.get(ObjectId::new(5, 0)).is_err());
@@ -670,7 +670,7 @@ fn a_section_checked_at_anothers_shift_says_what_a_scan_finds() {
     };
     for &(n, at) in &places {
         let record = doc.record(ObjectId::new(n, 0)).unwrap();
-        assert_eq!((record.at.start, record.origin), (at, origin(n)), "{n}");
+        assert_eq!((record.at.start(), record.origin), (at, origin(n)), "{n}");
     }
     reaches_its_page(&doc);
 }
@@ -748,7 +748,7 @@ fn a_reading_as_of_a_section_finds_nothing_a_later_update_wrote() {
     );
     let whole = read(&file);
     let id = ObjectId::new(3, 0);
-    let record = whole.record(id).map(|r| (r.at.start, r.origin));
+    let record = whole.record(id).map(|r| (r.at.start(), r.origin));
     assert_eq!(record, Some((end, Origin::File)));
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     let previous = reading.update().unwrap().previous;
@@ -936,7 +936,7 @@ fn a_base_as_of_the_newest_section_found_elsewhere_is_the_whole_readings() {
     }
     // As of where startxref says, past the table, nothing reads.
     let (file, _, table) = laid_out(b"", &OBJECTS, &|_, at| at, &|at| at + 5);
-    let header = pdf_objects::parse::Error::Header { at: table + 5 };
+    let header = pdf_objects::parse::ErrorKind::Header { at: table + 5 }.into();
     let why = Unwritten::Unread(crate::source::Unread::Parse(header));
     as_of_nothing(&file, table + 5, why);
 }
@@ -1404,7 +1404,7 @@ fn a_scanned_stream_without_endstream_ends_at_its_endobj_and_what_follows_reads(
         assert_eq!(stream_ends(&doc), std::slice::from_ref(&said));
         let data = doc.record(ObjectId::new(9, 0)).and_then(|r| r.data);
         assert_eq!(
-            data.map(|d| (d.at.start, d.at.end)),
+            data.map(|d| (d.at.start(), d.at.end())),
             end.map(|end| (start, end))
         );
         assert_eq!(doc.get(ObjectId::new(9, 0)).is_ok(), end.is_some());
@@ -1470,7 +1470,10 @@ fn a_document_in_a_scanned_streams_data_doesnt_stand_over_the_files_own_objects(
     assert!(doc.get(ObjectId::new(7, 0)).is_err());
     assert_eq!(stream_ends(&doc), []);
     let nine = doc.record(ObjectId::new(9, 0)).unwrap().data.unwrap();
-    assert_eq!((nine.at.start, nine.at.end), (start, start + data.len()));
+    assert_eq!(
+        (nine.at.start(), nine.at.end()),
+        (start, start + data.len())
+    );
     assert!(nine.declared);
     let doc = document(&file, &as_pdfium());
     let three = doc.get(ObjectId::new(3, 0)).unwrap().as_dict().unwrap();
@@ -1555,7 +1558,7 @@ fn a_scanned_stream_with_no_end_is_read_on_through_and_what_follows_reads() {
             (document(&file, &as_pdfium()), &no_end),
         ] {
             reaches_its_page(&doc);
-            let at = doc.record(ObjectId::new(3, 0)).unwrap().at.start;
+            let at = doc.record(ObjectId::new(3, 0)).unwrap().at.start();
             assert_eq!(at, head.len() + data.len());
             assert_eq!(&stream_ends(&doc), said);
         }
@@ -1634,7 +1637,7 @@ fn an_object_inside_a_streams_data_passed_by_its_length_isnt_read() {
         assert!(doc.get(ObjectId::new(5, 0)).is_err(), "{how:?}");
         let nine = doc.record(ObjectId::new(9, 0)).unwrap().data.unwrap();
         assert!(nine.declared);
-        assert_eq!(nine.at.end - nine.at.start, data.len());
+        assert_eq!(nine.at.len(), data.len());
         assert_eq!(stream_ends(&doc), [], "{how:?}");
     }
 }
@@ -1676,7 +1679,7 @@ fn a_document_in_data_passed_by_its_length_gives_no_object_nor_trailer() {
         }
         let six = doc.record(ObjectId::new(6, 0)).unwrap().data.unwrap();
         assert!(six.declared);
-        assert_eq!(six.at.end - six.at.start, data.len());
+        assert_eq!(six.at.len(), data.len());
         assert_eq!(doc.faults(), document(&plain, &options).faults());
     }
 }
@@ -1797,7 +1800,7 @@ fn on(doc: &Document, n: u32) -> Vec<(Place, Fault)> {
 fn length_of(doc: &Document, n: u32, length: usize) -> (Place, Fault) {
     let id = ObjectId::new(n, 0);
     let dict = doc.get(id).unwrap().as_dict().unwrap();
-    let at = dict.get(b"Length").unwrap().at;
+    let at = dict.get(b"Length").unwrap().at();
     let length = Some(length);
     (Place::new(Some(id), at), Fault::Length { length })
 }
@@ -1806,7 +1809,7 @@ fn length_of(doc: &Document, n: u32, length: usize) -> (Place, Fault) {
 /// ended it.
 fn extent(doc: &Document, n: u32) -> (usize, usize, bool) {
     let data = doc.record(ObjectId::new(n, 0)).unwrap().data.unwrap();
-    (data.at.start, data.at.end, data.declared)
+    (data.at.start(), data.at.end(), data.declared)
 }
 
 /// [`without_endstream`]'s file: the scan ends stream 9's data at its
@@ -1824,8 +1827,8 @@ fn extent(doc: &Document, n: u32) -> (usize, usize, bool) {
 fn a_scanned_stream_ended_at_its_endobj_has_its_data_to_there() {
     let (file, places, keyword, endobj) = without_endstream(b"\n", b"\n");
     let start = keyword + 1;
-    // The file with `endstream` before 9's `endobj`.
-    let twin = [&file[..endobj], b"endstream\n", &file[endobj..]].concat();
+    // The file with a framing end of line and `endstream` before 9's `endobj`.
+    let twin = [&file[..endobj], b"\nendstream\n", &file[endobj..]].concat();
     let nine = ObjectId::new(9, 0);
     for options in [Options::DEFAULT, as_pdfium()] {
         let how = options.recovery;
@@ -1844,38 +1847,48 @@ fn a_scanned_stream_ended_at_its_endobj_has_its_data_to_there() {
         let n = b"%PDF-1.7\n".len();
         let past = endobj + b"endobj".len();
         assert_eq!(
-            (record.at.start, record.at.end, record.endobj),
+            (record.at.start(), record.at.end(), record.endobj),
             (n, past, true)
         );
         let twin = document(&twin, &options);
         assert_eq!(extent(&twin, 9), (start, endobj, false), "{how:?}");
         let (object, made) = (doc.get(nine).unwrap(), twin.get(nine).unwrap());
         assert_eq!(object.value(), made.value(), "{how:?}");
-        let (at, made) = (object.at.unwrap(), made.at.unwrap());
-        assert_eq!(made.end, endobj + b"endstream".len(), "{how:?}");
-        assert_eq!(at, Span::new(None, made.start, endobj), "{how:?}");
+        let (at, made) = (object.at().unwrap(), made.at().unwrap());
+        assert_eq!(made.end(), endobj + b"\nendstream".len(), "{how:?}");
+        assert_eq!(at, Span::new(None, made.start(), endobj), "{how:?}");
     }
 }
 
-/// [`without_endstream`]'s file, `stream` followed by spaces before its end
-/// of line: 9's data starts right after `stream` as its parser reads it,
+/// [`without_endstream`]'s file, `stream` followed by spaces or form-feed
+/// before its end of line: with spaces, both the parser and the scan start
+/// past that end of line (`ParseKind::StreamSpace`); with form-feed, 9's data
+/// starts right after `stream` as its parser reads it (`ParseKind::NoEol`),
 /// where the scan's starts past that end of line, and its own read still
-/// takes it to its `endobj`, as the scan ended it, every way; the end of
-/// line not right after `stream` said, as any stream's.
+/// takes it to its `endobj`, as the scan ended it, every way.
 #[test]
 fn a_scanned_stream_ended_at_its_endobj_after_spaces_past_stream_has_its_data_to_there() {
-    let (file, places, keyword, endobj) = without_endstream(b"   \n", b"\n");
-    for options in [Options::DEFAULT, as_pdfium()] {
-        let how = options.recovery;
-        let doc = read_as(&file, &options);
-        each_object_at(&doc, &places, &|_| Origin::Recovered);
-        assert_eq!(extent(&doc, 9), (keyword, endobj, false), "{how:?}");
-        let said = ended(NINE, keyword + 4, Some(endobj));
-        assert_eq!(stream_ends(&doc), [said], "{how:?}");
-        let faults = on(&doc, 9);
-        assert!(faults.contains(&length_of(&doc, 9, 999)), "{faults:?}");
-        let eol = |(_, f): &(Place, Fault)| matches!(f, Fault::Parse { kind, .. } if *kind == ParseKind::NoEol);
-        assert_eq!(faults.iter().filter(|f| eol(f)).count(), 1, "{how:?}");
+    for (eol_bytes, data_start, want_kind) in [
+        (&b"   \n"[..], 4, ParseKind::StreamSpace),
+        (&b"\x0c\n"[..], 0, ParseKind::NoEol),
+    ] {
+        let (file, places, keyword, endobj) = without_endstream(eol_bytes, b"\n");
+        for options in [Options::DEFAULT, as_pdfium()] {
+            let how = options.recovery;
+            let doc = read_as(&file, &options);
+            each_object_at(&doc, &places, &|_| Origin::Recovered);
+            assert_eq!(
+                extent(&doc, 9),
+                (keyword + data_start, endobj, false),
+                "{how:?}"
+            );
+            let said = ended(NINE, keyword + eol_bytes.len(), Some(endobj));
+            assert_eq!(stream_ends(&doc), [said], "{how:?}");
+            let faults = on(&doc, 9);
+            assert!(faults.contains(&length_of(&doc, 9, 999)), "{faults:?}");
+            let matched = |(_, f): &(Place, Fault)| matches!(f, Fault::Parse { kind, .. } if *kind == want_kind);
+            assert_eq!(faults.iter().filter(|f| matched(f)).count(), 1, "{how:?}");
+        }
     }
 }
 
@@ -1919,12 +1932,12 @@ fn a_scanned_stream_with_endstream_on_its_stream_line_has_its_data_to_that_endst
             let record = doc.record(id).unwrap();
             let past = endobj + b"endobj".len();
             assert_eq!(
-                (record.at.start, record.at.end, record.endobj),
+                (record.at.start(), record.at.end(), record.endobj),
                 (n, past, true),
                 "{how:?}"
             );
             let dict = n + b"9 0 obj\n".len();
-            let at = doc.get(id).unwrap().at;
+            let at = doc.get(id).unwrap().at();
             let made = Span::new(None, dict, endstream + b"endstream".len());
             assert_eq!(at, Some(made), "{how:?}");
         }
@@ -1977,8 +1990,8 @@ fn a_scanned_stream_ended_at_an_endobj_iso_doesnt_read_says_it_has_none() {
         reaches_its_page(&doc);
         assert_eq!(extent(&doc, 9), (start, endobj, false), "{how:?}");
         assert_eq!(stream_ends(&doc), [ended(NINE, start, Some(endobj))]);
-        let at = doc.get(nine).unwrap().at;
-        assert_eq!(at.map(|at| at.end), Some(endobj), "{how:?}");
+        let at = doc.get(nine).unwrap().at();
+        assert_eq!(at.map(|at| at.end()), Some(endobj), "{how:?}");
         let none = Fault::Parse {
             kind: ParseKind::NoEndobj,
             text: "9 0 obj has no endobj".into(),
@@ -1986,7 +1999,7 @@ fn a_scanned_stream_ended_at_an_endobj_iso_doesnt_read_says_it_has_none() {
         let said = [length_of(&doc, 9, 999), (Place::new(Some(nine), at), none)];
         assert_eq!(on(&doc, 9), said, "{how:?}");
         let record = doc.record(nine).unwrap();
-        assert_eq!((record.at.end, record.endobj), (endobj, false), "{how:?}");
+        assert_eq!((record.at.end(), record.endobj), (endobj, false), "{how:?}");
     }
 }
 
@@ -2071,9 +2084,9 @@ fn a_scanned_cross_reference_stream_ended_at_its_endobj_is_the_trailer_read_to_t
         assert_eq!(extent(&doc, 6), (start, endobj, false), "{how:?}");
         let said = ended(Some(six), start, Some(endobj));
         assert_eq!(stream_ends(&doc), [said], "{how:?}");
-        let trailer = doc.trailer.object.at;
+        let trailer = doc.trailer.object.at();
         assert_eq!(trailer, Some(Span::new(None, dict, endobj)), "{how:?}");
-        assert_eq!(trailer, doc.get(six).unwrap().at, "{how:?}");
+        assert_eq!(trailer, doc.get(six).unwrap().at(), "{how:?}");
         if how == Recovery::Verified {
             assert_eq!(doc.trailer.stream, Some(six));
             assert_eq!(doc.trailer.object.value(), doc.get(six).unwrap().value());
@@ -2336,7 +2349,7 @@ fn a_string_that_doesnt_close_in_data_read_on_through_is_read_past() {
         let start = head.len() + data.iter().position(|&b| b == b'(').unwrap();
         let doc = read(&file);
         reaches_its_page(&doc);
-        let at = doc.record(ObjectId::new(3, 0)).unwrap().at.start;
+        let at = doc.record(ObjectId::new(3, 0)).unwrap().at.start();
         assert_eq!(at, head.len() + data.len());
         assert_eq!(stream_ends(&doc), std::slice::from_ref(&no_end));
         assert_eq!(unclosed(&doc), [read_past(None, start, 1)]);
@@ -2530,7 +2543,7 @@ fn a_reading_as_of_a_section_says_the_objects_strings_give_before_its_end() {
     let id = |n| Some(ObjectId::new(n, 0));
     let said = read_in_string(id(6), six, six + string.len() - 1, 1);
     assert_eq!(in_string(&whole), [said]);
-    let five = |doc: &Document| (doc.record(ObjectId::new(5, 0))).map(|r| (r.origin, r.at.start));
+    let five = |doc: &Document| (doc.record(ObjectId::new(5, 0))).map(|r| (r.origin, r.at.start()));
     assert_eq!(
         five(&whole),
         Some((Origin::Recovered, six + "(six\n".len()))
@@ -2592,7 +2605,7 @@ fn a_reading_as_of_a_section_takes_an_object_a_later_update_writes_from_a_string
         )
         .as_bytes(),
     );
-    let five = |doc: &Document| (doc.record(ObjectId::new(5, 0))).map(|r| (r.origin, r.at.start));
+    let five = |doc: &Document| (doc.record(ObjectId::new(5, 0))).map(|r| (r.origin, r.at.start()));
     let whole = read(&file);
     assert_eq!(in_string(&whole), []);
     assert_eq!(five(&whole), Some((Origin::Recovered, written)));
@@ -2658,7 +2671,10 @@ fn a_string_whose_object_no_entry_takes_isnt_said_where_the_sections_read() {
                 let said = read_in_string(Some(ObjectId::new(4, 0)), string, end, 1);
                 assert_eq!(in_string(&doc), [said]);
                 let record = doc.record(id).unwrap();
-                assert_eq!((record.origin, record.at.start), (Origin::Recovered, seven));
+                assert_eq!(
+                    (record.origin, record.at.start()),
+                    (Origin::Recovered, seven)
+                );
             }
         }
     }
@@ -2693,7 +2709,7 @@ fn objects_after_a_string_closed_late_into_data_that_doesnt_close_are_found() {
     assert_eq!(unclosed(&doc), [read_past(forty_six, start, 1)]);
     let forty = ObjectId::new(40, 0);
     let header = b"%PDF-1.7\n".len();
-    assert_eq!(doc.record(forty).unwrap().at.start, header + info.len());
+    assert_eq!(doc.record(forty).unwrap().at.start(), header + info.len());
     assert!(doc.get(forty).is_ok());
     let producer = header + info.windows(3).position(|w| w == b"(BU").unwrap();
     let said = read_in_string(forty_six, producer, header + closed, 1);
@@ -2837,7 +2853,7 @@ fn a_scans_own_parses_read_over_their_bytes_as_over_the_whole_file() {
     each_object_at(&doc, &places, &|_| Origin::Recovered);
     let nine = doc.record(ObjectId::new(9, 0)).unwrap().data.unwrap();
     assert!(nine.declared);
-    assert_eq!(nine.at.end - nine.at.start, data.len());
+    assert_eq!(nine.at.len(), data.len());
     let (file, places) = scanned_after(b"", b"(open\n");
     let doc = read(&file);
     each_object_at(&doc, &places, &|_| Origin::Recovered);
@@ -2915,11 +2931,11 @@ fn an_object_found_again_past_a_string_read_past_stands_only_where_it_reads() {
     let doc = read(&file);
     reaches_its_page(&doc);
     assert_eq!(width(&doc), 20);
-    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, wide);
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start(), wide);
     let later = file.len() - CUT_PAGE.len();
     assert_eq!(earlier(&doc), [read_earlier(3, wide, later)]);
     assert_eq!(
-        doc.record(ObjectId::new(1, 0)).unwrap().at.start,
+        doc.record(ObjectId::new(1, 0)).unwrap().at.start(),
         places[0].1
     );
     let five = b"5 0 obj\n<< /A 1\nendobj\n";
@@ -2975,7 +2991,7 @@ fn a_number_the_second_scan_finds_again_past_a_string_stands_only_where_it_reads
     file.extend_from_slice(b" trailer << /Size 10 /Root 1 0 R >>\n");
     let doc = read(&file);
     reaches_its_page(&doc);
-    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, first);
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start(), first);
     assert_eq!(earlier(&doc), [read_earlier(3, first, later)]);
     assert_eq!(unclosed(&doc), []);
 }
@@ -3023,7 +3039,7 @@ fn an_object_found_again_past_data_taken_back_stands_only_where_it_reads() {
         }
         let data = file.len() + "4 0 obj\n<< /Length 99 >>\nstream\n".len();
         file.extend_from_slice(four.as_bytes());
-        let endstream = file.len() - "endstream\n".len();
+        let endstream = file.len() - "\nendstream\n".len();
         let later = file.len();
         file.extend_from_slice(copy.as_bytes());
         file.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n");
@@ -3031,7 +3047,7 @@ fn an_object_found_again_past_data_taken_back_stands_only_where_it_reads() {
         assert_eq!(unclosed(&doc), [], "{whole}");
         assert_eq!(stream_ends(&doc), [], "{whole}");
         assert_eq!(extent(&doc, 4), (data, endstream, false), "{whole}");
-        let three = doc.record(ObjectId::new(3, 0)).unwrap().at.start;
+        let three = doc.record(ObjectId::new(3, 0)).unwrap().at.start();
         match whole {
             false => {
                 reaches_its_page(&doc);
@@ -3111,7 +3127,10 @@ fn an_object_starting_a_line_inside_a_string_closed_late_is_read_there() {
     let doc = read(&file);
     reaches_its_page(&doc);
     let record = doc.record(ObjectId::new(3, 0)).unwrap();
-    assert_eq!((record.at.start, record.origin), (three, Origin::Recovered));
+    assert_eq!(
+        (record.at.start(), record.origin),
+        (three, Origin::Recovered)
+    );
     assert!(record.endobj);
     // Object 5, `)` where its dictionary's key goes, doesn't read there.
     let unread: Vec<ObjectId> = doc.unread().map(|(id, _)| id).collect();
@@ -3140,7 +3159,7 @@ fn an_object_inside_a_string_closed_late_of_a_number_found_elsewhere_isnt_taken(
             true => at,
             false => file.windows(7).position(|w| w == b"3 0 obj").unwrap(),
         };
-        assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+        assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start(), at);
         assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 1)]);
     }
 }
@@ -3160,7 +3179,7 @@ fn an_object_written_twice_inside_strings_closed_late_is_said_where_it_stands() 
     reaches_its_page(&doc);
     assert_eq!(width(&doc), 10);
     let at = file.windows(7).rposition(|w| w == b"3 0 obj").unwrap();
-    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start(), at);
     assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 2)]);
 
     for seven in ["", "7 0 obj\n(seven)\nendobj\n"] {
@@ -3170,7 +3189,7 @@ fn an_object_written_twice_inside_strings_closed_late_is_said_where_it_stands() 
         reaches_its_page(&doc);
         assert_eq!(width(&doc), 10);
         let at = file.windows(7).rposition(|w| w == b"3 0 obj").unwrap();
-        assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+        assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start(), at);
         let six = read_in_string(SIX, start, end, 2);
         match seven.is_empty() {
             true => assert_eq!(in_string(&doc), [six]),
@@ -3201,7 +3220,7 @@ fn an_object_inside_a_string_closed_late_that_the_second_scan_finds_elsewhere_is
     reaches_its_page(&doc);
     assert_eq!(width(&doc), 10);
     let at = b"%PDF-1.7\n".len() + head.len();
-    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start, at);
+    assert_eq!(doc.record(ObjectId::new(3, 0)).unwrap().at.start(), at);
     assert_eq!(in_string(&doc), [read_in_string(SIX, start, end, 1)]);
     let data = b"%PDF-1.7\n9 0 obj\n<< /Length 999 >>\nstream\n".len();
     let said = ended(NINE, data, Some(data + "q Q\n".len()));
@@ -3421,7 +3440,7 @@ fn a_scanned_files_last_cross_reference_stream_takes_root_from_an_earlier_one() 
     assert_eq!(taken.len(), 1);
     assert_eq!(taken[0].1, Fault::Taken { keys });
     let dict = last + "7 0 obj\n".len();
-    assert_eq!(taken[0].0.at.map(|at| at.start), Some(dict));
+    assert_eq!(taken[0].0.at.map(|at| at.start()), Some(dict));
 }
 
 /// A file of [`OBJECTS`] whose table's one subsection is numbered from 1
@@ -3528,7 +3547,11 @@ fn a_first_subsection_from_1_whose_rows_dont_all_land_from_0_is_read_as_written(
     assert_eq!(ids, [2, 3, 4]);
     for (n, at) in places {
         let record = doc.record(ObjectId::new(n, 0)).unwrap();
-        assert_eq!((record.at.start, record.origin), (at, Origin::File), "{n}");
+        assert_eq!(
+            (record.at.start(), record.origin),
+            (at, Origin::File),
+            "{n}"
+        );
     }
     // [`misnumbered`] with object 3's row the place of object 4, as
     // numbered from 1 as written, the rest from 0: neither way for all.

@@ -71,18 +71,18 @@ fn file(fonts: bool) -> Vec<u8> {
     let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
     doc.insert(
         1,
-        dict! { "Type" => "Catalog", "Pages" => Object::reference(2) },
+        dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
     );
     let kids: Vec<Object> = (0..PAGES).map(|i| Object::reference(10 + 3 * i)).collect();
     let media = vec![Object::from(0), 0.into(), 612.into(), 792.into()];
     let root = dict! {
-        "Type" => "Pages", "Kids" => kids, "Count" => i64::from(PAGES), "MediaBox" => media,
+        "Type" => Object::name("Pages"), "Kids" => kids, "Count" => i64::from(PAGES), "MediaBox" => media,
     };
     doc.insert(2, root);
     let encoder = Deflate::DEFAULT;
     for i in 0..PAGES {
         let (page, drawn, text) = (10 + 3 * i, 11 + 3 * i, 12 + 3 * i);
-        let space = vec![Object::from("ICCBased"), Object::reference(3)];
+        let space = vec![Object::name("ICCBased"), Object::reference(3)];
         let mut resources = dict! { "ColorSpace" => dict! { "CS0" => space } };
         if fonts {
             resources.set("Font", dict! { "F1" => Object::reference(4) });
@@ -91,7 +91,7 @@ fn file(fonts: bool) -> Vec<u8> {
         let contents = vec![Object::reference(drawn), Object::reference(text)];
         let parent = Object::reference(2);
         let dict = dict! {
-            "Type" => "Page", "Parent" => parent, "Contents" => contents, "Resources" => resources,
+            "Type" => Object::name("Page"), "Parent" => parent, "Contents" => contents, "Resources" => resources,
         };
         doc.insert(page, dict);
         doc.insert(drawn, stream(dict! {}, DRAWN.as_bytes().to_vec()));
@@ -103,13 +103,19 @@ fn file(fonts: bool) -> Vec<u8> {
         encoder
             .encode(written.as_bytes(), Prediction::None, &mut deflated)
             .unwrap();
-        doc.insert(text, stream(dict! { "Filter" => "FlateDecode" }, deflated));
+        doc.insert(
+            text,
+            stream(dict! { "Filter" => Object::name("FlateDecode") }, deflated),
+        );
     }
     doc.insert(3, stream(dict! { "N" => 4 }, Vec::new()));
     if fonts {
         let font = dict! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-            "Encoding" => "WinAnsiEncoding", "ToUnicode" => Object::reference(5),
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+            "Encoding" => Object::name("WinAnsiEncoding"),
+            "ToUnicode" => Object::reference(5),
         };
         doc.insert(4, font);
         let map = b"1 begincodespacerange <00> <FF> endcodespacerange \
@@ -118,7 +124,10 @@ fn file(fonts: bool) -> Vec<u8> {
         let form = b"q BT /F1 9 Tf 72 72 Td (A form's line) Tj ET Q".to_vec();
         doc.insert(
             6,
-            stream(dict! { "Type" => "XObject", "Subtype" => "Form" }, form),
+            stream(
+                dict! { "Type" => Object::name("XObject"), "Subtype" => Object::name("Form") },
+                form,
+            ),
         );
     }
     let mut options = write::Options::DEFAULT;
@@ -344,7 +353,7 @@ fn facade_save(font: &Res, line: &[u8]) -> Vec<u8> {
 fn direct_save(font: &Res, line: &[u8]) -> Vec<u8> {
     let trailer = dict! { "Root" => Object::reference(1) };
     let mut doc = Document::new(Version::new(1, 7), trailer);
-    doc.insert(1, dict! { "Type" => "Catalog" });
+    doc.insert(1, dict! { "Type" => Object::name("Catalog") });
     let mut deflate = Deflate::DEFAULT;
     deflate.backend = Backend::ZlibRs;
     let mut written = HashMap::new();
@@ -358,7 +367,7 @@ fn direct_save(font: &Res, line: &[u8]) -> Vec<u8> {
             .encode(&content, Prediction::None, &mut deflated)
             .unwrap();
         let mut stream = Stream::new(dict! {}, content);
-        stream.dict.set("Filter", "FlateDecode");
+        stream.dict.set("Filter", Object::name("FlateDecode"));
         stream.set_bytes(deflated);
         let contents = doc.add(Object::new(Value::Stream(Box::new(stream))));
         let mut fonts = pdfs::pdf_objects::Dict::new();
@@ -370,7 +379,7 @@ fn direct_save(font: &Res, line: &[u8]) -> Vec<u8> {
         }
         let media = vec![Object::from(0), 0.into(), 612.into(), 792.into()];
         let dict = dict! {
-            "Type" => "Page", "MediaBox" => media, "Resources" => dict! { "Font" => fonts },
+            "Type" => Object::name("Page"), "MediaBox" => media, "Resources" => dict! { "Font" => fonts },
             "Contents" => contents,
         };
         placed.push(doc.add(dict));

@@ -166,8 +166,7 @@ mod tests {
 
     /// `font` read over `objects`, its program where `programs` says.
     fn read<'o>(objects: &'o BTreeMap<ObjectId, Object>, font: &'o Dict, programs: bool) -> Font {
-        let resolve = |id: ObjectId| objects.get(&id);
-        let objects = WithStreams::new(&resolve, |id: ObjectId, _: usize| {
+        let objects = WithStreams::new(objects, |id: ObjectId, _: usize| {
             let data = objects.get(&id).and_then(Object::as_stream);
             let data = data.and_then(|stream| stream.data.bytes());
             data.map(<[u8]>::to_vec)
@@ -187,8 +186,9 @@ mod tests {
     #[test]
     fn a_font_read_is_a_span() {
         let helvetica = dict! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-            "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         };
         let objects = file(vec![helvetica.clone().into()]);
         for programs in [true, false] {
@@ -199,8 +199,7 @@ mod tests {
             let fields = vec![("programs", u64::from(programs))];
             assert_eq!(named(&made), [("read", Level::DEBUG, fields)]);
         }
-        let resolve = |id: ObjectId| objects.get(&id);
-        let objects = WithStreams::new(&resolve, |id: ObjectId, _: usize| {
+        let objects = WithStreams::new(&objects, |id: ObjectId, _: usize| {
             Err(Unreadable::new(id, Why::Damaged, "no streams"))
         });
         let fonts = Fonts::for_text();
@@ -225,12 +224,13 @@ mod tests {
         let own = b"1 begincidrange <0041> <0042> 10 endcidrange";
         let objects = file(vec![
             Stream::new(dict! {}, to_unicode.to_vec()).into(),
-            Stream::new(dict! { "Type" => "CMap" }, base.to_vec()).into(),
+            Stream::new(dict! { "Type" => Object::name("CMap") }, base.to_vec()).into(),
             Stream::new(dict! { "UseCMap" => Object::reference(2) }, own.to_vec()).into(),
-            dict! { "Subtype" => "CIDFontType2", "DW" => 500 }.into(),
+            dict! { "Subtype" => Object::name("CIDFontType2"), "DW" => 500 }.into(),
         ]);
         let font = dict! {
-            "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Foo",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"),
+            "BaseFont" => Object::name("Foo"),
             "Encoding" => Object::reference(3), "DescendantFonts" => vec![Object::reference(4)],
             "ToUnicode" => Object::reference(1),
         };
@@ -264,9 +264,15 @@ mod tests {
         let matrix = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]
             .map(Object::from)
             .to_vec();
-        let differences = vec![97.into(), "a".into(), "b".into(), "c".into()];
+        let differences = vec![
+            97.into(),
+            Object::name("a"),
+            Object::name("b"),
+            Object::name("c"),
+        ];
         let font = dict! {
-            "Type" => "Font", "Subtype" => "Type3", "FontMatrix" => matrix,
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type3"),
+            "FontMatrix" => matrix,
             "Encoding" => dict! { "Differences" => differences },
             "CharProcs" => dict! { "a" => one.clone(), "b" => one, "c" => Object::reference(2) },
         };
@@ -293,8 +299,10 @@ mod tests {
             dict! { "Flags" => 32, "FontFile2" => Object::reference(1) }.into(),
         ]);
         let font = dict! {
-            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Foo",
-            "FontDescriptor" => Object::reference(2), "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("Foo"),
+            "FontDescriptor" => Object::reference(2),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         };
         let made = spans(|| {
             let read = read(&objects, &font, true);
@@ -323,17 +331,24 @@ mod tests {
         use pdf_content_streams::{Concat, ResCx};
 
         let objects = file(vec![
-            Stream::new(dict! { "Subtype" => "Form" }, b"(B) Tj".to_vec()).into(),
+            Stream::new(
+                dict! { "Subtype" => Object::name("Form") },
+                b"(B) Tj".to_vec(),
+            )
+            .into(),
         ]);
-        let resolve = |id: ObjectId| objects.get(&id);
-        let objects = WithStreams::new(&resolve, |id: ObjectId, _: usize| {
+        let objects = WithStreams::new(&objects, |id: ObjectId, _: usize| {
             let data = objects.get(&id).and_then(Object::as_stream);
             let data = data.and_then(|stream| stream.data.bytes());
             data.map(<[u8]>::to_vec)
                 .ok_or_else(|| Unreadable::new(id, Why::Damaged, "no such stream"))
         });
         let resources = Object::from(dict! {
-            "Font" => dict! { "F1" => dict! { "Subtype" => "Type1", "BaseFont" => "Courier" } },
+            "Font" => dict! {
+                "F1" => dict! {
+                    "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Courier"),
+                },
+            },
             "XObject" => dict! { "X" => Object::reference(1) },
         });
         let content = Concat::new(&[b"/F1 9 Tf (A) Tj /X Do"]);
@@ -370,8 +385,10 @@ mod tests {
             dict! { "Flags" => 32, "FontFile2" => Object::reference(1) }.into(),
         ]);
         let font = dict! {
-            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Foo",
-            "FontDescriptor" => Object::reference(2), "Encoding" => "WinAnsiEncoding",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("Foo"),
+            "FontDescriptor" => Object::reference(2),
+            "Encoding" => Object::name("WinAnsiEncoding"),
         };
         let font = read(&objects, &font, true);
         let made = spans(|| {

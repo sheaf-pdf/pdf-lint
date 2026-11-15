@@ -483,7 +483,7 @@ fn said_as_got<S: ByteSource>(reading: &Reading<S>) {
             (Ok(None), Err(Error::Unread(Unread::Missing { .. }))) => {}
             (Err(why), Err(Error::Unread(unread))) => {
                 assert_eq!(why.id, id);
-                assert_eq!(why.message, format!("{id} R doesn't read: {unread}"));
+                assert_eq!(&*why.message, format!("{id} R doesn't read: {unread}"));
             }
             (said, got) => panic!("{id:?} resolves to {said:?}, and reads as {got:?}"),
         }
@@ -502,7 +502,7 @@ fn said_of_document(doc: &Document) {
             (Ok(None), Err(Unread::Missing { .. })) => {}
             (Err(why), Err(unread)) => {
                 assert_eq!(why.id, id);
-                assert_eq!(why.message, format!("{id} R doesn't read: {unread}"));
+                assert_eq!(&*why.message, format!("{id} R doesn't read: {unread}"));
             }
             (said, got) => panic!("{id:?} resolves to {said:?}, and reads as {got:?}"),
         }
@@ -772,7 +772,7 @@ fn within(file: &[u8], doc: &Document) {
             _ => false,
         };
         if elsewhere {
-            let at = header_exactly(file, 0, record.at.start, true);
+            let at = header_exactly(file, 0, record.at.start(), true);
             assert_eq!(
                 at,
                 Some(id),
@@ -781,12 +781,12 @@ fn within(file: &[u8], doc: &Document) {
         }
     }
     let inside = |at: Span, of: Option<ObjectId>| {
-        let len = match at.stream {
+        let len = match at.stream() {
             None => Some(file.len()),
             Some(stream) => doc.decoded.get(&stream).map(Vec::len),
         };
         assert!(
-            len.is_some_and(|len| at.start <= at.end && at.end <= len),
+            len.is_some_and(|len| at.start() <= at.end() && at.end() <= len),
             "{at:?}, in {of:?}, is out of what was read"
         );
     };
@@ -796,7 +796,7 @@ fn within(file: &[u8], doc: &Document) {
     for (of, object) in objects.chain([trailer]).chain(revisions) {
         let mut stack = vec![object];
         while let Some(o) = stack.pop() {
-            if let Some(at) = o.at {
+            if let Some(at) = o.at() {
                 inside(at, of);
             }
             let dict = match o.value() {
@@ -814,10 +814,10 @@ fn within(file: &[u8], doc: &Document) {
                 _ => continue,
             };
             for entry in dict.entries() {
-                if let Some(at) = entry.key_at {
+                if let Some(at) = entry.key_at() {
                     inside(at, of);
                 }
-                stack.push(&entry.value);
+                stack.push(entry.value());
             }
         }
     }
@@ -1253,8 +1253,10 @@ fn flipped(
     for (_, record) in doc.records().filter(|(_, r)| r.origin == Origin::File) {
         let at = record.at;
         match record.data {
-            Some(data) => spans.extend([at.start..data.at.start, data.at.end..at.end]),
-            None => spans.push(at.start..at.end),
+            Some(data) => {
+                spans.extend([at.start()..data.at.start(), data.at.end()..at.end()]);
+            }
+            None => spans.push(at.range()),
         }
     }
     let total: usize = spans.iter().map(Range::len).sum();
@@ -1284,7 +1286,7 @@ fn flipped(
         }
         Err(write::Error::Changed(Some(id))) => {
             let record = doc.record(id).expect("a copy's record");
-            let held = (record.at.start..record.at.end).contains(&at);
+            let held = record.at.range().contains(&at);
             assert!(held, "{id:?}'s bytes hold the byte flipped, {at}");
         }
         Err(_) => {}
@@ -1670,7 +1672,7 @@ mod tests {
             (
                 1,
                 dict! {
-                    "Type" => "Catalog",
+                    "Type" => Object::name("Catalog"),
                     "Pages" => Object::reference(2),
                     "Lang" => Object::text("en"),
                 }
@@ -1678,13 +1680,17 @@ mod tests {
             ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }
-                    .into(),
+                dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                }
+                .into(),
             ),
             (
                 3,
                 dict! {
-                    "Type" => "Page",
+                    "Type" => Object::name("Page"),
                     "Parent" => Object::reference(2),
                     "MediaBox" => numbers(&[0, 0, 612, 792]),
                     "Annots" => vec![Object::reference(4)],
@@ -1694,8 +1700,8 @@ mod tests {
             (
                 4,
                 dict! {
-                    "Type" => "Annot",
-                    "Subtype" => "Text",
+                    "Type" => Object::name("Annot"),
+                    "Subtype" => Object::name("Text"),
                     "Rect" => numbers(&[10, 10, 30, 30]),
                     "Contents" => Object::text("A note"),
                     "AP" => dict! { "N" => Object::reference(5) },
@@ -1706,8 +1712,8 @@ mod tests {
                 5,
                 Body::stream(
                     dict! {
-                        "Type" => "XObject",
-                        "Subtype" => "Form",
+                        "Type" => Object::name("XObject"),
+                        "Subtype" => Object::name("Form"),
                         "BBox" => numbers(&[0, 0, 20, 20]),
                     },
                     b"0 0 m 20 20 l S",
@@ -1972,7 +1978,7 @@ mod tests {
         let doc = read::document(&in_an_object_stream(), &read::Options::DEFAULT);
         let at = doc
             .get(ObjectId::new(3, 0))
-            .map(|o| o.at.and_then(|at| at.stream));
+            .map(|o| o.at().and_then(|at| at.stream()));
         assert_eq!(
             at,
             Ok(Some(ObjectId::new(4, 0))),

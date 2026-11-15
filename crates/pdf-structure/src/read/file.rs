@@ -320,7 +320,7 @@ mod tests {
             let Some(at) = object.as_stream().and_then(|s| s.data.at()) else {
                 continue;
             };
-            assert_eq!(reading.data(id).unwrap(), &bytes[at.start..at.end]);
+            assert_eq!(reading.data(id).unwrap(), &bytes[at.range()]);
             streams += 1;
         }
         assert!(streams > 1, "{streams}");

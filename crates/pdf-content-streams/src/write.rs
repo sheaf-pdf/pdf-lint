@@ -136,7 +136,7 @@ pub struct GState {
 impl GState {
     /// It as an ExtGState resource: a dictionary of names and numbers.
     pub(crate) fn res(self) -> Res {
-        let mut dict = dict! { "Type" => "ExtGState" };
+        let mut dict = dict! { "Type" => Object::name("ExtGState") };
         if let Some(a) = self.fill_alpha {
             dict.set("ca", alpha(a));
         }
@@ -144,7 +144,7 @@ impl GState {
             dict.set("CA", alpha(a));
         }
         if let Some(b) = self.blend {
-            dict.set("BM", b.name());
+            dict.set("BM", Object::name(b.name()));
         }
         Res::held([Object::from(dict)])
     }
@@ -280,7 +280,8 @@ impl Reserved {
     /// it, given by reference is followed, as are references to
     /// references, up to [`Limits::hops`] in a row; a stream is read as
     /// its dictionary, as pdf-objects reads one. `objects` is any resolver,
-    /// taken by value: a closure, or a `&dyn Resolve`.
+    /// taken by value: a [`resolve_fn`](pdf_objects::resolve_fn), a map, or
+    /// a `&dyn Resolve`.
     ///
     /// What a name binds matters only where it's one the writer gives, `Sh`
     /// and six base32 characters, which it may use again: every other name
@@ -451,9 +452,9 @@ fn told_by_content(object: &Object) -> bool {
 ///   literal string as written and ISO 32000-2 as LF, is never written
 ///   raw.
 /// - **Names**, a tag's among them, as pdf-objects writes them
-///   ([`serialize::name`]): `#` and two hex digits for `#`, white-space, a
-///   delimiter or a byte outside `!` to `~` (7.3.5), 0x80 and 0xFF among
-///   them, which PDFium reads as white-space.
+///   ([`serialize::name`]), and `#00` for NUL: `#` and two hex digits for
+///   `#`, white-space, a delimiter or a byte outside `!` to `~` (7.3.5),
+///   0x80 and 0xFF among them, which PDFium reads as white-space.
 /// - **Resources named at the end** (7.8.3): each resource drawn is one
 ///   need ([`ResourceNeeds`]) in each category it's drawn in, in the order
 ///   first drawn, however often it's drawn: a resource equal to one drawn
@@ -476,7 +477,7 @@ fn told_by_content(object: &Object) -> bool {
 /// reads it.
 ///
 /// ```
-/// use pdf_content_streams::pdf_objects::dict;
+/// use pdf_content_streams::pdf_objects::{Object, dict};
 /// use pdf_content_streams::{ContentWriter, Paint, Res, ResKind, Reserved};
 ///
 /// let mut w = ContentWriter::new();
@@ -485,7 +486,11 @@ fn told_by_content(object: &Object) -> bool {
 /// w.rect(10.0, 10.0, 100.0 / 3.0, 50.0);
 /// w.paint(Paint::Fill);
 /// w.begin_text();
-/// let font = Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1" }).unwrap();
+/// let font = Res::dict(dict! {
+///     "Type" => Object::name("Font"),
+///     "Subtype" => Object::name("Type1"),
+/// })
+/// .unwrap();
 /// w.font(font, 12.0);
 /// w.show(b"(Hi)");
 /// w.end_text();
@@ -716,7 +721,7 @@ impl ContentWriter {
     /// is written as every name is, every byte: PDFium reads a name's
     /// first 255, its `/` among them.
     pub fn begin_tagged(&mut self, tag: &str) {
-        serialize::name(&mut self.out, tag.as_bytes());
+        write_name(&mut self.out, tag.as_bytes());
         self.out.extend_from_slice(b" BMC\n");
     }
 
@@ -724,7 +729,7 @@ impl ContentWriter {
     /// ([`Res::dict`] makes one of a dictionary), named in the resources'
     /// `/Properties` at the end (14.6.2): lists are never written inline.
     pub fn begin_marked(&mut self, tag: &str, props: Res) {
-        serialize::name(&mut self.out, tag.as_bytes());
+        write_name(&mut self.out, tag.as_bytes());
         self.out.push(b' ');
         self.name(ResKind::Properties, props);
         self.out.extend_from_slice(b" BDC\n");
@@ -837,6 +842,23 @@ impl ContentWriter {
         };
         self.out.push(b'/');
         self.slots.push((self.out.len(), need));
+    }
+}
+
+/// Writes `bytes` as a `/` name: by [`serialize::name`], or, with a NUL
+/// byte, which ISO 32000-2 refuses, `#00` for NUL and every other byte as
+/// [`serialize::name`] writes it.
+fn write_name(out: &mut Vec<u8>, bytes: &[u8]) {
+    if serialize::name(out, bytes).is_err() {
+        out.reserve(1 + bytes.len() + 2);
+        out.push(b'/');
+        for &b in bytes {
+            if b.is_ascii_graphic() && !b"#()<>[]{}/%".contains(&b) {
+                out.push(b);
+            } else {
+                let _ = write!(out, "#{b:02X}");
+            }
+        }
     }
 }
 

@@ -783,18 +783,23 @@ fn stream_of<'o, R: Resolve<'o>>(
 ///
 /// ```
 /// use pdf_semantics::Limits;
-/// use pdf_semantics::pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
+/// use pdf_semantics::pdf_objects::{
+///     Object, ObjectId, Unreadable, Why, WithStreams, dict, resolve_fn,
+/// };
 /// use pdf_semantics::xmp::{self, Claims};
 ///
 /// let packet = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:a="http://www.aiim.org/pdfa/ns/id/"
 ///     a:part="4"/>"#;
-/// let stream = Object::stream(dict! { "Type" => "Metadata", "Subtype" => "XML" });
-/// let objects = |id: ObjectId| (id == ObjectId::new(5, 0)).then_some(&stream);
+/// let stream = Object::stream(dict! {
+///     "Type" => Object::name("Metadata"),
+///     "Subtype" => Object::name("XML"),
+/// });
+/// let objects = resolve_fn(|id: ObjectId| (id == ObjectId::new(5, 0)).then_some(&stream));
 /// let file = WithStreams::new(objects, |id: ObjectId, _: usize| match id.number {
 ///     5 => Ok(packet.to_vec()),
 ///     _ => Err(Unreadable::new(id, Why::Damaged, format!("{id} R isn't in the file"))),
 /// });
-/// let catalog = dict! { "Type" => "Catalog", "Metadata" => Object::reference(5) };
+/// let catalog = dict! { "Type" => Object::name("Catalog"), "Metadata" => Object::reference(5) };
 ///
 /// let claims = xmp::read_from(file, &catalog, &Limits::DEFAULT, &mut ()).unwrap();
 /// assert_eq!(claims.unwrap().pdfa_part.as_deref(), Some("4"));

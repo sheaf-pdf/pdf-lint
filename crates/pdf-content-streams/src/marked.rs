@@ -139,9 +139,9 @@ pub struct Marked<'p> {
 ///
 /// ```
 /// use pdf_content_streams::{Concat, Limits, Properties, Props, ResCx, marked};
-/// use pdf_content_streams::pdf_objects::dict;
+/// use pdf_content_streams::pdf_objects::{Object, dict};
 ///
-/// let header = dict! { "Subtype" => "Header" };
+/// let header = dict! { "Subtype" => Object::name("Header") };
 /// let props = Properties::new([(b"P0".to_vec(), header)]);
 /// let page = Concat::new(&[b"/Artifact /P0 BDC q", b"/Span BMC EMC Q EMC"]);
 /// let (res, limits) = (ResCx::none(), Limits::DEFAULT);

@@ -391,7 +391,7 @@ fn within(
     metadata: Option<ObjectId>,
     lengths: &mut BTreeMap<ObjectId, Option<usize>>,
 ) -> bool {
-    let len = match at.stream {
+    let len = match at.stream() {
         None => Some(file.len()),
         Some(stream) => {
             let held = doc.document().held(stream).map(<[u8]>::len);
@@ -406,7 +406,7 @@ fn within(
             })
         }
     };
-    len.is_some_and(|len| at.start <= at.end && at.end <= len)
+    len.is_some_and(|len| at.start() <= at.end() && at.end() <= len)
 }
 
 /// The catalog's metadata stream, as the XMP check names it
@@ -1168,7 +1168,7 @@ fn linearized(objects: &[impl AsRef<[u8]>]) -> (Vec<u8>, Vec<u8>) {
         .expect("it has a catalog");
     let mut catalog = reading.get(root).expect("its catalog reads").clone();
     if let Some(dict) = catalog.as_dict_mut() {
-        dict.set("PageLayout", "SinglePage");
+        dict.set("PageLayout", Object::name("SinglePage"));
     }
     let base = write::Base::of(&reading).expect("it can be updated");
     let mut updated = linearized.clone();
@@ -1323,7 +1323,7 @@ mod tests {
             assert!(opened, "{name}: {:?}", doc.encryption());
             assert_eq!(
                 doc.get(ObjectId::new(3, 0))
-                    .map(|o| o.at.and_then(|at| at.stream)),
+                    .map(|o| o.at().and_then(|at| at.stream())),
                 Ok(Some(ObjectId::new(4, 0))),
                 "{name}"
             );
@@ -1332,7 +1332,7 @@ mod tests {
                 .ok()
                 .and_then(|o| o.as_dict()?.get(b"Lang").cloned());
             let en = crate::object::Value::String(
-                crate::object::Str::Bytes(b"en".to_vec()),
+                crate::object::Str::bytes(b"en"),
                 Some(crate::object::Form::Hex),
             );
             assert_eq!(lang.map(|l| l.into_value()), Some(en), "{name}");
@@ -1472,10 +1472,10 @@ mod tests {
         // where it has one.
         let type0 = |n: u32, to_unicode: bool| {
             let mut font = dict! {
-                "Type" => "Font",
-                "Subtype" => "Type0",
-                "BaseFont" => "Batang",
-                "Encoding" => "Identity-H",
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type0"),
+                "BaseFont" => Object::name("Batang"),
+                "Encoding" => Object::name("Identity-H"),
                 "DescendantFonts" => vec![r(n + 1)],
             };
             let info = dict! {
@@ -1484,16 +1484,16 @@ mod tests {
                 "Supplement" => 0,
             };
             let cid_font = dict! {
-                "Type" => "Font",
-                "Subtype" => "CIDFontType2",
-                "BaseFont" => "Batang",
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("CIDFontType2"),
+                "BaseFont" => Object::name("Batang"),
                 "CIDSystemInfo" => info,
                 "FontDescriptor" => r(n + 2),
-                "CIDToGIDMap" => "Identity",
+                "CIDToGIDMap" => Object::name("Identity"),
             };
             let descriptor = dict! {
-                "Type" => "FontDescriptor",
-                "FontName" => "Batang",
+                "Type" => Object::name("FontDescriptor"),
+                "FontName" => Object::name("Batang"),
                 "Flags" => 4,
                 "FontBBox" => numbers(&[-200, -200, 1000, 900]),
                 "ItalicAngle" => 0,
@@ -1517,15 +1517,23 @@ mod tests {
         };
         let fonts = dict! { "F1" => r(4), "F2" => r(8) };
         let mut objects: Vec<(u32, Body)> = vec![
-            (1, dict! { "Type" => "Catalog", "Pages" => r(2) }.into()),
+            (
+                1,
+                dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }.into(),
+            ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }.into(),
+                dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![r(3)],
+                    "Count" => 1,
+                }
+                .into(),
             ),
             (
                 3,
                 dict! {
-                    "Type" => "Page",
+                    "Type" => Object::name("Page"),
                     "Parent" => r(2),
                     "MediaBox" => numbers(&[0, 0, 612, 792]),
                     "Resources" => dict! { "Font" => fonts },

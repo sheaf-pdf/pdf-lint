@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use pdf_objects::{Data, Dict, Object, ObjectId, Span, Str, Stream, Value, dict};
+use pdf_objects::{Data, Dict, Object, ObjectId, Span, Str, Stream, Value, dict, resolve_fn};
 
 use super::*;
 use crate::fuzz::read_as_written as close;
@@ -20,7 +20,7 @@ fn written(w: ContentWriter) -> (String, ResourceNeeds) {
 }
 
 fn list(subtype: &str) -> Dict {
-    dict! { "Type" => "Pagination", "Subtype" => subtype }
+    dict! { "Type" => Object::name("Pagination"), "Subtype" => Object::name(subtype) }
 }
 
 /// A pagination artifact's property list as a resource.
@@ -30,7 +30,12 @@ fn props(subtype: &str) -> Res {
 
 /// A font's resource, standing in for one a font gives.
 fn font(base: &str) -> Res {
-    Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base }).unwrap()
+    Res::dict(dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name(base),
+    })
+    .unwrap()
 }
 
 /// A name `Sh` and six base32 characters, counted up by one.
@@ -47,11 +52,7 @@ fn next(name: &[u8]) -> Vec<u8> {
 
 /// The names `resources` binds, its references resolved in `objects`.
 fn reserved(objects: &BTreeMap<ObjectId, Object>, resources: &Object) -> Reserved {
-    Reserved::read(
-        |id: ObjectId| objects.get(&id),
-        Some(resources),
-        &Limits::DEFAULT,
-    )
+    Reserved::read(objects, Some(resources), &Limits::DEFAULT)
 }
 
 /// `content`'s operations, every one read.
@@ -418,7 +419,10 @@ fn marked_content_names_its_list() {
         (
             ResKind::ExtGState,
             &Res::dict(dict! {
-                "Type" => "ExtGState", "ca" => 0.5, "CA" => 1.0, "BM" => "Multiply",
+                "Type" => Object::name("ExtGState"),
+                "ca" => 0.5,
+                "CA" => 1.0,
+                "BM" => Object::name("Multiply"),
             })
             .unwrap()
         )
@@ -442,7 +446,8 @@ fn a_gstate_is_written_as_it_sets() {
         blend: None,
     };
     let dict = |ca: f64, stroke: f64| {
-        Res::dict(dict! { "Type" => "ExtGState", "ca" => ca, "CA" => stroke }).unwrap()
+        Res::dict(dict! { "Type" => Object::name("ExtGState"), "ca" => ca, "CA" => stroke })
+            .unwrap()
     };
     for (state, want) in [
         (alphas(f32::NAN, f32::INFINITY), dict(0.0, 0.0)),
@@ -460,7 +465,7 @@ fn a_gstate_is_written_as_it_sets() {
     }
     assert_eq!(
         gs(GState::default()),
-        Res::dict(dict! { "Type" => "ExtGState" }).unwrap()
+        Res::dict(dict! { "Type" => Object::name("ExtGState") }).unwrap()
     );
     let blends = [
         (Blend::Normal, "Normal"),
@@ -485,7 +490,11 @@ fn a_gstate_is_written_as_it_sets() {
             blend: Some(blend),
             ..GState::default()
         };
-        let want = Res::dict(dict! { "Type" => "ExtGState", "BM" => name }).unwrap();
+        let want = Res::dict(dict! {
+            "Type" => Object::name("ExtGState"),
+            "BM" => Object::name(name),
+        })
+        .unwrap();
         assert_eq!(gs(state), want);
     }
 }
@@ -619,7 +628,7 @@ fn resources_by_reference_are_followed() {
 fn a_placed_stream_is_told_by_its_reference_alone() {
     let stream = |data: Data| {
         let mut s = Stream::default();
-        s.dict = dict! { "Type" => "XObject", "Subtype" => "Form" };
+        s.dict = dict! { "Type" => Object::name("XObject"), "Subtype" => Object::name("Form") };
         s.data = data;
         Object::from(s)
     };
@@ -700,10 +709,10 @@ fn each_object_names_bind_is_read_once() {
     }
     let resources = Object::from(dict! { "XObject" => names });
     let five = Cell::new(0);
-    let resolve = |id: ObjectId| {
+    let resolve = resolve_fn(|id: ObjectId| {
         five.set(five.get() + usize::from(id == ObjectId::new(5, 0)));
         objects.get(&id)
-    };
+    });
     let kept = Reserved::read(resolve, Some(&resources), &Limits::DEFAULT);
     assert_eq!(five.get(), 1, "object 5 read once");
     assert_eq!(kept.names().count(), 400);
@@ -760,8 +769,7 @@ fn references_are_followed_as_far_as_hops_says() {
             hops,
             ..Limits::DEFAULT
         };
-        let resolve = |id: ObjectId| objects.get(&id);
-        w.named(&Reserved::read(resolve, Some(&resources), &limits))
+        w.named(&Reserved::read(&objects, Some(&resources), &limits))
             .1
             .0[0]
             .name
@@ -848,7 +856,7 @@ fn resources_of_one_id_and_other_objects_are_two() {
 #[test]
 fn a_resolver_reads_resources_made_after_it() {
     let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(list("Header")))]);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = resolve_fn(|id: ObjectId| objects.get(&id));
     let mut read = 0;
     for name in ["ShAAAAAA", "ShAAAAAB"] {
         let resources = Object::from(dict! {
@@ -886,7 +894,7 @@ fn a_resource_in_two_categories_is_a_need_in_each() {
 /// apart in one content, the second drawn the next name up.
 #[test]
 fn resources_whose_digests_start_alike_are_named_apart() {
-    let list = |n: i64| dict! { "Type" => "Pagination", "N" => n };
+    let list = |n: i64| dict! { "Type" => Object::name("Pagination"), "N" => n };
     let (a, b) = (
         Res::dict(list(22_004)).unwrap(),
         Res::dict(list(27_618)).unwrap(),
@@ -1214,4 +1222,28 @@ fn a_long_name_and_string_are_written_whole() {
     assert_eq!(&tag_read[..], &tag.as_bytes()[..254]);
     let string = object(ops[1].arg(0).unwrap().bytes(), &Limits::DEFAULT).unwrap();
     assert_eq!(string.as_bytes(), Some(&codes[..32_767]));
+}
+
+/// A marked-content tag holding NUL, which ISO 32000-2's name writer refuses,
+/// writes `#00` for NUL and escapes every other byte as `serialize::name`
+/// does, reading back whole through `name`.
+#[test]
+fn a_tag_holding_nul_is_escaped_and_reads_back() {
+    let mut w = ContentWriter::new();
+    w.begin_tagged("A\0b/c#(d)\n");
+    w.begin_marked("\0", props("Header"));
+    w.end_marked();
+    w.end_marked();
+    let (text, needs) = written(w);
+    let p = String::from_utf8_lossy(&needs.0[0].name);
+    assert_eq!(
+        text,
+        format!("/A#00b#2Fc#23#28d#29#0A BMC\n/#00 /{p} BDC\nEMC\nEMC\n")
+    );
+    let ops = read(text.as_bytes());
+    assert_eq!(
+        ops[0].arg(0).unwrap().name().as_deref(),
+        Some(&b"A\0b/c#(d)\n"[..])
+    );
+    assert_eq!(ops[1].arg(1).unwrap().name().as_deref(), Some(&b"\0"[..]));
 }

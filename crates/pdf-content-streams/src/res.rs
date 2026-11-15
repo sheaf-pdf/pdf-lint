@@ -25,9 +25,8 @@ use crate::unprinted::Unprinted;
 /// - **A dictionary** by its keys in order of their bytes, each key once
 ///   with its last value, as a lookup gives it: dictionaries equal key by
 ///   key digest alike however their entries are written.
-/// - **A string** by its bytes, whether written literal or hex; a text
-///   string a reader decoded ([`Str::Text`]) and ciphertext
-///   ([`Str::Encrypted`]) each apart from bytes, and from each other.
+/// - **A string** by its bytes, whether written literal or hex; ciphertext
+///   ([`Str::Encrypted`]) apart from bytes.
 /// - **A number** by its kind and its value: an integer as its 64 bits,
 ///   apart from a real, and a real as the bits of its `f64`, which is how
 ///   pdf-objects holds an `f32` given it (the `f64` of its shortest
@@ -84,10 +83,10 @@ impl ResId {
 /// use std::collections::HashMap;
 ///
 /// use pdf_content_streams::Res;
-/// use pdf_content_streams::pdf_objects::{ObjectId, dict};
+/// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
 ///
-/// let a = Res::dict(dict! { "Type" => "ExtGState", "ca" => 0.5 }).unwrap();
-/// let b = Res::dict(dict! { "ca" => 0.5, "Type" => "ExtGState" }).unwrap();
+/// let a = Res::dict(dict! { "Type" => Object::name("ExtGState"), "ca" => 0.5 }).unwrap();
+/// let b = Res::dict(dict! { "ca" => 0.5, "Type" => Object::name("ExtGState") }).unwrap();
 /// assert_eq!(a, b);
 /// assert_ne!(a, Res::written(ObjectId::new(7, 0)));
 ///
@@ -334,10 +333,6 @@ pub(crate) fn feed(out: &mut Vec<u8>, object: &Object) {
             out.push(b'(');
             run(out, bytes);
         }
-        Value::String(Str::Text(text), _) => {
-            out.push(b't');
-            run(out, text.as_bytes());
-        }
         Value::String(Str::Encrypted(bytes), _) => {
             out.push(b'e');
             run(out, bytes);
@@ -394,7 +389,7 @@ fn stream(out: &mut Vec<u8>, stream: &Stream) {
 /// Where a stream's data was written: the object stream it's in, if any,
 /// and its two offsets.
 fn place(out: &mut Vec<u8>, at: Span) {
-    match at.stream {
+    match at.stream() {
         None => out.push(0),
         Some(ObjectId { number, generation }) => {
             out.push(1);
@@ -402,8 +397,8 @@ fn place(out: &mut Vec<u8>, at: Span) {
             out.extend(generation.to_le_bytes());
         }
     }
-    out.extend((at.start as u64).to_le_bytes());
-    out.extend((at.end as u64).to_le_bytes());
+    out.extend((at.start() as u64).to_le_bytes());
+    out.extend((at.end() as u64).to_le_bytes());
 }
 
 fn count(out: &mut Vec<u8>, n: usize) {
@@ -445,7 +440,6 @@ pub(crate) fn same(a: &Object, b: &Object) -> bool {
         (Value::Name(a), Value::Name(b)) => a == b,
         (Value::String(a, _), Value::String(b, _)) => match (a, b) {
             (Str::Bytes(a), Str::Bytes(b)) | (Str::Encrypted(a), Str::Encrypted(b)) => a == b,
-            (Str::Text(a), Str::Text(b)) => a == b,
             _ => false,
         },
         (Value::Array(a), Value::Array(b)) => {
@@ -489,7 +483,7 @@ fn same_dict(a: &Dict, b: &Dict) -> bool {
 fn same_data(a: &Data, b: &Data) -> bool {
     match (a, b) {
         (Data::Bytes(a), Data::Bytes(b)) => a == b,
-        (Data::At(a), Data::At(b)) => (a.stream, a.start, a.end) == (b.stream, b.start, b.end),
+        (Data::At(a), Data::At(b)) => a == b,
         (Data::Unplaced, Data::Unplaced) => true,
         (Data::Bytes(_) | Data::At(_) | Data::Unplaced, _) => false,
         (_, b) => !matches!(b, Data::Bytes(_) | Data::At(_) | Data::Unplaced),

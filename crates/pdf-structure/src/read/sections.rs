@@ -288,8 +288,8 @@ impl Reader {
             .ok()
             .map(|(id, object, record)| FirstObject {
                 id,
-                at: record.at.start,
-                end: record.at.end,
+                at: record.at.start(),
+                end: record.at.end(),
                 object,
             }))
     }
@@ -512,9 +512,9 @@ impl Reader {
         if !is_xref(&stream.dict) {
             return fault(Unwritten::NotXref { id, at });
         }
-        let written = stream.data.at().map(|at| file.get(at.start..at.end));
+        let written = stream.data.at().map(|at| file.get(at.range()));
         let written = written.transpose()?.flatten().unwrap_or_default();
-        let end = record.at.end;
+        let end = record.at.end();
         let startxref = file.read_from(&mut cx, end, 0, |w, _| Ok(startxref_at(w, end)))?;
         let startxref = startxref.map(|at| self.in_bytes(at));
         // As many bytes before it as a writer has ever been seen to put there.

@@ -18,7 +18,9 @@ use crate::object::{Object, ObjectId, Span, Value};
 
 /// Whether `outer`, where a value was written, holds the bytes `at`.
 fn holds(outer: Option<Span>, at: Span) -> bool {
-    outer.is_some_and(|v| v.stream == at.stream && v.start <= at.start && at.end <= v.end)
+    outer.is_some_and(|v| {
+        v.stream() == at.stream() && v.start() <= at.start() && at.end() <= v.end()
+    })
 }
 
 /// Each entry or element written in `value`, through what's written in
@@ -36,15 +38,15 @@ pub(super) fn holders(value: &Object, at: Span) -> Vec<(String, &Object, &Object
         };
         let next = match (entries, here.value()) {
             (Some(dict), _) => (dict.entries().iter())
-                .find(|entry| holds(entry.value.at, at))
+                .find(|entry| holds(entry.value().at(), at))
                 .map(|entry| {
                     (
-                        String::from_utf8_lossy(&entry.key).into_owned(),
-                        &entry.value,
+                        String::from_utf8_lossy(entry.key()).into_owned(),
+                        entry.value(),
                     )
                 }),
             (None, Value::Array(array)) => (array.iter().enumerate())
-                .find(|(_, element)| holds(element.at, at))
+                .find(|(_, element)| holds(element.at(), at))
                 .map(|(i, element)| (i.to_string(), element)),
             (None, _) => None,
         };
@@ -68,7 +70,7 @@ pub(super) fn holding(value: &Object, at: Span) -> Option<(String, &Object)> {
 /// element is at the bytes `at`, as the walk's findings are.
 pub(super) fn written_at(value: &Object, at: Span) -> Option<&Object> {
     let here = holding(value, at).map_or(value, |(_, value)| value);
-    if here.at == Some(at) {
+    if here.at() == Some(at) {
         return Some(here);
     }
     let dict = match here.value() {
@@ -78,7 +80,7 @@ pub(super) fn written_at(value: &Object, at: Span) -> Option<&Object> {
     };
     (dict.entries().iter())
         .find(|entry| entry_at(entry) == Some(at))
-        .map(|entry| &entry.value)
+        .map(|entry| entry.value())
 }
 
 /// What a read told, as it's found where the walk found nothing at its key
@@ -138,7 +140,7 @@ impl<'a> Walk<'a> {
     ) -> Option<(Option<ObjectId>, Span)> {
         let (written, at) = (self.written(object)?, at?);
         let mut there = holding(written, at).map_or(written, |(_, value)| value);
-        if there.at != Some(at) {
+        if there.at() != Some(at) {
             return None;
         }
         let mut object = object;
@@ -153,7 +155,7 @@ impl<'a> Walk<'a> {
         }
         match there.value() {
             Value::Dict(_) | Value::Stream(_) => None,
-            _ => Some((object, there.at?)),
+            _ => Some((object, there.at()?)),
         }
     }
 
@@ -180,7 +182,7 @@ impl<'a> Walk<'a> {
                 Some(&(_, _, value)) => value,
                 None => written,
             };
-            let there = (there.at == Some(at)).then_some(there);
+            let there = (there.at() == Some(at)).then_some(there);
             let container = match keyed {
                 Keyed::Holding => held.last().map_or(written, |&(_, container, _)| container),
                 Keyed::Entry(key) => match held.iter().rev().find(|(k, ..)| k == key) {
@@ -193,7 +195,7 @@ impl<'a> Walk<'a> {
             (!ptr::eq(container, written)).then_some(container)
         });
         let visited = container
-            .and_then(|container| self.parts_in.get(&(object, container.at?)))
+            .and_then(|container| self.parts_in.get(&(object, container.at()?)))
             .or(first);
         match visited {
             Some(visited) => (visited.trail.path(), visited.table),

@@ -1,8 +1,8 @@
 //! PDF color space parser and component counter (ISO 32000-2, §8.6).
 //!
 //! `pdf-color` reads color spaces through any [`Resolve`](pdf_objects::Resolve) implementation
-//! (`&reading`, `&document`, or a closure) without decoding ICC profile streams, evaluating
-//! functions, or converting pixel values.
+//! (`&reading`, `&document`, `&BTreeMap`, or [`resolve_fn`](pdf_objects::resolve_fn)) without
+//! decoding ICC profile streams, evaluating functions, or converting pixel values.
 //!
 //! # Core Concepts
 //!
@@ -22,8 +22,9 @@
 //!   (`Limits::space_visits`) so cyclic or shared function graphs cannot cause exponential work.
 //!   Reader caps, locked files, and source I/O errors propagate as [`Unreadable`](pdf_objects::Unreadable).
 //!
-//! `pdf-objects` is re-exported at [`pdf_objects`] (`Object`, `Resolve`, `Span`, [`dict!`](pdf_objects::dict),
-//! and [`Sink`](pdf_objects::fault::Sink)).
+//! `pdf-objects` is re-exported at [`pdf_objects`] (`Object`, `Resolve`,
+//! [`resolve_fn`](pdf_objects::resolve_fn), `Span`, [`dict!`](pdf_objects::dict), and
+//! [`Sink`](pdf_objects::fault::Sink)).
 
 /// Re-export of `pdf-objects` for values, resolvers, spans, and fault sinks.
 pub use pdf_objects;

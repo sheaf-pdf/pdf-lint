@@ -45,9 +45,9 @@ fn every_kind() -> Object {
         Object::from(1e30),
         Object::from(0.1f32),
         Object::from(1e10f32),
-        Object::from("N"),
-        Object::from("Na me"),
-        Object::from(""),
+        Object::name("N"),
+        Object::name("Na me"),
+        Object::name(""),
         Object::bytes(*b"lit"),
         Object::hex([0, 0xff]),
         Object::bytes([]),
@@ -56,7 +56,10 @@ fn every_kind() -> Object {
         Object::from(vec![Object::from(vec![Object::from(1), Object::from(2)])]),
         Object::from(Dict::new()),
         Object::from(nested),
-        Object::from(Stream::new(dict! { "Filter" => "AHx" }, b"41>".to_vec())),
+        Object::from(Stream::new(
+            dict! { "Filter" => Object::name("AHx") },
+            b"41>".to_vec(),
+        )),
         Object::from(Stream::new(Dict::new(), Vec::new())),
         Object::from(ObjectId::new(7, 0)),
         Object::from(ObjectId::new(u32::MAX, u16::MAX)),
@@ -71,11 +74,11 @@ fn every_kind() -> Object {
 /// kind.
 #[test]
 fn digests_of_resources_as_writers_build_them_are_pinned() {
-    let list = dict! { "Type" => "Pagination", "Subtype" => "Header" };
+    let list = dict! { "Type" => Object::name("Pagination"), "Subtype" => Object::name("Header") };
     let pinned = ResId(0xf59e69a77e0a864f2fd274e4f601de18);
     assert_eq!(Res::dict(list).unwrap().id, pinned);
 
-    let gstate = dict! { "Type" => "ExtGState", "ca" => 0.3f32 };
+    let gstate = dict! { "Type" => Object::name("ExtGState"), "ca" => 0.3f32 };
     let pinned = ResId(0x5e992d673c12d51cee9fe27e39ef7b67);
     assert_eq!(Res::dict(gstate).unwrap().id, pinned);
 
@@ -87,10 +90,10 @@ fn digests_of_resources_as_writers_build_them_are_pinned() {
     assert_eq!(Res::of([q]).unwrap().id, pinned);
 
     let font = dict! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     };
     let pinned = ResId(0xb31ab5babf0445a2a50ae8ab6340c26e);
     assert_eq!(Res::dict(font).unwrap().id, pinned);
@@ -101,9 +104,9 @@ fn digests_of_resources_as_writers_build_them_are_pinned() {
 
 /// Values of every kind, and values a feed without kinds or lengths
 /// would run together, each digest apart: a kind's tag, each run of bytes
-/// and each list counted, a string's bytes apart from a text string and
-/// from ciphertext, a stream's data in memory apart from data at a place
-/// and from data neither, and each place apart.
+/// and each list counted, a string's bytes apart from ciphertext, a
+/// stream's data in memory apart from data at a place and from data
+/// neither, and each place apart.
 #[test]
 fn every_kind_of_value_is_fed_apart() {
     let length = |n: i64| dict! { "Length" => n };
@@ -117,23 +120,22 @@ fn every_kind_of_value_is_fed_apart() {
         Object::from(0.0),
         Object::from(-0.0),
         Object::from(1.0),
-        Object::from("a"),
-        Object::from("ab"),
+        Object::name("a"),
+        Object::name("ab"),
         Object::bytes(*b"a"),
-        Object::new(Value::String(Str::Text("a".into()), None)),
-        Object::new(Value::String(Str::Encrypted(b"a".to_vec()), None)),
+        Object::new(Value::String(Str::encrypted(b"a"), None)),
         Object::bytes("é".as_bytes()),
-        Object::new(Value::String(Str::Text("é".into()), None)),
+        Object::text("é"),
         Object::from(Vec::new()),
-        Object::from(vec![Object::from("ab"), Object::from("c")]),
-        Object::from(vec![Object::from("a"), Object::from("bc")]),
-        Object::from(vec![Object::from("a/b"), Object::from("c")]),
-        Object::from(vec![Object::from("a"), Object::from("b/c")]),
+        Object::from(vec![Object::name("ab"), Object::name("c")]),
+        Object::from(vec![Object::name("a"), Object::name("bc")]),
+        Object::from(vec![Object::name("a/b"), Object::name("c")]),
+        Object::from(vec![Object::name("a"), Object::name("b/c")]),
         Object::from(vec![Object::from(vec![Object::from(1)]), Object::from(2)]),
         Object::from(vec![Object::from(vec![Object::from(1), Object::from(2)])]),
         Object::from(Dict::new()),
         Object::from(dict! { "a" => Object::null() }),
-        Object::from(dict! { "a" => "b" }),
+        Object::from(dict! { "a" => Object::name("b") }),
         Object::from(dict! { "ab" => Object::null() }),
         Object::from(ObjectId::new(1, 0)),
         Object::from(ObjectId::new(0, 1)),
@@ -171,8 +173,14 @@ fn equal_values_digest_alike_however_written() {
     let alike = |a: Object, b: Object| assert_eq!(id(a.clone()), id(b.clone()), "{a:?} {b:?}");
 
     alike(
-        Object::from(dict! { "Type" => "Pagination", "Subtype" => "Header" }),
-        Object::from(dict! { "Subtype" => "Header", "Type" => "Pagination" }),
+        Object::from(dict! {
+            "Type" => Object::name("Pagination"),
+            "Subtype" => Object::name("Header"),
+        }),
+        Object::from(dict! {
+            "Subtype" => Object::name("Header"),
+            "Type" => Object::name("Pagination"),
+        }),
     );
     alike(
         Object::from(dict! { "A" => 1, "B" => 2, "A" => 3 }),
@@ -182,19 +190,21 @@ fn equal_values_digest_alike_however_written() {
     alike(
         Object::bytes(*b"a)"),
         Object::new(Value::String(
-            Str::Bytes(b"a)".to_vec()),
+            Str::bytes(b"a)"),
             Some(pdf_objects::Form::Literal),
         )),
     );
 
     let span = Span::new(None, 10, 11);
-    alike(Object::from(5).at(span), Object::from(5));
+    alike(Object::from(5).with_span(span), Object::from(5));
     let mut placed = Dict::new();
-    placed.push_entry(Entry {
-        key: b"K".to_vec(),
-        key_at: Some(span),
-        value: Object::from(vec![Object::from(1).at(span)]).at(span),
-    });
+    placed.push_entry(
+        Entry::new(
+            "K",
+            Object::from(vec![Object::from(1).with_span(span)]).with_span(span),
+        )
+        .with_key_span(span),
+    );
     alike(
         Object::from(placed),
         Object::from(dict! { "K" => vec![Object::from(1)] }),
@@ -205,11 +215,14 @@ fn equal_values_digest_alike_however_written() {
 
     // A stream however its data was given, `/Length` set alike.
     let mut set = Stream::default();
-    set.dict = dict! { "Filter" => "AHx" };
+    set.dict = dict! { "Filter" => Object::name("AHx") };
     set.set_bytes(b"41>".to_vec());
     alike(
         Object::from(set),
-        Object::from(Stream::new(dict! { "Filter" => "AHx" }, b"41>".to_vec())),
+        Object::from(Stream::new(
+            dict! { "Filter" => Object::name("AHx") },
+            b"41>".to_vec(),
+        )),
     );
 }
 
@@ -217,7 +230,7 @@ fn equal_values_digest_alike_however_written() {
 /// reference to it, and a dictionary as the one object it is.
 #[test]
 fn a_resource_is_named_by_what_it_is() {
-    let list = dict! { "Type" => "Pagination", "Subtype" => "Footer" };
+    let list = dict! { "Type" => Object::name("Pagination"), "Subtype" => Object::name("Footer") };
     let res = Res::dict(list.clone()).unwrap();
     assert_eq!(res.id, id(Object::from(list.clone())));
     let objects: Arc<[Object]> = Arc::new([Object::from(list.clone())]);
@@ -274,10 +287,9 @@ fn values_are_the_same_exactly_where_they_feed_alike() {
         Object::from(-0.0),
         Object::from(1.0),
         Object::from(f64::NAN),
-        Object::from("a"),
+        Object::name("a"),
         Object::bytes(*b"a"),
-        Object::new(Value::String(Str::Text("a".into()), None)),
-        Object::new(Value::String(Str::Encrypted(b"a".to_vec()), None)),
+        Object::new(Value::String(Str::encrypted(b"a"), None)),
         Object::from(Vec::new()),
         Object::from(vec![Object::from(1)]),
         Object::from(vec![Object::from(1), Object::from(2)]),
@@ -306,21 +318,29 @@ fn values_are_the_same_exactly_where_they_feed_alike() {
 /// by each of the digest's rules: a dictionary's entries in another order,
 /// a key written twice taken at its last value, a string literal or hex,
 /// a value with where it was written or without, and an `f32` as the `f64`
-/// of its shortest decimal. And not equal where the digest parts them: a
-/// text string beside its bytes, an integer beside its real.
+/// of its shortest decimal. And not equal where the digest parts them:
+/// ciphertext beside its bytes, an integer beside its real.
 #[test]
 fn equal_resources_are_equal_however_written() {
     let span = Span::new(None, 10, 11);
     let mut placed = Dict::new();
-    placed.push_entry(Entry {
-        key: b"K".to_vec(),
-        key_at: Some(span),
-        value: Object::from(vec![Object::from(1).at(span)]).at(span),
-    });
+    placed.push_entry(
+        Entry::new(
+            "K",
+            Object::from(vec![Object::from(1).with_span(span)]).with_span(span),
+        )
+        .with_key_span(span),
+    );
     let alike = [
         (
-            Object::from(dict! { "Type" => "Pagination", "Subtype" => "Header" }),
-            Object::from(dict! { "Subtype" => "Header", "Type" => "Pagination" }),
+            Object::from(dict! {
+                "Type" => Object::name("Pagination"),
+                "Subtype" => Object::name("Header"),
+            }),
+            Object::from(dict! {
+                "Subtype" => Object::name("Header"),
+                "Type" => Object::name("Pagination"),
+            }),
         ),
         (
             Object::from(dict! { "A" => 1, "B" => 2, "A" => 3 }),
@@ -331,7 +351,7 @@ fn equal_resources_are_equal_however_written() {
             Object::from(dict! { "A" => 3, "B" => 2 }),
         ),
         (Object::bytes(*b"a)"), Object::hex(*b"a)")),
-        (Object::from(5).at(span), Object::from(5)),
+        (Object::from(5).with_span(span), Object::from(5)),
         (
             Object::from(placed),
             Object::from(dict! { "K" => vec![Object::from(1)] }),
@@ -347,7 +367,7 @@ fn equal_resources_are_equal_however_written() {
     }
     let apart = [
         (
-            Object::new(Value::String(Str::Text("a".into()), None)),
+            Object::new(Value::String(Str::encrypted(b"a"), None)),
             Object::bytes(*b"a"),
         ),
         (Object::from(1), Object::from(1.0)),
@@ -373,8 +393,14 @@ fn equal_resources_are_equal_however_written() {
 /// whose id is theirs.
 #[test]
 fn an_id_names_a_resource_and_its_objects_decide_it() {
-    let header = Object::from(dict! { "Type" => "Pagination", "Subtype" => "Header" });
-    let footer = Object::from(dict! { "Type" => "Pagination", "Subtype" => "Footer" });
+    let header = Object::from(dict! {
+        "Type" => Object::name("Pagination"),
+        "Subtype" => Object::name("Header"),
+    });
+    let footer = Object::from(dict! {
+        "Type" => Object::name("Pagination"),
+        "Subtype" => Object::name("Footer"),
+    });
     let res = Res::of([header.clone()]).unwrap();
     let forged = by_hand(res.id, vec![footer.clone()]);
     assert_ne!(res, forged);
@@ -405,8 +431,8 @@ fn an_id_names_a_resource_and_its_objects_decide_it() {
 fn a_resource_is_a_key() {
     let gstate = |ca: f64, first: bool| {
         let dict = match first {
-            true => dict! { "Type" => "ExtGState", "ca" => ca },
-            false => dict! { "ca" => ca, "Type" => "ExtGState" },
+            true => dict! { "Type" => Object::name("ExtGState"), "ca" => ca },
+            false => dict! { "ca" => ca, "Type" => Object::name("ExtGState") },
         };
         Res::dict(dict).unwrap()
     };
@@ -423,7 +449,9 @@ fn a_resource_is_a_key() {
     assert_eq!(written[&gstate(0.25, false)], ObjectId::new(3, 0));
     let forged = by_hand(
         gstate(0.5, true).id,
-        vec![Object::from(dict! { "Type" => "ExtGState", "ca" => 0.75 })],
+        vec![Object::from(
+            dict! { "Type" => Object::name("ExtGState"), "ca" => 0.75 },
+        )],
     );
     assert!(!written.contains_key(&forged));
     written.insert(forged.clone(), ObjectId::new(4, 0));
@@ -443,7 +471,7 @@ fn a_resource_holds_its_streams_in_memory() {
     let placed = Data::At(Span::new(None, 10, 20));
     let in_stream = Data::At(Span::new(Some(ObjectId::new(4, 0)), 0, 7));
     let held = || stream(dict! { "Length" => 2 }, Data::Bytes(b"q\n".to_vec()));
-    let font = Object::from(dict! { "Type" => "Font" });
+    let font = Object::from(dict! { "Type" => Object::name("Font") });
     for data in [placed, in_stream, Data::Unplaced] {
         let unheld = || stream(Dict::new(), data.clone());
         let nested = [
@@ -468,7 +496,7 @@ fn a_resource_holds_its_streams_in_memory() {
                 Ok(res) => panic!("{res:?}"),
             }
         }
-        let dict = dict! { "Type" => "XObject", "S" => unheld() };
+        let dict = dict! { "Type" => Object::name("XObject"), "S" => unheld() };
         let refused = ResError::Unheld(Unheld { object: 0 });
         assert_eq!(Res::dict(dict).unwrap_err(), refused);
         let body = ResBody::Objects(vec![font.clone(), unheld()].into());

@@ -63,7 +63,7 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         assert_eq!(doc.unread().next(), None, "{name}");
         let annotation = annotation(&doc);
         assert_eq!(
-            annotation.at.unwrap().stream.is_some(),
+            annotation.at().unwrap().stream().is_some(),
             packed,
             "{name}: in an object stream or not"
         );
@@ -76,7 +76,7 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         };
         assert_eq!(
             *contents.value(),
-            Value::String(Str::Bytes(b"A note".to_vec()), Some(form)),
+            Value::String(Str::bytes(b"A note"), Some(form)),
             "{name}"
         );
         // Clean, but for what the model finds of the encryption itself

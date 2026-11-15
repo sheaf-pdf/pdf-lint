@@ -2,7 +2,7 @@
 
 PDF color space parser and component counter (ISO 32000-2, §8.6), built on [pdf-objects](https://crates.io/crates/pdf-objects).
 
-`pdf-color` operates over any `Resolve` implementation (`&reading`, `&document`, or a closure) without performing file I/O, evaluating functions, or decoding ICC streams. It serves two complementary needs: sizing unfiltered inline images in content streams (matching PDFium's component counts) and validating color space definitions against ISO 32000-2.
+`pdf-color` operates over any `Resolve` implementation (`&reading`, `&document`, `&BTreeMap`, or `resolve_fn`) without performing file I/O, evaluating functions, or decoding ICC streams. It serves two complementary needs: sizing unfiltered inline images in content streams (matching PDFium's component counts) and validating color space definitions against ISO 32000-2.
 
 ## Core Concepts
 
@@ -20,16 +20,16 @@ PDF color space parser and component counter (ISO 32000-2, §8.6), built on [pdf
 Count components across a `/Resources` dictionary:
 
 ```rust
-use pdf_color::pdf_objects::{Object, ObjectId, dict};
+use pdf_color::pdf_objects::{Object, ObjectId, dict, resolve_fn};
 use pdf_color::{Limits, Spaces, components};
 
 let resources = Object::from(dict! {
     "ColorSpace" => dict! {
-        "Spot" => vec![Object::from("Separation"), Object::from("Gold"), Object::from("DeviceCMYK")],
-        "Plain" => "DeviceRGB",
+        "Spot" => vec![Object::name("Separation"), Object::name("Gold"), Object::name("DeviceCMYK")],
+        "Plain" => Object::name("DeviceRGB"),
     },
 });
-let nothing = |_: ObjectId| None;
+let nothing = resolve_fn(|_: ObjectId| None);
 let spaces = Spaces::read(nothing, Some(&resources)).unwrap().unwrap();
 let spot = spaces.get(b"Spot").unwrap();
 assert_eq!(components(nothing, spot.value, &Limits::DEFAULT), Ok(Some(1)));
@@ -44,15 +44,15 @@ assert_eq!(counts, [(&b"Spot"[..], Some(1)), (&b"Plain"[..], Some(3))]);
 Parse the same `Separation` space as a typed ISO 32000-2 `Space` and inspect spec faults:
 
 ```rust
-use pdf_color::pdf_objects::{Object, ObjectId};
-use pdf_color::{Colorant, Fault, Family, Limits, Space};
+use pdf_color::pdf_objects::{Object, ObjectId, resolve_fn};
+use pdf_color::{Colorant, Family, Fault, Limits, Space};
 
 let spot = Object::from(vec![
-    Object::from("Separation"),
-    Object::from("Gold"),
-    Object::from("DeviceCMYK"),
+    Object::name("Separation"),
+    Object::name("Gold"),
+    Object::name("DeviceCMYK"),
 ]);
-let nothing = |_: ObjectId| None;
+let nothing = resolve_fn(|_: ObjectId| None);
 let mut faults = Vec::new();
 let space = Space::read(nothing, &spot, &Limits::DEFAULT, &mut faults).unwrap().unwrap();
 assert_eq!(space.family(), Family::Separation);

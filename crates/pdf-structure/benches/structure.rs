@@ -878,7 +878,7 @@ fn walk_group(c: &mut Criterion, files: &Files) {
         b.iter(|| {
             black_box(&doc)
                 .records()
-                .fold(0, |n, (_, r)| n ^ r.at.start)
+                .fold(0, |n, (_, r)| n ^ r.at.start())
         })
     });
     group.throughput(Throughput::Elements(ids.len() as u64));

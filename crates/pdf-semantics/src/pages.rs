@@ -55,17 +55,19 @@
 //!
 //! let objects = BTreeMap::from([
 //!     (ObjectId::new(2, 0), Object::from(dict! {
-//!         "Type" => "Pages",
+//!         "Type" => Object::name("Pages"),
 //!         "Kids" => vec![Object::reference(3)],
 //!         "Count" => 1,
 //!         "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(200)],
 //!     })),
-//!     (ObjectId::new(3, 0), Object::from(dict! { "Type" => "Page", "Parent" => Object::reference(2) })),
+//!     (ObjectId::new(3, 0), Object::from(dict! {
+//!         "Type" => Object::name("Page"),
+//!         "Parent" => Object::reference(2),
+//!     })),
 //! ]);
-//! let resolve = |id: ObjectId| objects.get(&id);
 //! let catalog = dict! { "Pages" => Object::reference(2) };
 //!
-//! let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+//! let table = pages(&objects, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
 //! assert_eq!(table.len(), 1);
 //! let page = table.get(0).unwrap();
 //! assert_eq!(page.id, Some(ObjectId::new(3, 0)));
@@ -252,17 +254,20 @@ impl<'a, 'o> IntoIterator for &'a Pages<'o> {
 ///
 /// let objects = BTreeMap::from([
 ///     (ObjectId::new(2, 0), Object::from(dict! {
-///         "Type" => "Pages",
+///         "Type" => Object::name("Pages"),
 ///         "Kids" => vec![Object::reference(3), Object::reference(3)],
 ///         "Count" => 2,
 ///         "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(200)],
 ///     })),
-///     (ObjectId::new(3, 0), Object::from(dict! { "Type" => "Page", "Parent" => Object::reference(2), "Rotate" => 90 })),
+///     (ObjectId::new(3, 0), Object::from(dict! {
+///         "Type" => Object::name("Page"),
+///         "Parent" => Object::reference(2),
+///         "Rotate" => 90,
+///     })),
 /// ]);
-/// let resolve = |id: ObjectId| objects.get(&id);
 /// let catalog = dict! { "Pages" => Object::reference(2) };
 ///
-/// let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+/// let table = pages(&objects, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
 /// assert_eq!((table.len(), table.counted()), (2, 2));
 ///
 /// // Listed twice, it's two pages, the second saying so.
@@ -692,14 +697,14 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                 Ok(Some(object)) => at = object,
                 Ok(None) => return Ok(Reached::Nothing),
                 Err(unreadable) if unreadable.why == Why::Damaged => {
-                    self.say(at.at, Fault::Damaged { id: *id });
+                    self.say(at.at(), Fault::Damaged { id: *id });
                     return Ok(Reached::Damaged);
                 }
                 Err(unreadable) => return Err(unreadable.into()),
             }
         }
         if followed > 1 && !self.pdfium {
-            self.say(written.at, Fault::PageTreeChain);
+            self.say(written.at(), Fault::PageTreeChain);
         }
         Ok(Reached::Object(at, last))
     }
@@ -744,26 +749,26 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
         };
         self.object = id;
         if self.pdfium {
-            return self.walk_pdfium_root(id, root, object.at);
+            return self.walk_pdfium_root(id, root, object.at());
         }
         if id.is_none() {
-            self.say(object.at, Fault::PageTreeRootDirect);
+            self.say(object.at(), Fault::PageTreeRootDirect);
         }
         if has_value(root, b"Parent") {
-            self.say(object.at, Fault::PageTreeRootParent);
+            self.say(object.at(), Fault::PageTreeRootParent);
         }
-        match self.class(root, object.at)? {
-            Class::Node => self.walk(id, root, object.at)?,
+        match self.class(root, object.at())? {
+            Class::Node => self.walk(id, root, object.at())?,
             Class::Page => {
                 if root.has_type(b"Page") && !root.has(b"Kids") {
-                    self.say(object.at, Fault::PageTreeType);
+                    self.say(object.at(), Fault::PageTreeType);
                 }
-                self.page(id, root, object.at)?;
+                self.page(id, root, object.at())?;
             }
             Class::Empty => {}
         }
         if self.pages.is_empty() {
-            self.say(object.at, Fault::PageTreeEmpty);
+            self.say(object.at(), Fault::PageTreeEmpty);
         }
         Ok(())
     }
@@ -925,7 +930,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
             }
             let holder = frame.id;
             if !self.pdfium && kid.as_reference().is_none() && !kid.is_null() {
-                self.say(kid.at, Fault::PageTreeKidDirect);
+                self.say(kid.at(), Fault::PageTreeKidDirect);
             }
             let hops = self.hops(1);
             let (id, object) = match self.reach(kid, hops)? {
@@ -941,7 +946,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
             };
             if let Some(first) = id.and_then(|id| self.listed.get(&id)).map(|at| at.0) {
                 if let (Some(id), true) = (id, self.checking()) {
-                    self.say(kid.at, Fault::PageTreeRepeated { id });
+                    self.say(kid.at(), Fault::PageTreeRepeated { id });
                 }
                 let again = self.pages[first].clone();
                 self.push(again)?;
@@ -956,15 +961,15 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
             let listing = self.object;
             self.object = id.or(listing);
             if !self.pdfium && matches!(object.value(), Value::Stream(_)) {
-                self.say(object.at, Fault::PageTreeKidNotDictionary);
+                self.say(object.at(), Fault::PageTreeKidNotDictionary);
             }
-            let class = self.class(dict, object.at)?;
+            let class = self.class(dict, object.at())?;
             self.object = listing;
             match class {
                 Class::Page => {
                     self.object = id.or(self.object);
-                    self.check_parent(dict, object.at, holder);
-                    self.page(id, dict, object.at)?;
+                    self.check_parent(dict, object.at(), holder);
+                    self.page(id, dict, object.at())?;
                 }
                 Class::Empty => self.push(Page::none(id))?,
                 Class::Node => {
@@ -972,7 +977,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                         if self.pdfium {
                             return Err(Error::Cycle);
                         }
-                        self.say(kid.at, Fault::PageTreeCycle { id });
+                        self.say(kid.at(), Fault::PageTreeCycle { id });
                         continue;
                     }
                     if stack.len() >= self.limits.page_depth {
@@ -985,11 +990,11 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                     if let (Some(id), true) = (id, self.checking())
                         && !self.seen_nodes.insert(id)
                     {
-                        self.say(kid.at, Fault::PageTreeRepeated { id });
+                        self.say(kid.at(), Fault::PageTreeRepeated { id });
                     }
                     self.object = id.or(self.object);
-                    self.check_parent(dict, object.at, holder);
-                    let kids = self.node_kids(dict, object.at)?;
+                    self.check_parent(dict, object.at(), holder);
+                    let kids = self.node_kids(dict, object.at())?;
                     if let Some(id) = id {
                         path.insert(id);
                     }
@@ -997,7 +1002,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                         id,
                         object: self.object,
                         dict,
-                        at: object.at,
+                        at: object.at(),
                         kids,
                         next: 0,
                         first: self.pages.len(),
@@ -1020,7 +1025,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
             return self.push(Page::none(id));
         }
         if say {
-            self.say(kid.at, Fault::PageTreeKidNotDictionary);
+            self.say(kid.at(), Fault::PageTreeKidNotDictionary);
         }
         Ok(())
     }
@@ -1188,7 +1193,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                 Reached::Nothing | Reached::Damaged => break,
             };
             if !self.pdfium && parent.as_reference().is_none() && !parent.is_null() {
-                self.say(parent.at, Fault::PageTreeParentDirect);
+                self.say(parent.at(), Fault::PageTreeParentDirect);
             }
             if let Some(id) = id {
                 if let Some(known) = self.nodes.get(&id) {
@@ -1199,7 +1204,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                     if self.pdfium {
                         return Err(Error::ParentLoop);
                     }
-                    self.say(parent.at, Fault::PageTreeParentLoop);
+                    self.say(parent.at(), Fault::PageTreeParentLoop);
                     break;
                 }
             }
@@ -1307,7 +1312,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
             Some(written) => match self.reach(written, HOPS) {
                 Ok(Reached::Object(_, id)) => id,
                 Ok(_) => None,
-                Err(stopped) => return self.unchecked(written.at, stopped),
+                Err(stopped) => return self.unchecked(written.at(), stopped),
             },
             None => None,
         };
@@ -1327,7 +1332,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
         let count = match self.found(node, b"Count") {
             Ok(found) => found.and_then(|(_, count)| count.as_integer()),
             Err(stopped) => {
-                let written = node.get(b"Count").and_then(|count| count.at);
+                let written = node.get(b"Count").and_then(Object::at);
                 return self.unchecked(written.or(at), stopped);
             }
         };
@@ -1428,13 +1433,12 @@ pub const FANOUT: usize = 32;
 ///     .collect();
 /// for (&page, &parent) in numbered.iter().zip(&written.parents) {
 ///     let media = vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)];
-///     let page_dict = dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+///     let page_dict = dict! { "Type" => Object::name("Page"), "Parent" => parent, "MediaBox" => media };
 ///     objects.insert(page, Object::from(page_dict));
 /// }
-/// let resolve = |id: ObjectId| objects.get(&id);
 /// let catalog = dict! { "Pages" => written.root };
 /// let mut faults = Vec::new();
-/// let table = pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut faults).unwrap();
+/// let table = pages(&objects, &catalog, Rules::Iso, &Limits::DEFAULT, &mut faults).unwrap();
 /// assert!(faults.is_empty());
 /// let listed: Vec<_> = table.iter().map(|page| page.id.unwrap()).collect();
 /// assert_eq!(listed, numbered);
@@ -1504,7 +1508,7 @@ pub fn write(
     let nodes = (shape.nodes.iter().zip(&numbered))
         .map(|(node, &id)| {
             let mut dict = Dict::new();
-            dict.push("Type", "Pages");
+            dict.push("Type", Object::name("Pages"));
             if let Some(parent) = node.parent {
                 dict.push("Parent", numbered[parent]);
             }

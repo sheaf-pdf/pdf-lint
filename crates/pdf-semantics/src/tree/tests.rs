@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_objects::parse::Parser;
-use pdf_objects::{Str, dict, serialize};
+use pdf_objects::{Str, dict, resolve_fn, serialize};
 use pdf_structure::read::{self, ByteSource, Options, Reading};
 use pdf_structure::source::Document;
 
@@ -99,9 +99,8 @@ struct Walked {
 /// The name tree whose root is object 1 of `objects`, walked to its end.
 fn walked(objects: &[&str], limits: &Limits) -> Walked {
     let objects = file(objects);
-    let resolve = |id: ObjectId| objects.get(&id);
     let root = Object::reference(1);
-    let mut walk = names(resolve, &root, limits, Kept::default());
+    let mut walk = names(&objects, &root, limits, Kept::default());
     let keys = (walk.by_ref())
         .map(|entry| String::from_utf8_lossy(entry.unwrap().0).into_owned())
         .collect();
@@ -141,11 +140,13 @@ fn reads_a_number_tree_with_kids() {
     let objects = [
         (
             1,
-            dict! { "Type" => "Catalog", "PageLabels" => Object::reference(4) }.into(),
+            dict! { "Type" => Object::name("Catalog"), "PageLabels" => Object::reference(4) }
+                .into(),
         ),
         (
             2,
-            dict! { "Nums" => vec![Object::from(0), dict! { "S" => "r" }.into()] }.into(),
+            dict! { "Nums" => vec![Object::from(0), dict! { "S" => Object::name("r") }.into()] }
+                .into(),
         ),
         (
             3,
@@ -157,7 +158,7 @@ fn reads_a_number_tree_with_kids() {
         ),
         (
             5,
-            dict! { "S" => "D", "St" => 5, "P" => Object::text("Tab ") }.into(),
+            dict! { "S" => Object::name("D"), "St" => 5, "P" => Object::text("Tab ") }.into(),
         ),
     ]
     .map(|(n, object): (u32, Object)| (n, Body::Object(object)));
@@ -232,7 +233,7 @@ impl ByteSource for &ByPosition<'_> {
 #[test]
 fn no_labels_is_none() {
     let objects = file(&["<< /Type /Catalog >>", "null"]);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let trailer = dict! { "Root" => Object::reference(1) };
     let catalog = catalog(resolve, &trailer).unwrap().unwrap();
     assert!(catalog.get(b"PageLabels").is_none());
@@ -248,14 +249,18 @@ fn no_labels_is_none() {
 // Written, in a file, and read back: what was written, in order.
 #[test]
 fn number_tree_round_trips() {
-    let label = |prefix: &str| Object::from(dict! { "S" => "D", "P" => Object::text(prefix) });
+    let label = |prefix: &str| {
+        Object::from(dict! { "S" => Object::name("D"), "P" => Object::text(prefix) })
+    };
     let entries = vec![(3, label("A-")), (0, label("é"))];
     let tree = write_numbers(entries).unwrap();
 
     let objects = [
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "PageLabels" => Object::reference(2) }),
+            Body::from(
+                dict! { "Type" => Object::name("Catalog"), "PageLabels" => Object::reference(2) },
+            ),
         ),
         (2, Body::from(tree)),
     ];
@@ -305,7 +310,7 @@ fn a_name_tree_written_reads_back_sorted_with_no_fault() {
 
     let expected: [&[u8]; 5] = [b"", b"(a)\\\n\xFF", b"a", b"ab", b"b"];
     for root in [&root, &again] {
-        let nothing = |_: ObjectId| -> Option<&Object> { None };
+        let nothing = resolve_fn(|_: ObjectId| None);
         let mut walk = names(nothing, root, &Limits::DEFAULT, Kept::default());
         let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
         assert_eq!(keys, expected);
@@ -361,7 +366,7 @@ fn a_tree_written_is_sorted_with_each_key_once() {
     let empty = write_names([]).unwrap();
     assert_eq!(empty.get(b"Names").unwrap().as_array(), Some(&[][..]));
     let empty = Object::from(empty);
-    let nothing = |_: ObjectId| -> Option<&Object> { None };
+    let nothing = resolve_fn(|_: ObjectId| None);
     let mut walk = names(nothing, &empty, &Limits::DEFAULT, Kept::default());
     assert!(walk.next().is_none());
     assert!(walk.whole());
@@ -832,9 +837,8 @@ fn a_number_tree_says_the_same_of_its_own_keys() {
         "<< /Limits [10 20] /Nums [20 0 10 0 5 0 (a) 0 null 0 1.5 0 9] >>",
         "<< /Limits [1 2] /Nums [-3 0] >>",
     ]);
-    let resolve = |id: ObjectId| objects.get(&id);
     let root = Object::reference(1);
-    let mut walk = numbers(resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = numbers(&objects, &root, &Limits::DEFAULT, Kept::default());
     let keys: Vec<i64> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
     assert_eq!(keys, [20, 10, 5, -3]);
     assert!(!walk.whole());
@@ -858,36 +862,33 @@ fn a_number_tree_says_the_same_of_its_own_keys() {
 
 #[test]
 fn a_key_the_reader_didn_t_give_is_said_and_lost() {
-    let unread = [Str::Encrypted(b"a".to_vec()), Str::Text("a".to_string())];
-    for string in unread {
-        let root = Object::from(dict! {
-            "Names" => vec![
-                Object::new(Value::String(string.clone(), None)),
-                Object::from(0),
-                Object::bytes("b"),
-                Object::from(0),
-            ],
-        });
-        let nothing = |_: ObjectId| -> Option<&Object> { None };
-        let mut walk = names(nothing, &root, &Limits::DEFAULT, Kept::default());
-        let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
-        assert_eq!(keys, [b"b"], "{string:?}");
-        assert!(!walk.whole(), "{string:?}");
-        assert_eq!(
-            walk.into_sink().faults(),
-            [Fault::TreeKeyUnread],
-            "{string:?}"
-        );
-    }
+    let string = Str::encrypted(b"a");
+    let root = Object::from(dict! {
+        "Names" => vec![
+            Object::new(Value::String(string.clone(), None)),
+            Object::from(0),
+            Object::bytes("b"),
+            Object::from(0),
+        ],
+    });
+    let nothing = resolve_fn(|_: ObjectId| None);
+    let mut walk = names(nothing, &root, &Limits::DEFAULT, Kept::default());
+    let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
+    assert_eq!(keys, [b"b"], "{string:?}");
+    assert!(!walk.whole(), "{string:?}");
+    assert_eq!(
+        walk.into_sink().faults(),
+        [Fault::TreeKeyUnread],
+        "{string:?}"
+    );
 }
 
 #[test]
 fn a_fault_says_where_it_is() {
     let text = "<< /Names [(a) 0 1 0] >>";
     let objects = file(&["<< /Kids [2 0 R] >>", text]);
-    let resolve = |id: ObjectId| objects.get(&id);
     let root = Object::reference(1);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(&objects, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     let (no_limits, key) = (&told[0], &told[1]);
@@ -896,15 +897,14 @@ fn a_fault_says_where_it_is() {
     assert_eq!(key.1, Fault::TreeKeyKind);
     assert_eq!(key.0.object, Some(ObjectId::new(2, 0)));
     let key_at = key.0.at.unwrap();
-    assert_eq!(&text[key_at.start..key_at.end], "1");
+    assert_eq!(&text[key_at.range()], "1");
     let node_at = no_limits.0.at.unwrap();
-    assert_eq!((node_at.start, node_at.end), (0, text.len()));
+    assert_eq!((node_at.start(), node_at.end()), (0, text.len()));
 
     // An array by reference is in its own object; a node written in place
     // in its parent's, and a root in place, in none.
     let objects = file(&["<< /Names 2 0 R >>", "[1 0]"]);
-    let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(&objects, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     assert_eq!(walk.into_sink().0[0].0.object, Some(ObjectId::new(2, 0)));
 
@@ -914,8 +914,7 @@ fn a_fault_says_where_it_is() {
         "<< /Kids 2 0 R >>",
         "[7 << /Limits [(a) (a)] /Names [] >> 8]",
     ]);
-    let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(&objects, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     let of = |fault| {
@@ -933,23 +932,21 @@ fn a_fault_says_where_it_is() {
     );
 
     let objects = file(&["<< /Kids [<< /Limits [(a) (a)] /Kids [] >>] >>"]);
-    let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(&objects, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     assert_eq!(told[0], (told[0].0, Fault::TreeKidDirect));
     assert_eq!(told[0].0.object, Some(ObjectId::new(1, 0)));
 
     let in_place = parsed("<< >>");
-    let mut walk = names(resolve, &in_place, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(&objects, &in_place, &Limits::DEFAULT, Kept::default());
     assert!(walk.next().is_none());
     assert_eq!(walk.into_sink().0[0].0.object, None);
 
     // What's at a reference that isn't what it should be is in that object,
     // its place being there, and what's after it back in the node.
     let objects = file(&["<< /Kids [2 0 R 3 0 R] /Names 4 0 R >>", "7", "8", "9"]);
-    let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(&objects, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     let of = |wanted: fn(&Fault) -> bool| -> Vec<Option<ObjectId>> {
@@ -984,7 +981,7 @@ fn what_s_read_is_the_same_whatever_the_sink() {
     ];
     for objects in shapes {
         let objects = file(objects);
-        let resolve = |id: ObjectId| objects.get(&id);
+        let resolve = &objects;
         let root = Object::reference(1);
         let limits = Limits::DEFAULT;
 
@@ -1308,12 +1305,10 @@ fn a_chain_of_references_too_long_ends_the_walk() {
     };
     let root = Object::reference(1);
     let at = chain(31);
-    let resolve = |id: ObjectId| at.get(&id);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
+    let mut walk = names(&at, &root, &Limits::DEFAULT, ());
     assert_eq!(walk.next().unwrap().unwrap().0, b"a");
     let past = chain(32);
-    let resolve = |id: ObjectId| past.get(&id);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
+    let mut walk = names(&past, &root, &Limits::DEFAULT, ());
     assert_eq!(walk.next().unwrap().unwrap_err().why, Why::Capped);
     assert!(walk.next().is_none());
 
@@ -1322,8 +1317,7 @@ fn a_chain_of_references_too_long_ends_the_walk() {
     for at in 2..34 {
         long.insert(ObjectId::new(at, 0), Object::reference(at + 1));
     }
-    let resolve = |id: ObjectId| long.get(&id);
-    let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
+    let mut walk = names(&long, &root, &Limits::DEFAULT, ());
     let failed = walk.next().unwrap().unwrap_err();
     assert_eq!(failed.why, Why::Capped);
     assert_eq!(
@@ -1429,7 +1423,7 @@ fn a_document_gives_what_its_reading_gives() {
 #[test]
 fn follow_goes_through_references_to_a_value() {
     let objects = file(&["5", "1 0 R", "null", "4 0 R", "4 0 R"]);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let (one, two, three, four, five) = (
         Object::reference(1),
         Object::reference(2),
@@ -1460,7 +1454,7 @@ fn follow_goes_through_references_to_a_value() {
 #[test]
 fn catalog_follows_the_trailer_s_root() {
     let objects = file(&["<< /Type /Catalog >>", "1 0 R", "5"]);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let is = |trailer: Dict| {
         let trailer = Box::leak(Box::new(trailer));
         catalog(resolve, trailer).map(|c| c.is_some())

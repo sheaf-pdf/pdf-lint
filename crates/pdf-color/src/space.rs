@@ -423,11 +423,16 @@ impl<'o> Space<'o> {
     /// have a [`Limits::space_visits`] of their own.
     ///
     /// ```
-    /// use pdf_color::pdf_objects::{Object, ObjectId};
+    /// use pdf_color::pdf_objects::{Object, ObjectId, resolve_fn};
     /// use pdf_color::{Fault, Family, Limits, Space};
     ///
-    /// let gray = Object::from(vec![Object::from("Indexed"), Object::from("DeviceGray"), Object::from(1), Object::bytes(*b"\x00\xFF")]);
-    /// let nothing = |_: ObjectId| None;
+    /// let gray = Object::from(vec![
+    ///     Object::name("Indexed"),
+    ///     Object::name("DeviceGray"),
+    ///     Object::from(1),
+    ///     Object::bytes(*b"\x00\xFF"),
+    /// ]);
+    /// let nothing = resolve_fn(|_: ObjectId| None);
     /// let mut faults = Vec::new();
     /// let space = Space::read(nothing, &gray, &Limits::DEFAULT, &mut faults).unwrap().unwrap();
     /// assert_eq!(space.family(), Family::Indexed);
@@ -435,7 +440,12 @@ impl<'o> Space<'o> {
     /// assert_eq!(space.base(), Some(&Space::DeviceGray));
     /// assert!(faults.is_empty());
     ///
-    /// let short = Object::from(vec![Object::from("Indexed"), Object::from("DeviceGray"), Object::from(1), Object::bytes(*b"\x00")]);
+    /// let short = Object::from(vec![
+    ///     Object::name("Indexed"),
+    ///     Object::name("DeviceGray"),
+    ///     Object::from(1),
+    ///     Object::bytes(*b"\x00"),
+    /// ]);
     /// Space::read(nothing, &short, &Limits::DEFAULT, &mut faults).unwrap();
     /// assert_eq!(faults[0].1, Fault::LookupLength);
     /// ```

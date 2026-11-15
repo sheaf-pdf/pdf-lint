@@ -1,5 +1,5 @@
 use pdf_fixtures::fixture::{self, Body, Xref};
-use pdf_objects::{Object, Stream, Version, Why, WithStreams, dict};
+use pdf_objects::{Object, Stream, Version, Why, WithStreams, dict, resolve_fn};
 use pdf_structure::pdf_crypt::Password;
 use pdf_structure::pdf_crypt::writer::{Kind, Settings};
 use pdf_structure::read::{Options, Reading, WithReading};
@@ -65,14 +65,15 @@ fn packet(description: &str) -> String {
 
 /// A file whose catalog's `/Metadata` holds `xml`, deflated when `deflate`.
 fn with_xmp(xml: &str, deflate: bool) -> Vec<u8> {
-    let mut metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+    let mut metadata =
+        dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") };
     let data = if deflate {
-        metadata.set("Filter", "FlateDecode");
+        metadata.set("Filter", Object::name("FlateDecode"));
         fixture::zlib(xml.as_bytes())
     } else {
         xml.as_bytes().to_vec()
     };
-    let catalog = dict! { "Type" => "Catalog", "Metadata" => Object::reference(4) };
+    let catalog = dict! { "Type" => Object::name("Catalog"), "Metadata" => Object::reference(4) };
     let objects = [(1, Body::from(catalog)), (4, Body::Stream(metadata, data))];
     let trailer = dict! { "Root" => Object::reference(1) };
     fixture::file("1.7", &objects, trailer, Xref::Table)
@@ -150,7 +151,7 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
         "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"two\"/>";
     assert!(claims(unreadable, false).is_err());
     // No /Metadata, no claims.
-    let catalog = dict! { "Type" => "Catalog" };
+    let catalog = dict! { "Type" => Object::name("Catalog") };
     let trailer = dict! { "Root" => Object::reference(1) };
     let file = fixture::file("1.7", &[(1, Body::from(catalog))], trailer, Xref::Table);
     assert_eq!(conformance_of(&file).unwrap(), Conformance::default());
@@ -382,7 +383,7 @@ fn a_claim_s_element_holding_an_element_isn_t_its_value() {
         )
         .unwrap();
         let at = kept.0[0].0.at.unwrap();
-        assert_eq!(&xml[at.start..at.end], claim, "{inside}");
+        assert_eq!(&xml[at.range()], claim, "{inside}");
         // Alone, it's no value.
         let xml = format!("<d {A}>{claim}</d>");
         assert_eq!(claims_of(&xml), (Claims::default(), vec![Fault::XmpMixed]));
@@ -541,8 +542,8 @@ fn an_attribute_that_doesn_t_read_is_passed_and_said() {
     let (place, _) = kept.0[0];
     assert_eq!(place.object, Some(ObjectId::new(4, 0)));
     let at = place.at.unwrap();
-    assert_eq!(at.stream, Some(ObjectId::new(4, 0)));
-    assert_eq!(&xml[at.start..at.end], "<d a=1/>");
+    assert_eq!(at.stream(), Some(ObjectId::new(4, 0)));
+    assert_eq!(&xml[at.range()], "<d a=1/>");
     // With none given, nothing says what its offsets would be of.
     let mut kept = Kept::default();
     read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept).unwrap();
@@ -638,7 +639,7 @@ fn what_isn_t_utf_8_doesn_t_read() {
         assert_eq!(answer, Ok(Claims::default()), "{mark:x?}");
         assert_eq!(kept.faults(), [Fault::XmpNotUtf8], "{mark:x?}");
         let at = kept.0[0].0.at.unwrap();
-        assert_eq!((at.start, at.end), (0, end), "{mark:x?}");
+        assert_eq!((at.start(), at.end()), (0, end), "{mark:x?}");
         // And a mark alone is enough.
         if !mark.is_empty() {
             let bare = [mark, text.as_bytes()].concat();
@@ -664,7 +665,7 @@ fn what_isn_t_utf_8_doesn_t_read() {
         );
         assert_eq!(kept.faults(), [Fault::XmpNotUtf8]);
         let at = kept.0[0].0.at.unwrap();
-        assert_eq!((at.start, at.end), (0, end), "{xml:x?}");
+        assert_eq!((at.start(), at.end()), (0, end), "{xml:x?}");
     }
     let late = format!("<d {A} pdfaid:part=\"3\"/>\0");
     assert_eq!(part(&late), some("3"));
@@ -1029,13 +1030,13 @@ fn a_claim_that_doesn_t_say_what_it_s_for_is_an_error_of_its_own() {
 
 #[test]
 fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
-    let stream = Object::stream(dict! { "Type" => "Metadata" });
+    let stream = Object::stream(dict! { "Type" => Object::name("Metadata") });
     let chain = std::collections::BTreeMap::from([
         (ObjectId::new(4, 0), Object::reference(5)),
         (ObjectId::new(5, 0), stream),
         (ObjectId::new(6, 0), Object::from(dict! {})),
     ]);
-    let resolve = |id: ObjectId| chain.get(&id);
+    let resolve = &chain;
     let of = |metadata: Option<Object>| {
         let mut catalog = dict! {};
         if let Some(metadata) = metadata {
@@ -1060,7 +1061,7 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
     // A loop of references is a limit; the same over a reading and its
     // document, whose stream it reads by number.
     let looped = std::collections::BTreeMap::from([(ObjectId::new(4, 0), Object::reference(4))]);
-    let resolve = |id: ObjectId| looped.get(&id);
+    let resolve = &looped;
     let catalog = dict! { "Metadata" => Object::reference(4) };
     assert_eq!(
         metadata_stream(resolve, &catalog).unwrap_err().why,
@@ -1411,7 +1412,7 @@ fn a_value_that_wouldn_t_read_back_is_refused() {
 
 /// A metadata stream's dictionary.
 fn metadata() -> Dict {
-    dict! { "Type" => "Metadata", "Subtype" => "XML" }
+    dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") }
 }
 
 /// A packet claiming PDF/A-2b, an attribute of which doesn't read, so that
@@ -1435,7 +1436,7 @@ fn root() -> Dict {
 
 /// A catalog whose `/Metadata` is `metadata`.
 fn catalog_with(metadata: Object) -> Body {
-    Body::from(dict! { "Type" => "Catalog", "Metadata" => metadata })
+    Body::from(dict! { "Type" => Object::name("Catalog"), "Metadata" => metadata })
 }
 
 /// The objects of a file whose catalog's `/Metadata` is stream 4, `xml`,
@@ -1444,7 +1445,7 @@ fn with_packet(xml: &[u8], deflate: bool) -> Vec<(u32, Body)> {
     let (mut dict, data) = (metadata(), xml.to_vec());
     let data = match deflate {
         true => {
-            dict.set("Filter", "FlateDecode");
+            dict.set("Filter", Object::name("FlateDecode"));
             fixture::zlib(&data)
         }
         false => data,
@@ -1524,7 +1525,7 @@ fn a_file_s_packet_is_read_through_its_streams() {
     assert_eq!(told.len(), 1);
     let (place, fault) = told[0];
     assert_eq!((place.object, fault), (Some(stream), Fault::XmpAttribute));
-    assert_eq!(place.at.and_then(|at| at.stream), Some(stream));
+    assert_eq!(place.at.and_then(|at| at.stream()), Some(stream));
     for deflate in [false, true] {
         let objects = with_packet(xml.as_bytes(), deflate);
         let (read, faults) = read_each(&file_of(&objects), &[], &Limits::DEFAULT);
@@ -1570,11 +1571,11 @@ fn the_way_to_a_file_s_packet_is_metadata_stream_s() {
     let nothing = |metadata: Option<Object>| {
         let catalog = match metadata {
             Some(metadata) => catalog_with(metadata),
-            None => Body::from(dict! { "Type" => "Catalog" }),
+            None => Body::from(dict! { "Type" => Object::name("Catalog") }),
         };
         let objects = [
             (1, catalog),
-            (5, Body::from(dict! { "Type" => "Metadata" })),
+            (5, Body::from(dict! { "Type" => Object::name("Metadata") })),
         ];
         read_each(&file_of(&objects), &[], &Limits::DEFAULT)
     };
@@ -1699,8 +1700,8 @@ fn a_packet_past_the_cap_has_nothing_read_through_its_streams() {
 fn a_packet_is_read_through_any_resolver_and_its_streams() {
     let xml = told_packet();
     let stream = Object::stream(metadata());
-    let objects = |id: ObjectId| (id == ObjectId::new(4, 0)).then_some(&stream);
-    let catalog = dict! { "Type" => "Catalog", "Metadata" => Object::reference(4) };
+    let objects = resolve_fn(|id: ObjectId| (id == ObjectId::new(4, 0)).then_some(&stream));
+    let catalog = dict! { "Type" => Object::name("Catalog"), "Metadata" => Object::reference(4) };
     let len = xml.len();
     let mut limits = Limits::DEFAULT;
     let through = |given: &dyn Fn(ObjectId, usize) -> Result<Vec<u8>, Unreadable>,
@@ -1778,7 +1779,7 @@ fn a_packet_is_read_through_any_resolver_and_its_streams() {
     // No `/Metadata`, or one to nothing: none, and nothing asked.
     let asked = |_: ObjectId, _: usize| -> Result<Vec<u8>, Unreadable> { panic!("asked") };
     let catalogs = [
-        dict! { "Type" => "Catalog" },
+        dict! { "Type" => Object::name("Catalog") },
         dict! { "Metadata" => Object::reference(9) },
     ];
     for catalog in &catalogs {

@@ -115,14 +115,14 @@ fn held_tree(name: &str, listed: &[ObjectId], written: &pages::Written) {
             Object::from(612),
             Object::from(792),
         ];
-        let dict = dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+        let dict =
+            dict! { "Type" => Object::name("Page"), "Parent" => parent, "MediaBox" => media };
         objects.insert(page, Object::from(dict));
     }
-    let resolve = |id: ObjectId| objects.get(&id);
     let catalog = dict! { "Pages" => written.root };
     for rules in [Rules::Iso, Rules::Pdfium] {
         let mut faults = Faults::default();
-        let read = pages(resolve, &catalog, rules, &Limits::DEFAULT, &mut faults);
+        let read = pages(&objects, &catalog, rules, &Limits::DEFAULT, &mut faults);
         let read = read.unwrap_or_else(|e| panic!("pages-write/{name}: {rules:?}: {e}"));
         assert!(
             faults.0.is_empty(),

@@ -159,11 +159,16 @@ mod tests {
         let objects = [
             (
                 1,
-                dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into(),
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) }.into(),
             ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 }.into(),
+                dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => Vec::<Object>::new(),
+                    "Count" => 0,
+                }
+                .into(),
             ),
         ];
         fixture::file(
@@ -280,7 +285,7 @@ mod tests {
         let made = spans(|| {
             let base = write::Base::of(&reading).unwrap();
             let mut out = file.clone();
-            let page = dict! { "Type" => "Page", "Parent" => Object::reference(2) };
+            let page = dict! { "Type" => Object::name("Page"), "Parent" => Object::reference(2) };
             let bodies = [(ObjectId::new(3, 0), write::Body::from(Object::from(page)))];
             let options = write::Options::DEFAULT;
             write::update(&mut out, &base, bodies, None, Some(&reading), &options).unwrap();

@@ -281,9 +281,11 @@ impl<'w> Window<'w> {
     }
 
     /// What a parser's call gave, the window touched when it's short of
-    /// the file's end ([`parse::Error::Short`]).
+    /// the file's end ([`parse::ErrorKind::Short`]).
     pub(super) fn parsed<T>(&self, read: Result<T, parse::Error>) -> Result<T, parse::Error> {
-        if let Err(parse::Error::Short { .. }) = read {
+        if let Err(ref e) = read
+            && matches!(e.kind(), parse::ErrorKind::Short { .. })
+        {
             self.touch();
         }
         read
@@ -738,7 +740,7 @@ mod tests {
         let three = resolve.try_resolve(ObjectId::new(3, 0)).unwrap_err();
         assert_eq!((three.id, three.why), (ObjectId::new(3, 0), Why::Damaged));
         let unread = in_memory.get(ObjectId::new(3, 0)).unwrap_err().to_string();
-        assert_eq!(three.message, format!("3 0 R doesn't read: {unread}"));
+        assert_eq!(&*three.message, format!("3 0 R doesn't read: {unread}"));
         let said = Source::get(&in_memory, ObjectId::new(3, 0)).unwrap_err();
         assert_eq!(said, *doc.unread().next().unwrap().1);
         assert_eq!(said.unreadable(ObjectId::new(3, 0)), Some(three));

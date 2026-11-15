@@ -275,16 +275,18 @@ impl Reader {
         let len = file.len();
         let hi = offset.saturating_add(HEAD).min(len);
         if let Some(bytes) = file.get(offset..hi)? {
-            let parser = Parser::at(&bytes, 0).window(offset, hi == len);
-            match parser.limits(self.limits.parser).header() {
-                Err(parse::Error::Short { .. }) => {}
+            let mut parser = Parser::at(&bytes, 0)
+                .window(offset, hi == len)
+                .limits(self.limits.parser);
+            match parser.header(&mut ()) {
+                Err(e) if matches!(e.kind(), parse::ErrorKind::Short { .. }) => {}
                 read => return Ok(read.ok()),
             }
         }
         let mut cx = Cx::opening(false);
         file.read_from(&mut cx, offset, 0, |w, _| {
             let mut parser = w.parser(offset).limits(self.limits.parser);
-            Ok(w.parsed(parser.header()).ok())
+            Ok(w.parsed(parser.header(&mut ())).ok())
         })
     }
 

@@ -58,7 +58,7 @@ pub fn standard_font(font: Std14) -> Res {
 /// let mut written = HashMap::new();
 /// // A font and its widths, which it reaches as object 1 of the two.
 /// let font = Res::of(vec![
-///     Object::from(dict! { "Type" => "Font", "Widths" => Object::reference(1) }),
+///     Object::from(dict! { "Type" => Object::name("Font"), "Widths" => Object::reference(1) }),
 ///     Object::from(vec![Object::from(500)]),
 /// ])
 /// .unwrap();
@@ -225,7 +225,7 @@ pub fn page(
     let mut resources = Object::from(Dict::new());
     bind(doc, written, &needs, &mut resources, deflate)?;
     Ok(dict! {
-        "Type" => "Page", "MediaBox" => rect(media_box), "Resources" => resources,
+        "Type" => Object::name("Page"), "MediaBox" => rect(media_box), "Resources" => resources,
         "Contents" => contents,
     })
 }
@@ -244,7 +244,7 @@ pub fn page(
 /// use pdfs::pdf_structure::Document;
 ///
 /// let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
-/// doc.insert(1, dict! { "Type" => "Catalog" });
+/// doc.insert(1, dict! { "Type" => Object::name("Catalog") });
 /// let mut claims = Claims::default();
 /// claims.pdfa_part = Some("2".into());
 /// claims.pdfa_conformance = Some("B".into());
@@ -268,7 +268,7 @@ pub fn claim(doc: &mut Document, claims: &Claims) -> Result<ObjectId, Error> {
     }
     let packet = xmp::write(claims).map_err(Error::Claims)?;
     let metadata = Stream::new(
-        dict! { "Type" => "Metadata", "Subtype" => "XML" },
+        dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
         packet.into_bytes(),
     );
     let id = doc.add(Object::from(metadata));
@@ -289,7 +289,7 @@ fn deflated(stream: &mut Stream, deflate: Deflate) -> Result<(), write::Error> {
     };
     let mut out = Vec::new();
     deflate.encode(data, Prediction::None, &mut out)?;
-    stream.dict.set("Filter", "FlateDecode");
+    stream.dict.set("Filter", Object::name("FlateDecode"));
     stream.set_bytes(out);
     Ok(())
 }

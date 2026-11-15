@@ -24,16 +24,16 @@ fn content() -> Vec<(u32, Body)> {
     vec![
         (
             1,
-            dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into(),
+            dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) }.into(),
         ),
         (
             2,
-            dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }.into(),
+            dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::reference(3)], "Count" => 1 }.into(),
         ),
         (
             3,
             dict! {
-                "Type" => "Page",
+                "Type" => Object::name("Page"),
                 "Parent" => Object::reference(2),
                 "Contents" => vec![Object::reference(4), Object::reference(5)],
             }
@@ -42,7 +42,10 @@ fn content() -> Vec<(u32, Body)> {
         (4, Body::stream(Dict::new(), CONTENT)),
         (
             5,
-            Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(TEXT)),
+            Body::stream(
+                dict! { "Filter" => Object::name("FlateDecode") },
+                &fixture::zlib(TEXT),
+            ),
         ),
     ]
 }
@@ -231,7 +234,7 @@ fn each_kind_of_encryption_hands_out_each_streams_data_decrypted() {
                 assert_eq!(data, plain, "{what}");
                 assert!(matches!(data, Cow::Owned(_)), "{what}: decrypted");
                 let at = reading.record(id).unwrap().data.unwrap().at;
-                assert_ne!(&file[at.start..at.end], plain, "{what}: ciphertext written");
+                assert_ne!(&file[at.range()], plain, "{what}: ciphertext written");
                 assert_eq!(
                     reading.decoded_within(id, usize::MAX).unwrap(),
                     decoded,
@@ -309,12 +312,12 @@ fn a_cross_reference_streams_data_is_handed_out_as_written() {
             .unwrap()
             .at;
         assert!(matches!(data, Cow::Borrowed(_)), "{passwords:?}");
-        assert_eq!(data, &file[at.start..at.end], "{passwords:?}");
+        assert_eq!(data, &file[at.range()], "{passwords:?}");
         assert_eq!(
             reading
                 .decoded_within(ObjectId::new(5, 0), usize::MAX)
                 .unwrap(),
-            &file[at.start..at.end]
+            &file[at.range()]
         );
         assert!(
             matches!(reading.data(ObjectId::new(4, 0)), Err(Error::Locked)) == passwords.is_empty()
@@ -349,10 +352,10 @@ fn a_cross_reference_streams_data_is_handed_out_as_written() {
 #[test]
 fn metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not() {
     let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
-    let metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+    let metadata = dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") };
     let objects = [
-        (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
-        (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+        (1, dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+        (2, dict! { "Type" => Object::name("Pages"), "Kids" => vec![], "Count" => 0 }.into()),
         (3, Body::stream(metadata, xmp)),
     ];
     // The kinds of /V 4 and 5, from which /EncryptMetadata counts.
@@ -1010,9 +1013,12 @@ fn decoded_within_holds_its_limit_for_a_stream_with_or_without_filters() {
         (1, Body::stream(dict! {}, plain)),
         (
             2,
-            Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(plain)),
+            Body::stream(
+                dict! { "Filter" => Object::name("FlateDecode") },
+                &fixture::zlib(plain),
+            ),
         ),
-        (3, dict! { "Not" => "a stream" }.into()),
+        (3, dict! { "Not" => Object::name("a stream") }.into()),
     ];
     let file = fixture::file("1.7", &objects, dict! {}, fixture::Xref::Table);
     let by_position = fuzz::Counted::new(&file, 16);
@@ -1123,13 +1129,16 @@ mod through_streams {
         vec![
             (
                 1,
-                dict! { "Subtype" => "Type1", "BaseFont" => "Foo", "ToUnicode" => Object::reference(2) }
+                dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Foo"), "ToUnicode" => Object::reference(2) }
                     .into(),
             ),
             (2, Body::stream(dict! {}, PLAIN)),
             (
                 3,
-                Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(PLAIN)),
+                Body::stream(
+                    dict! { "Filter" => Object::name("FlateDecode") },
+                    &fixture::zlib(PLAIN),
+                ),
             ),
         ]
     }
@@ -1164,27 +1173,33 @@ mod through_streams {
     /// past its cap.
     #[test]
     fn what_doesn_t_decode_whole() {
-        let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
+        let many: Vec<Object> = (0..26).map(|_| Object::name("ASCIIHexDecode")).collect();
         let objects = vec![
             (
                 1,
-                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"4142 zz"),
+                Body::stream(
+                    dict! { "Filter" => Object::name("ASCIIHexDecode") },
+                    b"4142 zz",
+                ),
             ),
             (
                 2,
-                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"zz"),
+                Body::stream(dict! { "Filter" => Object::name("ASCIIHexDecode") }, b"zz"),
             ),
             (
                 3,
-                Body::stream(dict! { "Filter" => "JBIG2Decode" }, b"data"),
+                Body::stream(dict! { "Filter" => Object::name("JBIG2Decode") }, b"data"),
             ),
-            (4, dict! { "Not" => "a stream" }.into()),
+            (4, dict! { "Not" => Object::name("a stream") }.into()),
             (5, Body::stream(dict! { "Filter" => many }, b"41>")),
             (6, Body::Object(Object::from(2))),
             (7, Body::stream(dict! {}, b"")),
             (
                 8,
-                Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(b"")),
+                Body::stream(
+                    dict! { "Filter" => Object::name("FlateDecode") },
+                    &fixture::zlib(b""),
+                ),
             ),
             (9, Body::stream(dict! { "Filter" => 5 }, b"data")),
         ];
@@ -1237,8 +1252,8 @@ mod through_streams {
             4,
             Body::stream(
                 dict! {
-                    "Filter" => vec![Object::from("Crypt")],
-                    "DecodeParms" => vec![Object::from(dict! { "Name" => "Undefined" })],
+                    "Filter" => vec![Object::name("Crypt")],
+                    "DecodeParms" => vec![Object::from(dict! { "Name" => Object::name("Undefined") })],
                 },
                 b"data",
             ),
