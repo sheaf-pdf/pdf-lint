@@ -760,6 +760,8 @@ fn asking(data: &[u8], asked: &mut dyn FnMut(&str)) {
         for (depth, nodes) in SMALL {
             let mut limits = Limits::DEFAULT;
             (limits.tree_depth, limits.tree_nodes) = (depth, nodes);
+            (limits.field_depth, limits.field_nodes) = (depth, nodes);
+            limits.field_bytes = nodes * 4;
             (limits.structure_depth, limits.structure_nodes) = (depth, nodes);
             let small = file(resolve, false).limits(limits);
             for at in places(container) {
@@ -790,7 +792,8 @@ const TREES: [&str; 4] = [
 ];
 
 /// The caps the predicates body reads the trees under beside the default:
-/// each depth and nodes cap, for all three walks.
+/// each depth and nodes cap, for all three walks, and the fields' names
+/// four bytes a node.
 const SMALL: [(usize, usize); 4] = [(0, 0), (1, 2), (2, 4), (3, 8)];
 
 /// The call `text` is, in brackets or `fn:Eval` or neither, as the model's

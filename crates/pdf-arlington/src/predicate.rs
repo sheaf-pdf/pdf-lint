@@ -39,7 +39,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::BuildHasher;
 use std::num::ParseIntError;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 
@@ -137,7 +136,7 @@ const HOPS: usize = 32;
 
 /// The caps on the walks of a file's trees the predicates read: past one,
 /// what's left isn't read, and what a predicate asks of it is unknown,
-/// never guessed. Each walk is iterative, so neither cap is the stack's. A
+/// never guessed. Each walk is iterative, so no cap is the stack's. A
 /// caller sets them on a copy of [`Limits::DEFAULT`] (`limits.tree_depth =
 /// 16`, say), as more may come, and gives them to a file
 /// ([`FileCx::limits`]).
@@ -145,14 +144,25 @@ const HOPS: usize = 32;
 #[non_exhaustive]
 pub struct Limits {
     /// How many levels below its root a name tree's `/Kids` are read
-    /// (`fn:InNameTree`), and the form's fields below `/Fields`, an array
-    /// and a field each a level (`fn:IsFullyQualifiedFieldName`): 2,048 by
-    /// default. Each node is read once, so it costs no more than
-    /// [`tree_nodes`](Limits::tree_nodes) lets.
+    /// (`fn:InNameTree`): 2,048 by default.
     pub tree_depth: usize,
-    /// How many of a name tree's nodes are read, and of the form's fields,
-    /// its arrays among them, each once: 100,000 by default.
+    /// How many of a name tree's nodes are read: 100,000 by default.
     pub tree_nodes: usize,
+    /// How many levels below `/Fields` the form's fields are read, an
+    /// array and a field each a level (`fn:IsFullyQualifiedFieldName`):
+    /// 2,048 by default. Each is read once, so its depth costs nothing its
+    /// nodes don't but the longer names it makes, which
+    /// [`field_bytes`](Limits::field_bytes) bounds.
+    pub field_depth: usize,
+    /// How many of the form's fields are read, its arrays among them, each
+    /// once: 100,000 by default.
+    pub field_nodes: usize,
+    /// How many bytes of the fields' fully qualified names are made, each
+    /// counted before it's made: 16 MiB by default. A field's name is its
+    /// parent's, a period and its own partial name, so a deep form of long
+    /// names makes far more than it holds, and this, not the depth, is
+    /// what bounds them.
+    pub field_bytes: usize,
     /// How many levels below the structure tree's root are read, an array
     /// and an element each a level (`fn:ImageIsStructContentItem`,
     /// `fn:PageContainsStructContentItems`): 8,192 by default. Each level
@@ -169,6 +179,9 @@ impl Limits {
     pub const DEFAULT: Limits = Limits {
         tree_depth: 2048,
         tree_nodes: 100_000,
+        field_depth: 2048,
+        field_nodes: 100_000,
+        field_bytes: 16 << 20,
         structure_depth: 8192,
         structure_nodes: 1_000_000,
     };
@@ -728,7 +741,7 @@ impl fmt::Debug for Fields {
 /// them: every field read, and every partial name a string whose text
 /// the reader gave.
 struct Names {
-    names: HashSet<String>,
+    names: HashSet<Arc<str>>,
     whole: bool,
 }
 
@@ -2564,7 +2577,7 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
             cx.file.fields.0.get_or_init(|| read)
         }
     };
-    match (fields.names.contains(&name), fields.whole) {
+    match (fields.names.contains(name.as_str()), fields.whole) {
         (true, _) => Tri::Is(true),
         (false, true) => Tri::Is(false),
         (false, false) => Tri::Unknown(f.to_string()),
@@ -2577,7 +2590,9 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
 /// period; one without `/T` has its parent's, as it's another way the same
 /// field is shown, not a field of its own, and one at the top without it,
 /// none. Each node once, as deep and as many as its file's [`Limits`] let
-/// (`tree_depth`, `tree_nodes`).
+/// (`field_depth`, `field_nodes`), and each name counted before it's made,
+/// its bytes no more than they let (`field_bytes`): a field past them, and
+/// those under it, not named.
 fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
     let mut names = Names {
         names: HashSet::new(),
@@ -2590,11 +2605,12 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
         return names;
     };
     let mut seen = HashSet::new();
-    // Each node, its parent's name, and its depth.
-    let limits = cx.file.limits;
-    let mut nodes: Vec<(&'c Object, Option<Rc<str>>, usize)> = vec![(fields, None, 0)];
+    // Each node, its parent's name, and its depth; and how many bytes of
+    // names have been made.
+    let (limits, mut made) = (cx.file.limits, 0);
+    let mut nodes: Vec<(&'c Object, Option<Arc<str>>, usize)> = vec![(fields, None, 0)];
     while let Some((node, parent, depth)) = nodes.pop() {
-        if depth > limits.tree_depth || seen.len() >= limits.tree_nodes {
+        if depth > limits.field_depth || seen.len() >= limits.field_nodes {
             names.whole = false;
             continue;
         }
@@ -2622,12 +2638,22 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
             .and_then(|t| deref(t, cx))
             .map(|t| t.value())
         {
+            // Its parent's, kept when it was made.
             None => parent,
             Some(Value::String(t, _)) => match t.text() {
-                Some(t) => Some(match parent {
-                    Some(parent) => format!("{parent}.{t}").into(),
-                    None => t.into(),
-                }),
+                Some(t) => {
+                    let size = parent.as_ref().map_or(0, |parent| parent.len() + 1) + t.len();
+                    if !count(&mut made, size, limits.field_bytes) {
+                        names.whole = false;
+                        continue;
+                    }
+                    let name: Arc<str> = match parent {
+                        Some(parent) => format!("{parent}.{t}").into(),
+                        None => t.into(),
+                    };
+                    names.names.insert(Arc::clone(&name));
+                    Some(name)
+                }
                 // Neither it nor the fields under it can be named.
                 None => {
                     names.whole = false;
@@ -2639,9 +2665,6 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
                 continue;
             }
         };
-        if let Some(name) = &name {
-            names.names.insert(name.to_string());
-        }
         if let Some(kids) = field.get(b"Kids").and_then(|k| deref(k, cx)) {
             nodes.push((kids, name, depth + 1));
         }
@@ -2788,8 +2811,16 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
 /// Counts a kid a walk looks at, before it's looked at: false, counting
 /// none, where `cap` have been.
 fn look(looked: &mut usize, cap: usize) -> bool {
-    let room = *looked < cap;
-    *looked += usize::from(room);
+    count(looked, 1, cap)
+}
+
+/// Counts `n` more of what a walk is capped at, before they're read or
+/// made: false, counting none, where they'd pass `cap`.
+fn count(counted: &mut usize, n: usize, cap: usize) -> bool {
+    let room = n <= cap.saturating_sub(*counted);
+    if room {
+        *counted += n;
+    }
     room
 }
 
@@ -5173,15 +5204,29 @@ mod tests {
         limits
     }
 
+    /// [`Limits::DEFAULT`] with the form's fields' three caps given.
+    fn field_caps(depth: usize, nodes: usize, bytes: usize) -> Limits {
+        let mut limits = Limits::DEFAULT;
+        (limits.field_depth, limits.field_nodes) = (depth, nodes);
+        limits.field_bytes = bytes;
+        limits
+    }
+
     #[test]
     fn a_files_trees_are_read_under_the_default_caps_unless_given_others() {
         assert_eq!(Limits::default(), Limits::DEFAULT);
         assert_eq!(Limits::DEFAULT, caps(2048, 100_000, 8192, 1_000_000));
+        let fields = Limits::DEFAULT;
+        let fields = (fields.field_depth, fields.field_nodes, fields.field_bytes);
+        assert_eq!(fields, (2048, 100_000, 16 << 20));
         let file = bare();
         let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let shown = format!("{:?}", FileCx::new(&file.trailer, v("1.7"), closure));
         assert!(
-            shown.contains("limits: Limits { tree_depth: 2048, tree_nodes: 100000, "),
+            shown.contains(
+                "limits: Limits { tree_depth: 2048, tree_nodes: 100000, field_depth: 2048, \
+                 field_nodes: 100000, field_bytes: 16777216, "
+            ),
             "{shown}"
         );
         let lowered = FileCx::new(&file.trailer, v("1.7"), closure).limits(caps(1, 2, 3, 4));
@@ -5243,7 +5288,7 @@ mod tests {
         };
         let (t, f) = (Truth::True, Truth::False);
         let u = unknown("fn:IsFullyQualifiedFieldName");
-        let field = |tree_depth, tree_nodes| caps(tree_depth, tree_nodes, depth, nodes);
+        let field = |depth, nodes| field_caps(depth, nodes, 16 << 20);
         assert_eq!(named(field(5, 6)), [t.clone(), t.clone(), f], "at its size");
         assert_eq!(
             named(field(4, 6)),
@@ -5293,6 +5338,97 @@ mod tests {
             "past its nodes"
         );
         assert_eq!(on(structure(3, 0)), [u.clone(), u], "no nodes");
+    }
+
+    /// What `fn:IsFullyQualifiedFieldName` says, under `limits`, of each
+    /// name of `asked` and of one of none, in a form whose fields are a
+    /// chain `n` long, field `k` object `10 + k` and the one kid of the one
+    /// before, each one's `/T` `len` bytes of one letter: field `k`'s name
+    /// is `k + 1` of them, a period between each two.
+    fn chain_named(n: u32, len: usize, limits: Limits, asked: &[u32]) -> Vec<Truth> {
+        let t = "A".repeat(len);
+        let mut objects = Vec::new();
+        for k in 0..n {
+            let mut field = dict! { "T" => Object::text(&t) };
+            if k + 1 < n {
+                field.set(b"Kids", vec![Object::reference(11 + k)]);
+            }
+            objects.push((10 + k, Object::from(field)));
+        }
+        let form = dict! { "Fields" => vec![Object::reference(10)] };
+        objects.push((
+            1,
+            dict! { "Type" => Object::name("Catalog"), "AcroForm" => form }.into(),
+        ));
+        let file = File::new(dict! { "Root" => Object::reference(1) }, objects);
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let cx = FileCx::new(&file.trailer, v("1.7"), closure).limits(limits);
+        let name = |k: u32| vec![t.as_str(); k as usize + 1].join(".");
+        (asked.iter().map(|&k| name(k)))
+            .chain(["z".to_string()])
+            .map(|name| {
+                let row = Object::from(dict! { "X" => Object::text(&name) });
+                holds(
+                    "fn:IsFullyQualifiedFieldName(@X)",
+                    &cx.at(&row, At::Key(b"X")),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_fields_names_are_made_no_longer_than_their_budget_of_bytes() {
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:IsFullyQualifiedFieldName");
+        // Four fields of 100-byte partial names: their names 100, 201, 302
+        // and 403 bytes, 1,006 in all.
+        let named = |bytes| chain_named(4, 100, field_caps(2048, 100_000, bytes), &[0, 2, 3]);
+        assert_eq!(named(1006), [t.clone(), t.clone(), t.clone(), f], "all");
+        let past = [t.clone(), t.clone(), u.clone(), u.clone()];
+        assert_eq!(named(1005), past, "one byte fewer: the last not made");
+        assert_eq!(named(603), past);
+        assert_eq!(named(602), [t, u.clone(), u.clone(), u.clone()]);
+        assert_eq!(named(0), [u.clone(), u.clone(), u.clone(), u]);
+    }
+
+    #[test]
+    fn a_field_without_a_partial_name_makes_none() {
+        // A field of a 100-byte partial name, its 1,000 kids without one,
+        // and one kid more, `b`: two names made, 100 and 102 bytes, the
+        // kids' their parent's.
+        let t = "A".repeat(100);
+        let mut kids = vec![Object::from(dict! { "FT" => Object::name("Tx") }); 1000];
+        kids.push(dict! { "T" => Object::text("b") }.into());
+        let top = dict! { "T" => Object::text(&t), "Kids" => kids };
+        let form = dict! { "Fields" => vec![Object::from(top)] };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "AcroForm" => form };
+        let file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into())],
+        );
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let cx =
+            FileCx::new(&file.trailer, v("1.7"), closure).limits(field_caps(2048, 100_000, 202));
+        let asks = |name: &str| {
+            let row = Object::from(dict! { "X" => Object::text(name) });
+            holds(
+                "fn:IsFullyQualifiedFieldName(@X)",
+                &cx.at(&row, At::Key(b"X")),
+            )
+        };
+        assert_eq!(asks(&t), Truth::True);
+        assert_eq!(asks(&format!("{t}.b")), Truth::True);
+        assert_eq!(asks("z"), Truth::False, "read whole");
+    }
+
+    #[test]
+    fn a_deep_form_of_long_names_costs_its_budget_not_the_square_of_its_depth() {
+        // 1,000 fields deep, each of a 1,000-byte partial name: their names
+        // would be 500 MB, and the default caps make 16 MiB of them, the
+        // first 183 or so.
+        let u = unknown("fn:IsFullyQualifiedFieldName");
+        let named = chain_named(1000, 1000, Limits::DEFAULT, &[0, 100, 999]);
+        assert_eq!(named, [Truth::True, Truth::True, u.clone(), u]);
     }
 
     /// `text`, a content item's function, held of `container` in `file`:
