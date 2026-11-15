@@ -146,28 +146,31 @@ const HOPS: usize = 32;
 pub struct Limits {
     /// How many levels below its root a name tree's `/Kids` are read
     /// (`fn:InNameTree`), and the form's fields below `/Fields`, an array
-    /// and a field each a level (`fn:IsFullyQualifiedFieldName`): 32 by
-    /// default.
+    /// and a field each a level (`fn:IsFullyQualifiedFieldName`): 2,048 by
+    /// default. Each node is read once, so it costs no more than
+    /// [`tree_nodes`](Limits::tree_nodes) lets.
     pub tree_depth: usize,
     /// How many of a name tree's nodes are read, and of the form's fields,
     /// its arrays among them, each once: 100,000 by default.
     pub tree_nodes: usize,
     /// How many levels below the structure tree's root are read, an array
     /// and an element each a level (`fn:ImageIsStructContentItem`,
-    /// `fn:PageContainsStructContentItems`): 32 by default.
+    /// `fn:PageContainsStructContentItems`): 8,192 by default. Each level
+    /// is a kid looked at, so it costs no more than
+    /// [`structure_nodes`](Limits::structure_nodes) lets.
     pub structure_depth: usize,
     /// How many of the structure tree's kids are looked at, each entry of
-    /// a `/K` each time it's reached: 100,000 by default.
+    /// a `/K` each time it's reached: 1,000,000 by default.
     pub structure_nodes: usize,
 }
 
 impl Limits {
     /// The caps a file's trees are read under unless it's given others.
     pub const DEFAULT: Limits = Limits {
-        tree_depth: 32,
+        tree_depth: 2048,
         tree_nodes: 100_000,
-        structure_depth: 32,
-        structure_nodes: 100_000,
+        structure_depth: 8192,
+        structure_nodes: 1_000_000,
     };
 }
 
@@ -5021,14 +5024,14 @@ mod tests {
     }
 
     #[test]
-    fn a_files_caps_are_its_trees_and_the_constants_by_default() {
+    fn a_files_trees_are_read_under_the_default_caps_unless_given_others() {
         assert_eq!(Limits::default(), Limits::DEFAULT);
-        assert_eq!(Limits::DEFAULT, caps(32, 100_000, 32, 100_000));
+        assert_eq!(Limits::DEFAULT, caps(2048, 100_000, 8192, 1_000_000));
         let file = bare();
         let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let shown = format!("{:?}", FileCx::new(&file.trailer, v("1.7"), closure));
         assert!(
-            shown.contains("limits: Limits { tree_depth: 32, tree_nodes: 100000, "),
+            shown.contains("limits: Limits { tree_depth: 2048, tree_nodes: 100000, "),
             "{shown}"
         );
         let lowered = FileCx::new(&file.trailer, v("1.7"), closure).limits(caps(1, 2, 3, 4));
