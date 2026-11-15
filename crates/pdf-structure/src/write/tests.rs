@@ -11627,12 +11627,16 @@ fn streaming_writers_bound_memory_and_propagate_write_io_errors() {
     }
 
     // Stream 128 x 4 MiB = 512 MiB through `Writer` into a non-`Seek` sink while keeping peak
-    // scratch capacity <= 64 KiB after every object.
+    // scratch capacity <= 64 KiB after every object. Process-wide `VmRSS` is checked in an
+    // isolated single-test child process so concurrent sibling tests in `cargo test` cannot
+    // inflate `/proc/self/status` during the measurement.
     const CHUNK: usize = 4 * 1024 * 1024;
     const COUNT: u32 = 128;
 
     #[cfg(target_os = "linux")]
-    let rss_before = current_rss_kib();
+    let isolated_rss_child = std::env::var_os("PDF_STRUCTURE_RSS_ISOLATED").is_some();
+    #[cfg(target_os = "linux")]
+    let rss_before = isolated_rss_child.then(current_rss_kib).flatten();
 
     let mut sink = CountingSink { bytes: 0 };
     let mut writer = write::Writer::begin(&mut sink, None, &write::Options::DEFAULT).unwrap();
@@ -11665,7 +11669,7 @@ fn streaming_writers_bound_memory_and_propagate_write_io_errors() {
     }
 
     #[cfg(target_os = "linux")]
-    let rss_after_pushes = current_rss_kib();
+    let rss_after_pushes = isolated_rss_child.then(current_rss_kib).flatten();
 
     let trailer = dict! {
         "Root" => Object::reference(1),
@@ -11677,11 +11681,35 @@ fn streaming_writers_bound_memory_and_propagate_write_io_errors() {
     assert!(written.id.is_some());
 
     #[cfg(target_os = "linux")]
-    if let (Some(before), Some(after)) = (rss_before, rss_after_pushes) {
+    if isolated_rss_child {
+        let (Some(before), Some(after)) = (rss_before, rss_after_pushes) else {
+            panic!("expected /proc/self/status VmRSS on Linux");
+        };
         let growth_kib = after.saturating_sub(before);
         assert!(
             growth_kib < 64 * 1024,
             "streaming 512 MiB grew VmRSS by {growth_kib} KiB (before={before} KiB, after={after} KiB)"
+        );
+        return;
+    }
+
+    #[cfg(all(target_os = "linux", not(miri)))]
+    {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("PDF_STRUCTURE_RSS_ISOLATED", "1")
+            .args([
+                "--exact",
+                "write::tests::streaming_writers_bound_memory_and_propagate_write_io_errors",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .output()
+            .expect("spawn isolated VmRSS child test");
+        assert!(
+            output.status.success(),
+            "isolated VmRSS child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
     }
 
