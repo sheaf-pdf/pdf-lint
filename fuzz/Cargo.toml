@@ -158,7 +158,7 @@
 # a piece each between `\0`s, its first line the table's name, loaded as a
 # folder of them is: one that doesn't load saying which file and a line within
 # it, a name with a tab or a line break refused; one that loads the same in
-# any order, its hash of the framing `Grammar::hash` gives, each row where
+# any order, its hash of the framing `Grammar::digest` gives, each row where
 # `Table::row` says, each predicate in its cells parsing or saying why not,
 # one that parses printing back as a text that parses to it, and each row's
 # cells, asked over an object of its table's keys, the same given the model

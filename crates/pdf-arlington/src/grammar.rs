@@ -100,32 +100,32 @@ pub const HEADER: [&str; 12] = [
 /// for as long as the model is ([`FileCx::grammar`](crate::FileCx::grammar)).
 pub struct Grammar {
     tables: BTreeMap<String, Table>,
-    /// Its tables' files' SHA-256 ([`Grammar::hash`]).
-    hash: Digest,
+    /// Its tables' files' SHA-256 ([`Grammar::digest`]).
+    digest: Digest,
     /// Its rows' predicates, each parsed the first time it's asked for:
     /// made the first time a [`FileCx`](crate::FileCx) given the model asks
     /// ([`Grammar::parses`]), so a caller that never gives one pays nothing.
     parses: OnceLock<Parses>,
 }
 
-/// How many tables it has, and its hash: each [`Table`] shows its own
+/// How many tables it has, and its digest: each [`Table`] shows its own
 /// rows.
 impl fmt::Debug for Grammar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Grammar")
             .field("tables", &self.tables.len())
-            .field("hash", &self.hash)
+            .field("digest", &self.digest)
             .finish_non_exhaustive()
     }
 }
 
-/// Two models are equal when their digests are ([`Grammar::hash`]): when
+/// Two models are equal when their digests are ([`Grammar::digest`]): when
 /// their tables' files are the same, byte for byte, as SHA-256 is made so
 /// that no two inputs that differ can be found with one digest. What either
 /// keeps of the predicates asked through it is no part of what it is.
 impl PartialEq for Grammar {
     fn eq(&self, other: &Grammar) -> bool {
-        self.hash == other.hash
+        self.digest == other.digest
     }
 }
 
@@ -134,14 +134,14 @@ impl Eq for Grammar {}
 /// Its digest's hash, as models are equal by their digests. What it keeps
 /// of its predicates is behind a lock, which clippy's `mutable_key_type`
 /// reads as a key that can change; neither this nor `==` reads it, and a
-/// map keyed by the digest ([`Grammar::hash`]) is keyed alike.
+/// map keyed by the digest ([`Grammar::digest`]) is keyed alike.
 impl std::hash::Hash for Grammar {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.hash.hash(state);
+        self.digest.hash(state);
     }
 }
 
-/// What names a model ([`Grammar::hash`]): the SHA-256 of its tables'
+/// What names a model ([`Grammar::digest`]): the SHA-256 of its tables'
 /// files, 32 bytes, which [`Display`](fmt::Display) and
 /// [`Debug`](fmt::Debug) write as 64 lowercase hex digits, as `sha256sum`
 /// does. Ordered by its bytes.
@@ -368,7 +368,7 @@ pub enum Error {
     },
     /// A table's name holds a tab, a line feed or a carriage return,
     /// which cut the model's files into cells and lines: in the bytes
-    /// [`Grammar::hash`] is of, each table's name on a line of its own
+    /// [`Grammar::digest`] is of, each table's name on a line of its own
     /// before its text, such a name could read as a table's row, and two
     /// models could hash alike. Said before the table is read, by its
     /// path as [`Debug`](fmt::Debug) writes it, so the character shows.
@@ -597,7 +597,7 @@ impl Grammar {
     ) -> Result<Grammar, Error> {
         let mut files: Vec<File> = files.into_iter().collect();
         files.sort_by_cached_key(|file| format!("{}.tsv", file.name));
-        // The bytes `hash` says it's of, given a piece at a time.
+        // The bytes `digest` says it's of, given a piece at a time.
         let mut sha = Sha256::new();
         for file in &files {
             if !names_a_table(&file.name) {
@@ -609,7 +609,7 @@ impl Grammar {
             sha.update(b".tsv\n");
             sha.update(file.text.as_bytes());
         }
-        let hash = Digest(sha.finalize().into());
+        let digest = Digest(sha.finalize().into());
         let mut tables = BTreeMap::new();
         let mut labels = BTreeMap::new();
         for file in files {
@@ -642,7 +642,7 @@ impl Grammar {
         }
         Ok(Grammar {
             tables,
-            hash,
+            digest,
             parses: OnceLock::new(),
         })
     }
@@ -665,8 +665,8 @@ impl Grammar {
     /// upstream's at the same commit, which [`Grammar::load`] reads as it
     /// is.
     #[must_use]
-    pub const fn hash(&self) -> Digest {
-        self.hash
+    pub const fn digest(&self) -> Digest {
+        self.digest
     }
 
     /// The table named `name`.
@@ -1254,11 +1254,11 @@ mod tests {
             assert_eq!(rest, want, "{name}");
         }
         let loaded = Grammar::load(&dir().join("tsv/latest")).unwrap();
-        assert_ne!(loaded.hash(), Grammar::embedded().hash());
+        assert_ne!(loaded.digest(), Grammar::embedded().digest());
     }
 
     /// The model's hashes, as coreutils' `sha256sum` computes them over the
-    /// command in [`Grammar::hash`]'s doc: over `model/tsv/latest`,
+    /// command in [`Grammar::digest`]'s doc: over `model/tsv/latest`,
     /// upstream's tables as they are; and over the embedded ones, those
     /// with the corrections made and the additions added (upstream's
     /// folder with the build's corrected and added tables over it). They
@@ -1268,12 +1268,12 @@ mod tests {
     fn the_models_hashes_are_the_references() {
         let upstream = Grammar::load(&dir().join("tsv/latest")).unwrap();
         assert_eq!(
-            upstream.hash().to_string(),
+            upstream.digest().to_string(),
             "3493c24c602b0637685e453bbb01cc16f1aee2aba8cbfaa0bf336426b17d2c1b"
         );
         let embedded = Grammar::embedded();
         assert_eq!(
-            embedded.hash().to_string(),
+            embedded.digest().to_string(),
             "2bf6c3ab3fb4783fec94c0d6bdec719117128719259e4f994b8574e0d48f83bc"
         );
     }
@@ -1310,20 +1310,20 @@ mod tests {
             std::fs::write(dir.path().join(format!("{name}.tsv")), text).unwrap();
         }
         let loaded = Grammar::load(dir.path()).unwrap();
-        assert_eq!(loaded.hash().as_bytes(), &want);
+        assert_eq!(loaded.digest().as_bytes(), &want);
         let in_memory = |order: &[usize]| {
             let files = order.iter().map(|&i| File {
                 name: tables[i].0.to_string(),
                 label: format!("{}.tsv", tables[i].0).into(),
                 text: tables[i].1.as_str().into(),
             });
-            Grammar::from_files(files).unwrap().hash()
+            Grammar::from_files(files).unwrap().digest()
         };
         for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2]] {
-            assert_eq!(in_memory(&order), loaded.hash(), "{order:?}");
+            assert_eq!(in_memory(&order), loaded.digest(), "{order:?}");
         }
         let hex: String = want.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(loaded.hash().to_string(), hex);
+        assert_eq!(loaded.digest().to_string(), hex);
     }
 
     /// A digest is written as 64 lowercase hex digits, by `Display` and
@@ -1355,7 +1355,7 @@ mod tests {
         let model = Grammar::embedded();
         let debug = format!("{model:?}");
         assert!(
-            debug.contains(&format!("hash: {}", model.hash())),
+            debug.contains(&format!("digest: {}", model.digest())),
             "{debug}"
         );
     }

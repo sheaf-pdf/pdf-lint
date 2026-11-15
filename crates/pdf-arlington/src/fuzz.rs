@@ -107,7 +107,7 @@ fn files(pieces: &[(String, String)]) -> impl DoubleEndedIterator<Item = File<'_
     })
 }
 
-/// What [`Grammar::hash`] says it's of, built here: each piece's name,
+/// What [`Grammar::digest`] says it's of, built here: each piece's name,
 /// `.tsv`, a newline and its text, in byte order of `<name>.tsv`, as
 /// `LC_ALL=C ls` lists a folder's files (so `a-b.tsv` before `a.tsv`, where
 /// `a` comes before `a-b`).
@@ -132,7 +132,7 @@ fn framing(pieces: &[(String, String)]) -> Vec<u8> {
 /// or a line break is refused, the first by `<name>.tsv`, and no other
 /// table is refused so; one that loads loads the same from its files in
 /// any order, the same tables of the same rows; its hash is of the framing
-/// [`Grammar::hash`] gives, built here from the pieces; every row is where
+/// [`Grammar::digest`] gives, built here from the pieces; every row is where
 /// [`Table::row`] says, at its key and at each index;
 /// every predicate in its cells parses or says why not, and one that
 /// parses prints back as a text that parses to it, nested no deeper than
@@ -168,7 +168,7 @@ fn loaded(data: &[u8], asked: &mut dyn FnMut(&str)) -> Option<Digest> {
     };
     let framed: [u8; 32] = Sha256::digest(framing(&pieces)).into();
     assert_eq!(
-        model.hash().as_bytes(),
+        model.digest().as_bytes(),
         &framed,
         "the hash isn't of the framing"
     );
@@ -179,13 +179,13 @@ fn loaded(data: &[u8], asked: &mut dyn FnMut(&str)) -> Option<Digest> {
         prints_back(text);
     }
     evaluated(&model, asked);
-    Some(model.hash())
+    Some(model.digest())
 }
 
 /// Whether two models are alike: of one hash, and the same tables of the
 /// same rows.
 fn alike(model: &Grammar, other: &Grammar) {
-    assert_eq!(model.hash(), other.hash(), "one model, two hashes");
+    assert_eq!(model.digest(), other.digest(), "one model, two hashes");
     let each = |model: &Grammar| -> Vec<(String, Vec<Row>, usize)> {
         let tables = model.tables();
         tables
@@ -1502,7 +1502,7 @@ mod tests {
             .collect();
         assert_eq!(pieces.len(), 614);
         let hash = loaded(pieces.join("\0").as_bytes(), &mut |_| {});
-        assert_eq!(hash, Some(Grammar::embedded().hash()));
+        assert_eq!(hash, Some(Grammar::embedded().digest()));
     }
 
     /// Every seed keeps every promise, the loader's load, and each

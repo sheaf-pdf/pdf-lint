@@ -573,7 +573,7 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
             .field("fields", &self.fields)
             .field("pages", &self.pages.map(<[_]>::len))
             .field("latin", &self.latin.is_some())
-            .field("grammar", &self.grammar.map(Grammar::hash))
+            .field("grammar", &self.grammar.map(Grammar::digest))
             .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
@@ -7320,7 +7320,7 @@ mod tests {
             "trees: [Tree { keys: 1, whole: true }]".to_string(),
             "fields: Some(Names { names: 1, whole: true })".to_string(),
             "structure: None".to_string(),
-            format!("grammar: Some({})", model.hash()),
+            format!("grammar: Some({})", model.digest()),
             "container: Dict { at: Some(Span { stream: None, start: 40, end: 80 }) }".to_string(),
             "parents: [Dict { at: None }]".to_string(),
             "defaults: None".to_string(),

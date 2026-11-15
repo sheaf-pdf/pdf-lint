@@ -1642,7 +1642,7 @@ fn a_file_beginning_with_a_dash_follows_two_dashes() {
 
 #[test]
 fn the_version_is_two_lines_naming_the_model() {
-    let hash = pdf_lint::grammar().hash();
+    let hash = pdf_lint::grammar().digest();
     let n = pdf_lint::grammar::corrections().len();
     let m = pdf_lint::grammar::additions().len();
     let version = format!(
@@ -1918,7 +1918,7 @@ fn json_reports_a_line_for_each_file() {
     let field = |j: &Value, key: &str| j.get(key).cloned().unwrap_or_else(|| panic!("{key}"));
     assert_eq!(field(&report, "file"), json!(path.display().to_string()));
     assert_eq!(field(&report, "version"), json!("1.7"));
-    let model = pdf_lint::grammar().hash().to_string();
+    let model = pdf_lint::grammar().digest().to_string();
     assert_eq!(field(&report, "model"), json!(model));
     assert_eq!(
         field(&report, "ignored"),
@@ -2008,7 +2008,7 @@ fn json_strings_are_escaped_as_they_were() {
     // A file that doesn't exist: the line saying it can't be read.
     let out = lint(&name);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
-    let model = pdf_lint::grammar().hash().to_string();
+    let model = pdf_lint::grammar().digest().to_string();
     let version = env!("CARGO_PKG_VERSION");
     let line =
         format!("{{\"pdf_lint\":\"{version}\",\"model\":\"{model}\",{escaped}\",\"error\":\"");
