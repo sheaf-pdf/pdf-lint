@@ -136,10 +136,12 @@ const HOPS: usize = 32;
 
 /// The caps on the walks of a file's trees the predicates read: past one,
 /// what's left isn't read, and what a predicate asks of it is unknown,
-/// never guessed. Each walk is iterative, so no cap is the stack's. A
-/// caller sets them on a copy of [`Limits::DEFAULT`] (`limits.tree_depth =
-/// 16`, say), as more may come, and gives them to a file
-/// ([`FileCx::limits`]).
+/// never guessed. Each walk is iterative, so no cap is the stack's, and
+/// reads each node once and each array once (the structure tree's once
+/// under each page it's reached from), so what it costs is what its caps
+/// let, beside the arrays the file holds. A caller sets them on a copy of
+/// [`Limits::DEFAULT`] (`limits.tree_depth = 16`, say), as more may come,
+/// and gives them to a file ([`FileCx::limits`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -167,12 +169,14 @@ pub struct Limits {
     pub field_bytes: usize,
     /// How many levels below the structure tree's root are read, an array
     /// and an element each a level (`fn:ImageIsStructContentItem`,
-    /// `fn:PageContainsStructContentItems`): 8,192 by default. Each level
-    /// is a kid looked at, so it costs no more than
-    /// [`structure_nodes`](Limits::structure_nodes) lets.
+    /// `fn:PageContainsStructContentItems`): 8,192 by default.
     pub structure_depth: usize,
-    /// How many of the structure tree's kids are looked at, each entry of
-    /// a `/K` each time it's reached: 1,000,000 by default.
+    /// How many of the structure tree's dictionaries are read, each once,
+    /// and of the kids of an array read again, under a page other than
+    /// those it's been read under, each counted before it's read:
+    /// 1,000,000 by default. An array is read again so, as its
+    /// marked-content identifiers are on the page of the element it's
+    /// reached from, and under a page it's been read under, not at all.
     pub structure_nodes: usize,
 }
 
@@ -2724,13 +2728,13 @@ fn items<'c>(cx: &Cx<'c, '_>) -> &'c Items {
 /// (OBJR, to their `/Obj`). An MCR or OBJR is told by its `/Type`, or
 /// without one by its `/MCID` or `/Obj` where an element would have `/S`.
 /// Each page and object is [`Known`] as its entry, `/Pg` or `/Obj`, names
-/// it. A file without a structure tree has no content items. Each element
-/// is read once, and an array each time it's reached, under the page of
-/// the element it's reached from, as deep as its file's [`Limits`] let
-/// (`structure_depth`); and no more kids are looked at than they let
-/// (`structure_nodes`), each entry of a `/K`
-/// counted each time it's reached, before it's looked at, so that an array
-/// that holds itself ends there, not read whole.
+/// it. A file without a structure tree has no content items. Each
+/// dictionary is read once, and an array once under each page it's
+/// reached from, as its marked-content identifiers are on the page of the
+/// element it's reached from, so an array that holds itself is read once;
+/// as deep as its file's [`Limits`] let (`structure_depth`), and no more
+/// dictionaries, and kids of an array read again under another page, than
+/// they let (`structure_nodes`), each counted before it's read.
 fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     let mut items = Items {
         objects: Objects::new(),
@@ -2742,74 +2746,75 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     else {
         return items;
     };
-    let mut seen = HashSet::new();
+    // The dictionaries read; the arrays read, and each with the pages it's
+    // been read under.
+    let (mut seen, mut arrays, mut read) = (HashSet::new(), HashSet::new(), HashSet::new());
     // Each node, the page of the element it's a kid of, and its depth; and
-    // how many kids have been looked at.
+    // how many have been counted.
     let mut nodes: Vec<(&'c Object, Option<Known>, usize)> = Vec::new();
-    let (limits, mut looked) = (cx.file.limits, 0);
+    if let Some(kids) = value_at(root, At::Key(b"K"), cx) {
+        nodes.push((kids, None, 0));
+    }
+    let (limits, mut counted) = (cx.file.limits, 0);
     let cut = 'walk: {
-        if let Some(kids) = entry(root, At::Key(b"K"), cx) {
-            if !look(&mut looked, limits.structure_nodes) {
-                break 'walk true;
-            }
-            if let Some(kids) = deref(kids, cx) {
-                nodes.push((kids, None, 0));
-            }
-        }
         while let Some((node, page, depth)) = nodes.pop() {
             if depth > limits.structure_depth {
                 items.objects.whole = false;
                 items.pages.whole = false;
                 continue;
             }
-            // The node's kids, and the page of the element they're kids of.
-            let (kids, on) = match node.value() {
-                Value::Array(kids) => (&kids[..], page),
-                // A marked-content identifier, on the element's page.
-                Value::Integer(_) => {
-                    match page {
-                        Some(page) => items.pages.insert(page),
-                        None => items.pages.whole = false,
-                    }
-                    continue;
-                }
-                Value::Dict(d) => {
-                    if !seen.insert(address(node)) {
+            match node.value() {
+                Value::Array(kids) => {
+                    if !read.insert((address(node), page)) {
                         continue;
                     }
+                    // Read again, under another page: its kids counted.
+                    if !arrays.insert(address(node))
+                        && !count(&mut counted, kids.len(), limits.structure_nodes)
+                    {
+                        break 'walk true;
+                    }
+                    for kid in kids {
+                        if let Some(kid) = deref(kid, cx) {
+                            nodes.push((kid, page, depth + 1));
+                        }
+                    }
+                }
+                // A marked-content identifier, on the element's page.
+                Value::Integer(_) => match page {
+                    Some(page) => items.pages.insert(page),
+                    None => items.pages.whole = false,
+                },
+                Value::Dict(d) => {
+                    if seen.contains(&address(node)) {
+                        continue;
+                    }
+                    if !count(&mut counted, 1, limits.structure_nodes) {
+                        break 'walk true;
+                    }
+                    seen.insert(address(node));
                     let name = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)?.as_name());
                     let has = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)).is_some();
                     let own_page = d.get(b"Pg").and_then(|o| deref_known(o, cx));
                     let element = !has(b"S");
                     if name(b"Type") == Some(b"MCR") || (element && has(b"MCID")) {
-                        if !has(b"Stm") {
-                            match own_page.or(page) {
-                                Some(page) => items.pages.insert(page),
-                                None => items.pages.whole = false,
-                            }
+                        if has(b"Stm") {
+                            continue;
                         }
-                        continue;
+                        match own_page.or(page) {
+                            Some(page) => items.pages.insert(page),
+                            None => items.pages.whole = false,
+                        }
                     } else if name(b"Type") == Some(b"OBJR") || (element && has(b"Obj")) {
                         match d.get(b"Obj").and_then(|o| deref_known(o, cx)) {
                             Some(object) => items.objects.insert(object),
                             None => items.objects.whole = false,
                         }
-                        continue;
-                    }
-                    match d.get(b"K") {
-                        Some(kids) => (std::slice::from_ref(kids), own_page),
-                        None => continue,
+                    } else if let Some(kids) = d.get(b"K").and_then(|o| deref(o, cx)) {
+                        nodes.push((kids, own_page, depth + 1));
                     }
                 }
-                _ => continue,
-            };
-            for kid in kids {
-                if !look(&mut looked, limits.structure_nodes) {
-                    break 'walk true;
-                }
-                if let Some(kid) = deref(kid, cx) {
-                    nodes.push((kid, on, depth + 1));
-                }
+                _ => {}
             }
         }
         false
@@ -2819,12 +2824,6 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
         items.pages.whole = false;
     }
     items
-}
-
-/// Counts a kid a walk looks at, before it's looked at: false, counting
-/// none, where `cap` have been.
-fn look(looked: &mut usize, cap: usize) -> bool {
-    count(looked, 1, cap)
 }
 
 /// Counts `n` more of what a walk is capped at, before they're read or
@@ -5203,12 +5202,12 @@ mod tests {
     }
 
     #[test]
-    fn a_structure_tree_whose_array_holds_itself_is_read_no_further_than_its_cap() {
+    fn a_structure_tree_whose_array_holds_itself_is_read_once_and_whole() {
         // The root's /K, 5, an array holding itself, twice or three times,
-        // and an element putting marked content on page 2: each time it's
-        // reached, it's read again, its kids counted, until the walk has
-        // looked at as many as it may.
-        for times in [1, 2, 3] {
+        // and an element putting marked content on page 2: reached again
+        // under the page it's been read under, it isn't read again, so the
+        // tree is read whole and quickly.
+        for times in [1, 2, 3, 1000] {
             let mut kids = vec![Object::reference(5); times];
             kids.push(
                 dict! { "S" => Object::name("P"), "Pg" => Object::reference(2), "K" => 0 }.into(),
@@ -5232,9 +5231,90 @@ mod tests {
                 item_in(&file, container, Some(ObjectId::new(n, 0)), text)
             };
             assert_eq!(asks(2), Truth::True, "{times}");
-            let unknown = unknown("fn:PageContainsStructContentItems");
-            assert_eq!(asks(3), unknown, "{times}: not read whole");
+            assert_eq!(asks(3), Truth::False, "{times}: read whole");
         }
+    }
+
+    /// Whether pages 2 to 5 have marked content, under `limits`, in a
+    /// structure tree whose root's `/K` is the elements `elements` gives,
+    /// each an element of `/Pg` the page it names and `/K` the object it
+    /// names, an array.
+    fn on_pages(
+        limits: Limits,
+        elements: &[(u32, u32)],
+        arrays: impl IntoIterator<Item = (u32, Object)>,
+    ) -> Vec<Truth> {
+        let elements: Vec<Object> = (elements.iter())
+            .map(|&(pg, k)| {
+                let element =
+                    dict! { "S" => Object::name("P"), "Pg" => Object::reference(pg), "K" => Object::reference(k) };
+                Object::from(element)
+            })
+            .collect();
+        let root = dict! { "Type" => Object::name("StructTreeRoot"), "K" => elements };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
+        let mut objects = vec![(1, Object::from(catalog))];
+        objects.extend((2..6).map(|n| (n, Object::from(dict! { "Type" => Object::name("Page") }))));
+        objects.extend(arrays);
+        let file = File::new(dict! { "Root" => Object::reference(1) }, objects);
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let cx = FileCx::new(&file.trailer, v("1.7"), closure).limits(limits);
+        (2..6)
+            .map(|n| {
+                let id = ObjectId::new(n, 0);
+                let at = cx.at(&file.objects[&id], At::Key(b"X")).id(id);
+                holds("fn:PageContainsStructContentItems()", &at)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_structure_tree_is_read_whole_however_many_kids_its_elements_have() {
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:PageContainsStructContentItems");
+        // Three elements on page 2, each of 30 marked-content identifiers:
+        // three dictionaries read, and 90 kids looked at.
+        let mcids = || Object::from((0..30).map(Object::from).collect::<Vec<_>>());
+        let arrays = || [(10, mcids()), (11, mcids()), (12, mcids())];
+        let elements = [(2, 10), (2, 11), (2, 12)];
+        let limits = caps(2048, 100_000, 8192, 3);
+        let said = on_pages(limits, &elements, arrays());
+        assert_eq!(said, [t.clone(), f.clone(), f.clone(), f.clone()], "whole");
+        let limits = caps(2048, 100_000, 8192, 2);
+        assert_eq!(
+            on_pages(limits, &elements, arrays())[1..],
+            [u.clone(), u.clone(), u]
+        );
+        // 40,000 elements, each of 30: 1,200,000 kids, read whole under
+        // the default caps.
+        let objects = (0..40_000u32).map(|n| (10 + n, mcids()));
+        let elements: Vec<_> = (0..40_000u32).map(|n| (2, 10 + n)).collect();
+        let said = on_pages(Limits::DEFAULT, &elements, objects);
+        assert_eq!(said, [t, f.clone(), f.clone(), f]);
+    }
+
+    #[test]
+    fn an_array_of_several_pages_elements_is_read_under_each_its_kids_counted_again() {
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:PageContainsStructContentItems");
+        // Three elements, on pages 2, 3 and 4, sharing one array of five
+        // marked-content identifiers, 10, so each page has marked content:
+        // three dictionaries, and the array read again twice, ten kids.
+        let array = || {
+            [(
+                10,
+                Object::from((0..5).map(Object::from).collect::<Vec<_>>()),
+            )]
+        };
+        let elements = [(2, 10), (3, 10), (4, 10)];
+        let said = on_pages(caps(2048, 100_000, 8192, 13), &elements, array());
+        assert_eq!(said, [t.clone(), t.clone(), t, f.clone()], "whole");
+        let said = on_pages(caps(2048, 100_000, 8192, 12), &elements, array());
+        assert_eq!(said[3], u, "past its nodes");
+        // Two of them on one page: read once under it.
+        let elements = [(2, 10), (3, 10), (3, 10)];
+        let said = on_pages(caps(2048, 100_000, 8192, 8), &elements, array());
+        assert_eq!(said, [Truth::True, Truth::True, f.clone(), f]);
     }
 
     /// [`Limits::DEFAULT`] with the four caps given.
@@ -5343,12 +5423,12 @@ mod tests {
         );
         assert_eq!(named(field(5, 0)), [u.clone(), u.clone(), u], "no nodes");
 
-        // The structure tree: the root's /K, an array, at depth 0, looked at
-        // first; an element on page 2 at 1; its /K at 2; a marked-content
-        // identifier at 3: four kids looked at.
-        let element = dict! { "S" => Object::name("P"), "Pg" => Object::reference(2), "K" => vec![Object::from(0)] };
-        let root =
-            dict! { "Type" => Object::name("StructTreeRoot"), "K" => vec![Object::from(element)] };
+        // The structure tree: the root's /K, an array, at depth 0; two
+        // elements on page 2 at 1, each its /K at 2 and a marked-content
+        // identifier at 3: two dictionaries read.
+        let element = || dict! { "S" => Object::name("P"), "Pg" => Object::reference(2), "K" => vec![Object::from(0)] };
+        let elements = vec![Object::from(element()), Object::from(element())];
+        let root = dict! { "Type" => Object::name("StructTreeRoot"), "K" => elements };
         let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
         let page = || Object::from(dict! { "Type" => Object::name("Page") });
         let tagged = File::new(
@@ -5367,17 +5447,14 @@ mod tests {
         let (t, f) = (Truth::True, Truth::False);
         let u = unknown("fn:PageContainsStructContentItems");
         let structure = |depth, nodes| caps(32, 100_000, depth, nodes);
-        assert_eq!(on(structure(3, 4)), [t, f], "at its size");
+        assert_eq!(on(structure(3, 2)), [t.clone(), f], "at its size");
         assert_eq!(
-            on(structure(2, 4)),
+            on(structure(2, 2)),
             [u.clone(), u.clone()],
             "past its depth"
         );
-        assert_eq!(
-            on(structure(3, 3)),
-            [u.clone(), u.clone()],
-            "past its nodes"
-        );
+        // The second element read first, its marked content found.
+        assert_eq!(on(structure(3, 1)), [t, u.clone()], "past its nodes");
         assert_eq!(on(structure(3, 0)), [u.clone(), u], "no nodes");
     }
 
