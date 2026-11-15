@@ -127,18 +127,18 @@ fn framing(pieces: &[(String, String)]) -> Vec<u8> {
 
 /// The fuzz target's body for the model's tables: `data` as tables' files
 /// ([`pieces`]), loaded as a folder of them is, and held to the loader's
-/// promises: it never panics; a model that doesn't load says which file,
-/// and a line within it where it gives one; a table whose name holds a tab
-/// or a line break is refused, the first by `<name>.tsv`, and no other
-/// table is refused so; one that loads loads the same from its files in
-/// any order, the same tables of the same rows; its hash is of the framing
+/// promises: it never panics; a model that doesn't load says which file, and
+/// a line within it where it gives one; a table whose name holds a tab or a
+/// line break is refused, the first by `<name>.tsv`, and no other table is
+/// refused so; one that loads loads the same from its files in any order,
+/// the same tables of the same rows; its hash is of the framing
 /// [`Grammar::digest`] gives, built here from the pieces; every row is where
-/// [`Table::row`] says, at its key and at each index;
-/// every predicate in its cells parses or says why not, and one that
-/// parses prints back as a text that parses to it, nested no deeper than
-/// the parser goes; and every row's cells, asked as a checker asks them
-/// over an object of its table's keys, say the same through a [`FileCx`]
-/// given the model and one given none, and asked again.
+/// [`Table::row`] says, at its key and at each index; every predicate in its
+/// cells parses or says why not, and one that parses prints back as a text
+/// that parses to it, nested no deeper than the parser goes; and every row's
+/// cells, asked as a checker asks them over an object of its table's keys,
+/// say the same through a [`FileCx`] given the model and one given none, and
+/// asked again.
 pub fn tables(data: &[u8]) {
     loaded(data, &mut |_| {});
 }

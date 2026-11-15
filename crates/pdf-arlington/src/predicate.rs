@@ -127,11 +127,12 @@ pub const STANDARD_14: [&str; 14] = [
 /// deepest is 5 brackets deep (the census test prints it).
 pub(crate) const DEPTH: usize = 32;
 
-/// How many references a value may go through to its object: past them,
-/// it's null wherever a value is read, as one the file hasn't is, but in a
-/// name tree or on the way to one, which isn't then read whole
-/// (`fn:InNameTree`). So it isn't a caller's to lower, as a [`Limits`] is:
-/// a value read as null past it is a guess.
+/// How many objects a value is read through to its own, itself the first:
+/// so it goes through 31 references at most, and past them it's null
+/// wherever a value is read, as one the file hasn't is, but in a name tree
+/// or on the way to one, which isn't then read whole (`fn:InNameTree`). So
+/// it isn't a caller's to lower, as a [`Limits`] is: a value read as null
+/// past it is a guess.
 const HOPS: usize = 32;
 
 /// The caps on the walks of a file's trees the predicates read: past one,
@@ -1930,7 +1931,7 @@ fn entry<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
     }
 }
 
-/// `o` with its references followed, at most [`HOPS`]: none for null, or
+/// `o` with its references followed, fewer than [`HOPS`]: none for null, or
 /// for a reference to an object the file hasn't, which is null (ISO
 /// 32000-2, 7.3.10).
 fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {

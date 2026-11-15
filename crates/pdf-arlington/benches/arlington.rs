@@ -26,13 +26,14 @@
 //!   ask, which reads the tree (`first`), in keys read; and every key asked
 //!   after it, of the tree the file keeps (`kept`), in keys asked.
 //!
-//! Each input is held to what it gives before it's timed: the predicates
-//! to how many there are and how many parse; each row asked to the row
-//! found; the tables to their count, and each walk to their rows; the answers to their tally, the same with the model given and
-//! without; each key of the tree to true, and a key in none to false. The
-//! objects are made here, into a map that's the resolver, which gives every
-//! object it's asked for, so that no read fails and no cap is met; nothing
-//! is read from disk, and the inputs are the same on every run.
+//! Each input is held to what it gives before it's timed: the predicates to
+//! how many there are and how many parse; each row asked to the row found;
+//! the tables to their count, and each walk to their rows; the answers to
+//! their tally, the same with the model given and without; each key of the
+//! tree to true, and a key in none to false. The objects are made here,
+//! into a map that's the resolver, which gives every object it's asked for,
+//! so that no read fails and no cap is met; nothing is read from disk, and
+//! the inputs are the same on every run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;

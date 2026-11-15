@@ -544,7 +544,10 @@ impl Grammar {
     }
 
     /// The tables in `dir`, a `.tsv` file each: a checkout of upstream's
-    /// `tsv/latest`, newer than the embedded one, say.
+    /// `tsv/latest`, newer than the embedded one, say. Each `.tsv` file in
+    /// it is read whole, under no cap but the files' sizes, so `dir` is a
+    /// folder its caller trusts, as pdf-lint's `--model` names its user's
+    /// own.
     ///
     /// # Errors
     ///
