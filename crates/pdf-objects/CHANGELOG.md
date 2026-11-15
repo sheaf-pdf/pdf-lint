@@ -23,6 +23,7 @@
 - Converted `Object` (`Drop`, `Clone`, `PartialEq`, `eq_value`), `Parser`, and `serialize` container walks to iterative heap-stack state machines for constant call-stack usage on deeply nested inputs.
 - `Dict` lookup and duplicate detection use an inline 64-entry `u64` bitset and deterministic index sorting above 64 entries; `Dict::set` updates the last matching entry in place and removes shadowed duplicates.
 - `WithStreams::decoded` now enforces the caller's byte `limit` (`Why::Limit`), and `Debug` redacts `Str::Encrypted` and `Data::Bytes` payloads alongside capped `Fault` byte previews.
+- Raised MSRV from Rust 1.89 to 1.92 to match the workspace.
 
 ### Fixed
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 (unreleased)
+
+- **Rust 1.92.** Raised MSRV from Rust 1.89 to 1.92 to match the workspace (`hayro-ccitt` 0.5 in `pdf-content-streams`). Under Cargo's MSRV-aware resolver (resolver 3, edition 2024), projects on older Rust keep `0.2.1`.
+
 ## 0.2.1 (2026-11-07)
 
 - **Rust 1.89.** The minimum Rust is 1.89, from 1.85: the family's, moved for the RustCrypto releases pdf-crypt wants (its CHANGELOG says which), nothing of this crate's own needing it. Under cargo's resolver that minds Rust versions (resolver 3, edition 2024's), a project on an older Rust keeps 0.2.0.

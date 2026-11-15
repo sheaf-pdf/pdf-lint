@@ -13,6 +13,10 @@ Decode as PDFium does where its reading parts from qpdf's, when you ask for it. 
 - `Prefix::decoded`: what the decoder gave before its predictor, refused or not, so a caller can count what decoding cost.
 - `Predictor::pdfium_refuses`: whether PDFium refuses what a filter decoded under this predictor, told without undoing it.
 
+### Changed
+
+- Raised MSRV from Rust 1.89 to 1.92 to match the workspace.
+
 ## 0.1.0-alpha.2 (2026-11-07)
 
 - **Rust 1.89.** The minimum Rust is 1.89, from 1.85: the family's, moved for the RustCrypto releases pdf-crypt wants (its CHANGELOG says which), nothing of this crate's own needing it. A dependent names an alpha exactly, so it takes this one by naming it.

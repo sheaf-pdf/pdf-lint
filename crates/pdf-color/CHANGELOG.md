@@ -3,6 +3,7 @@
 ## 0.1.0-alpha.2 (unreleased)
 
 - **pdf-objects 0.1.0-alpha.3.** Updated to `pdf-objects` `=0.1.0-alpha.3`, re-exported as `pdf_color::pdf_objects`.
+- **Rust 1.92.** Raised MSRV from Rust 1.89 to 1.92 to match the workspace.
 
 ## 0.1.0-alpha.1 (2026-11-07)
 

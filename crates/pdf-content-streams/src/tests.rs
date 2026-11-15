@@ -3328,6 +3328,9 @@ fn a_filters_own_end_of_data_is_iso_s_data() {
     let s = [format!("BI {fax}>> /L 10 ID ").as_bytes(), &g4, b" EI"].concat();
     assert_eq!(first_image(&s, lim).0, G4);
     assert_eq!(told_with(&s, &DECODED), []);
+    let many_eols = [G4, &b"\x08\x00\x80".repeat(6)].concat();
+    let s_many = [format!("BI {fax}>> ID ").as_bytes(), &many_eols, b" EI"].concat();
+    assert_eq!(first_image(&s_many, lim).0, G4);
     let s = [format!("BI {fax}>> ID ").as_bytes(), &g4, b"xy EI"].concat();
     assert_eq!(
         told_with(&s, &DECODED),

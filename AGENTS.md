@@ -71,12 +71,13 @@ Run development checks via [`just`](justfile):
 |---|---|
 | `just fmt` | Check formatting (`cargo fmt --all` to fix). |
 | `just clippy` | Run Clippy with `-D warnings` across workspace feature combinations. |
-| `just test` | Run unit tests and doctests across default, `--no-default-features`, and extra features. |
+| `just test-unit` | Run workspace unit/integration tests via `cargo-nextest` (no doctests). |
+| `just test` | Run unit tests (`cargo-nextest`) and doctests across default, `--no-default-features`, and extra features. |
 | `just doc` | Build rustdoc with `RUSTDOCFLAGS="-D warnings"` across feature combinations. |
 | `just test-pdfium` | Verify generated cases, doc build pins, and PDFium (`chromium/8152`) answers. |
 | `just test-qpdf` | Run ignored cross-checks against pinned `qpdf` 12.4.2. |
 | `just fuzz <target>` | Run libFuzzer target on nightly (see `fuzz/Cargo.toml`). |
-| `just ci` | Full local CI suite (requires Rust 1.89, nightly `rust-src`, and cross targets). |
+| `just ci` | Full local CI suite (requires `cargo-nextest`, Rust 1.92, nightly `rust-src`, and cross targets). |
 
 ## 4. Repository & Test Invariants (Watch Out!)
 
@@ -93,4 +94,4 @@ Several automated tests enforce strict consistency across code and documentation
 5. **PDFium `chromium/8152` pin check (`oracle/pdfium.py`):**
    Every crate with a `tests/pdfium/` directory (`pdf-tokenizer`, `pdf-objects`, `pdf-structure`, `pdf-content-streams`, `pdf-semantics`, `pdf-color`, `pdf-fonts`, `pdf-linearize`) must include the exact phrase `as of chromium/8152` in its `README.md`, and any `as of chromium/NNNN` mention in `README.md` or `src/` must match the recorded `chromium-NNNN.txt` file.
 6. **MSRV & Workspace Dependencies:**
-   Published library crates target **`rust-version = "1.89"`**. Pre-release crates in `[workspace.dependencies]` use exact version pins (`=0.1.0-alpha.N`), and `just _package` enforces a strict allowlist of packaged files (`src/**/*.rs`, `README.md`, `CHANGELOG.md`, `Cargo.toml`, `Cargo.lock`, plus `pdf-fonts` assets and `pdf-arlington`'s build script and model files).
+   Published library crates target **`rust-version = "1.92"`**. Pre-release crates in `[workspace.dependencies]` use exact version pins (`=0.1.0-alpha.N`), and `just _package` enforces a strict allowlist of packaged files (`src/**/*.rs`, `README.md`, `CHANGELOG.md`, `Cargo.toml`, `Cargo.lock`, plus `pdf-fonts` assets and `pdf-arlington`'s build script and model files).

@@ -195,7 +195,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 
 ## Stability
 
-`pdfs` is currently in alpha (`=0.1.0-alpha.1`). Pin the exact version in `Cargo.toml` (`pdfs = "=0.1.0-alpha.1"`), as alpha releases may introduce breaking API changes documented in `CHANGELOG.md`. Requires Rust **1.89** or later.
+`pdfs` is currently in alpha (`=0.1.0-alpha.1`). Pin the exact version in `Cargo.toml` (`pdfs = "=0.1.0-alpha.1"`), as alpha releases may introduce breaking API changes documented in `CHANGELOG.md`. Requires Rust **1.92** or later.
 
 ## License
 

@@ -6,7 +6,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Added
 
-- The family re-exported whole: pdf-tokenizer `0.2`, pdf-objects and pdf-filters `=0.1.0-alpha.3`, pdf-crypt and pdf-color `=0.1.0-alpha.2`, and pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize `=0.1.0-alpha.1`.
+- The family re-exported whole: pdf-tokenizer `0.2`, pdf-objects, pdf-filters and pdf-crypt `=0.1.0-alpha.3`, pdf-color `=0.1.0-alpha.2`, and pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize `=0.1.0-alpha.1`.
 - `open`, `from_bytes` and `Options`: a file opened by its path or from any source, as a viewer reads it by default (PDFium's recovery and rules, zlib-rs, no fault looked for). `Pdf` reads each object when it's asked for. `Pdf::unlock` opens it by a password after.
 - `Pdf::pages`, `Page` and `Page::content`: a file's pages, each with what it inherits, and a page's streams joined (`Content`), with their operations.
 - `Page::text` and `Page::fonts`: the strings a page's content shows, in its fonts, its forms followed, as PDFium reads them for its text (pdf-fonts' `Shown`), and the fonts its resources name (`NamedFont`), each read once a file.
@@ -29,7 +29,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Notes
 
-- It needs Rust 1.89. Nothing panics on any file, and past a cap a call says so.
+- It needs Rust 1.92. Nothing panics on any file, and past a cap a call says so.
 - A page's or a form's stream that doesn't decode, damaged or through a filter the reader doesn't take, is read as none and said (`Concat::undecoded`, `Unread::Undecoded`), where PDFium reads its data as written.
 - A page's box is written as the content writer writes a number, one that isn't finite as 0.
 - `Options`, `Limits`, `Error` and `NamedFont` are `#[non_exhaustive]`, so each can grow in a minor release. The crates' own types keep their own policies.

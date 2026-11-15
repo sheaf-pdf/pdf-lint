@@ -2,7 +2,7 @@
 name = "pdf-content-streams"
 version = "0.1.0-alpha.1"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-content-streams"
@@ -48,7 +48,7 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_12
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
 # With `image-ends`: CCITTFax data in an inline image decoded to find where
 # it ends, as PDFium decodes it.
-hayro-ccitt = { version = "0.3", optional = true }
+hayro-ccitt = { version = "0.5", optional = true }
 
 # The decoders that find DCT's and CCITTFax's ends as PDFium finds them, for
 # a reading that asks for them (`Limits::coded_ends`), where without them

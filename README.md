@@ -71,11 +71,12 @@ For an architectural map of how these crates connect and conventions for contrib
 
 ## Development
 
-Tasks are defined in the [justfile](justfile) and run with [just](https://github.com/casey/just):
+Tasks are defined in the [justfile](justfile) and run with [just](https://github.com/casey/just) and [cargo-nextest](https://nexte.st):
 
 ```sh
 just              # list all available recipes
-just test         # run unit tests and doctests across feature combinations
+just test-unit    # run workspace unit and integration tests via cargo-nextest
+just test         # run unit tests (nextest) and doctests across feature combinations
 just clippy       # run clippy across workspace feature combinations
 just doc          # build rustdoc with -D warnings across feature combinations
 just ci           # run the full local CI suite (all checks except cargo-semver-checks)
@@ -85,7 +86,7 @@ just ci           # run the full local CI suite (all checks except cargo-semver-
 
 - **PDFium oracle (`just test-pdfium`):** Requires Python 3. Downloads a pinned PDFium build (`chromium/8152` on Linux x86_64, or uses `PDF_LINT_PDFIUM`) and verifies recorded test expectations across crates that emulate PDFium behavior. See [oracle/README.md](oracle/README.md).
 - **qpdf oracle (`just test-qpdf`):** Downloads a pinned `qpdf` binary on Linux x86_64 (or uses `PDF_LINT_QPDF`) to cross-check file reading, writing, encryption, and linearization.
-- **Full `just ci` prerequisites:** Requires Rust **1.89** (workspace MSRV), `nightly` with `rust-src` (for `pdf-tokenizer`'s `core`-only build), and targets `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`, and `wasm32-unknown-unknown`. Note that `*-package` recipes run `cargo publish --dry-run` and require network access.
+- **Full `just ci` prerequisites:** Requires `cargo-nextest`, Rust **1.92** (workspace MSRV), `nightly` with `rust-src` (for `pdf-tokenizer`'s `core`-only build), and targets `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`, and `wasm32-unknown-unknown`. Note that `*-package` recipes run `cargo publish --dry-run` and require network access.
 - **Semver checks (`just <crate>-semver`):** Uses [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) to check published crates against crates.io.
 - **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
 

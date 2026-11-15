@@ -80,11 +80,16 @@ clippy:
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
 
-# Unit tests and doctests: the workspace's, where the filters have both
-# Flate backends, as pdf-structure's tests turn zlib-rs on, and the content
-# streams `image-ends`, as pdf-lint turns it on; then the filters' with
-# their default alone, miniz_oxide, the build a dependent that names no
-# feature gets, which the workspace's unified features hide, and with
+# Workspace unit and integration tests through cargo-nextest (no doctests;
+# pass extra nextest arguments, e.g. `just test-unit -p pdf-structure`).
+test-unit *args="--workspace":
+    cargo nextest run --locked {{ args }}
+
+# Unit tests (through cargo-nextest) and doctests: the workspace's, where the
+# filters have both Flate backends, as pdf-structure's tests turn zlib-rs on,
+# and the content streams `image-ends`, as pdf-lint turns it on; then the
+# filters' with their default alone, miniz_oxide, the build a dependent that
+# names no feature gets, which the workspace's unified features hide, and with
 # zlib-rs alone; then the content streams' without `image-ends`, and with
 # it, `simd`, the dependencies' SIMD, and its spans, which nothing else
 # turns on and only its tests read; then pdf-semantics' without its clock,
@@ -96,21 +101,36 @@ clippy:
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
 # and with every feature it forwards but its test writer.
 test:
-    cargo test --locked --workspace
-    cargo test --locked -p pdf-filters
-    cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
-    cargo test --locked -p pdf-content-streams
-    cargo test --locked -p pdf-content-streams --features simd,image-ends,tracing
-    cargo test --locked -p pdf-semantics --no-default-features
-    cargo test --locked -p pdf-semantics --features tracing
-    cargo test --locked -p pdf-linearize --no-default-features
-    cargo test --locked -p pdf-linearize --features tracing
-    cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing
-    cargo test --locked -p pdf-fonts --no-default-features
-    cargo test --locked -p pdf-structure --features tracing
-    cargo test --locked -p pdfs
-    cargo test --locked -p pdfs --no-default-features
-    cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
+    cargo nextest run --locked --workspace
+    cargo test --locked --workspace --doc
+    cargo nextest run --locked -p pdf-filters
+    cargo test --locked -p pdf-filters --doc
+    cargo nextest run --locked -p pdf-filters --no-default-features --features zlib-rs
+    cargo test --locked -p pdf-filters --no-default-features --features zlib-rs --doc
+    cargo nextest run --locked -p pdf-content-streams
+    cargo test --locked -p pdf-content-streams --doc
+    cargo nextest run --locked -p pdf-content-streams --features simd,image-ends,tracing
+    cargo test --locked -p pdf-content-streams --features simd,image-ends,tracing --doc
+    cargo nextest run --locked -p pdf-semantics --no-default-features
+    cargo test --locked -p pdf-semantics --no-default-features --doc
+    cargo nextest run --locked -p pdf-semantics --features tracing
+    cargo test --locked -p pdf-semantics --features tracing --doc
+    cargo nextest run --locked -p pdf-linearize --no-default-features
+    cargo test --locked -p pdf-linearize --no-default-features --doc
+    cargo nextest run --locked -p pdf-linearize --features tracing
+    cargo test --locked -p pdf-linearize --features tracing --doc
+    cargo nextest run --locked -p pdf-fonts --features predefined-cmaps,tracing
+    cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing --doc
+    cargo nextest run --locked -p pdf-fonts --no-default-features
+    cargo test --locked -p pdf-fonts --no-default-features --doc
+    cargo nextest run --locked -p pdf-structure --features tracing
+    cargo test --locked -p pdf-structure --features tracing --doc
+    cargo nextest run --locked -p pdfs
+    cargo test --locked -p pdfs --doc
+    cargo nextest run --locked -p pdfs --no-default-features
+    cargo test --locked -p pdfs --no-default-features --doc
+    cargo nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
+    cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -419,16 +439,16 @@ semantics-package: (_package "pdf-semantics" "pdf-objects")
 # the package holds with its terms.
 fonts-package: (_package "pdf-fonts" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-filters")
 
-# Package pdf-linearize as a publish would, pdf-objects, pdf-structure,
-# pdf-semantics and pdf-filters beside it while the versions it and they name
-# aren't published; `_package` says what's checked.
-linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-structure" "pdf-semantics" "pdf-filters")
+# Package pdf-linearize as a publish would, pdf-objects, pdf-crypt,
+# pdf-structure, pdf-semantics and pdf-filters beside it while the versions it
+# and they name aren't published; `_package` says what's checked.
+linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-crypt" "pdf-structure" "pdf-semantics" "pdf-filters")
 
-# Package pdfs as a publish would, pdf-objects, pdf-color, pdf-filters,
-# pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts and
+# Package pdfs as a publish would, pdf-objects, pdf-crypt, pdf-color,
+# pdf-filters, pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts and
 # pdf-linearize beside it while the versions it names aren't published;
 # `_package` says what's checked.
-pdfs-package: (_package "pdfs" "pdf-objects" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize")
+pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize")
 
 # Package pdf-arlington as a publish would, the model it embeds with its
 # licence and notice beside its sources, and pdf-objects and pdf-color
@@ -480,78 +500,103 @@ color-semver: (_semver "pdf-color")
 
 # Test the tokenizer on its oldest supported Rust, which must be installed.
 tokenizer-msrv:
-    cargo +{{ tokenizer_msrv }} test --locked -p pdf-tokenizer
+    cargo +{{ tokenizer_msrv }} nextest run --locked -p pdf-tokenizer
+    cargo +{{ tokenizer_msrv }} test --locked -p pdf-tokenizer --doc
 
 # Test the filters on their oldest supported Rust, which must be installed,
 # with both Flate backends.
 filters-msrv:
-    cargo +{{ filters_msrv }} test --locked -p pdf-filters --all-features
+    cargo +{{ filters_msrv }} nextest run --locked -p pdf-filters --all-features
+    cargo +{{ filters_msrv }} test --locked -p pdf-filters --all-features --doc
 
 # Test pdf-crypt on its oldest supported Rust, which must be installed.
 crypt-msrv:
-    cargo +{{ crypt_msrv }} test --locked -p pdf-crypt
+    cargo +{{ crypt_msrv }} nextest run --locked -p pdf-crypt
+    cargo +{{ crypt_msrv }} test --locked -p pdf-crypt --doc
 
 # Test pdf-objects on its oldest supported Rust, which must be installed.
 objects-msrv:
-    cargo +{{ objects_msrv }} test --locked -p pdf-objects
+    cargo +{{ objects_msrv }} nextest run --locked -p pdf-objects
+    cargo +{{ objects_msrv }} test --locked -p pdf-objects --doc
 
 # Test pdf-structure on its oldest supported Rust, which must be installed,
 # without its spans and with them.
 structure-msrv:
-    cargo +{{ structure_msrv }} test --locked -p pdf-structure
-    cargo +{{ structure_msrv }} test --locked -p pdf-structure --features tracing
+    cargo +{{ structure_msrv }} nextest run --locked -p pdf-structure
+    cargo +{{ structure_msrv }} test --locked -p pdf-structure --doc
+    cargo +{{ structure_msrv }} nextest run --locked -p pdf-structure --features tracing
+    cargo +{{ structure_msrv }} test --locked -p pdf-structure --features tracing --doc
 
 # Test pdf-content-streams on its oldest Rust, then with `image-ends` on
 # that feature's, and with it, `simd` and `tracing`, each of which must be
 # installed.
 content-msrv:
-    cargo +{{ content_msrv }} test --locked -p pdf-content-streams
-    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends
-    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends,simd,tracing
+    cargo +{{ content_msrv }} nextest run --locked -p pdf-content-streams
+    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --doc
+    cargo +{{ content_msrv }} nextest run --locked -p pdf-content-streams --features image-ends
+    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends --doc
+    cargo +{{ content_msrv }} nextest run --locked -p pdf-content-streams --features image-ends,simd,tracing
+    cargo +{{ content_msrv }} test --locked -p pdf-content-streams --features image-ends,simd,tracing --doc
 
 # Test pdf-semantics on its oldest supported Rust, which must be installed,
 # as it's published, without its clock and with its spans.
 semantics-msrv:
-    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics
-    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --no-default-features
-    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --features tracing
+    cargo +{{ semantics_msrv }} nextest run --locked -p pdf-semantics
+    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --doc
+    cargo +{{ semantics_msrv }} nextest run --locked -p pdf-semantics --no-default-features
+    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --no-default-features --doc
+    cargo +{{ semantics_msrv }} nextest run --locked -p pdf-semantics --features tracing
+    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --features tracing --doc
 
 # Test pdf-color on its oldest supported Rust, which must be installed.
 color-msrv:
-    cargo +{{ color_msrv }} test --locked -p pdf-color
+    cargo +{{ color_msrv }} nextest run --locked -p pdf-color
+    cargo +{{ color_msrv }} test --locked -p pdf-color --doc
 
 # Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it,
 # with no feature, and with its spans, which must be installed.
 fonts-msrv:
-    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts
-    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --no-default-features
-    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features tracing
+    cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --doc
+    cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts --no-default-features
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --no-default-features --doc
+    cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts --features tracing
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features tracing --doc
 
 # Test pdf-fonts with `predefined-cmaps` on that feature's oldest Rust, which must
 # be installed.
 fonts-cmaps-msrv:
-    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features predefined-cmaps
+    cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts --features predefined-cmaps
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features predefined-cmaps --doc
 
 # Test pdf-linearize on its oldest supported Rust, which must be installed,
 # with its adapter and without, and with its spans (`tracing`); and the lopdf
 # adapter's crate, never published, on the same Rust, which its manifest names.
 linearize-msrv:
-    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize
-    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
-    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features tracing
-    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize-lopdf
+    cargo +{{ linearize_msrv }} nextest run --locked -p pdf-linearize
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --doc
+    cargo +{{ linearize_msrv }} nextest run --locked -p pdf-linearize --no-default-features
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features --doc
+    cargo +{{ linearize_msrv }} nextest run --locked -p pdf-linearize --features tracing
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --features tracing --doc
+    cargo +{{ linearize_msrv }} nextest run --locked -p pdf-linearize-lopdf
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize-lopdf --doc
 
 # Test pdfs on its oldest supported Rust, which must be installed, as it's
 # published, with no feature, and with every feature it forwards but its test
 # writer.
 pdfs-msrv:
-    cargo +{{ pdfs_msrv }} test --locked -p pdfs
-    cargo +{{ pdfs_msrv }} test --locked -p pdfs --no-default-features
-    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
+    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --doc
+    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --no-default-features
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --no-default-features --doc
+    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:
-    cargo +{{ arlington_msrv }} test --locked -p pdf-arlington
+    cargo +{{ arlington_msrv }} nextest run --locked -p pdf-arlington
+    cargo +{{ arlington_msrv }} test --locked -p pdf-arlington --doc
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
