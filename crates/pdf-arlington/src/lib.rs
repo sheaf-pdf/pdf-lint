@@ -21,6 +21,9 @@
 //!   list all extensions referenced by a grammar ([`Grammar::extensions`]).
 
 pub mod extension;
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod grammar;
 pub mod predicate;
 

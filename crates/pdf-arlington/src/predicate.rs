@@ -126,7 +126,7 @@ pub const STANDARD_14: [&str; 14] = [
 
 /// How deep a predicate may nest, in brackets and calls. The model's
 /// deepest is 5 brackets deep (the census test prints it).
-const DEPTH: usize = 32;
+pub(crate) const DEPTH: usize = 32;
 
 /// How many references a value may go through to its object.
 const HOPS: usize = 32;
@@ -1131,7 +1131,7 @@ impl Parses {
 
     /// The texts it keeps.
     #[cfg(test)]
-    fn kept(&self) -> BTreeSet<&str> {
+    pub(crate) fn kept(&self) -> BTreeSet<&str> {
         let slots = self.slots.iter().filter_map(OnceLock::get);
         slots.map(|kept| &*kept.text).collect()
     }

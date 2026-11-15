@@ -407,10 +407,10 @@ pub enum TableError {
 
 /// A table's file, to read: the table's name, what an error calls the
 /// file, and its text.
-struct File<'a> {
-    name: String,
-    label: PathBuf,
-    text: std::borrow::Cow<'a, str>,
+pub(crate) struct File<'a> {
+    pub(crate) name: String,
+    pub(crate) label: PathBuf,
+    pub(crate) text: std::borrow::Cow<'a, str>,
 }
 
 impl Grammar {
@@ -472,7 +472,9 @@ impl Grammar {
         Grammar::from_files(files)
     }
 
-    fn from_files<'a>(files: impl IntoIterator<Item = File<'a>>) -> Result<Grammar, Error> {
+    pub(crate) fn from_files<'a>(
+        files: impl IntoIterator<Item = File<'a>>,
+    ) -> Result<Grammar, Error> {
         let mut files: Vec<File> = files.into_iter().collect();
         files.sort_by_cached_key(|file| format!("{}.tsv", file.name));
         let mut bytes = Vec::new();

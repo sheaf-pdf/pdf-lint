@@ -572,10 +572,12 @@ arlington-msrv:
 # `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
 # through the facade, and written in the clear and encrypted, read locked and
-# unlocked; or `check`, the reader and the checker.
+# unlocked; `arlington`, pdf-arlington's loader on any tables and its
+# evaluator on any predicate over any objects; or `check`, the reader and the
+# checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
-# `color`, `fonts`, `linearize` and `pdfs` from those their own crates' fuzz modules make. The
+# `color`, `fonts`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'
 # SIMD, which `content` reaches (`just fuzz content 300 simd`); and
@@ -643,13 +645,18 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/pdfs
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" pdfs fuzz/corpus/pdfs fuzz/seeds/pdfs -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    arlington)
+        PDF_ARLINGTON_FUZZ_SEEDS="$PWD/fuzz/seeds/arlington" cargo test --locked -q -p pdf-arlington --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/arlington
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" arlington fuzz/corpus/arlington fuzz/seeds/arlington -- -dict=fuzz/arlington.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, pdfs or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, pdfs, arlington or check" >&2
         exit 2
         ;;
     esac

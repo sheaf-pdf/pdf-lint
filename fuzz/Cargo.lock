@@ -510,6 +510,7 @@ name = "pdf-tokenizer-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "pdf-arlington",
  "pdf-color",
  "pdf-content-streams",
  "pdf-crypt",

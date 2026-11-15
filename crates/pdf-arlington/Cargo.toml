@@ -48,3 +48,5 @@ harness = false
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
