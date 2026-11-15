@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **An empty predicate is unknown for a reason.** pdf-arlington's evaluator, re-exported here, says an empty text, which no cell of the embedded model the checker asks holds but a caller may ask, is unknown by `an empty predicate` (`Truth::Unknown`, and `Reference::Unknown` and `Since::Unknown` alike), where its reason was the empty text; a text that doesn't parse is unknown by itself, as before. No report of the embedded model moves; a model of one's own whose IndirectReference has an empty item (`[TRUE];[]`) is not checked there for `an empty predicate`, where the reason was empty.
 - **A content fault's words cut at a character, and marked.** Where a finding quotes content that ISO 32000-2 reads otherwise, and what it quotes is longer than 40 bytes, it shows the first 40 and then `…`. A character that would run past them is left out. Before, it showed the 40 bytes alone, cut wherever they fell, with no mark. The findings are the same; only these words move.
 - **An inline image's LZW data ended as PDFium ends it.** Where an inline image's LZW data holds a code past the table's next entry, not the first since a clear code, the content check reads on through it as PDFium's decoder does, and ends the image where PDFium ends it. Before, it stopped at that code and read on from the image's data to the next `EI`, so what it checked after such an image can move.
 - **Rust 1.89.** The minimum Rust is 1.89, from 1.88: the family's, moved for the RustCrypto releases pdf-crypt wants (its CHANGELOG says which).

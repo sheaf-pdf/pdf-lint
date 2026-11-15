@@ -245,7 +245,9 @@ pub enum Truth {
     False,
     /// It can't be told, for the first thing in the way: a function the
     /// evaluator doesn't support (`fn:BitsClear`), or a value it can't read
-    /// (`@Type`, which the object lacks, with no default to stand in).
+    /// (`@Type`, which the object lacks, with no default to stand in); or
+    /// the text, as written, where it doesn't parse or isn't the call its
+    /// cell asks for, an empty one as `an empty predicate`. Never empty.
     Unknown(String),
 }
 
@@ -730,7 +732,8 @@ pub enum Since {
     /// With this extension, and in no version, the file not being checked
     /// under it (not among the extensions [`since`] is given).
     Extension(String),
-    /// A cell the reader doesn't read.
+    /// A cell the reader doesn't read, as written, an empty one as `an
+    /// empty predicate`.
     Unknown(String),
 }
 
@@ -760,11 +763,11 @@ pub fn required(cell: &str, cx: &Cx) -> Truth {
     }
     let expr = parsed(cell, cx.file.grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
-        return Truth::Unknown(cell.to_string());
+        return Truth::Unknown(unknown_by(cell));
     };
     match (f.as_str(), &args[..]) {
         ("fn:IsRequired", [cond]) => truth(cond, cx).truth(false),
-        _ => Truth::Unknown(cell.to_string()),
+        _ => Truth::Unknown(unknown_by(cell)),
     }
 }
 
@@ -775,7 +778,7 @@ pub fn required(cell: &str, cx: &Cx) -> Truth {
 pub fn holds(text: &str, cx: &Cx) -> Truth {
     match &*parsed(text, cx.file.grammar) {
         Ok(expr) => truth(expr, cx).truth(true),
-        Err(_) => Truth::Unknown(text.to_string()),
+        Err(_) => Truth::Unknown(unknown_by(text)),
     }
 }
 
@@ -792,17 +795,17 @@ pub fn reference(cell: &str, cx: &Cx) -> Reference {
     }
     let expr = parsed(cell, cx.file.grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
-        return Reference::Unknown(cell.to_string());
+        return Reference::Unknown(unknown_by(cell));
     };
     let must = match f.as_str() {
         "fn:MustBeDirect" => Reference::Direct,
         "fn:MustBeIndirect" => Reference::Indirect,
-        _ => return Reference::Unknown(cell.to_string()),
+        _ => return Reference::Unknown(unknown_by(cell)),
     };
     let applies = match &args[..] {
         [] => Tri::Is(true),
         [cond] => truth(cond, cx),
-        _ => return Reference::Unknown(cell.to_string()),
+        _ => return Reference::Unknown(unknown_by(cell)),
     };
     match applies {
         Tri::Is(true) => must,
@@ -827,7 +830,7 @@ fn since_in(cell: &str, extensions: &BTreeSet<String>, grammar: Option<&Grammar>
     if let Some(v) = version(cell) {
         return Since::In(v);
     }
-    let unread = || Since::Unknown(cell.to_string());
+    let unread = || Since::Unknown(unknown_by(cell));
     let expr = parsed(cell, grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
         return unread();
@@ -890,6 +893,16 @@ pub fn gate(wraps: &[Wrap], file: Version, extensions: &BTreeSet<String>) -> Gat
     deprecated.map_or(Gate::Allowed, Gate::AllowedDeprecated)
 }
 
+/// What's unknown by a text the evaluator can't read, or that isn't the
+/// call its cell asks for: the text, as written, or for an empty one, which
+/// would say nothing, `an empty predicate`.
+fn unknown_by(text: &str) -> String {
+    match text {
+        "" => "an empty predicate".to_string(),
+        _ => text.to_string(),
+    }
+}
+
 /// [`holds`], when every function in `text` is [`SUPPORTED`]: else
 /// unknown, by the first that isn't, even where the rest would decide
 /// it. TestGrammar takes a predicate it hasn't wholly implemented as no
@@ -902,7 +915,7 @@ pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
             Some(f) => Truth::Unknown(f.to_string()),
             None => truth(expr, cx).truth(true),
         },
-        Err(_) => Truth::Unknown(text.to_string()),
+        Err(_) => Truth::Unknown(unknown_by(text)),
     };
     let kept = (cx.file.grammar).and_then(|grammar| grammar.parses().find(text));
     match kept {
@@ -5211,6 +5224,38 @@ mod tests {
             assert_eq!(holds_fully(eval, &cx), unknown(eval));
             for item in [eval, value, plain] {
                 assert_eq!(required_value(item, &cx), None, "{item}");
+            }
+        }
+    }
+
+    /// An empty text, which no cell of a model that loads asks but a caller
+    /// may, is unknown by `an empty predicate`, through a model and not, so
+    /// that what's unknown says why; one that doesn't parse, by its text.
+    #[test]
+    fn an_empty_text_is_unknown_for_a_reason() {
+        let page = Object::from(dict! { "Rotate" => 90 });
+        let trailer = Dict::new();
+        let resolve = resolve_fn(|_: ObjectId| None);
+        let model = loaded();
+        let alone = FileCx::new(&trailer, v("2.0"), &resolve);
+        let given = FileCx::new(&trailer, v("2.0"), &resolve).grammar(&model);
+        let why = "an empty predicate";
+        for file in [&alone, &given] {
+            let cx = file.at(&page, At::Key(b"Rotate"));
+            assert_eq!(required("", &cx), unknown(why));
+            assert_eq!(holds("", &cx), unknown(why));
+            assert_eq!(holds_fully("", &cx), unknown(why));
+            assert_eq!(reference("", &cx), Reference::Unknown(why.to_string()));
+            assert_eq!(file.since(""), Since::Unknown(why.to_string()));
+            assert_eq!(since("", &none()), Since::Unknown(why.to_string()));
+            assert_eq!(required_value("", &cx), None);
+            assert_eq!(ignored("", &cx), None);
+            for text in ["@", "fn:", "(Rotate", " "] {
+                assert_eq!(required(text, &cx), unknown(text));
+                assert_eq!(holds(text, &cx), unknown(text));
+                assert_eq!(holds_fully(text, &cx), unknown(text));
+                assert_eq!(reference(text, &cx), Reference::Unknown(text.to_string()));
+                assert_eq!(file.since(text), Since::Unknown(text.to_string()));
             }
         }
     }
