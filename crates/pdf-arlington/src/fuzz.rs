@@ -574,10 +574,14 @@ fn said(text: &str, cx: &Cx) -> [Said; 6] {
 /// cell to; and every one of the evaluator's functions, at every key and
 /// element of the container, says the same through a [`FileCx`] given the
 /// body's own model and one given none, asked twice of each, what a
-/// [`FileCx`] keeps read once; and every unknown says why. A name tree
-/// read over a resolver that fails some of its reads is held to no more: a
-/// part that doesn't read is read as absent, so a key it holds may be said
-/// not to be there.
+/// [`FileCx`] keeps read once; and every unknown says why. Where the text
+/// is one `fn:InNameTree` call, a key the tree holds over a resolver that
+/// gives every object is never said to be missing over the input's, which
+/// fails what the input marks, where the row's own value, and the
+/// references its entry goes through, read alike over both: a part of the
+/// tree, or of the way to it, that doesn't read leaves a key it may hold
+/// unknown. The row's own value that doesn't read is null, as an absent
+/// row is, which the function says is in no tree.
 pub fn predicates(data: &[u8]) {
     asking(data, &mut |_| {});
 }
@@ -635,7 +639,7 @@ fn asking(data: &[u8], asked: &mut dyn FnMut(&str)) {
         latin.insert(Some(*id), None, id.number % 2 == 1);
         latin.insert(None, object.at(), id.number % 2 == 1);
     }
-    let file = |given: bool| {
+    let file = |resolve, given: bool| {
         let file = FileCx::new(trailer, version, resolve)
             .size(size)
             .extensions(&extensions);
@@ -651,7 +655,7 @@ fn asking(data: &[u8], asked: &mut dyn FnMut(&str)) {
         };
         if given { file.grammar(&model) } else { file }
     };
-    let (given, alone) = (file(true), file(false));
+    let (given, alone) = (file(resolve, true), file(resolve, false));
     let parents: Vec<&Object> = (3..3 + u32::from(picks & 3))
         .filter_map(|n| objects.get(&ObjectId::new(n, 0)))
         .collect();
@@ -683,6 +687,42 @@ fn asking(data: &[u8], asked: &mut dyn FnMut(&str)) {
             assert!(said(&text, &cx(file, at)) == first, "{text:?} at {at:?}");
         }
         first.iter().for_each(Said::reasoned);
+    }
+
+    if calls_alone(&text, "fn:InNameTree") {
+        let all = Failing {
+            why: None,
+            ..resolve
+        };
+        let whole = file(all, false);
+        for at in places(container) {
+            let (over_all, over_some) = (cx(&whole, at), cx(&alone, at));
+            let own = |cx: &Cx| predicate::value_at(container, at, cx).map(std::ptr::from_ref);
+            if predicate::holds(&text, &over_all) == Truth::True
+                && own(&over_all) == own(&over_some)
+            {
+                assert!(
+                    predicate::holds(&text, &over_some) != Truth::False,
+                    "{text:?} at {at:?}: a key the tree holds said to be missing where some reads fail"
+                );
+            }
+        }
+    }
+}
+
+/// Whether `text` is one call of `function`, its argument a path, in
+/// brackets or `fn:Eval` or neither, as the model's cells write one.
+fn calls_alone(text: &str, function: &str) -> bool {
+    let Ok(mut e) = predicate::parse(text) else {
+        return false;
+    };
+    loop {
+        e = match e {
+            Expr::Group(inner) => *inner,
+            Expr::Call(f, mut args) if f == "fn:Eval" && args.len() == 1 => args.remove(0),
+            Expr::Call(f, args) => return f == function && matches!(&args[..], [Expr::Path(_)]),
+            _ => return false,
+        };
     }
 }
 
@@ -765,6 +805,19 @@ const DEVICE_N: &str = "<< /Subtype /NChannel /Colorants << /Spot 4 0 R >> \
      << /Type /Catalog >> \
      << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>";
 
+/// A go-to action whose destination is named in a name tree each part of
+/// which is a reference: the catalog, 3, its `/Names`, 4, the tree's root,
+/// 5, its `/Kids`, 6, a leaf, 7, its `/Names`, 8, and the key `b`, 9.
+const NAMES_REFERRED: &str = "<< /S /GoTo /D (b) >> \
+                              << /Root 3 0 R /Size 10 >> \
+                              << /Type /Catalog /Names 4 0 R >> \
+                              << /Dests 5 0 R >> \
+                              << /Kids 6 0 R >> \
+                              [7 0 R] \
+                              << /Limits [(a) (b)] /Names 8 0 R >> \
+                              [(a) 0 9 0 R 0] \
+                              (b)";
+
 /// A target, of an embedded file named in a name tree, and its target,
 /// which names a page by number and an annotation of it.
 const TARGET: &str = "<< /R /C /N (doc) /P 0 /A 0 /T << /R /P >> >> \
@@ -818,7 +871,8 @@ fn rewrapped(value: &Wrapped<String>) -> String {
 /// for the evaluator, one for each function it supports, its text the
 /// shortest of the embedded model's cells that call it (`fn:InNameTree`'s
 /// the go-to action's), over a small object graph that gives it something
-/// to read, and one over a resolver that fails a name tree's kid.
+/// to read; and over a resolver that fails a name tree's kid, and one by
+/// one each reference on the way to a tree and in it.
 pub fn fixtures() -> Vec<(String, Vec<u8>)> {
     let mut seeds = Vec::new();
     let mut together = Vec::new();
@@ -891,6 +945,21 @@ pub fn fixtures() -> Vec<(String, Vec<u8>)> {
     let goto = "fn:Eval(fn:InNameTree(trailer::Catalog::Names::Dests))";
     let failing = seed(goto, [1 << 6, how | 1, picks], NAMES);
     seeds.push(("predicate-InNameTree-damaged".to_string(), failing));
+    // Each reference on the way to a tree, and in it, failing, one at a
+    // time, for each reason (1 to 4: damaged, capped, locked, the source).
+    let parts = [
+        ("catalog", 3, 1),
+        ("names", 4, 3),
+        ("root", 5, 2),
+        ("kids", 6, 4),
+        ("leaf", 7, 1),
+        ("leaf-names", 8, 3),
+        ("key", 9, 2),
+    ];
+    for (part, n, why) in parts {
+        let failing = seed(goto, [1 << (n % 8), how | why, picks], NAMES_REFERRED);
+        seeds.push((format!("predicate-InNameTree-{part}"), failing));
+    }
     seeds
 }
 

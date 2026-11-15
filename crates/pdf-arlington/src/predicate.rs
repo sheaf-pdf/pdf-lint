@@ -273,10 +273,19 @@ pub enum Truth {
 /// An object its resolver gives none for is null to the predicates, as
 /// one the file hasn't is (ISO 32000-2, 7.3.10), whatever the reason: over
 /// a reading by position, one whose bytes the source failed to give is
-/// null in that row, and missing from any tree read then, which is kept
-/// so. pdf-structure's `Reading::failed_resolves` counts those, for a caller
-/// to learn that some were, and what asks of a resolver itself can ask why
-/// (`Resolve::try_resolve`).
+/// null in that row, and missing from the form's fields and the structure
+/// tree read then, which are kept so. pdf-structure's
+/// `Reading::failed_resolves` counts those, for a caller to learn that some
+/// were. `fn:InNameTree` alone asks why (`Resolve::try_resolve`), of each
+/// reference on the way to its name tree and in it, the row's own value
+/// aside: where one doesn't read, by a cap, a password, damage or the
+/// source, or a chain of references runs past those a value is followed
+/// through, the tree isn't read whole, as pdf-semantics' `tree::names` has
+/// it, and a key its readable part doesn't hold is unknown, not false. A
+/// tree is kept as it was read, not whole for a source's failure too, as
+/// what a `FileCx` reads once isn't read again for each row that asks: a
+/// caller whose source may give the bytes if asked again asks through
+/// another `FileCx`.
 ///
 /// Those it keeps know an object by where it was written and by its
 /// number, so the spans of the objects it's given, and of those its
@@ -1682,7 +1691,7 @@ fn step<'c>(o: &'c Object, key: &str, cx: &Cx<'c, '_>) -> Option<Option<&'c Obje
 }
 
 /// `o`'s entry at `at`, a stream's from its dictionary; none for null.
-fn value_at<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
+pub(crate) fn value_at<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
     deref(entry(o, at, cx)?, cx)
 }
 
@@ -1708,6 +1717,84 @@ fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {
         }
     }
     None
+}
+
+/// A reference that doesn't read, for a reason its resolver gives, or a
+/// chain of them past [`HOPS`]: what [`deref_tried`] stops at.
+struct Unread;
+
+/// `o` with its references followed as [`deref()`] follows them, but each
+/// through [`Resolve::try_resolve`], which says why one doesn't read: none
+/// for null, or for a reference to an object the file hasn't; [`Unread`]
+/// for one that doesn't read, by a cap, a password, damage or the source,
+/// and for a chain of them past [`HOPS`], which [`deref()`] ends as null.
+fn deref_tried<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Result<Option<&'c Object>, Unread> {
+    for _ in 0..HOPS {
+        match o.value() {
+            Value::Ref(id) => match cx.file.resolve.try_resolve(*id) {
+                Ok(Some(to)) => o = to,
+                Ok(None) => return Ok(None),
+                Err(_) => return Err(Unread),
+            },
+            Value::Null => return Ok(None),
+            _ => return Ok(Some(o)),
+        }
+    }
+    Err(Unread)
+}
+
+/// What stops [`walk_tried`]: a step that can't be told, as [`walk`] stops
+/// at one, or a reference on the way that doesn't read ([`Unread`]).
+enum Stop {
+    Step,
+    Unread,
+}
+
+impl From<Unread> for Stop {
+    fn from(_: Unread) -> Stop {
+        Stop::Unread
+    }
+}
+
+/// The object at the end of `p`, as [`walk`] reaches it, but each reference
+/// on the way followed through [`deref_tried`]: stopped by one that doesn't
+/// read. The row's own value, where the path starts at it (`@*`), is read
+/// as every value is ([`value_at`]).
+fn walk_tried<'c>(p: &Path, cx: &Cx<'c, '_>) -> Result<Option<&'c Object>, Stop> {
+    let (mut at, keys) = match (p.base, &p.keys[..]) {
+        (Base::Here, [first, rest @ ..]) if wild(first) => {
+            (value_at(cx.container, cx.at, cx), rest)
+        }
+        (Base::Here, keys) => (Some(cx.container), keys),
+        (Base::Parent(n), keys) => (parent(n, keys, cx), keys),
+        (Base::Trailer, [first, rest @ ..]) => match cx.file.trailer.get(first.as_bytes()) {
+            Some(entry) => (deref_tried(entry, cx)?, rest),
+            None => (None, rest),
+        },
+        (Base::Trailer, []) => return Err(Stop::Step),
+    };
+    // As [`walk`], a `*` past the start can't be told, wherever the path
+    // stops.
+    if keys.iter().any(|key| wild(key)) {
+        return Err(Stop::Step);
+    }
+    for key in keys {
+        let Some(o) = at else { break };
+        let Some(o) = deref_tried(o, cx)? else {
+            return Ok(None);
+        };
+        let at_key = match o.value() {
+            Value::Array(_) => At::Index(key.parse().map_err(|_| Stop::Step)?),
+            Value::Dict(_) | Value::Stream(_) => At::Key(key.as_bytes()),
+            _ => return Err(Stop::Step),
+        };
+        // `o` is followed, so [`entry`] follows nothing more of it.
+        at = match entry(o, at_key, cx) {
+            Some(value) => deref_tried(value, cx)?,
+            None => None,
+        };
+    }
+    Ok(at)
 }
 
 /// How the object `o` comes to, its references followed as [`deref()`]
@@ -2115,7 +2202,11 @@ fn hex(f: &str, cx: &Cx) -> Tri {
 /// no such tree. A row that isn't a string isn't what the function asks
 /// of (INTERNAL_GRAMMAR.md: "which must be a PDF string"), and can't be
 /// told; nor can one whose bytes the reader didn't give, or one the tree's
-/// readable keys don't hold when some of it doesn't read.
+/// readable keys don't hold when some of it doesn't read. The references
+/// on the way to the tree, and those in it, are followed asking why one
+/// doesn't read ([`walk_tried`], [`name_tree`]): where one on the way
+/// doesn't, no tree is read, and a key can't be told. The row's own value
+/// is read as every value is, null where it doesn't read.
 fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
     let key = match value_at(cx.container, cx.at, cx).map(|o| o.value()) {
         None => return Tri::Is(false),
@@ -2123,10 +2214,11 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
         Some(Value::String(..)) => return Tri::Unknown("the string's bytes".to_string()),
         Some(_) => return Tri::Unknown(f.to_string()),
     };
-    let root = match walk(tree, &tree.keys, cx) {
+    let root = match walk_tried(tree, cx) {
         Ok(Some(root)) => root,
         Ok(None) => return Tri::Is(false),
-        Err(why) => return Tri::Unknown(why),
+        Err(Stop::Step) => return Tri::Unknown(tree.text.clone()),
+        Err(Stop::Unread) => return Tri::Unknown(f.to_string()),
     };
     let known = Known {
         at: root.at(),
@@ -2180,7 +2272,11 @@ fn entry_id(p: &Path, cx: &Cx) -> Option<ObjectId> {
 
 /// The keys of the name tree at `root` (ISO 32000-2, 7.9.6): each node's
 /// `/Names` pairs' first, through its `/Kids`, each node once, as deep and
-/// as many as [`TREE_DEPTH`] and [`TREE_NODES`] let.
+/// as many as [`TREE_DEPTH`] and [`TREE_NODES`] let. Each reference in it
+/// is followed through [`deref_tried`]: one that doesn't read leaves the
+/// tree not whole, and the walk goes on beside it. A `/Names` or `/Kids`
+/// that's null, or a reference to nothing, is none, and a kid or a key
+/// that is, a part not read, as pdf-semantics' walk reads them.
 fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
     let mut tree = Tree {
         keys: HashSet::new(),
@@ -2200,32 +2296,35 @@ fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
             tree.whole = false;
             continue;
         };
-        let array = |key: &[u8]| node.get(key).and_then(|o| deref(o, cx)).map(|o| o.value());
+        let array = |key: &[u8]| match node.get(key) {
+            Some(o) => deref_tried(o, cx).map(|o| o.map(Object::value)),
+            None => Ok(None),
+        };
         match array(b"Names") {
-            Some(Value::Array(names)) => {
+            Ok(Some(Value::Array(names))) => {
                 for key in names.iter().step_by(2) {
-                    match deref(key, cx).map(|o| o.value()) {
-                        Some(Value::String(Str::Bytes(key), _)) => {
+                    match deref_tried(key, cx).map(|o| o.map(Object::value)) {
+                        Ok(Some(Value::String(Str::Bytes(key), _))) => {
                             tree.keys.insert(key.clone());
                         }
                         _ => tree.whole = false,
                     }
                 }
             }
-            None => {}
-            Some(_) => tree.whole = false,
+            Ok(None) => {}
+            Ok(Some(_)) | Err(Unread) => tree.whole = false,
         }
         match array(b"Kids") {
-            Some(Value::Array(kids)) => {
+            Ok(Some(Value::Array(kids))) => {
                 for kid in kids {
-                    match deref(kid, cx) {
-                        Some(kid) => nodes.push((kid, depth + 1)),
-                        None => tree.whole = false,
+                    match deref_tried(kid, cx) {
+                        Ok(Some(kid)) => nodes.push((kid, depth + 1)),
+                        Ok(None) | Err(Unread) => tree.whole = false,
                     }
                 }
             }
-            None => {}
-            Some(_) => tree.whole = false,
+            Ok(None) => {}
+            Ok(Some(_)) | Err(Unread) => tree.whole = false,
         }
     }
     tree
@@ -2956,12 +3055,12 @@ mod tests {
     //! supported function means what INTERNAL_GRAMMAR.md says, on the
     //! model's own cells where it has them.
 
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
     use std::sync::Barrier;
     use std::thread::ThreadId;
 
-    use pdf_objects::{Dict, dict, resolve_fn};
+    use pdf_objects::{Dict, Unreadable, Why, dict, resolve_fn};
 
     use super::*;
     use crate::grammar::{self, Grammar, Row, model, split};
@@ -4396,6 +4495,236 @@ mod tests {
             });
             assert_eq!(said, own, "placed: {placed}, in turn in one container");
         }
+    }
+
+    /// A resolver over `objects` that fails each object `fails` names for
+    /// its `Why`, as a reader fails one it can't read; and, where `once`
+    /// names one, fails it for the source the first time it's asked for.
+    #[derive(Clone, Copy)]
+    struct Failing<'o> {
+        objects: &'o BTreeMap<ObjectId, Object>,
+        fails: &'o [(u32, Why)],
+        once: Option<(u32, &'o Cell<bool>)>,
+    }
+
+    impl<'o> Failing<'o> {
+        fn new(objects: &'o BTreeMap<ObjectId, Object>, fails: &'o [(u32, Why)]) -> Failing<'o> {
+            Failing {
+                objects,
+                fails,
+                once: None,
+            }
+        }
+    }
+
+    impl<'o> Resolve<'o> for Failing<'o> {
+        fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+            self.try_resolve(id).ok().flatten()
+        }
+
+        fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+            let named = (self.fails.iter()).find(|(n, _)| *n == id.number);
+            let why = named.map(|&(_, why)| why).or_else(|| match self.once {
+                Some((n, failed)) if n == id.number && !failed.replace(true) => Some(Why::Source),
+                _ => None,
+            });
+            match why {
+                Some(why) => Err(Unreadable::new(id, why, "made to fail")),
+                None => Ok(self.objects.get(&id)),
+            }
+        }
+    }
+
+    /// A file whose catalog, 1, has `/Names`, 2, whose `/Dests`, 3, is a
+    /// name tree, each by reference: the root's `/Kids`, 4, holds a node,
+    /// 5, over a leaf, 7, whose `/Names`, 8, holds `a` and, by reference,
+    /// 9, `b`; and a leaf, 6, holding `c`.
+    fn dests() -> File {
+        let names = vec![
+            Object::text("a"),
+            Object::from(0),
+            Object::reference(9),
+            Object::from(0),
+        ];
+        File::new(
+            dict! { "Root" => Object::reference(1) },
+            [
+                (
+                    1,
+                    dict! { "Type" => Object::name("Catalog"), "Names" => Object::reference(2) }
+                        .into(),
+                ),
+                (2, dict! { "Dests" => Object::reference(3) }.into()),
+                (3, dict! { "Kids" => Object::reference(4) }.into()),
+                (4, vec![Object::reference(5), Object::reference(6)].into()),
+                (5, dict! { "Kids" => vec![Object::reference(7)] }.into()),
+                (6, leaf(&["c"])),
+                (7, dict! { "Names" => Object::reference(8) }.into()),
+                (8, names.into()),
+                (9, Object::text("b")),
+            ],
+        )
+    }
+
+    /// The answers `said` writes, one a letter: true, false, or unknown
+    /// for `fn:InNameTree`.
+    fn truths(said: &str) -> Vec<Truth> {
+        (said.chars())
+            .map(|c| match c {
+                'T' => Truth::True,
+                'F' => Truth::False,
+                _ => unknown("fn:InNameTree"),
+            })
+            .collect()
+    }
+
+    /// Whether `a`, `b`, `c` and `z` are in [`dests`]' tree, over `file`.
+    fn in_dests(file: &FileCx) -> Vec<Truth> {
+        in_tree(
+            file,
+            "trailer::Catalog::Names::Dests",
+            &["a", "b", "c", "z"],
+        )
+    }
+
+    #[test]
+    fn a_name_tree_whose_reference_doesn_t_read_can_t_say_a_key_is_missing() {
+        let file = dests();
+        let asks = |fails: &[(u32, Why)]| {
+            let resolve = Failing::new(&file.objects, fails);
+            in_dests(&FileCx::new(&file.trailer, v("1.7"), resolve))
+        };
+        assert_eq!(asks(&[]), truths("TTTF"), "all of it read");
+        // Each place a reference can fail, on the way to the tree or in it:
+        // what's read of the rest is held, and a key it doesn't hold can't
+        // be told.
+        let places = [
+            (1, "the catalog", "UUUU"),
+            (2, "its /Names", "UUUU"),
+            (3, "the tree's root", "UUUU"),
+            (4, "the root's /Kids", "UUUU"),
+            (5, "a node", "UUTU"),
+            (7, "the node's kid", "UUTU"),
+            (8, "a leaf's /Names", "UUTU"),
+            (9, "a key", "TUTU"),
+            (6, "a kid", "TTUU"),
+        ];
+        for why in [Why::Damaged, Why::Capped, Why::Locked, Why::Source] {
+            for (n, what, said) in places {
+                assert_eq!(asks(&[(n, why)]), truths(said), "{what}, {why:?}");
+            }
+        }
+        // A reference to nothing reads as it does where nothing asks why:
+        // the way to the tree, its root, or a /Names or /Kids, none; a kid
+        // or a key, a part not read.
+        let missing = [
+            (1, "the catalog", "FFFF"),
+            (2, "its /Names", "FFFF"),
+            (3, "the tree's root", "FFFF"),
+            (4, "the root's /Kids", "FFFF"),
+            (5, "a node", "UUTU"),
+            (8, "a leaf's /Names", "FFTF"),
+            (9, "a key", "TUTU"),
+            (6, "a kid", "TTUU"),
+        ];
+        for (n, what, said) in missing {
+            let mut objects = file.objects.clone();
+            objects.remove(&ObjectId::new(n, 0));
+            let resolve = Failing::new(&objects, &[]);
+            let asked = FileCx::new(&file.trailer, v("1.7"), resolve);
+            assert_eq!(in_dests(&asked), truths(said), "{what}, missing");
+            let closure = resolve_fn(|id: ObjectId| objects.get(&id));
+            let asked = FileCx::new(&file.trailer, v("1.7"), &closure);
+            assert_eq!(
+                in_dests(&asked),
+                truths(said),
+                "{what}, missing, by a closure"
+            );
+        }
+        // The row's own value is read as every value is: one that doesn't
+        // read is null, as an absent row is.
+        let mut objects = file.objects.clone();
+        objects.insert(ObjectId::new(10, 0), Object::text("a"));
+        let row = Object::from(dict! { "X" => Object::reference(10) });
+        let tree = "fn:InNameTree(trailer::Catalog::Names::Dests)";
+        for (fails, said) in [
+            (&[][..], Truth::True),
+            (&[(10, Why::Damaged)], Truth::False),
+        ] {
+            let file = FileCx::new(&file.trailer, v("1.7"), Failing::new(&objects, fails));
+            assert_eq!(holds(tree, &file.at(&row, At::Key(b"X"))), said);
+        }
+    }
+
+    /// `n` objects from 100 on, each a reference to the next, the last to
+    /// `to`: a reference to 100 is a chain of `n + 1` of them.
+    fn chain(objects: &mut BTreeMap<ObjectId, Object>, n: usize, to: u32) {
+        let last = 99 + u32::try_from(n).unwrap();
+        for at in 100..=last {
+            let next = if at == last { to } else { at + 1 };
+            objects.insert(ObjectId::new(at, 0), Object::reference(next));
+        }
+    }
+
+    #[test]
+    fn a_chain_of_references_past_hops_leaves_a_name_tree_not_read_whole() {
+        // Over a closure, which can't say why an object doesn't read: one
+        // past the chain's cap isn't read, on the way to the tree or in it,
+        // and a key isn't said to be missing, where it was read as null.
+        let file = dests();
+        let places: [(u32, &[u8], u32, &str, &str); 4] = [
+            (1, b"Names", 2, "the catalog's /Names", "UUUU"),
+            (2, b"Dests", 3, "the tree's root", "UUUU"),
+            (3, b"Kids", 4, "the root's /Kids", "UUUU"),
+            (7, b"Names", 8, "a leaf's /Names", "UUTU"),
+        ];
+        for (holder, key, to, what, said) in places {
+            // A chain of HOPS references, and one of a reference fewer.
+            for (n, said) in [(HOPS - 1, said), (HOPS - 2, "TTTF")] {
+                let mut objects = file.objects.clone();
+                chain(&mut objects, n, to);
+                let id = ObjectId::new(holder, 0);
+                let held = objects.get_mut(&id).unwrap().as_dict_mut().unwrap();
+                held.set(key, Object::reference(100));
+                let closure = resolve_fn(|id: ObjectId| objects.get(&id));
+                let file = FileCx::new(&file.trailer, v("1.7"), &closure);
+                assert_eq!(
+                    in_dests(&file),
+                    truths(said),
+                    "{what}: {} references",
+                    n + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_tree_not_read_whole_is_kept_so_for_its_file() {
+        // The source fails the kid, 6, the first time it's asked for: the
+        // tree's kept as it was read, not whole, for the file, and read
+        // again by another.
+        let file = dests();
+        let failed = Cell::new(false);
+        let resolve = Failing {
+            objects: &file.objects,
+            fails: &[],
+            once: Some((6, &failed)),
+        };
+        let first = FileCx::new(&file.trailer, v("1.7"), resolve);
+        assert_eq!(in_dests(&first), truths("TTUU"));
+        assert!(failed.get(), "the kid didn't read");
+        assert_eq!(in_dests(&first), truths("TTUU"), "as it was read");
+        let again = FileCx::new(&file.trailer, v("1.7"), resolve);
+        assert_eq!(in_dests(&again), truths("TTTF"), "read again");
+        // A way to the tree that doesn't read keeps nothing: the row after
+        // reads it.
+        let failed = Cell::new(false);
+        let resolve = Failing {
+            once: Some((2, &failed)),
+            ..resolve
+        };
+        let file = FileCx::new(&file.trailer, v("1.7"), resolve);
+        assert_eq!(in_dests(&file), truths("UTTF"));
     }
 
     #[test]
