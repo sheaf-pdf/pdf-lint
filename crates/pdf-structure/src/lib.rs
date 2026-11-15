@@ -24,7 +24,8 @@
 //!   [`Source::tell_faults`], or skipped at zero cost with [`read::Faults::Off`]), and [`Record`]
 //!   and [`Facts`] describe how and where objects were found.
 //! - **Encryption & streams:** Passwords in [`Options::passwords`] or [`Reading::unlock`]
-//!   transparently decrypt strings, object streams, and stream payloads through [`pdf_crypt`].
+//!   transparently decrypt strings, object streams, and stream payloads through [`pdf_crypt`]
+//!   ([`Reading::decoded_within`], [`Reading::decoded_standard_within`], [`read::filter_chain`]).
 //!   [`Encryption`] summarizes unlock state and permissions, and [`Limits`] bounds stream and
 //!   total per-reading decode sizes.
 //! - **Writing ([`write`](mod@write)):**
@@ -34,6 +35,8 @@
 //!   - [`write::update`] appends incremental updates onto a [`write::Base`], copying unmodified
 //!     [`write::Body::Read`] bytes when verified against their read [`Record`] (or re-attached via
 //!     [`Reading::adopt`]) and preventing RC4 keystream reuse.
+//!   - [`write::Writer`] and [`write::UpdateWriter`] stream whole files and incremental updates one
+//!     [`write::Body`] at a time to any `std::io::Write` (no `Seek`) with bounded scratch memory.
 //!   - [`write::Parts`], [`write::Section`], and [`write::container`] expose low-level layout
 //!     building blocks for custom writers.
 //! - **Revisions:** Read a file as of an earlier cross-reference section ([`Options::section`])

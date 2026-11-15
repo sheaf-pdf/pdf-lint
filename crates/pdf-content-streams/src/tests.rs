@@ -6992,3 +6992,108 @@ fn a_faults_text_is_cut_at_a_character_and_marked() {
     let tok = Tok::Op(name.as_bytes());
     assert_eq!(format!("{tok:?}"), format!("Op({shown_name})"));
 }
+
+#[test]
+fn inline_image_abbreviation_expansion_and_to_dict() {
+    use crate::{expand_inline_key, expand_inline_value};
+
+    for (short, full) in [
+        (&b"BPC"[..], &b"BitsPerComponent"[..]),
+        (b"CS", b"ColorSpace"),
+        (b"D", b"Decode"),
+        (b"DP", b"DecodeParms"),
+        (b"F", b"Filter"),
+        (b"H", b"Height"),
+        (b"IM", b"ImageMask"),
+        (b"I", b"Interpolate"),
+        (b"L", b"Length"),
+        (b"W", b"Width"),
+    ] {
+        assert_eq!(expand_inline_key(short), Some(full));
+        assert_eq!(expand_inline_key(full), None);
+    }
+
+    for (short, full) in [
+        (&b"G"[..], &b"DeviceGray"[..]),
+        (b"RGB", b"DeviceRGB"),
+        (b"CMYK", b"DeviceCMYK"),
+        (b"I", b"Indexed"),
+        (b"AHx", b"ASCIIHexDecode"),
+        (b"A85", b"ASCII85Decode"),
+        (b"LZW", b"LZWDecode"),
+        (b"Fl", b"FlateDecode"),
+        (b"RL", b"RunLengthDecode"),
+        (b"CCF", b"CCITTFaxDecode"),
+        (b"DCT", b"DCTDecode"),
+    ] {
+        assert_eq!(expand_inline_value(short), Some(full));
+        assert_eq!(expand_inline_value(full), None);
+    }
+
+    let content = b"BI /W 4 /H 2 /BPC 1 /IM false /I true /D [0 1] \
+        /CS [/I /CMYK 1 <00000000ffffffff>] \
+        /F [/AHx /DCT] /DP [null << /ColorTransform 0 >>] \
+        /Intent /Perceptual /L 2 ID 00> EI";
+    let op = operations(content, &ResCx::none(), &Limits::DEFAULT)
+        .next()
+        .unwrap()
+        .unwrap();
+    let image = op.inline_image().unwrap();
+    let dict = image.to_dict(&Limits::DEFAULT).unwrap();
+
+    assert_eq!(dict.get(b"Width").and_then(Object::as_integer), Some(4));
+    assert_eq!(dict.get(b"Height").and_then(Object::as_integer), Some(2));
+    assert_eq!(
+        dict.get(b"BitsPerComponent").and_then(Object::as_integer),
+        Some(1)
+    );
+    assert_eq!(
+        dict.get(b"ImageMask").and_then(Object::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        dict.get(b"Interpolate").and_then(Object::as_bool),
+        Some(true)
+    );
+    assert_eq!(dict.get(b"Length").and_then(Object::as_integer), Some(2));
+    assert_eq!(
+        dict.get(b"Intent").and_then(Object::as_name),
+        Some(&b"Perceptual"[..])
+    );
+
+    let cs = dict.get(b"ColorSpace").and_then(Object::as_array).unwrap();
+    assert_eq!(cs[0].as_name(), Some(&b"Indexed"[..]));
+    assert_eq!(cs[1].as_name(), Some(&b"DeviceCMYK"[..]));
+
+    let filters = dict.get(b"Filter").and_then(Object::as_array).unwrap();
+    assert_eq!(filters[0].as_name(), Some(&b"ASCIIHexDecode"[..]));
+    assert_eq!(filters[1].as_name(), Some(&b"DCTDecode"[..]));
+
+    // Spot colorant `/G` in Separation is preserved while alternate space `/RGB` expands.
+    let sep = b"BI /W 1 /H 1 /BPC 8 /CS [/Separation /G /RGB << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >>] /F /CCF ID x EI";
+    let sep_op = operations(sep, &ResCx::none(), &Limits::DEFAULT)
+        .next()
+        .unwrap()
+        .unwrap();
+    let sep_dict = sep_op
+        .inline_image()
+        .unwrap()
+        .to_dict(&Limits::DEFAULT)
+        .unwrap();
+    let sep_cs = sep_dict
+        .get(b"ColorSpace")
+        .and_then(Object::as_array)
+        .unwrap();
+    assert_eq!(sep_cs[0].as_name(), Some(&b"Separation"[..]));
+    assert_eq!(sep_cs[1].as_name(), Some(&b"G"[..]));
+    assert_eq!(sep_cs[2].as_name(), Some(&b"DeviceRGB"[..]));
+    assert_eq!(
+        sep_dict.get(b"Filter").and_then(Object::as_name),
+        Some(&b"CCITTFaxDecode"[..])
+    );
+
+    // Operands exceeding `limits` return `None`.
+    let mut tight = Limits::DEFAULT;
+    tight.values = 2;
+    assert!(image.to_dict(&tight).is_none());
+}

@@ -16,7 +16,7 @@ use pdf_crypt::{Encoded, Handler, Refused};
 use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
-use pdf_objects::{Resolve, Streams, Unreadable, Why};
+use pdf_objects::{DecodedStream, FilterTail, Resolve, Streams, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{
@@ -1264,6 +1264,45 @@ impl<S: ByteSource> Reading<S> {
         self.decoded_within_as(id, None, limit)
     }
 
+    /// Decodes stream `id` through all leading standard filters (`pdf_filters`), stopping at the
+    /// first non-standard filter (such as `DCTDecode`, `CCITTFaxDecode`, `JBIG2Decode`, or
+    /// `JPXDecode`) and returning the decoded bytes together with any remaining [`FilterTail`].
+    ///
+    /// Decryption, `/Filter` and `/DecodeParms` resolution, and output size caps (`limit` and
+    /// [`Limits::stream`](super::Limits::stream), whichever is smaller) follow the exact same rules
+    /// as [`Reading::decoded_within`], including streams with no leading standard filters (whose
+    /// raw/decrypted payload is capped at `limit` with [`Fault::Limit`](pdf_filters::Fault::Limit)).
+    ///
+    /// Resource limits and panic freedom apply only through decryption and standard filters; this
+    /// crate makes no promise about third-party image codecs run by callers on the returned bytes.
+    ///
+    /// ```
+    /// use pdf_structure::pdf_objects::ObjectId;
+    /// use pdf_structure::read::{Options, Reading};
+    ///
+    /// let file = b"%PDF-1.7\n\
+    ///     1 0 obj\n<< /Length 9 /Filter [/ASCIIHexDecode /DCTDecode] >>\n\
+    ///     stream\nffd8ffd9>\nendstream\nendobj\n\
+    ///     trailer\n<< /Size 2 >>\n%%EOF\n";
+    /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    /// let out = reading.decoded_standard_within(ObjectId::new(1, 0), 64).unwrap();
+    /// assert_eq!(&*out.data, &[0xff, 0xd8, 0xff, 0xd9]);
+    /// assert_eq!(out.tail.unwrap().first.name.as_bytes(), b"DCTDecode");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Fails under the same conditions as [`Reading::decoded_within`], except that a non-standard
+    /// filter stops standard decoding cleanly rather than returning [`Unfiltered::Unsupported`].
+    pub fn decoded_standard_within(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'static>, Error> {
+        let (decoded, tail) = self.decoded_standard_within_as(id, None, limit);
+        decoded.map(|data| DecodedStream::new(Cow::Owned(data), tail))
+    }
+
     /// Whether a decode asked for within `limit` is held to the reader's own
     /// cap on a stream's data instead
     /// ([`Limits::stream`](super::Limits::stream)), that being the less:
@@ -1299,6 +1338,29 @@ impl<S: ByteSource> Reading<S> {
         }
     }
 
+    /// [`Reading::decoded_standard_within`], using `object` when already held by a [`Document`].
+    pub(super) fn decoded_standard_within_as<'f>(
+        &'f self,
+        id: ObjectId,
+        object: Option<Result<&'f Object, &Unread>>,
+        limit: usize,
+    ) -> (Result<Vec<u8>, Error>, Option<FilterTail>) {
+        let limit = limit.min(self.reader.limits.stream);
+        let (decoded, tail) = self.decoded_standard_as(id, object, limit);
+        let decoded = match decoded {
+            Ok(mut data) if data.len() > limit => {
+                data.truncate(limit);
+                data.shrink_to_fit();
+                Err(Error::Decode(pdf_filters::Error {
+                    data,
+                    faults: vec![(0, pdf_filters::Fault::Limit)],
+                }))
+            }
+            decoded => decoded,
+        };
+        (decoded, tail)
+    }
+
     /// The data of stream `id` decoded, each filter's output up to `limit`
     /// bytes and a stream without filters whole, the stream `object` where
     /// it's given.
@@ -1314,6 +1376,25 @@ impl<S: ByteSource> Reading<S> {
                 decoded
             }
             None => (self.decoded_in(self.by_position(), id, object, limit)).map_err(Error::Io)?,
+        }
+    }
+
+    /// [`Reading::decoded_standard_within_as`] before final limit clamp.
+    fn decoded_standard_as<'f>(
+        &'f self,
+        id: ObjectId,
+        object: Option<Result<&'f Object, &Unread>>,
+        limit: usize,
+    ) -> (Result<Vec<u8>, Error>, Option<FilterTail>) {
+        match self.source.whole() {
+            Some(file) => {
+                let Ok(out) = self.decoded_standard_in(InMemory(file), id, object, limit);
+                out
+            }
+            None => match self.decoded_standard_in(self.by_position(), id, object, limit) {
+                Ok(out) => out,
+                Err(io) => (Err(Error::Io(io)), None),
+            },
         }
     }
 
@@ -1401,6 +1482,62 @@ impl<S: ByteSource> Reading<S> {
                 pdf_filters::decode(&data, &filters, limit, reader.flate).map_err(Error::Decode)
             }
             Err(why) => Err(Error::Filters(why)),
+        })
+    }
+
+    /// [`Reading::decoded_standard_as`], of `file`.
+    #[allow(clippy::type_complexity)]
+    fn decoded_standard_in<'f, F: Bytes<'f>>(
+        &'f self,
+        file: F,
+        id: ObjectId,
+        object: Option<Result<&'f Object, &Unread>>,
+        limit: usize,
+    ) -> Result<(Result<Vec<u8>, Error>, Option<FilterTail>), F::Error> {
+        let handed = match object {
+            Some(object) => self.data_of(file, id, object)?,
+            None => self.data_in(file, id)?,
+        };
+        let (stream, data) = match handed {
+            Ok(read) => read,
+            Err(error) => return Ok((Err(error), None)),
+        };
+        let reader = &self.reader;
+        let failed = Cell::new(None);
+        let resolve = pdf_objects::resolve_fn(|id| match reader.get(file, id) {
+            Ok(object) => object.ok(),
+            Err(error) => {
+                failed.set(Some(error));
+                None
+            }
+        });
+        // A cross-reference stream's values are direct (ISO 32000-2,
+        // 7.5.8.2), so its references aren't followed, as the file is read.
+        let chain = match is_xref(&stream.dict) {
+            true => super::filter_chain(&stream.dict, None),
+            false => super::filter_chain(&stream.dict, Some(&resolve)),
+        };
+        if let Some(error) = failed.into_inner() {
+            return Err(error);
+        }
+        Ok(match chain {
+            Ok(chain) => {
+                let decoded = if chain.standard.is_empty() {
+                    if data.len() > limit {
+                        Err(Error::Decode(pdf_filters::Error {
+                            data: data[..limit].to_vec(),
+                            faults: vec![(0, pdf_filters::Fault::Limit)],
+                        }))
+                    } else {
+                        Ok(data.into_owned())
+                    }
+                } else {
+                    pdf_filters::decode(&data, &chain.standard, limit, reader.flate)
+                        .map_err(Error::Decode)
+                };
+                (decoded, chain.tail)
+            }
+            Err(why) => (Err(Error::Filters(why)), None),
         })
     }
 
@@ -1722,6 +1859,20 @@ impl<S: ByteSource> Streams for Reading<S> {
         }
         viewed(id, self.decoded_within(id, limit), self.capped_at(limit)).map(Cow::Owned)
     }
+
+    fn decoded_standard(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'_>, Unreadable> {
+        match Resolve::try_resolve(&self, id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(missing(id)),
+            Err(unreadable) => return Err(unreadable),
+        }
+        let (decoded, tail) = self.decoded_standard_within_as(id, None, limit);
+        viewed_standard(id, decoded, tail, self.capped_at(limit))
+    }
 }
 
 /// A file as it's read so far ([`Source`]): each answer its own method's
@@ -1794,6 +1945,14 @@ impl<S: ByteSource> Source for Reading<S> {
 
     fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
         Some(Reading::decoded_within(self, id, limit))
+    }
+
+    fn decoded_standard_within(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Option<Result<DecodedStream<'static>, Error>> {
+        Some(Reading::decoded_standard_within(self, id, limit))
     }
 }
 
@@ -1878,4 +2037,19 @@ pub fn viewed(
         },
         Err(error) => Err(unreadable(Why::Damaged, &error)),
     }
+}
+
+/// Viewer-mode conversion for [`Reading::decoded_standard_within`], preserving `tail` alongside
+/// partially decoded standard-filter output when not stopped by a size limit ([`Streams::decoded_standard`]).
+///
+/// # Errors
+///
+/// Maps errors identically to [`viewed`].
+pub fn viewed_standard(
+    id: ObjectId,
+    decoded: Result<Vec<u8>, Error>,
+    tail: Option<FilterTail>,
+    capped: bool,
+) -> Result<DecodedStream<'static>, Unreadable> {
+    viewed(id, decoded, capped).map(|data| DecodedStream::new(Cow::Owned(data), tail))
 }

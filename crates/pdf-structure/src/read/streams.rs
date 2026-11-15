@@ -1383,4 +1383,247 @@ mod through_streams {
             Ok(PLAIN.to_vec())
         );
     }
+
+    #[test]
+    fn decoded_standard_stops_at_image_filters_and_enforces_limits() {
+        let jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\xff\xd9";
+        let ccitt = b"\x00\x10\x01\x00\x80\xaa\x55";
+        let jbig2 = b"\x00\x00\x00\x01\x30\x00\x01";
+        let globals = b"\x00\x00\x00\x00\x00\x01";
+        let bomb_plain = vec![0x5au8; 8192];
+
+        let hex_ccitt: String = ccitt.iter().map(|b| format!("{b:02x}")).collect();
+        let objects = vec![
+            (1, dict! { "Type" => Object::name("Catalog") }.into()),
+            (
+                2,
+                Body::stream(
+                    dict! {
+                        "Filter" => vec![Object::name("FlateDecode"), Object::name("DCTDecode")],
+                        "DecodeParms" => vec![Object::null(), Object::reference(10)],
+                    },
+                    &fixture::zlib(jpeg),
+                ),
+            ),
+            (
+                3,
+                Body::stream(
+                    dict! {
+                        "Filter" => vec![Object::name("ASCIIHexDecode"), Object::name("CCITTFaxDecode")],
+                        "DecodeParms" => vec![
+                            Object::null(),
+                            Object::from(dict! { "K" => -1, "Columns" => 1728 }),
+                        ],
+                    },
+                    hex_ccitt.as_bytes(),
+                ),
+            ),
+            (
+                4,
+                Body::stream(dict! { "Filter" => Object::name("CCF") }, ccitt),
+            ),
+            (
+                5,
+                Body::stream(
+                    dict! {
+                        "Filter" => vec![Object::name("FlateDecode"), Object::name("DCTDecode")],
+                    },
+                    &fixture::zlib(&bomb_plain),
+                ),
+            ),
+            (10, dict! { "ColorTransform" => 1 }.into()),
+        ];
+
+        let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let with_reading = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
+
+        // Standard `Streams::decoded` still rejects codec streams with `Why::Filter`.
+        assert_eq!(asked(&reading, ObjectId::new(2, 0), 1024), Err(Why::Filter));
+
+        // `Streams::decoded_standard` agrees across `Reading`, `WithReading`, and `&dyn Streams`.
+        for streams in [&reading as &dyn Streams, &with_reading as &dyn Streams] {
+            let dct = streams.decoded_standard(ObjectId::new(2, 0), 1024).unwrap();
+            assert_eq!(&*dct.data, jpeg);
+            let tail = dct.tail.unwrap();
+            assert_eq!(tail.first.name.as_bytes(), b"DCTDecode");
+            assert_eq!(
+                tail.first
+                    .parms
+                    .as_ref()
+                    .and_then(|d| d.get(b"ColorTransform"))
+                    .and_then(Object::as_integer),
+                Some(1)
+            );
+            assert!(tail.after.is_empty());
+
+            let fax = streams.decoded_standard(ObjectId::new(3, 0), 1024).unwrap();
+            assert_eq!(&*fax.data, ccitt);
+            let tail = fax.tail.unwrap();
+            assert_eq!(tail.first.name.as_bytes(), b"CCITTFaxDecode");
+            assert_eq!(
+                tail.first
+                    .parms
+                    .as_ref()
+                    .and_then(|d| d.get(b"K"))
+                    .and_then(Object::as_integer),
+                Some(-1)
+            );
+
+            let inline_fax = streams
+                .decoded_standard(ObjectId::new(4, 0), ccitt.len())
+                .unwrap();
+            assert_eq!(&*inline_fax.data, ccitt);
+            assert_eq!(
+                inline_fax.tail.unwrap().first.name.as_bytes(),
+                b"CCITTFaxDecode"
+            );
+
+            // Codec-only stream (no standard filter) still enforces `limit`!
+            assert_eq!(
+                streams
+                    .decoded_standard(ObjectId::new(4, 0), ccitt.len() - 1)
+                    .unwrap_err()
+                    .why,
+                Why::Limit
+            );
+
+            // Flate bomb before `DCTDecode` stopped by `limit` -> `Why::Limit`.
+            assert_eq!(
+                streams
+                    .decoded_standard(ObjectId::new(5, 0), 1024)
+                    .unwrap_err()
+                    .why,
+                Why::Limit
+            );
+        }
+
+        // Strict `Reading::decoded_standard_within` reports `Fault::Limit` with truncated prefix.
+        let Err(Error::Decode(cut)) = reading.decoded_standard_within(ObjectId::new(4, 0), 3)
+        else {
+            panic!("expected limit error");
+        };
+        assert_eq!(cut.data, &ccitt[..3]);
+        assert_eq!(cut.faults, [(0, Fault::Limit)]);
+
+        // `Limits::stream` cap reports `Why::Capped` when smaller than caller's `limit`.
+        let mut small_opts = Options::DEFAULT;
+        small_opts.limits.stream = 512;
+        let small = Reading::open(&file[..], &small_opts).unwrap();
+        assert_eq!(
+            Streams::decoded_standard(&small, ObjectId::new(5, 0), usize::MAX)
+                .unwrap_err()
+                .why,
+            Why::Capped
+        );
+
+        // Encrypted file with `JBIG2Decode` and indirect `/JBIG2Globals` stream.
+        let enc_objects = vec![
+            (1, dict! { "Type" => Object::name("Catalog") }.into()),
+            (
+                2,
+                Body::stream(
+                    dict! {
+                        "Filter" => vec![Object::name("FlateDecode"), Object::name("JBIG2Decode")],
+                        "DecodeParms" => vec![
+                            Object::null(),
+                            Object::from(dict! { "JBIG2Globals" => Object::reference(6) }),
+                        ],
+                    },
+                    &fixture::zlib(jbig2),
+                ),
+            ),
+            (
+                6,
+                Body::stream(
+                    dict! { "Filter" => Object::name("FlateDecode") },
+                    &fixture::zlib(globals),
+                ),
+            ),
+        ];
+        let enc_file = fixture::encrypted(&settings(Kind::Aes256, b"user"), &enc_objects, dict! {});
+        let locked = Reading::open(&enc_file[..], &Options::DEFAULT).unwrap();
+        assert_eq!(
+            Streams::decoded_standard(&locked, ObjectId::new(2, 0), 1024)
+                .unwrap_err()
+                .why,
+            Why::Locked
+        );
+        let opened = Reading::open(
+            &enc_file[..],
+            &Options {
+                passwords: &[Password("user")],
+                ..Options::DEFAULT
+            },
+        )
+        .unwrap();
+        let out = Streams::decoded_standard(&opened, ObjectId::new(2, 0), 1024).unwrap();
+        assert_eq!(&*out.data, jbig2);
+        let globals_id = out
+            .tail
+            .unwrap()
+            .first
+            .parms
+            .unwrap()
+            .get(b"JBIG2Globals")
+            .and_then(Object::as_reference)
+            .unwrap();
+        assert_eq!(
+            &*Streams::decoded(&opened, globals_id, 1024).unwrap(),
+            globals
+        );
+
+        // In-memory `Document` with `Data::Bytes` decodes standard filters and preserves codec tail.
+        let mut doc = Document::new(pdf_objects::Version::new(1, 7), dict! {});
+        let mem_id = ObjectId::new(20, 0);
+        doc.set(
+            mem_id,
+            pdf_objects::Stream::new(
+                dict! { "Filter" => vec![Object::name("Fl"), Object::name("DCT")] },
+                fixture::zlib(jpeg),
+            ),
+        );
+        let mem_out = Streams::decoded_standard(&doc, mem_id, 1024).unwrap();
+        assert_eq!(&*mem_out.data, jpeg);
+        assert_eq!(mem_out.tail.unwrap().first.name.as_bytes(), b"DCTDecode");
+        assert_eq!(
+            Streams::decoded_standard(&doc, mem_id, jpeg.len() - 1)
+                .unwrap_err()
+                .why,
+            Why::Limit
+        );
+
+        // Check `read::filter_chain` against `read::filters` across all lazy reader test fixtures.
+        for (_, bytes, passwords) in super::super::lazy::files() {
+            let doc = super::super::document(
+                &bytes,
+                &Options {
+                    passwords: &passwords,
+                    ..Options::DEFAULT
+                },
+            );
+            for (_, object) in doc.objects() {
+                if let Some(stream) = object.as_stream() {
+                    match super::super::filters(&stream.dict, Some(&&doc)) {
+                        Ok(std_filters) => assert_eq!(
+                            super::super::filter_chain(&stream.dict, Some(&&doc)),
+                            Ok(FilterChain::new(std_filters, None))
+                        ),
+                        Err(Unfiltered::Unsupported { .. }) => {
+                            let chain =
+                                super::super::filter_chain(&stream.dict, Some(&&doc)).unwrap();
+                            assert!(chain.tail.is_some());
+                        }
+                        Err(other) => {
+                            if let Err(chain_err) =
+                                super::super::filter_chain(&stream.dict, Some(&&doc))
+                            {
+                                assert_eq!(chain_err, other);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

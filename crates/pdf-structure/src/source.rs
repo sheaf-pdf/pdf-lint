@@ -14,7 +14,7 @@ use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Data, Dict, Entry, Object, ObjectId, Span, Str, Value};
 use pdf_objects::parse;
 use pdf_objects::version::Version;
-use pdf_objects::{Resolve, Streams, Unreadable, Why};
+use pdf_objects::{DecodedStream, Resolve, Streams, Unreadable, Why};
 
 use crate::read::{Error, Fault, SourceId, Undecoded, Unfiltered, Unindexed, Unwritten};
 
@@ -165,6 +165,19 @@ pub trait Source: Streams {
     /// ([`WithReading`](crate::read::WithReading)).
     #[must_use]
     fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
+        let _ = (id, limit);
+        None
+    }
+    /// Decodes stream `id` through all leading standard filters (`pdf_filters`), stopping at the
+    /// first non-standard filter, as
+    /// [`Reading::decoded_standard_within`](crate::read::Reading::decoded_standard_within) gives
+    /// it. Returns `None` on [`Document`], which does not hold detached file stream bytes.
+    #[must_use]
+    fn decoded_standard_within(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Option<Result<DecodedStream<'static>, Error>> {
         let _ = (id, limit);
         None
     }
@@ -2094,6 +2107,36 @@ impl Streams for Document {
             )),
         }
     }
+
+    fn decoded_standard(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'_>, Unreadable> {
+        let object = match Resolve::try_resolve(&self, id) {
+            Ok(Some(object)) => object,
+            Ok(None) => return Err(crate::read::missing(id)),
+            Err(unreadable) => return Err(unreadable),
+        };
+        let Some(stream) = object.as_stream() else {
+            let message = format!("{id} R doesn't read: {}", Error::NotAStream { id });
+            return Err(Unreadable::new(id, Why::Damaged, message));
+        };
+        if let Some(data) = (self.decoded.get(&id)).filter(|_| self.whole.contains(&id)) {
+            return lent(id, data, limit).map(|data| DecodedStream::new(data, None));
+        }
+        match stream.data.bytes() {
+            Some(data) => self.decoded_standard_bytes(id, &stream.dict, data, limit),
+            None => Err(Unreadable::new(
+                id,
+                Why::Detached,
+                format!(
+                    "{id} R's data isn't held decoded: a document alone decodes only what it \
+                     holds as bytes, and holds only the object streams its reader decoded whole"
+                ),
+            )),
+        }
+    }
 }
 
 impl Document {
@@ -2129,6 +2172,40 @@ impl Document {
             }
         };
         crate::read::viewed(id, decoded, capped)
+    }
+
+    /// Stream `id`'s in-memory `data` decoded through all leading standard filters up to the
+    /// first non-standard filter ([`Streams::decoded_standard`] for [`Document`]).
+    fn decoded_standard_bytes(
+        &self,
+        id: ObjectId,
+        dict: &Dict,
+        data: &[u8],
+        limit: usize,
+    ) -> Result<DecodedStream<'static>, Unreadable> {
+        let resolve = pdf_objects::resolve_fn(|id| self.object(id));
+        let within = limit.min(crate::read::STREAM);
+        let capped = crate::read::STREAM < limit;
+        let (decoded, tail) = match crate::read::filter_chain(dict, Some(&resolve)) {
+            Err(why) => (Err(Error::Filters(why)), None),
+            Ok(chain) => {
+                let flate = crate::read::Options::DEFAULT.flate;
+                let decoded = if chain.standard.is_empty() {
+                    if data.len() > within {
+                        Err(Error::Decode(pdf_filters::Error {
+                            data: data[..within].to_vec(),
+                            faults: vec![(0, pdf_filters::Fault::Limit)],
+                        }))
+                    } else {
+                        Ok(data.to_vec())
+                    }
+                } else {
+                    pdf_filters::decode(data, &chain.standard, within, flate).map_err(Error::Decode)
+                };
+                (decoded, chain.tail)
+            }
+        };
+        crate::read::viewed_standard(id, decoded, tail, capped)
     }
 }
 

@@ -292,5 +292,48 @@ mod tests {
         });
         assert_eq!(named(&made), [("update", Level::DEBUG)]);
         assert_eq!(made[0].fields, [("at", true)]);
+
+        let made = spans(|| {
+            let mut out = Vec::new();
+            let mut writer =
+                write::Writer::begin(&mut out, Some(&reading), &write::Options::DEFAULT).unwrap();
+            for (id, body) in write::bodies(&doc) {
+                writer.push(id, body).unwrap();
+            }
+            writer.finish(doc.trailer().dict()).unwrap();
+        });
+        assert_eq!(
+            named(&made),
+            [
+                ("writer_begin", Level::DEBUG),
+                ("writer_finish", Level::DEBUG)
+            ]
+        );
+        assert_eq!(made[1].fields, [("objects", true)]);
+
+        let made = spans(|| {
+            let base = write::Base::of(&reading).unwrap();
+            let mut out = file.clone();
+            let mut uw = write::UpdateWriter::begin(
+                &mut out,
+                &base,
+                Some(&reading),
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            let page = dict! { "Type" => Object::name("Page"), "Parent" => Object::reference(2) };
+            uw.push(ObjectId::new(3, 0), write::Body::from(Object::from(page)))
+                .unwrap();
+            uw.finish().unwrap();
+        });
+        assert_eq!(
+            named(&made),
+            [
+                ("update_writer_begin", Level::DEBUG),
+                ("update_writer_finish", Level::DEBUG),
+            ]
+        );
+        assert_eq!(made[0].fields, [("at", true)]);
+        assert_eq!(made[1].fields, [("objects", true)]);
     }
 }

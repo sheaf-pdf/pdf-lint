@@ -769,6 +769,23 @@ impl Encryptor {
         shared.map(named).min()
     }
 
+    /// Single-body check matching [`Encryptor::shared`] against [`Encryptor::as_read`] for
+    /// streaming whole-file writes.
+    pub(super) fn shared_with_read(
+        &self,
+        to: Numbering<'_>,
+        given: ObjectId,
+        at: ObjectId,
+    ) -> Option<ObjectId> {
+        to.0?;
+        let (then, now) = (&self.as_read().dictionaries, &self.list.dictionaries);
+        if !now.contains(&at) || then.contains(&given) {
+            return None;
+        }
+        let there = then.iter().copied().filter(|&id| to.at(id) == Some(at));
+        Some(there.min().unwrap_or(at))
+    }
+
     /// The numbers [`Encryptor::dictionary_object`] says are an encryption
     /// dictionary's, or what one refers to, in the numbers the renumbering
     /// `to` writes, as [`Encryptor::renumbered`] has them: what's at them is

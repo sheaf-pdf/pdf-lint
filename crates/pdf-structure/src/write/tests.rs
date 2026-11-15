@@ -11087,3 +11087,724 @@ fn a_documents_bodies_walk_as_they_did() {
     let read_ones = write::bodies(&read).filter(|(_, b)| matches!(b, write::Body::Read { .. }));
     assert_eq!(read_ones.count(), 3);
 }
+
+/// [`write::Writer`] streams whole files byte-for-byte equal to [`write::full`]
+/// across cross-reference tables and streams, `/ID` omission and incremental
+/// SHA-256 computation, dangling references, verified raw copies, renumbering,
+/// and deterministic-IV encryption.
+#[test]
+fn streaming_writer_matches_full_byte_for_byte() {
+    use std::sync::atomic::AtomicBool;
+
+    use chacha20::ChaCha20Rng;
+
+    let (plain, base_trailer) = plaintext();
+    let mut id_trailer = base_trailer.clone();
+    id_trailer.set("ID", vec![Object::hex(ID), Object::hex(b"old")]);
+    let mut dangling_trailer = id_trailer.clone();
+    dangling_trailer.set("DanglingRef", Object::reference(17));
+
+    // Unencrypted whole files: with and without /ID[0], dangling references in
+    // bodies and trailer, across Table and Stream xref sections.
+    for kind in KINDS {
+        for (label, trailer) in [
+            ("no_id", &base_trailer),
+            ("with_id", &id_trailer),
+            ("dangling", &dangling_trailer),
+        ] {
+            let mut objects = plain.clone();
+            // Add a dangling reference at the number immediately past the highest body so
+            // an xref stream must skip over it identically to `write::full`.
+            let next_num = objects.iter().map(|(n, _)| n + 1).max().unwrap();
+            objects.push((
+                next_num,
+                Object::from(dict! {
+                    "DanglingBodyRef" => Object::reference(next_num + 1),
+                }),
+            ));
+            let opts = options(kind, None);
+
+            let mut batch = Vec::new();
+            let batch_written =
+                write::full(&mut batch, bodies(&objects), trailer, None, None, &opts).unwrap();
+
+            let mut streamed = Vec::new();
+            let mut writer = write::Writer::begin(&mut streamed, None, &opts).unwrap();
+            assert!(writer.bytes_written() > 0);
+            assert_eq!(writer.bytes_written(), writer.next_offset());
+            for (n, obj) in &objects {
+                let expected_off = writer.next_offset();
+                let pos = writer
+                    .push(ObjectId::new(*n, 0), write::Body::from(obj))
+                    .unwrap();
+                assert_eq!(pos, expected_off, "{kind:?}/{label}");
+            }
+            let (out_ref, streamed_written) = writer.finish_into(trailer).unwrap();
+            let _ = out_ref;
+
+            assert_eq!(streamed, batch, "{kind:?}/{label}");
+            assert_eq!(streamed_written, batch_written, "{kind:?}/{label}");
+            assert_eq!(
+                streamed_written.id,
+                write::file_id(
+                    write::first_id(trailer),
+                    false,
+                    &streamed[..streamed_written.start],
+                ),
+                "{kind:?}/{label}"
+            );
+            assert!(sound(&open(&streamed)), "{kind:?}/{label}");
+        }
+    }
+
+    // Verified `Body::Read` copies and renumbering from an open `Reading`.
+    let source_bytes = whole(&plain, &id_trailer, XrefKind::Table, None);
+    let reading = open(&source_bytes);
+    let mut doc = reading.to_document().unwrap();
+    doc.get_dict_mut(PAGE).unwrap().set("Rotate", 90);
+    let shift = |id: ObjectId| Some(ObjectId::new(id.number + 10, id.generation));
+    for kind in KINDS {
+        for renumber in [false, true] {
+            let mut opts = options(kind, None);
+            if renumber {
+                opts.renumber = Some(&shift);
+            }
+            let left = write::encryption_objects(&doc, None);
+            let doc_bodies = || {
+                write::bodies(&doc)
+                    .filter(|(id, body)| !write::left_out(body.object()) && !left.contains(id))
+            };
+
+            let mut batch = Vec::new();
+            let batch_written = write::full(
+                &mut batch,
+                doc_bodies(),
+                doc.trailer.dict(),
+                None,
+                Some(&reading),
+                &opts,
+            )
+            .unwrap();
+
+            let mut streamed = Vec::new();
+            let mut writer = write::Writer::begin(&mut streamed, Some(&reading), &opts).unwrap();
+            for (id, body) in doc_bodies() {
+                writer.push(id, body).unwrap();
+            }
+            let streamed_written = writer.finish(doc.trailer.dict()).unwrap();
+
+            assert_eq!(streamed, batch, "{kind:?}/renumber={renumber}");
+            assert_eq!(
+                streamed_written, batch_written,
+                "{kind:?}/renumber={renumber}"
+            );
+        }
+    }
+
+    // Encrypted whole files: new AES-256 (`Encryptor::create_with` + direct `/Info` promotion)
+    // and existing non-RC4 encrypted readings (`derived_methods`), compared byte-for-byte via
+    // `derived` IVs.
+    let prepared = Password("user").prepared().unwrap();
+    for encrypt_metadata in [true, false] {
+        let mut protection = Protection::new(&prepared);
+        protection.encrypt_metadata = encrypt_metadata;
+        let mut rng = ChaCha20Rng::seed_from_u64(77);
+        let created = derived(Encryptor::create_with(&protection, &mut rng).unwrap());
+        let mut direct_info_trailer = base_trailer.clone();
+        direct_info_trailer.set("Info", dict! { "Title" => lit(TITLE) });
+        for kind in KINDS {
+            let opts = options(kind, None);
+            let mut batch = Vec::new();
+            let batch_written = write::full(
+                &mut batch,
+                bodies(&plain),
+                &direct_info_trailer,
+                Some(&created),
+                None,
+                &opts,
+            )
+            .unwrap();
+
+            let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
+                plain
+                    .iter()
+                    .find(|(n, _)| ObjectId::new(*n, 0) == id)
+                    .map(|(_, o)| o)
+            });
+            let encrypting = created
+                .laid_out(None, None, &direct_info_trailer, &resolve)
+                .unwrap();
+            let mut streamed = Vec::new();
+            let streamed_written = {
+                let mut writer =
+                    write::Writer::begin_encrypted(&mut streamed, &encrypting, None, &opts)
+                        .unwrap();
+                for (n, obj) in &plain {
+                    writer
+                        .push(ObjectId::new(*n, 0), write::Body::from(obj))
+                        .unwrap();
+                }
+                writer.finish(&direct_info_trailer).unwrap()
+            };
+
+            assert_eq!(
+                streamed, batch,
+                "created/{kind:?}/metadata={encrypt_metadata}"
+            );
+            assert_eq!(
+                streamed_written, batch_written,
+                "created/{kind:?}/metadata={encrypt_metadata}"
+            );
+            let pdf = opened(&streamed, "user");
+            assert!(sound(&pdf), "created/{kind:?}/metadata={encrypt_metadata}");
+        }
+    }
+
+    for method in derived_methods().iter().filter(|m| !m.encryptor.rc4()) {
+        for kind in KINDS {
+            let source = whole(&plain, &id_trailer, kind, Some(&method.encryptor));
+            let reading = opened(&source, "user");
+            let doc = reading.to_document().unwrap();
+            let enc = derived(Encryptor::of(&reading).unwrap().unwrap());
+            let opts = options(kind, None);
+            let left = write::encryption_objects(&doc, Some(&enc));
+            let doc_bodies = || {
+                write::bodies(&doc)
+                    .filter(|(id, body)| !write::left_out(body.object()) && !left.contains(id))
+            };
+
+            let mut batch = Vec::new();
+            let batch_written = write::full(
+                &mut batch,
+                doc_bodies(),
+                doc.trailer.dict(),
+                Some(&enc),
+                Some(&reading),
+                &opts,
+            )
+            .unwrap();
+
+            let doc_ref = &doc;
+            let encrypting = enc
+                .laid_out(None, enc.at(), doc.trailer.dict(), &doc_ref)
+                .unwrap();
+            let mut streamed = Vec::new();
+            let streamed_written = {
+                let mut writer = write::Writer::begin_encrypted(
+                    &mut streamed,
+                    &encrypting,
+                    Some(&reading),
+                    &opts,
+                )
+                .unwrap();
+                for (id, body) in doc_bodies() {
+                    writer.push(id, body).unwrap();
+                }
+                writer.finish(doc.trailer.dict()).unwrap()
+            };
+
+            assert_eq!(streamed, batch, "{}/{kind:?}", method.name);
+            assert_eq!(streamed_written, batch_written, "{}/{kind:?}", method.name);
+        }
+    }
+
+    // Refusals: packed options, unusable object numbers, duplicates, encrypt_at collision, stop.
+    let mut sink = Vec::new();
+    assert_eq!(
+        write::Writer::begin(
+            &mut sink,
+            None,
+            &options(XrefKind::Table, Some(write::Pack::DEFAULT))
+        )
+        .unwrap_err(),
+        Error::PackedTable
+    );
+    assert_eq!(
+        write::Writer::begin(
+            &mut sink,
+            None,
+            &options(XrefKind::Stream, Some(write::Pack::DEFAULT))
+        )
+        .unwrap_err(),
+        Error::PackedStream
+    );
+
+    let stop = AtomicBool::new(false);
+    let mut opts = write::Options::DEFAULT;
+    opts.stop = Some(&stop);
+    let mut buf = Vec::new();
+    let mut writer = write::Writer::begin(&mut buf, None, &opts).unwrap();
+    assert_eq!(
+        writer
+            .push(ObjectId::new(0, 0), write::Body::from(&catalog()))
+            .unwrap_err(),
+        Error::Number(0)
+    );
+    assert_eq!(
+        writer
+            .push(
+                ObjectId::new(write::NUMBERS, 0),
+                write::Body::from(&catalog())
+            )
+            .unwrap_err(),
+        Error::Number(write::NUMBERS)
+    );
+    writer
+        .push(ObjectId::new(1, 0), write::Body::from(&catalog()))
+        .unwrap();
+    assert_eq!(
+        writer
+            .push(ObjectId::new(1, 0), write::Body::from(&catalog()))
+            .unwrap_err(),
+        Error::Twice(1)
+    );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        writer
+            .push(ObjectId::new(2, 0), write::Body::from(&catalog()))
+            .unwrap_err(),
+        Error::Stopped
+    );
+}
+
+/// [`write::UpdateWriter`] streams incremental updates byte-for-byte equal to
+/// [`write::update`] across tables and streams, bases with and without trailing
+/// newlines, prefixes, unchanged pass-throughs (writing zero bytes), chained
+/// revisions, duplicate refusals, and encrypted updates.
+#[test]
+fn streaming_update_writer_matches_update_byte_for_byte() {
+    let (plain, trailer) = plaintext();
+    let mut id_trailer = trailer.clone();
+    id_trailer.set("ID", vec![Object::hex(ID), Object::hex(b"old")]);
+
+    for kind in KINDS {
+        let initial = whole(&plain, &id_trailer, kind, None);
+        // Test both trailing `\n` (`ends_line == true`) and stripped trailing `\n`
+        // (`ends_line == false`), plus a 100-byte prefix before `%PDF-`.
+        let trimmed = initial.strip_suffix(b"\n").unwrap().to_vec();
+        let prefixed = [&PREFIX[..], &initial].concat();
+
+        for (label, source) in [
+            ("newline", initial),
+            ("no_newline", trimmed),
+            ("prefixed", prefixed),
+        ] {
+            let reading = open(&source);
+            let base = write::Base::of(&reading).unwrap();
+
+            // 1. Passing only unchanged `Body::Read` entries (or nothing) writes 0 bytes
+            // even when `!base.ends_line`.
+            let doc = reading.to_document().unwrap();
+            let mut untouched = Vec::new();
+            let mut uw = write::Writer::begin_update(
+                &mut untouched,
+                &base,
+                Some(&reading),
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            for (id, body) in write::bodies(&doc).filter(|(_, b)| !write::left_out(b.object())) {
+                assert_eq!(uw.push(id, body).unwrap(), None, "{kind:?}/{label}");
+            }
+            assert_eq!(uw.bytes_written(), 0, "{kind:?}/{label}");
+            assert_eq!(uw.finish().unwrap(), None, "{kind:?}/{label}");
+            assert!(untouched.is_empty(), "{kind:?}/{label}");
+
+            // 2. Modifying a page and adding an annotation matches `write::update` byte-for-byte,
+            // and `next_offset()` predicts the exact file offset (including pending `\n`).
+            let mut edited = reading.to_document().unwrap();
+            let note = edited.add(dict! {
+                "Type" => Object::name("Annot"),
+                "Subtype" => Object::name("Text"),
+                "Contents" => lit(NOTE),
+            });
+            let page = edited.get_dict_mut(PAGE).unwrap();
+            page.set("Rotate", 90);
+            page.set("Annots", vec![Object::from(note)]);
+
+            let update_bodies =
+                || write::bodies(&edited).filter(|(_, b)| !write::left_out(b.object()));
+
+            let mut batch = source.clone();
+            let batch_written = write::update(
+                &mut batch,
+                &base,
+                update_bodies(),
+                None,
+                Some(&reading),
+                &write::Options::DEFAULT,
+            )
+            .unwrap()
+            .unwrap();
+
+            let mut streamed = source.clone();
+            let mut uw = write::UpdateWriter::begin(
+                &mut streamed,
+                &base,
+                Some(&reading),
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            for (id, body) in update_bodies() {
+                let predicted = uw.next_offset();
+                if let Some(pos) = uw.push(id, body).unwrap() {
+                    assert_eq!(pos, predicted, "{kind:?}/{label}/{id:?}");
+                }
+            }
+            let streamed_written = uw.finish().unwrap().unwrap();
+
+            assert_eq!(streamed, batch, "{kind:?}/{label}");
+            assert_eq!(streamed_written, batch_written, "{kind:?}/{label}");
+
+            // 3. Chained second incremental revision on `streamed_written.base`.
+            let rev2_obj = Object::from(dict! { "Type" => Object::name("Annot"), "F" => 4 });
+            let rev2_id = ObjectId::new(streamed_written.size + 2, 0);
+            let mut batch2 = batch.clone();
+            let batch2_written = write::update(
+                &mut batch2,
+                &batch_written.base,
+                [(rev2_id, write::Body::from(&rev2_obj))],
+                None,
+                Some(&reading),
+                &write::Options::DEFAULT,
+            )
+            .unwrap()
+            .unwrap();
+
+            let mut streamed2 = streamed.clone();
+            let mut uw2 = write::UpdateWriter::begin(
+                &mut streamed2,
+                &streamed_written.base,
+                Some(&reading),
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            uw2.push(rev2_id, write::Body::from(&rev2_obj)).unwrap();
+            let streamed2_written = uw2.finish().unwrap().unwrap();
+            assert_eq!(streamed2, batch2, "{kind:?}/{label}/rev2");
+            assert_eq!(streamed2_written, batch2_written, "{kind:?}/{label}/rev2");
+        }
+    }
+
+    // Duplicate number refusal between passed-over `Body::Read` and modified `Body::New` in both orders.
+    let initial = whole(&plain, &id_trailer, XrefKind::Table, None);
+    let reading = open(&initial);
+    let base = write::Base::of(&reading).unwrap();
+    let doc = reading.to_document().unwrap();
+    let read_cat = write::bodies(&doc)
+        .find(|(id, _)| *id == ObjectId::new(1, 0))
+        .unwrap()
+        .1;
+
+    let mut sink = Vec::new();
+    let mut uw =
+        write::UpdateWriter::begin(&mut sink, &base, Some(&reading), &write::Options::DEFAULT)
+            .unwrap();
+    assert_eq!(
+        uw.push(ObjectId::new(1, 0), read_cat.clone()).unwrap(),
+        None
+    );
+    assert_eq!(
+        uw.push(ObjectId::new(1, 0), write::Body::from(&catalog()))
+            .unwrap_err(),
+        Error::Twice(1)
+    );
+
+    let mut sink = Vec::new();
+    let mut uw =
+        write::UpdateWriter::begin(&mut sink, &base, Some(&reading), &write::Options::DEFAULT)
+            .unwrap();
+    uw.push(ObjectId::new(1, 0), write::Body::from(&catalog()))
+        .unwrap();
+    assert_eq!(
+        uw.push(ObjectId::new(1, 0), read_cat).unwrap_err(),
+        Error::Twice(1)
+    );
+
+    // Encrypted incremental updates across all methods (with deterministic IVs).
+    let methods = methods();
+    for (name, _kind, _method, source) in sources(&methods) {
+        let reading = opened(&source, "user");
+        let mut edited = reading.to_document().unwrap();
+        let note = edited.add(dict! {
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Square"),
+            "Contents" => lit(NOTE),
+        });
+        let page = edited.get_dict_mut(PAGE).unwrap();
+        page.set("Rotate", 90);
+        page.set("Annots", vec![Object::from(note)]);
+
+        let base = write::Base::of(&reading).unwrap();
+        let encryptor = derived(Encryptor::of(&reading).unwrap().unwrap());
+        let given = || [PAGE, note].map(|id| (id, write::Body::from(edited.get(id).unwrap())));
+
+        let mut batch = source.clone();
+        let batch_written = write::update(
+            &mut batch,
+            &base,
+            given(),
+            Some(&encryptor),
+            Some(&reading),
+            &write::Options::DEFAULT,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut streamed = source.clone();
+        let edited_ref = &edited;
+        let streamed_written = {
+            let mut uw = write::Writer::begin_update_encrypted(
+                &mut streamed,
+                &base,
+                &encryptor,
+                &edited_ref,
+                Some(&reading),
+                &write::Options::DEFAULT,
+            )
+            .unwrap();
+            for (id, body) in given() {
+                uw.push(id, body).unwrap();
+            }
+            uw.finish().unwrap().unwrap()
+        };
+
+        assert_eq!(streamed, batch, "{name}");
+        assert_eq!(streamed_written, batch_written, "{name}");
+        let pdf = opened(&streamed, "user");
+        assert!(sound(&pdf), "{name}: {:?}", pdf.faults());
+    }
+}
+
+/// [`write::Writer`] and [`write::UpdateWriter`] require only `std::io::Write`
+/// (no `Seek`), shrink their per-body scratch buffer back to `<= 64 KiB` so
+/// streaming hundreds of megabytes keeps memory bounded by a single body,
+/// surface sink failures as [`Error::WriteIo`], and never include plaintext in
+/// `Debug` output.
+#[test]
+fn streaming_writers_bound_memory_and_propagate_write_io_errors() {
+    use std::io;
+
+    struct CountingSink {
+        bytes: usize,
+    }
+
+    impl io::Write for CountingSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes += buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingSink {
+        fail_after: usize,
+        written: usize,
+    }
+
+    impl io::Write for FailingSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.written + buf.len() > self.fail_after {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "sink closed"));
+            }
+            self.written += buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_rss_kib() -> Option<usize> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+        line.split_whitespace().nth(1)?.parse().ok()
+    }
+
+    // Stream 128 x 4 MiB = 512 MiB through `Writer` into a non-`Seek` sink while keeping peak
+    // scratch capacity <= 64 KiB after every object.
+    const CHUNK: usize = 4 * 1024 * 1024;
+    const COUNT: u32 = 128;
+
+    #[cfg(target_os = "linux")]
+    let rss_before = current_rss_kib();
+
+    let mut sink = CountingSink { bytes: 0 };
+    let mut writer = write::Writer::begin(&mut sink, None, &write::Options::DEFAULT).unwrap();
+    writer
+        .push(
+            ObjectId::new(1, 0),
+            write::Body::from(&Object::from(dict! {
+                "Type" => Object::name("Catalog"),
+                "Secret" => lit(b"TOP_SECRET_SENTINEL_PAYLOAD"),
+            })),
+        )
+        .unwrap();
+    let writer_dbg = format!("{writer:?}");
+    assert!(!writer_dbg.contains("TOP_SECRET_SENTINEL_PAYLOAD"));
+
+    for i in 0..COUNT {
+        let id = ObjectId::new(2 + i, 0);
+        let stream = Object::from(Stream::new(
+            dict! { "Type" => Object::name("XObject"), "Subtype" => Object::name("Image") },
+            vec![(i & 0xff) as u8; CHUNK],
+        ));
+        writer
+            .push(id, write::Body::New(Cow::Owned(stream)))
+            .unwrap();
+        assert!(
+            writer.scratch_capacity() <= 64 * 1024,
+            "scratch capacity {} exceeded 64 KiB after body {i}",
+            writer.scratch_capacity()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    let rss_after_pushes = current_rss_kib();
+
+    let trailer = dict! {
+        "Root" => Object::reference(1),
+        "ID" => vec![Object::hex(ID), Object::hex(ID)],
+    };
+    let written = writer.finish(&trailer).unwrap();
+    assert_eq!(sink.bytes, written.base.len);
+    assert!(sink.bytes > (COUNT as usize) * CHUNK);
+    assert!(written.id.is_some());
+
+    #[cfg(target_os = "linux")]
+    if let (Some(before), Some(after)) = (rss_before, rss_after_pushes) {
+        let growth_kib = after.saturating_sub(before);
+        assert!(
+            growth_kib < 64 * 1024,
+            "streaming 512 MiB grew VmRSS by {growth_kib} KiB (before={before} KiB, after={after} KiB)"
+        );
+    }
+
+    // Same scratch bound and Debug hygiene on `UpdateWriter`.
+    let initial = file(&[]);
+    let reading = open(&initial);
+    let base = write::Base::of(&reading).unwrap();
+    let mut update_sink = CountingSink { bytes: 0 };
+    let mut uw = write::UpdateWriter::begin(
+        &mut update_sink,
+        &base,
+        Some(&reading),
+        &write::Options::DEFAULT,
+    )
+    .unwrap();
+    let big_stream = Object::from(Stream::new(
+        dict! { "Secret" => lit(b"UPDATE_SECRET_SENTINEL") },
+        vec![0xAB; CHUNK],
+    ));
+    uw.push(
+        ObjectId::new(2, 0),
+        write::Body::New(Cow::Owned(big_stream)),
+    )
+    .unwrap();
+    assert!(uw.scratch_capacity() <= 64 * 1024);
+    assert!(!format!("{uw:?}").contains("UPDATE_SECRET_SENTINEL"));
+    uw.finish().unwrap().unwrap();
+    assert!(update_sink.bytes > CHUNK);
+
+    // `Error::WriteIo` propagation on header write, mid-`push`, leading `\n`, and `finish`.
+    let header_err = write::Writer::begin(
+        FailingSink {
+            fail_after: 0,
+            written: 0,
+        },
+        None,
+        &write::Options::DEFAULT,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            header_err,
+            Error::WriteIo {
+                kind: io::ErrorKind::BrokenPipe,
+                ..
+            }
+        ),
+        "{header_err:?}"
+    );
+
+    let mut mid_writer = write::Writer::begin(
+        FailingSink {
+            fail_after: 20,
+            written: 0,
+        },
+        None,
+        &write::Options::DEFAULT,
+    )
+    .unwrap();
+    let push_err = mid_writer
+        .push(ObjectId::new(1, 0), write::Body::from(&catalog()))
+        .unwrap_err();
+    assert!(
+        matches!(
+            push_err,
+            Error::WriteIo {
+                kind: io::ErrorKind::BrokenPipe,
+                ..
+            }
+        ),
+        "{push_err:?}"
+    );
+
+    let mut finish_writer = write::Writer::begin(
+        FailingSink {
+            fail_after: 60,
+            written: 0,
+        },
+        None,
+        &write::Options::DEFAULT,
+    )
+    .unwrap();
+    finish_writer
+        .push(ObjectId::new(1, 0), write::Body::from(&catalog()))
+        .unwrap();
+    let finish_err = finish_writer
+        .finish(&dict! { "Root" => Object::reference(1) })
+        .unwrap_err();
+    assert!(
+        matches!(
+            finish_err,
+            Error::WriteIo {
+                kind: io::ErrorKind::BrokenPipe,
+                ..
+            }
+        ),
+        "{finish_err:?}"
+    );
+
+    let trimmed = initial.strip_suffix(b"\n").unwrap();
+    let trimmed_reading = open(trimmed);
+    let trimmed_base = write::Base::of(&trimmed_reading).unwrap();
+    let mut newline_uw = write::UpdateWriter::begin(
+        FailingSink {
+            fail_after: 0,
+            written: 0,
+        },
+        &trimmed_base,
+        Some(&trimmed_reading),
+        &write::Options::DEFAULT,
+    )
+    .unwrap();
+    let nl_err = newline_uw
+        .push(ObjectId::new(1, 0), write::Body::from(&catalog()))
+        .unwrap_err();
+    assert!(
+        matches!(
+            nl_err,
+            Error::WriteIo {
+                kind: io::ErrorKind::BrokenPipe,
+                ..
+            }
+        ),
+        "{nl_err:?}"
+    );
+}
