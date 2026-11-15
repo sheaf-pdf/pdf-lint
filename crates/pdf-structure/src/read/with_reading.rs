@@ -7,9 +7,9 @@ use std::fmt;
 use pdf_objects::fault::Place;
 use pdf_objects::object::{Object, ObjectId};
 use pdf_objects::version::Version;
-use pdf_objects::{Resolve, Streams, Unreadable};
+use pdf_objects::{DecodedStream, Resolve, Streams, Unreadable};
 
-use super::reading::{missing, viewed};
+use super::reading::{missing, viewed, viewed_standard};
 use super::{ByteSource, Error, Options, Reading};
 use crate::read::Fault;
 use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread};
@@ -132,6 +132,22 @@ impl<S: ByteSource> Streams for WithReading<S> {
         let decoded = self.reading.decoded_within_as(id, object, limit);
         viewed(id, decoded, self.reading.capped_at(limit)).map(Cow::Owned)
     }
+
+    fn decoded_standard(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'_>, Unreadable> {
+        match Resolve::try_resolve(&&self.document, id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(missing(id)),
+            Err(unreadable) => return Err(unreadable),
+        }
+        let object = Source::get(&self.document, id);
+        let object = Some(object.as_ref().map(|o| *o));
+        let (decoded, tail) = self.reading.decoded_standard_within_as(id, object, limit);
+        viewed_standard(id, decoded, tail, self.reading.capped_at(limit))
+    }
 }
 
 /// Its document's answers, and a stream's data decoded by its reading.
@@ -188,6 +204,17 @@ impl<S: ByteSource> Source for WithReading<S> {
         let object = Source::get(&self.document, id);
         let object = Some(object.as_ref().map(|o| *o));
         Some(self.reading.decoded_within_as(id, object, limit))
+    }
+
+    fn decoded_standard_within(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Option<Result<DecodedStream<'static>, Error>> {
+        let object = Source::get(&self.document, id);
+        let object = Some(object.as_ref().map(|o| *o));
+        let (decoded, tail) = self.reading.decoded_standard_within_as(id, object, limit);
+        Some(decoded.map(|data| DecodedStream::new(Cow::Owned(data), tail)))
     }
 }
 

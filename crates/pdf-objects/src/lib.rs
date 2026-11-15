@@ -86,7 +86,7 @@ pub use parse::Limits;
 /// Re-export of `pdf-tokenizer` for lexical tokenizing and [`Rules`].
 pub use pdf_tokenizer;
 pub use pdf_tokenizer::Rules;
-pub use streams::{Streams, WithStreams};
+pub use streams::{DecodedStream, FilterStep, FilterTail, Streams, WithStreams};
 pub use version::Version;
 
 /// Resolves indirect [`ObjectId`] references to borrowed [`Object`]s.
@@ -288,7 +288,8 @@ impl Unreadable {
 pub enum Why {
     /// Syntax, offset, or container corruption prevented reading the object or stream.
     Damaged,
-    /// Decoded stream output exceeded the caller's `limit` in [`Streams::decoded`].
+    /// Decoded stream output exceeded the caller's `limit` in [`Streams::decoded`] or
+    /// [`Streams::decoded_standard`].
     Limit,
     /// Reading exceeded one of the reader's configured resource caps (nesting depth, value count,
     /// filter chain length, stream budget, or reference hop limit).
@@ -298,10 +299,10 @@ pub enum Why {
     /// Underlying byte-source I/O failed; retrying may succeed.
     Source,
     /// Unsupported filter or malformed `/Filter` / `/DecodeParms`. Returned only by
-    /// [`Streams::decoded`].
+    /// [`Streams::decoded`] and [`Streams::decoded_standard`].
     Filter,
     /// Stream bytes are detached from any backing byte source. Returned only by
-    /// [`Streams::decoded`].
+    /// [`Streams::decoded`] and [`Streams::decoded_standard`].
     Detached,
 }
 

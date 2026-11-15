@@ -1,15 +1,24 @@
-//! PDF file structure writer (ISO 32000-2, §7.5–7.6): full files ([`full`], [`document`]),
-//! incremental updates ([`update`]), and low-level layout primitives ([`Parts`], [`Section`],
-//! [`container`]).
+//! PDF file structure writer (ISO 32000-2, §7.5–7.6): full files ([`full`], [`document`],
+//! [`Writer`]), incremental updates ([`update`], [`UpdateWriter`]), and low-level layout primitives
+//! ([`Parts`], [`Section`], [`container`]).
 //!
 //! # Capabilities
 //!
-//! - **Full files ([`full`], [`document`]):** Writes a `%PDF-` header, indirect objects, optional
-//!   object streams ([`Options::pack`], built in parallel across threads), optional encryption
-//!   dictionary, and a single cross-reference table or PNG-Up deflated cross-reference stream
-//!   with a deterministic SHA-256 `/ID[1]` digest.
-//! - **Incremental updates ([`update`]):** Appends modified objects and a chained `/Prev`
-//!   cross-reference section after a [`Base`] ([`Base::of`] or [`Base::new`]), returning
+//! - **Full files ([`full`], [`document`], [`Writer`]):** Writes a `%PDF-` header, indirect
+//!   objects, optional object streams ([`Options::pack`], built in parallel across threads in
+//!   [`full`]), optional encryption dictionary, and a single cross-reference table or PNG-Up
+//!   deflated cross-reference stream with a deterministic SHA-256 `/ID[1]` digest. Unencrypted new
+//!   files omit `/ID` unless `trailer` supplies `/ID[0]`; encrypted files without `/ID[0]` use the
+//!   SHA-256 digest for both elements.
+//! - **Streaming output ([`Writer`], [`UpdateWriter`]):** Streams whole files and incremental
+//!   updates one [`Body`] at a time to any `W: std::io::Write` (requiring no `Seek`), bounding
+//!   scratch memory to a single body and producing the exact same bytes as [`full`] and [`update`]
+//!   for the same unencrypted inputs in the same order.
+//! - **Determinism:** *Same inputs, same bytes, unencrypted.* Encrypted writes draw fresh operating
+//!   system IVs for every AES string and stream ciphertext, so repeated encrypted writes of the
+//!   same document intentionally differ.
+//! - **Incremental updates ([`update`], [`UpdateWriter`]):** Appends modified objects and a chained
+//!   `/Prev` cross-reference section after a [`Base`] ([`Base::of`] or [`Base::new`]), returning
 //!   [`Written`] with an updated `Base` so consecutive updates can be chained without re-parsing.
 //! - **Verified byte copying ([`Body::Read`], [`bodies`]):** Unmodified objects read from a
 //!   [`ReadFrom`] (`Reading`) are copied directly from their source bytes after verifying their
@@ -39,6 +48,7 @@ mod crypt;
 mod full;
 mod objstm;
 mod parts;
+mod stream;
 #[cfg(test)]
 pub(crate) mod tests;
 mod xref;
@@ -66,6 +76,7 @@ pub use crypt::{Encrypting, Encryptor, Unencryptable, encryption};
 pub use full::{document, encryption_objects, full, left_out};
 pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
 pub use parts::{Packed, Parts};
+pub use stream::{UpdateWriter, Writer};
 pub use xref::{Entry, Section};
 
 // A reading compares a document's encryption dictionary as written too
@@ -93,7 +104,10 @@ pub struct Deflate {
     /// The backend that deflates: by default pdf-filters'
     /// `Backend::MinizOxide`, which every build of this crate has;
     /// `Backend::ZlibRs` with its `zlib-rs` feature. The two deflate to
-    /// different bytes, each zlib data any inflater reads.
+    /// different bytes, each zlib data any inflater reads (note that inline
+    /// image prefix readers in `pdf-content-streams` use `Backend::ZlibRs`, so
+    /// callers pinning exact deflated bytes across tools should set `backend`
+    /// explicitly).
     pub backend: Backend,
     /// How hard it works to make the data small: pdf-filters'
     /// `Level::DEFAULT`, 6, by default.
@@ -886,6 +900,11 @@ pub enum Error {
     /// object streams, whose members only a stream lists.
     #[error("a cross-reference table can't list objects in object streams")]
     PackedTable,
+    /// A streaming writer ([`Writer`]) asked to pack objects into object
+    /// streams ([`Options::pack`]), which require buffering members across
+    /// bodies.
+    #[error("a streaming writer writes each object as pushed, not in object streams")]
+    PackedStream,
     /// An update whose cross-reference stream would be numbered at or past
     /// [`NUMBERS`], past every number its file and it use: its number.
     #[error("no object number left for an update's cross-reference stream: it would be {0}")]
@@ -1045,12 +1064,29 @@ pub enum Error {
         "object {0} is an encryption dictionary or what one refers to, whose number a reader reads in the clear: the renumbering writes another object there, or moves it in an update, which leaves it where it is"
     )]
     Moved(ObjectId),
+    /// Writing to the destination `std::io::Write` failed: the I/O error's
+    /// kind and message.
+    #[error("writing output failed: {why}")]
+    WriteIo {
+        /// The error's kind.
+        kind: std::io::ErrorKind,
+        /// Its words.
+        why: String,
+    },
 }
 
 impl Error {
     /// [`Error::Io`], of `e`.
     fn io(e: &std::io::Error) -> Error {
         Error::Io {
+            kind: e.kind(),
+            why: e.to_string(),
+        }
+    }
+
+    /// [`Error::WriteIo`], of `e`.
+    pub(super) fn write_io(e: &std::io::Error) -> Error {
+        Error::WriteIo {
             kind: e.kind(),
             why: e.to_string(),
         }

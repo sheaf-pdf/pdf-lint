@@ -13,6 +13,7 @@ use std::borrow::Cow;
 
 use pdf_filters::{Filter, Layout, Predictor};
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
+use pdf_objects::streams::{FilterStep, FilterTail};
 
 /// The most filters a stream may list, as qpdf allows: more is
 /// [`Unfiltered::Filters`]. A cap of the reader's own, not one of
@@ -132,6 +133,54 @@ fn lossy(bytes: &[u8]) -> Cow<'_, str> {
 /// 32000-2, 7.5.8.2).
 pub(crate) type Resolve<'r, 'a> = Option<&'r dyn Fn(ObjectId) -> Option<&'a Object>>;
 
+/// Parsed `/Filter` and `/DecodeParms` pipeline for a stream dictionary
+/// ([`read::filter_chain`](crate::read::filter_chain)).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct FilterChain {
+    /// Leading standard filters (`FlateDecode`, `LZWDecode`, `ASCIIHexDecode`, `ASCII85Decode`,
+    /// `RunLengthDecode`), ready for [`pdf_filters::decode`].
+    ///
+    /// `/Crypt` filters are validated and elided here because stream decryption runs before filter
+    /// decoding.
+    pub standard: Vec<Filter>,
+    /// First non-standard filter (such as `DCTDecode`, `CCITTFaxDecode`, `JBIG2Decode`, or
+    /// `JPXDecode`) and any filters listed after it, or `None` when every filter in the pipeline
+    /// is standard.
+    pub tail: Option<FilterTail>,
+}
+
+impl FilterChain {
+    /// Creates a [`FilterChain`] from leading `standard` filters and optional `tail`.
+    #[must_use]
+    pub const fn new(standard: Vec<Filter>, tail: Option<FilterTail>) -> FilterChain {
+        FilterChain { standard, tail }
+    }
+}
+
+/// Expands ISO 32000-2 §8.9.7 Table 92 inline filter abbreviations to their canonical names.
+fn expand_filter_name(name: &[u8]) -> &[u8] {
+    match name {
+        b"AHx" => b"ASCIIHexDecode",
+        b"A85" => b"ASCII85Decode",
+        b"LZW" => b"LZWDecode",
+        b"Fl" => b"FlateDecode",
+        b"RL" => b"RunLengthDecode",
+        b"CCF" => b"CCITTFaxDecode",
+        b"DCT" => b"DCTDecode",
+        other => other,
+    }
+}
+
+/// Reads `dict`'s `/Filter` and `/DecodeParms` pipeline, stopping at the first non-standard
+/// filter.
+pub(crate) fn filter_chain<'a>(
+    dict: &'a Dict,
+    resolve: Resolve<'_, 'a>,
+) -> Result<FilterChain, Unfiltered> {
+    chain_inner(dict, resolve).map(|(chain, _)| chain)
+}
+
 /// The filters `dict`'s `/Filter` and `/DecodeParms` give, in order,
 /// references followed by `resolve`: none for no `/Filter`, a null, or an
 /// empty array; or why the reader doesn't decode them.
@@ -139,7 +188,21 @@ pub(crate) fn filters<'a>(
     dict: &'a Dict,
     resolve: Resolve<'_, 'a>,
 ) -> Result<Vec<Filter>, Unfiltered> {
-    let names: Vec<&[u8]> = match dict
+    let (chain, unsupported) = chain_inner(dict, resolve)?;
+    if let Some(raw) = unsupported {
+        return Err(Unfiltered::Unsupported {
+            filter: raw.to_vec(),
+        });
+    }
+    Ok(chain.standard)
+}
+
+/// Parses `dict`'s filter chain and returns `(FilterChain, raw_first_unsupported_name)`.
+pub(crate) fn chain_inner<'a>(
+    dict: &'a Dict,
+    resolve: Resolve<'_, 'a>,
+) -> Result<(FilterChain, Option<&'a [u8]>), Unfiltered> {
+    let names: Vec<&'a [u8]> = match dict
         .get(b"Filter")
         .map(|o| resolved(o, resolve))
         .transpose()?
@@ -158,8 +221,9 @@ pub(crate) fn filters<'a>(
         return Err(Unfiltered::Filters { count: names.len() });
     }
     let parms = parameters(dict, names.len(), resolve)?;
-    let mut filters = Vec::new();
-    for (name, parms) in names.into_iter().zip(parms) {
+    let mut standard = Vec::new();
+    let mut iter = names.into_iter().zip(parms);
+    while let Some((name, parms)) = iter.next() {
         let none = |filter: Filter| match parms {
             None => Ok(filter),
             Some(_) => Err(Unfiltered::Unwanted {
@@ -170,7 +234,7 @@ pub(crate) fn filters<'a>(
             filter: name.to_vec(),
             why: Box::new(why),
         };
-        filters.push(match name {
+        standard.push(match name {
             b"FlateDecode" | b"Fl" => Filter::Flate {
                 predictor: predictor(parms, resolve).map_err(named)?,
             },
@@ -186,13 +250,31 @@ pub(crate) fn filters<'a>(
                 continue;
             }
             _ => {
-                return Err(Unfiltered::Unsupported {
-                    filter: name.to_vec(),
-                });
+                let step = |raw: &'a [u8], p: Option<&'a Object>| {
+                    FilterStep::new(
+                        expand_filter_name(raw),
+                        p.and_then(Object::as_dict).cloned(),
+                    )
+                };
+                let first = step(name, parms);
+                let after = iter.map(|(raw, p)| step(raw, p)).collect();
+                return Ok((
+                    FilterChain {
+                        standard,
+                        tail: Some(FilterTail::new(first, after)),
+                    },
+                    Some(name),
+                ));
             }
         });
     }
-    Ok(filters)
+    Ok((
+        FilterChain {
+            standard,
+            tail: None,
+        },
+        None,
+    ))
 }
 
 /// The name of the crypt filter a stream's own `/Crypt` filter names, when
@@ -739,5 +821,111 @@ mod tests {
             why.to_string(),
             "its /Filter or /DecodeParms holds a reference, which a cross-reference stream's may not"
         );
+    }
+
+    #[test]
+    fn filter_chain_stops_at_first_non_standard_filter_and_agrees_with_filters() {
+        // Pure standard chain has `tail: None` and matches `filters`.
+        let predicted = dict! { "Predictor" => 12, "Columns" => 4 };
+        let parms: Vec<Object> = vec![Object::null(), predicted.clone().into()];
+        let pure = dict! { "Filter" => names(&["AHx", "Fl"]), "DecodeParms" => parms };
+        assert_eq!(
+            filter_chain(&pure, Some(&|_| None)),
+            Ok(FilterChain::new(
+                vec![
+                    Filter::AsciiHex,
+                    Filter::Flate {
+                        predictor: png(1, 8, 4)
+                    }
+                ],
+                None,
+            ))
+        );
+
+        // Standard filter followed by DCTDecode with indirect parameters.
+        let dct_parms = dict! { "ColorTransform" => 0 };
+        let jbig2_parms = dict! { "JBIG2Globals" => Object::reference(15) };
+        let objects = BTreeMap::from([
+            (ObjectId::new(10, 0), Object::from(dct_parms.clone())),
+            (ObjectId::new(12, 0), Object::from(jbig2_parms.clone())),
+        ]);
+        let resolve = |id| objects.get(&id);
+
+        let parms: Vec<Object> = vec![predicted.into(), Object::reference(10)];
+        let flate_dct =
+            dict! { "Filter" => names(&["FlateDecode", "DCTDecode"]), "DecodeParms" => parms };
+        assert_eq!(
+            filter_chain(&flate_dct, Some(&resolve)),
+            Ok(FilterChain::new(
+                vec![Filter::Flate {
+                    predictor: png(1, 8, 4)
+                }],
+                Some(FilterTail::new(
+                    FilterStep::new("DCTDecode", Some(dct_parms)),
+                    vec![],
+                )),
+            ))
+        );
+
+        // JBIG2Decode preserves indirect `/JBIG2Globals` inside resolved `parms`.
+        let jbig2 = dict! {
+            "Filter" => Object::name("JBIG2Decode"),
+            "DecodeParms" => Object::reference(12),
+        };
+        let chain = filter_chain(&jbig2, Some(&resolve)).unwrap();
+        assert!(chain.standard.is_empty());
+        let tail = chain.tail.unwrap();
+        assert_eq!(tail.first.name.as_bytes(), b"JBIG2Decode");
+        assert_eq!(
+            tail.first
+                .parms
+                .as_ref()
+                .and_then(|d| d.get(b"JBIG2Globals"))
+                .and_then(Object::as_reference),
+            Some(ObjectId::new(15, 0))
+        );
+        assert!(tail.after.is_empty());
+
+        // Inline abbreviations `CCF` and `DCT` expand in `first` and `after`, and `/Crypt` is
+        // validated and elided before the codec.
+        let inline_chain = dict! {
+            "Filter" => names(&["Crypt", "CCF", "DCT", "Fl"]),
+            "DecodeParms" => vec![
+                Object::from(dict! { "Name" => Object::name("Identity") }),
+                Object::from(dict! { "K" => -1 }),
+                Object::null(),
+                Object::null(),
+            ],
+        };
+        let chain = filter_chain(&inline_chain, None).unwrap();
+        assert!(chain.standard.is_empty());
+        let tail = chain.tail.unwrap();
+        assert_eq!(tail.first.name.as_bytes(), b"CCITTFaxDecode");
+        assert_eq!(
+            tail.first
+                .parms
+                .as_ref()
+                .and_then(|d| d.get(b"K"))
+                .and_then(Object::as_integer),
+            Some(-1)
+        );
+        assert_eq!(
+            tail.after,
+            vec![
+                FilterStep::new("DCTDecode", None),
+                FilterStep::new("FlateDecode", None),
+            ]
+        );
+
+        // Refusals on structural errors or invalid leading standard filter parameters match `filters`.
+        let bad_leading = dict! {
+            "Filter" => names(&["Fl", "DCTDecode"]),
+            "DecodeParms" => vec![Object::from(dict! { "Predictor" => 99 }), Object::null()],
+        };
+        assert_eq!(
+            filter_chain(&bad_leading, None).unwrap_err(),
+            filters(&bad_leading, None).unwrap_err()
+        );
+        assert_eq!(filter_chain(&jbig2, None), Err(Unfiltered::Reference));
     }
 }

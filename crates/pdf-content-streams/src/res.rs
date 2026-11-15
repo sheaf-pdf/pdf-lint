@@ -170,6 +170,10 @@ pub struct Unheld {
 impl Res {
     /// The resource `objects` are ([`ResBody::Objects`]), named by them.
     ///
+    /// Because `Res::of` reads and hashes every byte of `objects` in memory, prefer
+    /// [`Res::written`] when streaming large image XObjects that have already been written to an
+    /// output file.
+    ///
     /// # Errors
     ///
     /// [`ResError::Empty`] where there are none, as there's no object to

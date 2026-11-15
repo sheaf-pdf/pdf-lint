@@ -14,7 +14,7 @@ Owned PDF syntax objects, byte-span tracking, iterative parser and serializer, t
 - **Deterministic serializer (`serialize`):** Iterative serializer for direct values and indirect objects/streams, rejecting unparseable constructs (`InlineStream`, `NulName`, `ZeroObjectId`, `RealOutOfRange`) and supporting on-the-fly `Renumber` and `Encrypt` hooks.
 - **Zero-I/O resolver traits (`Resolve`, `Streams`, `fault::Sink`):**
   - `Resolve` looks up indirect objects by `ObjectId` (implemented for `&BTreeMap`, `&HashMap`, smart pointers, trait objects, and closures wrapped in `ResolveFn` / `resolve_fn`), with `try_resolve` returning `Unreadable`.
-  - `Streams` extends `Resolve` to return decrypted, filter-decoded stream bytes bounded by `limit` (`WithStreams` pairs any resolver with a bounded stream closure).
+  - `Streams` extends `Resolve` to return decrypted, filter-decoded stream bytes bounded by `limit` (`decoded`, plus `decoded_standard` returning `DecodedStream` with any trailing `FilterTail` / `FilterStep` for image codecs; `WithStreams` pairs any resolver with a bounded stream closure).
   - `fault::Sink<F>` collects recoverable spec departures with their `Place`; pass `&mut ()` to disable fault collection at zero cost.
 
 ## Quickstart: Objects, Dictionaries, and Text Strings

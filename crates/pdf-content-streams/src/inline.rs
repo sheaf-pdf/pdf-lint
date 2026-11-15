@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use pdf_color::Spaces;
 use pdf_filters::{Backend, Faults, Layout, Predictor, Reading, decode_prefix_into_as};
-use pdf_objects::{Object, ObjectId, Resolve, Unreadable};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable};
 use pdf_tokenizer::decode::{self, NumberError, pdfium};
 use pdf_tokenizer::is_white_space;
 
@@ -372,6 +372,84 @@ impl<'a> InlineImage<'a> {
         let set = |key: &[u8], value| dict.set(key, value);
         image_dict(s, self.at.start, UNCAPPED, set, &mut ()).ok()?;
         int(&self.content[dict.iso(L)?])
+    }
+
+    /// Converts this inline image's parameters into an expanded [`Dict`] suitable for stream
+    /// filter-chain and color-space readers, under `limits`.
+    ///
+    /// Abbreviated keys from ISO 32000-2 §8.9.7 Table 91 (`BPC`, `CS`, `D`, `DP`, `F`, `H`, `IM`,
+    /// `I`, `L`, `W`) are expanded to their canonical names using the same duplicate/conflict
+    /// selection as [`InlineImage::entry`], and abbreviated value names from Table 92 (`G`, `RGB`,
+    /// `CMYK`, `I`, `AHx`, `A85`, `LZW`, `Fl`, `RL`, `CCF`, `DCT`) are expanded on `/ColorSpace`
+    /// and `/Filter`. Returns `None` if any selected parameter fails to parse as an [`Object`]
+    /// within `limits`.
+    ///
+    /// ```
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    ///
+    /// let content = b"BI /W 2 /H 1 /BPC 8 /CS [/I /RGB 1 <000000ffffff>] /F [/A85 /CCF] /DP [null << /K -1 >>] ID ~> EI";
+    /// let op = operations(content, &ResCx::none(), &Limits::DEFAULT).next().unwrap().unwrap();
+    /// let dict = op.inline_image().unwrap().to_dict(&Limits::DEFAULT).unwrap();
+    /// assert_eq!(dict.get(b"Width").and_then(|o| o.as_integer()), Some(2));
+    /// let cs = dict.get(b"ColorSpace").and_then(|o| o.as_array()).unwrap();
+    /// assert_eq!(cs[0].as_name(), Some(&b"Indexed"[..]));
+    /// assert_eq!(cs[1].as_name(), Some(&b"DeviceRGB"[..]));
+    /// let filters = dict.get(b"Filter").and_then(|o| o.as_array()).unwrap();
+    /// assert_eq!(filters[0].as_name(), Some(&b"ASCII85Decode"[..]));
+    /// assert_eq!(filters[1].as_name(), Some(&b"CCITTFaxDecode"[..]));
+    /// ```
+    #[must_use]
+    pub fn to_dict(&self, limits: &Limits) -> Option<Dict> {
+        let mut known = ImageDict::default();
+        let mut extras: Vec<(Vec<u8>, Range<usize>)> = Vec::new();
+        image_dict(
+            &self.content[..self.at.end],
+            self.at.start,
+            UNCAPPED,
+            |k, value| {
+                let raw_key = &k[1..];
+                let is_known = (KEYS.iter()).any(|&(full, short, _)| {
+                    raw_key == full.as_bytes() || raw_key == short.as_bytes()
+                });
+                if is_known {
+                    known.set(k, value);
+                    return;
+                }
+                let Some(decoded_key) = name(k) else {
+                    return;
+                };
+                match value.object() {
+                    Some(range) => {
+                        if let Some(slot) = extras.iter_mut().find(|(ek, _)| *ek == *decoded_key) {
+                            slot.1 = range;
+                        } else {
+                            extras.push((decoded_key.into_owned(), range));
+                        }
+                    }
+                    None => extras.retain(|(ek, _)| *ek != *decoded_key),
+                }
+            },
+            &mut (),
+        )
+        .ok()?;
+
+        let mut out = Dict::new();
+        for (i, &(full, _, _)) in KEYS.iter().enumerate() {
+            if let Some(range) = known.get(self.content, i) {
+                let obj = Operand::new(self.content, range).object(limits)?;
+                let obj = match i {
+                    CS => expand_color_space(obj, 0),
+                    F => expand_filter_value(obj),
+                    _ => obj,
+                };
+                out.set(full, obj);
+            }
+        }
+        for (key, range) in extras {
+            let obj = Operand::new(self.content, range).object(limits)?;
+            out.set(key, obj);
+        }
+        Some(out)
     }
 }
 
@@ -1295,9 +1373,49 @@ const H: usize = 5;
 const L: usize = 8;
 const W: usize = 9;
 
-/// The full name an abbreviated name stands for in an inline image
-/// (8.9.7, Table 92), `name` decoded; None for any other.
-pub(crate) fn expanded(name: &[u8]) -> Option<&'static [u8]> {
+/// Expands an inline image dictionary key abbreviation from ISO 32000-2 §8.9.7 Table 91 (`BPC`,
+/// `CS`, `D`, `DP`, `F`, `H`, `IM`, `I`, `L`, `W`) to its full key name, or returns `None` if
+/// `key` is not an abbreviated inline image key.
+///
+/// ```
+/// use pdf_content_streams::expand_inline_key;
+///
+/// assert_eq!(expand_inline_key(b"BPC"), Some(&b"BitsPerComponent"[..]));
+/// assert_eq!(expand_inline_key(b"DP"), Some(&b"DecodeParms"[..]));
+/// assert_eq!(expand_inline_key(b"L"), Some(&b"Length"[..]));
+/// assert_eq!(expand_inline_key(b"Width"), None);
+/// ```
+#[must_use]
+pub fn expand_inline_key(key: &[u8]) -> Option<&'static [u8]> {
+    Some(match key {
+        b"BPC" => b"BitsPerComponent",
+        b"CS" => b"ColorSpace",
+        b"D" => b"Decode",
+        b"DP" => b"DecodeParms",
+        b"F" => b"Filter",
+        b"H" => b"Height",
+        b"IM" => b"ImageMask",
+        b"I" => b"Interpolate",
+        b"L" => b"Length",
+        b"W" => b"Width",
+        _ => return None,
+    })
+}
+
+/// Expands an inline image name value abbreviation from ISO 32000-2 §8.9.7 Table 92 (`G`, `RGB`,
+/// `CMYK`, `I`, `AHx`, `A85`, `LZW`, `Fl`, `RL`, `CCF`, `DCT`) to its full name, or returns `None`
+/// if `name` is not an abbreviated inline image value.
+///
+/// ```
+/// use pdf_content_streams::expand_inline_value;
+///
+/// assert_eq!(expand_inline_value(b"RGB"), Some(&b"DeviceRGB"[..]));
+/// assert_eq!(expand_inline_value(b"CCF"), Some(&b"CCITTFaxDecode"[..]));
+/// assert_eq!(expand_inline_value(b"DCT"), Some(&b"DCTDecode"[..]));
+/// assert_eq!(expand_inline_value(b"FlateDecode"), None);
+/// ```
+#[must_use]
+pub fn expand_inline_value(name: &[u8]) -> Option<&'static [u8]> {
     Some(match name {
         b"G" => b"DeviceGray",
         b"RGB" => b"DeviceRGB",
@@ -1312,6 +1430,65 @@ pub(crate) fn expanded(name: &[u8]) -> Option<&'static [u8]> {
         b"DCT" => b"DCTDecode",
         _ => return None,
     })
+}
+
+/// The full name an abbreviated name stands for in an inline image
+/// (8.9.7, Table 92), `name` decoded; None for any other.
+pub(crate) fn expanded(name: &[u8]) -> Option<&'static [u8]> {
+    expand_inline_value(name)
+}
+
+fn expand_filter_value(obj: Object) -> Object {
+    match obj.into_value() {
+        pdf_objects::Value::Name(n) => match expand_inline_value(&n) {
+            Some(full) => Object::name(full),
+            None => Object::from(pdf_objects::Value::Name(n)),
+        },
+        pdf_objects::Value::Array(mut arr) => {
+            for item in &mut arr {
+                if let Some(n) = item.as_name()
+                    && let Some(full) = expand_inline_value(n)
+                {
+                    *item = Object::name(full);
+                }
+            }
+            Object::from(arr)
+        }
+        other => Object::from(other),
+    }
+}
+
+fn expand_color_space(obj: Object, depth: usize) -> Object {
+    if depth > 8 {
+        return obj;
+    }
+    match obj.into_value() {
+        pdf_objects::Value::Name(n) => match expand_inline_value(&n) {
+            Some(full) => Object::name(full),
+            None => Object::from(pdf_objects::Value::Name(n)),
+        },
+        pdf_objects::Value::Array(mut arr) => {
+            if let Some(first) = arr.first_mut()
+                && let Some(n) = first.as_name()
+                && let Some(full) = expand_inline_value(n)
+            {
+                *first = Object::name(full);
+            }
+            let sub_idx = match arr.first().and_then(Object::as_name) {
+                Some(b"Indexed" | b"Pattern") => Some(1),
+                Some(b"Separation" | b"DeviceN") => Some(2),
+                _ => None,
+            };
+            if let Some(idx) = sub_idx
+                && let Some(sub) = arr.get_mut(idx)
+            {
+                let taken = std::mem::replace(sub, Object::null());
+                *sub = expand_color_space(taken, depth + 1);
+            }
+            Object::from(arr)
+        }
+        other => Object::from(other),
+    }
 }
 
 /// Whether an inline image's key, decoded, is one 8.9.7 has it read

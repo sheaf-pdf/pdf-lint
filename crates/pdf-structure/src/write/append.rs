@@ -736,7 +736,7 @@ fn appended(
 /// another file's encryptor, whose `/Encrypt` is at the same number, or
 /// another reading's of the same file by a key it wasn't written under,
 /// isn't taken for it.
-fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
+pub(super) fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
     // A null is no entry (ISO 32000-2, 7.3.9), so no encryption.
     let encrypt = (base.trailer.get(b"Encrypt")).filter(|e| !e.is_null());
     let (e, encrypt) = match (encryptor, encrypt) {

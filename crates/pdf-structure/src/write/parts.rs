@@ -109,6 +109,11 @@ impl<'w> Parts<'w> {
         self.to.0.is_some()
     }
 
+    /// The renumbering bodies are written under.
+    pub(super) const fn numbering(&self) -> Numbering<'w> {
+        self.to
+    }
+
     /// Object `id`, `body`, written on its own at the end of `out` at `at`, `n g
     /// obj` to `endobj` and a line's end: where it starts in `out`. Copied where
     /// it's copied, else written anew, a stream's data where it was written read

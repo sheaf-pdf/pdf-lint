@@ -1,6 +1,6 @@
 //! Bounded access to decrypted, filter-decoded PDF stream data ([`Streams`], [`WithStreams`]).
 //!
-//! [`Resolve`] looks up indirect objects—including stream dictionaries and raw [`Data`](crate::Data)
+//! [`Resolve`] looks up indirect objects—including stream dictionaries and raw [`Data`]
 //! locations—without running stream filters or ciphers. Domain crates that read decoded stream
 //! payloads (such as content streams, `/ToUnicode` CMaps, or ICC profiles) accept [`Streams`] so
 //! any file reader, cache, or custom closure ([`WithStreams`]) can supply decoded bytes under a
@@ -14,8 +14,206 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::object::{Object, ObjectId};
+use crate::object::{Data, Dict, Entry, Name, Object, ObjectId, Str, Value};
 use crate::{Resolve, Unreadable, Why};
+
+/// Stream payload decoded through all leading standard filters, paired with any trailing
+/// non-standard filters left for a caller's codec ([`Streams::decoded_standard`]).
+///
+/// `Debug` prints `data` by byte length rather than raw contents so stream payloads never leak into
+/// logs or diagnostics.
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub struct DecodedStream<'a> {
+    /// Decrypted stream bytes after every leading standard filter (`data.len() <= limit`).
+    pub data: Cow<'a, [u8]>,
+    /// First non-standard filter (for example `DCTDecode`, `CCITTFaxDecode`, `JBIG2Decode`, or
+    /// `JPXDecode`) and any filters listed after it, or `None` when the stream used only standard
+    /// filters (or none).
+    pub tail: Option<FilterTail>,
+}
+
+impl<'a> DecodedStream<'a> {
+    /// Creates a [`DecodedStream`] from `data` and optional remaining `tail`.
+    #[must_use]
+    pub const fn new(data: Cow<'a, [u8]>, tail: Option<FilterTail>) -> DecodedStream<'a> {
+        DecodedStream { data, tail }
+    }
+
+    /// Converts borrowed `data` into an owned `'static` [`DecodedStream`].
+    #[must_use]
+    pub fn into_owned(self) -> DecodedStream<'static> {
+        DecodedStream {
+            data: Cow::Owned(self.data.into_owned()),
+            tail: self.tail,
+        }
+    }
+}
+
+impl fmt::Debug for DecodedStream<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecodedStream")
+            .field("data", &ByteLen(self.data.len()))
+            .field("tail", &self.tail)
+            .finish()
+    }
+}
+
+/// Non-standard filter where standard stream decoding stopped, together with any filters listed
+/// after it in `/Filter`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct FilterTail {
+    /// First non-standard filter (such as `DCTDecode`, `CCITTFaxDecode`, `JBIG2Decode`, or
+    /// `JPXDecode`) and its resolved `/DecodeParms` dictionary.
+    pub first: FilterStep,
+    /// Any filters listed after [`Self::first`] in pipeline order.
+    ///
+    /// Single-codec image streams have an empty `after`; callers decoding a trailing image codec
+    /// should reject a non-empty `after` unless they explicitly handle the remaining steps.
+    pub after: Vec<FilterStep>,
+}
+
+impl FilterTail {
+    /// Creates a [`FilterTail`] starting at `first` followed by `after`.
+    #[must_use]
+    pub const fn new(first: FilterStep, after: Vec<FilterStep>) -> FilterTail {
+        FilterTail { first, after }
+    }
+}
+
+/// A single stream filter and its resolved `/DecodeParms` dictionary.
+///
+/// `Debug` redacts string and stream byte payloads inside `parms` to byte lengths.
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub struct FilterStep {
+    /// Filter name, with ISO 32000-2 §8.9.7 Table 92 inline abbreviations (`AHx`, `A85`, `LZW`,
+    /// `Fl`, `RL`, `CCF`, `DCT`) expanded to their full names by stream chain readers.
+    pub name: Name,
+    /// Resolved `/DecodeParms` dictionary for this filter, when present and a dictionary.
+    ///
+    /// Indirect references *to* the `/DecodeParms` entry are resolved by the reader, while
+    /// indirect references *inside* the dictionary (such as `/JBIG2Globals`) remain [`ObjectId`]
+    /// references for the caller to resolve via [`Resolve`] and [`Streams`].
+    pub parms: Option<Dict>,
+}
+
+impl FilterStep {
+    /// Creates a [`FilterStep`] for filter `name` and optional parameter dictionary `parms`.
+    #[must_use]
+    pub fn new(name: impl Into<Name>, parms: Option<Dict>) -> FilterStep {
+        FilterStep {
+            name: name.into(),
+            parms,
+        }
+    }
+}
+
+impl fmt::Debug for FilterStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parms = self.parms.as_ref().map(|d| RedactedDict(d, 0));
+        f.debug_struct("FilterStep")
+            .field("name", &self.name)
+            .field("parms", &parms)
+            .finish()
+    }
+}
+
+struct ByteLen(usize);
+
+impl fmt::Debug for ByteLen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} bytes", self.0)
+    }
+}
+
+const MAX_DEBUG_DEPTH: usize = 16;
+
+struct RedactedDict<'a>(&'a Dict, usize);
+
+impl fmt::Debug for RedactedDict<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.1 >= MAX_DEBUG_DEPTH {
+            return write!(f, "Dict({} entries, ...)", self.0.entries().len());
+        }
+        let mut map = f.debug_struct("Dict");
+        let entries: Vec<_> = self
+            .0
+            .entries()
+            .iter()
+            .map(|entry| RedactedEntry(entry, self.1 + 1))
+            .collect();
+        map.field("entries", &entries).finish()
+    }
+}
+
+struct RedactedEntry<'a>(&'a Entry, usize);
+
+impl fmt::Debug for RedactedEntry<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry")
+            .field("key", &self.0.key_name())
+            .field("key_at", &self.0.key_at())
+            .field("value", &RedactedObject(self.0.value(), self.1))
+            .finish()
+    }
+}
+
+struct RedactedObject<'a>(&'a Object, usize);
+
+impl fmt::Debug for RedactedObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Object")
+            .field("value", &RedactedValue(self.0.value(), self.1))
+            .field("at", &self.0.at())
+            .finish()
+    }
+}
+
+struct RedactedValue<'a>(&'a Value, usize);
+
+impl fmt::Debug for RedactedValue<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Value::String(Str::Bytes(bytes), form) => f
+                .debug_tuple("String")
+                .field(&ByteLen(bytes.len()))
+                .field(form)
+                .finish(),
+            Value::String(Str::Encrypted(bytes), form) => f
+                .debug_tuple("EncryptedString")
+                .field(&ByteLen(bytes.len()))
+                .field(form)
+                .finish(),
+            Value::Array(items) if self.1 >= MAX_DEBUG_DEPTH => {
+                write!(f, "Array({} items, ...)", items.len())
+            }
+            Value::Array(items) => {
+                let redacted: Vec<_> = items
+                    .iter()
+                    .map(|o| RedactedObject(o, self.1 + 1))
+                    .collect();
+                f.debug_tuple("Array").field(&redacted).finish()
+            }
+            Value::Dict(dict) => f
+                .debug_tuple("Dict")
+                .field(&RedactedDict(dict, self.1))
+                .finish(),
+            Value::Stream(stream) => {
+                let data: &dyn fmt::Debug = match &stream.data {
+                    Data::Bytes(bytes) => &ByteLen(bytes.len()),
+                    other => other,
+                };
+                f.debug_struct("Stream")
+                    .field("dict", &RedactedDict(&stream.dict, self.1 + 1))
+                    .field("data", data)
+                    .finish()
+            }
+            other => fmt::Debug::fmt(other, f),
+        }
+    }
+}
 
 /// Decodes and decrypts indirect PDF stream payloads up to a caller-supplied byte limit.
 ///
@@ -38,11 +236,49 @@ pub trait Streams {
     /// - [`Why::Source`] if reading from the underlying byte source fails;
     /// - [`Why::Detached`] if the backing stream bytes are no longer attached.
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable>;
+
+    /// Decodes stream `id` through all leading standard filters up to `limit` bytes, stopping at
+    /// the first non-standard filter (such as `DCTDecode`, `CCITTFaxDecode`, `JBIG2Decode`, or
+    /// `JPXDecode`) and returning the remaining [`FilterTail`] alongside the decoded bytes.
+    ///
+    /// When the stream uses only standard filters (or none), [`DecodedStream::tail`] is `None` and
+    /// [`DecodedStream::data`] matches [`Streams::decoded`].
+    ///
+    /// The default implementation delegates to [`Streams::decoded`], returning `tail: None` on
+    /// success and preserving [`Why::Filter`] for streams with non-standard filters on existing
+    /// implementations.
+    ///
+    /// Resource limits and panic freedom apply only through the standard filters run by the
+    /// implementation; callers running third-party image codecs on the returned bytes must enforce
+    /// their own bounds and error handling on those codecs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unreadable`] for the same reasons as [`Streams::decoded`], except that
+    /// implementations supporting partial filter chains return [`DecodedStream`] with `tail: Some`
+    /// instead of [`Why::Filter`] when decoding stops cleanly at a non-standard filter within
+    /// `limit`.
+    fn decoded_standard(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'_>, Unreadable> {
+        self.decoded(id, limit)
+            .map(|data| DecodedStream::new(data, None))
+    }
 }
 
 impl<S: Streams + ?Sized> Streams for &S {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         (**self).decoded(id, limit)
+    }
+
+    fn decoded_standard(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'_>, Unreadable> {
+        (**self).decoded_standard(id, limit)
     }
 }
 
@@ -50,12 +286,28 @@ impl<S: Streams + ?Sized> Streams for Box<S> {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         (**self).decoded(id, limit)
     }
+
+    fn decoded_standard(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'_>, Unreadable> {
+        (**self).decoded_standard(id, limit)
+    }
 }
 
 #[cfg(target_has_atomic = "ptr")]
 impl<S: Streams + ?Sized> Streams for Arc<S> {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         (**self).decoded(id, limit)
+    }
+
+    fn decoded_standard(
+        &self,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<DecodedStream<'_>, Unreadable> {
+        (**self).decoded_standard(id, limit)
     }
 }
 
@@ -323,5 +575,89 @@ mod tests {
         const WITH: WithStreams<Objects, Streamed> = WithStreams::new(resolve_fn(none), empty);
         assert!(WITH.resolve(ObjectId::new(1, 0)).is_none());
         assert_eq!(WITH.decoded(ObjectId::new(1, 0), 0).unwrap().as_ref(), b"");
+    }
+
+    #[test]
+    fn decoded_standard_default_forwarding_and_debug_hygiene() {
+        // Default `decoded_standard` keeps `Why::Filter` on existing `Streams` impls and returns
+        // `tail: None` when `decoded` succeeds.
+        let none = resolve_fn(|_: ObjectId| -> Option<&Object> { None });
+        let legacy = WithStreams::new(none, |id: ObjectId, _: usize| match id.number {
+            1 => Ok(b"plain".to_vec()),
+            _ => Err(Unreadable::new(id, Why::Filter, "unsupported /DCTDecode")),
+        });
+        let plain = legacy.decoded_standard(ObjectId::new(1, 0), 10).unwrap();
+        assert_eq!(plain.data.as_ref(), b"plain");
+        assert_eq!(plain.tail, None);
+        assert_eq!(
+            legacy
+                .decoded_standard(ObjectId::new(2, 0), 10)
+                .unwrap_err()
+                .why,
+            Why::Filter
+        );
+
+        // Custom `decoded_standard` forwards through `&S`, `&dyn Streams`, `Box`, and `Arc`.
+        struct CodecSource(Vec<u8>);
+        impl Streams for CodecSource {
+            fn decoded(&self, id: ObjectId, _: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+                Err(Unreadable::new(id, Why::Filter, "codec stream"))
+            }
+
+            fn decoded_standard(
+                &self,
+                id: ObjectId,
+                limit: usize,
+            ) -> Result<DecodedStream<'_>, Unreadable> {
+                if self.0.len() > limit {
+                    return Err(Unreadable::new(id, Why::Limit, "past limit"));
+                }
+                let step = FilterStep::new(
+                    "DCTDecode",
+                    Some(crate::dict! {
+                        "ColorTransform" => 0,
+                        "SecretNote" => Object::text("do-not-print-me"),
+                    }),
+                );
+                let tail = FilterTail::new(step, vec![FilterStep::new("FlateDecode", None)]);
+                Ok(DecodedStream::new(Cow::Borrowed(&self.0), Some(tail)))
+            }
+        }
+
+        let src = CodecSource(b"SECRET_JPEG_PAYLOAD".to_vec());
+        let check = |s: &dyn Streams| {
+            let got = s.decoded_standard(ObjectId::new(5, 0), 64).unwrap();
+            assert_eq!(got.data.as_ref(), b"SECRET_JPEG_PAYLOAD");
+            let tail = got.tail.as_ref().unwrap();
+            assert_eq!(tail.first.name.as_bytes(), b"DCTDecode");
+            assert_eq!(
+                tail.first
+                    .parms
+                    .as_ref()
+                    .and_then(|d| d.get("ColorTransform"))
+                    .and_then(Object::as_integer),
+                Some(0)
+            );
+            assert_eq!(tail.after.len(), 1);
+            assert_eq!(tail.after[0].name.as_bytes(), b"FlateDecode");
+
+            // `Debug` must never print stream payload bytes or string plaintext inside `parms`.
+            let dbg = format!("{got:?}");
+            assert!(!dbg.contains("SECRET_JPEG_PAYLOAD"), "{dbg}");
+            assert!(!dbg.contains("do-not-print-me"), "{dbg}");
+            assert!(dbg.contains("19 bytes"), "{dbg}");
+
+            let owned = got.into_owned();
+            assert_eq!(owned.data.as_ref(), b"SECRET_JPEG_PAYLOAD");
+        };
+
+        check(&src);
+        let src_ref = &src;
+        check(&src_ref);
+        let boxed: Box<dyn Streams> = Box::new(CodecSource(b"SECRET_JPEG_PAYLOAD".to_vec()));
+        check(&boxed);
+        let shared: Arc<dyn Streams + Send + Sync> =
+            Arc::new(CodecSource(b"SECRET_JPEG_PAYLOAD".to_vec()));
+        check(&shared);
     }
 }

@@ -269,7 +269,7 @@ use pdf_objects::version::Version;
 
 use crate::crypt::{self, Eff, Get, List, Stream, follow, is_xref};
 use crate::filter;
-pub use crate::filter::{FILTERS, Unfiltered};
+pub use crate::filter::{FILTERS, FilterChain, Unfiltered};
 use crate::phases::phase;
 use crate::source::{
     DataExtent, Document, Encryption, Facts, Held, Origin, Record, Revision, RevisionEnd, Trailer,
@@ -293,7 +293,9 @@ pub use file::Identity;
 pub use limits::{Faults, Limits, Options, Recovery};
 use pdfium::{Loaded, Rebuild, Stop};
 pub(crate) use reading::missing;
-pub use reading::{ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed};
+pub use reading::{
+    ByteSource, Entries, Error, Ids, Prefix, Reading, SourceId, viewed, viewed_standard,
+};
 #[cfg(any(test, fuzzing))]
 pub(crate) use recovery::header_exactly;
 use recovery::{Found, Shift, count};
@@ -545,6 +547,59 @@ pub fn filters<'o>(
     match resolve {
         None => filter::filters(dict, None),
         Some(resolve) => filter::filters(dict, Some(&|id| resolve.resolve(id))),
+    }
+}
+
+/// Reads `dict`'s `/Filter` and `/DecodeParms` pipeline by the same rules as [`filters`], stopping
+/// at the first non-standard filter instead of refusing it ([`Reading::decoded_standard_within`]).
+///
+/// Leading standard filters (`FlateDecode`/`Fl`, `LZWDecode`/`LZW`, `ASCIIHexDecode`/`AHx`,
+/// `ASCII85Decode`/`A85`, `RunLengthDecode`/`RL`, and `/Crypt`) are validated and returned in
+/// [`FilterChain::standard`]. If a non-standard filter (such as `DCTDecode`/`DCT`,
+/// `CCITTFaxDecode`/`CCF`, `JBIG2Decode`, or `JPXDecode`) is encountered, parsing stops there and
+/// returns that filter (with ISO 32000-2 §8.9.7 Table 92 abbreviations `CCF` and `DCT` expanded),
+/// its resolved `/DecodeParms` dictionary, and any filters listed after it in
+/// [`FilterChain::tail`].
+///
+/// Pass `None` for `resolve` when indirect references are forbidden (such as cross-reference
+/// streams or direct inline image dictionaries), or `Some(&resolve)` to follow indirect references.
+///
+/// ```
+/// use pdf_structure::pdf_filters::Filter;
+/// use pdf_structure::pdf_objects::{Dict, Object, ObjectId, resolve_fn};
+/// use pdf_structure::read;
+///
+/// let mut dict = Dict::new();
+/// dict.set("Filter", vec![Object::name("Fl"), Object::name("DCT")]);
+/// let mut parms = Dict::new();
+/// parms.set("ColorTransform", 1);
+/// let parms_obj = Object::from(parms);
+/// dict.set("DecodeParms", vec![Object::null(), Object::reference(5)]);
+///
+/// let resolve = resolve_fn(|id: ObjectId| (id == ObjectId::new(5, 0)).then_some(&parms_obj));
+/// let chain = read::filter_chain(&dict, Some(&resolve)).unwrap();
+/// assert!(matches!(chain.standard[..], [Filter::Flate { .. }]));
+/// let tail = chain.tail.unwrap();
+/// assert_eq!(tail.first.name.as_bytes(), b"DCTDecode");
+/// assert_eq!(
+///     tail.first.parms.as_ref().and_then(|d| d.get(b"ColorTransform")).and_then(Object::as_integer),
+///     Some(1)
+/// );
+/// assert!(tail.after.is_empty());
+/// ```
+///
+/// # Errors
+///
+/// Returns [`Unfiltered`] if `/Filter` is not a name or array of names, lists more than
+/// [`FILTERS`] entries, pairs with a mismatched `/DecodeParms` array length, supplies invalid
+/// parameters to a leading standard filter, or holds a reference when `resolve` is `None`.
+pub fn filter_chain<'o>(
+    dict: &'o Dict,
+    resolve: Option<&dyn Resolve<'o>>,
+) -> Result<FilterChain, Unfiltered> {
+    match resolve {
+        None => filter::filter_chain(dict, None),
+        Some(resolve) => filter::filter_chain(dict, Some(&|id| resolve.resolve(id))),
     }
 }
 

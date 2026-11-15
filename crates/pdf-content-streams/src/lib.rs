@@ -13,8 +13,10 @@
 //!   departures to a caller-supplied sink.
 //! - **Inline images ([`InlineImage`], [`ResCx`]):** Sizes unfiltered inline images via resource
 //!   color space component counts ([`ResCx::read`]), decodes Flate and LZW inline images via
-//!   `pdf-filters` to PDFium's stop point, and optionally decodes DCT and CCITTFax ends with the
-//!   `image-ends` feature ([`Limits::coded_ends`]).
+//!   `pdf-filters` to PDFium's stop point, optionally decodes DCT and CCITTFax ends with the
+//!   `image-ends` feature ([`Limits::coded_ends`]), and expands inline key/value abbreviations into
+//!   a standard dictionary ([`InlineImage::to_dict`], [`expand_inline_key`],
+//!   [`expand_inline_value`]).
 //! - **Multi-stream pages ([`Join`], [`Concat`]):** Joins a page's `/Contents` streams
 //!   ([`Join::push_from`], [`Join::push_contents`]) while mapping spans back to individual streams
 //!   ([`Pos`], [`SpanAcross`]) and recording undecodable streams ([`Concat::undecoded`]).
@@ -127,7 +129,7 @@ pub use pdf_color;
 
 pub use balance::{Balance, balance};
 pub use error::{Error, ErrorKind};
-pub use inline::{ImageStream, InlineImage, ResCx};
+pub use inline::{ImageStream, InlineImage, ResCx, expand_inline_key, expand_inline_value};
 pub use limits::{CodedEnds, Limits};
 pub use marked::{Marked, MarkedEvent, MarkedNest, Properties, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};
