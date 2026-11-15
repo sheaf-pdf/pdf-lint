@@ -65,6 +65,7 @@ pub struct Claims<'a> {
 /// before a check, from a few objects, which a reader on demand then
 /// needn't keep, where a check reads every object, many more than once. A
 /// `Resolve` gives one by a clone: `&|id| resolver.resolve(id).cloned()`.
+#[must_use]
 pub fn declared(
     root: Option<&Object>,
     claims: Claims,
@@ -129,6 +130,7 @@ impl Grammar {
     /// Every extension the model names, in its cells (`fn:Extension(X`)
     /// and around its types, values and links: what a file can be checked
     /// under.
+    #[must_use]
     pub fn extensions(&self) -> BTreeSet<String> {
         let mut names = BTreeSet::new();
         for table in self.tables() {

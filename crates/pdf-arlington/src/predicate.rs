@@ -408,6 +408,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     /// A file of `trailer` at `version`, whose references `resolve` gives
     /// the objects of; of no known length, checked under no extension, its
     /// trees read under [`Limits::DEFAULT`].
+    #[must_use]
     pub fn new(trailer: &'a Dict, version: Version, resolve: R) -> FileCx<'a, R> {
         FileCx {
             trailer,
@@ -491,6 +492,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     /// value is in: reached through no parents, with no defaults, and of
     /// no number, until [`Cx::parents`], [`Cx::defaults`] and [`Cx::id`]
     /// say.
+    #[must_use]
     pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a>
     where
         R: 'c,
@@ -510,6 +512,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
 impl<'a> FileCx<'a> {
     /// The row at `at` in `container`, as one over its resolver's own type
     /// makes it.
+    #[must_use]
     pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a> {
         Cx {
             file: self,
@@ -528,6 +531,7 @@ impl<R: ?Sized> FileCx<'_, R> {
     /// the file's checked under ([`FileCx::extensions`]), and through its
     /// model when it's given one ([`FileCx::grammar`]). The file's own: it
     /// says another where another file is checked under other extensions.
+    #[must_use]
     pub fn since(&self, cell: &str) -> Since {
         since_in(cell, self.extensions, self.grammar)
     }
@@ -585,6 +589,7 @@ impl Latin {
     /// What's said of the descriptor that's object `id`, by its number
     /// alone, or without one of that written at `at`; none where nothing
     /// is.
+    #[must_use]
     pub fn get(&self, id: Option<ObjectId>, at: Option<Span>) -> Option<bool> {
         match (id, at) {
             (Some(id), _) => self.ids.get(&id).copied(),
@@ -651,12 +656,14 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// its number when [`Cx::id`] gives it, and else by where it was
     /// written, its span; not by where it's kept, so a copy is known as the
     /// object it copies while it has its span or its number.
+    #[must_use]
     pub fn container(&self) -> &'c Object {
         self.container
     }
 
     /// Where in the container the row is: the key or element it matched,
     /// which `@*` and `@1*` read.
+    #[must_use]
     pub fn at(&self) -> At<'c> {
         self.at
     }
@@ -859,6 +866,7 @@ pub enum Gate {
 /// `FALSE`, or `fn:IsRequired(cond)`, required when `cond` is true and
 /// optional when it's false, or when nothing in it applies at the file's
 /// version.
+#[must_use]
 pub fn required(cell: &str, cx: &Cx) -> Truth {
     match cell {
         "TRUE" => return Truth::True,
@@ -879,6 +887,7 @@ pub fn required(cell: &str, cx: &Cx) -> Truth {
 /// "Column 10 - SpecialCase": true valid, false invalid), or an `fn:Eval`
 /// among its PossibleValues. Met when nothing in it applies at the file's
 /// version.
+#[must_use]
 pub fn holds(text: &str, cx: &Cx) -> Truth {
     match &*parsed(text, cx.file.grammar) {
         Ok(expr) => truth(expr, cx).truth(true),
@@ -891,6 +900,7 @@ pub fn holds(text: &str, cx: &Cx) -> Truth {
 /// `fn:MustBeDirect()` and `fn:MustBeIndirect()` that it be direct or
 /// indirect, and with a condition, that when it holds; when it doesn't, or
 /// nothing in it applies at the file's version, nothing.
+#[must_use]
 pub fn reference(cell: &str, cx: &Cx) -> Reference {
     match cell {
         "TRUE" => return Reference::Indirect,
@@ -925,6 +935,7 @@ pub fn reference(cell: &str, cx: &Cx) -> Reference {
 /// extension's from `v` and standard from `w`, the earlier of the two
 /// when X is one of `extensions`, else `w` (TestGrammar without X in its
 /// `--extensions`). [`FileCx::since`] reads it under a file's extensions.
+#[must_use]
 pub fn since(cell: &str, extensions: &BTreeSet<String>) -> Since {
     since_in(cell, extensions, None)
 }
@@ -973,6 +984,7 @@ fn since_in(cell: &str, extensions: &BTreeSet<String>, grammar: Option<&Grammar>
 /// deprecation "is allowed/permitted but is strongly recommended
 /// against"); and `fn:Extension` lets it in under one of `extensions`
 /// only.
+#[must_use]
 pub fn gate(wraps: &[Wrap], file: Version, extensions: &BTreeSet<String>) -> Gate {
     let mut deprecated: Option<Version> = None;
     for wrap in wraps {
@@ -1013,6 +1025,7 @@ fn unknown_by(text: &str) -> String {
 /// verdict either way (its `WasFullyImplemented`, which ParseObjects.cpp's
 /// `check_everything` reads); the checker's rules read SpecialCase and
 /// PossibleValues so.
+#[must_use]
 pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
     let fully = |parse: &Result<Expr, Error>, unsupported: Option<&str>| match parse {
         Ok(expr) => match unsupported {
@@ -1036,6 +1049,7 @@ pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
 /// evaluates to true"): whether the condition holds, read as
 /// [`holds_fully`] reads a predicate, and the value, as the model writes
 /// it. None for any other item.
+#[must_use]
 pub fn required_value(text: &str, cx: &Cx) -> Option<(Truth, String)> {
     let expr = parsed(text, cx.file.grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
@@ -1058,6 +1072,7 @@ pub fn required_value(text: &str, cx: &Cx) -> Option<(Truth, String)> {
 /// the row: `fn:Ignore` when its condition holds, or always;
 /// `fn:IsMeaningful` when its condition doesn't. False where the note
 /// doesn't apply at the file's version; none for any other SpecialCase.
+#[must_use]
 pub fn ignored(text: &str, cx: &Cx) -> Option<Truth> {
     let expr = parsed(text, cx.file.grammar);
     let Ok(expr) = &*expr else {
@@ -1119,8 +1134,13 @@ fn unsupported(e: &Expr) -> Option<&str> {
     }
 }
 
-/// `text`, the whole of it, parsed. An [`Error`] says the predicate, then
-/// what stopped it and where.
+/// `text`, the whole of it, parsed.
+///
+/// # Errors
+///
+/// An [`Error`] where it isn't a predicate, or is one nested deeper than
+/// the parser goes: the predicate, then what stopped the parser, and where
+/// when it knows.
 pub fn parse(text: &str) -> Result<Expr, Error> {
     #[cfg(test)]
     PARSED.with(|n| n.set(n.get() + 1));
@@ -2852,7 +2872,8 @@ impl Cmp {
     const ALL: [Cmp; 6] = [Cmp::Eq, Cmp::Ne, Cmp::Le, Cmp::Ge, Cmp::Lt, Cmp::Gt];
 
     /// As the model writes it: `==`, `<=`.
-    pub fn symbol(self) -> &'static str {
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
         match self {
             Cmp::Eq => "==",
             Cmp::Ne => "!=",
@@ -2882,7 +2903,8 @@ impl Arith {
     /// As the model writes it: `-` and `*` spaced, to tell them from a
     /// negative number and a wildcard, and `mod` (INTERNAL_GRAMMAR.md,
     /// "Predicates (declarative functions)").
-    pub fn symbol(self) -> &'static str {
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
         match self {
             Arith::Add => "+",
             Arith::Sub => " - ",

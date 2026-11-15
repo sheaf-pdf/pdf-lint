@@ -48,6 +48,7 @@ pub struct Correction {
 
 /// The corrections the embedded model has ([`Grammar::embedded`]). A
 /// model [`Grammar::load`] reads is as its files have it.
+#[must_use]
 pub fn corrections() -> &'static [Correction] {
     model::CORRECTIONS
 }
@@ -73,6 +74,7 @@ pub struct Addition {
 }
 
 /// The rows the embedded model adds ([`Grammar::embedded`]).
+#[must_use]
 pub fn additions() -> &'static [Addition] {
     model::ADDITIONS
 }
@@ -520,12 +522,16 @@ pub(crate) struct File<'a> {
 impl Grammar {
     /// The model this crate embeds: upstream's `tsv/latest` at
     /// [`COMMIT`](crate::COMMIT), with the [`corrections`] made and the
-    /// [`additions`] added, read the first time it's asked for. Panics,
-    /// naming the file and line, when it doesn't read, which its tests
-    /// rule out. It's one for the process, so what it keeps of the
-    /// predicates asked through it
+    /// [`additions`] added, read the first time it's asked for. It's one
+    /// for the process, so what it keeps of the predicates asked through it
     /// ([`FileCx::grammar`](crate::FileCx::grammar)) is kept for the
     /// process, and every file and thread shares it.
+    ///
+    /// # Panics
+    ///
+    /// Naming the file and line, when the embedded model doesn't read,
+    /// which its tests rule out.
+    #[must_use]
     pub fn embedded() -> &'static Grammar {
         EMBEDDED.get_or_init(|| {
             Grammar::from_files(model::TABLES.iter().map(|&(name, text)| File {
@@ -538,10 +544,16 @@ impl Grammar {
     }
 
     /// The tables in `dir`, a `.tsv` file each: a checkout of upstream's
-    /// `tsv/latest`, newer than the embedded one, say. An [`Error`] names
+    /// `tsv/latest`, newer than the embedded one, say.
+    ///
+    /// # Errors
+    ///
+    /// An [`Error`] where the model doesn't read: `dir`, or a table in it,
+    /// that can't be read, a table's name that isn't UTF-8, or no tables;
     /// the file and line of a row that doesn't read, or that links to a
-    /// table `dir` doesn't have; and a table whose name holds a tab or a
-    /// line break ([`Error::Separator`]), before it's read.
+    /// table `dir` doesn't have ([`Error::Table`]); and a table whose name
+    /// holds a tab or a line break ([`Error::Separator`]), before it's
+    /// read.
     pub fn load(dir: &Path) -> Result<Grammar, Error> {
         let entries = std::fs::read_dir(dir).map_err(|error| Error::Read {
             path: dir.to_path_buf(),
@@ -658,6 +670,7 @@ impl Grammar {
     }
 
     /// The table named `name`.
+    #[must_use]
     pub fn table(&self, name: &str) -> Option<&Table> {
         self.tables.get(name)
     }
@@ -791,6 +804,7 @@ impl Table {
     /// The row for the value at `at`: the row with its key or index, else,
     /// for an array's element, the repeating row it falls on, else the
     /// wildcard `*`.
+    #[must_use]
     pub fn row(&self, at: At) -> Option<&Row> {
         let named = |key: &[u8]| self.rows.iter().find(|r| r.key.as_bytes() == key);
         match at {
@@ -802,6 +816,7 @@ impl Table {
 
     /// The repeating rows, a set the array's elements after the other
     /// rows go through again and again; none when the table has none.
+    #[must_use]
     pub fn repeating(&self) -> &[Row] {
         &self.rows[self.repeats..]
     }
@@ -932,7 +947,8 @@ impl ArlType {
     ];
 
     /// Its name in the model: `name-tree`, `string-text`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             ArlType::Array => "array",
             ArlType::Bitmask => "bitmask",
@@ -956,6 +972,7 @@ impl ArlType {
     }
 
     /// The type the model names `name`.
+    #[must_use]
     pub fn named(name: &str) -> Option<ArlType> {
         ArlType::ALL.iter().copied().find(|t| t.name() == name)
     }
@@ -974,7 +991,8 @@ impl WrapFn {
     ];
 
     /// Its name, less `fn:`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             WrapFn::SinceVersion => "SinceVersion",
             WrapFn::BeforeVersion => "BeforeVersion",
@@ -1074,6 +1092,7 @@ fn wrapper(item: &str) -> Option<(Wrap, &str)> {
 
 /// A version as the model writes one: `1.0` to `1.7`, or `2.0`
 /// (INTERNAL_GRAMMAR.md, "Parameters to predicates").
+#[must_use]
 pub fn version(text: &str) -> Option<Version> {
     match text.as_bytes() {
         [b'1', b'.', minor @ b'0'..=b'7'] => Some(Version::new(1, minor - b'0')),
@@ -1573,6 +1592,20 @@ mod tests {
             | WrapFn::Deprecated => false,
         };
         assert!(WrapFn::ALL.last().copied().is_some_and(last));
+    }
+
+    /// What's `const` makes a constant: a type's name and a wrapping
+    /// predicate's, a comparison's symbol and an operator's, and the trees'
+    /// default caps.
+    #[test]
+    fn const_fns_make_constants() {
+        use crate::predicate::{Arith, Cmp, Limits};
+        const NAMES: [&str; 2] = [ArlType::NameTree.name(), WrapFn::IsPDFVersion.name()];
+        const SYMBOLS: [&str; 2] = [Cmp::Le.symbol(), Arith::Mod.symbol()];
+        const CAPS: Limits = Limits::DEFAULT;
+        assert_eq!(NAMES, ["name-tree", "IsPDFVersion"]);
+        assert_eq!(SYMBOLS, ["<=", " mod "]);
+        assert_eq!(CAPS, Limits::default());
     }
 
     #[test]
