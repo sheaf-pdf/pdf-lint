@@ -20,7 +20,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Notes
 
-- It's built on pdf-objects `=0.1.0-alpha.2`, re-exported whole and none of its items by name. Its types, and pdf-tokenizer's `Rules`, are named through `pdf_semantics::pdf_objects` at that version. It needs Rust 1.89.
+- It's built on pdf-objects `=0.1.0-alpha.3`, re-exported whole and none of its items by name. Its types, and pdf-tokenizer's `Rules`, are named through `pdf_semantics::pdf_objects` at that version. It needs Rust 1.92.
 - Where the page walk by PDFium's rules reads a case otherwise than PDFium, the repository's `tests/pdfium/differ.tsv` lists it and why.
 - It never panics on input. An object past the reader's own cap or behind a password ends a walk with pdf-objects' `Unreadable`, so a failed read never looks like an empty tree. A damaged one is a `Fault`, and the walk goes on past it.
 - XMP is read as 14.3.2 has it, in UTF-8: a packet in UTF-16 or UTF-32 is told (`Fault::XmpNotUtf8`) and not read, so with `()` as the sink it claims nothing. A claim's element that holds an element beside its text is told (`Fault::XmpMixed`), and its value isn't taken.

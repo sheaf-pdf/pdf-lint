@@ -474,27 +474,81 @@ fn settings(width: i32, height: i32, fax: Fax) -> Option<DecodeSettings> {
         encoding: match fax.k {
             k if k < 0 => EncodingMode::Group4,
             0 => EncodingMode::Group3_1D,
-            k => EncodingMode::Group3_2D { k: k as u32 },
+            _ => EncodingMode::Group3_2D,
         },
-        invert_black: false,
+        strict: false,
     })
 }
 
 /// Where hayro-ccitt, decoding `data` by `settings`, stands once it's
 /// done, rounded up to a byte and never past the data's end, as PDFium
 /// holds its decoder's end.
+///
+/// In Group 4 with `end_of_block` off, hayro-ccitt still reads any
+/// end-of-line codes right after the last row before checking its row
+/// count, where PDFium stops as the last row ends. Where every row decoded
+/// and `data[..end]` ends with the 12 bits of an EOL, an exponential then
+/// binary search finds the shortest prefix that decodes every row: Huffman
+/// and 2D mode codes are prefix-free, and the ≤7 alignment bits left in
+/// the last row's byte are too few for an EOL.
 fn decode(data: &[u8], settings: DecodeSettings) -> Result<usize, DecodeError> {
-    let mut context = DecoderContext::new(settings);
-    hayro_ccitt::decode(data, &mut Pixels, &mut context).map(|end| end.min(data.len()))
+    let run = |slice: &[u8]| {
+        let mut context = DecoderContext::new(settings);
+        let mut pixels = Pixels { rows: 0 };
+        let end = hayro_ccitt::decode(slice, &mut pixels, &mut context)?;
+        Ok((end.min(slice.len()), pixels.rows))
+    };
+    let (mut end, rows) = run(data)?;
+    if !settings.end_of_block
+        && settings.encoding == EncodingMode::Group4
+        && rows == settings.rows
+        && ends_with_eol(&data[..end])
+    {
+        let mut step = 1usize;
+        let mut lo = loop {
+            let probe = end.saturating_sub(step);
+            if probe == 0 {
+                break 1;
+            }
+            match run(&data[..probe]) {
+                Ok((at, n)) if n == settings.rows => {
+                    end = at;
+                    step = step.saturating_mul(2);
+                }
+                _ => break probe + 1,
+            }
+        };
+        while lo < end {
+            let mid = lo + (end - lo) / 2;
+            match run(&data[..mid]) {
+                Ok((at, n)) if n == settings.rows => end = at,
+                _ => lo = mid + 1,
+            }
+        }
+    }
+    Ok(end)
 }
 
-/// A fax image's pixels, decoded and let go.
-struct Pixels;
+/// Whether `decoded` ends with the 12 bits `0000_0000_0001` of an EOL code
+/// whose final `1` bit lies inside its last byte.
+fn ends_with_eol(decoded: &[u8]) -> bool {
+    let n = decoded.len();
+    if n < 2 {
+        return false;
+    }
+    let b0 = if n >= 3 { decoded[n - 3] } else { 0 };
+    let tail = u32::from_be_bytes([0, b0, decoded[n - 2], decoded[n - 1]]);
+    let bits = n * 8;
+    (0..8).any(|s| s + 12 <= bits && (tail >> s) & 0xfff == 1)
+}
+
+/// A fax image's rows counted, its pixels let go.
+struct Pixels {
+    rows: u32,
+}
 
 impl hayro_ccitt::Decoder for Pixels {
-    fn push_pixel(&mut self, _white: bool) {}
-
-    fn push_pixel_chunk(&mut self, _white: bool, _chunk_count: u32) {}
-
-    fn next_line(&mut self) {}
+    fn push_row(&mut self, _changes: &[u32]) {
+        self.rows += 1;
+    }
 }

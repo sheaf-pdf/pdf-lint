@@ -26,6 +26,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Check formatting
         run: just fmt
@@ -96,8 +99,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - name: Test
-        run: cargo test --locked -p pdf-structure
+        run: |
+          cargo nextest run --locked -p pdf-structure
+          cargo test --locked -p pdf-structure --doc
 
   # The tokenizer's own promises: no std, no alloc, its oldest Rust, what
   # its package holds, and its API against the version published. None of
@@ -141,7 +149,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-tokenizer/Cargo.toml,
       # which `just tokenizer-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just tokenizer-msrv
@@ -194,7 +205,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-filters/Cargo.toml,
       # which `just filters-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just filters-msrv
@@ -208,7 +222,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-crypt/Cargo.toml,
       # which `just crypt-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just crypt-msrv
@@ -222,7 +239,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-objects/Cargo.toml,
       # which `just objects-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just objects-msrv
@@ -512,7 +532,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-structure/Cargo.toml,
       # which `just structure-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just structure-msrv
@@ -528,7 +551,10 @@ jobs:
       # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
       # reads, with and without the `image-ends` feature, and with it,
       # `simd` and `tracing`.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just content-msrv
@@ -542,7 +568,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-semantics/Cargo.toml,
       # which `just semantics-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just semantics-msrv
@@ -556,7 +585,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-color/Cargo.toml,
       # which `just color-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just color-msrv
@@ -572,7 +604,10 @@ jobs:
       # `just fonts-msrv` reads, as published, with no feature and with
       # `tracing`, and `just fonts-cmaps-msrv` (the `predefined-cmaps`
       # feature's).
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just fonts-msrv fonts-cmaps-msrv
@@ -588,7 +623,10 @@ jobs:
       # crates/pdf-linearize-lopdf/Cargo.toml, which `just linearize-msrv`
       # reads, with and without `family`, and with `tracing`, and the lopdf
       # adapter's crate.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just linearize-msrv
@@ -603,7 +641,10 @@ jobs:
       # Keep in step with rust-version in crates/pdfs/Cargo.toml, which
       # `just pdfs-msrv` reads, as published, with no feature, and with every
       # feature it forwards but its test writer.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just pdfs-msrv
@@ -617,7 +658,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-arlington/Cargo.toml,
       # which `just arlington-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
       - name: Test
         run: just arlington-msrv

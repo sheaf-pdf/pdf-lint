@@ -2,8 +2,8 @@
 name = "pdf-lint"
 version = "0.2.0"
 edition = "2024"
-# For let-chains.
-rust-version = "1.89"
+# The workspace's floor.
+rust-version = "1.92"
 # As the model it embeds and the parts adapted from TestGrammar are.
 license = "Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"

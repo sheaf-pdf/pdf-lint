@@ -20,6 +20,6 @@ First release. Until `0.1.0` stabilizes, alpha releases may include breaking API
 
 ### Notes
 
-- Re-exports `pdf-objects`, `pdf-filters`, and `pdf-crypt` at `pdf_objects`, `pdf_filters`, and `pdf_crypt`. Requires Rust 1.89.
+- Re-exports `pdf-objects`, `pdf-filters`, and `pdf-crypt` at `pdf_objects`, `pdf_filters`, and `pdf_crypt`. Requires Rust 1.92.
 - Never panics on untrusted input, and `Debug` implementations and `tracing` spans never include file plaintext, stream bytes, keys, or passwords.
 - Public enums and configuration/metadata structs are `#[non_exhaustive]` so new variants and fields can be added without breaking callers.

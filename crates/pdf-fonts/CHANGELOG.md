@@ -20,7 +20,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Notes
 
-- It's built on pdf-objects `=0.1.0-alpha.2` and pdf-content-streams `=0.1.0-alpha.1`, both re-exported whole and none of their items by name. `Limits::content` is pdf-content-streams' type. It needs Rust 1.89.
+- It's built on pdf-objects `=0.1.0-alpha.3` and pdf-content-streams `=0.1.0-alpha.1`, both re-exported whole and none of their items by name. `Limits::content` is pdf-content-streams' type. It needs Rust 1.92.
 - Where it reads a case otherwise than PDFium, the repository's `tests/pdfium/differ.tsv` lists it and why.
 - `Fault::UseCMap`, `Fault::ToUnicode` and `Fault::ProgramMalformed` are told too of a stream whose filters the reader doesn't decode, which is the reader's and not the file's. A later alpha may tell that apart.
 - A reading past the caller's budget fails with `Error::TooLarge`. A stream past a cap of what gives it fails it with `Error::Unreadable`, the caller's to know, as one behind a password does. Nothing is told to the sink after that. Either way the budget is as it was.

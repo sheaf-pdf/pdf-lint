@@ -27,7 +27,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Notes
 
-- It's built on pdf-objects `=0.1.0-alpha.2`, and with `family` on pdf-structure and pdf-semantics `=0.1.0-alpha.1`, each re-exported whole. It needs Rust 1.89.
+- It's built on pdf-objects `=0.1.0-alpha.3`, and with `family` on pdf-structure and pdf-semantics `=0.1.0-alpha.1`, each re-exported whole. It needs Rust 1.92.
 - qpdf's `--check-linearization` warns of some files ISO 32000-2 allows, which this crate writes. The repository's `tests/qpdf.rs` says why for each. Where the check reads a case otherwise than PDFium, `tests/pdfium/differ.tsv` lists it.
 - Nothing panics on any graph, any hint table's bytes or any facts.
 - `plan::What`, `layout::Piece`, `plan::Use`, the hint tables' headers, entries and tables, and `check::Attribute` are exhaustive on purpose, as a writer handles every one and the standard's tables and its list of inherited attributes are closed. Every other enum and every struct with public fields is `#[non_exhaustive]`, so each can grow in a minor release.

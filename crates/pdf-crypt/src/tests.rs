@@ -2494,7 +2494,7 @@ fn the_readmes_licence_links_reach_the_files() {
 
 /// The crate doc's example is the README's first, line for line, so that
 /// what docs.rs shows and what crates.io shows are one example, and each
-/// runs as a doctest, on Rust 1.89 too.
+/// runs as a doctest, on Rust 1.92 too.
 #[test]
 fn the_crate_docs_example_is_the_readmes_first() {
     let readme: Vec<&str> = (include_str!("../README.md").lines())

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-alpha.3 (unreleased)
+
+- **Rust 1.92.** Raised MSRV from Rust 1.89 to 1.92 to match the workspace (`hayro-ccitt` 0.5 in `pdf-content-streams`). Depend on this alpha exactly, `=0.1.0-alpha.3`.
+
 ## 0.1.0-alpha.2 (2026-11-09)
 
 AES's IVs and a new file's key and salts come from the operating system, and the test writer's feature says what it is. Depend on this alpha exactly, `=0.1.0-alpha.2`.

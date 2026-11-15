@@ -19,6 +19,6 @@ First release. Until `0.1.0` stabilizes, alpha releases may include breaking API
 
 ### Notes
 
-- Re-exports `pdf-objects` and `pdf-color` at `pdf_objects` and `pdf_color`. Requires Rust 1.89.
+- Re-exports `pdf-objects` and `pdf-color` at `pdf_objects` and `pdf_color`. Requires Rust 1.92.
 - Performs no file I/O, never panics on untrusted input, and never includes raw string or image bytes in `Debug` implementations or `tracing` spans (fault previews are capped at 40 bytes).
 - Closed ISO 32000-2 syntax and graphics enums (`Tok`, `Props`, `MarkedEvent`, `Paint`, `FillRule`, `LineCap`, `LineJoin`, `TextMode`, `Blend`) are exhaustive; other enums and configuration/analysis structs (`Limits`, `GState`, `Balance`, `Marked`, `Kept`) are `#[non_exhaustive]`.
