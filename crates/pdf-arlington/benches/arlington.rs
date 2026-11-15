@@ -10,6 +10,9 @@
 //! - `rows`: `Table::row` at every row's key or index, and at a key no row
 //!   has, in the model's five largest tables, each by its name, in rows
 //!   asked.
+//! - `tables`: a walk over every table `Grammar::tables` gives, their rows
+//!   summed, by `next` alone (`next`), in one pass (`fold`), and collected
+//!   into a vector first (`collect`), in tables walked.
 //! - `evaluate`: every row of `PageObject`, `Catalog`, `FontType1` and
 //!   `XObjectImage`, in an object of that table's kind with a value of its
 //!   first type for each key, through `required`, `reference` (each
@@ -25,7 +28,7 @@
 //!
 //! Each input is held to what it gives before it's timed: the predicates
 //! to how many there are and how many parse; each row asked to the row
-//! found; the answers to their tally, the same with the model given and
+//! found; the tables to their count, and each walk to their rows; the answers to their tally, the same with the model given and
 //! without; each key of the tree to true, and a key in none to false. The
 //! objects are made here, into a map that's the resolver, which gives every
 //! object it's asked for, so that no read fails and no cap is met; nothing
@@ -153,6 +156,58 @@ fn rows_group(c: &mut Criterion) {
         assert_eq!(found(table, &asks), expected, "rows/{name}: the rows found");
         group.throughput(Throughput::Elements(asks.len() as u64));
         group.bench_function(name, |b| b.iter(|| found(table, black_box(&asks))));
+    }
+    group.finish();
+}
+
+/// How many tables the embedded model has, and how many rows they hold.
+const TABLES: (usize, usize) = (614, 3_988);
+
+/// The rows of each table `tables` gives, summed by asking for each in
+/// turn, `next` by `next`, as a `for` does.
+fn rows_by_next(tables: impl Iterator<Item = &'static Table>) -> usize {
+    let mut rows = 0;
+    for table in tables {
+        rows += table.rows.len();
+    }
+    rows
+}
+
+/// The rows of each table `tables` gives, summed in one pass, as `sum`,
+/// `count` and `for_each` go.
+fn rows_by_fold(tables: impl Iterator<Item = &'static Table>) -> usize {
+    tables.fold(0, |rows, table| rows + table.rows.len())
+}
+
+/// The rows of each table `tables` gives, collected into a vector, as
+/// `collect` sizes it, then summed.
+fn rows_by_collect(tables: impl Iterator<Item = &'static Table>) -> usize {
+    let rows: Vec<usize> = tables.map(|table| table.rows.len()).collect();
+    rows.iter().sum()
+}
+
+/// A walk over a model's tables, which sums their rows.
+type Walk = fn(&'static Grammar) -> usize;
+
+fn tables_group(c: &mut Criterion) {
+    let model = Grammar::embedded();
+    let walks: [(&str, Walk); 3] = [
+        ("next", |model| rows_by_next(model.tables())),
+        ("fold", |model| rows_by_fold(model.tables())),
+        ("collect", |model| rows_by_collect(model.tables())),
+    ];
+    assert_eq!(
+        model.tables().count(),
+        TABLES.0,
+        "tables: the model's tables"
+    );
+    for (name, walk) in walks {
+        assert_eq!(walk(model), TABLES.1, "tables/{name}: their rows");
+    }
+    let mut group = c.benchmark_group("tables");
+    group.throughput(Throughput::Elements(TABLES.0 as u64));
+    for (name, walk) in walks {
+        group.bench_function(name, |b| b.iter(|| walk(black_box(model))));
     }
     group.finish();
 }
@@ -413,6 +468,7 @@ fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     parse_group(&mut criterion);
     rows_group(&mut criterion);
+    tables_group(&mut criterion);
     evaluate_group(&mut criterion);
     trees_group(&mut criterion);
     criterion.final_summary();

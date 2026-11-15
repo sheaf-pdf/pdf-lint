@@ -6,9 +6,10 @@
 //! link are taken off and kept beside it. What a predicate means is the
 //! checker's to say.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, btree_map};
 use std::fmt;
 use std::io;
+use std::iter::FusedIterator;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -622,11 +623,79 @@ impl Grammar {
         self.tables.get(name)
     }
 
-    /// Every table, by name.
-    pub fn tables(&self) -> impl Iterator<Item = &Table> {
-        self.tables.values()
+    /// Every table, in order of name.
+    pub fn tables(&self) -> Tables<'_> {
+        Tables {
+            tables: self.tables.values(),
+        }
     }
 }
+
+/// A model's tables, in order of name: what [`Grammar::tables`] gives. It
+/// knows how many are left, walks from either end, and a `count`,
+/// `for_each` or `fold` over it goes through them in one pass.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Clone)]
+pub struct Tables<'a> {
+    tables: btree_map::Values<'a, String, Table>,
+}
+
+/// How many are left; not the tables, each of which shows its rows.
+impl fmt::Debug for Tables<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tables")
+            .field("left", &self.tables.len())
+            .finish()
+    }
+}
+
+impl<'a> Iterator for Tables<'a> {
+    type Item = &'a Table;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a Table> {
+        self.tables.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.tables.size_hint()
+    }
+
+    /// The last, from the map's end, not by walking to it.
+    #[inline]
+    fn last(self) -> Option<&'a Table> {
+        self.tables.last()
+    }
+
+    /// One pass over the map, as `count`, `for_each` and `sum` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, &'a Table) -> B>(self, init: B, f: F) -> B {
+        self.tables.fold(init, f)
+    }
+}
+
+impl<'a> DoubleEndedIterator for Tables<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'a Table> {
+        self.tables.next_back()
+    }
+
+    /// One pass over the map from its end, as `rev` folds.
+    #[inline]
+    fn rfold<B, F: FnMut(B, &'a Table) -> B>(self, init: B, f: F) -> B {
+        self.tables.rfold(init, f)
+    }
+}
+
+impl ExactSizeIterator for Tables<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.tables.len()
+    }
+}
+
+impl FusedIterator for Tables<'_> {}
 
 /// The embedded model, read once ([`Grammar::embedded`]).
 static EMBEDDED: OnceLock<Grammar> = OnceLock::new();
@@ -1365,6 +1434,53 @@ mod tests {
         assert_eq!(inks, expected.map(Some));
         assert_eq!(key("ArrayOfQuadPoints", At::Index(17)), Some("1*"));
         assert_eq!(key("ArrayOfAnnots", At::Index(4)), Some("*"));
+    }
+
+    /// The tables walked by `next` and by `fold` alike, in order of name;
+    /// from the back by `next_back` and by `rfold`, and from both ends at
+    /// once; each walk knowing how many are left, and giving none after
+    /// its last.
+    #[test]
+    fn the_tables_are_walked_alike_every_way() {
+        let g = Grammar::embedded();
+        let names: Vec<&str> = g.tables.keys().map(String::as_str).collect();
+        let n = names.len();
+        let backwards: Vec<&str> = names.iter().rev().copied().collect();
+        let name = |table: &'static Table| table.name.as_str();
+        let push = |mut all: Vec<&'static str>, table: &'static Table| {
+            all.push(name(table));
+            all
+        };
+        let mut tables = g.tables();
+        assert_eq!((tables.len(), tables.size_hint()), (n, (n, Some(n))));
+        assert_eq!(format!("{tables:?}"), format!("Tables {{ left: {n} }}"));
+        // By `next` alone, as `from_fn` asks for each.
+        let by_next: Vec<&str> = std::iter::from_fn(|| tables.next()).map(name).collect();
+        assert_eq!(by_next, names);
+        assert_eq!((tables.len(), tables.size_hint()), (0, (0, Some(0))));
+        assert!(tables.next().is_none() && tables.next_back().is_none());
+        assert_eq!(format!("{tables:?}"), "Tables { left: 0 }");
+        assert_eq!(g.tables().fold(Vec::new(), push), names);
+        let mut back = g.tables();
+        let by_next_back: Vec<&str> = std::iter::from_fn(|| back.next_back()).map(name).collect();
+        assert_eq!(by_next_back, backwards);
+        assert_eq!(g.tables().rfold(Vec::new(), push), backwards);
+        assert_eq!(g.tables().rev().fold(Vec::new(), push), backwards);
+        assert_eq!(g.tables().count(), n);
+        assert_eq!(g.tables().last().map(name), names.last().copied());
+        assert_eq!(g.tables().nth(2).map(name), Some(names[2]));
+        // From both ends at once, a clone going on alone.
+        let mut both = g.tables();
+        assert_eq!(both.next().map(name), Some(names[0]));
+        assert_eq!(both.next_back().map(name), Some(names[n - 1]));
+        assert_eq!(both.len(), n - 2);
+        let rest = both.clone();
+        assert_eq!(both.fold(Vec::new(), push), names[1..n - 1]);
+        assert_eq!(rest.len(), n - 2);
+        for (table, name) in g.tables().zip(&names) {
+            assert_eq!(table.name, *name);
+            assert!(std::ptr::eq(table, g.table(name).unwrap()));
+        }
     }
 
     #[test]
