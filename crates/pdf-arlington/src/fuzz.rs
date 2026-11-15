@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Version, Why, resolve_fn};
-use twox_hash::XxHash64;
+use sha2::{Digest as _, Sha256};
 
-use crate::grammar::{ArlType, At, Error, File, Grammar, Row, Table, Wrapped, version};
+use crate::grammar::{ArlType, At, Digest, Error, File, Grammar, Row, Table, Wrapped, version};
 use crate::predicate::{
     self, Cx, DEPTH, Expr, FileCx, Latin, Limits, Reference, SUPPORTED, Since, Truth,
 };
@@ -128,10 +128,12 @@ fn framing(pieces: &[(String, String)]) -> Vec<u8> {
 /// The fuzz target's body for the model's tables: `data` as tables' files
 /// ([`pieces`]), loaded as a folder of them is, and held to the loader's
 /// promises: it never panics; a model that doesn't load says which file,
-/// and a line within it where it gives one; one that loads loads the same
-/// from its files in any order, the same tables of the same rows; its hash
-/// is of the framing [`Grammar::hash`] gives, built here from the pieces;
-/// every row is where [`Table::row`] says, at its key and at each index;
+/// and a line within it where it gives one; a table whose name holds a tab
+/// or a line break is refused, the first by `<name>.tsv`, and no other
+/// table is refused so; one that loads loads the same from its files in
+/// any order, the same tables of the same rows; its hash is of the framing
+/// [`Grammar::hash`] gives, built here from the pieces; every row is where
+/// [`Table::row`] says, at its key and at each index;
 /// every predicate in its cells parses or says why not, and one that
 /// parses prints back as a text that parses to it, nested no deeper than
 /// the parser goes; and every row's cells, asked as a checker asks them
@@ -143,7 +145,7 @@ pub fn tables(data: &[u8]) {
 
 /// [`tables`], telling `asked` each predicate it asks through the model it
 /// loads, and giving that model's hash.
-fn loaded(data: &[u8], asked: &mut dyn FnMut(&str)) -> Option<u64> {
+fn loaded(data: &[u8], asked: &mut dyn FnMut(&str)) -> Option<Digest> {
     let pieces = pieces(data);
     let read = Grammar::from_files(files(&pieces));
     let backwards = Grammar::from_files(files(&pieces).rev());
@@ -154,6 +156,9 @@ fn loaded(data: &[u8], asked: &mut dyn FnMut(&str)) -> Option<u64> {
             panic!("the files' order decides whether they load: {error}")
         }
     }
+    if refuses_a_name(&read, &pieces) {
+        return None;
+    }
     let model = match read {
         Ok(model) => model,
         Err(error) => {
@@ -161,8 +166,12 @@ fn loaded(data: &[u8], asked: &mut dyn FnMut(&str)) -> Option<u64> {
             return None;
         }
     };
-    let framed = XxHash64::oneshot(0, &framing(&pieces));
-    assert_eq!(model.hash(), framed, "the hash isn't of the framing");
+    let framed: [u8; 32] = Sha256::digest(framing(&pieces)).into();
+    assert_eq!(
+        model.hash().as_bytes(),
+        &framed,
+        "the hash isn't of the framing"
+    );
     for table in model.tables() {
         found(table);
     }
@@ -184,6 +193,26 @@ fn alike(model: &Grammar, other: &Grammar) {
             .collect()
     };
     assert!(each(model) == each(other), "one model, two readings");
+}
+
+/// Whether `read` refused a table's name, held to the loader's promise: it
+/// refuses the first piece whose name holds a tab, a line feed or a
+/// carriage return, by the bytes of `<name>.tsv`, where any does, naming
+/// its file, and refuses no name where none does.
+fn refuses_a_name(read: &Result<Grammar, Error>, pieces: &[(String, String)]) -> bool {
+    let first = (pieces.iter())
+        .filter(|(name, _)| name.contains(['\t', '\n', '\r']))
+        .map(|(name, _)| format!("{name}.tsv"))
+        .min();
+    match (first, read) {
+        (Some(first), Err(Error::Separator { path })) => {
+            assert_eq!(path.to_str(), Some(first.as_str()), "another name refused");
+            true
+        }
+        (Some(first), _) => panic!("{first:?} isn't refused, a name the hash can't frame"),
+        (None, Err(Error::Separator { path })) => panic!("{path:?} is refused, a name it frames"),
+        (None, _) => false,
+    }
 }
 
 /// That `error`, of a load in memory, is a table's, naming its piece's file,
@@ -1237,15 +1266,20 @@ mod tests {
         text
     }
 
-    /// Random tables: a few pieces, each a name and a random table's text.
+    /// Random tables: a few pieces, each a name and a random table's text,
+    /// a name now and then one no table can have.
     fn random_tables() -> Vec<Vec<u8>> {
         let mut random = generator(0x7AB1E5);
         let names = ["A", "B", "a", "a-b", "A", ""];
+        let unnamed = ["A\tB", "a\r"];
         let mut inputs = Vec::new();
         for _ in 0..1_000 {
             let pieces: Vec<String> = (0..1 + random() % 3)
                 .map(|_| {
-                    let name = names[random() % names.len()];
+                    let name = match random() % 32 {
+                        0 => unnamed[random() % unnamed.len()],
+                        _ => names[random() % names.len()],
+                    };
                     format!("{name}\n{}", random_table(&mut random))
                 })
                 .collect();

@@ -370,8 +370,8 @@ dependencies = [
  "pdf-color",
  "pdf-objects",
  "rustc-hash",
+ "sha2",
  "thiserror",
- "twox-hash",
 ]
 
 [[package]]

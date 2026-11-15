@@ -1230,10 +1230,13 @@ fn model_checks_against_another_checkout() {
     let upstream = upstream.to_str().unwrap();
     let embedded = model(&[], path);
     let hash = |h: &str| json!(h);
-    assert_eq!(embedded, hash("fc22d1fadc1fd269"));
+    assert_eq!(
+        embedded,
+        hash("2bf6c3ab3fb4783fec94c0d6bdec719117128719259e4f994b8574e0d48f83bc")
+    );
     assert_eq!(
         model(&["--model", upstream], path),
-        hash("c2bdcab22f823d8d")
+        hash("3493c24c602b0637685e453bbb01cc16f1aee2aba8cbfaa0bf336426b17d2c1b")
     );
     assert_ne!(
         model(&["--model", earlier.to_str().unwrap()], path),
@@ -1643,7 +1646,7 @@ fn the_version_is_two_lines_naming_the_model() {
     let n = pdf_lint::grammar::corrections().len();
     let m = pdf_lint::grammar::additions().len();
     let version = format!(
-        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
+        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (sha256 {hash})\n",
         env!("CARGO_PKG_VERSION"),
         pdf_lint::COMMIT
     );
@@ -1915,7 +1918,7 @@ fn json_reports_a_line_for_each_file() {
     let field = |j: &Value, key: &str| j.get(key).cloned().unwrap_or_else(|| panic!("{key}"));
     assert_eq!(field(&report, "file"), json!(path.display().to_string()));
     assert_eq!(field(&report, "version"), json!("1.7"));
-    let model = format!("{:016x}", pdf_lint::grammar().hash());
+    let model = pdf_lint::grammar().hash().to_string();
     assert_eq!(field(&report, "model"), json!(model));
     assert_eq!(
         field(&report, "ignored"),
@@ -2005,7 +2008,7 @@ fn json_strings_are_escaped_as_they_were() {
     // A file that doesn't exist: the line saying it can't be read.
     let out = lint(&name);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
-    let model = format!("{:016x}", pdf_lint::grammar().hash());
+    let model = pdf_lint::grammar().hash().to_string();
     let version = env!("CARGO_PKG_VERSION");
     let line =
         format!("{{\"pdf_lint\":\"{version}\",\"model\":\"{model}\",{escaped}\",\"error\":\"");

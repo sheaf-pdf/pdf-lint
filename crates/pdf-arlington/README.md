@@ -7,7 +7,7 @@ The Arlington PDF Model is the PDF Association's machine-readable TSV specificat
 ## Key Capabilities
 
 - **Zero-setup embedded model (`Grammar::embedded()`):** Compiles in upstream's `tsv/latest` tables (at `COMMIT`) alongside audited spec fixes (`grammar::corrections()`) and missing legacy rows (`grammar::additions()`). Build scripts verify that upstream TSV files remain unmodified and that every patch still cleanly applies.
-- **Load custom checkouts (`Grammar::load`):** Parse any local `tsv/latest` directory at runtime, identified by an XXH64 content digest (`Grammar::hash`).
+- **Load custom checkouts (`Grammar::load`):** Parse any local `tsv/latest` directory at runtime, identified by a SHA-256 content digest (`Grammar::hash`).
 - **Typed TSV rows (`Table`, `Row`):** Splits multi-type cells (`ArlType`), per-type value/link lists, and version/extension wrapper predicates (`Wrapped`) into structured Rust types.
 - **Three-valued predicate evaluation (`predicate`, `FileCx`, `Cx`, `Truth`):** Evaluates Arlington `fn:` predicates, boolean logic, comparisons, arithmetic, and `@Key` / `parent::` / `trailer::` path lookups over any `pdf_objects::Resolve` implementation. Predicates that cannot be determined (due to missing context or unsupported functions) return `Truth::Unknown` rather than guessing. Attaching `.grammar(model)` to `FileCx` caches parsed ASTs across files and threads.
 - **PDF version & extension gating (`extension`):** Evaluates `fn:SinceVersion`, `fn:Deprecated`, and `fn:Extension` wrappers against declared catalog `/Extensions` and XMP conformance claims (`extension::declared`).

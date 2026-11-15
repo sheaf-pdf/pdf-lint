@@ -21,10 +21,11 @@ pdf-color.workspace = true
 pdf-objects.workspace = true
 # The hash a kept predicate is found by, rustc's: quick on short texts.
 rustc-hash = { version = "2.1", default-features = false }
+# SHA-256, which names a model by its tables' bytes: RustCrypto's, as
+# pdf-structure takes it, without the default features (`alloc`, `oid`),
+# which a digest of bytes doesn't use.
+sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
-# XXH64, which names a model by its tables' bytes, without the crate's other
-# hashes, its random seeds or std.
-twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
 # bench mode too, so criterion's options reach them as given.

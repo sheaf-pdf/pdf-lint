@@ -1,8 +1,9 @@
 //! The model's loader and its predicates' evaluator, on any bytes: read as
 //! tables' files, a piece each between `\0`s, its first line the table's
 //! name, loaded as a folder of them is: a model that doesn't load saying
-//! which file, and a line within it; one that loads the same from its files
-//! in any order, its hash of the framing its doc gives, each row where
+//! which file, and a line within it, a name with a tab or a line break
+//! refused; one that loads the same from its files in any order, its hash
+//! of the framing its doc gives, each row where
 //! `Table::row` says, each predicate in its cells parsing or saying why
 //! not, one that parses printing back as a text that parses to it, and each
 //! row's cells, asked over an object of its table's keys, the same through

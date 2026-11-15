@@ -122,7 +122,7 @@ when a file can't be read or the command line is wrong.
 
 With `--format json`, `pdf-lint` emits one JSON object per line (JSON Lines):
 
-- **Metadata & configuration:** `pdf_lint` (tool version), `file`, `version`, `checked_as`, `model` (16-hex-digit XXH64 hash of the active Arlington tables), `extensions`, `one_table`, `unlisted_in`, `deprecations`, `unused_findings`, `departure_findings`.
+- **Metadata & configuration:** `pdf_lint` (tool version), `file`, `version`, `checked_as`, `model` (64-hex-digit SHA-256 hash of the active Arlington tables), `extensions`, `one_table`, `unlisted_in`, `deprecations`, `unused_findings`, `departure_findings`.
 - **Findings (`findings`):** Array of objects with `rule`, `table`, `key`, `path`, `object` (`[num, gen]` or `null`), `made`, `value`, and `at` (`{ "stream": [num, gen] | null, "start": usize, "end": usize }` or `null`).
 - **Summary counts:** `objects`, `keys`, `carried`, `allowed`, `tables`, `not_checked`, `unlisted`, `deprecated`, `content_read`, `linearized` (`"holds"`, `"fails"`, `"updated"`, `"not-taken"`, or `null`), `unused`, `departures`, `ignored`, `no_table`, `ties`, `truncated`, `two_contexts`, and `two_tables`.
 - **Unreadable files:** Emit `{ "pdf_lint", "model", "file", "error" }`.
