@@ -26,7 +26,11 @@ pub(crate) mod model {
 /// ISO 32000-2: a line of `model/corrections.tsv`, which `build.rs` makes
 /// to the embedded copy only, failing when upstream's cell isn't
 /// `upstream` any more.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate,
+/// so a field more is a minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Correction {
     /// The table's name.
     pub table: &'static str,
@@ -52,7 +56,11 @@ pub fn corrections() -> &'static [Correction] {
 /// defines: a row of a file in `model/additions`, in upstream's format,
 /// which `build.rs` adds to the embedded copy only, failing when upstream
 /// has the table, or the table's row, itself.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate,
+/// so a field more is a minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Addition {
     /// The table's name.
     pub table: &'static str,
@@ -161,7 +169,11 @@ impl fmt::Debug for Digest {
 }
 
 /// One object's table: `Catalog`, `AnnotSquare`, `ArrayOfAnnots`.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more is a minor release.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Table {
     /// Its file's name less `.tsv`, which links name it by.
     pub name: String,
@@ -175,6 +187,10 @@ pub struct Table {
 
 /// Where in an object a value is: under a dictionary's key, or an array's
 /// element.
+///
+/// Exhaustive on purpose: a value in an object is under a key or at an
+/// index, and nowhere else, so a match on both is checked by the compiler;
+/// another would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At<'a> {
     /// Under a dictionary's key.
@@ -185,7 +201,12 @@ pub enum At<'a> {
 
 /// One row: a key of a dictionary or an element of an array. The fields
 /// are upstream's columns, in their order.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more (where its line is in its
+/// file's bytes, say, or a cell's parse) is a minor release.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Row {
     /// The line of its table's file it's on, the header being line 1.
     pub line: usize,
@@ -224,7 +245,12 @@ pub struct Row {
 /// Arlington's types (INTERNAL_GRAMMAR.md, "Column 2 - Type"): PDF's
 /// objects, refined as the specification refines them (a date is a
 /// string, a rectangle an array of four numbers).
+///
+/// Not exhaustive: these are the model's types, which upstream may add
+/// to, so a match on them takes a wildcard, and a type more is a minor
+/// release. [`ArlType::ALL`] lists every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum ArlType {
     /// `array`.
     Array,
@@ -267,7 +293,11 @@ pub enum ArlType {
 /// A cell's item with the version predicates around it taken off,
 /// outermost first: `fn:IsPDFVersion(1.7,fn:Extension(ADBE_Extn3,X))` is
 /// `X` in `IsPDFVersion` of `1.7` and `Extension` of `ADBE_Extn3`.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Wrapped<T> {
     /// The version predicates around it, outermost first.
     pub wraps: Vec<Wrap>,
@@ -276,7 +306,11 @@ pub struct Wrapped<T> {
 }
 
 /// A version predicate around an item.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Wrap {
     /// Which predicate it is.
     pub func: WrapFn,
@@ -287,7 +321,12 @@ pub struct Wrap {
 
 /// The predicates that wrap an item: those INTERNAL_GRAMMAR.md's "Column
 /// 11 - Link" allows around a link, which wrap types and values too.
+///
+/// Not exhaustive: these are the model's, which upstream may add to, so a
+/// match on them takes a wildcard, and a predicate more is a minor
+/// release. [`WrapFn::ALL`] lists every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum WrapFn {
     /// `fn:SinceVersion(v,X)`: `X` from version `v` on.
     SinceVersion,
@@ -868,8 +907,10 @@ impl Row {
 }
 
 impl ArlType {
-    /// All 18, in the model's order (its names', alphabetical).
-    pub const ALL: [ArlType; 18] = [
+    /// Every one, once, in the model's order (its names', alphabetical): a
+    /// slice, not an array of a fixed length, so a type can come without a
+    /// breaking release.
+    pub const ALL: &'static [ArlType] = &[
         ArlType::Array,
         ArlType::Bitmask,
         ArlType::Boolean,
@@ -916,13 +957,15 @@ impl ArlType {
 
     /// The type the model names `name`.
     pub fn named(name: &str) -> Option<ArlType> {
-        ArlType::ALL.into_iter().find(|t| t.name() == name)
+        ArlType::ALL.iter().copied().find(|t| t.name() == name)
     }
 }
 
 impl WrapFn {
-    /// All 5, in the order [`WrapFn`] lists them.
-    pub const ALL: [WrapFn; 5] = [
+    /// Every one, once, in the order [`WrapFn`] lists them: a slice, not an
+    /// array of a fixed length, so a predicate can come without a breaking
+    /// release.
+    pub const ALL: &'static [WrapFn] = &[
         WrapFn::SinceVersion,
         WrapFn::BeforeVersion,
         WrapFn::IsPDFVersion,
@@ -1003,7 +1046,7 @@ fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str), TableError> {
     }
     let name = item.strip_prefix("fn:").and_then(|f| f.split_once('('));
     if let Some((name, _)) = name
-        && WrapFn::ALL.into_iter().any(|f| f.name() == name)
+        && WrapFn::ALL.iter().copied().any(|f| f.name() == name)
     {
         return Err(TableError::Wrap {
             item: item.to_string(),
@@ -1017,7 +1060,7 @@ fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str), TableError> {
 /// `arg`, and `inner`.
 fn wrapper(item: &str) -> Option<(Wrap, &str)> {
     let (name, args) = item.strip_prefix("fn:")?.split_once('(')?;
-    let func = WrapFn::ALL.into_iter().find(|f| f.name() == name)?;
+    let func = WrapFn::ALL.iter().copied().find(|f| f.name() == name)?;
     let (arg, inner) = args.strip_suffix(')')?.split_once(',')?;
     if arg.contains(['(', ')']) || !balanced(inner) {
         return None;
@@ -1140,7 +1183,7 @@ mod tests {
         }
         assert_eq!(
             used,
-            BTreeSet::from(ArlType::ALL),
+            ArlType::ALL.iter().copied().collect::<BTreeSet<_>>(),
             "the model uses every type and no other"
         );
     }
@@ -1481,6 +1524,55 @@ mod tests {
             assert_eq!(table.name, *name);
             assert!(std::ptr::eq(table, g.table(name).unwrap()));
         }
+    }
+
+    /// [`ArlType::ALL`] and [`WrapFn::ALL`] hold every variant once, in the
+    /// order its enum lists them, each at its own discriminant's place, and
+    /// end at the enum's last, which a match the compiler holds whole says:
+    /// so a variant more doesn't build here until it's said where it goes.
+    /// Each reads back from its name, the types in their names' order.
+    #[test]
+    fn each_all_holds_every_variant_once_in_order() {
+        for (i, &t) in ArlType::ALL.iter().enumerate() {
+            assert_eq!(t as usize, i, "{t:?}");
+            assert_eq!(ArlType::named(t.name()), Some(t), "{t:?}");
+        }
+        let last = |t: ArlType| match t {
+            ArlType::StringText => true,
+            ArlType::Array
+            | ArlType::Bitmask
+            | ArlType::Boolean
+            | ArlType::Date
+            | ArlType::Dictionary
+            | ArlType::Integer
+            | ArlType::Matrix
+            | ArlType::Name
+            | ArlType::NameTree
+            | ArlType::Null
+            | ArlType::Number
+            | ArlType::NumberTree
+            | ArlType::Rectangle
+            | ArlType::Stream
+            | ArlType::String
+            | ArlType::StringAscii
+            | ArlType::StringByte => false,
+        };
+        assert!(ArlType::ALL.last().copied().is_some_and(last));
+        assert!(ArlType::ALL.is_sorted_by_key(|t| t.name()));
+        assert_eq!(ArlType::named("nonesuch"), None);
+        for (i, &f) in WrapFn::ALL.iter().enumerate() {
+            assert_eq!(f as usize, i, "{f:?}");
+            let read = WrapFn::ALL.iter().copied().find(|g| g.name() == f.name());
+            assert_eq!(read, Some(f), "{f:?}");
+        }
+        let last = |f: WrapFn| match f {
+            WrapFn::Extension => true,
+            WrapFn::SinceVersion
+            | WrapFn::BeforeVersion
+            | WrapFn::IsPDFVersion
+            | WrapFn::Deprecated => false,
+        };
+        assert!(WrapFn::ALL.last().copied().is_some_and(last));
     }
 
     #[test]

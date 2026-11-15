@@ -188,6 +188,9 @@ const AND: &str = " && ";
 const OR: &str = " || ";
 
 /// A predicate, or a part of one.
+///
+/// Not exhaustive: the language is upstream's, which may grow a form, so a
+/// match on it takes a wildcard, and a form more is a minor release.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Expr {
@@ -221,6 +224,10 @@ pub enum Expr {
 }
 
 /// A comparison.
+///
+/// Exhaustive on purpose: these are the six a comparison can be, each its
+/// own question of an order, so a match on the six is checked by the
+/// compiler; another would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmp {
     /// `==`.
@@ -238,7 +245,12 @@ pub enum Cmp {
 }
 
 /// An arithmetic operator.
+///
+/// Not exhaustive: the language's operators are upstream's, which may add
+/// one, so a match on them takes a wildcard, and an operator more is a
+/// minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Arith {
     /// `+`.
     Add,
@@ -253,7 +265,11 @@ pub enum Arith {
 /// A path through objects: keys and array indices between `::`, the
 /// last maybe `@`, the value there (INTERNAL_GRAMMAR.md, "Validation of
 /// predicates").
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// ([`parse`] makes it), so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Path {
     /// Where it starts.
     pub base: Base,
@@ -268,7 +284,12 @@ pub struct Path {
 }
 
 /// Where a path starts.
+///
+/// Not exhaustive: the language is upstream's, which may start a path
+/// elsewhere, so a match on it takes a wildcard, and a start more is a
+/// minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Base {
     /// The object the row is in.
     Here,
@@ -280,6 +301,10 @@ pub enum Base {
 }
 
 /// What a predicate comes to.
+///
+/// Exhaustive on purpose: a predicate holds, doesn't, or can't be told,
+/// and a checker counts each its own way, so a match on the three is
+/// checked by the compiler; a fourth would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Truth {
     /// It holds.
@@ -779,6 +804,10 @@ struct Tree {
 }
 
 /// What a type's IndirectReference cell asks of its value.
+///
+/// Exhaustive on purpose: a value is asked to be direct, indirect or
+/// either, or what's asked can't be told, so a match on the four is
+/// checked by the compiler; another would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reference {
     /// That it be direct.
@@ -792,6 +821,10 @@ pub enum Reference {
 }
 
 /// When a key came in: its SinceVersion cell.
+///
+/// Exhaustive on purpose: a key came in with a version or an extension,
+/// or its cell can't be read, so a match on the three is checked by the
+/// compiler; another would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Since {
     /// In this version.
@@ -806,6 +839,10 @@ pub enum Since {
 
 /// What the version predicates around a type, a value or a link make of
 /// it at a file's version.
+///
+/// Exhaustive on purpose: an item is let in, let in and deprecated, or
+/// kept out, so a match on the three is checked by the compiler; another
+/// would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
     /// Allowed at the file's version, under its extensions.
