@@ -41,7 +41,7 @@ use std::hash::BuildHasher;
 use std::num::ParseIntError;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 
 use pdf_color::Colorant;
 use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, SmallBytes, Span, Str, Value, Version};
@@ -537,11 +537,15 @@ impl<R: ?Sized> FileCx<'_, R> {
     }
 }
 
-/// Its parts but its resolver, which needn't be one that can be shown.
+/// Its parts but its resolver, which needn't be one that can be shown,
+/// and none of the file's values, which may be decrypted: the trailer by
+/// its count of entries, and what it keeps of the file's trees (the name
+/// trees' keys, the structure tree's content items, the fields' names) by
+/// their counts; the pages by their count, and the model by its digest.
 impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileCx")
-            .field("trailer", &self.trailer)
+            .field("trailer", &format_args!("{} entries", self.trailer.len()))
             .field("version", &self.version)
             .field("size", &self.size)
             .field("extensions", &self.extensions)
@@ -550,7 +554,7 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
             .field("fields", &self.fields)
             .field("pages", &self.pages.map(<[_]>::len))
             .field("latin", &self.latin.is_some())
-            .field("grammar", &self.grammar)
+            .field("grammar", &self.grammar.map(Grammar::hash))
             .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
@@ -669,39 +673,89 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
 }
 
-/// Its row's parts, and the defaults' table by name; not its file.
+/// Its row's place: the container and each parent by kind and where it
+/// was written, the number [`Cx::id`] gives, the key or element, and the
+/// defaults' table by name; not their values, which are the file's and may
+/// be decrypted, nor its file.
 impl fmt::Debug for Cx<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parents: Vec<Shape> = self.parents.iter().map(|&parent| Shape(parent)).collect();
         f.debug_struct("Cx")
-            .field("container", &self.container)
+            .field("container", &Shape(self.container))
             .field("id", &self.id)
             .field("at", &self.at)
-            .field("parents", &self.parents)
+            .field("parents", &parents)
             .field("defaults", &self.defaults.map(|table| &table.name))
             .finish_non_exhaustive()
     }
 }
 
+/// An object as a `Debug` that holds none of a file's values shows it: its
+/// kind, as [`Value`] names it, and where it was written.
+struct Shape<'o>(&'o Object);
+
+impl fmt::Debug for Shape<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.0.value() {
+            Value::Null => "Null",
+            Value::Bool(_) => "Bool",
+            Value::Integer(_) => "Integer",
+            Value::Real(_) => "Real",
+            Value::Name(_) => "Name",
+            Value::String(..) => "String",
+            Value::Array(_) => "Array",
+            Value::Dict(_) => "Dict",
+            Value::Stream(_) => "Stream",
+            Value::Ref(_) => "Ref",
+        };
+        f.debug_struct(kind).field("at", &self.0.at()).finish()
+    }
+}
+
 /// The interactive form's fields' fully qualified names, kept once read,
 /// the first kept where two threads read them at once.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Fields(OnceLock<Names>);
+
+/// The names once read, as [`Names`] shows them; none before.
+impl fmt::Debug for Fields {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.get().fmt(f)
+    }
+}
 
 /// Fields' fully qualified names, as text, and whether they're all of
 /// them: every field read, and every partial name a string whose text
 /// the reader gave.
-#[derive(Debug)]
 struct Names {
     names: HashSet<String>,
     whole: bool,
+}
+
+/// How many names, and whether they're all; not the names, which are the
+/// file's strings.
+impl fmt::Debug for Names {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Names")
+            .field("names", &self.names.len())
+            .field("whole", &self.whole)
+            .finish()
+    }
 }
 
 /// The structure tree's content items, kept once read, the first kept
 /// where two threads read them at once. It knows the
 /// objects it found by where they were written, or their numbers
 /// ([`Known`]), so it serves one file.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Structure(OnceLock<Items>);
+
+/// The items once read, as [`Items`] shows them; none before.
+impl fmt::Debug for Structure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.get().fmt(f)
+    }
+}
 
 /// What the structure tree says of its content items (ISO 32000-2,
 /// 14.7.5): the objects its object references (OBJR) point at, and the
@@ -714,7 +768,6 @@ struct Items {
 
 /// The objects content items of one kind name, each as it's [`Known`],
 /// and whether they're all of them.
-#[derive(Debug)]
 struct Objects {
     /// The numbers of those named by reference.
     ids: HashSet<ObjectId>,
@@ -725,6 +778,19 @@ struct Objects {
     /// Whether they're all of them: every node read, and every item's
     /// object found.
     whole: bool,
+}
+
+/// How many of each, and whether they're all; not the numbers and places
+/// themselves, which may be many.
+impl fmt::Debug for Objects {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Objects")
+            .field("ids", &self.ids.len())
+            .field("spans", &self.spans.len())
+            .field("unplaced", &self.unplaced)
+            .field("whole", &self.whole)
+            .finish()
+    }
 }
 
 impl Objects {
@@ -791,8 +857,22 @@ struct Known {
 /// is read each time it's asked of. Not by where it's kept: a root in a
 /// container given for a row may be dropped after it, and another root
 /// take its place.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Trees(Mutex<HashMap<Known, Arc<Tree>>>);
+
+/// Each tree kept, as [`Tree`] shows it, in no order; `<locked>` while a
+/// thread reads them, as std's `Mutex` shows itself.
+impl fmt::Debug for Trees {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.try_lock() {
+            Ok(trees) => f.debug_list().entries(trees.values()).finish(),
+            Err(TryLockError::Poisoned(trees)) => {
+                f.debug_list().entries(trees.get_ref().values()).finish()
+            }
+            Err(TryLockError::WouldBlock) => f.write_str("<locked>"),
+        }
+    }
+}
 
 impl Trees {
     /// The trees read so far. A map that a panic poisoned is read as it
@@ -804,10 +884,20 @@ impl Trees {
 
 /// A name tree's keys, and whether they're all of them: every node read,
 /// and every key a string whose bytes the reader gave.
-#[derive(Debug)]
 struct Tree {
     keys: HashSet<SmallBytes>,
     whole: bool,
+}
+
+/// How many keys, and whether they're all; not the keys, which are the
+/// file's strings.
+impl fmt::Debug for Tree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tree")
+            .field("keys", &self.keys.len())
+            .field("whole", &self.whole)
+            .finish()
+    }
 }
 
 /// What a type's IndirectReference cell asks of its value.
@@ -6894,5 +6984,99 @@ mod tests {
         assert_eq!(is("fn:Eval(fn:BitSet(3))"), Truth::True);
         assert_eq!(is("fn:Eval(fn:BitsSet(2,3))"), Truth::False);
         assert_eq!(is("fn:Eval(fn:BitSet(33))"), unknown("fn:BitSet"));
+    }
+
+    /// Asserts that `shown`, a `Debug`'s text, holds `value` neither as
+    /// text nor as the list of its bytes a derived `Debug` writes, on one
+    /// line or across several.
+    fn holds_none_of(shown: &str, value: &str) {
+        let squeezed: String = shown.split_whitespace().collect();
+        let bytes: String = format!("{:?}", value.as_bytes())
+            .split_whitespace()
+            .collect();
+        let bytes = &bytes[1..bytes.len() - 1];
+        assert!(!shown.contains(value), "{value} is in {shown}");
+        assert!(!squeezed.contains(bytes), "{value}'s bytes are in {shown}");
+    }
+
+    /// None of a file's values is in a `FileCx`'s `Debug` or a `Cx`'s:
+    /// not a trailer's string, nor a name tree's key or a field's name once
+    /// they're read and kept, nor a row's container's string or a parent's.
+    /// The trailer is its count of entries, the tree and the fields their
+    /// counts, the model its digest, and the container and the parent their
+    /// kinds and where they were written.
+    #[test]
+    fn a_debug_holds_none_of_a_files_values() {
+        let text = Object::text;
+        let catalog = dict! {
+            "Type" => Object::name("Catalog"),
+            "Names" => dict! { "Dests" => Object::reference(2) },
+            "AcroForm" => dict! { "Fields" => vec![Object::reference(3)] },
+        };
+        let trailer = dict! {
+            "Root" => Object::reference(1),
+            "ID" => vec![Object::bytes(*b"Zebraidentity"), Object::bytes(*b"Zebraidentity")],
+            "Info" => dict! { "Title" => text("Zebratrailer") },
+        };
+        let file = File::new(
+            trailer,
+            [
+                (1, catalog.into()),
+                (2, leaf(&["Zebrakey"])),
+                (
+                    3,
+                    dict! { "T" => text("Zebrafield"), "FT" => Object::name("Tx") }.into(),
+                ),
+            ],
+        );
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let model = Grammar::embedded();
+        let read = FileCx::new(&file.trailer, v("2.0"), &resolve).grammar(model);
+        let container = Object::from(dict! { "X" => text("Zebracontainer") })
+            .with_span(Span::new(None, 40, 80));
+        let parent = Object::from(dict! { "Title" => text("Zebraparent") });
+        let parents = [&parent];
+        let cx = read
+            .at(&container, At::Key(b"X"))
+            .parents(&parents)
+            .id(ObjectId::new(7, 0));
+        let asked = [
+            "fn:InNameTree(trailer::Catalog::Names::Dests)",
+            "fn:IsFullyQualifiedFieldName(@X)",
+        ];
+        for text in asked {
+            assert_eq!(holds(text, &cx), Truth::False, "{text}");
+        }
+        let unread = FileCx::new(&file.trailer, v("2.0"), &resolve);
+        let shown = format!("{read:?} {read:#?} {cx:?} {cx:#?} {unread:?}");
+        let values = [
+            "Zebraidentity",
+            "Zebratrailer",
+            "Zebrakey",
+            "Zebrafield",
+            "Zebracontainer",
+            "Zebraparent",
+        ];
+        for value in values {
+            holds_none_of(&shown, value);
+        }
+        let said = [
+            "trailer: 3 entries".to_string(),
+            "trees: [Tree { keys: 1, whole: true }]".to_string(),
+            "fields: Some(Names { names: 1, whole: true })".to_string(),
+            "structure: None".to_string(),
+            format!("grammar: Some({})", model.hash()),
+            "container: Dict { at: Some(Span { stream: None, start: 40, end: 80 }) }".to_string(),
+            "parents: [Dict { at: None }]".to_string(),
+            "defaults: None".to_string(),
+        ];
+        for said in said {
+            assert!(shown.contains(&said), "{said} isn't in {shown}");
+        }
+        let unread = format!("{unread:?}");
+        assert!(
+            unread.contains("trees: [], structure: None, fields: None"),
+            "{unread}"
+        );
     }
 }
