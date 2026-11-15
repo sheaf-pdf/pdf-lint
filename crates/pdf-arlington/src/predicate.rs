@@ -128,14 +128,54 @@ pub const STANDARD_14: [&str; 14] = [
 /// deepest is 5 brackets deep (the census test prints it).
 pub(crate) const DEPTH: usize = 32;
 
-/// How many references a value may go through to its object.
+/// How many references a value may go through to its object: past them,
+/// it's null wherever a value is read, as one the file hasn't is, but in a
+/// name tree or on the way to one, which isn't then read whole
+/// (`fn:InNameTree`). So it isn't a caller's to lower, as a [`Limits`] is:
+/// a value read as null past it is a guess.
 const HOPS: usize = 32;
 
-/// How deep a name tree's `/Kids`, the structure tree, or the form's
-/// fields, may go, and how many nodes each may have, before the rest of
-/// it is left unread.
-const TREE_DEPTH: usize = 32;
-const TREE_NODES: usize = 100_000;
+/// The caps on the walks of a file's trees the predicates read: past one,
+/// what's left isn't read, and what a predicate asks of it is unknown,
+/// never guessed. Each walk is iterative, so neither cap is the stack's. A
+/// caller sets them on a copy of [`Limits::DEFAULT`] (`limits.tree_depth =
+/// 16`, say), as more may come, and gives them to a file
+/// ([`FileCx::limits`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+    /// How many levels below its root a name tree's `/Kids` are read
+    /// (`fn:InNameTree`), and the form's fields below `/Fields`, an array
+    /// and a field each a level (`fn:IsFullyQualifiedFieldName`): 32 by
+    /// default.
+    pub tree_depth: usize,
+    /// How many of a name tree's nodes are read, and of the form's fields,
+    /// its arrays among them, each once: 100,000 by default.
+    pub tree_nodes: usize,
+    /// How many levels below the structure tree's root are read, an array
+    /// and an element each a level (`fn:ImageIsStructContentItem`,
+    /// `fn:PageContainsStructContentItems`): 32 by default.
+    pub structure_depth: usize,
+    /// How many of the structure tree's kids are looked at, each entry of
+    /// a `/K` each time it's reached: 100,000 by default.
+    pub structure_nodes: usize,
+}
+
+impl Limits {
+    /// The caps a file's trees are read under unless it's given others.
+    pub const DEFAULT: Limits = Limits {
+        tree_depth: 32,
+        tree_nodes: 100_000,
+        structure_depth: 32,
+        structure_nodes: 100_000,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits::DEFAULT
+    }
+}
 
 /// How near two numbers are equal: TestGrammar's `ArlNumberTolerance`,
 /// half the fifth digit old PDF specifications recommended.
@@ -257,8 +297,9 @@ pub enum Truth {
 /// it's given one ([`FileCx::grammar`]), which keeps their predicates
 /// parsed; and what the predicates read of the file as a whole (its name
 /// trees' keys, its structure tree's content items, its form's fields'
-/// names), kept inside it once read, the first kept where two threads read
-/// one at once. [`FileCx::at`] makes a row's [`Cx`] from it. It's shared
+/// names), read under the caps it's given ([`FileCx::limits`]) and kept
+/// inside it once read, the first kept where two threads read one at
+/// once. [`FileCx::at`] makes a row's [`Cx`] from it. It's shared
 /// across threads when its resolver is `Sync`, each thread making its
 /// rows' [`Cx`]s there.
 ///
@@ -323,6 +364,8 @@ pub struct FileCx<'a, R: ?Sized = dyn Resolve<'a> + 'a> {
     /// The model whose rows' predicates it's asked, which parses each once,
     /// when given ([`FileCx::grammar`]).
     grammar: Option<&'a Grammar>,
+    /// The caps its trees are read under ([`FileCx::limits`]).
+    limits: Limits,
     /// An indirect object; none for one the file hasn't, which is null
     /// (ISO 32000-2, 7.3.10). Last, so that a `FileCx` of any resolver is
     /// read through one of `dyn Resolve` ([`Cx`]'s).
@@ -335,7 +378,8 @@ static NO_EXTENSIONS: BTreeSet<String> = BTreeSet::new();
 
 impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     /// A file of `trailer` at `version`, whose references `resolve` gives
-    /// the objects of; of no known length, checked under no extension.
+    /// the objects of; of no known length, checked under no extension, its
+    /// trees read under [`Limits::DEFAULT`].
     pub fn new(trailer: &'a Dict, version: Version, resolve: R) -> FileCx<'a, R> {
         FileCx {
             trailer,
@@ -348,6 +392,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
             pages: None,
             latin: None,
             grammar: None,
+            limits: Limits::DEFAULT,
             resolve,
         }
     }
@@ -402,6 +447,15 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     #[must_use = "it gives the FileCx back, with the model"]
     pub fn grammar(mut self, grammar: &'a Grammar) -> FileCx<'a, R> {
         self.grammar = Some(grammar);
+        self
+    }
+
+    /// The caps the file's trees are read under, which the predicates that
+    /// read a tree read: past one, a key, a name or an item the part read
+    /// doesn't hold is unknown. Unless given, [`Limits::DEFAULT`].
+    #[must_use = "it gives the FileCx back, with the caps"]
+    pub fn limits(mut self, limits: Limits) -> FileCx<'a, R> {
+        self.limits = limits;
         self
     }
 
@@ -465,6 +519,7 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
             .field("pages", &self.pages.map(<[_]>::len))
             .field("latin", &self.latin.is_some())
             .field("grammar", &self.grammar)
+            .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
 }
@@ -2272,7 +2327,8 @@ fn entry_id(p: &Path, cx: &Cx) -> Option<ObjectId> {
 
 /// The keys of the name tree at `root` (ISO 32000-2, 7.9.6): each node's
 /// `/Names` pairs' first, through its `/Kids`, each node once, as deep and
-/// as many as [`TREE_DEPTH`] and [`TREE_NODES`] let. Each reference in it
+/// as many as its file's [`Limits`] let (`tree_depth`, `tree_nodes`), a
+/// cap met counted before a node past it is read. Each reference in it
 /// is followed through [`deref_tried`]: one that doesn't read leaves the
 /// tree not whole, and the walk goes on beside it. A `/Names` or `/Kids`
 /// that's null, or a reference to nothing, is none, and a kid or a key
@@ -2283,9 +2339,10 @@ fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
         whole: true,
     };
     let mut seen = HashSet::new();
+    let limits = cx.file.limits;
     let mut nodes = vec![(root, 0)];
     while let Some((node, depth)) = nodes.pop() {
-        if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
+        if depth > limits.tree_depth || seen.len() >= limits.tree_nodes {
             tree.whole = false;
             continue;
         }
@@ -2368,8 +2425,8 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
 /// `/Kids`, each one's partial name, `/T`, after its parent's and a
 /// period; one without `/T` has its parent's ("different representations
 /// of the same underlying field"), and one at the top without it, none.
-/// Each node once, as deep and as many as [`TREE_DEPTH`] and
-/// [`TREE_NODES`] let.
+/// Each node once, as deep and as many as its file's [`Limits`] let
+/// (`tree_depth`, `tree_nodes`).
 fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
     let mut names = Names {
         names: HashSet::new(),
@@ -2383,9 +2440,10 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
     };
     let mut seen = HashSet::new();
     // Each node, its parent's name, and its depth.
+    let limits = cx.file.limits;
     let mut nodes: Vec<(&'c Object, Option<Rc<str>>, usize)> = vec![(fields, None, 0)];
     while let Some((node, parent, depth)) = nodes.pop() {
-        if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
+        if depth > limits.tree_depth || seen.len() >= limits.tree_nodes {
             names.whole = false;
             continue;
         }
@@ -2481,8 +2539,9 @@ fn items<'c>(cx: &Cx<'c, '_>) -> &'c Items {
 /// Each page and object is [`Known`] as its entry, `/Pg` or `/Obj`, names
 /// it. A file without a structure tree has no content items. Each element
 /// is read once, and an array each time it's reached, under the page of
-/// the element it's reached from, as deep as [`TREE_DEPTH`] lets; and no
-/// more kids are looked at than [`TREE_NODES`], each entry of a `/K`
+/// the element it's reached from, as deep as its file's [`Limits`] let
+/// (`structure_depth`); and no more kids are looked at than they let
+/// (`structure_nodes`), each entry of a `/K`
 /// counted each time it's reached, before it's looked at, so that an array
 /// that holds itself ends there, not read whole.
 fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
@@ -2500,10 +2559,10 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     // Each node, the page of the element it's a kid of, and its depth; and
     // how many kids have been looked at.
     let mut nodes: Vec<(&'c Object, Option<Known>, usize)> = Vec::new();
-    let mut looked = 0;
+    let (limits, mut looked) = (cx.file.limits, 0);
     let cut = 'walk: {
         if let Some(kids) = entry(root, At::Key(b"K"), cx) {
-            if !look(&mut looked, TREE_NODES) {
+            if !look(&mut looked, limits.structure_nodes) {
                 break 'walk true;
             }
             if let Some(kids) = deref(kids, cx) {
@@ -2511,7 +2570,7 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
             }
         }
         while let Some((node, page, depth)) = nodes.pop() {
-            if depth > TREE_DEPTH {
+            if depth > limits.structure_depth {
                 items.objects.whole = false;
                 items.pages.whole = false;
                 continue;
@@ -2558,7 +2617,7 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
                 _ => continue,
             };
             for kid in kids {
-                if !look(&mut looked, TREE_NODES) {
+                if !look(&mut looked, limits.structure_nodes) {
                     break 'walk true;
                 }
                 if let Some(kid) = deref(kid, cx) {
@@ -4951,6 +5010,136 @@ mod tests {
             let unknown = unknown("fn:PageContainsStructContentItems");
             assert_eq!(asks(3), unknown, "{times}: not read whole");
         }
+    }
+
+    /// [`Limits::DEFAULT`] with the four caps given.
+    fn caps(tree_depth: usize, tree_nodes: usize, depth: usize, nodes: usize) -> Limits {
+        let mut limits = Limits::DEFAULT;
+        (limits.tree_depth, limits.tree_nodes) = (tree_depth, tree_nodes);
+        (limits.structure_depth, limits.structure_nodes) = (depth, nodes);
+        limits
+    }
+
+    #[test]
+    fn a_files_caps_are_its_trees_and_the_constants_by_default() {
+        assert_eq!(Limits::default(), Limits::DEFAULT);
+        assert_eq!(Limits::DEFAULT, caps(32, 100_000, 32, 100_000));
+        let file = bare();
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let shown = format!("{:?}", FileCx::new(&file.trailer, v("1.7"), closure));
+        assert!(
+            shown.contains("limits: Limits { tree_depth: 32, tree_nodes: 100000, "),
+            "{shown}"
+        );
+        let lowered = FileCx::new(&file.trailer, v("1.7"), closure).limits(caps(1, 2, 3, 4));
+        assert!(format!("{lowered:?}").contains("structure_nodes: 4 }"));
+    }
+
+    #[test]
+    fn a_tree_past_its_files_caps_is_unknown_never_false_where_it_may_hold_what_s_asked() {
+        // A name tree, its root, 3, over a node, 5, and a leaf, 6, at depth
+        // 1, and the node's leaf, 7, at depth 2: four nodes, read 3, 6, 5,
+        // 7, as the walk takes the last kid first.
+        let file = dests();
+        let names = |limits: Limits| {
+            let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+            in_dests(&FileCx::new(&file.trailer, v("1.7"), closure).limits(limits))
+        };
+        let structure = Limits::DEFAULT;
+        let (depth, nodes) = (structure.structure_depth, structure.structure_nodes);
+        assert_eq!(
+            names(caps(2, 4, depth, nodes)),
+            truths("TTTF"),
+            "at its size"
+        );
+        assert_eq!(
+            names(caps(1, 4, depth, nodes)),
+            truths("UUTU"),
+            "past its depth"
+        );
+        assert_eq!(
+            names(caps(2, 3, depth, nodes)),
+            truths("UUTU"),
+            "past its nodes"
+        );
+        assert_eq!(names(caps(2, 0, depth, nodes)), truths("UUUU"), "no nodes");
+
+        // The form's fields: /Fields, an array, at depth 0; `a` at 1; its
+        // /Kids at 2; `a.b` at 3; its /Kids at 4; `a.b.c` at 5: six nodes.
+        let c = dict! { "T" => Object::text("c") };
+        let b = dict! { "T" => Object::text("b"), "Kids" => vec![Object::from(c)] };
+        let a = dict! { "T" => Object::text("a"), "Kids" => vec![Object::from(b)] };
+        let form = dict! { "Fields" => vec![Object::from(a)] };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "AcroForm" => form };
+        let fields = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into())],
+        );
+        let named = |limits: Limits| {
+            let closure = resolve_fn(|id: ObjectId| fields.objects.get(&id));
+            let file = FileCx::new(&fields.trailer, v("1.7"), closure).limits(limits);
+            (["a.b", "a.b.c", "z"].iter())
+                .map(|name| {
+                    let row = Object::from(dict! { "X" => Object::text(name) });
+                    holds(
+                        "fn:IsFullyQualifiedFieldName(@X)",
+                        &file.at(&row, At::Key(b"X")),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:IsFullyQualifiedFieldName");
+        let field = |tree_depth, tree_nodes| caps(tree_depth, tree_nodes, depth, nodes);
+        assert_eq!(named(field(5, 6)), [t.clone(), t.clone(), f], "at its size");
+        assert_eq!(
+            named(field(4, 6)),
+            [t.clone(), u.clone(), u.clone()],
+            "past its depth"
+        );
+        assert_eq!(
+            named(field(5, 5)),
+            [t, u.clone(), u.clone()],
+            "past its nodes"
+        );
+        assert_eq!(named(field(5, 0)), [u.clone(), u.clone(), u], "no nodes");
+
+        // The structure tree: the root's /K, an array, at depth 0, looked at
+        // first; an element on page 2 at 1; its /K at 2; a marked-content
+        // identifier at 3: four kids looked at.
+        let element = dict! { "S" => Object::name("P"), "Pg" => Object::reference(2), "K" => vec![Object::from(0)] };
+        let root =
+            dict! { "Type" => Object::name("StructTreeRoot"), "K" => vec![Object::from(element)] };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
+        let page = || Object::from(dict! { "Type" => Object::name("Page") });
+        let tagged = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into()), (2, page()), (3, page())],
+        );
+        let on = |limits: Limits| {
+            let closure = resolve_fn(|id: ObjectId| tagged.objects.get(&id));
+            let file = FileCx::new(&tagged.trailer, v("1.7"), closure).limits(limits);
+            [2, 3].map(|n| {
+                let id = ObjectId::new(n, 0);
+                let cx = file.at(&tagged.objects[&id], At::Key(b"X")).id(id);
+                holds("fn:PageContainsStructContentItems()", &cx)
+            })
+        };
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:PageContainsStructContentItems");
+        let structure = |depth, nodes| caps(32, 100_000, depth, nodes);
+        assert_eq!(on(structure(3, 4)), [t, f], "at its size");
+        assert_eq!(
+            on(structure(2, 4)),
+            [u.clone(), u.clone()],
+            "past its depth"
+        );
+        assert_eq!(
+            on(structure(3, 3)),
+            [u.clone(), u.clone()],
+            "past its nodes"
+        );
+        assert_eq!(on(structure(3, 0)), [u.clone(), u], "no nodes");
     }
 
     /// `text`, a content item's function, held of `container` in `file`:

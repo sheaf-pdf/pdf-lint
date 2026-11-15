@@ -32,7 +32,7 @@ pub mod predicate;
 pub use pdf_objects;
 
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped};
-pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
+pub use predicate::{Cx, FileCx, Gate, Latin, Limits, Reference, Since, Truth};
 
 /// The upstream commit the embedded model is (`model/SOURCE.md`).
 pub const COMMIT: &str = "d148fee5a0cb6dcacadf58c09ed842e32847024d";

@@ -12,8 +12,10 @@
 //! of the evaluator's functions, at every key and element of the container,
 //! over a resolver failing the objects the input marks for the reason it
 //! names, saying the same through a context given a model of the body's own
-//! and one given none, each asked twice, every unknown saying why, and a key
-//! a name tree holds never said to be missing where some reads fail.
+//! and one given none, each asked twice, every unknown saying why, a key a
+//! name tree holds never said to be missing where some reads fail, and a
+//! function that reads a tree false under smaller caps only where it's false
+//! under the default.
 
 #![no_main]
 

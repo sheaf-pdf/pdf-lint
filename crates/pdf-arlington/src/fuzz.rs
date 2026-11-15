@@ -17,7 +17,9 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Version, W
 use twox_hash::XxHash64;
 
 use crate::grammar::{ArlType, At, Error, File, Grammar, Row, Table, Wrapped, version};
-use crate::predicate::{self, Cx, DEPTH, Expr, FileCx, Latin, Reference, SUPPORTED, Since, Truth};
+use crate::predicate::{
+    self, Cx, DEPTH, Expr, FileCx, Latin, Limits, Reference, SUPPORTED, Since, Truth,
+};
 
 /// How many pieces of an input are read as tables: more than the embedded
 /// model has.
@@ -581,7 +583,15 @@ fn said(text: &str, cx: &Cx) -> [Said; 6] {
 /// references its entry goes through, read alike over both: a part of the
 /// tree, or of the way to it, that doesn't read leaves a key it may hold
 /// unknown. The row's own value that doesn't read is null, as an absent
-/// row is, which the function says is in no tree.
+/// row is, which the function says is in no tree. And where the text is
+/// one call of a function that reads a tree (a name tree, the form's
+/// fields, the structure tree's content items), under smaller caps than
+/// the default, false only where the default's answer is false too, as a
+/// cap met leaves the tree not read whole; for a name tree, true never
+/// where the default's is false either. A field or a structure element
+/// reached by two paths is read by the first, so under a cap past which
+/// one path isn't read, a name or a page another path gives may be found
+/// where the default doesn't find it.
 pub fn predicates(data: &[u8]) {
     asking(data, &mut |_| {});
 }
@@ -689,14 +699,22 @@ fn asking(data: &[u8], asked: &mut dyn FnMut(&str)) {
         first.iter().for_each(Said::reasoned);
     }
 
-    if calls_alone(&text, "fn:InNameTree") {
+    let call = sole_call(&text);
+    let function = match &call {
+        Some(Expr::Call(f, _)) => f.as_str(),
+        _ => "",
+    };
+    let of_a_path =
+        matches!(&call, Some(Expr::Call(_, args)) if matches!(&args[..], [Expr::Path(_)]));
+    if function == "fn:InNameTree" && of_a_path {
         let all = Failing {
             why: None,
             ..resolve
         };
         let whole = file(all, false);
         for at in places(container) {
-            let (over_all, over_some) = (cx(&whole, at), cx(&alone, at));
+            let over_all = placed(&whole, container, at, &parents, defaults, id);
+            let over_some = placed(&alone, container, at, &parents, defaults, id);
             let own = |cx: &Cx| predicate::value_at(container, at, cx).map(std::ptr::from_ref);
             if predicate::holds(&text, &over_all) == Truth::True
                 && own(&over_all) == own(&over_some)
@@ -708,20 +726,54 @@ fn asking(data: &[u8], asked: &mut dyn FnMut(&str)) {
             }
         }
     }
+
+    if TREES.contains(&function) {
+        for (depth, nodes) in SMALL {
+            let mut limits = Limits::DEFAULT;
+            (limits.tree_depth, limits.tree_nodes) = (depth, nodes);
+            (limits.structure_depth, limits.structure_nodes) = (depth, nodes);
+            let small = file(resolve, false).limits(limits);
+            for at in places(container) {
+                let by_default = predicate::holds(&text, &cx(&alone, at));
+                let under = placed(&small, container, at, &parents, defaults, id);
+                let under = predicate::holds(&text, &under);
+                assert!(
+                    under != Truth::False || by_default == Truth::False,
+                    "{text:?} at {at:?}: false under {limits:?}, {by_default:?} by default"
+                );
+                assert!(
+                    function != "fn:InNameTree"
+                        || under != Truth::True
+                        || by_default != Truth::False,
+                    "{text:?} at {at:?}: a key held under {limits:?} is missing by default"
+                );
+            }
+        }
+    }
 }
 
-/// Whether `text` is one call of `function`, its argument a path, in
-/// brackets or `fn:Eval` or neither, as the model's cells write one.
-fn calls_alone(text: &str, function: &str) -> bool {
-    let Ok(mut e) = predicate::parse(text) else {
-        return false;
-    };
+/// The functions that read one of a file's trees, under its [`Limits`].
+const TREES: [&str; 4] = [
+    "fn:InNameTree",
+    "fn:IsFullyQualifiedFieldName",
+    "fn:ImageIsStructContentItem",
+    "fn:PageContainsStructContentItems",
+];
+
+/// The caps the predicates body reads the trees under beside the default:
+/// each depth and nodes cap, for all three walks.
+const SMALL: [(usize, usize); 4] = [(0, 0), (1, 2), (2, 4), (3, 8)];
+
+/// The call `text` is, in brackets or `fn:Eval` or neither, as the model's
+/// cells write one; none where it's something else, or doesn't parse.
+fn sole_call(text: &str) -> Option<Expr> {
+    let mut e = predicate::parse(text).ok()?;
     loop {
         e = match e {
             Expr::Group(inner) => *inner,
             Expr::Call(f, mut args) if f == "fn:Eval" && args.len() == 1 => args.remove(0),
-            Expr::Call(f, args) => return f == function && matches!(&args[..], [Expr::Path(_)]),
-            _ => return false,
+            call @ Expr::Call(..) => return Some(call),
+            _ => return None,
         };
     }
 }
