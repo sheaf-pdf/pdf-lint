@@ -3,7 +3,8 @@
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
 # `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz linearize`, `just fuzz pdfs` or `just fuzz check`, or:
+# `just fuzz linearize`, `just fuzz pdfs`, `just fuzz arlington` or
+# `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -153,6 +154,29 @@
 # `the_seeds_write_documents_read_back_as_written`,
 # `mutated_seeds_keep_every_promise` and `random_bytes_keep_every_promise`)
 # run on its seeds, mutated seeds and random bytes.
+# `arlington` calls `pdf_arlington::fuzz::tables`, its bytes as tables' files,
+# a piece each between `\0`s, its first line the table's name, loaded as a
+# folder of them is: one that doesn't load saying which file and a line within
+# it, a name with a tab or a line break refused; one that loads the same in
+# any order, its hash of the framing `Grammar::digest` gives, each row where
+# `Table::row` says, each predicate in its cells parsing or saying why not,
+# one that parses printing back as a text that parses to it, and each row's
+# cells, asked over an object of its table's keys, the same given the model
+# and not, and asked again; and `pdf_arlington::fuzz::predicates`, its bytes
+# as a predicate's text, choices and objects, every function evaluated at
+# every key and element of the container over a resolver failing what the
+# input marks, the same through a model of the body's own and through none,
+# each asked twice, every unknown saying why, a key a name tree holds never
+# said to be missing where some reads fail, a function that reads a tree false
+# under smaller caps only where it is under the default; neither asking
+# anything through the embedded model, whose memo is the process's; which six
+# stable unit tests (`the_seeds_keep_every_promise`,
+# `mutated_seeds_keep_every_promise`, `random_tables_keep_every_promise`,
+# `random_predicates_keep_every_promise`,
+# `the_embedded_tables_keep_every_promise` and
+# `the_bodies_keep_none_of_their_texts_in_the_embedded_model`) run on its
+# seeds, mutated seeds, random tables, random predicates, the embedded model's
+# tables and texts no other test asks.
 # The lopdf adapter's body, in its crate (pdf-linearize-lopdf), which is never
 # published, isn't here: a stable test of that crate
 # (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
@@ -175,6 +199,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+pdf-arlington = { path = "../crates/pdf-arlington" }
 # With `image-ends`, so the content target can read with DCT and CCITTFax
 # data decoded to find where an inline image's ends, as it asks to.
 pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
@@ -294,6 +319,13 @@ bench = false
 [[bin]]
 name = "pdfs"
 path = "fuzz_targets/pdfs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "arlington"
+path = "fuzz_targets/arlington.rs"
 test = false
 doc = false
 bench = false

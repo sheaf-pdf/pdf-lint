@@ -6,14 +6,15 @@
 //! link are taken off and kept beside it. What a predicate means is the
 //! checker's to say.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, btree_map};
 use std::fmt;
 use std::io;
+use std::iter::FusedIterator;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use pdf_objects::Version;
-use twox_hash::XxHash64;
+use sha2::{Digest as _, Sha256};
 
 use crate::predicate::Parses;
 
@@ -25,7 +26,11 @@ pub(crate) mod model {
 /// ISO 32000-2: a line of `model/corrections.tsv`, which `build.rs` makes
 /// to the embedded copy only, failing when upstream's cell isn't
 /// `upstream` any more.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate,
+/// so a field more is a minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Correction {
     /// The table's name.
     pub table: &'static str,
@@ -43,6 +48,7 @@ pub struct Correction {
 
 /// The corrections the embedded model has ([`Grammar::embedded`]). A
 /// model [`Grammar::load`] reads is as its files have it.
+#[must_use]
 pub fn corrections() -> &'static [Correction] {
     model::CORRECTIONS
 }
@@ -51,7 +57,11 @@ pub fn corrections() -> &'static [Correction] {
 /// defines: a row of a file in `model/additions`, in upstream's format,
 /// which `build.rs` adds to the embedded copy only, failing when upstream
 /// has the table, or the table's row, itself.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate,
+/// so a field more is a minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Addition {
     /// The table's name.
     pub table: &'static str,
@@ -64,6 +74,7 @@ pub struct Addition {
 }
 
 /// The rows the embedded model adds ([`Grammar::embedded`]).
+#[must_use]
 pub fn additions() -> &'static [Addition] {
     model::ADDITIONS
 }
@@ -89,27 +100,82 @@ pub const HEADER: [&str; 12] = [
 /// for as long as the model is ([`FileCx::grammar`](crate::FileCx::grammar)).
 pub struct Grammar {
     tables: BTreeMap<String, Table>,
-    /// Its tables' files' XXH64 ([`Grammar::hash`]).
-    hash: u64,
+    /// Its tables' files' SHA-256 ([`Grammar::digest`]).
+    digest: Digest,
     /// Its rows' predicates, each parsed the first time it's asked for:
     /// made the first time a [`FileCx`](crate::FileCx) given the model asks
     /// ([`Grammar::parses`]), so a caller that never gives one pays nothing.
     parses: OnceLock<Parses>,
 }
 
-/// How many tables it has, and its hash: each [`Table`] shows its own
+/// How many tables it has, and its digest: each [`Table`] shows its own
 /// rows.
 impl fmt::Debug for Grammar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Grammar")
             .field("tables", &self.tables.len())
-            .field("hash", &format_args!("{:016x}", self.hash))
+            .field("digest", &self.digest)
             .finish_non_exhaustive()
     }
 }
 
+/// Two models are equal when their digests are ([`Grammar::digest`]): when
+/// their tables' files are the same, byte for byte, as SHA-256 is made so
+/// that no two inputs that differ can be found with one digest. What either
+/// keeps of the predicates asked through it is no part of what it is.
+impl PartialEq for Grammar {
+    fn eq(&self, other: &Grammar) -> bool {
+        self.digest == other.digest
+    }
+}
+
+impl Eq for Grammar {}
+
+/// Its digest's hash, as models are equal by their digests. What it keeps
+/// of its predicates is behind a lock, which clippy's `mutable_key_type`
+/// reads as a key that can change; neither this nor `==` reads it, and a
+/// map keyed by the digest ([`Grammar::digest`]) is keyed alike.
+impl std::hash::Hash for Grammar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.digest.hash(state);
+    }
+}
+
+/// What names a model ([`Grammar::digest`]): the SHA-256 of its tables'
+/// files, 32 bytes, which [`Display`](fmt::Display) and
+/// [`Debug`](fmt::Debug) write as 64 lowercase hex digits, as `sha256sum`
+/// does. Ordered by its bytes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Digest([u8; 32]);
+
+impl Digest {
+    /// Its 32 bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Its 64 lowercase hex digits.
+impl fmt::Display for Digest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
+/// Its 64 lowercase hex digits, as [`Display`](fmt::Display) writes them.
+impl fmt::Debug for Digest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 /// One object's table: `Catalog`, `AnnotSquare`, `ArrayOfAnnots`.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more is a minor release.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Table {
     /// Its file's name less `.tsv`, which links name it by.
     pub name: String,
@@ -123,6 +189,10 @@ pub struct Table {
 
 /// Where in an object a value is: under a dictionary's key, or an array's
 /// element.
+///
+/// Exhaustive on purpose: a value in an object is under a key or at an
+/// index, and nowhere else, so a match on both is checked by the compiler;
+/// another would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At<'a> {
     /// Under a dictionary's key.
@@ -133,7 +203,12 @@ pub enum At<'a> {
 
 /// One row: a key of a dictionary or an element of an array. The fields
 /// are upstream's columns, in their order.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more (where its line is in its
+/// file's bytes, say, or a cell's parse) is a minor release.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Row {
     /// The line of its table's file it's on, the header being line 1.
     pub line: usize,
@@ -172,7 +247,12 @@ pub struct Row {
 /// Arlington's types (INTERNAL_GRAMMAR.md, "Column 2 - Type"): PDF's
 /// objects, refined as the specification refines them (a date is a
 /// string, a rectangle an array of four numbers).
+///
+/// Not exhaustive: these are the model's types, which upstream may add
+/// to, so a match on them takes a wildcard, and a type more is a minor
+/// release. [`ArlType::ALL`] lists every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum ArlType {
     /// `array`.
     Array,
@@ -215,7 +295,11 @@ pub enum ArlType {
 /// A cell's item with the version predicates around it taken off,
 /// outermost first: `fn:IsPDFVersion(1.7,fn:Extension(ADBE_Extn3,X))` is
 /// `X` in `IsPDFVersion` of `1.7` and `Extension` of `ADBE_Extn3`.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Wrapped<T> {
     /// The version predicates around it, outermost first.
     pub wraps: Vec<Wrap>,
@@ -224,7 +308,11 @@ pub struct Wrapped<T> {
 }
 
 /// A version predicate around an item.
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// (a model's loader makes it), so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Wrap {
     /// Which predicate it is.
     pub func: WrapFn,
@@ -235,7 +323,12 @@ pub struct Wrap {
 
 /// The predicates that wrap an item: those INTERNAL_GRAMMAR.md's "Column
 /// 11 - Link" allows around a link, which wrap types and values too.
+///
+/// Not exhaustive: these are the model's, which upstream may add to, so a
+/// match on them takes a wildcard, and a predicate more is a minor
+/// release. [`WrapFn::ALL`] lists every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum WrapFn {
     /// `fn:SinceVersion(v,X)`: `X` from version `v` on.
     SinceVersion,
@@ -271,6 +364,19 @@ pub enum Error {
     #[error("{path}: not a UTF-8 name")]
     Name {
         /// The table's path.
+        path: PathBuf,
+    },
+    /// A table's name holds a tab, a line feed or a carriage return,
+    /// which cut the model's files into cells and lines: in the bytes
+    /// [`Grammar::digest`] is of, each table's name on a line of its own
+    /// before its text, such a name could read as a table's row, and two
+    /// models could hash alike. Said before the table is read, by its
+    /// path as [`Debug`](fmt::Debug) writes it, so the character shows.
+    #[error(
+        "{path:?}: a table's name can't hold a tab or a line break, which the model's hash would read as a table's text"
+    )]
+    Separator {
+        /// The table's file, as [`Error::Table`] names it.
         path: PathBuf,
     },
     /// The folder has no `.tsv` file.
@@ -407,21 +513,25 @@ pub enum TableError {
 
 /// A table's file, to read: the table's name, what an error calls the
 /// file, and its text.
-struct File<'a> {
-    name: String,
-    label: PathBuf,
-    text: std::borrow::Cow<'a, str>,
+pub(crate) struct File<'a> {
+    pub(crate) name: String,
+    pub(crate) label: PathBuf,
+    pub(crate) text: std::borrow::Cow<'a, str>,
 }
 
 impl Grammar {
     /// The model this crate embeds: upstream's `tsv/latest` at
     /// [`COMMIT`](crate::COMMIT), with the [`corrections`] made and the
-    /// [`additions`] added, read the first time it's asked for. Panics,
-    /// naming the file and line, when it doesn't read, which its tests
-    /// rule out. It's one for the process, so what it keeps of the
-    /// predicates asked through it
+    /// [`additions`] added, read the first time it's asked for. It's one
+    /// for the process, so what it keeps of the predicates asked through it
     /// ([`FileCx::grammar`](crate::FileCx::grammar)) is kept for the
     /// process, and every file and thread shares it.
+    ///
+    /// # Panics
+    ///
+    /// Naming the file and line, when the embedded model doesn't read,
+    /// which its tests rule out.
+    #[must_use]
     pub fn embedded() -> &'static Grammar {
         EMBEDDED.get_or_init(|| {
             Grammar::from_files(model::TABLES.iter().map(|&(name, text)| File {
@@ -434,9 +544,19 @@ impl Grammar {
     }
 
     /// The tables in `dir`, a `.tsv` file each: a checkout of upstream's
-    /// `tsv/latest`, newer than the embedded one, say. An [`Error`] names
+    /// `tsv/latest`, newer than the embedded one, say. Each `.tsv` file in
+    /// it is read whole, under no cap but the files' sizes, so `dir` is a
+    /// folder its caller trusts, as pdf-lint's `--model` names its user's
+    /// own.
+    ///
+    /// # Errors
+    ///
+    /// An [`Error`] where the model doesn't read: `dir`, or a table in it,
+    /// that can't be read, a table's name that isn't UTF-8, or no tables;
     /// the file and line of a row that doesn't read, or that links to a
-    /// table `dir` doesn't have.
+    /// table `dir` doesn't have ([`Error::Table`]); and a table whose name
+    /// holds a tab or a line break ([`Error::Separator`]), before it's
+    /// read.
     pub fn load(dir: &Path) -> Result<Grammar, Error> {
         let entries = std::fs::read_dir(dir).map_err(|error| Error::Read {
             path: dir.to_path_buf(),
@@ -454,6 +574,9 @@ impl Grammar {
         for path in &paths {
             let name = path.file_stem().and_then(|s| s.to_str());
             let name = name.ok_or_else(|| Error::Name { path: path.clone() })?;
+            if !names_a_table(name) {
+                return Err(Error::Separator { path: path.clone() });
+            }
             let text = std::fs::read_to_string(path).map_err(|error| Error::Read {
                 path: path.clone(),
                 error,
@@ -472,15 +595,24 @@ impl Grammar {
         Grammar::from_files(files)
     }
 
-    fn from_files<'a>(files: impl IntoIterator<Item = File<'a>>) -> Result<Grammar, Error> {
+    pub(crate) fn from_files<'a>(
+        files: impl IntoIterator<Item = File<'a>>,
+    ) -> Result<Grammar, Error> {
         let mut files: Vec<File> = files.into_iter().collect();
         files.sort_by_cached_key(|file| format!("{}.tsv", file.name));
-        let mut bytes = Vec::new();
+        // The bytes `digest` says it's of, given a piece at a time.
+        let mut sha = Sha256::new();
         for file in &files {
-            bytes.extend_from_slice(format!("{}.tsv\n", file.name).as_bytes());
-            bytes.extend_from_slice(file.text.as_bytes());
+            if !names_a_table(&file.name) {
+                return Err(Error::Separator {
+                    path: file.label.clone(),
+                });
+            }
+            sha.update(file.name.as_bytes());
+            sha.update(b".tsv\n");
+            sha.update(file.text.as_bytes());
         }
-        let hash = XxHash64::oneshot(0, &bytes);
+        let digest = Digest(sha.finalize().into());
         let mut tables = BTreeMap::new();
         let mut labels = BTreeMap::new();
         for file in files {
@@ -513,7 +645,7 @@ impl Grammar {
         }
         Ok(Grammar {
             tables,
-            hash,
+            digest,
             parses: OnceLock::new(),
         })
     }
@@ -524,32 +656,110 @@ impl Grammar {
         self.parses.get_or_init(|| Parses::of(self))
     }
 
-    /// What names the model, as reports give it: XXH64, seed 0, of each
+    /// What names the model, as reports give it: the SHA-256 of each
     /// table's file in byte order of the files' names, its name
     /// (`Catalog.tsv`), a newline, and its bytes. Two models are alike when
-    /// it is, wherever each was read from. With xxHash's own command line,
-    /// in a `tsv/latest` folder: `for f in $(LC_ALL=C ls *.tsv); do printf
-    /// '%s\n' "$f"; cat "$f"; done | xxhsum -H1`. The embedded model's is
-    /// of its tables with the [`corrections`] made and the [`additions`]
-    /// added, so it isn't upstream's at the same commit, which
-    /// [`Grammar::load`] reads as it is.
-    pub fn hash(&self) -> u64 {
-        self.hash
+    /// it is, wherever each was read from, and equal (`==`); no table's
+    /// name holds a tab or a line break ([`Error::Separator`]), so no two
+    /// models give it the same bytes. With coreutils, in a `tsv/latest`
+    /// folder: `for f in $(LC_ALL=C ls *.tsv); do printf '%s\n' "$f"; cat
+    /// "$f"; done | sha256sum`. The embedded model's is of its tables with
+    /// the [`corrections`] made and the [`additions`] added, so it isn't
+    /// upstream's at the same commit, which [`Grammar::load`] reads as it
+    /// is.
+    #[must_use]
+    pub const fn digest(&self) -> Digest {
+        self.digest
     }
 
     /// The table named `name`.
+    #[must_use]
     pub fn table(&self, name: &str) -> Option<&Table> {
         self.tables.get(name)
     }
 
-    /// Every table, by name.
-    pub fn tables(&self) -> impl Iterator<Item = &Table> {
-        self.tables.values()
+    /// Every table, in order of name.
+    pub fn tables(&self) -> Tables<'_> {
+        Tables {
+            tables: self.tables.values(),
+        }
     }
 }
 
+/// A model's tables, in order of name: what [`Grammar::tables`] gives. It
+/// knows how many are left, walks from either end, and a `count`,
+/// `for_each` or `fold` over it goes through them in one pass.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Clone)]
+pub struct Tables<'a> {
+    tables: btree_map::Values<'a, String, Table>,
+}
+
+/// How many are left; not the tables, each of which shows its rows.
+impl fmt::Debug for Tables<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tables")
+            .field("left", &self.tables.len())
+            .finish()
+    }
+}
+
+impl<'a> Iterator for Tables<'a> {
+    type Item = &'a Table;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a Table> {
+        self.tables.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.tables.size_hint()
+    }
+
+    /// The last, from the map's end, not by walking to it.
+    #[inline]
+    fn last(self) -> Option<&'a Table> {
+        self.tables.last()
+    }
+
+    /// One pass over the map, as `count`, `for_each` and `sum` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, &'a Table) -> B>(self, init: B, f: F) -> B {
+        self.tables.fold(init, f)
+    }
+}
+
+impl<'a> DoubleEndedIterator for Tables<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'a Table> {
+        self.tables.next_back()
+    }
+
+    /// One pass over the map from its end, as `rev` folds.
+    #[inline]
+    fn rfold<B, F: FnMut(B, &'a Table) -> B>(self, init: B, f: F) -> B {
+        self.tables.rfold(init, f)
+    }
+}
+
+impl ExactSizeIterator for Tables<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.tables.len()
+    }
+}
+
+impl FusedIterator for Tables<'_> {}
+
 /// The embedded model, read once ([`Grammar::embedded`]).
 static EMBEDDED: OnceLock<Grammar> = OnceLock::new();
+
+/// Whether `name` can name a table: it holds no tab, line feed or carriage
+/// return ([`Error::Separator`]).
+fn names_a_table(name: &str) -> bool {
+    !name.contains(['\t', '\n', '\r'])
+}
 
 impl Table {
     /// The table in `text`, a TSV file's whole: upstream's header, then a
@@ -597,6 +807,7 @@ impl Table {
     /// The row for the value at `at`: the row with its key or index, else,
     /// for an array's element, the repeating row it falls on, else the
     /// wildcard `*`.
+    #[must_use]
     pub fn row(&self, at: At) -> Option<&Row> {
         let named = |key: &[u8]| self.rows.iter().find(|r| r.key.as_bytes() == key);
         match at {
@@ -608,6 +819,7 @@ impl Table {
 
     /// The repeating rows, a set the array's elements after the other
     /// rows go through again and again; none when the table has none.
+    #[must_use]
     pub fn repeating(&self) -> &[Row] {
         &self.rows[self.repeats..]
     }
@@ -713,8 +925,10 @@ impl Row {
 }
 
 impl ArlType {
-    /// All 18, in the model's order (its names', alphabetical).
-    pub const ALL: [ArlType; 18] = [
+    /// Every one, once, in the model's order (its names', alphabetical): a
+    /// slice, not an array of a fixed length, so a type can come without a
+    /// breaking release.
+    pub const ALL: &'static [ArlType] = &[
         ArlType::Array,
         ArlType::Bitmask,
         ArlType::Boolean,
@@ -736,7 +950,8 @@ impl ArlType {
     ];
 
     /// Its name in the model: `name-tree`, `string-text`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             ArlType::Array => "array",
             ArlType::Bitmask => "bitmask",
@@ -760,14 +975,17 @@ impl ArlType {
     }
 
     /// The type the model names `name`.
+    #[must_use]
     pub fn named(name: &str) -> Option<ArlType> {
-        ArlType::ALL.into_iter().find(|t| t.name() == name)
+        ArlType::ALL.iter().copied().find(|t| t.name() == name)
     }
 }
 
 impl WrapFn {
-    /// All 5, in the order [`WrapFn`] lists them.
-    pub const ALL: [WrapFn; 5] = [
+    /// Every one, once, in the order [`WrapFn`] lists them: a slice, not an
+    /// array of a fixed length, so a predicate can come without a breaking
+    /// release.
+    pub const ALL: &'static [WrapFn] = &[
         WrapFn::SinceVersion,
         WrapFn::BeforeVersion,
         WrapFn::IsPDFVersion,
@@ -776,7 +994,8 @@ impl WrapFn {
     ];
 
     /// Its name, less `fn:`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             WrapFn::SinceVersion => "SinceVersion",
             WrapFn::BeforeVersion => "BeforeVersion",
@@ -848,7 +1067,7 @@ fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str), TableError> {
     }
     let name = item.strip_prefix("fn:").and_then(|f| f.split_once('('));
     if let Some((name, _)) = name
-        && WrapFn::ALL.into_iter().any(|f| f.name() == name)
+        && WrapFn::ALL.iter().copied().any(|f| f.name() == name)
     {
         return Err(TableError::Wrap {
             item: item.to_string(),
@@ -862,7 +1081,7 @@ fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str), TableError> {
 /// `arg`, and `inner`.
 fn wrapper(item: &str) -> Option<(Wrap, &str)> {
     let (name, args) = item.strip_prefix("fn:")?.split_once('(')?;
-    let func = WrapFn::ALL.into_iter().find(|f| f.name() == name)?;
+    let func = WrapFn::ALL.iter().copied().find(|f| f.name() == name)?;
     let (arg, inner) = args.strip_suffix(')')?.split_once(',')?;
     if arg.contains(['(', ')']) || !balanced(inner) {
         return None;
@@ -876,6 +1095,7 @@ fn wrapper(item: &str) -> Option<(Wrap, &str)> {
 
 /// A version as the model writes one: `1.0` to `1.7`, or `2.0`
 /// (INTERNAL_GRAMMAR.md, "Parameters to predicates").
+#[must_use]
 pub fn version(text: &str) -> Option<Version> {
     match text.as_bytes() {
         [b'1', b'.', minor @ b'0'..=b'7'] => Some(Version::new(1, minor - b'0')),
@@ -985,7 +1205,7 @@ mod tests {
         }
         assert_eq!(
             used,
-            BTreeSet::from(ArlType::ALL),
+            ArlType::ALL.iter().copied().collect::<BTreeSet<_>>(),
             "the model uses every type and no other"
         );
     }
@@ -1037,77 +1257,198 @@ mod tests {
             assert_eq!(rest, want, "{name}");
         }
         let loaded = Grammar::load(&dir().join("tsv/latest")).unwrap();
-        assert_ne!(loaded.hash(), Grammar::embedded().hash());
+        assert_ne!(loaded.digest(), Grammar::embedded().digest());
     }
 
-    /// The model's hashes, as xxHash 0.8.2's reference computes them (the
-    /// command in [`Grammar::hash`]'s doc): over `model/tsv/latest`,
+    /// The model's hashes, as coreutils' `sha256sum` computes them over the
+    /// command in [`Grammar::digest`]'s doc: over `model/tsv/latest`,
     /// upstream's tables as they are; and over the embedded ones, those
-    /// with the corrections made. They move with the model and its
-    /// corrections, and `model/SOURCE.md`'s steps say so.
+    /// with the corrections made and the additions added (upstream's
+    /// folder with the build's corrected and added tables over it). They
+    /// move with the model, its corrections and its additions, and
+    /// `model/SOURCE.md`'s steps say so.
     #[test]
     fn the_models_hashes_are_the_references() {
         let upstream = Grammar::load(&dir().join("tsv/latest")).unwrap();
-        assert_eq!(format!("{:016x}", upstream.hash()), "c2bdcab22f823d8d");
+        assert_eq!(
+            upstream.digest().to_string(),
+            "3493c24c602b0637685e453bbb01cc16f1aee2aba8cbfaa0bf336426b17d2c1b"
+        );
         let embedded = Grammar::embedded();
-        assert_eq!(format!("{:016x}", embedded.hash()), "fc22d1fadc1fd269");
+        assert_eq!(
+            embedded.digest().to_string(),
+            "2bf6c3ab3fb4783fec94c0d6bdec719117128719259e4f994b8574e0d48f83bc"
+        );
     }
 
-    /// XXH64, by which [`Grammar::hash`] is computed, as xxHash's reference
-    /// has it. First as xxHash 0.8.2's `xxhash.h` has it, through each
-    /// path: under 32 bytes, stripes of 32, and tails of 8, 4 and 1. Then
-    /// xxHash 0.8.3's own sanity check (`cli/xsum_sanity_check.c`, its
-    /// `XSUM_XXH64_testdata`), over the buffer its `XSUM_fillTestBuffer`
-    /// makes: each byte the top 8 bits of a 64-bit number that starts at
-    /// 2654435761 and is multiplied by 11400714785074694797 from one byte
-    /// to the next.
+    /// A table's text, `T` of [`rotate`]'s row with `note` its Note, so
+    /// that each table of a model built of them is another.
+    fn noted(note: &str) -> String {
+        format!("{}\n{}\n", HEADER.join("\t"), rotate(&[("Note", note)]))
+    }
+
+    /// A model's digest is the SHA-256 of the bytes its doc says, built
+    /// here apart from the loader: each table's name, `.tsv`, a newline
+    /// and its text, in byte order of `<name>.tsv`, so `B` before `a-b`
+    /// before `a` (`-` is before `.`), as `LC_ALL=C ls` lists them; read
+    /// from a folder, and from the same files in memory in any order.
     #[test]
-    fn xxh64_is_as_the_reference_has_it() {
-        let xxh64 = |data: &[u8], seed| XxHash64::oneshot(seed, data);
-        let big: Vec<u8> = (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
-        let cases: [(&[u8], u64, u64); 12] = [
-            (b"", 0, 0xef46db3751d8e999),
-            (b"a", 0, 0xd24ec4f1a98c6e5b),
-            (b"abc", 0, 0x44bc2cf5ad770999),
-            (b"abc", 1, 0xbea9ca8199328908),
-            (&big[..31], 0, 0xa2aa5f33cc4a6119),
-            (&big[..32], 0, 0x23c3c17ef790fd97),
-            (&big[..33], 0, 0x50a7cfc7ba588784),
-            (&big[..63], 0, 0x5e3e54b431c7493c),
-            (&big[..64], 0, 0x0eb64b3ef6eeb01f),
-            (&big[..65], 0, 0xa383b724b2bd12f1),
-            (&big[..100], 0, 0xa61f8d4c170fe531),
-            (&big[..1000], 0, 0x5f235fa033f1a3fb),
+    fn a_models_digest_is_sha256_of_its_tables_files_framed() {
+        let tables = [
+            ("a", noted("one")),
+            ("a-b", noted("two")),
+            ("B", noted("three")),
         ];
-        for (data, seed, want) in cases {
-            assert_eq!(xxh64(data, seed), want, "{} bytes, seed {seed}", data.len());
+        let mut framed = Vec::new();
+        for name in ["B", "a-b", "a"] {
+            let (_, text) = tables.iter().find(|(n, _)| *n == name).unwrap();
+            framed.extend_from_slice(format!("{name}.tsv\n{text}").as_bytes());
         }
-        const PRIME32: u64 = 2654435761;
-        const PRIME64: u64 = 11400714785074694797;
-        let next = |n: &u64| Some(n.wrapping_mul(PRIME64));
-        let sanity: Vec<u8> = std::iter::successors(Some(PRIME32), next)
-            .map(|n| (n >> 56) as u8)
-            .take(222)
-            .collect();
-        let cases: [(usize, u64, u64); 9] = [
-            (0, 0, 0xef46db3751d8e999),
-            (0, PRIME32, 0xac75fda2929b17ef),
-            (1, 0, 0xe934a84adb052768),
-            (1, PRIME32, 0x5014607643a9b4c3),
-            (4, 0, 0x9136a0dca57457ee),
-            (14, 0, 0x8282dcc4994e35c8),
-            (14, PRIME32, 0xc3bd6bf63deb6df0),
-            (222, 0, 0xb641ae8cb691c174),
-            (222, PRIME32, 0x20cb8ab7ae10c14a),
-        ];
-        for (len, seed, want) in cases {
-            let data = &sanity[..len];
-            assert_eq!(
-                xxh64(data, seed),
-                want,
-                "the sanity check's {len} bytes, seed {seed}"
-            );
+        let want: [u8; 32] = Sha256::digest(&framed).into();
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-arlington-digest-")
+            .tempdir()
+            .unwrap();
+        for (name, text) in &tables {
+            std::fs::write(dir.path().join(format!("{name}.tsv")), text).unwrap();
         }
+        let loaded = Grammar::load(dir.path()).unwrap();
+        assert_eq!(loaded.digest().as_bytes(), &want);
+        let in_memory = |order: &[usize]| {
+            let files = order.iter().map(|&i| File {
+                name: tables[i].0.to_string(),
+                label: format!("{}.tsv", tables[i].0).into(),
+                text: tables[i].1.as_str().into(),
+            });
+            Grammar::from_files(files).unwrap().digest()
+        };
+        for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2]] {
+            assert_eq!(in_memory(&order), loaded.digest(), "{order:?}");
+        }
+        let hex: String = want.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(loaded.digest().to_string(), hex);
+    }
+
+    /// A digest is written as 64 lowercase hex digits, by `Display` and
+    /// `Debug` alike, and its bytes are what it's compared, ordered and
+    /// hashed by.
+    #[test]
+    fn a_digest_is_written_in_64_lowercase_hex_digits() {
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(0x4B) ^ 0xA0;
+        }
+        let digest = Digest(bytes);
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex.len(), 64);
+        assert!(hex.bytes().any(|b| b.is_ascii_alphabetic()));
+        assert_eq!(digest.to_string(), hex);
+        assert_eq!(format!("{digest:?}"), hex);
+        assert_eq!(digest.as_bytes(), &bytes);
+        let copy = digest;
+        assert_eq!(copy, digest, "Copy");
+        let (low, high) = (Digest([0; 32]), Digest([0xFF; 32]));
+        let mut last = [0; 32];
+        last[31] = 1;
+        let mut first = [0; 32];
+        first[0] = 1;
+        assert!(low < Digest(last) && Digest(last) < Digest(first) && Digest(first) < high);
+        let set: HashSet<Digest> = [low, high, low].into_iter().collect();
+        assert_eq!(set.len(), 2);
+        let model = Grammar::embedded();
+        let debug = format!("{model:?}");
+        assert!(
+            debug.contains(&format!("digest: {}", model.digest())),
+            "{debug}"
+        );
+    }
+
+    /// A table whose name holds a tab, a line feed or a carriage return
+    /// doesn't load: from a folder, before its file is read (here a
+    /// folder, which doesn't read), and from files in memory, each said by
+    /// its path's `Debug`.
+    #[test]
+    fn a_tables_name_with_a_tab_or_a_line_break_is_refused() {
+        let why = "a table's name can't hold a tab or a line break, \
+                   which the model's hash would read as a table's text";
+        for name in ["A\tB", "A\nB", "A\rB", "\t", "A\n"] {
+            let file = |name: &str| File {
+                name: name.to_string(),
+                label: format!("{name}.tsv").into(),
+                text: noted("").into(),
+            };
+            let Err(e) = Grammar::from_files([file("Z"), file(name)]) else {
+                panic!("{name:?} loaded");
+            };
+            let label = PathBuf::from(format!("{name}.tsv"));
+            assert_eq!(e.to_string(), format!("{label:?}: {why}"), "{name:?}");
+            assert!(matches!(e, Error::Separator { path } if path == label));
+        }
+        // A name of a folder's file, where the file system takes one.
+        #[cfg(target_os = "linux")]
+        {
+            let dir = tempfile::Builder::new()
+                .prefix("pdf-arlington-names-")
+                .tempdir()
+                .unwrap();
+            for (i, name) in ["A\tB", "A\nB", "A\rB"].into_iter().enumerate() {
+                let folder = dir.path().join(i.to_string());
+                std::fs::create_dir(&folder).unwrap();
+                std::fs::write(folder.join("Z.tsv"), noted("")).unwrap();
+                let table = folder.join(format!("{name}.tsv"));
+                std::fs::create_dir(&table).unwrap();
+                let e = Grammar::load(&folder).unwrap_err();
+                assert_eq!(e.to_string(), format!("{table:?}: {why}"), "{name:?}");
+                std::fs::remove_dir(&table).unwrap();
+                std::fs::write(&table, noted("")).unwrap();
+                let e = Grammar::load(&folder).unwrap_err();
+                assert_eq!(e.to_string(), format!("{table:?}: {why}"), "{name:?}");
+            }
+        }
+    }
+
+    /// Models are equal, and hash alike, by their digests: the embedded
+    /// model and a load of its tables written out are one, upstream's
+    /// tables another, and upstream's with one Note changed a third, of as
+    /// many tables.
+    #[test]
+    // What a model keeps of its predicates is behind a lock, which the
+    // lint reads as a key that can change; its hash and equality read the
+    // digest alone, which can't.
+    #[allow(clippy::mutable_key_type)]
+    fn models_are_equal_by_their_digests() {
+        let embedded = Grammar::embedded();
+        assert_eq!(embedded, embedded);
+        let temp = tempfile::Builder::new()
+            .prefix("pdf-arlington-equal-")
+            .tempdir()
+            .unwrap();
+        let written = temp.path().join("embedded");
+        std::fs::create_dir(&written).unwrap();
+        for &(name, text) in model::TABLES {
+            std::fs::write(written.join(format!("{name}.tsv")), text).unwrap();
+        }
+        let copy = Grammar::load(&written).unwrap();
+        assert_eq!(copy, *embedded);
+        let upstream = Grammar::load(&dir().join("tsv/latest")).unwrap();
+        assert_ne!(upstream, *embedded);
+        let edited = temp.path().join("edited");
+        std::fs::create_dir(&edited).unwrap();
+        for entry in std::fs::read_dir(dir().join("tsv/latest")).unwrap() {
+            let path = entry.unwrap().path();
+            let mut text = std::fs::read_to_string(&path).unwrap();
+            if path.file_name().unwrap() == "Catalog.tsv" {
+                // The last row's Note, its last cell, a word longer.
+                assert_eq!(text.pop(), Some('\n'));
+                text.push_str(" edited\n");
+            }
+            std::fs::write(edited.join(path.file_name().unwrap()), text).unwrap();
+        }
+        let edited = Grammar::load(&edited).unwrap();
+        assert_eq!(edited.tables().count(), upstream.tables().count());
+        assert_ne!(edited, upstream);
+        let models: HashSet<&Grammar> = [embedded, &copy, &upstream, &edited].into_iter().collect();
+        assert_eq!(models.len(), 3);
     }
 
     /// A model keeps its rows' predicates parsed only once a file given it
@@ -1158,6 +1499,116 @@ mod tests {
         assert_eq!(inks, expected.map(Some));
         assert_eq!(key("ArrayOfQuadPoints", At::Index(17)), Some("1*"));
         assert_eq!(key("ArrayOfAnnots", At::Index(4)), Some("*"));
+    }
+
+    /// The tables walked by `next` and by `fold` alike, in order of name;
+    /// from the back by `next_back` and by `rfold`, and from both ends at
+    /// once; each walk knowing how many are left, and giving none after
+    /// its last.
+    #[test]
+    fn the_tables_are_walked_alike_every_way() {
+        let g = Grammar::embedded();
+        let names: Vec<&str> = g.tables.keys().map(String::as_str).collect();
+        let n = names.len();
+        let backwards: Vec<&str> = names.iter().rev().copied().collect();
+        let name = |table: &'static Table| table.name.as_str();
+        let push = |mut all: Vec<&'static str>, table: &'static Table| {
+            all.push(name(table));
+            all
+        };
+        let mut tables = g.tables();
+        assert_eq!((tables.len(), tables.size_hint()), (n, (n, Some(n))));
+        assert_eq!(format!("{tables:?}"), format!("Tables {{ left: {n} }}"));
+        // By `next` alone, as `from_fn` asks for each.
+        let by_next: Vec<&str> = std::iter::from_fn(|| tables.next()).map(name).collect();
+        assert_eq!(by_next, names);
+        assert_eq!((tables.len(), tables.size_hint()), (0, (0, Some(0))));
+        assert!(tables.next().is_none() && tables.next_back().is_none());
+        assert_eq!(format!("{tables:?}"), "Tables { left: 0 }");
+        assert_eq!(g.tables().fold(Vec::new(), push), names);
+        let mut back = g.tables();
+        let by_next_back: Vec<&str> = std::iter::from_fn(|| back.next_back()).map(name).collect();
+        assert_eq!(by_next_back, backwards);
+        assert_eq!(g.tables().rfold(Vec::new(), push), backwards);
+        assert_eq!(g.tables().rev().fold(Vec::new(), push), backwards);
+        assert_eq!(g.tables().count(), n);
+        assert_eq!(g.tables().last().map(name), names.last().copied());
+        assert_eq!(g.tables().nth(2).map(name), Some(names[2]));
+        // From both ends at once, a clone going on alone.
+        let mut both = g.tables();
+        assert_eq!(both.next().map(name), Some(names[0]));
+        assert_eq!(both.next_back().map(name), Some(names[n - 1]));
+        assert_eq!(both.len(), n - 2);
+        let rest = both.clone();
+        assert_eq!(both.fold(Vec::new(), push), names[1..n - 1]);
+        assert_eq!(rest.len(), n - 2);
+        for (table, name) in g.tables().zip(&names) {
+            assert_eq!(table.name, *name);
+            assert!(std::ptr::eq(table, g.table(name).unwrap()));
+        }
+    }
+
+    /// [`ArlType::ALL`] and [`WrapFn::ALL`] hold every variant once, in the
+    /// order its enum lists them, each at its own discriminant's place, and
+    /// end at the enum's last, which a match the compiler holds whole says:
+    /// so a variant more doesn't build here until it's said where it goes.
+    /// Each reads back from its name, the types in their names' order.
+    #[test]
+    fn each_all_holds_every_variant_once_in_order() {
+        for (i, &t) in ArlType::ALL.iter().enumerate() {
+            assert_eq!(t as usize, i, "{t:?}");
+            assert_eq!(ArlType::named(t.name()), Some(t), "{t:?}");
+        }
+        let last = |t: ArlType| match t {
+            ArlType::StringText => true,
+            ArlType::Array
+            | ArlType::Bitmask
+            | ArlType::Boolean
+            | ArlType::Date
+            | ArlType::Dictionary
+            | ArlType::Integer
+            | ArlType::Matrix
+            | ArlType::Name
+            | ArlType::NameTree
+            | ArlType::Null
+            | ArlType::Number
+            | ArlType::NumberTree
+            | ArlType::Rectangle
+            | ArlType::Stream
+            | ArlType::String
+            | ArlType::StringAscii
+            | ArlType::StringByte => false,
+        };
+        assert!(ArlType::ALL.last().copied().is_some_and(last));
+        assert!(ArlType::ALL.is_sorted_by_key(|t| t.name()));
+        assert_eq!(ArlType::named("nonesuch"), None);
+        for (i, &f) in WrapFn::ALL.iter().enumerate() {
+            assert_eq!(f as usize, i, "{f:?}");
+            let read = WrapFn::ALL.iter().copied().find(|g| g.name() == f.name());
+            assert_eq!(read, Some(f), "{f:?}");
+        }
+        let last = |f: WrapFn| match f {
+            WrapFn::Extension => true,
+            WrapFn::SinceVersion
+            | WrapFn::BeforeVersion
+            | WrapFn::IsPDFVersion
+            | WrapFn::Deprecated => false,
+        };
+        assert!(WrapFn::ALL.last().copied().is_some_and(last));
+    }
+
+    /// What's `const` makes a constant: a type's name and a wrapping
+    /// predicate's, a comparison's symbol and an operator's, and the trees'
+    /// default caps.
+    #[test]
+    fn const_fns_make_constants() {
+        use crate::predicate::{Arith, Cmp, Limits};
+        const NAMES: [&str; 2] = [ArlType::NameTree.name(), WrapFn::IsPDFVersion.name()];
+        const SYMBOLS: [&str; 2] = [Cmp::Le.symbol(), Arith::Mod.symbol()];
+        const CAPS: Limits = Limits::DEFAULT;
+        assert_eq!(NAMES, ["name-tree", "IsPDFVersion"]);
+        assert_eq!(SYMBOLS, ["<=", " mod "]);
+        assert_eq!(CAPS, Limits::default());
     }
 
     #[test]

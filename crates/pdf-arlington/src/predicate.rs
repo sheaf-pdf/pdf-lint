@@ -39,9 +39,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::BuildHasher;
 use std::num::ParseIntError;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 
 use pdf_color::Colorant;
 use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, SmallBytes, Span, Str, Value, Version};
@@ -126,16 +125,80 @@ pub const STANDARD_14: [&str; 14] = [
 
 /// How deep a predicate may nest, in brackets and calls. The model's
 /// deepest is 5 brackets deep (the census test prints it).
-const DEPTH: usize = 32;
+pub(crate) const DEPTH: usize = 32;
 
-/// How many references a value may go through to its object.
+/// How many objects a value is read through to its own, itself the first:
+/// so it goes through 31 references at most, and past them it's null
+/// wherever a value is read, as one the file hasn't is, but in a name tree
+/// or on the way to one, which isn't then read whole (`fn:InNameTree`). So
+/// it isn't a caller's to lower, as a [`Limits`] is: a value read as null
+/// past it is a guess.
 const HOPS: usize = 32;
 
-/// How deep a name tree's `/Kids`, the structure tree, or the form's
-/// fields, may go, and how many nodes each may have, before the rest of
-/// it is left unread.
-const TREE_DEPTH: usize = 32;
-const TREE_NODES: usize = 100_000;
+/// The caps on the walks of a file's trees the predicates read: past one,
+/// what's left isn't read, and what a predicate asks of it is unknown,
+/// never guessed. Each walk is iterative, so no cap is the stack's, and
+/// reads each node once and each array once (the structure tree's once
+/// under each page it's reached from), so what it costs is what its caps
+/// let, beside the arrays the file holds. A caller sets them on a copy of
+/// [`Limits::DEFAULT`] (`limits.tree_depth = 16`, say), as more may come,
+/// and gives them to a file ([`FileCx::limits`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+    /// How many levels below its root a name tree's `/Kids` are read
+    /// (`fn:InNameTree`): 2,048 by default. Each node, and each `/Kids`
+    /// and `/Names` array however many nodes hold it, is read once, so its
+    /// depth costs nothing its nodes and the file's arrays don't.
+    pub tree_depth: usize,
+    /// How many of a name tree's nodes are read: 100,000 by default.
+    pub tree_nodes: usize,
+    /// How many levels below `/Fields` the form's fields are read, an
+    /// array and a field each a level (`fn:IsFullyQualifiedFieldName`):
+    /// 2,048 by default. Each is read once, so its depth costs nothing its
+    /// nodes don't but the longer names it makes, which
+    /// [`field_bytes`](Limits::field_bytes) bounds.
+    pub field_depth: usize,
+    /// How many of the form's fields are read, its arrays among them, each
+    /// once: 100,000 by default.
+    pub field_nodes: usize,
+    /// How many bytes of the fields' fully qualified names are made, each
+    /// counted before it's made: 16 MiB by default. A field's name is its
+    /// parent's, a period and its own partial name, so a deep form of long
+    /// names makes far more than it holds, and this, not the depth, is
+    /// what bounds them.
+    pub field_bytes: usize,
+    /// How many levels below the structure tree's root are read, an array
+    /// and an element each a level (`fn:ImageIsStructContentItem`,
+    /// `fn:PageContainsStructContentItems`): 8,192 by default.
+    pub structure_depth: usize,
+    /// How many of the structure tree's dictionaries are read, each once,
+    /// and of the kids of an array read again, under a page other than
+    /// those it's been read under, each counted before it's read:
+    /// 1,000,000 by default. An array is read again so, as its
+    /// marked-content identifiers are on the page of the element it's
+    /// reached from, and under a page it's been read under, not at all.
+    pub structure_nodes: usize,
+}
+
+impl Limits {
+    /// The caps a file's trees are read under unless it's given others.
+    pub const DEFAULT: Limits = Limits {
+        tree_depth: 2048,
+        tree_nodes: 100_000,
+        field_depth: 2048,
+        field_nodes: 100_000,
+        field_bytes: 16 << 20,
+        structure_depth: 8192,
+        structure_nodes: 1_000_000,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits::DEFAULT
+    }
+}
 
 /// How near two numbers are equal: TestGrammar's `ArlNumberTolerance`,
 /// half the fifth digit old PDF specifications recommended.
@@ -145,6 +208,9 @@ const AND: &str = " && ";
 const OR: &str = " || ";
 
 /// A predicate, or a part of one.
+///
+/// Not exhaustive: the language is upstream's, which may grow a form, so a
+/// match on it takes a wildcard, and a form more is a minor release.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Expr {
@@ -178,6 +244,10 @@ pub enum Expr {
 }
 
 /// A comparison.
+///
+/// Exhaustive on purpose: these are the six a comparison can be, each its
+/// own question of an order, so a match on the six is checked by the
+/// compiler; another would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmp {
     /// `==`.
@@ -195,7 +265,12 @@ pub enum Cmp {
 }
 
 /// An arithmetic operator.
+///
+/// Not exhaustive: the language's operators are upstream's, which may add
+/// one, so a match on them takes a wildcard, and an operator more is a
+/// minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Arith {
     /// `+`.
     Add,
@@ -210,7 +285,11 @@ pub enum Arith {
 /// A path through objects: keys and array indices between `::`, the
 /// last maybe `@`, the value there (INTERNAL_GRAMMAR.md, "Validation of
 /// predicates").
+///
+/// Not exhaustive: read by its fields, and never built outside this crate
+/// ([`parse`] makes it), so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Path {
     /// Where it starts.
     pub base: Base,
@@ -225,7 +304,12 @@ pub struct Path {
 }
 
 /// Where a path starts.
+///
+/// Not exhaustive: the language is upstream's, which may start a path
+/// elsewhere, so a match on it takes a wildcard, and a start more is a
+/// minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Base {
     /// The object the row is in.
     Here,
@@ -237,6 +321,10 @@ pub enum Base {
 }
 
 /// What a predicate comes to.
+///
+/// Exhaustive on purpose: a predicate holds, doesn't, or can't be told,
+/// and a checker counts each its own way, so a match on the three is
+/// checked by the compiler; a fourth would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Truth {
     /// It holds.
@@ -245,7 +333,9 @@ pub enum Truth {
     False,
     /// It can't be told, for the first thing in the way: a function the
     /// evaluator doesn't support (`fn:BitsClear`), or a value it can't read
-    /// (`@Type`, which the object lacks, with no default to stand in).
+    /// (`@Type`, which the object lacks, with no default to stand in); or
+    /// the text, as written, where it doesn't parse or isn't the call its
+    /// cell asks for, an empty one as `an empty predicate`. Never empty.
     Unknown(String),
 }
 
@@ -255,8 +345,9 @@ pub enum Truth {
 /// it's given one ([`FileCx::grammar`]), which keeps their predicates
 /// parsed; and what the predicates read of the file as a whole (its name
 /// trees' keys, its structure tree's content items, its form's fields'
-/// names), kept inside it once read, the first kept where two threads read
-/// one at once. [`FileCx::at`] makes a row's [`Cx`] from it. It's shared
+/// names), read under the caps it's given ([`FileCx::limits`]) and kept
+/// inside it once read, the first kept where two threads read one at
+/// once. [`FileCx::at`] makes a row's [`Cx`] from it. It's shared
 /// across threads when its resolver is `Sync`, each thread making its
 /// rows' [`Cx`]s there.
 ///
@@ -271,10 +362,19 @@ pub enum Truth {
 /// An object its resolver gives none for is null to the predicates, as
 /// one the file hasn't is (ISO 32000-2, 7.3.10), whatever the reason: over
 /// a reading by position, one whose bytes the source failed to give is
-/// null in that row, and missing from any tree read then, which is kept
-/// so. pdf-structure's `Reading::failed_resolves` counts those, for a caller
-/// to learn that some were, and what asks of a resolver itself can ask why
-/// (`Resolve::try_resolve`).
+/// null in that row, and missing from the form's fields and the structure
+/// tree read then, which are kept so. pdf-structure's
+/// `Reading::failed_resolves` counts those, for a caller to learn that some
+/// were. `fn:InNameTree` alone asks why (`Resolve::try_resolve`), of each
+/// reference on the way to its name tree and in it, the row's own value
+/// aside: where one doesn't read, by a cap, a password, damage or the
+/// source, or a chain of references runs past those a value is followed
+/// through, the tree isn't read whole, as pdf-semantics' `tree::names` has
+/// it, and a key its readable part doesn't hold is unknown, not false. A
+/// tree is kept as it was read, not whole for a source's failure too, as
+/// what a `FileCx` reads once isn't read again for each row that asks: a
+/// caller whose source may give the bytes if asked again asks through
+/// another `FileCx`.
 ///
 /// Those it keeps know an object by where it was written and by its
 /// number, so the spans of the objects it's given, and of those its
@@ -312,6 +412,8 @@ pub struct FileCx<'a, R: ?Sized = dyn Resolve<'a> + 'a> {
     /// The model whose rows' predicates it's asked, which parses each once,
     /// when given ([`FileCx::grammar`]).
     grammar: Option<&'a Grammar>,
+    /// The caps its trees are read under ([`FileCx::limits`]).
+    limits: Limits,
     /// An indirect object; none for one the file hasn't, which is null
     /// (ISO 32000-2, 7.3.10). Last, so that a `FileCx` of any resolver is
     /// read through one of `dyn Resolve` ([`Cx`]'s).
@@ -324,7 +426,9 @@ static NO_EXTENSIONS: BTreeSet<String> = BTreeSet::new();
 
 impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     /// A file of `trailer` at `version`, whose references `resolve` gives
-    /// the objects of; of no known length, checked under no extension.
+    /// the objects of; of no known length, checked under no extension, its
+    /// trees read under [`Limits::DEFAULT`].
+    #[must_use]
     pub fn new(trailer: &'a Dict, version: Version, resolve: R) -> FileCx<'a, R> {
         FileCx {
             trailer,
@@ -337,6 +441,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
             pages: None,
             latin: None,
             grammar: None,
+            limits: Limits::DEFAULT,
             resolve,
         }
     }
@@ -394,10 +499,20 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
         self
     }
 
+    /// The caps the file's trees are read under, which the predicates that
+    /// read a tree read: past one, a key, a name or an item the part read
+    /// doesn't hold is unknown. Unless given, [`Limits::DEFAULT`].
+    #[must_use = "it gives the FileCx back, with the caps"]
+    pub fn limits(mut self, limits: Limits) -> FileCx<'a, R> {
+        self.limits = limits;
+        self
+    }
+
     /// The row at `at` in `container`, the dictionary, array or stream its
     /// value is in: reached through no parents, with no defaults, and of
     /// no number, until [`Cx::parents`], [`Cx::defaults`] and [`Cx::id`]
     /// say.
+    #[must_use]
     pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a>
     where
         R: 'c,
@@ -417,6 +532,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
 impl<'a> FileCx<'a> {
     /// The row at `at` in `container`, as one over its resolver's own type
     /// makes it.
+    #[must_use]
     pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a> {
         Cx {
             file: self,
@@ -435,16 +551,21 @@ impl<R: ?Sized> FileCx<'_, R> {
     /// the file's checked under ([`FileCx::extensions`]), and through its
     /// model when it's given one ([`FileCx::grammar`]). The file's own: it
     /// says another where another file is checked under other extensions.
+    #[must_use]
     pub fn since(&self, cell: &str) -> Since {
         since_in(cell, self.extensions, self.grammar)
     }
 }
 
-/// Its parts but its resolver, which needn't be one that can be shown.
+/// Its parts but its resolver, which needn't be one that can be shown,
+/// and none of the file's values, which may be decrypted: the trailer by
+/// its count of entries, and what it keeps of the file's trees (the name
+/// trees' keys, the structure tree's content items, the fields' names) by
+/// their counts; the pages by their count, and the model by its digest.
 impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileCx")
-            .field("trailer", &self.trailer)
+            .field("trailer", &format_args!("{} entries", self.trailer.len()))
             .field("version", &self.version)
             .field("size", &self.size)
             .field("extensions", &self.extensions)
@@ -453,7 +574,8 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
             .field("fields", &self.fields)
             .field("pages", &self.pages.map(<[_]>::len))
             .field("latin", &self.latin.is_some())
-            .field("grammar", &self.grammar)
+            .field("grammar", &self.grammar.map(Grammar::digest))
+            .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
 }
@@ -491,6 +613,7 @@ impl Latin {
     /// What's said of the descriptor that's object `id`, by its number
     /// alone, or without one of that written at `at`; none where nothing
     /// is.
+    #[must_use]
     pub fn get(&self, id: Option<ObjectId>, at: Option<Span>) -> Option<bool> {
         match (id, at) {
             (Some(id), _) => self.ids.get(&id).copied(),
@@ -557,50 +680,102 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// its number when [`Cx::id`] gives it, and else by where it was
     /// written, its span; not by where it's kept, so a copy is known as the
     /// object it copies while it has its span or its number.
+    #[must_use]
     pub fn container(&self) -> &'c Object {
         self.container
     }
 
     /// Where in the container the row is: the key or element it matched,
     /// which `@*` and `@1*` read.
+    #[must_use]
     pub fn at(&self) -> At<'c> {
         self.at
     }
 }
 
-/// Its row's parts, and the defaults' table by name; not its file.
+/// Its row's place: the container and each parent by kind and where it
+/// was written, the number [`Cx::id`] gives, the key or element, and the
+/// defaults' table by name; not their values, which are the file's and may
+/// be decrypted, nor its file.
 impl fmt::Debug for Cx<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parents: Vec<Shape> = self.parents.iter().map(|&parent| Shape(parent)).collect();
         f.debug_struct("Cx")
-            .field("container", &self.container)
+            .field("container", &Shape(self.container))
             .field("id", &self.id)
             .field("at", &self.at)
-            .field("parents", &self.parents)
+            .field("parents", &parents)
             .field("defaults", &self.defaults.map(|table| &table.name))
             .finish_non_exhaustive()
     }
 }
 
+/// An object as a `Debug` that holds none of a file's values shows it: its
+/// kind, as [`Value`] names it, and where it was written.
+struct Shape<'o>(&'o Object);
+
+impl fmt::Debug for Shape<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.0.value() {
+            Value::Null => "Null",
+            Value::Bool(_) => "Bool",
+            Value::Integer(_) => "Integer",
+            Value::Real(_) => "Real",
+            Value::Name(_) => "Name",
+            Value::String(..) => "String",
+            Value::Array(_) => "Array",
+            Value::Dict(_) => "Dict",
+            Value::Stream(_) => "Stream",
+            Value::Ref(_) => "Ref",
+        };
+        f.debug_struct(kind).field("at", &self.0.at()).finish()
+    }
+}
+
 /// The interactive form's fields' fully qualified names, kept once read,
 /// the first kept where two threads read them at once.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Fields(OnceLock<Names>);
+
+/// The names once read, as [`Names`] shows them; none before.
+impl fmt::Debug for Fields {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.get().fmt(f)
+    }
+}
 
 /// Fields' fully qualified names, as text, and whether they're all of
 /// them: every field read, and every partial name a string whose text
 /// the reader gave.
-#[derive(Debug)]
 struct Names {
-    names: HashSet<String>,
+    names: HashSet<Arc<str>>,
     whole: bool,
+}
+
+/// How many names, and whether they're all; not the names, which are the
+/// file's strings.
+impl fmt::Debug for Names {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Names")
+            .field("names", &self.names.len())
+            .field("whole", &self.whole)
+            .finish()
+    }
 }
 
 /// The structure tree's content items, kept once read, the first kept
 /// where two threads read them at once. It knows the
 /// objects it found by where they were written, or their numbers
 /// ([`Known`]), so it serves one file.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Structure(OnceLock<Items>);
+
+/// The items once read, as [`Items`] shows them; none before.
+impl fmt::Debug for Structure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.get().fmt(f)
+    }
+}
 
 /// What the structure tree says of its content items (ISO 32000-2,
 /// 14.7.5): the objects its object references (OBJR) point at, and the
@@ -613,7 +788,6 @@ struct Items {
 
 /// The objects content items of one kind name, each as it's [`Known`],
 /// and whether they're all of them.
-#[derive(Debug)]
 struct Objects {
     /// The numbers of those named by reference.
     ids: HashSet<ObjectId>,
@@ -624,6 +798,19 @@ struct Objects {
     /// Whether they're all of them: every node read, and every item's
     /// object found.
     whole: bool,
+}
+
+/// How many of each, and whether they're all; not the numbers and places
+/// themselves, which may be many.
+impl fmt::Debug for Objects {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Objects")
+            .field("ids", &self.ids.len())
+            .field("spans", &self.spans.len())
+            .field("unplaced", &self.unplaced)
+            .field("whole", &self.whole)
+            .finish()
+    }
 }
 
 impl Objects {
@@ -690,8 +877,22 @@ struct Known {
 /// is read each time it's asked of. Not by where it's kept: a root in a
 /// container given for a row may be dropped after it, and another root
 /// take its place.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Trees(Mutex<HashMap<Known, Arc<Tree>>>);
+
+/// Each tree kept, as [`Tree`] shows it, in no order; `<locked>` while a
+/// thread reads them, as std's `Mutex` shows itself.
+impl fmt::Debug for Trees {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.try_lock() {
+            Ok(trees) => f.debug_list().entries(trees.values()).finish(),
+            Err(TryLockError::Poisoned(trees)) => {
+                f.debug_list().entries(trees.get_ref().values()).finish()
+            }
+            Err(TryLockError::WouldBlock) => f.write_str("<locked>"),
+        }
+    }
+}
 
 impl Trees {
     /// The trees read so far. A map that a panic poisoned is read as it
@@ -703,13 +904,27 @@ impl Trees {
 
 /// A name tree's keys, and whether they're all of them: every node read,
 /// and every key a string whose bytes the reader gave.
-#[derive(Debug)]
 struct Tree {
     keys: HashSet<SmallBytes>,
     whole: bool,
 }
 
+/// How many keys, and whether they're all; not the keys, which are the
+/// file's strings.
+impl fmt::Debug for Tree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tree")
+            .field("keys", &self.keys.len())
+            .field("whole", &self.whole)
+            .finish()
+    }
+}
+
 /// What a type's IndirectReference cell asks of its value.
+///
+/// Exhaustive on purpose: a value is asked to be direct, indirect or
+/// either, or what's asked can't be told, so a match on the four is
+/// checked by the compiler; another would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reference {
     /// That it be direct.
@@ -723,6 +938,10 @@ pub enum Reference {
 }
 
 /// When a key came in: its SinceVersion cell.
+///
+/// Exhaustive on purpose: a key came in with a version or an extension,
+/// or its cell can't be read, so a match on the three is checked by the
+/// compiler; another would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Since {
     /// In this version.
@@ -730,12 +949,17 @@ pub enum Since {
     /// With this extension, and in no version, the file not being checked
     /// under it (not among the extensions [`since`] is given).
     Extension(String),
-    /// A cell the reader doesn't read.
+    /// A cell the reader doesn't read, as written, an empty one as `an
+    /// empty predicate`.
     Unknown(String),
 }
 
 /// What the version predicates around a type, a value or a link make of
 /// it at a file's version.
+///
+/// Exhaustive on purpose: an item is let in, let in and deprecated, or
+/// kept out, so a match on the three is checked by the compiler; another
+/// would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
     /// Allowed at the file's version, under its extensions.
@@ -752,6 +976,7 @@ pub enum Gate {
 /// `FALSE`, or `fn:IsRequired(cond)`, required when `cond` is true and
 /// optional when it's false, or when nothing in it applies at the file's
 /// version.
+#[must_use]
 pub fn required(cell: &str, cx: &Cx) -> Truth {
     match cell {
         "TRUE" => return Truth::True,
@@ -760,11 +985,11 @@ pub fn required(cell: &str, cx: &Cx) -> Truth {
     }
     let expr = parsed(cell, cx.file.grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
-        return Truth::Unknown(cell.to_string());
+        return Truth::Unknown(unknown_by(cell));
     };
     match (f.as_str(), &args[..]) {
         ("fn:IsRequired", [cond]) => truth(cond, cx).truth(false),
-        _ => Truth::Unknown(cell.to_string()),
+        _ => Truth::Unknown(unknown_by(cell)),
     }
 }
 
@@ -772,10 +997,11 @@ pub fn required(cell: &str, cx: &Cx) -> Truth {
 /// "Column 10 - SpecialCase": true valid, false invalid), or an `fn:Eval`
 /// among its PossibleValues. Met when nothing in it applies at the file's
 /// version.
+#[must_use]
 pub fn holds(text: &str, cx: &Cx) -> Truth {
     match &*parsed(text, cx.file.grammar) {
         Ok(expr) => truth(expr, cx).truth(true),
-        Err(_) => Truth::Unknown(text.to_string()),
+        Err(_) => Truth::Unknown(unknown_by(text)),
     }
 }
 
@@ -784,6 +1010,7 @@ pub fn holds(text: &str, cx: &Cx) -> Truth {
 /// `fn:MustBeDirect()` and `fn:MustBeIndirect()` that it be direct or
 /// indirect, and with a condition, that when it holds; when it doesn't, or
 /// nothing in it applies at the file's version, nothing.
+#[must_use]
 pub fn reference(cell: &str, cx: &Cx) -> Reference {
     match cell {
         "TRUE" => return Reference::Indirect,
@@ -792,17 +1019,17 @@ pub fn reference(cell: &str, cx: &Cx) -> Reference {
     }
     let expr = parsed(cell, cx.file.grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
-        return Reference::Unknown(cell.to_string());
+        return Reference::Unknown(unknown_by(cell));
     };
     let must = match f.as_str() {
         "fn:MustBeDirect" => Reference::Direct,
         "fn:MustBeIndirect" => Reference::Indirect,
-        _ => return Reference::Unknown(cell.to_string()),
+        _ => return Reference::Unknown(unknown_by(cell)),
     };
     let applies = match &args[..] {
         [] => Tri::Is(true),
         [cond] => truth(cond, cx),
-        _ => return Reference::Unknown(cell.to_string()),
+        _ => return Reference::Unknown(unknown_by(cell)),
     };
     match applies {
         Tri::Is(true) => must,
@@ -818,6 +1045,7 @@ pub fn reference(cell: &str, cx: &Cx) -> Reference {
 /// extension's from `v` and standard from `w`, the earlier of the two
 /// when X is one of `extensions`, else `w` (TestGrammar without X in its
 /// `--extensions`). [`FileCx::since`] reads it under a file's extensions.
+#[must_use]
 pub fn since(cell: &str, extensions: &BTreeSet<String>) -> Since {
     since_in(cell, extensions, None)
 }
@@ -827,7 +1055,7 @@ fn since_in(cell: &str, extensions: &BTreeSet<String>, grammar: Option<&Grammar>
     if let Some(v) = version(cell) {
         return Since::In(v);
     }
-    let unread = || Since::Unknown(cell.to_string());
+    let unread = || Since::Unknown(unknown_by(cell));
     let expr = parsed(cell, grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
         return unread();
@@ -866,6 +1094,7 @@ fn since_in(cell: &str, extensions: &BTreeSet<String>, grammar: Option<&Grammar>
 /// deprecation "is allowed/permitted but is strongly recommended
 /// against"); and `fn:Extension` lets it in under one of `extensions`
 /// only.
+#[must_use]
 pub fn gate(wraps: &[Wrap], file: Version, extensions: &BTreeSet<String>) -> Gate {
     let mut deprecated: Option<Version> = None;
     for wrap in wraps {
@@ -890,19 +1119,30 @@ pub fn gate(wraps: &[Wrap], file: Version, extensions: &BTreeSet<String>) -> Gat
     deprecated.map_or(Gate::Allowed, Gate::AllowedDeprecated)
 }
 
+/// What's unknown by a text the evaluator can't read, or that isn't the
+/// call its cell asks for: the text, as written, or for an empty one, which
+/// would say nothing, `an empty predicate`.
+fn unknown_by(text: &str) -> String {
+    match text {
+        "" => "an empty predicate".to_string(),
+        _ => text.to_string(),
+    }
+}
+
 /// [`holds`], when every function in `text` is [`SUPPORTED`]: else
 /// unknown, by the first that isn't, even where the rest would decide
 /// it. TestGrammar takes a predicate it hasn't wholly implemented as no
 /// verdict either way (its `WasFullyImplemented`, which ParseObjects.cpp's
 /// `check_everything` reads); the checker's rules read SpecialCase and
 /// PossibleValues so.
+#[must_use]
 pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
     let fully = |parse: &Result<Expr, Error>, unsupported: Option<&str>| match parse {
         Ok(expr) => match unsupported {
             Some(f) => Truth::Unknown(f.to_string()),
             None => truth(expr, cx).truth(true),
         },
-        Err(_) => Truth::Unknown(text.to_string()),
+        Err(_) => Truth::Unknown(unknown_by(text)),
     };
     let kept = (cx.file.grammar).and_then(|grammar| grammar.parses().find(text));
     match kept {
@@ -919,6 +1159,7 @@ pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
 /// evaluates to true"): whether the condition holds, read as
 /// [`holds_fully`] reads a predicate, and the value, as the model writes
 /// it. None for any other item.
+#[must_use]
 pub fn required_value(text: &str, cx: &Cx) -> Option<(Truth, String)> {
     let expr = parsed(text, cx.file.grammar);
     let Ok(Expr::Call(f, args)) = &*expr else {
@@ -941,6 +1182,7 @@ pub fn required_value(text: &str, cx: &Cx) -> Option<(Truth, String)> {
 /// the row: `fn:Ignore` when its condition holds, or always;
 /// `fn:IsMeaningful` when its condition doesn't. False where the note
 /// doesn't apply at the file's version; none for any other SpecialCase.
+#[must_use]
 pub fn ignored(text: &str, cx: &Cx) -> Option<Truth> {
     let expr = parsed(text, cx.file.grammar);
     let Ok(expr) = &*expr else {
@@ -1002,8 +1244,13 @@ fn unsupported(e: &Expr) -> Option<&str> {
     }
 }
 
-/// `text`, the whole of it, parsed. An [`Error`] says the predicate, then
-/// what stopped it and where.
+/// `text`, the whole of it, parsed.
+///
+/// # Errors
+///
+/// An [`Error`] where it isn't a predicate, or is one nested deeper than
+/// the parser goes: the predicate, then what stopped the parser, and where
+/// when it knows.
 pub fn parse(text: &str) -> Result<Expr, Error> {
     #[cfg(test)]
     PARSED.with(|n| n.set(n.get() + 1));
@@ -1118,7 +1365,7 @@ impl Parses {
 
     /// The texts it keeps.
     #[cfg(test)]
-    fn kept(&self) -> BTreeSet<&str> {
+    pub(crate) fn kept(&self) -> BTreeSet<&str> {
         let slots = self.slots.iter().filter_map(OnceLock::get);
         slots.map(|kept| &*kept.text).collect()
     }
@@ -1635,9 +1882,10 @@ fn walk<'c>(p: &Path, keys: &[String], cx: &Cx<'c, '_>) -> Result<Option<&'c Obj
 /// key, not an index: an array holds no keys, and what a key means there
 /// is what holds the array. An object reference in a structure element's
 /// `/K` array has the array as its parent, but its `parent::Pg` is the
-/// element's (ISO 32000-2, 14.7.5.3: "the page on which the object is
-/// shown, if not the structure element's /Pg"), while a DeviceN
-/// colourspace's attributes' `parent::1` indexes the array itself.
+/// element's (ISO 32000-2, 14.7.5.3: an object reference's own `/Pg`,
+/// where it has one, says the page its object is on, and the element's
+/// says it where it hasn't), while a DeviceN colourspace's attributes'
+/// `parent::1` indexes the array itself.
 fn parent<'c>(n: usize, keys: &[String], cx: &Cx<'c, '_>) -> Option<&'c Object> {
     let mut at = n.checked_sub(1)?;
     let by_key = keys
@@ -1669,7 +1917,7 @@ fn step<'c>(o: &'c Object, key: &str, cx: &Cx<'c, '_>) -> Option<Option<&'c Obje
 }
 
 /// `o`'s entry at `at`, a stream's from its dictionary; none for null.
-fn value_at<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
+pub(crate) fn value_at<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
     deref(entry(o, at, cx)?, cx)
 }
 
@@ -1683,7 +1931,7 @@ fn entry<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
     }
 }
 
-/// `o` with its references followed, at most [`HOPS`]: none for null, or
+/// `o` with its references followed, fewer than [`HOPS`]: none for null, or
 /// for a reference to an object the file hasn't, which is null (ISO
 /// 32000-2, 7.3.10).
 fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {
@@ -1695,6 +1943,84 @@ fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {
         }
     }
     None
+}
+
+/// A reference that doesn't read, for a reason its resolver gives, or a
+/// chain of them past [`HOPS`]: what [`deref_tried`] stops at.
+struct Unread;
+
+/// `o` with its references followed as [`deref()`] follows them, but each
+/// through [`Resolve::try_resolve`], which says why one doesn't read: none
+/// for null, or for a reference to an object the file hasn't; [`Unread`]
+/// for one that doesn't read, by a cap, a password, damage or the source,
+/// and for a chain of them past [`HOPS`], which [`deref()`] ends as null.
+fn deref_tried<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Result<Option<&'c Object>, Unread> {
+    for _ in 0..HOPS {
+        match o.value() {
+            Value::Ref(id) => match cx.file.resolve.try_resolve(*id) {
+                Ok(Some(to)) => o = to,
+                Ok(None) => return Ok(None),
+                Err(_) => return Err(Unread),
+            },
+            Value::Null => return Ok(None),
+            _ => return Ok(Some(o)),
+        }
+    }
+    Err(Unread)
+}
+
+/// What stops [`walk_tried`]: a step that can't be told, as [`walk`] stops
+/// at one, or a reference on the way that doesn't read ([`Unread`]).
+enum Stop {
+    Step,
+    Unread,
+}
+
+impl From<Unread> for Stop {
+    fn from(_: Unread) -> Stop {
+        Stop::Unread
+    }
+}
+
+/// The object at the end of `p`, as [`walk`] reaches it, but each reference
+/// on the way followed through [`deref_tried`]: stopped by one that doesn't
+/// read. The row's own value, where the path starts at it (`@*`), is read
+/// as every value is ([`value_at`]).
+fn walk_tried<'c>(p: &Path, cx: &Cx<'c, '_>) -> Result<Option<&'c Object>, Stop> {
+    let (mut at, keys) = match (p.base, &p.keys[..]) {
+        (Base::Here, [first, rest @ ..]) if wild(first) => {
+            (value_at(cx.container, cx.at, cx), rest)
+        }
+        (Base::Here, keys) => (Some(cx.container), keys),
+        (Base::Parent(n), keys) => (parent(n, keys, cx), keys),
+        (Base::Trailer, [first, rest @ ..]) => match cx.file.trailer.get(first.as_bytes()) {
+            Some(entry) => (deref_tried(entry, cx)?, rest),
+            None => (None, rest),
+        },
+        (Base::Trailer, []) => return Err(Stop::Step),
+    };
+    // As [`walk`], a `*` past the start can't be told, wherever the path
+    // stops.
+    if keys.iter().any(|key| wild(key)) {
+        return Err(Stop::Step);
+    }
+    for key in keys {
+        let Some(o) = at else { break };
+        let Some(o) = deref_tried(o, cx)? else {
+            return Ok(None);
+        };
+        let at_key = match o.value() {
+            Value::Array(_) => At::Index(key.parse().map_err(|_| Stop::Step)?),
+            Value::Dict(_) | Value::Stream(_) => At::Key(key.as_bytes()),
+            _ => return Err(Stop::Step),
+        };
+        // `o` is followed, so [`entry`] follows nothing more of it.
+        at = match entry(o, at_key, cx) {
+            Some(value) => deref_tried(value, cx)?,
+            None => None,
+        };
+    }
+    Ok(at)
 }
 
 /// How the object `o` comes to, its references followed as [`deref()`]
@@ -2102,7 +2428,11 @@ fn hex(f: &str, cx: &Cx) -> Tri {
 /// no such tree. A row that isn't a string isn't what the function asks
 /// of (INTERNAL_GRAMMAR.md: "which must be a PDF string"), and can't be
 /// told; nor can one whose bytes the reader didn't give, or one the tree's
-/// readable keys don't hold when some of it doesn't read.
+/// readable keys don't hold when some of it doesn't read. The references
+/// on the way to the tree, and those in it, are followed asking why one
+/// doesn't read ([`walk_tried`], [`name_tree`]): where one on the way
+/// doesn't, no tree is read, and a key can't be told. The row's own value
+/// is read as every value is, null where it doesn't read.
 fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
     let key = match value_at(cx.container, cx.at, cx).map(|o| o.value()) {
         None => return Tri::Is(false),
@@ -2110,10 +2440,11 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
         Some(Value::String(..)) => return Tri::Unknown("the string's bytes".to_string()),
         Some(_) => return Tri::Unknown(f.to_string()),
     };
-    let root = match walk(tree, &tree.keys, cx) {
+    let root = match walk_tried(tree, cx) {
         Ok(Some(root)) => root,
         Ok(None) => return Tri::Is(false),
-        Err(why) => return Tri::Unknown(why),
+        Err(Stop::Step) => return Tri::Unknown(tree.text.clone()),
+        Err(Stop::Unread) => return Tri::Unknown(f.to_string()),
     };
     let known = Known {
         at: root.at(),
@@ -2167,52 +2498,72 @@ fn entry_id(p: &Path, cx: &Cx) -> Option<ObjectId> {
 
 /// The keys of the name tree at `root` (ISO 32000-2, 7.9.6): each node's
 /// `/Names` pairs' first, through its `/Kids`, each node once, as deep and
-/// as many as [`TREE_DEPTH`] and [`TREE_NODES`] let.
+/// as many as its file's [`Limits`] let (`tree_depth`, `tree_nodes`), a
+/// cap met counted before a node past it is read; and each `/Names` and
+/// `/Kids` array once, however many nodes hold it, so the walk costs what
+/// its nodes and the file's arrays do. Each reference in it is followed
+/// through [`deref_tried`]: one that doesn't read leaves the tree not
+/// whole, and the walk goes on beside it. A `/Names` or `/Kids` that's
+/// null, or a reference to nothing, is none, and a kid or a key that is, a
+/// part not read, as pdf-semantics' walk reads them.
 fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
     let mut tree = Tree {
         keys: HashSet::new(),
         whole: true,
     };
-    let mut seen = HashSet::new();
+    let address = |o: &Object| std::ptr::from_ref(o) as usize;
+    // The nodes read, and the arrays.
+    let (mut seen, mut arrays) = (HashSet::new(), HashSet::new());
+    let limits = cx.file.limits;
     let mut nodes = vec![(root, 0)];
     while let Some((node, depth)) = nodes.pop() {
-        if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
+        if depth > limits.tree_depth || seen.len() >= limits.tree_nodes {
             tree.whole = false;
             continue;
         }
-        if !seen.insert(std::ptr::from_ref(node) as usize) {
+        if !seen.insert(address(node)) {
             continue;
         }
         let Value::Dict(node) = node.value() else {
             tree.whole = false;
             continue;
         };
-        let array = |key: &[u8]| node.get(key).and_then(|o| deref(o, cx)).map(|o| o.value());
+        // The array at `key`: none where there's none or it's been read
+        // already, and `Some(None)` where it isn't an array.
+        let mut array = |key: &[u8]| match node.get(key).map(|o| deref_tried(o, cx)) {
+            Some(Ok(Some(o))) => match o.value() {
+                Value::Array(array) if arrays.insert(address(o)) => Ok(Some(Some(&array[..]))),
+                Value::Array(_) => Ok(None),
+                _ => Ok(Some(None)),
+            },
+            Some(Ok(None)) | None => Ok(None),
+            Some(Err(Unread)) => Err(Unread),
+        };
         match array(b"Names") {
-            Some(Value::Array(names)) => {
+            Ok(Some(Some(names))) => {
                 for key in names.iter().step_by(2) {
-                    match deref(key, cx).map(|o| o.value()) {
-                        Some(Value::String(Str::Bytes(key), _)) => {
+                    match deref_tried(key, cx).map(|o| o.map(Object::value)) {
+                        Ok(Some(Value::String(Str::Bytes(key), _))) => {
                             tree.keys.insert(key.clone());
                         }
                         _ => tree.whole = false,
                     }
                 }
             }
-            None => {}
-            Some(_) => tree.whole = false,
+            Ok(None) => {}
+            Ok(Some(None)) | Err(Unread) => tree.whole = false,
         }
         match array(b"Kids") {
-            Some(Value::Array(kids)) => {
+            Ok(Some(Some(kids))) => {
                 for kid in kids {
-                    match deref(kid, cx) {
-                        Some(kid) => nodes.push((kid, depth + 1)),
-                        None => tree.whole = false,
+                    match deref_tried(kid, cx) {
+                        Ok(Some(kid)) => nodes.push((kid, depth + 1)),
+                        Ok(None) | Err(Unread) => tree.whole = false,
                     }
                 }
             }
-            None => {}
-            Some(_) => tree.whole = false,
+            Ok(None) => {}
+            Ok(Some(None)) | Err(Unread) => tree.whole = false,
         }
     }
     tree
@@ -2220,8 +2571,8 @@ fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
 
 /// Whether the string at `p` is the fully qualified name of a field of
 /// the file's interactive form (`fn:IsFullyQualifiedFieldName`, which
-/// this crate defines for a hide action's `/T`, ISO 32000-2 12.6.4: "the
-/// fully qualified field name of an interactive form field"), as text,
+/// this crate defines for a hide action's `/T`, a string of which names a
+/// field by its fully qualified name: ISO 32000-2, 12.6.4.11), as text,
 /// however each is encoded. A value that isn't a string isn't what the
 /// function asks of, and can't be told; nor can one whose text the
 /// reader didn't give, or one the form's readable fields don't name when
@@ -2244,7 +2595,7 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
             cx.file.fields.0.get_or_init(|| read)
         }
     };
-    match (fields.names.contains(&name), fields.whole) {
+    match (fields.names.contains(name.as_str()), fields.whole) {
         (true, _) => Tri::Is(true),
         (false, true) => Tri::Is(false),
         (false, false) => Tri::Unknown(f.to_string()),
@@ -2254,10 +2605,12 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
 /// The fully qualified names of the fields of the catalog's `/AcroForm`
 /// (ISO 32000-2, 12.7.4.2): from each field in its `/Fields` down through
 /// `/Kids`, each one's partial name, `/T`, after its parent's and a
-/// period; one without `/T` has its parent's ("different representations
-/// of the same underlying field"), and one at the top without it, none.
-/// Each node once, as deep and as many as [`TREE_DEPTH`] and
-/// [`TREE_NODES`] let.
+/// period; one without `/T` has its parent's, as it's another way the same
+/// field is shown, not a field of its own, and one at the top without it,
+/// none. Each node once, as deep and as many as its file's [`Limits`] let
+/// (`field_depth`, `field_nodes`), and each name counted before it's made,
+/// its bytes no more than they let (`field_bytes`): a field past them, and
+/// those under it, not named.
 fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
     let mut names = Names {
         names: HashSet::new(),
@@ -2270,10 +2623,12 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
         return names;
     };
     let mut seen = HashSet::new();
-    // Each node, its parent's name, and its depth.
-    let mut nodes: Vec<(&'c Object, Option<Rc<str>>, usize)> = vec![(fields, None, 0)];
+    // Each node, its parent's name, and its depth; and how many bytes of
+    // names have been made.
+    let (limits, mut made) = (cx.file.limits, 0);
+    let mut nodes: Vec<(&'c Object, Option<Arc<str>>, usize)> = vec![(fields, None, 0)];
     while let Some((node, parent, depth)) = nodes.pop() {
-        if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
+        if depth > limits.field_depth || seen.len() >= limits.field_nodes {
             names.whole = false;
             continue;
         }
@@ -2301,12 +2656,22 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
             .and_then(|t| deref(t, cx))
             .map(|t| t.value())
         {
+            // Its parent's, kept when it was made.
             None => parent,
             Some(Value::String(t, _)) => match t.text() {
-                Some(t) => Some(match parent {
-                    Some(parent) => format!("{parent}.{t}").into(),
-                    None => t.into(),
-                }),
+                Some(t) => {
+                    let size = parent.as_ref().map_or(0, |parent| parent.len() + 1) + t.len();
+                    if !count(&mut made, size, limits.field_bytes) {
+                        names.whole = false;
+                        continue;
+                    }
+                    let name: Arc<str> = match parent {
+                        Some(parent) => format!("{parent}.{t}").into(),
+                        None => t.into(),
+                    };
+                    names.names.insert(Arc::clone(&name));
+                    Some(name)
+                }
                 // Neither it nor the fields under it can be named.
                 None => {
                     names.whole = false;
@@ -2318,9 +2683,6 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
                 continue;
             }
         };
-        if let Some(name) = &name {
-            names.names.insert(name.to_string());
-        }
         if let Some(kids) = field.get(b"Kids").and_then(|k| deref(k, cx)) {
             nodes.push((kids, name, depth + 1));
         }
@@ -2367,7 +2729,13 @@ fn items<'c>(cx: &Cx<'c, '_>) -> &'c Items {
 /// (OBJR, to their `/Obj`). An MCR or OBJR is told by its `/Type`, or
 /// without one by its `/MCID` or `/Obj` where an element would have `/S`.
 /// Each page and object is [`Known`] as its entry, `/Pg` or `/Obj`, names
-/// it. A file without a structure tree has no content items.
+/// it. A file without a structure tree has no content items. Each
+/// dictionary is read once, and an array once under each page it's
+/// reached from, as its marked-content identifiers are on the page of the
+/// element it's reached from, so an array that holds itself is read once;
+/// as deep as its file's [`Limits`] let (`structure_depth`), and no more
+/// dictionaries, and kids of an array read again under another page, than
+/// they let (`structure_nodes`), each counted before it's read.
 fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     let mut items = Items {
         objects: Objects::new(),
@@ -2379,60 +2747,94 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     else {
         return items;
     };
-    let mut seen = HashSet::new();
-    // Each node, the page of the element it's a kid of, and its depth.
+    // The dictionaries read; the arrays read, and each with the pages it's
+    // been read under.
+    let (mut seen, mut arrays, mut read) = (HashSet::new(), HashSet::new(), HashSet::new());
+    // Each node, the page of the element it's a kid of, and its depth; and
+    // how many have been counted.
     let mut nodes: Vec<(&'c Object, Option<Known>, usize)> = Vec::new();
     if let Some(kids) = value_at(root, At::Key(b"K"), cx) {
         nodes.push((kids, None, 0));
     }
-    while let Some((node, page, depth)) = nodes.pop() {
-        if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
-            items.objects.whole = false;
-            items.pages.whole = false;
-            continue;
-        }
-        match node.value() {
-            Value::Array(kids) => {
-                for kid in kids {
-                    if let Some(kid) = deref(kid, cx) {
-                        nodes.push((kid, page, depth + 1));
-                    }
-                }
+    let (limits, mut counted) = (cx.file.limits, 0);
+    let cut = 'walk: {
+        while let Some((node, page, depth)) = nodes.pop() {
+            if depth > limits.structure_depth {
+                items.objects.whole = false;
+                items.pages.whole = false;
+                continue;
             }
-            // A marked-content identifier, on the element's page.
-            Value::Integer(_) => match page {
-                Some(page) => items.pages.insert(page),
-                None => items.pages.whole = false,
-            },
-            Value::Dict(d) => {
-                if !seen.insert(address(node)) {
-                    continue;
-                }
-                let name = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)?.as_name());
-                let has = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)).is_some();
-                let own_page = d.get(b"Pg").and_then(|o| deref_known(o, cx));
-                let element = !has(b"S");
-                if name(b"Type") == Some(b"MCR") || (element && has(b"MCID")) {
-                    if has(b"Stm") {
+            match node.value() {
+                Value::Array(kids) => {
+                    if !read.insert((address(node), page)) {
                         continue;
                     }
-                    match own_page.or(page) {
-                        Some(page) => items.pages.insert(page),
-                        None => items.pages.whole = false,
+                    // Read again, under another page: its kids counted.
+                    if !arrays.insert(address(node))
+                        && !count(&mut counted, kids.len(), limits.structure_nodes)
+                    {
+                        break 'walk true;
                     }
-                } else if name(b"Type") == Some(b"OBJR") || (element && has(b"Obj")) {
-                    match d.get(b"Obj").and_then(|o| deref_known(o, cx)) {
-                        Some(object) => items.objects.insert(object),
-                        None => items.objects.whole = false,
+                    for kid in kids {
+                        if let Some(kid) = deref(kid, cx) {
+                            nodes.push((kid, page, depth + 1));
+                        }
                     }
-                } else if let Some(kids) = d.get(b"K").and_then(|o| deref(o, cx)) {
-                    nodes.push((kids, own_page, depth + 1));
                 }
+                // A marked-content identifier, on the element's page.
+                Value::Integer(_) => match page {
+                    Some(page) => items.pages.insert(page),
+                    None => items.pages.whole = false,
+                },
+                Value::Dict(d) => {
+                    if seen.contains(&address(node)) {
+                        continue;
+                    }
+                    if !count(&mut counted, 1, limits.structure_nodes) {
+                        break 'walk true;
+                    }
+                    seen.insert(address(node));
+                    let name = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)?.as_name());
+                    let has = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)).is_some();
+                    let own_page = d.get(b"Pg").and_then(|o| deref_known(o, cx));
+                    let element = !has(b"S");
+                    if name(b"Type") == Some(b"MCR") || (element && has(b"MCID")) {
+                        if has(b"Stm") {
+                            continue;
+                        }
+                        match own_page.or(page) {
+                            Some(page) => items.pages.insert(page),
+                            None => items.pages.whole = false,
+                        }
+                    } else if name(b"Type") == Some(b"OBJR") || (element && has(b"Obj")) {
+                        match d.get(b"Obj").and_then(|o| deref_known(o, cx)) {
+                            Some(object) => items.objects.insert(object),
+                            None => items.objects.whole = false,
+                        }
+                    } else if let Some(kids) = d.get(b"K").and_then(|o| deref(o, cx)) {
+                        nodes.push((kids, own_page, depth + 1));
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
+        false
+    };
+    if cut {
+        items.objects.whole = false;
+        items.pages.whole = false;
     }
     items
+}
+
+/// Counts `n` more of what a walk is capped at, before they're read or
+/// made: false, counting none, where they'd pass `cap`.
+fn count(counted: &mut usize, n: usize, cap: usize) -> bool {
+    let room = n <= cap.saturating_sub(*counted);
+    if room {
+        *counted += n;
+    }
+    room
 }
 
 /// Whether the row's own value, a name, is a key of the dictionary at
@@ -2605,7 +3007,8 @@ impl Cmp {
     const ALL: [Cmp; 6] = [Cmp::Eq, Cmp::Ne, Cmp::Le, Cmp::Ge, Cmp::Lt, Cmp::Gt];
 
     /// As the model writes it: `==`, `<=`.
-    pub fn symbol(self) -> &'static str {
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
         match self {
             Cmp::Eq => "==",
             Cmp::Ne => "!=",
@@ -2635,7 +3038,8 @@ impl Arith {
     /// As the model writes it: `-` and `*` spaced, to tell them from a
     /// negative number and a wildcard, and `mod` (INTERNAL_GRAMMAR.md,
     /// "Predicates (declarative functions)").
-    pub fn symbol(self) -> &'static str {
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
         match self {
             Arith::Add => "+",
             Arith::Sub => " - ",
@@ -2943,12 +3347,12 @@ mod tests {
     //! supported function means what INTERNAL_GRAMMAR.md says, on the
     //! model's own cells where it has them.
 
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
     use std::sync::Barrier;
     use std::thread::ThreadId;
 
-    use pdf_objects::{Dict, dict, resolve_fn};
+    use pdf_objects::{Dict, Unreadable, Why, dict, resolve_fn};
 
     use super::*;
     use crate::grammar::{self, Grammar, Row, model, split};
@@ -4226,6 +4630,34 @@ mod tests {
     }
 
     #[test]
+    fn a_name_trees_array_is_read_once_however_many_nodes_hold_it() {
+        // 500 nodes, 10 to 509, each holding one /Kids array, 3, of all
+        // of them, and one /Names array, 4; the root, 2, holding the /Kids
+        // array too. Read once each, the arrays cost what they hold, where
+        // read with each node, they'd cost its square.
+        let n = 500;
+        let kids: Vec<Object> = (10..10 + n).map(Object::reference).collect();
+        let node = || dict! { "Kids" => Object::reference(3), "Names" => Object::reference(4) };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "Names" => dict! { "Dests" => Object::reference(2) } };
+        let mut objects = vec![
+            (1, Object::from(catalog)),
+            (2, dict! { "Kids" => Object::reference(3) }.into()),
+            (3, kids.into()),
+            (4, vec![Object::text("k"), Object::from(0)].into()),
+        ];
+        objects.extend((10..10 + n).map(|n| (n, Object::from(node()))));
+        let file = File::new(dict! { "Root" => Object::reference(1) }, objects);
+        let tree = "trailer::Catalog::Names::Dests";
+        let (said, resolved) = file.counted("1.7", |file| in_tree(file, tree, &["k", "z"]));
+        assert_eq!(said, [Truth::True, Truth::False], "read whole");
+        for id in 10..10 + n {
+            assert_eq!(resolved[&ObjectId::new(id, 0)], 1, "{id}, read once");
+        }
+        let all: usize = resolved.values().sum();
+        assert!(all < 4 * n as usize, "{all} objects resolved");
+    }
+
+    #[test]
     fn a_name_tree_is_kept_by_where_its_root_was_written_or_its_number() {
         // A root over a kid by reference, 3, which only reading the tree
         // resolves: the catalog's /Dests, written directly or by
@@ -4385,6 +4817,236 @@ mod tests {
         }
     }
 
+    /// A resolver over `objects` that fails each object `fails` names for
+    /// its `Why`, as a reader fails one it can't read; and, where `once`
+    /// names one, fails it for the source the first time it's asked for.
+    #[derive(Clone, Copy)]
+    struct Failing<'o> {
+        objects: &'o BTreeMap<ObjectId, Object>,
+        fails: &'o [(u32, Why)],
+        once: Option<(u32, &'o Cell<bool>)>,
+    }
+
+    impl<'o> Failing<'o> {
+        fn new(objects: &'o BTreeMap<ObjectId, Object>, fails: &'o [(u32, Why)]) -> Failing<'o> {
+            Failing {
+                objects,
+                fails,
+                once: None,
+            }
+        }
+    }
+
+    impl<'o> Resolve<'o> for Failing<'o> {
+        fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+            self.try_resolve(id).ok().flatten()
+        }
+
+        fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+            let named = (self.fails.iter()).find(|(n, _)| *n == id.number);
+            let why = named.map(|&(_, why)| why).or_else(|| match self.once {
+                Some((n, failed)) if n == id.number && !failed.replace(true) => Some(Why::Source),
+                _ => None,
+            });
+            match why {
+                Some(why) => Err(Unreadable::new(id, why, "made to fail")),
+                None => Ok(self.objects.get(&id)),
+            }
+        }
+    }
+
+    /// A file whose catalog, 1, has `/Names`, 2, whose `/Dests`, 3, is a
+    /// name tree, each by reference: the root's `/Kids`, 4, holds a node,
+    /// 5, over a leaf, 7, whose `/Names`, 8, holds `a` and, by reference,
+    /// 9, `b`; and a leaf, 6, holding `c`.
+    fn dests() -> File {
+        let names = vec![
+            Object::text("a"),
+            Object::from(0),
+            Object::reference(9),
+            Object::from(0),
+        ];
+        File::new(
+            dict! { "Root" => Object::reference(1) },
+            [
+                (
+                    1,
+                    dict! { "Type" => Object::name("Catalog"), "Names" => Object::reference(2) }
+                        .into(),
+                ),
+                (2, dict! { "Dests" => Object::reference(3) }.into()),
+                (3, dict! { "Kids" => Object::reference(4) }.into()),
+                (4, vec![Object::reference(5), Object::reference(6)].into()),
+                (5, dict! { "Kids" => vec![Object::reference(7)] }.into()),
+                (6, leaf(&["c"])),
+                (7, dict! { "Names" => Object::reference(8) }.into()),
+                (8, names.into()),
+                (9, Object::text("b")),
+            ],
+        )
+    }
+
+    /// The answers `said` writes, one a letter: true, false, or unknown
+    /// for `fn:InNameTree`.
+    fn truths(said: &str) -> Vec<Truth> {
+        (said.chars())
+            .map(|c| match c {
+                'T' => Truth::True,
+                'F' => Truth::False,
+                _ => unknown("fn:InNameTree"),
+            })
+            .collect()
+    }
+
+    /// Whether `a`, `b`, `c` and `z` are in [`dests`]' tree, over `file`.
+    fn in_dests(file: &FileCx) -> Vec<Truth> {
+        in_tree(
+            file,
+            "trailer::Catalog::Names::Dests",
+            &["a", "b", "c", "z"],
+        )
+    }
+
+    #[test]
+    fn a_name_tree_whose_reference_doesn_t_read_can_t_say_a_key_is_missing() {
+        let file = dests();
+        let asks = |fails: &[(u32, Why)]| {
+            let resolve = Failing::new(&file.objects, fails);
+            in_dests(&FileCx::new(&file.trailer, v("1.7"), resolve))
+        };
+        assert_eq!(asks(&[]), truths("TTTF"), "all of it read");
+        // Each place a reference can fail, on the way to the tree or in it:
+        // what's read of the rest is held, and a key it doesn't hold can't
+        // be told.
+        let places = [
+            (1, "the catalog", "UUUU"),
+            (2, "its /Names", "UUUU"),
+            (3, "the tree's root", "UUUU"),
+            (4, "the root's /Kids", "UUUU"),
+            (5, "a node", "UUTU"),
+            (7, "the node's kid", "UUTU"),
+            (8, "a leaf's /Names", "UUTU"),
+            (9, "a key", "TUTU"),
+            (6, "a kid", "TTUU"),
+        ];
+        for why in [Why::Damaged, Why::Capped, Why::Locked, Why::Source] {
+            for (n, what, said) in places {
+                assert_eq!(asks(&[(n, why)]), truths(said), "{what}, {why:?}");
+            }
+        }
+        // A reference to nothing reads as it does where nothing asks why:
+        // the way to the tree, its root, or a /Names or /Kids, none; a kid
+        // or a key, a part not read.
+        let missing = [
+            (1, "the catalog", "FFFF"),
+            (2, "its /Names", "FFFF"),
+            (3, "the tree's root", "FFFF"),
+            (4, "the root's /Kids", "FFFF"),
+            (5, "a node", "UUTU"),
+            (8, "a leaf's /Names", "FFTF"),
+            (9, "a key", "TUTU"),
+            (6, "a kid", "TTUU"),
+        ];
+        for (n, what, said) in missing {
+            let mut objects = file.objects.clone();
+            objects.remove(&ObjectId::new(n, 0));
+            let resolve = Failing::new(&objects, &[]);
+            let asked = FileCx::new(&file.trailer, v("1.7"), resolve);
+            assert_eq!(in_dests(&asked), truths(said), "{what}, missing");
+            let closure = resolve_fn(|id: ObjectId| objects.get(&id));
+            let asked = FileCx::new(&file.trailer, v("1.7"), &closure);
+            assert_eq!(
+                in_dests(&asked),
+                truths(said),
+                "{what}, missing, by a closure"
+            );
+        }
+        // The row's own value is read as every value is: one that doesn't
+        // read is null, as an absent row is.
+        let mut objects = file.objects.clone();
+        objects.insert(ObjectId::new(10, 0), Object::text("a"));
+        let row = Object::from(dict! { "X" => Object::reference(10) });
+        let tree = "fn:InNameTree(trailer::Catalog::Names::Dests)";
+        for (fails, said) in [
+            (&[][..], Truth::True),
+            (&[(10, Why::Damaged)], Truth::False),
+        ] {
+            let file = FileCx::new(&file.trailer, v("1.7"), Failing::new(&objects, fails));
+            assert_eq!(holds(tree, &file.at(&row, At::Key(b"X"))), said);
+        }
+    }
+
+    /// `n` objects from 100 on, each a reference to the next, the last to
+    /// `to`: a reference to 100 is a chain of `n + 1` of them.
+    fn chain(objects: &mut BTreeMap<ObjectId, Object>, n: usize, to: u32) {
+        let last = 99 + u32::try_from(n).unwrap();
+        for at in 100..=last {
+            let next = if at == last { to } else { at + 1 };
+            objects.insert(ObjectId::new(at, 0), Object::reference(next));
+        }
+    }
+
+    #[test]
+    fn a_chain_of_references_past_hops_leaves_a_name_tree_not_read_whole() {
+        // Over a closure, which can't say why an object doesn't read: one
+        // past the chain's cap isn't read, on the way to the tree or in it,
+        // and a key isn't said to be missing, where it was read as null.
+        let file = dests();
+        let places: [(u32, &[u8], u32, &str, &str); 4] = [
+            (1, b"Names", 2, "the catalog's /Names", "UUUU"),
+            (2, b"Dests", 3, "the tree's root", "UUUU"),
+            (3, b"Kids", 4, "the root's /Kids", "UUUU"),
+            (7, b"Names", 8, "a leaf's /Names", "UUTU"),
+        ];
+        for (holder, key, to, what, said) in places {
+            // A chain of HOPS references, and one of a reference fewer.
+            for (n, said) in [(HOPS - 1, said), (HOPS - 2, "TTTF")] {
+                let mut objects = file.objects.clone();
+                chain(&mut objects, n, to);
+                let id = ObjectId::new(holder, 0);
+                let held = objects.get_mut(&id).unwrap().as_dict_mut().unwrap();
+                held.set(key, Object::reference(100));
+                let closure = resolve_fn(|id: ObjectId| objects.get(&id));
+                let file = FileCx::new(&file.trailer, v("1.7"), &closure);
+                assert_eq!(
+                    in_dests(&file),
+                    truths(said),
+                    "{what}: {} references",
+                    n + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_tree_not_read_whole_is_kept_so_for_its_file() {
+        // The source fails the kid, 6, the first time it's asked for: the
+        // tree's kept as it was read, not whole, for the file, and read
+        // again by another.
+        let file = dests();
+        let failed = Cell::new(false);
+        let resolve = Failing {
+            objects: &file.objects,
+            fails: &[],
+            once: Some((6, &failed)),
+        };
+        let first = FileCx::new(&file.trailer, v("1.7"), resolve);
+        assert_eq!(in_dests(&first), truths("TTUU"));
+        assert!(failed.get(), "the kid didn't read");
+        assert_eq!(in_dests(&first), truths("TTUU"), "as it was read");
+        let again = FileCx::new(&file.trailer, v("1.7"), resolve);
+        assert_eq!(in_dests(&again), truths("TTTF"), "read again");
+        // A way to the tree that doesn't read keeps nothing: the row after
+        // reads it.
+        let failed = Cell::new(false);
+        let resolve = Failing {
+            once: Some((2, &failed)),
+            ..resolve
+        };
+        let file = FileCx::new(&file.trailer, v("1.7"), resolve);
+        assert_eq!(in_dests(&file), truths("UTTF"));
+    }
+
     #[test]
     fn a_fully_qualified_field_name_is_a_fields_in_the_form() {
         let text = |s: &str| Object::text(s);
@@ -4538,6 +5200,354 @@ mod tests {
             [(1, catalog.into()), (2, page())],
         );
         assert_eq!(asks(&file, 2, pages), Truth::False);
+    }
+
+    #[test]
+    fn a_structure_tree_whose_array_holds_itself_is_read_once_and_whole() {
+        // The root's /K, 5, an array holding itself, twice or three times,
+        // and an element putting marked content on page 2: reached again
+        // under the page it's been read under, it isn't read again, so the
+        // tree is read whole and quickly.
+        for times in [1, 2, 3, 1000] {
+            let mut kids = vec![Object::reference(5); times];
+            kids.push(
+                dict! { "S" => Object::name("P"), "Pg" => Object::reference(2), "K" => 0 }.into(),
+            );
+            let root =
+                dict! { "Type" => Object::name("StructTreeRoot"), "K" => Object::reference(5) };
+            let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
+            let page = || Object::from(dict! { "Type" => Object::name("Page") });
+            let file = File::new(
+                dict! { "Root" => Object::reference(1) },
+                [
+                    (1, catalog.into()),
+                    (2, page()),
+                    (3, page()),
+                    (5, kids.into()),
+                ],
+            );
+            let asks = |n: u32| {
+                let container = file.objects.get(&ObjectId::new(n, 0)).unwrap();
+                let text = "fn:PageContainsStructContentItems()";
+                item_in(&file, container, Some(ObjectId::new(n, 0)), text)
+            };
+            assert_eq!(asks(2), Truth::True, "{times}");
+            assert_eq!(asks(3), Truth::False, "{times}: read whole");
+        }
+    }
+
+    /// Whether pages 2 to 5 have marked content, under `limits`, in a
+    /// structure tree whose root's `/K` is the elements `elements` gives,
+    /// each an element of `/Pg` the page it names and `/K` the object it
+    /// names, an array.
+    fn on_pages(
+        limits: Limits,
+        elements: &[(u32, u32)],
+        arrays: impl IntoIterator<Item = (u32, Object)>,
+    ) -> Vec<Truth> {
+        let elements: Vec<Object> = (elements.iter())
+            .map(|&(pg, k)| {
+                let element =
+                    dict! { "S" => Object::name("P"), "Pg" => Object::reference(pg), "K" => Object::reference(k) };
+                Object::from(element)
+            })
+            .collect();
+        let root = dict! { "Type" => Object::name("StructTreeRoot"), "K" => elements };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
+        let mut objects = vec![(1, Object::from(catalog))];
+        objects.extend((2..6).map(|n| (n, Object::from(dict! { "Type" => Object::name("Page") }))));
+        objects.extend(arrays);
+        let file = File::new(dict! { "Root" => Object::reference(1) }, objects);
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let cx = FileCx::new(&file.trailer, v("1.7"), closure).limits(limits);
+        (2..6)
+            .map(|n| {
+                let id = ObjectId::new(n, 0);
+                let at = cx.at(&file.objects[&id], At::Key(b"X")).id(id);
+                holds("fn:PageContainsStructContentItems()", &at)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_structure_tree_is_read_whole_however_many_kids_its_elements_have() {
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:PageContainsStructContentItems");
+        // Three elements on page 2, each of 30 marked-content identifiers:
+        // three dictionaries read, and 90 kids looked at.
+        let mcids = || Object::from((0..30).map(Object::from).collect::<Vec<_>>());
+        let arrays = || [(10, mcids()), (11, mcids()), (12, mcids())];
+        let elements = [(2, 10), (2, 11), (2, 12)];
+        let limits = caps(2048, 100_000, 8192, 3);
+        let said = on_pages(limits, &elements, arrays());
+        assert_eq!(said, [t.clone(), f.clone(), f.clone(), f.clone()], "whole");
+        let limits = caps(2048, 100_000, 8192, 2);
+        assert_eq!(
+            on_pages(limits, &elements, arrays())[1..],
+            [u.clone(), u.clone(), u]
+        );
+        // 40,000 elements, each of 30: 1,200,000 kids, read whole under
+        // the default caps.
+        let objects = (0..40_000u32).map(|n| (10 + n, mcids()));
+        let elements: Vec<_> = (0..40_000u32).map(|n| (2, 10 + n)).collect();
+        let said = on_pages(Limits::DEFAULT, &elements, objects);
+        assert_eq!(said, [t, f.clone(), f.clone(), f]);
+    }
+
+    #[test]
+    fn an_array_of_several_pages_elements_is_read_under_each_its_kids_counted_again() {
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:PageContainsStructContentItems");
+        // Three elements, on pages 2, 3 and 4, sharing one array of five
+        // marked-content identifiers, 10, so each page has marked content:
+        // three dictionaries, and the array read again twice, ten kids.
+        let array = || {
+            [(
+                10,
+                Object::from((0..5).map(Object::from).collect::<Vec<_>>()),
+            )]
+        };
+        let elements = [(2, 10), (3, 10), (4, 10)];
+        let said = on_pages(caps(2048, 100_000, 8192, 13), &elements, array());
+        assert_eq!(said, [t.clone(), t.clone(), t, f.clone()], "whole");
+        let said = on_pages(caps(2048, 100_000, 8192, 12), &elements, array());
+        assert_eq!(said[3], u, "past its nodes");
+        // Two of them on one page: read once under it.
+        let elements = [(2, 10), (3, 10), (3, 10)];
+        let said = on_pages(caps(2048, 100_000, 8192, 8), &elements, array());
+        assert_eq!(said, [Truth::True, Truth::True, f.clone(), f]);
+    }
+
+    /// [`Limits::DEFAULT`] with the four caps given.
+    fn caps(tree_depth: usize, tree_nodes: usize, depth: usize, nodes: usize) -> Limits {
+        let mut limits = Limits::DEFAULT;
+        (limits.tree_depth, limits.tree_nodes) = (tree_depth, tree_nodes);
+        (limits.structure_depth, limits.structure_nodes) = (depth, nodes);
+        limits
+    }
+
+    /// [`Limits::DEFAULT`] with the form's fields' three caps given.
+    fn field_caps(depth: usize, nodes: usize, bytes: usize) -> Limits {
+        let mut limits = Limits::DEFAULT;
+        (limits.field_depth, limits.field_nodes) = (depth, nodes);
+        limits.field_bytes = bytes;
+        limits
+    }
+
+    #[test]
+    fn a_files_trees_are_read_under_the_default_caps_unless_given_others() {
+        assert_eq!(Limits::default(), Limits::DEFAULT);
+        assert_eq!(Limits::DEFAULT, caps(2048, 100_000, 8192, 1_000_000));
+        let fields = Limits::DEFAULT;
+        let fields = (fields.field_depth, fields.field_nodes, fields.field_bytes);
+        assert_eq!(fields, (2048, 100_000, 16 << 20));
+        let file = bare();
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let shown = format!("{:?}", FileCx::new(&file.trailer, v("1.7"), closure));
+        assert!(
+            shown.contains(
+                "limits: Limits { tree_depth: 2048, tree_nodes: 100000, field_depth: 2048, \
+                 field_nodes: 100000, field_bytes: 16777216, "
+            ),
+            "{shown}"
+        );
+        let lowered = FileCx::new(&file.trailer, v("1.7"), closure).limits(caps(1, 2, 3, 4));
+        assert!(format!("{lowered:?}").contains("structure_nodes: 4 }"));
+    }
+
+    #[test]
+    fn a_tree_past_its_files_caps_is_unknown_never_false_where_it_may_hold_what_s_asked() {
+        // A name tree, its root, 3, over a node, 5, and a leaf, 6, at depth
+        // 1, and the node's leaf, 7, at depth 2: four nodes, read 3, 6, 5,
+        // 7, as the walk takes the last kid first.
+        let file = dests();
+        let names = |limits: Limits| {
+            let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+            in_dests(&FileCx::new(&file.trailer, v("1.7"), closure).limits(limits))
+        };
+        let structure = Limits::DEFAULT;
+        let (depth, nodes) = (structure.structure_depth, structure.structure_nodes);
+        assert_eq!(
+            names(caps(2, 4, depth, nodes)),
+            truths("TTTF"),
+            "at its size"
+        );
+        assert_eq!(
+            names(caps(1, 4, depth, nodes)),
+            truths("UUTU"),
+            "past its depth"
+        );
+        assert_eq!(
+            names(caps(2, 3, depth, nodes)),
+            truths("UUTU"),
+            "past its nodes"
+        );
+        assert_eq!(names(caps(2, 0, depth, nodes)), truths("UUUU"), "no nodes");
+
+        // The form's fields: /Fields, an array, at depth 0; `a` at 1; its
+        // /Kids at 2; `a.b` at 3; its /Kids at 4; `a.b.c` at 5: six nodes.
+        let c = dict! { "T" => Object::text("c") };
+        let b = dict! { "T" => Object::text("b"), "Kids" => vec![Object::from(c)] };
+        let a = dict! { "T" => Object::text("a"), "Kids" => vec![Object::from(b)] };
+        let form = dict! { "Fields" => vec![Object::from(a)] };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "AcroForm" => form };
+        let fields = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into())],
+        );
+        let named = |limits: Limits| {
+            let closure = resolve_fn(|id: ObjectId| fields.objects.get(&id));
+            let file = FileCx::new(&fields.trailer, v("1.7"), closure).limits(limits);
+            (["a.b", "a.b.c", "z"].iter())
+                .map(|name| {
+                    let row = Object::from(dict! { "X" => Object::text(name) });
+                    holds(
+                        "fn:IsFullyQualifiedFieldName(@X)",
+                        &file.at(&row, At::Key(b"X")),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:IsFullyQualifiedFieldName");
+        let field = |depth, nodes| field_caps(depth, nodes, 16 << 20);
+        assert_eq!(named(field(5, 6)), [t.clone(), t.clone(), f], "at its size");
+        assert_eq!(
+            named(field(4, 6)),
+            [t.clone(), u.clone(), u.clone()],
+            "past its depth"
+        );
+        assert_eq!(
+            named(field(5, 5)),
+            [t, u.clone(), u.clone()],
+            "past its nodes"
+        );
+        assert_eq!(named(field(5, 0)), [u.clone(), u.clone(), u], "no nodes");
+
+        // The structure tree: the root's /K, an array, at depth 0; two
+        // elements on page 2 at 1, each its /K at 2 and a marked-content
+        // identifier at 3: two dictionaries read.
+        let element = || dict! { "S" => Object::name("P"), "Pg" => Object::reference(2), "K" => vec![Object::from(0)] };
+        let elements = vec![Object::from(element()), Object::from(element())];
+        let root = dict! { "Type" => Object::name("StructTreeRoot"), "K" => elements };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
+        let page = || Object::from(dict! { "Type" => Object::name("Page") });
+        let tagged = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into()), (2, page()), (3, page())],
+        );
+        let on = |limits: Limits| {
+            let closure = resolve_fn(|id: ObjectId| tagged.objects.get(&id));
+            let file = FileCx::new(&tagged.trailer, v("1.7"), closure).limits(limits);
+            [2, 3].map(|n| {
+                let id = ObjectId::new(n, 0);
+                let cx = file.at(&tagged.objects[&id], At::Key(b"X")).id(id);
+                holds("fn:PageContainsStructContentItems()", &cx)
+            })
+        };
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:PageContainsStructContentItems");
+        let structure = |depth, nodes| caps(32, 100_000, depth, nodes);
+        assert_eq!(on(structure(3, 2)), [t.clone(), f], "at its size");
+        assert_eq!(
+            on(structure(2, 2)),
+            [u.clone(), u.clone()],
+            "past its depth"
+        );
+        // The second element read first, its marked content found.
+        assert_eq!(on(structure(3, 1)), [t, u.clone()], "past its nodes");
+        assert_eq!(on(structure(3, 0)), [u.clone(), u], "no nodes");
+    }
+
+    /// What `fn:IsFullyQualifiedFieldName` says, under `limits`, of each
+    /// name of `asked` and of one of none, in a form whose fields are a
+    /// chain `n` long, field `k` object `10 + k` and the one kid of the one
+    /// before, each one's `/T` `len` bytes of one letter: field `k`'s name
+    /// is `k + 1` of them, a period between each two.
+    fn chain_named(n: u32, len: usize, limits: Limits, asked: &[u32]) -> Vec<Truth> {
+        let t = "A".repeat(len);
+        let mut objects = Vec::new();
+        for k in 0..n {
+            let mut field = dict! { "T" => Object::text(&t) };
+            if k + 1 < n {
+                field.set(b"Kids", vec![Object::reference(11 + k)]);
+            }
+            objects.push((10 + k, Object::from(field)));
+        }
+        let form = dict! { "Fields" => vec![Object::reference(10)] };
+        objects.push((
+            1,
+            dict! { "Type" => Object::name("Catalog"), "AcroForm" => form }.into(),
+        ));
+        let file = File::new(dict! { "Root" => Object::reference(1) }, objects);
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let cx = FileCx::new(&file.trailer, v("1.7"), closure).limits(limits);
+        let name = |k: u32| vec![t.as_str(); k as usize + 1].join(".");
+        (asked.iter().map(|&k| name(k)))
+            .chain(["z".to_string()])
+            .map(|name| {
+                let row = Object::from(dict! { "X" => Object::text(&name) });
+                holds(
+                    "fn:IsFullyQualifiedFieldName(@X)",
+                    &cx.at(&row, At::Key(b"X")),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_fields_names_are_made_no_longer_than_their_budget_of_bytes() {
+        let (t, f) = (Truth::True, Truth::False);
+        let u = unknown("fn:IsFullyQualifiedFieldName");
+        // Four fields of 100-byte partial names: their names 100, 201, 302
+        // and 403 bytes, 1,006 in all.
+        let named = |bytes| chain_named(4, 100, field_caps(2048, 100_000, bytes), &[0, 2, 3]);
+        assert_eq!(named(1006), [t.clone(), t.clone(), t.clone(), f], "all");
+        let past = [t.clone(), t.clone(), u.clone(), u.clone()];
+        assert_eq!(named(1005), past, "one byte fewer: the last not made");
+        assert_eq!(named(603), past);
+        assert_eq!(named(602), [t, u.clone(), u.clone(), u.clone()]);
+        assert_eq!(named(0), [u.clone(), u.clone(), u.clone(), u]);
+    }
+
+    #[test]
+    fn a_field_without_a_partial_name_makes_none() {
+        // A field of a 100-byte partial name, its 1,000 kids without one,
+        // and one kid more, `b`: two names made, 100 and 102 bytes, the
+        // kids' their parent's.
+        let t = "A".repeat(100);
+        let mut kids = vec![Object::from(dict! { "FT" => Object::name("Tx") }); 1000];
+        kids.push(dict! { "T" => Object::text("b") }.into());
+        let top = dict! { "T" => Object::text(&t), "Kids" => kids };
+        let form = dict! { "Fields" => vec![Object::from(top)] };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "AcroForm" => form };
+        let file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into())],
+        );
+        let closure = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let cx =
+            FileCx::new(&file.trailer, v("1.7"), closure).limits(field_caps(2048, 100_000, 202));
+        let asks = |name: &str| {
+            let row = Object::from(dict! { "X" => Object::text(name) });
+            holds(
+                "fn:IsFullyQualifiedFieldName(@X)",
+                &cx.at(&row, At::Key(b"X")),
+            )
+        };
+        assert_eq!(asks(&t), Truth::True);
+        assert_eq!(asks(&format!("{t}.b")), Truth::True);
+        assert_eq!(asks("z"), Truth::False, "read whole");
+    }
+
+    #[test]
+    fn a_deep_form_of_long_names_costs_its_budget_not_the_square_of_its_depth() {
+        // 1,000 fields deep, each of a 1,000-byte partial name: their names
+        // would be 500 MB, and the default caps make 16 MiB of them, the
+        // first 183 or so.
+        let u = unknown("fn:IsFullyQualifiedFieldName");
+        let named = chain_named(1000, 1000, Limits::DEFAULT, &[0, 100, 999]);
+        assert_eq!(named, [Truth::True, Truth::True, u.clone(), u]);
     }
 
     /// `text`, a content item's function, held of `container` in `file`:
@@ -5211,6 +6221,38 @@ mod tests {
             assert_eq!(holds_fully(eval, &cx), unknown(eval));
             for item in [eval, value, plain] {
                 assert_eq!(required_value(item, &cx), None, "{item}");
+            }
+        }
+    }
+
+    /// An empty text, which no cell of a model that loads asks but a caller
+    /// may, is unknown by `an empty predicate`, through a model and not, so
+    /// that what's unknown says why; one that doesn't parse, by its text.
+    #[test]
+    fn an_empty_text_is_unknown_for_a_reason() {
+        let page = Object::from(dict! { "Rotate" => 90 });
+        let trailer = Dict::new();
+        let resolve = resolve_fn(|_: ObjectId| None);
+        let model = loaded();
+        let alone = FileCx::new(&trailer, v("2.0"), &resolve);
+        let given = FileCx::new(&trailer, v("2.0"), &resolve).grammar(&model);
+        let why = "an empty predicate";
+        for file in [&alone, &given] {
+            let cx = file.at(&page, At::Key(b"Rotate"));
+            assert_eq!(required("", &cx), unknown(why));
+            assert_eq!(holds("", &cx), unknown(why));
+            assert_eq!(holds_fully("", &cx), unknown(why));
+            assert_eq!(reference("", &cx), Reference::Unknown(why.to_string()));
+            assert_eq!(file.since(""), Since::Unknown(why.to_string()));
+            assert_eq!(since("", &none()), Since::Unknown(why.to_string()));
+            assert_eq!(required_value("", &cx), None);
+            assert_eq!(ignored("", &cx), None);
+            for text in ["@", "fn:", "(Rotate", " "] {
+                assert_eq!(required(text, &cx), unknown(text));
+                assert_eq!(holds(text, &cx), unknown(text));
+                assert_eq!(holds_fully(text, &cx), unknown(text));
+                assert_eq!(reference(text, &cx), Reference::Unknown(text.to_string()));
+                assert_eq!(file.since(text), Since::Unknown(text.to_string()));
             }
         }
     }
@@ -6198,5 +7240,99 @@ mod tests {
         assert_eq!(is("fn:Eval(fn:BitSet(3))"), Truth::True);
         assert_eq!(is("fn:Eval(fn:BitsSet(2,3))"), Truth::False);
         assert_eq!(is("fn:Eval(fn:BitSet(33))"), unknown("fn:BitSet"));
+    }
+
+    /// Asserts that `shown`, a `Debug`'s text, holds `value` neither as
+    /// text nor as the list of its bytes a derived `Debug` writes, on one
+    /// line or across several.
+    fn holds_none_of(shown: &str, value: &str) {
+        let squeezed: String = shown.split_whitespace().collect();
+        let bytes: String = format!("{:?}", value.as_bytes())
+            .split_whitespace()
+            .collect();
+        let bytes = &bytes[1..bytes.len() - 1];
+        assert!(!shown.contains(value), "{value} is in {shown}");
+        assert!(!squeezed.contains(bytes), "{value}'s bytes are in {shown}");
+    }
+
+    /// None of a file's values is in a `FileCx`'s `Debug` or a `Cx`'s:
+    /// not a trailer's string, nor a name tree's key or a field's name once
+    /// they're read and kept, nor a row's container's string or a parent's.
+    /// The trailer is its count of entries, the tree and the fields their
+    /// counts, the model its digest, and the container and the parent their
+    /// kinds and where they were written.
+    #[test]
+    fn a_debug_holds_none_of_a_files_values() {
+        let text = Object::text;
+        let catalog = dict! {
+            "Type" => Object::name("Catalog"),
+            "Names" => dict! { "Dests" => Object::reference(2) },
+            "AcroForm" => dict! { "Fields" => vec![Object::reference(3)] },
+        };
+        let trailer = dict! {
+            "Root" => Object::reference(1),
+            "ID" => vec![Object::bytes(*b"Zebraidentity"), Object::bytes(*b"Zebraidentity")],
+            "Info" => dict! { "Title" => text("Zebratrailer") },
+        };
+        let file = File::new(
+            trailer,
+            [
+                (1, catalog.into()),
+                (2, leaf(&["Zebrakey"])),
+                (
+                    3,
+                    dict! { "T" => text("Zebrafield"), "FT" => Object::name("Tx") }.into(),
+                ),
+            ],
+        );
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        let model = Grammar::embedded();
+        let read = FileCx::new(&file.trailer, v("2.0"), &resolve).grammar(model);
+        let container = Object::from(dict! { "X" => text("Zebracontainer") })
+            .with_span(Span::new(None, 40, 80));
+        let parent = Object::from(dict! { "Title" => text("Zebraparent") });
+        let parents = [&parent];
+        let cx = read
+            .at(&container, At::Key(b"X"))
+            .parents(&parents)
+            .id(ObjectId::new(7, 0));
+        let asked = [
+            "fn:InNameTree(trailer::Catalog::Names::Dests)",
+            "fn:IsFullyQualifiedFieldName(@X)",
+        ];
+        for text in asked {
+            assert_eq!(holds(text, &cx), Truth::False, "{text}");
+        }
+        let unread = FileCx::new(&file.trailer, v("2.0"), &resolve);
+        let shown = format!("{read:?} {read:#?} {cx:?} {cx:#?} {unread:?}");
+        let values = [
+            "Zebraidentity",
+            "Zebratrailer",
+            "Zebrakey",
+            "Zebrafield",
+            "Zebracontainer",
+            "Zebraparent",
+        ];
+        for value in values {
+            holds_none_of(&shown, value);
+        }
+        let said = [
+            "trailer: 3 entries".to_string(),
+            "trees: [Tree { keys: 1, whole: true }]".to_string(),
+            "fields: Some(Names { names: 1, whole: true })".to_string(),
+            "structure: None".to_string(),
+            format!("grammar: Some({})", model.digest()),
+            "container: Dict { at: Some(Span { stream: None, start: 40, end: 80 }) }".to_string(),
+            "parents: [Dict { at: None }]".to_string(),
+            "defaults: None".to_string(),
+        ];
+        for said in said {
+            assert!(shown.contains(&said), "{said} isn't in {shown}");
+        }
+        let unread = format!("{unread:?}");
+        assert!(
+            unread.contains("trees: [], structure: None, fields: None"),
+            "{unread}"
+        );
     }
 }

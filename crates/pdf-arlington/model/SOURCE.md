@@ -32,7 +32,7 @@ added row's Note says why, beginning `pdf-lint:`.
 and stops the build when a corrected cell isn't as the line says
 upstream has it, or upstream has an added row's key, or a table of an
 added table's name, itself. So the embedded model's hash
-(`Grammar::hash`) is of the corrected and added tables, not upstream's
+(`Grammar::digest`) is of the corrected and added tables, not upstream's
 at the same commit; `Grammar::load` (pdf-lint's `--model`) reads a
 checkout as it is; and a release archive carries them as
 `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. Each goes once
@@ -42,7 +42,10 @@ To update: fetch a newer commit the same way, into a scratch directory;
 replace `LICENSE`, `NOTICE.txt` and `tsv/latest` with its own; build, and
 for each correction or addition the build stops on, drop it if upstream
 fixed the model, or redo it if upstream changed it otherwise; update the
-commit here and in `pdf_arlington::COMMIT`, and the two hashes in
-`grammar.rs`'s `the_models_hashes_are_the_references`, upstream's tables'
-and the embedded ones' (`Grammar::hash` says how to work them out); rerun
-`just test`; and record in the changelog what moved.
+commit here and in `pdf_arlington::COMMIT`, the two hashes in
+`grammar.rs`'s `the_models_hashes_are_the_references` and pdf-lint's
+`tests/cli.rs`, upstream's tables' and the embedded ones', each a
+SHA-256 (`Grammar::digest` says how to work them out with `sha256sum`), and
+the tables' count, here and in the justfile's `_package`, which holds the
+package to it; rerun `just test` and `just arlington-package`; and record
+in the changelog what moved.

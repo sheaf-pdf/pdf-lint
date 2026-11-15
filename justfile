@@ -37,7 +37,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package linearize-package pdfs-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package linearize-package pdfs-package arlington-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -321,8 +321,17 @@ _package crate *beside:
     # What a crate's package holds beside those, file by file, so that a file
     # added beside them still fails: pdf-fonts' data, each file with its
     # terms (Adobe's metrics and their notice, the two glyph lists), and the
-    # FreeType Project License.
+    # FreeType Project License; pdf-arlington's build script, which embeds
+    # the model, the model's licence and notice, where it's from, and the
+    # corrections and additions the build makes to the copy it embeds. A
+    # crate's files of one kind may be held instead by where they are and
+    # how many, `tables` and `count`, so that one added, dropped or put
+    # elsewhere fails without a line for each: the model's tables,
+    # upstream's files in `model/tsv/latest`, 613 at the commit
+    # `model/SOURCE.md` names (the count moves with them).
     extra=()
+    tables=
+    count=0
     case "$crate" in
     pdf-fonts)
         extra=(
@@ -336,16 +345,33 @@ _package crate *beside:
             assets/afm/MustRead.html assets/glyphlist.txt assets/zapfdingbats.txt
             FTL.TXT
         ) ;;
+    pdf-arlington)
+        extra=(
+            build.rs model/LICENSE model/NOTICE.txt model/SOURCE.md
+            model/corrections.tsv model/additions/EncodingMap.tsv
+            model/additions/FieldChoice.tsv model/additions/FieldTx.tsv
+        )
+        tables='model/tsv/latest/[^/]+\.tsv'
+        count=613 ;;
     esac
     : > "$dir/extra.txt"
     if [ "${#extra[@]}" -gt 0 ]; then printf '%s\n' "${extra[@]}" > "$dir/extra.txt"; fi
-    if grep -v -E '^(src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json)$' "$dir/files.txt" | grep -v -x -F -f "$dir/extra.txt"; then
+    kinds='src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json'
+    if [ -n "$tables" ]; then kinds="$kinds|$tables"; fi
+    if grep -v -E "^($kinds)\$" "$dir/files.txt" | grep -v -x -F -f "$dir/extra.txt"; then
         echo "the package holds more than its sources, README, CHANGELOG, manifest and lock, and the files its list names (above)" >&2
         exit 1
     fi
     if grep -v -x -F -f "$dir/files.txt" "$dir/extra.txt" | grep .; then
         echo "the package lacks files its list names (above)" >&2
         exit 1
+    fi
+    if [ -n "$tables" ]; then
+        held=$(grep -c -x -E "$tables" "$dir/files.txt" || true)
+        if [ "$held" -ne "$count" ]; then
+            echo "the package holds $held files under $tables, where its list says $count" >&2
+            exit 1
+        fi
     fi
     manifest=("$dir"/package/"$crate"-*/Cargo.toml)
     if [ "${#manifest[@]}" -ne 1 ] || [ ! -f "${manifest[0]}" ]; then
@@ -403,6 +429,13 @@ linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-structure" "pdf-
 # pdf-linearize beside it while the versions it names aren't published;
 # `_package` says what's checked.
 pdfs-package: (_package "pdfs" "pdf-objects" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize")
+
+# Package pdf-arlington as a publish would, the model it embeds with its
+# licence and notice beside its sources, and pdf-objects and pdf-color
+# beside it while the versions it names aren't published; `_package` says
+# what's checked, and lists the files the package holds beside its
+# sources.
+arlington-package: (_package "pdf-arlington" "pdf-objects" "pdf-color")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
@@ -539,10 +572,12 @@ arlington-msrv:
 # `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
 # through the facade, and written in the clear and encrypted, read locked and
-# unlocked; or `check`, the reader and the checker.
+# unlocked; `arlington`, pdf-arlington's loader on any tables and its
+# evaluator on any predicate over any objects; or `check`, the reader and the
+# checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
-# `color`, `fonts`, `linearize` and `pdfs` from those their own crates' fuzz modules make. The
+# `color`, `fonts`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'
 # SIMD, which `content` reaches (`just fuzz content 300 simd`); and
@@ -610,13 +645,18 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/pdfs
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" pdfs fuzz/corpus/pdfs fuzz/seeds/pdfs -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    arlington)
+        PDF_ARLINGTON_FUZZ_SEEDS="$PWD/fuzz/seeds/arlington" cargo test --locked -q -p pdf-arlington --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/arlington
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" arlington fuzz/corpus/arlington fuzz/seeds/arlington -- -dict=fuzz/arlington.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, pdfs or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, pdfs, arlington or check" >&2
         exit 2
         ;;
     esac

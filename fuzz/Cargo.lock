@@ -365,13 +365,13 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "pdf-arlington"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "pdf-color",
  "pdf-objects",
  "rustc-hash",
+ "sha2",
  "thiserror",
- "twox-hash",
 ]
 
 [[package]]
@@ -510,6 +510,7 @@ name = "pdf-tokenizer-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "pdf-arlington",
  "pdf-color",
  "pdf-content-streams",
  "pdf-crypt",

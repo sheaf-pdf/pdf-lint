@@ -305,7 +305,7 @@ struct Setup {
     allow: Option<Allowances>,
     baseline: Option<Baseline>,
     /// The model the files are checked against, as the JSON report says:
-    /// its hash ([`Grammar::hash`]), 16 hex digits.
+    /// its hash ([`Grammar::digest`]), 64 hex digits.
     model: String,
 }
 
@@ -500,11 +500,11 @@ fn joined(command: &clap::Command, words: impl IntoIterator<Item = OsString>) ->
 /// What `--version` prints: pdf-lint's version, then the embedded model's
 /// commit, its corrections and additions, and its hash.
 fn version() -> String {
-    let hash = pdf_lint::grammar().hash();
+    let hash = pdf_lint::grammar().digest();
     let n = pdf_lint::grammar::corrections().len();
     let m = pdf_lint::grammar::additions().len();
     format!(
-        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
+        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (sha256 {hash})\n",
         env!("CARGO_PKG_VERSION"),
         pdf_lint::COMMIT
     )
@@ -571,7 +571,7 @@ fn run(mut args: Args) -> Result<ExitCode> {
         }
         None => None,
     };
-    let model = format!("{:016x}", pdf_lint::grammar().hash());
+    let model = pdf_lint::grammar().digest().to_string();
     let setup = Setup {
         args,
         hold,
@@ -895,7 +895,7 @@ fn unread(path: &Path, why: &str, json: bool) -> Checked {
     let mut err = format!("{name}: {why}\n");
     let out = match json {
         true => {
-            let model = format!("{:016x}", pdf_lint::grammar().hash());
+            let model = pdf_lint::grammar().digest().to_string();
             let unread = Unread {
                 pdf_lint: env!("CARGO_PKG_VERSION"),
                 model: &model,

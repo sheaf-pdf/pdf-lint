@@ -1,11 +1,12 @@
 [package]
 name = "pdf-arlington"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
 # As the model it embeds is.
 license = "Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-arlington"
 description = "Embedded Arlington PDF Model grammar and predicate evaluator over pdf-objects"
 keywords = ["pdf", "arlington", "grammar", "validation", "iso-32000"]
 categories = ["parser-implementations", "development-tools::testing"]
@@ -20,15 +21,33 @@ pdf-color.workspace = true
 pdf-objects.workspace = true
 # The hash a kept predicate is found by, rustc's: quick on short texts.
 rustc-hash = { version = "2.1", default-features = false }
+# SHA-256, which names a model by its tables' bytes: RustCrypto's, as
+# pdf-structure takes it, without the default features (`alloc`, `oid`),
+# which a digest of bytes doesn't use.
+sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
-# XXH64, which names a model by its tables' bytes, without the crate's other
-# hashes, its random seeds or std.
-twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
 
 [dev-dependencies]
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # The tests' folders of their own, removed after.
 tempfile = "3"
+
+# The benchmarks: `cargo bench -p pdf-arlington`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "arlington"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

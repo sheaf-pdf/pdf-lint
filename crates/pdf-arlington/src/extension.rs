@@ -8,6 +8,7 @@
 //! [`Grammar::extensions`].
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use pdf_objects::{Dict, Object, ObjectId, Value};
 
@@ -31,14 +32,34 @@ pub const ISO: &[(&str, i64)] = &[
 /// What a file's XMP metadata claims, of what [`declared`] reads: each value
 /// as it's written there but for the white space round it, none if it's not
 /// claimed. It's filled in a field at a time, from `Claims::default()`, as
-/// more may come.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// more may come. Its `Debug` gives each value's length, not the value,
+/// which is the file's metadata and may be decrypted.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Claims<'a> {
     /// PDF/A's part: `pdfaid:part`.
     pub pdfa_part: Option<&'a str>,
     /// PDF/VT's version: `pdfvtid:GTS_PDFVTVersion`.
     pub pdfvt_version: Option<&'a str>,
+}
+
+/// Each value's length; not the values, which may be decrypted.
+impl fmt::Debug for Claims<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Claims")
+            .field("pdfa_part", &self.pdfa_part.map(Len))
+            .field("pdfvt_version", &self.pdfvt_version.map(Len))
+            .finish()
+    }
+}
+
+/// A value by its length, in bytes, for a `Debug` that holds none.
+struct Len<'a>(&'a str);
+
+impl fmt::Debug for Len<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} bytes", self.0.len())
+    }
 }
 
 /// The extensions a file declares, as the model names them, from `root`,
@@ -65,6 +86,7 @@ pub struct Claims<'a> {
 /// before a check, from a few objects, which a reader on demand then
 /// needn't keep, where a check reads every object, many more than once. A
 /// `Resolve` gives one by a clone: `&|id| resolver.resolve(id).cloned()`.
+#[must_use]
 pub fn declared(
     root: Option<&Object>,
     claims: Claims,
@@ -129,6 +151,7 @@ impl Grammar {
     /// Every extension the model names, in its cells (`fn:Extension(X`)
     /// and around its types, values and links: what a file can be checked
     /// under.
+    #[must_use]
     pub fn extensions(&self) -> BTreeSet<String> {
         let mut names = BTreeSet::new();
         for table in self.tables() {
@@ -265,5 +288,21 @@ mod tests {
             .collect();
         let known: BTreeSet<String> = ISO.iter().map(|(name, _)| name.to_string()).collect();
         assert_eq!(iso, known);
+    }
+
+    /// What the metadata claims is never in a `Debug`: each value by its
+    /// length, as it may be decrypted.
+    #[test]
+    fn a_claims_debug_holds_no_value() {
+        let claims = Claims {
+            pdfa_part: Some("Zebrafish"),
+            ..Claims::default()
+        };
+        let shown = format!("{claims:?} {claims:#?}");
+        assert!(!shown.contains("Zebrafish"), "{shown}");
+        assert_eq!(
+            format!("{claims:?}"),
+            "Claims { pdfa_part: Some(9 bytes), pdfvt_version: None }"
+        );
     }
 }

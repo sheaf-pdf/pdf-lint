@@ -1806,9 +1806,9 @@ pub fn file_version(source: &dyn Source) -> Version {
 
 /// A file's objects, as the predicates resolve a reference: an object that
 /// doesn't read is none, as one the file hasn't is. Asked why, as the
-/// common structures' walks ask ([`structure`]) and the predicates never
-/// do, it says it as a document's own resolver does
-/// ([`Unread::unreadable`]).
+/// common structures' walks ask ([`structure`]) and the predicates do of a
+/// name tree (`fn:InNameTree`), it says it as a document's own resolver
+/// does ([`Unread::unreadable`]).
 ///
 /// [`Unread::unreadable`]: crate::source::Unread::unreadable
 #[derive(Clone, Copy)]
@@ -10854,12 +10854,105 @@ mod tests {
         assert_eq!(in_name_tree(&file, &root, b"c"), Truth::False);
     }
 
+    /// A resolver over `objects` that fails each object `fails` names for
+    /// its `Why`, as a reader fails one it can't read.
+    #[derive(Clone, Copy)]
+    struct Failing<'a> {
+        objects: &'a BTreeMap<ObjectId, Object>,
+        fails: &'a [(u32, crate::Why)],
+    }
+
+    impl<'a> Resolve<'a> for Failing<'a> {
+        fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
+            self.try_resolve(id).ok().flatten()
+        }
+
+        fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
+            match self.fails.iter().find(|(n, _)| *n == id.number) {
+                Some(&(_, why)) => Err(Unreadable::new(id, why, "made to fail")),
+                None => Ok(self.objects.get(&id)),
+            }
+        }
+    }
+
+    /// A tree each part of which is a reference, its root object 1, read over
+    /// a resolver that fails one of them, by damage and for a password:
+    /// `fn:InNameTree` holds to pdf-semantics' walk, which knows why one
+    /// doesn't read, as it does where each reads.
+    #[test]
+    fn in_name_tree_holds_to_the_walk_where_a_part_doesn_t_read() {
+        let objects = parsed_objects(&[
+            "<< /Kids [2 0 R 3 0 R] >>",
+            "<< /Limits [(a) (b)] /Names 4 0 R >>",
+            "<< /Kids 5 0 R >>",
+            "[(a) 0 6 0 R 0]",
+            "[7 0 R]",
+            "(b)",
+            "<< /Limits [(k) (k)] /Names [(k) 0] >>",
+        ]);
+        let trailer = Dict::new();
+        let root = r(1);
+        let parts = [
+            (None, "nothing"),
+            (Some(1), "the root"),
+            (Some(4), "a /Names"),
+            (Some(5), "a /Kids"),
+            (Some(7), "a kid"),
+            (Some(6), "a key"),
+        ];
+        for why in [crate::Why::Damaged, crate::Why::Locked] {
+            for (part, what) in parts {
+                let fails: Vec<_> = part.map(|n| (n, why)).into_iter().collect();
+                let resolve = Failing {
+                    objects: &objects,
+                    fails: &fails,
+                };
+                held_to_the_walk(&trailer, resolve, &root, &format!("{what}, {why:?}"));
+                let (keys, whole) = name_tree_keys(resolve, &root);
+                assert_eq!(whole, part.is_none(), "{what}, {why:?}: {keys:?}");
+            }
+        }
+    }
+
+    /// `fn:InNameTree` of the tree the trailer names, over a reading whose
+    /// catalog, and then whose catalog's `/Names`, doesn't read: no tree is
+    /// read, and a key isn't said to be missing from it.
+    #[test]
+    fn in_name_tree_can_t_say_a_key_is_missing_where_the_way_to_the_tree_doesn_t_read() {
+        let (catalog, names): (&[u8], &[u8]) = (b"<< /Names 2 0 R >>", b"<< /Dests 3 0 R >>");
+        let tree: &[u8] = b"<< /Names [(a) 0] >>";
+        let unknown = Truth::Unknown("fn:InNameTree".to_string());
+        // Each read, then the catalog unterminated, then its /Names.
+        let cases = [
+            ("each read", catalog, names, "TF"),
+            ("the catalog", b"<< /Names 2 0 R".as_slice(), names, "UU"),
+            ("its /Names", catalog, b"<< /Dests 3 0 R".as_slice(), "UU"),
+        ];
+        let text = "fn:InNameTree(trailer::Catalog::Names::Dests)";
+        for (what, catalog, names, said) in cases {
+            let objects = [(1, catalog), (2, names), (3, tree)];
+            let file = fixture::assembled("1.7", &objects, "<< /Root 1 0 R >>");
+            let reading = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+            let file = FileCx::new(reading.trailer().dict(), Version::new(1, 7), &reading);
+            for (key, said) in [b"a", b"z"].into_iter().zip(said.chars()) {
+                let row = Object::from(dict! { "X" => Object::bytes(key) });
+                let asked = predicate::holds(text, &file.at(&row, At::Key(b"X")));
+                let truth = match said {
+                    'T' => Truth::True,
+                    'F' => Truth::False,
+                    _ => unknown.clone(),
+                };
+                assert_eq!(asked, truth, "{what}: {key:?}");
+            }
+        }
+    }
+
     /// A `/Names` that doesn't read, which only a resolver that says why can
     /// tell from one that isn't there: the walk isn't whole, and
-    /// `fn:InNameTree`, which reads through `resolve` and can't be told, has
-    /// it as a tree without it, so a key it doesn't hold is false.
+    /// `fn:InNameTree`, which asks why too, has a key it doesn't hold as one
+    /// it can't say is missing.
     #[test]
-    fn in_name_tree_can_t_tell_a_names_that_doesn_t_read() {
+    fn in_name_tree_can_t_say_a_key_is_missing_from_a_names_that_doesn_t_read() {
         let file = fixture::assembled(
             "1.7",
             &[
@@ -10879,7 +10972,10 @@ mod tests {
         assert!(!whole, "the walk knows why");
         let file = FileCx::new(reading.trailer().dict(), Version::new(1, 7), objects);
         assert_eq!(in_name_tree(&file, &root, b"a"), Truth::True);
-        assert_eq!(in_name_tree(&file, &root, b"k"), Truth::False);
+        assert_eq!(
+            in_name_tree(&file, &root, b"k"),
+            Truth::Unknown("fn:InNameTree".to_string())
+        );
     }
 
     /// The name trees of pdf-lint's fixtures, the fuzzer's seeds, over a
