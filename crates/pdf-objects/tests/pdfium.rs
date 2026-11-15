@@ -15,7 +15,7 @@
 //!   no such array, the 612 by 792 PDFium gives a page then.
 //! - `info`: the document's `/Info` dictionary, PDFium's answer the text of
 //!   its entry under the key `.tag` holds; here that entry's string decoded
-//!   by PDFium's rules (`text::decode_with`), and none where there's no such
+//!   by PDFium's rules (`text::pdfium::decode`), and none where there's no such
 //!   entry, or no dictionary.
 //! - `kids`: what a page tree's `/Kids` holds, the page object 3, of 50 by
 //!   60, PDFium's answer the page's size, or `no-page`; here whether the
@@ -150,9 +150,7 @@ fn info(bytes: &[u8], tag: &[u8]) -> String {
     let text = value(bytes)
         .and_then(|v| v.as_dict().and_then(|d| d.get(tag)).cloned())
         .and_then(|e| match e.into_value() {
-            Value::String(s, _) => s
-                .as_bytes()
-                .map(|bytes| text::decode_with(bytes, Rules::Pdfium).text),
+            Value::String(s, _) => s.as_bytes().map(|bytes| text::pdfium::decode(bytes).text),
             _ => None,
         })
         .unwrap_or_default();

@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `#![no_std]` + `alloc` support when `default-features = false` (`std` feature enabled by default).
+- `SmallBytes` and `Name` types with inline small-buffer storage (`<= 15` bytes inline, thin `Box<[u8]>` up to `u32::MAX`, boxed spill above), shrinking `Object` to 64 bytes (one cache line) and `Entry` to 112 bytes on 64-bit targets.
+- `ResolveFn` and `resolve_fn` wrapper for closure resolvers, plus `Resolve` implementations for `&BTreeMap<ObjectId, Object>`, `&HashMap<ObjectId, Object, S>` (`std`), `Box<R>`, `Arc<R>`, `&WithStreams<R, F>`, and `&(dyn Resolve + Send + Sync)`.
+- `text::pdfium` submodule (`pdfium::decode`, `pdfium::Text`, `pdfium::Encoding`, `pdfium::Quirk` including `SplitSurrogate`) dedicated to PDFium text-string decoding (as of chromium/8152), plus `text::decode_str(bytes, rules)` and `Str` decode helpers (`decode`, `decode_pdfium`, `decode_str`, `is_encrypted`).
+- `Text::languages` on ISO `text::Text` capturing ISO 32000-2 §7.9.2.2.2 `0x1B` language escape tags, plus `const fn pdf_doc_byte(char) -> Option<u8>`.
+- `Limits::new`, `Limits::with_nesting`, and `Limits::with_values` constructors.
+- `OwnedFault` (`Fault::into_owned`), `FaultSink` adapter from `fault::Sink<OwnedFault>` to `parse::Sink`, and `parse::Sink` implementations for `Vec<(Span, Fault<'a>)>` and `Vec<(Span, OwnedFault)>`.
+- Parser faults `Fault::ZeroObjectNumber`, `Fault::SignedObjectId`, `Fault::StreamSpace`, `Fault::BeforeEndstream`, and `Fault::NoEndobj`.
+- Serializer error variants `serialize::Error::RealOutOfRange`, `InlineStream`, `NulName`, and `ZeroObjectId`.
+- `Object::eq_value`, `Object::name`, `Object::with_span`, `Object::clear_span`, `Span::try_new`, `Span::slice_in`, `Span::stream_slice_in`, and `ExactSizeIterator` on `Dict` iterators (`Iter`, `IterMut`, `LastEntries`, `Duplicates`).
+
+### Changed
+- **Breaking:** Removed blanket `impl<F: Fn(ObjectId) -> Option<&Object>> Resolve for F` in favor of `ResolveFn` / `resolve_fn` to eliminate trait coherence conflicts on smart pointers and wrapper types.
+- **Breaking:** Encapsulated `Span` fields (`start()`, `end()`, `stream()`, `len()`, `is_empty()`, `range()`), `Object::at` (`at()`, `with_span()`, `clear_span()`), and `Entry` fields (`key()`, `key_at()`, `value()`, `value_mut()`, `set_key()`).
+- **Breaking:** Replaced `Value::Name(Vec<u8>)` with `Value::Name(Name)` and `Str::Bytes(Vec<u8>)` / `Str::Encrypted(Vec<u8>)` with `SmallBytes`; removed `Str::Text(String)` and implicit `From<&str>` / `From<String>` -> `Value::Name` conversions on `Object` (use `Object::name` or `Object::text`).
+- **Breaking:** Separated ISO 32000-2 `text` (`Encoding::{Utf16Be, Utf8, PdfDoc}`) from `text::pdfium`; `serialize::name` now returns `Result<(), serialize::Error>` to reject NUL bytes; `Encrypt::clear_key` replaced by predicate `Encrypt::is_clear_key(&self, id, dict, key) -> bool`.
+- **Breaking:** `Parser::header(&mut self, sink)` now accepts a fault sink, and `Parser::body` / `Parser::stream` consume trailing `endobj` when present (or emit `Fault::NoEndobj`); `parse::Error` is boxed (`8` bytes) and dereferences to `parse::ErrorKind`.
+- Converted `Object` (`Drop`, `Clone`, `PartialEq`, `eq_value`), `Parser`, and `serialize` container walks to iterative heap-stack state machines for constant call-stack usage on deeply nested trees.
+- `Dict` lookup and duplicate detection use a 64-entry inline `u64` bitset and deterministic index sorting above 64 entries; `Dict::set` updates the last matching entry in place and removes shadowed earlier duplicates.
+- `WithStreams::decoded` now enforces the caller's byte `limit` (`Why::Limit`), and `Debug` redacts `Str::Encrypted` and `Data::Bytes` payloads alongside capped `Fault` byte previews.
+
+### Fixed
+- `StreamHead::scanned()` now skips false `endstream` matches followed by regular characters (such as `endstreamX`), records window-boundary touches when `endstream` ends at a non-final window cut, and strips at most one preceding stream-framing EOL (`\r\n`, `\n`, or `\r`).
+- `text::decode` now maps all 24 undefined bytes in ISO 32000-2 Table D.2 (`0x00..=0x08`, `0x0B..=0x0C`, `0x0E..=0x17`, `0x7F..=0x80`, `0xAD`) to `U+FFFD` with `Quirk::UndefinedByte`, restricts `Object::text` verbatim `PDFDocEncoding` selection to defined identity code points, and strips `0x1B` language escapes at the byte/unit level prior to UTF-8/UTF-16 decoding.
+- `serialize::real` no longer silently clamps finite `f64` values to `3.4e38` or flushes subnormals like `1e-45f32` to `0.0`, instead round-tripping all finite reals whose fixed-point token fits within 255 bytes.
+
 ## 0.1.0-alpha.2 (2026-11-07)
 
 - **Rust 1.89.** The minimum Rust is 1.89, from 1.85: the family's, moved for the RustCrypto releases pdf-crypt wants (its CHANGELOG says which), nothing of this crate's own needing it. A dependent names an alpha exactly, so it takes this one by naming it.

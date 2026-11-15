@@ -1,46 +1,27 @@
-//! pdf-objects timed on inputs made here, so that a change to its parser,
-//! its writer, its dictionaries, its walks of references or its text
-//! strings can be judged before and after it, by `cargo bench -p
-//! pdf-objects`:
+//! Criterion benchmarks for `pdf-objects` (`cargo bench -p pdf-objects`).
 //!
-//! - `parse`: indirect objects as a file's body holds them (a page, its
-//!   content stream, the page tree, fonts and annotations), each read
-//!   through its header, its body and a stream's data by its `/Length`,
-//!   then past its `endobj`; arrays of numbers; arrays of literal and
-//!   hexadecimal strings, with escapes; arrays of names, with `#` escapes;
-//!   and dictionaries of 1,000 keys (`wide`). Each is read by ISO 32000-2's
-//!   rules (`iso`) and PDFium's (`pdfium`) with a sink that wants no
-//!   faults, and by PDFium's with one that wants them (`pdfium-told`), for
-//!   which the parser looks at each token as ISO 32000-2 reads it too.
-//!   Objects with 0x80 and 0xFF between their tokens, white-space by
-//!   PDFium's rules alone, are read by PDFium's (`high`).
-//! - `write`: the objects `parse` reads, written back as indirect objects;
-//!   arrays of reals; and arrays of strings, plain, with escapes, and
-//!   hexadecimal.
-//! - `dict`: a dictionary of 16 entries and one of 1,000 (`few`, `many`),
-//!   each with keys written twice: its every key looked up (`get`), its
-//!   entries walked (`iter`, `iter_mut`, `last_entries`), those a later
-//!   one overrides found (`duplicates`), and its keys counted (`len`).
-//! - `object`: the references in a page tree's pages walked (`references`)
-//!   and each named anew (`renumber`).
-//! - `text`: text strings decoded, and texts encoded, in PDFDocEncoding,
-//!   UTF-16BE and UTF-8.
-//!
-//! Throughput is in bytes of what's read or written, but for `dict` and
-//! `object`, which read none: there it's in entries and references.
-//! Nothing is read from disk, and the inputs are the same on every run.
+//! Measures throughput across:
+//! - `parse`: indirect objects and streams (`objects`, `scanned`, `high`), numbers, strings, names,
+//!   and 1,000-entry dictionaries (`wide`) under `Rules::Iso` and `Rules::Pdfium` (with and without
+//!   fault collection).
+//! - `write`: indirect objects (plain, encrypted, and renumbered), reals, and strings.
+//! - `dict`: `get`, `set`, `iter`, `last_entries`, `duplicates`, `len`, and `iter_mut` on 16-entry
+//!   (`few`) and 1,000-entry (`many`) dictionaries with duplicate keys.
+//! - `object`: `references` traversal and in-place `renumber` on a 1,000-page tree.
+//! - `text`: ISO 32000-2 `decode` / `encode` and `text::pdfium::decode` across `PDFDocEncoding`,
+//!   `UTF-16BE`, and `UTF-8`.
 
+use std::borrow::Cow;
 use std::hint::black_box;
 
 use criterion::measurement::WallTime;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput};
 use pdf_objects::parse::{Body, Fault, Parser, Sink, StreamHead};
+use pdf_objects::serialize::{self, Encrypt};
 use pdf_objects::text::{self, Encoding};
-use pdf_objects::{Dict, Object, ObjectId, Span, serialize};
-use pdf_tokenizer::{Rules, Tokenizer};
+use pdf_objects::{Dict, Object, ObjectId, Span};
+use pdf_tokenizer::Rules;
 
-/// A page, its content stream, the page tree's root, the fonts and the
-/// annotations the page names, as a writer lays them out.
 const OBJECTS: &[u8] = b"1 0 obj\n\
     << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [0 0 612.0 792.0]\n\
     /Resources << /Font << /F1 5 0 R /F2 6 0 R >> /ProcSet [/PDF /Text /ImageC] /XObject << /Im0 7 0 R >> >>\n\
@@ -57,36 +38,25 @@ const OBJECTS: &[u8] = b"1 0 obj\n\
     9 0 obj\n<< /Type /Annot /Subtype /Text /Rect [72 650 92 670] /Contents <FEFF00480065006C006C006F> /M (D:20261106120000+00'00') >>\nendobj\n\
     % a comment between objects\n";
 
-/// Objects with 0x80 and 0xFF where white-space goes: between a header and
-/// its value, a dictionary's keys and values, an array's elements and a
-/// reference's parts, before `endobj`, and around a stream's `stream` and
-/// `endstream`. White-space by PDFium's rules, and regular characters by ISO
-/// 32000-2's, which then reads other objects.
 const HIGH: &[u8] =
     b"1 0 obj\x80<< /Type\xff/Page /Parent 2\x800 R /MediaBox [0\xff0 612\x80792] >>\x80endobj\n\
     4 0 obj\n<< /Length 10 >>\xffstream\n0123456789\n\x80endstream\nendobj\n\
     5 0 obj\n<<\xff/Type /Font /Subtype\x80/Type1 /BaseFont /Helvetica\xff>>\nendobj\n";
 
-/// Integers and reals, as a page's boxes and a font's widths hold them.
 const NUMBERS: &[u8] = b"[0 1 -1 42 612 792 65535 123456789 -2147483648 14.4 -0.5 .5 1.0 0.0001 720.25 -72.5 +17 -.002 0 0 1 0 0 1 72 720 278 556 889]\n";
 
-/// Literal strings, plain and with escapes, a line continuation and
-/// parentheses nested, and hexadecimal ones, with white-space too.
 const STRINGS: &[u8] = b"[(Hello, world) (caf\\351 \\(1\\) \\\\ and a\\nbreak) <48656C6C6F20776F726C64> <FEFF00480069> \
     (D:20261106120000+00'00') (https://example.org/a#b) (nested (parens) here) (a line \\\ncontinued) <4 8 6 5 6 C>]\n";
 
-/// Names, half of them with an escape.
 const NAMES: &[u8] = b"[/Type /Name#20with#20spaces /A#2FB /Caf#E9 /Plain /Hash#23 /Font /F1 /Length /Lo#6Eg#20escaped#20name /MediaBox /B#41SE]\n";
 
-/// A dictionary of 1,000 keys, each value an integer, a name or a
-/// reference in turn.
 fn wide() -> Vec<u8> {
     let mut dict = b"<<".to_vec();
     for i in 0..1000 {
         let value = match i % 3 {
             0 => format!(" /K{i} {i}"),
             1 => format!(" /K{i} /N{i}"),
-            _ => format!(" /K{i} {i} 0 R"),
+            _ => format!(" /K{i} {} 0 R", i + 1),
         };
         dict.extend_from_slice(value.as_bytes());
     }
@@ -94,12 +64,8 @@ fn wide() -> Vec<u8> {
     dict
 }
 
-/// About 1 MB, so that a run of the parser is a few milliseconds and the
-/// input is past the faster caches.
 const INPUT_LEN: usize = 1 << 20;
 
-/// `piece` repeated until the input holds `len` bytes or more, and how
-/// many times it is.
 fn repeated(piece: &[u8], len: usize) -> (Vec<u8>, usize) {
     let mut input = Vec::with_capacity(len + piece.len());
     let mut times = 0;
@@ -110,8 +76,6 @@ fn repeated(piece: &[u8], len: usize) -> (Vec<u8>, usize) {
     (input, times)
 }
 
-/// A sink that wants every fault and counts them, as a checker that keeps
-/// them is told them.
 #[derive(Default)]
 struct Counted(usize);
 
@@ -121,22 +85,17 @@ impl Sink<'_> for Counted {
     }
 }
 
-/// How a `parse` input is read.
 trait Reading {
-    /// What `input` holds, read by `rules`, its faults told to `sink`: how
-    /// many it read before the first it couldn't.
     fn read<'a>(input: &'a [u8], rules: Rules, sink: &mut (impl Sink<'a> + ?Sized)) -> usize;
 }
 
-/// Indirect objects, one after another, as a file's reader reads them
-/// ([`next_object`]).
 struct Objects;
 
 impl Reading for Objects {
     fn read<'a>(input: &'a [u8], rules: Rules, sink: &mut (impl Sink<'a> + ?Sized)) -> usize {
         let mut parser = Parser::at(input, 0).rules(rules);
         let mut n = 0;
-        while let Some(object) = next_object(&mut parser, input, rules, sink) {
+        while let Some(object) = next_object(&mut parser, sink, false) {
             black_box(object);
             n += 1;
         }
@@ -144,44 +103,49 @@ impl Reading for Objects {
     }
 }
 
-/// The next indirect object of `input` that `parser` reads by `rules`, as
-/// a file's reader reads one: its header, then its body, and a stream's
-/// data by its `/Length`, or up to `endstream` where that's wrong; and the
-/// parser then past its `endobj`, which the parser looks for without
-/// reading. None where any of them isn't there.
+struct ScannedObjects;
+
+impl Reading for ScannedObjects {
+    fn read<'a>(input: &'a [u8], rules: Rules, sink: &mut (impl Sink<'a> + ?Sized)) -> usize {
+        let mut parser = Parser::at(input, 0).rules(rules);
+        let mut n = 0;
+        while let Some(object) = next_object(&mut parser, sink, true) {
+            black_box(object);
+            n += 1;
+        }
+        n
+    }
+}
+
 fn next_object<'a>(
     parser: &mut Parser<'a>,
-    input: &'a [u8],
-    rules: Rules,
     sink: &mut (impl Sink<'a> + ?Sized),
+    force_scan: bool,
 ) -> Option<(ObjectId, Object)> {
-    let id = parser.header().ok()?;
+    let id = parser.header(sink).ok()?;
     let object = match parser.body(id, sink).ok()? {
         Body::Object(object) => object,
         Body::Stream(head) => {
-            let data = data(&head);
-            parser.stream(head, data, sink).ok()?
+            let span = if force_scan {
+                head.scanned()
+            } else {
+                data(&head)
+            };
+            parser.stream(head, span, sink).ok()?
         }
     };
-    let mut t = Tokenizer::at(input, parser.offset()).with_rules(rules);
-    if !t.next_significant()?.is_keyword(b"endobj") {
-        return None;
-    }
-    *parser = Parser::at(input, t.offset()).rules(rules);
     Some((id, object))
 }
 
-/// A stream's data by its `/Length`, or up to `endstream` where that's
-/// wrong, as a file's reader chooses it.
 fn data(head: &StreamHead<'_>) -> Span {
-    (head.dict().get(b"Length"))
+    head.dict()
+        .get("Length")
         .and_then(Object::as_integer)
         .and_then(|length| usize::try_from(length).ok())
         .and_then(|length| head.declared(length))
         .unwrap_or_else(|| head.scanned())
 }
 
-/// Values, one after another.
 struct Values;
 
 impl Reading for Values {
@@ -196,11 +160,6 @@ impl Reading for Values {
     }
 }
 
-/// `piece`, repeated to [`INPUT_LEN`], read as `R` reads it under each
-/// side: by ISO 32000-2's rules, where `iso`, and PDFium's, with a sink
-/// that wants no faults; and by PDFium's with one that wants them. Each
-/// side is held first to reading every one of the input's objects or
-/// values, so that none is timed reading less.
 fn parse_benches<R: Reading>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     name: &str,
@@ -222,16 +181,16 @@ fn parse_benches<R: Reading>(
     group.throughput(Throughput::Bytes(input.len() as u64));
     if iso {
         group.bench_function(BenchmarkId::new("iso", name), |b| {
-            b.iter(|| R::read(input, Rules::Iso, &mut ()))
+            b.iter(|| R::read(black_box(input), Rules::Iso, &mut ()))
         });
     }
     group.bench_function(BenchmarkId::new("pdfium", name), |b| {
-        b.iter(|| R::read(input, Rules::Pdfium, &mut ()))
+        b.iter(|| R::read(black_box(input), Rules::Pdfium, &mut ()))
     });
     group.bench_function(BenchmarkId::new("pdfium-told", name), |b| {
         b.iter(|| {
             let mut sink = Counted::default();
-            R::read(input, Rules::Pdfium, &mut sink) + sink.0
+            R::read(black_box(input), Rules::Pdfium, &mut sink) + sink.0
         })
     });
 }
@@ -239,6 +198,7 @@ fn parse_benches<R: Reading>(
 fn parse_group(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
     parse_benches::<Objects>(&mut group, "objects", OBJECTS, true);
+    parse_benches::<ScannedObjects>(&mut group, "scanned", OBJECTS, true);
     parse_benches::<Values>(&mut group, "numbers", NUMBERS, true);
     parse_benches::<Values>(&mut group, "strings", STRINGS, true);
     parse_benches::<Values>(&mut group, "names", NAMES, true);
@@ -247,30 +207,50 @@ fn parse_group(c: &mut Criterion) {
     group.finish();
 }
 
-/// Each indirect object of `input` with its number, as the parser reads
-/// them by ISO 32000-2's rules, a stream's data then held in memory, so
-/// that each is written whole.
 fn read_back(input: &[u8]) -> Vec<(ObjectId, Object)> {
     let mut parser = Parser::at(input, 0);
     let mut objects = Vec::new();
-    while let Some((id, mut object)) = next_object(&mut parser, input, Rules::Iso, &mut ()) {
+    while let Some((id, mut object)) = next_object(&mut parser, &mut (), false) {
         if let Some(stream) = object.as_stream_mut() {
             let at = stream.data.at().expect("its data's place");
-            stream.set_bytes(input[at.start..at.end].to_vec());
+            stream.set_bytes(input[at.range()].to_vec());
         }
         objects.push((id, object));
     }
     objects
 }
 
-/// `objects` written as indirect objects, at the end of `out`.
 fn write_objects(out: &mut Vec<u8>, objects: &[(ObjectId, Object)]) {
     for (id, object) in objects {
         serialize::indirect(out, *id, object).expect("written");
     }
 }
 
-/// Reals as a page's content and its objects hold them.
+struct XorEncrypt;
+
+impl Encrypt for XorEncrypt {
+    type Error = core::convert::Infallible;
+
+    fn is_clear_key(&self, _: ObjectId, _: &Dict, key: &[u8]) -> bool {
+        key == b"M"
+    }
+
+    fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error> {
+        let mask = id.number as u8 ^ 0xA5;
+        Ok(Cow::Owned(text.iter().map(|b| b ^ mask).collect()))
+    }
+
+    fn stream<'d>(
+        &self,
+        id: ObjectId,
+        _: &Dict,
+        data: &'d [u8],
+    ) -> Result<Cow<'d, [u8]>, Self::Error> {
+        let mask = id.number as u8 ^ 0x5A;
+        Ok(Cow::Owned(data.iter().map(|b| b ^ mask).collect()))
+    }
+}
+
 const REALS: [f64; 16] = [
     0.5, -0.5, 2.5, 14.4, 720.25, -72.5, 612.0, 0.0001, 1.0, 100.125, 0.333333, -1234.5678, 25.4,
     0.07, 65535.5, 1e-5,
@@ -279,7 +259,10 @@ const REALS: [f64; 16] = [
 fn write_group(c: &mut Criterion) {
     let (input, _) = repeated(OBJECTS, INPUT_LEN);
     let objects = read_back(&input);
-    let reals: Vec<Object> = (REALS.iter().cycle().take(1 << 16))
+    let reals: Vec<Object> = REALS
+        .iter()
+        .cycle()
+        .take(1 << 16)
         .map(|&x| Object::from(x))
         .collect();
     let strings: Vec<Object> = (0..1 << 14)
@@ -299,7 +282,27 @@ fn write_group(c: &mut Criterion) {
     group.bench_function("objects", |b| {
         b.iter(|| {
             out.clear();
-            write_objects(&mut out, &objects);
+            write_objects(&mut out, black_box(&objects));
+            out.len()
+        })
+    });
+    group.bench_function("objects-encrypted", |b| {
+        b.iter(|| {
+            out.clear();
+            for (id, object) in black_box(&objects) {
+                serialize::indirect_with(&mut out, *id, object, &XorEncrypt).expect("encrypted");
+            }
+            out.len()
+        })
+    });
+    group.bench_function("objects-renumbered", |b| {
+        let remap = |id: ObjectId| Some(ObjectId::new(id.number + 100, id.generation));
+        b.iter(|| {
+            out.clear();
+            for (id, object) in black_box(&objects) {
+                serialize::indirect_renumbered(&mut out, *id, object, &(), &remap)
+                    .expect("renumbered");
+            }
             out.len()
         })
     });
@@ -310,7 +313,7 @@ fn write_group(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter(|| {
                 out.clear();
-                serialize::write(&mut out, value).expect("written");
+                serialize::write(&mut out, black_box(value)).expect("written");
                 out.len()
             })
         });
@@ -318,7 +321,6 @@ fn write_group(c: &mut Criterion) {
     group.finish();
 }
 
-/// A font's keys, for a dictionary of few entries.
 const FONT_KEYS: [&str; 14] = [
     "Type",
     "Subtype",
@@ -336,9 +338,6 @@ const FONT_KEYS: [&str; 14] = [
     "CharProcs",
 ];
 
-/// A dictionary of `len` entries, a font's keys and numbered ones past
-/// them, and every key it holds; one entry in every eight written again
-/// later, as a key written twice.
 fn dictionary(len: usize) -> (Dict, Vec<Vec<u8>>) {
     let mut keys: Vec<Vec<u8>> = Vec::new();
     let mut dict = Dict::new();
@@ -351,7 +350,7 @@ fn dictionary(len: usize) -> (Dict, Vec<Vec<u8>>) {
         if !keys.contains(&key) {
             keys.push(key.clone());
         }
-        dict.push(&key, i as i64);
+        dict.push(key.as_slice(), i as i64);
     }
     (dict, keys)
 }
@@ -363,26 +362,52 @@ fn dict_group(c: &mut Criterion) {
         assert!(dict.len() < len && dict.duplicates().count() == len - dict.len());
         group.throughput(Throughput::Elements(keys.len() as u64));
         group.bench_function(BenchmarkId::new("get", name), |b| {
-            b.iter(|| keys.iter().filter_map(|key| dict.get(key)).count())
+            b.iter(|| {
+                black_box(&keys)
+                    .iter()
+                    .filter_map(|key| black_box(&dict).get(key.as_slice()))
+                    .count()
+            })
+        });
+        group.bench_function(BenchmarkId::new("set", name), |b| {
+            b.iter_batched(
+                || dict.clone(),
+                |mut cloned| {
+                    for (idx, key) in black_box(&keys).iter().enumerate() {
+                        cloned.set(key.as_slice(), idx as i64);
+                    }
+                    cloned
+                },
+                BatchSize::SmallInput,
+            )
         });
         group.throughput(Throughput::Elements(len as u64));
         group.bench_function(BenchmarkId::new("iter", name), |b| {
-            b.iter(|| dict.iter().map(|(key, _)| key.len()).sum::<usize>())
+            b.iter(|| {
+                black_box(&dict)
+                    .iter()
+                    .map(|(key, _)| key.len())
+                    .sum::<usize>()
+            })
         });
         group.bench_function(BenchmarkId::new("last_entries", name), |b| {
             b.iter(|| {
-                dict.last_entries()
-                    .map(|entry| entry.key.len())
+                black_box(&dict)
+                    .last_entries()
+                    .map(|entry| entry.key().len())
                     .sum::<usize>()
             })
         });
         group.bench_function(BenchmarkId::new("duplicates", name), |b| {
-            b.iter(|| dict.duplicates().count())
+            b.iter(|| black_box(&dict).duplicates().count())
         });
-        group.bench_function(BenchmarkId::new("len", name), |b| b.iter(|| dict.len()));
+        group.bench_function(BenchmarkId::new("len", name), |b| {
+            b.iter(|| black_box(&dict).len())
+        });
         group.bench_function(BenchmarkId::new("iter_mut", name), |b| {
             b.iter(|| {
-                (dict.iter_mut())
+                black_box(&mut dict)
+                    .iter_mut()
                     .map(|(key, value)| key.len() + usize::from(value.is_null()))
                     .sum::<usize>()
             })
@@ -391,8 +416,6 @@ fn dict_group(c: &mut Criterion) {
     group.finish();
 }
 
-/// A page as a page tree holds it, naming its parent, its content, its
-/// fonts, an image and its annotations.
 const PAGE: &[u8] = b"<< /Type /Page /Parent 2 0 R /Contents 10 0 R /MediaBox [0 0 612 792]\n\
     /Resources << /Font << /F1 5 0 R /F2 6 0 R >> /XObject << /Im0 7 0 R >> >> /Annots [8 0 R 9 0 R] >>\n";
 
@@ -407,7 +430,9 @@ fn object_group(c: &mut Criterion) {
     assert_eq!(references, 7000);
     let mut group = c.benchmark_group("object");
     group.throughput(Throughput::Elements(references as u64));
-    group.bench_function("references", |b| b.iter(|| pages.references().count()));
+    group.bench_function("references", |b| {
+        b.iter(|| black_box(&pages).references().count())
+    });
     group.bench_function("renumber", |b| {
         b.iter_batched(
             || pages.clone(),
@@ -421,8 +446,6 @@ fn object_group(c: &mut Criterion) {
     group.finish();
 }
 
-/// Texts as a document's outline and information hold them, in characters
-/// PDFDocEncoding has.
 const LATIN: [&str; 4] = [
     "Annual Report 2026",
     "Chapter 3: Results and Discussion",
@@ -430,7 +453,6 @@ const LATIN: [&str; 4] = [
     "\u{201c}Quoted\u{201d} \u{2026} \u{fb01}nal \u{2013} \u{dc}ber",
 ];
 
-/// Texts with characters PDFDocEncoding hasn't.
 const WIDE: [&str; 4] = [
     "\u{6771}\u{4eac} 2026 \u{5e74}\u{6b21}\u{5831}\u{544a}",
     "\u{395}\u{3bb}\u{3bb}\u{3b7}\u{3bd}\u{3b9}\u{3ba}\u{3ac} \u{3ba}\u{3b5}\u{3af}\u{3bc}\u{3b5}\u{3bd}\u{3b1}",
@@ -447,29 +469,46 @@ fn text_group(c: &mut Criterion) {
     let mut group = c.benchmark_group("text");
     for (name, texts, encoding) in sides {
         let texts: Vec<&str> = texts.iter().copied().cycle().take(1024).collect();
-        let strings: Vec<Vec<u8>> = (texts.iter())
-            .map(|text| text::encode_as(text, encoding).expect("encodable"))
+        let strings: Vec<Vec<u8>> = texts
+            .iter()
+            .map(|t| text::encode_as(t, encoding).expect("encodable"))
             .collect();
-        assert!((strings.iter().zip(&texts)).all(|(s, t)| text::decode(s).text == *t));
+        assert!(
+            strings
+                .iter()
+                .zip(&texts)
+                .all(|(s, t)| text::decode(s).text == *t)
+        );
         let encoded: usize = strings.iter().map(Vec::len).sum();
         let written: usize = texts.iter().map(|t| t.len()).sum();
         group.throughput(Throughput::Bytes(encoded as u64));
-        group.bench_function(BenchmarkId::new("decode", name), |b| {
+        group.bench_function(BenchmarkId::new("decode-iso", name), |b| {
             b.iter(|| {
-                (strings.iter())
+                black_box(&strings)
+                    .iter()
                     .map(|s| text::decode(s).text.len())
                     .sum::<usize>()
             })
         });
-        // UTF-16BE is what `encode` writes a text PDFDocEncoding can't
-        // take as it is in; the other two are asked for.
+        group.bench_function(BenchmarkId::new("decode-pdfium", name), |b| {
+            b.iter(|| {
+                black_box(&strings)
+                    .iter()
+                    .map(|s| text::pdfium::decode(s).text.len())
+                    .sum::<usize>()
+            })
+        });
         group.throughput(Throughput::Bytes(written as u64));
         group.bench_function(BenchmarkId::new("encode", name), |b| match encoding {
-            Encoding::Utf16Be => {
-                b.iter(|| (texts.iter()).map(|t| text::encode(t).len()).sum::<usize>())
-            }
+            Encoding::Utf16Be => b.iter(|| {
+                black_box(&texts)
+                    .iter()
+                    .map(|t| text::encode(t).len())
+                    .sum::<usize>()
+            }),
             _ => b.iter(|| {
-                (texts.iter())
+                black_box(&texts)
+                    .iter()
                     .map(|t| text::encode_as(t, encoding).map_or(0, |s| s.len()))
                     .sum::<usize>()
             }),
@@ -478,9 +517,6 @@ fn text_group(c: &mut Criterion) {
     group.finish();
 }
 
-/// The groups, as one benchmark binary: what `criterion_group!` and
-/// `criterion_main!` would write, without the public function the first
-/// makes.
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     parse_group(&mut criterion);

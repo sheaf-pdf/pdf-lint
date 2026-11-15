@@ -1,37 +1,46 @@
-//! The objects a checked file holds, as a reader read them: owned, each
-//! value with where it was written when the reader knows and no edit has
-//! changed it since, and each dictionary as written, in order and with any
-//! key written twice.
+//! Owned PDF objects, inline-optimized names/strings, span tracking, and exact dictionaries
+//! (ISO 32000-2 §7.3).
+//!
+//! Every [`Object`] pairs a [`Value`] with an optional [`Span`] recording its byte range in the
+//! source file or decoded object stream (`size_of::<Object>() == 64` on 64-bit targets).
+//! Mutating an object via [`Object::value_mut`] or `as_*_mut` clears the span on the edited node
+//! and its containers while preserving untouched siblings' spans.
+//!
+//! Recursive operations—`Drop`, `Clone`, `PartialEq`, [`Object::eq_value`],
+//! [`Object::references`], [`Object::renumber`], and [`Object::unplace`]—use explicit heap stacks
+//! so arbitrarily deep structures never overflow the call stack.
 
-use std::collections::HashSet;
-use std::fmt;
-use std::iter::{Enumerate, FusedIterator};
-use std::slice;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::string::String;
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::fmt::{self, Write as _};
+use core::hash::{Hash, Hasher};
+use core::iter::{Enumerate, FusedIterator};
+use core::ops::{Deref, Range};
+use core::slice;
 
 use crate::text;
 
-/// An indirect object's number and generation (ISO 32000-2, 7.3.10).
+/// Indirect object identifier (`number` and `generation`, ISO 32000-2 §7.3.10).
 ///
-/// Ordered and hashed by number, then generation, so a set of ids
-/// iterates in the file's numbering. Eight bytes, and `Copy`. Written as
-/// a file writes the pair, `12 0`: a reference is `format!("{id} R")`,
-/// an object's header `format!("{id} obj")`. A pair `(number,
-/// generation)`, as another object model may spell it, converts both
-/// ways through `From`.
-///
-/// Exhaustive on purpose: an id is its two fields, built by a literal and
-/// taken apart by them as the pair is, so a field more would be a breaking
-/// release.
+/// Ordered and hashed by `(number, generation)`. `Display` formats as `"{number} {generation}"`,
+/// so `format!("{id} R")` produces an indirect reference and `format!("{id} obj")` an object
+/// header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectId {
-    /// Its object number.
+    /// Positive object number (`0` is reserved for the free-list head in xref tables).
     pub number: u32,
-    /// Its generation number.
+    /// Generation number (`0..=65535`).
     pub generation: u16,
 }
 
 impl ObjectId {
-    /// Object `number`, generation `generation`.
+    /// Creates an [`ObjectId`] for `number` and `generation`.
     #[must_use]
     pub const fn new(number: u32, generation: u16) -> ObjectId {
         ObjectId { number, generation }
@@ -51,240 +60,1012 @@ impl From<ObjectId> for (u32, u16) {
 }
 
 impl fmt::Display for ObjectId {
-    /// `12 0`: the number, a space and the generation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.number, self.generation)
     }
 }
 
-/// Where a value was written: a run of the file's bytes, or of a stream's
-/// decoded data.
+/// Source byte range of a parsed PDF token, value, or stream payload.
+///
+/// When [`Span::stream`] is `None`, [`Span::start`] and [`Span::end`] are byte offsets in the
+/// outer PDF file. When [`Span::stream`] is `Some(id)`, they are byte offsets inside the decoded
+/// payload of object stream `id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
 pub struct Span {
-    /// The stream whose decoded data it's in, an object stream for an object
-    /// in one; none for the file.
-    pub stream: Option<ObjectId>,
-    /// The offset of its first byte.
-    pub start: usize,
-    /// The offset just past its last byte.
-    pub end: usize,
+    stream: Option<ObjectId>,
+    start: usize,
+    end: usize,
 }
 
 impl Span {
-    /// Bytes `start..end` of the file, or of stream `stream`'s decoded data.
+    /// Creates a [`Span`] covering `start..end` in the file (`stream: None`) or in object stream
+    /// `stream`.
+    ///
+    /// Debug-asserts `start <= end`; use [`Span::try_new`] when offsets come from untrusted
+    /// arithmetic.
     #[must_use]
     pub const fn new(stream: Option<ObjectId>, start: usize, end: usize) -> Span {
+        debug_assert!(start <= end, "Span::new requires start <= end");
         Span { stream, start, end }
+    }
+
+    /// Creates a [`Span`] if `start <= end`, returning `None` otherwise.
+    #[must_use]
+    pub const fn try_new(stream: Option<ObjectId>, start: usize, end: usize) -> Option<Span> {
+        if start <= end {
+            Some(Span { stream, start, end })
+        } else {
+            None
+        }
+    }
+
+    /// Enclosing object stream [`ObjectId`], or `None` for top-level file bytes.
+    #[must_use]
+    #[inline]
+    pub const fn stream(&self) -> Option<ObjectId> {
+        self.stream
+    }
+
+    /// Byte offset of the first byte in the span.
+    #[must_use]
+    #[inline]
+    pub const fn start(&self) -> usize {
+        self.start
+    }
+
+    /// Byte offset one past the last byte in the span.
+    #[must_use]
+    #[inline]
+    pub const fn end(&self) -> usize {
+        self.end
+    }
+
+    /// `self.start()..self.end()` as a [`Range`].
+    #[must_use]
+    #[inline]
+    pub const fn range(&self) -> Range<usize> {
+        self.start..self.end
+    }
+
+    /// Length of the span in bytes.
+    #[must_use]
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+
+    /// Returns `true` if the span covers zero bytes.
+    #[must_use]
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.start >= self.end
+    }
+
+    /// Slices `file` at `self.range()` when this span refers to top-level file bytes
+    /// (`self.stream().is_none()`).
+    ///
+    /// Returns `None` if `self.stream().is_some()` or if the range exceeds `file.len()`.
+    #[must_use]
+    #[inline]
+    pub fn slice_in<'a>(&self, file: &'a [u8]) -> Option<&'a [u8]> {
+        if self.stream.is_some() {
+            return None;
+        }
+        file.get(self.start..self.end)
+    }
+
+    /// Slices `decoded` at `self.range()` when `self.stream() == Some(stream_id)`.
+    #[must_use]
+    #[inline]
+    pub fn stream_slice_in<'a>(&self, stream_id: ObjectId, decoded: &'a [u8]) -> Option<&'a [u8]> {
+        if self.stream != Some(stream_id) {
+            return None;
+        }
+        decoded.get(self.start..self.end)
     }
 }
 
-/// A value, and where it was written.
+/// Compact 16-byte immutable byte buffer optimized for PDF names and short strings.
 ///
-/// Its value is read through [`Object::value`] and changed through
-/// [`Object::value_mut`] or an `as_*_mut` accessor, each an edit, which
-/// drops its span: reaching a value inside another goes through each
-/// value that holds it, so their spans go too, and a value no edit
-/// reached keeps its own. [`Object::renumber`] names its references anew,
-/// an edit of each it changes; [`Object::unplace`] drops every place in
-/// it, for an object put among another file's.
-///
-/// Two are equal when their values are and they were written at the same
-/// place, as [`Value`]'s equality takes in places too: a value read, with
-/// its span and a string's form, isn't equal to the same value built,
-/// which has neither, as `5` read from a file isn't `Object::from(5)`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Object {
-    value: Value,
-    /// Where it was written, when the reader knows and no edit has changed
-    /// it since: a reader of the file's bytes always does, and one through
-    /// another tool's JSON, as qpdf's, may not. A value changed in place
-    /// has none, nor has anything that holds it, as they may no longer be
-    /// what those bytes say; one no edit touched keeps its own, so a
-    /// writer of a file may copy it as it was written. This crate's writer,
-    /// [`serialize`](crate::serialize), writes every value anew. A real's
-    /// spelling, `1.50` or `.5`, is in the bytes it names.
-    pub at: Option<Span>,
+/// Stores `0..=14` bytes inline with zero heap allocations, `15..=64` bytes in a single thin
+/// 64-byte allocation, and larger buffers behind a reference-counted slice for $O(1)$ cloning.
+#[derive(Clone)]
+pub struct SmallBytes(BytesRepr);
+
+#[derive(Clone)]
+enum BytesRepr {
+    Inline {
+        len: u8,
+        buf: [u8; 14],
+    },
+    Medium {
+        len: u8,
+        buf: Box<[u8; 64]>,
+    },
+    #[cfg(target_has_atomic = "ptr")]
+    Large(Arc<Box<[u8]>>),
+    #[cfg(not(target_has_atomic = "ptr"))]
+    Large(Box<Box<[u8]>>),
 }
 
-/// PDF's objects (ISO 32000-2, 7.3).
+impl SmallBytes {
+    /// An empty [`SmallBytes`] buffer.
+    pub const EMPTY: SmallBytes = SmallBytes(BytesRepr::Inline {
+        len: 0,
+        buf: [0; 14],
+    });
+
+    /// Creates an empty [`SmallBytes`] buffer without allocating.
+    #[must_use]
+    pub const fn new() -> SmallBytes {
+        SmallBytes::EMPTY
+    }
+
+    /// Copies `bytes` into a [`SmallBytes`] buffer.
+    #[must_use]
+    pub fn from_slice(bytes: &[u8]) -> SmallBytes {
+        if bytes.len() <= 14 {
+            let mut buf = [0u8; 14];
+            buf[..bytes.len()].copy_from_slice(bytes);
+            SmallBytes(BytesRepr::Inline {
+                len: bytes.len() as u8,
+                buf,
+            })
+        } else if bytes.len() <= 64 {
+            let mut buf = Box::new([0u8; 64]);
+            buf[..bytes.len()].copy_from_slice(bytes);
+            SmallBytes(BytesRepr::Medium {
+                len: bytes.len() as u8,
+                buf,
+            })
+        } else {
+            let boxed = bytes.to_vec().into_boxed_slice();
+            SmallBytes::from_large(boxed)
+        }
+    }
+
+    /// Converts an owned `Vec<u8>` into [`SmallBytes`], reusing its heap buffer when longer than
+    /// 64 bytes.
+    #[must_use]
+    pub fn from_vec(bytes: Vec<u8>) -> SmallBytes {
+        if bytes.len() <= 64 {
+            SmallBytes::from_slice(&bytes)
+        } else {
+            SmallBytes::from_large(bytes.into_boxed_slice())
+        }
+    }
+
+    /// Collects an iterator of decoded bytes into [`SmallBytes`] using a 64-byte stack buffer
+    /// before spilling to `Vec`.
+    pub(crate) fn from_iter_bounded<I: IntoIterator<Item = u8>>(
+        iter: I,
+        cap_hint: usize,
+    ) -> SmallBytes {
+        let mut iter = iter.into_iter();
+        let mut stack = [0u8; 64];
+        let mut len = 0usize;
+        while len < 64 {
+            let Some(b) = iter.next() else {
+                return SmallBytes::from_slice(&stack[..len]);
+            };
+            stack[len] = b;
+            len += 1;
+        }
+        let Some(next) = iter.next() else {
+            return SmallBytes(BytesRepr::Medium {
+                len: 64,
+                buf: Box::new(stack),
+            });
+        };
+        let mut vec = Vec::with_capacity(cap_hint.max(128));
+        vec.extend_from_slice(&stack);
+        vec.push(next);
+        vec.extend(iter);
+        SmallBytes::from_large(vec.into_boxed_slice())
+    }
+
+    #[cfg(target_has_atomic = "ptr")]
+    fn from_large(boxed: Box<[u8]>) -> SmallBytes {
+        SmallBytes(BytesRepr::Large(Arc::new(boxed)))
+    }
+
+    #[cfg(not(target_has_atomic = "ptr"))]
+    fn from_large(boxed: Box<[u8]>) -> SmallBytes {
+        SmallBytes(BytesRepr::Large(Box::new(boxed)))
+    }
+
+    /// Views the buffer as a byte slice.
+    #[must_use]
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        match &self.0 {
+            BytesRepr::Inline { len, buf } => &buf[..usize::from(*len)],
+            BytesRepr::Medium { len, buf } => &buf[..usize::from(*len)],
+            BytesRepr::Large(buf) => buf,
+        }
+    }
+
+    /// Length in bytes.
+    #[must_use]
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Returns `true` if empty.
+    #[must_use]
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Converts into an owned `Vec<u8>`, reusing uniquely owned large allocations without copying.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<u8> {
+        match self.0 {
+            BytesRepr::Inline { len, buf } => buf[..usize::from(len)].to_vec(),
+            BytesRepr::Medium { len, buf } => buf[..usize::from(len)].to_vec(),
+            #[cfg(target_has_atomic = "ptr")]
+            BytesRepr::Large(arc) => match Arc::try_unwrap(arc) {
+                Ok(boxed) => boxed.into_vec(),
+                Err(shared) => shared.as_ref().to_vec(),
+            },
+            #[cfg(not(target_has_atomic = "ptr"))]
+            BytesRepr::Large(boxed) => (*boxed).into_vec(),
+        }
+    }
+}
+
+impl Default for SmallBytes {
+    fn default() -> SmallBytes {
+        SmallBytes::EMPTY
+    }
+}
+
+impl Deref for SmallBytes {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for SmallBytes {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl Borrow<[u8]> for SmallBytes {
+    #[inline]
+    fn borrow(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl fmt::Debug for SmallBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_capped_bytes(f, self.as_slice())
+    }
+}
+
+impl PartialEq for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &SmallBytes) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for SmallBytes {}
+
+impl PartialOrd for SmallBytes {
+    #[inline]
+    fn partial_cmp(&self, other: &SmallBytes) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SmallBytes {
+    #[inline]
+    fn cmp(&self, other: &SmallBytes) -> Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl Hash for SmallBytes {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
+impl PartialEq<[u8]> for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl PartialEq<&[u8]> for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_slice() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_slice() == *other
+    }
+}
+
+impl PartialEq<Vec<u8>> for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl PartialEq<str> for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &str) -> bool {
+        self.as_slice() == other.as_bytes()
+    }
+}
+
+impl PartialEq<&str> for SmallBytes {
+    #[inline]
+    fn eq(&self, other: &&str) -> bool {
+        self.as_slice() == other.as_bytes()
+    }
+}
+
+impl PartialEq<SmallBytes> for [u8] {
+    #[inline]
+    fn eq(&self, other: &SmallBytes) -> bool {
+        self == other.as_slice()
+    }
+}
+
+impl PartialEq<SmallBytes> for &[u8] {
+    #[inline]
+    fn eq(&self, other: &SmallBytes) -> bool {
+        *self == other.as_slice()
+    }
+}
+
+impl From<&[u8]> for SmallBytes {
+    fn from(bytes: &[u8]) -> SmallBytes {
+        SmallBytes::from_slice(bytes)
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for SmallBytes {
+    fn from(bytes: &[u8; N]) -> SmallBytes {
+        SmallBytes::from_slice(bytes)
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for SmallBytes {
+    fn from(bytes: [u8; N]) -> SmallBytes {
+        SmallBytes::from_slice(&bytes)
+    }
+}
+
+impl From<Vec<u8>> for SmallBytes {
+    fn from(bytes: Vec<u8>) -> SmallBytes {
+        SmallBytes::from_vec(bytes)
+    }
+}
+
+impl From<&Vec<u8>> for SmallBytes {
+    fn from(bytes: &Vec<u8>) -> SmallBytes {
+        SmallBytes::from_slice(bytes)
+    }
+}
+
+impl From<Box<[u8]>> for SmallBytes {
+    fn from(bytes: Box<[u8]>) -> SmallBytes {
+        if bytes.len() <= 64 {
+            SmallBytes::from_slice(&bytes)
+        } else {
+            SmallBytes::from_large(bytes)
+        }
+    }
+}
+
+impl From<&str> for SmallBytes {
+    fn from(s: &str) -> SmallBytes {
+        SmallBytes::from_slice(s.as_bytes())
+    }
+}
+
+impl From<String> for SmallBytes {
+    fn from(s: String) -> SmallBytes {
+        SmallBytes::from_vec(s.into_bytes())
+    }
+}
+
+impl From<&String> for SmallBytes {
+    fn from(s: &String) -> SmallBytes {
+        SmallBytes::from_slice(s.as_bytes())
+    }
+}
+
+impl From<Cow<'_, [u8]>> for SmallBytes {
+    fn from(cow: Cow<'_, [u8]>) -> SmallBytes {
+        match cow {
+            Cow::Borrowed(b) => SmallBytes::from_slice(b),
+            Cow::Owned(v) => SmallBytes::from_vec(v),
+        }
+    }
+}
+
+impl FromIterator<u8> for SmallBytes {
+    fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> SmallBytes {
+        let iter = iter.into_iter();
+        let (low, _) = iter.size_hint();
+        SmallBytes::from_iter_bounded(iter, low)
+    }
+}
+
+impl From<SmallBytes> for Vec<u8> {
+    fn from(bytes: SmallBytes) -> Vec<u8> {
+        bytes.into_vec()
+    }
+}
+
+/// Decoded PDF name object bytes without the leading `/` (ISO 32000-2 §7.3.5).
 ///
-/// Two are equal when they're the same kind and what they hold is equal,
-/// places too: each value's span inside them, a string's form, and a
-/// dictionary's entries in order, with their keys' spans.
+/// Stores standard PDF keys (`Type`, `Subtype`, `BaseFont`, `FontDescriptor`, `Resources`,
+/// `MediaBox`, `Length`, `Filter`, `FlateDecode`, etc.) inline in 16 bytes with zero heap
+/// allocations.
 ///
-/// Exhaustive on purpose: these are ISO 32000-2's kinds of object, so a
-/// match on every kind is checked by the compiler; another would be a
-/// breaking release.
-#[derive(Debug, Clone, PartialEq)]
+/// Unlike strings, [`Name`] converts directly into [`Object`] via `Object::from(Name::new("Page"))`
+/// or [`Object::name`]; plain `&str` and `String` do not implement `Into<Object>` so text strings
+/// ([`Object::text`]) and names ([`Object::name`]) cannot be confused.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Name(SmallBytes);
+
+impl Name {
+    /// The empty name (`/`).
+    pub const EMPTY: Name = Name(SmallBytes::EMPTY);
+
+    /// Creates a [`Name`] from raw decoded bytes (without the leading `/`).
+    #[must_use]
+    pub fn new(bytes: impl Into<SmallBytes>) -> Name {
+        Name(bytes.into())
+    }
+
+    /// Wraps an existing [`SmallBytes`] as a [`Name`].
+    #[must_use]
+    pub const fn from_small_bytes(bytes: SmallBytes) -> Name {
+        Name(bytes)
+    }
+
+    /// Returns the decoded name bytes.
+    #[must_use]
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    /// Views the name as UTF-8 if its decoded bytes are valid UTF-8.
+    #[must_use]
+    #[inline]
+    pub fn as_str(&self) -> Option<&str> {
+        core::str::from_utf8(self.as_bytes()).ok()
+    }
+
+    /// Unwraps the inner [`SmallBytes`].
+    #[must_use]
+    #[inline]
+    pub fn into_bytes(self) -> SmallBytes {
+        self.0
+    }
+
+    /// Converts the name into an owned `Vec<u8>`.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0.into_vec()
+    }
+}
+
+impl Deref for Name {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl AsRef<[u8]> for Name {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl Borrow<[u8]> for Name {
+    #[inline]
+    fn borrow(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl fmt::Debug for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("/")?;
+        let bytes = self.as_bytes();
+        let shown = bytes.len().min(64);
+        for &b in &bytes[..shown] {
+            if (0x21..=0x7E).contains(&b) && b != b'#' && b != b'/' {
+                f.write_char(char::from(b))?;
+            } else {
+                write!(f, "#{b:02X}")?;
+            }
+        }
+        if bytes.len() > shown {
+            write!(f, "...({} bytes)", bytes.len())?;
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq<[u8]> for Name {
+    #[inline]
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_bytes() == other
+    }
+}
+
+impl PartialEq<&[u8]> for Name {
+    #[inline]
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_bytes() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for Name {
+    #[inline]
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_bytes() == other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for Name {
+    #[inline]
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_bytes() == *other
+    }
+}
+
+impl PartialEq<Vec<u8>> for Name {
+    #[inline]
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_bytes() == other.as_slice()
+    }
+}
+
+impl PartialEq<SmallBytes> for Name {
+    #[inline]
+    fn eq(&self, other: &SmallBytes) -> bool {
+        self.as_bytes() == other.as_slice()
+    }
+}
+
+impl PartialEq<str> for Name {
+    #[inline]
+    fn eq(&self, other: &str) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl PartialEq<&str> for Name {
+    #[inline]
+    fn eq(&self, other: &&str) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl PartialEq<Name> for [u8] {
+    #[inline]
+    fn eq(&self, other: &Name) -> bool {
+        self == other.as_bytes()
+    }
+}
+
+impl PartialEq<Name> for &[u8] {
+    #[inline]
+    fn eq(&self, other: &Name) -> bool {
+        *self == other.as_bytes()
+    }
+}
+
+impl From<SmallBytes> for Name {
+    fn from(bytes: SmallBytes) -> Name {
+        Name(bytes)
+    }
+}
+
+impl From<&[u8]> for Name {
+    fn from(bytes: &[u8]) -> Name {
+        Name(SmallBytes::from_slice(bytes))
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for Name {
+    fn from(bytes: &[u8; N]) -> Name {
+        Name(SmallBytes::from_slice(bytes))
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for Name {
+    fn from(bytes: [u8; N]) -> Name {
+        Name(SmallBytes::from_slice(&bytes))
+    }
+}
+
+impl From<Vec<u8>> for Name {
+    fn from(bytes: Vec<u8>) -> Name {
+        Name(SmallBytes::from_vec(bytes))
+    }
+}
+
+impl From<&Vec<u8>> for Name {
+    fn from(bytes: &Vec<u8>) -> Name {
+        Name(SmallBytes::from_slice(bytes))
+    }
+}
+
+impl From<&str> for Name {
+    fn from(s: &str) -> Name {
+        Name(SmallBytes::from_slice(s.as_bytes()))
+    }
+}
+
+impl From<String> for Name {
+    fn from(s: String) -> Name {
+        Name(SmallBytes::from_vec(s.into_bytes()))
+    }
+}
+
+impl From<&String> for Name {
+    fn from(s: &String) -> Name {
+        Name(SmallBytes::from_slice(s.as_bytes()))
+    }
+}
+
+impl From<&Name> for Name {
+    fn from(name: &Name) -> Name {
+        name.clone()
+    }
+}
+
+impl From<Name> for SmallBytes {
+    fn from(name: Name) -> SmallBytes {
+        name.0
+    }
+}
+
+impl From<Name> for Vec<u8> {
+    fn from(name: Name) -> Vec<u8> {
+        name.into_vec()
+    }
+}
+
+fn write_capped_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    f.write_str("b\"")?;
+    let shown = bytes.len().min(64);
+    for &b in &bytes[..shown] {
+        for esc in core::ascii::escape_default(b) {
+            f.write_char(char::from(esc))?;
+        }
+    }
+    f.write_str("\"")?;
+    if bytes.len() > shown {
+        write!(f, "...({} bytes)", bytes.len())?;
+    }
+    Ok(())
+}
+
+/// Owned PDF object pairing a [`Value`] with an optional source [`Span`].
+///
+/// Two [`Object`]s are `==` when both their [`Value`]s and their [`Span`]s (including string
+/// [`Form`]s, dictionary entry order, duplicate keys, and key spans) match. Use
+/// [`Object::eq_value`] to compare semantic PDF values while ignoring spans, string forms, key
+/// order, and shadowed dictionary duplicates.
+#[derive(Debug)]
+pub struct Object {
+    value: Value,
+    at: Option<Span>,
+}
+
+/// PDF object variants (ISO 32000-2 §7.3).
+#[derive(Debug)]
 pub enum Value {
-    /// The null object.
+    /// The `null` object.
     Null,
-    /// `true` or `false`.
+    /// Boolean (`true` or `false`).
     Bool(bool),
-    /// An integer.
+    /// 64-bit signed integer.
     Integer(i64),
-    /// A real number; its spelling as written is in the bytes its span
-    /// names. The parser holds it at 64 bits by either rules, the `f64`
-    /// nearest the decimal written, so that `0.1` is written back as
-    /// `0.1`, where PDFium holds the nearest `f32`: this as an `f32`, but
-    /// where rounding twice parts from rounding once
-    /// ([`Parser::rules`](crate::parse::Parser::rules) says where, and how
-    /// to read PDFium's own).
+    /// Floating-point real number (original token spelling is preserved via [`Object::at`]).
     Real(f64),
-    /// A name's bytes, its `#xx` escapes decoded.
-    Name(Vec<u8>),
-    /// A string, and its form when it was written or chosen: none for one
-    /// built without choosing, or read by a reader that doesn't say, which
-    /// a writer writes as a literal string.
+    /// Name object (`#xx` hex escapes decoded).
+    Name(Name),
+    /// Byte/text string paired with its original or preferred lexical [`Form`].
     String(Str, Option<Form>),
-    /// An array: its elements, in order.
+    /// Ordered array of objects.
     Array(Vec<Object>),
-    /// A dictionary.
+    /// Dictionary of key-value entries.
     Dict(Dict),
-    /// A stream: its dictionary, and its data, boxed, so that a value of
-    /// any other kind isn't a stream's size.
+    /// Indirect stream dictionary and data location/payload.
     Stream(Box<Stream>),
-    /// A reference to an indirect object, `n g R`.
+    /// Indirect object reference (`n g R`).
     Ref(ObjectId),
 }
 
-/// A string's value.
-///
-/// Exhaustive on purpose: each says what a reader can know of the
-/// string's bytes, all of them or what depends on them can't be told, so a
-/// match on all three is checked by the compiler; a fourth would be a
-/// breaking release.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Decoded or still-encrypted PDF string payload.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Str {
-    /// Its bytes, its escapes decoded (and decrypted, in an encrypted
-    /// file).
-    Bytes(Vec<u8>),
-    /// Text a reader decoded without saying from which encoding, as a
-    /// reader through another tool's JSON may give a string it reads as
-    /// text (one through qpdf's does): what depends on the bytes, such as
-    /// whether they're ASCII, can't be told. A reader of the file's bytes
-    /// never gives it.
-    Text(String),
-    /// Ciphertext as written, in an encrypted file its reader doesn't
-    /// decrypt: what depends on its value can't be told.
-    Encrypted(Vec<u8>),
+    /// Decoded (and, in encrypted files, decrypted) string bytes.
+    Bytes(SmallBytes),
+    /// Raw ciphertext bytes from an encrypted file that has not yet been decrypted.
+    ///
+    /// Redacted in `Debug` output and rejected by [`serialize`](crate::serialize) unless caller
+    /// encryption/copying handles it first.
+    Encrypted(SmallBytes),
 }
 
-/// How a string was written (ISO 32000-2, 7.3.4.2 and 7.3.4.3).
-///
-/// Exhaustive on purpose: a string is written as one or the other, so a
-/// match on both is checked by the compiler.
+impl fmt::Debug for Str {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Str::Bytes(bytes) => f.debug_tuple("Bytes").field(bytes).finish(),
+            Str::Encrypted(bytes) => write!(f, "Encrypted({} bytes)", bytes.len()),
+        }
+    }
+}
+
+/// Lexical form of a PDF string token (ISO 32000-2 §7.3.4.2–7.3.4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Form {
-    /// A literal string, `(...)`.
+    /// Parenthesized literal string `(...)`.
     Literal,
-    /// A hex string, `<...>`.
+    /// Angle-bracketed hexadecimal string `<...>`.
     Hex,
 }
 
-/// A dictionary: its entries as written, in order. Lookups take a key's
-/// last entry, as readers do; [`Dict::duplicates`] gives the others. A
-/// lookup allocates nothing for a dictionary of up to 32 entries. Two are
-/// equal when their entries are, in the same order, with their keys' spans
-/// and their values' places.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Dict {
-    entries: Vec<Entry>,
-}
-
-/// A dictionary's entry.
+/// PDF dictionary preserving entry order, key spans, and duplicate keys (ISO 32000-2 §7.3.7).
 ///
-/// Exhaustive on purpose: an entry is its three fields, built by a literal
-/// and taken apart by them, so a field more would be a breaking release.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Entry {
-    /// The key's bytes, its `#xx` escapes decoded.
-    pub key: Vec<u8>,
-    /// Where the key was written, when the reader knows. A key changed in
-    /// place keeps it, naming the bytes of the key it was, so whatever
-    /// changes one clears it.
-    pub key_at: Option<Span>,
-    /// The key's value.
-    pub value: Object,
+/// Lookups ([`Dict::get`], [`Dict::iter`]) return each key's last entry—matching PDF viewers—while
+/// [`Dict::duplicates`] yields earlier shadowed entries for linting. Dictionaries up to 64 entries
+/// perform duplicate-aware iteration with zero heap allocations.
+///
+/// ```
+/// use pdf_objects::{Object, dict};
+///
+/// let mut d = dict! {
+///     "Type" => Object::name("Page"),
+///     "Rotate" => 90,
+///     "Rotate" => 180,
+/// };
+/// assert_eq!(d.type_name(), Some(&b"Page"[..]));
+/// assert_eq!(d.get("Rotate").and_then(Object::as_integer), Some(180));
+/// assert_eq!(d.duplicates().len(), 1);
+///
+/// // `set` updates the key's effective position and removes earlier duplicates.
+/// d.set("Rotate", 270);
+/// assert_eq!(d.duplicates().len(), 0);
+/// assert_eq!(d.get("Rotate").and_then(Object::as_integer), Some(270));
+/// ```
+#[derive(Debug, Default)]
+pub struct Dict {
+    pub(crate) entries: Vec<Entry>,
 }
 
-/// A stream: its dictionary, and its data. Outside this crate it's made
-/// by [`Stream::new`], from its bytes, or [`Object::stream`], or from
-/// `Stream::default()` with its fields set, as more may come.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// Single key-value entry in a [`Dict`].
+#[derive(Debug)]
+pub struct Entry {
+    pub(crate) key: Name,
+    pub(crate) key_at: Option<Span>,
+    pub(crate) value: Object,
+}
+
+impl Entry {
+    /// Creates an unplaced [`Entry`] for `key` and `value`.
+    #[must_use]
+    pub fn new(key: impl Into<Name>, value: impl Into<Object>) -> Entry {
+        Entry {
+            key: key.into(),
+            key_at: None,
+            value: value.into(),
+        }
+    }
+
+    /// Attaches source span `at` to this entry's key.
+    #[must_use]
+    pub const fn with_key_span(mut self, at: Span) -> Entry {
+        self.key_at = Some(at);
+        self
+    }
+
+    /// Decoded key bytes.
+    #[must_use]
+    #[inline]
+    pub fn key(&self) -> &[u8] {
+        self.key.as_bytes()
+    }
+
+    /// Key as a [`Name`].
+    #[must_use]
+    #[inline]
+    pub const fn key_name(&self) -> &Name {
+        &self.key
+    }
+
+    /// Source span of the key token, if known and unedited.
+    #[must_use]
+    #[inline]
+    pub const fn key_at(&self) -> Option<Span> {
+        self.key_at
+    }
+
+    /// Entry value.
+    #[must_use]
+    #[inline]
+    pub const fn value(&self) -> &Object {
+        &self.value
+    }
+
+    /// Mutable reference to the entry's value.
+    #[must_use]
+    #[inline]
+    pub fn value_mut(&mut self) -> &mut Object {
+        &mut self.value
+    }
+
+    /// Consumes the entry and returns its [`Object`] value.
+    #[must_use]
+    #[inline]
+    pub fn into_value(self) -> Object {
+        self.value
+    }
+
+    /// Decomposes the entry into `(key, key_at, value)`.
+    #[must_use]
+    #[inline]
+    pub fn into_parts(self) -> (Name, Option<Span>, Object) {
+        (self.key, self.key_at, self.value)
+    }
+
+    /// Replaces the entry's key and clears its [`Entry::key_at`] span.
+    pub fn set_key(&mut self, key: impl Into<Name>) {
+        self.key = key.into();
+        self.key_at = None;
+    }
+
+    /// Clears the key's [`Span`].
+    pub fn clear_key_span(&mut self) {
+        self.key_at = None;
+    }
+}
+
+/// PDF stream dictionary paired with its raw (filter-encoded) payload [`Data`].
+#[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct Stream {
-    /// Its dictionary.
+    /// Stream dictionary (`/Length`, `/Filter`, `/DecodeParms`, etc.).
     pub dict: Dict,
-    /// Its data: where it was written, or its bytes. An edit of the
-    /// dictionary leaves it as it is, as the data didn't change: data a
-    /// reader placed stays encoded by the filters the stream was read
-    /// with, whatever its `/Filter` and `/DecodeParms` become.
+    /// Stream payload location or in-memory bytes.
     pub data: Data,
 }
 
-/// A stream's data.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Backing storage for a [`Stream`]'s raw (filter-encoded) bytes.
+#[derive(Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Data {
-    /// Where it was written, as written: encoded by the filters the stream
-    /// was read with, and encrypted in an encrypted file. A reader's.
+    /// Byte span in the source file (`Span::stream() == None`) as originally written.
     At(Span),
-    /// Its bytes, in memory: encoded by the stream's filters, if it has
-    /// any, and written as they are ([`serialize`](crate::serialize)).
+    /// Owned raw stream bytes in memory (redacted to byte length in `Debug`).
     Bytes(Vec<u8>),
-    /// Neither: a reader that doesn't say where, as one through another
-    /// tool's JSON may not, or a stream built without its data.
+    /// Unplaced stream with no attached byte slice.
     #[default]
     Unplaced,
 }
 
+impl fmt::Debug for Data {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Data::At(span) => f.debug_tuple("At").field(span).finish(),
+            Data::Bytes(bytes) => write!(f, "Bytes({} bytes)", bytes.len()),
+            Data::Unplaced => f.write_str("Unplaced"),
+        }
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(size_of::<ObjectId>() == 8);
+    assert!(size_of::<SmallBytes>() == 16);
+    assert!(size_of::<Name>() == 16);
+    assert!(size_of::<Str>() == 24);
+    assert!(size_of::<Dict>() == 24);
+    assert!(size_of::<Span>() == 32);
+    assert!(size_of::<Option<Span>>() == 32);
+    assert!(size_of::<Value>() == 32);
+    assert!(size_of::<Object>() == 64);
+    assert!(size_of::<Entry>() == 112);
+};
+
 impl Object {
-    /// `value`, not placed.
+    /// Wraps `value` with no source [`Span`].
     #[must_use]
     pub const fn new(value: Value) -> Object {
         Object { value, at: None }
     }
 
-    /// The null object, not placed.
+    /// Creates an unplaced `null` object.
     #[must_use]
     pub const fn null() -> Object {
         Object::new(Value::Null)
     }
 
-    /// A reference to object `n`, generation 0.
+    /// Creates an indirect reference `n 0 R`.
     #[must_use]
     pub const fn reference(n: u32) -> Object {
         Object::new(Value::Ref(ObjectId::new(n, 0)))
     }
 
-    /// A text string (ISO 32000-2, 7.9.2.2) that reads back as `text`: the
-    /// bytes [`text::encode`] gives, written as a literal string when
-    /// they're as they are, and as a hex string when they're UTF-16BE.
+    /// Creates a [`Value::Name`] object from decoded name bytes (without leading `/`).
+    #[must_use]
+    pub fn name(name: impl Into<Name>) -> Object {
+        Object::new(Value::Name(name.into()))
+    }
+
+    /// Encodes `text` as an ISO 32000-2 §7.9.2.2 PDF text string.
+    ///
+    /// Uses [`Form::Literal`] when `text` consists of printable ASCII / `\t` / `\n` / `\r`
+    /// (`PDFDocEncoding` verbatim subset) and [`Form::Hex`] (`UTF-16BE` with BOM) otherwise.
+    /// Note that `U+001B` is reserved as the §7.9.2.2.2 language-escape delimiter in PDF text
+    /// strings and will be stripped as an escape on decode.
     #[must_use]
     pub fn text(text: &str) -> Object {
-        let form = if text::as_it_is(text) {
+        let form = if text::is_verbatim_pdf_doc(text) {
             Form::Literal
         } else {
             Form::Hex
         };
-        Object::new(Value::String(Str::Bytes(text::encode(text)), Some(form)))
+        Object::new(Value::String(
+            Str::Bytes(SmallBytes::from_vec(text::encode(text))),
+            Some(form),
+        ))
     }
 
-    /// A string of `bytes`, its form not chosen.
+    /// Creates a byte string with no preferred lexical [`Form`].
     #[must_use]
-    pub fn bytes(bytes: impl Into<Vec<u8>>) -> Object {
+    pub fn bytes(bytes: impl Into<SmallBytes>) -> Object {
         Object::new(Value::String(Str::Bytes(bytes.into()), None))
     }
 
-    /// A string of `bytes`, written as a hex string.
+    /// Creates a byte string marked for hexadecimal `<...>` serialization.
     #[must_use]
-    pub fn hex(bytes: impl Into<Vec<u8>>) -> Object {
+    pub fn hex(bytes: impl Into<SmallBytes>) -> Object {
         Object::new(Value::String(Str::Bytes(bytes.into()), Some(Form::Hex)))
     }
 
-    /// A stream of `dict`, whose data isn't placed.
+    /// Creates an unplaced stream object with `dict` and [`Data::Unplaced`].
     #[must_use]
     pub fn stream(dict: Dict) -> Object {
         Object::new(Value::Stream(Box::new(Stream {
@@ -293,45 +1074,61 @@ impl Object {
         })))
     }
 
-    /// The same value, written at `at`.
+    /// Returns the source [`Span`] of this object, if unedited since parsing.
     #[must_use]
-    pub const fn at(mut self, at: Span) -> Object {
-        // Set in place, as a `const fn` can't drop what `..self` would leave.
-        self.at = Some(at);
+    #[inline]
+    pub const fn at(&self) -> Option<Span> {
+        self.at
+    }
+
+    /// Attaches source `span` to `self`.
+    #[must_use]
+    #[inline]
+    pub const fn with_span(mut self, span: Span) -> Object {
+        self.at = Some(span);
         self
     }
 
-    /// Its value.
+    /// Clears this object's top-level [`Span`] without walking nested children.
+    #[inline]
+    pub fn clear_span(&mut self) {
+        self.at = None;
+    }
+
+    /// Borrows the underlying [`Value`].
     #[must_use]
+    #[inline]
     pub const fn value(&self) -> &Value {
         &self.value
     }
 
-    /// Its value, without where it was written.
+    /// Extracts the inner [`Value`], discarding any top-level [`Span`].
     #[must_use]
-    pub fn into_value(self) -> Value {
-        self.value
+    #[inline]
+    pub fn into_value(mut self) -> Value {
+        core::mem::replace(&mut self.value, Value::Null)
     }
 
-    /// Its value, to change: an edit, so its span goes, as what it holds
-    /// may no longer be what the bytes it names stand for.
+    /// Mutably borrows the inner [`Value`] and clears `self.at()`.
+    #[inline]
     pub fn value_mut(&mut self) -> &mut Value {
         self.at = None;
         &mut self.value
     }
 
-    /// Its value, to change into what the same bytes stand for, as a
-    /// reader does when it decrypts a string it read: its span is kept.
-    /// Any other change is an edit, through [`Object::value_mut`]. A
-    /// writer that copies a value by its span trusts this: a value changed
-    /// through it into what its bytes don't stand for is copied as those
-    /// bytes, the change lost.
+    /// Mutably borrows the inner [`Value`] **without** clearing `self.at()`.
+    ///
+    /// Intended only for representations of the same source bytes (such as decrypting a parsed
+    /// [`Str::Encrypted`] into [`Str::Bytes`]); copy-on-write writers treat intact spans as
+    /// unchanged source bytes.
+    #[inline]
     pub fn as_written_mut(&mut self) -> &mut Value {
         &mut self.value
     }
 
-    /// A boolean's value.
+    /// Returns the boolean value if [`Value::Bool`].
     #[must_use]
+    #[inline]
     pub const fn as_bool(&self) -> Option<bool> {
         match self.value {
             Value::Bool(b) => Some(b),
@@ -339,17 +1136,29 @@ impl Object {
         }
     }
 
-    /// A name's bytes.
+    /// Returns the decoded name bytes if [`Value::Name`].
     #[must_use]
+    #[inline]
     pub fn as_name(&self) -> Option<&[u8]> {
+        match &self.value {
+            Value::Name(name) => Some(name.as_bytes()),
+            _ => None,
+        }
+    }
+
+    /// Returns the [`Name`] if [`Value::Name`].
+    #[must_use]
+    #[inline]
+    pub const fn as_name_value(&self) -> Option<&Name> {
         match &self.value {
             Value::Name(name) => Some(name),
             _ => None,
         }
     }
 
-    /// An integer's value.
+    /// Returns the integer value if [`Value::Integer`].
     #[must_use]
+    #[inline]
     pub const fn as_integer(&self) -> Option<i64> {
         match self.value {
             Value::Integer(i) => Some(i),
@@ -357,8 +1166,9 @@ impl Object {
         }
     }
 
-    /// An integer's or a real's value.
+    /// Returns the numeric value as `f64` if [`Value::Integer`] or [`Value::Real`].
     #[must_use]
+    #[inline]
     pub const fn as_number(&self) -> Option<f64> {
         match self.value {
             Value::Integer(i) => Some(i as f64),
@@ -367,8 +1177,19 @@ impl Object {
         }
     }
 
-    /// A string's bytes, when the reader gave them ([`Str::as_bytes`]).
+    /// Returns the [`Str`] if [`Value::String`].
     #[must_use]
+    #[inline]
+    pub const fn as_str(&self) -> Option<&Str> {
+        match &self.value {
+            Value::String(s, _) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Returns decoded string bytes if [`Value::String`] holds [`Str::Bytes`].
+    #[must_use]
+    #[inline]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match &self.value {
             Value::String(s, _) => s.as_bytes(),
@@ -376,8 +1197,9 @@ impl Object {
         }
     }
 
-    /// An array's elements.
+    /// Returns the element slice if [`Value::Array`].
     #[must_use]
+    #[inline]
     pub fn as_array(&self) -> Option<&[Object]> {
         match &self.value {
             Value::Array(array) => Some(array),
@@ -385,8 +1207,9 @@ impl Object {
         }
     }
 
-    /// A dictionary, or a stream's dictionary.
+    /// Returns the dictionary if [`Value::Dict`] or [`Value::Stream`].
     #[must_use]
+    #[inline]
     pub fn as_dict(&self) -> Option<&Dict> {
         match &self.value {
             Value::Dict(dict) => Some(dict),
@@ -395,8 +1218,9 @@ impl Object {
         }
     }
 
-    /// A stream.
+    /// Returns the [`Stream`] if [`Value::Stream`].
     #[must_use]
+    #[inline]
     pub fn as_stream(&self) -> Option<&Stream> {
         match &self.value {
             Value::Stream(stream) => Some(stream),
@@ -404,8 +1228,7 @@ impl Object {
         }
     }
 
-    /// An array's elements, to change: an edit, as through
-    /// [`Object::value_mut`], when it's an array.
+    /// Mutably borrows the array and clears `self.at()` if [`Value::Array`].
     pub fn as_array_mut(&mut self) -> Option<&mut Vec<Object>> {
         match &mut self.value {
             Value::Array(array) => {
@@ -416,10 +1239,7 @@ impl Object {
         }
     }
 
-    /// A dictionary, or a stream's dictionary, to change: an edit, as
-    /// through [`Object::value_mut`], when it's either. A stream's data
-    /// keeps where it was written, encoded by the filters it was read
-    /// with, whatever its `/Filter` and `/DecodeParms` become.
+    /// Mutably borrows the dictionary (or stream dictionary) and clears `self.at()`.
     pub fn as_dict_mut(&mut self) -> Option<&mut Dict> {
         let dict = match &mut self.value {
             Value::Dict(dict) => dict,
@@ -430,9 +1250,7 @@ impl Object {
         Some(dict)
     }
 
-    /// A stream, to change: an edit, as through [`Object::value_mut`],
-    /// when it's a stream. Its data keeps where it was written, until it's
-    /// replaced, as [`Object::as_dict_mut`] says.
+    /// Mutably borrows the [`Stream`] and clears `self.at()` if [`Value::Stream`].
     pub fn as_stream_mut(&mut self) -> Option<&mut Stream> {
         match &mut self.value {
             Value::Stream(stream) => {
@@ -443,8 +1261,9 @@ impl Object {
         }
     }
 
-    /// The object a reference names.
+    /// Returns the referenced [`ObjectId`] if [`Value::Ref`].
     #[must_use]
+    #[inline]
     pub const fn as_reference(&self) -> Option<ObjectId> {
         match self.value {
             Value::Ref(id) => Some(id),
@@ -452,49 +1271,97 @@ impl Object {
         }
     }
 
-    /// Whether it's the null object.
+    /// Returns `true` if [`Value::Null`].
     #[must_use]
+    #[inline]
     pub const fn is_null(&self) -> bool {
         matches!(self.value, Value::Null)
     }
 
-    /// The ids of the objects its references name, nested ones too, in the
-    /// order written: itself, when it's a reference; an array's elements; a
-    /// dictionary's every entry, a key written twice included; a stream's
-    /// dictionary, never its data. Walked with a stack of its own, so a
-    /// value nested however deeply, as one built in memory may be, walks
-    /// without overflowing the thread's.
-    pub fn references(&self) -> References<'_> {
-        References { stack: vec![self] }
+    /// Compares semantic PDF values, ignoring source [`Span`]s, string [`Form`]s, dictionary key
+    /// order, and shadowed duplicate dictionary entries.
+    #[must_use]
+    pub fn eq_value(&self, other: &Object) -> bool {
+        if let Some(eq) = eq_scalar_values(&self.value, &other.value) {
+            return eq;
+        }
+        let mut stack = alloc::vec![(&self.value, &other.value)];
+        while let Some((va, vb)) = stack.pop() {
+            if let Some(eq) = eq_scalar_values(va, vb) {
+                if !eq {
+                    return false;
+                }
+                continue;
+            }
+            match (va, vb) {
+                (Value::Array(ax), Value::Array(ay)) => {
+                    if ax.len() != ay.len() {
+                        return false;
+                    }
+                    for (x, y) in ax.iter().zip(ay.iter()) {
+                        if let Some(eq) = eq_scalar_values(&x.value, &y.value) {
+                            if !eq {
+                                return false;
+                            }
+                        } else {
+                            stack.push((&x.value, &y.value));
+                        }
+                    }
+                }
+                (Value::Dict(dx), Value::Dict(dy)) => {
+                    if !push_dict_eq_value(dx, dy, &mut stack) {
+                        return false;
+                    }
+                }
+                (Value::Stream(sx), Value::Stream(sy)) => {
+                    if sx.data != sy.data || !push_dict_eq_value(&sx.dict, &sy.dict, &mut stack) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
-    /// Each reference in it, itself too, named as `to` names its object:
-    /// the number and generation it gives, or null where it gives none,
-    /// which is how a reference to no object reads (ISO 32000-2, 7.3.10).
-    /// Its references are those [`Object::references`] gives, in the order
-    /// it gives them, a stream's dictionary's among them, never its data,
-    /// and `to` is asked once each. Whether it changed any.
+    /// Iterates over all indirect [`ObjectId`]s referenced inside `self` in written order
+    /// (including shadowed dictionary entries and stream dictionaries, never stream data).
+    pub fn references(&self) -> References<'_> {
+        let stack = match &self.value {
+            Value::Ref(_) | Value::Array(_) | Value::Dict(_) | Value::Stream(_) => {
+                alloc::vec![self]
+            }
+            _ => Vec::new(),
+        };
+        References { stack }
+    }
+
+    /// Rewrites every indirect reference in `self` using `to`, replacing unmapped references
+    /// (`None`) with `Value::Null` (ISO 32000-2 §7.3.10).
     ///
-    /// Each reference it changes is an edit, as through
-    /// [`Object::value_mut`]: its place goes, and the place of every value
-    /// that holds it, as they may no longer be what their bytes say. A value
-    /// it changed nothing in keeps its own, a key its own, and a stream its
-    /// data's, so a writer may still copy what `to` left as it was. It walks
-    /// with a stack of its own, as [`Object::references`] does, so a value
-    /// nested however deeply walks without overflowing the thread's.
-    ///
-    /// The writer names references so as it writes them, without changing
-    /// the value ([`Renumber`](crate::serialize::Renumber)); a renumbering
-    /// given so is given here as `|id| to.renumber(id)`.
+    /// Clears the [`Span`] on each modified reference and its ancestor containers while leaving
+    /// untouched subtrees' spans intact. Returns `true` if at least one reference changed.
     pub fn renumber(&mut self, mut to: impl FnMut(ObjectId) -> Option<ObjectId>) -> bool {
-        // The place of each value that holds the one walked, from the
-        // outermost, and how many of them, from the outermost, have been
-        // dropped: those holding a reference changed already.
+        match &mut self.value {
+            Value::Ref(id) => {
+                let named = to(*id);
+                if named != Some(*id) {
+                    self.value = named.map_or(Value::Null, Value::Ref);
+                    self.at = None;
+                    return true;
+                }
+                return false;
+            }
+            Value::Array(a) if !a.is_empty() => {}
+            Value::Dict(d) if !d.entries.is_empty() => {}
+            Value::Stream(s) if !s.dict.entries.is_empty() => {}
+            _ => return false,
+        }
+
         let mut holders: Vec<&mut Option<Span>> = Vec::new();
         let mut dropped = 0;
         let mut changed = false;
-        // Each value still to walk, and how many values hold it.
-        let mut stack = vec![(self, 0)];
+        let mut stack = alloc::vec![(self, 0)];
         while let Some((Object { value, at }, depth)) = stack.pop() {
             holders.truncate(depth);
             dropped = dropped.min(depth);
@@ -504,7 +1371,9 @@ impl Object {
                     if named != Some(*id) {
                         *value = named.map_or(Value::Null, Value::Ref);
                         *at = None;
-                        holders[dropped..].iter_mut().for_each(|held| **held = None);
+                        for held in &mut holders[dropped..] {
+                            **held = None;
+                        }
                         dropped = depth;
                         changed = true;
                     }
@@ -526,18 +1395,25 @@ impl Object {
         changed
     }
 
-    /// Every place in it dropped: its own, each value's in it and each
-    /// key's, and a stream's data's where it was written ([`Data::At`]),
-    /// which then has none ([`Data::Unplaced`]); data in memory
-    /// ([`Data::Bytes`]) stays. For an object of one file put among
-    /// another's objects, whose places would be read as places in that
-    /// file: a writer would write the bytes it has there, and a checker
-    /// point at them. A stream's data is given first as its bytes
-    /// ([`Stream::set_bytes`]), from the reading it was read in, as a stream
-    /// unplaced has no data a writer writes. It walks with a stack of its
-    /// own, as [`Object::references`] does.
+    /// Strips every [`Span`] in `self` (values, dictionary keys, and [`Data::At`] stream spans,
+    /// which become [`Data::Unplaced`]). [`Data::Bytes`] payloads are preserved.
     pub fn unplace(&mut self) {
-        let mut stack = vec![self];
+        self.at = None;
+        match &mut self.value {
+            Value::Array(a) if !a.is_empty() => {}
+            Value::Dict(d) if !d.entries.is_empty() => {}
+            Value::Stream(s) => {
+                if matches!(s.data, Data::At(_)) {
+                    s.data = Data::Unplaced;
+                }
+                if s.dict.entries.is_empty() {
+                    return;
+                }
+            }
+            _ => return,
+        }
+
+        let mut stack = alloc::vec![self];
         while let Some(Object { value, at }) = stack.pop() {
             *at = None;
             let entries = match value {
@@ -547,7 +1423,7 @@ impl Object {
                 }
                 Value::Dict(dict) => &mut dict.entries,
                 Value::Stream(stream) => {
-                    if let Data::At(_) = stream.data {
+                    if matches!(stream.data, Data::At(_)) {
                         stream.data = Data::Unplaced;
                     }
                     &mut stream.dict.entries
@@ -560,33 +1436,600 @@ impl Object {
             }
         }
     }
+
+    #[inline]
+    fn is_container(&self) -> bool {
+        matches!(
+            self.value,
+            Value::Array(_) | Value::Dict(_) | Value::Stream(_)
+        )
+    }
+
+    #[inline]
+    fn clone_scalar(&self) -> Object {
+        let value = match &self.value {
+            Value::Null => Value::Null,
+            Value::Bool(b) => Value::Bool(*b),
+            Value::Integer(i) => Value::Integer(*i),
+            Value::Real(r) => Value::Real(*r),
+            Value::Name(n) => Value::Name(n.clone()),
+            Value::String(s, f) => Value::String(s.clone(), *f),
+            Value::Ref(id) => Value::Ref(*id),
+            Value::Array(_) | Value::Dict(_) | Value::Stream(_) => {
+                unreachable!("clone_scalar called on container")
+            }
+        };
+        Object { value, at: self.at }
+    }
+
+    fn drop_containers(&mut self) {
+        let mut current = core::mem::replace(&mut self.value, Value::Null);
+        let mut stack: Vec<Value> = Vec::new();
+        loop {
+            let mut next_container: Option<Value> = None;
+            let mut push_child = |obj: &mut Object| {
+                if obj.is_container() {
+                    let child = core::mem::replace(&mut obj.value, Value::Null);
+                    if let Some(prev) = next_container.replace(child) {
+                        stack.push(prev);
+                    }
+                }
+            };
+            match current {
+                Value::Array(mut elems) => {
+                    for elem in &mut elems {
+                        push_child(elem);
+                    }
+                }
+                Value::Dict(mut dict) => {
+                    for entry in &mut dict.entries {
+                        push_child(&mut entry.value);
+                    }
+                }
+                Value::Stream(mut stream) => {
+                    for entry in &mut stream.dict.entries {
+                        push_child(&mut entry.value);
+                    }
+                }
+                _ => {}
+            }
+            current = match next_container.or_else(|| stack.pop()) {
+                Some(v) => v,
+                None => break,
+            };
+        }
+    }
+}
+
+impl Drop for Object {
+    #[inline]
+    fn drop(&mut self) {
+        if self.is_container() {
+            self.drop_containers();
+        }
+    }
+}
+
+enum CloneFrame<'a> {
+    Array {
+        at: Option<Span>,
+        out: Vec<Object>,
+        rest: slice::Iter<'a, Object>,
+    },
+    Dict {
+        at: Option<Span>,
+        stream_data: Option<Data>,
+        out: Vec<Entry>,
+        next_key: Name,
+        next_key_at: Option<Span>,
+        rest: slice::Iter<'a, Entry>,
+    },
+}
+
+fn clone_object_deep(root: &Object) -> Object {
+    let mut frames: Vec<CloneFrame<'_>> = Vec::new();
+    let mut current = root;
+
+    'descend: loop {
+        let mut finished = match &current.value {
+            Value::Array(elems) => {
+                let mut out = Vec::with_capacity(elems.len());
+                let mut rest = elems.iter();
+                while let Some(item) = rest.next() {
+                    if !item.is_container() {
+                        out.push(item.clone_scalar());
+                    } else {
+                        frames.push(CloneFrame::Array {
+                            at: current.at,
+                            out,
+                            rest,
+                        });
+                        current = item;
+                        continue 'descend;
+                    }
+                }
+                Object {
+                    value: Value::Array(out),
+                    at: current.at,
+                }
+            }
+            Value::Dict(dict) => {
+                let mut out = Vec::with_capacity(dict.entries.len());
+                let mut rest = dict.entries.iter();
+                while let Some(entry) = rest.next() {
+                    if !entry.value.is_container() {
+                        out.push(Entry {
+                            key: entry.key.clone(),
+                            key_at: entry.key_at,
+                            value: entry.value.clone_scalar(),
+                        });
+                    } else {
+                        frames.push(CloneFrame::Dict {
+                            at: current.at,
+                            stream_data: None,
+                            out,
+                            next_key: entry.key.clone(),
+                            next_key_at: entry.key_at,
+                            rest,
+                        });
+                        current = &entry.value;
+                        continue 'descend;
+                    }
+                }
+                Object {
+                    value: Value::Dict(Dict { entries: out }),
+                    at: current.at,
+                }
+            }
+            Value::Stream(stream) => {
+                let mut out = Vec::with_capacity(stream.dict.entries.len());
+                let mut rest = stream.dict.entries.iter();
+                let stream_data = stream.data.clone();
+                while let Some(entry) = rest.next() {
+                    if !entry.value.is_container() {
+                        out.push(Entry {
+                            key: entry.key.clone(),
+                            key_at: entry.key_at,
+                            value: entry.value.clone_scalar(),
+                        });
+                    } else {
+                        frames.push(CloneFrame::Dict {
+                            at: current.at,
+                            stream_data: Some(stream_data),
+                            out,
+                            next_key: entry.key.clone(),
+                            next_key_at: entry.key_at,
+                            rest,
+                        });
+                        current = &entry.value;
+                        continue 'descend;
+                    }
+                }
+                Object {
+                    value: Value::Stream(Box::new(Stream {
+                        dict: Dict { entries: out },
+                        data: stream_data,
+                    })),
+                    at: current.at,
+                }
+            }
+            _ => current.clone_scalar(),
+        };
+
+        while let Some(frame) = frames.pop() {
+            match frame {
+                CloneFrame::Array {
+                    at,
+                    mut out,
+                    mut rest,
+                } => {
+                    out.push(finished);
+                    while let Some(item) = rest.next() {
+                        if !item.is_container() {
+                            out.push(item.clone_scalar());
+                        } else {
+                            frames.push(CloneFrame::Array { at, out, rest });
+                            current = item;
+                            continue 'descend;
+                        }
+                    }
+                    finished = Object {
+                        value: Value::Array(out),
+                        at,
+                    };
+                }
+                CloneFrame::Dict {
+                    at,
+                    stream_data,
+                    mut out,
+                    next_key,
+                    next_key_at,
+                    mut rest,
+                } => {
+                    out.push(Entry {
+                        key: next_key,
+                        key_at: next_key_at,
+                        value: finished,
+                    });
+                    while let Some(entry) = rest.next() {
+                        if !entry.value.is_container() {
+                            out.push(Entry {
+                                key: entry.key.clone(),
+                                key_at: entry.key_at,
+                                value: entry.value.clone_scalar(),
+                            });
+                        } else {
+                            frames.push(CloneFrame::Dict {
+                                at,
+                                stream_data,
+                                out,
+                                next_key: entry.key.clone(),
+                                next_key_at: entry.key_at,
+                                rest,
+                            });
+                            current = &entry.value;
+                            continue 'descend;
+                        }
+                    }
+                    let dict = Dict { entries: out };
+                    let value = match stream_data {
+                        Some(data) => Value::Stream(Box::new(Stream { dict, data })),
+                        None => Value::Dict(dict),
+                    };
+                    finished = Object { value, at };
+                }
+            }
+        }
+        return finished;
+    }
+}
+
+impl Clone for Object {
+    #[inline]
+    fn clone(&self) -> Object {
+        if !self.is_container() {
+            self.clone_scalar()
+        } else {
+            clone_object_deep(self)
+        }
+    }
+}
+
+impl Clone for Entry {
+    #[inline]
+    fn clone(&self) -> Entry {
+        Entry {
+            key: self.key.clone(),
+            key_at: self.key_at,
+            value: self.value.clone(),
+        }
+    }
+}
+
+impl Clone for Dict {
+    fn clone(&self) -> Dict {
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            entries.push(entry.clone());
+        }
+        Dict { entries }
+    }
+}
+
+impl Clone for Stream {
+    fn clone(&self) -> Stream {
+        Stream {
+            dict: self.dict.clone(),
+            data: self.data.clone(),
+        }
+    }
+}
+
+impl Clone for Value {
+    #[inline]
+    fn clone(&self) -> Value {
+        match self {
+            Value::Null => Value::Null,
+            Value::Bool(b) => Value::Bool(*b),
+            Value::Integer(i) => Value::Integer(*i),
+            Value::Real(r) => Value::Real(*r),
+            Value::Name(n) => Value::Name(n.clone()),
+            Value::String(s, f) => Value::String(s.clone(), *f),
+            Value::Ref(id) => Value::Ref(*id),
+            Value::Array(elems) => {
+                let mut out = Vec::with_capacity(elems.len());
+                for elem in elems {
+                    out.push(elem.clone());
+                }
+                Value::Array(out)
+            }
+            Value::Dict(dict) => Value::Dict(dict.clone()),
+            Value::Stream(stream) => Value::Stream(Box::new((**stream).clone())),
+        }
+    }
+}
+
+#[inline]
+fn eq_scalar_exact(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::Null, Value::Null) => Some(true),
+        (Value::Bool(x), Value::Bool(y)) => Some(x == y),
+        (Value::Integer(x), Value::Integer(y)) => Some(x == y),
+        (Value::Real(x), Value::Real(y)) => Some(x == y),
+        (Value::Name(x), Value::Name(y)) => Some(x == y),
+        (Value::String(sx, fx), Value::String(sy, fy)) => Some(fx == fy && sx == sy),
+        (Value::Ref(x), Value::Ref(y)) => Some(x == y),
+        (Value::Array(_), Value::Array(_))
+        | (Value::Dict(_), Value::Dict(_))
+        | (Value::Stream(_), Value::Stream(_)) => None,
+        _ => Some(false),
+    }
+}
+
+#[inline]
+fn eq_scalar_values(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::Null, Value::Null) => Some(true),
+        (Value::Bool(x), Value::Bool(y)) => Some(x == y),
+        (Value::Integer(x), Value::Integer(y)) => Some(x == y),
+        (Value::Real(x), Value::Real(y)) => Some(x == y),
+        (Value::Name(x), Value::Name(y)) => Some(x == y),
+        (Value::String(sx, _), Value::String(sy, _)) => Some(sx == sy),
+        (Value::Ref(x), Value::Ref(y)) => Some(x == y),
+        (Value::Array(_), Value::Array(_))
+        | (Value::Dict(_), Value::Dict(_))
+        | (Value::Stream(_), Value::Stream(_)) => None,
+        _ => Some(false),
+    }
+}
+
+fn push_dict_eq_value<'a>(
+    dx: &'a Dict,
+    dy: &'a Dict,
+    stack: &mut Vec<(&'a Value, &'a Value)>,
+) -> bool {
+    let x_iter = dx.iter();
+    let y_iter = dy.iter();
+    if x_iter.len() != y_iter.len() {
+        return false;
+    }
+    if x_iter.len() <= 32 {
+        for (k, vx) in x_iter {
+            let Some(vy) = dy.get(k) else {
+                return false;
+            };
+            if let Some(eq) = eq_scalar_values(&vx.value, &vy.value) {
+                if !eq {
+                    return false;
+                }
+            } else {
+                stack.push((&vx.value, &vy.value));
+            }
+        }
+        true
+    } else {
+        let mut ys: Vec<(&[u8], &Object)> = y_iter.collect();
+        ys.sort_unstable_by_key(|&(k, _)| k);
+        for (k, vx) in x_iter {
+            let Ok(idx) = ys.binary_search_by_key(&k, |&(ky, _)| ky) else {
+                return false;
+            };
+            let vy = ys[idx].1;
+            if let Some(eq) = eq_scalar_values(&vx.value, &vy.value) {
+                if !eq {
+                    return false;
+                }
+            } else {
+                stack.push((&vx.value, &vy.value));
+            }
+        }
+        true
+    }
+}
+
+enum EqTask<'a> {
+    Objects(&'a [Object], &'a [Object]),
+    Entries(&'a [Entry], &'a [Entry]),
+}
+
+fn eq_task_deep(first: EqTask<'_>) -> bool {
+    let mut current = first;
+    let mut stack: Vec<EqTask<'_>> = Vec::new();
+
+    'outer: loop {
+        match current {
+            EqTask::Objects(mut xs, mut ys) => {
+                while let (Some((x, xs_rest)), Some((y, ys_rest))) =
+                    (xs.split_first(), ys.split_first())
+                {
+                    if x.at != y.at {
+                        return false;
+                    }
+                    if let Some(eq) = eq_scalar_exact(&x.value, &y.value) {
+                        if !eq {
+                            return false;
+                        }
+                        xs = xs_rest;
+                        ys = ys_rest;
+                    } else {
+                        let Some(child) = container_eq_task(&x.value, &y.value) else {
+                            return false;
+                        };
+                        if !xs_rest.is_empty() {
+                            stack.push(EqTask::Objects(xs_rest, ys_rest));
+                        }
+                        current = child;
+                        continue 'outer;
+                    }
+                }
+            }
+            EqTask::Entries(mut xs, mut ys) => {
+                while let (Some((x, xs_rest)), Some((y, ys_rest))) =
+                    (xs.split_first(), ys.split_first())
+                {
+                    if x.key != y.key || x.key_at != y.key_at || x.value.at != y.value.at {
+                        return false;
+                    }
+                    if let Some(eq) = eq_scalar_exact(&x.value.value, &y.value.value) {
+                        if !eq {
+                            return false;
+                        }
+                        xs = xs_rest;
+                        ys = ys_rest;
+                    } else {
+                        let Some(child) = container_eq_task(&x.value.value, &y.value.value) else {
+                            return false;
+                        };
+                        if !xs_rest.is_empty() {
+                            stack.push(EqTask::Entries(xs_rest, ys_rest));
+                        }
+                        current = child;
+                        continue 'outer;
+                    }
+                }
+            }
+        }
+        current = match stack.pop() {
+            Some(next) => next,
+            None => return true,
+        };
+    }
+}
+
+#[inline]
+fn container_eq_task<'a>(a: &'a Value, b: &'a Value) -> Option<EqTask<'a>> {
+    match (a, b) {
+        (Value::Array(ax), Value::Array(ay)) if ax.len() == ay.len() => {
+            Some(EqTask::Objects(ax, ay))
+        }
+        (Value::Dict(dx), Value::Dict(dy)) if dx.entries.len() == dy.entries.len() => {
+            Some(EqTask::Entries(&dx.entries, &dy.entries))
+        }
+        (Value::Stream(sx), Value::Stream(sy))
+            if sx.data == sy.data && sx.dict.entries.len() == sy.dict.entries.len() =>
+        {
+            Some(EqTask::Entries(&sx.dict.entries, &sy.dict.entries))
+        }
+        _ => None,
+    }
+}
+
+impl PartialEq for Object {
+    #[inline]
+    fn eq(&self, other: &Object) -> bool {
+        if self.at != other.at {
+            return false;
+        }
+        self.value == other.value
+    }
+}
+
+impl PartialEq for Value {
+    #[inline]
+    fn eq(&self, other: &Value) -> bool {
+        if let Some(eq) = eq_scalar_exact(self, other) {
+            return eq;
+        }
+        match container_eq_task(self, other) {
+            Some(task) => eq_task_deep(task),
+            None => false,
+        }
+    }
+}
+
+impl PartialEq for Entry {
+    #[inline]
+    fn eq(&self, other: &Entry) -> bool {
+        self.key == other.key && self.key_at == other.key_at && self.value == other.value
+    }
+}
+
+impl PartialEq for Dict {
+    #[inline]
+    fn eq(&self, other: &Dict) -> bool {
+        self.entries.len() == other.entries.len()
+            && eq_task_deep(EqTask::Entries(&self.entries, &other.entries))
+    }
+}
+
+impl PartialEq for Stream {
+    #[inline]
+    fn eq(&self, other: &Stream) -> bool {
+        self.data == other.data && self.dict == other.dict
+    }
 }
 
 impl Str {
-    /// The string as text (ISO 32000-2, 7.9.2.2), however it's encoded;
-    /// none for ciphertext.
+    /// Creates a [`Str::Bytes`] payload.
     #[must_use]
-    pub fn text(&self) -> Option<String> {
+    pub fn bytes(bytes: impl Into<SmallBytes>) -> Str {
+        Str::Bytes(bytes.into())
+    }
+
+    /// Creates a [`Str::Encrypted`] ciphertext payload.
+    #[must_use]
+    pub fn encrypted(bytes: impl Into<SmallBytes>) -> Str {
+        Str::Encrypted(bytes.into())
+    }
+
+    /// Decodes the string under ISO 32000-2 §7.9.2.2 rules, returning `None` for
+    /// [`Str::Encrypted`].
+    #[must_use]
+    pub fn decode(&self) -> Option<text::Text> {
         match self {
-            Str::Bytes(bytes) => Some(text::decode(bytes).text),
-            Str::Text(text) => Some(text.clone()),
+            Str::Bytes(bytes) => Some(text::decode(bytes)),
             Str::Encrypted(_) => None,
         }
     }
 
-    /// Its bytes, when the reader gave them.
+    /// Decodes the string under PDFium (`chromium/8152`) rules, returning `None` for
+    /// [`Str::Encrypted`].
     #[must_use]
+    pub fn decode_pdfium(&self) -> Option<text::pdfium::Text> {
+        match self {
+            Str::Bytes(bytes) => Some(text::pdfium::decode(bytes)),
+            Str::Encrypted(_) => None,
+        }
+    }
+
+    /// Decodes the string into a `String` using either ISO 32000-2 or PDFium rules according to
+    /// `rules`, returning `None` for [`Str::Encrypted`].
+    #[must_use]
+    pub fn decode_str(&self, rules: pdf_tokenizer::Rules) -> Option<String> {
+        match self {
+            Str::Bytes(bytes) => Some(text::decode_str(bytes, rules)),
+            Str::Encrypted(_) => None,
+        }
+    }
+
+    /// Decodes the string as ISO 32000-2 text, returning `None` for [`Str::Encrypted`].
+    #[must_use]
+    pub fn text(&self) -> Option<String> {
+        self.decode().map(|t| t.text)
+    }
+
+    /// Returns the raw decoded string bytes, or `None` for [`Str::Encrypted`].
+    #[must_use]
+    #[inline]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            Str::Bytes(bytes) => Some(bytes),
-            Str::Text(_) | Str::Encrypted(_) => None,
+            Str::Bytes(bytes) => Some(bytes.as_slice()),
+            Str::Encrypted(_) => None,
         }
+    }
+
+    /// Returns `true` if the string is still [`Str::Encrypted`].
+    #[must_use]
+    #[inline]
+    pub const fn is_encrypted(&self) -> bool {
+        matches!(self, Str::Encrypted(_))
     }
 }
 
 impl Data {
-    /// Where it was written, when it's [`Data::At`].
+    /// Returns the source [`Span`] if [`Data::At`].
     #[must_use]
+    #[inline]
     pub const fn at(&self) -> Option<Span> {
         match self {
             Data::At(at) => Some(*at),
@@ -594,8 +2037,9 @@ impl Data {
         }
     }
 
-    /// Its bytes, when it's [`Data::Bytes`].
+    /// Returns the in-memory byte slice if [`Data::Bytes`].
     #[must_use]
+    #[inline]
     pub fn bytes(&self) -> Option<&[u8]> {
         match self {
             Data::Bytes(bytes) => Some(bytes),
@@ -605,7 +2049,7 @@ impl Data {
 }
 
 impl Stream {
-    /// A stream of `dict` and `bytes`, its `/Length` set to their length.
+    /// Creates a [`Stream`] with `dict` and `bytes`, setting `/Length` to `bytes.len()`.
     #[must_use]
     pub fn new(dict: Dict, bytes: Vec<u8>) -> Stream {
         let mut stream = Stream {
@@ -616,8 +2060,8 @@ impl Stream {
         stream
     }
 
-    /// Its data replaced by `bytes`, and its `/Length` set to their length,
-    /// in its last entry or a new one.
+    /// Replaces the stream payload with `bytes` and sets `/Length` to `bytes.len()` (removing any
+    /// shadowed `/Length` duplicates).
     pub fn set_bytes(&mut self, bytes: Vec<u8>) {
         self.dict.set("Length", bytes.len() as i64);
         self.data = Data::Bytes(bytes);
@@ -625,151 +2069,201 @@ impl Stream {
 }
 
 impl Dict {
-    /// A dictionary with no entries.
+    /// Empty dictionary constant.
     pub const EMPTY: Dict = Dict {
         entries: Vec::new(),
     };
 
-    /// A dictionary with no entries.
+    /// Creates an empty [`Dict`].
     #[must_use]
     pub const fn new() -> Dict {
         Dict::EMPTY
     }
 
-    /// `key`'s value: its last entry's.
+    /// Creates an empty [`Dict`] with pre-allocated capacity for `capacity` entries.
     #[must_use]
-    pub fn get(&self, key: &[u8]) -> Option<&Object> {
+    pub fn with_capacity(capacity: usize) -> Dict {
+        Dict {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Returns the effective (last) value for `key`.
+    #[must_use]
+    #[inline]
+    pub fn get(&self, key: impl AsRef<[u8]>) -> Option<&Object> {
         self.entry(key).map(|entry| &entry.value)
     }
 
-    /// `key`'s value, its last entry's, to change.
+    /// Mutably borrows the effective (last) value for `key`.
     #[must_use]
-    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut Object> {
-        (self.entries.iter_mut().rev())
-            .find(|entry| entry.key == key)
+    #[inline]
+    pub fn get_mut(&mut self, key: impl AsRef<[u8]>) -> Option<&mut Object> {
+        let key = key.as_ref();
+        self.entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.key.as_bytes() == key)
             .map(|entry| &mut entry.value)
     }
 
-    /// `key`'s last entry.
+    /// Returns the effective (last) [`Entry`] for `key`.
     #[must_use]
-    pub fn entry(&self, key: &[u8]) -> Option<&Entry> {
-        self.entries.iter().rev().find(|entry| entry.key == key)
+    #[inline]
+    pub fn entry(&self, key: impl AsRef<[u8]>) -> Option<&Entry> {
+        let key = key.as_ref();
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| entry.key.as_bytes() == key)
     }
 
-    /// Whether it has `key`.
+    /// Returns `true` if `key` is present.
     #[must_use]
-    pub fn has(&self, key: &[u8]) -> bool {
+    #[inline]
+    pub fn has(&self, key: impl AsRef<[u8]>) -> bool {
         self.entry(key).is_some()
     }
 
-    /// Its `/Type`, when that's a name.
+    /// Returns `/Type` when it is a [`Value::Name`].
     #[must_use]
+    #[inline]
     pub fn type_name(&self) -> Option<&[u8]> {
         self.get(b"Type").and_then(Object::as_name)
     }
 
-    /// Whether its `/Type` is the name `name`.
+    /// Returns `true` if `/Type` is the name `name`.
     #[must_use]
-    pub fn has_type(&self, name: &[u8]) -> bool {
-        self.type_name() == Some(name)
+    #[inline]
+    pub fn has_type(&self, name: impl AsRef<[u8]>) -> bool {
+        self.type_name() == Some(name.as_ref())
     }
 
-    /// Each key and its value, in order, a key written twice at its last.
+    /// Iterates over effective `(key, value)` pairs in entry order (skipping shadowed duplicates).
     pub fn iter(&self) -> Iter<'_> {
+        let shadowed = Shadowed::of(&self.entries);
+        let remaining = self.entries.len() - shadowed.len();
         Iter {
             entries: self.entries.iter().enumerate(),
-            shadowed: Shadowed::of(&self.entries),
+            shadowed,
+            remaining,
         }
     }
 
-    /// Each key and its value, as [`Dict::iter`] gives them, the values to
-    /// change.
+    /// Iterates mutably over effective `(key, value)` pairs in entry order.
     pub fn iter_mut(&mut self) -> IterMut<'_> {
+        let shadowed = Shadowed::of(&self.entries);
+        let remaining = self.entries.len() - shadowed.len();
         IterMut {
-            shadowed: Shadowed::of(&self.entries),
             entries: self.entries.iter_mut().enumerate(),
+            shadowed,
+            remaining,
         }
     }
 
-    /// Each key's last entry, in order.
+    /// Iterates over each key's effective (last) [`Entry`] in entry order.
     pub fn last_entries(&self) -> LastEntries<'_> {
+        let shadowed = Shadowed::of(&self.entries);
+        let remaining = self.entries.len() - shadowed.len();
         LastEntries {
             entries: self.entries.iter().enumerate(),
-            shadowed: Shadowed::of(&self.entries),
+            shadowed,
+            remaining,
         }
     }
 
-    /// The entries a later one with the same key overrides, in order.
+    /// Iterates over earlier [`Entry`] occurrences overridden by a later entry with the same key.
     pub fn duplicates(&self) -> Duplicates<'_> {
+        let shadowed = Shadowed::of(&self.entries);
+        let remaining = shadowed.len();
         Duplicates {
             entries: self.entries.iter().enumerate(),
-            shadowed: Shadowed::of(&self.entries),
+            shadowed,
+            remaining,
         }
     }
 
-    /// Every entry as written, duplicates and all.
+    /// Returns all entries as written, including shadowed duplicates.
     #[must_use]
+    #[inline]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
 
-    /// Every entry as written, to change. A key changed keeps its
-    /// `key_at`, which names the key it was, until the caller clears it.
+    /// Mutably iterates over all raw entries as written (use [`Entry::set_key`] if renaming a key
+    /// so its [`Entry::key_at`] span is cleared).
     pub fn entries_mut(&mut self) -> slice::IterMut<'_, Entry> {
         self.entries.iter_mut()
     }
 
-    /// How many keys it has.
+    /// Number of distinct keys in the dictionary.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len() - Shadowed::of(&self.entries).len()
     }
 
-    /// Whether it has no entries.
+    /// Returns `true` if the dictionary has no entries.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Adds an entry after the others, whether or not `key` has one.
-    pub fn push(&mut self, key: impl AsRef<[u8]>, value: impl Into<Object>) {
-        self.push_entry(Entry {
-            key: key.as_ref().to_vec(),
-            key_at: None,
-            value: value.into(),
-        });
+    /// Appends `(key, value)` at the end of the dictionary without checking for existing keys.
+    pub fn push(&mut self, key: impl Into<Name>, value: impl Into<Object>) {
+        self.push_entry(Entry::new(key, value));
     }
 
-    /// Adds `entry` after the others, whether or not its key has one.
+    /// Appends raw `entry` at the end of the dictionary.
     pub fn push_entry(&mut self, entry: Entry) {
         self.entries.push(entry);
     }
 
-    /// Sets `key` to `value`: in its last entry, or a new one.
-    pub fn set(&mut self, key: impl AsRef<[u8]>, value: impl Into<Object>) {
-        let key = key.as_ref();
-        match self.entries.iter_mut().rev().find(|entry| entry.key == key) {
-            Some(entry) => entry.value = value.into(),
-            None => self.push(key, value),
+    /// Sets `key` to `value` in place at its effective (last) entry—or appends a new entry if
+    /// absent—and removes any earlier shadowed duplicates of `key`.
+    pub fn set(&mut self, key: impl Into<Name>, value: impl Into<Object>) {
+        let key = key.into();
+        let key_bytes = key.as_bytes();
+        let Some(last) = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.key.as_bytes() == key_bytes)
+        else {
+            self.push_entry(Entry::new(key, value));
+            return;
+        };
+        self.entries[last].value = value.into();
+        if self.entries[..last]
+            .iter()
+            .any(|entry| entry.key.as_bytes() == key_bytes)
+        {
+            let mut idx = 0;
+            self.entries.retain(|entry| {
+                let keep = idx == last || entry.key.as_bytes() != key_bytes;
+                idx += 1;
+                keep
+            });
         }
     }
 
-    /// Removes every entry with `key`, the others kept in order, and gives
-    /// the value of the last it removed, `key`'s value as [`Dict::get`]
-    /// gave it.
-    pub fn remove(&mut self, key: &[u8]) -> Option<Object> {
-        let last = self.entries.iter().rposition(|entry| entry.key == key)?;
+    /// Removes every entry matching `key` and returns the effective (last) entry's value.
+    pub fn remove(&mut self, key: impl AsRef<[u8]>) -> Option<Object> {
+        let key = key.as_ref();
+        let last = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.key.as_bytes() == key)?;
         let value = self.entries.remove(last).value;
-        self.entries.retain(|entry| entry.key != key);
+        self.entries.retain(|entry| entry.key.as_bytes() != key);
         Some(value)
     }
 
-    /// Removes the entries a later one with the same key overrides
-    /// ([`Dict::duplicates`]), the others kept in order: each key's last
-    /// is left, as ISO 32000-2 has a dictionary hold one entry for a key
-    /// (7.3.7).
+    /// Removes all shadowed duplicate entries, keeping each key's last occurrence in order.
     pub fn remove_duplicates(&mut self) {
         let shadowed = Shadowed::of(&self.entries);
+        if shadowed.len() == 0 {
+            return;
+        }
         let mut index = 0;
         self.entries.retain(|_| {
             let kept = !shadowed.contains(index);
@@ -779,73 +2273,95 @@ impl Dict {
     }
 }
 
-/// How many entries a dictionary may have for its lookups to find the ones
-/// a later entry overrides without allocating.
-const FEW: usize = 32;
+const FEW: usize = 64;
 
-/// The indices of a dictionary's entries a later one with the same key
-/// overrides: for at most [`FEW`] entries, found by comparing each key with
-/// the later ones, in a mask, so that a lookup allocates nothing; past that,
-/// in a set.
 #[derive(Debug, Clone)]
 enum Shadowed {
-    Few(u32),
-    Many(HashSet<usize>),
+    None,
+    Few(u64),
+    Many { bits: Box<[u64]>, count: usize },
 }
 
 impl Shadowed {
     fn of(entries: &[Entry]) -> Shadowed {
+        if entries.len() <= 1 {
+            return Shadowed::None;
+        }
         if entries.len() <= FEW {
-            let mut mask = 0;
+            let mut mask = 0u64;
             for (i, entry) in entries.iter().enumerate() {
-                if entries[i + 1..].iter().any(|later| later.key == entry.key) {
-                    mask |= 1 << i;
+                let key = entry.key.as_bytes();
+                if entries[i + 1..]
+                    .iter()
+                    .any(|later| later.key.as_bytes() == key)
+                {
+                    mask |= 1u64 << i;
                 }
             }
-            return Shadowed::Few(mask);
+            return if mask == 0 {
+                Shadowed::None
+            } else {
+                Shadowed::Few(mask)
+            };
         }
-        // Every key goes in, so the set is made with room for them all.
-        let mut seen = HashSet::with_capacity(entries.len());
-        let mut shadowed = HashSet::new();
-        for (i, entry) in entries.iter().enumerate().rev() {
-            if !seen.insert(entry.key.as_slice()) {
-                shadowed.insert(i);
+
+        // Guaranteed O(n log n) worst-case with a single temporary index buffer (no hash-DoS).
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        order.sort_unstable_by(|&a, &b| {
+            entries[a]
+                .key
+                .as_bytes()
+                .cmp(entries[b].key.as_bytes())
+                .then(a.cmp(&b))
+        });
+
+        let has_dups = order
+            .windows(2)
+            .any(|w| entries[w[0]].key.as_bytes() == entries[w[1]].key.as_bytes());
+        if !has_dups {
+            return Shadowed::None;
+        }
+
+        let mut bits = alloc::vec![0u64; entries.len().div_ceil(64)].into_boxed_slice();
+        let mut count = 0usize;
+        for w in order.windows(2) {
+            if entries[w[0]].key.as_bytes() == entries[w[1]].key.as_bytes() {
+                let idx = w[0];
+                bits[idx >> 6] |= 1u64 << (idx & 63);
+                count += 1;
             }
         }
-        Shadowed::Many(shadowed)
+        Shadowed::Many { bits, count }
     }
 
-    // A hint, so that a walk's loop inlined into its caller tests each
-    // entry in place.
     #[inline]
     fn contains(&self, i: usize) -> bool {
         match self {
-            Shadowed::Few(mask) => i < FEW && (mask & (1 << i)) != 0,
-            Shadowed::Many(set) => set.contains(&i),
+            Shadowed::None => false,
+            Shadowed::Few(mask) => i < FEW && (mask & (1u64 << i)) != 0,
+            Shadowed::Many { bits, .. } => bits
+                .get(i >> 6)
+                .is_some_and(|w| (w & (1u64 << (i & 63))) != 0),
         }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         match self {
+            Shadowed::None => 0,
             Shadowed::Few(mask) => mask.count_ones() as usize,
-            Shadowed::Many(set) => set.len(),
+            Shadowed::Many { count, .. } => *count,
         }
     }
 }
 
-// The walks of a dictionary's entries below are types of their own, so
-// that a caller can hold one in a struct or name it in a signature. Each
-// method is a hint to inline, as `core`'s own adapters' are (`filter` and
-// `map`'s, which they replace), so that a consumer's loop over the entries
-// is one loop; and each is fused, as the entries' own iterator is.
-
-/// A dictionary's keys and their values, in order, a key written twice at
-/// its last entry: what [`Dict::iter`] gives, and a `for` over a `&Dict`.
-#[must_use = "an iterator is lazy: it gives nothing until asked"]
+/// Iterator over effective `(key, value)` pairs in a [`Dict`].
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[derive(Debug, Clone)]
 pub struct Iter<'a> {
     entries: Enumerate<slice::Iter<'a, Entry>>,
     shadowed: Shadowed,
+    remaining: usize,
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -854,26 +2370,32 @@ impl<'a> Iterator for Iter<'a> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .find(|(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| (entry.key.as_slice(), &entry.value))
+            .map(|(_, entry)| (entry.key.as_bytes(), &entry.value));
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
     }
 
-    /// At most one an entry left.
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.entries.size_hint().1)
+        (self.remaining, Some(self.remaining))
     }
 
-    /// One pass over the entries, as `count`, `for_each` and `last` fold.
     #[inline]
     fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, mut f: F) -> B {
         let shadowed = self.shadowed;
-        self.entries
-            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
-                true => acc,
-                false => f(acc, (entry.key.as_slice(), &entry.value)),
-            })
+        self.entries.fold(init, |acc, (i, entry)| {
+            if shadowed.contains(i) {
+                acc
+            } else {
+                f(acc, (entry.key.as_bytes(), &entry.value))
+            }
+        })
     }
 }
 
@@ -881,21 +2403,34 @@ impl DoubleEndedIterator for Iter<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .rfind(|(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| (entry.key.as_slice(), &entry.value))
+            .map(|(_, entry)| (entry.key.as_bytes(), &entry.value));
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
+    }
+}
+
+impl ExactSizeIterator for Iter<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 
 impl FusedIterator for Iter<'_> {}
 
-/// A dictionary's keys and their values, as [`Iter`] gives them, the
-/// values to change: what [`Dict::iter_mut`] gives.
-#[must_use = "an iterator is lazy: it gives nothing until asked"]
+/// Mutable iterator over effective `(key, value)` pairs in a [`Dict`].
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[derive(Debug)]
 pub struct IterMut<'a> {
     entries: Enumerate<slice::IterMut<'a, Entry>>,
     shadowed: Shadowed,
+    remaining: usize,
 }
 
 impl<'a> Iterator for IterMut<'a> {
@@ -904,26 +2439,32 @@ impl<'a> Iterator for IterMut<'a> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .find(|(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| (entry.key.as_slice(), &mut entry.value))
+            .map(|(_, entry)| (entry.key.as_bytes(), &mut entry.value));
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
     }
 
-    /// At most one an entry left.
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.entries.size_hint().1)
+        (self.remaining, Some(self.remaining))
     }
 
-    /// One pass over the entries, as `count`, `for_each` and `last` fold.
     #[inline]
     fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, mut f: F) -> B {
         let shadowed = self.shadowed;
-        self.entries
-            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
-                true => acc,
-                false => f(acc, (entry.key.as_slice(), &mut entry.value)),
-            })
+        self.entries.fold(init, |acc, (i, entry)| {
+            if shadowed.contains(i) {
+                acc
+            } else {
+                f(acc, (entry.key.as_bytes(), &mut entry.value))
+            }
+        })
     }
 }
 
@@ -931,21 +2472,34 @@ impl DoubleEndedIterator for IterMut<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .rfind(|(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| (entry.key.as_slice(), &mut entry.value))
+            .map(|(_, entry)| (entry.key.as_bytes(), &mut entry.value));
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
+    }
+}
+
+impl ExactSizeIterator for IterMut<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 
 impl FusedIterator for IterMut<'_> {}
 
-/// A dictionary's entries, each key's last, in order: what
-/// [`Dict::last_entries`] gives.
-#[must_use = "an iterator is lazy: it gives nothing until asked"]
+/// Iterator over each key's effective (last) [`Entry`] in a [`Dict`].
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[derive(Debug, Clone)]
 pub struct LastEntries<'a> {
     entries: Enumerate<slice::Iter<'a, Entry>>,
     shadowed: Shadowed,
+    remaining: usize,
 }
 
 impl<'a> Iterator for LastEntries<'a> {
@@ -954,26 +2508,32 @@ impl<'a> Iterator for LastEntries<'a> {
     #[inline]
     fn next(&mut self) -> Option<&'a Entry> {
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .find(|(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| entry)
+            .map(|(_, entry)| entry);
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
     }
 
-    /// At most one an entry left.
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.entries.size_hint().1)
+        (self.remaining, Some(self.remaining))
     }
 
-    /// One pass over the entries, as `count`, `for_each` and `last` fold.
     #[inline]
     fn fold<B, F: FnMut(B, &'a Entry) -> B>(self, init: B, mut f: F) -> B {
         let shadowed = self.shadowed;
-        self.entries
-            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
-                true => acc,
-                false => f(acc, entry),
-            })
+        self.entries.fold(init, |acc, (i, entry)| {
+            if shadowed.contains(i) {
+                acc
+            } else {
+                f(acc, entry)
+            }
+        })
     }
 }
 
@@ -981,21 +2541,34 @@ impl DoubleEndedIterator for LastEntries<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .rfind(|(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| entry)
+            .map(|(_, entry)| entry);
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
+    }
+}
+
+impl ExactSizeIterator for LastEntries<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 
 impl FusedIterator for LastEntries<'_> {}
 
-/// A dictionary's entries that a later one with the same key overrides, in
-/// order: what [`Dict::duplicates`] gives.
-#[must_use = "an iterator is lazy: it gives nothing until asked"]
+/// Iterator over shadowed duplicate [`Entry`] items in a [`Dict`].
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[derive(Debug, Clone)]
 pub struct Duplicates<'a> {
     entries: Enumerate<slice::Iter<'a, Entry>>,
     shadowed: Shadowed,
+    remaining: usize,
 }
 
 impl<'a> Iterator for Duplicates<'a> {
@@ -1003,50 +2576,76 @@ impl<'a> Iterator for Duplicates<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<&'a Entry> {
+        if self.remaining == 0 {
+            self.entries = [].iter().enumerate();
+            return None;
+        }
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .find(|(i, _)| shadowed.contains(*i))
-            .map(|(_, entry)| entry)
+            .map(|(_, entry)| entry);
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
     }
 
-    /// At most one an entry left.
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.entries.size_hint().1)
+        (self.remaining, Some(self.remaining))
     }
 
-    /// One pass over the entries, as `count`, `for_each` and `last` fold.
     #[inline]
     fn fold<B, F: FnMut(B, &'a Entry) -> B>(self, init: B, mut f: F) -> B {
+        if self.remaining == 0 {
+            return init;
+        }
         let shadowed = self.shadowed;
-        self.entries
-            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
-                true => f(acc, entry),
-                false => acc,
-            })
+        self.entries.fold(init, |acc, (i, entry)| {
+            if shadowed.contains(i) {
+                f(acc, entry)
+            } else {
+                acc
+            }
+        })
     }
 }
 
 impl DoubleEndedIterator for Duplicates<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            self.entries = [].iter().enumerate();
+            return None;
+        }
         let shadowed = &self.shadowed;
-        (self.entries.by_ref())
+        let item = self
+            .entries
+            .by_ref()
             .rfind(|(i, _)| shadowed.contains(*i))
-            .map(|(_, entry)| entry)
+            .map(|(_, entry)| entry);
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
+    }
+}
+
+impl ExactSizeIterator for Duplicates<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 
 impl FusedIterator for Duplicates<'_> {}
 
-/// The ids of the objects a value's references name, nested ones too, in
-/// the order written: what [`Object::references`] gives. It walks with a
-/// stack of its own, so a value nested however deeply walks without
-/// overflowing the thread's.
-#[must_use = "an iterator is lazy: it gives nothing until asked"]
+/// Stack-safe iterator over indirect [`ObjectId`]s referenced inside an [`Object`].
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[derive(Debug, Clone)]
 pub struct References<'a> {
-    /// The values left to walk, the next on top.
     stack: Vec<&'a Object>,
 }
 
@@ -1073,7 +2672,6 @@ impl Iterator for References<'_> {
     }
 }
 
-// The stack only shrinks to empty, and stays so.
 impl FusedIterator for References<'_> {}
 
 impl<'a> IntoIterator for &'a Dict {
@@ -1085,12 +2683,10 @@ impl<'a> IntoIterator for &'a Dict {
     }
 }
 
-/// A dictionary of these keys and values, each value anything that's
-/// [`Into<Object>`], each pushed: a key given twice is kept twice, as
-/// [`dict!`](crate::dict) keeps it.
-impl<K: AsRef<[u8]>, V: Into<Object>> FromIterator<(K, V)> for Dict {
+impl<K: Into<Name>, V: Into<Object>> FromIterator<(K, V)> for Dict {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Dict {
-        let mut dict = Dict::new();
+        let iter = iter.into_iter();
+        let mut dict = Dict::with_capacity(iter.size_hint().0);
         for (key, value) in iter {
             dict.push(key, value);
         }
@@ -1158,39 +2754,62 @@ impl From<f64> for Object {
     }
 }
 
-/// The f64 nearest the f32's shortest decimal, which is what an f32 is
-/// written as: `0.1f32` is 0.1, where `f64::from` would give
-/// 0.10000000149011612. Every f32's `Display` (`inf` and `NaN` too) parses
-/// as an f64. Finding the shortest decimal is most of the cost, so a whole
-/// number below 2^24, which is its own shortest decimal, skips it.
+struct StackBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> StackBuf<N> {
+    const fn new() -> Self {
+        StackBuf {
+            buf: [0; N],
+            len: 0,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).expect("ASCII decimal formatting")
+    }
+}
+
+impl<const N: usize> fmt::Write for StackBuf<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let bytes = s.as_bytes();
+        if self.len + bytes.len() > N {
+            return Err(fmt::Error);
+        }
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
+}
+
+/// Converts `f32` to the `f64` nearest its shortest decimal representation (`0.1f32` becomes
+/// `0.1`, not `0.10000000149011612`), formatting onto a stack buffer with zero heap allocations.
 impl From<f32> for Object {
     fn from(r: f32) -> Object {
-        if r.fract() == 0.0 && r.abs() < 16_777_216.0 {
-            return Object::new(Value::Real(r.into()));
+        if !r.is_finite() || r == 0.0 {
+            return Object::new(Value::Real(f64::from(r)));
         }
-        let r = r
-            .to_string()
-            .parse()
-            .expect("an f32's Display parses as an f64");
-        Object::new(Value::Real(r))
+        if r > -16_777_216.0 && r < 16_777_216.0 && (r as i32 as f32) == r {
+            return Object::new(Value::Real(f64::from(r)));
+        }
+        let mut buf = StackBuf::<64>::new();
+        write!(&mut buf, "{r}").expect("f32 Display fits in 64 bytes");
+        let parsed = buf
+            .as_str()
+            .parse::<f64>()
+            .expect("finite f32 Display parses as f64");
+        Object::new(Value::Real(parsed))
     }
 }
 
-/// A name.
-impl From<&str> for Object {
-    fn from(name: &str) -> Object {
-        Object::new(Value::Name(name.as_bytes().to_vec()))
+impl From<Name> for Object {
+    fn from(name: Name) -> Object {
+        Object::new(Value::Name(name))
     }
 }
 
-/// A name.
-impl From<String> for Object {
-    fn from(name: String) -> Object {
-        Object::new(Value::Name(name.into_bytes()))
-    }
-}
-
-/// A reference.
 impl From<ObjectId> for Object {
     fn from(id: ObjectId) -> Object {
         Object::new(Value::Ref(id))
@@ -1215,9 +2834,21 @@ impl From<Stream> for Object {
     }
 }
 
-/// A dictionary of these keys and values, each value anything that's
-/// [`Into<Object>`]: `dict! { "Type" => "Catalog", "Pages" =>
-/// Object::reference(2) }`, a `&str` value being a name.
+/// Constructs a [`Dict`] from `key => value` pairs in written order.
+///
+/// Keys accept anything implementing `Into<Name>` (`&str`, `&[u8]`, `Name`, etc.), and values
+/// accept anything implementing `Into<Object>`. Use [`Object::name`] for PDF name values and
+/// [`Object::text`] for PDF text strings:
+///
+/// ```
+/// use pdf_objects::{Object, dict};
+///
+/// let catalog = dict! {
+///     "Type" => Object::name("Catalog"),
+///     "Pages" => Object::reference(2),
+/// };
+/// assert!(catalog.has_type("Catalog"));
+/// ```
 #[macro_export]
 macro_rules! dict {
     () => { $crate::object::Dict::new() };
@@ -1230,56 +2861,26 @@ macro_rules! dict {
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::BTreeSet;
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec;
+
     use super::*;
 
-    /// An id is eight bytes, as the pair of its numbers is, and is built
-    /// in a constant.
     #[test]
-    fn an_id_is_eight_bytes_and_const() {
+    fn object_id_layout_and_conversions() {
         const ID: ObjectId = ObjectId::new(12, 3);
         assert_eq!(size_of::<ObjectId>(), 8);
-        assert_eq!(
-            ID,
-            ObjectId {
-                number: 12,
-                generation: 3
-            }
-        );
         assert_eq!((ID.number, ID.generation), (12, 3));
-    }
+        assert_eq!(ID.to_string(), "12 0".replace("0", "3"));
+        assert_eq!(format!("{} obj", ObjectId::new(7, 65535)), "7 65535 obj");
 
-    /// A value that holds nothing on the heap is made at compile time,
-    /// placed or not, and so is a dictionary with no entries; a value's
-    /// readings that give a `Copy` value read it there too.
-    #[test]
-    fn values_are_made_and_read_at_compile_time() {
-        const AT: Span = Span::new(None, 3, 8);
-        const PLACED: &Object = &Object::reference(7).at(AT);
-        const REAL: &Object = &Object::new(Value::Real(5.5));
-        const NULL: &Object = &Object::null();
-        const EMPTY: &Dict = &Dict::new();
-        const VALUE: &Value = PLACED.value();
-        const READ: (Option<bool>, Option<i64>, Option<f64>) =
-            (REAL.as_bool(), REAL.as_integer(), REAL.as_number());
-        const NAMED: (Option<ObjectId>, Option<ObjectId>) =
-            (PLACED.as_reference(), REAL.as_reference());
-        const NULLS: (bool, bool) = (NULL.is_null(), PLACED.is_null());
-        const DATA: (Option<Span>, Option<Span>) = (Data::At(AT).at(), Data::Unplaced.at());
-        assert_eq!(PLACED.at, Some(AT));
-        assert_eq!(*VALUE, Value::Ref(ObjectId::new(7, 0)));
-        assert_eq!(READ, (None, None, Some(5.5)));
-        assert_eq!(NAMED, (Some(ObjectId::new(7, 0)), None));
-        assert_eq!(NULLS, (true, false));
-        assert_eq!((NULL.at, EMPTY), (None, &Dict::EMPTY));
-        assert_eq!(DATA, (Some(AT), None));
-    }
+        for pair in [(0, 0), (1, 0), (12, 3), (u32::MAX, u16::MAX), (65536, 1)] {
+            let id = ObjectId::from(pair);
+            assert_eq!(<(u32, u16)>::from(id), pair);
+        }
 
-    /// Ids order and hash as their pairs do: by number, then generation,
-    /// so a set of them iterates as a set of pairs did.
-    #[test]
-    fn ids_order_and_hash_as_their_pairs_do() {
-        use std::collections::{BTreeSet, HashSet};
-        use std::hash::{BuildHasher, RandomState};
         let pairs = [
             (3, 0),
             (1, 2),
@@ -1291,13 +2892,6 @@ mod tests {
             (1, 1),
         ];
         let ids: Vec<ObjectId> = pairs.iter().map(|&(n, g)| ObjectId::new(n, g)).collect();
-        for (a, pa) in ids.iter().zip(pairs) {
-            for (b, pb) in ids.iter().zip(pairs) {
-                assert_eq!(a.cmp(b), pa.cmp(&pb), "{a} against {b}");
-                assert_eq!(a.partial_cmp(b), pa.partial_cmp(&pb));
-                assert_eq!(a == b, pa == pb);
-            }
-        }
         let sorted: Vec<(u32, u16)> = ids
             .iter()
             .copied()
@@ -1308,74 +2902,151 @@ mod tests {
         let mut by_pair = pairs.to_vec();
         by_pair.sort();
         assert_eq!(sorted, by_pair);
-        let hasher = RandomState::new();
-        for (id, pair) in ids.iter().zip(pairs) {
-            assert_eq!(hasher.hash_one(id), hasher.hash_one(pair), "{id}");
+    }
+
+    #[test]
+    fn span_accessors_and_safe_slicing() {
+        let file = b"0123456789";
+        let top = Span::new(None, 2, 6);
+        assert_eq!(
+            (top.stream(), top.start(), top.end(), top.len()),
+            (None, 2, 6, 4)
+        );
+        assert_eq!(top.range(), 2..6);
+        assert!(!top.is_empty());
+        assert_eq!(top.slice_in(file), Some(&b"2345"[..]));
+        assert_eq!(top.stream_slice_in(ObjectId::new(1, 0), file), None);
+
+        let in_stream = Span::new(Some(ObjectId::new(9, 0)), 1, 4);
+        assert_eq!(in_stream.slice_in(file), None);
+        assert_eq!(
+            in_stream.stream_slice_in(ObjectId::new(9, 0), file),
+            Some(&b"123"[..])
+        );
+        assert_eq!(in_stream.stream_slice_in(ObjectId::new(8, 0), file), None);
+
+        assert_eq!(Span::try_new(None, 5, 4), None);
+        assert_eq!(Span::try_new(None, 5, 5).unwrap().len(), 0);
+        assert!(Span::new(None, 5, 5).is_empty());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "Span::new requires start <= end")]
+    fn span_new_panics_in_debug_when_inverted() {
+        let _ = Span::new(None, 10, 9);
+    }
+
+    #[test]
+    fn small_bytes_and_name_cover_inline_medium_and_large_tiers() {
+        for len in [0, 1, 14, 15, 64, 65, 300] {
+            let raw: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let sb = SmallBytes::from_slice(&raw);
+            assert_eq!(sb.len(), len);
+            assert_eq!(sb.is_empty(), len == 0);
+            assert_eq!(sb, raw.as_slice());
+            assert_eq!(sb, raw);
+            let cloned = sb.clone();
+            assert_eq!(cloned, sb);
+            assert_eq!(sb.into_vec(), raw);
+
+            let from_iter: SmallBytes = raw.iter().copied().collect();
+            assert_eq!(from_iter, raw.as_slice());
+
+            let name = Name::from(raw.clone());
+            assert_eq!(name.as_bytes(), raw.as_slice());
+            assert_eq!(name.into_vec(), raw);
         }
-        let set: HashSet<ObjectId> = ids.iter().copied().collect();
-        assert_eq!(set.len(), pairs.len());
-        assert!(pairs.iter().all(|&p| set.contains(&ObjectId::from(p))));
+
+        let n = Name::new("Type");
+        assert_eq!(n.as_str(), Some("Type"));
+        assert_eq!(n, "Type");
+        assert_eq!(n, *b"Type");
+        assert_eq!(format!("{n:?}"), "/Type");
+        assert_eq!(format!("{:?}", Name::new(b"A#/\0")), "/A#23#2F#00");
     }
 
-    /// An id writes as a file writes the pair, `12 0`, so `{id} R` is a
-    /// reference and `{id} obj` a header; its `Debug` is the derive.
     #[test]
-    fn an_id_displays_as_its_number_and_generation() {
-        let id = ObjectId::new(12, 0);
-        assert_eq!(id.to_string(), "12 0");
-        assert_eq!(format!("{id} R"), "12 0 R");
-        assert_eq!(format!("{} obj", ObjectId::new(7, 65535)), "7 65535 obj");
-        assert_eq!(format!("{id:?}"), "ObjectId { number: 12, generation: 0 }");
+    fn debug_redacts_encrypted_strings_and_stream_bytes() {
+        let secret = Str::encrypted(*b"top-secret-plaintext");
+        let dbg = format!("{secret:?}");
+        assert_eq!(dbg, "Encrypted(20 bytes)");
+        assert!(!dbg.contains("secret"));
+
+        let data = Data::Bytes(b"raw-stream-payload".to_vec());
+        let data_dbg = format!("{data:?}");
+        assert_eq!(data_dbg, "Bytes(18 bytes)");
+        assert!(!data_dbg.contains("payload"));
     }
 
-    /// A pair converts to an id and back, each field in its place.
     #[test]
-    fn an_id_and_a_pair_convert_both_ways() {
-        for pair in [(0, 0), (1, 0), (12, 3), (u32::MAX, u16::MAX), (65536, 1)] {
-            let id = ObjectId::from(pair);
-            assert_eq!((id.number, id.generation), pair);
-            assert_eq!(<(u32, u16)>::from(id), pair);
-            let back: (u32, u16) = id.into();
-            assert_eq!(back, pair);
-            assert_eq!(ObjectId::new(pair.0, pair.1), id);
-        }
+    fn const_construction_and_accessors() {
+        const AT: Span = Span::new(None, 3, 8);
+        const PLACED: &Object = &Object::reference(7).with_span(AT);
+        const REAL: &Object = &Object::new(Value::Real(5.5));
+        const NULL: &Object = &Object::null();
+        const EMPTY: &Dict = &Dict::new();
+        assert_eq!(PLACED.at(), Some(AT));
+        assert_eq!(REAL.as_number(), Some(5.5));
+        assert!(NULL.is_null());
+        assert_eq!(EMPTY, &Dict::EMPTY);
     }
 
-    /// A text string is literal as it is and hex as UTF-16BE, and what it
-    /// must escape as a literal reads back, by either rules.
     #[test]
-    fn a_text_string_is_written_in_the_form_it_is_and_reads_back() {
+    fn str_decode_helpers_respect_rules_and_encryption() {
+        let utf16_le = Str::bytes(*b"\xFF\xFEA\x00");
+        assert_eq!(utf16_le.decode().unwrap().text, "ÿþA\u{FFFD}");
+        assert_eq!(utf16_le.decode_pdfium().unwrap().text, "A");
+        assert_eq!(
+            utf16_le.decode_str(pdf_tokenizer::Rules::Iso).unwrap(),
+            "ÿþA\u{FFFD}"
+        );
+        assert_eq!(
+            utf16_le.decode_str(pdf_tokenizer::Rules::Pdfium).unwrap(),
+            "A"
+        );
+        assert_eq!(utf16_le.text().unwrap(), "ÿþA\u{FFFD}");
+        assert!(!utf16_le.is_encrypted());
+
+        let enc = Str::encrypted(*b"\xFF\xFEA\x00");
+        assert!(enc.is_encrypted());
+        assert!(enc.decode().is_none());
+        assert!(enc.decode_pdfium().is_none());
+        assert!(enc.decode_str(pdf_tokenizer::Rules::Iso).is_none());
+        assert!(enc.text().is_none());
+        assert!(enc.as_bytes().is_none());
+    }
+
+    #[test]
+    fn text_objects_choose_form_and_round_trip() {
         let plain = Object::text("plain");
         assert_eq!(
             plain.value(),
-            &Value::String(Str::Bytes(b"plain".to_vec()), Some(Form::Literal))
+            &Value::String(Str::bytes(*b"plain"), Some(Form::Literal))
         );
         let marked = Object::text("é");
         assert_eq!(
             marked.value(),
-            &Value::String(Str::Bytes(b"\xFE\xFF\x00\xE9".to_vec()), Some(Form::Hex))
+            &Value::String(Str::bytes(*b"\xFE\xFF\x00\xE9"), Some(Form::Hex))
         );
-        let delete = Object::text("a\x7F");
-        assert_eq!(delete.as_bytes(), Some(&b"\xFE\xFF\x00a\x00\x7F"[..]));
-        let mut written = Vec::new();
-        crate::serialize::write(&mut written, &plain).unwrap();
-        assert_eq!(written, b"(plain)");
-        written.clear();
-        crate::serialize::write(&mut written, &marked).unwrap();
-        assert_eq!(written, b"<FEFF00E9>");
-        for text in [
+        // NUL and DEL are outside verbatim PDFDocEncoding, so they use UTF-16BE Hex.
+        let nul = Object::text("\t\0");
+        assert_eq!(nul.as_bytes(), Some(&b"\xFE\xFF\x00\t\x00\0"[..]));
+
+        for sample in [
             "", "a\rb", "a\r\nb", "a\nb", "a(b", "a)b", "(a)", "a\\b", "\\", "\t\0", "é\r",
-            "\x1B\x7F",
+            "a\x7F", "\x01\x17",
         ] {
             let mut written = Vec::new();
-            crate::serialize::write(&mut written, &Object::text(text)).unwrap();
+            crate::serialize::write(&mut written, &Object::text(sample)).unwrap();
             for rules in [pdf_tokenizer::Rules::Iso, pdf_tokenizer::Rules::Pdfium] {
-                let read = (crate::parse::Parser::at(&written, 0).rules(rules))
+                let parsed = crate::parse::Parser::at(&written, 0)
+                    .rules(rules)
                     .value(&mut ())
                     .unwrap();
                 assert_eq!(
-                    read.as_bytes().map(|bytes| crate::text::decode(bytes).text),
-                    Some(text.to_string()),
+                    parsed.as_str().and_then(|s| s.decode_str(rules)),
+                    Some(sample.to_string()),
                     "{written:?}"
                 );
             }
@@ -1383,1026 +3054,264 @@ mod tests {
     }
 
     #[test]
-    fn a_dictionary_keeps_what_was_written_and_reads_a_keys_last_entry() {
-        let mut d = dict! { "A" => 1, "B" => 2, "A" => 3 };
-        assert_eq!(d.get(b"A").and_then(Object::as_integer), Some(3));
-        assert_eq!(d.len(), 2);
-        let keys: Vec<_> = d.iter().map(|(k, v)| (k, v.as_integer())).collect();
-        assert_eq!(keys, [(&b"B"[..], Some(2)), (&b"A"[..], Some(3))]);
-        let duplicates: Vec<_> = d.duplicates().map(|e| e.value.as_integer()).collect();
-        assert_eq!(duplicates, [Some(1)]);
-        assert_eq!(d.entries().len(), 3);
-        d.set("A", 4);
-        assert_eq!(d.get(b"A").and_then(Object::as_integer), Some(4));
-        assert_eq!(
-            d.entries()[0].value.as_integer(),
-            Some(1),
-            "set changes the last"
-        );
-        d.set("C", 5);
+    fn dict_set_overwrites_last_and_removes_shadowed_duplicates() {
+        let mut d = dict! { "A" => 1, "B" => 2, "A" => 3, "C" => 4 };
+        assert_eq!(d.get("A").and_then(Object::as_integer), Some(3));
         assert_eq!(d.len(), 3);
-        assert!(!d.has(b"D"));
-    }
+        assert_eq!(d.duplicates().len(), 1);
 
-    /// A dictionary without its overridden entries keeps each key's last,
-    /// in order, and is written with each key once; with few entries or
-    /// many.
-    #[test]
-    fn remove_duplicates_keeps_each_keys_last_entry() {
-        let mut d = dict! { "A" => 1, "B" => 2, "A" => 3, "C" => 4, "B" => 5 };
-        d.remove_duplicates();
-        let entries: Vec<_> = (d.entries().iter())
-            .map(|e| (e.key.as_slice(), e.value.as_integer()))
-            .collect();
-        let last = [(&b"A"[..], Some(3)), (b"C", Some(4)), (b"B", Some(5))];
-        assert_eq!(entries, last);
-        let mut out = Vec::new();
-        crate::serialize::write(&mut out, &Object::from(d)).unwrap();
-        assert_eq!(out, b"<</A 3/C 4/B 5>>");
-        let mut many: Dict = (0..40).map(|i| (format!("K{}", i % 20), i)).collect();
-        many.remove_duplicates();
-        assert_eq!((many.entries().len(), many.len()), (20, 20));
-        assert_eq!(many.duplicates().count(), 0);
-        assert_eq!(many.get(b"K0").and_then(Object::as_integer), Some(20));
-        assert_eq!(many.entries()[0].key, b"K0");
-    }
-
-    /// The objects, and what reads and writes them, can be shared across
-    /// threads.
-    #[test]
-    fn the_types_are_send_and_sync() {
-        fn shared<T: Send + Sync>() {}
-        shared::<Object>();
-        shared::<Value>();
-        shared::<Str>();
-        shared::<Dict>();
-        shared::<Entry>();
-        shared::<Iter<'_>>();
-        shared::<Stream>();
-        shared::<Data>();
-        shared::<Span>();
-        shared::<crate::parse::Limits>();
-        shared::<crate::parse::Parser<'_>>();
-        shared::<crate::parse::StreamHead<'_>>();
-        shared::<crate::parse::Body<'_>>();
-        shared::<crate::parse::Error>();
-        shared::<crate::serialize::Error>();
-    }
-
-    #[test]
-    fn values_say_what_they_are() {
-        assert_eq!(Object::from("Page").as_name(), Some(&b"Page"[..]));
-        assert_eq!(Object::from(4.5).as_number(), Some(4.5));
-        assert_eq!(Object::from(7).as_number(), Some(7.0));
+        d.set("A", 99);
+        assert_eq!(d.entries().len(), 3);
+        assert_eq!(d.duplicates().len(), 0);
+        let items: Vec<_> = d.iter().map(|(k, v)| (k, v.as_integer())).collect();
         assert_eq!(
-            Object::reference(3).as_reference(),
-            Some(ObjectId::new(3, 0))
+            items,
+            [
+                (&b"B"[..], Some(2)),
+                (&b"A"[..], Some(99)),
+                (&b"C"[..], Some(4))
+            ]
         );
-        let stream = Object::stream(dict! { "Length" => 0 });
-        assert!(stream.as_dict().is_some_and(|d| d.has(b"Length")));
-        assert!(Object::null().is_null());
-        let span = Span {
-            stream: None,
-            start: 3,
-            end: 9,
+
+        // Stream::set_bytes cleans up any shadowed indirect /Length reference.
+        let mut s = Stream {
+            dict: dict! {
+                "Length" => Object::reference(10),
+                "Filter" => Object::name("FlateDecode"),
+                "Length" => 50,
+            },
+            data: Data::Unplaced,
         };
-        assert_eq!(Object::from(1).at(span).at, Some(span));
-        assert_eq!(Str::Text("x".to_string()).as_bytes(), None);
-        let hex = Value::String(Str::Bytes(b"x".to_vec()), Some(Form::Hex));
-        assert_eq!(Object::hex(*b"x").value, hex);
-        let unchosen = Value::String(Str::Bytes(b"x".to_vec()), None);
-        assert_eq!(Object::bytes(*b"x").value, unchosen);
+        s.set_bytes(b"hello".to_vec());
+        assert_eq!(Object::from(s).references().collect::<Vec<_>>(), []);
     }
 
-    /// `text`'s value, as the parser reads it: each value placed.
+    #[test]
+    fn dict_exact_size_iterators_few_and_many() {
+        for n in [0usize, 1, 16, 64, 65, 130] {
+            let mut d = Dict::new();
+            if n >= 3 {
+                for i in 0..(n - 3) {
+                    d.push(format!("K{i}"), i as i64);
+                }
+                d.push("K0", -1);
+                d.push("X", 1);
+                d.push("X", 2);
+            } else {
+                for i in 0..n {
+                    d.push(format!("K{i}"), i as i64);
+                }
+            }
+
+            let expected_dups = if n >= 4 {
+                2
+            } else if n == 3 {
+                1
+            } else {
+                0
+            };
+            let expected_len = n - expected_dups;
+            assert_eq!(d.len(), expected_len, "n={n}");
+            assert_eq!(d.iter().len(), expected_len, "n={n}");
+            assert_eq!(d.last_entries().len(), expected_len, "n={n}");
+            assert_eq!(d.duplicates().len(), expected_dups, "n={n}");
+
+            let mut it = d.iter();
+            let mut rem = expected_len;
+            while it.next().is_some() {
+                rem -= 1;
+                assert_eq!(it.len(), rem);
+            }
+            assert_eq!(it.next(), None);
+
+            let mut rev_it = d.iter();
+            let mut rem = expected_len;
+            while rev_it.next_back().is_some() {
+                rem -= 1;
+                assert_eq!(rev_it.len(), rem);
+            }
+            assert_eq!(rev_it.next_back(), None);
+
+            let fwd_dups: Vec<_> = d.duplicates().map(|e| e.key().to_vec()).collect();
+            let mut bwd_dups: Vec<_> = d.duplicates().rev().map(|e| e.key().to_vec()).collect();
+            bwd_dups.reverse();
+            assert_eq!(fwd_dups, bwd_dups);
+        }
+    }
+
+    #[test]
+    fn eq_value_ignores_spans_forms_key_order_and_duplicates() {
+        let a = crate::parse::Parser::at(b"<< /B (hi) /A 1 /A [2 3] >>", 0)
+            .value(&mut ())
+            .unwrap();
+        let b = Object::from(dict! {
+            "A" => vec![Object::from(2), Object::from(3)],
+            "B" => Object::hex(*b"hi"),
+        });
+        assert_ne!(a, b);
+        assert!(a.eq_value(&b));
+        assert!(b.eq_value(&a));
+
+        // Large (>32 entry) dictionaries compare order-independently as well.
+        let d1: Object = (0..50)
+            .map(|i| (format!("K{i}"), i))
+            .collect::<Dict>()
+            .into();
+        let d2: Object = (0..50)
+            .rev()
+            .map(|i| (format!("K{i}"), i))
+            .collect::<Dict>()
+            .into();
+        assert!(d1.eq_value(&d2));
+    }
+
     fn read(text: &[u8]) -> Object {
         crate::parse::Parser::at(text, 0).value(&mut ()).unwrap()
     }
 
-    /// The bytes of `text` that `o`'s span names, when it has one.
-    fn written<'a>(text: &'a [u8], o: &Object) -> Option<&'a [u8]> {
-        o.at.map(|at| &text[at.start..at.end])
-    }
-
-    /// Stream 4 0 of `file`, read by the parser, its data by `/Length`.
-    fn stream(file: &[u8]) -> Object {
+    fn stream_obj(file: &[u8]) -> Object {
         use crate::parse::{Body, Parser};
         let mut parser = Parser::at(file, 0);
-        let id = parser.header().unwrap();
+        let id = parser.header(&mut ()).unwrap();
         let Ok(Body::Stream(head)) = parser.body(id, &mut ()) else {
-            panic!("a stream");
+            panic!("expected stream");
         };
-        let length = head.dict().get(b"Length").and_then(Object::as_integer);
+        let length = head.dict().get("Length").and_then(Object::as_integer);
         let data = head.declared(length.unwrap() as usize).unwrap();
         parser.stream(head, data, &mut ()).unwrap()
     }
 
     #[test]
-    fn an_edit_drops_the_span_of_what_it_changed_and_of_what_holds_it() {
+    fn edit_tracking_clears_ancestor_spans_only() {
         let text = b"<< /A [1 [2 3]] /B 4 >>";
         let mut o = read(text);
-        let a = o.as_dict_mut().unwrap().get_mut(b"A").unwrap();
+        let a = o.as_dict_mut().unwrap().get_mut("A").unwrap();
         let inner = &mut a.as_array_mut().unwrap()[1];
         *inner.as_array_mut().unwrap()[0].value_mut() = Value::Integer(5);
 
         let d = o.as_dict().unwrap();
-        let a = d.get(b"A").unwrap();
+        let a = d.get("A").unwrap();
         let [one, inner] = a.as_array().unwrap() else {
-            panic!("two elements");
+            panic!()
         };
         let [five, three] = inner.as_array().unwrap() else {
-            panic!("two elements");
+            panic!()
         };
-        // What changed, and each value that holds it.
-        assert_eq!(five.as_integer(), Some(5));
         for changed in [&o, a, inner, five] {
-            assert_eq!(changed.at, None, "{changed:?}");
+            assert_eq!(changed.at(), None);
         }
-        // Its siblings, at each depth, and the keys.
-        assert_eq!(written(text, three), Some(&b"3"[..]));
-        assert_eq!(written(text, one), Some(&b"1"[..]));
-        assert_eq!(written(text, d.get(b"B").unwrap()), Some(&b"4"[..]));
-        assert!(d.entries().iter().all(|e| e.key_at.is_some()));
-    }
-
-    #[test]
-    fn each_call_that_changes_a_value_is_an_edit() {
-        let mut o = read(b"[1]");
-        o.value_mut();
-        assert_eq!(o.at, None, "value_mut");
-        let mut o = read(b"[1]");
-        assert!(o.as_array_mut().is_some());
-        assert_eq!(o.at, None, "as_array_mut");
-        let mut o = read(b"<< /A 1 >>");
-        assert!(o.as_dict_mut().is_some());
-        assert_eq!(o.at, None, "as_dict_mut");
-        let mut o = stream(b"4 0 obj << /Length 1 >> stream\nx\nendstream endobj");
-        assert!(o.as_stream_mut().is_some());
-        assert_eq!(o.at, None, "as_stream_mut");
-        let mut o = stream(b"4 0 obj << /Length 1 >> stream\nx\nendstream endobj");
-        assert!(o.as_dict_mut().is_some());
-        assert_eq!(o.at, None, "as_dict_mut of a stream");
-        // One that reaches nothing changes nothing.
-        let mut o = read(b"7");
-        assert!(o.as_array_mut().is_none());
-        assert!(o.as_dict_mut().is_none());
-        assert!(o.as_stream_mut().is_none());
-        assert_eq!(written(b"7", &o), Some(&b"7"[..]));
-    }
-
-    #[test]
-    fn a_dictionarys_changes_leave_its_other_entries_placed() {
-        let text = b"<< /A 1 /B 2 /C 3 >>";
-        let mut o = read(text);
-        let d = o.as_dict_mut().unwrap();
-        d.set("B", 5);
-        d.push("D", 6);
-        d.remove(b"C");
-        assert_eq!(o.at, None);
-        let d = o.as_dict().unwrap();
-        assert_eq!(written(text, d.get(b"A").unwrap()), Some(&b"1"[..]));
-        assert_eq!(d.get(b"B").unwrap().at, None);
-        assert_eq!(d.get(b"D").unwrap().at, None);
-        let key = d.entries()[1].key_at.expect("a key placed");
+        assert_eq!(three.at().unwrap().slice_in(text), Some(&b"3"[..]));
+        assert_eq!(one.at().unwrap().slice_in(text), Some(&b"1"[..]));
         assert_eq!(
-            &text[key.start..key.end],
-            b"/B",
-            "an entry set keeps its key's"
+            d.get("B").unwrap().at().unwrap().slice_in(text),
+            Some(&b"4"[..])
         );
+        assert!(d.entries().iter().all(|e| e.key_at().is_some()));
+
+        // Entry::set_key clears key_at.
+        let mut o2 = read(b"<< /Old 1 >>");
+        let entry = o2.as_dict_mut().unwrap().entries_mut().next().unwrap();
+        assert!(entry.key_at().is_some());
+        entry.set_key("New");
+        assert!(entry.key_at().is_none());
+        assert_eq!(entry.key(), b"New");
     }
 
     #[test]
-    fn as_written_mut_keeps_the_span() {
-        let text = b"<< /S (secret) >>";
-        let mut o = read(text);
-        let Value::Dict(d) = o.as_written_mut() else {
-            panic!("a dictionary");
-        };
-        let s = d.get_mut(b"S").unwrap();
-        let Value::String(s, _) = s.as_written_mut() else {
-            panic!("a string");
-        };
-        *s = Str::Bytes(b"plain".to_vec());
-        assert_eq!(written(text, &o), Some(&text[..]));
-        let s = o.as_dict().unwrap().get(b"S").unwrap();
-        assert_eq!(s.as_bytes(), Some(&b"plain"[..]));
-        assert_eq!(written(text, s), Some(&b"(secret)"[..]));
-    }
-
-    #[test]
-    fn a_streams_dictionary_edited_keeps_its_datas_span() {
-        let file = b"4 0 obj\n<< /Length 5 >>\nstream\nhello\nendstream\nendobj\n";
-        let mut o = stream(file);
-        let data = o.as_stream().unwrap().data.at().unwrap();
-        assert_eq!(&file[data.start..data.end], b"hello");
-        o.as_dict_mut().unwrap().set("Filter", "FlateDecode");
-        assert_eq!(o.at, None);
-        assert_eq!(o.as_stream().unwrap().data, Data::At(data));
-        // Its data replaced is its bytes, and /Length with them.
-        o.as_stream_mut().unwrap().set_bytes(b"bye".to_vec());
-        let s = o.as_stream().unwrap();
-        assert_eq!(s.data.bytes(), Some(&b"bye"[..]));
-        assert_eq!(s.data.at(), None);
-        assert_eq!(s.dict.get(b"Length").and_then(Object::as_integer), Some(3));
-    }
-
-    #[test]
-    fn remove_keeps_the_order_and_gives_the_last() {
-        let mut d = dict! { "A" => 1, "B" => 2, "A" => 3, "C" => 4 };
-        assert_eq!(d.remove(b"A").and_then(|o| o.as_integer()), Some(3));
-        let keys: Vec<&[u8]> = d.entries().iter().map(|e| &e.key[..]).collect();
-        assert_eq!(keys, [&b"B"[..], b"C"]);
-        assert_eq!(d.remove(b"A"), None);
-        assert_eq!(d.len(), 2);
-    }
-
-    #[test]
-    fn get_mut_and_iter_mut_take_a_keys_last_entry() {
-        let mut d = dict! { "A" => 1, "B" => 2, "A" => 3 };
-        *d.get_mut(b"A").unwrap() = Object::from(5);
-        assert!(d.get_mut(b"C").is_none());
-        let mut keys = Vec::new();
-        for (key, value) in d.iter_mut() {
-            keys.push(key.to_vec());
-            *value = Object::from(value.as_integer().unwrap() * 10);
-        }
-        assert_eq!(keys, [b"B".to_vec(), b"A".to_vec()]);
-        let values: Vec<_> = d.entries().iter().map(|e| e.value.as_integer()).collect();
-        assert_eq!(values, [Some(1), Some(20), Some(50)]);
-    }
-
-    #[test]
-    fn set_on_a_key_written_twice_changes_its_last_entry() {
-        let mut d = dict! { "A" => 1, "A" => 2 };
-        d.set("A", 3);
-        let values: Vec<_> = d.entries().iter().map(|e| e.value.as_integer()).collect();
-        assert_eq!(values, [Some(1), Some(3)]);
-        assert_eq!(d.get(b"A").and_then(Object::as_integer), Some(3));
-    }
-
-    /// The lookups that find the entries a later one overrides, on a
-    /// dictionary of 32 entries, which they do without allocating, and of
-    /// 33, which they do through a set: each with a key written twice at
-    /// its start and one at its end.
-    #[test]
-    fn lookups_read_a_keys_last_entry_with_few_entries_or_many() {
-        for n in [32, 33] {
-            let mut d: Dict = (0..n - 3).map(|i| (format!("K{i}"), i)).collect();
-            d.push("K0", -1);
-            d.push("X", 1);
-            d.push("X", 2);
-            assert_eq!(d.entries().len(), n as usize);
-            assert_eq!(d.len(), n as usize - 2);
-            let mut keys: Vec<Vec<u8>> = (1..n - 3).map(|i| format!("K{i}").into_bytes()).collect();
-            keys.extend([b"K0".to_vec(), b"X".to_vec()]);
-            let read: Vec<Vec<u8>> = d.iter().map(|(k, _)| k.to_vec()).collect();
-            assert_eq!(read, keys, "{n}");
-            let back: Vec<Vec<u8>> = d.iter().rev().map(|(k, _)| k.to_vec()).collect();
-            assert_eq!(back, keys.iter().rev().cloned().collect::<Vec<_>>(), "{n}");
-            let last: Vec<Vec<u8>> = d.last_entries().map(|e| e.key.clone()).collect();
-            assert_eq!(last, keys, "{n}");
-            let twice: Vec<_> = d.duplicates().map(|e| e.value.as_integer()).collect();
-            assert_eq!(twice, [Some(0), Some(1)], "{n}");
-            let values: Vec<_> = (&d).into_iter().map(|(_, v)| v.as_integer()).collect();
-            assert_eq!(values[values.len() - 2..], [Some(-1), Some(2)], "{n}");
-            assert_eq!(d.iter_mut().count(), n as usize - 2, "{n}");
-        }
-    }
-
-    /// The keys `walk` gives, walked every way: by `next`, from the back,
-    /// folded, counted and to its last, each the same; then none, again and
-    /// again; its `size_hint` bounding what it gave.
-    fn every_way<I>(walk: I, key: impl Fn(&I::Item) -> Vec<u8>) -> Vec<Vec<u8>>
-    where
-        I: DoubleEndedIterator + FusedIterator + Clone,
-    {
-        let (low, high) = walk.size_hint();
-        let (mut forward, mut by_next) = (walk.clone(), Vec::new());
-        // A `for` over a borrow of it asks its `next`.
-        for item in forward.by_ref() {
-            by_next.push(key(&item));
-        }
-        assert!(forward.next().is_none() && forward.next().is_none());
-        assert!(low <= by_next.len() && high.is_none_or(|high| by_next.len() <= high));
-        let (mut back, mut by_back) = (walk.clone(), Vec::new());
-        while let Some(item) = back.next_back() {
-            by_back.push(key(&item));
-        }
-        by_back.reverse();
-        assert_eq!(by_back, by_next);
-        let folded = walk.clone().fold(Vec::new(), |mut keys, item| {
-            keys.push(key(&item));
-            keys
-        });
-        assert_eq!(folded, by_next);
-        assert_eq!(walk.clone().count(), by_next.len());
-        assert_eq!(walk.last().map(|item| key(&item)), by_next.last().cloned());
-        by_next
-    }
-
-    /// Each walk of a dictionary's entries is a type of its own, which a
-    /// caller can name and hold, and gives the same entries however it's
-    /// walked: each key's last, or the entries a later one overrides, and
-    /// to change, each key's last value once. With few entries and many,
-    /// a key written twice at its start and at its end.
-    #[test]
-    fn each_walk_of_a_dictionary_is_a_type_of_its_own_and_reads_alike_every_way() {
-        for n in [16, 40] {
-            let mut d: Dict = (0..n - 3).map(|i| (format!("K{i}"), i)).collect();
-            d.push("K0", -1);
-            d.push("X", 1);
-            d.push("X", 2);
-            let keys: Vec<Vec<u8>> = d.entries().iter().map(|e| e.key.clone()).collect();
-            let shadowed = |i: usize| keys[i + 1..].contains(&keys[i]);
-            let (twice, last): (Vec<usize>, Vec<usize>) =
-                (0..keys.len()).partition(|&i| shadowed(i));
-            let keyed =
-                |at: &[usize]| -> Vec<Vec<u8>> { at.iter().map(|&i| keys[i].clone()).collect() };
-            assert_eq!(keyed(&twice), [b"K0".to_vec(), b"X".to_vec()], "{n}");
-
-            let iter: Iter<'_> = d.iter();
-            assert_eq!(
-                every_way(iter, |(key, _)| key.to_vec()),
-                keyed(&last),
-                "{n}"
-            );
-            let last_entries: LastEntries<'_> = d.last_entries();
-            assert_eq!(
-                every_way(last_entries, |e| e.key.clone()),
-                keyed(&last),
-                "{n}"
-            );
-            let duplicates: Duplicates<'_> = d.duplicates();
-            assert_eq!(
-                every_way(duplicates, |e| e.key.clone()),
-                keyed(&twice),
-                "{n}"
-            );
-
-            // To change: by `next`, from the back, and by `for_each`, which
-            // folds, each key's last value once; then none, and none again.
-            let iter_mut: IterMut<'_> = d.iter_mut();
-            let by_next: Vec<Vec<u8>> = iter_mut.map(|(key, _)| key.to_vec()).collect();
-            assert_eq!(by_next, keyed(&last), "{n}");
-            let mut by_back: Vec<Vec<u8>> = d.iter_mut().rev().map(|(k, _)| k.to_vec()).collect();
-            by_back.reverse();
-            assert_eq!(by_back, keyed(&last), "{n}");
-            let values = |d: &Dict| -> Vec<i64> {
-                (d.entries().iter())
-                    .map(|e| e.value.as_integer().unwrap())
-                    .collect()
-            };
-            let was = values(&d);
-            let ten = |value: &mut Object| *value = Object::from(value.as_integer().unwrap() * 10);
-            d.iter_mut().for_each(|(_, value)| ten(value));
-            let times = |i: usize| if shadowed(i) { was[i] } else { was[i] * 10 };
-            assert_eq!(
-                values(&d),
-                (0..keys.len()).map(times).collect::<Vec<_>>(),
-                "{n}"
-            );
-            assert_eq!(d.iter_mut().count(), last.len(), "{n}");
-            let mut walk = d.iter_mut();
-            while walk.next().is_some() {}
-            assert!(walk.next().is_none() && walk.next().is_none());
-
-            // Every entry as written, to change: the slice's own iterator.
-            let entries_mut: slice::IterMut<'_, Entry> = d.entries_mut();
-            assert_eq!(entries_mut.len(), keys.len(), "{n}");
-        }
-    }
-
-    /// A walk of a value's references is a type of its own, which a caller
-    /// can name and hold: a clone walks on from where it was, and once it's
-    /// given the last, it gives none, again and again.
-    #[test]
-    fn a_walk_of_references_is_a_type_of_its_own() {
-        let value = Object::from(vec![
-            Object::reference(1),
-            dict! { "A" => Object::reference(2) }.into(),
-            Object::reference(3),
-        ]);
-        let mut walk: References<'_> = value.references();
-        assert_eq!(walk.next(), Some(ObjectId::new(1, 0)));
-        let rest: Vec<ObjectId> = walk.clone().collect();
-        assert_eq!(rest, [ObjectId::new(2, 0), ObjectId::new(3, 0)]);
-        assert_eq!(walk.by_ref().count(), 2);
-        assert_eq!((walk.next(), walk.next()), (None, None));
-    }
-
-    #[test]
-    fn a_reals_spelling_is_the_bytes_its_span_names() {
-        let text = b"[1.50 +17. .5 -0.0]";
-        let o = read(text);
-        let reals = o.as_array().unwrap();
-        let spelled = [
-            (1.5, &b"1.50"[..]),
-            (17.0, b"+17."),
-            (0.5, b".5"),
-            (-0.0, b"-0.0"),
-        ];
-        for (o, (value, spelling)) in reals.iter().zip(spelled) {
-            assert_eq!(*o.value(), Value::Real(value));
-            assert_eq!(written(text, o), Some(spelling));
-        }
-    }
-
-    #[test]
-    fn values_come_from_their_rust_types() {
-        let integer = |o: Object| o.as_integer();
-        assert_eq!(integer(Object::from(u8::MAX)), Some(255));
-        assert_eq!(integer(Object::from(u16::MAX)), Some(65_535));
-        assert_eq!(integer(Object::from(u32::MAX)), Some(4_294_967_295));
-        assert_eq!(integer(Object::from(i8::MIN)), Some(-128));
-        assert_eq!(integer(Object::from(i16::MIN)), Some(-32_768));
-        assert_eq!(integer(Object::from(i32::MIN)), Some(-2_147_483_648));
-        assert_eq!(integer(Object::from(i64::MIN)), Some(i64::MIN));
+    fn renumber_and_unplace_preserve_invariants() {
+        let file = b"4 0 obj\n<< /Length 5 /F 1 0 R /G 2 0 R >>\nstream\nhello\nendstream\nendobj";
+        let mut s = stream_obj(file);
+        assert!(s.renumber(|id: ObjectId| (id.number != 1).then_some(id)));
+        assert_eq!(s.at(), None);
+        let st = s.as_stream().unwrap();
+        assert_eq!(st.data.at().unwrap().slice_in(file), Some(&b"hello"[..]));
+        assert_eq!(st.dict.get("F"), Some(&Object::null()));
         assert_eq!(
-            Object::from(ObjectId::new(3, 1)).as_reference(),
-            Some(ObjectId::new(3, 1))
+            st.dict.get("G").unwrap().at().unwrap().slice_in(file),
+            Some(&b"2 0 R"[..])
         );
-        assert_eq!(Object::from(true).as_bool(), Some(true));
-        assert_eq!(Object::from(0.25).as_number(), Some(0.25));
-        // An f32 as its shortest decimal: 0.1, not 0.10000000149011612.
+
+        s.unplace();
+        assert_eq!(s.as_stream().unwrap().data, Data::Unplaced);
+    }
+
+    #[test]
+    fn f32_conversion_is_stack_buffered_and_shortest_decimal() {
         assert_eq!(Object::from(0.1f32).value, Value::Real(0.1));
         assert_eq!(Object::from(-3.0f32).value, Value::Real(-3.0));
+        assert!(
+            Object::from(-0.0f32)
+                .as_number()
+                .unwrap()
+                .is_sign_negative()
+        );
         assert_eq!(Object::from(1e30f32).value, Value::Real(1e30));
+        assert_eq!(Object::from(1e-45f32).value, Value::Real(1e-45));
         assert_eq!(Object::from(16_777_216f32).value, Value::Real(16_777_216.0));
         assert_eq!(
             Object::from(f32::INFINITY).value,
             Value::Real(f64::INFINITY)
         );
         assert!(Object::from(f32::NAN).as_number().is_some_and(f64::is_nan));
-        // A string, borrowed or owned, is a name.
-        assert_eq!(Object::from("Page").as_name(), Some(&b"Page"[..]));
-        assert_eq!(
-            Object::from("Page".to_string()).as_name(),
-            Some(&b"Page"[..])
-        );
-        let array = Object::from(vec![Object::from(1)]);
-        assert_eq!(array.as_array().map(<[Object]>::len), Some(1));
-        assert!(Object::from(Dict::new()).as_dict().is_some());
-        assert!(Object::from(Stream::default()).as_stream().is_some());
-        assert_eq!(Object::from(Value::Null), Object::null());
     }
 
-    #[test]
-    fn objects_are_built_and_read_by_kind() {
-        // Each kind's variant, and its accessor.
-        let null = Object::new(Value::Null);
-        assert!(null.is_null());
-        assert_eq!(Object::new(Value::Bool(false)).as_bool(), Some(false));
-        assert_eq!(Object::new(Value::Integer(-2)).as_integer(), Some(-2));
-        assert_eq!(Object::new(Value::Real(2.5)).as_number(), Some(2.5));
-        assert_eq!(Object::new(Value::Integer(2)).as_number(), Some(2.0));
-        assert_eq!(
-            Object::new(Value::Name(b"N".to_vec())).as_name(),
-            Some(&b"N"[..])
-        );
-        assert_eq!(
-            Object::new(Value::Ref(ObjectId::new(5, 0))).as_reference(),
-            Some(ObjectId::new(5, 0))
-        );
-        let array = Object::new(Value::Array(vec![Object::from(1), Object::from(2)]));
-        assert_eq!(array.as_array().map(<[Object]>::len), Some(2));
-        let dict = Object::new(Value::Dict(dict! { "Type" => "Page" }));
-        assert!(dict.as_dict().is_some_and(|d| d.has_type(b"Page")));
-        let stream = Object::new(Value::Stream(Box::new(Stream::new(
-            Dict::new(),
-            b"x".to_vec(),
-        ))));
-        assert_eq!(
-            stream.as_stream().and_then(|s| s.data.bytes()),
-            Some(&b"x"[..])
-        );
-        // A stream's dictionary is a dictionary to `as_dict`.
-        assert!(stream.as_dict().is_some_and(|d| d.has(b"Length")));
-        // A string's bytes, and each form.
-        let literal = Object::bytes(*b"(a)");
-        assert_eq!(literal.as_bytes(), Some(&b"(a)"[..]));
-        let forms = [Object::bytes(*b"a"), Object::hex(*b"a")].map(|o| match o.into_value() {
-            Value::String(_, form) => form,
-            _ => panic!("a string"),
-        });
-        assert_eq!(forms, [None, Some(Form::Hex)]);
-        let text = Object::new(Value::String(
-            Str::Text("a".to_string()),
-            Some(Form::Literal),
-        ));
-        assert_eq!(text.as_bytes(), None);
-        // Each accessor refuses the other kinds.
-        let one = Object::from(1);
-        assert_eq!(one.as_bool(), None);
-        assert_eq!(one.as_name(), None);
-        assert_eq!(one.as_bytes(), None);
-        assert_eq!(one.as_array(), None);
-        assert_eq!(one.as_dict(), None);
-        assert_eq!(one.as_stream(), None);
-        assert_eq!(one.as_reference(), None);
-        assert_eq!(Object::from("N").as_number(), None);
-        assert_eq!(Object::from(1.5).as_integer(), None);
-        // The changing accessors, each its kind's.
-        let mut array = Object::from(vec![]);
-        array.as_array_mut().unwrap().push(Object::from(3));
-        assert_eq!(array.as_array().map(<[Object]>::len), Some(1));
-        let mut stream = Object::stream(Dict::new());
-        stream.as_stream_mut().unwrap().set_bytes(Vec::new());
-        stream.as_dict_mut().unwrap().set("Type", "XObject");
-        let dict = stream.as_dict().unwrap();
-        assert_eq!(dict.get(b"Length").and_then(Object::as_integer), Some(0));
-        assert_eq!(dict.type_name(), Some(&b"XObject"[..]));
-        // Values compare by value and place; a value says what it is.
-        let id: ObjectId = ObjectId::new(1, 0);
-        assert_eq!(Object::from(id), Object::reference(1));
-        assert_ne!(Object::from(1), Object::from(1).at(Span::new(None, 0, 1)));
-        assert_eq!(format!("{:?}", Value::Integer(1)), "Integer(1)");
-        assert_eq!(Object::from(7).into_value(), Value::Integer(7));
-    }
-
-    #[test]
-    fn dictionaries_are_built_read_and_changed() {
-        let mut d = Dict::new();
-        assert!(d.is_empty() && d == Dict::default());
-        assert_eq!(d.len(), 0);
-        d.set("Type", "Annot");
-        d.set("Subtype", "Text");
-        assert!(d.has(b"Type") && !d.has(b"Rect"));
-        assert!(d.has_type(b"Annot") && !d.has_type(b"Page"));
-        assert_eq!(d.type_name(), Some(&b"Annot"[..]));
-        assert_eq!(
-            d.get(b"Subtype").and_then(Object::as_name),
-            Some(&b"Text"[..])
-        );
-        assert_eq!(d.len(), 2);
-        // A /Type that isn't a name names no type.
-        assert_eq!(dict! { "Type" => 1 }.type_name(), None);
-        // `dict!` and `collect` push, so a key given twice is kept twice.
-        let pushed: Dict = [("A", 1), ("A", 2)].into_iter().collect();
-        assert_eq!(pushed, dict! { "A" => 1, "A" => 2 });
-        assert_eq!(pushed.entries().len(), 2);
-        // A `for` over a dictionary, as `iter`, and equality in order.
-        let mut keys = Vec::new();
-        for (key, _) in &d {
-            keys.push(key);
-        }
-        assert_eq!(keys, [&b"Type"[..], b"Subtype"]);
-        assert_ne!(d, dict! { "Subtype" => "Text", "Type" => "Annot" });
-        assert!(d.iter().any(|(_, v)| v.as_name() == Some(b"Text")));
-        // Changed in place, and removed.
-        if let Some(subtype) = d.get_mut(b"Subtype") {
-            *subtype = Object::from("FreeText");
-        }
-        for (_, value) in d.iter_mut() {
-            assert!(value.as_name().is_some());
-        }
-        assert_eq!(
-            d.remove(b"Type")
-                .and_then(|t| t.as_name().map(<[u8]>::to_vec)),
-            Some(b"Annot".to_vec())
-        );
-        assert_eq!(d, dict! { "Subtype" => "FreeText" });
-        assert_eq!(format!("{:?}", Dict::new()), "Dict { entries: [] }");
-    }
-
-    #[test]
-    fn streams_are_built_with_their_bytes() {
-        // Its /Length set to its bytes' length, in place of the one given.
-        let s = Stream::new(
-            dict! { "Length" => 99, "Filter" => "FlateDecode" },
-            b"abc".to_vec(),
-        );
-        assert_eq!(s.data, Data::Bytes(b"abc".to_vec()));
-        assert_eq!(s.dict.get(b"Length").and_then(Object::as_integer), Some(3));
-        assert_eq!(s.dict.entries().len(), 2);
-        let mut s = s;
-        // Its data replaced; dropping /Filter for plain bytes is the
-        // caller's.
-        s.set_bytes(b"plain".to_vec());
-        s.dict.remove(b"Filter");
-        assert_eq!(s.data.bytes(), Some(&b"plain"[..]));
-        assert_eq!(s.dict, dict! { "Length" => 5 });
-        // Built without its data, or as a reader placed it.
-        assert_eq!(Stream::default().data, Data::Unplaced);
-        assert_eq!(Data::default().bytes(), None);
-        let at = Span::new(None, 10, 15);
-        assert_eq!(Data::At(at).at(), Some(at));
-        assert_eq!(Data::At(at).bytes(), None);
-        assert_eq!(Data::Bytes(Vec::new()).at(), None);
-    }
-
-    /// The references a value holds, nested ones too, in the order
-    /// written: a reference, an array's, a dictionary's every entry's, a
-    /// key written twice included, and a stream's dictionary's, never its
-    /// data's.
-    #[test]
-    fn a_values_references_are_in_the_order_written() {
-        fn ids(o: &Object) -> Vec<ObjectId> {
-            o.references().collect()
-        }
-        assert_eq!(ids(&Object::reference(7)), [ObjectId::new(7, 0)]);
-        for scalar in [
-            Object::null(),
-            1.into(),
-            "Name".into(),
-            Object::text("1 0 R"),
-        ] {
-            assert_eq!(ids(&scalar), [], "{scalar:?}");
-        }
-        assert_eq!(ids(&Object::from(Vec::new())), []);
-        assert_eq!(ids(&Dict::new().into()), []);
-
-        // As the parser reads it, and as built: the same, in order, a
-        // reference named twice given twice.
-        let text = b"[1 0 R << /A 2 0 R /B [3 0 R << /C 4 1 R >>] /A 5 0 R >> [] 6 0 R 1 0 R]";
-        let built = Object::from(vec![
-            Object::reference(1),
-            dict! {
-                "A" => Object::reference(2),
-                "B" => vec![Object::reference(3), dict! { "C" => ObjectId::new(4, 1) }.into()],
-                "A" => Object::reference(5),
-            }
-            .into(),
-            Vec::new().into(),
-            Object::reference(6),
-            Object::reference(1),
-        ]);
-        let order = [
-            ObjectId::new(1, 0),
-            ObjectId::new(2, 0),
-            ObjectId::new(3, 0),
-            ObjectId::new(4, 1),
-            ObjectId::new(5, 0),
-            ObjectId::new(6, 0),
-            ObjectId::new(1, 0),
-        ];
-        assert_eq!(ids(&read(text)), order);
-        assert_eq!(ids(&built), order);
-
-        // A stream's dictionary, its /Length's reference among it, not its
-        // data, whatever the data says.
-        let mut built = Stream::new(
-            dict! { "Resources" => ObjectId::new(8, 0) },
-            b"9 0 R".to_vec(),
-        );
-        built.dict.set("Length", Object::reference(10));
-        assert_eq!(
-            ids(&built.into()),
-            [ObjectId::new(8, 0), ObjectId::new(10, 0)]
-        );
-        let file = b"4 0 obj\n<< /Length 5 /F 11 0 R >>\nstream\n9 0 R\nendstream\nendobj";
-        assert_eq!(ids(&stream(file)), [ObjectId::new(11, 0)]);
-    }
-
-    /// A value nested far deeper than the parser reads, as one built in
-    /// memory may be, is walked with a stack of the walk's own: on a thread
-    /// of 64 KiB, where a recursive walk overflows. It's built on the
-    /// test's own thread, and taken apart there a level at a time, as
-    /// dropping it whole recurses.
-    #[test]
-    fn a_value_nested_ten_thousand_deep_walks_on_a_small_stack() {
-        const DEPTH: u32 = 10_000;
-        // Each level a reference to its depth, then the level below: in
-        // an array, or a dictionary at every other level.
-        let mut value = Object::reference(DEPTH);
-        for n in (0..DEPTH).rev() {
-            value = match n % 2 {
-                0 => vec![Object::reference(n), value].into(),
-                _ => dict! { "N" => Object::reference(n), "Kid" => value }.into(),
-            };
-        }
-        let walked = std::thread::scope(|scope| {
-            let walk = std::thread::Builder::new().stack_size(64 * 1024);
-            let walk = walk.spawn_scoped(scope, || value.references().collect::<Vec<_>>());
-            walk.unwrap().join().unwrap()
-        });
-        let order: Vec<ObjectId> = (0..=DEPTH).map(|n| ObjectId::new(n, 0)).collect();
-        assert_eq!(walked, order);
-        let mut level = Some(value);
-        while let Some(object) = level.take() {
-            level = match object.into_value() {
-                Value::Array(mut array) => array.pop(),
-                Value::Dict(mut dict) => dict.remove(b"Kid"),
-                _ => None,
-            };
-        }
-    }
-
-    /// How many places `o` holds: its own, each value's in it and each
-    /// key's, and a stream's data's where it was written.
-    fn places(o: &Object) -> usize {
-        let entries = |d: &Dict| -> usize {
-            (d.entries.iter())
-                .map(|e| usize::from(e.key_at.is_some()) + places(&e.value))
-                .sum()
-        };
-        usize::from(o.at.is_some())
-            + match &o.value {
-                Value::Array(a) => a.iter().map(places).sum(),
-                Value::Dict(d) => entries(d),
-                Value::Stream(s) => usize::from(s.data.at().is_some()) + entries(&s.dict),
-                _ => 0,
-            }
-    }
-
-    /// Each reference renumbered as the map names its object, the map
-    /// asked once each, in the order written: a reference itself, an
-    /// array's, a dictionary's every entry, a key written twice included,
-    /// and a stream's dictionary's, never its data; nested; generations
-    /// too; null where the map names none; and two numbers named as one.
-    #[test]
-    fn renumber_names_each_reference_as_the_map_does() {
-        use std::cell::RefCell;
-        use std::collections::BTreeMap;
-        let map = BTreeMap::from([
-            (ObjectId::new(1, 0), Some(ObjectId::new(10, 0))),
-            (ObjectId::new(2, 0), Some(ObjectId::new(10, 0))),
-            (ObjectId::new(3, 0), None),
-            (ObjectId::new(4, 1), Some(ObjectId::new(40, 2))),
-        ]);
-        let asked = RefCell::new(Vec::new());
-        let to = |id| {
-            asked.borrow_mut().push(id);
-            map.get(&id).copied().unwrap_or(Some(id))
-        };
-        // A reference: named anew, null, or as it is.
-        let mut one = Object::reference(1);
-        assert!(one.renumber(to));
-        assert_eq!(one, Object::from(ObjectId::new(10, 0)));
-        let mut three = Object::reference(3);
-        assert!(three.renumber(to));
-        assert_eq!(three, Object::null());
-        let mut five = Object::reference(5);
-        assert!(!five.renumber(to));
-        assert_eq!(five, Object::reference(5));
-        for mut scalar in [Object::null(), 1.into(), "N".into(), Object::text("1 0 R")] {
-            let was = scalar.clone();
-            assert!(!scalar.renumber(to), "{scalar:?}");
-            assert_eq!(scalar, was);
-        }
-
-        // As the parser reads it, nested: in the order written, a key
-        // written twice and 1 named twice among them.
-        asked.borrow_mut().clear();
-        let text = b"[1 0 R << /A 2 0 R /B [3 0 R << /C 4 1 R >>] /A 5 0 R >> [] 6 0 R 1 0 R]";
-        let mut o = read(text);
-        assert!(o.renumber(to));
-        o.unplace();
-        let renumbered = Object::from(vec![
-            Object::from(ObjectId::new(10, 0)),
-            dict! {
-                "A" => ObjectId::new(10, 0),
-                "B" => vec![Object::null(), dict! { "C" => ObjectId::new(40, 2) }.into()],
-                "A" => ObjectId::new(5, 0),
-            }
-            .into(),
-            Vec::new().into(),
-            Object::reference(6),
-            Object::from(ObjectId::new(10, 0)),
-        ]);
-        assert_eq!(o, renumbered);
-        let order = [
-            ObjectId::new(1, 0),
-            ObjectId::new(2, 0),
-            ObjectId::new(3, 0),
-            ObjectId::new(4, 1),
-            ObjectId::new(5, 0),
-            ObjectId::new(6, 0),
-            ObjectId::new(1, 0),
-        ];
-        assert_eq!(*asked.borrow(), order);
-
-        // A stream's dictionary, not its data, whatever the data says,
-        // which stays where it was written; its /Length's reference among
-        // it.
-        asked.borrow_mut().clear();
-        let file = b"4 0 obj\n<< /Length 5 /F 2 0 R >>\nstream\n1 0 R\nendstream\nendobj";
-        let mut s = stream(file);
-        let data = s.as_stream().unwrap().data.clone();
-        assert!(s.renumber(to));
-        assert_eq!(*asked.borrow(), [ObjectId::new(2, 0)]);
-        let s = s.as_stream().unwrap();
-        assert_eq!(s.data, data);
-        assert_eq!(s.dict.get(b"F"), Some(&Object::from(ObjectId::new(10, 0))));
-        asked.borrow_mut().clear();
-        let mut built = Stream::new(dict! { "F" => ObjectId::new(4, 1) }, b"1 0 R".to_vec());
-        built.dict.set("Length", Object::reference(1));
-        let mut built = Object::from(built);
-        assert!(built.renumber(to));
-        assert_eq!(*asked.borrow(), [ObjectId::new(4, 1), ObjectId::new(1, 0)]);
-        let s = built.as_stream().unwrap();
-        assert_eq!(s.data.bytes(), Some(&b"1 0 R"[..]));
-        assert_eq!(
-            s.dict,
-            dict! { "F" => ObjectId::new(40, 2), "Length" => ObjectId::new(10, 0) }
-        );
-    }
-
-    /// Renumbering drops the place of each reference it changes and of
-    /// every value that holds one, and nothing else's: a sibling's, at each
-    /// depth, before the change and after it, a key's, a dictionary's that
-    /// holds no change, and a stream's data's stay. A map that changes
-    /// nothing changes nothing.
-    #[test]
-    fn renumber_drops_the_places_on_the_path_to_a_change_and_keeps_the_rest() {
-        let text = b"<< /E [5] /A [1 0 R 2 0 R] /B << /C 3 0 R >> /D 4 0 R >>";
-        let to = |id: ObjectId| {
-            Some(if (2..=3).contains(&id.number) {
-                ObjectId::new(id.number * 10, 0)
-            } else {
-                id
-            })
-        };
-        let read_ = read(text);
-        let mut o = read_.clone();
-        assert!(o.renumber(to));
-        let d = o.as_dict().unwrap();
-        let a = d.get(b"A").unwrap();
-        let [one, twenty] = a.as_array().unwrap() else {
-            panic!("two elements");
-        };
-        let b = d.get(b"B").unwrap();
-        let thirty = b.as_dict().unwrap().get(b"C").unwrap();
-        // What changed, and each value that holds it: in one array, then
-        // in the dictionary after it.
-        assert_eq!(twenty, &Object::from(ObjectId::new(20, 0)));
-        assert_eq!(thirty, &Object::from(ObjectId::new(30, 0)));
-        for changed in [&o, a, twenty, b, thirty] {
-            assert_eq!(changed.at, None, "{changed:?}");
-        }
-        // Everything else, where it was written.
-        assert_eq!(written(text, one), Some(&b"1 0 R"[..]));
-        assert_eq!(written(text, d.get(b"D").unwrap()), Some(&b"4 0 R"[..]));
-        let e = d.get(b"E").unwrap();
-        assert_eq!(written(text, e), Some(&b"[5]"[..]));
-        assert_eq!(written(text, &e.as_array().unwrap()[0]), Some(&b"5"[..]));
-        assert!(d.entries().iter().all(|e| e.key_at.is_some()));
-        assert_eq!(places(&o), places(&read_) - 5);
-
-        // Nothing changed: the same value, every place kept, though the map
-        // gave each reference, as it is.
-        for to in [
-            |id| Some(id),
-            |ObjectId { number, generation }| Some(ObjectId::new(number, generation)),
-        ] {
-            let mut same = read_.clone();
-            assert!(!same.renumber(to));
-            assert_eq!(same, read_);
-        }
-
-        // A stream's dictionary's reference made null: the stream's place
-        // goes, its data's stays, and its other entries'.
-        let file = b"4 0 obj\n<< /Length 5 /F 1 0 R /G 2 0 R >>\nstream\nhello\nendstream\nendobj";
-        let mut s = stream(file);
-        let before = places(&s);
-        assert!(s.renumber(|id: ObjectId| (id.number != 1).then_some(id)));
-        assert_eq!(s.at, None);
-        let stream_ = s.as_stream().unwrap();
-        let data = stream_.data.at().unwrap();
-        assert_eq!(&file[data.start..data.end], b"hello");
-        assert_eq!(stream_.dict.get(b"F"), Some(&Object::null()));
-        assert_eq!(
-            written(file, stream_.dict.get(b"G").unwrap()),
-            Some(&b"2 0 R"[..])
-        );
-        assert_eq!(places(&s), before - 2);
-    }
-
-    /// Every place dropped: each value's, each key's, and a stream's data's
-    /// where it was written, which then has none, so the writer refuses it;
-    /// a stream's data given first as its bytes stays, and is written. The
-    /// values are what they were.
-    #[test]
-    fn unplace_drops_every_place_and_a_streams_data_where_it_was_written() {
-        let text = b"<< /A [1 (s) <61> 2.50] /B << /C 2 0 R >> /A 3 >>";
-        let mut o = read(text);
-        let mut was = Vec::new();
-        crate::serialize::write(&mut was, &o).unwrap();
-        assert!(places(&o) > 10);
-        o.unplace();
-        assert_eq!(places(&o), 0);
-        let mut now = Vec::new();
-        crate::serialize::write(&mut now, &o).unwrap();
-        assert_eq!(now, was);
-        assert_eq!(now, b"<</A[1(s)<61> 2.5]/B<</C 2 0 R>>/A 3>>");
-
-        // A stream: its data where it was written is gone, so the writer
-        // has none to write.
-        let file = b"4 0 obj\n<< /Length 5 /F (f) >>\nstream\nhello\nendstream\nendobj";
-        let mut s = stream(file);
-        s.unplace();
-        assert_eq!(places(&s), 0);
-        assert_eq!(s.as_stream().unwrap().data, Data::Unplaced);
-        let refused = crate::serialize::indirect(&mut Vec::new(), ObjectId::new(4, 0), &s);
-        let data = crate::serialize::Error::Data {
-            id: Some(ObjectId::new(4, 0)),
-        };
-        assert_eq!(refused, Err(data));
-        // Given as its bytes first, from where it was read, they stay.
-        let mut s = stream(file);
-        let at = s.as_stream().unwrap().data.at().unwrap();
-        let bytes = file[at.start..at.end].to_vec();
-        s.as_stream_mut().unwrap().set_bytes(bytes);
-        s.unplace();
-        assert_eq!(places(&s), 0);
-        assert_eq!(s.as_stream().unwrap().data.bytes(), Some(&b"hello"[..]));
-        let mut out = Vec::new();
-        crate::serialize::indirect(&mut out, ObjectId::new(4, 0), &s).unwrap();
-        let want = b"4 0 obj\n<</Length 5/F(f)>>\nstream\nhello\nendstream\nendobj\n";
-        assert_eq!(out, want);
-    }
-
-    /// A value 10,000 levels deep, each level placed, its key too, holding
-    /// a reference to its depth and the level below, as
-    /// [`a_value_nested_ten_thousand_deep_walks_on_a_small_stack`] builds
-    /// it.
     fn nested(depth: u32) -> Object {
         let at = |n: u32| Span::new(None, n as usize, n as usize + 1);
-        let mut value = Object::reference(depth).at(at(depth));
+        let mut value = Object::reference(depth).with_span(at(depth));
         for n in (0..depth).rev() {
             value = match n % 2 {
-                0 => Object::from(vec![Object::reference(n).at(at(n)), value]),
+                0 => Object::from(vec![Object::reference(n).with_span(at(n)), value]),
                 _ => {
                     let mut dict = Dict::new();
-                    for (key, value) in [("N", Object::reference(n).at(at(n))), ("Kid", value)] {
-                        let key_at = Some(at(n));
-                        let key = key.as_bytes().to_vec();
-                        dict.push_entry(Entry { key, key_at, value });
-                    }
+                    dict.push_entry(
+                        Entry::new("N", Object::reference(n).with_span(at(n))).with_key_span(at(n)),
+                    );
+                    dict.push_entry(Entry::new("Kid", value).with_key_span(at(n)));
                     Object::from(dict)
                 }
             };
-            value = value.at(at(n));
+            value = value.with_span(at(n));
         }
         value
     }
 
-    /// `value` taken apart a level at a time, as dropping it whole
-    /// recurses, each level given to `each`.
-    fn take_apart(value: Object, mut each: impl FnMut(&Object)) {
-        let mut level = Some(value);
-        while let Some(object) = level.take() {
-            each(&object);
-            level = match object.into_value() {
-                Value::Array(mut array) => array.pop(),
-                Value::Dict(mut dict) => dict.remove(b"Kid"),
-                _ => None,
-            };
-        }
-    }
-
-    /// `walk` on `value`, on a thread of 64 KiB, where a recursive walk of a
-    /// value nested 10,000 deep overflows.
-    fn on_a_small_stack<T: Send>(
-        value: &mut Object,
-        walk: impl FnOnce(&mut Object) -> T + Send,
-    ) -> T {
-        std::thread::scope(|scope| {
-            let small = std::thread::Builder::new().stack_size(64 * 1024);
-            let walked = small.spawn_scoped(scope, || walk(value));
-            walked.unwrap().join().unwrap()
-        })
-    }
-
-    /// A value nested far deeper than the parser reads, as one built in
-    /// memory may be, renumbered with a stack of the walk's own: on a
-    /// thread of 64 KiB. Every level holds a reference changed, so every
-    /// place goes.
     #[test]
-    fn a_value_nested_ten_thousand_deep_renumbers_on_a_small_stack() {
+    fn deep_objects_clone_compare_walk_and_drop_on_64kib_stack() {
         const DEPTH: u32 = 10_000;
-        let mut value = nested(DEPTH);
-        let changed = on_a_small_stack(&mut value, |v| {
-            v.renumber(|id: ObjectId| Some(ObjectId::new(id.number + 1, id.generation)))
-        });
-        assert!(changed);
-        let walked = on_a_small_stack(&mut value, |v| v.references().collect::<Vec<_>>());
-        let order: Vec<ObjectId> = (1..=DEPTH + 1).map(|n| ObjectId::new(n, 0)).collect();
-        assert_eq!(walked, order);
-        let mut levels = 0;
-        take_apart(value, |level| {
-            assert_eq!(level.at, None);
-            levels += 1;
-        });
-        assert_eq!(levels, DEPTH + 1);
+        let built = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let mut a = nested(DEPTH);
+                let b = a.clone();
+                assert_eq!(a, b);
+                assert!(a.eq_value(&b));
+                assert_eq!(a.references().count(), (DEPTH + 1) as usize);
+                assert!(a.renumber(|id| Some(ObjectId::new(id.number + 1, id.generation))));
+                assert_ne!(a, b);
+                assert!(!a.eq_value(&b));
+                a.unplace();
+                drop(a);
+                drop(b);
+            })
+            .unwrap();
+        built.join().unwrap();
     }
 
-    /// A value nested far deeper than the parser reads unplaced with a
-    /// stack of the walk's own, on a thread of 64 KiB: no level keeps a
-    /// place, nor its keys.
     #[test]
-    fn a_value_nested_ten_thousand_deep_unplaces_on_a_small_stack() {
-        const DEPTH: u32 = 10_000;
-        let mut value = nested(DEPTH);
-        on_a_small_stack(&mut value, Object::unplace);
-        let mut levels = 0;
-        take_apart(value, |level| {
-            let keys = level.as_dict().map_or(&[][..], Dict::entries);
-            assert!(level.at.is_none() && keys.iter().all(|e| e.key_at.is_none()));
-            if let Some(n) = level.as_dict().and_then(|d| d.get(b"N")) {
-                assert_eq!(n.at, None);
-            }
-            levels += 1;
-        });
-        assert_eq!(levels, DEPTH + 1);
+    fn types_are_send_and_sync() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Object>();
+        shared::<Value>();
+        shared::<SmallBytes>();
+        shared::<Name>();
+        shared::<Str>();
+        shared::<Dict>();
+        shared::<Entry>();
+        shared::<Iter<'_>>();
+        shared::<LastEntries<'_>>();
+        shared::<Duplicates<'_>>();
+        shared::<Stream>();
+        shared::<Data>();
+        shared::<Span>();
     }
 }
