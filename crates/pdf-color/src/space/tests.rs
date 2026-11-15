@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use pdf_objects::fault::Place;
 use pdf_objects::parse::Parser;
-use pdf_objects::{ObjectId, Unreadable, Why};
+use pdf_objects::{ObjectId, Unreadable, Why, resolve_fn};
 use pdf_structure::read::{Options, Reading};
 
 use super::*;
@@ -94,7 +94,7 @@ impl Sink<Fault> for Unwanted {
 /// sink that wants none and through a `dyn`, and no more looked up than the caps
 /// allow.
 fn read_under(file: File, limits: &Limits) -> (Option<Space<'static>>, Vec<Fault>) {
-    let resolve = |id: ObjectId| file.objects.get(&id);
+    let resolve = file.objects;
     let mut kept = Vec::new();
     let space = Space::read(resolve, file.value, limits, &mut kept).unwrap();
     assert_eq!(
@@ -237,8 +237,7 @@ fn each_family_well_formed_tells_nothing_and_counts_as_pdfium() {
         assert_eq!(space.family(), *family, "{text}");
         assert_eq!(space.components(), Some(*count), "{text}");
         let file = file(text, extra);
-        let resolve = |id: ObjectId| file.objects.get(&id);
-        let counted = components(resolve, file.value, &Limits::DEFAULT);
+        let counted = components(file.objects, file.value, &Limits::DEFAULT);
         assert_eq!(counted, Ok(Some(*count)), "{text}");
     }
 }
@@ -1233,9 +1232,8 @@ fn a_fault_says_where_it_is() {
         "[/Pattern 5 0 R]",
         &["[/CalGray << /WhitePoint 6 0 R >>]", "7"],
     );
-    let resolve = |id: ObjectId| file.objects.get(&id);
     let mut kept = Vec::new();
-    Space::read(resolve, file.value, &Limits::DEFAULT, &mut kept).unwrap();
+    Space::read(file.objects, file.value, &Limits::DEFAULT, &mut kept).unwrap();
     let (place, fault) = kept[0];
     assert_eq!(fault, Fault::WhitePoint);
     assert_eq!(
@@ -1246,11 +1244,11 @@ fn a_fault_says_where_it_is() {
     assert!(place.at.is_some());
 
     let direct = value("/Foo");
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     let mut kept = Vec::new();
     Space::read(nothing, &direct, &Limits::DEFAULT, &mut kept).unwrap();
     assert_eq!(kept[0].0.object, None, "written in place");
-    assert_eq!(kept[0].0, Place::new(None, direct.at));
+    assert_eq!(kept[0].0, Place::new(None, direct.at()));
 }
 
 /// A file of `objects`, the first of them object 5, its page's resources object
@@ -1310,7 +1308,7 @@ fn faults_placed(
             .unwrap_or_else(|| panic!("{fault:?} written nowhere"));
         let within = &at[&object];
         assert!(
-            within.start <= span.start as u32 && span.end as u32 <= within.end,
+            within.start <= span.start() as u32 && span.end() as u32 <= within.end,
             "{fault:?}: {span:?} isn't in object {object}, at {within:?}"
         );
         (*fault, object)
@@ -1462,11 +1460,11 @@ fn a_stream_held_can_have_its_data_asked_for() {
     };
     assert_eq!(icc.id, Some(ObjectId::new(5, 0)));
     let built = Object::from(vec![
-        Object::from("ICCBased"),
+        Object::name("ICCBased"),
         Object::stream(pdf_objects::dict! { "N" => 1 }),
     ]);
     let built: &Object = Box::leak(Box::new(built));
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     let space = Space::read(nothing, built, &Limits::DEFAULT, &mut ());
     let Ok(Some(Space::ICCBased(icc))) = space else {
         panic!("not ICCBased");
@@ -1515,18 +1513,16 @@ fn stitched_by_reference(n: u32) -> File {
 #[test]
 fn a_tint_past_the_depth_is_told_where_components_meets_it() {
     let at = stitched_by_reference(63);
-    let resolve = |id: ObjectId| at.objects.get(&id);
     let (space, faults) = read_under(at, &Limits::DEFAULT);
     assert_eq!(faults, []);
-    let read = counted(resolve, at.value, &Limits::DEFAULT).unwrap();
+    let read = counted(at.objects, at.value, &Limits::DEFAULT).unwrap();
     assert_eq!((read.count, read.capped), (Some(1), false));
     assert_eq!(space.unwrap().components(), Some(1));
 
     let past = stitched_by_reference(64);
-    let resolve = |id: ObjectId| past.objects.get(&id);
     let (space, faults) = read_under(past, &Limits::DEFAULT);
     assert_eq!(faults, [Fault::TooDeep]);
-    let read = counted(resolve, past.value, &Limits::DEFAULT).unwrap();
+    let read = counted(past.objects, past.value, &Limits::DEFAULT).unwrap();
     assert_eq!((read.count, read.capped), (Some(3), true));
     assert_eq!(space.unwrap().components(), Some(1));
 }
@@ -1547,15 +1543,13 @@ fn each_reading_spends_its_own_visits() {
         )
     };
     let under = at(4094);
-    let resolve = |id: ObjectId| under.objects.get(&id);
-    let read = counted(resolve, under.value, &Limits::DEFAULT).unwrap();
+    let read = counted(under.objects, under.value, &Limits::DEFAULT).unwrap();
     assert_eq!((read.count, read.capped), (Some(1), false));
     let (_, faults) = read_under(under, &Limits::DEFAULT);
     assert_eq!(faults, []);
 
     let met = at(4095);
-    let resolve = |id: ObjectId| met.objects.get(&id);
-    let read = counted(resolve, met.value, &Limits::DEFAULT).unwrap();
+    let read = counted(met.objects, met.value, &Limits::DEFAULT).unwrap();
     assert_eq!((read.count, read.capped), (Some(3), true));
     let (space, faults) = read_under(met, &Limits::DEFAULT);
     assert_eq!(faults, [], "no cap met by this one");
@@ -1575,7 +1569,7 @@ fn separations_are_read_on_asking() {
         "[/Separation /B /DeviceGray 5 0 R]",
     ];
     let file = file(text, &extra);
-    let resolve = |id: ObjectId| file.objects.get(&id);
+    let resolve = file.objects;
     let (space, _) = read_under(file, &Limits::DEFAULT);
     let Some(Space::DeviceN(device_n)) = space else {
         panic!("not DeviceN");
@@ -1642,9 +1636,8 @@ fn a_pattern_over_more_than_sixteen_is_the_promise_s_exception() {
     assert_eq!(faults, []);
     assert_eq!(space.unwrap().components(), Some(18));
     let file = file(&text, &[&function]);
-    let resolve = |id: ObjectId| file.objects.get(&id);
     assert_eq!(
-        components(resolve, file.value, &Limits::DEFAULT),
+        components(file.objects, file.value, &Limits::DEFAULT),
         Ok(Some(3))
     );
 }

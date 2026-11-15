@@ -731,16 +731,18 @@ pub fn shown(data: &[u8]) -> usize {
     let resources = Object::from(dict! {
         "Font" => dict! {
             "F1" => Object::reference(9), "F2" => Object::reference(1),
-            "H" => dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            "H" => dict! {
+                "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
+            },
         },
         "XObject" => dict! { "X" => Object::reference(7), "Y" => Object::reference(8) },
         "ExtGState" => dict! {
-            "G" => dict! { "Font" => vec![Object::from("F2"), Object::from(9)] },
+            "G" => dict! { "Font" => vec![Object::name("F2"), Object::from(9)] },
             "R" => dict! { "Font" => vec![Object::reference(9), Object::from(9)] },
         },
     });
     let form = |resources: Option<&Object>, content: &[u8]| {
-        let mut dict = dict! { "Subtype" => "Form" };
+        let mut dict = dict! { "Subtype" => Object::name("Form") };
         if let Some(resources) = resources {
             dict.set("Resources", resources.clone());
         }

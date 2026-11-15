@@ -38,10 +38,10 @@ fn file_of(n: usize, fanout: usize) -> (Vec<u8>, Vec<ObjectId>) {
         ];
         doc.set(
             page,
-            dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media },
+            dict! { "Type" => Object::name("Page"), "Parent" => parent, "MediaBox" => media },
         );
     }
-    let catalog = doc.add(dict! { "Type" => "Catalog", "Pages" => written.root });
+    let catalog = doc.add(dict! { "Type" => Object::name("Catalog"), "Pages" => written.root });
     doc.trailer_mut().dict_mut().set("Root", catalog);
     let mut file = Vec::new();
     let options = pdf_structure::write::Options::DEFAULT;

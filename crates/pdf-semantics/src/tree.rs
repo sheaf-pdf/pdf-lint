@@ -26,7 +26,7 @@
 //! ```
 //! use pdf_semantics::tree::{names, write_names};
 //! use pdf_semantics::Limits;
-//! use pdf_semantics::pdf_objects::{Object, ObjectId};
+//! use pdf_semantics::pdf_objects::{Object, ObjectId, resolve_fn};
 //!
 //! let tree = write_names([
 //!     (b"b".to_vec(), Object::reference(5)),
@@ -35,7 +35,7 @@
 //! .unwrap();
 //! let root = Object::from(tree);
 //!
-//! let nothing = |_: ObjectId| -> Option<&Object> { None };
+//! let nothing = resolve_fn(|_: ObjectId| None);
 //! let mut walk = names(nothing, &root, &Limits::DEFAULT, ());
 //! let (key, value) = walk.next().unwrap().unwrap();
 //! assert_eq!((key, value.as_integer()), (&b"a"[..], Some(1)));
@@ -67,7 +67,7 @@ use crate::{HOPS, followed};
 /// use std::collections::BTreeMap;
 ///
 /// use pdf_semantics::pdf_objects::fault::{Place, Sink};
-/// use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
+/// use pdf_semantics::pdf_objects::{Object, ObjectId, dict, resolve_fn};
 /// use pdf_semantics::tree::names;
 /// use pdf_semantics::{Fault, Limits};
 ///
@@ -89,7 +89,7 @@ use crate::{HOPS, followed};
 ///     ],
 /// };
 /// let objects = BTreeMap::from([(ObjectId::new(2, 0), Object::from(leaf))]);
-/// let resolve = |id: ObjectId| objects.get(&id);
+/// let resolve = resolve_fn(|id: ObjectId| objects.get(&id));
 /// let root = Object::from(dict! { "Kids" => vec![Object::reference(2), Object::reference(2)] });
 ///
 /// let mut walk = names(resolve, &root, &Limits::DEFAULT, Faults::default());
@@ -302,14 +302,14 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
                 [key, value, rest @ ..] => {
                     self.entries = rest;
                     if let Some(read) = self.key(key)? {
-                        self.check(read, key.at);
+                        self.check(read, key.at());
                         return Ok(Some((read, value)));
                     }
                     continue;
                 }
                 [key] => {
                     self.entries = &[];
-                    self.lost(key.at, Fault::TreeOddKey);
+                    self.lost(key.at(), Fault::TreeOddKey);
                     continue;
                 }
                 [] => {}
@@ -345,11 +345,11 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
     fn enter(&mut self, value: &'o Object, depth: usize) -> Result<(), Unreadable> {
         let root = depth == 0;
         if depth > self.limits.tree_depth {
-            self.lost(value.at, Fault::TreeTooDeep);
+            self.lost(value.at(), Fault::TreeTooDeep);
             return Ok(());
         }
         if self.nodes >= self.limits.tree_nodes {
-            self.lost(value.at, Fault::TreeTooManyNodes);
+            self.lost(value.at(), Fault::TreeTooManyNodes);
             self.path.clear();
             return Ok(());
         }
@@ -357,22 +357,22 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
             Reached::Object(node, id) => (node, id),
             Reached::Nothing if root => return Ok(()),
             Reached::Nothing => {
-                self.lost(value.at, Fault::TreeNodeNotDictionary);
+                self.lost(value.at(), Fault::TreeNodeNotDictionary);
                 return Ok(());
             }
             Reached::Repeated | Reached::Damaged => return Ok(()),
         };
         self.object = id.or(self.object);
         let Value::Dict(dict) = node.value() else {
-            self.lost(node.at, Fault::TreeNodeNotDictionary);
+            self.lost(node.at(), Fault::TreeNodeNotDictionary);
             return Ok(());
         };
         self.nodes += 1;
         let limits = if self.sink.wants() {
             if !root && id.is_none() {
-                self.say(node.at, Fault::TreeKidDirect);
+                self.say(node.at(), Fault::TreeKidDirect);
             }
-            self.shape(dict, node.at, root)
+            self.shape(dict, node.at(), root)
         } else {
             None
         };
@@ -420,7 +420,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
     fn bounds(&mut self, node: &'o Dict) -> Option<(K, K)> {
         let written = node.get(b"Limits")?;
         let bad = |walk: &mut Self| {
-            walk.say(written.at, Fault::TreeBadLimits);
+            walk.say(written.at(), Fault::TreeBadLimits);
             None
         };
         let limits = self.for_check(written).ok()?;
@@ -448,7 +448,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
             Err(unreadable) if unreadable.why == Why::Damaged => Ok(None),
             Err(unreadable) => {
                 let (id, why) = (unreadable.id, unreadable.why);
-                self.say(written.at, Fault::Unchecked { id, why });
+                self.say(written.at(), Fault::Unchecked { id, why });
                 Err(())
             }
         }
@@ -466,7 +466,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
                 match array.value() {
                     Value::Array(items) => Ok(items),
                     _ => {
-                        self.lost(array.at, Fault::TreeNotArray { key });
+                        self.lost(array.at(), Fault::TreeNotArray { key });
                         Ok(&[])
                     }
                 }
@@ -485,14 +485,14 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
                 Value::Ref(id) => {
                     last = Some(*id);
                     if !self.seen.insert(*id) {
-                        self.say(at.at, Fault::TreeRepeated { id: *id });
+                        self.say(at.at(), Fault::TreeRepeated { id: *id });
                         return Ok(Reached::Repeated);
                     }
                     match self.objects.try_resolve(*id) {
                         Ok(Some(object)) => at = object,
                         Ok(None) => return Ok(Reached::Nothing),
                         Err(unreadable) if unreadable.why == Why::Damaged => {
-                            self.lost(at.at, Fault::Damaged { id: *id });
+                            self.lost(at.at(), Fault::Damaged { id: *id });
                             return Ok(Reached::Damaged);
                         }
                         Err(unreadable) => return Err(unreadable),
@@ -512,7 +512,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
             Ok(key) => key,
             Err(unreadable) if unreadable.why == Why::Damaged => {
                 let id = unreadable.id;
-                self.lost(written.at, Fault::Damaged { id });
+                self.lost(written.at(), Fault::Damaged { id });
                 return Ok(None);
             }
             Err(unreadable) => return Err(unreadable),
@@ -522,7 +522,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
             Some(Err(fault)) => fault,
             None => Fault::TreeKeyKind,
         };
-        self.lost(written.at, fault);
+        self.lost(written.at(), fault);
         Ok(None)
     }
 

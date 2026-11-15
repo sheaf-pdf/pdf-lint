@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use pdf_objects::{
-    Data, Dict, Form, Object, ObjectId, Resolve, Span, Str, Stream, Streams, Unreadable, Value,
-    Why, dict,
+    Data, Dict, Form, Name, Object, ObjectId, Resolve, Span, Str, Stream, Streams, Unreadable,
+    Value, Why, dict, resolve_fn,
 };
 use pdf_tokenizer::Kind;
 use pdf_tokenizer::decode::{self, NumberError};
@@ -424,6 +424,7 @@ fn spaced(data: &[u8], limits: &Limits) {
     let Some(space) = object(array, limits) else {
         return;
     };
+    let nothing = resolve_fn(nothing);
     let read = pdf_color::counted(nothing, &space, &limits.color).expect("nothing to fail");
     let want = read.count.expect("a value that's no reference counts");
     let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space.clone() } });
@@ -612,7 +613,7 @@ pub fn passes(data: &[u8]) {
     let res = ResCx::new([(b"CS3".to_vec(), 3)]);
     let props = Properties::new([(
         b"P0".to_vec(),
-        dict! { "Type" => "Pagination", "Subtype" => "Header" },
+        dict! { "Type" => Object::name("Pagination"), "Subtype" => Object::name("Header") },
     )]);
     let limits = &Limits::DEFAULT;
     let ops: Vec<Result<Operation, Error>> = page.operations(&res, limits).collect();
@@ -1032,11 +1033,19 @@ enum Arg {
 pub fn calls(data: &[u8]) {
     let mut input = Choices(data);
     let fonts = ["Helvetica", "Courier", "Wide"].map(|base| {
-        Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base })
-            .expect("a font of names")
+        Res::dict(dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(base),
+        })
+        .expect("a font of names")
     });
     let lists = ["Header", "Footer", "Watermark"].map(|subtype| {
-        Res::dict(dict! { "Type" => "Pagination", "Subtype" => subtype }).expect("a list of names")
+        Res::dict(dict! {
+            "Type" => Object::name("Pagination"),
+            "Subtype" => Object::name(subtype),
+        })
+        .expect("a list of names")
     });
     let alphas = [None, Some(0.0), Some(0.5), Some(1.5), Some(f32::NAN)];
     let blends = [
@@ -1384,7 +1393,7 @@ fn bound_elsewhere(needs: &ResourceNeeds) -> Reserved {
         category.push(&need.name, Object::null());
     }
     let resources = Object::from(bound);
-    Reserved::read(|_| None, Some(&resources), &LIMITS)
+    Reserved::read(resolve_fn(|_| None), Some(&resources), &LIMITS)
 }
 
 /// Pairs of objects `data`'s bytes choose, the second the first written again
@@ -1471,13 +1480,10 @@ fn chosen(input: &mut Choices, depth: usize) -> Object {
         4 => Value::Name(["A", "B", "Ab"][input.below(3)].into()),
         5 => {
             let form = [None, Some(Form::Literal), Some(Form::Hex)][input.below(3)];
-            Value::String(Str::Bytes(input.bytes(2).to_vec()), form)
+            Value::String(Str::bytes(input.bytes(2)), form)
         }
-        6 => Value::String(
-            Str::Text(String::from_utf8_lossy(input.bytes(2)).into_owned()),
-            None,
-        ),
-        7 => Value::String(Str::Encrypted(input.bytes(2).to_vec()), None),
+        6 => Object::text(&String::from_utf8_lossy(input.bytes(2))).into_value(),
+        7 => Value::String(Str::encrypted(input.bytes(2)), None),
         8 => Value::Ref(ObjectId::new(input.below(3) as u32, input.below(2) as u16)),
         9 => Value::Array(
             (0..input.below(4))
@@ -1497,11 +1503,12 @@ fn chosen(input: &mut Choices, depth: usize) -> Object {
             Value::Stream(Box::new(stream))
         }
     };
-    let mut object = Object::new(value);
+    let object = Object::new(value);
     if input.below(4) == 0 {
-        object.at = Some(Span::new(None, 1, 2));
+        object.with_span(Span::new(None, 1, 2))
+    } else {
+        object
     }
-    object
 }
 
 /// A real `input` chooses: an edge, an `f32` as pdf-objects holds one (the
@@ -1528,8 +1535,8 @@ fn chosen_dict(input: &mut Choices, depth: usize) -> Dict {
 /// rules alone: a dictionary's entries reversed, a key written twice (its
 /// first value a stand-in), a string's form turned, where a value was
 /// written set or dropped, a real given as the `f32` it is; or with a part
-/// changed: an integer made its real, a string's bytes made text, a real's
-/// sign turned, a reference's generation, a stream's data placed or
+/// changed: an integer made its real, a string's bytes made ciphertext, a
+/// real's sign turned, a reference's generation, a stream's data placed or
 /// neither, an element or an entry dropped.
 fn rewritten(input: &mut Choices, object: &Object) -> (Object, bool) {
     let mut by_rules = true;
@@ -1568,8 +1575,7 @@ fn rewritten(input: &mut Choices, object: &Object) -> (Object, bool) {
         Value::String(Str::Bytes(bytes), form) => match input.below(5) {
             0 => {
                 by_rules = false;
-                let text = String::from_utf8_lossy(bytes).into_owned();
-                Value::String(Str::Text(text), *form)
+                Value::String(Str::Encrypted(bytes.clone()), *form)
             }
             1 => Value::String(Str::Bytes(bytes.clone()), Some(Form::Hex)),
             2 => Value::String(Str::Bytes(bytes.clone()), Some(Form::Literal)),
@@ -1599,11 +1605,14 @@ fn rewritten(input: &mut Choices, object: &Object) -> (Object, bool) {
         }
         value => value.clone(),
     };
-    let mut again = Object::new(value);
-    again.at = match input.below(3) {
-        0 => None,
-        1 => Some(Span::new(None, 5, 9)),
-        _ => object.at,
+    let again = Object::new(value);
+    let again = match input.below(3) {
+        0 => again,
+        1 => again.with_span(Span::new(None, 5, 9)),
+        _ => match object.at() {
+            Some(span) => again.with_span(span),
+            None => again,
+        },
     };
     (again, by_rules)
 }
@@ -1677,7 +1686,7 @@ pub fn spliced(data: &[u8]) -> usize {
     ]);
     let props = Properties::new([(
         b"P0".to_vec(),
-        dict! { "Type" => "Pagination", "Subtype" => "Header" },
+        dict! { "Type" => Object::name("Pagination"), "Subtype" => Object::name("Header") },
     )]);
     let limits = &LIMITS;
     let (first, second) = data.split_at(data.len() / 2);
@@ -2755,7 +2764,7 @@ fn operand_reads(operand: &[u8], limits: &Limits) {
         }
         Some(b'(' | b'<') => assert!(matches!(read, Some(Value::String(..))), "a string reads"),
         Some(b'/') => {
-            let decoded = name(operand).map(|n| n.into_owned());
+            let decoded = name(operand).map(Name::new);
             assert_eq!(read, decoded.map(Value::Name), "a name reads as decoded");
         }
         _ => {}
@@ -3102,9 +3111,12 @@ mod tests {
     /// bumped, name the font where they did, the tag left as it is.
     #[test]
     fn a_tag_named_as_a_bumped_resource_is_none() {
-        let font =
-            Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" })
-                .unwrap();
+        let font = Res::dict(dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+        })
+        .unwrap();
         let mut w = ContentWriter::new();
         w.font(font, 12.0);
         let (_, needs) = w.named(&Reserved::default());

@@ -181,7 +181,7 @@ mod tests {
     /// A file whose catalog, object 1, has `extensions`, and metadata that
     /// claims `claims`.
     fn declaring(extensions: Option<Dict>, claims: Claims) -> File {
-        let mut catalog = dict! { "Type" => "Catalog" };
+        let mut catalog = dict! { "Type" => Object::name("Catalog") };
         if let Some(extensions) = extensions {
             catalog.set("Extensions", extensions);
         }
@@ -198,7 +198,7 @@ mod tests {
     }
 
     fn developer(base: &str, level: i64) -> Object {
-        dict! { "BaseVersion" => base, "ExtensionLevel" => level }.into()
+        dict! { "BaseVersion" => Object::name(base), "ExtensionLevel" => level }.into()
     }
 
     #[test]

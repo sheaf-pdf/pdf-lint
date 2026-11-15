@@ -49,12 +49,12 @@ assert_eq!(doc.trailer().unwritten, None);
 let pages = doc.get(ObjectId::new(2, 0)).unwrap();
 let count = pages.as_dict().unwrap().get(b"Count").and_then(Object::as_integer);
 assert_eq!(count, Some(0));
-let at = pages.at.unwrap();
-assert_eq!(&file[at.start..at.end], b"<< /Type /Pages /Kids [] /Count 0 >>");
+let at = pages.at().unwrap();
+assert_eq!(&file[at.range()], b"<< /Type /Pages /Kids [] /Count 0 >>");
 
 let [(place, fault)] = doc.faults() else { panic!() };
 assert_eq!(*fault, Fault::AfterEof { bytes: 8 });
-assert_eq!(place.at.map(|at| &file[at.start..at.end]), Some(&b"\n% more\n"[..]));
+assert_eq!(place.at.map(|at| &file[at.range()]), Some(&b"\n% more\n"[..]));
 ```
 
 ### Read lazily across threads or from disk

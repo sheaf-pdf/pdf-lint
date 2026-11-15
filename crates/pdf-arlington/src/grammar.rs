@@ -1116,13 +1116,13 @@ mod tests {
     #[test]
     fn a_models_parses_are_made_the_first_time_a_file_given_it_asks() {
         use crate::predicate::{self, FileCx, Truth};
-        use pdf_objects::{Dict, Object, ObjectId, dict};
+        use pdf_objects::{Dict, Object, ObjectId, dict, resolve_fn};
 
         let model = Grammar::load(&dir().join("tsv/latest")).unwrap();
         let rotate = model.table("PageObject").unwrap().row(At::Key(b"Rotate"));
         let text = &rotate.unwrap().possible_values[0][0].item;
         let (trailer, page) = (Dict::new(), Object::from(dict! { "Rotate" => 90 }));
-        let resolve = |_: ObjectId| None;
+        let resolve = resolve_fn(|_: ObjectId| None);
         let holds =
             |file: &FileCx| predicate::holds_fully(text, &file.at(&page, At::Key(b"Rotate")));
         let alone = FileCx::new(&trailer, Version::new(2, 0), &resolve);

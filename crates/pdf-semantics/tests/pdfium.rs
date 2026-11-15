@@ -22,7 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_objects::{Object, ObjectId, Value};
+use pdf_objects::{Object, ObjectId};
 use pdf_semantics::pages::{Error, FANOUT, Origin, Page, Pages, Rect, counted, pages, write};
 use pdf_semantics::{Limits, catalog};
 use pdf_structure::read::{self, Options, Reading};
@@ -247,19 +247,7 @@ const WRITTEN: [(&str, u32, usize); 3] = [
 /// too.
 fn unplaced(o: &Object) -> Object {
     let mut o = o.clone();
-    let mut stack = vec![&mut o];
-    while let Some(o) = stack.pop() {
-        match o.value_mut() {
-            Value::Array(a) => stack.extend(a.iter_mut()),
-            Value::Dict(d) => {
-                for entry in d.entries_mut() {
-                    entry.key_at = None;
-                    stack.push(&mut entry.value);
-                }
-            }
-            _ => {}
-        }
-    }
+    o.unplace();
     o
 }
 

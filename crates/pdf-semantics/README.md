@@ -2,7 +2,7 @@
 
 Read and write PDF document-level data structures—dates, page trees, name and number trees, `/Info` metadata, and XMP conformance packets (ISO 32000-2, §7.7.3, §7.9, §14.3).
 
-`pdf-semantics` operates over any [pdf-objects](https://crates.io/crates/pdf-objects) `Resolve` (and `Streams` for XMP streams), such as a `pdf-structure` `&Reading`, `&Document`, or an in-memory closure, without performing file I/O directly. `pdf-objects` is re-exported at `pdf_semantics::pdf_objects`.
+`pdf-semantics` operates over any [pdf-objects](https://crates.io/crates/pdf-objects) `Resolve` (and `Streams` for XMP streams), such as a `pdf-structure` `&Reading`, `&Document`, `&BTreeMap`, or `resolve_fn` closure, without performing file I/O directly. `pdf-objects` is re-exported at `pdf_semantics::pdf_objects`.
 
 ## Core Concepts
 
@@ -48,14 +48,13 @@ for (id, mut node) in written.nodes {
     objects.insert(id, Object::from(node));
 }
 for (&page, &parent) in numbered.iter().zip(&written.parents) {
-    objects.insert(page, Object::from(dict! { "Type" => "Page", "Parent" => parent }));
+    objects.insert(page, Object::from(dict! { "Type" => Object::name("Page"), "Parent" => parent }));
 }
 
 // Read back by ISO's rules with nothing told, the last page's box its root's.
-let resolve = |id: ObjectId| objects.get(&id);
 let catalog = dict! { "Pages" => written.root };
 let mut faults = Vec::new();
-let table = pages::pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut faults).unwrap();
+let table = pages::pages(&objects, &catalog, Rules::Iso, &Limits::DEFAULT, &mut faults).unwrap();
 assert!(faults.is_empty());
 let last = table.get(2).unwrap();
 assert_eq!(last.id, Some(ObjectId::new(3, 0)));

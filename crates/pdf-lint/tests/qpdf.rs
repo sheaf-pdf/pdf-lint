@@ -151,7 +151,7 @@ fn what_qpdf_linearizes_then_updated_is_found_so() {
             catalog
                 .as_dict_mut()
                 .unwrap()
-                .set("PageLayout", "SinglePage");
+                .set("PageLayout", pdf_lint::Object::name("SinglePage"));
             let base = write::Base::of(&reading).unwrap();
             let bodies = [(root, write::Body::from(&catalog))];
             let options = write::Options::DEFAULT;

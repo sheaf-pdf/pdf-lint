@@ -2,7 +2,7 @@
 //! would change the rest of the page refused; and property lists written
 //! again without some of their keys.
 
-use pdf_objects::{Object, ObjectId, dict};
+use pdf_objects::{Object, ObjectId, dict, resolve_fn};
 
 use super::*;
 use crate::fuzz::KEYS;
@@ -790,11 +790,11 @@ fn a_range_that_a_decoder_reads_past_is_refused() {
 /// past `space_depth` 0 its underlying space doesn't load, so it counts 1,
 /// capped, where by default it counts 4.
 fn x_under(space_depth: usize) -> ResCx {
-    let space = Object::from(vec![Object::from("Pattern"), Object::from("DeviceRGB")]);
+    let space = Object::from(vec![Object::name("Pattern"), Object::name("DeviceRGB")]);
     let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space } });
     let mut lim = Limits::DEFAULT;
     lim.color.space_depth = space_depth;
-    ResCx::read(|_: ObjectId| None, Some(&resources), &lim).unwrap()
+    ResCx::read(resolve_fn(|_: ObjectId| None), Some(&resources), &lim).unwrap()
 }
 
 /// Content that holds an inline image sized by a count past a cap is

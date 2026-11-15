@@ -7,7 +7,7 @@
 //!
 //! Each entry is read as Table 349 types it: a text string decoded
 //! (7.9.2.2) by the [`Rules`] given, as pdf-objects'
-//! [`decode_with`](pdf_objects::text::decode_with) decodes it, a date read
+//! [`decode_str`](pdf_objects::text::decode_str) decodes it, a date read
 //! from its text ([`Date::read`]), and `/Trapped` a name. One that's absent
 //! or null is none. One of another type is told and read as none, and a
 //! date that doesn't read is told and kept as its text ([`Dated::Text`]).
@@ -25,13 +25,12 @@
 //!     "Title" => Object::text("Annual report"),
 //!     "CreationDate" => Object::text("D:20261112093000Z"),
 //!     "ModDate" => Object::text("last Tuesday"),
-//!     "Trapped" => "False",
+//!     "Trapped" => Object::name("False"),
 //! };
 //! let objects = BTreeMap::from([(ObjectId::new(7, 0), Object::from(info))]);
-//! let resolve = |id: ObjectId| objects.get(&id);
 //!
 //! let mut faults = Vec::new();
-//! let read = info::read(resolve, &Object::reference(7), Rules::Iso, &mut faults).unwrap();
+//! let read = info::read(&objects, &Object::reference(7), Rules::Iso, &mut faults).unwrap();
 //! let read = read.unwrap();
 //! assert_eq!(read.title.as_deref(), Some("Annual report"));
 //! assert_eq!(read.created.as_ref().and_then(Dated::date).map(|date| date.year()), Some(2026));
@@ -163,7 +162,7 @@ pub fn read<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         Some((object, id)) => match object.value() {
             Value::Dict(dict) => (dict, id),
             _ => {
-                read.say(Place::new(id, object.at), Fault::InfoNotDictionary);
+                read.say(Place::new(id, object.at()), Fault::InfoNotDictionary);
                 return Ok(None);
             }
         },
@@ -224,7 +223,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Read<'_, R, S> {
                         Ok(Some(object)) => at = object,
                         Ok(None) => return Ok(None),
                         Err(unreadable) if unreadable.why == Why::Damaged => {
-                            let place = Place::new(within, value.at);
+                            let place = Place::new(within, value.at());
                             self.say(place, Fault::Damaged { id: *id });
                             return Ok(None);
                         }
@@ -250,10 +249,9 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Read<'_, R, S> {
         let Some((object, id)) = self.reached(value, within)? else {
             return Ok(None);
         };
-        let place = Place::new(id, object.at);
+        let place = Place::new(id, object.at());
         let text = match object.value() {
-            Value::String(Str::Bytes(bytes), _) => text::decode_with(bytes, self.rules).text,
-            Value::String(Str::Text(text), _) => text.clone(),
+            Value::String(Str::Bytes(bytes), _) => text::decode_str(bytes, self.rules),
             Value::String(Str::Encrypted(_), _) => {
                 let id = id.unwrap_or(ObjectId::new(0, 0));
                 let message = format!("{id} R holds /{key} as ciphertext: it takes a password");
@@ -302,7 +300,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Read<'_, R, S> {
             Some(b"False") => Trapped::False,
             Some(b"Unknown") => Trapped::Unknown,
             _ => {
-                self.say(Place::new(id, object.at), Fault::InfoTrapped);
+                self.say(Place::new(id, object.at()), Fault::InfoTrapped);
                 return Ok(None);
             }
         };

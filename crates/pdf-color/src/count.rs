@@ -43,16 +43,16 @@ const MOST_UNDERLYING: u32 = 16;
 /// load: [`counted`] says which it is.
 ///
 /// ```
-/// use pdf_color::pdf_objects::{Object, ObjectId};
+/// use pdf_color::pdf_objects::{Object, ObjectId, resolve_fn};
 /// use pdf_color::{Limits, components};
 ///
 /// let file: Vec<Object> = vec![
-///     Object::from("DeviceCMYK"),
-///     Object::from(vec![Object::from("Pattern"), Object::from("DeviceRGB")]),
-///     Object::from("CalGray"),
+///     Object::name("DeviceCMYK"),
+///     Object::from(vec![Object::name("Pattern"), Object::name("DeviceRGB")]),
+///     Object::name("CalGray"),
 ///     Object::reference(9),
 /// ];
-/// let nothing = |_: ObjectId| None;
+/// let nothing = resolve_fn(|_: ObjectId| None);
 /// let count = |at: usize| components(nothing, &file[at], &Limits::DEFAULT);
 /// assert_eq!(count(0), Ok(Some(4)));
 /// // The underlying space's components, and the pattern's name.
@@ -96,11 +96,11 @@ pub struct Counted {
 /// be sure of, or read it again under larger caps.
 ///
 /// ```
-/// use pdf_color::pdf_objects::{Object, ObjectId};
+/// use pdf_color::pdf_objects::{Object, ObjectId, resolve_fn};
 /// use pdf_color::{Limits, counted};
 ///
-/// let nested = Object::from(vec![Object::from(vec![Object::from("DeviceGray")])]);
-/// let nothing = |_: ObjectId| None;
+/// let nested = Object::from(vec![Object::from(vec![Object::name("DeviceGray")])]);
+/// let nothing = resolve_fn(|_: ObjectId| None);
 /// let whole = counted(nothing, &nested, &Limits::DEFAULT).unwrap();
 /// assert_eq!((whole.count, whole.capped), (Some(1), false));
 ///
@@ -402,9 +402,9 @@ impl<'l, 'o, R: Resolve<'o>> Walk<'l, R> {
                 // as written, and it drops an empty key as it parses one. A
                 // value by reference is no name here.
                 let stocked = (stream.dict.last_entries())
-                    .filter(|entry| !entry.key.is_empty())
-                    .filter_map(|entry| Some((&entry.key, stock(entry.value.as_name()?)?)));
-                let first = stocked.min_by_key(|(key, _)| key.as_slice());
+                    .filter(|entry| !entry.key().is_empty())
+                    .filter_map(|entry| Some((entry.key(), stock(entry.value().as_name()?)?)));
+                let first = stocked.min_by_key(|&(key, _)| key);
                 Ok(first.map(|(_, space)| space))
             }
             Value::Array(parts) if !parts.is_empty() => walk.of_array(at, parts, depth),
@@ -589,6 +589,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use pdf_objects::parse::Parser;
+    use pdf_objects::resolve_fn;
 
     use super::*;
 
@@ -619,8 +620,7 @@ mod tests {
     /// What `text` counts as, with `extra` for its objects.
     fn counted(text: &str, extra: &[&str]) -> Option<u32> {
         let (value, objects) = (value(text), objects(extra));
-        let resolve = |id: ObjectId| objects.get(&id);
-        components(resolve, &value, &Limits::DEFAULT).unwrap()
+        components(&objects, &value, &Limits::DEFAULT).unwrap()
     }
 
     /// Each `(value, count)`, with no objects.
@@ -1259,26 +1259,24 @@ mod tests {
                 Object::from(vec![Object::reference(6 + at)]),
             );
         }
-        objects.insert(ObjectId::new(5 + n, 0), Object::from("DeviceCMYK"));
+        objects.insert(ObjectId::new(5 + n, 0), Object::name("DeviceCMYK"));
         (Object::reference(5), objects)
     }
 
     #[test]
     fn past_the_depth_a_chain_does_not_load() {
         let (value, objects) = chain(64);
-        let resolve = |id: ObjectId| objects.get(&id);
-        assert_eq!(components(resolve, &value, &Limits::DEFAULT), Ok(Some(4)));
+        assert_eq!(components(&objects, &value, &Limits::DEFAULT), Ok(Some(4)));
         let mut small = Limits::DEFAULT;
         small.space_depth = 63;
-        assert_eq!(components(resolve, &value, &small), Ok(Some(3)));
-        assert!(super::counted(resolve, &value, &small).unwrap().capped);
+        assert_eq!(components(&objects, &value, &small), Ok(Some(3)));
+        assert!(super::counted(&objects, &value, &small).unwrap().capped);
         let (value, objects) = chain(65);
-        let resolve = |id: ObjectId| objects.get(&id);
-        assert_eq!(components(resolve, &value, &Limits::DEFAULT), Ok(Some(3)));
+        assert_eq!(components(&objects, &value, &Limits::DEFAULT), Ok(Some(3)));
         let mut large = Limits::DEFAULT;
         large.space_depth = 65;
-        assert_eq!(components(resolve, &value, &large), Ok(Some(4)));
-        assert!(!super::counted(resolve, &value, &large).unwrap().capped);
+        assert_eq!(components(&objects, &value, &large), Ok(Some(4)));
+        assert!(!super::counted(&objects, &value, &large).unwrap().capped);
     }
 
     /// A resolver over `objects` that counts what it's asked.
@@ -1373,7 +1371,7 @@ mod tests {
             "<< /FunctionType 3 /Domain [0 1] /Functions [{kids}] /Bounds [{bounds}] /Encode [{encode}] >>"
         );
         let space = value(&format!("[/DeviceN [/A /B] /DeviceGray {function}]"));
-        let nothing = |_: ObjectId| None;
+        let nothing = resolve_fn(|_: ObjectId| None);
         assert_eq!(components(nothing, &space, &Limits::DEFAULT), Ok(Some(2)));
         let mut limits = Limits::DEFAULT;
         limits.space_visits = 99;
@@ -1438,9 +1436,13 @@ mod tests {
     #[test]
     fn it_takes_a_reading_a_dyn_and_a_closure() {
         let objects = objects(&["/DeviceCMYK"]);
-        let closure = |id: ObjectId| objects.get(&id);
+        let closure = resolve_fn(|id: ObjectId| objects.get(&id));
         let dynamic: &dyn Resolve = &closure;
         let reference = Object::reference(5);
+        assert_eq!(
+            components(&objects, &reference, &Limits::DEFAULT),
+            Ok(Some(4))
+        );
         assert_eq!(
             components(closure, &reference, &Limits::DEFAULT),
             Ok(Some(4))
@@ -1451,10 +1453,10 @@ mod tests {
         );
         // Nothing's copied that a caller could see, nor kept between calls.
         let seen = RefCell::new(Vec::new());
-        let recording = |id: ObjectId| {
+        let recording = resolve_fn(|id: ObjectId| {
             seen.borrow_mut().push(id);
             objects.get(&id)
-        };
+        });
         assert_eq!(
             components(recording, &reference, &Limits::DEFAULT),
             Ok(Some(4))

@@ -551,13 +551,17 @@ mod tests {
     /// One page drawing stream 4.
     fn one_page() -> Document {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => r(1) });
-        doc.insert(1, dict! { "Type" => "Catalog", "Pages" => r(2) });
+        doc.insert(
+            1,
+            dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) },
+        );
         let media = vec![Object::from(0), 0.into(), 612.into(), 792.into()];
-        let root =
-            dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1, "MediaBox" => media };
+        let root = dict! {
+            "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1, "MediaBox" => media,
+        };
         doc.insert(2, root);
         let page = dict! {
-            "Type" => "Page", "Parent" => r(2), "Contents" => r(4), "Resources" => dict! {},
+            "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(4), "Resources" => dict! {},
         };
         doc.insert(3, page);
         doc.insert(4, stream("0 0 m 9 9 l S"));
@@ -575,25 +579,28 @@ mod tests {
         claims.pdfa_conformance = Some("B".into());
         let packet = xmp::write(&claims).unwrap();
         let metadata = Stream::new(
-            dict! { "Type" => "Metadata", "Subtype" => "XML" },
+            dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
             packet.into_bytes(),
         );
         let catalog = dict! {
-            "Type" => "Catalog", "Pages" => r(2), "Version" => "2.0", "Metadata" => r(10),
+            "Type" => Object::name("Catalog"),
+            "Pages" => r(2),
+            "Version" => Object::name("2.0"),
+            "Metadata" => r(10),
         };
         doc.insert(1, catalog);
         let resources = dict! {
-            "ColorSpace" => dict! { "CS0" => "DeviceCMYK" },
+            "ColorSpace" => dict! { "CS0" => Object::name("DeviceCMYK") },
             "Font" => dict! { "F1" => r(11) },
             "XObject" => dict! { "X" => r(13) },
         };
         let root = dict! {
-            "Type" => "Pages", "Kids" => vec![r(3), r(4), r(5)], "Count" => 3,
+            "Type" => Object::name("Pages"), "Kids" => vec![r(3), r(4), r(5)], "Count" => 3,
             "Resources" => resources,
         };
         doc.insert(2, root);
         let page = |contents: Option<Object>| {
-            let mut page = dict! { "Type" => "Page", "Parent" => r(2) };
+            let mut page = dict! { "Type" => Object::name("Page"), "Parent" => r(2) };
             if let Some(contents) = contents {
                 page.set("Contents", contents);
             }
@@ -606,15 +613,21 @@ mod tests {
         doc.insert(6, stream("q BI /W 1 /H 1 /BPC 8 /CS /CS0 ID abcd EI Q"));
         doc.insert(7, stream("BT (text) Tj /F1 9 Tf (Text) Tj ET /X Do"));
         let font = dict! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-            "Encoding" => "WinAnsiEncoding", "ToUnicode" => r(12),
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+            "Encoding" => Object::name("WinAnsiEncoding"),
+            "ToUnicode" => r(12),
         };
         doc.insert(11, font);
         doc.insert(
             12,
             stream("1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <54> <0074> endbfchar"),
         );
-        let form = Stream::new(dict! { "Subtype" => "Form" }, b"(Form) Tj".to_vec());
+        let form = Stream::new(
+            dict! { "Subtype" => Object::name("Form") },
+            b"(Form) Tj".to_vec(),
+        );
         doc.insert(13, Object::new(Value::Stream(Box::new(form))));
         let info = dict! {
             "Title" => Object::text("A title"),

@@ -783,9 +783,10 @@ fn written_entries(entries: &pdf_objects::object::Dict) -> Result<Vec<u8>, Error
         if !out.is_empty() {
             out.push(b' ');
         }
-        serialize::name(&mut out, &entry.key);
+        serialize::name(&mut out, entry.key())
+            .map_err(|e| Error::Write(write::Error::Serialize(e)))?;
         out.push(b' ');
-        serialize::write(&mut out, &entry.value)
+        serialize::write(&mut out, entry.value())
             .map_err(|e| Error::Write(write::Error::Serialize(e)))?;
     }
     Ok(out)
@@ -820,7 +821,7 @@ fn encoded(
     }
     if let (StreamKind::Hint, Some(encrypting)) = (stream.what, encrypting) {
         let id = ObjectId::new(stream.number, 0);
-        let dict = pdf_objects::dict! { "Filter" => "FlateDecode" };
+        let dict = pdf_objects::dict! { "Filter" => Object::name("FlateDecode") };
         data = (encrypting.stream(id, &dict, &data))
             .map_err(|why| write::Error::Encrypt { id, why })?
             .into_owned();

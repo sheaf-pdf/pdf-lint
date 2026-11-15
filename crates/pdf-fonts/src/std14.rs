@@ -5,7 +5,7 @@
 
 use std::sync::OnceLock;
 
-use pdf_objects::{Dict, dict};
+use pdf_objects::{Dict, Object, dict};
 
 use crate::afm::Afm;
 use crate::encoding::Encoding;
@@ -211,22 +211,32 @@ impl Std14 {
     /// given ([`Font::text`](crate::Font::text)).
     ///
     /// ```
-    /// use pdf_fonts::pdf_objects::dict;
+    /// use pdf_fonts::pdf_objects::{Object, dict};
     /// use pdf_fonts::Std14;
     ///
     /// let helvetica = dict! {
-    ///     "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-    ///     "Encoding" => "WinAnsiEncoding",
+    ///     "Type" => Object::name("Font"),
+    ///     "Subtype" => Object::name("Type1"),
+    ///     "BaseFont" => Object::name("Helvetica"),
+    ///     "Encoding" => Object::name("WinAnsiEncoding"),
     /// };
     /// assert_eq!(Std14::Helvetica.dict(), helvetica);
-    /// let symbol = dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Symbol" };
+    /// let symbol = dict! {
+    ///     "Type" => Object::name("Font"),
+    ///     "Subtype" => Object::name("Type1"),
+    ///     "BaseFont" => Object::name("Symbol"),
+    /// };
     /// assert_eq!(Std14::Symbol.dict(), symbol);
     /// ```
     #[must_use]
     pub fn dict(self) -> Dict {
-        let mut dict = dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => self.name() };
+        let mut dict = dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name(self.name()),
+        };
         if self.written_in() == Encoding::WinAnsi {
-            dict.push("Encoding", "WinAnsiEncoding");
+            dict.push("Encoding", Object::name("WinAnsiEncoding"));
         }
         dict
     }

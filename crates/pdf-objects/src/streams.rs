@@ -1,105 +1,119 @@
-//! A stream's data, which [`Resolve`] doesn't give: what gives it
-//! ([`Streams`]), decrypted and decoded through the stream's filters, and a
-//! resolver and a function as one ([`WithStreams`]), for what has its
-//! streams some other way.
+//! Bounded access to decrypted, filter-decoded PDF stream data ([`Streams`], [`WithStreams`]).
+//!
+//! [`Resolve`] looks up indirect objects—including stream dictionaries and raw [`Data`](crate::Data)
+//! locations—without running stream filters or ciphers. Domain crates that read decoded stream
+//! payloads (such as content streams, `/ToUnicode` CMaps, or ICC profiles) accept [`Streams`] so
+//! any file reader, cache, or custom closure ([`WithStreams`]) can supply decoded bytes under a
+//! caller-enforced byte limit.
 
-use std::borrow::Cow;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::format;
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt;
 
 use crate::object::{Object, ObjectId};
-use crate::{Resolve, Unreadable};
+use crate::{Resolve, Unreadable, Why};
 
-/// What gives a stream's data, decrypted and decoded through its filters:
-/// what reads a file implements this, a reference to it being one too, and
-/// [`Resolve`], so that what reads a stream's data, a font's `/ToUnicode` or
-/// a page's content, reads it through any of them. [`WithStreams`] makes one
-/// of a resolver and a function.
+/// Decodes and decrypts indirect PDF stream payloads up to a caller-supplied byte limit.
 ///
-/// It's the data as a viewer takes it: a stream that decodes in part is what
-/// decoded, as PDFium takes it, unless what stopped it is the limit. A
-/// checker that wants every fault of a decode reads the reader's own account
-/// of it instead, which pdf-structure gives as `Reading::decoded_within` and
-/// `Source::decoded_within`. On a pdf-structure `Reading`, whose own
-/// `decoded` takes no limit, this one is `Streams::decoded(&reading, id,
-/// limit)`.
-///
-/// What's given is borrowed where the reader holds it decoded, as a document
-/// holds its object streams', and owned where it's decoded for the call. A
-/// caller's cache of what's decoded goes behind this, a hit lent.
-///
-/// The data is at most the limit asked for, or the answer is
-/// [`Why::Limit`](crate::Why::Limit). A caller doesn't trust what it's
-/// given: data longer than it asked for is past the limit, whatever gave it.
+/// Implementations return `Cow::Borrowed` when decoded bytes are already cached in memory and
+/// `Cow::Owned` when decoded on demand. Returned slices are guaranteed to have length at most
+/// `limit`; outputs exceeding `limit` fail with [`Why::Limit`].
 pub trait Streams {
-    /// Stream `id`'s data, at most `limit` bytes of it. `id` is the stream's
-    /// own number: a caller has followed any reference to it.
+    /// Returns at most `limit` decrypted, filter-decoded bytes for stream `id`.
+    ///
+    /// `id` must be the stream object's own [`ObjectId`] (after resolving any indirect reference).
     ///
     /// # Errors
     ///
-    /// [`Unreadable`], saying why there's none:
-    /// [`Why::Damaged`](crate::Why::Damaged) where it isn't a stream, doesn't
-    /// read, or its decode fails before it gives a byte (a stream that
-    /// decodes cleanly to nothing is empty data, not this);
-    /// [`Why::Limit`](crate::Why::Limit) past `limit`;
-    /// [`Why::Capped`](crate::Why::Capped) past a cap the reader reads
-    /// under; [`Why::Locked`](crate::Why::Locked) where it takes
-    /// a password the reader wasn't given, or doesn't decrypt;
-    /// [`Why::Filter`](crate::Why::Filter) through a filter the reader doesn't
-    /// decode, or with a `/Filter` or `/DecodeParms` it can't take as written;
-    /// [`Why::Source`](crate::Why::Source) where the source of the file's
-    /// bytes didn't give them, which asked again may;
-    /// [`Why::Detached`](crate::Why::Detached) where the reader holds no
-    /// stream's data and has nothing to read it from, as a document alone
-    /// hasn't, which asked again won't.
+    /// Returns [`Unreadable`] with:
+    /// - [`Why::Damaged`] if `id` is absent, is not a stream, or fails to decode any bytes;
+    /// - [`Why::Limit`] if the decoded output exceeds `limit` bytes;
+    /// - [`Why::Capped`] if decoding exceeds a reader-configured resource cap;
+    /// - [`Why::Locked`] if decryption requires a missing password or fails;
+    /// - [`Why::Filter`] if `/Filter` or `/DecodeParms` is unsupported or malformed;
+    /// - [`Why::Source`] if reading from the underlying byte source fails;
+    /// - [`Why::Detached`] if the backing stream bytes are no longer attached.
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable>;
 }
 
-/// A reference to what gives a stream's data gives it, as what reads a
-/// file's streams is read over a reference for its objects' lifetime.
 impl<S: Streams + ?Sized> Streams for &S {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         (**self).decoded(id, limit)
     }
 }
 
-/// A resolver and a function from a stream's number and a limit to its data,
-/// as one: objects, with their streams' data by the function, for what reads a
-/// file and has its streams some other way. The function gives the data owned:
-/// a closure can't lend what outlives the call, so a reader that holds what it
-/// decodes, and would lend it, implements [`Streams`] on a type of its own.
-/// What the function gives is given as it is, longer than asked for or not:
-/// the caller's to refuse.
+impl<S: Streams + ?Sized> Streams for Box<S> {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        (**self).decoded(id, limit)
+    }
+}
+
+#[cfg(target_has_atomic = "ptr")]
+impl<S: Streams + ?Sized> Streams for Arc<S> {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        (**self).decoded(id, limit)
+    }
+}
+
+/// Pairs an object resolver `R` with a stream-decoding function `F` to implement both [`Resolve`]
+/// and [`Streams`].
+///
+/// [`WithStreams::decoded`] enforces the requested `limit`: if `F` returns more than `limit`
+/// bytes, [`WithStreams`] returns `Err(Unreadable)` with [`Why::Limit`].
 ///
 /// ```
-/// use pdf_objects::{Object, ObjectId, Resolve, Streams, Unreadable, WithStreams, Why};
+/// use pdf_objects::{
+///     Object, ObjectId, Resolve, Streams, Unreadable, Why, WithStreams, dict, resolve_fn,
+/// };
 ///
-/// let font = Object::from(pdf_objects::dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" });
-/// let objects = |id: ObjectId| (id == ObjectId::new(1, 0)).then_some(&font);
-/// let read = WithStreams::new(&objects, |id: ObjectId, _: usize| match id.number {
-///     2 => Ok(b"1 beginbfchar <41> <0041> endbfchar".to_vec()),
-///     _ => Err(Unreadable::new(id, Why::Damaged, format!("{id} R isn't in the file"))),
+/// let font = Object::from(dict! {
+///     "Subtype" => Object::name("Type1"),
+///     "BaseFont" => Object::name("Helvetica"),
 /// });
-/// assert_eq!(read.resolve(ObjectId::new(1, 0)), Some(&font));
-/// assert!(read.resolve(ObjectId::new(2, 0)).is_none());
-/// let data = read.decoded(ObjectId::new(2, 0), 100).unwrap();
-/// assert!(data.starts_with(b"1 beginbfchar"));
-/// let none = read.decoded(ObjectId::new(3, 0), 100).unwrap_err();
-/// assert_eq!((none.why, none.to_string()), (Why::Damaged, "3 0 R isn't in the file".into()));
+/// let objects = resolve_fn(|id: ObjectId| (id == ObjectId::new(1, 0)).then_some(&font));
+/// let reader = WithStreams::new(objects, |id: ObjectId, _limit: usize| match id.number {
+///     2 => Ok(b"1 beginbfchar <41> <0041> endbfchar".to_vec()),
+///     _ => Err(Unreadable::new(id, Why::Damaged, format!("{id} R is missing"))),
+/// });
+///
+/// assert_eq!(reader.resolve(ObjectId::new(1, 0)), Some(&font));
+/// let cmap = reader.decoded(ObjectId::new(2, 0), 100).unwrap();
+/// assert!(cmap.starts_with(b"1 beginbfchar"));
+/// assert_eq!(reader.decoded(ObjectId::new(2, 0), 5).unwrap_err().why, Why::Limit);
+/// assert_eq!(reader.decoded(ObjectId::new(3, 0), 100).unwrap_err().why, Why::Damaged);
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct WithStreams<R, F> {
     objects: R,
     streams: F,
 }
 
 impl<R, F> WithStreams<R, F> {
-    /// `objects`, its streams' data by `streams`.
+    /// Combines resolver `objects` with stream-decoding function `streams`.
     #[must_use]
     pub const fn new(objects: R, streams: F) -> WithStreams<R, F> {
         WithStreams { objects, streams }
     }
+
+    /// Returns a reference to the underlying object resolver.
+    #[must_use]
+    pub const fn objects(&self) -> &R {
+        &self.objects
+    }
 }
 
-/// Its objects, as its resolver gives them, and why not, as it says.
+impl<R: fmt::Debug, F> fmt::Debug for WithStreams<R, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WithStreams")
+            .field("objects", &self.objects)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'o, R: Resolve<'o>, F> Resolve<'o> for WithStreams<R, F> {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         self.objects.resolve(id)
@@ -110,44 +124,65 @@ impl<'o, R: Resolve<'o>, F> Resolve<'o> for WithStreams<R, F> {
     }
 }
 
-/// Its streams' data, as its function gives it, owned.
+impl<'o, R: Resolve<'o>, F> Resolve<'o> for &WithStreams<R, F> {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        self.objects.resolve(id)
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        self.objects.try_resolve(id)
+    }
+}
+
 impl<R, F: Fn(ObjectId, usize) -> Result<Vec<u8>, Unreadable>> Streams for WithStreams<R, F> {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
-        (self.streams)(id, limit).map(Cow::Owned)
+        let bytes = (self.streams)(id, limit)?;
+        if bytes.len() > limit {
+            return Err(Unreadable::new(
+                id,
+                Why::Limit,
+                format!(
+                    "decoded stream {id} R length ({}) exceeds limit ({limit})",
+                    bytes.len()
+                ),
+            ));
+        }
+        Ok(Cow::Owned(bytes))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
+    use alloc::string::ToString;
+    use alloc::vec;
+    use core::cell::Cell;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::Why;
     use crate::object::Stream;
+    use crate::{ResolveFn, resolve_fn};
 
-    /// A file's objects in a map, which lends each stream's bytes as its
-    /// data, and counts what it's asked.
     struct Map {
         objects: BTreeMap<ObjectId, Object>,
-        asked: Cell<usize>,
+        asked: AtomicUsize,
     }
 
     impl Streams for Map {
         fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
-            self.asked.set(self.asked.get() + 1);
+            self.asked.fetch_add(1, Ordering::Relaxed);
             let stream = self.objects.get(&id).and_then(Object::as_stream);
-            let Some(data) = stream.and_then(|stream| stream.data.bytes()) else {
+            let Some(data) = stream.and_then(|s| s.data.bytes()) else {
                 return Err(Unreadable::new(id, Why::Damaged, "no stream"));
             };
-            match data.len() > limit {
-                true => Err(Unreadable::new(id, Why::Limit, "past the limit")),
-                false => Ok(Cow::Borrowed(data)),
+            if data.len() > limit {
+                Err(Unreadable::new(id, Why::Limit, "past the limit"))
+            } else {
+                Ok(Cow::Borrowed(data))
             }
         }
     }
 
-    /// A map of one stream, object 1, and one object that's no stream, 2.
     fn map() -> Map {
         let stream = Stream::new(crate::dict! {}, b"abc".to_vec());
         let objects = BTreeMap::from([
@@ -156,27 +191,28 @@ mod tests {
         ]);
         Map {
             objects,
-            asked: Cell::new(0),
+            asked: AtomicUsize::new(0),
         }
     }
 
-    /// What `streams` gives of objects 1, within its length and a byte
-    /// short, 2 and 3: the data, or why there's none.
+    fn by_resolve<'o>(r: impl Resolve<'o>, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        r.try_resolve(id)
+    }
+
     fn gives<S: Streams + ?Sized>(streams: &S) -> Vec<Result<Vec<u8>, Why>> {
         let asked = [(1, 3), (1, 2), (2, 10), (3, 10)];
-        let given = asked.map(|(n, limit)| streams.decoded(ObjectId::new(n, 0), limit));
-        (given.into_iter())
-            .map(|given| {
-                given
+        asked
+            .into_iter()
+            .map(|(n, limit)| {
+                streams
+                    .decoded(ObjectId::new(n, 0), limit)
                     .map(Cow::into_owned)
-                    .map_err(|unreadable| unreadable.why)
+                    .map_err(|u| u.why)
             })
             .collect()
     }
 
-    /// What a map gives: its stream's data within the limit, and past it,
-    /// or of what's no stream or isn't there, why not.
-    fn given() -> Vec<Result<Vec<u8>, Why>> {
+    fn expected() -> Vec<Result<Vec<u8>, Why>> {
         vec![
             Ok(b"abc".to_vec()),
             Err(Why::Limit),
@@ -185,77 +221,98 @@ mod tests {
         ]
     }
 
-    /// A reference to what gives a stream's data, and a `dyn Streams`, give
-    /// what it gives, and ask it each time: nothing's kept between.
     #[test]
-    fn a_reference_gives_what_it_refers_to() {
+    fn references_and_smart_pointers_forward_streams() {
         let map = map();
-        assert_eq!(gives(&map), given());
-        assert_eq!(gives(&&map), given());
+        assert_eq!(gives(&map), expected());
+        assert_eq!(gives(&&map), expected());
         let dynamic: &dyn Streams = &map;
-        assert_eq!(gives(dynamic), given());
-        assert_eq!(gives(&dynamic), given());
-        assert_eq!(map.asked.get(), 16);
-        // What it holds, it lends, through a reference too.
-        let by_reference = &map;
-        let lent = Streams::decoded(&by_reference, ObjectId::new(1, 0), 3).unwrap();
+        assert_eq!(gives(dynamic), expected());
+        assert_eq!(gives(&dynamic), expected());
+        assert_eq!(map.asked.load(Ordering::Relaxed), 16);
+
+        let by_ref = &map;
+        let lent = Streams::decoded(&by_ref, ObjectId::new(1, 0), 3).unwrap();
         assert!(matches!(lent, Cow::Borrowed(b"abc")));
+
+        let boxed: Box<dyn Streams> = Box::new(self::map());
+        assert_eq!(gives(&boxed), expected());
+
+        let shared: Arc<dyn Streams + Send + Sync> = Arc::new(self::map());
+        assert_eq!(gives(&shared), expected());
     }
 
-    /// `WithStreams` resolves by its resolver, says why as it says, and gives
-    /// its function's data owned, or why there's none, as the function says.
     #[test]
-    fn with_resolves_by_its_resolver_and_gives_its_function_s_data_owned() {
+    fn with_streams_resolves_formats_debug_and_enforces_limit() {
         let map = map();
-        let objects = |id: ObjectId| map.objects.get(&id);
         let asked = Cell::new(Vec::new());
-        let with = WithStreams::new(&objects, |id: ObjectId, limit: usize| {
+        let with = WithStreams::new(&map.objects, |id: ObjectId, limit: usize| {
             let mut was = asked.take();
             was.push((id, limit));
             asked.set(was);
             Streams::decoded(&map, id, limit).map(Cow::into_owned)
         });
+
+        let dbg = format!("{with:?}");
+        assert!(dbg.starts_with("WithStreams { objects:"));
+        assert_eq!(with.objects().len(), 2);
+
         assert_eq!(
             with.resolve(ObjectId::new(2, 0))
                 .and_then(Object::as_integer),
             Some(7)
         );
-        assert_eq!(with.try_resolve(ObjectId::new(3, 0)), Ok(None));
-        assert_eq!(gives(&with), given());
+        let with_ref = &with;
+        assert_eq!(
+            by_resolve(with_ref, ObjectId::new(2, 0))
+                .unwrap()
+                .and_then(Object::as_integer),
+            Some(7)
+        );
+        assert_eq!(by_resolve(with_ref, ObjectId::new(3, 0)), Ok(None));
+        assert_eq!(gives(&with), expected());
         let given = with.decoded(ObjectId::new(1, 0), 3).unwrap();
         assert!(matches!(given, Cow::Owned(ref data) if data == b"abc"));
-        let asked: Vec<(u32, usize)> = (asked.take().iter())
-            .map(|(id, limit)| (id.number, *limit))
-            .collect();
-        assert_eq!(asked, [(1, 3), (1, 2), (2, 10), (3, 10), (1, 3)]);
 
-        // A resolver that says why is heard through it.
+        // Over-limit closure output is rejected with `Why::Limit`.
+        let none = resolve_fn(|_: ObjectId| -> Option<&Object> { None });
+        let over = WithStreams::new(none, |_: ObjectId, limit: usize| Ok(vec![0; limit + 1]));
+        let copied = over;
+        assert_eq!(
+            over.decoded(ObjectId::new(1, 0), 4).unwrap_err().why,
+            Why::Limit
+        );
+        assert_eq!(
+            copied.decoded(ObjectId::new(1, 0), 0).unwrap_err().why,
+            Why::Limit
+        );
+
+        // Underlying `try_resolve` and stream errors propagate unchanged.
         struct Locked;
         impl<'o> Resolve<'o> for Locked {
             fn resolve(&self, _: ObjectId) -> Option<&'o Object> {
                 None
             }
+
             fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
                 Err(Unreadable::new(id, Why::Locked, "it wants a password"))
             }
         }
-        // And a function that gives no data, for either reason a source
-        // may have, is heard as it says.
-        for given in [Why::Source, Why::Detached] {
+
+        for reason in [Why::Source, Why::Detached] {
             let locked = WithStreams::new(Locked, |id: ObjectId, _: usize| {
-                Err::<Vec<u8>, _>(Unreadable::new(id, given, "no bytes"))
+                Err::<Vec<u8>, _>(Unreadable::new(id, reason, "no bytes"))
             });
-            let why = locked.try_resolve(ObjectId::new(4, 0)).unwrap_err();
+            let why = by_resolve(&locked, ObjectId::new(4, 0)).unwrap_err();
             assert_eq!((why.id, why.why), (ObjectId::new(4, 0), Why::Locked));
             let why = locked.decoded(ObjectId::new(4, 0), 1).unwrap_err();
-            assert_eq!((why.why, why.to_string()), (given, "no bytes".into()));
+            assert_eq!((why.why, why.to_string()), (reason, "no bytes".to_string()));
         }
     }
 
-    /// A `WithStreams` of functions is made at compile time.
     #[test]
-    fn with_streams_is_made_at_compile_time() {
-        type Objects = fn(ObjectId) -> Option<&'static Object>;
+    fn with_streams_const_construction() {
+        type Objects = ResolveFn<fn(ObjectId) -> Option<&'static Object>>;
         type Streamed = fn(ObjectId, usize) -> Result<Vec<u8>, Unreadable>;
         fn none(_: ObjectId) -> Option<&'static Object> {
             None
@@ -263,33 +320,8 @@ mod tests {
         fn empty(_: ObjectId, _: usize) -> Result<Vec<u8>, Unreadable> {
             Ok(Vec::new())
         }
-        const WITH: WithStreams<Objects, Streamed> = WithStreams::new(none, empty);
+        const WITH: WithStreams<Objects, Streamed> = WithStreams::new(resolve_fn(none), empty);
         assert!(WITH.resolve(ObjectId::new(1, 0)).is_none());
-        assert_eq!(
-            WITH.decoded(ObjectId::new(1, 0), 1),
-            Ok(Cow::Borrowed(&[][..]))
-        );
-    }
-
-    /// What a function gives past the limit, `WithStreams` gives as it is:
-    /// holding what's given to the limit is the caller's, which refuses it.
-    #[test]
-    fn data_past_the_limit_is_given_as_it_is_for_the_caller_to_refuse() {
-        let none = |_: ObjectId| -> Option<&Object> { None };
-        let over = WithStreams::new(&none, |_: ObjectId, limit: usize| Ok(vec![0; limit + 1]));
-        let given = over.decoded(ObjectId::new(1, 0), 4).unwrap();
-        assert_eq!(given.len(), 5);
-        let held = |limit: usize| match over.decoded(ObjectId::new(1, 0), limit) {
-            Ok(data) if data.len() <= limit => Ok(data.len()),
-            Ok(_) => Err(Why::Limit),
-            Err(unreadable) => Err(unreadable.why),
-        };
-        assert_eq!(held(0), Err(Why::Limit));
-        assert_eq!(held(4), Err(Why::Limit));
-        // A `WithStreams` is `Copy` where what it holds is, as a font's
-        // reading wants.
-        let copied = over;
-        assert_eq!(copied.decoded(ObjectId::new(1, 0), 0).unwrap().len(), 1);
-        assert_eq!(over.decoded(ObjectId::new(1, 0), 0).unwrap().len(), 1);
+        assert_eq!(WITH.decoded(ObjectId::new(1, 0), 0).unwrap().as_ref(), b"");
     }
 }

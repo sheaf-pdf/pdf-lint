@@ -34,7 +34,9 @@ impl File {
     /// A form whose content is `content`, with `resources` of its own where they're
     /// given.
     fn form(&mut self, content: &str, resources: Option<Object>) -> ObjectId {
-        let mut form = dict! { "Type" => "XObject", "Subtype" => "Form" };
+        let mut form = dict! {
+            "Type" => Object::name("XObject"), "Subtype" => Object::name("Form"),
+        };
         if let Some(resources) = resources {
             form.set("Resources", resources);
         }
@@ -79,8 +81,9 @@ impl Streams for &File {
 /// Courier, each code its own glyph: what most tests show in.
 fn courier() -> Object {
     dict! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Courier"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     }
     .into()
 }
@@ -89,8 +92,9 @@ fn courier() -> Object {
 /// text.
 fn courier_as(glyph: &str) -> Object {
     dict! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
-        "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::from(glyph)] },
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Courier"),
+        "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::name(glyph)] },
     }
     .into()
 }
@@ -225,7 +229,10 @@ fn q_and_q_save_and_restore_the_font() {
 #[test]
 fn a_font_pdfium_doesnt_load_leaves_the_one_before() {
     let file = File::default();
-    let unloaded = dict! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H" };
+    let unloaded = dict! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"),
+        "Encoding" => Object::name("Identity-H"),
+    };
     let resources = Object::from(dict! {
         "Font" => dict! { "B" => courier_as("B"), "T" => unloaded },
     });
@@ -250,7 +257,7 @@ fn gs_picks_a_font_by_its_extgstates_font() {
     let resources = Object::from(dict! {
         "Font" => dict! { "B" => courier_as("B"), "C" => courier_as("C"), "R" => Object::from(font) },
         "ExtGState" => dict! {
-            "G" => dict! { "Font" => vec![Object::from("B"), Object::from(12)] },
+            "G" => dict! { "Font" => vec![Object::name("B"), Object::from(12)] },
             "S" => dict! { "Font" => vec![Object::bytes(*b"B"), Object::from(12)] },
             "R" => dict! { "Font" => vec![Object::from(font), Object::from(12)] },
         },
@@ -284,21 +291,24 @@ fn gs_picks_a_font_by_its_extgstates_font() {
 fn a_gs_that_sets_no_font_changes_nothing() {
     let mut file = File::default();
     let stream = file.add(Stream::new(
-        dict! { "Font" => vec![Object::from("B"), Object::from(12)] },
+        dict! { "Font" => vec![Object::name("B"), Object::from(12)] },
         vec![],
     ));
-    let array = file.add(vec![Object::from("B"), Object::from(12)]);
-    let unloaded = dict! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H" };
+    let array = file.add(vec![Object::name("B"), Object::from(12)]);
+    let unloaded = dict! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"),
+        "Encoding" => Object::name("Identity-H"),
+    };
     let resources = Object::from(dict! {
         "Font" => dict! { "B" => courier_as("B"), "C" => courier_as("C"), "T" => unloaded },
         "ExtGState" => dict! {
             "M" => Object::from(stream),
-            "N" => dict! { "Font" => "B" },
+            "N" => dict! { "Font" => Object::name("B") },
             "O" => dict! { "Font" => Object::reference(99) },
             "P" => dict! { "Font" => Object::from(array) },
-            "U" => dict! { "Font" => vec![Object::from("T"), Object::from(12)] },
+            "U" => dict! { "Font" => vec![Object::name("T"), Object::from(12)] },
             "E" => dict! { "Font" => Vec::<Object>::new() },
-            "1" => dict! { "Font" => vec![Object::from("B"), Object::from(12)] },
+            "1" => dict! { "Font" => vec![Object::name("B"), Object::from(12)] },
         },
     });
     let cases = [
@@ -326,7 +336,7 @@ fn a_gs_that_sets_no_font_changes_nothing() {
 #[test]
 fn gs_names_a_font_as_pdfium_reads_its_first_element() {
     let mut file = File::default();
-    let name = file.add(Object::from("B"));
+    let name = file.add(Object::name("B"));
     let twice = file.add(Object::from(name));
     let font = |first: Object| dict! { "Font" => vec![first, Object::from(12)] };
     let resources = Object::from(dict! {
@@ -368,7 +378,7 @@ fn gs_names_a_font_as_pdfium_reads_its_first_element() {
 #[test]
 fn a_forms_gs_finds_its_extgstate_as_any_resource() {
     let mut file = File::default();
-    let states = dict! { "G" => dict! { "Font" => vec![Object::from("B"), Object::from(12)] } };
+    let states = dict! { "G" => dict! { "Font" => vec![Object::name("B"), Object::from(12)] } };
     let own = file.form(
         "/G gs (A) Tj",
         Some(dict! { "Font" => dict! { "B" => courier_as("C") } }.into()),
@@ -402,7 +412,7 @@ fn a_forms_gs_finds_its_extgstate_as_any_resource() {
 #[test]
 fn a_gs_that_doesnt_read_is_told() {
     let mut file = File::default();
-    let locked = file.add(dict! { "Font" => vec![Object::from("B"), Object::from(12)] });
+    let locked = file.add(dict! { "Font" => vec![Object::name("B"), Object::from(12)] });
     file.unresolved = Some((locked, Why::Locked));
     let to_unicode = file.add(Stream::new(
         dict! {},
@@ -415,7 +425,7 @@ fn a_gs_that_doesnt_read_is_told() {
         "Font" => dict! { "C" => courier_as("C"), "L" => font },
         "ExtGState" => dict! {
             "Locked" => Object::from(locked),
-            "Font" => dict! { "Font" => vec![Object::from("L"), Object::from(12)] },
+            "Font" => dict! { "Font" => vec![Object::name("L"), Object::from(12)] },
         },
     });
     let read = walk(
@@ -466,14 +476,16 @@ fn a_strings_text_is_its_fonts() {
             .to_vec(),
     ));
     let descendant = file.add(dict! {
-        "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "Foo",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("CIDFontType2"),
+        "BaseFont" => Object::name("Foo"),
         "CIDSystemInfo" => dict! {
             "Registry" => Object::text("Adobe"), "Ordering" => Object::text("Identity"),
             "Supplement" => 0,
         },
     });
     let type0 = dict! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Foo", "Encoding" => "Identity-H",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("Foo"), "Encoding" => Object::name("Identity-H"),
         "DescendantFonts" => vec![Object::from(descendant)], "ToUnicode" => Object::from(cmap),
     };
     let resources = Object::from(dict! { "Font" => dict! { "S" => simple, "T" => type0 } });
@@ -539,7 +551,7 @@ fn a_forms_resources_are_its_own_else_its_callers_else_the_pages() {
     let shows = file.form("/F1 9 Tf (A) Tj", None);
     let cases: [(Object, &str); 5] = [
         // Its own, with no `/Font`: the page's.
-        (dict! { "ProcSet" => vec![Object::from("PDF")] }.into(), "B"),
+        (dict! { "ProcSet" => vec![Object::name("PDF")] }.into(), "B"),
         // Its own `/Font` no dictionary: the page's.
         (dict! { "Font" => 7 }.into(), "B"),
         // Its own `/Font`, without `F1`: the stock font.
@@ -598,14 +610,14 @@ fn only_a_form_is_followed() {
     let with = |subtype: Option<&str>| {
         let mut dict = dict! { "Resources" => dict! { "Font" => dict! { "F1" => courier() } } };
         if let Some(subtype) = subtype {
-            dict.set("Subtype", subtype);
+            dict.set("Subtype", Object::name(subtype));
         }
         Stream::new(dict, content.clone())
     };
     let image = file.add(with(Some("Image")));
     let ps = file.add(with(Some("PS")));
     let none = file.add(with(None));
-    let not_a_stream = file.add(dict! { "Subtype" => "Form" });
+    let not_a_stream = file.add(dict! { "Subtype" => Object::name("Form") });
     let resources = Object::from(dict! {
         "Font" => dict! { "F1" => courier() },
         "XObject" => dict! {
@@ -894,7 +906,8 @@ fn each_page_is_charged_for_its_fonts() {
         b"1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <41> <0042> endbfchar";
     let to_unicode = file.add(Stream::new(dict! {}, map.to_vec()));
     let font = file.add(dict! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Courier"),
         "ToUnicode" => Object::from(to_unicode),
     });
     let resources = Object::from(dict! { "Font" => dict! { "F1" => Object::from(font) } });
@@ -979,7 +992,9 @@ fn a_forms_inline_images_end_by_its_own_color_spaces() {
     // Four components of a byte each: the image's data runs past the content, where
     // with the page's, which haven't the space, it ends at its `EI`.
     let spaces = dict! {
-        "ColorSpace" => dict! { "CS0" => vec![Object::from("Pattern"), Object::from("DeviceRGB")] },
+        "ColorSpace" => dict! {
+            "CS0" => vec![Object::name("Pattern"), Object::name("DeviceRGB")],
+        },
     };
     let image = "BI /W 2 /H 1 /BPC 8 /CS /CS0 ID (A) Tj EI (B) Tj";
     let own = file.form(image, Some(spaces.into()));
@@ -1004,7 +1019,7 @@ fn no_debug_holds_a_string_or_a_name() {
     let mut file = File::default();
     let form = file.form("(MARKER) Tj", None);
     file.failing = Some((form, Why::Locked));
-    let state = file.add(dict! { "Font" => vec![Object::from("MARKERFONT"), Object::from(9)] });
+    let state = file.add(dict! { "Font" => vec![Object::name("MARKERFONT"), Object::from(9)] });
     file.unresolved = Some((state, Why::Locked));
     let resources = Object::from(dict! {
         "Font" => dict! { "MARKERFONT" => courier() },

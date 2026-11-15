@@ -85,7 +85,9 @@ impl<'d> Prepared<'d> {
         let left = write::encryption_objects(doc, encryptor);
         let values: Vec<ObjectId> = encryptor.map_or_else(Vec::new, |encryptor| {
             let values = encryptor.dictionary().entries().iter();
-            values.flat_map(|entry| entry.value.references()).collect()
+            values
+                .flat_map(|entry| entry.value().references())
+                .collect()
         });
         let reached = reached(doc, &values);
         let mut bodies: Vec<(ObjectId, Body<'d>)> = write::bodies(doc)
@@ -324,8 +326,8 @@ impl<'d> Prepared<'d> {
             && let Some(dict) = dict_of(object)
         {
             let links: [&[u8]; 5] = [b"First", b"Last", b"Next", b"Prev", b"Parent"];
-            let others = dict.entries().iter().filter(|e| !links.contains(&&*e.key));
-            refs.extend(others.flat_map(|entry| entry.value.references()));
+            let others = dict.entries().iter().filter(|e| !links.contains(&e.key()));
+            refs.extend(others.flat_map(|entry| entry.value().references()));
             return;
         }
         if self.names == Some(id)
@@ -336,8 +338,8 @@ impl<'d> Prepared<'d> {
         }
         if let Value::Stream(stream) = object.value() {
             let held = stream.dict.entries().iter();
-            let entries = held.filter(|entry| entry.key != b"Length");
-            refs.extend(entries.flat_map(|entry| entry.value.references()));
+            let entries = held.filter(|entry| entry.key() != b"Length");
+            refs.extend(entries.flat_map(|entry| entry.value().references()));
             return;
         }
         refs.extend(object.references());
@@ -376,7 +378,7 @@ fn past_every(
     more: impl Iterator<Item = ObjectId>,
 ) -> Result<ObjectId, Error> {
     let trailer =
-        (doc.trailer().dict().entries().iter()).flat_map(|entry| entry.value.references());
+        (doc.trailer().dict().entries().iter()).flat_map(|entry| entry.value().references());
     let named = bodies.iter().flat_map(|(id, body)| {
         let references = body.object().references();
         std::iter::once(*id).chain(references)
@@ -399,7 +401,7 @@ fn past_every(
 fn reached(doc: &Document, values: &[ObjectId]) -> HashSet<ObjectId> {
     let trailer = write::trailer_entries(doc.trailer().dict(), &());
     let mut stack: Vec<ObjectId> = (trailer.entries().iter())
-        .flat_map(|entry| entry.value.references())
+        .flat_map(|entry| entry.value().references())
         .chain(values.iter().copied())
         .collect();
     let mut seen: HashSet<ObjectId> = stack.iter().copied().collect();
@@ -415,8 +417,8 @@ fn reached(doc: &Document, values: &[ObjectId]) -> HashSet<ObjectId> {
         match object.value() {
             Value::Stream(stream) => {
                 let held = stream.dict.entries().iter();
-                let entries = held.filter(|entry| entry.key != b"Length");
-                for id in entries.flat_map(|entry| entry.value.references()) {
+                let entries = held.filter(|entry| entry.key() != b"Length");
+                for id in entries.flat_map(|entry| entry.value().references()) {
                     see(id, &mut stack);
                 }
             }
@@ -866,8 +868,8 @@ fn page_references(dict: &Dict, refs: &mut Vec<ObjectId>) {
     of(b"Resources");
     let placed: [&[u8]; 5] = [b"Annots", b"B", b"Resources", b"Contents", b"Parent"];
     for entry in dict.entries() {
-        if !placed.contains(&&*entry.key) && entry.key != b"Thumb" {
-            refs.extend(entry.value.references());
+        if !placed.contains(&entry.key()) && entry.key() != b"Thumb" {
+            refs.extend(entry.value().references());
         }
     }
     if let Some(contents) = dict.get(b"Contents") {

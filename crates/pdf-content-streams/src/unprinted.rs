@@ -26,7 +26,7 @@ impl fmt::Debug for Unprinted<'_, Object> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Object")
             .field("value", &Unprinted(self.0.value()))
-            .field("at", &self.0.at)
+            .field("at", &self.0.at())
             .finish()
     }
 }
@@ -37,7 +37,6 @@ impl fmt::Debug for Unprinted<'_, Value> {
             Value::String(text, form) => {
                 let (kind, len) = match text {
                     Str::Bytes(bytes) => ("Bytes", bytes.len()),
-                    Str::Text(text) => ("Text", text.len()),
                     Str::Encrypted(bytes) => ("Encrypted", bytes.len()),
                 };
                 let text = DebugTuple(kind, Len(len));
@@ -64,7 +63,7 @@ impl fmt::Debug for Unprinted<'_, Value> {
 impl fmt::Debug for Unprinted<'_, Dict> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let entries: Vec<_> = (self.0.entries().iter())
-            .map(|entry| DebugEntry(entry, Unprinted(&entry.value)))
+            .map(|entry| DebugEntry(entry, Unprinted(entry.value())))
             .collect();
         f.debug_struct("Dict").field("entries", &entries).finish()
     }
@@ -97,8 +96,8 @@ struct DebugEntry<'v>(&'v Entry, Unprinted<'v, Object>);
 impl fmt::Debug for DebugEntry<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry")
-            .field("key", &self.0.key)
-            .field("key_at", &self.0.key_at)
+            .field("key", self.0.key_name())
+            .field("key_at", &self.0.key_at())
             .field("value", &self.1)
             .finish()
     }

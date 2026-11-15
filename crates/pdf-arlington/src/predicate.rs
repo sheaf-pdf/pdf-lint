@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pdf_color::Colorant;
-use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, Span, Str, Value, Version};
+use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, SmallBytes, Span, Str, Value, Version};
 use rustc_hash::FxBuildHasher;
 
 use crate::grammar::{At, Grammar, Table, Wrap, WrapFn, split, version};
@@ -260,13 +260,13 @@ pub enum Truth {
 /// across threads when its resolver is `Sync`, each thread making its
 /// rows' [`Cx`]s there.
 ///
-/// Its type names its resolver: one made from a closure is of the
-/// closure's type, and one over a document or a reading of that
-/// reference's. `FileCx<'a>`, the default, is one over any resolver, a
-/// `dyn Resolve`, as a [`Cx`] reads through it: so `&FileCx` in a
-/// signature takes a reference to one over any resolver. It isn't kept so
-/// by value: one kept is kept by its resolver's type, or boxed
-/// (`Box<FileCx>`).
+/// Its type names its resolver: one made from a closure
+/// ([`pdf_objects::resolve_fn`]) is of its wrapper's type, and one over a
+/// map, a document or a reading of that reference's. `FileCx<'a>`, the
+/// default, is one over any resolver, a `dyn Resolve`, as a [`Cx`] reads
+/// through it: so `&FileCx` in a signature takes a reference to one over
+/// any resolver. It isn't kept so by value: one kept is kept by its
+/// resolver's type, or boxed (`Box<FileCx>`).
 ///
 /// An object its resolver gives none for is null to the predicates, as
 /// one the file hasn't is (ISO 32000-2, 7.3.10), whatever the reason: over
@@ -705,7 +705,7 @@ impl Trees {
 /// and every key a string whose bytes the reader gave.
 #[derive(Debug)]
 struct Tree {
-    keys: HashSet<Vec<u8>>,
+    keys: HashSet<SmallBytes>,
     whole: bool,
 }
 
@@ -1395,7 +1395,7 @@ fn not_standard_14(cx: &Cx) -> bool {
 /// ([`FileCx::latin`]): by the container's number where [`Cx::id`] gives
 /// it, else by where it was written. Unknown where nothing is said of it.
 fn has_latin(f: &str, cx: &Cx) -> Tri {
-    let said = (cx.file.latin).and_then(|latin| latin.get(cx.id, cx.container.at));
+    let said = (cx.file.latin).and_then(|latin| latin.get(cx.id, cx.container.at()));
     said.map_or_else(|| Tri::Unknown(f.to_string()), Tri::Is)
 }
 
@@ -1484,7 +1484,7 @@ fn key_is_colorant(f: &str, cx: &Cx) -> Tri {
 /// [`HOPS`] objects.
 fn no_cycle(f: &str, cx: &Cx) -> Tri {
     let mut met: HashSet<ObjectId> = cx.id.into_iter().collect();
-    let written = cx.container.at.filter(|_| cx.id.is_none());
+    let written = cx.container.at().filter(|_| cx.id.is_none());
     let mut o = cx.container;
     for _ in 0..HOPS {
         let Some(id) = entry(o, cx.at, cx).and_then(Object::as_reference) else {
@@ -1496,7 +1496,7 @@ fn no_cycle(f: &str, cx: &Cx) -> Tri {
         let Some(next) = cx.file.resolve.resolve(id) else {
             return Tri::Is(true);
         };
-        if written.is_some() && next.at == written {
+        if written.is_some() && next.at() == written {
             return Tri::Is(false);
         }
         o = next;
@@ -1709,7 +1709,7 @@ fn deref_known<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<Known> {
                 o = cx.file.resolve.resolve(*to)?;
             }
             Value::Null => return None,
-            _ => return Some(Known { at: o.at, id }),
+            _ => return Some(Known { at: o.at(), id }),
         }
     }
     None
@@ -1837,7 +1837,7 @@ fn scalar(o: &Object) -> Option<Scalar> {
     Some(match o.value() {
         Value::Integer(i) => Scalar::Int(*i),
         Value::Real(r) => Scalar::Real(*r),
-        Value::Name(name) => Scalar::Name(name.clone()),
+        Value::Name(name) => Scalar::Name(name.as_bytes().to_vec()),
         Value::String(s, _) => Scalar::Str(s.text()?),
         Value::Bool(b) => Scalar::Bool(*b),
         _ => return None,
@@ -2116,7 +2116,7 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
         Err(why) => return Tri::Unknown(why),
     };
     let known = Known {
-        at: root.at,
+        at: root.at(),
         id: entry_id(tree, cx),
     };
     // Read with no lock held, as reading it resolves; two threads may
@@ -2335,7 +2335,7 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
 /// all there are, else unknown.
 fn content_item(f: &str, found: &Objects, cx: &Cx) -> Tri {
     let container = Known {
-        at: cx.container.at,
+        at: cx.container.at(),
         id: cx.id,
     };
     match (found.has(container), found.whole) {
@@ -2948,7 +2948,7 @@ mod tests {
     use std::sync::Barrier;
     use std::thread::ThreadId;
 
-    use pdf_objects::{Dict, dict};
+    use pdf_objects::{Dict, dict, resolve_fn};
 
     use super::*;
     use crate::grammar::{self, Grammar, Row, model, split};
@@ -3180,7 +3180,7 @@ mod tests {
             version: &str,
             f: impl Fn(&Cx) -> T,
         ) -> T {
-            let resolve = |id: ObjectId| self.objects.get(&id);
+            let resolve = resolve_fn(|id: ObjectId| self.objects.get(&id));
             let pages: Option<Vec<&Dict>> = (self.pages.as_ref()).map(|pages| {
                 let page = |n| self.objects[&ObjectId::new(n, 0)].as_dict().unwrap();
                 pages.iter().map(|&n| page(n)).collect()
@@ -3213,10 +3213,10 @@ mod tests {
         ) -> (T, BTreeMap<ObjectId, usize>) {
             let resolved = RefCell::new(BTreeMap::new());
             let said = {
-                let resolve = |id: ObjectId| {
+                let resolve = resolve_fn(|id: ObjectId| {
                     *resolved.borrow_mut().entry(id).or_insert(0) += 1;
                     self.objects.get(&id)
-                };
+                });
                 let file = FileCx::new(&self.trailer, v(version), &resolve)
                     .size(self.size)
                     .extensions(&self.extensions);
@@ -3228,7 +3228,7 @@ mod tests {
 
     /// A file with nothing but a catalog, object 1.
     fn bare() -> File {
-        let catalog = dict! { "Type" => "Catalog" }.into();
+        let catalog = dict! { "Type" => Object::name("Catalog") }.into();
         File::new(dict! { "Root" => Object::reference(1) }, [(1, catalog)])
     }
 
@@ -3260,7 +3260,7 @@ mod tests {
 
     #[test]
     fn is_present_reads_keys_paths_from_the_trailer_and_any_entry() {
-        let catalog = dict! { "Type" => "Catalog", "PieceInfo" => dict! {} }.into();
+        let catalog = dict! { "Type" => Object::name("Catalog"), "PieceInfo" => dict! {} }.into();
         let file = File::new(dict! { "Root" => Object::reference(1) }, [(1, catalog)]);
         let here = dict! {
             "Null" => Object::null(),
@@ -3307,7 +3307,7 @@ mod tests {
 
         // An annotation's AS is required when its appearances are
         // dictionaries of states, not when they're one stream each.
-        let appearance = || Object::stream(dict! { "Subtype" => "Form" });
+        let appearance = || Object::stream(dict! { "Subtype" => Object::name("Form") });
         let annot = |n: Object| Object::from(dict! { "AP" => dict! { "N" => n } });
         let states = annot(dict! { "Off" => appearance(), "On" => appearance() }.into());
         let one = annot(appearance());
@@ -3350,7 +3350,7 @@ mod tests {
     #[test]
     fn the_trailers_info_is_required_from_1_4_when_the_catalog_has_piece_info() {
         let info = &row("FileTrailer", b"Info").required;
-        let pieces = dict! { "Type" => "Catalog", "PieceInfo" => dict! {} }.into();
+        let pieces = dict! { "Type" => Object::name("Catalog"), "PieceInfo" => dict! {} }.into();
         let file = File::new(dict! { "Root" => Object::reference(1) }, [(1, pieces)]);
         let trailer = Object::from(file.trailer.clone());
         assert_eq!(required_in(&file, &trailer, "1.3", info), Truth::False);
@@ -3365,7 +3365,7 @@ mod tests {
         let ap = &row("AnnotSquare", b"AP").required;
         let file = bare();
         let square = |rect: [i64; 4]| {
-            Object::from(dict! { "Subtype" => "Square", "Rect" => integers(rect) })
+            Object::from(dict! { "Subtype" => Object::name("Square"), "Rect" => integers(rect) })
         };
         let wide = square([0, 0, 100, 50]);
         assert_eq!(required_in(&file, &wide, "1.7", ap), Truth::False);
@@ -3384,7 +3384,7 @@ mod tests {
             Truth::True,
             "any two opposite corners"
         );
-        let unboxed = Object::from(dict! { "Subtype" => "Square" });
+        let unboxed = Object::from(dict! { "Subtype" => Object::name("Square") });
         assert_eq!(required_in(&file, &unboxed, "2.0", ap), unknown("Rect"));
     }
 
@@ -3392,7 +3392,7 @@ mod tests {
     fn a_pages_parent_is_required_unless_it_is_a_template() {
         let parent = row("PageObject", b"Parent");
         let file = bare();
-        let page = |ty: &str| Object::from(dict! { "Type" => ty });
+        let page = |ty: &str| Object::from(dict! { "Type" => Object::name(ty) });
         assert_eq!(
             required_in(&file, &page("Page"), "1.7", &parent.required),
             Truth::True
@@ -3714,14 +3714,14 @@ mod tests {
     #[test]
     fn the_page_functions_read_the_pages_given() {
         let annotation = |nm: Option<Object>| {
-            let mut annotation = dict! { "Subtype" => "Text" };
+            let mut annotation = dict! { "Subtype" => Object::name("Text") };
             if let Some(nm) = nm {
                 annotation.set("NM", nm);
             }
             Object::from(annotation)
         };
         let page = |annots: Option<Vec<u32>>| {
-            let mut page = dict! { "Type" => "Page" };
+            let mut page = dict! { "Type" => Object::name("Page") };
             if let Some(annots) = annots {
                 let annots: Vec<_> = annots.into_iter().map(Object::reference).collect();
                 page.set("Annots", annots);
@@ -3731,7 +3731,7 @@ mod tests {
         let mut file = File::new(
             dict! { "Root" => Object::reference(1) },
             [
-                (1, dict! { "Type" => "Catalog" }.into()),
+                (1, dict! { "Type" => Object::name("Catalog") }.into()),
                 (3, page(Some(vec![5, 6]))),
                 (4, page(None)),
                 (5, annotation(Some(Object::text("one")))),
@@ -3740,9 +3740,11 @@ mod tests {
                 (8, page(Some(vec![6, 7]))),
             ],
         );
-        let target = |p: Object, a: Object| Object::from(dict! { "R" => "C", "P" => p, "A" => a });
-        let action = Object::from(dict! { "S" => "GoToE", "T" => Object::null() });
-        let embedded = Object::from(dict! { "R" => "C", "N" => Object::text("x") });
+        let target = |p: Object, a: Object| {
+            Object::from(dict! { "R" => Object::name("C"), "P" => p, "A" => a })
+        };
+        let action = Object::from(dict! { "S" => Object::name("GoToE"), "T" => Object::null() });
+        let embedded = Object::from(dict! { "R" => Object::name("C"), "N" => Object::text("x") });
         let item = |key: &[u8], i: usize| &row("Target", key).possible_values[i][0].item;
         let (p, a, nm) = (item(b"P", 0), item(b"A", 0), item(b"A", 1));
         assert_eq!(p, "fn:Eval((@P>=0) && (@P<fn:NumberOfPages()))");
@@ -3818,12 +3820,12 @@ mod tests {
         assert_eq!(cell, "fn:NoCycle()");
         // Object stream `n`, extending `to`, written at byte `n`.
         let container = |n: u32, to: Option<u32>| {
-            let mut dict = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0 };
+            let mut dict = dict! { "Type" => Object::name("ObjStm"), "N" => 0, "First" => 0 };
             if let Some(to) = to {
                 dict.set("Extends", Object::reference(to));
             }
             let stream = Object::from(pdf_objects::Stream::new(dict, Vec::new()));
-            (n, stream.at(written(n as usize)))
+            (n, stream.with_span(written(n as usize)))
         };
         let file = |links: &[(u32, Option<u32>)]| {
             let objects = links.iter().map(|&(n, to)| container(n, to));
@@ -3890,7 +3892,7 @@ mod tests {
             "Half" => 0.5,
             "Whole" => 180.0,
             "Big" => i64::MAX,
-            "N" => "Name",
+            "N" => Object::name("Name"),
         });
         let is = |text: &str| holds_in(&file, &x, "1.7", text);
         assert_eq!(is("fn:Eval((@A+@B)==3)"), Truth::True);
@@ -3947,21 +3949,25 @@ mod tests {
     #[test]
     fn functions_read_strings_arrays_and_the_file() {
         let mut file = bare();
-        let bytes = |b: &[u8]| Object::new(Value::String(Str::Bytes(b.to_vec()), None));
+        let bytes = |b: &[u8]| Object::new(Value::String(Str::bytes(b), None));
         let x = Object::from(dict! {
             "ID" => vec![bytes(&[7; 16]), bytes(b"0123")],
             "Panose" => bytes(&[0; 12]),
-            "Text" => Object::new(Value::String(Str::Text("A".to_string()), None)),
-            "Cipher" => Object::new(Value::String(Str::Encrypted(vec![1, 2]), None)),
+            "Cipher" => Object::new(Value::String(Str::encrypted([1, 2]), None)),
             "N" => 1,
             "Prev" => 500,
             "Index" => integers([0, 3, 5, 1, 9, 2]),
             "Down" => integers([5, 1, 0, 3]),
             "Even" => integers([0, 1, 0, 2]),
-            "Mixed" => vec![Object::from(0), Object::from(1), Object::from("A"), Object::from(2)],
+            "Mixed" => vec![
+                Object::from(0),
+                Object::from(1),
+                Object::name("A"),
+                Object::from(2),
+            ],
             "Empty" => integers([]),
-            "Filter" => "DCTDecode",
-            "Filters" => vec![Object::from("FlateDecode"), Object::from("DCTDecode")],
+            "Filter" => Object::name("DCTDecode"),
+            "Filters" => vec![Object::name("FlateDecode"), Object::name("DCTDecode")],
         });
         let is = |file: &File, text: &str| holds_in(file, &x, "1.7", text);
         // A string's length in bytes, by key or by an array's index.
@@ -3976,10 +3982,6 @@ mod tests {
         assert_eq!(
             is(&file, "fn:Eval(fn:StringLength(Panose)==12)"),
             Truth::True
-        );
-        assert_eq!(
-            is(&file, "fn:Eval(fn:StringLength(Text)==1)"),
-            unknown("the string's bytes")
         );
         assert_eq!(
             is(&file, "fn:Eval(fn:StringLength(Cipher)==2)"),
@@ -4019,7 +4021,7 @@ mod tests {
         assert_eq!(is(&file, "fn:Contains(@Gone,DCTDecode)"), unknown("@Gone"));
         // The file's catalog's /MarkInfo /Marked.
         let tagged = |marked: Option<bool>| {
-            let mut catalog = dict! { "Type" => "Catalog" };
+            let mut catalog = dict! { "Type" => Object::name("Catalog") };
             if let Some(marked) = marked {
                 catalog.set("MarkInfo", dict! { "Marked" => marked });
             }
@@ -4038,9 +4040,9 @@ mod tests {
     fn functions_read_the_rows_own_string() {
         let file = bare();
         let row = |value: Value| Object::from(dict! { "X" => Object::new(value) });
-        let sig = |form| row(Value::String(Str::Bytes(b"sig".to_vec()), form));
+        let sig = |form| row(Value::String(Str::bytes(*b"sig"), form));
         let string = sig(None);
-        let cipher = row(Value::String(Str::Encrypted(b"sig".to_vec()), None));
+        let cipher = row(Value::String(Str::encrypted(*b"sig"), None));
         let number = row(Value::Integer(1));
         let is = |file: &File, x: &Object, text: &str| holds_in(file, x, "1.7", text);
         // As written, when the reader says.
@@ -4052,10 +4054,7 @@ mod tests {
         assert_eq!(is(&file, &hex, "fn:IsHexString()"), Truth::True);
         let literal = sig(Some(Form::Literal));
         assert_eq!(is(&file, &literal, "fn:IsHexString()"), Truth::False);
-        let cipher_hex = row(Value::String(
-            Str::Encrypted(b"sig".to_vec()),
-            Some(Form::Hex),
-        ));
+        let cipher_hex = row(Value::String(Str::encrypted(*b"sig"), Some(Form::Hex)));
         assert_eq!(is(&file, &cipher_hex, "fn:IsHexString()"), Truth::True);
         assert_eq!(is(&file, &number, "fn:IsHexString()"), Truth::False);
         // Unencrypted: any string as read, but ciphertext.
@@ -4069,7 +4068,7 @@ mod tests {
 
     #[test]
     fn a_name_tree_and_a_key_map_hold_the_rows_name() {
-        let bytes = |b: &str| Object::new(Value::String(Str::Bytes(b.as_bytes().to_vec()), None));
+        let bytes = |b: &str| Object::new(Value::String(Str::bytes(b.as_bytes()), None));
         // A tree of two leaves under a root, one leaf indirect, and a
         // catalog's old-style /Dests.
         let leaf = |keys: &[&str]| {
@@ -4080,7 +4079,7 @@ mod tests {
         };
         let dests = dict! { "Kids" => vec![Object::reference(2), leaf(&["b", "c"])] };
         let catalog = dict! {
-            "Type" => "Catalog",
+            "Type" => Object::name("Catalog"),
             "Names" => dict! { "Dests" => dests },
             "Dests" => dict! { "Old" => vec![Object::from(0)] },
         };
@@ -4113,12 +4112,13 @@ mod tests {
             is(&file, &row(Object::from(1)), tree),
             unknown("fn:InNameTree")
         );
-        let text = Object::new(Value::String(Str::Text("a".to_string()), None));
-        assert_eq!(is(&file, &row(text), tree), unknown("the string's bytes"));
+        let cipher = Object::new(Value::String(Str::encrypted(*b"a"), None));
+        assert_eq!(is(&file, &row(cipher), tree), unknown("the string's bytes"));
         // A tree that doesn't all read: what it's found to hold, it holds;
         // what it isn't can't be told.
         let broken = dict! { "Kids" => vec![Object::reference(9), leaf(&["b"])] };
-        let catalog = dict! { "Type" => "Catalog", "Names" => dict! { "Dests" => broken } };
+        let catalog =
+            dict! { "Type" => Object::name("Catalog"), "Names" => dict! { "Dests" => broken } };
         let partial = File::new(
             dict! { "Root" => Object::reference(1) },
             [(1, catalog.into())],
@@ -4130,14 +4130,14 @@ mod tests {
         );
         // The old-style map, by name.
         let map = "fn:InKeyMap(trailer::Catalog::Dests)";
-        assert_eq!(is(&file, &row(Object::from("Old")), map), Truth::True);
-        assert_eq!(is(&file, &row(Object::from("New")), map), Truth::False);
+        assert_eq!(is(&file, &row(Object::name("Old")), map), Truth::True);
+        assert_eq!(is(&file, &row(Object::name("New")), map), Truth::False);
         assert_eq!(is(&file, &Object::from(dict! {}), map), Truth::False);
         assert_eq!(is(&file, &row(bytes("Old")), map), unknown("fn:InKeyMap"));
         assert_eq!(
             is(
                 &file,
-                &row(Object::from("Old")),
+                &row(Object::name("Old")),
                 "fn:InKeyMap(trailer::Catalog::Gone)"
             ),
             Truth::False,
@@ -4149,9 +4149,9 @@ mod tests {
     fn a_parent_is_what_holds_an_array_for_a_key_and_the_array_for_an_index() {
         let file = bare();
         // An object reference in a structure element's /K array.
-        let element = Object::from(dict! { "Pg" => 1, "S" => "Link" });
-        let kids = Object::from(vec![Object::from(dict! { "Type" => "OBJR" })]);
-        let reference = Object::from(dict! { "Type" => "OBJR" });
+        let element = Object::from(dict! { "Pg" => 1, "S" => Object::name("Link") });
+        let kids = Object::from(vec![Object::from(dict! { "Type" => Object::name("OBJR") })]);
+        let reference = Object::from(dict! { "Type" => Object::name("OBJR") });
         let parents = [&kids, &element];
         let is = |text: &str| {
             file.eval(&reference, At::Key(b"Pg"), &parents, "1.7", |cx| {
@@ -4202,15 +4202,17 @@ mod tests {
         // which only reading the tree resolves: each row's own path
         // resolves the catalog and the root, and again for the number its
         // entry ends at.
-        let catalog =
-            dict! { "Type" => "Catalog", "Names" => dict! { "Dests" => Object::reference(2) } };
+        let catalog = dict! {
+            "Type" => Object::name("Catalog"),
+            "Names" => dict! { "Dests" => Object::reference(2) },
+        };
         let root = dict! { "Kids" => vec![Object::reference(3)] };
         let file = File::new(
             dict! { "Root" => Object::reference(1) },
             [
-                (1, Object::from(catalog).at(written(10))),
-                (2, Object::from(root).at(written(20))),
-                (3, leaf(&["a", "b"]).at(written(30))),
+                (1, Object::from(catalog).with_span(written(10))),
+                (2, Object::from(root).with_span(written(20))),
+                (3, leaf(&["a", "b"]).with_span(written(30))),
             ],
         );
         let tree = "trailer::Catalog::Names::Dests";
@@ -4230,7 +4232,8 @@ mod tests {
         // reference, to 2; placed or not.
         let root = || Object::from(dict! { "Kids" => vec![Object::reference(3)] });
         let file = |dests: Object, two: Option<Object>| {
-            let catalog = dict! { "Type" => "Catalog", "Names" => dict! { "Dests" => dests } };
+            let catalog =
+                dict! { "Type" => Object::name("Catalog"), "Names" => dict! { "Dests" => dests } };
             let mut objects = vec![(1, Object::from(catalog)), (3, leaf(&["a"]))];
             objects.extend(two.map(|two| (2, two)));
             File::new(dict! { "Root" => Object::reference(1) }, objects)
@@ -4249,8 +4252,8 @@ mod tests {
             resolved[&ObjectId::new(3, 0)]
         };
         // Where it was written, directly or by reference.
-        assert_eq!(reads(&file(root().at(written(20)), None)), 1);
-        let two = Some(root().at(written(20)));
+        assert_eq!(reads(&file(root().with_span(written(20)), None)), 1);
+        let two = Some(root().with_span(written(20)));
         assert_eq!(reads(&file(Object::reference(2), two)), 1);
         // Not placed: by its number.
         assert_eq!(reads(&file(Object::reference(2), Some(root()))), 1);
@@ -4259,7 +4262,7 @@ mod tests {
 
         // A container's own, built in memory: read for each row; placed,
         // once.
-        for (root, reads) in [(root(), 4), (root().at(written(40)), 1)] {
+        for (root, reads) in [(root(), 4), (root().with_span(written(40)), 1)] {
             let file = file(Object::null(), None);
             let ((), resolved) = file.counted("1.7", |file| {
                 for (key, holds_it) in [("a", true), ("c", false), ("a", true), ("c", false)] {
@@ -4281,13 +4284,13 @@ mod tests {
         for placed in [true, false] {
             let (mut dests, mut files) = (leaf(&["d"]), leaf(&["e"]));
             if placed {
-                (dests, files) = (dests.at(written(20)), files.at(written(30)));
+                (dests, files) = (dests.with_span(written(20)), files.with_span(written(30)));
             }
             let names = dict! { "Dests" => dests, "EmbeddedFiles" => files };
-            let catalog = dict! { "Type" => "Catalog", "Names" => names };
+            let catalog = dict! { "Type" => Object::name("Catalog"), "Names" => names };
             let file = File::new(
                 dict! { "Root" => Object::reference(1) },
-                [(1, Object::from(catalog).at(written(10)))],
+                [(1, Object::from(catalog).with_span(written(10)))],
             );
             let (said, _) = file.counted("1.7", |file| {
                 let tree = |name: &str| format!("trailer::Catalog::Names::{name}");
@@ -4309,13 +4312,13 @@ mod tests {
         // keeping where it was written in its own: the same span.
         let names =
             dict! { "Dests" => Object::reference(2), "EmbeddedFiles" => Object::reference(3) };
-        let catalog = dict! { "Type" => "Catalog", "Names" => names };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "Names" => names };
         let file = File::new(
             dict! { "Root" => Object::reference(1) },
             [
                 (1, Object::from(catalog)),
-                (2, leaf(&["d"]).at(written(20))),
-                (3, leaf(&["e"]).at(written(20))),
+                (2, leaf(&["d"]).with_span(written(20))),
+                (3, leaf(&["e"]).with_span(written(20))),
             ],
         );
         let (said, _) = file.counted("1.7", |file| {
@@ -4341,7 +4344,7 @@ mod tests {
         let tree = |i: usize, placed: bool| {
             let tree = Object::from(dict! { "Names" => vec![key(i), Object::from(0)] });
             match placed {
-                true => tree.at(written(100 + 10 * i)),
+                true => tree.with_span(written(100 + 10 * i)),
                 false => tree,
             }
         };
@@ -4391,18 +4394,23 @@ mod tests {
         let utf16: Vec<u8> = [0xFE, 0xFF].into_iter().chain([0, b'c']).collect();
         let fields = vec![
             Object::reference(2),
-            dict! { "T" => Object::bytes(utf16), "FT" => "Tx" }.into(),
-            dict! { "FT" => "Tx" }.into(),
+            dict! { "T" => Object::bytes(utf16), "FT" => Object::name("Tx") }.into(),
+            dict! { "FT" => Object::name("Tx") }.into(),
         ];
         let a = dict! {
             "T" => text("a"),
             "Kids" => vec![
                 Object::from(dict! { "T" => text("b"), "Parent" => Object::reference(2) }),
-                Object::from(dict! { "Subtype" => "Widget", "Parent" => Object::reference(2) }),
+                Object::from(
+                    dict! { "Subtype" => Object::name("Widget"), "Parent" => Object::reference(2) },
+                ),
                 Object::from(dict! { "Kids" => vec![Object::from(dict! { "T" => text("d") })] }),
             ],
         };
-        let catalog = dict! { "Type" => "Catalog", "AcroForm" => dict! { "Fields" => fields } };
+        let catalog = dict! {
+            "Type" => Object::name("Catalog"),
+            "AcroForm" => dict! { "Fields" => fields },
+        };
         let file = File::new(
             dict! { "Root" => Object::reference(1) },
             [(1, catalog.into()), (2, a.into())],
@@ -4421,14 +4429,17 @@ mod tests {
             is(&file, Object::from(1)),
             unknown("fn:IsFullyQualifiedFieldName")
         );
-        let cipher = Object::new(Value::String(Str::Encrypted(b"a".to_vec()), None));
+        let cipher = Object::new(Value::String(Str::encrypted(*b"a"), None));
         assert_eq!(is(&file, cipher), unknown("the string's bytes"));
         // No form, no fields.
         assert_eq!(is(&bare(), text("a")), Truth::False);
         // A form that doesn't all read: a name it has is a field's, and one
         // it hasn't can't be told.
         let fields = vec![Object::reference(9), dict! { "T" => text("d") }.into()];
-        let catalog = dict! { "Type" => "Catalog", "AcroForm" => dict! { "Fields" => fields } };
+        let catalog = dict! {
+            "Type" => Object::name("Catalog"),
+            "AcroForm" => dict! { "Fields" => fields },
+        };
         let partial = File::new(
             dict! { "Root" => Object::reference(1) },
             [(1, catalog.into())],
@@ -4453,10 +4464,10 @@ mod tests {
         // Pages 2 to 5 and an image, 6; a tree whose elements put marked
         // content on 2 (by MCID), 3 (by an MCR's own /Pg) and 4 (in a
         // form XObject's stream, which isn't the page's), and point at 6.
-        let page = || Object::from(dict! { "Type" => "Page" });
-        let image = Object::from(dict! { "Subtype" => "Image" });
+        let page = || Object::from(dict! { "Type" => Object::name("Page") });
+        let image = Object::from(dict! { "Subtype" => Object::name("Image") });
         let mcr = |pg: Option<u32>, stm: bool| {
-            let mut mcr = dict! { "Type" => "MCR", "MCID" => 0 };
+            let mut mcr = dict! { "Type" => Object::name("MCR"), "MCID" => 0 };
             if let Some(pg) = pg {
                 mcr.set("Pg", Object::reference(pg));
             }
@@ -4466,9 +4477,12 @@ mod tests {
             Object::from(mcr)
         };
         let element = |pg: u32, kids: Vec<Object>| {
-            Object::from(dict! { "S" => "P", "Pg" => Object::reference(pg), "K" => kids })
+            Object::from(
+                dict! { "S" => Object::name("P"), "Pg" => Object::reference(pg), "K" => kids },
+            )
         };
-        let objr = Object::from(dict! { "Type" => "OBJR", "Obj" => Object::reference(6) });
+        let objr =
+            Object::from(dict! { "Type" => Object::name("OBJR"), "Obj" => Object::reference(6) });
         let tree = |extra: Vec<Object>| {
             let mut kids = vec![
                 element(2, vec![Object::from(0), Object::from(1)]),
@@ -4478,8 +4492,8 @@ mod tests {
                 ),
             ];
             kids.extend(extra);
-            let root = dict! { "Type" => "StructTreeRoot", "K" => kids };
-            let catalog = dict! { "Type" => "Catalog", "StructTreeRoot" => root };
+            let root = dict! { "Type" => Object::name("StructTreeRoot"), "K" => kids };
+            let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
             File::new(
                 dict! { "Root" => Object::reference(1) },
                 [
@@ -4513,12 +4527,12 @@ mod tests {
         );
         // An MCR without a page, its element's or its own: the pages not
         // found can't be told.
-        let lost = Object::from(dict! { "S" => "P", "K" => vec![mcr(None, false)] });
+        let lost = Object::from(dict! { "S" => Object::name("P"), "K" => vec![mcr(None, false)] });
         let file = tree(vec![lost]);
         assert_eq!(asks(&file, 2, pages), Truth::True);
         assert_eq!(asks(&file, 5, pages), unknown(&pages[..pages.len() - 2]));
         // No structure tree, no content items.
-        let catalog = dict! { "Type" => "Catalog" };
+        let catalog = dict! { "Type" => Object::name("Catalog") };
         let file = File::new(
             dict! { "Root" => Object::reference(1) },
             [(1, catalog.into()), (2, page())],
@@ -4539,10 +4553,11 @@ mod tests {
     /// element puts marked content on its `/Pg`, `pg`, by an MCID, and
     /// points at `obj`, an object reference's `/Obj`.
     fn tagged(pg: Object, obj: Object, objects: impl IntoIterator<Item = (u32, Object)>) -> File {
-        let objr = Object::from(dict! { "Type" => "OBJR", "Obj" => obj });
-        let element = dict! { "S" => "P", "Pg" => pg, "K" => vec![Object::from(0), objr] };
-        let root = dict! { "Type" => "StructTreeRoot", "K" => element };
-        let catalog = dict! { "Type" => "Catalog", "StructTreeRoot" => root };
+        let objr = Object::from(dict! { "Type" => Object::name("OBJR"), "Obj" => obj });
+        let element =
+            dict! { "S" => Object::name("P"), "Pg" => pg, "K" => vec![Object::from(0), objr] };
+        let root = dict! { "Type" => Object::name("StructTreeRoot"), "K" => element };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
         let mut all = vec![(1, Object::from(catalog))];
         all.extend(objects);
         File::new(dict! { "Root" => Object::reference(1) }, all)
@@ -4550,8 +4565,8 @@ mod tests {
 
     #[test]
     fn a_content_item_is_known_by_where_it_was_written_or_its_number() {
-        let page = || Object::from(dict! { "Type" => "Page" });
-        let image = || Object::from(dict! { "Subtype" => "Image" });
+        let page = || Object::from(dict! { "Type" => Object::name("Page") });
+        let image = || Object::from(dict! { "Subtype" => Object::name("Image") });
         let (pages, images) = (
             "fn:PageContainsStructContentItems()",
             "fn:ImageIsStructContentItem()",
@@ -4562,7 +4577,7 @@ mod tests {
         // Pages 2 and 5 and an image, 6, placed or not; the tree names
         // page 2 and the image by reference.
         let file = |placed: bool| {
-            let at = |o: Object, n| if placed { o.at(written(n)) } else { o };
+            let at = |o: Object, n| if placed { o.with_span(written(n)) } else { o };
             let objects = [
                 (2, at(page(), 20)),
                 (5, at(page(), 50)),
@@ -4595,7 +4610,10 @@ mod tests {
             f
         );
         // A page written directly, elsewhere: no item's span is its.
-        assert_eq!(item_in(&placed, &page().at(written(90)), None, pages), f);
+        assert_eq!(
+            item_in(&placed, &page().with_span(written(90)), None, pages),
+            f
+        );
         // An equal copy without its number: nothing tells it apart.
         assert_eq!(item_in(&placed, &page(), None, pages), unknown_page);
         assert_eq!(item_in(&placed, &image(), None, images), unknown_image);
@@ -4616,11 +4634,11 @@ mod tests {
         assert_eq!(item_in(&unplaced, &two, None, pages), unknown_page);
         // A page known by its span alone, beside items known by their
         // numbers alone, can't be told apart from them either.
-        let direct = page().at(written(90));
+        let direct = page().with_span(written(90));
         assert_eq!(item_in(&unplaced, &direct, None, pages), unknown_page);
 
         // Beside no content items, an object nothing identifies isn't one.
-        let catalog = dict! { "Type" => "Catalog" };
+        let catalog = dict! { "Type" => Object::name("Catalog") };
         let bare = File::new(
             dict! { "Root" => Object::reference(1) },
             [(1, catalog.into())],
@@ -4630,14 +4648,17 @@ mod tests {
 
         // An object an item names directly, placed: known by where it was
         // written, which no number could say.
-        let inline = image().at(written(70));
+        let inline = image().with_span(written(70));
         let direct = tagged(
             Object::reference(2),
             inline.clone(),
             [(2, page()), (6, image())],
         );
         assert_eq!(item_in(&direct, &inline, None, images), t);
-        assert_eq!(item_in(&direct, &image().at(written(60)), None, images), f);
+        assert_eq!(
+            item_in(&direct, &image().with_span(written(60)), None, images),
+            f
+        );
 
         // An item the reader didn't place, written directly: never an
         // indirect object, so not image 6; a container nothing identifies
@@ -4645,7 +4666,10 @@ mod tests {
         let lost = tagged(
             Object::reference(2),
             image(),
-            [(2, page().at(written(20))), (6, image().at(written(60)))],
+            [
+                (2, page().with_span(written(20))),
+                (6, image().with_span(written(60))),
+            ],
         );
         let six = object(&lost, 6);
         assert_eq!(item_in(&lost, &six, Some(ObjectId::new(6, 0)), images), f);
@@ -4675,7 +4699,11 @@ mod tests {
         let twins = tagged(
             Object::reference(4),
             Object::reference(6),
-            [(3, page().at(at)), (4, page().at(at)), (6, image())],
+            [
+                (3, page().with_span(at)),
+                (4, page().with_span(at)),
+                (6, image()),
+            ],
         );
         assert_eq!(
             item_in(&twins, &object(&twins, 4), Some(ObjectId::new(4, 0)), pages),
@@ -4695,9 +4723,9 @@ mod tests {
         // stream's header starts page 3 too: one span, but a value written
         // directly is never page 3.
         let inside = tagged(
-            page().at(at),
+            page().with_span(at),
             Object::reference(6),
-            [(3, page().at(at)), (6, image())],
+            [(3, page().with_span(at)), (6, image())],
         );
         assert_eq!(
             item_in(
@@ -4708,25 +4736,25 @@ mod tests {
             ),
             f
         );
-        assert_eq!(item_in(&inside, &page().at(at), None, pages), t);
+        assert_eq!(item_in(&inside, &page().with_span(at), None, pages), t);
     }
 
     #[test]
     fn a_page_written_directly_as_an_elements_pg_is_known_by_where_it_was_written() {
         // The element's /Pg is the page itself: its MCIDs are on that page,
         // which only where it was written can name.
-        let page = || Object::from(dict! { "Type" => "Page" });
+        let page = || Object::from(dict! { "Type" => Object::name("Page") });
         let pages = "fn:PageContainsStructContentItems()";
-        let image = Object::from(dict! { "Subtype" => "Image" });
+        let image = Object::from(dict! { "Subtype" => Object::name("Image") });
         let file = |pg: &Object| {
             let objects = [
-                (2, page().at(written(20))),
-                (6, image.clone().at(written(60))),
+                (2, page().with_span(written(20))),
+                (6, image.clone().with_span(written(60))),
             ];
             tagged(pg.clone(), Object::reference(6), objects)
         };
         // The page as the walk reaches it in the tree: the same span.
-        let inline = page().at(written(80));
+        let inline = page().with_span(written(80));
         let placed = file(&inline);
         assert_eq!(item_in(&placed, &inline, None, pages), Truth::True);
         let two = placed.objects.get(&ObjectId::new(2, 0)).unwrap();
@@ -4753,23 +4781,23 @@ mod tests {
         // Image 6 is in object stream 9, at bytes 20 to 21 of its decoded
         // data; an image written at bytes 20 to 21 of the file isn't it.
         let images = "fn:ImageIsStructContentItem()";
-        let image = || Object::from(dict! { "Subtype" => "Image" });
-        let member = image().at(Span::new(Some(ObjectId::new(9, 0)), 20, 21));
-        let page = Object::from(dict! { "Type" => "Page" }).at(written(40));
+        let image = || Object::from(dict! { "Subtype" => Object::name("Image") });
+        let member = image().with_span(Span::new(Some(ObjectId::new(9, 0)), 20, 21));
+        let page = Object::from(dict! { "Type" => Object::name("Page") }).with_span(written(40));
         let file = tagged(
             Object::reference(2),
             Object::reference(6),
             [(2, page), (6, member.clone())],
         );
         assert_eq!(item_in(&file, &member, None, images), Truth::True);
-        let at_its_offsets = image().at(written(20));
+        let at_its_offsets = image().with_span(written(20));
         assert_eq!(item_in(&file, &at_its_offsets, None, images), Truth::False);
     }
 
     /// A boxed resolver over `file`'s objects. Written in a `let`, its type
     /// would need the objects' lifetime, which only a signature can name.
-    fn boxed<'f>(file: &'f File) -> Box<dyn Fn(ObjectId) -> Option<&'f Object> + 'f> {
-        Box::new(|id| file.objects.get(&id))
+    fn boxed<'f>(file: &'f File) -> Box<dyn Resolve<'f> + 'f> {
+        Box::new(resolve_fn(|id| file.objects.get(&id)))
     }
 
     /// Whether `file`'s catalog, by reference, has `/X`, and has `/Y`,
@@ -4785,18 +4813,20 @@ mod tests {
 
     #[test]
     fn a_file_resolves_through_a_closure_a_dyn_fn_or_a_box() {
-        let catalog = dict! { "Type" => "Catalog", "X" => 7 };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "X" => 7 };
         let file = File::new(
             dict! { "Root" => Object::reference(1) },
             [(1, catalog.into())],
         );
         let (t, f) = (Truth::True, Truth::False);
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let by_map = FileCx::new(&file.trailer, v("1.7"), &file.objects);
+        assert_eq!(present(&by_map), (t.clone(), f.clone()));
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let by_value = FileCx::new(&file.trailer, v("1.7"), resolve);
         assert_eq!(present(&by_value), (t.clone(), f.clone()));
         let by_reference = FileCx::new(&file.trailer, v("1.7"), &resolve);
         assert_eq!(present(&by_reference), (t.clone(), f.clone()));
-        let dynamic = FileCx::new(&file.trailer, v("1.7"), &resolve as &dyn Fn(_) -> _);
+        let dynamic = FileCx::new(&file.trailer, v("1.7"), &resolve as &dyn Resolve<'_>);
         assert_eq!(present(&dynamic), (t.clone(), f.clone()));
         let boxed = FileCx::new(&file.trailer, v("1.7"), boxed(&file));
         assert_eq!(present(&boxed), (t, f));
@@ -4806,7 +4836,8 @@ mod tests {
     fn a_file_over_a_sync_resolver_is_send_and_sync() {
         fn shared<T: Send + Sync + ?Sized>(_: &T) {}
         let file = bare();
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
+        shared(&FileCx::new(&file.trailer, v("1.7"), &file.objects));
         shared(&FileCx::new(&file.trailer, v("1.7"), resolve));
         shared(&FileCx::new(&file.trailer, v("1.7"), &resolve));
         // Given a model, which keeps its rows' predicates parsed.
@@ -5009,7 +5040,7 @@ mod tests {
         defaults: bool,
     ) -> Vec<(String, usize, bool)> {
         let file = bare();
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let cx = FileCx::new(&file.trailer, v(version), &resolve).extensions(extensions);
         let cx = if given { cx.grammar(model) } else { cx };
         let mut said = Vec::new();
@@ -5088,7 +5119,7 @@ mod tests {
         let each = all.iter().map(|e| BTreeSet::from([e.clone()]));
         let sets: Vec<BTreeSet<String>> = [none(), all.clone()].into_iter().chain(each).collect();
         let file = bare();
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let mut extended = 0;
         for extensions in &sets {
             let alone = FileCx::new(&file.trailer, v("2.0"), &resolve).extensions(extensions);
@@ -5157,7 +5188,7 @@ mod tests {
 
         let page = Object::from(dict! { "Rotate" => 90 });
         let trailer = Dict::new();
-        let resolve = |_: ObjectId| None;
+        let resolve = resolve_fn(|_: ObjectId| None);
         let alone = FileCx::new(&trailer, v("2.0"), &resolve);
         let given = FileCx::new(&trailer, v("2.0"), &resolve).grammar(&model);
         for file in [&alone, &given] {
@@ -5191,7 +5222,7 @@ mod tests {
     fn a_text_not_of_the_models_rows_is_kept_as_a_rows_is() {
         let model = loaded();
         let file = bare();
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let given = FileCx::new(&file.trailer, v("1.7"), &resolve).grammar(&model);
         let catalog = &file.objects[&ObjectId::new(1, 0)];
         let text = "fn:Eval(@Type==Catalog) && fn:IsPresent(Nonesuch)";
@@ -5225,7 +5256,7 @@ mod tests {
         assert_eq!(room, 32, "a model of one row");
         let page = Object::from(dict! { "Rotate" => 90 });
         let trailer = Dict::new();
-        let resolve = |_: ObjectId| None;
+        let resolve = resolve_fn(|_: ObjectId| None);
         let given = FileCx::new(&trailer, v("2.0"), &resolve).grammar(&model);
         let cx = given.at(&page, At::Key(b"Rotate"));
         let texts: Vec<String> = (0..=room).map(|n| format!("@Rotate=={n}")).collect();
@@ -5262,9 +5293,9 @@ mod tests {
         let text = rotate.unwrap().possible_values[0][0].item.as_str();
         assert_eq!(text, "fn:Eval((@Rotate mod 90)==0)");
         let file = bare();
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let shared = FileCx::new(&file.trailer, v("2.0"), &resolve).grammar(&model);
-        let page = Object::from(dict! { "Type" => "Page", "Rotate" => 180 });
+        let page = Object::from(dict! { "Type" => Object::name("Page"), "Rotate" => 180 });
         let start = Barrier::new(8);
         let said: Vec<(usize, usize)> = std::thread::scope(|scope| {
             let threads: Vec<_> = (0..8)
@@ -5333,17 +5364,22 @@ mod tests {
         let names = dict! { "Dests" => Object::reference(2) };
         let form = dict! { "Fields" => vec![Object::reference(9)] };
         let catalog = dict! {
-            "Type" => "Catalog",
+            "Type" => Object::name("Catalog"),
             "Names" => names,
             "StructTreeRoot" => Object::reference(7),
             "AcroForm" => form,
         };
-        let objr = Object::from(dict! { "Type" => "OBJR", "Obj" => Object::reference(6) });
-        let element =
-            dict! { "S" => "P", "Pg" => Object::reference(4), "K" => vec![Object::from(0), objr] };
-        let page = |n| Object::from(dict! { "Type" => "Page" }).at(written(n));
-        let image = Object::from(dict! { "Subtype" => "Image" }).at(written(60));
-        let root = dict! { "Type" => "StructTreeRoot", "K" => Object::reference(8) };
+        let objr =
+            Object::from(dict! { "Type" => Object::name("OBJR"), "Obj" => Object::reference(6) });
+        let element = dict! {
+            "S" => Object::name("P"),
+            "Pg" => Object::reference(4),
+            "K" => vec![Object::from(0), objr],
+        };
+        let page = |n| Object::from(dict! { "Type" => Object::name("Page") }).with_span(written(n));
+        let image =
+            Object::from(dict! { "Subtype" => Object::name("Image") }).with_span(written(60));
+        let root = dict! { "Type" => Object::name("StructTreeRoot"), "K" => Object::reference(8) };
         let a = dict! { "T" => Object::text("a"), "Kids" => vec![Object::reference(10)] };
         let b = dict! { "T" => Object::text("b"), "Parent" => Object::reference(9) };
         let file = File::new(
@@ -5363,11 +5399,11 @@ mod tests {
         );
         // Each object resolved, counted by the thread that resolved it.
         let counts = Mutex::new(HashMap::new());
-        let resolve = |id: ObjectId| {
+        let resolve = resolve_fn(|id: ObjectId| {
             let thread = std::thread::current().id();
             *counts.lock().unwrap().entry((thread, id)).or_insert(0) += 1;
             file.objects.get(&id)
-        };
+        });
         let read = |counts: &HashMap<_, usize>, thread, id| counts.get(&(thread, id)).copied();
         let kids = [
             ObjectId::new(3, 0),
@@ -5483,7 +5519,8 @@ mod tests {
             })
         };
         let aes = "fn:RequiredValue(@CFM==AESV2,128)";
-        let filter = |cfm: &str| Object::from(dict! { "CFM" => cfm, "Length" => 128 });
+        let filter =
+            |cfm: &str| Object::from(dict! { "CFM" => Object::name(cfm), "Length" => 128 });
         assert_eq!(
             required(filter("AESV2"), aes),
             Some((Truth::True, "128".to_string()))
@@ -5518,7 +5555,7 @@ mod tests {
         // An image's /ColorSpace, which an image mask mustn't have: its
         // /ImageMask false unless it says.
         let mask_free = "fn:Not(fn:IsPresent(@ImageMask==true))";
-        let image = Object::from(dict! { "ColorSpace" => "DeviceRGB" });
+        let image = Object::from(dict! { "ColorSpace" => Object::name("DeviceRGB") });
         let images = Some(table("XObjectImage"));
         assert_eq!(special(images, &image, mask_free), Truth::True);
         assert_eq!(
@@ -5572,7 +5609,7 @@ mod tests {
             .chain("Marked".encode_utf16().flat_map(u16::to_be_bytes))
             .collect();
         let x = Object::from(dict! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "V" => 4.0,
             "CA" => 1,
             "StateModel" => Object::bytes(utf16),
@@ -5665,7 +5702,7 @@ mod tests {
         assert_eq!(at(2, "fn:Eval(@*>0)"), Truth::False);
         assert_eq!(at(2, "fn:Eval(@1*>=0)"), Truth::False);
         assert_eq!(at(0, "fn:Eval(@0<=@1)"), Truth::True, "indices");
-        let urls = Object::from(vec![Object::from(dict! { "FS" => "URL" })]);
+        let urls = Object::from(vec![Object::from(dict! { "FS" => Object::name("URL") })]);
         let url = file.eval(&urls, At::Index(0), &[], "2.0", |cx| {
             holds("fn:Eval(fn:IsPresent(*::FS) && (*::@FS==URL))", cx)
         });
@@ -5760,13 +5797,20 @@ mod tests {
         let file = bare();
         let cell = &row("FontType1", b"Widths").required;
         let font = |base: &str| {
-            Object::from(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base })
+            Object::from(dict! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type1"),
+                "BaseFont" => Object::name(base),
+            })
         };
         let at = |font: &Object, version| required_in(&file, font, version, cell);
         assert_eq!(at(&font("Helvetica"), "1.7"), Truth::False, "{cell}");
         assert_eq!(at(&font("Helvetica"), "2.0"), Truth::True);
         assert_eq!(at(&font("ArialMT"), "1.7"), Truth::True);
-        let untyped = Object::from(dict! { "Subtype" => "Type1", "BaseFont" => "ArialMT" });
+        let untyped = Object::from(dict! {
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("ArialMT"),
+        });
         assert_eq!(at(&untyped, "1.7"), Truth::False, "not /Type /Font");
     }
 
@@ -5775,9 +5819,9 @@ mod tests {
     fn device_n(names: Object, attributes: Dict) -> Object {
         let tint = dict! { "FunctionType" => 2, "Domain" => integers([0, 1]), "N" => 1 };
         let space = vec![
-            Object::from("DeviceN"),
+            Object::name("DeviceN"),
             names,
-            Object::from("DeviceCMYK"),
+            Object::name("DeviceCMYK"),
             tint.into(),
             attributes.into(),
         ];
@@ -5786,7 +5830,7 @@ mod tests {
 
     /// Names, as an array.
     fn names(names: &[&str]) -> Object {
-        let names: Vec<Object> = names.iter().map(|&n| Object::from(n)).collect();
+        let names: Vec<Object> = names.iter().map(|&n| Object::name(n)).collect();
         names.into()
     }
 
@@ -5811,8 +5855,8 @@ mod tests {
         let file = File::new(
             dict! { "Root" => Object::reference(1) },
             [
-                (1, dict! { "Type" => "Catalog" }.into()),
-                (2, Object::from("PANTONE 300 C")),
+                (1, dict! { "Type" => Object::name("Catalog") }.into()),
+                (2, Object::name("PANTONE 300 C")),
                 (3, names(&["Cyan", "Spot"])),
             ],
         );
@@ -5855,7 +5899,7 @@ mod tests {
             unknown("fn:HasSpotColorants"),
             unknown("fn:HasProcessColorants"),
         );
-        let odd = |name: &str| vec![Object::from(1), Object::from(name)].into();
+        let odd = |name: &str| vec![Object::from(1), Object::name(name)].into();
         assert_eq!(
             both(odd("Black"), dict! {}),
             (unknown_both.0.clone(), t.clone())
@@ -5870,7 +5914,7 @@ mod tests {
             "a reference to nothing"
         );
         assert_eq!(
-            both(Object::from("Cyan"), dict! {}),
+            both(Object::name("Cyan"), dict! {}),
             unknown_both,
             "no array"
         );
@@ -5880,8 +5924,11 @@ mod tests {
         let rgb = ["Red", "Green", "Blue"];
         let process_of = |components: Object| {
             dict! {
-                "Subtype" => "NChannel",
-                "Process" => dict! { "ColorSpace" => "DeviceRGB", "Components" => components },
+                "Subtype" => Object::name("NChannel"),
+                "Process" => dict! {
+                    "ColorSpace" => Object::name("DeviceRGB"),
+                    "Components" => components,
+                },
             }
         };
         assert_eq!(
@@ -5943,7 +5990,7 @@ mod tests {
                 required(b"Process", process),
             )
         };
-        let nchannel = || dict! { "Subtype" => "NChannel" };
+        let nchannel = || dict! { "Subtype" => Object::name("NChannel") };
         let (t, f) = (Truth::True, Truth::False);
         assert_eq!(
             at(&["Cyan", "Gold"], nchannel(), "1.7"),
@@ -5958,8 +6005,11 @@ mod tests {
         );
         let rgb = ["Red", "Green", "Blue"];
         let over_rgb = dict! {
-            "Subtype" => "NChannel",
-            "Process" => dict! { "ColorSpace" => "DeviceRGB", "Components" => names(&rgb) },
+            "Subtype" => Object::name("NChannel"),
+            "Process" => dict! {
+                "ColorSpace" => Object::name("DeviceRGB"),
+                "Components" => names(&rgb),
+            },
         };
         assert_eq!(
             at(&rgb, over_rgb, "1.7"),
@@ -5967,7 +6017,7 @@ mod tests {
             "the process dictionary lists them"
         );
         // A DeviceN space, not NChannel: neither, from 1.6.
-        let device_n = || dict! { "Subtype" => "DeviceN" };
+        let device_n = || dict! { "Subtype" => Object::name("DeviceN") };
         assert_eq!(at(&["Gold"], device_n(), "1.7"), (f.clone(), f.clone()));
         // No /Subtype, which a Required cell takes no default for: what the
         // names decide, else unknown.
@@ -5995,7 +6045,7 @@ mod tests {
         let file = bare();
         let special = &row("HalftoneType5", b"*").special_case[0];
         let halftone = Object::from(dict! {
-            "Type" => "Halftone",
+            "Type" => Object::name("Halftone"),
             "HalftoneType" => 5,
             "Default" => dict! {},
             "Cyan" => dict! {},
@@ -6008,7 +6058,7 @@ mod tests {
         assert_eq!(at(b"All"), Truth::False);
         assert_eq!(at(b"None"), Truth::False);
 
-        let elements = vec![Object::from("Cyan"), Object::from("All"), Object::from(1)].into();
+        let elements = vec![Object::name("Cyan"), Object::name("All"), Object::from(1)].into();
         let at = |i| {
             file.eval(&elements, At::Index(i), &[], "1.7", |cx| {
                 holds("fn:Eval(fn:KeyNameIsColorant())", cx)
@@ -6031,13 +6081,13 @@ mod tests {
     #[test]
     fn a_font_has_latin_characters_as_its_file_is_told() {
         let file = bare();
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let resolve = resolve_fn(|id: ObjectId| file.objects.get(&id));
         let descriptor = |at: usize| {
-            Object::from(dict! { "Type" => "FontDescriptor", "FontName" => "F" }).at(Span::new(
-                None,
-                at,
-                at + 10,
-            ))
+            Object::from(dict! {
+                "Type" => Object::name("FontDescriptor"),
+                "FontName" => Object::name("F"),
+            })
+            .with_span(Span::new(None, at, at + 10))
         };
         let (indirect, direct, other, unplaced) = (
             descriptor(10),
@@ -6046,21 +6096,21 @@ mod tests {
             Object::from(dict! {}),
         );
         let mut latin = Latin::default();
-        latin.insert(Some(ObjectId::new(5, 0)), indirect.at, true);
-        latin.insert(None, direct.at, false);
-        latin.insert(Some(ObjectId::new(6, 0)), other.at, false);
-        latin.insert(Some(ObjectId::new(6, 0)), other.at, true);
-        latin.insert(Some(ObjectId::new(6, 0)), other.at, false);
-        latin.insert(None, unplaced.at, true);
+        latin.insert(Some(ObjectId::new(5, 0)), indirect.at(), true);
+        latin.insert(None, direct.at(), false);
+        latin.insert(Some(ObjectId::new(6, 0)), other.at(), false);
+        latin.insert(Some(ObjectId::new(6, 0)), other.at(), true);
+        latin.insert(Some(ObjectId::new(6, 0)), other.at(), false);
+        latin.insert(None, unplaced.at(), true);
         // What's said is found again, in a copy too.
         let copy = latin.clone();
         assert_eq!(copy.get(Some(ObjectId::new(5, 0)), None), Some(true));
-        assert_eq!(copy.get(None, direct.at), Some(false));
+        assert_eq!(copy.get(None, direct.at()), Some(false));
         assert_eq!(
-            copy.get(Some(ObjectId::new(6, 0)), descriptor(90).at),
+            copy.get(Some(ObjectId::new(6, 0)), descriptor(90).at()),
             Some(true)
         );
-        assert_eq!(copy.get(None, indirect.at), None);
+        assert_eq!(copy.get(None, indirect.at()), None);
         assert_eq!(copy.get(None, None), None);
         let text = "fn:Eval(fn:FontHasLatinChars())";
         let has = |file: &FileCx, container: &Object, id: Option<ObjectId>| {
@@ -6115,7 +6165,7 @@ mod tests {
         // A button field is a push button, a checkbox or a radio button by
         // its /Ff's bits 16 and 17 (ISO 32000-2, 12.7.5.2).
         let ff = |table: &str| &row(table, b"Ff").special_case[0];
-        let field = |ff: i64| Object::from(dict! { "FT" => "Btn", "Ff" => ff });
+        let field = |ff: i64| Object::from(dict! { "FT" => Object::name("Btn"), "Ff" => ff });
         let at = |table: &str, flags: i64| {
             file.eval(&field(flags), At::Key(b"Ff"), &[], "1.7", |cx| {
                 holds(ff(table), cx)

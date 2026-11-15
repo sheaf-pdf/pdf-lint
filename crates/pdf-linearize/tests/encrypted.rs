@@ -233,7 +233,7 @@ fn reads_back(out: &[u8], done: &family::Linearized, password: &str, name: &str)
     );
     // The hint stream, by what's at /H, under its number.
     let (at, _) = done.layout.hint_extent();
-    let hint = Parser::at(out, at as usize).header().unwrap();
+    let hint = Parser::at(out, at as usize).header(&mut ()).unwrap();
     assert_eq!(
         &*reading.data(hint).unwrap(),
         deflated(done.layout.hint_data()),
@@ -277,7 +277,7 @@ fn the_hint_streams_data_is_encrypted_and_a_section_isnt() {
             if options.kind == XrefKind::Stream {
                 let reading = opened(&out, "");
                 for at in [done.layout.first_section(), done.layout.main_section()] {
-                    let number = Parser::at(&out, at as usize).header().unwrap();
+                    let number = Parser::at(&out, at as usize).header(&mut ()).unwrap();
                     let listed = reading.get(number).unwrap();
                     let Value::Stream(listed) = listed.value() else {
                         panic!("{name}: no stream at {at}");
@@ -382,7 +382,7 @@ fn stored_mark(file: &[u8], n: u32) -> Option<Vec<u8>> {
         return None;
     };
     let mut parser = Parser::at(file, offset).ciphertext(false);
-    parser.header().ok()?;
+    parser.header(&mut ()).ok()?;
     let value = parser.value(&mut ()).ok()?;
     let mark = value.as_dict()?.get(b"Mark")?;
     match mark.value() {
@@ -468,8 +468,8 @@ fn holds_a_string(object: &Object) -> bool {
                 }
             }
             Value::Array(items) => stack.extend(items),
-            Value::Dict(dict) => stack.extend(dict.entries().iter().map(|e| &e.value)),
-            Value::Stream(stream) => stack.extend(stream.dict.entries().iter().map(|e| &e.value)),
+            Value::Dict(dict) => stack.extend(dict.entries().iter().map(|e| e.value())),
+            Value::Stream(stream) => stack.extend(stream.dict.entries().iter().map(|e| e.value())),
             _ => {}
         }
     }
@@ -632,7 +632,7 @@ fn under_rc4_only_what_goes_at_a_keystream_used_is_refused() {
         assert_eq!(why, write::Unencryptable::Keystream);
         let (out, done) = own(&bytes, "", &options).unwrap();
         let (at, _) = done.layout.hint_extent();
-        let hint = Parser::at(&out, at as usize).header().unwrap();
+        let hint = Parser::at(&out, at as usize).header(&mut ()).unwrap();
         assert_eq!(id, hint);
         assert_eq!(done.keystreams_reused, [hint]);
         assert_eq!(at_used_keystreams(&bytes, &out, ""), [hint]);
@@ -900,8 +900,8 @@ fn what_no_password_opened_is_refused() {
         false,
         |dict| {
             in_hex(dict);
-            dict.set("StmF", "Identity");
-            dict.set("StrF", "Identity");
+            dict.set("StmF", Object::name("Identity"));
+            dict.set("StrF", Object::name("Identity"));
         },
         &[],
     );
@@ -924,7 +924,7 @@ fn a_handler_that_cant_be_opened_is_refused() {
         false,
         |dict| {
             in_hex(dict);
-            dict.set("Filter", "Other");
+            dict.set("Filter", Object::name("Other"));
         },
         &[],
     );
@@ -1243,7 +1243,7 @@ fn asked_to_pack_under_an_encryption_that_doesnt_it_isnt_packed() {
         false,
         |dict| {
             in_hex(dict);
-            dict.set("StmF", "Identity");
+            dict.set("StmF", Object::name("Identity"));
         },
         &[],
     );

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use pdf_objects::parse::Parser;
-use pdf_objects::{Form, Object, ObjectId, Resolve, Str, Unreadable, Value, Why, dict};
+use pdf_objects::{Form, Object, ObjectId, Resolve, Str, Unreadable, Value, Why, dict, resolve_fn};
 use pdf_tokenizer::Rules;
 
 use crate::fault::{Fault, Sink};
@@ -156,7 +156,7 @@ fn names_decode_their_escapes() {
 
 /// A string of `bytes` in `form`, as an operand reads.
 fn string(bytes: &[u8], form: Form) -> Object {
-    Object::new(Value::String(Str::Bytes(bytes.to_vec()), Some(form)))
+    Object::new(Value::String(Str::bytes(bytes), Some(form)))
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn operands_read_as_objects() {
     assert_eq!(o(b"72."), Some(Object::from(72.0)));
     assert_eq!(o(b"true"), Some(Object::from(true)));
     assert_eq!(o(b"null"), Some(Object::null()));
-    assert_eq!(o(b"/A#20B"), Some(Object::from("A B")));
+    assert_eq!(o(b"/A#20B"), Some(Object::name("A B")));
     // Escapes, octal codes, a line continued, and an end of line, a CR LF
     // read as written, as PDFium reads it (`(a\rb\r\nc) Tj` shows those
     // bytes in PDFium's chromium/7881, 8076 and 8125).
@@ -185,7 +185,7 @@ fn operands_read_as_objects() {
         o(b"[1 /N (s) [2]]"),
         Some(Object::from(vec![
             1.into(),
-            Object::from("N"),
+            Object::name("N"),
             string(b"s", Literal),
             2.into(),
         ]))
@@ -194,7 +194,7 @@ fn operands_read_as_objects() {
         o(b"<</A [1 [2]] /B /C>>"),
         Some(Object::from(dict! {
             "A" => Object::from(vec![1.into(), Object::from(vec![2.into()])]),
-            "B" => "C",
+            "B" => Object::name("C"),
         }))
     );
     // A key that isn't a name, or a value that's no object, makes the
@@ -206,7 +206,7 @@ fn operands_read_as_objects() {
     assert_eq!(o(b"<</A foo>>"), None);
     assert_eq!(
         o(b"[<</A 1 2 /B>> 3]"),
-        Some(Object::from(vec![Object::from("B"), 3.into()]))
+        Some(Object::from(vec![Object::name("B"), 3.into()]))
     );
     // A number word as PDFium reads it: PDFium's chromium/7881, 8076 and
     // 8125 hold a property list's `/MCID --5` and `/MCID 1.2.3` as 0 and 1,
@@ -624,7 +624,7 @@ fn a_name_is_read_as_pdfium_reads_it() {
     let kept = [&f254[..252], b"#4"].concat();
     assert_eq!(name(&cut).as_deref(), Some(&kept[..]));
     let read = object(b"<</F#3G [/G#3G]>>", &Limits::DEFAULT);
-    let g0 = Object::from(vec![Object::from("G0")]);
+    let g0 = Object::from(vec![Object::name("G0")]);
     assert_eq!(read, Some(Object::from(dict! { "F0" => g0 })));
 }
 
@@ -976,8 +976,7 @@ fn objects_from_5(extra: &[&str]) -> BTreeMap<ObjectId, Object> {
 /// `resources` read, `extra` its objects, under the default caps.
 fn res_cx(resources: &str, extra: &[&str]) -> ResCx {
     let (resources, objects) = (parsed(resources), objects_from_5(extra));
-    let resolve = |id: ObjectId| objects.get(&id);
-    ResCx::read(resolve, Some(&resources), &Limits::DEFAULT).unwrap()
+    ResCx::read(&objects, Some(&resources), &Limits::DEFAULT).unwrap()
 }
 
 /// `ResCx` of these names and counts.
@@ -1003,7 +1002,7 @@ fn color_spaces_count_their_components() {
         ("Odd", 3),
     ]);
     assert_eq!(res, want);
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     assert_eq!(
         ResCx::read(nothing, None, &Limits::DEFAULT),
         Ok(ResCx::none())
@@ -1092,7 +1091,7 @@ fn limits_color_caps_what_is_counted() {
     low.color.space_depth = 0;
     // In the resources: an underlying space past the cap doesn't load.
     let resources = parsed("<< /ColorSpace << /X [/Pattern /DeviceRGB] >> >>");
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     let read = ResCx::read(nothing, Some(&resources), &low).unwrap();
     assert_eq!(read.spaces, counted(&[("X", 1)]).spaces);
     // And that's said, of the name it was met for.
@@ -1170,7 +1169,7 @@ fn an_image_is_capped_where_a_cap_sized_it() {
     let mut low = Limits::DEFAULT;
     low.color.space_depth = 0;
     let resources = parsed("<< /ColorSpace << /X [/Pattern /DeviceRGB] /Y /DeviceRGB >> >>");
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     let res = ResCx::read(nothing, Some(&resources), &low).unwrap();
     assert_eq!(res.capped().collect::<Vec<_>>(), [b"X"]);
     let by = |cs: &str, lim: &Limits| {
@@ -6113,9 +6112,12 @@ fn span_of(s: &[u8], part: &[u8]) -> SpanAcross {
 
 #[test]
 fn marked_ranges_have_their_lists() {
-    let ocg = dict! { "Type" => "OCG" };
+    let ocg = dict! { "Type" => Object::name("OCG") };
     let props = Properties::new([
-        (b"P0".to_vec(), dict! { "Subtype" => "Header" }),
+        (
+            b"P0".to_vec(),
+            dict! { "Subtype" => Object::name("Header") },
+        ),
         (b"oc1".to_vec(), ocg.clone()),
     ]);
     let first: &[u8] =
@@ -6134,7 +6136,7 @@ fn marked_ranges_have_their_lists() {
     let Some(Props::Inline(list)) = &m[0].props else {
         panic!("{:?}", m[0].props)
     };
-    assert_eq!(list.get(b"Subtype").unwrap(), &Object::from("Footer"));
+    assert_eq!(list.get(b"Subtype").unwrap(), &Object::name("Footer"));
     assert_eq!(
         list.get(b"A").unwrap(),
         &Object::from(vec![
@@ -6148,7 +6150,7 @@ fn marked_ranges_have_their_lists() {
     assert_eq!(m[2].props, None);
     assert_eq!(
         m[3].props.as_ref().and_then(Props::dict),
-        Some(&dict! { "Subtype" => "Header" })
+        Some(&dict! { "Subtype" => Object::name("Header") })
     );
     assert_eq!(m[4].props, Some(Props::Named(b"None".to_vec(), None)));
 }
@@ -6233,7 +6235,7 @@ fn names_used_are_by_category() {
 /// names content uses have.
 #[test]
 fn marked_content_takes_the_operands_pdfium_gives_bdc() {
-    let list = dict! { "Lang" => "en" };
+    let list = dict! { "Lang" => Object::name("en") };
     let props = Properties::new([(b"P1".to_vec(), list.clone())]);
     let s: &[u8] = b"/Span <</MCID 0 1 /Alt>> BDC 0 0 1 1 re f EMC /Tag <</A 1 2 /P1 BDC EMC";
     let c = Concat::new(&[s]);
@@ -6264,7 +6266,7 @@ fn marked_content_takes_the_operands_pdfium_gives_bdc() {
 #[test]
 fn marked_content_stepped_by_hand() {
     use MarkedEvent::{Ended, Opened};
-    let header = dict! { "Subtype" => "Header" };
+    let header = dict! { "Subtype" => Object::name("Header") };
     let props = Properties::new([(b"P0".to_vec(), header.clone())]);
     let s: &[u8] = b"/A BMC q /B /P0 BDC 0 0 m EMC Q /C <</K 1>> BDC EMC EMC";
     let page = Concat::new(&[s]);
@@ -6392,7 +6394,10 @@ fn marked_content_stepped_by_hand() {
 /// dictionary, is its range's alone.
 #[test]
 fn marked_content_holds_no_more_than_its_cap() {
-    let props = Properties::new([(b"P0".to_vec(), dict! { "Subtype" => "Header" })]);
+    let props = Properties::new([(
+        b"P0".to_vec(),
+        dict! { "Subtype" => Object::name("Header") },
+    )]);
     let read = |s: &[u8], marked| {
         let lim = Limits { marked, ..*LIM };
         let found = crate::marked(&Concat::new(&[s]), &props, &ResCx::none(), &lim);
@@ -6904,7 +6909,7 @@ fn no_debug_prints_content() {
     let resources = Object::from(dict! {
         "Properties" => dict! { "ShAAAAAA" => dict! { "Alt" => Object::bytes(RUN) } },
     });
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     let reserved = Reserved::read(nothing, Some(&resources), &limits);
     unprinted("Reserved", &format!("{reserved:?}"));
 

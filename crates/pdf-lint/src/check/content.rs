@@ -1345,10 +1345,10 @@ impl<'a> Walk<'a> {
                 false => &none,
                 true => {
                     let source = self.source;
-                    let objects = move |id| source.get(id).ok();
                     (spaces.entry(resources.map(ptr::from_ref))).or_insert_with(|| {
                         // A closure can't say why an object doesn't read,
                         // so this never fails.
+                        let objects = pdf_objects::resolve_fn(move |id| source.get(id).ok());
                         ResCx::read(objects, resources, &limits).unwrap_or_default()
                     })
                 }
@@ -1409,7 +1409,7 @@ impl<'a> Walk<'a> {
             let (kind, key) = (category.kind, category_key(category.kind));
             let spared = categories.spared.get(&kind);
             for entry in category.dict.last_entries() {
-                let name = &entry.key[..];
+                let name = entry.key();
                 match category.used.get(name) {
                     Some(false) => {}
                     _ => continue,
@@ -1430,7 +1430,7 @@ impl<'a> Walk<'a> {
                 let trail = Rc::new(Trail {
                     up: Some(category.trail.clone()),
                     step: Step::Key(name),
-                    object: &entry.value,
+                    object: entry.value(),
                 });
                 let shown = String::from_utf8_lossy(&name[..name.len().min(TOKEN)]);
                 self.report.findings.push(Finding {
@@ -1441,7 +1441,7 @@ impl<'a> Walk<'a> {
                     key: key.clone(),
                     rule: Rule::Unused,
                     value: format!("/{shown}"),
-                    at: entry.key_at.or(entry.value.at),
+                    at: entry.key_at().or(entry.value().at()),
                     revision: None,
                 });
             }
@@ -1474,11 +1474,10 @@ impl<'a> Walk<'a> {
         let reached = self.resources_at.get(&ptr::from_ref(resources.object));
         let mut found = Vec::new();
         for entry in dict.last_entries() {
-            let Some(&kind) = (ResKind::ALL.iter()).find(|kind| kind.key() == entry.key.as_slice())
-            else {
+            let Some(&kind) = (ResKind::ALL.iter()).find(|kind| kind.key() == entry.key()) else {
                 continue;
             };
-            let (id, value) = match self.resolve(&entry.value) {
+            let (id, value) = match self.resolve(entry.value()) {
                 Ok((_, value)) if value.is_null() => continue,
                 Ok(found) => found,
                 Err(_) => {
@@ -1493,12 +1492,12 @@ impl<'a> Walk<'a> {
             let identity = match (id, resources.id) {
                 (Some(id), _) => Some(Identity::Object(id)),
                 (None, Some(id)) => Some(Identity::Key(id, kind)),
-                (None, None) => value.at.map(Identity::At),
+                (None, None) => value.at().map(Identity::At),
             };
             let make = || {
                 let used = (names.last_entries())
-                    .filter(|e| !matches!(self.resolve(&e.value), Ok((_, v)) if v.is_null()))
-                    .map(|e| (&e.key[..], false))
+                    .filter(|e| !matches!(self.resolve(e.value()), Ok((_, v)) if v.is_null()))
+                    .map(|e| (e.key(), false))
                     .collect();
                 let object = (id.or(resources.id))
                     .or_else(|| reached.and_then(|r| r.holder))
@@ -1513,7 +1512,7 @@ impl<'a> Walk<'a> {
                 };
                 let trail = Rc::new(Trail {
                     up: Some(up),
-                    step: Step::Key(&entry.key),
+                    step: Step::Key(entry.key()),
                     object: value,
                 });
                 Category {
@@ -2191,9 +2190,9 @@ mod tests {
             .filter(|f| counted(f.rule, &f.key))
             .map(|f| {
                 let at = f.at.unwrap();
-                let data = opened.decoded_within(at.stream.unwrap(), usize::MAX);
+                let data = opened.decoded_within(at.stream().unwrap(), usize::MAX);
                 let data = data.unwrap().unwrap();
-                let bytes = String::from_utf8_lossy(&data[at.start..at.end]).into_owned();
+                let bytes = String::from_utf8_lossy(&data[at.start()..at.end()]).into_owned();
                 let object = f.object.unwrap().number;
                 (
                     f.rule,
@@ -2298,8 +2297,8 @@ mod tests {
         let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
         let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
         let spans: Vec<_> = report.findings.iter().map(|f| f.at.unwrap()).collect();
-        let (start, end) = (spans[1].start, spans[1].end);
-        assert_eq!((spans[0].start, spans[0].end, start, end), (0, 1, 4, 5));
+        let (start, end) = (spans[1].start(), spans[1].end());
+        assert_eq!((spans[0].start(), spans[0].end(), start, end), (0, 1, 4, 5));
         // Across a page's streams, as one.
         assert_eq!(found_in_page(&["q 1 0 0 1 9 9 cm", "Q"]), []);
         assert_eq!(
@@ -3447,15 +3446,13 @@ mod tests {
             .filter(|f| f.rule == rule)
             .map(|f| {
                 let bytes = match f.at {
-                    Some(
-                        at @ Span {
-                            stream: Some(id), ..
-                        },
-                    ) => {
-                        let data = opened.decoded_within(id, usize::MAX).unwrap().unwrap();
-                        data[at.start..at.end].to_vec()
-                    }
-                    Some(at) => file[at.start..at.end].to_vec(),
+                    Some(at) => match at.stream() {
+                        Some(id) => {
+                            let data = opened.decoded_within(id, usize::MAX).unwrap().unwrap();
+                            data[at.start()..at.end()].to_vec()
+                        }
+                        None => file[at.start()..at.end()].to_vec(),
+                    },
                     None => Vec::new(),
                 };
                 (

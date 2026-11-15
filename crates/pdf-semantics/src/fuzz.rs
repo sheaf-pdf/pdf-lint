@@ -9,7 +9,8 @@ use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{
-    Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, WithStreams, dict, serialize,
+    Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, WithStreams, dict, resolve_fn,
+    serialize,
 };
 
 use crate::date::{Date, Quirk};
@@ -403,7 +404,7 @@ fn written_back(walk: &Walked, kind: Kind) {
         Kind::Numbers => tree::write_numbers(owned.map(|(k, v)| (number_of(&k), v))),
     };
     let root = Object::from(tree.expect("each key once, no stream a value of a tree can be"));
-    let nothing = |_: ObjectId| -> Option<&Object> { None };
+    let nothing = resolve_fn(|_: ObjectId| None);
     let mut kept = Kept::default();
     let back = walked(nothing, &root, kind, &Limits::DEFAULT, &mut kept);
     assert_eq!(kept.0, [], "written, it has no fault");
@@ -772,7 +773,7 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
 /// ([`tree_written`]).
 pub fn walks(data: &[u8]) {
     let objects = values(data);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     if let Some(trailer) = objects.get(&ObjectId::new(1, 0)).and_then(Object::as_dict) {
         over(resolve, trailer);
     }
@@ -950,10 +951,11 @@ fn tree_read_back(
             Object::from(page.number),
             Object::from(200),
         ];
-        let dict = dict! { "Type" => "Page", "Parent" => parent, "MediaBox" => media };
+        let dict =
+            dict! { "Type" => Object::name("Page"), "Parent" => parent, "MediaBox" => media };
         assert!(objects.insert(page, Object::from(dict)).is_none());
     }
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = &objects;
     let catalog = dict! { "Pages" => written.root };
     for rules in [Rules::Iso, Rules::Pdfium] {
         let mut kept = Kept::default();
@@ -1050,9 +1052,9 @@ pub fn xmp(data: &[u8]) {
         fn fault(&mut self, place: Place, _: Fault) {
             assert_eq!(place.object, Some(PACKET));
             let at = place.at.expect("a place in the packet");
-            assert_eq!(at.stream, Some(PACKET));
-            assert!(at.start <= at.end);
-            self.0 = self.0.max(at.end);
+            assert_eq!(at.stream(), Some(PACKET));
+            assert!(at.start() <= at.end());
+            self.0 = self.0.max(at.end());
         }
     }
 
@@ -1075,7 +1077,7 @@ pub fn xmp(data: &[u8]) {
     let mixed_at = (heard.0.iter()).filter(|(_, fault)| *fault == Fault::XmpMixed);
     for (place, _) in mixed_at {
         let at = place.at.expect("a place in the packet");
-        let bytes = &data[at.start..at.end];
+        let bytes = &data[at.range()];
         assert!(bytes.starts_with(b"<") && bytes.ends_with(b">"), "{at:?}");
     }
     mixed(data);
@@ -1129,8 +1131,11 @@ pub fn xmp(data: &[u8]) {
 /// catalog's `/Metadata` leads to no stream, nothing asked of the function.
 fn from_streams(data: &[u8], read: &Result<Claims, xmp::Error>, heard: &[(Place, Fault)]) {
     const PACKET: ObjectId = ObjectId::new(9, 0);
-    let stream = Object::stream(dict! { "Type" => "Metadata", "Subtype" => "XML" });
-    let objects = |id: ObjectId| (id == PACKET).then_some(&stream);
+    let stream = Object::stream(dict! {
+        "Type" => Object::name("Metadata"),
+        "Subtype" => Object::name("XML"),
+    });
+    let objects = resolve_fn(|id: ObjectId| (id == PACKET).then_some(&stream));
     let catalogs = [
         dict! { "Metadata" => Object::reference(9) },
         dict! { "Metadata" => Object::reference(8) },

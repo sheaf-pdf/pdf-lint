@@ -40,9 +40,9 @@ impl<'o> Named<'o> {
     /// The name `entry` is.
     fn of(entry: &'o Entry) -> Named<'o> {
         Named {
-            key: &entry.key,
-            key_at: entry.key_at,
-            value: &entry.value,
+            key: entry.key(),
+            key_at: entry.key_at(),
+            value: entry.value(),
         }
     }
 }
@@ -90,11 +90,11 @@ impl<'o> Spaces<'o> {
     /// of chromium/8152 there's no dictionary, and that's no error.
     ///
     /// ```
-    /// use pdf_color::pdf_objects::{Object, ObjectId, dict};
+    /// use pdf_color::pdf_objects::{Object, ObjectId, dict, resolve_fn};
     /// use pdf_color::{Limits, Spaces, components};
     ///
-    /// let resources = Object::from(dict! { "ColorSpace" => dict! { "A" => "DeviceCMYK" } });
-    /// let nothing = |_: ObjectId| None;
+    /// let resources = Object::from(dict! { "ColorSpace" => dict! { "A" => Object::name("DeviceCMYK") } });
+    /// let nothing = resolve_fn(|_: ObjectId| None);
     /// let spaces = Spaces::read(nothing, Some(&resources)).unwrap().unwrap();
     /// let named = spaces.get(b"A").unwrap();
     /// assert_eq!(components(nothing, named.value, &Limits::DEFAULT), Ok(Some(4)));
@@ -144,16 +144,20 @@ impl<'o> Spaces<'o> {
     /// them, so a caller that stops early pays for what it asked, and the
     /// whole costs what each name's [`counted`](crate::counted) does, with no
     /// cap over all of them ([`Limits::space_visits`] says what that can come
-    /// to). Its upper bound is the dictionary's entries, for a caller that
-    /// makes room for every name at once.
+    /// to). Its upper bound is the dictionary's distinct keys, for a caller
+    /// that makes room for every name at once.
     ///
     /// ```
-    /// use pdf_color::pdf_objects::{Object, ObjectId, dict};
+    /// use pdf_color::pdf_objects::{Object, ObjectId, dict, resolve_fn};
     /// use pdf_color::{Limits, Spaces};
     ///
-    /// let spaces = dict! { "A" => "DeviceCMYK", "B" => Object::reference(9), "C" => "Pattern" };
+    /// let spaces = dict! {
+    ///     "A" => Object::name("DeviceCMYK"),
+    ///     "B" => Object::reference(9),
+    ///     "C" => Object::name("Pattern"),
+    /// };
     /// let resources = Object::from(dict! { "ColorSpace" => spaces });
-    /// let nothing = |_: ObjectId| None;
+    /// let nothing = resolve_fn(|_: ObjectId| None);
     /// let spaces = Spaces::read(nothing, Some(&resources)).unwrap().unwrap();
     /// let counts: Vec<(&[u8], Option<u32>)> = (spaces.components(nothing, &Limits::DEFAULT))
     ///     .map(|(named, counted)| (named.key, counted.unwrap().count))
@@ -210,11 +214,11 @@ impl<'o> Iterator for Iter<'o> {
     #[inline]
     fn next(&mut self) -> Option<Named<'o>> {
         (self.entries.by_ref())
-            .find(|entry| !entry.key.is_empty())
+            .find(|entry| !entry.key().is_empty())
             .map(Named::of)
     }
 
-    /// At most one an entry left: as many as the dictionary has, at first.
+    /// At most one per distinct key left.
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, self.entries.size_hint().1)
@@ -224,7 +228,7 @@ impl<'o> Iterator for Iter<'o> {
     #[inline]
     fn fold<B, F: FnMut(B, Named<'o>) -> B>(self, init: B, mut f: F) -> B {
         self.entries
-            .fold(init, |acc, entry| match entry.key.is_empty() {
+            .fold(init, |acc, entry| match entry.key().is_empty() {
                 true => acc,
                 false => f(acc, Named::of(entry)),
             })
@@ -235,7 +239,7 @@ impl DoubleEndedIterator for Iter<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         (self.entries.by_ref())
-            .rfind(|entry| !entry.key.is_empty())
+            .rfind(|entry| !entry.key().is_empty())
             .map(Named::of)
     }
 }
@@ -295,7 +299,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use pdf_objects::parse::Parser;
-    use pdf_objects::{Object, ObjectId, Why, dict};
+    use pdf_objects::{Object, ObjectId, Why, dict, resolve_fn};
 
     use super::*;
     use crate::{Limits, components};
@@ -324,8 +328,7 @@ mod tests {
     /// dictionary, by what it holds under `/X`.
     fn found(resources: &str, extra: &[&str]) -> Option<usize> {
         let (resources, objects) = (value(resources), objects(extra));
-        let resolve = |id: ObjectId| objects.get(&id);
-        let spaces = Spaces::read(resolve, Some(&resources)).unwrap();
+        let spaces = Spaces::read(&objects, Some(&resources)).unwrap();
         spaces.map(|spaces| spaces.iter().count())
     }
 
@@ -339,24 +342,24 @@ mod tests {
     #[test]
     fn color_spaces_count_their_components() {
         let icc = Object::stream(dict! { "N" => 4 });
-        let gray = Object::from("DeviceGray");
+        let gray = Object::name("DeviceGray");
         let spaces = Object::from(dict! {
-            "Icc" => vec![Object::from("ICCBased"), Object::reference(1)],
-            "Cmyk" => "DeviceCMYK",
+            "Icc" => vec![Object::name("ICCBased"), Object::reference(1)],
+            "Cmyk" => Object::name("DeviceCMYK"),
             "Gray" => Object::reference(2),
             "Idx" => vec![
-                Object::from("Indexed"),
-                Object::from("DeviceRGB"),
+                Object::name("Indexed"),
+                Object::name("DeviceRGB"),
                 Object::from(1),
                 Object::text("abcdef"),
             ],
             "N2" => vec![
-                Object::from("DeviceN"),
-                Object::from(vec![Object::from("a"), Object::from("b")]),
-                Object::from("DeviceRGB"),
+                Object::name("DeviceN"),
+                Object::from(vec![Object::name("a"), Object::name("b")]),
+                Object::name("DeviceRGB"),
                 Object::reference(4),
             ],
-            "Lab" => vec![Object::from("Lab"), Object::from(dict! {})],
+            "Lab" => vec![Object::name("Lab"), Object::from(dict! {})],
             "Odd" => 7,
         });
         let function = value("<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [0 0 0] >>");
@@ -367,7 +370,7 @@ mod tests {
             (ObjectId::new(4, 0), function),
         ]);
         let resources = Object::from(dict! { "ColorSpace" => Object::reference(3) });
-        let resolve = |id: ObjectId| objects.get(&id);
+        let resolve = &objects;
         let spaces = Spaces::read(resolve, Some(&resources)).unwrap().unwrap();
         let counted: Vec<(&[u8], Option<u32>)> = (spaces.iter())
             .map(|named| {
@@ -449,7 +452,7 @@ mod tests {
     #[test]
     fn a_key_written_twice_is_its_last_and_each_read_is_the_same() {
         let resources = value("<< /ColorSpace << /X /DeviceGray /Y 7 /X /DeviceCMYK / /G >> >>");
-        let nothing = |_: ObjectId| None;
+        let nothing = resolve_fn(|_: ObjectId| None);
         let spaces = Spaces::read(nothing, Some(&resources)).unwrap().unwrap();
         let keys: Vec<&[u8]> = spaces.iter().map(|named| named.key).collect();
         assert_eq!(keys, [&b"Y"[..], &b"X"[..]]);
@@ -468,11 +471,11 @@ mod tests {
     /// name, an empty key none, in order.
     fn filtered<'o>(spaces: &Spaces<'o>) -> Vec<Named<'o>> {
         (spaces.dict.last_entries())
-            .filter(|entry| !entry.key.is_empty())
+            .filter(|entry| !entry.key().is_empty())
             .map(|entry| Named {
-                key: &entry.key,
-                key_at: entry.key_at,
-                value: &entry.value,
+                key: entry.key(),
+                key_at: entry.key_at(),
+                value: entry.value(),
             })
             .collect()
     }
@@ -501,12 +504,11 @@ mod tests {
         ];
         for (text, extra) in shapes {
             let (resources, objects) = (value(text), objects(extra));
-            let resolve = |id: ObjectId| objects.get(&id);
-            let spaces = Spaces::read(resolve, Some(&resources)).unwrap().unwrap();
+            let spaces = Spaces::read(&objects, Some(&resources)).unwrap().unwrap();
             let want = filtered(&spaces);
             let iter: Iter<'_> = spaces.iter();
-            // At most every entry, so a caller can make room for them all.
-            let entries = spaces.dict.entries().len();
+            // At most every distinct key, so a caller can make room for them all.
+            let entries = spaces.dict.last_entries().len();
             assert_eq!(iter.size_hint(), (0, Some(entries)), "{text}");
             let names: Vec<Named<'_>> = iter.clone().collect();
             assert_eq!(names, want, "{text}");
@@ -525,7 +527,7 @@ mod tests {
         }
         // From both ends at once, each name once.
         let resources = value(shapes[2].0);
-        let nothing = |_: ObjectId| None;
+        let nothing = resolve_fn(|_: ObjectId| None);
         let spaces = Spaces::read(nothing, Some(&resources)).unwrap().unwrap();
         let mut iter = spaces.iter();
         let key = |named: Option<Named<'_>>| named.map(|named| named.key.to_vec());
@@ -601,7 +603,7 @@ mod tests {
     #[test]
     fn components_says_which_names_met_a_cap() {
         let resources = value("<< /ColorSpace << /N [[/DeviceGray]] /G /DeviceGray >> >>");
-        let nothing = |_: ObjectId| None;
+        let nothing = resolve_fn(|_: ObjectId| None);
         let spaces = Spaces::read(nothing, Some(&resources)).unwrap().unwrap();
         let mut limits = Limits::DEFAULT;
         limits.space_depth = 0;

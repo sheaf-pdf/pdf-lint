@@ -699,11 +699,19 @@ mod tests {
         let objects = [
             (
                 1,
-                fixture::Body::from(dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }),
+                fixture::Body::from(dict! {
+                    "Type" => Object::name("Catalog"),
+                    "Pages" => Object::reference(2),
+                }),
             ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 }.into(),
+                dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => Vec::<Object>::new(),
+                    "Count" => 0,
+                }
+                .into(),
             ),
             (5, dict! { "Title" => Object::text("Old") }.into()),
         ];
@@ -749,7 +757,7 @@ mod tests {
             .unwrap();
         let title = info.get(b"Title").unwrap().value();
         assert!(
-            matches!(title, Value::String(Str::Bytes(b), _) if b == b"Old"),
+            matches!(title, Value::String(Str::Bytes(b), _) if b.as_slice() == b"Old"),
             "{title:?}"
         );
         assert!(

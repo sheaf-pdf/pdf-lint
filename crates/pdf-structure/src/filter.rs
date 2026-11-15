@@ -432,7 +432,7 @@ mod tests {
     fn names(names: &[&str]) -> Object {
         names
             .iter()
-            .map(|&n| Object::from(n))
+            .map(|&n| Object::name(n))
             .collect::<Vec<_>>()
             .into()
     }
@@ -568,12 +568,12 @@ mod tests {
         ];
         for (name, filter) in all {
             assert_eq!(
-                read(&dict! { "Filter" => name }),
+                read(&dict! { "Filter" => Object::name(name) }),
                 Ok(vec![filter]),
                 "{name}"
             );
         }
-        let why = read(&dict! { "Filter" => "DCTDecode" }).unwrap_err();
+        let why = read(&dict! { "Filter" => Object::name("DCTDecode") }).unwrap_err();
         assert_eq!(why, "its filter /DCTDecode isn't one the reader decodes");
         let why = read(&dict! { "Filter" => 1 }).unwrap_err();
         assert_eq!(why, "its /Filter is neither a name nor an array");
@@ -597,16 +597,16 @@ mod tests {
         let dict = dict! { "Filter" => names(&["Fl", "Fl"]), "DecodeParms" => predicted };
         assert_eq!(read(&dict), Ok(vec![flate, flate]));
         // An empty array, none; another length, not decoded.
-        let dict = dict! { "Filter" => "Fl", "DecodeParms" => names(&[]) };
+        let dict = dict! { "Filter" => Object::name("Fl"), "DecodeParms" => names(&[]) };
         assert_eq!(read(&dict), Ok(vec![FLATE]));
         let two: Vec<Object> = vec![Object::null(), Object::null()];
-        let dict = dict! { "Filter" => "Fl", "DecodeParms" => two };
+        let dict = dict! { "Filter" => Object::name("Fl"), "DecodeParms" => two };
         assert_eq!(
             read(&dict).unwrap_err(),
             "its /DecodeParms has 2 entries for 1 filters"
         );
         // A filter that takes none given some, even none at all.
-        let dict = dict! { "Filter" => "AHx", "DecodeParms" => dict! {} };
+        let dict = dict! { "Filter" => Object::name("AHx"), "DecodeParms" => dict! {} };
         let why = read(&dict).unwrap_err();
         assert_eq!(
             why,
@@ -614,14 +614,15 @@ mod tests {
         );
         // What isn't a dictionary, LZW and Flate take as the defaults.
         assert_eq!(
-            read(&dict! { "Filter" => "Fl", "DecodeParms" => 5 }),
+            read(&dict! { "Filter" => Object::name("Fl"), "DecodeParms" => 5 }),
             Ok(vec![FLATE])
         );
     }
 
     #[test]
     fn predictors_and_early_change_are_read_and_checked() {
-        let with = |parms: Dict| read(&dict! { "Filter" => "LZW", "DecodeParms" => parms });
+        let with =
+            |parms: Dict| read(&dict! { "Filter" => Object::name("LZW"), "DecodeParms" => parms });
         let tiff = Predictor::Tiff(Layout {
             colors: 3,
             bits_per_component: 16,
@@ -645,7 +646,7 @@ mod tests {
                 "/LZW's /Predictor is 3, not 1, 2 or 10 to 15",
             ),
             (
-                dict! { "Predictor" => "PNG" },
+                dict! { "Predictor" => Object::name("PNG") },
                 "/LZW's /Predictor isn't an integer",
             ),
             (
@@ -675,27 +676,36 @@ mod tests {
             with(dict! { "Columns" => -1, "Colors" => 5_000_000_000i64 }),
             Ok(vec![lzw])
         );
-        let why = with(dict! { "Columns" => "many" }).unwrap_err();
+        let why = with(dict! { "Columns" => Object::name("many") }).unwrap_err();
         assert_eq!(why, "/LZW's /Columns isn't an integer");
     }
 
     #[test]
     fn crypt_with_the_identity_filter_is_no_filter() {
-        let identity = dict! { "Name" => "Identity" };
+        let identity = dict! { "Name" => Object::name("Identity") };
         let parms: Vec<Object> = vec![identity.into(), Object::null()];
         let dict = dict! { "Filter" => names(&["Crypt", "Fl"]), "DecodeParms" => parms };
         assert_eq!(read(&dict), Ok(vec![FLATE]));
-        assert_eq!(read(&dict! { "Filter" => "Crypt" }), Ok(vec![]));
+        assert_eq!(
+            read(&dict! { "Filter" => Object::name("Crypt") }),
+            Ok(vec![])
+        );
         // Whatever its crypt filter: the streams the reader decodes aren't
         // encrypted. But parameters qpdf doesn't take, it doesn't.
-        let other = dict! { "Filter" => "Crypt", "DecodeParms" => dict! { "Name" => "StdCF" } };
+        let other = dict! {
+            "Filter" => Object::name("Crypt"),
+            "DecodeParms" => dict! { "Name" => Object::name("StdCF") },
+        };
         assert_eq!(read(&other), Ok(vec![]));
-        let odd =
-            dict! { "Filter" => "Crypt", "DecodeParms" => dict! { "Name" => "StdCF", "X" => 1 } };
+        let odd = dict! {
+            "Filter" => Object::name("Crypt"),
+            "DecodeParms" => dict! { "Name" => Object::name("StdCF"), "X" => 1 },
+        };
         assert_eq!(read(&odd).unwrap_err(), "/Crypt's parameters have /X");
-        let typed = dict! { "Type" => "CryptFilterDecodeParms", "X" => Object::null() };
+        let typed =
+            dict! { "Type" => Object::name("CryptFilterDecodeParms"), "X" => Object::null() };
         assert_eq!(
-            read(&dict! { "Filter" => "Crypt", "DecodeParms" => typed }),
+            read(&dict! { "Filter" => Object::name("Crypt"), "DecodeParms" => typed }),
             Ok(vec![])
         );
     }
@@ -704,7 +714,7 @@ mod tests {
     fn references_are_followed_as_far_as_they_resolve() {
         let predicted = dict! { "Predictor" => Object::reference(9), "Columns" => 4 };
         let objects = BTreeMap::from([
-            (ObjectId::new(7, 0), Object::from("FlateDecode")),
+            (ObjectId::new(7, 0), Object::name("FlateDecode")),
             (ObjectId::new(8, 0), Object::from(predicted)),
             (ObjectId::new(9, 0), Object::from(12)),
         ]);

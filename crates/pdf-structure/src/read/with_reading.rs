@@ -305,7 +305,7 @@ mod tests {
                 assert!(!Source::in_the_clear(&reading, stream), "{name}: {stream}");
             }
             for (id, object) in alone.objects() {
-                let Some(stream) = object.at.and_then(|at| at.stream) else {
+                let Some(stream) = object.at().and_then(|at| at.stream()) else {
                     continue;
                 };
                 let first = Source::held(&reading, stream).is_none();

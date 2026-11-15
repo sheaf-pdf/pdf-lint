@@ -22,11 +22,13 @@ PDF content stream lexer, operator parser, analyzer, writer, and byte-preserving
 Join two page content streams from a stream provider, iterate operations, and inspect graphics balance and marked content:
 
 ```rust
-use pdf_content_streams::pdf_objects::{Object, ObjectId, Unreadable, WithStreams, Why};
+use pdf_content_streams::pdf_objects::{
+    Object, ObjectId, Unreadable, Why, WithStreams, resolve_fn,
+};
 use pdf_content_streams::{Join, Limits, Operator, Pos, Properties, ResCx, balance, marked};
 
 // A reader that gives streams 4 and 5, decoded.
-let nothing = |_: ObjectId| None::<&Object>;
+let nothing = resolve_fn(|_: ObjectId| None::<&Object>);
 let streams = WithStreams::new(nothing, |id: ObjectId, _limit: usize| match id.number {
     4 => Ok(b"q /Span <</MCID 0>> BDC BT (Hel".to_vec()),
     5 => Ok(b"lo) Tj ET EMC Q".to_vec()),
@@ -66,10 +68,15 @@ assert_eq!(found[0].span.to_string(), "stream 0 byte 2 to stream 1 byte 13");
 Write content and assign collision-free resource names at finalization:
 
 ```rust
-use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
+use pdf_content_streams::pdf_objects::{Object, ObjectId, dict, resolve_fn};
 use pdf_content_streams::{ContentWriter, Limits, Res, Reserved};
 
-let font = Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" }).unwrap();
+let font = Res::dict(dict! {
+    "Type" => Object::name("Font"),
+    "Subtype" => Object::name("Type1"),
+    "BaseFont" => Object::name("Helvetica"),
+})
+.unwrap();
 let mut w = ContentWriter::new();
 w.begin_text();
 w.font(font.clone(), 12.0);
@@ -82,8 +89,11 @@ let want = format!("BT\n/{name} 12 Tf\n72 700 Td\n(Hello, \\(world\\)) Tj\nET\n"
 assert_eq!(content, want.as_bytes());
 
 // Avoid colliding with an existing `/Resources` binding for a different font:
-let objects = [Object::from(dict! { "Type" => "Font", "BaseFont" => "Courier" })];
-let resolve = |id: ObjectId| objects.get((id.number as usize).checked_sub(1)?);
+let objects = [Object::from(dict! {
+    "Type" => Object::name("Font"),
+    "BaseFont" => Object::name("Courier"),
+})];
+let resolve = resolve_fn(|id: ObjectId| objects.get((id.number as usize).checked_sub(1)?));
 let resources = Object::from(dict! { "Font" => dict! { name.as_str() => Object::reference(1) } });
 let (_, renamed) = w.named(&Reserved::read(resolve, Some(&resources), &Limits::DEFAULT));
 assert_ne!(renamed.0[0].name, needs.0[0].name);

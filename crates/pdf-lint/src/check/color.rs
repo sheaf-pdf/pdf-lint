@@ -286,7 +286,7 @@ impl<'a> Walk<'a> {
         // The value at the fault's bytes, where it's written whole there.
         let there = held.as_ref().and_then(|(held, written, at)| {
             let there = held.as_ref().map_or(*written, |&(_, value)| value);
-            (there.at == Some(*at)).then_some(there)
+            (there.at() == Some(*at)).then_some(there)
         });
         let (key, keyed) = match (kind_key(&fault), fault) {
             (Some(key), _) => (key.to_string(), Keyed::Entry(key)),
@@ -301,7 +301,7 @@ impl<'a> Walk<'a> {
         };
         let whole = object.filter(|_| {
             held.as_ref()
-                .is_some_and(|(held, written, at)| held.is_none() && written.at == Some(*at))
+                .is_some_and(|(held, written, at)| held.is_none() && written.at() == Some(*at))
         });
         let family = there.filter(|_| of_a_family(fault)).and_then(|there| {
             // Through its references, as the walk reaches the space.
@@ -312,7 +312,7 @@ impl<'a> Walk<'a> {
                 };
                 (object, space) = (Some(id), self.source.get(id).ok()?);
             }
-            Some((object, space.as_array()?.first()?.at?))
+            Some((object, space.as_array()?.first()?.at()?))
         });
         let first = object.and_then(|id| self.spaces_at.get(&id));
         let (path, table) = self.path_and_table(object, written, at, keyed, first, space);
@@ -375,7 +375,7 @@ pub(super) mod tests {
     }
 
     fn names(names: &[&str]) -> Object {
-        let names: Vec<Object> = names.iter().map(|&n| Object::from(n)).collect();
+        let names: Vec<Object> = names.iter().map(|&n| Object::name(n)).collect();
         names.into()
     }
 
@@ -384,16 +384,24 @@ pub(super) mod tests {
     /// every object held as built.
     fn checked(version: &str, resources: Dict) -> Report {
         let page = dict! {
-            "Type" => "Page",
+            "Type" => Object::name("Page"),
             "Parent" => r(2),
             "MediaBox" => numbers(&[0, 0, 612, 792]),
             "Resources" => resources,
         };
         let objects: Vec<(u32, Body)> = vec![
-            (1, dict! { "Type" => "Catalog", "Pages" => r(2) }.into()),
+            (
+                1,
+                dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }.into(),
+            ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }.into(),
+                dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![r(3)],
+                    "Count" => 1,
+                }
+                .into(),
             ),
             (3, page.into()),
         ];
@@ -417,9 +425,9 @@ pub(super) mod tests {
             "N" => 1,
         };
         let space = vec![
-            Object::from("DeviceN"),
+            Object::name("DeviceN"),
             self::names(names),
-            Object::from("DeviceCMYK"),
+            Object::name("DeviceCMYK"),
             tint.into(),
             attributes.into(),
         ];
@@ -458,14 +466,14 @@ pub(super) mod tests {
     #[test]
     fn a_device_n_space_s_names_decide_its_colorants_and_process() {
         let nchannel = |more: Dict| {
-            let mut attributes = dict! { "Subtype" => "NChannel" };
+            let mut attributes = dict! { "Subtype" => Object::name("NChannel") };
             for (key, value) in more.iter() {
                 attributes.set(key, value.clone());
             }
             attributes
         };
         let process = |space: &str, components: &[&str]| {
-            dict! { "ColorSpace" => space, "Components" => names(components) }
+            dict! { "ColorSpace" => Object::name(space), "Components" => names(components) }
         };
         let spot = |name: &str| {
             let tint = dict! {
@@ -476,9 +484,9 @@ pub(super) mod tests {
                 "N" => 1,
             };
             let space = vec![
-                Object::from("Separation"),
-                Object::from(name),
-                Object::from("DeviceCMYK"),
+                Object::name("Separation"),
+                Object::name(name),
+                Object::name("DeviceCMYK"),
                 tint.into(),
             ];
             Object::from(space)
@@ -536,18 +544,18 @@ pub(super) mod tests {
     fn a_halftone_s_keys_name_colorants_but_all_and_none() {
         let screen = || {
             dict! {
-                "Type" => "Halftone",
+                "Type" => Object::name("Halftone"),
                 "HalftoneType" => 1,
                 "Frequency" => 60,
                 "Angle" => 45,
-                "SpotFunction" => "Round",
+                "SpotFunction" => Object::name("Round"),
             }
         };
-        let mut halftone = dict! { "Type" => "Halftone", "HalftoneType" => 5 };
+        let mut halftone = dict! { "Type" => Object::name("Halftone"), "HalftoneType" => 5 };
         for key in ["Default", "Cyan", "Spot1", "All", "None"] {
             halftone.set(key, screen());
         }
-        let state = dict! { "Type" => "ExtGState", "HT" => halftone };
+        let state = dict! { "Type" => Object::name("ExtGState"), "HT" => halftone };
         let report = checked("1.7", dict! { "ExtGState" => dict! { "GS0" => state } });
         let found: Vec<(&str, Rule)> = (report.findings.iter())
             .filter(|f| f.table == "HalftoneType5")
@@ -620,7 +628,9 @@ pub(super) mod tests {
         (report.findings.iter())
             .filter(|f| f.rule == Rule::ColorSpace)
             .map(|f| {
-                let at = f.at.map(|at| &file[at.start..at.end]).unwrap_or_default();
+                let at =
+                    f.at.map(|at| &file[at.start()..at.end()])
+                        .unwrap_or_default();
                 (
                     f.object.map(|id| id.number),
                     f.path.clone(),

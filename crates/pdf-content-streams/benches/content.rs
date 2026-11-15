@@ -53,7 +53,7 @@ use pdf_content_streams::{
 };
 use pdf_filters::{Backend, Encoder, Layout, Level, Prediction, Row, encode};
 use pdf_objects::parse::Parser;
-use pdf_objects::{Dict, Object, ObjectId, Stream, dict};
+use pdf_objects::{Dict, Object, ObjectId, Stream, dict, resolve_fn};
 
 const LIM: &Limits = &Limits::DEFAULT;
 
@@ -326,7 +326,10 @@ fn tagged() -> Vec<u8> {
 /// The lists the tagged page names, `MC0` to `MC3`.
 fn lists() -> Properties {
     Properties::new((0..4).map(|i| {
-        let list = dict! { "Type" => "Pagination", "Subtype" => "Header" };
+        let list = dict! {
+            "Type" => Object::name("Pagination"),
+            "Subtype" => Object::name("Header"),
+        };
         (format!("MC{i}").into_bytes(), list)
     }))
 }
@@ -427,14 +430,13 @@ fn rescx_group(c: &mut Criterion) {
             (ObjectId::new(number, 0), stream.unwrap_or(object))
         })
         .collect();
-    let resolve = |id: ObjectId| objects.get(&id);
     let mut text = String::from("<< /ProcSet [/PDF /ImageC] /ColorSpace <<");
     for (at, (space, _)) in (0..SPACE_NAMES).zip(SPACES.iter().cycle()) {
         text.push_str(&format!(" /CS{at} {space}"));
     }
     text.push_str(" >> >>");
     let resources = value(&text);
-    let read = ResCx::read(resolve, Some(&resources), LIM);
+    let read = ResCx::read(&objects, Some(&resources), LIM);
     let read = read.unwrap_or_else(|e| panic!("rescx/read-100: {e}"));
     let expected = ResCx::new(
         (0..SPACE_NAMES)
@@ -447,7 +449,7 @@ fn rescx_group(c: &mut Criterion) {
     let mut group = c.benchmark_group("rescx");
     group.throughput(Throughput::Bytes(written as u64));
     group.bench_function("read-100", |b| {
-        b.iter(|| ResCx::read(resolve, Some(black_box(&resources)), LIM))
+        b.iter(|| ResCx::read(&objects, Some(black_box(&resources)), LIM))
     });
     group.finish();
 }
@@ -509,10 +511,18 @@ const WRITTEN_OPERATIONS: usize = 17;
 /// The written page's resources: its font and its image, an image stream
 /// whose data is in memory.
 fn drawn() -> (Res, Res) {
-    let font = dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let font = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    };
     let image = dict! {
-        "Type" => "XObject", "Subtype" => "Image", "Width" => 32, "Height" => 32,
-        "BitsPerComponent" => 8, "ColorSpace" => "DeviceGray",
+        "Type" => Object::name("XObject"),
+        "Subtype" => Object::name("Image"),
+        "Width" => 32,
+        "Height" => 32,
+        "BitsPerComponent" => 8,
+        "ColorSpace" => Object::name("DeviceGray"),
     };
     let image = Object::from(Stream::new(image, pixels()));
     let font = Res::dict(font).expect("write/calls: a font of names");
@@ -578,8 +588,11 @@ fn write_group(c: &mut Criterion) {
         resources.push(kind.key(), category);
     }
     let resources = Object::from(resources);
-    let other = Object::from(dict! { "Type" => "Font", "BaseFont" => "Courier" });
-    let resolve = |id: ObjectId| (id == ObjectId::new(1, 0)).then_some(&other);
+    let other = Object::from(dict! {
+        "Type" => Object::name("Font"),
+        "BaseFont" => Object::name("Courier"),
+    });
+    let resolve = resolve_fn(|id: ObjectId| (id == ObjectId::new(1, 0)).then_some(&other));
     let reserved = Reserved::read(resolve, Some(&resources), LIM);
     assert_eq!(
         reserved.names().count(),

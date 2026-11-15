@@ -345,8 +345,8 @@ type Handed<'f> = Result<(&'f Stream, Cow<'f, [u8]>), Error>;
 
 /// [`Error::Outside`]'s text.
 fn outside(span: &Span) -> String {
-    let (start, end) = (span.start, span.end);
-    match span.stream {
+    let (start, end) = (span.start(), span.end());
+    match span.stream() {
         None => format!("bytes {start}..{end} aren't in the file"),
         Some(stream) => {
             format!("bytes {start}..{end} aren't in object stream {stream} R's decoded data")
@@ -1121,7 +1121,7 @@ impl<S: ByteSource> Reading<S> {
         file: F,
         span: Span,
     ) -> Result<Result<Cow<'f, [u8]>, Error>, F::Error> {
-        match span.stream {
+        match span.stream() {
             None if self.reader.list.encrypts => Ok(Err(Error::Encrypted)),
             _ => self.written_in(file, span),
         }
@@ -1153,9 +1153,9 @@ impl<S: ByteSource> Reading<S> {
         file: F,
         span: Span,
     ) -> Result<Result<Cow<'f, [u8]>, Error>, F::Error> {
-        let range = span.start..span.end;
+        let range = span.range();
         let outside = Error::Outside { span };
-        Ok(match span.stream {
+        Ok(match span.stream() {
             None => file.get(range)?.ok_or(outside),
             Some(ObjectId {
                 number: stream,
@@ -1380,13 +1380,13 @@ impl<S: ByteSource> Reading<S> {
         };
         let reader = &self.reader;
         let failed = Cell::new(None);
-        let resolve = |id| match reader.get(file, id) {
+        let resolve = pdf_objects::resolve_fn(|id| match reader.get(file, id) {
             Ok(object) => object.ok(),
             Err(error) => {
                 failed.set(Some(error));
                 None
             }
-        };
+        });
         // A cross-reference stream's values are direct (ISO 32000-2,
         // 7.5.8.2), so its references aren't followed, as the file is read.
         let filters = match is_xref(&stream.dict) {

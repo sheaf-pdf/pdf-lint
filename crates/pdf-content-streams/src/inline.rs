@@ -74,12 +74,12 @@ impl ResCx {
     /// own means for now.
     ///
     /// ```
-    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict, resolve_fn};
     /// use pdf_content_streams::{Limits, ResCx, operations};
     ///
-    /// let space = Object::from(vec![Object::from("Pattern"), Object::from("DeviceRGB")]);
+    /// let space = Object::from(vec![Object::name("Pattern"), Object::name("DeviceRGB")]);
     /// let resources = Object::from(dict! { "ColorSpace" => dict! { "CS0" => space } });
-    /// let nothing = |_: ObjectId| None;
+    /// let nothing = resolve_fn(|_: ObjectId| None);
     /// let res = ResCx::read(nothing, Some(&resources), &Limits::DEFAULT).unwrap();
     /// assert_eq!(res, ResCx::new([(b"CS0".to_vec(), 4)]));
     ///
@@ -129,12 +129,12 @@ impl ResCx {
     /// capped ([`InlineImage::capped`]).
     ///
     /// ```
-    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict, resolve_fn};
     /// use pdf_content_streams::{Limits, ResCx};
     ///
-    /// let nested = Object::from(vec![Object::from(vec![Object::from("DeviceGray")])]);
+    /// let nested = Object::from(vec![Object::from(vec![Object::name("DeviceGray")])]);
     /// let resources = Object::from(dict! { "ColorSpace" => dict! { "CS0" => nested } });
-    /// let nothing = |_: ObjectId| None;
+    /// let nothing = resolve_fn(|_: ObjectId| None);
     /// let mut limits = Limits::DEFAULT;
     /// assert_eq!(ResCx::read(nothing, Some(&resources), &limits).unwrap().capped().count(), 0);
     /// limits.color.space_depth = 0;
@@ -810,7 +810,7 @@ impl<'a, 'r> Images<'a, 'r> {
         let Within::Read(Some(space), _) = space else {
             return Some((3, false));
         };
-        let nothing = |_: ObjectId| None;
+        let nothing = pdf_objects::resolve_fn(|_: ObjectId| None);
         let counted = pdf_color::counted(nothing, &space, &self.lim.color);
         Some(counted.map_or((3, false), |read| {
             (read.count.map_or(3, u64::from), read.capped)

@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-color"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "criterion",
  "pdf-fixtures",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-objects"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "criterion",
  "memchr",

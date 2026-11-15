@@ -185,7 +185,7 @@ impl<'w> Copying<'w> {
         }
         let bytes = self.checked(id, record)?;
         let mut header = Parser::at(&bytes, 0);
-        if header.header().ok() != Some(id) {
+        if header.header(&mut ()).ok() != Some(id) {
             return Err(Error::Elsewhere(id));
         }
         let header = header.offset();
@@ -196,7 +196,7 @@ impl<'w> Copying<'w> {
         if to.0.is_some() {
             // A stream's references are in its dictionary, before its data.
             let end = match record.data {
-                Some(data) => data.at.start.saturating_sub(record.at.start),
+                Some(data) => data.at.start().saturating_sub(record.at.start()),
                 None => bytes.len(),
             };
             let placed = references(id, object, record, &bytes, header..end, to, &mut anew);
@@ -284,7 +284,7 @@ impl<'w> Copying<'w> {
             }) => (s, i) == (stream, index),
             _ => false,
         };
-        if !listed || id.generation != 0 || record.at.stream != Some(ObjectId::new(stream, 0)) {
+        if !listed || id.generation != 0 || record.at.stream() != Some(ObjectId::new(stream, 0)) {
             return Err(Error::Elsewhere(id));
         }
         let bytes = self.checked(id, record)?;
@@ -337,12 +337,12 @@ fn references(
     while let Some(object) = stack.pop() {
         let entries = match object.value() {
             Value::Ref(named) => {
-                let at = object.at.ok_or_else(elsewhere)?;
-                let start = at.start.checked_sub(record.at.start);
-                let end = at.end.checked_sub(record.at.start);
+                let at = object.at().ok_or_else(elsewhere)?;
+                let start = at.start().checked_sub(record.at.start());
+                let end = at.end().checked_sub(record.at.start());
                 let run = match (start, end) {
                     (Some(start), Some(end))
-                        if at.stream == record.at.stream
+                        if at.stream() == record.at.stream()
                             && past <= start
                             && start < end
                             && end <= within.end =>
@@ -369,7 +369,7 @@ fn references(
             Value::Stream(stream) => stream.dict.entries(),
             _ => continue,
         };
-        stack.extend(entries.iter().rev().map(|entry| &entry.value));
+        stack.extend(entries.iter().rev().map(pdf_objects::Entry::value));
     }
     Ok(())
 }
@@ -423,11 +423,12 @@ pub(super) fn as_read(
     if record.source != source || record.id != id {
         return Err(Error::Elsewhere(id));
     }
-    let Some(at) = object.at else {
+    let Some(at) = object.at() else {
         return Ok(false);
     };
-    let within =
-        at.stream == record.at.stream && record.at.start <= at.start && at.end <= record.at.end;
+    let within = at.stream() == record.at.stream()
+        && record.at.start() <= at.start()
+        && at.end() <= record.at.end();
     let stream = match object.value() {
         Value::Stream(stream) => Some(stream),
         _ => None,

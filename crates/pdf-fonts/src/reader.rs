@@ -53,7 +53,7 @@ impl<'c, O, S: Sink<Fault> + ?Sized> Reader<'c, O, S> {
     ) {
         let mut sink = self.sink.borrow_mut();
         if sink.wants() && self.failed.borrow().is_none() {
-            let at = value.and_then(|value| value.at);
+            let at = value.and_then(Object::at);
             sink.fault(Place::new(object, at), fault());
         }
     }

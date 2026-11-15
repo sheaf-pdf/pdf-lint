@@ -146,8 +146,8 @@ impl Rows {
             _ => &mut entries.many[..],
         };
         for entry in dict.entries() {
-            if let Some(place) = self.place(&entry.key) {
-                slots[place] = Some(&entry.value);
+            if let Some(place) = self.place(entry.key()) {
+                slots[place] = Some(entry.value());
             }
         }
         entries

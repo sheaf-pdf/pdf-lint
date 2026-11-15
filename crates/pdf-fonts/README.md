@@ -30,8 +30,8 @@ use pdf_fonts::{Error, Font, Limits};
 
 // Helvetica-Bold, by a name PDFium takes for it, its /ToUnicode object 1.
 let font = dict! {
-    "Subtype" => "Type1", "BaseFont" => "Arial,Bold", "Encoding" => "WinAnsiEncoding",
-    "ToUnicode" => Object::reference(1),
+    "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Arial,Bold"),
+    "Encoding" => Object::name("WinAnsiEncoding"), "ToUnicode" => Object::reference(1),
 };
 let cmap = b"1 begincodespacerange <00> <FF> endcodespacerange\n\
     1 beginbfchar <01> <FB01> endbfchar";
@@ -39,8 +39,7 @@ let stream = Stream::new(dict! {}, cmap.to_vec());
 let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(stream))]);
 
 // Its objects, and its streams' data as they hold it.
-let resolve = |id: ObjectId| objects.get(&id);
-let streams = WithStreams::new(&resolve, |id, _| {
+let streams = WithStreams::new(&objects, |id, _| {
     let data = objects.get(&id).and_then(Object::as_stream);
     let data = data.and_then(|stream| stream.data.bytes()).map(<[u8]>::to_vec);
     data.ok_or_else(|| Unreadable::new(id, Why::Damaged, "no such stream"))
@@ -59,7 +58,7 @@ assert_eq!(read.text(b"\x01A\x80").as_deref(), Some("\u{FB01}A€"));
 assert!(read.approx().heights);
 
 // A stream past a cap of what gives it is the caller's to know, the budget kept.
-let capped = WithStreams::new(&resolve, |id, _| {
+let capped = WithStreams::new(&objects, |id, _| {
     Err(Unreadable::new(id, Why::Capped, "past the reader's cap"))
 });
 let mut budget = 1 << 20;

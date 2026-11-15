@@ -1,78 +1,45 @@
-//! The writer: values as PDF syntax (ISO 32000-2, 7.3), as a direct
-//! object, or as an indirect object's `n g obj` to `endobj`, which the
-//! parser ([`parse`](crate::parse)) reads back as the same value, under
-//! limits that take in its count of values. The writer keeps to
-//! [`Limits::DEFAULT`]'s nesting, but not to its 2^25 values, which a
-//! value in memory may pass.
+//! Deterministic PDF object serializer (ISO 32000-2 §7.3).
 //!
-//! - **Reals** in their shortest form that reads back as the same f64,
-//!   past i64's range too, never with an exponent; a magnitude past Annex
-//!   C's is clamped to it, and one too small for it written as 0.
-//! - **Names and strings** byte by byte, a string in its [`Form`], or
-//!   literal when it has none.
-//! - **Dictionaries** with every entry, in order, a key written twice
-//!   included, though ISO 32000-2 has a dictionary hold one entry for a
-//!   key (7.3.7): [`Dict::remove_duplicates`] leaves each key's last.
-//! - **Streams** with their data as it is, and its length as their
-//!   `/Length`, in place of each `/Length` entry or after the others. A
-//!   stream reads back only as an indirect object, as it is one (7.3.8):
-//!   one written alone by [`write()`], or inside another value, is
-//!   written all the same, though no reader reads it back as a stream.
+//! Writes direct values ([`write()`], [`write_renumbered`]) and indirect objects ([`indirect`],
+//! [`indirect_with`], [`indirect_renumbered`], [`indirect_stream`], [`indirect_stream_with`],
+//! [`indirect_stream_renumbered`]) as canonical PDF syntax:
 //!
-//! Numbers, names and strings are written byte by byte rather than through
-//! `write!`, which a writer of thousands of objects pays for at every one;
-//! a real alone goes through it, for its shortest form.
+//! - **Reals:** Shortest fixed-point decimal representation (always containing `.` and never an
+//!   exponent) that round-trips to the same `f64`, up to 255 bytes. Non-finite values return
+//!   [`Error::NonFinite`]; finite values whose fixed-point token exceeds 255 bytes return
+//!   [`Error::RealOutOfRange`].
+//! - **Names and strings:** Written byte-for-byte. Names containing NUL (`0x00`) are rejected
+//!   ([`Error::NulName`]). Strings preserve their [`Form`] (defaulting to [`Form::Literal`]), and
+//!   unencrypted [`Str::Encrypted`] values are rejected ([`Error::Encrypted`]).
+//! - **Dictionaries:** Preserve entry order and duplicate keys; use [`Dict::remove_duplicates`]
+//!   before serializing if strict single-key output is desired.
+//! - **Streams:** Written only as top-level indirect objects (`n g obj ... endobj`), updating or
+//!   appending `/Length` to match the serialized byte count. Direct or nested [`Value::Stream`]
+//!   values are rejected ([`Error::InlineStream`]).
+//! - **Object IDs:** Object number `0` is reserved for the cross-reference free list; indirect
+//!   headers or emitted references with `number == 0` are rejected ([`Error::ZeroObjectId`]).
 //!
-//! What it can't write as the value is refused, and then nothing is
-//! written ([`Error`]): a real that isn't finite, values nested deeper than
-//! a parser reads them under [`Limits::DEFAULT`], a string whose bytes
-//! aren't known or that's still ciphertext, and a stream whose data isn't
-//! in memory, which [`indirect_stream`] writes from data given apart.
-//!
-//! **Encrypted as it's written.** An indirect object of an encrypted file
-//! is written through an encryptor ([`Encrypt`], by [`indirect_with`] and
-//! [`indirect_stream_with`]), which every string in it, a stream's
-//! dictionary's included, and a stream's data pass through, given the
-//! object's number and generation, as each is written (ISO 32000-2,
-//! 7.6.2): a stream's `/Length` is then its encrypted data's. It says what
-//! it leaves in the clear: a whole object, or a dictionary's entry. `()`
-//! encrypts nothing, for a file that isn't encrypted, and [`indirect`] and
-//! [`indirect_stream`] write as through it, by a walk of their own with
-//! nothing to encrypt, so they pay for no encryptor. A direct object
-//! ([`write()`]) is never encrypted, as an object stream's members are
-//! encrypted with their container, whole, and a trailer isn't (7.5.7,
-//! 7.6.2). The encryptor refusing, nothing is written either
-//! ([`Refused`]).
-//!
-//! **References named as they're written.** A file whose objects are
-//! written at numbers other than those they're held at names each
-//! reference through a renumbering ([`Renumber`], by [`write_renumbered`],
-//! [`indirect_renumbered`] and [`indirect_stream_renumbered`]): the number
-//! and generation it gives, or `null` where it gives none, the value
-//! itself unchanged. An indirect object's own number is the one it's
-//! written at, given as [`indirect`] is given it, and so is the one an
-//! encryptor is given; the dictionary it's given beside it is the value as
-//! held, its references in the numbers they're held at. `()` names each as
-//! it is, and the writers without a renumbering write as through it, by
-//! the walk compiled for it, so they pay for none.
+//! On any [`Error`] or [`Refused`], the output buffer is rolled back to its starting length.
 
-use std::borrow::Cow;
-use std::convert::Infallible;
-use std::io::Write as _;
-use std::marker::PhantomData;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::convert::Infallible;
+use core::fmt::{self, Write as _};
+use core::marker::PhantomData;
+use core::slice;
 
 use crate::object::{Dict, Entry, Form, Object, ObjectId, Str, Value};
 use crate::parse::Limits;
 
-/// The largest magnitude a real is written at: Annex C's, for readers
-/// that hold reals in single precision.
-const MAX_REAL: f64 = 3.4e38;
+/// Maximum fixed-point byte length emitted by [`real`].
+const MAX_REAL_LEN: usize = 255;
 
-/// The smallest nonzero magnitude: a real nearer 0 is written as 0.
-const MIN_REAL: f64 = 1.175e-38;
-
-/// The bytes a name writes as they are: `!`–`~` but `#` and the
-/// delimiters.
+/// Lookup table of ASCII graphic bytes written verbatim in PDF names (`!`..=`~` minus `#` and
+/// PDF delimiters). Note that `REGULAR[0]` is `false`.
 const REGULAR: [bool; 256] = {
     let mut regular = [false; 256];
     let mut b = b'!';
@@ -89,132 +56,129 @@ const REGULAR: [bool; 256] = {
     regular
 };
 
-/// Why the writer wrote nothing.
+/// Reason serialization refused an object and wrote nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// A real that's NaN or an infinity, which no reader can read back.
-    #[error("a real that isn't a finite number{}", in_object(.id))]
+    /// A real number is `NaN` or infinite.
+    #[error("non-finite real number{}", in_object(.id))]
     NonFinite {
-        /// The indirect object it's in, when that's known.
+        /// Indirect object ID being written, if any.
         id: Option<ObjectId>,
     },
-    /// Arrays and dictionaries nested deeper than a parser reads them under
-    /// [`Limits::DEFAULT`], so what's written reads back.
-    #[error("arrays and dictionaries nested deeper than {limit}{}", in_object(.id))]
-    Nested {
-        /// The indirect object they're in, when that's known.
+    /// A finite real number requires more than 255 bytes in fixed-point decimal notation.
+    #[error("real number exceeds 255-byte fixed-point limit{}", in_object(.id))]
+    RealOutOfRange {
+        /// Indirect object ID being written, if any.
         id: Option<ObjectId>,
-        /// How deeply they may nest.
+    },
+    /// Containers are nested deeper than [`Limits::DEFAULT`]'s nesting cap.
+    #[error("containers nested deeper than {limit}{}", in_object(.id))]
+    Nested {
+        /// Indirect object ID being written, if any.
+        id: Option<ObjectId>,
+        /// Maximum permitted container nesting depth.
         limit: usize,
     },
-    /// A string read as text, whose bytes aren't known ([`Str::Text`]).
-    #[error("a string read as text, whose bytes aren't known{}", in_object(.id))]
-    Text {
-        /// The indirect object it's in, when that's known.
-        id: Option<ObjectId>,
-    },
-    /// A string that's still ciphertext ([`Str::Encrypted`]), which is
-    /// right to write only under the key, and the number and generation,
-    /// it was encrypted with.
-    #[error("a string that's still ciphertext{}", in_object(.id))]
+    /// A string is still marked as ciphertext ([`Str::Encrypted`]).
+    #[error("string is still ciphertext{}", in_object(.id))]
     Encrypted {
-        /// The indirect object it's in, when that's known.
+        /// Indirect object ID being written, if any.
         id: Option<ObjectId>,
     },
-    /// A stream whose data isn't in memory, as
-    /// [`Data::Bytes`](crate::Data::Bytes): [`indirect_stream`] writes one
-    /// from data given apart.
-    #[error("a stream whose data isn't in memory{}", in_object(.id))]
+    /// A stream's payload is not held in memory as [`Data::Bytes`](crate::Data::Bytes).
+    ///
+    /// Use [`indirect_stream`] to serialize stream bytes supplied out-of-line.
+    #[error("stream data is not in memory{}", in_object(.id))]
     Data {
-        /// The indirect object it's in, when that's known.
+        /// Indirect object ID being written, if any.
+        id: Option<ObjectId>,
+    },
+    /// A [`Value::Stream`] was passed to [`write()`] / [`write_renumbered`] or nested inside an
+    /// array or dictionary.
+    #[error("stream cannot be written as a direct or nested value{}", in_object(.id))]
+    InlineStream {
+        /// Indirect object ID being written, if any.
+        id: Option<ObjectId>,
+    },
+    /// A name or dictionary key contains a NUL (`0x00`) byte (forbidden by ISO 32000-2 §7.3.5).
+    #[error("name contains a NUL byte{}", in_object(.id))]
+    NulName {
+        /// Indirect object ID being written, if any.
+        id: Option<ObjectId>,
+    },
+    /// An indirect object header or emitted indirect reference has `number == 0`.
+    #[error("object number 0 is reserved for the free list{}", in_object(.id))]
+    ZeroObjectId {
+        /// Indirect object ID being written, if any.
         id: Option<ObjectId>,
     },
 }
 
 impl Error {
-    /// The error, said of object `id`.
+    /// Attaches indirect object `id` to an error that has none yet.
     fn within(self, id: ObjectId) -> Error {
         match self {
             Error::NonFinite { id: None } => Error::NonFinite { id: Some(id) },
+            Error::RealOutOfRange { id: None } => Error::RealOutOfRange { id: Some(id) },
             Error::Nested { id: None, limit } => Error::Nested {
                 id: Some(id),
                 limit,
             },
-            Error::Text { id: None } => Error::Text { id: Some(id) },
             Error::Encrypted { id: None } => Error::Encrypted { id: Some(id) },
             Error::Data { id: None } => Error::Data { id: Some(id) },
-            e => e,
+            Error::InlineStream { id: None } => Error::InlineStream { id: Some(id) },
+            Error::NulName { id: None } => Error::NulName { id: Some(id) },
+            Error::ZeroObjectId { id: None } => Error::ZeroObjectId { id: Some(id) },
+            other => other,
         }
     }
 }
 
-/// " in object n g", when `id` is known, for an error's text.
 fn in_object(id: &Option<ObjectId>) -> String {
     id.map(|id| format!(" in object {id}")).unwrap_or_default()
 }
 
-/// What encrypts an encrypted file's strings and streams' data as the
-/// writer writes them (ISO 32000-2, 7.6.2), each given the number and
-/// generation of the object it's in, and says what it leaves in the clear.
-/// [`indirect_with`] and [`indirect_stream_with`] write through one; `()`
-/// encrypts nothing, for a file that isn't encrypted, and [`indirect`] and
-/// [`indirect_stream`] write as through it. pdf-structure's writer
-/// implements it over pdf-crypt, by the list of what an encrypted file
-/// leaves in the clear that its reader decrypts by.
+/// Per-object encryption hook for [`indirect_with`], [`indirect_renumbered`],
+/// [`indirect_stream_with`], and [`indirect_stream_renumbered`] (ISO 32000-2 §7.6.2).
 ///
-/// An object's strings and its data are encrypted, but where it says
-/// otherwise, so that a caller that leaves something out leaves it in the
-/// clear only by its say: the writer asks it of each indirect object
-/// ([`Encrypt::clear`]), then of each dictionary in it
-/// ([`Encrypt::clear_key`]), and passes every other string through
-/// [`Encrypt::string`] and a stream's data through [`Encrypt::stream`],
-/// once each, as it writes them, a stream's data before its dictionary, so
-/// that its `/Length` is what it gave.
-///
-/// The `id` each is asked with is the number the object is written at,
-/// whose key encrypts it; the `dict` it's given is the object's, or its
-/// stream's, as held, its references not renumbered, though a renumbering
-/// writes them otherwise ([`indirect_renumbered`],
-/// [`indirect_stream_renumbered`]): an encryptor that follows one, to a
-/// stream's `/DecodeParms` given by reference say, resolves it in the
-/// numbers the objects are held at.
+/// `()` implements `Encrypt` as a no-op cleartext pass-through.
 pub trait Encrypt {
-    /// Why it doesn't encrypt a string or a stream's data, which the writer
-    /// gives back ([`Refused::Encrypt`]).
+    /// Error returned when encrypting a string or stream fails.
     type Error;
 
-    /// Whether object `id` is written as it is, every string in it and its
-    /// data, given its dictionary, or its stream's, when it has one, and
-    /// whether it's a stream: asked once an indirect object, before any of
-    /// it is written. An encryption dictionary, say, or a cross-reference
-    /// stream (7.5.8.2).
+    /// Returns `true` if the entire indirect object `id` should be written in the clear (for
+    /// example, an `/Encrypt` dictionary or `/XRef` stream).
     #[must_use]
-    fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool;
+    fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool {
+        let _ = (id, dict, stream);
+        false
+    }
 
-    /// The key of `dict`'s entry, in object `id`, that's written as it is,
-    /// every string in its value, if any: asked once a dictionary, in an
-    /// object [`Encrypt::clear`] doesn't leave in the clear, before its
-    /// entries are written. A signature's `/Contents`, say (7.6.2).
+    /// Returns `true` if `key` inside `dict` (in object `id`) should have its value written in
+    /// the clear (for example, `/Contents` in a signature dictionary).
     #[must_use]
-    fn clear_key(&self, id: ObjectId, dict: &Dict) -> Option<&'static [u8]>;
+    fn is_clear_key(&self, id: ObjectId, dict: &Dict, key: &[u8]) -> bool {
+        let _ = (id, dict, key);
+        false
+    }
 
-    /// String `text` of object `id`, as it's written.
+    /// Encrypts string `text` belonging to indirect object `id`.
     ///
     /// # Errors
     ///
-    /// Its own, where it doesn't encrypt `text`: the writer then refuses
-    /// the object ([`Refused::Encrypt`]), and writes nothing of it.
+    /// Returns `Self::Error` if encryption fails; the serializer rolls back the entire object and
+    /// returns [`Refused::Encrypt`].
     fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error>;
 
-    /// The data of stream `id`, whose dictionary is `dict`, as it's
-    /// written: `data` is plaintext, encoded by the filters `dict` names,
-    /// and its `/Length` is what this gives.
+    /// Encrypts filter-encoded stream payload `data` belonging to stream `id` with `dict`.
+    ///
+    /// Called before serializing `dict` so `/Length` reflects the encrypted byte count.
     ///
     /// # Errors
     ///
-    /// Its own, where it doesn't encrypt `data`: the writer then refuses
-    /// the object ([`Refused::Encrypt`]), and writes nothing of it.
+    /// Returns `Self::Error` if encryption fails; the serializer rolls back the entire object and
+    /// returns [`Refused::Encrypt`].
     fn stream<'d>(
         &self,
         id: ObjectId,
@@ -223,8 +187,6 @@ pub trait Encrypt {
     ) -> Result<Cow<'d, [u8]>, Self::Error>;
 }
 
-/// Nothing encrypted: an object of a file that isn't encrypted, written
-/// as it is.
 impl Encrypt for () {
     type Error = Infallible;
 
@@ -234,8 +196,8 @@ impl Encrypt for () {
     }
 
     #[inline]
-    fn clear_key(&self, _: ObjectId, _: &Dict) -> Option<&'static [u8]> {
-        None
+    fn is_clear_key(&self, _: ObjectId, _: &Dict, _: &[u8]) -> bool {
+        false
     }
 
     #[inline]
@@ -254,22 +216,107 @@ impl Encrypt for () {
     }
 }
 
-/// Why the writer wrote nothing, written through an encryptor: the
-/// writer's own refusal, or the encryptor's. Exhaustive on purpose: each
-/// grows in its own error, so this one doesn't, and a match on both is
-/// checked by the compiler.
+impl<E: Encrypt + ?Sized> Encrypt for &E {
+    type Error = E::Error;
+
+    #[inline]
+    fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool {
+        (**self).clear(id, dict, stream)
+    }
+
+    #[inline]
+    fn is_clear_key(&self, id: ObjectId, dict: &Dict, key: &[u8]) -> bool {
+        (**self).is_clear_key(id, dict, key)
+    }
+
+    #[inline]
+    fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error> {
+        (**self).string(id, text)
+    }
+
+    #[inline]
+    fn stream<'d>(
+        &self,
+        id: ObjectId,
+        dict: &Dict,
+        data: &'d [u8],
+    ) -> Result<Cow<'d, [u8]>, Self::Error> {
+        (**self).stream(id, dict, data)
+    }
+}
+
+impl<E: Encrypt + ?Sized> Encrypt for Box<E> {
+    type Error = E::Error;
+
+    #[inline]
+    fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool {
+        (**self).clear(id, dict, stream)
+    }
+
+    #[inline]
+    fn is_clear_key(&self, id: ObjectId, dict: &Dict, key: &[u8]) -> bool {
+        (**self).is_clear_key(id, dict, key)
+    }
+
+    #[inline]
+    fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error> {
+        (**self).string(id, text)
+    }
+
+    #[inline]
+    fn stream<'d>(
+        &self,
+        id: ObjectId,
+        dict: &Dict,
+        data: &'d [u8],
+    ) -> Result<Cow<'d, [u8]>, Self::Error> {
+        (**self).stream(id, dict, data)
+    }
+}
+
+impl<E: Encrypt + ?Sized> Encrypt for Arc<E> {
+    type Error = E::Error;
+
+    #[inline]
+    fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool {
+        (**self).clear(id, dict, stream)
+    }
+
+    #[inline]
+    fn is_clear_key(&self, id: ObjectId, dict: &Dict, key: &[u8]) -> bool {
+        (**self).is_clear_key(id, dict, key)
+    }
+
+    #[inline]
+    fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error> {
+        (**self).string(id, text)
+    }
+
+    #[inline]
+    fn stream<'d>(
+        &self,
+        id: ObjectId,
+        dict: &Dict,
+        data: &'d [u8],
+    ) -> Result<Cow<'d, [u8]>, Self::Error> {
+        (**self).stream(id, dict, data)
+    }
+}
+
+/// Combined serialization or encryption error returned by `*_with` and `*_renumbered` writers.
+///
+/// Exhaustive on purpose: each variant delegates extensibility to its inner error type.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refused<E> {
-    /// What the writer can't write as the value ([`Error`]).
+    /// Serialization error ([`Error`]).
     #[error("{0}")]
     Write(Error),
-    /// A string or a stream's data of object `id` the encryptor doesn't
-    /// encrypt, and why.
+    /// Encryption error returned by [`Encrypt`].
     #[error("object {id} can't be encrypted: {why}")]
     Encrypt {
-        /// The object.
+        /// Indirect object ID whose string or stream failed encryption.
         id: ObjectId,
-        /// The encryptor's error.
+        /// Underlying encryptor error.
         why: E,
     },
 }
@@ -281,59 +328,48 @@ impl<E> From<Error> for Refused<E> {
 }
 
 impl<E> Refused<E> {
-    /// The refusal, said of object `id`.
     fn within(self, id: ObjectId) -> Refused<E> {
         match self {
             Refused::Write(e) => Refused::Write(e.within(id)),
-            e => e,
+            other => other,
         }
     }
 }
 
-/// What the writer names each reference as, for a file whose objects are
-/// written at numbers other than those they're held at
-/// ([`write_renumbered`], [`indirect_renumbered`],
-/// [`indirect_stream_renumbered`]): given the number and generation a
-/// reference names, those of the object it's written as naming, or none
-/// for a reference to an object the file doesn't hold, which is written as
-/// `null`, as a reference to no object reads (ISO 32000-2, 7.3.10). A
-/// value is written as it is held, unchanged; [`Object::renumber`] changes
-/// it so in memory instead.
+/// On-the-fly indirect reference remapping during serialization.
 ///
-/// `()` names each as it is, and [`write()`], [`indirect`],
-/// [`indirect_with`], [`indirect_stream`] and [`indirect_stream_with`]
-/// write as through it, the walk compiled for it naming nothing anew, so
-/// they pay for no renumbering. Any function from an [`ObjectId`] to an
-/// `Option<ObjectId>` is one, a closure, a `dyn Fn` and a reference to one
-/// among them.
+/// Returning `Some(new_id)` writes `new_id` as `n g R` (unless `new_id.number == 0`, which fails
+/// with [`Error::ZeroObjectId`]); returning `None` writes `null` (ISO 32000-2 §7.3.10).
 ///
-/// It is a function: a writer may ask it of the same id many times, in
-/// any order and on several threads at once (as pdf-structure's does, one
-/// place naming by number what's written in another), and it gives the
-/// same answer each time. A numbering made as it's asked, its next number
-/// handed to the next id it hasn't seen, is made first and given as a map.
+/// Implemented for `()` (identity), any `Fn(ObjectId) -> Option<ObjectId>` closure or function,
+/// and `&dyn Renumber` / `Box<dyn Renumber>`.
 ///
 /// ```
 /// use std::collections::BTreeMap;
-///
 /// use pdf_objects::{Object, ObjectId, dict, serialize};
 ///
-/// let page = Object::from(dict! { "Parent" => ObjectId::new(2, 0), "Annots" => ObjectId::new(9, 0) });
-/// // Object 2 is written as object 1, and object 9 not at all.
-/// let to = BTreeMap::from([(ObjectId::new(2, 0), ObjectId::new(1, 0))]);
-/// let renumber = |id| to.get(&id).copied();
+/// let page = Object::from(dict! {
+///     "Parent" => ObjectId::new(2, 0),
+///     "Annots" => ObjectId::new(9, 0),
+/// });
+/// let map = BTreeMap::from([(ObjectId::new(2, 0), ObjectId::new(1, 0))]);
 /// let mut out = Vec::new();
-/// serialize::indirect_renumbered(&mut out, ObjectId::new(3, 0), &page, &(), &renumber).unwrap();
+/// serialize::indirect_renumbered(
+///     &mut out,
+///     ObjectId::new(3, 0),
+///     &page,
+///     &(),
+///     &|id| map.get(&id).copied(),
+/// )
+/// .unwrap();
 /// assert_eq!(out, b"3 0 obj\n<</Parent 1 0 R/Annots null>>\nendobj\n");
 /// ```
 pub trait Renumber {
-    /// The number and generation of the object a reference to `id` is
-    /// written as naming; none for one written as `null`.
+    /// Maps `id` to its serialized target ID, or `None` to emit `null`.
     #[must_use]
     fn renumber(&self, id: ObjectId) -> Option<ObjectId>;
 }
 
-/// Each reference as it is.
 impl Renumber for () {
     #[inline]
     fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
@@ -341,35 +377,63 @@ impl Renumber for () {
     }
 }
 
-/// A closure, or a function, from a reference's id to the one it's written
-/// as.
 impl<F: Fn(ObjectId) -> Option<ObjectId> + ?Sized> Renumber for F {
+    #[inline]
     fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
         self(id)
     }
 }
 
-/// What a value's strings and streams' data go through as the writer
-/// writes them, and why a write through it fails: nothing, for a value
-/// written as it is ([`Plain`]); or an encryptor, for an indirect object's
-/// ([`Crypt`]). Each is its own copy of the walk, so a value written as it
-/// is carries no encryptor through it, and pays for none.
+impl Renumber for &(dyn Renumber + '_) {
+    #[inline]
+    fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
+        (**self).renumber(id)
+    }
+}
+
+impl Renumber for &(dyn Renumber + Send + '_) {
+    #[inline]
+    fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
+        (**self).renumber(id)
+    }
+}
+
+impl Renumber for &(dyn Renumber + Send + Sync + '_) {
+    #[inline]
+    fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
+        (**self).renumber(id)
+    }
+}
+
+impl Renumber for Box<dyn Renumber + '_> {
+    #[inline]
+    fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
+        (**self).renumber(id)
+    }
+}
+
+impl Renumber for Box<dyn Renumber + Send + '_> {
+    #[inline]
+    fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
+        (**self).renumber(id)
+    }
+}
+
+impl Renumber for Box<dyn Renumber + Send + Sync + '_> {
+    #[inline]
+    fn renumber(&self, id: ObjectId) -> Option<ObjectId> {
+        (**self).renumber(id)
+    }
+}
+
 trait Through: Copy {
-    /// Why a write through it fails.
     type Error: From<Error>;
-    /// What the value of the entry it leaves in the clear goes through.
-    type Clear: Through<Error = Self::Error>;
-    /// The same, but nothing encrypted.
-    fn clear(self) -> Self::Clear;
-    /// The key of `dict`'s entry written as it is, if any.
-    fn clear_key(self, dict: &Dict) -> Option<&'static [u8]>;
-    /// `text`, a string, as it's written.
+    fn clear(self) -> Self;
+    fn is_clear_key(self, dict: &Dict, key: &[u8]) -> bool;
     fn string<'t>(self, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error>;
-    /// `data`, a stream's of dictionary `dict`, as it's written.
     fn stream<'d>(self, dict: &Dict, data: &'d [u8]) -> Result<Cow<'d, [u8]>, Self::Error>;
 }
 
-/// Nothing: what's written as it is, refused, when it is, as `E`.
 struct Plain<E>(PhantomData<fn() -> E>);
 
 impl<E> Plain<E> {
@@ -386,16 +450,15 @@ impl<E> Copy for Plain<E> {}
 
 impl<E: From<Error>> Through for Plain<E> {
     type Error = E;
-    type Clear = Plain<E>;
 
     #[inline]
-    fn clear(self) -> Plain<E> {
+    fn clear(self) -> Self {
         self
     }
 
     #[inline]
-    fn clear_key(self, _: &Dict) -> Option<&'static [u8]> {
-        None
+    fn is_clear_key(self, _: &Dict, _: &[u8]) -> bool {
+        false
     }
 
     #[inline]
@@ -409,10 +472,8 @@ impl<E: From<Error>> Through for Plain<E> {
     }
 }
 
-/// An encryptor, and the id of the object whose strings and data go
-/// through it.
 struct Crypt<'e, E: ?Sized> {
-    encrypt: &'e E,
+    encrypt: Option<&'e E>,
     id: ObjectId,
 }
 
@@ -426,38 +487,50 @@ impl<E: ?Sized> Copy for Crypt<'_, E> {}
 
 impl<E: Encrypt + ?Sized> Through for Crypt<'_, E> {
     type Error = Refused<E::Error>;
-    type Clear = Plain<Refused<E::Error>>;
 
-    fn clear(self) -> Self::Clear {
-        Plain::NEW
+    #[inline]
+    fn clear(self) -> Self {
+        Crypt {
+            encrypt: None,
+            id: self.id,
+        }
     }
 
-    fn clear_key(self, dict: &Dict) -> Option<&'static [u8]> {
-        self.encrypt.clear_key(self.id, dict)
+    #[inline]
+    fn is_clear_key(self, dict: &Dict, key: &[u8]) -> bool {
+        self.encrypt
+            .is_some_and(|enc| enc.is_clear_key(self.id, dict, key))
     }
 
+    #[inline]
     fn string<'t>(self, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error> {
-        let Crypt { encrypt, id } = self;
-        encrypt
-            .string(id, text)
-            .map_err(|why| Refused::Encrypt { id, why })
+        match self.encrypt {
+            Some(enc) => enc
+                .string(self.id, text)
+                .map_err(|why| Refused::Encrypt { id: self.id, why }),
+            None => Ok(Cow::Borrowed(text)),
+        }
     }
 
+    #[inline]
     fn stream<'d>(self, dict: &Dict, data: &'d [u8]) -> Result<Cow<'d, [u8]>, Self::Error> {
-        let Crypt { encrypt, id } = self;
-        encrypt
-            .stream(id, dict, data)
-            .map_err(|why| Refused::Encrypt { id, why })
+        match self.encrypt {
+            Some(enc) => enc
+                .stream(self.id, dict, data)
+                .map_err(|why| Refused::Encrypt { id: self.id, why }),
+            None => Ok(Cow::Borrowed(data)),
+        }
     }
 }
 
-/// `n g obj`, what `body` writes, and `endobj`, at the end of `out`, and
-/// where it starts; nothing, where `body` fails.
-fn object<R>(
+fn object_frame<R: From<Error>>(
     out: &mut Vec<u8>,
     id: ObjectId,
     body: impl FnOnce(&mut Vec<u8>) -> Result<(), R>,
 ) -> Result<usize, R> {
+    if id.number == 0 {
+        return Err(Error::ZeroObjectId { id: Some(id) }.into());
+    }
     let start = out.len();
     reference(out, id);
     out.extend_from_slice(b" obj\n");
@@ -473,56 +546,48 @@ fn object<R>(
     }
 }
 
-/// `obj` as a direct object. A stream is written as one, though a parser
-/// reads it back only as an indirect object ([`indirect`]). Nothing in it
-/// is encrypted, as a direct object isn't alone: an object stream's
-/// members are encrypted with their container, and a trailer isn't.
+/// Writes `obj` as a direct PDF object into `out`.
 ///
 /// # Errors
 ///
-/// [`Error`] for what can't be written as the value, and then nothing is
-/// written: a real that isn't finite, values nested deeper than a parser
-/// reads them under [`Limits::DEFAULT`], a string whose bytes aren't known
-/// or that's still ciphertext, or a stream whose data isn't in memory.
+/// Returns [`Error`] and leaves `out` unchanged if `obj` contains a non-finite or out-of-range
+/// real, exceeds [`Limits::DEFAULT`] nesting, contains [`Str::Encrypted`], contains a NUL byte in
+/// a name, emits reference `0`, or contains a [`Value::Stream`].
 pub fn write(out: &mut Vec<u8>, obj: &Object) -> Result<(), Error> {
     write_renumbered(out, obj, &())
 }
 
-/// `obj` as a direct object, as [`write()`] writes it, each reference in it
-/// as `to` names it ([`Renumber`]): its number and generation, or `null`.
+/// Writes `obj` as a direct PDF object into `out`, remapping references through `to`.
 ///
 /// # Errors
 ///
-/// As [`write()`]'s, and then nothing is written.
+/// Same as [`write()`]; leaves `out` unchanged on error.
 pub fn write_renumbered<N: Renumber + ?Sized>(
     out: &mut Vec<u8>,
     obj: &Object,
     to: &N,
 ) -> Result<(), Error> {
     let start = out.len();
-    value(out, obj, 0, Plain::<Error>::NEW, to).inspect_err(|_| out.truncate(start))
+    value(out, obj, false, Plain::<Error>::NEW, to).inspect_err(|_| out.truncate(start))
 }
 
-/// `obj` as indirect object `id`, `n g obj` to `endobj`, and where in
-/// `out` it starts. Nothing in it is encrypted, as through `()`:
-/// [`indirect_with`] writes an encrypted file's.
+/// Writes `obj` as indirect object `id` (`n g obj\n...\nendobj\n`), returning its start offset in
+/// `out`.
 ///
 /// # Errors
 ///
-/// As [`write()`]'s, the error naming `id`, and then nothing is written.
+/// Returns [`Error`] (attributed to `id`) and leaves `out` unchanged if `id.number == 0` or `obj`
+/// cannot be serialized.
 pub fn indirect(out: &mut Vec<u8>, id: ObjectId, obj: &Object) -> Result<usize, Error> {
     let plain = Plain::<Error>::NEW;
-    object(out, id, |out| value(out, obj, 0, plain, &())).map_err(|e| e.within(id))
+    object_frame(out, id, |out| value(out, obj, true, plain, &())).map_err(|e| e.within(id))
 }
 
-/// `obj` as indirect object `id`, `n g obj` to `endobj`, and where in
-/// `out` it starts, its strings and its data through `encrypt` as it says
-/// ([`Encrypt`]).
+/// Writes `obj` as indirect object `id`, encrypting strings and stream data through `encrypt`.
 ///
 /// # Errors
 ///
-/// [`Refused::Write`] as [`write()`] refuses, the error naming `id`, or
-/// [`Refused::Encrypt`] as `encrypt` refuses; and then nothing is written.
+/// Returns [`Refused::Write`] or [`Refused::Encrypt`] and leaves `out` unchanged on failure.
 pub fn indirect_with<E: Encrypt + ?Sized>(
     out: &mut Vec<u8>,
     id: ObjectId,
@@ -532,16 +597,15 @@ pub fn indirect_with<E: Encrypt + ?Sized>(
     indirect_renumbered(out, id, obj, encrypt, &())
 }
 
-/// `obj` as indirect object `id`, as [`indirect_with`] writes it, each
-/// reference in it as `to` names it ([`Renumber`]). `id` is the number and
-/// generation it's written at, which `to` isn't asked: its `n g obj`, and
-/// what `encrypt` is given, its key being that number's; the dictionary
-/// `encrypt` is given is `obj`'s as held, its references as they are
-/// ([`Encrypt`]).
+/// Writes `obj` as indirect object `id`, encrypting through `encrypt` and remapping references
+/// through `to`.
+///
+/// `id` is the serialized object number (not passed through `to`) and is passed to `encrypt` along
+/// with `obj`'s un-renumbered dictionary when present.
 ///
 /// # Errors
 ///
-/// As [`indirect_with`]'s, and then nothing is written.
+/// Same as [`indirect_with`]; leaves `out` unchanged on failure.
 pub fn indirect_renumbered<E: Encrypt + ?Sized, N: Renumber + ?Sized>(
     out: &mut Vec<u8>,
     id: ObjectId,
@@ -549,37 +613,35 @@ pub fn indirect_renumbered<E: Encrypt + ?Sized, N: Renumber + ?Sized>(
     encrypt: &E,
     to: &N,
 ) -> Result<usize, Refused<E::Error>> {
-    let (dict, stream) = match obj.value() {
+    if id.number == 0 {
+        return Err(Refused::Write(Error::ZeroObjectId { id: Some(id) }));
+    }
+    let (dict, is_stream) = match obj.value() {
         Value::Dict(d) => (Some(d), false),
         Value::Stream(s) => (Some(&s.dict), true),
         _ => (None, false),
     };
-    let written = match encrypt.clear(id, dict, stream) {
-        true => object(out, id, |out| value(out, obj, 0, Plain::NEW, to)),
-        false => object(out, id, |out| value(out, obj, 0, Crypt { encrypt, id }, to)),
+    let written = if encrypt.clear(id, dict, is_stream) {
+        object_frame(out, id, |out| value(out, obj, true, Plain::NEW, to))
+    } else {
+        let crypt = Crypt {
+            encrypt: Some(encrypt),
+            id,
+        };
+        object_frame(out, id, |out| value(out, obj, true, crypt, to))
     };
     written.map_err(|e| e.within(id))
 }
 
-/// A stream of `dict` and `data`, as indirect object `id`, `n g obj` to
-/// `endobj`, and where in `out` it starts: for data that isn't in memory
-/// as [`Data::Bytes`](crate::Data::Bytes), given apart, without copying
-/// it there. Its `/Length` is `data`'s length. Nothing in it is encrypted,
-/// as through `()`: [`indirect_stream_with`] writes an encrypted file's.
+/// Writes a stream of `dict` and out-of-line `data` as indirect object `id`, returning its start
+/// offset in `out`.
 ///
-/// `data` is written as it is, so it's the stream's data when it's
-/// encoded by the filters `dict` names. It's plaintext: in an encrypted
-/// file, [`indirect_stream_with`] encrypts it as object `id`'s. A reader's
-/// [`Data::At`](crate::Data::At) names data as it was read: encoded by the
-/// filters the stream had then, and in an encrypted file ciphertext, which
-/// is right to copy only whole, as the object it's in was read, under the
-/// key, and the number and generation, it was encrypted with, as a
-/// string's is ([`Error::Encrypted`]).
+/// `data` is written verbatim (already filter-encoded) with `/Length` set to `data.len()`.
 ///
 /// # Errors
 ///
-/// As [`write()`]'s for `dict`, the error naming `id`, and then nothing is
-/// written.
+/// Returns [`Error`] (attributed to `id`) and leaves `out` unchanged if `id.number == 0` or
+/// `dict` cannot be serialized.
 pub fn indirect_stream(
     out: &mut Vec<u8>,
     id: ObjectId,
@@ -587,18 +649,15 @@ pub fn indirect_stream(
     data: &[u8],
 ) -> Result<usize, Error> {
     let plain = Plain::<Error>::NEW;
-    object(out, id, |out| stream(out, dict, data, 0, plain, &())).map_err(|e| e.within(id))
+    object_frame(out, id, |out| stream(out, dict, data, plain, &())).map_err(|e| e.within(id))
 }
 
-/// A stream of `dict` and `data`, as indirect object `id`, as
-/// [`indirect_stream`] writes it, its dictionary's strings and `data`
-/// through `encrypt` as it says ([`Encrypt`]), so its `/Length` is what
-/// `encrypt` gives of `data`. `data` is plaintext, encoded by the filters
-/// `dict` names.
+/// Writes a stream of `dict` and plaintext filter-encoded `data` as indirect object `id`,
+/// encrypting through `encrypt`.
 ///
 /// # Errors
 ///
-/// As [`indirect_with`]'s, and then nothing is written.
+/// Same as [`indirect_with`]; leaves `out` unchanged on failure.
 pub fn indirect_stream_with<E: Encrypt + ?Sized>(
     out: &mut Vec<u8>,
     id: ObjectId,
@@ -609,15 +668,12 @@ pub fn indirect_stream_with<E: Encrypt + ?Sized>(
     indirect_stream_renumbered(out, id, dict, data, encrypt, &())
 }
 
-/// A stream of `dict` and `data`, as indirect object `id`, as
-/// [`indirect_stream_with`] writes it, each reference in `dict` as `to`
-/// names it ([`Renumber`]), but a `/Length`, which is the data's. `id` is
-/// the number and generation it's written at, which `to` isn't asked, and
-/// `encrypt` is given `dict` as it is, as [`indirect_renumbered`] has it.
+/// Writes a stream of `dict` and `data` as indirect object `id`, encrypting through `encrypt` and
+/// remapping references in `dict` through `to`.
 ///
 /// # Errors
 ///
-/// As [`indirect_with`]'s, and then nothing is written.
+/// Same as [`indirect_with`]; leaves `out` unchanged on failure.
 pub fn indirect_stream_renumbered<E: Encrypt + ?Sized, N: Renumber + ?Sized>(
     out: &mut Vec<u8>,
     id: ObjectId,
@@ -626,46 +682,92 @@ pub fn indirect_stream_renumbered<E: Encrypt + ?Sized, N: Renumber + ?Sized>(
     encrypt: &E,
     to: &N,
 ) -> Result<usize, Refused<E::Error>> {
-    let written = match encrypt.clear(id, Some(dict), true) {
-        true => object(out, id, |out| stream(out, dict, data, 0, Plain::NEW, to)),
-        false => object(out, id, |out| {
-            stream(out, dict, data, 0, Crypt { encrypt, id }, to)
-        }),
+    if id.number == 0 {
+        return Err(Refused::Write(Error::ZeroObjectId { id: Some(id) }));
+    }
+    let written = if encrypt.clear(id, Some(dict), true) {
+        object_frame(out, id, |out| stream(out, dict, data, Plain::NEW, to))
+    } else {
+        let crypt = Crypt {
+            encrypt: Some(encrypt),
+            id,
+        };
+        object_frame(out, id, |out| stream(out, dict, data, crypt, to))
     };
     written.map_err(|e| e.within(id))
 }
 
-/// `x` in its shortest form that reads back as the same f64, never with
-/// an exponent and always with a point, so an integral real reads back
-/// as a real. Magnitudes past `MAX_REAL`, 3.4e38, are clamped to it, and
-/// those under `MIN_REAL`, 1.175e-38, written as 0, as is -0.
+struct StackBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> StackBuf<N> {
+    const fn new() -> Self {
+        StackBuf {
+            buf: [0; N],
+            len: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    fn extend(&mut self, bytes: &[u8]) -> Result<(), fmt::Error> {
+        if self.len + bytes.len() > N {
+            return Err(fmt::Error);
+        }
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
+}
+
+impl<const N: usize> fmt::Write for StackBuf<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.extend(s.as_bytes())
+    }
+}
+
+/// Formats `x` in shortest fixed-point decimal notation (always containing `.` and never an
+/// exponent), up to 255 bytes. `-0.0` normalizes to `0.0`.
 ///
 /// # Errors
 ///
-/// [`Error::NonFinite`] for NaN and the infinities, and then nothing is
-/// written.
+/// Returns [`Error::NonFinite`] for `NaN` or infinities, and [`Error::RealOutOfRange`] if the
+/// fixed-point representation exceeds 255 bytes. Leaves `out` unchanged on error.
 pub fn real(out: &mut Vec<u8>, x: f64) -> Result<(), Error> {
     if !x.is_finite() {
         return Err(Error::NonFinite { id: None });
     }
-    let x = if x.abs() > MAX_REAL {
-        MAX_REAL.copysign(x)
-    } else if x.abs() < MIN_REAL {
-        0.0
-    } else {
-        x
-    };
-    let start = out.len();
-    let _ = write!(out, "{x}");
-    if !out[start..].contains(&b'.') {
-        out.extend_from_slice(b".0");
+    if x == 0.0 {
+        out.extend_from_slice(b"0.0");
+        return Ok(());
     }
+    // Fast path for exact integral reals within ±2^53.
+    if x > -9_007_199_254_740_992.0 && x < 9_007_199_254_740_992.0 && (x as i64 as f64) == x {
+        integer(out, x as i64);
+        out.extend_from_slice(b".0");
+        return Ok(());
+    }
+    let mut buf = StackBuf::<260>::new();
+    if write!(&mut buf, "{x}").is_err() {
+        return Err(Error::RealOutOfRange { id: None });
+    }
+    if !buf.as_bytes().contains(&b'.') && buf.extend(b".0").is_err() {
+        return Err(Error::RealOutOfRange { id: None });
+    }
+    if buf.len > MAX_REAL_LEN {
+        return Err(Error::RealOutOfRange { id: None });
+    }
+    out.extend_from_slice(buf.as_bytes());
     Ok(())
 }
 
-/// `n` in decimal, as `{n}` formats it.
+/// Formats `n` in unsigned base-10 ASCII digits.
 pub fn decimal(out: &mut Vec<u8>, mut n: u64) {
-    let mut digits = [0; 20];
+    let mut digits = [0u8; 20];
     let mut at = digits.len();
     loop {
         at -= 1;
@@ -678,7 +780,6 @@ pub fn decimal(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&digits[at..]);
 }
 
-/// `n` in decimal, as `{n}` formats it: a minus before a negative.
 fn integer(out: &mut Vec<u8>, n: i64) {
     if n < 0 {
         out.push(b'-');
@@ -686,28 +787,37 @@ fn integer(out: &mut Vec<u8>, n: i64) {
     decimal(out, n.unsigned_abs());
 }
 
-/// `id`'s number and generation, as `n g`.
 fn reference(out: &mut Vec<u8>, id: ObjectId) {
     decimal(out, id.number.into());
     out.push(b' ');
     decimal(out, id.generation.into());
 }
 
-/// `b` as two uppercase hex digits, as `{b:02X}` formats it.
+#[inline]
 fn hex(out: &mut Vec<u8>, b: u8) {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     out.extend_from_slice(&[DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 15)]]);
 }
 
-/// `/` and `name`, `#`, white-space, a delimiter or a byte outside
-/// `!`–`~` written `#xx`.
-pub fn name(out: &mut Vec<u8>, name: &[u8]) {
-    out.push(b'/');
-    if name.iter().all(|&b| REGULAR[usize::from(b)]) {
-        out.extend_from_slice(name);
-        return;
+/// Writes `/` followed by `bytes`, escaping `#`, whitespace, delimiters, and non-ASCII bytes as
+/// `#XX`.
+///
+/// # Errors
+///
+/// Returns [`Error::NulName`] and leaves `out` unchanged if `bytes` contains `0x00`.
+pub fn name(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Error> {
+    if bytes.iter().all(|&b| REGULAR[usize::from(b)]) {
+        out.reserve(1 + bytes.len());
+        out.push(b'/');
+        out.extend_from_slice(bytes);
+        return Ok(());
     }
-    for &b in name {
+    if memchr::memchr(0, bytes).is_some() {
+        return Err(Error::NulName { id: None });
+    }
+    out.reserve(1 + bytes.len());
+    out.push(b'/');
+    for &b in bytes {
         if REGULAR[usize::from(b)] {
             out.push(b);
         } else {
@@ -715,18 +825,49 @@ pub fn name(out: &mut Vec<u8>, name: &[u8]) {
             hex(out, b);
         }
     }
+    Ok(())
 }
 
-/// `text` as a string in `form`. A literal escapes `\`, CR (which would
-/// read back as LF) and any parenthesis left unbalanced.
+/// Writes `text` as a PDF string in `form`, escaping `\`, `\r`, and any unbalanced parentheses in
+/// [`Form::Literal`].
 pub fn string(out: &mut Vec<u8>, text: &[u8], form: Form) {
     match form {
-        Form::Literal if !text.iter().any(|b| b"\\\r()".contains(b)) => {
-            out.push(b'(');
-            out.extend_from_slice(text);
-            out.push(b')');
-        }
         Form::Literal => {
+            let mut has_backslash_or_cr = false;
+            let mut depth = 0usize;
+            let mut unmatched_close = false;
+            for &b in text {
+                match b {
+                    b'\\' | b'\r' => has_backslash_or_cr = true,
+                    b'(' => depth += 1,
+                    b')' if depth > 0 => depth -= 1,
+                    b')' => unmatched_close = true,
+                    _ => {}
+                }
+            }
+            let balanced = depth == 0 && !unmatched_close;
+            if !has_backslash_or_cr && balanced {
+                out.reserve(2 + text.len());
+                out.push(b'(');
+                out.extend_from_slice(text);
+                out.push(b')');
+                return;
+            }
+            if balanced {
+                out.reserve(2 + text.len() + 4);
+                out.push(b'(');
+                for &b in text {
+                    match b {
+                        b'\\' => out.extend_from_slice(b"\\\\"),
+                        b'\r' => out.extend_from_slice(b"\\r"),
+                        _ => out.push(b),
+                    }
+                }
+                out.push(b')');
+                return;
+            }
+            // Slow path for strings with unbalanced parentheses: every index in `lone` is pushed
+            // when `open` is empty, so `lone` followed by remaining `open` is already sorted.
             let mut open = Vec::new();
             let mut lone = Vec::new();
             for (i, &b) in text.iter().enumerate() {
@@ -737,8 +878,9 @@ pub fn string(out: &mut Vec<u8>, text: &[u8], form: Form) {
                 }
             }
             lone.extend(open);
-            lone.sort_unstable();
+            debug_assert!(lone.windows(2).all(|w| w[0] < w[1]));
             let mut lone = lone.into_iter().peekable();
+            out.reserve(2 + text.len() + lone.len());
             out.push(b'(');
             for (i, &b) in text.iter().enumerate() {
                 match b {
@@ -747,12 +889,13 @@ pub fn string(out: &mut Vec<u8>, text: &[u8], form: Form) {
                     b'(' | b')' if lone.next_if_eq(&i).is_some() => {
                         out.extend_from_slice(&[b'\\', b]);
                     }
-                    b => out.push(b),
+                    _ => out.push(b),
                 }
             }
             out.push(b')');
         }
         Form::Hex => {
+            out.reserve(2 + text.len().saturating_mul(2));
             out.push(b'<');
             for &b in text {
                 hex(out, b);
@@ -762,125 +905,205 @@ pub fn string(out: &mut Vec<u8>, text: &[u8], form: Form) {
     }
 }
 
-/// `obj`, nested `depth` deep in what's written, its strings and its
-/// streams' data through `through`, each reference as `to` names it.
-fn value<T: Through, N: Renumber + ?Sized>(
-    out: &mut Vec<u8>,
-    obj: &Object,
-    depth: usize,
-    through: T,
-    to: &N,
-) -> Result<(), T::Error> {
-    let limit = Limits::DEFAULT.nesting;
-    if depth > limit {
-        return Err(Error::Nested { id: None, limit }.into());
-    }
-    match obj.value() {
-        Value::Null => out.extend_from_slice(b"null"),
-        Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
-        Value::Integer(i) => integer(out, *i),
-        Value::Real(x) => real(out, *x)?,
-        Value::Name(n) => name(out, n),
-        Value::String(Str::Bytes(text), form) => {
-            let text = through.string(text)?;
-            string(out, &text, form.unwrap_or(Form::Literal));
-        }
-        Value::String(Str::Text(_), _) => return Err(Error::Text { id: None }.into()),
-        Value::String(Str::Encrypted(_), _) => return Err(Error::Encrypted { id: None }.into()),
-        Value::Array(items) => {
-            out.push(b'[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 && spaced(item) {
-                    out.push(b' ');
-                }
-                value(out, item, depth + 1, through, to)?;
-            }
-            out.push(b']');
-        }
-        Value::Dict(d) => dictionary(out, d, None, depth, through, to)?,
-        Value::Stream(s) => {
-            let Some(data) = s.data.bytes() else {
-                return Err(Error::Data { id: None }.into());
-            };
-            stream(out, &s.dict, data, depth, through, to)?;
-        }
-        Value::Ref(id) => match to.renumber(*id) {
-            Some(id) => {
-                reference(out, id);
-                out.extend_from_slice(b" R");
-            }
-            None => out.extend_from_slice(b"null"),
-        },
-    }
-    Ok(())
+enum Frame<'a, T> {
+    Array {
+        iter: slice::Iter<'a, Object>,
+        first: bool,
+        through: T,
+    },
+    Dict {
+        dict: &'a Dict,
+        iter: slice::Iter<'a, Entry>,
+        stream_len: Option<usize>,
+        wrote_len: bool,
+        through: T,
+    },
 }
 
-/// A stream of `dict` and `data`, nested `depth` deep, its data, then its
-/// dictionary's strings, through `through`, each reference in its
-/// dictionary as `to` names it.
+/// Iterative heap-stack serializer for an `Object`.
+fn value<T: Through, N: Renumber + ?Sized>(
+    out: &mut Vec<u8>,
+    root: &Object,
+    allow_top_stream: bool,
+    root_through: T,
+    to: &N,
+) -> Result<(), T::Error> {
+    if let Value::Stream(s) = root.value() {
+        if !allow_top_stream {
+            return Err(Error::InlineStream { id: None }.into());
+        }
+        let Some(data) = s.data.bytes() else {
+            return Err(Error::Data { id: None }.into());
+        };
+        return stream(out, &s.dict, data, root_through, to);
+    }
+
+    let mut frames: Vec<Frame<'_, T>> = Vec::new();
+    let mut next: Option<(&Object, T)> = Some((root, root_through));
+    run_frames(out, &mut frames, &mut next, to)
+}
+
 fn stream<T: Through, N: Renumber + ?Sized>(
     out: &mut Vec<u8>,
     dict: &Dict,
     data: &[u8],
-    depth: usize,
     through: T,
     to: &N,
 ) -> Result<(), T::Error> {
     let data = through.stream(dict, data)?;
-    dictionary(out, dict, Some(data.len()), depth, through, to)?;
+    let payload_len = data.len();
+    out.reserve(payload_len.saturating_add(48));
+    out.extend_from_slice(b"<<");
+    let mut frames = Vec::with_capacity(4);
+    frames.push(Frame::Dict {
+        dict,
+        iter: dict.entries().iter(),
+        stream_len: Some(payload_len),
+        wrote_len: false,
+        through,
+    });
+    let mut next = None;
+    run_frames(out, &mut frames, &mut next, to)?;
     out.extend_from_slice(b"\nstream\n");
     out.extend_from_slice(&data);
     out.extend_from_slice(b"\nendstream");
     Ok(())
 }
 
-/// `d`, nested `depth` deep, every entry in order, a key written twice
-/// included; its `/Length` the stream's `length` when it's a stream's. Its
-/// strings through `through`, but those of the entry it leaves in the
-/// clear, and each reference as `to` names it.
-fn dictionary<T: Through, N: Renumber + ?Sized>(
+fn run_frames<'a, T: Through, N: Renumber + ?Sized>(
     out: &mut Vec<u8>,
-    d: &Dict,
-    length: Option<usize>,
-    depth: usize,
-    through: T,
+    frames: &mut Vec<Frame<'a, T>>,
+    next: &mut Option<(&'a Object, T)>,
     to: &N,
 ) -> Result<(), T::Error> {
-    let clear = through.clear_key(d);
-    out.extend_from_slice(b"<<");
-    for Entry {
-        key: k, value: v, ..
-    } in d.entries()
-    {
-        name(out, k);
-        match length {
-            Some(n) if k == b"Length" => {
-                out.push(b' ');
-                decimal(out, n as u64);
+    let limit = Limits::DEFAULT.nesting;
+
+    loop {
+        if let Some((obj, through)) = next.take() {
+            if frames.len() > limit {
+                return Err(Error::Nested { id: None, limit }.into());
             }
-            _ => {
-                if spaced(v) {
-                    out.push(b' ');
+            match obj.value() {
+                Value::Null => out.extend_from_slice(b"null"),
+                Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+                Value::Integer(i) => integer(out, *i),
+                Value::Real(x) => real(out, *x)?,
+                Value::Name(n) => name(out, n.as_bytes())?,
+                Value::String(Str::Bytes(bytes), form) => {
+                    let encrypted = through.string(bytes.as_slice())?;
+                    string(out, &encrypted, form.unwrap_or(Form::Literal));
                 }
-                match clear == Some(&k[..]) {
-                    true => value(out, v, depth + 1, through.clear(), to)?,
-                    false => value(out, v, depth + 1, through, to)?,
+                Value::String(Str::Encrypted(_), _) => {
+                    return Err(Error::Encrypted { id: None }.into());
                 }
+                Value::Array(items) => {
+                    if items.is_empty() {
+                        out.extend_from_slice(b"[]");
+                    } else {
+                        out.push(b'[');
+                        frames.push(Frame::Array {
+                            iter: items.iter(),
+                            first: true,
+                            through,
+                        });
+                    }
+                }
+                Value::Dict(d) => {
+                    if d.is_empty() {
+                        out.extend_from_slice(b"<<>>");
+                    } else {
+                        out.extend_from_slice(b"<<");
+                        frames.push(Frame::Dict {
+                            dict: d,
+                            iter: d.entries().iter(),
+                            stream_len: None,
+                            wrote_len: false,
+                            through,
+                        });
+                    }
+                }
+                Value::Stream(_) => return Err(Error::InlineStream { id: None }.into()),
+                Value::Ref(id) => match to.renumber(*id) {
+                    Some(mapped) => {
+                        if mapped.number == 0 {
+                            return Err(Error::ZeroObjectId { id: None }.into());
+                        }
+                        reference(out, mapped);
+                        out.extend_from_slice(b" R");
+                    }
+                    None => out.extend_from_slice(b"null"),
+                },
             }
+            continue;
+        }
+
+        let Some(top) = frames.last_mut() else {
+            return Ok(());
+        };
+
+        match top {
+            Frame::Array {
+                iter,
+                first,
+                through,
+            } => match iter.next() {
+                Some(item) => {
+                    if !*first && spaced(item) {
+                        out.push(b' ');
+                    }
+                    *first = false;
+                    *next = Some((item, *through));
+                }
+                None => {
+                    out.push(b']');
+                    frames.pop();
+                }
+            },
+            Frame::Dict {
+                dict,
+                iter,
+                stream_len,
+                wrote_len,
+                through,
+            } => match iter.next() {
+                Some(entry) => {
+                    let key = entry.key();
+                    name(out, key)?;
+                    if let Some(n) = *stream_len
+                        && key == b"Length"
+                    {
+                        out.push(b' ');
+                        decimal(out, n as u64);
+                        *wrote_len = true;
+                        continue;
+                    }
+                    let val = entry.value();
+                    if spaced(val) {
+                        out.push(b' ');
+                    }
+                    let child_through = if through.is_clear_key(dict, key) {
+                        through.clear()
+                    } else {
+                        *through
+                    };
+                    *next = Some((val, child_through));
+                }
+                None => {
+                    if let Some(n) = *stream_len
+                        && !*wrote_len
+                    {
+                        out.extend_from_slice(b"/Length ");
+                        decimal(out, n as u64);
+                    }
+                    out.extend_from_slice(b">>");
+                    frames.pop();
+                }
+            },
         }
     }
-    if let Some(n) = length
-        && !d.has(b"Length")
-    {
-        out.extend_from_slice(b"/Length ");
-        decimal(out, n as u64);
-    }
-    out.extend_from_slice(b">>");
-    Ok(())
 }
 
-/// Whether `obj` starts with a regular character, so needs white-space
-/// after what comes before it.
+#[inline]
 fn spaced(obj: &Object) -> bool {
     matches!(
         obj.value(),
@@ -890,7 +1113,9 @@ fn spaced(obj: &Object) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
+    use alloc::string::ToString;
+    use alloc::vec;
 
     use super::*;
     use crate::dict;
@@ -898,7 +1123,6 @@ mod tests {
     use crate::object::{Data, Span, Stream};
     use crate::parse::{Body, Parser};
 
-    /// The objects a file holds, by number and generation.
     struct Objects(BTreeMap<ObjectId, Object>);
 
     impl Objects {
@@ -907,34 +1131,28 @@ mod tests {
         }
     }
 
-    /// What [`file`] wrote, each object read back in turn by the parser, a
-    /// stream's data by its `/Length`, and its places taken out, so that it
-    /// compares with what was built.
     fn open(bytes: &[u8]) -> Objects {
         let mut objects = BTreeMap::new();
         let mut at = 0;
         while at < bytes.len() {
             let mut parser = Parser::at(bytes, at);
-            let id = parser.header().unwrap();
+            let id = parser.header(&mut ()).unwrap();
             let mut obj = match parser.body(id, &mut ()).unwrap() {
                 Body::Object(obj) => obj,
                 Body::Stream(head) => {
-                    let length = head.dict().get(b"Length").and_then(Object::as_integer);
+                    let length = head.dict().get("Length").and_then(Object::as_integer);
                     let data = head.declared(length.unwrap() as usize).unwrap();
                     parser.stream(head, data, &mut ()).unwrap()
                 }
             };
             fuzz::unplace(&mut obj, bytes);
-            let endobj = b"\nendobj\n";
-            assert!(bytes[parser.offset()..].starts_with(endobj));
-            at = parser.offset() + endobj.len();
+            assert_eq!(bytes.get(parser.offset()), Some(&b'\n'));
+            at = parser.offset() + 1;
             objects.insert(id, obj);
         }
         Objects(objects)
     }
 
-    /// A file's objects as the writer writes them: `objects`, each an
-    /// indirect object, one after another.
     fn file(objects: &[(u32, Object)]) -> Vec<u8> {
         let mut out = Vec::new();
         for (num, obj) in objects {
@@ -943,7 +1161,6 @@ mod tests {
         out
     }
 
-    /// `obj` written as object 2 of a file, and read back.
     fn round_trip(obj: &Object) -> Object {
         open(&file(&[(2, obj.clone())]))
             .get(ObjectId::new(2, 0))
@@ -951,7 +1168,6 @@ mod tests {
             .clone()
     }
 
-    /// `obj` as written.
     fn written(obj: &Object) -> String {
         let mut out = Vec::new();
         write(&mut out, obj).unwrap();
@@ -959,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn reals_round_trip_at_f64() {
+    fn reals_round_trip_without_clamping_across_f32_and_f64() {
         let kept = [
             0.1,
             1.0 / 3.0,
@@ -969,32 +1185,35 @@ mod tests {
             3.4e38,
             -3.4e38,
             1.2e-38,
+            1e100,
+            -1e100,
+            1e-100,
+            -1e-100,
             612.0,
             -612.0,
             0.0,
         ]
         .map(Object::from)
         .into_iter()
-        .chain([0.1f32, 1.0 / 3.0, 595.32, 841.89, 1e20].map(Object::from));
-        let clamped = [
-            (1e39, 3.4e38),
-            (-f64::MAX, -3.4e38),
-            (f64::from(f32::MAX), 3.4e38),
-            (1e-39, 0.0),
-            (-1e-300, 0.0),
-            (-0.0, 0.0),
-        ];
-        let wrote: Vec<Object> = kept
-            .clone()
-            .chain(clamped.iter().map(|&(x, _)| Object::from(x)))
-            .collect();
-        let want: Vec<f64> = kept
-            .map(|o| match *o.value() {
-                Value::Real(x) => x,
-                _ => panic!("{o:?} isn't a real"),
-            })
-            .chain(clamped.iter().map(|&(_, y)| y))
-            .collect();
+        .chain(
+            [
+                0.1f32,
+                1.0 / 3.0,
+                595.32,
+                841.89,
+                1e20,
+                f32::MAX,
+                f32::MIN,
+                f32::MIN_POSITIVE,
+                1e-45f32,
+                -1e-45f32,
+            ]
+            .map(Object::from),
+        );
+
+        let wrote: Vec<Object> = kept.clone().chain([Object::from(-0.0)]).collect();
+        let want: Vec<f64> = kept.map(|o| o.as_number().unwrap()).chain([0.0]).collect();
+
         let Value::Array(back) = round_trip(&Object::from(wrote)).into_value() else {
             panic!("not an array");
         };
@@ -1005,65 +1224,128 @@ mod tests {
             };
             assert_eq!(x.to_bits(), want.to_bits(), "{want} read back as {x}");
         }
-        // Shortest digits, a point always, and never an exponent.
+
         assert_eq!(written(&Object::from(612.0)), "612.0");
         assert_eq!(written(&Object::from(-0.0)), "0.0");
         assert_eq!(written(&Object::from(1e-7)), "0.0000001");
         assert_eq!(written(&Object::from(0.1f32)), "0.1");
         assert_eq!(written(&Object::from(1e20)), "100000000000000000000.0");
+        assert_eq!(
+            written(&Object::from(1e-45f32)),
+            "0.000000000000000000000000000000000000000000001"
+        );
     }
 
     #[test]
-    fn nan_and_infinities_are_refused() {
+    fn non_finite_and_out_of_range_reals_are_refused() {
         for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut out = b"%PDF-1.7\n".to_vec();
             assert_eq!(
                 write(&mut out, &Object::from(x)),
                 Err(Error::NonFinite { id: None })
             );
-            let deep = Object::from(vec![
-                Object::from(1),
-                Object::from(dict! { "Rect" => vec![Object::from(x)] }),
-            ]);
             assert_eq!(
-                indirect(&mut out, ObjectId::new(7, 0), &deep),
+                indirect(&mut out, ObjectId::new(7, 0), &Object::from(x)),
                 Err(Error::NonFinite {
                     id: Some(ObjectId::new(7, 0))
                 })
             );
-            let stream = Stream::new(
-                dict! { "Decode" => vec![Object::from(x)] },
-                b"data".to_vec(),
+            assert_eq!(out, b"%PDF-1.7\n");
+        }
+
+        for extreme in [
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            5e-324,
+            1e260,
+            -1e-260,
+        ] {
+            let mut out = b"%PDF-1.7\n".to_vec();
+            assert_eq!(
+                write(&mut out, &Object::from(extreme)),
+                Err(Error::RealOutOfRange { id: None }),
+                "{extreme:e}"
             );
             assert_eq!(
-                indirect(&mut out, ObjectId::new(8, 1), &Object::from(stream)),
-                Err(Error::NonFinite {
-                    id: Some(ObjectId::new(8, 1))
+                indirect(&mut out, ObjectId::new(9, 0), &Object::from(extreme)),
+                Err(Error::RealOutOfRange {
+                    id: Some(ObjectId::new(9, 0))
                 })
             );
-            assert_eq!(out, b"%PDF-1.7\n", "nothing written");
+            assert_eq!(out, b"%PDF-1.7\n");
         }
+    }
+
+    #[test]
+    fn inline_streams_nul_names_and_zero_object_ids_are_refused() {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let stream_obj = Object::from(Stream::new(dict! {}, b"abc".to_vec()));
         assert_eq!(
-            Error::NonFinite { id: None }.to_string(),
-            "a real that isn't a finite number"
+            write(&mut out, &stream_obj),
+            Err(Error::InlineStream { id: None })
+        );
+        let nested_stream = Object::from(vec![stream_obj]);
+        assert_eq!(
+            indirect(&mut out, ObjectId::new(3, 0), &nested_stream),
+            Err(Error::InlineStream {
+                id: Some(ObjectId::new(3, 0))
+            })
+        );
+
+        let nul_name = Object::name(b"A\0B");
+        assert_eq!(write(&mut out, &nul_name), Err(Error::NulName { id: None }));
+        assert_eq!(name(&mut out, b"A\0B"), Err(Error::NulName { id: None }));
+        let nul_key = Object::from(dict! { b"K\0".as_slice() => 1 });
+        assert_eq!(
+            indirect(&mut out, ObjectId::new(4, 0), &nul_key),
+            Err(Error::NulName {
+                id: Some(ObjectId::new(4, 0))
+            })
+        );
+
+        assert_eq!(
+            indirect(&mut out, ObjectId::new(0, 0), &Object::null()),
+            Err(Error::ZeroObjectId {
+                id: Some(ObjectId::new(0, 0))
+            })
         );
         assert_eq!(
-            Error::NonFinite {
-                id: Some(ObjectId::new(7, 0))
-            }
-            .to_string(),
-            "a real that isn't a finite number in object 7 0"
+            indirect_stream(&mut out, ObjectId::new(0, 1), &dict! {}, b""),
+            Err(Error::ZeroObjectId {
+                id: Some(ObjectId::new(0, 1))
+            })
         );
+        let zero_ref = Object::from(ObjectId::new(0, 0));
+        assert_eq!(
+            write(&mut out, &zero_ref),
+            Err(Error::ZeroObjectId { id: None })
+        );
+        assert_eq!(
+            indirect(&mut out, ObjectId::new(5, 0), &zero_ref),
+            Err(Error::ZeroObjectId {
+                id: Some(ObjectId::new(5, 0))
+            })
+        );
+        assert_eq!(out, b"%PDF-1.7\n");
+
+        // Renumbering 0 -> None emits `null` cleanly.
+        let mut cleaned = Vec::new();
+        write_renumbered(&mut cleaned, &zero_ref, &|id: ObjectId| {
+            (id.number != 0).then_some(id)
+        })
+        .unwrap();
+        assert_eq!(cleaned, b"null");
     }
 
     #[test]
     fn strings_names_and_streams_round_trip() {
-        let literal =
-            |s: &[u8]| Object::new(Value::String(Str::Bytes(s.to_vec()), Some(Form::Literal)));
+        let literal = |s: &[u8]| Object::new(Value::String(Str::bytes(s), Some(Form::Literal)));
         let hex = |s: &[u8]| Object::hex(s);
-        let name = |s: &[u8]| Object::new(Value::Name(s.to_vec()));
+        let nm = |s: &[u8]| Object::name(s);
         let values = Object::from(vec![
             literal(b"balanced (parens (nest)) as they are"),
+            literal(b"balanced (parens) with \\ and \r"),
             literal(b"unbalanced ) and ( and ((x)"),
             literal(b"a back\\slash, and \\) escaped"),
             literal(b"CR\r alone, CR LF\r\n and LF\n"),
@@ -1071,21 +1353,21 @@ mod tests {
             literal(b""),
             hex(b"\x00\x01()\\\r"),
             hex(b""),
-            name(b"A B"),
-            name(b"#23 and /slash"),
-            name(b"\x00\t\x7f\x80\xff"),
-            name(b"()<>[]{}%"),
-            name(b"Plain-Name_1.0"),
-            name(b""),
-            name(b"After"),
+            nm(b"A B"),
+            nm(b"#23 and /slash"),
+            nm(b"\t\x7f\x80\xff"),
+            nm(b"()<>[]{}%"),
+            nm(b"Plain-Name_1.0"),
+            nm(b""),
+            nm(b"After"),
             Object::from(dict! {
                 "True" => true,
                 "Null" => Object::null(),
                 "Ref" => ObjectId::new(3, 0),
                 "Neg" => -1,
                 "Mixed" => vec![
-                    name(b"A"),
-                    name(b"B"),
+                    nm(b"A"),
+                    nm(b"B"),
                     Object::from(1),
                     Object::from(2.5),
                     Object::from(false),
@@ -1096,19 +1378,19 @@ mod tests {
             }),
         ]);
         let content = b"\x00binary\nendstream\nendobj\n\xff".to_vec();
-        let mut long = Stream::new(dict! { "Kind" => "Test" }, content.clone());
+        let mut long = Stream::new(dict! { "Kind" => Object::name("Test") }, content.clone());
         long.dict.set("Length", 999);
         let mut unsaid = Stream::new(dict! {}, content.clone());
-        unsaid.dict.remove(b"Length");
-        let mut indirect = Stream::new(dict! {}, content.clone());
-        indirect
+        unsaid.dict.remove("Length");
+        let mut ind_len = Stream::new(dict! {}, content.clone());
+        ind_len
             .dict
             .set("Length", Object::from(ObjectId::new(9, 0)));
         let pdf = open(&file(&[
             (2, values.clone()),
             (3, Object::from(long)),
             (4, Object::from(unsaid)),
-            (5, Object::from(indirect)),
+            (5, Object::from(ind_len)),
         ]));
         assert_eq!(pdf.get(ObjectId::new(2, 0)).unwrap(), &values);
         for id in [
@@ -1118,7 +1400,7 @@ mod tests {
         ] {
             let s = pdf.get(id).unwrap().as_stream().unwrap();
             assert_eq!(s.data.bytes(), Some(content.as_slice()), "{id:?}");
-            let length = s.dict.get(b"Length").unwrap();
+            let length = s.dict.get("Length").unwrap();
             assert_eq!(length, &Object::from(content.len() as i64), "{id:?}");
         }
         assert_eq!(
@@ -1127,14 +1409,12 @@ mod tests {
                 .as_stream()
                 .unwrap()
                 .dict
-                .get(b"Kind")
+                .get("Kind")
                 .unwrap(),
-            &name(b"Test")
+            &nm(b"Test")
         );
     }
 
-    /// Numbers, names and strings are written byte by byte: as `write!`
-    /// formatted them.
     #[test]
     fn numbers_names_and_strings_write_as_formatting_would() {
         let bytes = |obj: &Object| {
@@ -1142,6 +1422,11 @@ mod tests {
             write(&mut out, obj).unwrap();
             out
         };
+
+        let mut dec = Vec::new();
+        decimal(&mut dec, u64::MAX);
+        assert_eq!(dec, format!("{}", u64::MAX).into_bytes());
+
         let mut integers = vec![i64::MAX, i64::MIN, i64::MIN + 1, u32::MAX.into()];
         for power in 0..19 {
             let ten = 10i64.pow(power);
@@ -1151,7 +1436,7 @@ mod tests {
             assert_eq!(written(&Object::from(i)), format!("{i}"));
         }
         for id in [
-            ObjectId::new(0, 0),
+            ObjectId::new(1, 0),
             ObjectId::new(7, 0),
             ObjectId::new(10, 1),
             ObjectId::new(u32::MAX, u16::MAX),
@@ -1162,182 +1447,172 @@ mod tests {
             indirect(&mut out, id, &Object::null()).unwrap();
             assert_eq!(out, format!("{n} {g} obj\nnull\nendobj\n").into_bytes());
         }
-        let every: Vec<u8> = (0..=255).collect();
-        let mut name = b"/".to_vec();
-        for &b in &every {
+        let non_nul: Vec<u8> = (1..=255).collect();
+        let mut expected_name = b"/".to_vec();
+        for &b in &non_nul {
             match b.is_ascii_graphic() && !b"#()<>[]{}/%".contains(&b) {
-                true => name.push(b),
-                false => name.extend(format!("#{b:02X}").bytes()),
+                true => expected_name.push(b),
+                false => expected_name.extend(format!("#{b:02X}").bytes()),
             }
         }
-        assert_eq!(bytes(&Object::new(Value::Name(every.clone()))), name);
-        assert_eq!(
-            written(&Object::new(Value::Name(b"Plain-Name_1.0".to_vec()))),
-            "/Plain-Name_1.0"
-        );
-        let hex: String = every.iter().map(|b| format!("{b:02X}")).collect();
-        let string =
-            |text: &[u8], form| Object::new(Value::String(Str::Bytes(text.to_vec()), Some(form)));
-        assert_eq!(written(&string(&every, Form::Hex)), format!("<{hex}>"));
-        // A literal with nothing to escape is written as it is.
-        let plain: Vec<u8> = (every.iter().copied())
+        assert_eq!(bytes(&Object::name(non_nul.as_slice())), expected_name);
+        assert_eq!(written(&Object::name(b"Plain-Name_1.0")), "/Plain-Name_1.0");
+        let every: Vec<u8> = (0..=255).collect();
+        let hex_str: String = every.iter().map(|b| format!("{b:02X}")).collect();
+        let mk_str = |text: &[u8], form| Object::new(Value::String(Str::bytes(text), Some(form)));
+        assert_eq!(written(&mk_str(&every, Form::Hex)), format!("<{hex_str}>"));
+        let plain: Vec<u8> = every
+            .iter()
+            .copied()
             .filter(|b| !b"\\\r()".contains(b))
             .collect();
         let want = [b"(".as_slice(), &plain, b")"].concat();
-        assert_eq!(bytes(&string(&plain, Form::Literal)), want);
+        assert_eq!(bytes(&mk_str(&plain, Form::Literal)), want);
         assert_eq!(
-            written(&string(b"a\\b\rc(d) e)", Form::Literal)),
+            written(&mk_str(b"a\\b\rc(d) e)", Form::Literal)),
             "(a\\\\b\\rc(d) e\\))"
         );
+
         let mut stream = Stream::new(dict! {}, vec![0; 1234]);
-        let head = |s: &Stream| bytes(&Object::from(s.clone()))[..16].to_vec();
+        let head = |s: &Stream| {
+            let mut out = Vec::new();
+            indirect(&mut out, ObjectId::new(1, 0), &Object::from(s.clone())).unwrap();
+            out[8..24].to_vec()
+        };
         assert_eq!(head(&stream), b"<</Length 1234>>");
-        stream.dict.remove(b"Length");
+        stream.dict.remove("Length");
         assert_eq!(head(&stream), b"<</Length 1234>>");
     }
 
-    /// A string with no form is written as a literal one, and reads back
-    /// as one.
     #[test]
     fn a_string_with_no_form_is_written_literal() {
-        assert_eq!(written(&Object::text("a (b")), "(a \\(b)");
+        assert_eq!(written(&Object::bytes(*b"a (b")), "(a \\(b)");
         assert_eq!(written(&Object::bytes(*b"\x01")), "(\x01)");
-        let back = round_trip(&Object::text("x"));
+        let back = round_trip(&Object::bytes(*b"x"));
         assert_eq!(
             *back.value(),
-            Value::String(Str::Bytes(b"x".to_vec()), Some(Form::Literal))
+            Value::String(Str::bytes(*b"x"), Some(Form::Literal))
         );
     }
 
-    /// What can't be written as the value is refused, said of the object
-    /// it's in when that's known, and nothing is written, wherever in the
-    /// value it is.
     #[test]
-    fn each_refusal_says_why_and_writes_nothing() {
-        let text = Object::new(Value::String(Str::Text("x".to_string()), None));
-        let ciphertext = Value::String(Str::Encrypted(b"x".to_vec()), Some(Form::Hex));
-        let at = Stream {
+    fn each_refusal_rolls_back_output() {
+        let ciphertext = Object::new(Value::String(Str::encrypted(*b"x"), Some(Form::Hex)));
+        let at = Object::from(Stream {
             dict: dict! { "Length" => 4 },
             data: Data::At(Span::new(None, 0, 4)),
-        };
+        });
+        let unplaced_stream = Object::stream(dict! {});
         let mut deep = Object::from(1);
         for _ in 0..=Limits::DEFAULT.nesting {
             deep = Object::from(vec![deep]);
         }
-        let cases = [
-            (
-                text,
-                Error::Text { id: None },
-                "a string read as text, whose bytes aren't known",
-            ),
-            (
-                Object::new(ciphertext),
-                Error::Encrypted { id: None },
-                "a string that's still ciphertext",
-            ),
-            (
-                Object::from(at),
-                Error::Data { id: None },
-                "a stream whose data isn't in memory",
-            ),
-            (
-                Object::stream(dict! {}),
-                Error::Data { id: None },
-                "a stream whose data isn't in memory",
-            ),
+
+        let mut out = b"%PDF-1.7\n".to_vec();
+        for s in [&at, &unplaced_stream] {
+            assert_eq!(
+                indirect(&mut out, ObjectId::new(7, 2), s),
+                Err(Error::Data {
+                    id: Some(ObjectId::new(7, 2))
+                })
+            );
+            assert_eq!(write(&mut out, s), Err(Error::InlineStream { id: None }));
+        }
+        assert_eq!(out, b"%PDF-1.7\n");
+
+        for (refused, error) in [
+            (ciphertext, Error::Encrypted { id: None }),
             (
                 deep,
                 Error::Nested {
                     id: None,
                     limit: 256,
                 },
-                "arrays and dictionaries nested deeper than 256",
             ),
-        ];
-        for (refused, error, said) in cases {
+        ] {
             let within = error.within(ObjectId::new(7, 2));
-            assert_eq!(error.to_string(), said);
-            assert_eq!(within.to_string(), format!("{said} in object 7 2"));
-            // Alone, and after what the writer would write.
             let after = Object::from(vec![
                 Object::from(1),
                 Object::from(dict! { "A" => 2, "B" => refused.clone() }),
             ]);
-            let mut out = b"%PDF-1.7\n".to_vec();
             for obj in [&refused, &after] {
-                assert_eq!(write(&mut out, obj), Err(error), "{said}");
-                assert_eq!(
-                    indirect(&mut out, ObjectId::new(7, 2), obj),
-                    Err(within),
-                    "{said}"
-                );
+                assert_eq!(write(&mut out, obj), Err(error));
+                assert_eq!(indirect(&mut out, ObjectId::new(7, 2), obj), Err(within));
             }
-            let dict = dict! { "B" => refused };
+            let d = dict! { "B" => refused };
             assert_eq!(
-                indirect_stream(&mut out, ObjectId::new(7, 2), &dict, b""),
+                indirect_stream(&mut out, ObjectId::new(7, 2), &d, b""),
                 Err(within)
             );
-            assert_eq!(out, b"%PDF-1.7\n", "nothing written: {said}");
+            assert_eq!(out, b"%PDF-1.7\n");
         }
     }
 
-    /// A stream's data given apart is written as a stream holding it is,
-    /// and a stream read where it was written, written so, is its bytes.
     #[test]
     fn a_streams_data_given_apart_is_written_as_it_would_be_held() {
         let data = b"\x00binary\nendstream\n".to_vec();
-        let dict = dict! { "Kind" => "Test", "Length" => Object::from(ObjectId::new(9, 0)) };
+        let d = dict! {
+            "Kind" => Object::name("Test"),
+            "Length" => Object::from(ObjectId::new(9, 0)),
+        };
         let held = Object::from(Stream {
-            dict: dict.clone(),
+            dict: d.clone(),
             data: Data::Bytes(data.clone()),
         });
-        let mut written = b"%PDF-1.7\n".to_vec();
-        assert_eq!(indirect(&mut written, ObjectId::new(4, 1), &held), Ok(9));
-        let mut apart = b"%PDF-1.7\n".to_vec();
+        let mut written_buf = b"%PDF-1.7\n".to_vec();
         assert_eq!(
-            indirect_stream(&mut apart, ObjectId::new(4, 1), &dict, &data),
+            indirect(&mut written_buf, ObjectId::new(4, 1), &held),
             Ok(9)
         );
-        assert_eq!(apart, written);
+        let mut apart = b"%PDF-1.7\n".to_vec();
+        assert_eq!(
+            indirect_stream(&mut apart, ObjectId::new(4, 1), &d, &data),
+            Ok(9)
+        );
+        assert_eq!(apart, written_buf);
         assert!(
             apart.ends_with(b"/Length 18>>\nstream\n\x00binary\nendstream\n\nendstream\nendobj\n")
         );
-        // Read, its data is where it was written; written apart again, the
-        // same bytes.
+
         let mut parser = Parser::at(&apart, 9);
-        let id = parser.header().unwrap();
+        let id = parser.header(&mut ()).unwrap();
         let Ok(Body::Stream(head)) = parser.body(id, &mut ()) else {
             panic!("a stream");
         };
         let declared = head.declared(data.len()).unwrap();
         let read = parser.stream(head, declared, &mut ()).unwrap();
         let s = read.as_stream().unwrap();
-        assert_eq!(write(&mut Vec::new(), &read), Err(Error::Data { id: None }));
+        assert_eq!(
+            indirect(&mut Vec::new(), id, &read),
+            Err(Error::Data { id: Some(id) })
+        );
         let mut again = b"%PDF-1.7\n".to_vec();
-        let at = s.data.at().unwrap();
-        indirect_stream(&mut again, id, &s.dict, &apart[at.start..at.end]).unwrap();
+        let slice = s.data.at().unwrap().slice_in(&apart).unwrap();
+        indirect_stream(&mut again, id, &s.dict, slice).unwrap();
         assert_eq!(again, apart);
     }
 
-    /// Every entry of a dictionary is written, in order, a key written
-    /// twice included, and reads back so; a stream's `/Length` is its
-    /// data's in each of its entries.
     #[test]
     fn a_key_written_twice_is_written_twice() {
         let d = dict! { "A" => 1, "B" => 2, "A" => 3 };
         assert_eq!(written(&Object::from(d.clone())), "<</A 1/B 2/A 3>>");
         assert_eq!(round_trip(&Object::from(d.clone())), Object::from(d));
         let s = Stream {
-            dict: dict! { "Length" => 1, "Filter" => "FlateDecode", "Length" => 2 },
+            dict: dict! {
+                "Length" => 1,
+                "Filter" => Object::name("FlateDecode"),
+                "Length" => 2,
+            },
             data: Data::Bytes(b"data".to_vec()),
         };
+        let mut out = Vec::new();
+        indirect(&mut out, ObjectId::new(1, 0), &Object::from(s)).unwrap();
         assert_eq!(
-            written(&Object::from(s)),
-            "<</Length 4/Filter/FlateDecode/Length 4>>\nstream\ndata\nendstream"
+            out,
+            b"1 0 obj\n<</Length 4/Filter/FlateDecode/Length 4>>\nstream\ndata\nendstream\nendobj\n"
         );
     }
 
-    /// Random numbers, by xorshift from a seed, as the fuzz tests have them.
     struct Random(u64);
 
     impl Random {
@@ -1352,14 +1627,15 @@ mod tests {
             (self.next() % below as u64) as usize
         }
 
-        /// At most `most` bytes of any value, half of them those a name or
-        /// a string writes otherwise than as itself.
-        fn bytes(&mut self, most: usize) -> Vec<u8> {
+        fn bytes(&mut self, most: usize, allow_nul: bool) -> Vec<u8> {
             const SPECIAL: &[u8] = b"\\()\r\n\t #/%<>[]{}\x00\x7f\x80\xff";
             (0..self.below(most + 1))
-                .map(|_| match self.below(2) {
-                    0 => SPECIAL[self.below(SPECIAL.len())],
-                    _ => self.next() as u8,
+                .map(|_| {
+                    let b = match self.below(2) {
+                        0 => SPECIAL[self.below(SPECIAL.len())],
+                        _ => self.next() as u8,
+                    };
+                    if !allow_nul && b == 0 { b'_' } else { b }
                 })
                 .collect()
         }
@@ -1372,13 +1648,11 @@ mod tests {
             }
         }
 
-        /// Any finite real: Annex C's bounds and either side of them, ones
-        /// past i64's range, decimals, and any bits that are finite.
         fn real(&mut self) -> f64 {
-            let bounds = [3.4e38f64, 1.175e-38];
+            let bounds = [3.4e38f64, 1.175e-38, 1e-45];
             match self.below(4) {
                 0 => {
-                    let x = bounds[self.below(2)];
+                    let x = bounds[self.below(3)];
                     let x = match self.below(3) {
                         0 => f64::from_bits(x.to_bits() - 1),
                         1 => x,
@@ -1389,25 +1663,23 @@ mod tests {
                 1 => [
                     0.0,
                     -0.0,
-                    f64::MAX,
-                    f64::MIN,
-                    f64::MIN_POSITIVE,
-                    5e-324,
-                    1e19,
+                    f64::from(f32::MAX),
+                    f64::from(f32::MIN),
+                    f64::from(1e-45f32),
+                    1e100,
+                    1e-100,
                     0.1,
                 ][self.below(8)],
-                2 => self.integer() as f64 / 10f64.powi(self.below(8) as i32),
+                2 => self.integer() as f64 / 10u64.pow(self.below(8) as u32) as f64,
                 _ => loop {
                     let x = f64::from_bits(self.next());
-                    if x.is_finite() {
+                    if x.is_finite() && super::real(&mut Vec::new(), x).is_ok() {
                         break x;
                     }
                 },
             }
         }
 
-        /// A value of no more than `*budget` values, of which it takes
-        /// its own, nested no more than `depth` deeper.
         fn value(&mut self, budget: &mut usize, depth: usize) -> Object {
             *budget = budget.saturating_sub(1);
             let kinds = if *budget > 0 && depth > 0 { 9 } else { 7 };
@@ -1418,13 +1690,14 @@ mod tests {
                 },
                 1 => Object::from(self.integer()),
                 2 => Object::from(self.real()),
-                3 => Object::new(Value::Name(self.bytes(12))),
+                3 => Object::name(self.bytes(12, false)),
                 4 => {
                     let form = [None, Some(Form::Literal), Some(Form::Hex)][self.below(3)];
-                    Object::new(Value::String(Str::Bytes(self.bytes(24)), form))
+                    Object::new(Value::String(Str::bytes(self.bytes(24, true)), form))
                 }
                 5 => {
-                    let n = [0, 1, u32::MAX, self.next() as u32][self.below(4)];
+                    let raw = (self.next() as u32).max(1);
+                    let n = [1, 2, u32::MAX, raw][self.below(4)];
                     let g = [0, 1, u16::MAX, self.next() as u16][self.below(4)];
                     Object::from(ObjectId::new(n, g))
                 }
@@ -1434,31 +1707,25 @@ mod tests {
             }
         }
 
-        /// An array of values no more than `depth` deeper.
         fn array(&mut self, budget: &mut usize, depth: usize) -> Vec<Object> {
             (0..self.below(8))
                 .map(|_| self.value(budget, depth))
                 .collect()
         }
 
-        /// A dictionary of values no more than `depth` deeper, now and then
-        /// with a key written twice, or `/Length`.
         fn dict(&mut self, budget: &mut usize, depth: usize) -> Dict {
             let mut d = Dict::new();
             for _ in 0..self.below(8) {
                 let key = match (self.below(6), d.entries().last()) {
-                    (0, Some(entry)) => entry.key.clone(),
+                    (0, Some(entry)) => entry.key().to_vec(),
                     (1, _) => b"Length".to_vec(),
-                    _ => self.bytes(8),
+                    _ => self.bytes(8, false),
                 };
                 d.push(key, self.value(budget, depth));
             }
             d
         }
 
-        /// A value nested as deep as a parser reads it, `depth` deep
-        /// already, each level an array or a dictionary, beside a few
-        /// values more.
         fn deep(&mut self, depth: usize) -> Object {
             let mut inner = match self.below(3) {
                 0 => Object::from(Vec::new()),
@@ -1475,11 +1742,8 @@ mod tests {
             inner
         }
 
-        /// A stream of up to 64 bytes, `endstream` among them now and then,
-        /// its dictionary's values as deep as a parser reads them when
-        /// `deep`.
         fn stream(&mut self, budget: &mut usize, deep: bool) -> Object {
-            let mut data = self.bytes(64);
+            let mut data = self.bytes(64, true);
             if self.below(4) == 0 {
                 data.extend_from_slice(b"\nendstream\n");
             }
@@ -1493,9 +1757,6 @@ mod tests {
             })
         }
 
-        /// A value of a few hundred values at most, one in a hundred
-        /// nested as deep as a parser reads it; one in eight a stream,
-        /// three a dictionary and two an array.
         fn object(&mut self) -> Object {
             let deep = self.below(100) == 0;
             let most = self.below(300);
@@ -1510,15 +1771,10 @@ mod tests {
         }
 
         fn id(&mut self) -> ObjectId {
-            ObjectId::new(self.next() as u32, self.next() as u16)
+            ObjectId::new((self.next() as u32).max(1), self.next() as u16)
         }
     }
 
-    /// Any value the writer writes reads back as the same value as it was
-    /// written, places aside: a string with no form as a literal one, a real
-    /// as the writer clamps it, and a stream's `/Length` its data's; and
-    /// written again, it's the same bytes. Values, and streams, as indirect
-    /// objects, which is how a stream is read; values as direct objects too.
     #[test]
     fn values_written_read_back_as_written_and_write_the_same_bytes_again() {
         let mut random = Random(0x9e37_79b9_7f4a_7c15);
@@ -1532,103 +1788,84 @@ mod tests {
         }
     }
 
-    /// How many values `o` holds that hold none: its numbers, names and
-    /// the like, and its empty arrays and dictionaries; a stream's are its
-    /// dictionary's, but in a `/Length`, whose value isn't written.
     fn leaves(o: &Object) -> usize {
         match o.value() {
             Value::Array(a) if !a.is_empty() => a.iter().map(leaves).sum(),
-            Value::Dict(d) if !d.is_empty() => d.entries().iter().map(|e| leaves(&e.value)).sum(),
-            Value::Stream(s) => (s.dict.entries().iter())
-                .filter(|e| e.key != b"Length")
-                .map(|e| leaves(&e.value))
+            Value::Dict(d) if !d.is_empty() => d.entries().iter().map(|e| leaves(e.value())).sum(),
+            Value::Stream(s) => s
+                .dict
+                .entries()
+                .iter()
+                .filter(|e| e.key() != b"Length")
+                .map(|e| leaves(e.value()))
                 .sum(),
             _ => 1,
         }
     }
 
-    /// `o` with `string` in place of its leaf `*n`, counting from 0 as
-    /// [`leaves`] counts them.
-    fn plant(o: &mut Object, n: &mut usize, string: &Value) {
+    fn plant(o: &mut Object, n: &mut usize, replacement: &Value) {
         match o.value_mut() {
-            Value::Array(a) if !a.is_empty() => a.iter_mut().for_each(|e| plant(e, n, string)),
+            Value::Array(a) if !a.is_empty() => a.iter_mut().for_each(|e| plant(e, n, replacement)),
             Value::Dict(d) if !d.is_empty() => {
-                d.entries_mut().for_each(|e| plant(&mut e.value, n, string));
+                d.entries_mut()
+                    .for_each(|e| plant(e.value_mut(), n, replacement));
             }
-            Value::Stream(s) => (s.dict.entries_mut())
-                .filter(|e| e.key != b"Length")
-                .for_each(|e| plant(&mut e.value, n, string)),
+            Value::Stream(s) => s
+                .dict
+                .entries_mut()
+                .filter(|e| e.key() != b"Length")
+                .for_each(|e| plant(e.value_mut(), n, replacement)),
             leaf => {
                 if *n == 0 {
-                    *leaf = string.clone();
+                    *leaf = replacement.clone();
                 }
-                // Past 0, it never comes to 0 again.
                 *n = n.wrapping_sub(1);
             }
         }
     }
 
-    /// `object` with `string` in place of one of its leaves, chosen by
-    /// `random`, or in the dictionary of a stream that has none.
     fn planted(random: &mut Random, object: &Object, string: Str) -> Object {
         let mut object = object.clone();
-        let string = Value::String(string, [None, Some(Form::Hex)][random.below(2)]);
+        let val = Value::String(string, [None, Some(Form::Hex)][random.below(2)]);
         match leaves(&object) {
             0 => match object.as_stream_mut() {
-                Some(s) => s.dict.push("S", Object::new(string)),
+                Some(s) => s.dict.push("S", Object::new(val)),
                 None => unreachable!("only a stream holds no leaf"),
             },
-            n => plant(&mut object, &mut random.below(n), &string),
+            n => plant(&mut object, &mut random.below(n), &val),
         }
         object
     }
 
-    /// Random values, each holding a string read as text in place of one
-    /// of its values, are refused, and nothing is written: through
-    /// `write`, `indirect`, and for a stream, `indirect_stream`.
-    #[test]
-    fn values_holding_text_are_refused_wherever_it_is() {
-        refused_wherever(Str::Text("text".to_string()), |id| Error::Text { id });
-    }
-
-    /// Random values, each holding ciphertext in place of one of its
-    /// values, are refused, and nothing is written: through `write`,
-    /// `indirect`, and for a stream, `indirect_stream`.
     #[test]
     fn values_holding_ciphertext_are_refused_wherever_it_is() {
-        let ciphertext = Str::Encrypted(b"\x8f\x02".to_vec());
-        refused_wherever(ciphertext, |id| Error::Encrypted { id });
-    }
-
-    /// Random values with `string` planted in each, refused as `error`
-    /// says.
-    fn refused_wherever(string: Str, error: fn(Option<ObjectId>) -> Error) {
+        let ciphertext = Str::encrypted(*b"\x8f\x02");
         let mut random = Random(0x2545_f491_4f6c_dd1d);
         for _ in 0..2_000 {
-            let object = random.object();
-            let object = planted(&mut random, &object, string.clone());
+            let base = random.object();
+            let object = planted(&mut random, &base, ciphertext.clone());
             let id = random.id();
             let mut out = b"%PDF-1.7\n".to_vec();
-            assert_eq!(write(&mut out, &object), Err(error(None)), "{object:?}");
-            assert_eq!(indirect(&mut out, id, &object), Err(error(Some(id))));
+            if object.as_stream().is_none() {
+                assert_eq!(write(&mut out, &object), Err(Error::Encrypted { id: None }));
+            }
+            assert_eq!(
+                indirect(&mut out, id, &object),
+                Err(Error::Encrypted { id: Some(id) })
+            );
             if let Some(s) = object.as_stream() {
                 let data = s.data.bytes().unwrap();
                 let apart = indirect_stream(&mut out, id, &s.dict, data);
-                assert_eq!(apart, Err(error(Some(id))));
+                assert_eq!(apart, Err(Error::Encrypted { id: Some(id) }));
             }
-            assert_eq!(out, b"%PDF-1.7\n", "nothing written");
+            assert_eq!(out, b"%PDF-1.7\n");
         }
     }
 
-    /// Through an encryptor, every string of an object, a stream's
-    /// dictionary's included, and a stream's data are given to it once, in
-    /// the order written, as the object's, and what it gives is written in
-    /// their place: undone, the toy's bytes are what's written through `()`,
-    /// which are the plain writer's; random values, as indirect objects.
     #[test]
     fn an_encryptor_is_given_every_string_and_streams_data_once_as_its_objects() {
         let mut random = Random(0x6a09_e667_f3bc_c908);
-        let mut given = 0;
+        let mut given_count = 0;
         for _ in 0..5_000 {
             let object = random.object();
             let id = random.id();
@@ -1636,11 +1873,11 @@ mod tests {
             indirect(&mut plain, id, &object).unwrap();
             let mut unit = Vec::new();
             assert_eq!(indirect_with(&mut unit, id, &object, &()), Ok(0));
-            assert_eq!(unit, plain, "through (), the plain bytes");
+            assert_eq!(unit, plain);
             fuzz::toyed(&object, id, &[], Limits::DEFAULT, &plain);
             let toy = fuzz::Toy::default();
             indirect_with(&mut Vec::new(), id, &object, &toy).unwrap();
-            given += toy.seen.borrow().len();
+            given_count += toy.seen.borrow().len();
             if let Some(s) = object.as_stream() {
                 let data = s.data.bytes().unwrap();
                 let mut apart = Vec::new();
@@ -1651,27 +1888,27 @@ mod tests {
                 assert_eq!(unit, plain);
                 let (mut held, mut given) = (Vec::new(), Vec::new());
                 let toy = fuzz::Toy::default();
+                let boxed_toy: Box<dyn Encrypt<Error = &'static str>> =
+                    Box::new(fuzz::Toy::default());
+                let _ = indirect_with(&mut Vec::new(), id, &object, &boxed_toy).unwrap();
                 indirect_with(&mut held, id, &object, &toy).unwrap();
                 let toy_apart = fuzz::Toy::default();
                 indirect_stream_with(&mut given, id, &s.dict, data, &toy_apart).unwrap();
-                assert_eq!(given, held, "given apart, the same bytes");
+                assert_eq!(given, held);
                 assert_eq!(toy_apart.seen, toy.seen);
             }
         }
-        assert!(given > 2_000, "{given} given");
+        assert!(given_count > 2_000, "{given_count} given");
     }
 
-    /// A string is written in its form, as what the encryptor gives; a
-    /// stream's `/Length` is its encrypted data's, in each `/Length` entry;
-    /// and a stream's data is given before its dictionary's strings.
     #[test]
     fn what_an_encryptor_gives_is_written_and_a_streams_length_is_its() {
         let toy = fuzz::Toy::default();
         let id = ObjectId::new(7, 1);
-        let hex = Object::hex(b"ab");
-        let dict = dict! { "Length" => 1, "S" => Object::text("x(y"), "H" => hex, "Length" => 2 };
+        let hex = Object::hex(*b"ab");
+        let d = dict! { "Length" => 1, "S" => Object::text("x(y"), "H" => hex, "Length" => 2 };
         let mut out = Vec::new();
-        indirect_stream_with(&mut out, id, &dict, b"data", &toy).unwrap();
+        indirect_stream_with(&mut out, id, &d, b"data", &toy).unwrap();
         let seen = toy.seen.borrow();
         let order = [
             (id, b"data".to_vec(), true),
@@ -1687,16 +1924,13 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out), want);
     }
 
-    /// What the encryptor leaves in the clear is written as it is: a whole
-    /// object it says so of, and a dictionary's entry, every string in it,
-    /// a key written twice too, while the rest of the dictionary is
-    /// encrypted. It's asked once an object and once a dictionary.
     #[test]
     fn what_an_encryptor_leaves_in_the_clear_is_written_as_it_is() {
         let signature = dict! {
-            "Contents" => Object::hex(b"\x30\x82"),
+            "Contents" => Object::hex(*b"\x30\x82"),
             "ByteRange" => vec![Object::from(0), Object::from(4)],
             "M" => Object::text("D:2026"),
+            "Prop_Build" => Object::text("Acrobat"),
             "Contents" => vec![Object::text("in the clear")],
         };
         let plain_of = |id, obj: &Object| {
@@ -1704,9 +1938,10 @@ mod tests {
             indirect(&mut out, id, obj).unwrap();
             out
         };
-        // The toy leaves an object whose number is a multiple of 5 as it is,
-        // and a cross-reference stream.
-        let xref = dict! { "Type" => "XRef", "ID" => vec![Object::text("an /ID")] };
+        let xref = dict! {
+            "Type" => Object::name("XRef"),
+            "ID" => vec![Object::text("an /ID")],
+        };
         let xref_stream = Object::from(Stream::new(xref.clone(), vec![1, 0, 0]));
         for (id, obj) in [
             (ObjectId::new(10, 0), Object::from(signature.clone())),
@@ -1718,7 +1953,7 @@ mod tests {
             assert_eq!(out, plain_of(id, &obj), "{id:?}");
             assert!(toy.seen.borrow().is_empty(), "{id:?}");
         }
-        // A signature's /Contents, both, as written; its /M encrypted.
+        // Multiple clear keys (`Contents` and `Prop_Build`) via `is_clear_key`.
         let toy = fuzz::Toy::default();
         let id = ObjectId::new(3, 0);
         let mut out = Vec::new();
@@ -1726,18 +1961,15 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("/Contents<3082>"), "{text}");
         assert!(text.contains("/Contents[(in the clear)]"), "{text}");
+        assert!(text.contains("/Prop_Build(Acrobat)"), "{text}");
         assert!(!text.contains("D:2026"), "{text}");
-        let seen = toy.seen.borrow();
-        assert_eq!(*seen, [(id, b"D:2026".to_vec(), false)]);
-        // A dictionary typed /XRef that isn't a stream is encrypted.
+        assert_eq!(*toy.seen.borrow(), [(id, b"D:2026".to_vec(), false)]);
+
         let toy = fuzz::Toy::default();
         indirect_with(&mut Vec::new(), id, &Object::from(xref), &toy).unwrap();
         assert_eq!(*toy.seen.borrow(), [(id, b"an /ID".to_vec(), false)]);
     }
 
-    /// The encryptor refusing a string or a stream's data, nothing is
-    /// written, and the refusal names the object; the writer's own refusal
-    /// through an encryptor names it too.
     #[test]
     fn an_encryptors_refusal_writes_nothing() {
         let toy = fuzz::Toy {
@@ -1768,21 +2000,13 @@ mod tests {
             indirect_with(&mut out, id, &Object::from(nan), &toy),
             Err(Refused::Write(Error::NonFinite { id: Some(id) }))
         );
-        assert_eq!(out, b"%PDF-1.7\n", "nothing written");
+        assert_eq!(out, b"%PDF-1.7\n");
         assert_eq!(
             refused.to_string(),
             "object 7 2 can't be encrypted: the toy refuses it"
         );
-        let write: Refused<&str> = Refused::Write(Error::NonFinite { id: Some(id) });
-        assert_eq!(
-            write.to_string(),
-            "a real that isn't a finite number in object 7 2"
-        );
     }
 
-    /// The writer writes values nested as deep as a parser reads them under
-    /// the default limits, which reads them back, and refuses one deeper,
-    /// as the parser does.
     #[test]
     fn values_nest_as_deep_as_the_parser_reads_them_and_no_deeper() {
         let limit = Limits::DEFAULT.nesting;
@@ -1791,8 +2015,6 @@ mod tests {
             (|o| Object::from(vec![o]), b"[", b"]"),
             (|o| Object::from(dict! { "K" => o }), b"<</K ", b">>"),
         ];
-        // An integer, and an empty array, which is one deeper than what's
-        // in it, inside as many arrays or dictionaries as may be.
         for inner in [Object::from(1), Object::from(Vec::new())] {
             for (wrap, open, close) in wraps {
                 let mut deepest = inner.clone();
@@ -1805,8 +2027,7 @@ mod tests {
                 fuzz::unplace(&mut read, &out);
                 assert_eq!(read, deepest);
                 assert!(indirect(&mut Vec::new(), ObjectId::new(1, 0), &deepest).is_ok());
-                // One deeper: the writer refuses it, and the parser refuses
-                // it written by hand, staying where it was.
+
                 let past = wrap(deepest);
                 let nested = Error::Nested { id: None, limit };
                 assert_eq!(write(&mut Vec::new(), &past), Err(nested));
@@ -1817,8 +2038,10 @@ mod tests {
                 let text = [open, &out, close].concat();
                 let mut parser = Parser::at(&text, 0);
                 let refused = parser.value(&mut ());
-                let Err(crate::parse::Error::Nested { limit: refused, .. }) = refused else {
-                    panic!("read past the limit: {refused:?}");
+                let Err(crate::parse::ErrorKind::Nested { limit: refused, .. }) =
+                    refused.map_err(crate::parse::Error::into_kind)
+                else {
+                    panic!("expected Nested error");
                 };
                 assert_eq!(refused, limit);
                 assert_eq!(parser.offset(), 0);
@@ -1826,11 +2049,6 @@ mod tests {
         }
     }
 
-    /// Each reference is written as the renumbering names it, `null` where
-    /// it names none, in a value, an indirect object and a stream's
-    /// dictionary given apart, but its `/Length`, which is the data's; an
-    /// indirect object at the number it's given, which the renumbering
-    /// isn't asked. Through `()`, as the writers without one write.
     #[test]
     fn each_reference_is_written_as_the_renumbering_names_it() {
         let to = |id: ObjectId| match id.number {
@@ -1843,9 +2061,12 @@ mod tests {
             Object::from(ObjectId::new(2, 0)),
             Object::from(7),
         ];
-        let obj = Object::from(
-            dict! { "A" => ObjectId::new(1, 0), "B" => ObjectId::new(2, 0), "C" => ObjectId::new(3, 0), "K" => refs },
-        );
+        let obj = Object::from(dict! {
+            "A" => ObjectId::new(1, 0),
+            "B" => ObjectId::new(2, 0),
+            "C" => ObjectId::new(3, 0),
+            "K" => refs,
+        });
         let renumbered = |obj: &Object| {
             let mut out = Vec::new();
             write_renumbered(&mut out, obj, &to).unwrap();
@@ -1857,16 +2078,16 @@ mod tests {
         );
         assert_eq!(renumbered(&Object::from(ObjectId::new(2, 0))), "null");
         assert_eq!(renumbered(&Object::from(ObjectId::new(1, 0))), "5 2 R");
-        // A `dyn Fn`, and `()`, which is the writer without one.
-        let dynamic: &dyn Fn(ObjectId) -> Option<ObjectId> = &to;
-        let mut out = Vec::new();
-        write_renumbered(&mut out, &obj, dynamic).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), renumbered(&obj));
-        let mut out = Vec::new();
-        write_renumbered(&mut out, &obj, &()).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), written(&obj));
 
-        // As an indirect object, at the number given.
+        let dyn_fn: &dyn Fn(ObjectId) -> Option<ObjectId> = &to;
+        let dyn_renumber: &dyn Renumber = &to;
+        let boxed_renumber: Box<dyn Renumber> = Box::new(to);
+        for mapper in [&dyn_fn as &dyn Renumber, &dyn_renumber, &boxed_renumber] {
+            let mut out = Vec::new();
+            write_renumbered(&mut out, &obj, mapper).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), renumbered(&obj));
+        }
+
         let mut out = Vec::new();
         assert_eq!(
             indirect_renumbered(&mut out, ObjectId::new(1, 0), &obj, &(), &to),
@@ -1874,33 +2095,18 @@ mod tests {
         );
         let want = format!("1 0 obj\n{}\nendobj\n", renumbered(&obj));
         assert_eq!(String::from_utf8(out).unwrap(), want);
-        let dict = dict! { "Length" => ObjectId::new(1, 0), "F" => ObjectId::new(1, 0), "G" => vec![Object::from(ObjectId::new(2, 0))] };
+
+        let d = dict! {
+            "Length" => ObjectId::new(1, 0),
+            "F" => ObjectId::new(1, 0),
+            "G" => vec![Object::from(ObjectId::new(2, 0))],
+        };
         let mut out = Vec::new();
-        indirect_stream_renumbered(&mut out, ObjectId::new(2, 0), &dict, b"1 0 R", &(), &to)
-            .unwrap();
+        indirect_stream_renumbered(&mut out, ObjectId::new(2, 0), &d, b"1 0 R", &(), &to).unwrap();
         let want = "2 0 obj\n<</Length 5/F 5 2 R/G[null]>>\nstream\n1 0 R\nendstream\nendobj\n";
         assert_eq!(String::from_utf8(out).unwrap(), want);
-
-        // Refused as the writer refuses, the error naming the number
-        // written, nothing written.
-        let nan = Object::from(dict! { "A" => ObjectId::new(1, 0), "N" => f64::NAN });
-        let mut out = b"%PDF-1.7\n".to_vec();
-        let refused = Error::NonFinite { id: None };
-        assert_eq!(write_renumbered(&mut out, &nan, &to), Err(refused));
-        let refused = Refused::Write(Error::NonFinite {
-            id: Some(ObjectId::new(9, 0)),
-        });
-        assert_eq!(
-            indirect_renumbered(&mut out, ObjectId::new(9, 0), &nan, &(), &to),
-            Err(refused)
-        );
-        assert_eq!(out, b"%PDF-1.7\n", "nothing written");
     }
 
-    /// Through `()`, or a function that names each reference as it is, the
-    /// writers with a renumbering write the bytes the writers without one
-    /// write, plainly and through an encryptor, which is given the same:
-    /// random values, as direct and as indirect objects.
     #[test]
     fn renumbering_nothing_writes_what_the_writers_without_one_write() {
         let mut random = Random(0x3c6e_f372_fe94_f82b);
@@ -1954,11 +2160,6 @@ mod tests {
         }
     }
 
-    /// Any value the writer writes through a renumbering reads back as the
-    /// value renumbered in memory ([`Object::renumber`]), places aside, as
-    /// the writer writes it, and as an indirect object through an
-    /// encryptor too, undone, as it wrote it plainly ([`fuzz::renumbered`]):
-    /// random values, under random renumberings, some naming nothing anew.
     #[test]
     fn values_written_renumbered_read_back_as_renumbered_in_memory() {
         let mut random = Random(0xbb67_ae85_84ca_a73b);
@@ -1983,12 +2184,8 @@ mod tests {
         assert!(changed > 5_000, "{changed} changed");
     }
 
-    /// An encryptor is given the number and generation an object is written
-    /// at, which its key is: not the number it's held at, which the
-    /// renumbering names anew in its references.
     #[test]
     fn an_encryptor_is_given_the_number_an_object_is_written_at() {
-        // Held at 3, written at 8, a reference to itself among it.
         let to = |id: ObjectId| {
             Some(if id.number == 3 {
                 ObjectId::new(8, 0)
@@ -2009,14 +2206,12 @@ mod tests {
         );
         let toy = fuzz::Toy::default();
         let mut out = Vec::new();
-        let dict = dict! { "Self" => ObjectId::new(3, 0) };
-        indirect_stream_renumbered(&mut out, ObjectId::new(8, 0), &dict, b"cd", &toy, &to).unwrap();
+        let d = dict! { "Self" => ObjectId::new(3, 0) };
+        indirect_stream_renumbered(&mut out, ObjectId::new(8, 0), &d, b"cd", &toy, &to).unwrap();
         assert_eq!(
             *toy.seen.borrow(),
             [(ObjectId::new(8, 0), b"cd".to_vec(), true)]
         );
-        // The toy leaves an object written at a multiple of 5 as it is,
-        // whatever it was held at.
         let toy = fuzz::Toy::default();
         let mut out = Vec::new();
         indirect_renumbered(&mut out, ObjectId::new(10, 0), &page, &toy, &to).unwrap();

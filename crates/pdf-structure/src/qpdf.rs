@@ -129,18 +129,18 @@ mod tests {
     fn clean() -> Vec<(u32, Body)> {
         let r = Object::reference;
         let form = dict! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "BBox" => vec![Object::from(0), Object::from(0), Object::from(20), Object::from(20)],
-            "Resources" => dict! { "ProcSet" => vec![Object::from("PDF")] },
+            "Resources" => dict! { "ProcSet" => vec![Object::name("PDF")] },
         };
         vec![
-            (1, dict! { "Type" => "Catalog", "Pages" => r(2) }.into()),
-            (2, dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }.into()),
+            (1, dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }.into()),
+            (2, dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 }.into()),
             (
                 3,
                 dict! {
-                    "Type" => "Page",
+                    "Type" => Object::name("Page"),
                     "Parent" => r(2),
                     "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
                     "Resources" => dict! {},
@@ -151,8 +151,8 @@ mod tests {
             (
                 4,
                 dict! {
-                    "Type" => "Annot",
-                    "Subtype" => "Text",
+                    "Type" => Object::name("Annot"),
+                    "Subtype" => Object::name("Text"),
                     "Rect" => vec![Object::from(100), Object::from(100), Object::from(120), Object::from(120)],
                     "Contents" => Object::text("A note"),
                     "AP" => dict! { "N" => r(5) },
@@ -306,10 +306,10 @@ mod tests {
         let mut in_streams = 0;
         assert_eq!(doc.unread().next(), None);
         for (id, object) in doc.objects() {
-            let at = object.at.unwrap();
-            if let Some(stream) = at.stream {
+            let at = object.at().unwrap();
+            if let Some(stream) = at.stream() {
                 in_streams += 1;
-                let written = &doc.decoded[&stream][at.start..at.end];
+                let written = &doc.decoded[&stream][at.range()];
                 assert!(
                     written.starts_with(b"<<") && written.ends_with(b">>"),
                     "{id:?}"
@@ -377,13 +377,13 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("{kind}: the annotation reads"));
             assert!(
-                annot.at.unwrap().stream.is_some(),
+                annot.at().unwrap().stream().is_some(),
                 "{kind}: in an object stream"
             );
             let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
             assert_eq!(
                 *contents.value(),
-                Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(&b"A note"[..]), Some(Form::Literal)),
                 "{kind}"
             );
             let owned = read::document(
@@ -500,7 +500,7 @@ mod tests {
                     let theirs = theirs[&id].as_deref();
                     if id == ObjectId::new(4, 0) && *ignored {
                         let at = reading.record(id).unwrap().data.unwrap().at;
-                        assert_eq!(theirs, Ok(&file[at.start..at.end]), "{what}: {id:?}");
+                        assert_eq!(theirs, Ok(&file[at.range()]), "{what}: {id:?}");
                     } else {
                         assert_eq!(theirs, Ok(&mine[..]), "{what}: {id:?}");
                     }
@@ -1077,7 +1077,6 @@ mod tests {
             Value::Real(_) => "a real",
             Value::Name(_) => "a name",
             Value::String(Str::Bytes(_), _) => "bytes",
-            Value::String(Str::Text(_), _) => "text",
             Value::String(Str::Encrypted(_), _) => "ciphertext",
             Value::Array(_) => "an array",
             Value::Dict(_) => "a dictionary",
@@ -1128,13 +1127,14 @@ mod tests {
                 return Some((kind, at.to_string()));
             }
             (x.last_entries()).find_map(|e| {
-                let name = String::from_utf8_lossy(&e.key);
-                difference(&e.value, y.get(&e.key)?, &format!("{at}/{name}"), nothing)
+                let name = String::from_utf8_lossy(e.key());
+                difference(e.value(), y.get(e.key())?, &format!("{at}/{name}"), nothing)
             })
         };
         match (a.value(), b.value()) {
-            (Value::String(Str::Bytes(x), _), Value::String(Str::Text(y), _)) => {
-                if &text::decode(x).text == y {
+            (Value::String(Str::Bytes(x), _), Value::String(Str::Bytes(y), _)) => {
+                let dy = text::decode(y);
+                if x == y || (dy.quirks.is_empty() && text::decode(x).text == dy.text) {
                     None
                 } else if x.starts_with(&[0xFF, 0xFE]) {
                     explained(
@@ -1241,7 +1241,7 @@ mod tests {
             assert!(heard.is_empty(), "{test}: {heard:?}");
             assert_eq!(alone.trailer.unwritten, None, "{test}");
             assert!(
-                alone.objects().all(|(_, o)| o.at.is_none()),
+                alone.objects().all(|(_, o)| o.at().is_none()),
                 "{test}: qpdf says nowhere"
             );
         }
@@ -1264,13 +1264,17 @@ mod tests {
         let catalog = alone.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         assert!(catalog.has(b"Odd Name") && catalog.has(b"Bin\xFFx"));
         assert_eq!(
-            catalog.entries().iter().filter(|e| e.key == b"Dup").count(),
+            catalog
+                .entries()
+                .iter()
+                .filter(|e| e.key() == b"Dup")
+                .count(),
             1
         );
         assert_eq!(catalog.get(b"Dup").and_then(Object::as_integer), Some(2));
         assert_eq!(
             *catalog.get(b"Utf16").unwrap().value(),
-            Value::String(Str::Text("AB".to_string()), None),
+            Value::String(Str::bytes(&b"AB"[..]), None),
             "text, its encoding lost"
         );
         assert_eq!(catalog.get(b"Real").and_then(Object::as_number), Some(0.5));
@@ -1382,7 +1386,7 @@ mod tests {
         assert!(through.faults().is_empty(), "{:?}", through.faults());
         assert_eq!(
             *contents(&through).value(),
-            Value::String(Str::Text("A note".to_string()), Some(Form::Hex))
+            Value::String(Str::bytes(&b"A note"[..]), Some(Form::Hex))
         );
         let doc = read::document(&data, &read::Options::DEFAULT);
         assert!(doc.faults().is_empty(), "{:?}", doc.faults());
@@ -1393,13 +1397,13 @@ mod tests {
         let contents = contents(&doc);
         assert_eq!(
             *contents.value(),
-            Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Hex)),
+            Value::String(Str::bytes(&b"A note"[..]), Some(Form::Hex)),
             "its bytes"
         );
-        let at = contents.at.unwrap();
-        assert_eq!(at.stream, None, "in plain view");
+        let at = contents.at().unwrap();
+        assert_eq!(at.stream(), None, "in plain view");
         assert!(
-            !data[at.start..at.end].windows(6).any(|w| w == b"A note"),
+            !data[at.range()].windows(6).any(|w| w == b"A note"),
             "placed on its ciphertext"
         );
         // A password that doesn't open it, though its user password is
@@ -1416,7 +1420,7 @@ mod tests {
         let annot = (doc.objects().map(|(_, o)| o))
             .find(|o| {
                 o.as_dict()
-                    .is_some_and(|d| d.get(b"Contents").is_some_and(|c| c.at == Some(at)))
+                    .is_some_and(|d| d.get(b"Contents").is_some_and(|c| c.at() == Some(at)))
             })
             .expect("the annotation reads");
         let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
@@ -1442,10 +1446,15 @@ mod tests {
         use pdf_objects::serialize;
 
         // A catalog, and the page tree qpdf needs, as object 2.
-        let catalog =
-            || Object::from(dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0) });
+        let catalog = || {
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => ObjectId::new(2, 0) },
+            )
+        };
         let pages = || {
-            Object::from(dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 })
+            Object::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => Vec::<Object>::new(), "Count" => 0 },
+            )
         };
         let root = || dict! { "Root" => ObjectId::new(1, 0) };
         let deflate = Deflate::DEFAULT;
@@ -1531,7 +1540,7 @@ mod tests {
         let base = write::Base::of(&reading).unwrap();
         assert_eq!(base.header, 100);
         let marked = Object::from(
-            dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0), "Marked" => true },
+            dict! { "Type" => Object::name("Catalog"), "Pages" => ObjectId::new(2, 0), "Marked" => true },
         );
         let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
         let options = write::Options::DEFAULT;
@@ -1619,7 +1628,7 @@ mod tests {
             let reading = read::Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
             let base = write::Base::of(&reading).unwrap();
             let marked = Object::from(
-                dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0), "Marked" => true },
+                dict! { "Type" => Object::name("Catalog"), "Pages" => ObjectId::new(2, 0), "Marked" => true },
             );
             let given = [(ObjectId::new(1, 0), write::Body::from(&marked))];
             let mut data = file.clone();
@@ -2461,55 +2470,55 @@ mod tests {
         // Sixteen rows of four pixels of three samples.
         let tiff = dict! { "Predictor" => 2, "Colors" => 3, "Columns" => 4 };
         let tiff3 = dict! { "Predictor" => 2, "BitsPerComponent" => 3 };
-        let identity = dict! { "Name" => "Identity" };
+        let identity = dict! { "Name" => Object::name("Identity") };
         let crypt: Vec<Object> = vec![identity.into(), Object::null()];
-        let crypted: Vec<Object> = vec![Object::from("Crypt"), Object::from("FlateDecode")];
+        let crypted: Vec<Object> = vec![Object::name("Crypt"), Object::name("FlateDecode")];
         let cases: Vec<(&str, Dict, Vec<u8>, Expect)> = vec![
             (
                 "ASCIIHex",
-                dict! { "Filter" => "ASCIIHexDecode" },
+                dict! { "Filter" => Object::name("ASCIIHexDecode") },
                 ended(&hex(&text)),
                 Alike,
             ),
             (
                 "ASCII85",
-                dict! { "Filter" => "ASCII85Decode" },
+                dict! { "Filter" => Object::name("ASCII85Decode") },
                 fixture::ascii85(&text),
                 Alike,
             ),
             (
                 "LZW",
-                dict! { "Filter" => "LZWDecode" },
+                dict! { "Filter" => Object::name("LZWDecode") },
                 fixture::lzw(&text),
                 Alike,
             ),
             (
                 "RunLength",
-                dict! { "Filter" => "RunLengthDecode" },
+                dict! { "Filter" => Object::name("RunLengthDecode") },
                 fixture::run_length(&text),
                 Alike,
             ),
             (
                 "Flate",
-                dict! { "Filter" => "FlateDecode" },
+                dict! { "Filter" => Object::name("FlateDecode") },
                 fixture::zlib(&text),
                 Alike,
             ),
             (
                 "Fl",
-                dict! { "Filter" => "Fl" },
+                dict! { "Filter" => Object::name("Fl") },
                 fixture::zlib(&text),
                 Alike,
             ),
             (
                 "PNG",
-                dict! { "Filter" => "FlateDecode", "DecodeParms" => png },
+                dict! { "Filter" => Object::name("FlateDecode"), "DecodeParms" => png },
                 fixture::zlib(&rows),
                 Alike,
             ),
             (
                 "TIFF",
-                dict! { "Filter" => "FlateDecode", "DecodeParms" => tiff },
+                dict! { "Filter" => Object::name("FlateDecode"), "DecodeParms" => tiff },
                 fixture::zlib(&rows[..192]),
                 Alike,
             ),
@@ -2521,34 +2530,34 @@ mod tests {
             ),
             (
                 "checksum",
-                dict! { "Filter" => "FlateDecode" },
+                dict! { "Filter" => Object::name("FlateDecode") },
                 damaged,
                 AlikeBut("Checksum"),
             ),
             (
                 "no >",
-                dict! { "Filter" => "ASCIIHexDecode" },
+                dict! { "Filter" => Object::name("ASCIIHexDecode") },
                 hex(&text),
                 AlikeBut("NoEnd"),
             ),
             // ISO 32000-2, 7.4.5: 128 is the end; qpdf reads on past it.
             (
                 "past 128",
-                dict! { "Filter" => "RunLengthDecode" },
+                dict! { "Filter" => Object::name("RunLengthDecode") },
                 [&fixture::run_length(&text)[..], b"\x02abc\x80"].concat(),
                 Shorter,
             ),
             // 7.2.3: NUL is white-space, which qpdf takes as a fault.
             (
                 "NUL",
-                dict! { "Filter" => "ASCIIHexDecode" },
+                dict! { "Filter" => Object::name("ASCIIHexDecode") },
                 ended(&[&b"41\x00"[..], &hex(&text)].concat()),
                 QpdfRefuses,
             ),
             // 7.4.4.4: TIFF's samples are 1, 2, 4, 8 or 16 bits.
             (
                 "3 bits",
-                dict! { "Filter" => "FlateDecode", "DecodeParms" => tiff3 },
+                dict! { "Filter" => Object::name("FlateDecode"), "DecodeParms" => tiff3 },
                 fixture::zlib(&rows),
                 ReaderRefuses,
             ),
@@ -2575,7 +2584,7 @@ mod tests {
                 panic!("{name}")
             };
             let at = stream.data.at().unwrap();
-            let written = &data[at.start..at.end];
+            let written = &data[at.range()];
             let theirs = &theirs[&id];
             let got = match crate::filter::filters(&stream.dict, Some(&|_| None)) {
                 Err(_) => match theirs {
@@ -2783,9 +2792,9 @@ mod tests {
                                 let Value::Stream(stream) = object.value() else {
                                     return None;
                                 };
-                                let at = stream.data.at().filter(|at| at.stream.is_none())?;
+                                let at = stream.data.at().filter(|at| at.stream().is_none())?;
                                 let filters = crate::filter::filters(&stream.dict, Some(&resolve)).ok()?;
-                                (!filters.is_empty()).then(|| (id, filters, &data[at.start..at.end]))
+                                (!filters.is_empty()).then(|| (id, filters, &data[at.range()]))
                             })
                             .collect();
                         let ids: Vec<ObjectId> = streams.iter().map(|&(id, _, _)| id).collect();
@@ -3101,8 +3110,8 @@ mod tests {
                                     let Value::Stream(stream) = object.value() else {
                                         return None;
                                     };
-                                    let at = stream.data.at().filter(|at| at.stream.is_none())?;
-                                    let written = &data[at.start..at.end];
+                                    let at = stream.data.at().filter(|at| at.stream().is_none())?;
+                                    let written = &data[at.range()];
                                     let typed = stream.dict.get(b"Type").and_then(Object::as_name);
                                     let crypt = crate::filter::crypt_filter(&stream.dict, Some(&resolve));
                                     let own = crypt.as_deref().filter(|&c| c != b"Identity");

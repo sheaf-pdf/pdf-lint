@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
+use pdf_objects::object::{Dict, Name, Object, ObjectId, Str, Value};
 use pdf_objects::version::Version;
 use pdf_structure::read::Unwritten;
 use pdf_structure::source::{Document, Trailer, Unread};
@@ -212,7 +212,7 @@ impl Qpdf {
     /// (`--json-stream-data=none`): every object it lists, as written but
     /// for what qpdf doesn't keep, which is where anything was written, the
     /// order of a dictionary's keys and any key written twice, a name's
-    /// escapes, and which encoding a text string had ([`Str::Text`]); its
+    /// escapes, and which encoding a text string had; its
     /// strings decrypted. Where qpdf reconstructed the cross-references, the
     /// trailer says so, in qpdf's words ([`Unwritten::Other`]). The error is
     /// why qpdf read nothing. Built as a reader outside pdf-structure builds
@@ -492,13 +492,13 @@ fn object(json: &Json) -> Result<Object, String> {
         Json::Number(n) => Value::Integer(n.parse().map_err(|_| format!("{n} isn't an integer"))?),
         Json::String(s) => {
             if let Some(hex) = s.strip_prefix("b:") {
-                Value::String(Str::Bytes(unhex(hex)?), None)
+                Value::String(Str::bytes(unhex(hex)?), None)
             } else if let Some(text) = s.strip_prefix("u:") {
-                Value::String(Str::Text(text.to_string()), None)
+                Value::String(Str::bytes(pdf_objects::text::encode(text)), None)
             } else if let Some(id) = reference(s) {
                 Value::Ref(id)
             } else {
-                Value::Name(name(s)?)
+                Value::Name(Name::new(name(s)?))
             }
         }
         Json::Array(elements) => {
@@ -737,9 +737,12 @@ mod tests {
             ])
         );
         let text = dict.get(b"Odd Name").unwrap().value();
-        assert_eq!(text, &Value::String(Str::Text("Café".to_string()), None));
+        assert_eq!(
+            text,
+            &Value::String(Str::bytes(pdf_objects::text::encode("Café")), None)
+        );
         let bytes = dict.get(b"Bytes").unwrap().value();
-        assert_eq!(bytes, &Value::String(Str::Bytes(vec![0, 0xFF, 0x10]), None));
+        assert_eq!(bytes, &Value::String(Str::bytes(vec![0, 0xFF, 0x10]), None));
         assert_eq!(
             *dict.get(b"Pages").unwrap().value(),
             Value::Ref(ObjectId::new(2, 0))

@@ -961,9 +961,9 @@ fn a_length_something_else_names_is_no_part_of_its_stream_s_page() {
         .as_reference()
         .unwrap();
     assert_eq!(doc.get(mine).unwrap().as_integer(), Some(5));
-    let place = doc.record(mine).unwrap().at.start as u64;
+    let place = doc.record(mine).unwrap().at.start() as u64;
     let section = at(&out, "(second content)");
-    let tree = doc.record(page_ids_parent(&doc)).unwrap().at.start as u64;
+    let tree = doc.record(page_ids_parent(&doc)).unwrap().at.start() as u64;
     assert!(place > section && place > tree, "{place} {section} {tree}");
     assert!(done.layout.main_section() > place);
 }

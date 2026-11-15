@@ -39,7 +39,9 @@ pub use check::{
 };
 // `grammar` is the module and the function both.
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
-pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
+pub use object::{
+    Data, Dict, Entry, Form, Name, Object, ObjectId, SmallBytes, Span, Str, Stream, Value,
+};
 // The model, its tables and predicates, and the commit it's at, are
 // pdf-arlington's; which model every check reads is this crate's.
 pub use pdf_arlington::{COMMIT, predicate};
@@ -48,7 +50,9 @@ pub use pdf_arlington::{COMMIT, predicate};
 // the reader's faults name (`fault::Place`, and the `fault::Sink` a
 // `Source` tells them to) is named at the version this crate takes.
 pub use pdf_objects;
-pub use pdf_objects::{Resolve, Streams, Unreadable, Why, dict, object, version};
+pub use pdf_objects::{
+    Resolve, ResolveFn, Streams, Unreadable, Why, dict, object, resolve_fn, version,
+};
 // The reader, and what it reads a file into, are pdf-structure's: its
 // `read` module is this crate's `bytes`, the name it has had here; the
 // error a stream's data that doesn't decode cleanly gives is pdf-filters',
@@ -144,8 +148,8 @@ pub mod text {
         use crate::pdf_crypt::{Encoding, Password};
 
         /// A password's encodings (pdf-crypt's [`Password::encodings`])
-        /// take this table for PDFDocEncoding exactly, though pdf-crypt
-        /// keeps a copy of its own. With `Ł` after it, 0x95 in
+        /// take [`pdfium::pdf_doc_char`] for PDFDocEncoding exactly, though
+        /// pdf-crypt keeps a copy of its own. With `Ł` after it, 0x95 in
         /// PDFDocEncoding and in neither WinAnsiEncoding nor
         /// MacRomanEncoding, a character a byte decodes to has its UTF-8
         /// and that byte's PDFDocEncoding, no more; the Latin-1 characters
@@ -162,6 +166,9 @@ pub mod text {
             };
             for b in 0..=255 {
                 if let Some(c) = pdf_doc_char(b) {
+                    assert_eq!(pdfium::pdf_doc_char(b), Some(c), "{b:#x}");
+                }
+                if let Some(c) = pdfium::pdf_doc_char(b) {
                     let typed = format!("{c}Ł");
                     let want = [
                         (Encoding::Utf8, typed.as_bytes().to_vec()),
@@ -271,10 +278,13 @@ pub mod extension {
         fn a_document_declares_through_its_catalog_and_metadata() {
             let mut doc =
                 Document::new(Version::new(2, 0), dict! { "Root" => Object::reference(1) });
-            let iso = dict! { "BaseVersion" => "2.0", "ExtensionLevel" => 32001 };
+            let iso = dict! { "BaseVersion" => Object::name("2.0"), "ExtensionLevel" => 32001 };
             doc.insert(
                 1,
-                dict! { "Type" => "Catalog", "Extensions" => dict! { "ISO_" => iso } },
+                dict! {
+                    "Type" => Object::name("Catalog"),
+                    "Extensions" => dict! { "ISO_" => iso },
+                },
             );
             assert_eq!(declared(&doc), BTreeSet::from(["ISO_TS_32001".to_string()]));
             assert_eq!(declared(&doc), quietly(&doc));
@@ -314,10 +324,16 @@ pub mod extension {
             let clean = packet(r#"pdfaid:part="3""#, vt);
             let mut doc =
                 Document::new(Version::new(2, 0), dict! { "Root" => Object::reference(1) });
-            let catalog = dict! { "Type" => "Catalog", "Metadata" => Object::reference(5) };
+            let catalog = dict! {
+                "Type" => Object::name("Catalog"),
+                "Metadata" => Object::reference(5),
+            };
             doc.insert(1, catalog);
             let stream = |data: &[u8]| {
-                let dict = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+                let dict = dict! {
+                    "Type" => Object::name("Metadata"),
+                    "Subtype" => Object::name("XML"),
+                };
                 crate::object::Stream::new(dict, data.to_vec())
             };
             let both = ["ISO_19005_3", "PDF_VT2"].map(String::from);
@@ -337,8 +353,8 @@ pub mod extension {
                     assert_eq!(*count, 1);
                     assert_eq!(place.object, Some(ObjectId::new(5, 0)));
                     let at = place.at.unwrap();
-                    assert_eq!(at.stream, Some(ObjectId::new(5, 0)));
-                    assert!(data[at.start..at.end].starts_with(b"<rdf:Description"));
+                    assert_eq!(at.stream(), Some(ObjectId::new(5, 0)));
+                    assert!(data[at.start()..at.end()].starts_with(b"<rdf:Description"));
                 }
             }
             // With no catalog to name its stream, a fault's in no object.

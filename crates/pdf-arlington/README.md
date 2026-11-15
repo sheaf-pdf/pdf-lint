@@ -15,7 +15,7 @@ The Arlington PDF Model is the PDF Association's machine-readable TSV specificat
 ## Quickstart
 
 ```rust
-use pdf_arlington::pdf_objects::{Dict, Object, ObjectId, Version, dict};
+use pdf_arlington::pdf_objects::{Dict, Object, ObjectId, Version, dict, resolve_fn};
 use pdf_arlington::predicate;
 use pdf_arlington::{At, FileCx, Grammar, Truth};
 
@@ -29,11 +29,11 @@ assert_eq!(multiple, "fn:Eval((@Rotate mod 90)==0)");
 
 // Evaluate that predicate against two page dictionaries.
 let trailer = Dict::new();
-let resolve = |_: ObjectId| None;
+let resolve = resolve_fn(|_: ObjectId| None);
 let file = FileCx::new(&trailer, Version::new(2, 0), &resolve).grammar(Grammar::embedded());
 let holds = |page: &Object| predicate::holds_fully(multiple, &file.at(page, At::Key(b"Rotate")));
-assert_eq!(holds(&dict! { "Type" => "Page", "Rotate" => 180 }.into()), Truth::True);
-assert_eq!(holds(&dict! { "Type" => "Page", "Rotate" => 45 }.into()), Truth::False);
+assert_eq!(holds(&dict! { "Type" => Object::name("Page"), "Rotate" => 180 }.into()), Truth::True);
+assert_eq!(holds(&dict! { "Type" => Object::name("Page"), "Rotate" => 45 }.into()), Truth::False);
 ```
 
 ## License

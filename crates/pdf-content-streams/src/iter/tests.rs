@@ -7,7 +7,7 @@
 use std::fmt::Debug;
 use std::iter::FusedIterator;
 
-use pdf_objects::{Object, ObjectId, dict};
+use pdf_objects::{Object, ObjectId, dict, resolve_fn};
 
 use crate::*;
 
@@ -148,15 +148,15 @@ fn a_sets_operators_walk_alike_in_order() {
 
 #[test]
 fn capped_names_walk_alike() {
-    let nested = || Object::from(vec![Object::from(vec![Object::from("DeviceGray")])]);
+    let nested = || Object::from(vec![Object::from(vec![Object::name("DeviceGray")])]);
     let spaces = dict! {
         "CS2" => nested(),
         "CS0" => nested(),
-        "CS1" => Object::from("DeviceRGB"),
+        "CS1" => Object::name("DeviceRGB"),
         "CS3" => nested(),
     };
     let resources = Object::from(dict! { "ColorSpace" => spaces });
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     let mut limits = Limits::DEFAULT;
     limits.color.space_depth = 0;
     let res = ResCx::read(nothing, Some(&resources), &limits).unwrap();
@@ -229,7 +229,7 @@ fn reserved_names_walk_alike() {
         "Font" => dict! { "F2" => Object::reference(1), "F1" => Object::reference(2) },
         "ExtGState" => dict! { "GS0" => dict! { "ca" => 0.5 } },
     });
-    let nothing = |_: ObjectId| None;
+    let nothing = resolve_fn(|_: ObjectId| None);
     let reserved = Reserved::read(nothing, Some(&resources), &Limits::DEFAULT);
     let names = walked(reserved.names());
     hinted_exactly(reserved.names());

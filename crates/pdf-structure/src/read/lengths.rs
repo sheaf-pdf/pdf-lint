@@ -21,9 +21,10 @@ use crate::source::Source;
 /// the first `endstream` takes its first line.
 const CONTENT: &str = "0 0 m 100 100 l S\nendstream\n10 10 50 50 re f";
 
-/// [`CONTENT`] up to the first `endstream`, as a reader that finds its data
-/// so takes it, and then finds no `endobj` after that `endstream`.
-const SCANNED: &str = "0 0 m 100 100 l S\n";
+/// [`CONTENT`] up to the first `endstream`, its framing end of line stripped,
+/// as a reader that finds its data so takes it, and then finds no `endobj`
+/// after that `endstream`.
+const SCANNED: &str = "0 0 m 100 100 l S";
 
 /// An object stream to write: its number, its dictionary's entries past
 /// `/Type /ObjStm`, `/N` and `/First` (a `/Length` among them, or its
@@ -328,7 +329,7 @@ pub(super) fn data(doc: &Document, file: &[u8], n: u32) -> (String, bool) {
     let id = ObjectId::new(n, 0);
     let extent = doc.record(id).unwrap().data.unwrap();
     let at = extent.at;
-    let data = String::from_utf8_lossy(&file[at.start..at.end]).into_owned();
+    let data = String::from_utf8_lossy(&file[at.range()]).into_owned();
     (data, extent.declared)
 }
 
@@ -337,7 +338,7 @@ pub(super) fn data(doc: &Document, file: &[u8], n: u32) -> (String, bool) {
 pub(super) fn no_length(doc: &Document, n: u32) -> (Place, Fault) {
     let id = ObjectId::new(n, 0);
     let dict = doc.get(id).unwrap().as_dict().unwrap();
-    let at = dict.get(b"Length").unwrap().at;
+    let at = dict.get(b"Length").unwrap().at();
     (Place::new(Some(id), at), Fault::Length { length: None })
 }
 
@@ -353,7 +354,7 @@ pub(super) fn unfollowed(doc: &Document, n: u32) -> (Place, Fault) {
 /// `endstream` is no `endobj`.
 pub(super) fn scanned(doc: &Document, n: u32) -> [(Place, Fault); 2] {
     let id = ObjectId::new(n, 0);
-    let at = doc.get(id).unwrap().at;
+    let at = doc.get(id).unwrap().at();
     let unended = Fault::Parse {
         kind: ParseKind::NoEndobj,
         text: format!("{n} 0 obj has no endobj").into(),
@@ -538,7 +539,7 @@ fn a_scanned_files_stream_whose_length_is_in_an_object_stream_is_read_by_it() {
     assert_eq!(doc.faults(), [(Place::new(None, None), members)]);
     assert_eq!(data(&doc, &file, 4), (CONTENT.to_string(), true));
     let record = doc.record(ObjectId::new(4, 0)).unwrap();
-    assert_eq!(record.at.start, at);
+    assert_eq!(record.at.start(), at);
     assert!(record.data.unwrap().indirect_length);
     // Read alone, the stream says nothing either.
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
@@ -569,7 +570,7 @@ fn a_first_objects_length_in_an_object_stream_isnt_read() {
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     let data = |first: FirstObject| {
         let at = first.object.as_stream().unwrap().data.at().unwrap();
-        String::from_utf8_lossy(&file[at.start..at.end]).into_owned()
+        String::from_utf8_lossy(&file[at.range()]).into_owned()
     };
     let before = reading.first_object().unwrap().unwrap();
     assert_eq!(before.id, ObjectId::new(4, 0));

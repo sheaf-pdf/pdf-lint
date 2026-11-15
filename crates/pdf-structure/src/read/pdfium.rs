@@ -290,7 +290,7 @@ pub(super) fn stream_end(
         #[cfg(test)]
         super::scan_read(head.len() - at);
         let mut parser = Parser::at(head, at).limits(limits);
-        parser.header().ok()?;
+        parser.header(&mut ()).ok()?;
         let value = parser.value(&mut ()).ok()?;
         let length = value.as_dict()?.get(b"Length")?;
         match *length.value() {
@@ -654,7 +654,9 @@ impl Reader {
                 && let Value::Stream(stream) = object.value()
             {
                 let mut dict = Object::new(Value::Dict(stream.dict.clone()));
-                dict.at = object.at;
+                if let Some(span) = object.at() {
+                    dict = dict.with_span(span);
+                }
                 dicts.push((at, dict));
             }
         }
@@ -662,17 +664,21 @@ impl Reader {
         let last = dicts
             .last()
             .map(|(_, last)| last.as_dict().cloned().unwrap_or_default());
+        let set_at = |target: &mut Object, at: Option<pdf_objects::Span>| match at {
+            Some(at) => *target = std::mem::replace(target, Object::null()).with_span(at),
+            None => target.clear_span(),
+        };
         let mut made: Option<Object> = None;
         for (_, object) in dicts {
             match &mut made {
                 None => made = Some(object),
                 Some(earlier) => {
-                    let at = object.at;
+                    let at = object.at();
                     if let (Some(earlier), Some(newer)) = (earlier.as_dict_mut(), object.as_dict())
                     {
                         merge_trailer(earlier, newer);
                     }
-                    earlier.at = at;
+                    set_at(earlier, at);
                 }
             }
         }
@@ -684,7 +690,7 @@ impl Reader {
                 .map(|&key| key.to_vec())
                 .collect();
             if !taken.is_empty() {
-                cx.tell(None, made.at, Fault::Taken { keys: taken });
+                cx.tell(None, made.at(), Fault::Taken { keys: taken });
             }
         }
         let object = match (loaded.trailer, made) {
@@ -692,7 +698,7 @@ impl Reader {
                 if let (Some(sections), Some(made)) = (sections.as_dict_mut(), made.as_dict()) {
                     merge_trailer(sections, made);
                 }
-                sections.at = made.at;
+                set_at(&mut sections, made.at());
                 sections
             }
             (Some(sections), None) => sections,

@@ -36,7 +36,7 @@ mod tests {
     use std::thread::{self, ThreadId};
 
     use pdf_objects::pdf_tokenizer::Rules;
-    use pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
+    use pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict, resolve_fn};
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Level, Metadata, Subscriber};
@@ -164,12 +164,15 @@ mod tests {
     fn tree() -> BTreeMap<ObjectId, Object> {
         let page = || {
             let media = [0, 0, 1, 1].map(Object::from).to_vec();
-            let page =
-                dict! { "Type" => "Page", "Parent" => Object::reference(2), "MediaBox" => media };
+            let page = dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "MediaBox" => media,
+            };
             Object::from(page)
         };
         let kids = vec![Object::reference(3), Object::reference(4)];
-        let root = dict! { "Type" => "Pages", "Kids" => kids, "Count" => 2 };
+        let root = dict! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 2 };
         BTreeMap::from([
             (ObjectId::new(2, 0), Object::from(root)),
             (ObjectId::new(3, 0), page()),
@@ -182,12 +185,11 @@ mod tests {
     #[test]
     fn a_page_tree_walked_or_counted_is_a_span() {
         let objects = tree();
-        let resolve = |id: ObjectId| objects.get(&id);
         let catalog = dict! { "Pages" => Object::reference(2) };
         let limits = Limits::DEFAULT;
         for rules in [Rules::Iso, Rules::Pdfium] {
             let made = spans(|| {
-                let table = pages::pages(resolve, &catalog, rules, &limits, &mut ()).unwrap();
+                let table = pages::pages(&objects, &catalog, rules, &limits, &mut ()).unwrap();
                 assert_eq!(table.len(), 2);
                 let parents = table.iter().map(|page| page.parents().count());
                 assert_eq!(parents.sum::<usize>(), 2);
@@ -196,7 +198,7 @@ mod tests {
             assert_eq!(fields(&made[0]), ["pdfium"]);
         }
         let made = spans(|| {
-            assert_eq!(pages::counted(resolve, &catalog, &limits), Ok(2));
+            assert_eq!(pages::counted(&objects, &catalog, &limits), Ok(2));
         });
         assert_eq!(named(&made), [("counted", Level::DEBUG)]);
         assert_eq!(fields(&made[0]), Vec::<&str>::new());
@@ -231,8 +233,11 @@ mod tests {
         });
         assert_eq!(named(&made), [("read", Level::DEBUG)]);
         assert_eq!(fields(&made[0]), ["bytes"]);
-        let stream = Object::stream(dict! { "Type" => "Metadata", "Subtype" => "XML" });
-        let objects = |id: ObjectId| (id == ObjectId::new(5, 0)).then_some(&stream);
+        let stream = Object::stream(dict! {
+            "Type" => Object::name("Metadata"),
+            "Subtype" => Object::name("XML"),
+        });
+        let objects = resolve_fn(|id: ObjectId| (id == ObjectId::new(5, 0)).then_some(&stream));
         let file = WithStreams::new(objects, |id: ObjectId, _: usize| match id.number {
             5 => Ok(packet.to_vec()),
             _ => Err(Unreadable::new(id, Why::Damaged, "no such stream")),
@@ -265,7 +270,7 @@ mod tests {
     fn a_tree_walked_and_the_lookups_are_none() {
         let made = spans(|| {
             let root = Object::from(tree::write_names([(b"a".to_vec(), Object::from(1))]).unwrap());
-            let nothing = |_: ObjectId| None::<&Object>;
+            let nothing = resolve_fn(|_: ObjectId| None);
             let limits = Limits::DEFAULT;
             assert_eq!(tree::names(nothing, &root, &limits, ()).count(), 1);
             let root = Object::from(tree::write_numbers([(1, Object::from(1))]).unwrap());

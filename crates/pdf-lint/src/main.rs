@@ -830,39 +830,35 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
     let mut content: Option<(ObjectId, Vec<u8>)> = None;
     for finding in &shown {
         let _ = writeln!(out, "- {finding}");
-        match finding.at {
-            Some(at @ Span { stream: None, .. }) => {
-                let _ = writeln!(out, "    | {}", snippet(&data, at));
-            }
-            Some(
-                at @ Span {
-                    stream: Some(stream),
-                    ..
-                },
-            ) => {
-                // An object stream's data, which the document holds; else a
-                // content stream's or the metadata stream's, which the
-                // reading decodes again, as content was read.
-                let decoded = match doc.document().held(stream) {
-                    Some(decoded) => Some(decoded),
-                    None => {
-                        if content.as_ref().is_none_or(|(id, _)| *id != stream) {
-                            content = (doc.decoded_within(stream, usize::MAX))
-                                .and_then(Result::ok)
-                                .map(|data| (stream, data));
+        if let Some(at) = finding.at {
+            match at.stream() {
+                None => {
+                    let _ = writeln!(out, "    | {}", snippet(&data, at));
+                }
+                Some(stream) => {
+                    // An object stream's data, which the document holds; else a
+                    // content stream's or the metadata stream's, which the
+                    // reading decodes again, as content was read.
+                    let decoded = match doc.document().held(stream) {
+                        Some(decoded) => Some(decoded),
+                        None => {
+                            if content.as_ref().is_none_or(|(id, _)| *id != stream) {
+                                content = (doc.decoded_within(stream, usize::MAX))
+                                    .and_then(Result::ok)
+                                    .map(|data| (stream, data));
+                            }
+                            content.as_ref().map(|(_, data)| &data[..])
                         }
-                        content.as_ref().map(|(_, data)| &data[..])
+                    };
+                    if let Some(decoded) = decoded {
+                        let _ = writeln!(
+                            out,
+                            "    | {}   (of {stream} R's data, decoded)",
+                            snippet(decoded, at)
+                        );
                     }
-                };
-                if let Some(decoded) = decoded {
-                    let _ = writeln!(
-                        out,
-                        "    | {}   (of {stream} R's data, decoded)",
-                        snippet(decoded, at)
-                    );
                 }
             }
-            None => {}
         }
     }
     Checked {
@@ -963,9 +959,9 @@ fn json(
                 made: f.made.name(),
                 value: &f.value,
                 at: f.at.map(|at| At {
-                    stream: at.stream.map(Into::into),
-                    start: at.start,
-                    end: at.end,
+                    stream: at.stream().map(Into::into),
+                    start: at.start(),
+                    end: at.end(),
                 }),
             })
             .collect(),
@@ -1171,8 +1167,8 @@ impl Formatter for Reports {
 /// The bytes at `at`, the first [`SHOWN`] of them, printable ASCII as it is
 /// and any other byte escaped.
 fn snippet(data: &[u8], at: Span) -> String {
-    let end = at.end.min(data.len());
-    let start = at.start.min(end);
+    let end = at.end().min(data.len());
+    let start = at.start().min(end);
     let mut out = String::new();
     for &b in &data[start..end.min(start + SHOWN)] {
         match b {

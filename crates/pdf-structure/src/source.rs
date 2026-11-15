@@ -383,7 +383,7 @@ impl fmt::Debug for Unprinted<'_, Object> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Object")
             .field("value", &Unprinted(self.0.value()))
-            .field("at", &self.0.at)
+            .field("at", &self.0.at())
             .finish()
     }
 }
@@ -394,7 +394,6 @@ impl fmt::Debug for Unprinted<'_, Value> {
             Value::String(text, form) => {
                 let (kind, len) = match text {
                     Str::Bytes(bytes) => ("Bytes", bytes.len()),
-                    Str::Text(text) => ("Text", text.len()),
                     Str::Encrypted(bytes) => ("Encrypted", bytes.len()),
                 };
                 let text = DebugTuple(kind, Len(len));
@@ -421,7 +420,7 @@ impl fmt::Debug for Unprinted<'_, Value> {
 impl fmt::Debug for Unprinted<'_, Dict> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let entries: Vec<_> = (self.0.entries().iter())
-            .map(|entry| DebugEntry(entry, Unprinted(&entry.value)))
+            .map(|entry| DebugEntry(entry, Unprinted(entry.value())))
             .collect();
         f.debug_struct("Dict").field("entries", &entries).finish()
     }
@@ -454,8 +453,8 @@ struct DebugEntry<'v>(&'v Entry, Unprinted<'v, Object>);
 impl fmt::Debug for DebugEntry<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry")
-            .field("key", &self.0.key)
-            .field("key_at", &self.0.key_at)
+            .field("key", &self.0.key_name())
+            .field("key_at", &self.0.key_at())
             .field("value", &self.1)
             .finish()
     }
@@ -1026,7 +1025,14 @@ impl Unread {
     /// that a new one is put with its like on purpose.
     fn why(&self) -> Why {
         match self {
-            Unread::Parse(parse::Error::Nested { .. } | parse::Error::Values { .. }) => Why::Capped,
+            Unread::Parse(e)
+                if matches!(
+                    e.kind(),
+                    parse::ErrorKind::Nested { .. } | parse::ErrorKind::Values { .. }
+                ) =>
+            {
+                Why::Capped
+            }
             Unread::Container { why, .. } => match why {
                 Undecoded::Filters(Unfiltered::Filters { .. }) => Why::Capped,
                 Undecoded::Encrypted { .. } | Undecoded::Decrypt(_) => Why::Locked,
@@ -1322,7 +1328,7 @@ impl Document {
     ///
     /// let trailer = dict! { "Root" => Object::reference(1) };
     /// let mut doc = Document::new(Version::new(1, 7), trailer);
-    /// doc.insert(1, dict! { "Type" => "Catalog" });
+    /// doc.insert(1, dict! { "Type" => Object::name("Catalog") });
     /// doc.set_update(Some(Update::new(BTreeSet::from([ObjectId::new(1, 0)]), 9)));
     /// doc.set_encryption(Encryption::opened(false));
     /// assert!(doc.get(ObjectId::new(1, 0)).is_ok());
@@ -1677,7 +1683,7 @@ impl Document {
         let mut found = Vec::new();
         let mut seen = HashSet::new();
         let trailer = self.trailer.dict().entries().iter();
-        for id in trailer.flat_map(|entry| entry.value.references()) {
+        for id in trailer.flat_map(|entry| entry.value().references()) {
             if seen.insert(id) {
                 found.push(id);
             }
@@ -2101,7 +2107,7 @@ impl Document {
         data: &[u8],
         limit: usize,
     ) -> Result<Vec<u8>, Unreadable> {
-        let resolve = |id| self.object(id);
+        let resolve = pdf_objects::resolve_fn(|id| self.object(id));
         let within = limit.min(crate::read::STREAM);
         let capped = crate::read::STREAM < limit;
         let decoded = match crate::read::filters(dict, Some(&resolve)) {
@@ -2197,10 +2203,10 @@ pub(crate) mod tests {
     /// them.
     fn strings(value: &Value, out: &mut Vec<Vec<u8>>) {
         let entries = |dict: &Dict, out: &mut Vec<Vec<u8>>| {
-            (dict.entries().iter()).for_each(|entry| strings(entry.value.value(), out));
+            (dict.entries().iter()).for_each(|entry| strings(entry.value().value(), out));
         };
         match value {
-            Value::String(Str::Bytes(bytes), _) => out.push(bytes.clone()),
+            Value::String(Str::Bytes(bytes), _) => out.push(bytes.to_vec()),
             Value::Array(items) => items.iter().for_each(|item| strings(item.value(), out)),
             Value::Dict(dict) => entries(dict, out),
             Value::Stream(stream) => entries(&stream.dict, out),
@@ -2222,7 +2228,10 @@ pub(crate) mod tests {
                 "{name}"
             );
             let data = b"plaintext of a stream held as bytes".to_vec();
-            let stream = doc.add(Stream::new(dict! { "Type" => "XObject" }, data.clone()));
+            let stream = doc.add(Stream::new(
+                dict! { "Type" => Object::name("XObject") },
+                data.clone(),
+            ));
             let mut trailer = Vec::new();
             strings(&Value::Dict(doc.trailer().dict().clone()), &mut trailer);
             let mut decrypted = Vec::new();
@@ -2424,9 +2433,9 @@ pub(crate) mod tests {
     #[test]
     fn a_documents_iterators_walk_as_they_did() {
         let mut built = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
-        built.insert(1, dict! { "Type" => "Catalog" });
+        built.insert(1, dict! { "Type" => Object::name("Catalog") });
         built.insert(2, 2);
-        built.set(ObjectId::new(6, 2), "Six");
+        built.set(ObjectId::new(6, 2), Object::name("Six"));
         built.set_unread(
             ObjectId::new(3, 0),
             Unread::Other("it doesn't parse".to_string()),
@@ -2480,7 +2489,7 @@ pub(crate) mod tests {
     #[test]
     fn a_document_gives_what_it_holds() {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
-        doc.insert(1, dict! { "Type" => "Catalog" });
+        doc.insert(1, dict! { "Type" => Object::name("Catalog") });
         let why = Unread::Other("it doesn't parse".to_string());
         doc.set_unread(ObjectId::new(2, 0), why.clone());
         assert_eq!(doc.ids(), [ObjectId::new(1, 0), ObjectId::new(2, 0)]);
@@ -2536,10 +2545,13 @@ pub(crate) mod tests {
             source
         };
         let mut doc = read.clone();
-        doc.catalog_mut().unwrap().set("Lang", Object::from("en"));
+        doc.catalog_mut().unwrap().set("Lang", Object::name("en"));
         assert_eq!(given(&doc).as_deref(), Some(&xmp[..]), "the catalog edited");
         let metadata = ObjectId::new(2, 0);
-        let new = Stream::new(dict! { "Type" => "Metadata" }, b"new".to_vec());
+        let new = Stream::new(
+            dict! { "Type" => Object::name("Metadata") },
+            b"new".to_vec(),
+        );
         let edit = |doc: &mut Document, what: &str| match what {
             "put" => drop(doc.set(metadata, new.clone())),
             "taken to edit" => {
@@ -2577,7 +2589,7 @@ pub(crate) mod tests {
     #[test]
     fn a_document_resolves_the_objects_that_read() {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
-        doc.insert(1, dict! { "Type" => "Catalog" });
+        doc.insert(1, dict! { "Type" => Object::name("Catalog") });
         let why = Unread::Other("it doesn't parse".to_string());
         doc.set_unread(ObjectId::new(2, 0), why);
         let resolve = &doc;
@@ -2595,10 +2607,10 @@ pub(crate) mod tests {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
         assert!(doc.ids().is_empty());
         assert_eq!(doc.objects().next(), None);
-        doc.insert(1, dict! { "Type" => "Catalog" });
+        doc.insert(1, dict! { "Type" => Object::name("Catalog") });
         doc.insert(2, 2);
         doc.insert(5, 5);
-        doc.set(ObjectId::new(6, 2), "Six");
+        doc.set(ObjectId::new(6, 2), Object::name("Six"));
         doc.insert(7, 7);
         let why = Unread::Other("it doesn't parse".to_string());
         doc.set_unread(ObjectId::new(3, 0), why.clone());
@@ -2702,11 +2714,14 @@ pub(crate) mod tests {
         // Each record says where its object was written.
         let true_to_the_file = |doc: &Document| {
             for (id, record) in doc.records() {
-                let written = &file[record.at.start..record.at.end];
+                let written = &file[record.at.range()];
                 let header = format!("{id} obj");
                 assert!(written.starts_with(header.as_bytes()), "{id:?}");
                 assert_eq!(
-                    doc.get(id).unwrap().at.map(|at| at.end <= record.at.end),
+                    doc.get(id)
+                        .unwrap()
+                        .at()
+                        .map(|at| at.end() <= record.at.end()),
                     Some(true)
                 );
             }
@@ -2730,7 +2745,10 @@ pub(crate) mod tests {
         // Put in: no record, giving back what it replaces where that read.
         let catalog = read.get(ObjectId::new(1, 0)).unwrap().clone();
         assert_eq!(
-            doc.set(ObjectId::new(1, 0), dict! { "Type" => "Catalog" }),
+            doc.set(
+                ObjectId::new(1, 0),
+                dict! { "Type" => Object::name("Catalog") }
+            ),
             Some(catalog)
         );
         assert_eq!(doc.record(ObjectId::new(1, 0)), None);
@@ -2796,7 +2814,7 @@ pub(crate) mod tests {
         // keeps a record.
         for id in edited.ids() {
             if let Some(object) = edited.get_mut(id) {
-                object.at = None;
+                object.clear_span();
             }
         }
         assert_eq!(edited.records().next(), None);
@@ -2847,7 +2865,7 @@ pub(crate) mod tests {
     fn each_reason_an_object_doesnt_read_is_said_as_it_was() {
         let (stream, index, number, offset) = (4, 1, 9, 120);
         let id = ObjectId::new(3, 1);
-        let parse = parse::Error::Header { at: 7 };
+        let parse: parse::Error = parse::ErrorKind::Header { at: 7 }.into();
         let why = Undecoded::NotAStream;
         let inner = Unread::Parse(parse.clone());
         let cases = [
@@ -2945,20 +2963,23 @@ pub(crate) mod tests {
             why: Undecoded::Filters(why),
         };
         let container = |why| Unread::Container { stream, why };
-        let parse_error = |error| Unread::Parse(error);
+        let parse_error = |kind: parse::ErrorKind| Unread::Parse(kind.into());
         let boxed = |why: Unread| Unread::ContainerUnread {
             stream,
             why: Box::new(why),
         };
         let cases = [
-            (parse_error(parse::Error::End), Why::Damaged),
-            (parse_error(parse::Error::Header { at: 7 }), Why::Damaged),
+            (parse_error(parse::ErrorKind::End), Why::Damaged),
             (
-                parse_error(parse::Error::Nested { limit: 2, at: 7 }),
+                parse_error(parse::ErrorKind::Header { at: 7 }),
+                Why::Damaged,
+            ),
+            (
+                parse_error(parse::ErrorKind::Nested { limit: 2, at: 7 }),
                 Why::Capped,
             ),
             (
-                parse_error(parse::Error::Values { limit: 2, at: 7 }),
+                parse_error(parse::ErrorKind::Values { limit: 2, at: 7 }),
                 Why::Capped,
             ),
             (
@@ -2989,10 +3010,10 @@ pub(crate) mod tests {
             (Unread::Undecodable { stream }, Why::Locked),
             (boxed(Unread::Undecodable { stream }), Why::Locked),
             (
-                boxed(parse_error(parse::Error::Nested { limit: 2, at: 7 })),
+                boxed(parse_error(parse::ErrorKind::Nested { limit: 2, at: 7 })),
                 Why::Capped,
             ),
-            (boxed(parse_error(parse::Error::End)), Why::Damaged),
+            (boxed(parse_error(parse::ErrorKind::End)), Why::Damaged),
             // The stream isn't in the file, though the object is listed.
             (
                 boxed(Unread::Missing {
@@ -3036,8 +3057,8 @@ pub(crate) mod tests {
             assert_eq!(resolve.resolve(id), None, "{unread:?}");
             let said = resolve.try_resolve(id).unwrap_err();
             assert_eq!((said.id, said.why), (id, why), "{unread:?}");
-            assert_eq!(said.message, format!("9 1 R doesn't read: {unread}"));
-            assert_eq!(said.to_string(), said.message);
+            assert_eq!(&*said.message, format!("9 1 R doesn't read: {unread}"));
+            assert_eq!(said.to_string(), &*said.message);
         }
         let resolve = &doc;
         assert_eq!(resolve.try_resolve(object), Ok(resolve.resolve(object)));
@@ -3053,7 +3074,7 @@ pub(crate) mod tests {
     #[test]
     fn why_an_object_doesnt_read_says_the_object_stream_its_in_where_its_why() {
         let stream = 4;
-        let inner = Unread::Parse(parse::Error::Header { at: 7 });
+        let inner = Unread::Parse(parse::ErrorKind::Header { at: 7 }.into());
         let placed = [
             Unread::Container {
                 stream,
@@ -3177,7 +3198,7 @@ pub(crate) mod tests {
         let mut doc = crate::read::document(&file, &crate::read::Options::DEFAULT);
         let source: &dyn Source = &doc;
         let member = (doc.objects())
-            .find_map(|(id, o)| Some((id, o.at?.stream?)))
+            .find_map(|(id, o)| Some((id, o.at()?.stream()?)))
             .expect("a member");
         let (id, stream) = member;
         assert_eq!(source.record(id), doc.record(id));
@@ -3222,7 +3243,10 @@ pub(crate) mod tests {
             (ObjectId::new(1, 0), ObjectId::new(2, 0))
         );
         assert_eq!(doc.max_id(), 2);
-        assert_eq!(doc.add(dict! { "Type" => "Catalog" }), ObjectId::new(3, 0));
+        assert_eq!(
+            doc.add(dict! { "Type" => Object::name("Catalog") }),
+            ObjectId::new(3, 0)
+        );
         assert!(
             doc.get_dict(ObjectId::new(3, 0))
                 .is_some_and(|d| d.has_type(b"Catalog"))
@@ -3255,7 +3279,7 @@ pub(crate) mod tests {
 
         // Past what's put in, read or not; one put in below leaves them.
         let mut doc = sized(8.into());
-        doc.set(ObjectId::new(20, 3), "Twenty");
+        doc.set(ObjectId::new(20, 3), Object::name("Twenty"));
         assert_eq!(doc.new_id(), ObjectId::new(21, 0));
         doc.set_unread(
             ObjectId::new(30, 0),
@@ -3317,7 +3341,7 @@ pub(crate) mod tests {
         // Past a cross-reference stream's number, which neither its rows
         // nor /Size reach.
         let objects = [
-            (1, dict! { "Type" => "Catalog" }.into()),
+            (1, dict! { "Type" => Object::name("Catalog") }.into()),
             (2, Object::from(2).into()),
         ];
         let root = dict! { "Root" => Object::reference(1) };
@@ -3370,16 +3394,16 @@ pub(crate) mod tests {
                     Unread::Other("copied".to_string()),
                 );
             } else {
-                doc.set(ObjectId::new(u32::MAX, 0), "Copied");
+                doc.set(ObjectId::new(u32::MAX, 0), Object::name("Copied"));
             }
             assert_eq!(doc.max_id(), u32::MAX);
-            let font = doc.add("Font");
+            let font = doc.add(Object::name("Font"));
             assert_eq!(
                 (page, font),
                 (ObjectId::new(1, 0), ObjectId::new(2, 0)),
                 "{unread}"
             );
-            assert_eq!(doc.set(page, "Page"), None, "{unread}");
+            assert_eq!(doc.set(page, Object::name("Page")), None, "{unread}");
             let name = doc.get(font).ok().and_then(Object::as_name);
             assert_eq!(name, Some(&b"Font"[..]), "{unread}");
             assert_eq!(doc.new_id(), ObjectId::new(3, 0), "{unread}");
@@ -3394,7 +3418,7 @@ pub(crate) mod tests {
         file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f");
         let mut doc = crate::read::document(&file, &crate::read::Options::DEFAULT);
         assert!(!doc.contains(ObjectId::new(2, 0)) && doc.contains(ObjectId::new(3, 0)));
-        doc.set(ObjectId::new(u32::MAX, 0), "Copied");
+        doc.set(ObjectId::new(u32::MAX, 0), Object::name("Copied"));
         assert_eq!(
             (doc.new_id(), doc.new_id()),
             (ObjectId::new(4, 0), ObjectId::new(5, 0))
@@ -3427,11 +3451,11 @@ pub(crate) mod tests {
         // A document holding the largest: numbers no entry holds, at any
         // generation, read or not, in turn from the last handed out.
         let mut doc = Document::new(Version::new(1, 7), Dict::new());
-        doc.insert(u32::MAX, "Last");
+        doc.insert(u32::MAX, Object::name("Last"));
         for n in [1, 2, 6] {
             doc.insert(n, n);
         }
-        doc.set(ObjectId::new(4, 2), "Four");
+        doc.set(ObjectId::new(4, 2), Object::name("Four"));
         doc.set_unread(
             ObjectId::new(5, 0),
             Unread::Other("it doesn't parse".to_string()),
@@ -3439,13 +3463,13 @@ pub(crate) mod tests {
         assert_eq!(doc.max_id(), u32::MAX);
         let (three, seven) = (doc.new_id(), doc.new_id());
         assert_eq!((three, seven), (ObjectId::new(3, 0), ObjectId::new(7, 0)));
-        assert_eq!(doc.add("Eight"), ObjectId::new(8, 0));
+        assert_eq!(doc.add(Object::name("Eight")), ObjectId::new(8, 0));
         doc.insert(9, 9);
         assert_eq!(doc.new_id(), ObjectId::new(10, 0));
         assert!(!doc.contains(three) && !doc.contains(seven));
 
         // Past the last held, from 1 again, to the first no entry holds.
-        doc.insert(u32::MAX - 1, "Next to last");
+        doc.insert(u32::MAX - 1, Object::name("Next to last"));
         doc.next = PAST + u64::from(u32::MAX - 2);
         assert_eq!(doc.free_after(u32::MAX - 2), None);
         assert_eq!(
@@ -3535,7 +3559,7 @@ pub(crate) mod tests {
             .unwrap()
             .set("Count", 1);
         assert_eq!(doc.record(ObjectId::new(3, 0)), None);
-        assert_eq!(doc.get(ObjectId::new(3, 0)).unwrap().at, None);
+        assert_eq!(doc.get(ObjectId::new(3, 0)).unwrap().at(), None);
         assert_eq!(
             doc.record(ObjectId::new(2, 0)),
             read.record(ObjectId::new(2, 0))
@@ -3555,7 +3579,7 @@ pub(crate) mod tests {
         }
         doc.get_dict_mut(ObjectId::new(4, 0))
             .unwrap()
-            .set("Filter", "FlateDecode");
+            .set("Filter", Object::name("FlateDecode"));
         let stream = doc.get(ObjectId::new(4, 0)).unwrap().as_stream().unwrap();
         assert_eq!(
             stream.data,
@@ -3606,7 +3630,7 @@ pub(crate) mod tests {
     /// cross-reference stream's; a trailer that's neither made one.
     #[test]
     fn a_trailers_dictionary_is_changed_where_it_is() {
-        let objects = [(1, dict! { "Type" => "Catalog" }.into())];
+        let objects = [(1, dict! { "Type" => Object::name("Catalog") }.into())];
         let root = || dict! { "Root" => Object::reference(1) };
         for kind in [
             pdf_fixtures::fixture::Xref::Table,
@@ -3614,10 +3638,10 @@ pub(crate) mod tests {
         ] {
             let file = pdf_fixtures::fixture::file("1.7", &objects, root(), kind);
             let mut doc = crate::read::document(&file, &crate::read::Options::DEFAULT);
-            assert!(doc.trailer.object.at.is_some());
+            assert!(doc.trailer.object.at().is_some());
             let stream = doc.trailer.stream;
             doc.trailer.dict_mut().set("Info", Object::reference(2));
-            assert_eq!(doc.trailer.object.at, None, "{kind:?}: an edit");
+            assert_eq!(doc.trailer.object.at(), None, "{kind:?}: an edit");
             assert!(doc.trailer.dict().has(b"Info") && doc.trailer.dict().has(b"Root"));
             let streamed = doc.trailer.object.as_stream().is_some();
             assert_eq!(streamed, kind == pdf_fixtures::fixture::Xref::Stream);
@@ -3643,7 +3667,7 @@ pub(crate) mod tests {
         doc.insert(
             1,
             dict! {
-                "Type" => "Catalog",
+                "Type" => Object::name("Catalog"),
                 "Pages" => r(3),
                 "Outlines" => r(4),
                 "Names" => dict! { "Dests" => r(5) },
@@ -3699,9 +3723,15 @@ pub(crate) mod tests {
     #[test]
     fn prune_removes_what_the_trailer_doesnt_reach() {
         let mut doc = walked();
-        doc.insert(18, Stream::new(dict! { "Type" => "XRef" }, Vec::new()));
+        doc.insert(
+            18,
+            Stream::new(dict! { "Type" => Object::name("XRef") }, Vec::new()),
+        );
         doc.trailer.stream = Some(ObjectId::new(18, 0));
-        doc.insert(19, Stream::new(dict! { "Type" => "ObjStm" }, Vec::new()));
+        doc.insert(
+            19,
+            Stream::new(dict! { "Type" => Object::name("ObjStm") }, Vec::new()),
+        );
         doc.decoded.insert(ObjectId::new(19, 0), b"20 0".to_vec());
         let before = doc.clone();
         assert_eq!(
@@ -3808,10 +3838,10 @@ pub(crate) mod tests {
                                 Value::String(..) => strings += 1,
                                 Value::Array(a) => stack.extend(a),
                                 Value::Dict(d) => {
-                                    stack.extend(d.entries().iter().map(|e| &e.value))
+                                    stack.extend(d.entries().iter().map(|e| e.value()))
                                 }
                                 Value::Stream(s) => {
-                                    stack.extend(s.dict.entries().iter().map(|e| &e.value))
+                                    stack.extend(s.dict.entries().iter().map(|e| e.value()))
                                 }
                                 _ => {}
                             }

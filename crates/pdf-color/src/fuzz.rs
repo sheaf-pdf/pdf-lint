@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why, resolve_fn};
 
 use crate::count::counted;
 use crate::{Family, Fault, Limits, Space, Spaces, components};
@@ -357,7 +357,7 @@ fn a_resources<'o, R: Resolve<'o> + Copy>(objects: R, resources: Option<&'o Obje
 /// each read as resources, its names counted as they're given.
 pub fn counts(data: &[u8]) {
     let objects = values(data);
-    let resolve = |id: ObjectId| objects.get(&id);
+    let resolve = resolve_fn(|id: ObjectId| objects.get(&id));
     let longest = objects.values().map(longest_array).max().unwrap_or(0);
     let most = u32::try_from(longest).unwrap_or(u32::MAX);
     for value in objects.values().take(VALUES) {

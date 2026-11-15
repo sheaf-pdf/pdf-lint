@@ -71,14 +71,14 @@ fn unplaced(o: &Object) -> Object {
             Value::Array(a) => stack.extend(a.iter_mut()),
             Value::Dict(d) => {
                 for entry in d.entries_mut() {
-                    entry.key_at = None;
-                    stack.push(&mut entry.value);
+                    entry.clear_key_span();
+                    stack.push(entry.value_mut());
                 }
             }
             Value::Stream(s) => {
                 for entry in s.dict.entries_mut() {
-                    entry.key_at = None;
-                    stack.push(&mut entry.value);
+                    entry.clear_key_span();
+                    stack.push(entry.value_mut());
                 }
             }
             _ => {}
@@ -113,7 +113,7 @@ fn inflated(stream: &Stream) -> Vec<u8> {
 }
 
 fn catalog() -> Object {
-    Object::from(dict! { "Type" => "Catalog" })
+    Object::from(dict! { "Type" => Object::name("Catalog") })
 }
 
 /// A file the writer wrote: a catalog as object 1, then `objects`, and a
@@ -160,7 +160,7 @@ fn nan_and_infinities_in_a_trailer_are_refused() {
     }
     assert_eq!(
         Error::Serialize(serialize::Error::NonFinite { id: None }).to_string(),
-        "a real that isn't a finite number"
+        "non-finite real number"
     );
 }
 
@@ -220,7 +220,7 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
     let base = open(&out);
     let prev = newest(&base).0;
     let mut section = Section::append(size(&base), 0);
-    let marked = Object::from(dict! { "Type" => "Catalog", "Marked" => true });
+    let marked = Object::from(dict! { "Type" => Object::name("Catalog"), "Marked" => true });
     let one = serialize::indirect(&mut out, ObjectId::new(1, 0), &marked).unwrap();
     section.insert(
         1,
@@ -295,7 +295,7 @@ fn positions_count_from_the_header() {
     assert_eq!(prefixed.facts().sections, 2);
     assert_eq!(value(&prefixed, ObjectId::new(2, 0)), Object::from(22));
     let record = prefixed.record(ObjectId::new(2, 0)).unwrap();
-    assert_eq!(record.at.start, pos_of_two(&out));
+    assert_eq!(record.at.start(), pos_of_two(&out));
 }
 
 /// Where the last `2 0 obj` in `file` starts.
@@ -567,13 +567,16 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
         ("a stream", stream(dict! {})),
         (
             "a cross-reference stream",
-            stream(dict! { "Type" => "XRef" }),
+            stream(dict! { "Type" => Object::name("XRef") }),
         ),
-        ("an object stream", stream(dict! { "Type" => "ObjStm" })),
+        (
+            "an object stream",
+            stream(dict! { "Type" => Object::name("ObjStm") }),
+        ),
         (
             "an encryption dictionary",
             dict(dict! {
-                "Filter" => "Standard",
+                "Filter" => Object::name("Standard"),
                 "V" => 2,
                 "O" => bytes(b"o"),
                 "U" => bytes(b"u"),
@@ -585,10 +588,18 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
         ),
         (
             "a signature",
-            dict(dict! { "Type" => "Sig", "Filter" => "Adobe.PPKLite" }),
+            dict(
+                dict! { "Type" => Object::name("Sig"), "Filter" => Object::name("Adobe.PPKLite") },
+            ),
         ),
-        ("a time stamp", dict(dict! { "Type" => "DocTimeStamp" })),
-        ("a signature by /FT", dict(dict! { "FT" => "Sig" })),
+        (
+            "a time stamp",
+            dict(dict! { "Type" => Object::name("DocTimeStamp") }),
+        ),
+        (
+            "a signature by /FT",
+            dict(dict! { "FT" => Object::name("Sig") }),
+        ),
         (
             "a signature without /Type",
             dict(dict! {
@@ -619,19 +630,19 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
         (
             "a signature field's widget",
             dict(dict! {
-                "Type" => "Annot",
-                "Subtype" => "Widget",
-                "FT" => "Sig",
+                "Type" => Object::name("Annot"),
+                "Subtype" => Object::name("Widget"),
+                "FT" => Object::name("Sig"),
                 "V" => ObjectId::new(9, 0),
             }),
         ),
         (
             "a button field",
-            dict(dict! { "FT" => "Btn", "V" => ObjectId::new(9, 0) }),
+            dict(dict! { "FT" => Object::name("Btn"), "V" => ObjectId::new(9, 0) }),
         ),
         (
             "a /Filter name alone",
-            dict(dict! { "Filter" => "Standard", "O" => bytes(b"o") }),
+            dict(dict! { "Filter" => Object::name("Standard"), "O" => bytes(b"o") }),
         ),
         (
             "/Contents without /ByteRange",
@@ -656,7 +667,7 @@ fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
     let stream = |d: Dict| Object::from(Stream::new(d, b"data".to_vec()));
     let bytes = |b: &[u8]| Object::hex(b);
     let encryption = dict(dict! {
-        "Filter" => "Standard",
+        "Filter" => Object::name("Standard"),
         "V" => 2,
         "O" => bytes(b"o"),
         "U" => bytes(b"u"),
@@ -666,12 +677,12 @@ fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
         (ObjectId::new(5, 0), stream(dict! {}), Some(KeptOut::Stream)),
         (
             ObjectId::new(5, 0),
-            stream(dict! { "Type" => "XRef" }),
+            stream(dict! { "Type" => Object::name("XRef") }),
             Some(KeptOut::Stream),
         ),
         (
             ObjectId::new(5, 0),
-            stream(dict! { "Type" => "ObjStm" }),
+            stream(dict! { "Type" => Object::name("ObjStm") }),
             Some(KeptOut::Stream),
         ),
         (ObjectId::new(5, 2), stream(dict! {}), Some(KeptOut::Stream)),
@@ -689,15 +700,21 @@ fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
         ),
         (ObjectId::new(5, 0), catalog(), None),
         (ObjectId::new(5, 0), Object::from(7), None),
-        (ObjectId::new(5, 0), dict(dict! { "Type" => "Page" }), None),
         (
             ObjectId::new(5, 0),
-            dict(dict! { "Filter" => "Standard", "O" => bytes(b"o") }),
+            dict(dict! { "Type" => Object::name("Page") }),
             None,
         ),
         (
             ObjectId::new(5, 0),
-            dict(dict! { "Type" => "Sig", "Filter" => "Adobe.PPKLite" }),
+            dict(dict! { "Filter" => Object::name("Standard"), "O" => bytes(b"o") }),
+            None,
+        ),
+        (
+            ObjectId::new(5, 0),
+            dict(
+                dict! { "Type" => Object::name("Sig"), "Filter" => Object::name("Adobe.PPKLite") },
+            ),
             None,
         ),
     ];
@@ -730,12 +747,11 @@ fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
 /// member back, and its `/Length` is written direct.
 #[test]
 fn a_container_lists_each_member_where_it_is() {
-    let literal =
-        |s: &[u8]| Object::new(Value::String(Str::Bytes(s.to_vec()), Some(Form::Literal)));
+    let literal = |s: &[u8]| Object::new(Value::String(Str::bytes(s), Some(Form::Literal)));
     let members = [
         (4, Object::from(12)),
         (9, Object::from(13)),
-        (2, Object::from("Name")),
+        (2, Object::name("Name")),
         (3, literal(b"two\nlines (")),
         (
             7,
@@ -828,10 +844,7 @@ fn a_container_past_what_the_reader_takes_isn_t_made() {
 /// container's number isn't counted from.
 #[test]
 fn a_type_2_entry_is_written_as_its_container_and_place() {
-    let five = Object::new(Value::String(
-        Str::Bytes(b"five".to_vec()),
-        Some(Form::Literal),
-    ));
+    let five = Object::new(Value::String(Str::bytes(b"five"), Some(Form::Literal)));
     let six = Object::from(dict! { "Six" => 6 });
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
@@ -1128,7 +1141,12 @@ fn deflated_on_either_backend_at_any_level_each_reads_back() {
     );
     assert_eq!(Deflate::default(), Deflate::DEFAULT);
     let members: Vec<(u32, Object)> = (2..300)
-        .map(|n| (n, Object::from(dict! { "N" => n, "Name" => "Same" })))
+        .map(|n| {
+            (
+                n,
+                Object::from(dict! { "N" => n, "Name" => Object::name("Same") }),
+            )
+        })
         .collect();
     let numbers: Vec<u32> = members.iter().map(|&(n, _)| n).collect();
     for level in [Level::NONE, Level::DEFAULT, Level::BEST] {
@@ -1200,10 +1218,7 @@ const ENCRYPT: u32 = 40;
 
 /// A literal string.
 pub(crate) fn lit(text: &[u8]) -> Object {
-    Object::new(Value::String(
-        Str::Bytes(text.to_vec()),
-        Some(Form::Literal),
-    ))
+    Object::new(Value::String(Str::bytes(text), Some(Form::Literal)))
 }
 
 /// A file to encrypt, built here, numbered from 1 and with its trailer: a
@@ -1224,14 +1239,16 @@ pub(crate) fn plaintext() -> (Vec<(u32, Object)>, Dict) {
     let objects = vec![
         (
             1,
-            Object::from(dict! { "Type" => "Pages", "Kids" => vec![r(4)], "Count" => 1 }),
+            Object::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(4)], "Count" => 1 },
+            ),
         ),
         (
             2,
             stream(
                 dict! {
-                    "Type" => "XObject",
-                    "Subtype" => "Form",
+                    "Type" => Object::name("XObject"),
+                    "Subtype" => Object::name("Form"),
                     "BBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(100)],
                     "PieceInfo" => piece(FORM_STRING),
                     "LastModified" => lit(b"D:20261016120000Z"),
@@ -1243,7 +1260,7 @@ pub(crate) fn plaintext() -> (Vec<(u32, Object)>, Dict) {
         (
             4,
             Object::from(dict! {
-                "Type" => "Page",
+                "Type" => Object::name("Page"),
                 "Parent" => r(1),
                 "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
                 "Resources" => dict! { "XObject" => dict! { "Fx" => r(2) } },
@@ -1254,14 +1271,17 @@ pub(crate) fn plaintext() -> (Vec<(u32, Object)>, Dict) {
         ),
         (
             5,
-            stream(dict! { "Type" => "Metadata", "Subtype" => "XML" }, XMP),
+            stream(
+                dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
+                XMP,
+            ),
         ),
         (
             6,
             stream(
                 dict! {
-                    "Type" => "EmbeddedFile",
-                    "Subtype" => "text/plain",
+                    "Type" => Object::name("EmbeddedFile"),
+                    "Subtype" => Object::name("text/plain"),
                     "Params" => dict! {
                         "Size" => ATTACHMENT.len() as i64,
                         "ModDate" => lit(b"D:20261016120000Z"),
@@ -1274,7 +1294,7 @@ pub(crate) fn plaintext() -> (Vec<(u32, Object)>, Dict) {
         (
             7,
             Object::from(dict! {
-                "Type" => "Filespec",
+                "Type" => Object::name("Filespec"),
                 "F" => lit(b"notes.txt"),
                 "EF" => dict! { "F" => r(6) },
             }),
@@ -1282,9 +1302,9 @@ pub(crate) fn plaintext() -> (Vec<(u32, Object)>, Dict) {
         (
             8,
             Object::from(dict! {
-                "Type" => "Sig",
-                "Filter" => "Adobe.PPKLite",
-                "SubFilter" => "adbe.pkcs7.detached",
+                "Type" => Object::name("Sig"),
+                "Filter" => Object::name("Adobe.PPKLite"),
+                "SubFilter" => Object::name("adbe.pkcs7.detached"),
                 "ByteRange" => vec![Object::from(0), Object::from(10), Object::from(20), Object::from(30)],
                 "Contents" => Object::hex(SIGNATURE),
                 "M" => lit(b"D:20261016120000Z"),
@@ -1292,21 +1312,26 @@ pub(crate) fn plaintext() -> (Vec<(u32, Object)>, Dict) {
         ),
         (
             9,
-            Object::from(dict! { "FT" => "Sig", "T" => lit(FIELD_NAME), "V" => r(8) }),
+            Object::from(
+                dict! { "FT" => Object::name("Sig"), "T" => lit(FIELD_NAME), "V" => r(8) },
+            ),
         ),
         (
             10,
             Object::from(dict! {
-                "Filter" => "Adobe.PPKLite",
+                "Filter" => Object::name("Adobe.PPKLite"),
                 "ByteRange" => vec![Object::from(0), Object::from(10), Object::from(20), Object::from(30)],
                 "Contents" => Object::hex(UNTYPED_SIGNATURE),
             }),
         ),
-        (11, Object::from(dict! { "FT" => "Sig", "V" => r(10) })),
+        (
+            11,
+            Object::from(dict! { "FT" => Object::name("Sig"), "V" => r(10) }),
+        ),
         (
             12,
             Object::from(dict! {
-                "Type" => "Catalog",
+                "Type" => Object::name("Catalog"),
                 "Pages" => r(1),
                 "Metadata" => r(5),
                 "Names" => dict! { "EmbeddedFiles" => dict! {
@@ -1346,8 +1371,11 @@ pub(crate) fn listed() -> (Vec<(u32, Object)>, Dict) {
     let stream = |dict: Dict, data: &[u8]| Object::from(Stream::new(dict, data.to_vec()));
     let crypt = |name: &str| {
         dict! {
-            "Filter" => vec![Object::from("Crypt")],
-            "DecodeParms" => vec![Object::from(dict! { "Type" => "CryptFilterDecodeParms", "Name" => name })],
+            "Filter" => vec![Object::name("Crypt")],
+            "DecodeParms" => vec![Object::from(dict! {
+                "Type" => Object::name("CryptFilterDecodeParms"),
+                "Name" => Object::name(name),
+            })],
         }
     };
     for (num, obj) in &mut objects {
@@ -1363,23 +1391,23 @@ pub(crate) fn listed() -> (Vec<(u32, Object)>, Dict) {
     objects.extend([
         (
             14,
-            stream(dict! { "Type" => "Metadata", "Subtype" => "XML" }, PAGE_XMP),
+            stream(dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") }, PAGE_XMP),
         ),
         (15, stream(crypt("Identity"), OWN_IDENTITY)),
         (16, stream(crypt("StdCF"), OWN_STDCF)),
         (
             17,
-            Object::from(dict! { "Type" => "Sig", "Contents" => lit(UNSIGNED) }),
+            Object::from(dict! { "Type" => Object::name("Sig"), "Contents" => lit(UNSIGNED) }),
         ),
         (
             18,
             Object::from(dict! {
-                "Filter" => "Standard", "V" => 2, "R" => 3, "O" => lit(SHAPED), "U" => lit(b"x"), "P" => -4,
+                "Filter" => Object::name("Standard"), "V" => 2, "R" => 3, "O" => lit(SHAPED), "U" => lit(b"x"), "P" => -4,
             }),
         ),
         (
             19,
-            Object::from(dict! { "Type" => "XRef", "Note" => lit(XREF_DICT) }),
+            Object::from(dict! { "Type" => Object::name("XRef"), "Note" => lit(XREF_DICT) }),
         ),
     ]);
     (objects, trailer)
@@ -1522,9 +1550,9 @@ pub(crate) fn methods() -> Vec<Method> {
     let created = Encryptor::create_with(&Protection::new(&prepared), &mut rng).unwrap();
     methods.push(all("AES-256 created", created));
     let mut eff = dictionary_of(Kind::Aes128, true);
-    eff.set("StmF", "Identity");
-    eff.set("StrF", "Identity");
-    eff.set("EFF", "StdCF");
+    eff.set("StmF", Object::name("Identity"));
+    eff.set("StrF", Object::name("Identity"));
+    eff.set("EFF", Object::name("StdCF"));
     methods.push(Method {
         name: "attachments alone",
         encryptor: of(eff),
@@ -1535,7 +1563,7 @@ pub(crate) fn methods() -> Vec<Method> {
         filters: true,
     });
     let mut identity = dictionary_of(Kind::Aes128, true);
-    identity.set("StmF", "Identity");
+    identity.set("StmF", Object::name("Identity"));
     methods.push(Method {
         name: "streams in the clear",
         encryptor: of(identity),
@@ -1581,11 +1609,11 @@ pub(crate) fn encrypted_by(
     trailer: &Dict,
     kind: XrefKind,
 ) -> Vec<u8> {
-    let resolve = |id: ObjectId| {
+    let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
         (objects.iter())
             .find(|(n, _)| ObjectId::new(*n, 0) == id)
             .map(|(_, o)| o)
-    };
+    });
     let encrypting = encryptor.encrypting(trailer, &resolve).unwrap();
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
@@ -1769,9 +1797,9 @@ pub(crate) fn assert_reads_to(
 fn objects_encrypt_as_the_lazy_reader_decrypts() {
     let (plain, trailer) = plaintext();
     let mut eff = dictionary_of(Kind::Aes128, true);
-    eff.set("StmF", "Identity");
-    eff.set("StrF", "Identity");
-    eff.set("EFF", "StdCF");
+    eff.set("StmF", Object::name("Identity"));
+    eff.set("StrF", Object::name("Identity"));
+    eff.set("EFF", Object::name("StdCF"));
     let states = [
         ("RC4-128", dictionary_of(Kind::Rc4By128, true)),
         ("AES-128", dictionary_of(Kind::Aes128, true)),
@@ -1828,11 +1856,11 @@ fn objects_encrypt_alike_every_time() {
     for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
         let os = encryptor_of(&source(dictionary_of(kind, true), false));
         let crypt = derived(os.clone());
-        let resolve = |id: ObjectId| {
+        let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
             (plain.iter())
                 .find(|(n, _)| ObjectId::new(*n, 0) == id)
                 .map(|(_, o)| o)
-        };
+        });
         let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
         let encrypt = |num: u32, obj: &Object| {
             let mut out = Vec::new();
@@ -1856,11 +1884,11 @@ fn objects_encrypt_alike_every_time() {
                 .collect::<Vec<_>>()
         });
         assert_eq!(again, [once.clone(), once.clone()], "{kind:?}");
-        let resolve = |id: ObjectId| {
+        let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
             (plain.iter())
                 .find(|(n, _)| ObjectId::new(*n, 0) == id)
                 .map(|(_, o)| o)
-        };
+        });
         let [first, second] = [(); 2].map(|()| {
             let encrypting = os.encrypting(&trailer, &resolve).unwrap();
             (plain.iter())
@@ -1908,9 +1936,9 @@ fn ivs_written(bytes: &[u8]) -> Vec<[u8; 16]> {
                 let at = s
                     .data
                     .at()
-                    .filter(|at| at.stream.is_none() && at.end - at.start >= 32);
+                    .filter(|at| at.stream().is_none() && at.len() >= 32);
                 if let Some(at) = at {
-                    out.push(file[at.start..at.start + 16].try_into().unwrap());
+                    out.push(file[at.start()..at.start() + 16].try_into().unwrap());
                 }
             }
             _ => {}
@@ -1970,11 +1998,11 @@ fn ivs_are_keyed_by_what_the_object_is() {
     for kind in [Kind::Aes128, Kind::Aes256R5, Kind::Aes256] {
         let os = encryptor_of(&source(dictionary_of(kind, true), false));
         let crypt = derived(os.clone());
-        let resolve = |id: ObjectId| {
+        let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
             (plain.iter())
                 .find(|(n, _)| ObjectId::new(*n, 0) == id)
                 .map(|(_, o)| o)
-        };
+        });
         let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
         let iv = |id: ObjectId, value: &[u8]| encrypting.string(id, value).unwrap()[..16].to_vec();
         let first = iv(ObjectId::new(5, 0), b"a value");
@@ -1986,11 +2014,11 @@ fn ivs_are_keyed_by_what_the_object_is() {
         ] {
             assert_ne!(other, first, "{kind:?}");
         }
-        let resolve_os = |id: ObjectId| {
+        let resolve_os = pdf_objects::resolve_fn(|id: ObjectId| {
             (plain.iter())
                 .find(|(n, _)| ObjectId::new(*n, 0) == id)
                 .map(|(_, o)| o)
-        };
+        });
         let drawn = os.encrypting(&trailer, &resolve_os).unwrap();
         let os_iv = |value: &[u8]| drawn.string(ObjectId::new(5, 0), value).unwrap()[..16].to_vec();
         assert_ne!(os_iv(b"a value"), os_iv(b"a value"), "{kind:?}");
@@ -1999,7 +2027,7 @@ fn ivs_are_keyed_by_what_the_object_is() {
         let mut section = Section::full(0);
         let objects = [(
             1,
-            Object::from(dict! { "Type" => "Catalog", "V" => lit(b"a value") }),
+            Object::from(dict! { "Type" => Object::name("Catalog"), "V" => lit(b"a value") }),
         )];
         for (num, obj) in &objects {
             let pos = serialize::indirect_with(&mut file, ObjectId::new(*num, 0), obj, &encrypting)
@@ -2034,11 +2062,11 @@ fn ivs_are_keyed_by_what_the_object_is() {
 fn xref_streams_metadata_and_the_encrypt_dict_stay_plain() {
     let (plain, trailer) = listed();
     let crypt = encryptor_of(&source(dictionary_of(Kind::Aes128, false), false));
-    let resolve = |id: ObjectId| {
+    let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
         (plain.iter())
             .find(|(n, _)| ObjectId::new(*n, 0) == id)
             .map(|(_, o)| o)
-    };
+    });
     let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let written = |id: ObjectId, obj: &Object| {
         let mut out = Vec::new();
@@ -2052,7 +2080,7 @@ fn xref_streams_metadata_and_the_encrypt_dict_stay_plain() {
     };
     let xref = Stream::new(
         dict! {
-            "Type" => "XRef",
+            "Type" => Object::name("XRef"),
             "ID" => vec![lit(b"an /ID"), lit(b"an /ID")],
         },
         vec![1, 0, 0, 0],
@@ -2102,7 +2130,7 @@ fn xref_streams_metadata_and_the_encrypt_dict_stay_plain() {
 fn in_clear_finds_a_string_written_in_hex() {
     let file = |form, case: fn(&mut Vec<u8>)| {
         let mut member = Vec::new();
-        let value = Object::new(Value::String(Str::Bytes(b"Ann Lee".to_vec()), Some(form)));
+        let value = Object::new(Value::String(Str::bytes(b"Ann Lee"), Some(form)));
         serialize::write(&mut member, &Object::from(dict! { "V" => value })).unwrap();
         case(&mut member);
         let container = write::container(&[(1, member.clone())], Deflate::DEFAULT).unwrap();
@@ -2215,11 +2243,11 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
         }
         let trailer = dict! { "Root" => ObjectId::new(1, 0) };
         let objects = [(1, catalog())];
-        let resolve = |id: ObjectId| {
+        let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
             (objects.iter())
                 .find(|(n, _)| ObjectId::new(*n, 0) == id)
                 .map(|(_, o)| o)
-        };
+        });
         let encrypting = method.encryptor.encrypting(&trailer, &resolve).unwrap();
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut section = Section::full(0);
@@ -2284,7 +2312,7 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
 fn an_encryptor_isnt_had_of_a_locked_plain_or_unsupported_reading() {
     let plain = fixture::file(
         "1.7",
-        &[(1, Body::from(dict! { "Type" => "Catalog" }))],
+        &[(1, Body::from(dict! { "Type" => Object::name("Catalog") }))],
         dict! { "Root" => ObjectId::new(1, 0) },
         Xref::Table,
     );
@@ -2293,13 +2321,13 @@ fn an_encryptor_isnt_had_of_a_locked_plain_or_unsupported_reading() {
     assert_eq!(*locked.encryption(), Encryption::Locked);
     assert_eq!(Encryptor::of(&locked).unwrap_err(), Error::Locked);
     let mut identity = dictionary_of(Kind::Aes128, true);
-    identity.set("StmF", "Identity");
-    identity.set("StrF", "Identity");
+    identity.set("StmF", Object::name("Identity"));
+    identity.set("StrF", Object::name("Identity"));
     let plain_only = opened(&source(identity, false), "wrong");
     assert_eq!(*plain_only.encryption(), Encryption::Plain);
     assert_eq!(Encryptor::of(&plain_only).unwrap_err(), Error::Locked);
     let mut other = dictionary_of(Kind::Aes128, true);
-    other.set("Filter", "Nonesuch");
+    other.set("Filter", Object::name("Nonesuch"));
     let unsupported = opened(&source(other, false), "user");
     let Encryption::Unsupported(why) = unsupported.encryption().clone() else {
         panic!("{:?}", unsupported.encryption());
@@ -2359,11 +2387,11 @@ fn a_direct_encryption_dictionary_is_its_own_with_no_number() {
 fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     let crypt = encryptor_of(&source(dictionary_of(Kind::Aes128, true), false));
     let trailer = dict! { "Root" => ObjectId::new(1, 0) };
-    let resolve = |_: ObjectId| None;
+    let resolve = pdf_objects::resolve_fn(|_: ObjectId| None);
     let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let unknown = dict! {
-        "Filter" => "Crypt",
-        "DecodeParms" => dict! { "Name" => "Nonesuch" },
+        "Filter" => Object::name("Crypt"),
+        "DecodeParms" => dict! { "Name" => Object::name("Nonesuch") },
     };
     let mut out = b"%PDF-1.7\n".to_vec();
     let refused = serialize::indirect_stream_with(
@@ -2403,7 +2431,7 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     let crypt = encryptor_of(&source(unsaid, false));
     let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let embedded = Object::from(Stream::new(
-        dict! { "Type" => "EmbeddedFile" },
+        dict! { "Type" => Object::name("EmbeddedFile") },
         b"data".to_vec(),
     ));
     let refused = serialize::indirect_with(&mut out, ObjectId::new(3, 0), &embedded, &encrypting);
@@ -2861,7 +2889,9 @@ fn containers_build_alike_on_one_thread_and_on_eight() {
     let trailer = dict! { "Root" => ObjectId::new(1, 0) };
     // The catalog given, which says which stream is the metadata where
     // `/EncryptMetadata false` leaves it in the clear.
-    let resolve = |id: ObjectId| (objects.iter()).find(|(at, _)| *at == id).map(|(_, o)| o);
+    let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
+        (objects.iter()).find(|(at, _)| *at == id).map(|(_, o)| o)
+    });
     let methods = derived_methods();
     let encrypting: Vec<(&str, Option<write::Encrypting<'_>>)> = std::iter::once(("plain", None))
         .chain((methods.iter().filter(|m| m.encryptor.packs())).map(|m| {
@@ -3005,16 +3035,18 @@ fn numbered() -> Vec<(u32, Object)> {
     let mut objects = vec![
         (
             1,
-            Object::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Object::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (
             2,
-            Object::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }),
+            Object::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+            ),
         ),
         (
             3,
             Object::from(dict! {
-                "Type" => "Page", "Parent" => r(2), "Contents" => r(4),
+                "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(4),
                 "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
             }),
         ),
@@ -3158,7 +3190,7 @@ fn a_container_past_what_the_reader_takes_is_written_plain() {
     for (n, obj) in &mut objects {
         if *n == 11 {
             *obj = Object::new(Value::String(
-                Str::Bytes(vec![b'a'; write::MAX_DATA]),
+                Str::bytes(vec![b'a'; write::MAX_DATA]),
                 Some(Form::Literal),
             ));
         }
@@ -3209,14 +3241,17 @@ fn a_table_layout_refuses_to_pack() {
 #[test]
 fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
     let linearized = dict! { "Linearized" => 1, "L" => 1000 };
-    let objstm = Stream::new(dict! { "Type" => "ObjStm", "N" => 0, "First" => 0 }, vec![]);
+    let objstm = Stream::new(
+        dict! { "Type" => Object::name("ObjStm"), "N" => 0, "First" => 0 },
+        vec![],
+    );
     let xref = Stream::new(
-        dict! { "Type" => "XRef", "W" => vec![Object::from(1)] },
+        dict! { "Type" => Object::name("XRef"), "W" => vec![Object::from(1)] },
         vec![],
     );
     let mut doc = crate::Document::new(pdf_objects::version::Version::new(1, 4), Dict::new());
     doc.insert(1, catalog());
-    doc.insert(2, dict! { "Title" => "Info" });
+    doc.insert(2, dict! { "Title" => Object::name("Info") });
     doc.insert(3, linearized);
     doc.insert(4, Object::from(objstm));
     doc.insert(5, Object::from(xref));
@@ -3225,7 +3260,7 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
     let mut base = dict! {
         "Root" => ObjectId::new(1, 0),
         "Info" => ObjectId::new(2, 0),
-        "Custom" => "Kept",
+        "Custom" => Object::name("Kept"),
         "ID" => vec![id.clone(), id],
         "Encrypt" => ObjectId::new(9, 0),
     };
@@ -3242,7 +3277,7 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
         "FFilter",
         "FDecodeParms",
     ] {
-        base.set(key, "Stale");
+        base.set(key, Object::name("Stale"));
     }
     *doc.trailer.dict_mut() = base;
     for kind in KINDS {
@@ -3595,8 +3630,11 @@ fn encrypted_files_append_encrypted() {
     for (name, kind, method, source) in &sources {
         let reading = opened(source, "user");
         let mut doc = reading.to_document().unwrap();
-        let note =
-            doc.add(dict! { "Type" => "Annot", "Subtype" => "Square", "Contents" => lit(NOTE) });
+        let note = doc.add(dict! {
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Square"),
+            "Contents" => lit(NOTE),
+        });
         let page = doc.get_dict_mut(PAGE).unwrap();
         page.set("Rotate", 90);
         page.set("Annots", vec![Object::from(note)]);
@@ -3704,9 +3742,9 @@ fn a_base_numbered_to_the_last_number_isnt_appended_to() {
         Object::from(200),
     ];
     let objects = [
-        dict! { "Type" => "Catalog", "Pages" => r(2) },
-        dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 },
-        dict! { "Type" => "Page", "Parent" => r(2), "MediaBox" => media },
+        dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) },
+        dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+        dict! { "Type" => Object::name("Page"), "Parent" => r(2), "MediaBox" => media },
     ];
     for (num, dict) in (1..).zip(objects) {
         let pos = serialize::indirect(&mut file, ObjectId::new(num, 0), &dict.into()).unwrap();
@@ -3716,7 +3754,7 @@ fn a_base_numbered_to_the_last_number_isnt_appended_to() {
     }
     let start = file.len();
     let xref = dict! {
-        "Type" => "XRef",
+        "Type" => Object::name("XRef"),
         "Size" => 4,
         "W" => vec![Object::from(1), Object::from(4), Object::from(2)],
         "Index" => vec![Object::from(0), Object::from(4)],
@@ -3858,11 +3896,11 @@ fn an_encrypted_object_stream_base_rewrites() {
 /// it, as its stream method leaves it; and a cross-reference stream.
 fn packed_in_the_clear(encryptor: &Encryptor) -> Vec<u8> {
     let (plain, trailer) = plaintext();
-    let resolve = |id: ObjectId| {
+    let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
         (plain.iter())
             .find(|(n, _)| ObjectId::new(*n, 0) == id)
             .map(|(_, o)| o)
-    };
+    });
     let encrypting = encryptor.encrypting(&trailer, &resolve).unwrap();
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
@@ -4268,7 +4306,7 @@ fn title_written(file: &[u8]) -> Vec<u8> {
     assert_eq!(locked.encryption(), &Encryption::Locked);
     let info = locked.get(ObjectId::new(13, 0)).unwrap().as_dict().unwrap();
     match info.get(b"Title").unwrap().value() {
-        Value::String(Str::Encrypted(bytes), _) => bytes.clone(),
+        Value::String(Str::Encrypted(bytes), _) => bytes.to_vec(),
         other => panic!("{other:?}"),
     }
 }
@@ -4351,7 +4389,7 @@ fn an_rc4_update_changing_a_string_is_refused_and_told_to_reuse_leaks_its_xor() 
 /// dictionary at 4, number 2's row made `00001 f`.
 fn freed_at_one(kind: Kind) -> Vec<u8> {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (3, Body::from(dict! { "N" => 3 })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -4369,7 +4407,7 @@ fn freed_at_one(kind: Kind) -> Vec<u8> {
 #[test]
 fn a_number_its_file_lists_past_what_a_file_may_use_is_left_off_the_free_list() {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Note" => lit(b"two") })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -4491,7 +4529,7 @@ fn under_rc4_an_update_below_a_free_number_s_generation_is_refused_and_at_it_wri
 #[test]
 fn a_whole_file_refuses_a_number_given_twice_before_a_copy_under_every_method() {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (3, Body::from(dict! { "Note" => lit(b"three") })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -4542,7 +4580,7 @@ fn under_rc4_an_update_after_another_counts_what_the_first_wrote_as_used() {
         let locked = open(file);
         let object = locked.get(at).unwrap().as_dict().unwrap();
         match object.get(b"Note").unwrap().value() {
-            Value::String(Str::Encrypted(bytes), _) => bytes.clone(),
+            Value::String(Str::Encrypted(bytes), _) => bytes.to_vec(),
             other => panic!("{other:?}"),
         }
     };
@@ -4683,16 +4721,16 @@ fn encrypting_without_the_catalog_where_metadata_is_in_the_clear_is_refused() {
     let (plain, trailer) = plaintext();
     let root = trailer.get(b"Root").and_then(Object::as_reference).unwrap();
     let encryptor = &clear.encryptor;
-    let none = |_: ObjectId| -> Option<&Object> { None };
+    let none = pdf_objects::resolve_fn(|_: ObjectId| -> Option<&Object> { None });
     let refused = encryptor
         .laid_out(None, encryptor.at(), &trailer, &none)
         .err();
     assert_eq!(refused, Some(Error::Catalog(root)));
-    let resolve = |id: ObjectId| {
+    let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
         (plain.iter())
             .find(|(n, _)| ObjectId::new(*n, 0) == id)
             .map(|(_, o)| o)
-    };
+    });
     assert!(
         encryptor
             .laid_out(None, encryptor.at(), &trailer, &resolve)
@@ -4751,7 +4789,7 @@ fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
         let held = own.laid_out(None, own.at(), trailer, resolve).unwrap();
         let metadata = held.stream(ObjectId::new(5, 0), &dict_of(5), XMP).unwrap();
         assert_eq!(metadata.as_ref(), XMP, "{name}: the metadata, held at 5");
-        let none = |_: ObjectId| -> Option<&Object> { None };
+        let none = pdf_objects::resolve_fn(|_: ObjectId| -> Option<&Object> { None });
         let refused = own.laid_out(Some(&swap), at, trailer, &none).err();
         let root = trailer.get(b"Root").and_then(Object::as_reference);
         assert_eq!(refused, root.map(Error::Catalog), "{name}");
@@ -4825,16 +4863,20 @@ fn a_caller_laying_out_writes_the_metadata_s_own_identity_crypt_through_parts_al
     use chacha20::ChaCha20Rng;
 
     let r = Object::reference;
-    let identity =
-        || Object::from(dict! { "Type" => "CryptFilterDecodeParms", "Name" => "Identity" });
+    let identity = || {
+        Object::from(dict! {
+            "Type" => Object::name("CryptFilterDecodeParms"),
+            "Name" => Object::name("Identity"),
+        })
+    };
     let mut dict =
-        dict! { "Filter" => vec![Object::from("Crypt")], "DecodeParms" => vec![identity()] };
-    dict.set("Type", "Metadata");
-    dict.set("Subtype", "XML");
+        dict! { "Filter" => vec![Object::name("Crypt")], "DecodeParms" => vec![identity()] };
+    dict.set("Type", Object::name("Metadata"));
+    dict.set("Subtype", Object::name("XML"));
     let objects = vec![
         (
             1,
-            Object::from(dict! { "Type" => "Catalog", "Metadata" => r(2) }),
+            Object::from(dict! { "Type" => Object::name("Catalog"), "Metadata" => r(2) }),
         ),
         (2, Object::from(Stream::new(dict.clone(), XMP.to_vec()))),
     ];
@@ -5040,7 +5082,7 @@ fn a_base_is_a_reading_s_file_as_its_last_section_says() {
     assert_eq!(write::Base::of(&open(&small)).unwrap().size, 6);
     let stream = fixture::file(
         "1.7",
-        &[(1, Body::from(dict! { "Type" => "Catalog" }))],
+        &[(1, Body::from(dict! { "Type" => Object::name("Catalog") }))],
         dict! { "Root" => ObjectId::new(1, 0) },
         Xref::Stream,
     );
@@ -5209,7 +5251,7 @@ fn positions_count_from_where_the_write_starts_in_out() {
 #[test]
 fn an_update_carries_its_file_s_trailer_entries() {
     let (plain, mut trailer) = plaintext();
-    trailer.set("Custom", "Kept");
+    trailer.set("Custom", Object::name("Kept"));
     trailer.set("Other", 7);
     for kind in KINDS {
         let file = whole(&plain, &trailer, kind, None);
@@ -5360,12 +5402,13 @@ fn a_built_document_is_written_whole() {
     let mut doc = crate::Document::new(pdf_objects::version::Version::new(2, 0), Dict::new());
     let content = doc.add(Stream::new(dict! {}, b"0 0 m 9 9 l S".to_vec()));
     let pages = doc.new_id();
-    let page = doc.add(dict! { "Type" => "Page", "Parent" => pages, "Contents" => content });
+    let page =
+        doc.add(dict! { "Type" => Object::name("Page"), "Parent" => pages, "Contents" => content });
     doc.set(
         pages,
-        dict! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 },
+        dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1 },
     );
-    let catalog = doc.add(dict! { "Type" => "Catalog", "Pages" => pages });
+    let catalog = doc.add(dict! { "Type" => Object::name("Catalog"), "Pages" => pages });
     doc.trailer.dict_mut().set("Root", catalog);
     let mut options = write::Options::DEFAULT;
     options.version = pdf_objects::version::Version::new(2, 0);
@@ -5394,8 +5437,11 @@ fn every_refusal_writes_nothing() {
     let nan = Object::from(dict! { "N" => f64::NAN });
     let unknown = Object::from(Stream::new(
         dict! {
-            "Filter" => vec![Object::from("Crypt")],
-            "DecodeParms" => vec![Object::from(dict! { "Type" => "CryptFilterDecodeParms", "Name" => "Nonesuch" })],
+            "Filter" => vec![Object::name("Crypt")],
+            "DecodeParms" => vec![Object::from(dict! {
+                "Type" => Object::name("CryptFilterDecodeParms"),
+                "Name" => Object::name("Nonesuch"),
+            })],
         },
         b"data".to_vec(),
     ));
@@ -5563,7 +5609,7 @@ fn every_refusal_writes_nothing() {
 #[test]
 fn an_update_under_another_file_s_encryptor_is_refused() {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Title" => lit(b"secret") })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -5589,7 +5635,7 @@ fn an_update_under_another_file_s_encryptor_is_refused() {
         write::update(&mut out, &base, given, owner.as_ref(), None, options).unwrap();
         assert_eq!(value(&opened(&out, "user"), at), changed, "{name}");
     }
-    let catalog = Object::from(dict! { "Type" => "Catalog", "Lang" => lit(b"en") });
+    let catalog = Object::from(dict! { "Type" => Object::name("Catalog"), "Lang" => lit(b"en") });
     let a = source(dictionary_of(Kind::Aes128, true), true);
     let b = source(dictionary_of(Kind::Aes128, false), true);
     let theirs = encryptor_of(&b);
@@ -5625,7 +5671,7 @@ fn an_update_under_another_file_s_encryptor_is_refused() {
 #[test]
 fn an_update_is_matched_to_its_file_by_the_key() {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Title" => lit(b"secret") })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -5670,9 +5716,9 @@ fn an_update_by_one_password_isnt_taken_for_the_other_s_key() {
     let Some(Value::String(Str::Bytes(ue), _)) = dict.get(b"UE").map(Object::value) else {
         panic!("/UE is a string");
     };
-    let mut ue = ue.clone();
+    let mut ue = ue.to_vec();
     ue[0] ^= 1;
-    dict.set("UE", Object::new(Value::String(Str::Bytes(ue), None)));
+    dict.set("UE", Object::new(Value::String(Str::bytes(ue), None)));
     let file = source(dict, false);
     let readings = [
         ("user", opened(&file, "user")),
@@ -5680,7 +5726,7 @@ fn an_update_by_one_password_isnt_taken_for_the_other_s_key() {
     ];
     let unconfirmed = |reading: &Reading<Arc<[u8]>>| matches!(reading.encryption(), Encryption::Opened { faults, .. } if faults == &[Fault::Unconfirmed]);
     assert!(unconfirmed(&readings[0].1) && !unconfirmed(&readings[1].1));
-    let catalog = Object::from(dict! { "Type" => "Catalog", "Lang" => lit(b"en") });
+    let catalog = Object::from(dict! { "Type" => Object::name("Catalog"), "Lang" => lit(b"en") });
     for (by, reading) in &readings {
         let base = write::Base::of(reading).unwrap();
         for (with, other) in &readings {
@@ -5716,9 +5762,9 @@ fn a_base_by_hand_is_matched_by_the_key_it_is_given() {
     let Some(Value::String(Str::Bytes(ue), _)) = dict.get(b"UE").map(Object::value) else {
         panic!("/UE is a string");
     };
-    let mut ue = ue.clone();
+    let mut ue = ue.to_vec();
     ue[0] ^= 1;
-    dict.set("UE", Object::new(Value::String(Str::Bytes(ue), None)));
+    dict.set("UE", Object::new(Value::String(Str::bytes(ue), None)));
     let file = source(dict, true);
     let (user, owner) = (opened(&file, "user"), opened(&file, "owner"));
     let checked = write::Base::of(&user).unwrap().key.unwrap();
@@ -5727,7 +5773,7 @@ fn a_base_by_hand_is_matched_by_the_key_it_is_given() {
         let trailer = user.trailer().dict().clone();
         write::Base::new(file.len(), prev, size(&user), xref, trailer)
     };
-    let catalog = Object::from(dict! { "Type" => "Catalog", "Lang" => lit(b"en") });
+    let catalog = Object::from(dict! { "Type" => Object::name("Catalog"), "Lang" => lit(b"en") });
     let given = [(ObjectId::new(1, 0), write::Body::from(&catalog))];
     let (ours, theirs) = (encryptor_of(&file), Encryptor::of(&owner).unwrap().unwrap());
     let mut out = file.clone();
@@ -5766,7 +5812,7 @@ fn a_base_by_hand_is_matched_by_the_key_it_is_given() {
 #[test]
 fn a_base_by_hand_of_a_dictionary_at_a_number_takes_an_update_once_told_it() {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Title" => lit(b"secret") })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -5812,7 +5858,7 @@ fn a_direct_info_is_written_encrypted_as_an_object() {
     use chacha20::ChaCha20Rng;
 
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Title" => lit(b"a page") })),
     ];
     let info = Object::from(dict! { "Title" => lit(TITLE), "Producer" => lit(b"a producer") });
@@ -5934,9 +5980,13 @@ fn a_new_encryption_drops_the_metadata_streams_own_identity_crypt() {
     use chacha20::ChaCha20Rng;
 
     let r = Object::reference;
-    let crypt = || Object::from("Crypt");
-    let identity =
-        || Object::from(dict! { "Type" => "CryptFilterDecodeParms", "Name" => "Identity" });
+    let crypt = || Object::name("Crypt");
+    let identity = || {
+        Object::from(dict! {
+            "Type" => Object::name("CryptFilterDecodeParms"),
+            "Name" => Object::name("Identity"),
+        })
+    };
     let shapes: [(&str, Dict, Vec<u8>); 3] = [
         (
             "by name",
@@ -5951,7 +6001,7 @@ fn a_new_encryption_drops_the_metadata_streams_own_identity_crypt() {
         (
             "before /FlateDecode",
             dict! {
-                "Filter" => vec![crypt(), Object::from("FlateDecode")],
+                "Filter" => vec![crypt(), Object::name("FlateDecode")],
                 "DecodeParms" => vec![identity(), Object::null()],
             },
             fixture::zlib(XMP),
@@ -5959,18 +6009,20 @@ fn a_new_encryption_drops_the_metadata_streams_own_identity_crypt() {
     ];
     let kept = || {
         let mut dict = dict! { "Filter" => vec![crypt()], "DecodeParms" => vec![identity()] };
-        dict.set("Type", "Note");
+        dict.set("Type", Object::name("Note"));
         Object::from(Stream::new(dict, OWN_IDENTITY.to_vec()))
     };
     let prepared = Password("new").prepared().unwrap();
     for (shape, filters, data) in shapes {
         let mut dict = filters.clone();
-        dict.set("Type", "Metadata");
-        dict.set("Subtype", "XML");
+        dict.set("Type", Object::name("Metadata"));
+        dict.set("Subtype", Object::name("XML"));
         let objects = vec![
             (
                 1,
-                Object::from(dict! { "Type" => "Catalog", "Metadata" => r(2), "Note" => r(3) }),
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Metadata" => r(2), "Note" => r(3) },
+                ),
             ),
             (2, Object::from(Stream::new(dict, data))),
             (3, kept()),
@@ -6024,12 +6076,12 @@ fn a_new_encryption_drops_the_metadata_streams_own_identity_crypt() {
         XMP.to_vec(),
     );
     let mut dict = filters;
-    dict.set("Type", "Metadata");
-    dict.set("Subtype", "XML");
+    dict.set("Type", Object::name("Metadata"));
+    dict.set("Subtype", Object::name("XML"));
     let objects = vec![
         (
             1,
-            Object::from(dict! { "Type" => "Catalog", "Metadata" => r(2) }),
+            Object::from(dict! { "Type" => Object::name("Catalog"), "Metadata" => r(2) }),
         ),
         (2, Object::from(Stream::new(dict, data))),
     ];
@@ -6786,7 +6838,7 @@ fn an_object_the_list_says_otherwise_of_in_the_file_written_isn_t_copied() {
         .and_then(Object::as_reference)
         .unwrap();
     let new = doc.new_id();
-    let dict = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+    let dict = dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") };
     doc.set(new, Stream::new(dict, NEW_XMP.to_vec()));
     (doc.get_dict_mut(root).unwrap()).set("Metadata", Object::from(new));
     let encryptor = Encryptor::of(&reading).unwrap();
@@ -6950,7 +7002,7 @@ fn members_spelled_as(members: &[(u32, &[u8])]) -> Vec<u8> {
     let kids = vec![Object::reference(3)];
     let mediabox = [0, 0, 612, 792].map(Object::from).to_vec();
     let page = dict! {
-        "Type" => "Page",
+        "Type" => Object::name("Page"),
         "Parent" => ObjectId::new(2, 0),
         "MediaBox" => mediabox,
         "Resources" => Dict::new(),
@@ -6958,11 +7010,13 @@ fn members_spelled_as(members: &[(u32, &[u8])]) -> Vec<u8> {
     let objects = [
         (
             1,
-            Object::from(dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0) }),
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => ObjectId::new(2, 0) },
+            ),
         ),
         (
             2,
-            Object::from(dict! { "Type" => "Pages", "Kids" => kids, "Count" => 1 }),
+            Object::from(dict! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => 1 }),
         ),
         (3, Object::from(page)),
         (20, Object::from(container)),
@@ -7227,7 +7281,7 @@ fn a_copy_whose_bytes_changed_since_they_were_read_is_refused() {
     // `1.50`'s `5`, in the page.
     let at = (file.windows(4).position(|w| w == b"1.50")).unwrap() + 2;
     let page = doc.record(ObjectId::new(3, 0)).unwrap().at;
-    assert!(page.start < at && at < page.end);
+    assert!(page.start() < at && at < page.end());
     source.flip(at);
     let mut out = Vec::new();
     let refused = write::document(&mut out, &doc, None, Some(&reading), &options);
@@ -7330,7 +7384,7 @@ fn a_copys_bytes_not_there_to_read_are_refused_each_in_its_words() {
     let reading = open(&file);
     let doc = reading.to_document().unwrap();
     let mut record = doc.record(id).unwrap().clone();
-    record.at = Span::new(None, record.at.start, len + 10);
+    record.at = Span::new(None, record.at.start(), len + 10);
     let object = doc.get(id).unwrap().clone();
     let bodies = (write::bodies(&doc)).map(|(at, body)| match at == id {
         true => (
@@ -8076,9 +8130,11 @@ fn a_reference_the_renumbering_names_none_of_is_written_null() {
     let objects = [
         (
             1,
-            Object::from(
-                dict! { "Type" => "Catalog", "Gone" => ObjectId::new(9, 0), "Kept" => ObjectId::new(30, 0) },
-            ),
+            Object::from(dict! {
+                "Type" => Object::name("Catalog"),
+                "Gone" => ObjectId::new(9, 0),
+                "Kept" => ObjectId::new(30, 0),
+            }),
         ),
         (
             2,
@@ -8810,7 +8866,7 @@ fn under_rc4_a_renumbering_moves_onto_fresh_generations_and_an_update_onto_used_
     const TWO: &[u8] = b"a second title!";
     assert_eq!(ONE.len(), TWO.len());
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Title" => lit(ONE) })),
         (3, Body::from(dict! { "Title" => lit(TWO) })),
     ];
@@ -8820,7 +8876,7 @@ fn under_rc4_a_renumbering_moves_onto_fresh_generations_and_an_update_onto_used_
         let locked = open(file);
         let dict = locked.get(id).unwrap().as_dict().unwrap().clone();
         match dict.get(b"Title").unwrap().value() {
-            Value::String(Str::Encrypted(bytes), _) => bytes.clone(),
+            Value::String(Str::Encrypted(bytes), _) => bytes.to_vec(),
             other => panic!("{other:?}"),
         }
     };
@@ -8898,7 +8954,7 @@ fn under_rc4_a_renumbering_moves_onto_fresh_generations_and_an_update_onto_used_
 pub(crate) fn rc4_revised() -> Vec<u8> {
     let r = Object::reference;
     let page = dict! {
-        "Type" => "Page", "Parent" => r(2), "Contents" => r(5), "Title" => lit(b"a page"),
+        "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(5), "Title" => lit(b"a page"),
         "Resources" => Dict::new(),
     };
     let media = vec![
@@ -8907,12 +8963,16 @@ pub(crate) fn rc4_revised() -> Vec<u8> {
         Object::from(100),
         Object::from(100),
     ];
-    let pages =
-        dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1, "MediaBox" => media };
+    let pages = dict! {
+        "Type" => Object::name("Pages"),
+        "Kids" => vec![r(3)],
+        "Count" => 1,
+        "MediaBox" => media,
+    };
     let objects = [
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (2, Body::from(pages)),
         (3, Body::from(page)),
@@ -9119,7 +9179,10 @@ fn under_rc4_a_whole_file_writes_what_it_writes_anew_past_every_generation_any_s
 fn under_rc4_an_object_whose_generations_are_spent_moves_to_a_fresh_number() {
     let r = Object::reference;
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog", "Two" => r(2) })),
+        (
+            1,
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Two" => r(2) }),
+        ),
         (2, Body::from(dict! { "Note" => lit(b"two") })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -9128,7 +9191,8 @@ fn under_rc4_an_object_whose_generations_are_spent_moves_to_a_fresh_number() {
     let own = Encryptor::of(&reading).unwrap().unwrap();
     let base = write::Base::of(&reading).unwrap();
     let spent = ObjectId::new(2, 65534);
-    let catalog = Object::from(dict! { "Type" => "Catalog", "Two" => Object::from(spent) });
+    let catalog =
+        Object::from(dict! { "Type" => Object::name("Catalog"), "Two" => Object::from(spent) });
     let two = Object::from(dict! { "Note" => lit(b"two, at its last") });
     let given = [
         (ObjectId::new(1, 0), write::Body::from(&catalog)),
@@ -9175,7 +9239,7 @@ fn under_rc4_an_object_whose_generations_are_spent_moves_to_a_fresh_number() {
 #[test]
 fn under_rc4_a_whole_file_as_of_an_earlier_section_writes_past_what_later_ones_used() {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Note" => lit(b"two") })),
         (3, Body::from(dict! { "Note" => lit(b"three") })),
     ];
@@ -9250,11 +9314,13 @@ fn an_rc4_update_changing_no_plaintext_is_written() {
     let objects = [
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 }),
+            Body::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => Vec::<Object>::new(), "Count" => 0 },
+            ),
         ),
         (3, Body::from(dict! { "Title" => lit(b"a long title") })),
     ];
@@ -9263,8 +9329,9 @@ fn an_rc4_update_changing_no_plaintext_is_written() {
     let reading = opened(&file, "user");
     let own = Encryptor::of(&reading).unwrap().unwrap();
     let base = write::Base::of(&reading).unwrap();
-    let pages =
-        Object::from(dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 1 });
+    let pages = Object::from(
+        dict! { "Type" => Object::name("Pages"), "Kids" => Vec::<Object>::new(), "Count" => 1 },
+    );
     let shorter = Object::from(dict! { "Title" => lit(b"a long"), "Rotate" => 90 });
     let options = write::Options::DEFAULT;
     let ways: [(&str, Option<&dyn write::ReadFrom>, ObjectId, &Object); 3] = [
@@ -9301,7 +9368,7 @@ fn an_rc4_update_changing_no_plaintext_is_written() {
 #[test]
 fn an_rc4_update_changing_a_string_back_to_an_earlier_revision_s_is_written() {
     let objects = [
-        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (1, Body::from(dict! { "Type" => Object::name("Catalog") })),
         (2, Body::from(dict! { "Title" => lit(b"the first") })),
     ];
     let root = dict! { "Root" => ObjectId::new(1, 0) };
@@ -9358,11 +9425,13 @@ fn an_rc4_update_after_a_regenerated_whole_file_is_given_its_written_ids() {
     let objects = [
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 }),
+            Body::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => Vec::<Object>::new(), "Count" => 0 },
+            ),
         ),
         (3, Body::from(dict! { "Title" => lit(b"three") })),
     ];
@@ -9391,8 +9460,9 @@ fn an_rc4_update_after_a_regenerated_whole_file_is_given_its_written_ids() {
         Some(pages)
     );
     let base = &written.base;
-    let tree =
-        Object::from(dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 2 });
+    let tree = Object::from(
+        dict! { "Type" => Object::name("Pages"), "Kids" => Vec::<Object>::new(), "Count" => 2 },
+    );
     let new = ObjectId::new(base.size, 0);
     let note = Object::from(dict! { "Note" => lit(b"a new one") });
     let given = [
@@ -9435,11 +9505,11 @@ fn copy_of<S: ByteSource>(
 ) -> Vec<u8> {
     fn placed(o: &Object, out: &mut Vec<(ObjectId, Span)>) {
         match o.value() {
-            Value::Ref(id) => out.push((*id, o.at.unwrap())),
+            Value::Ref(id) => out.push((*id, o.at().unwrap())),
             Value::Array(array) => array.iter().for_each(|o| placed(o, out)),
-            Value::Dict(dict) => dict.entries().iter().for_each(|e| placed(&e.value, out)),
+            Value::Dict(dict) => dict.entries().iter().for_each(|e| placed(e.value(), out)),
             Value::Stream(stream) => {
-                (stream.dict.entries().iter()).for_each(|e| placed(&e.value, out))
+                (stream.dict.entries().iter()).for_each(|e| placed(e.value(), out))
             }
             _ => {}
         }
@@ -9459,7 +9529,10 @@ fn copy_of<S: ByteSource>(
                 Some(id) => format!("{id} R"),
                 None => "null".to_string(),
             };
-            let run = (span.start - record.at.start, span.end - record.at.start);
+            let run = (
+                span.start() - record.at.start(),
+                span.end() - record.at.start(),
+            );
             runs.push((run.0, run.1, text.into_bytes()));
         }
     }
@@ -9610,18 +9683,21 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
             Value::Stream(stream) => edit(&mut stream.dict),
             other => panic!("{other:?}"),
         }
-        assert!(object.at.is_some());
+        assert!(object.at().is_some());
         object
+    };
+    let set_span = |o: &mut Object, at: Span| {
+        *o = std::mem::replace(o, Object::null()).with_span(at);
     };
     let span_of = |n: u32, key: &[u8]| -> Span {
         let object = doc.get(ObjectId::new(n, 0)).unwrap();
         let value = object.as_dict().unwrap().get(key).unwrap();
         match value.value() {
-            Value::Array(array) => array[0].at.unwrap(),
-            _ => value.at.unwrap(),
+            Value::Array(array) => array[0].at().unwrap(),
+            _ => value.at().unwrap(),
         }
     };
-    let past = doc.record(ObjectId::new(3, 0)).unwrap().at.end;
+    let past = doc.record(ObjectId::new(3, 0)).unwrap().at.end();
     let data = doc.record(ObjectId::new(8, 0)).unwrap().data.unwrap().at;
     let string = (file.windows(8).position(|w| w == b"(15 0 R)")).unwrap() + 2;
     let inside = Span::new(None, string, string + 5);
@@ -9629,12 +9705,12 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
         (
             "a moved one with no place",
             3,
-            edited(3, &|d| d.get_mut(b"Contents").unwrap().at = None),
+            edited(3, &|d| d.get_mut(b"Contents").unwrap().clear_span()),
         ),
         (
             "one kept with no place",
             3,
-            edited(3, &|d| d.get_mut(b"Parent").unwrap().at = None),
+            edited(3, &|d| d.get_mut(b"Parent").unwrap().clear_span()),
         ),
         (
             "one put in",
@@ -9647,10 +9723,10 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
             edited(7, &|d| {
                 let (b, dd) = (span_of(7, b"B"), span_of(7, b"D"));
                 match d.get_mut(b"B").unwrap().as_written_mut() {
-                    Value::Array(array) => array[0].at = Some(dd),
+                    Value::Array(array) => set_span(&mut array[0], dd),
                     other => panic!("{other:?}"),
                 }
-                d.get_mut(b"D").unwrap().at = Some(b);
+                set_span(d.get_mut(b"D").unwrap(), b);
             }),
         ),
         (
@@ -9658,7 +9734,7 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
             3,
             edited(3, &|d| {
                 let at = Span::new(None, past + 4, past + 9);
-                d.get_mut(b"Contents").unwrap().at = Some(at);
+                set_span(d.get_mut(b"Contents").unwrap(), at);
             }),
         ),
         (
@@ -9671,12 +9747,12 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
         (
             "one inside a string",
             8,
-            edited(8, &|d| d.get_mut(b"Ref").unwrap().at = Some(inside)),
+            edited(8, &|d| set_span(d.get_mut(b"Ref").unwrap(), inside)),
         ),
         (
             "one in its stream's data",
             8,
-            edited(8, &|d| d.get_mut(b"Ref").unwrap().at = Some(data)),
+            edited(8, &|d| set_span(d.get_mut(b"Ref").unwrap(), data)),
         ),
     ];
     for (name, n, object) in &cases {
@@ -9739,7 +9815,7 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
     pack.renumber = Some(&to);
     let mut member = doc.get(ObjectId::new(5, 0)).unwrap().clone();
     match member.as_written_mut() {
-        Value::Array(array) => array[2].at = None,
+        Value::Array(array) => array[2].clear_span(),
         other => panic!("{other:?}"),
     }
     let given = (write::bodies(&doc)).map(|(id, body)| match id {
@@ -10988,7 +11064,7 @@ fn a_documents_bodies_walk_as_they_did() {
     edited.get_mut(ObjectId::new(2, 0));
     edited.insert(7, 7);
     let mut built = crate::Document::new(pdf_objects::version::Version::new(1, 7), Dict::new());
-    built.insert(1, dict! { "Type" => "Catalog" });
+    built.insert(1, dict! { "Type" => Object::name("Catalog") });
     // The adapter as it was: each that reads, with its record, then its body.
     fn body<'d>(
         (&id, held): (&ObjectId, &'d crate::source::Held),

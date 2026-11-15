@@ -44,14 +44,14 @@ fn file_of(version: &str, pages: &[Dict], more: &[(u32, Body)], catalog: Dict) -
         (
             2,
             Body::from(dict! {
-                "Type" => "Pages", "Kids" => kids, "Count" => pages.len() as i64,
+                "Type" => Object::name("Pages"), "Kids" => kids, "Count" => pages.len() as i64,
                 "MediaBox" => vec![Object::from(0), 0.into(), 612.into(), 792.into()],
             }),
         ),
     ];
     for (i, page) in pages.iter().enumerate() {
         let mut page = page.clone();
-        page.set("Type", "Page");
+        page.set("Type", Object::name("Page"));
         page.set("Parent", r(2));
         objects.push((3 + i as u32, Body::from(page)));
     }
@@ -60,7 +60,7 @@ fn file_of(version: &str, pages: &[Dict], more: &[(u32, Body)], catalog: Dict) -
 }
 
 fn catalog() -> Dict {
-    dict! { "Type" => "Catalog", "Pages" => r(2) }
+    dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }
 }
 
 /// One page drawing stream 10, and object 10.
@@ -95,7 +95,7 @@ fn a_pages_streams_are_joined_whole() {
     let more = [
         (10, content_stream("q 1 0 0 rg")),
         (11, content_stream("0 0 9 9 re f Q")),
-        (12, Body::from(dict! { "Not" => "a stream" })),
+        (12, Body::from(dict! { "Not" => Object::name("a stream") })),
     ];
     let pdf = pdfs::from_bytes(file_of("1.7", &[page], &more, catalog())).unwrap();
     let pages = pdf.pages().unwrap();
@@ -108,16 +108,18 @@ fn a_pages_streams_are_joined_whole() {
     assert_eq!(operators, [&b"q"[..], b"rg", b"re", b"f", b"Q"]);
 
     // A single stream, its resources' color space inherited from the root.
-    let resources = dict! { "ColorSpace" => dict! { "CS0" => "DeviceCMYK" } };
+    let resources = dict! { "ColorSpace" => dict! { "CS0" => Object::name("DeviceCMYK") } };
     let root = dict! {
-        "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1, "Resources" => resources,
+        "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1, "Resources" => resources,
     };
     let objects = [
         (1, Body::from(catalog())),
         (2, Body::from(root)),
         (
             3,
-            Body::from(dict! { "Type" => "Page", "Parent" => r(2), "Contents" => r(4) }),
+            Body::from(
+                dict! { "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(4) },
+            ),
         ),
         (4, content_stream("BI /W 1 /H 1 /BPC 8 /CS /CS0 ID abcd EI")),
     ];
@@ -201,7 +203,7 @@ fn faults_are_told_to_the_sink_given() {
         (1, Body::from(catalog())),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)] }),
+            Body::from(dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)] }),
         ),
         (3, Body::from(dict! { "Parent" => r(2) })),
     ];
@@ -320,11 +322,15 @@ fn encrypted() -> Vec<u8> {
         (1, Body::from(catalog())),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }),
+            Body::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+            ),
         ),
         (
             3,
-            Body::from(dict! { "Type" => "Page", "Parent" => r(2), "Contents" => r(4) }),
+            Body::from(
+                dict! { "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(4) },
+            ),
         ),
         (4, content_stream("0 0 m 9 9 l S")),
         (5, Body::from(dict! { "Title" => Object::text("A title") })),
@@ -404,11 +410,11 @@ fn a_locked_page_tree_is_an_error_never_no_pages() {
     doc.insert(1, catalog());
     doc.insert(
         2,
-        dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 },
+        dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
     );
     doc.insert(
         3,
-        dict! { "Type" => "Page", "Parent" => r(2), "Contents" => r(4) },
+        dict! { "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(4) },
     );
     let stream = Stream::new(dict! {}, b"0 0 m".to_vec());
     doc.insert(
@@ -449,7 +455,7 @@ fn the_version_is_the_later_by_number() {
     let version = |header: &str, named: Option<&str>| {
         let mut root = catalog();
         if let Some(named) = named {
-            root.set("Version", Object::from(named));
+            root.set("Version", Object::name(named));
         }
         let file = file_of(header, &[dict! {}], &[], root);
         pdfs::from_bytes(file).unwrap().version().unwrap()
@@ -470,14 +476,14 @@ fn what_a_file_says_and_claims() {
     claims.pdfa_conformance = Some("B".into());
     let packet = xmp::write(&claims).unwrap();
     let metadata = Body::stream(
-        dict! { "Type" => "Metadata", "Subtype" => "XML" },
+        dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
         packet.as_bytes(),
     );
     let info = dict! {
         "Title" => Object::text("A title"),
         "CreationDate" => Object::text("D:20261112093000Z"),
         "ModDate" => Object::text("last Tuesday"),
-        "Trapped" => "False",
+        "Trapped" => Object::name("False"),
     };
     let mut root = catalog();
     root.set("Metadata", r(10));
@@ -485,9 +491,14 @@ fn what_a_file_says_and_claims() {
         (1, Body::from(root)),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }),
+            Body::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+            ),
         ),
-        (3, Body::from(dict! { "Type" => "Page", "Parent" => r(2) })),
+        (
+            3,
+            Body::from(dict! { "Type" => Object::name("Page"), "Parent" => r(2) }),
+        ),
         (10, metadata),
         (11, Body::from(info)),
     ];
@@ -645,7 +656,7 @@ fn a_file_is_read_on_many_threads() {
 fn no_debug_holds_a_files_text_or_a_password() {
     const MARKER: &str = "Zebrafish";
     let page = dict! {
-        "Type" => "Page", "Parent" => r(2), "Contents" => r(10),
+        "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(10),
         "PieceInfo" => Object::text(MARKER),
     };
     let mut root = catalog();
@@ -654,7 +665,9 @@ fn no_debug_holds_a_files_text_or_a_password() {
         (1, Body::from(root)),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }),
+            Body::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+            ),
         ),
         (3, Body::from(page)),
         (10, content_stream(&format!("({MARKER}) Tj"))),
@@ -662,7 +675,7 @@ fn no_debug_holds_a_files_text_or_a_password() {
         (
             12,
             Body::stream(
-                dict! { "Type" => "Metadata", "Subtype" => "XML" },
+                dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
                 format!(
                     "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
                      xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\

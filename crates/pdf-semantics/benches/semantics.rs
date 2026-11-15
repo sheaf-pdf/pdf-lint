@@ -114,7 +114,7 @@ fn tree(
     let mut objects = Objects::new();
     for node in nodes {
         let mut dict = Dict::new();
-        dict.set("Type", "Pages");
+        dict.set("Type", Object::name("Pages"));
         if let Some(&up) = parent.get(&node.id) {
             dict.set("Parent", reference(up));
         }
@@ -123,14 +123,14 @@ fn tree(
         if node.id == root {
             dict.set("MediaBox", numbers([0, 0, 612, 792]));
             let mut resources = Dict::new();
-            resources.set("ProcSet", Object::from(vec![Object::from("PDF")]));
+            resources.set("ProcSet", Object::from(vec![Object::name("PDF")]));
             dict.set("Resources", resources);
         }
         objects.insert(node.id, Object::from(dict));
     }
     for &page in &pages {
         let mut dict = Dict::new();
-        dict.set("Type", "Page");
+        dict.set("Type", Object::name("Page"));
         dict.set("Parent", reference(parent[&page]));
         objects.insert(page, Object::from(dict));
     }
@@ -141,7 +141,7 @@ fn tree(
     };
     let chains = pages.iter().map(chain).collect();
     let mut catalog = Dict::new();
-    catalog.set("Type", "Catalog");
+    catalog.set("Type", Object::name("Catalog"));
     catalog.set("Pages", reference(root));
     Tree {
         objects,
@@ -231,7 +231,7 @@ fn repeated() -> Tree {
 /// came from, and the faults: none, but each listing again of a page under
 /// ISO's rules.
 fn held_pages(name: &str, tree: &Tree, rules: Rules) {
-    let resolve = |id: ObjectId| tree.objects.get(&id);
+    let resolve = &tree.objects;
     let mut before = BTreeMap::new();
     let expected: Vec<(Option<ObjectId>, u32)> = (tree.pages.iter())
         .map(|&page| {
@@ -304,7 +304,7 @@ fn pages_group(c: &mut Criterion) {
     let trees = trees();
     let mut group = c.benchmark_group("pages");
     for (name, tree, _) in &trees {
-        let resolve = |id: ObjectId| tree.objects.get(&id);
+        let resolve = &tree.objects;
         group.throughput(Throughput::Elements(tree.pages.len() as u64));
         for (rules, said) in [(Rules::Iso, "iso"), (Rules::Pdfium, "pdfium")] {
             held_pages(&format!("{name}/{said}"), tree, rules);
@@ -358,7 +358,7 @@ fn parents_group(c: &mut Criterion) {
     let trees = trees();
     let mut group = c.benchmark_group("pages/parents");
     for (name, tree, depth) in trees.iter().filter(|(name, ..)| *name != "repeated") {
-        let resolve = |id: ObjectId| tree.objects.get(&id);
+        let resolve = &tree.objects;
         let table = pages(
             resolve,
             &tree.catalog,
@@ -481,8 +481,7 @@ fn walked<S: Sink<Fault>>(
     root: &Object,
     sink: S,
 ) -> Result<(u32, u64, bool, S), Unreadable> {
-    let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(resolve, root, &Limits::DEFAULT, sink);
+    let mut walk = names(objects, root, &Limits::DEFAULT, sink);
     let (mut count, mut sum) = (0, 0);
     for entry in walk.by_ref() {
         let (_, value) = entry?;
@@ -495,8 +494,7 @@ fn walked<S: Sink<Fault>>(
 /// The name tree at `root` held to every entry, in order, whole, with no
 /// fault.
 fn held_tree(name: &str, objects: &Objects, root: &Object) {
-    let resolve = |id: ObjectId| objects.get(&id);
-    let walk = names(resolve, root, &Limits::DEFAULT, Faults::new());
+    let walk = names(objects, root, &Limits::DEFAULT, Faults::new());
     let entries: Vec<(Vec<u8>, Option<ObjectId>)> = (walk.map(|entry| {
         let (key, value) = entry.unwrap_or_else(|e| panic!("trees/{name}: {e}"));
         (key.to_vec(), value.as_reference())

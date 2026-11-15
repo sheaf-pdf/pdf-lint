@@ -91,7 +91,7 @@ pub fn file(version: &str, objects: &[(u32, Body)], trailer: Dict, kind: Xref) -
                 rows.extend_from_slice(&(field as u32).to_be_bytes());
                 rows.extend_from_slice(&[0, if n == 0 { 0xFF } else { 0 }]);
             }
-            trailer.set("Type", "XRef");
+            trailer.set("Type", Object::name("XRef"));
             trailer.set("Size", i64::from(size));
             trailer.set("W", vec![Object::from(1), Object::from(4), Object::from(2)]);
             trailer.set(
@@ -271,13 +271,13 @@ fn under(
                 .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
             let signature = d.has(b"ByteRange") && typed;
             for entry in d.entries_mut() {
-                if !(signature && entry.key == b"Contents") {
-                    strings(&mut entry.value, encrypt);
+                if !(signature && entry.key() == b"Contents") {
+                    strings(entry.value_mut(), encrypt);
                 }
             }
         };
         match o.value_mut() {
-            Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes),
+            Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes).into(),
             Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
             Value::Dict(d) => entries(d),
             Value::Stream(s) => entries(&mut s.dict),
@@ -315,7 +315,7 @@ fn under(
     }
     let own = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
     written.push((own, Body::Object(dict.into())));
-    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
+    let s = |bytes: &[u8]| Object::new(Value::String(Str::bytes(bytes), None));
     let mut trailer = trailer;
     trailer.set("Encrypt", Object::reference(own));
     trailer.set("ID", vec![s(file_id), s(file_id)]);
@@ -394,15 +394,8 @@ pub fn value(out: &mut Vec<u8>, o: &Object) {
             }
             out.extend_from_slice(text.as_bytes());
         }
-        Value::Name(name) => self::name(out, name),
+        Value::Name(name) => self::name(out, name.as_bytes()),
         Value::String(Str::Bytes(bytes) | Str::Encrypted(bytes), _) => string(out, bytes),
-        Value::String(Str::Text(text), _) => {
-            let utf16: Vec<u8> = [0xFE, 0xFF]
-                .into_iter()
-                .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
-                .collect();
-            string(out, &utf16);
-        }
         Value::Array(array) => {
             out.push(b'[');
             for (i, element) in array.iter().enumerate() {
@@ -423,9 +416,9 @@ fn dict(out: &mut Vec<u8>, d: &Dict) {
     out.extend_from_slice(b"<<");
     for entry in d.entries() {
         out.push(b' ');
-        name(out, &entry.key);
+        name(out, entry.key());
         out.push(b' ');
-        value(out, &entry.value);
+        value(out, entry.value());
     }
     out.extend_from_slice(b" >>");
 }

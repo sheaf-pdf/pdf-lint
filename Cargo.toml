@@ -53,11 +53,11 @@ exclude = ["fuzz"]
 # keeps it.
 [workspace.dependencies]
 pdf-tokenizer = { path = "crates/pdf-tokenizer", version = "0.2" }
-pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.2" }
+pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.3" }
 pdf-filters = { path = "crates/pdf-filters", version = "=0.1.0-alpha.3", default-features = false }
 pdf-crypt = { path = "crates/pdf-crypt", version = "=0.1.0-alpha.2" }
 pdf-structure = { path = "crates/pdf-structure", version = "=0.1.0-alpha.1" }
-pdf-color = { path = "crates/pdf-color", version = "=0.1.0-alpha.1" }
+pdf-color = { path = "crates/pdf-color", version = "=0.1.0-alpha.2" }
 pdf-content-streams = { path = "crates/pdf-content-streams", version = "=0.1.0-alpha.1" }
 pdf-semantics = { path = "crates/pdf-semantics", version = "=0.1.0-alpha.1", default-features = false }
 pdf-fonts = { path = "crates/pdf-fonts", version = "=0.1.0-alpha.1", default-features = false }

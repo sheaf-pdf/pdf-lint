@@ -83,12 +83,12 @@ fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
 fn simple_widths_from_first_char_and_missing_width() {
     let mut pdf = Pdf::default();
     let descriptor = pdf.add_object(dict! {
-        "Type" => "FontDescriptor", "MissingWidth" => 500, "Ascent" => 800, "Descent" => -200,
+        "Type" => Object::name("FontDescriptor"), "MissingWidth" => 500, "Ascent" => 800, "Descent" => -200,
         "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
     });
     let truetype = |first: i64, last: i64| {
         dict! {
-            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Foo",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"),
             "FirstChar" => first, "LastChar" => last,
             "Widths" => vec![600.into(), Object::from(700.9)],
             "FontDescriptor" => descriptor,
@@ -131,7 +131,7 @@ fn simple_widths_from_first_char_and_missing_width() {
 fn standard_14_without_widths() {
     let mut pdf = Pdf::default();
     let type1 = |base: &str| {
-        dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base.to_string() }
+        dict! { "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name(base) }
     };
     let helvetica = font_of(&pdf, type1("Helvetica"));
     assert_eq!(
@@ -180,8 +180,8 @@ fn standard_14_without_widths() {
     encoded.set(
         "Encoding",
         dict! {
-            "BaseEncoding" => "WinAnsiEncoding",
-            "Differences" => vec![1.into(), "A".into()],
+            "BaseEncoding" => Object::name("WinAnsiEncoding"),
+            "Differences" => vec![1.into(), Object::name("A")],
         },
     );
     let encoded = font_of(&pdf, encoded);
@@ -194,7 +194,7 @@ fn standard_14_without_widths() {
     );
     assert_eq!(encoded.glyph_box(0x80), None);
     let mut given = type1("Helvetica");
-    given.set("Encoding", "WinAnsiEncoding");
+    given.set("Encoding", Object::name("WinAnsiEncoding"));
     given.set("FirstChar", 0x80);
     given.set("Widths", vec![600.into()]);
     let given = font_of(&pdf, given);
@@ -205,7 +205,7 @@ fn standard_14_without_widths() {
     let courier = font_of(&pdf, type1("Courier"));
     assert!((0..=255).all(|c| courier.width(c) == 600.0));
     let mut symbol = type1("Symbol");
-    symbol.set("Encoding", "WinAnsiEncoding");
+    symbol.set("Encoding", Object::name("WinAnsiEncoding"));
     assert_eq!(font_of(&pdf, symbol).width(b'a'.into()), 631.0);
 
     let program = pdf.add_object(Stream::new(dict! {}, crate::fixture::type1_program()));
@@ -252,7 +252,7 @@ fn standard_14_heights_and_boxes_are_the_afm_s() {
 fn type0(pdf: &mut Pdf, encoding: Object, descendant: Dictionary) -> Dictionary {
     let cid_font = pdf.add_object(descendant);
     dict! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Foo",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"), "BaseFont" => Object::name("Foo"),
         "Encoding" => encoding, "DescendantFonts" => vec![cid_font.into()],
     }
 }
@@ -278,9 +278,9 @@ fn identity_h_widths_from_w_and_dw() {
     ];
     let font = type0(
         &mut pdf,
-        "Identity-H".into(),
+        Object::name("Identity-H"),
         dict! {
-            "Subtype" => "CIDFontType2", "W" => w, "DW" => 900, "FontDescriptor" => descriptor,
+            "Subtype" => Object::name("CIDFontType2"), "W" => w, "DW" => 900, "FontDescriptor" => descriptor,
         },
     );
     let font = font_of(&pdf, font);
@@ -299,15 +299,15 @@ fn identity_h_widths_from_w_and_dw() {
     // No `/DW`: 1000.
     let bare = type0(
         &mut pdf,
-        "Identity-H".into(),
-        dict! { "Subtype" => "CIDFontType0" },
+        Object::name("Identity-H"),
+        dict! { "Subtype" => Object::name("CIDFontType0") },
     );
     let bare = font_of(&pdf, bare);
     assert_eq!(bare.kind(), FontKind::Type0(Descendant::CidFontType0));
     assert_eq!(bare.width(5), 1000.0);
     // A predefined CMap the build hasn't splits by the `/ToUnicode` codespace, its
     // CIDs unknown: KSCpc-EUC-V, which Adobe's hasn't.
-    let predefined = type0(&mut pdf, "KSCpc-EUC-V".into(), dict! { "DW" => 800 });
+    let predefined = type0(&mut pdf, Object::name("KSCpc-EUC-V"), dict! { "DW" => 800 });
     let predefined = font_of(&pdf, predefined);
     assert!(predefined.approx().codes);
     assert_eq!(predefined.cid(0x41), None);
@@ -316,7 +316,7 @@ fn identity_h_widths_from_w_and_dw() {
     // One PDFium doesn't know is two bytes each, each its CID, as PDFium reads it: a
     // name outside ISO's list; CNS-EUC-V, which PDFium's table hasn't.
     for name in ["Adobe-Korea1-V", "CNS-EUC-V"] {
-        let predefined = type0(&mut pdf, name.into(), dict! { "DW" => 800 });
+        let predefined = type0(&mut pdf, Object::name(name), dict! { "DW" => 800 });
         let predefined = font_of(&pdf, predefined);
         assert!(!predefined.approx().codes, "{name}");
         assert_eq!(predefined.cid(0x41), Some(0x41));
@@ -344,7 +344,7 @@ fn predefined_cmaps_are_adobe_s() {
     };
     let rksj = type0(
         &mut pdf,
-        "90ms-RKSJ-H".into(),
+        Object::name("90ms-RKSJ-H"),
         dict! { "W" => w(&[(264, 500), (843, 1000)]), "DW" => 700 },
     );
     let rksj = font_of(&pdf, rksj);
@@ -364,7 +364,7 @@ fn predefined_cmaps_are_adobe_s() {
 
     let ucs2 = type0(
         &mut pdf,
-        "UniJIS-UCS2-H".into(),
+        Object::name("UniJIS-UCS2-H"),
         dict! { "W" => w(&[(34, 550)]) },
     );
     let ucs2 = font_of(&pdf, ucs2);
@@ -379,7 +379,7 @@ fn predefined_cmaps_are_adobe_s() {
     assert_eq!(text.as_deref(), Some("Aあ日"));
     assert_eq!(ucs2.text(b"\0\0"), None);
 
-    let vertical = type0(&mut pdf, "90ms-RKSJ-V".into(), dict! {});
+    let vertical = type0(&mut pdf, Object::name("90ms-RKSJ-V"), dict! {});
     let vertical = font_of(&pdf, vertical);
     assert!(vertical.is_vertical());
     let cids = (vertical.cid(0x8141), vertical.cid(0x41));
@@ -408,13 +408,13 @@ fn type0_text_as_pdfium_reads_it() {
         font_of(pdf, font).text(b"\x01\x08\x03\x4b")
     };
     let japan1 = info(Object::text("Japan1"));
-    let named = info("Japan1".into());
+    let named = info(Object::name("Japan1"));
     let identity = info(Object::text("Identity"));
-    let ordered = text(&mut pdf, "Identity-H".into(), japan1.clone());
+    let ordered = text(&mut pdf, Object::name("Identity-H"), japan1.clone());
     assert_eq!(ordered.as_deref(), Some("Aあ"));
-    let ordered = text(&mut pdf, "Identity-V".into(), named);
+    let ordered = text(&mut pdf, Object::name("Identity-V"), named);
     assert_eq!(ordered.as_deref(), Some("Aあ"));
-    assert_eq!(text(&mut pdf, "Identity-H".into(), identity), None);
+    assert_eq!(text(&mut pdf, Object::name("Identity-H"), identity), None);
     let cmap = pdf.add_object(Stream::new(
         dict! {},
         b"1 begincidrange <0000> <FFFF> 0 endcidrange".to_vec(),
@@ -422,11 +422,11 @@ fn type0_text_as_pdfium_reads_it() {
     assert_eq!(text(&mut pdf, cmap.into(), japan1.clone()), None);
     // CID 0, `.notdef`, is Adobe's U+FFFD, as PDFium reads it, but a
     // string showing it isn't text: it's told from another by its bytes.
-    let font = type0(&mut pdf, "Identity-H".into(), japan1.clone());
+    let font = type0(&mut pdf, Object::name("Identity-H"), japan1.clone());
     let font = font_of(&pdf, font);
     assert_eq!(font.code_text(0).as_deref(), Some("\u{FFFD}"));
     assert_eq!(font.text(b"\x01\x08\x00\x00"), None);
-    let font = type0(&mut pdf, "90ms-RKSJ-H".into(), japan1.clone());
+    let font = type0(&mut pdf, Object::name("90ms-RKSJ-H"), japan1.clone());
     let font = font_of(&pdf, font);
     assert_eq!(font.cid(0x80), Some(0));
     assert_eq!(font.text(b"A"), Some("A".into()));
@@ -438,7 +438,7 @@ fn type0_text_as_pdfium_reads_it() {
           2 beginbfchar <0108> <005A> <034B> <0059> endbfchar"
             .to_vec(),
     ));
-    let mut font = type0(&mut pdf, "UniJIS-UCS2-H".into(), japan1);
+    let mut font = type0(&mut pdf, Object::name("UniJIS-UCS2-H"), japan1);
     font.set("ToUnicode", to_unicode);
     let font = font_of(&pdf, font);
     assert_eq!(font.text(b"\x01\x08\x03\x4b").as_deref(), Some("ZY"));
@@ -451,7 +451,7 @@ fn type0_text_as_pdfium_reads_it() {
 fn over_to_unicode(pdf: &mut Pdf, mappings: &[u8]) -> Font {
     let to_unicode = pdf.add_object(Stream::new(dict! {}, mappings.to_vec()));
     let font = dict! {
-        "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
+        "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "Encoding" => Object::name("WinAnsiEncoding"),
         "ToUnicode" => to_unicode,
     };
     font_of(pdf, font)
@@ -596,7 +596,7 @@ fn a_code_a_to_unicode_misses_is_its_cid_s_text() {
         dict! {},
         b"1 beginbfchar <0108> <005A> endbfchar".to_vec(),
     ));
-    let mut font = type0(&mut pdf, "Identity-H".into(), info);
+    let mut font = type0(&mut pdf, Object::name("Identity-H"), info);
     font.set("ToUnicode", to_unicode);
     let font = font_of(&pdf, font);
     assert_eq!(font.code_text(0x108).as_deref(), Some("Z"));
@@ -632,9 +632,9 @@ fn identity_v_metrics_from_w2_and_dw2() {
     ];
     let font = type0(
         &mut pdf,
-        "Identity-V".into(),
+        Object::name("Identity-V"),
         dict! {
-            "Subtype" => "CIDFontType0", "W" => vec![3.into(), vec![600.into()].into()],
+            "Subtype" => Object::name("CIDFontType0"), "W" => vec![3.into(), vec![600.into()].into()],
             "W2" => w2, "DW2" => vec![900.into(), (-1100).into()],
         },
     );
@@ -644,7 +644,7 @@ fn identity_v_metrics_from_w2_and_dw2() {
     assert_eq!(font.vertical(7), v(-800.0, 250.0, 700.0));
     assert_eq!(font.vertical(3), v(-1100.0, 300.0, 900.0));
     assert_eq!(font.vertical(4), v(-1100.0, 500.0, 900.0));
-    let plain = type0(&mut pdf, "Identity-V".into(), dict! {});
+    let plain = type0(&mut pdf, Object::name("Identity-V"), dict! {});
     assert_eq!(font_of(&pdf, plain).vertical(4), v(-1000.0, 500.0, 880.0));
 }
 
@@ -659,7 +659,7 @@ fn identity_v_metrics_from_w2_and_dw2() {
 fn embedded_cmap_over_the_one_it_uses() {
     let mut pdf = Pdf::default();
     let base = pdf.add_object(Stream::new(
-        dict! { "Type" => "CMap" },
+        dict! { "Type" => Object::name("CMap") },
         b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
           2 begincodespacerange <00> <7F> <8000> <FFFF> endcodespacerange\n\
           1 begincidrange <20> <7E> 1 endcidrange\n\
@@ -667,13 +667,17 @@ fn embedded_cmap_over_the_one_it_uses() {
             .to_vec(),
     ));
     let own = pdf.add_object(Stream::new(
-        dict! { "Type" => "CMap", "UseCMap" => base },
+        dict! { "Type" => Object::name("CMap"), "UseCMap" => base },
         b"begincmap /WMode 1 def\n\
           1 begincidchar <41> 500 endcidchar\n\
           1 begincidrange <8140> <8142> 1000 endcidrange endcmap"
             .to_vec(),
     ));
-    let font = type0(&mut pdf, own.into(), dict! { "Subtype" => "CIDFontType0" });
+    let font = type0(
+        &mut pdf,
+        own.into(),
+        dict! { "Subtype" => Object::name("CIDFontType0") },
+    );
     let font = font_of(&pdf, font);
     let split = codes(&font, b"A B\x81\x41\x81");
     let expected = [
@@ -725,7 +729,7 @@ fn embedded_cmap_over_the_one_it_uses() {
         assert_eq!(cids, [7, 843, 0].map(Some));
         assert!(other.approx().codes);
         let named = pdf.add_object(Stream::new(
-            dict! { "UseCMap" => "90ms-RKSJ-H" },
+            dict! { "UseCMap" => Object::name("90ms-RKSJ-H") },
             b"1 begincodespacerange <00> <FF> endcodespacerange".to_vec(),
         ));
         let named = type0(&mut pdf, named.into(), dict! {});
@@ -781,9 +785,9 @@ fn reading_a_font_is_charged_to_its_budget() {
     let proc = pdf.add_object(Stream::new(dict! {}, proc));
     let to_unicode = pdf.add_object(Stream::new(dict! {}, to_unicode));
     let type3 = dict! {
-        "Type" => "Font", "Subtype" => "Type3",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type3"),
         "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
-        "Encoding" => dict! { "Differences" => vec![97.into(), "a".into(), "b".into(), "c".into()] },
+        "Encoding" => dict! { "Differences" => vec![97.into(), Object::name("a"), Object::name("b"), Object::name("c")] },
         "CharProcs" => dict! { "a" => proc, "b" => proc, "c" => proc },
         "ToUnicode" => to_unicode,
     };
@@ -884,7 +888,7 @@ fn what_a_cmap_takes_from_one_it_uses_is_guessed() {
     assert!(!nothing.approx().codes);
     assert!(over(b"/Identity-H usecmap").approx().codes);
     let named = pdf.add_object(Stream::new(
-        dict! { "UseCMap" => "Identity-H" },
+        dict! { "UseCMap" => Object::name("Identity-H") },
         b"1 begincidchar <0001> 2 endcidchar".to_vec(),
     ));
     let named = type0(&mut pdf, named.into(), dict! {});
@@ -939,7 +943,7 @@ fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
     let looped = type0(
         &mut pdf,
         first.into(),
-        dict! { "Subtype" => "CIDFontType2" },
+        dict! { "Subtype" => Object::name("CIDFontType2") },
     );
     assert_eq!(
         told(&pdf, &looped),
@@ -953,7 +957,11 @@ fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
         next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, Vec::new()));
     }
     next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, program()));
-    let long = type0(&mut pdf, next.into(), dict! { "Subtype" => "CIDFontType2" });
+    let long = type0(
+        &mut pdf,
+        next.into(),
+        dict! { "Subtype" => Object::name("CIDFontType2") },
+    );
     assert_eq!(
         told(&pdf, &long),
         [(Place::new(Some(past), None), Fault::TooManyCMaps)]
@@ -970,7 +978,7 @@ fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
     let whole = type0(
         &mut pdf,
         whole.into(),
-        dict! { "Subtype" => "CIDFontType2" },
+        dict! { "Subtype" => Object::name("CIDFontType2") },
     );
     assert_eq!(told(&pdf, &whole), []);
 
@@ -982,7 +990,11 @@ fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
         next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, Vec::new()));
     }
     next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, program()));
-    let dangling = type0(&mut pdf, next.into(), dict! { "Subtype" => "CIDFontType2" });
+    let dangling = type0(
+        &mut pdf,
+        next.into(),
+        dict! { "Subtype" => Object::name("CIDFontType2") },
+    );
     assert_eq!(
         told(&pdf, &dangling),
         [(Place::new(Some(nothing), None), Fault::UseCMap)]
@@ -996,7 +1008,7 @@ fn a_to_unicode_that_doesn_t_decode_is_told() {
     let mut pdf = Pdf::default();
     let map = b"1 beginbfchar <41> <0416> endbfchar".to_vec();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
-    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
+    let font = dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "ToUnicode" => to_unicode };
     let undecoded = WithStreams::new(&pdf, |id, _| {
         Err(Unreadable::new(id, Why::Damaged, "it decodes to nothing"))
     });
@@ -1004,7 +1016,7 @@ fn a_to_unicode_that_doesn_t_decode_is_told() {
     let mut budget = BUDGET;
     let read = Font::read(undecoded, &font, &Limits::DEFAULT, &mut budget, &mut told).unwrap();
     assert_eq!(read.code_text(0x41).as_deref(), Some("A"));
-    let at = font.get(b"ToUnicode").and_then(|value| value.at);
+    let at = font.get(b"ToUnicode").and_then(Object::at);
     assert_eq!(told, [(Place::new(None, at), Fault::ToUnicode)]);
     assert_eq!(
         Fault::ToUnicode.to_string(),
@@ -1028,11 +1040,11 @@ fn type3_through_its_font_matrix() {
     );
     let type3 = |bbox: Option<Vec<Object>>| {
         let mut font = dict! {
-            "Type" => "Font", "Subtype" => "Type3",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type3"),
             "FontMatrix" => vec![0.01.into(), 0.into(), 0.into(), 0.01.into(), 0.into(), 0.into()],
             "FirstChar" => 65, "Widths" => vec![50.into(), 0.into()],
             "Encoding" => dict! {
-                "Differences" => vec![65.into(), "a".into(), "b".into(), "c".into()],
+                "Differences" => vec![65.into(), Object::name("a"), Object::name("b"), Object::name("c")],
             },
             "CharProcs" => dict! { "a" => a, "b" => b, "c" => c },
         };
@@ -1068,7 +1080,12 @@ fn type3_through_its_font_matrix() {
     let turned = [0.01f64, 0.0, 0.0, -0.01, 0.0, 0.0].map(Object::from);
     over.set("FontMatrix", turned.to_vec());
     let mut moved = over.clone();
-    let differences = vec![66.into(), "a".into(), "b".into(), "c".into()];
+    let differences = vec![
+        66.into(),
+        Object::name("a"),
+        Object::name("b"),
+        Object::name("c"),
+    ];
     moved.set("Encoding", dict! { "Differences" => differences });
     let moved = font_of(&pdf, moved);
     let m = moved.metrics();
@@ -1103,8 +1120,7 @@ fn type3_through_its_font_matrix() {
 fn heights_by_each_fallback() {
     let mut pdf = Pdf::default();
     let mut heights = |base: &str, descriptor: Option<Dictionary>| {
-        let mut font =
-            dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base.to_string() };
+        let mut font = dict! { "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name(base) };
         if let Some(d) = descriptor {
             font.set("FontDescriptor", pdf.add_object(d));
         }
@@ -1149,7 +1165,11 @@ fn hostile_metrics_stay_bounded() {
     for i in 0..100_000 {
         w.extend([0.into(), u32::MAX.into(), (i + 1).into()]);
     }
-    let font = type0(&mut pdf, "Identity-H".into(), dict! { "W" => w, "DW" => 7 });
+    let font = type0(
+        &mut pdf,
+        Object::name("Identity-H"),
+        dict! { "W" => w, "DW" => 7 },
+    );
     let font = font_of(&pdf, font);
     assert_eq!(
         [0, 12345, i32::MAX as u32].map(|c| font.width(c)),
@@ -1157,17 +1177,17 @@ fn hostile_metrics_stay_bounded() {
     );
     assert_eq!(font.width(u32::MAX), 7.0);
     let widths: Vec<Object> = (0..1_000_000).map(Object::from).collect();
-    let simple = dict! { "Subtype" => "Type1", "FirstChar" => 0, "Widths" => widths };
+    let simple = dict! { "Subtype" => Object::name("Type1"), "FirstChar" => 0, "Widths" => widths };
     let simple = font_of(&pdf, simple);
     assert_eq!(simple.width(255), 255.0);
     let differences = vec![
         Object::from(1i64 << 40),
-        "A".into(),
+        Object::name("A"),
         Object::from(-5),
-        "B".into(),
+        Object::name("B"),
     ];
     let encoded = dict! {
-        "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
         "Encoding" => dict! { "Differences" => differences },
     };
     assert_eq!(font_of(&pdf, encoded).width(b'A'.into()), 667.0);
@@ -1179,10 +1199,10 @@ fn hostile_metrics_stay_bounded() {
 fn fonts_are_read_once() {
     let mut pdf = Pdf::default();
     let helvetica =
-        pdf.add_object(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+        pdf.add_object(dict! { "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica") });
     let resources: Object = dict! {
         "Font" => dict! {
-            "F1" => dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier" },
+            "F1" => dict! { "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Courier") },
             "F2" => helvetica,
         },
     }
@@ -1222,7 +1242,7 @@ fn a_font_s_alternate_name_is_read_at_its_metrics() {
     let pdf = Pdf::default();
     let arial = font_of(
         &pdf,
-        dict! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Arial,Bold" },
+        dict! { "Type" => Object::name("Font"), "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Arial,Bold") },
     );
     assert_eq!(arial.width(b'A'.into()), 722.0);
     assert!(!arial.approx().widths);
@@ -1278,7 +1298,7 @@ fn codes_walk_alike_within_their_hints() {
         font_of(&pdf, font)
     };
     let named = |pdf: &mut Pdf, name: &str| {
-        let font = type0(pdf, name.into(), dict! {});
+        let font = type0(pdf, Object::name(name), dict! {});
         font_of(pdf, font)
     };
     let not_a_name = type0(&mut pdf, Object::from(7), dict! {});
@@ -1287,7 +1307,7 @@ fn codes_walk_alike_within_their_hints() {
     let fonts = [
         (
             "simple",
-            font_of(&pdf, dict! { "Subtype" => "TrueType" }),
+            font_of(&pdf, dict! { "Subtype" => Object::name("TrueType") }),
             true,
         ),
         ("identity", named(&mut pdf, "Identity-H"), true),
@@ -1378,9 +1398,9 @@ fn a_font_s_debug_holds_no_text_of_its_file() {
     let font = font_of(
         &pdf,
         dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Foo", "ToUnicode" => to_unicode,
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "ToUnicode" => to_unicode,
             "Encoding" => dict! {
-                "Differences" => vec![65.into(), Object::from("uni0051005A00580051")],
+                "Differences" => vec![65.into(), Object::name("uni0051005A00580051")],
             },
         },
     );
@@ -1398,7 +1418,7 @@ fn a_font_s_debug_holds_no_text_of_its_file() {
     );
     let fonts = Fonts::default();
     let id = pdf.add_object(dict! {
-        "Subtype" => "TrueType", "BaseFont" => "Foo", "ToUnicode" => to_unicode,
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "ToUnicode" => to_unicode,
     });
     let got = fonts.get(&pdf, &Object::from(id), &Limits::DEFAULT, &mut { BUDGET });
     assert!(got.unwrap().is_some());
@@ -1436,17 +1456,17 @@ fn a_code_is_word_spaced_by_how_its_cmap_sizes_it() {
     let none = embedded(&mut pdf, "");
     assert!(!none.word_spaced(32, 1) && !none.word_spaced(32, 2));
 
-    let identity = type0(&mut pdf, "Identity-H".into(), dict! {});
+    let identity = type0(&mut pdf, Object::name("Identity-H"), dict! {});
     let identity = font_of(&pdf, identity);
     assert!(!identity.word_spaced(32, 1) && !identity.word_spaced(32, 2));
-    let two_bytes = type0(&mut pdf, "Adobe-Korea1-2".into(), dict! {});
+    let two_bytes = type0(&mut pdf, Object::name("Adobe-Korea1-2"), dict! {});
     let two_bytes = font_of(&pdf, two_bytes);
     assert!(!two_bytes.word_spaced(32, 1) && !two_bytes.word_spaced(32, 2));
     let unknown = type0(&mut pdf, Object::from(7), dict! {});
     let unknown = font_of(&pdf, unknown);
     assert!(unknown.word_spaced(32, 1) && !unknown.word_spaced(32, 2));
     assert!(!unknown.word_spaced(33, 1));
-    let simple = font_of(&pdf, dict! { "Subtype" => "TrueType" });
+    let simple = font_of(&pdf, dict! { "Subtype" => Object::name("TrueType") });
     assert!(simple.word_spaced(32, 1) && !simple.word_spaced(33, 1));
 }
 
@@ -1457,7 +1477,7 @@ fn a_code_is_word_spaced_by_how_its_cmap_sizes_it() {
 #[test]
 fn without_the_feature_a_predefined_cmap_is_guessed() {
     let mut pdf = Pdf::default();
-    let font = type0(&mut pdf, "90ms-RKSJ-V".into(), dict! { "DW" => 800 });
+    let font = type0(&mut pdf, Object::name("90ms-RKSJ-V"), dict! { "DW" => 800 });
     let font = font_of(&pdf, font);
     assert!(font.approx().codes && font.is_vertical());
     assert_eq!(font.cid(0x41), None);
@@ -1469,7 +1489,7 @@ fn without_the_feature_a_predefined_cmap_is_guessed() {
     let identity = dict! {
         "CIDSystemInfo" => dict! { "Ordering" => Object::text("Japan1") },
     };
-    let identity = type0(&mut pdf, "Identity-H".into(), identity);
+    let identity = type0(&mut pdf, Object::name("Identity-H"), identity);
     assert_eq!(font_of(&pdf, identity).text(b"\x01\x08"), None);
 }
 
@@ -1522,7 +1542,11 @@ fn a_predefined_cmap_the_build_hasn_t_is_the_build_s() {
             }
             _ => not_built.clone(),
         };
-        let font = type0(&mut pdf, name.into(), dict! { "Subtype" => "CIDFontType2" });
+        let font = type0(
+            &mut pdf,
+            Object::name(name),
+            dict! { "Subtype" => Object::name("CIDFontType2") },
+        );
         assert_eq!(faults(&pdf, &font), named, "{name} as an /Encoding");
         let used = match name {
             _ if identity => vec![],
@@ -1531,14 +1555,23 @@ fn a_predefined_cmap_the_build_hasn_t_is_the_build_s() {
         };
         let by_operator = format!("/{name} usecmap").into_bytes();
         let by_operator = pdf.add_object(Stream::new(dict! {}, by_operator));
-        let by_key = pdf.add_object(Stream::new(dict! { "UseCMap" => name }, Vec::new()));
+        let by_key = pdf.add_object(Stream::new(
+            dict! { "UseCMap" => Object::name(name) },
+            Vec::new(),
+        ));
         for cmap in [by_operator, by_key] {
-            let font = type0(&mut pdf, cmap.into(), dict! { "Subtype" => "CIDFontType2" });
+            let font = type0(
+                &mut pdf,
+                cmap.into(),
+                dict! { "Subtype" => Object::name("CIDFontType2") },
+            );
             assert_eq!(faults(&pdf, &font), used, "{name} used by {cmap:?}");
         }
     }
-    let gbk = pdf_objects::object::Value::Name(b"\xCB\xCE\xCC\xE5".to_vec());
-    let gbk = dict! { "Subtype" => "TrueType", "BaseFont" => Object::new(gbk) };
+    let gbk = dict! {
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name(*b"\xCB\xCE\xCC\xE5"),
+    };
     assert_eq!(faults(&pdf, &gbk), not_built, "GBK");
 }
 
@@ -1600,11 +1633,11 @@ fn fonts_that_reach() -> (Pdf, Vec<(Dict, Vec<ObjectId>)>) {
     let widths = pdf.add_object(vec![Object::from(600)]);
     let number = pdf.add_object(Object::from(65));
     let encoding = pdf.add_object(dict! {
-        "Differences" => vec![Object::from(65), Object::from("A")],
+        "Differences" => vec![Object::from(65), Object::name("A")],
     });
     let to_unicode = map(&mut pdf);
     let simple = dict! {
-        "Subtype" => "TrueType", "BaseFont" => "Foo", "FontDescriptor" => descriptor,
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FontDescriptor" => descriptor,
         "Widths" => widths, "FirstChar" => number, "Encoding" => encoding,
         "ToUnicode" => to_unicode,
     };
@@ -1614,8 +1647,8 @@ fn fonts_that_reach() -> (Pdf, Vec<(Dict, Vec<ObjectId>)>) {
     let proc = pdf.add_object(Stream::new(dict! {}, b"100 0 d0".to_vec()));
     let procs = pdf.add_object(dict! { "a" => proc });
     let type3 = dict! {
-        "Subtype" => "Type3", "CharProcs" => procs,
-        "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::from("a")] },
+        "Subtype" => Object::name("Type3"), "CharProcs" => procs,
+        "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::name("a")] },
     };
     fonts.push((type3, vec![proc, procs]));
 
@@ -1623,12 +1656,12 @@ fn fonts_that_reach() -> (Pdf, Vec<(Dict, Vec<ObjectId>)>) {
     let info = pdf.add_object(dict! { "Ordering" => Object::text("Identity") });
     let descriptor = pdf.add_object(dict! { "Ascent" => 700 });
     let cid_font = pdf.add_object(dict! {
-        "Subtype" => "CIDFontType2", "W" => w, "CIDSystemInfo" => info,
+        "Subtype" => Object::name("CIDFontType2"), "W" => w, "CIDSystemInfo" => info,
         "FontDescriptor" => descriptor,
     });
     let descendants = pdf.add_object(vec![Object::from(cid_font)]);
     let identity = dict! {
-        "Subtype" => "Type0", "Encoding" => "Identity-V", "DescendantFonts" => descendants,
+        "Subtype" => Object::name("Type0"), "Encoding" => Object::name("Identity-V"), "DescendantFonts" => descendants,
     };
     fonts.push((identity, vec![w, info, descriptor, cid_font, descendants]));
 
@@ -1637,7 +1670,7 @@ fn fonts_that_reach() -> (Pdf, Vec<(Dict, Vec<ObjectId>)>) {
         dict! { "UseCMap" => base },
         b"begincmap endcmap".to_vec(),
     ));
-    let embedded = dict! { "Subtype" => "Type0", "Encoding" => cmap };
+    let embedded = dict! { "Subtype" => Object::name("Type0"), "Encoding" => cmap };
     fonts.push((embedded, vec![cmap, base]));
     (pdf, fonts)
 }
@@ -1659,11 +1692,11 @@ fn a_stream_is_no_dictionary() {
     ));
     let font = font_of(
         &pdf,
-        dict! { "Subtype" => "Type1", "FontDescriptor" => descriptor },
+        dict! { "Subtype" => Object::name("Type1"), "FontDescriptor" => descriptor },
     );
     assert_eq!(font.metrics().ascent, 700.0);
     let font = dict! {
-        "Subtype" => "Type0", "Encoding" => "Identity-H", "DescendantFonts" => vec![Object::from(cid_font)],
+        "Subtype" => Object::name("Type0"), "Encoding" => Object::name("Identity-H"), "DescendantFonts" => vec![Object::from(cid_font)],
     };
     assert_eq!(font_of(&pdf, font).width(1), 500.0);
 }
@@ -1714,7 +1747,9 @@ fn each_why_over_a_failing_resolver() {
 #[test]
 fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
     let mut pdf = Pdf::default();
-    let font = pdf.add_object(dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+    let font = pdf.add_object(
+        dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica") },
+    );
     let named = pdf.add_object(dict! { "F1" => font });
     let held = pdf.add_object(dict! { "Font" => named });
     let resources = Object::from(held);
@@ -1771,7 +1806,7 @@ fn a_scope_reads_a_font_that_doesn_t_read_once() {
     let mut pdf = Pdf::default();
     let map = b"1 beginbfchar <41> <0041> endbfchar".to_vec();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
-    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
+    let font = dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "ToUnicode" => to_unicode };
     let font = pdf.add_object(font);
     let named = pdf.add_object(dict! { "F1" => font, "F2" => font });
     let resources = Object::from(pdf.add_object(dict! { "Font" => named }));
@@ -1815,7 +1850,7 @@ fn a_scope_reads_a_font_that_doesn_t_read_once() {
 fn a_font_holds_a_streams_to_what_it_asked() {
     let mut pdf = Pdf::default();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, Vec::new()));
-    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
+    let font = dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "ToUnicode" => to_unicode };
     let lim = &Limits::DEFAULT;
     type Given<'g> = &'g dyn Fn(usize) -> Result<Vec<u8>, Unreadable>;
     let read = |given: Given, budget: &mut usize, told: &mut Vec<(Place, Fault)>| {
@@ -1879,9 +1914,9 @@ fn a_font_reads_on_past_a_capped_stream() {
         Object::from(2),
         vec![Object::from(600)].into(),
     ];
-    let cid_font = pdf.add_object(dict! { "Subtype" => "CIDFontType2", "W" => w });
+    let cid_font = pdf.add_object(dict! { "Subtype" => Object::name("CIDFontType2"), "W" => w });
     let font = dict! {
-        "Subtype" => "Type0", "BaseFont" => "Foo", "Encoding" => cmap,
+        "Subtype" => Object::name("Type0"), "BaseFont" => Object::name("Foo"), "Encoding" => cmap,
         "DescendantFonts" => vec![Object::from(cid_font)], "ToUnicode" => to_unicode,
     };
     for why in [Why::Capped, Why::Locked] {
@@ -1921,7 +1956,7 @@ fn a_failed_reading_tells_what_it_found_before_it() {
     let mut pdf = Pdf::default();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, b"no CMap".to_vec()));
     let font = dict! {
-        "Subtype" => "Type1", "BaseFont" => "Foo", "Encoding" => "Nope",
+        "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Foo"), "Encoding" => Object::name("Nope"),
         "ToUnicode" => to_unicode,
     };
     let read = |why: Option<Why>| {
@@ -1956,9 +1991,10 @@ fn a_failed_reading_tells_what_it_found_before_it() {
 fn a_program_that_doesn_t_read_is_told_where_it_s_the_file_s() {
     let mut pdf = Pdf::default();
     let file = pdf.add_object(Stream::new(dict! {}, b"no program".to_vec()));
-    let descriptor = pdf.add_object(dict! { "Type" => "FontDescriptor", "FontFile2" => file });
+    let descriptor =
+        pdf.add_object(dict! { "Type" => Object::name("FontDescriptor"), "FontFile2" => file });
     let font = dict! {
-        "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65,
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FirstChar" => 65,
         "Widths" => vec![Object::from(600)], "FontDescriptor" => descriptor,
     };
     let programs = cfg!(feature = "programs");
@@ -2034,10 +2070,10 @@ fn a_stream_is_asked_for_by_its_own_number() {
     let mut pdf = Pdf::default();
     let map = b"1 beginbfchar <41> <0416> endbfchar".to_vec();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
-    let simple = dict! { "Subtype" => "Type1", "BaseFont" => "Foo", "ToUnicode" => to_unicode };
+    let simple = dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Foo"), "ToUnicode" => to_unicode };
     assert_eq!(font_of(&pdf, simple).code_text(0x41).as_deref(), Some("Ж"));
     let once = pdf.add_object(Object::from(to_unicode));
-    let simple = dict! { "Subtype" => "Type1", "BaseFont" => "Foo", "ToUnicode" => once };
+    let simple = dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Foo"), "ToUnicode" => once };
     assert_eq!(font_of(&pdf, simple).code_text(0x41).as_deref(), Some("A"));
 
     let base = pdf.add_object(Stream::new(
@@ -2074,8 +2110,8 @@ fn a_stream_is_asked_for_by_its_own_number() {
     let proc = pdf.add_object(Stream::new(dict! {}, b"100 0 d0".to_vec()));
     let type3 = |proc: ObjectId| {
         dict! {
-            "Subtype" => "Type3", "CharProcs" => dict! { "a" => proc },
-            "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::from("a")] },
+            "Subtype" => Object::name("Type3"), "CharProcs" => dict! { "a" => proc },
+            "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::name("a")] },
         }
     };
     assert_eq!(font_of(&pdf, type3(proc)).width(65), 100_000.0);
@@ -2086,7 +2122,7 @@ fn a_stream_is_asked_for_by_its_own_number() {
     let mut pdf = Pdf::default();
     let looped = pdf.new_object_id();
     pdf.objects.insert(looped, Object::from(looped));
-    let font = dict! { "Subtype" => "Type1", "ToUnicode" => looped };
+    let font = dict! { "Subtype" => Object::name("Type1"), "ToUnicode" => looped };
     let mut told = Vec::new();
     let mut budget = BUDGET;
     let font = Font::read(&pdf, &font, &Limits::DEFAULT, &mut budget, &mut told).unwrap();
@@ -2097,7 +2133,7 @@ fn a_stream_is_asked_for_by_its_own_number() {
 /// `width`, written as `value` in a simple font's `/Widths` at code 65.
 fn simple_width(pdf: &Pdf, value: Object) -> f32 {
     let font = dict! {
-        "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65, "Widths" => vec![value],
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FirstChar" => 65, "Widths" => vec![value],
     };
     font_of(pdf, font).width(65)
 }
@@ -2115,7 +2151,7 @@ fn a_simple_font_s_widths_are_pdfium_s_integers_in_16_bits() {
         (Object::from(false), 0.0),
         (Object::text("a"), 0.0),
         (Object::null(), 0.0),
-        (Object::from("Name"), 0.0),
+        (Object::name("Name"), 0.0),
         (Object::from(vec![Object::from(700)]), 0.0),
         (Object::from(4294967296_i64), 0.0),
         (Object::from(2147483648_i64), 0.0),
@@ -2159,7 +2195,7 @@ fn a_cid_font_s_widths_are_pdfium_s_integers() {
         ]
         .into(),
     ];
-    let font = type0(&mut pdf, "Identity-H".into(), dict! { "W" => w });
+    let font = type0(&mut pdf, Object::name("Identity-H"), dict! { "W" => w });
     let font = font_of(&pdf, font);
     assert_eq!(
         [1, 2, 3, 4, 5, 6, 7, 8].map(|c| font.width(c)),
@@ -2176,10 +2212,14 @@ fn a_cid_font_s_widths_are_pdfium_s_integers() {
         (chain.into(), 0.0),
         (Object::reference(999), 0.0),
     ] {
-        let font = type0(&mut pdf, "Identity-H".into(), dict! { "DW" => dw.clone() });
+        let font = type0(
+            &mut pdf,
+            Object::name("Identity-H"),
+            dict! { "DW" => dw.clone() },
+        );
         assert_eq!(font_of(&pdf, font).width(1), width, "{dw:?}");
     }
-    let font = type0(&mut pdf, "Identity-H".into(), dict! {});
+    let font = type0(&mut pdf, Object::name("Identity-H"), dict! {});
     assert_eq!(font_of(&pdf, font).width(1), 1000.0);
 }
 
@@ -2188,7 +2228,7 @@ fn a_cid_font_s_widths_are_pdfium_s_integers() {
 fn a_cid_font_s_w_as_pdfium_reads_it() {
     let mut pdf = Pdf::default();
     let widths = |pdf: &mut Pdf, w: Vec<Object>, cids: [u32; 3]| {
-        let font = type0(pdf, "Identity-H".into(), dict! { "W" => w });
+        let font = type0(pdf, Object::name("Identity-H"), dict! { "W" => w });
         cids.map(|c| font_of(pdf, font.clone()).width(c))
     };
     let numbers = |ns: &[i32]| -> Object {
@@ -2242,10 +2282,10 @@ fn a_cid_font_s_w_as_pdfium_reads_it() {
     assert_eq!(widths(&mut pdf, w, [0, 1, 2]), [400.0, 400.0, 1000.0]);
     // By a reference it's read; by a chain, none is.
     let w = pdf.add_object(Object::from(vec![Object::from(1), numbers(&[300])]));
-    let by = type0(&mut pdf, "Identity-H".into(), dict! { "W" => w });
+    let by = type0(&mut pdf, Object::name("Identity-H"), dict! { "W" => w });
     assert_eq!(font_of(&pdf, by).width(1), 300.0);
     let chain = pdf.add_object(Object::from(w));
-    let by = type0(&mut pdf, "Identity-H".into(), dict! { "W" => chain });
+    let by = type0(&mut pdf, Object::name("Identity-H"), dict! { "W" => chain });
     assert_eq!(font_of(&pdf, by).width(1), 1000.0);
     // A CMap's CID is 16 bits.
     let cmap = pdf.add_object(Stream::new(
@@ -2264,7 +2304,7 @@ fn a_simple_font_s_range_of_widths() {
     let mut pdf = Pdf::default();
     let of = |pdf: &Pdf, extra: Dict, code: u32| {
         let mut font = dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Foo",
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"),
             "Widths" => vec![Object::from(500), Object::from(600)],
         };
         for (key, value) in extra.iter() {
@@ -2296,7 +2336,7 @@ fn a_simple_font_s_range_of_widths() {
     let descriptor = pdf.add_object(dict! { "MissingWidth" => 777 });
     let empty = |first: i32| {
         dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => first,
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FirstChar" => first,
             "FontDescriptor" => descriptor, "Widths" => Vec::<Object>::new(),
         }
     };
@@ -2310,7 +2350,7 @@ fn a_simple_font_s_range_of_widths() {
     ] {
         let descriptor = pdf.add_object(dict! { "MissingWidth" => missing.clone() });
         let font = dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65,
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FirstChar" => 65,
             "FontDescriptor" => descriptor, "Widths" => vec![Object::from(500)],
         };
         assert_eq!(font_of(&pdf, font).width(66), width, "{missing:?}");
@@ -2320,7 +2360,7 @@ fn a_simple_font_s_range_of_widths() {
     // past a subset's tag, it doesn't.
     let courier = |subtype: &str, name: &str| {
         let font = dict! {
-            "Subtype" => subtype.to_string(), "BaseFont" => name.to_string(),
+            "Subtype" => Object::name(subtype), "BaseFont" => Object::name(name),
             "FirstChar" => 65, "Widths" => vec![Object::from(500)],
         };
         font_of(&pdf, font).width(66)
@@ -2343,7 +2383,7 @@ fn all_caps_lower_case_takes_its_capital_s_width() {
     let fill: Vec<Object> = (0..34).map(|i| Object::from(300 + i)).collect();
     let font = |descriptor: ObjectId, widths: Vec<Object>| {
         dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 65,
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FirstChar" => 65,
             "FontDescriptor" => descriptor, "Widths" => widths,
         }
     };
@@ -2359,7 +2399,7 @@ fn all_caps_lower_case_takes_its_capital_s_width() {
     assert_eq!(read.width(u32::from(b'a')), 332.0);
     // Those of its other ranges; not those between them.
     let read = dict! {
-        "Subtype" => "TrueType", "BaseFont" => "Foo", "FirstChar" => 192,
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FirstChar" => 192,
         "FontDescriptor" => all_caps, "Widths" => vec![Object::from(500)],
     };
     let read = font_of(&pdf, read);
@@ -2369,7 +2409,7 @@ fn all_caps_lower_case_takes_its_capital_s_width() {
     );
     // With no `/Widths`: its capital's, in a standard font, with its box.
     let helvetica = dict! {
-        "Subtype" => "Type1", "BaseFont" => "Helvetica", "FontDescriptor" => all_caps,
+        "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "FontDescriptor" => all_caps,
     };
     let read = font_of(&pdf, helvetica);
     assert_eq!(read.width(u32::from(b'a')), 667.0);
@@ -2385,7 +2425,7 @@ fn all_caps_lower_case_takes_its_capital_s_width() {
     // A program's key that's no stream isn't one embedded.
     let no_program = pdf.add_object(dict! { "FontFile2" => Object::reference(999) });
     let helvetica = dict! {
-        "Subtype" => "Type1", "BaseFont" => "Helvetica", "FontDescriptor" => no_program,
+        "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "FontDescriptor" => no_program,
     };
     let read = font_of(&pdf, helvetica);
     assert!(!read.approx().widths && read.glyph_box(u32::from(b'A')).is_some());
@@ -2414,7 +2454,7 @@ fn a_descriptor_s_numbers_as_pdfium_reads_them() {
             "FontBBox" => bbox, "Ascent" => ascent, "Descent" => descent,
         });
         let font = dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Foo", "FontDescriptor" => descriptor,
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FontDescriptor" => descriptor,
         };
         let metrics = font_of(pdf, font).metrics();
         (metrics.ascent, metrics.descent)
@@ -2494,8 +2534,7 @@ fn a_descriptor_s_numbers_as_pdfium_reads_them() {
     let descriptor = pdf.add_object(dict! {
         "FontBBox" => once, "Ascent" => 800, "Descent" => -200,
     });
-    let font =
-        dict! { "Subtype" => "TrueType", "BaseFont" => "Foo", "FontDescriptor" => descriptor };
+    let font = dict! { "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FontDescriptor" => descriptor };
     assert!(font_of(&pdf, font).approx().heights);
 }
 
@@ -2510,7 +2549,7 @@ fn references_are_followed_as_each_accessor_follows_them() {
     let twice = refer(&mut pdf, once);
     let simple = |pdf: &Pdf, descriptor: ObjectId| {
         let font = dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Foo", "FontDescriptor" => descriptor,
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FontDescriptor" => descriptor,
             "FirstChar" => 65, "Widths" => vec![Object::from(500)],
         };
         font_of(pdf, font).width(66)
@@ -2523,7 +2562,7 @@ fn references_are_followed_as_each_accessor_follows_them() {
     let chain = refer(&mut pdf, widths);
     let helvetica = |pdf: &Pdf, widths: ObjectId| {
         let font = dict! {
-            "Subtype" => "Type1", "BaseFont" => "Helvetica", "FirstChar" => 65, "Widths" => widths,
+            "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "FirstChar" => 65, "Widths" => widths,
         };
         font_of(pdf, font).width(65)
     };
@@ -2536,7 +2575,7 @@ fn references_are_followed_as_each_accessor_follows_them() {
     let fonts_once = refer(&mut pdf, fonts);
     let cid_width = |pdf: &Pdf, fonts: Object| {
         let font = dict! {
-            "Subtype" => "Type0", "Encoding" => "Identity-H", "DescendantFonts" => fonts,
+            "Subtype" => Object::name("Type0"), "Encoding" => Object::name("Identity-H"), "DescendantFonts" => fonts,
         };
         font_of(pdf, font).width(1)
     };
@@ -2547,7 +2586,7 @@ fn references_are_followed_as_each_accessor_follows_them() {
 
     // What's told of a reference to a reference where it's read as none.
     let font = dict! {
-        "Subtype" => "Type1", "BaseFont" => "Helvetica", "FirstChar" => 65, "Widths" => chain,
+        "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "FirstChar" => 65, "Widths" => chain,
     };
     let told = told(&pdf, &font);
     assert_eq!(told, [(Place::new(Some(widths), None), Fault::Chained)]);
@@ -2561,27 +2600,33 @@ fn references_are_followed_as_each_accessor_follows_them() {
             "FirstChar" => 65, "Widths" => vec![Object::from(500)],
         }
     };
-    let courier = pdf.add_object(Object::from("Courier"));
+    let courier = pdf.add_object(Object::name("Courier"));
     let chained = refer(&mut pdf, courier);
     assert_eq!(
-        width_at_66(&pdf, by("Type1".into(), Object::text("Courier"))),
+        width_at_66(&pdf, by(Object::name("Type1"), Object::text("Courier"))),
         600.0
     );
-    assert_eq!(width_at_66(&pdf, by("Type1".into(), courier.into())), 600.0);
-    assert_eq!(width_at_66(&pdf, by("Type1".into(), chained.into())), 0.0);
     assert_eq!(
-        width_at_66(&pdf, by(Object::text("TrueType"), "Courier".into())),
+        width_at_66(&pdf, by(Object::name("Type1"), courier.into())),
+        600.0
+    );
+    assert_eq!(
+        width_at_66(&pdf, by(Object::name("Type1"), chained.into())),
         0.0
     );
-    let true_type = pdf.add_object(Object::from("TrueType"));
+    assert_eq!(
+        width_at_66(&pdf, by(Object::text("TrueType"), Object::name("Courier"))),
+        0.0
+    );
+    let true_type = pdf.add_object(Object::name("TrueType"));
     let chained = refer(&mut pdf, true_type);
     assert_eq!(
-        width_at_66(&pdf, by(true_type.into(), "Courier".into())),
+        width_at_66(&pdf, by(true_type.into(), Object::name("Courier"))),
         0.0
     );
     // By a chain it's no `/Subtype`, which reads as Type 1.
     assert_eq!(
-        width_at_66(&pdf, by(chained.into(), "Courier".into())),
+        width_at_66(&pdf, by(chained.into(), Object::name("Courier"))),
         600.0
     );
 }
@@ -2594,28 +2639,37 @@ fn differences_as_pdfium_reads_them() {
     let mut pdf = Pdf::default();
     let number = pdf.add_object(Object::from(66));
     let number_chain = pdf.add_object(Object::from(number));
-    let name = pdf.add_object(Object::from("C"));
+    let name = pdf.add_object(Object::name("C"));
     let name_chain = pdf.add_object(Object::from(name));
     let text = |pdf: &Pdf, differences: Object, code: u32| {
         let font = dict! {
-            "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
             "Encoding" => dict! { "Differences" => differences },
         };
         font_of(pdf, font).code_text(code).map(|t| t.into_owned())
     };
     let c = || Some("C".to_string());
-    assert_eq!(text(&pdf, vec![65.into(), "C".into()].into(), 65), c());
+    assert_eq!(
+        text(&pdf, vec![65.into(), Object::name("C")].into(), 65),
+        c()
+    );
     // A real is cut; `true` is 1; what's no number is 0, a string, `null`, an array.
-    assert_eq!(text(&pdf, vec![65.9.into(), "C".into()].into(), 65), c());
-    assert_eq!(text(&pdf, vec![true.into(), "C".into()].into(), 1), c());
+    assert_eq!(
+        text(&pdf, vec![65.9.into(), Object::name("C")].into(), 65),
+        c()
+    );
+    assert_eq!(
+        text(&pdf, vec![true.into(), Object::name("C")].into(), 1),
+        c()
+    );
     for other in [
         Object::text("s"),
         Object::null(),
         vec![Object::from(1)].into(),
     ] {
-        let list = vec![66.into(), other.clone(), "C".into()];
+        let list = vec![66.into(), other.clone(), Object::name("C")];
         assert_eq!(text(&pdf, list.into(), 0), c(), "{other:?}");
-        let list = vec![66.into(), other.clone(), "C".into()];
+        let list = vec![66.into(), other.clone(), Object::name("C")];
         assert_eq!(
             text(&pdf, list.into(), 66).as_deref(),
             Some("B"),
@@ -2623,39 +2677,46 @@ fn differences_as_pdfium_reads_them() {
         );
     }
     // A reference once; a chain to a number by the integer accessor, to a name 0.
-    assert_eq!(text(&pdf, vec![number.into(), "C".into()].into(), 66), c());
-    assert_eq!(text(&pdf, vec![65.into(), name.into()].into(), 65), c());
     assert_eq!(
-        text(&pdf, vec![number_chain.into(), "C".into()].into(), 66),
+        text(&pdf, vec![number.into(), Object::name("C")].into(), 66),
         c()
     );
-    let list = vec![66.into(), name_chain.into(), "C".into()];
+    assert_eq!(text(&pdf, vec![65.into(), name.into()].into(), 65), c());
+    assert_eq!(
+        text(
+            &pdf,
+            vec![number_chain.into(), Object::name("C")].into(),
+            66
+        ),
+        c()
+    );
+    let list = vec![66.into(), name_chain.into(), Object::name("C")];
     assert_eq!(text(&pdf, list.into(), 0), c());
     // A reference to nothing changes nothing.
-    let list = vec![66.into(), Object::reference(999), "C".into()];
+    let list = vec![66.into(), Object::reference(999), Object::name("C")];
     assert_eq!(text(&pdf, list.into(), 66), c());
     // Past 255, none; a negative comes back round to 0; past 32 bits is 0.
-    let list = vec![255.into(), "B".into(), "C".into()];
+    let list = vec![255.into(), Object::name("B"), Object::name("C")];
     assert_eq!(text(&pdf, list.clone().into(), 0).as_deref(), None);
     assert_eq!(text(&pdf, list.into(), 255).as_deref(), Some("B"));
-    let list = vec![(-1).into(), "B".into(), "C".into()];
+    let list = vec![(-1).into(), Object::name("B"), Object::name("C")];
     assert_eq!(text(&pdf, list.into(), 0), c());
-    let list = vec![4294967361_i64.into(), "C".into()];
+    let list = vec![4294967361_i64.into(), Object::name("C")];
     assert_eq!(text(&pdf, list.into(), 0), c());
     // An empty name leaves the code to its base encoding, and moves on.
-    let list = vec![65.into(), "".into(), "C".into()];
+    let list = vec![65.into(), Object::name(""), Object::name("C")];
     assert_eq!(text(&pdf, list.clone().into(), 65).as_deref(), Some("A"));
     assert_eq!(text(&pdf, list.into(), 66), c());
-    let list = vec![65.into(), "C".into(), 65.into(), "".into()];
+    let list = vec![65.into(), Object::name("C"), 65.into(), Object::name("")];
     assert_eq!(text(&pdf, list.into(), 65).as_deref(), Some("A"));
     // By a reference it's read, by a chain none is, and it's the array's own that's
     // told of what's in it.
-    let list = pdf.add_object(Object::from(vec![65.into(), "C".into()]));
+    let list = pdf.add_object(Object::from(vec![65.into(), Object::name("C")]));
     let once = pdf.add_object(Object::from(list));
     assert_eq!(text(&pdf, list.into(), 65), c());
     assert_eq!(text(&pdf, once.into(), 65).as_deref(), Some("A"));
     // `.notdef` is the space in what's read as Type 1 of no symbols.
-    let notdef = vec![65.into(), ".notdef".into()];
+    let notdef = vec![65.into(), Object::name(".notdef")];
     assert_eq!(text(&pdf, notdef.into(), 65).as_deref(), Some(" "));
 }
 
@@ -2667,10 +2728,10 @@ fn a_symbol_font_with_no_program_reads_as_pdfium_s_table_in_truetype() {
     let descriptor = |flags: i64| dict! { "Flags" => flags };
     let text = |pdf: &Pdf, subtype: &str, flags: i64, encoding: Option<&str>, code: u32| {
         let mut font = dict! {
-            "Subtype" => subtype, "BaseFont" => "Symbol", "FontDescriptor" => descriptor(flags),
+            "Subtype" => Object::name(subtype), "BaseFont" => Object::name("Symbol"), "FontDescriptor" => descriptor(flags),
         };
         if let Some(encoding) = encoding {
-            font.set("Encoding", encoding);
+            font.set("Encoding", Object::name(encoding));
         }
         font_of(pdf, font).code_text(code).map(|t| t.into_owned())
     };
@@ -2682,7 +2743,8 @@ fn a_symbol_font_with_no_program_reads_as_pdfium_s_table_in_truetype() {
     ] {
         assert_eq!(text(&pdf, "TrueType", 4, None, code), is(greek));
         assert_eq!(text(&pdf, "TrueType", 0, None, code), is(greek));
-        let no_descriptor = dict! { "Subtype" => "TrueType", "BaseFont" => "Symbol" };
+        let no_descriptor =
+            dict! { "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Symbol") };
         let read = font_of(&pdf, no_descriptor);
         assert_eq!(read.code_text(code).as_deref(), Some(greek));
         assert_eq!(
@@ -2699,7 +2761,7 @@ fn a_symbol_font_with_no_program_reads_as_pdfium_s_table_in_truetype() {
     // that's a Unicode one; read for text, a guess by name.
     let file = pdf.add_object(Stream::new(dict! {}, crate::fixture::truetype_program()));
     let font = Object::from(dict! {
-        "Subtype" => "TrueType", "BaseFont" => "Symbol",
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Symbol"),
         "FontDescriptor" => dict! { "Flags" => 4, "FontFile2" => file },
     });
     let read = |fonts: Fonts| {
@@ -2721,37 +2783,50 @@ fn a_symbol_font_with_no_program_reads_as_pdfium_s_table_in_truetype() {
 #[test]
 fn base_encodings_as_pdfium_comes_to_them() {
     let mut pdf = Pdf::default();
-    let name = pdf.add_object(Object::from("WinAnsiEncoding"));
+    let name = pdf.add_object(Object::name("WinAnsiEncoding"));
     let chain = pdf.add_object(Object::from(name));
     let quote = |pdf: &Pdf, font: Dict| font_of(pdf, font).code_text(0x27).map(|t| t.into_owned());
     let quoted = |text: &str| Some(text.to_string());
     let (standard, win_ansi) = (quoted("’"), quoted("'"));
     let with = |encoding: Object| {
-        dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => encoding }
+        dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "Encoding" => encoding }
     };
-    assert_eq!(quote(&pdf, with("WinAnsiEncoding".into())), win_ansi);
-    assert_eq!(quote(&pdf, with("MacRomanEncoding".into())), win_ansi);
-    assert_eq!(quote(&pdf, with("StandardEncoding".into())), standard);
+    assert_eq!(quote(&pdf, with(Object::name("WinAnsiEncoding"))), win_ansi);
+    assert_eq!(
+        quote(&pdf, with(Object::name("MacRomanEncoding"))),
+        win_ansi
+    );
+    assert_eq!(
+        quote(&pdf, with(Object::name("StandardEncoding"))),
+        standard
+    );
     // By name, MacExpertEncoding is read as WinAnsiEncoding, as PDFium has it.
-    assert_eq!(quote(&pdf, with("MacExpertEncoding".into())), win_ansi);
-    assert_eq!(quote(&pdf, with("Nope".into())), standard);
+    assert_eq!(
+        quote(&pdf, with(Object::name("MacExpertEncoding"))),
+        win_ansi
+    );
+    assert_eq!(quote(&pdf, with(Object::name("Nope"))), standard);
     assert_eq!(quote(&pdf, with(name.into())), win_ansi);
     assert_eq!(quote(&pdf, with(chain.into())), standard);
     assert_eq!(quote(&pdf, with(Object::text("WinAnsiEncoding"))), standard);
     let base = |value: Object| with(dict! { "BaseEncoding" => value }.into());
-    assert_eq!(quote(&pdf, base("WinAnsiEncoding".into())), win_ansi);
+    assert_eq!(quote(&pdf, base(Object::name("WinAnsiEncoding"))), win_ansi);
     assert_eq!(quote(&pdf, base(Object::text("WinAnsiEncoding"))), win_ansi);
     assert_eq!(quote(&pdf, base(name.into())), win_ansi);
     assert_eq!(quote(&pdf, base(chain.into())), standard);
-    assert_eq!(quote(&pdf, base("MacExpertEncoding".into())), standard);
+    assert_eq!(
+        quote(&pdf, base(Object::name("MacExpertEncoding"))),
+        standard
+    );
     // Symbol and ZapfDingbats keep their own whatever's named.
     let symbol = dict! {
-        "Subtype" => "Type1", "BaseFont" => "Symbol", "Encoding" => "WinAnsiEncoding",
+        "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Symbol"), "Encoding" => Object::name("WinAnsiEncoding"),
     };
     assert_eq!(font_of(&pdf, symbol).code_text(0x61).as_deref(), Some("α"));
     // A TrueType font is read in StandardEncoding but where its `/Flags` say it's
     // symbolic, and with no `/Encoding`, WinAnsiEncoding then.
-    let true_type = dict! { "Subtype" => "TrueType", "BaseFont" => "Foo" };
+    let true_type =
+        dict! { "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo") };
     assert_eq!(quote(&pdf, true_type.clone()), standard);
     let symbolic = pdf.add_object(dict! { "Flags" => 4 });
     let mut flagged = true_type.clone();
@@ -2759,7 +2834,8 @@ fn base_encodings_as_pdfium_comes_to_them() {
     assert_eq!(quote(&pdf, flagged), win_ansi);
     // Named Symbol, a TrueType font is drawn in Adobe's Symbol only where its `/Flags`
     // say it's symbolic, and else its widths are a face's, guessed.
-    let named_symbol = dict! { "Subtype" => "TrueType", "BaseFont" => "Symbol" };
+    let named_symbol =
+        dict! { "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Symbol") };
     let read = font_of(&pdf, named_symbol.clone());
     assert!(read.approx().widths);
     assert_eq!(read.width(u32::from(b'a')), 0.0);
@@ -2770,7 +2846,7 @@ fn base_encodings_as_pdfium_comes_to_them() {
     assert_eq!(read.width(u32::from(b'a')), 631.0);
     // In a Type 3 font's dictionary with no base it's StandardEncoding.
     let type3 = |encoding: Option<Object>| {
-        let mut font = dict! { "Subtype" => "Type3" };
+        let mut font = dict! { "Subtype" => Object::name("Type3") };
         if let Some(encoding) = encoding {
             font.set("Encoding", encoding);
         }
@@ -2794,9 +2870,9 @@ fn type3_numbers_as_pdfium_reads_them() {
         .into();
     let font = |matrix: Option<Object>, first: Object, widths: Object| {
         let mut font = dict! {
-            "Subtype" => "Type3", "FirstChar" => first, "Widths" => widths,
+            "Subtype" => Object::name("Type3"), "FirstChar" => first, "Widths" => widths,
             "CharProcs" => dict! { "A" => proc },
-            "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::from("A")] },
+            "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::name("A")] },
         };
         if let Some(matrix) = matrix {
             font.set("FontMatrix", matrix);
@@ -2880,9 +2956,9 @@ fn a_charproc_s_numbers_as_pdfium_takes_them() {
     let mut read = |content: &[u8]| {
         let proc = pdf.add_object(Stream::new(dict! {}, content.to_vec()));
         let font = dict! {
-            "Subtype" => "Type3", "FontMatrix" => matrix.clone(),
+            "Subtype" => Object::name("Type3"), "FontMatrix" => matrix.clone(),
             "CharProcs" => dict! { "A" => proc },
-            "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::from("A")] },
+            "Encoding" => dict! { "Differences" => vec![Object::from(65), Object::name("A")] },
         };
         let font = font_of(&pdf, font);
         (font.width(65), font.glyph_box(65))
@@ -2924,7 +3000,7 @@ fn a_vertical_font_s_numbers_are_16_bits() {
             .into()
     };
     let vertical = |pdf: &mut Pdf, keys: Dict| {
-        let font = type0(pdf, "Identity-V".into(), keys);
+        let font = type0(pdf, Object::name("Identity-V"), keys);
         font_of(pdf, font).vertical(65).unwrap()
     };
     let places = |v: VerticalMetrics| (v.w1, v.vx, v.vy);
@@ -2966,29 +3042,32 @@ fn a_vertical_font_s_numbers_are_16_bits() {
 #[test]
 fn a_font_pdfium_doesn_t_load_is_told() {
     let mut pdf = Pdf::default();
-    let cid_font = pdf.add_object(dict! { "Subtype" => "CIDFontType2" });
+    let cid_font = pdf.add_object(dict! { "Subtype" => Object::name("CIDFontType2") });
     let once = pdf.add_object(Object::from(cid_font));
     let list = pdf.add_object(Object::from(vec![Object::from(cid_font)]));
     let list_once = pdf.add_object(Object::from(list));
-    let name = pdf.add_object(Object::from("Identity-H"));
+    let name = pdf.add_object(Object::name("Identity-H"));
     let name_once = pdf.add_object(Object::from(name));
     let font = |fonts: Object, encoding: Object| {
-        dict! { "Subtype" => "Type0", "DescendantFonts" => fonts, "Encoding" => encoding }
+        dict! { "Subtype" => Object::name("Type0"), "DescendantFonts" => fonts, "Encoding" => encoding }
     };
     let good = || vec![Object::from(cid_font)].into();
     let faults = |pdf: &Pdf, font: Dict| -> Vec<Fault> {
         told(pdf, &font).into_iter().map(|(_, f)| f).collect()
     };
-    assert_eq!(faults(&pdf, font(good(), "Identity-H".into())), []);
-    assert_eq!(faults(&pdf, font(list.into(), "Identity-H".into())), []);
+    assert_eq!(faults(&pdf, font(good(), Object::name("Identity-H"))), []);
+    assert_eq!(
+        faults(&pdf, font(list.into(), Object::name("Identity-H"))),
+        []
+    );
     assert_eq!(faults(&pdf, font(good(), name.into())), []);
     let elem: Object = vec![Object::from(once)].into();
     assert_eq!(
-        faults(&pdf, font(elem, "Identity-H".into())),
+        faults(&pdf, font(elem, Object::name("Identity-H"))),
         [Fault::DescendantFonts]
     );
     assert_eq!(
-        faults(&pdf, font(list_once.into(), "Identity-H".into())),
+        faults(&pdf, font(list_once.into(), Object::name("Identity-H"))),
         [Fault::Chained, Fault::DescendantFonts]
     );
     assert_eq!(
@@ -2996,8 +3075,7 @@ fn a_font_pdfium_doesn_t_load_is_told() {
         [Fault::CMap]
     );
     assert_eq!(faults(&pdf, font(good(), name_once.into())), [Fault::CMap]);
-    let no_encoding =
-        dict! { "Subtype" => "Type0", "DescendantFonts" => vec![Object::from(cid_font)] };
+    let no_encoding = dict! { "Subtype" => Object::name("Type0"), "DescendantFonts" => vec![Object::from(cid_font)] };
     assert_eq!(faults(&pdf, no_encoding), [Fault::CMap]);
 }
 
@@ -3009,7 +3087,8 @@ fn a_truetype_font_read_as_gbk() {
     let mut pdf = Pdf::default();
     let named = |subtype: &str, descriptor: Option<ObjectId>| {
         let mut font = dict! {
-            "Subtype" => subtype.to_string(), "BaseFont" => Object::new(pdf_objects::object::Value::Name(b"\xCB\xCE\xCC\xE5".to_vec())),
+            "Subtype" => Object::name(subtype),
+            "BaseFont" => Object::name(*b"\xCB\xCE\xCC\xE5"),
             "FirstChar" => 65, "Widths" => vec![Object::from(510), Object::from(610)],
         };
         if let Some(descriptor) = descriptor {
@@ -3045,7 +3124,7 @@ fn a_truetype_font_read_as_gbk() {
 #[test]
 fn predefined_codes_below_the_space_have_cid_0() {
     let mut pdf = Pdf::default();
-    let font = type0(&mut pdf, "GBK-EUC-H".into(), dict! {});
+    let font = type0(&mut pdf, Object::name("GBK-EUC-H"), dict! {});
     let font = font_of(&pdf, font);
     assert_eq!(font.cid(1), Some(0));
     assert_ne!(font.cid(0x41), Some(0));
@@ -3157,11 +3236,11 @@ fn faults_are_told_where_they_are() {
         "FontBBox" => vec![Object::from(0), Object::from(-200), Object::from(900), Object::from(700)],
     });
     let good = dict! {
-        "Subtype" => "TrueType", "BaseFont" => "Foo", "FontDescriptor" => descriptor,
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo"), "FontDescriptor" => descriptor,
         "FirstChar" => 65, "LastChar" => 66, "Widths" => vec![Object::from(600), Object::from(700)],
         "Encoding" => dict! {
-            "BaseEncoding" => "MacExpertEncoding",
-            "Differences" => vec![Object::from(65), Object::from("A"), Object::from(66.5)],
+            "BaseEncoding" => Object::name("MacExpertEncoding"),
+            "Differences" => vec![Object::from(65), Object::name("A"), Object::from(66.5)],
         },
     };
     assert_eq!(faults(&pdf, good.clone()), []);
@@ -3178,7 +3257,7 @@ fn faults_are_told_where_they_are() {
     };
     assert_eq!(faults(&pdf, without(b"Subtype")), [Fault::Subtype]);
     assert_eq!(
-        faults(&pdf, with("Subtype", "Nope".into())),
+        faults(&pdf, with("Subtype", Object::name("Nope"))),
         [Fault::Subtype]
     );
     assert_eq!(faults(&pdf, without(b"Widths")), [Fault::NoWidths]);
@@ -3203,20 +3282,20 @@ fn faults_are_told_where_they_are() {
         [Fault::NotANumber]
     );
     assert_eq!(
-        faults(&pdf, with("Encoding", "Nope".into())),
+        faults(&pdf, with("Encoding", Object::name("Nope"))),
         [Fault::Encoding]
     );
     assert_eq!(
         faults(&pdf, with("Encoding", Object::from(1))),
         [Fault::Encoding]
     );
-    let base = dict! { "BaseEncoding" => "Nope" };
+    let base = dict! { "BaseEncoding" => Object::name("Nope") };
     assert_eq!(
         faults(&pdf, with("Encoding", base.into())),
         [Fault::Encoding]
     );
     let differences = |items: Vec<Object>| dict! { "Differences" => items };
-    let past = differences(vec![Object::from(300), Object::from("A")]);
+    let past = differences(vec![Object::from(300), Object::name("A")]);
     assert_eq!(
         faults(&pdf, with("Encoding", past.into())),
         [Fault::Differences]
@@ -3245,7 +3324,8 @@ fn faults_are_told_where_they_are() {
     );
 
     let bad = pdf.add_object(dict! { "Ascent" => Object::text("a") });
-    let mut font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let mut font =
+        dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica") };
     font.set("FontDescriptor", bad);
     assert_eq!(
         told(&pdf, &font),
@@ -3257,26 +3337,35 @@ fn faults_are_told_where_they_are() {
         |pdf: &mut Pdf, encoding: Object, descendant: Dict| type0(pdf, encoding, descendant);
     let good = type0_with(
         &mut pdf,
-        "Identity-H".into(),
-        dict! { "Subtype" => "CIDFontType2" },
+        Object::name("Identity-H"),
+        dict! { "Subtype" => Object::name("CIDFontType2") },
     );
     assert_eq!(faults(&pdf, good), []);
-    let bare = dict! { "Subtype" => "Type0", "Encoding" => "Identity-H" };
+    let bare =
+        dict! { "Subtype" => Object::name("Type0"), "Encoding" => Object::name("Identity-H") };
     assert_eq!(faults(&pdf, bare), [Fault::DescendantFonts]);
-    let cid_font = pdf.add_object(dict! { "Subtype" => "CIDFontType2" });
+    let cid_font = pdf.add_object(dict! { "Subtype" => Object::name("CIDFontType2") });
     let two = dict! {
-        "Subtype" => "Type0", "Encoding" => "Identity-H",
+        "Subtype" => Object::name("Type0"), "Encoding" => Object::name("Identity-H"),
         "DescendantFonts" => vec![Object::from(cid_font), Object::from(cid_font)],
     };
     assert_eq!(faults(&pdf, two), [Fault::DescendantFonts]);
-    let other = type0(&mut pdf, "Identity-H".into(), dict! { "Subtype" => "Nope" });
+    let other = type0(
+        &mut pdf,
+        Object::name("Identity-H"),
+        dict! { "Subtype" => Object::name("Nope") },
+    );
     assert_eq!(faults(&pdf, other), [Fault::Subtype]);
-    let none = type0(&mut pdf, 1.into(), dict! { "Subtype" => "CIDFontType2" });
+    let none = type0(
+        &mut pdf,
+        1.into(),
+        dict! { "Subtype" => Object::name("CIDFontType2") },
+    );
     assert_eq!(faults(&pdf, none), [Fault::CMap]);
     let unknown = type0(
         &mut pdf,
-        "Adobe-Korea1-2".into(),
-        dict! { "Subtype" => "CIDFontType2" },
+        Object::name("Adobe-Korea1-2"),
+        dict! { "Subtype" => Object::name("CIDFontType2") },
     );
     assert_eq!(faults(&pdf, unknown), [Fault::PredefinedUnknown]);
     let w = vec![
@@ -3284,8 +3373,8 @@ fn faults_are_told_where_they_are() {
         Object::from(2),
         vec![Object::from(600)].into(),
     ];
-    let cut = dict! { "Subtype" => "CIDFontType2", "W" => w.clone(), "W2" => w };
-    let cut = type0(&mut pdf, "Identity-V".into(), cut);
+    let cut = dict! { "Subtype" => Object::name("CIDFontType2"), "W" => w.clone(), "W2" => w };
+    let cut = type0(&mut pdf, Object::name("Identity-V"), cut);
     assert_eq!(faults(&pdf, cut), [Fault::W, Fault::W2]);
 
     // A CMap's chain.
@@ -3295,7 +3384,7 @@ fn faults_are_told_where_they_are() {
     let broken = type0(
         &mut pdf,
         broken.into(),
-        dict! { "Subtype" => "CIDFontType2" },
+        dict! { "Subtype" => Object::name("CIDFontType2") },
     );
     let chain = told(&pdf, &broken);
     assert_eq!(chain, [(Place::new(Some(nothing), None), Fault::UseCMap)]);
@@ -3305,14 +3394,14 @@ fn faults_are_told_where_they_are() {
     let looped = type0(
         &mut pdf,
         looped.into(),
-        dict! { "Subtype" => "CIDFontType2" },
+        dict! { "Subtype" => Object::name("CIDFontType2") },
     );
     assert_eq!(faults(&pdf, looped), [Fault::UseCMap]);
     let usecmap = pdf.add_object(Stream::new(dict! {}, b"/Nope-H usecmap".to_vec()));
     let usecmap = type0(
         &mut pdf,
         usecmap.into(),
-        dict! { "Subtype" => "CIDFontType2" },
+        dict! { "Subtype" => Object::name("CIDFontType2") },
     );
     assert_eq!(faults(&pdf, usecmap), [Fault::PredefinedUnknown]);
 
@@ -3356,7 +3445,10 @@ fn program_fonts() -> (Pdf, HashMap<&'static str, ObjectId>) {
     use crate::fixture::{cff_program, truetype_program, type1_program};
     let mut pdf = Pdf::default();
     let truetype = pdf.add_object(Stream::new(dict! {}, truetype_program()));
-    let cff = pdf.add_object(Stream::new(dict! { "Subtype" => "Type1C" }, cff_program()));
+    let cff = pdf.add_object(Stream::new(
+        dict! { "Subtype" => Object::name("Type1C") },
+        cff_program(),
+    ));
     let type1 = pdf.add_object(Stream::new(dict! {}, type1_program()));
     let widths = |pairs: &[(u8, i64)]| {
         let mut widths = vec![Object::from(0); 72];
@@ -3377,14 +3469,14 @@ fn program_fonts() -> (Pdf, HashMap<&'static str, ObjectId>) {
     let simple = |pdf: &mut Pdf, subtype: &str, widths: &[Object], descriptor: Dictionary| {
         let descriptor = pdf.add_object(descriptor);
         pdf.add_object(dict! {
-            "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Fix",
+            "Type" => Object::name("Font"), "Subtype" => Object::name(subtype), "BaseFont" => Object::name("Fix"),
             "FirstChar" => 32, "LastChar" => 103, "Widths" => widths.to_vec(),
-            "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+            "Encoding" => Object::name("WinAnsiEncoding"), "FontDescriptor" => descriptor,
         })
     };
     let descriptor = |file: &str, program: ObjectId, bbox: [i64; 4], ascent: i64, descent: i64| {
         let mut descriptor = dict! {
-            "Type" => "FontDescriptor", "FontName" => "Fix", "Flags" => 32,
+            "Type" => Object::name("FontDescriptor"), "FontName" => Object::name("Fix"), "Flags" => 32,
             "FontBBox" => bbox.iter().map(|&n| Object::from(n)).collect::<Vec<_>>(),
             "Ascent" => ascent, "Descent" => descent, "CapHeight" => 750,
             "ItalicAngle" => 0, "StemV" => 80,
@@ -3426,9 +3518,9 @@ fn program_fonts() -> (Pdf, HashMap<&'static str, ObjectId>) {
     let short_descriptor =
         pdf.add_object(descriptor("FontFile3", cff, [0, -100, 600, 500], 500, -100));
     let ps = pdf.add_object(dict! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Fix",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Fix"),
         "FirstChar" => 1, "LastChar" => 103, "Widths" => short,
-        "Encoding" => "WinAnsiEncoding", "FontDescriptor" => short_descriptor,
+        "Encoding" => Object::name("WinAnsiEncoding"), "FontDescriptor" => short_descriptor,
     });
     let cid_descriptor = pdf.add_object(descriptor(
         "FontFile2",
@@ -3438,8 +3530,8 @@ fn program_fonts() -> (Pdf, HashMap<&'static str, ObjectId>) {
         -200,
     ));
     let descendant = pdf.add_object(dict! {
-        "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "Fix",
-        "FontDescriptor" => cid_descriptor, "CIDToGIDMap" => "Identity",
+        "Type" => Object::name("Font"), "Subtype" => Object::name("CIDFontType2"), "BaseFont" => Object::name("Fix"),
+        "FontDescriptor" => cid_descriptor, "CIDToGIDMap" => Object::name("Identity"),
         "W" => vec![Object::from(1), [600, 500, 250, 450, 700].map(Object::from).to_vec().into()],
         "CIDSystemInfo" => dict! {
             "Registry" => Object::text("Adobe"),
@@ -3447,8 +3539,8 @@ fn program_fonts() -> (Pdf, HashMap<&'static str, ObjectId>) {
         },
     });
     let pi = pdf.add_object(dict! {
-        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Fix",
-        "Encoding" => "Identity-H", "DescendantFonts" => vec![Object::from(descendant)],
+        "Type" => Object::name("Font"), "Subtype" => Object::name("Type0"), "BaseFont" => Object::name("Fix"),
+        "Encoding" => Object::name("Identity-H"), "DescendantFonts" => vec![Object::from(descendant)],
     });
     let names = HashMap::from([
         ("PT", pt),
@@ -3600,14 +3692,14 @@ fn malformed_programs_fall_back() {
         let mut pdf = Pdf::default();
         let program = pdf.add_object(Stream::new(dict! {}, program));
         let mut descriptor = dict! {
-            "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 700, "Descent" => -200,
+            "Type" => Object::name("FontDescriptor"), "Flags" => 32, "Ascent" => 700, "Descent" => -200,
         };
         descriptor.set(key, program);
         let descriptor = pdf.add_object(descriptor);
         let font = font_of(
             &pdf,
             dict! {
-                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Bad",
+                "Type" => Object::name("Font"), "Subtype" => Object::name(subtype), "BaseFont" => Object::name("Bad"),
                 "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![Object::from(600)],
                 "FontDescriptor" => descriptor,
             },
@@ -3635,13 +3727,13 @@ fn a_cid_font_s_program_is_read_once() {
     let mut pdf = Pdf::default();
     let program = pdf.add_object(Stream::new(dict! {}, program));
     let descriptor = pdf.add_object(dict! {
-        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => -200,
+        "Type" => Object::name("FontDescriptor"), "Flags" => 32, "Ascent" => 750, "Descent" => -200,
         "FontFile" => program,
     });
     let font = type0(
         &mut pdf,
-        "Identity-H".into(),
-        dict! { "Subtype" => "CIDFontType0", "FontDescriptor" => descriptor },
+        Object::name("Identity-H"),
+        dict! { "Subtype" => Object::name("CIDFontType0"), "FontDescriptor" => descriptor },
     );
     let font = font_of(&pdf, font);
     assert_eq!(font.program(), FontProgram::Read);
@@ -3660,17 +3752,20 @@ fn a_cid_font_s_program_is_read_once() {
 fn a_loca_record_past_the_end_is_read_past() {
     let mut pdf = Pdf::default();
     let program = crate::fixture::loca_past_end_program();
-    let program = pdf.add_object(Stream::new(dict! { "Subtype" => "OpenType" }, program));
+    let program = pdf.add_object(Stream::new(
+        dict! { "Subtype" => Object::name("OpenType") },
+        program,
+    ));
     let descriptor = pdf.add_object(dict! {
-        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => -200,
+        "Type" => Object::name("FontDescriptor"), "Flags" => 32, "Ascent" => 750, "Descent" => -200,
         "FontFile3" => program,
     });
     let font = font_of(
         &pdf,
         dict! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Fix",
+            "Type" => Object::name("Font"), "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Fix"),
             "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![Object::from(600)],
-            "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+            "Encoding" => Object::name("WinAnsiEncoding"), "FontDescriptor" => descriptor,
         },
     );
     assert_eq!(font.program(), FontProgram::Read);
@@ -3688,7 +3783,7 @@ fn programs_past_their_work_are_unknown() {
         let mut pdf = Pdf::default();
         let program = pdf.add_object(Stream::new(dict! {}, program));
         let mut descriptor = dict! {
-            "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
+            "Type" => Object::name("FontDescriptor"), "Flags" => 32, "Ascent" => 750, "Descent" => 0,
             "FontBBox" => [0, 0, 600, 750].map(Object::from).to_vec(),
         };
         descriptor.set(key, program);
@@ -3696,9 +3791,9 @@ fn programs_past_their_work_are_unknown() {
         font_of(
             &pdf,
             dict! {
-                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Heavy",
+                "Type" => Object::name("Font"), "Subtype" => Object::name(subtype), "BaseFont" => Object::name("Heavy"),
                 "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![Object::from(600)],
-                "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+                "Encoding" => Object::name("WinAnsiEncoding"), "FontDescriptor" => descriptor,
             },
         )
     };
@@ -3713,13 +3808,13 @@ fn programs_past_their_work_are_unknown() {
     let mut pdf = Pdf::default();
     let bomb = pdf.add_object(Stream::new(dict! {}, composite_bomb_program()));
     let descriptor = pdf.add_object(dict! {
-        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
+        "Type" => Object::name("FontDescriptor"), "Flags" => 32, "Ascent" => 750, "Descent" => 0,
         "FontBBox" => [0, 0, 600, 750].map(Object::from).to_vec(), "FontFile2" => bomb,
     });
     let bomb = type0(
         &mut pdf,
-        "Identity-H".into(),
-        dict! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+        Object::name("Identity-H"),
+        dict! { "Subtype" => Object::name("CIDFontType2"), "FontDescriptor" => descriptor },
     );
     let bomb = font_of(&pdf, bomb);
     assert_eq!(bomb.char_box(0), None);
@@ -3742,8 +3837,8 @@ fn a_composite_s_components_end_at_skrifa_s_bound() {
         let descriptor = pdf.add_object(dict! { "Flags" => 4, "FontFile2" => file });
         let font = type0(
             &mut pdf,
-            "Identity-H".into(),
-            dict! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+            Object::name("Identity-H"),
+            dict! { "Subtype" => Object::name("CIDFontType2"), "FontDescriptor" => descriptor },
         );
         let mut budget = BUDGET;
         Font::read(&pdf, &font, &limits, &mut budget, &mut ()).unwrap()
@@ -3890,12 +3985,12 @@ fn over_program(
 ) -> Dictionary {
     let program = pdf.add_object(Stream::new(dict! {}, program));
     let mut descriptor = dict! {
-        "Type" => "FontDescriptor", "Flags" => flags, "Ascent" => 750, "Descent" => -200,
+        "Type" => Object::name("FontDescriptor"), "Flags" => flags, "Ascent" => 750, "Descent" => -200,
         "FontBBox" => [0, -200, 600, 750].map(Object::from).to_vec(),
     };
     descriptor.set(key, program);
     let mut font = dict! {
-        "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Fix", "FirstChar" => 32,
+        "Type" => Object::name("Font"), "Subtype" => Object::name(subtype), "BaseFont" => Object::name("Fix"), "FirstChar" => 32,
         "Widths" => vec![Object::from(500); 224], "FontDescriptor" => descriptor,
     };
     if let Some(encoding) = encoding {
@@ -3960,7 +4055,7 @@ fn a_program_says_the_text_its_encoding_leaves_to_it() {
         "FontFile",
         custom,
         4,
-        Some("WinAnsiEncoding".into()),
+        Some(Object::name("WinAnsiEncoding")),
     );
     let win = font_of(&pdf, win);
     assert_eq!(win.code_text(97).as_deref(), Some("a"));
@@ -4006,7 +4101,7 @@ fn a_program_says_the_text_its_encoding_leaves_to_it() {
         "FontFile2",
         with_map(1, 0),
         4,
-        Some("WinAnsiEncoding".into()),
+        Some(Object::name("WinAnsiEncoding")),
     );
     let moved = font_of(&pdf, moved);
     assert_eq!(moved.code_text(0x8a).as_deref(), Some("\u{e4}"));
@@ -4031,8 +4126,8 @@ fn a_cid_keyed_cff_s_glyphs_are_its_charset_s() {
     });
     let font = type0(
         &mut pdf,
-        "Identity-H".into(),
-        dict! { "Subtype" => "CIDFontType0", "FontDescriptor" => descriptor },
+        Object::name("Identity-H"),
+        dict! { "Subtype" => Object::name("CIDFontType0"), "FontDescriptor" => descriptor },
     );
     let font = font_of(&pdf, font);
     assert_eq!(font.program(), FontProgram::Read);
@@ -4055,9 +4150,9 @@ fn a_tricky_font_s_boxes_are_unknown() {
         "FontFile2",
         crate::fixture::truetype_program(),
         32,
-        Some("WinAnsiEncoding".into()),
+        Some(Object::name("WinAnsiEncoding")),
     );
-    font.set("BaseFont", "ABCDEF+MingLiU");
+    font.set("BaseFont", Object::name("ABCDEF+MingLiU"));
     let read = font_of(&pdf, font);
     assert_eq!(read.program(), FontProgram::Read);
     assert!(read.outlined() && read.approx().boxes);
@@ -4143,7 +4238,7 @@ fn a_program_that_doesn_t_load_is_read_as_none() {
 fn a_lower_case_with_no_glyph_takes_its_capital_s() {
     let mut pdf = Pdf::default();
     let program = crate::fixture::type1_program();
-    let differences = dict! { "Differences" => vec![Object::from(97), Object::from(".notdef")] };
+    let differences = dict! { "Differences" => vec![Object::from(97), Object::name(".notdef")] };
     let mut caps = over_program(
         &mut pdf,
         "Type1",
@@ -4177,7 +4272,7 @@ fn a_program_s_bounds_are_the_limits() {
             key,
             program,
             32,
-            Some("WinAnsiEncoding".into()),
+            Some(Object::name("WinAnsiEncoding")),
         );
         let mut budget = BUDGET;
         Font::read(&pdf, &font, &limits, &mut budget, &mut ()).unwrap()
@@ -4210,8 +4305,8 @@ fn a_program_s_bounds_are_the_limits() {
         let descriptor = pdf.add_object(dict! { "Flags" => 4, "FontFile2" => program });
         let font = type0(
             &mut pdf,
-            "Identity-H".into(),
-            dict! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+            Object::name("Identity-H"),
+            dict! { "Subtype" => Object::name("CIDFontType2"), "FontDescriptor" => descriptor },
         );
         let mut budget = BUDGET;
         let read = Font::read(&pdf, &font, &limits, &mut budget, &mut ()).unwrap();
@@ -4262,7 +4357,7 @@ fn a_program_s_bounds_are_the_limits() {
 fn a_type1_program_past_its_cap_is_told_as_the_cap_s() {
     let read = |program: Vec<u8>, type1_work: usize| {
         let mut pdf = Pdf::default();
-        let encoding = Some("WinAnsiEncoding".into());
+        let encoding = Some(Object::name("WinAnsiEncoding"));
         let font = over_program(&mut pdf, "Type1", "FontFile", program, 32, encoding);
         let limits = Limits {
             type1_work,
@@ -4367,7 +4462,8 @@ fn without_the_feature_a_font_reads_as_for_text() {
         let mut descriptor = dict! { "Flags" => 4, "FontBBox" => vec![Object::from(0); 4] };
         descriptor.set(key, program);
         let font = pdf.add_object(dict! {
-            "Subtype" => subtype, "BaseFont" => "Fix", "FontDescriptor" => descriptor,
+            "Subtype" => Object::name(subtype), "BaseFont" => Object::name("Fix"),
+            "FontDescriptor" => descriptor,
             "FirstChar" => 65, "Widths" => vec![Object::from(500)],
         });
         let font = Object::from(font);
@@ -4408,8 +4504,8 @@ fn identity_truetype(pdf: &mut Pdf, program: Vec<u8>) -> Dict {
     let descriptor = pdf.add_object(dict! { "Flags" => 4, "FontFile2" => file });
     type0(
         pdf,
-        "Identity-H".into(),
-        dict! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+        Object::name("Identity-H"),
+        dict! { "Subtype" => Object::name("CIDFontType2"), "FontDescriptor" => descriptor },
     )
 }
 
@@ -4429,7 +4525,7 @@ fn a_loca_entry_past_its_table_charges_nothing() {
         let file = pdf.add_object(Stream::new(dict! {}, program));
         let descriptor = dict! { "Flags" => 32, "FontFile2" => file };
         let font = dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Fix", "Encoding" => "WinAnsiEncoding",
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Fix"), "Encoding" => Object::name("WinAnsiEncoding"),
             "FontDescriptor" => descriptor, "FirstChar" => 65, "Widths" => vec![Object::from(500)],
         };
         Font::read(&pdf, &font, &Limits::DEFAULT, budget, &mut ()).map(|font| font.cost())
@@ -4486,7 +4582,7 @@ fn a_glyph_past_the_program_is_none() {
     let file = pdf.add_object(Stream::new(dict! {}, program));
     let descriptor = dict! { "Flags" => 4, "FontFile2" => file };
     let font = dict! {
-        "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Fix", "FontDescriptor" => descriptor,
+        "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("ABCDEF+Fix"), "FontDescriptor" => descriptor,
         "FirstChar" => 0, "Widths" => vec![Object::from(500); 256],
     };
     let read = font_of(&pdf, font);
@@ -4575,7 +4671,7 @@ fn a_name_pdfium_does_not_know_has_no_cid_s_text() {
         },
     };
     for name in ["Foo", "FooV"] {
-        let font = type0(&mut pdf, name.into(), japan1.clone());
+        let font = type0(&mut pdf, Object::name(name), japan1.clone());
         let read = font_of(&pdf, font);
         assert_eq!(read.code_text(1), None);
         assert_eq!(read.cid(1), Some(1));
@@ -4583,7 +4679,7 @@ fn a_name_pdfium_does_not_know_has_no_cid_s_text() {
     }
     #[cfg(feature = "predefined-cmaps")]
     {
-        let font = type0(&mut pdf, "Identity-H".into(), japan1);
+        let font = type0(&mut pdf, Object::name("Identity-H"), japan1);
         assert!(font_of(&pdf, font).code_text(1).is_some());
     }
 }
@@ -4595,7 +4691,11 @@ fn a_cmap_s_ranges_past_16_bits_are_apart() {
     let read = |cmap: &str| {
         let mut pdf = Pdf::default();
         let cmap = pdf.add_object(Stream::new(dict! {}, cmap.as_bytes().to_vec()));
-        let font = type0(&mut pdf, cmap.into(), dict! { "Subtype" => "CIDFontType2" });
+        let font = type0(
+            &mut pdf,
+            cmap.into(),
+            dict! { "Subtype" => Object::name("CIDFontType2") },
+        );
         font_of(&pdf, font)
     };
     let mixed = "2 begincodespacerange <00> <ff> <00000000> <ffffffff> endcodespacerange ";
@@ -4627,9 +4727,10 @@ fn a_cmap_s_ranges_past_16_bits_are_apart() {
 #[test]
 fn whether_a_font_is_loaded_is_said() {
     let mut pdf = Pdf::default();
-    let cid_font = pdf.add_object(dict! { "Subtype" => "CIDFontType2" });
+    let cid_font = pdf.add_object(dict! { "Subtype" => Object::name("CIDFontType2") });
     let type0 = |encoding: Option<Object>, fonts: Option<Object>| {
-        let mut font = dict! { "Subtype" => "Type0", "BaseFont" => "Foo" };
+        let mut font =
+            dict! { "Subtype" => Object::name("Type0"), "BaseFont" => Object::name("Foo") };
         if let Some(encoding) = encoding {
             font.set("Encoding", encoding);
         }
@@ -4639,10 +4740,10 @@ fn whether_a_font_is_loaded_is_said() {
         font
     };
     let one = || Some(Object::from(vec![Object::from(cid_font)]));
-    let identity = || Some(Object::from("Identity-H"));
+    let identity = || Some(Object::name("Identity-H"));
     let cases = [
         (type0(identity(), one()), true),
-        (type0(Some("Foo".into()), one()), true),
+        (type0(Some(Object::name("Foo")), one()), true),
         (type0(Some(5.into()), one()), false),
         (type0(None, one()), false),
         (type0(identity(), None), false),
@@ -4651,11 +4752,14 @@ fn whether_a_font_is_loaded_is_said() {
             false,
         ),
         (
-            dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica") },
             true,
         ),
-        (dict! { "Subtype" => "TrueType", "BaseFont" => "Foo" }, true),
-        (dict! { "Subtype" => "Type3" }, true),
+        (
+            dict! { "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Foo") },
+            true,
+        ),
+        (dict! { "Subtype" => Object::name("Type3") }, true),
     ];
     for (font, loaded) in cases {
         let refused = told(&pdf, &font)
@@ -4681,8 +4785,8 @@ fn a_font_read_for_text_reads_no_program() {
     for program in [file, bad] {
         let descriptor = dict! { "Flags" => 4, "FontFile2" => program };
         let font = dict! {
-            "Subtype" => "TrueType", "BaseFont" => "Fix", "FontDescriptor" => descriptor,
-            "FirstChar" => "A", "Widths" => vec![Object::from(500)],
+            "Subtype" => Object::name("TrueType"), "BaseFont" => Object::name("Fix"), "FontDescriptor" => descriptor,
+            "FirstChar" => Object::name("A"), "Widths" => vec![Object::from(500)],
         };
         let (mut one, mut other) = (BUDGET, BUDGET);
         let mut faults = Vec::new();
@@ -4705,14 +4809,14 @@ fn a_font_read_for_text_reads_no_program() {
 #[test]
 fn a_fault_says_the_numbered_object_it_is_in() {
     let mut pdf = Pdf::default();
-    let not_a_number: Object = "x".into();
+    let not_a_number: Object = Object::name("x");
     let widths = pdf.add_object(vec![not_a_number.clone()]);
     let differences = pdf.add_object(vec![Object::from(true)]);
     let encoding = pdf.add_object(dict! {
-        "BaseEncoding" => "Foo", "Differences" => differences,
+        "BaseEncoding" => Object::name("Foo"), "Differences" => differences,
     });
     let bare = pdf.add_object(dict! { "Differences" => vec![Object::from(true)] });
-    let named = pdf.add_object(Object::from("Foo"));
+    let named = pdf.add_object(Object::name("Foo"));
     let places = |pdf: &Pdf, font: Dict| -> Vec<(Fault, Option<ObjectId>)> {
         told(pdf, &font)
             .into_iter()
@@ -4722,7 +4826,7 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     let told_of = places(
         &pdf,
         dict! {
-            "Subtype" => "Type1", "BaseFont" => "Foo", "Encoding" => encoding,
+            "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Foo"), "Encoding" => encoding,
             "FirstChar" => 65, "LastChar" => 65, "Widths" => widths,
         },
     );
@@ -4740,7 +4844,7 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     );
     let told_of = places(
         &pdf,
-        dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => bare },
+        dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "Encoding" => bare },
     );
     assert!(
         told_of.contains(&(Fault::Differences, Some(bare))),
@@ -4748,7 +4852,7 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     );
     let told_of = places(
         &pdf,
-        dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => named },
+        dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"), "Encoding" => named },
     );
     assert!(
         told_of.contains(&(Fault::Encoding, Some(named))),
@@ -4758,7 +4862,7 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     let told_of = places(
         &pdf,
         dict! {
-            "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica"),
             "FirstChar" => 65, "Widths" => vec![not_a_number.clone()],
         },
     );
@@ -4766,7 +4870,7 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     let told_of = places(
         &pdf,
         dict! {
-            "Subtype" => "Type3", "FontMatrix" => widths, "FirstChar" => 65, "Widths" => widths,
+            "Subtype" => Object::name("Type3"), "FontMatrix" => widths, "FirstChar" => 65, "Widths" => widths,
         },
     );
     assert!(
@@ -4774,7 +4878,10 @@ fn a_fault_says_the_numbered_object_it_is_in() {
         "{told_of:?}"
     );
     let matrix = pdf.add_object(vec![not_a_number.clone(); 6]);
-    let told_of = places(&pdf, dict! { "Subtype" => "Type3", "FontMatrix" => matrix });
+    let told_of = places(
+        &pdf,
+        dict! { "Subtype" => Object::name("Type3"), "FontMatrix" => matrix },
+    );
     assert!(
         told_of.contains(&(Fault::NotANumber, Some(matrix))),
         "{told_of:?}"
@@ -4782,12 +4889,12 @@ fn a_fault_says_the_numbered_object_it_is_in() {
     let w = pdf.add_object(vec![Object::from(1), not_a_number.clone(), Object::from(2)]);
     let dw2 = pdf.add_object(vec![not_a_number.clone(), Object::from(1)]);
     let cid_font = pdf.add_object(dict! {
-        "Subtype" => "CIDFontType2", "W" => w, "W2" => w, "DW2" => dw2,
+        "Subtype" => Object::name("CIDFontType2"), "W" => w, "W2" => w, "DW2" => dw2,
     });
     let told_of = places(
         &pdf,
         dict! {
-            "Subtype" => "Type0", "Encoding" => "Identity-V",
+            "Subtype" => Object::name("Type0"), "Encoding" => Object::name("Identity-V"),
             "DescendantFonts" => vec![Object::from(cid_font)],
         },
     );
@@ -4822,7 +4929,8 @@ fn streams_go_on_the_type_and_a_font_is_read_over_a_reference() {
     let source = Source {
         objects: HashMap::new(),
     };
-    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let font =
+        dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Helvetica") };
     let mut budget = BUDGET;
     let read = Font::read(&source, &font, &Limits::DEFAULT, &mut budget, &mut ()).unwrap();
     assert_eq!(read.width(u32::from(b'A')), 667.0);
@@ -4903,7 +5011,7 @@ fn an_opentype_font_s_names_are_its_cff_s() {
                 "FontFile3",
                 program.clone(),
                 flags,
-                Some("WinAnsiEncoding".into()),
+                Some(Object::name("WinAnsiEncoding")),
             );
             let read = font_of(&pdf, font);
             assert_eq!(read.program(), FontProgram::Read);
@@ -4940,7 +5048,7 @@ fn an_opentype_font_with_no_cmap_has_one_of_its_names() {
             "FontFile3",
             program,
             32,
-            Some("WinAnsiEncoding".into()),
+            Some(Object::name("WinAnsiEncoding")),
         );
         let read = font_of(&pdf, font);
         assert_eq!(read.char_box(b'A'.into()), Some(a));
@@ -4964,8 +5072,8 @@ fn an_opentype_font_s_cids_are_its_glyphs() {
         let descriptor = pdf.add_object(dict! { "Flags" => 4, "FontFile3" => file });
         let font = type0(
             &mut pdf,
-            "Identity-H".into(),
-            dict! { "Subtype" => "CIDFontType0", "FontDescriptor" => descriptor },
+            Object::name("Identity-H"),
+            dict! { "Subtype" => Object::name("CIDFontType0"), "FontDescriptor" => descriptor },
         );
         let read = font_of(&pdf, font);
         [1, 2, 5].map(|cid| read.char_box(cid).map(|b| b.y1))
@@ -5062,7 +5170,7 @@ mod reading {
         vec![
             (
                 1,
-                dict! { "Subtype" => "Type1", "BaseFont" => "Foo", "ToUnicode" => Object::reference(2) }
+                dict! { "Subtype" => Object::name("Type1"), "BaseFont" => Object::name("Foo"), "ToUnicode" => Object::reference(2) }
                     .into(),
             ),
             (2, Body::stream(dict! {}, PLAIN)),
@@ -5114,10 +5222,10 @@ mod reading {
     /// budget as it was and nothing told after it.
     #[test]
     fn what_doesn_t_decode_is_none_and_past_a_cap_the_caller_s() {
-        let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
+        let many: Vec<Object> = (0..26).map(|_| Object::name("ASCIIHexDecode")).collect();
         let to_unicode = [
-            dict! { "Filter" => "ASCIIHexDecode" },
-            dict! { "Filter" => "JBIG2Decode" },
+            dict! { "Filter" => Object::name("ASCIIHexDecode") },
+            dict! { "Filter" => Object::name("JBIG2Decode") },
             dict! { "Filter" => many },
         ];
         let read = |dict: Dict, data: &[u8]| {

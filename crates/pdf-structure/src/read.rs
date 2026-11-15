@@ -518,13 +518,15 @@ pub fn document(file: &[u8], options: &Options<'_>) -> Document {
 ///
 /// ```
 /// use pdf_structure::pdf_filters::Filter;
-/// use pdf_structure::pdf_objects::{Dict, Object, ObjectId, Resolve};
+/// use pdf_structure::pdf_objects::{self, Dict, Object, ObjectId};
 /// use pdf_structure::read::{self, Unfiltered};
 ///
 /// let mut dict = Dict::new();
-/// dict.set("Filter", vec![Object::from("AHx"), Object::reference(7)]);
-/// let flate = Object::from("FlateDecode");
-/// let resolve = |id: ObjectId| (id == ObjectId::new(7, 0)).then_some(&flate);
+/// dict.set("Filter", vec![Object::name("AHx"), Object::reference(7)]);
+/// let flate = Object::name("FlateDecode");
+/// let resolve = pdf_objects::resolve_fn(|id: ObjectId| {
+///     (id == ObjectId::new(7, 0)).then_some(&flate)
+/// });
 /// let filters = read::filters(&dict, Some(&resolve)).unwrap();
 /// assert!(matches!(filters[..], [Filter::AsciiHex, Filter::Flate { .. }]));
 /// assert_eq!(read::filters(&dict, None), Err(Unfiltered::Reference));
@@ -569,13 +571,13 @@ pub fn filters<'o>(
 /// use pdf_structure::read;
 ///
 /// let mut dict = Dict::new();
-/// dict.set("Filter", Object::from("Standard"));
+/// dict.set("Filter", Object::name("Standard"));
 /// dict.set("V", 4);
 /// dict.set("StmF", Object::reference(9));
 /// let mut asked = Vec::new();
 /// let values = read::encryption(&dict, &mut |id: ObjectId| {
 ///     asked.push(id);
-///     Some(Cow::Owned(Object::from("StdCF")))
+///     Some(Cow::Owned(Object::name("StdCF")))
 /// });
 /// assert_eq!((values.filter, values.v, values.r), (b"Standard".to_vec(), 4, 0));
 /// assert_eq!(values.stm_f.as_deref(), Some(&b"StdCF"[..]));
@@ -935,7 +937,7 @@ fn overlaps<'r>(records: impl Iterator<Item = &'r Record>, sink: &mut impl Sink<
     }
     let mut members: Vec<(u32, usize, u32, &Record)> = records
         .filter_map(|record| match record.origin {
-            Origin::Stream { stream, index } => Some((stream, record.at.start, index, record)),
+            Origin::Stream { stream, index } => Some((stream, record.at.start(), index, record)),
             _ => None,
         })
         .collect();
@@ -943,18 +945,19 @@ fn overlaps<'r>(records: impl Iterator<Item = &'r Record>, sink: &mut impl Sink<
     // The one reaching furthest so far, in the stream gone through.
     let mut furthest: Option<(u32, &Record)> = None;
     for (stream, start, _, record) in members {
-        if let Some((_, outer)) = furthest.filter(|&(s, outer)| s == stream && start < outer.at.end)
+        if let Some((_, outer)) =
+            furthest.filter(|&(s, outer)| s == stream && start < outer.at.end())
         {
             let fault = Fault::Inside {
                 start,
                 stream,
                 id: outer.id,
-                from: outer.at.start,
-                to: outer.at.end,
+                from: outer.at.start(),
+                to: outer.at.end(),
             };
             sink.fault(Place::new(Some(record.id), Some(record.at)), fault);
         }
-        if furthest.is_none_or(|(s, outer)| s != stream || record.at.end > outer.at.end) {
+        if furthest.is_none_or(|(s, outer)| s != stream || record.at.end() > outer.at.end()) {
             furthest = Some((stream, record));
         }
     }
@@ -1072,9 +1075,9 @@ fn metadata<'f, 'o, F: Bytes<'f>>(
     let Some(Value::Stream(stream)) = follow(get, metadata)?.map(Object::value) else {
         return Ok(None);
     };
-    let at = (stream.data.at()).filter(|at| at.stream.is_none() && !stream.dict.has(b"Filter"));
+    let at = (stream.data.at()).filter(|at| at.stream().is_none() && !stream.dict.has(b"Filter"));
     match at {
-        Some(at) => file.get(at.start..at.end),
+        Some(at) => file.get(at.range()),
         None => Ok(None),
     }
 }
@@ -2077,18 +2080,15 @@ impl Reader {
                     None
                 }
             };
-            let _ = filters(&s.dict, Some(&resolve));
+            let _ = filters(&s.dict, Some(&pdf_objects::resolve_fn(&resolve)));
             let _ = filter::crypt_filter(&s.dict, Some(&resolve));
             if let Some(error) = failed.into_inner() {
                 return Err(error);
             }
             // Its data, which only an object stream's decode reads.
-            let at = (s.data.at()).filter(|at| at.stream.is_none());
+            let at = (s.data.at()).filter(|at| at.stream().is_none());
             if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"ObjStm") {
-                data = at
-                    .map(|at| file.get(at.start..at.end))
-                    .transpose()?
-                    .flatten();
+                data = at.map(|at| file.get(at.range())).transpose()?.flatten();
             }
         }
         let data = data.unwrap_or_default();
@@ -2205,10 +2205,10 @@ impl Reader {
             let Value::Stream(stream) = object.value() else {
                 continue;
             };
-            let Some(at) = stream.data.at().filter(|at| at.stream.is_none()) else {
+            let Some(at) = stream.data.at().filter(|at| at.stream().is_none()) else {
                 continue;
             };
-            let Some(data) = file.get(at.start..at.end)? else {
+            let Some(data) = file.get(at.range())? else {
                 continue;
             };
             if written_filters(object).is_none() {
@@ -2502,7 +2502,7 @@ impl Reader {
         for (i, fault) in faults {
             let at = match (i, place(&fault), written) {
                 (0, Some(at), Some(written)) => {
-                    Some(span(written.start + at, written.start + at + 1))
+                    Some(span(written.start() + at, written.start() + at + 1))
                 }
                 _ => data,
             };
@@ -2540,7 +2540,8 @@ impl Reader {
         // What its filters' values refer to is read and kept before its
         // decode, which reads nothing.
         let resolve = |id| self.kept(id)?.ok();
-        let filters = filters(&stream.dict, Some(&resolve)).map_err(Undecoded::Filters)?;
+        let filters = filters(&stream.dict, Some(&pdf_objects::resolve_fn(&resolve)))
+            .map_err(Undecoded::Filters)?;
         // In an encrypted file, decrypted first: by its own crypt filter
         // when it names one, else as the file's streams are. In one no
         // password opened whose streams aren't encrypted, its own crypt
@@ -3516,7 +3517,7 @@ impl Reader {
         if stream.dict.get(b"Type").and_then(Object::as_name) != Some(b"XRef") {
             return Ok(Err(Unwritten::NotXref { id, at: offset }));
         }
-        Ok(Ok((id, object, record.at.end)))
+        Ok(Ok((id, object, record.at.end())))
     }
 
     /// The rows of cross-reference stream `id`, written at `offset`, read
@@ -3540,7 +3541,7 @@ impl Reader {
             Value::Stream(stream) => stream.data.at(),
             _ => None,
         };
-        let written = at.map(|at| file.get(at.start..at.end)).transpose()?;
+        let written = at.map(|at| file.get(at.range())).transpose()?;
         let written = written.flatten().unwrap_or_default();
         let rows = self.rows_of(
             file, cx, offset, id, object, &written, decoded, own, decoder,
@@ -3747,7 +3748,7 @@ impl Reader {
             let len = file.len();
             cx.tell(
                 Some(id),
-                object.at,
+                object.at(),
                 Fault::StreamEntries { past, most, len },
             );
         }
@@ -3760,7 +3761,7 @@ impl Reader {
             )
         };
         if own && cx.wants && !listed() {
-            cx.tell(Some(id), object.at, Fault::Unlisted { id });
+            cx.tell(Some(id), object.at(), Fault::Unlisted { id });
         }
         Ok(entries)
     }
@@ -3771,7 +3772,7 @@ impl Reader {
         let Value::Stream(stream) = object.value() else {
             return None;
         };
-        let data = (stream.data.at()).and_then(|at| file.get(at.start..at.end))?;
+        let data = (stream.data.at()).and_then(|at| file.get(at.range()))?;
         self.written(file, &stream.dict, data)
     }
 
@@ -3780,8 +3781,8 @@ impl Reader {
     fn written<'a>(&self, file: &'a [u8], dict: &Dict, data: &'a [u8]) -> Option<Written<'a>> {
         let as_written = |key: &[u8]| {
             let value = dict.get(key)?;
-            let at = (value.at).filter(|_| !matches!(value.value(), Value::Ref(_)))?;
-            file.get(at.start..at.end)
+            let at = (value.at()).filter(|_| !matches!(value.value(), Value::Ref(_)))?;
+            file.get(at.range())
         };
         let filter = as_written(b"Filter")?;
         let parms = match dict.has(b"DecodeParms") {
@@ -3923,7 +3924,7 @@ impl Reader {
         }
         if let Some(object) = found {
             if !taken.is_empty() {
-                cx.tell(None, object.at, Fault::Taken { keys: taken });
+                cx.tell(None, object.at(), Fault::Taken { keys: taken });
             }
             return Trailer {
                 stream: None,
@@ -4001,7 +4002,7 @@ impl Reader {
             };
         };
         if !taken.is_empty() {
-            cx.tell(None, object.at, Fault::Taken { keys: taken });
+            cx.tell(None, object.at(), Fault::Taken { keys: taken });
         }
         Trailer {
             stream: Some(id),
@@ -4091,7 +4092,7 @@ impl Reader {
                     (None, Some(*id), Uncrypt::InObjectStream)
                 }
                 None | Some((_, XrefEntry::Free)) => {
-                    cx.tell(None, encrypt.at, Fault::NoEncrypt { id: *id });
+                    cx.tell(None, encrypt.at(), Fault::NoEncrypt { id: *id });
                     return Ok(());
                 }
             },
@@ -4116,7 +4117,7 @@ impl Reader {
                 why: why.clone(),
                 strings: self.list.strings,
             };
-            cx.tell(None, encrypt.at, fault);
+            cx.tell(None, encrypt.at(), fault);
         }
         Ok(())
     }
@@ -4208,7 +4209,7 @@ impl Reader {
         // Where a key is made, or would be by a password: the handler
         // takes the dictionary.
         if no_id && matches!(opened, Ok(_) | Err(Refused::Password)) {
-            let at = trailer.dict().get(b"ID").and_then(|o| o.at);
+            let at = trailer.dict().get(b"ID").and_then(Object::at);
             cx.tell(None, at, Fault::NoId);
         }
         // Followed as /StmF is: a null is no entry (7.3.9), and so is a
@@ -4343,18 +4344,18 @@ impl Reader {
             )
         };
         let cut =
-            container.cut && open(&object) && object.at.is_some_and(|at| at.end == data.len());
+            container.cut && open(&object) && object.at().is_some_and(|at| at.end() == data.len());
         if cut {
             return Err(Unread::Cut { stream });
         }
         // Every value the parser reads is placed, in the data it read.
-        let at = (object.at).unwrap_or(Span::new(Some(ObjectId::new(stream, 0)), offset, offset));
-        let bytes = data.get(at.start..at.end);
+        let at = (object.at()).unwrap_or(Span::new(Some(ObjectId::new(stream, 0)), offset, offset));
+        let bytes = data.get(at.range());
         debug_assert!(
             bytes.is_some(),
             "{id}'s bytes {}..{} past its stream's data",
-            at.start,
-            at.end
+            at.start(),
+            at.end()
         );
         let record = Record {
             source: self.id,
@@ -4408,7 +4409,8 @@ impl Reader {
         expected: Option<ObjectId>,
     ) -> Result<Indirect, F::Error> {
         let mut parser = w.parser(offset).limits(self.limits.parser);
-        let id = match w.parsed(parser.header()) {
+        let mut head_cx = Cx::new(cx.wants);
+        let id = match w.parsed(parser.header(&mut head_cx.parsed(None))) {
             Ok(id) => id,
             Err(error) => return Ok(Err(Unread::Parse(error))),
         };
@@ -4421,6 +4423,10 @@ impl Reader {
                 expected,
             }));
         }
+        for (mut place, fault) in head_cx.faults {
+            place.object = Some(id);
+            cx.faults.push((place, fault));
+        }
         let mut parser = parser.ciphertext(self.list.encrypted(id));
         // Where its value starts, at its first token past here.
         let value = parser.offset();
@@ -4429,8 +4435,12 @@ impl Reader {
             Ok(body) => body,
             Err(error) => return Ok(Err(Unread::Parse(error))),
         };
-        let (object, data, end) = match body {
-            Body::Object(object) => (object, None, parser.offset()),
+        let (object, data, end, has_endobj) = match body {
+            Body::Object(object) => {
+                let value_end = object.at().map_or(value, |at| at.end());
+                let end = parser.offset();
+                (object, None, end, end > value_end)
+            }
             Body::Stream(head) => {
                 let length = self.length(file, cx, head.dict(), id)?;
                 let declared = length.and_then(|len| head.declared(len));
@@ -4449,7 +4459,7 @@ impl Reader {
                     Some(data) => data,
                     None => {
                         let written = head.dict().get(b"Length");
-                        let at = (written.and_then(|l| l.at)).unwrap_or(head.keyword());
+                        let at = (written.and_then(Object::at)).unwrap_or(head.keyword());
                         let fault = match written.map(Object::value) {
                             Some(Value::Ref(_)) if is_xref(head.dict()) => Fault::XrefLength,
                             _ => Fault::Length { length },
@@ -4469,19 +4479,21 @@ impl Reader {
                 };
                 let read = match ended {
                     Some(_) => self.ended_stream(w, &mut parser, head, data, value, id, cx),
-                    None => (w.parsed(parser.stream(head, data, &mut cx.parsed(Some(id)))))
-                        .map(|object| (object, parser.offset())),
+                    None => (w.parsed(parser.stream(head, data, &mut cx.parsed(Some(id))))).map(
+                        |object| {
+                            let stream_end = object.at().map_or(data.end(), |at| at.end());
+                            let end = parser.offset();
+                            (object, end, end > stream_end)
+                        },
+                    ),
                 };
                 match read {
-                    Ok((object, end)) => (object, Some(extent), end),
+                    Ok((object, end, has_endobj)) => (object, Some(extent), end, has_endobj),
                     Err(error) => return Ok(Err(Unread::Parse(error))),
                 }
             }
         };
-        let endobj =
-            (w.significant(&mut w.tokenizer(end))).filter(|token| token.is_keyword(b"endobj"));
         let start = (w.significant(&mut w.tokenizer(offset))).map_or(offset, |n| w.place(n.start));
-        let end = endobj.as_ref().map_or(end, |token| w.place(token.end()));
         // Its bytes are in the window, always: where it starts and ends are
         // a token's or the parser's in it, and a read that runs to the
         // window's end touches it and is read again in a larger one. So
@@ -4499,7 +4511,7 @@ impl Reader {
             id,
             origin: Origin::File,
             at: span(start, end),
-            endobj: endobj.is_some(),
+            endobj: has_endobj,
             data,
             hash: Record::hash_of(bytes.unwrap_or_default()),
         };
@@ -4523,10 +4535,10 @@ impl Reader {
     /// it's placed from its dictionary to its data's end, and where the
     /// reader's tokens don't read `endobj` there, as the scan's, taking
     /// PDFium's white-space, may, the parser's fault for it is told, as its
-    /// look past `endstream` tells it. With where its bytes end, at the
-    /// data's end; or the parser's error where it would give one, as where
-    /// more of the file could change what the stream's `/Length` reads
-    /// ([`parse::Error::Short`]), so that a window read by position is read
+    /// look past `endstream` tells it. With where its bytes end and whether
+    /// `endobj` followed; or the parser's error where it would give one, as
+    /// where more of the file could change what the stream's `/Length` reads
+    /// (`parse::ErrorKind::Short`), so that a window read by position is read
     /// again in a larger one.
     #[allow(clippy::too_many_arguments)]
     fn ended_stream<'w>(
@@ -4538,7 +4550,7 @@ impl Reader {
         value: usize,
         id: ObjectId,
         cx: &mut Cx,
-    ) -> Result<(Object, usize), parse::Error> {
+    ) -> Result<(Object, usize, bool), parse::Error> {
         // The parser's own read of the data, which looks for `endstream`
         // past it, so that the window is read again where more of the file
         // could change what that look, or the head's `/Length`, read. It
@@ -4548,26 +4560,30 @@ impl Reader {
         // parser reads it.
         let probe = w.parsed(parser.stream(head.clone(), data, &mut ()));
         match probe {
-            Err(parse::Error::Endstream { .. }) => {}
+            Err(e) if matches!(e.kind(), parse::ErrorKind::Endstream { .. }) => {}
             Err(error) => return Err(error),
             Ok(_) => {
                 let object = w.parsed(parser.stream(head, data, &mut cx.parsed(Some(id))))?;
-                return Ok((object, parser.offset()));
+                let stream_end = object.at().map_or(data.end(), |at| at.end());
+                let end = parser.offset();
+                return Ok((object, end, end > stream_end));
             }
         }
         let dict = (w.significant(&mut w.tokenizer(value))).map_or(value, |t| w.place(t.start));
         let mut stream = pdf_objects::object::Stream::default();
         stream.dict = head.dict().clone();
         stream.data = pdf_objects::object::Data::At(data);
-        let object = Object::from(stream).at(span(dict, data.end));
-        if cx.wants {
-            let next = w.significant(&mut w.tokenizer(data.end));
-            if !next.is_some_and(|token| token.is_keyword(b"endobj")) {
-                let fault = parse::Fault::NoEndobj { id };
-                parse::Sink::fault(&mut cx.parsed(Some(id)), span(dict, data.end), fault);
-            }
+        let object = Object::from(stream).with_span(span(dict, data.end()));
+        let endobj = (w.significant(&mut w.tokenizer(data.end())))
+            .filter(|token| token.is_keyword(b"endobj"));
+        if cx.wants && endobj.is_none() {
+            let fault = parse::Fault::NoEndobj { id };
+            parse::Sink::fault(&mut cx.parsed(Some(id)), span(dict, data.end()), fault);
         }
-        Ok((object, data.end))
+        let end = endobj
+            .as_ref()
+            .map_or(data.end(), |token| w.place(token.end()));
+        Ok((object, end, endobj.is_some()))
     }
 
     /// A stream's `/Length`: an integer, or a reference to one, read again
@@ -5231,7 +5247,7 @@ fn stream_type(file: &[u8], at: usize, bound: usize, limits: parse::Limits) -> N
     #[cfg(test)]
     scan_read(bound - at);
     let mut parser = Parser::at(bytes, at).limits(limits);
-    let Ok(id) = parser.header() else {
+    let Ok(id) = parser.header(&mut ()) else {
         return Named::Neither;
     };
     let Ok(Body::Stream(head)) = parser.body(id, &mut ()) else {
@@ -5657,8 +5673,7 @@ fn is_xref_stream(o: &Object) -> bool {
 /// an earlier one's dictionary, `earlier`: each key taken added to `taken`
 /// where faults are wanted (`wants`) ([`Fault::Taken`]).
 fn take_document_keys(trailer: &mut Object, earlier: &Dict, taken: &mut Vec<Vec<u8>>, wants: bool) {
-    let at = trailer.at;
-    let last = match trailer.value_mut() {
+    let last = match trailer.as_written_mut() {
         Value::Dict(dict) => dict,
         Value::Stream(stream) => &mut stream.dict,
         _ => return,
@@ -5671,10 +5686,6 @@ fn take_document_keys(trailer: &mut Object, earlier: &Dict, taken: &mut Vec<Vec<
             }
         }
     }
-    // An edit, which drops its span; but the trailer this makes stands
-    // where the last was written, which its fault, and what's reported of
-    // it, point at.
-    trailer.at = at;
 }
 
 /// In an encrypted file it opened, object `id`'s strings in plain view
@@ -5732,7 +5743,7 @@ fn decrypt(
             Ok(plain) => {
                 let left = decrypted(object, &plain);
                 if left > 0 {
-                    let place = Place::new(Some(id), object.at);
+                    let place = Place::new(Some(id), object.at());
                     sink.fault(place, Fault::Ciphertext { left, id });
                 }
             }
@@ -5750,14 +5761,14 @@ fn decrypt(
 /// taken as plain, as it isn't encrypted (ISO 32000-2, 7.6.2). Each fault
 /// counted in `faults`, with where it was first, where they're counted.
 fn plaintext(o: &mut Object, id: ObjectId, handler: &Handler, faults: &mut Option<Unclean>) {
-    let at = o.at;
+    let at = o.at();
     // A dictionary's values, or a stream's dictionary's.
     let mut entries = |d: &mut Dict| {
         let signature = crypt::signature(d);
         for entry in d.entries_mut() {
-            match signature && entry.key == b"Contents" {
-                true => plain_strings(&mut entry.value),
-                false => plaintext(&mut entry.value, id, handler, faults),
+            match signature && entry.key() == b"Contents" {
+                true => plain_strings(entry.value_mut()),
+                false => plaintext(entry.value_mut(), id, handler, faults),
             }
         }
     };
@@ -5765,7 +5776,7 @@ fn plaintext(o: &mut Object, id: ObjectId, handler: &Handler, faults: &mut Optio
         Value::String(s, _) => {
             if let Str::Encrypted(bytes) = s {
                 match handler.decrypt_string(id.into(), bytes) {
-                    Ok(plain) => *s = Str::Bytes(plain),
+                    Ok(plain) => *s = Str::bytes(plain),
                     Err(error) => {
                         if let Some(faults) = faults {
                             let words = error.fault.to_string();
@@ -5773,7 +5784,7 @@ fn plaintext(o: &mut Object, id: ObjectId, handler: &Handler, faults: &mut Optio
                             faults.entry(words).or_insert((fault, 0, at)).1 += 1;
                         }
                         if let Some(plain) = error.data {
-                            *s = Str::Bytes(plain);
+                            *s = Str::bytes(plain);
                         }
                     }
                 }
@@ -5801,8 +5812,8 @@ fn plain_strings(o: &mut Object) {
                 }
             }
             Value::Array(a) => stack.extend(a.iter_mut()),
-            Value::Dict(d) => stack.extend(d.entries_mut().map(|entry| &mut entry.value)),
-            Value::Stream(s) => stack.extend(s.dict.entries_mut().map(|entry| &mut entry.value)),
+            Value::Dict(d) => stack.extend(d.entries_mut().map(Entry::value_mut)),
+            Value::Stream(s) => stack.extend(s.dict.entries_mut().map(Entry::value_mut)),
             _ => {}
         }
     }
@@ -5813,7 +5824,7 @@ fn ciphertexts(value: &Value) -> usize {
     let entries = |d: &Dict| -> usize {
         d.entries()
             .iter()
-            .map(|e| ciphertexts(e.value.value()))
+            .map(|e| ciphertexts(e.value().value()))
             .sum()
     };
     match value {
@@ -5836,17 +5847,16 @@ fn decrypted(object: &mut Object, plain: &Object) -> usize {
         let mut entries: Vec<&mut Entry> = d.entries_mut().collect();
         entries.reverse();
         (entries.into_iter())
-            .map(|entry| match p.get(&entry.key) {
-                Some(p) if placed.insert(entry.key.clone()) => decrypted(&mut entry.value, p),
-                _ => ciphertexts(entry.value.value()),
+            .map(|entry| match p.get(entry.key()) {
+                Some(p) if placed.insert(entry.key_name().clone()) => {
+                    decrypted(entry.value_mut(), p)
+                }
+                _ => ciphertexts(entry.value().value()),
             })
             .sum()
     };
     match (object.as_written_mut(), plain.value()) {
-        (
-            Value::String(s @ Str::Encrypted(_), _),
-            Value::String(p @ (Str::Bytes(_) | Str::Text(_)), _),
-        ) => {
+        (Value::String(s @ Str::Encrypted(_), _), Value::String(p @ Str::Bytes(_), _)) => {
             *s = p.clone();
             0
         }
@@ -5911,17 +5921,17 @@ fn holds_linearization<'f, F: Bytes<'f>>(
         return Ok(false);
     };
     let mut parser = (Parser::at(&head, 0).window(header, end == file.len())).limits(limits);
-    if parser.header().is_err() {
+    if parser.header(&mut ()).is_err() {
         return Ok(false);
-    }
+    };
     // A dictionary that doesn't end within the bytes read runs past the
     // 1024, and so does one the window cuts short.
     let Ok(first) = parser.value(&mut ()) else {
         return Ok(false);
     };
     let within = first
-        .at
-        .is_some_and(|at| at.end <= header.saturating_add(1024));
+        .at()
+        .is_some_and(|at| at.end() <= header.saturating_add(1024));
     let Some(dict) = first.as_dict().filter(|_| within) else {
         return Ok(false);
     };
@@ -6155,7 +6165,7 @@ pub(crate) mod tests {
             for id in [ObjectId::new(2, 0), ObjectId::new(3, 0)] {
                 let record = doc.record(id);
                 assert!(
-                    record.is_some_and(|r| r.at.stream == Some(container)),
+                    record.is_some_and(|r| r.at.stream() == Some(container)),
                     "{name}"
                 );
                 assert_eq!(record, read.record(id), "{name}: {id:?}");
@@ -6190,7 +6200,7 @@ pub(crate) mod tests {
     fn plain_dict(d: &Dict) -> Dict {
         let mut plain_d = Dict::new();
         for entry in d.entries() {
-            plain_d.push(&entry.key, plain(&entry.value));
+            plain_d.push(entry.key(), plain(entry.value()));
         }
         plain_d
     }
@@ -6212,13 +6222,13 @@ pub(crate) mod tests {
                 let mut stack = vec![&mut o];
                 while let Some(o) = stack.pop() {
                     match o.value_mut() {
-                        Value::String(s, _) => *s = Str::Bytes(Vec::new()),
+                        Value::String(s, _) => *s = Str::bytes(Vec::new()),
                         Value::Array(a) => stack.extend(a.iter_mut()),
                         Value::Dict(d) => {
-                            stack.extend(d.entries_mut().map(|entry| &mut entry.value));
+                            stack.extend(d.entries_mut().map(|entry| entry.value_mut()));
                         }
                         Value::Stream(s) => {
-                            stack.extend(s.dict.entries_mut().map(|entry| &mut entry.value));
+                            stack.extend(s.dict.entries_mut().map(|entry| entry.value_mut()));
                         }
                         _ => {}
                     }
@@ -6226,9 +6236,10 @@ pub(crate) mod tests {
             }
             o
         };
-        let at =
-            o.at.expect("a value from the file says where it was written");
-        let written = &file[at.start..at.end];
+        let at = o
+            .at()
+            .expect("a value from the file says where it was written");
+        let written = &file[at.range()];
         assert!(!written.is_empty(), "a value is a byte or more");
         let (first, last) = (written[0], written[written.len() - 1]);
         assert!(
@@ -6250,35 +6261,35 @@ pub(crate) mod tests {
         }
         // Read again from the file cut at the value's end: a place that
         // ends short leaves it unfinished.
-        let cut = &file[..at.end];
-        let again = Parser::at(cut, at.start).value(&mut ()).unwrap();
+        let cut = &file[..at.end()];
+        let again = Parser::at(cut, at.start()).value(&mut ()).unwrap();
         match o.value() {
             Value::Stream(s) => {
                 let dict = same(&Object::new(Value::Dict(s.dict.clone())));
                 assert_eq!(same(&again), dict);
-                assert!(file[at.start..at.end].ends_with(b"endstream"));
+                assert!(file[at.range()].ends_with(b"endstream"));
                 let data = s.data.at().expect("a stream says where its data is");
-                assert!(at.start < data.start && data.end < at.end);
+                assert!(at.start() < data.start() && data.end() < at.end());
             }
             _ => {
                 assert_eq!(same(&again), same(o));
                 // Read again, it's placed in what it's read from.
-                let range = |o: &Object| o.at.map(|at| at.start..at.end);
+                let range = |o: &Object| o.at().map(|at| at.range());
                 assert_eq!(
                     range(&again),
                     range(o),
                     "{:?}",
-                    String::from_utf8_lossy(&file[at.start..at.end])
+                    String::from_utf8_lossy(&file[at.range()])
                 );
             }
         }
         let entries = |d: &Dict| {
             for entry in d.entries() {
                 let key_at = entry
-                    .key_at
+                    .key_at()
                     .expect("a key from the file says where it was written");
-                assert_eq!(file[key_at.start], b'/');
-                placed_as(file, &entry.value, strings);
+                assert_eq!(file[key_at.start()], b'/');
+                placed_as(file, entry.value(), strings);
             }
         };
         match o.value() {
@@ -6302,17 +6313,17 @@ pub(crate) mod tests {
         vec![
             (
                 1,
-                dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into(),
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) }.into(),
             ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::reference(3)], "Count" => 1 }
                     .into(),
             ),
             (
                 3,
                 dict! {
-                    "Type" => "Page",
+                    "Type" => Object::name("Page"),
                     "Parent" => Object::reference(2),
                     "MediaBox" => numbers(&[0.0, 0.0, 612.5, 792.0]),
                     "Annots" => vec![Object::reference(4)],
@@ -6322,8 +6333,8 @@ pub(crate) mod tests {
             (
                 4,
                 dict! {
-                    "Type" => "Annot",
-                    "Subtype" => "Text",
+                    "Type" => Object::name("Annot"),
+                    "Subtype" => Object::name("Text"),
                     "Rect" => numbers(&[100.0, 100.0, 120.0, 120.0]),
                     "Contents" => Object::text("A (note) é\\"),
                     "NM" => Object::bytes(vec![0, 255, b'\r']),
@@ -6336,7 +6347,7 @@ pub(crate) mod tests {
             ),
             (
                 5,
-                Body::stream(dict! { "Subtype" => "Form" }, b"0 0 m 20 20 l S"),
+                Body::stream(dict! { "Subtype" => Object::name("Form") }, b"0 0 m 20 20 l S"),
             ),
         ]
     }
@@ -6365,7 +6376,7 @@ pub(crate) mod tests {
                         d.set("Length", data.len() as i64);
                         assert_eq!(plain_dict(&s.dict), plain_dict(&d));
                         let at = s.data.at().unwrap();
-                        assert_eq!(&file[at.start..at.end], &data[..]);
+                        assert_eq!(&file[at.range()], &data[..]);
                     }
                 }
                 placed(&file, read);
@@ -6392,7 +6403,7 @@ pub(crate) mod tests {
             panic!("not a stream");
         };
         let at = s.data.at().unwrap();
-        assert_eq!(&file[at.start..at.end], b"abcdef");
+        assert_eq!(&file[at.range()], b"abcdef");
         assert_eq!(
             *s.dict.get(b"Length").unwrap().value(),
             Value::Ref(ObjectId::new(3, 0)),
@@ -6431,7 +6442,7 @@ pub(crate) mod tests {
                 panic!("not a stream");
             };
             let at = s.data.at().unwrap();
-            assert_eq!(&file[at.start..at.end], b"abcdef\n");
+            assert_eq!(&file[at.range()], b"abcdef");
             let length = s.dict.get(b"Length").unwrap();
             assert_eq!(
                 *length.value(),
@@ -6439,7 +6450,7 @@ pub(crate) mod tests {
                 "as written"
             );
             let fault = (
-                Place::new(Some(ObjectId::new(2, 0)), length.at),
+                Place::new(Some(ObjectId::new(2, 0)), length.at()),
                 Fault::Length { length: None },
             );
             assert_eq!(doc.faults(), [fault]);
@@ -6479,12 +6490,12 @@ pub(crate) mod tests {
         let data = |n: u32| match doc.get(ObjectId::new(n, 0)).unwrap().value() {
             Value::Stream(s) => {
                 let at = s.data.at().unwrap();
-                file[at.start..at.end].to_vec()
+                file[at.range()].to_vec()
             }
             _ => panic!("{n} 0 R isn't a stream"),
         };
-        assert_eq!(data(2), b"abcdef\n");
-        assert_eq!(data(3), b"xy\n");
+        assert_eq!(data(2), b"abcdef");
+        assert_eq!(data(3), b"xy");
         assert_eq!(data(4), b"xy");
         assert!(
             doc.faults()
@@ -6507,7 +6518,7 @@ pub(crate) mod tests {
     #[test]
     fn an_update_reads_newest_first() {
         let base: Vec<(u32, Body)> = vec![
-            (1, dict! { "Type" => "Catalog" }.into()),
+            (1, dict! { "Type" => Object::name("Catalog") }.into()),
             (2, dict! { "A" => 1 }.into()),
             (3, dict! { "B" => 2 }.into()),
         ];
@@ -6647,7 +6658,7 @@ pub(crate) mod tests {
     fn each_revision_is_kept_with_its_trailer_and_the_numbers_it_lists() {
         // One section.
         let base: Vec<(u32, Body)> = vec![
-            (1, dict! { "Type" => "Catalog" }.into()),
+            (1, dict! { "Type" => Object::name("Catalog") }.into()),
             (2, dict! { "A" => 1 }.into()),
             (3, dict! { "B" => 2 }.into()),
         ];
@@ -6795,8 +6806,8 @@ pub(crate) mod tests {
         let warning = &doc.faults()[0];
         assert!(warning.1.to_string().contains("object 2"), "{warning:?}");
         let at = warning.0.at.unwrap();
-        let written = &file[at.start..at.end];
-        assert_eq!(at.start, row, "the row");
+        let written = &file[at.range()];
+        assert_eq!(at.start(), row, "the row");
         assert!(
             written.ends_with(b" 65536 n") && written.len() == 18,
             "{:?}",
@@ -6807,13 +6818,7 @@ pub(crate) mod tests {
     /// The faults reading `file` gives, each in its words, and where each is.
     fn warned(file: &[u8]) -> Vec<(String, Option<ObjectId>, Option<std::ops::Range<usize>>)> {
         (document(file, &Options::DEFAULT).faults().iter())
-            .map(|w| {
-                (
-                    w.1.to_string(),
-                    w.0.object,
-                    w.0.at.map(|at| at.start..at.end),
-                )
-            })
+            .map(|w| (w.1.to_string(), w.0.object, w.0.at.map(|at| at.range())))
             .collect()
     }
 
@@ -7076,8 +7081,8 @@ pub(crate) mod tests {
         );
         // Given what it lacks, it's still placed where the last trailer
         // was written, and so is the fault.
-        let at = doc.trailer.object.at.expect("placed");
-        assert_eq!(&file[at.start..at.end], b"<< /Size 6 >>");
+        let at = doc.trailer.object.at().expect("placed");
+        assert_eq!(&file[at.range()], b"<< /Size 6 >>");
         let warning = doc.faults().iter().find(|w| w.1.to_string() == message);
         assert_eq!(warning.map(|w| w.0.at), Some(Some(at)));
     }
@@ -7097,9 +7102,9 @@ pub(crate) mod tests {
             Some(&b"Pages"[..])
         );
         let first = catalog.duplicates().next().unwrap();
-        assert_eq!(first.value.as_name(), Some(&b"Catalog"[..]));
-        let key_at = first.key_at.unwrap();
-        assert_eq!(&file[key_at.start..key_at.end], b"/Type");
+        assert_eq!(first.value().as_name(), Some(&b"Catalog"[..]));
+        let key_at = first.key_at().unwrap();
+        assert_eq!(&file[key_at.range()], b"/Type");
     }
 
     #[test]
@@ -7129,15 +7134,15 @@ pub(crate) mod tests {
             _ => panic!("not a string"),
         };
         let doc = encrypted("2");
-        assert_eq!(string(&doc, 1, b"Lang"), Str::Encrypted(b"en".to_vec()));
-        assert_eq!(string(&doc, 2, b"O"), Str::Bytes(b"owner".to_vec()));
+        assert_eq!(string(&doc, 1, b"Lang"), Str::encrypted(b"en"));
+        assert_eq!(string(&doc, 2, b"O"), Str::bytes(b"owner"));
         let id = doc.trailer.dict().get(b"ID").unwrap();
         assert!(
             matches!(id.value(), Value::Array(a) if matches!(a[0].value(), Value::String(Str::Bytes(_), _)))
         );
         // A version 4 dictionary without /StrF leaves strings as they are.
         let doc = encrypted("4");
-        assert_eq!(string(&doc, 1, b"Lang"), Str::Bytes(b"en".to_vec()));
+        assert_eq!(string(&doc, 1, b"Lang"), Str::bytes(b"en"));
 
         // A null /Encrypt, or one that refers to no object, is none.
         for (encrypt, warned) in [("null", false), ("9 0 R", true)] {
@@ -7147,11 +7152,7 @@ pub(crate) mod tests {
                 &format!("<< /Size 2 /Root 1 0 R /Encrypt {encrypt} >>"),
             );
             let doc = document(&file, &Options::DEFAULT);
-            assert_eq!(
-                string(&doc, 1, b"Lang"),
-                Str::Bytes(b"en".to_vec()),
-                "{encrypt}"
-            );
+            assert_eq!(string(&doc, 1, b"Lang"), Str::bytes(b"en"), "{encrypt}");
             assert_eq!(
                 doc.faults().len(),
                 usize::from(warned),
@@ -7165,9 +7166,12 @@ pub(crate) mod tests {
         let objects: Vec<(u32, Body)> = vec![
             (
                 1,
-                dict! { "Type" => "Catalog", "Lang" => Object::text("en") }.into(),
+                dict! { "Type" => Object::name("Catalog"), "Lang" => Object::text("en") }.into(),
             ),
-            (2, dict! { "Filter" => "Standard", "V" => 2 }.into()),
+            (
+                2,
+                dict! { "Filter" => Object::name("Standard"), "V" => 2 }.into(),
+            ),
         ];
         let trailer = dict! {
             "Root" => Object::reference(1),
@@ -7176,7 +7180,7 @@ pub(crate) mod tests {
         };
         let file = fixture::file("1.7", &objects, trailer, Xref::Stream);
         let doc = document(&file, &Options::DEFAULT);
-        assert_eq!(string(&doc, 1, b"Lang"), Str::Encrypted(b"en".to_vec()));
+        assert_eq!(string(&doc, 1, b"Lang"), Str::encrypted(b"en"));
         let id = |o: &Object| o.as_dict().unwrap().get(b"ID").unwrap().clone();
         let written = Object::from(vec![Object::bytes(b"01".to_vec())]);
         assert_eq!(plain(&id(&doc.trailer.object)), written);
@@ -7202,8 +7206,8 @@ pub(crate) mod tests {
             .get(b"Pages")
             .unwrap();
         assert_eq!(*pages.value(), Value::Ref(ObjectId::new(2, 0)));
-        let at = pages.at.unwrap();
-        assert_eq!(&file[at.start..at.end], b"2 % a comment\n 0\r\nR");
+        let at = pages.at().unwrap();
+        assert_eq!(&file[at.range()], b"2 % a comment\n 0\r\nR");
     }
 
     #[test]
@@ -7330,7 +7334,7 @@ pub(crate) mod tests {
                 ok += 1;
                 if i % 50 == 0 {
                     // In the file, or in an object stream's data.
-                    let within = match object.at.and_then(|at| at.stream) {
+                    let within = match object.at().and_then(|at| at.stream()) {
                         Some(stream) => &doc.decoded[&stream][..],
                         None => &data[..],
                     };
@@ -7533,10 +7537,10 @@ pub(crate) mod tests {
         assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.trailer.unwritten, None);
         let pages = doc.get(ObjectId::new(2, 0)).unwrap();
-        let at = pages.at.unwrap();
-        assert_eq!(at.stream, Some(ObjectId::new(4, 0)));
+        let at = pages.at().unwrap();
+        assert_eq!(at.stream(), Some(ObjectId::new(4, 0)));
         assert_eq!(
-            &doc.decoded[&ObjectId::new(4, 0)][at.start..at.end],
+            &doc.decoded[&ObjectId::new(4, 0)][at.range()],
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Mine (plain) >>"
         );
         assert!(doc.get(ObjectId::new(3, 0)).is_ok());
@@ -7624,7 +7628,7 @@ pub(crate) mod tests {
             };
             assert_eq!(warning.0.object, Some(ObjectId::new(4, 0)), "{filter}");
             let at = warning.0.at.unwrap();
-            (warning.1.to_string(), file[at.start..at.end].to_vec())
+            (warning.1.to_string(), file[at.range()].to_vec())
         };
         // A fault with a place in the data as written: its byte.
         let (message, at) = warned(" /Filter /AHx", &[&hex[..], b"zz>"].concat());
@@ -7969,27 +7973,27 @@ pub(crate) mod tests {
     /// `extra` strings of the note's object as written, to be encrypted.
     pub(super) fn to_encrypt(extra: &[&[u8]]) -> Vec<(u32, Body)> {
         let mut note = dict! {
-            "Type" => "Annot",
-            "Subtype" => "Text",
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Text"),
             "Rect" => vec![Object::from(0), Object::from(0), Object::from(9), Object::from(9)],
             "Contents" => Object::text("A note"),
         };
         if !extra.is_empty() {
             let raw: Vec<Object> = (extra.iter())
-                .map(|b| Object::new(Value::String(Str::Encrypted(b.to_vec()), None)))
+                .map(|b| Object::new(Value::String(Str::encrypted(*b), None)))
                 .collect();
             note.set("Raw", raw);
         }
         let signature = dict! {
-            "Type" => "Sig",
-            "Filter" => "Adobe.PPKLite",
+            "Type" => Object::name("Sig"),
+            "Filter" => Object::name("Adobe.PPKLite"),
             "ByteRange" => vec![Object::from(0), Object::from(1), Object::from(2), Object::from(3)],
-            "Contents" => Object::new(Value::String(Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]), None)),
+            "Contents" => Object::new(Value::String(Str::bytes(vec![0x30, 0x82, 0x00, 0x01]), None)),
         };
         vec![
-            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Lang" => Object::text("en") }.into()),
-            (2, dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }.into()),
-            (3, dict! { "Type" => "Page", "Parent" => Object::reference(2), "Annots" => vec![Object::reference(4)] }.into()),
+            (1, dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2), "Lang" => Object::text("en") }.into()),
+            (2, dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::reference(3)], "Count" => 1 }.into()),
+            (3, dict! { "Type" => Object::name("Page"), "Parent" => Object::reference(2), "Annots" => vec![Object::reference(4)] }.into()),
             (4, note.into()),
             (5, signature.into()),
         ]
@@ -8051,26 +8055,26 @@ pub(crate) mod tests {
                 let lang = get(1, b"Lang");
                 assert_eq!(
                     *lang.value(),
-                    Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                    Value::String(Str::bytes(b"en"), Some(Form::Literal)),
                     "{kind:?}"
                 );
                 // Where the string is written, as ciphertext.
-                let at = lang.at.unwrap();
+                let at = lang.at().unwrap();
                 assert!(
-                    matches!(file[at.start], b'(' | b'<')
-                        && !file[at.start..at.end].starts_with(b"(en)"),
+                    matches!(file[at.start()], b'(' | b'<')
+                        && !file[at.range()].starts_with(b"(en)"),
                     "{kind:?}"
                 );
                 assert_eq!(
                     *get(4, b"Contents").value(),
-                    Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
+                    Value::String(Str::bytes(b"A note"), Some(Form::Literal)),
                     "{kind:?}"
                 );
                 // A signature's /Contents isn't encrypted, so not decrypted.
                 assert_eq!(
                     *get(5, b"Contents").value(),
                     Value::String(
-                        Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]),
+                        Str::bytes(vec![0x30, 0x82, 0x00, 0x01]),
                         Some(Form::Literal)
                     ),
                     "{kind:?}"
@@ -8128,20 +8132,20 @@ pub(crate) mod tests {
             let lang = get(1, b"Lang");
             assert_eq!(
                 *lang.value(),
-                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"en"), Some(Form::Literal)),
                 "{typed}"
             );
-            let at = lang.at.unwrap();
-            assert!(!file[at.start..at.end].starts_with(b"(en)"), "{typed}");
+            let at = lang.at().unwrap();
+            assert!(!file[at.range()].starts_with(b"(en)"), "{typed}");
             assert_eq!(
                 *get(4, b"Contents").value(),
-                Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"A note"), Some(Form::Literal)),
                 "{typed}"
             );
             assert_eq!(
                 *get(5, b"Contents").value(),
                 Value::String(
-                    Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]),
+                    Str::bytes(vec![0x30, 0x82, 0x00, 0x01]),
                     Some(Form::Literal)
                 ),
                 "{typed}"
@@ -8180,10 +8184,11 @@ pub(crate) mod tests {
         assert_eq!(why, pdf_crypt::Refused::Password);
         // Metadata not encrypted.
         let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
-        let metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+        let metadata =
+            dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") };
         let objects = [
-            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
-            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+            (1, dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+            (2, dict! { "Type" => Object::name("Pages"), "Kids" => vec![], "Count" => 0 }.into()),
             (3, Body::stream(metadata, xmp)),
         ];
         let file = created("user", false, &objects);
@@ -8265,7 +8270,7 @@ pub(crate) mod tests {
                 assert!(doc.faults().is_empty(), "{what}: {:?}", doc.faults());
                 let object = doc.get(ObjectId::new(4, 0)).unwrap();
                 let note = object.as_dict().unwrap().get(b"Contents").unwrap();
-                let plain = Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal));
+                let plain = Value::String(Str::bytes(b"A note"), Some(Form::Literal));
                 assert_eq!(*note.value(), plain, "{what}");
                 let (_, handler) = read_opened_by(&file, passwords);
                 assert_eq!(handler.unwrap().permissions(), written, "{what}");
@@ -8545,7 +8550,7 @@ pub(crate) mod tests {
             assert_eq!(doc.encryption, Encryption::Plain);
             assert!(doc.faults().is_empty(), "{:?}", doc.faults());
             assert_eq!(
-                doc.get(ObjectId::new(2, 0)).unwrap().at.unwrap().stream,
+                doc.get(ObjectId::new(2, 0)).unwrap().at().unwrap().stream(),
                 Some(ObjectId::new(4, 0))
             );
             let lang = doc
@@ -8556,7 +8561,7 @@ pub(crate) mod tests {
                 .get(b"Lang");
             assert_eq!(
                 *lang.unwrap().value(),
-                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
+                Value::String(Str::bytes(b"en"), Some(Form::Literal))
             );
         }
         // Its password opens it all the same.
@@ -8667,7 +8672,7 @@ pub(crate) mod tests {
                 .get(b"Lang");
             assert_eq!(
                 *lang.unwrap().value(),
-                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"en"), Some(Form::Literal)),
                 "{to}"
             );
             // What its values refer to is its own, not encrypted.
@@ -8713,7 +8718,7 @@ pub(crate) mod tests {
                 .get(b"Lang");
             assert_eq!(
                 *lang.unwrap().value(),
-                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"en"), Some(Form::Literal)),
                 "{kind:?}"
             );
         }
@@ -8799,8 +8804,8 @@ pub(crate) mod tests {
         // /Perms as written, a string of the encryption dictionary.
         let doc = document(&file, &Options::DEFAULT);
         let encrypt = doc.get(ObjectId::new(6, 0)).unwrap().as_dict().unwrap();
-        let at = encrypt.get(b"Perms").unwrap().at.unwrap();
-        let perms = String::from_utf8_lossy(&file[at.start..at.end]).into_owned();
+        let at = encrypt.get(b"Perms").unwrap().at().unwrap();
+        let perms = String::from_utf8_lossy(&file[at.range()]).into_owned();
         let replaced = "<000102030405060708090a0b0c0d0e0f>";
         let cases = [
             (
@@ -8993,7 +8998,7 @@ pub(crate) mod tests {
                 "{kind:?}"
             );
             assert!(doc.faults().is_empty(), "{kind:?}: {:?}", doc.faults());
-            let read = Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal));
+            let read = Value::String(Str::bytes(b"A note"), Some(Form::Literal));
             let contents = |doc: &Document| {
                 let note = doc.get(ObjectId::new(4, 0)).unwrap().as_dict().unwrap();
                 note.get(b"Contents").unwrap().value().clone()
@@ -9007,7 +9012,7 @@ pub(crate) mod tests {
                 .get(b"Lang");
             assert_eq!(
                 *lang.unwrap().value(),
-                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"en"), Some(Form::Literal)),
                 "{kind:?}"
             );
             // Written whole under its own encryption, the note is encrypted.
@@ -9039,10 +9044,11 @@ pub(crate) mod tests {
             ..settings(kind, b"user")
         };
         let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
-        let metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+        let metadata =
+            dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") };
         let objects = [
-            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
-            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+            (1, dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+            (2, dict! { "Type" => Object::name("Pages"), "Kids" => vec![], "Count" => 0 }.into()),
             (3, Body::stream(metadata, xmp)),
         ];
         let file = fixture::encrypted(&settings, &objects, root);
@@ -9067,11 +9073,14 @@ pub(crate) mod tests {
     fn metadata_not_encrypted_has_its_dictionarys_strings_decrypted_all_the_same() {
         let root = || dict! { "Root" => Object::reference(1) };
         let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
-        let metadata =
-            dict! { "Type" => "Metadata", "Subtype" => "XML", "Mine" => Object::text("about") };
+        let metadata = dict! {
+            "Type" => Object::name("Metadata"),
+            "Subtype" => Object::name("XML"),
+            "Mine" => Object::text("about"),
+        };
         let objects = [
-            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
-            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+            (1, dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+            (2, dict! { "Type" => Object::name("Pages"), "Kids" => vec![], "Count" => 0 }.into()),
             (3, Body::stream(metadata, xmp)),
         ];
         // The kinds of /V 4 and 5, from which /EncryptMetadata counts.
@@ -9104,7 +9113,7 @@ pub(crate) mod tests {
                 .get(b"Mine");
             assert_eq!(
                 *mine.unwrap().value(),
-                Value::String(Str::Bytes(b"about".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"about"), Some(Form::Literal)),
                 "{kind:?}"
             );
         }
@@ -9158,7 +9167,7 @@ pub(crate) mod tests {
         assert!(doc.faults().is_empty(), "{:?}", doc.faults());
         assert_eq!(doc.decoded[&ObjectId::new(4, 0)], objects);
         assert_eq!(
-            doc.get(ObjectId::new(2, 0)).unwrap().at.unwrap().stream,
+            doc.get(ObjectId::new(2, 0)).unwrap().at().unwrap().stream(),
             Some(ObjectId::new(4, 0))
         );
     }
@@ -9236,14 +9245,14 @@ pub(crate) mod tests {
             // as they are there, not decrypted again.
             let pages = doc.get(ObjectId::new(2, 0)).unwrap();
             assert_eq!(
-                pages.at.unwrap().stream,
+                pages.at().unwrap().stream(),
                 Some(ObjectId::new(4, 0)),
                 "{filter}"
             );
             let mine = pages.as_dict().unwrap().get(b"Mine");
             assert_eq!(
                 *mine.unwrap().value(),
-                Value::String(Str::Bytes(b"plain".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"plain"), Some(Form::Literal)),
                 "{filter}"
             );
         }
@@ -9359,7 +9368,7 @@ pub(crate) mod tests {
             let pages = doc.get(ObjectId::new(2, 0)).unwrap().as_dict().unwrap();
             assert_eq!(
                 *pages.get(b"Mine").unwrap().value(),
-                Value::String(Str::Bytes(b"plain".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"plain"), Some(Form::Literal)),
             );
             assert_eq!(doc.in_the_clear, four, "{kind:?}");
             assert_eq!(read_through(&file, &decoder).in_the_clear, four, "{kind:?}");
@@ -9471,7 +9480,7 @@ pub(crate) mod tests {
             .get(b"Lang");
         assert_eq!(
             *lang.unwrap().value(),
-            Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
+            Value::String(Str::bytes(b"en"), Some(Form::Literal))
         );
     }
 
@@ -9538,7 +9547,7 @@ pub(crate) mod tests {
     fn the_trailers_id_is_read_as_written_in_a_file_that_opens() {
         let id = &b"0123456789abcdef"[..];
         let written = Object::from(vec![Object::bytes(id), Object::bytes(id)]);
-        let en = Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal));
+        let en = Value::String(Str::bytes(b"en"), Some(Form::Literal));
         let lang = |doc: &Document| {
             let catalog = doc
                 .get(ObjectId::new(1, 0))
@@ -9563,9 +9572,9 @@ pub(crate) mod tests {
             assert_eq!(lang(&doc), en, "{kind:?}");
             let trailer_id = doc.trailer.dict().get(b"ID").unwrap();
             assert_eq!(plain(trailer_id), written, "{kind:?}");
-            let at = trailer_id.at.unwrap();
+            let at = trailer_id.at().unwrap();
             assert_eq!(
-                &file[at.start..at.end],
+                &file[at.range()],
                 b"[(0123456789abcdef) (0123456789abcdef)]",
                 "{kind:?}"
             );
@@ -9611,23 +9620,23 @@ pub(crate) mod tests {
         let der = vec![0x30, 0x82, 0x00, 0x01];
         let signature = |typed: Option<&str>| {
             let mut d = dict! {
-                "Filter" => "Adobe.PPKLite",
+                "Filter" => Object::name("Adobe.PPKLite"),
                 "ByteRange" => vec![Object::from(0), Object::from(1), Object::from(2), Object::from(3)],
-                "Contents" => Object::new(Value::String(Str::Bytes(der.clone()), None)),
+                "Contents" => Object::new(Value::String(Str::bytes(der.clone()), None)),
             };
             if let Some(typed) = typed {
-                d.set("Type", typed);
+                d.set("Type", Object::name(typed));
             }
             d
         };
         let objects = [
             (
                 1,
-                dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into(),
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) }.into(),
             ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into(),
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![], "Count" => 0 }.into(),
             ),
             (3, signature(None).into()),
             (4, signature(Some("DocTimeStamp")).into()),
@@ -9645,7 +9654,7 @@ pub(crate) mod tests {
                 .get(b"Contents");
             assert_eq!(
                 *contents.unwrap().value(),
-                Value::String(Str::Bytes(der.clone()), Some(Form::Literal)),
+                Value::String(Str::bytes(der.clone()), Some(Form::Literal)),
                 "{n}"
             );
         }
@@ -9691,7 +9700,7 @@ pub(crate) mod tests {
             let o = dict.get(b"O").unwrap().value();
             assert_eq!(
                 o,
-                &Value::String(Str::Bytes(written.clone().unwrap()), Some(Form::Literal)),
+                &Value::String(Str::bytes(written.clone().unwrap()), Some(Form::Literal)),
                 "{n}"
             );
         }
@@ -9761,16 +9770,16 @@ pub(crate) mod tests {
                 .get(b"Lang");
             assert_eq!(
                 *lang.unwrap().value(),
-                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"en"), Some(Form::Literal)),
                 "{kind:?}"
             );
             let id = |o: &Object| o.as_dict().unwrap().get(b"ID").unwrap().clone();
             assert_eq!(plain(&id(&doc.trailer.object)), written, "{kind:?}");
             let object = id(doc.get(ObjectId::new(7, 0)).unwrap());
             assert_eq!(plain(&object), written, "{kind:?}");
-            let at = object.at.unwrap();
+            let at = object.at().unwrap();
             assert_eq!(
-                &file[at.start..at.end],
+                &file[at.range()],
                 b"[(0123456789abcdef) (0123456789abcdef)]",
                 "{kind:?}"
             );
@@ -9782,16 +9791,16 @@ pub(crate) mod tests {
         let root = || dict! { "Root" => Object::reference(1) };
         let drawn: &[u8] = b"0 0 m 9 9 l S";
         let form = dict! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
             "BBox" => vec![Object::from(0), Object::from(0), Object::from(9), Object::from(9)],
             "Mine" => Object::text("on the form"),
         };
         let resources = dict! { "XObject" => dict! { "Fm" => Object::reference(4) } };
         let objects = [
-            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into()),
-            (2, dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }.into()),
-            (3, dict! { "Type" => "Page", "Parent" => Object::reference(2), "Resources" => resources }.into()),
+            (1, dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) }.into()),
+            (2, dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::reference(3)], "Count" => 1 }.into()),
+            (3, dict! { "Type" => Object::name("Page"), "Parent" => Object::reference(2), "Resources" => resources }.into()),
             (4, Body::stream(form, drawn)),
         ];
         for kind in KINDS {
@@ -9810,7 +9819,7 @@ pub(crate) mod tests {
             };
             assert_eq!(
                 *stream.dict.get(b"Mine").unwrap().value(),
-                Value::String(Str::Bytes(b"on the form".to_vec()), Some(Form::Literal)),
+                Value::String(Str::bytes(b"on the form"), Some(Form::Literal)),
                 "{kind:?}"
             );
             // Its data isn't read: it's where it was written, encrypted.
@@ -9819,8 +9828,8 @@ pub(crate) mod tests {
                 "{kind:?}"
             );
             let at = stream.data.at().unwrap();
-            assert_eq!(at.stream, None, "{kind:?}");
-            let data = &file[at.start..at.end];
+            assert_eq!(at.stream(), None, "{kind:?}");
+            let data = &file[at.range()];
             assert!(!data.windows(drawn.len()).any(|w| w == drawn), "{kind:?}");
             assert!(doc.decoded.is_empty(), "{kind:?}");
         }
@@ -9858,7 +9867,7 @@ pub(crate) mod tests {
             .clone();
         assert_eq!(
             *note.get(b"Contents").unwrap().value(),
-            Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal))
+            Value::String(Str::bytes(b"A note"), Some(Form::Literal))
         );
         let raw = note.get(b"Raw").unwrap();
         assert!(
@@ -9874,16 +9883,16 @@ pub(crate) mod tests {
         assert_eq!(doc.trailer.unwritten, None);
         assert_eq!(doc.trailer.stream, Some(ObjectId::new(5, 0)));
         let pages = doc.get(ObjectId::new(2, 0)).unwrap();
-        let at = pages.at.unwrap();
-        assert_eq!(at.stream, Some(ObjectId::new(4, 0)));
-        let written = &doc.decoded[&ObjectId::new(4, 0)][at.start..at.end];
+        let at = pages.at().unwrap();
+        assert_eq!(at.stream(), Some(ObjectId::new(4, 0)));
+        let written = &doc.decoded[&ObjectId::new(4, 0)][at.range()];
         assert_eq!(
             written,
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Mine (plain) >>"
         );
         let kids = pages.as_dict().unwrap().entry(b"Kids").unwrap();
         assert_eq!(
-            kids.key_at.unwrap().stream,
+            kids.key_at().unwrap().stream(),
             Some(ObjectId::new(4, 0)),
             "its keys too"
         );
@@ -9995,7 +10004,7 @@ pub(crate) mod tests {
             "the table's row, not the stream's"
         );
         assert_eq!(
-            doc.get(ObjectId::new(2, 0)).unwrap().at.unwrap().stream,
+            doc.get(ObjectId::new(2, 0)).unwrap().at().unwrap().stream(),
             Some(ObjectId::new(4, 0))
         );
         assert!(doc.get(ObjectId::new(3, 0)).is_ok());
@@ -10055,14 +10064,10 @@ pub(crate) mod tests {
             Value::String(s, _) => s.clone(),
             other => panic!("{other:?}"),
         };
-        assert_eq!(
-            string(1, b"Lang"),
-            Str::Encrypted(b"en".to_vec()),
-            "in plain view"
-        );
+        assert_eq!(string(1, b"Lang"), Str::encrypted(b"en"), "in plain view");
         assert_eq!(
             string(2, b"Mine"),
-            Str::Bytes(b"plain".to_vec()),
+            Str::bytes(b"plain"),
             "in an object stream"
         );
     }
@@ -10203,7 +10208,7 @@ pub(crate) mod tests {
         );
         let s = |text: &str| Object::bytes(text.as_bytes().to_vec());
         let plaintext = dict! {
-            "Type" => "Catalog",
+            "Type" => Object::name("Catalog"),
             "Lang" => s("en"),
             "Dup" => s("BB"),
             "Kids" => vec![s("K1"), s("K2")],
@@ -10226,23 +10231,19 @@ pub(crate) mod tests {
         let lang = catalog.get(b"Lang").unwrap();
         assert_eq!(
             *lang.value(),
-            Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
+            Value::String(Str::bytes(b"en"), Some(Form::Literal))
         );
-        let at = lang.at.unwrap();
-        assert_eq!(
-            &file[at.start..at.end],
-            b"(xx)",
-            "placed where it's written"
-        );
+        let at = lang.at().unwrap();
+        assert_eq!(&file[at.range()], b"(xx)", "placed where it's written");
         let dup: Vec<_> = (catalog.entries().iter())
-            .filter(|e| e.key == b"Dup")
-            .map(|e| e.value.value().clone())
+            .filter(|e| e.key() == b"Dup")
+            .map(|e| e.value().value().clone())
             .collect();
         assert_eq!(
             dup,
             [
-                Value::String(Str::Encrypted(b"aa".to_vec()), Some(Form::Literal)),
-                Value::String(Str::Bytes(b"BB".to_vec()), Some(Form::Literal))
+                Value::String(Str::encrypted(b"aa"), Some(Form::Literal)),
+                Value::String(Str::bytes(b"BB"), Some(Form::Literal))
             ],
             "only the last entry has a place in the plaintext"
         );
@@ -10252,7 +10253,7 @@ pub(crate) mod tests {
         assert_eq!(
             short,
             Object::from(vec![Object::new(Value::String(
-                Str::Encrypted(b"s1".to_vec()),
+                Str::encrypted(b"s1"),
                 None
             ))]),
             "an array of another length has no places"
@@ -10265,7 +10266,7 @@ pub(crate) mod tests {
             .get(b"T");
         assert_eq!(
             *t.unwrap().value(),
-            Value::String(Str::Encrypted(b"tt".to_vec()), Some(Form::Literal))
+            Value::String(Str::encrypted(b"tt"), Some(Form::Literal))
         );
         let warnings: Vec<_> = doc.faults().iter().map(|w| w.1.to_string()).collect();
         assert_eq!(
@@ -10285,7 +10286,7 @@ pub(crate) mod tests {
         let catalog = doc.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         assert_eq!(
             *catalog.get(b"Lang").unwrap().value(),
-            Value::String(Str::Encrypted(b"xx".to_vec()), Some(Form::Literal))
+            Value::String(Str::encrypted(b"xx"), Some(Form::Literal))
         );
         let warnings: Vec<_> = doc.faults().iter().map(|w| w.1.to_string()).collect();
         assert!(
@@ -10312,8 +10313,8 @@ pub(crate) mod tests {
     fn any_bytes_read_without_a_panic() {
         let inside = |file: &[u8], doc: &Document| {
             for (_, object) in doc.objects() {
-                let at = object.at.unwrap();
-                assert!(at.start <= at.end && at.end <= file.len());
+                let at = object.at().unwrap();
+                assert!(at.start() <= at.end() && at.end() <= file.len());
             }
         };
         let file = fixture::file("1.7", &clean(), root(), Xref::Table);

@@ -364,14 +364,14 @@ impl<'a> Places<'a> {
             let at = usize::try_from(at).ok().filter(|&at| at < len)?;
             Some(Span::new(None, at, at + 1))
         };
-        let dict = self.dict.and_then(|d| d.at);
+        let dict = self.dict.and_then(|d| d.at());
         match place {
             Some(Place::Key(key)) => {
                 let name = key.to_string();
                 let entries = self.dict.and_then(Object::as_dict);
                 let entry = entries.and_then(|d| {
                     let name = name.trim_start_matches('/').as_bytes();
-                    (d.entries().iter()).find(|e| &e.key[..] == name)
+                    (d.entries().iter()).find(|e| e.key() == name)
                 });
                 entry.and_then(entry_at).or(dict)
             }
@@ -382,7 +382,7 @@ impl<'a> Places<'a> {
                     return None;
                 };
                 (stream.dict.entries().iter())
-                    .find(|e| &e.key[..] == key.as_bytes())
+                    .find(|e| e.key() == key.as_bytes())
                     .and_then(entry_at)
             }
             Some(Place::Position(position)) => {
@@ -402,7 +402,7 @@ impl<'a> Places<'a> {
     /// after an update, no later revision lists and the file checked still
     /// holds to the same bytes.
     fn stood(&mut self, at: Span) -> Option<Span> {
-        let Some(stream) = at.stream else {
+        let Some(stream) = at.stream() else {
             return Some(at);
         };
         let Some((checked, later)) = self.after else {
@@ -525,7 +525,7 @@ impl<'a> Walk<'a> {
         // revision's.
         let record = self.source.record(id).map(|r| r.at);
         let at = usize::try_from(first.at).ok();
-        let whose = match record.is_some_and(|r| r.stream.is_none() && Some(r.start) == at) {
+        let whose = match record.is_some_and(|r| r.stream().is_none() && Some(r.start()) == at) {
             false if revisions.len() > 1 => Whose::First,
             _ => Whose::Dictionary,
         };
@@ -580,7 +580,7 @@ impl<'a> Walk<'a> {
             value: format!(
                 "the file was linearized as first written, its first {len} bytes; the update after it, its section at byte {at}, voids that: it's read as an ordinary file (ISO 32000-2, F.1, Table F.1)"
             ),
-            at: written.at,
+            at: written.at(),
             revision: None,
         });
     }
@@ -663,7 +663,7 @@ impl<'a> Walk<'a> {
             let inside = match fault {
                 Fault::HintItems { .. } => (dict.and_then(Object::as_dict))
                     .and_then(|d| d.get(b"H"))
-                    .and_then(|h| self.value_at(Some(id), h.at)),
+                    .and_then(|h| self.value_at(Some(id), h.at())),
                 _ => None,
             };
             found.push(Err(i));
@@ -723,7 +723,7 @@ mod tests {
                 resources.set("XObject", dict! { "Im1" => r(10) });
             }
             let page = dict! {
-                "Type" => "Page",
+                "Type" => Object::name("Page"),
                 "Parent" => r(2),
                 "MediaBox" => vec![Object::from(0), 0.into(), 612.into(), 792.into()],
                 "Resources" => resources,
@@ -733,10 +733,18 @@ mod tests {
         };
         let content = |n: u32, text: &str| (n, Body::stream(dict! {}, text.as_bytes()));
         let objects = vec![
-            (1, dict! { "Type" => "Catalog", "Pages" => r(2) }.into()),
+            (
+                1,
+                dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }.into(),
+            ),
             (
                 2,
-                dict! { "Type" => "Pages", "Kids" => vec![r(3), r(4), r(5)], "Count" => 3 }.into(),
+                dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![r(3), r(4), r(5)],
+                    "Count" => 3,
+                }
+                .into(),
             ),
             page(3, 6, false),
             page(4, 7, true),
@@ -746,14 +754,19 @@ mod tests {
             content(8, "BT /F1 12 Tf 72 720 Td (Three) Tj ET /Im1 Do"),
             (
                 9,
-                dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" }.into(),
+                dict! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("Type1"),
+                    "BaseFont" => Object::name("Helvetica"),
+                }
+                .into(),
             ),
             (
                 10,
                 Body::stream(
                     dict! {
-                        "Type" => "XObject",
-                        "Subtype" => "Form",
+                        "Type" => Object::name("XObject"),
+                        "Subtype" => Object::name("Form"),
                         "BBox" => vec![Object::from(0), 0.into(), 10.into(), 10.into()],
                         "Resources" => dict! {},
                     },
@@ -1097,7 +1110,7 @@ mod tests {
         let report = checked_with(&bare, &asked);
         let read = WithReading::new(&bare[..], &bytes::Options::DEFAULT).unwrap();
         let record = read.document().record(ObjectId::new(page, 0)).map(|r| r.at);
-        assert_eq!(record.map(|at| at.start), Some(object));
+        assert_eq!(record.map(|at| at.start()), Some(object));
         let value = "page 1 doesn't say its /MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
         assert_eq!(told(&report), [("-", value, record)], "{report}");
     }
@@ -1453,7 +1466,7 @@ mod tests {
         catalog
             .as_dict_mut()
             .unwrap()
-            .set("PageLayout", "SinglePage");
+            .set("PageLayout", Object::name("SinglePage"));
         let bodies = [(root, &catalog)]
             .into_iter()
             .chain(more.iter().map(|(id, o)| (*id, o)));
@@ -1535,7 +1548,7 @@ mod tests {
         );
         assert_eq!(voided(&report), [found], "{report}");
         let finding = report.findings.iter().find(|f| f.rule == Rule::Updated);
-        assert_eq!(finding.unwrap().at, trailer.object.at);
+        assert_eq!(finding.unwrap().at, trailer.object.at());
         assert_eq!(told(&report), [], "{report}");
         let rules: Vec<_> = report.findings.iter().map(|f| f.rule).collect();
         assert_eq!(rules, [Rule::Updated], "{report}");
@@ -1837,7 +1850,7 @@ mod tests {
         let before = checked_with(&file, &asked);
         let record = generation(&before);
         assert_eq!(record.len(), 1, "{before}");
-        assert_eq!(record[0].map(|at| at.start), Some(hint.at as usize));
+        assert_eq!(record[0].map(|at| at.start()), Some(hint.at as usize));
         let over = updated_with(
             &file,
             &[(ObjectId::new(hint.number, 1), dict! { "Hint" => 1 }.into())],
@@ -1860,14 +1873,14 @@ mod tests {
                 (
                     ObjectId::new(2, 0),
                     dict! {
-                        "Type" => "Pages",
+                        "Type" => Object::name("Pages"),
                         "Kids" => vec![r(3), r(4), r(5)],
                         "Count" => 3,
                         "XX_Filter" => r(11),
                     }
                     .into(),
                 ),
-                (ObjectId::new(11, 0), Object::from("FlateDecode")),
+                (ObjectId::new(11, 0), Object::name("FlateDecode")),
             ],
         );
         let file = linearized(&plain, &[]);
@@ -1897,7 +1910,7 @@ mod tests {
         let unplaced: Vec<_> = (told(&before).into_iter())
             .map(|(key, value, _)| (key, value, None))
             .collect();
-        for replacement in [Object::from("ASCIIHexDecode"), Vec::<Object>::new().into()] {
+        for replacement in [Object::name("ASCIIHexDecode"), Vec::<Object>::new().into()] {
             let changed = updated_with(&file, &[(filter, replacement)]);
             let opened = bytes::Reading::open(&changed[..], &bytes::Options::DEFAULT).unwrap();
             assert!(!listed_in(&opened.revisions()[1..], hint.number));
@@ -1958,14 +1971,14 @@ mod tests {
         };
         let span = stream.data.at().unwrap();
         let first_page = facts(&file).pages[0].id.unwrap();
-        let page_span = opened.get(first_page).unwrap().at.unwrap();
-        assert!(page_span.stream.is_none());
-        file[span.end - 1] ^= 1;
+        let page_span = opened.get(first_page).unwrap().at().unwrap();
+        assert!(page_span.stream().is_none());
+        file[span.end() - 1] ^= 1;
         // Have the first page reach `member`, which isn't in the first
         // section.
         let needle = b"/Resources ";
-        let at = page_span.start + find(&file[page_span.start..page_span.end], needle);
-        let old_ref = &file[at + needle.len()..page_span.end];
+        let at = page_span.start() + find(&file[page_span.start()..page_span.end()], needle);
+        let old_ref = &file[at + needle.len()..page_span.end()];
         let old_end = find(old_ref, b"R") + 1;
         let new_ref = format!("{member} R");
         assert!(new_ref.len() <= old_end);
@@ -1986,7 +1999,7 @@ mod tests {
         let before = checked_with(&file, &asked);
         let at = placed(&before);
         assert_eq!(at.len(), 1, "{before}");
-        assert_eq!(at[0].and_then(|s| s.stream), Some(container));
+        assert_eq!(at[0].and_then(|s| s.stream()), Some(container));
 
         let kept = updated(&file);
         assert_eq!(placed(&checked_with(&kept, &asked)), at);

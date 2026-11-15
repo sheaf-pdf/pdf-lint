@@ -28,16 +28,18 @@ fn file_of(pages: &[Dict], more: &[(u32, Body)]) -> Vec<u8> {
     let mut objects = vec![
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => kids, "Count" => pages.len() as i64 }),
+            Body::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => kids, "Count" => pages.len() as i64 },
+            ),
         ),
     ];
     for (i, page) in pages.iter().enumerate() {
         let mut page = page.clone();
-        page.set("Type", "Page");
+        page.set("Type", Object::name("Page"));
         page.set("Parent", r(2));
         objects.push((3 + i as u32, Body::from(page)));
     }
@@ -49,8 +51,10 @@ fn file_of(pages: &[Dict], more: &[(u32, Body)]) -> Vec<u8> {
 /// object `to_unicode`.
 fn courier(to_unicode: Option<u32>) -> Body {
     let mut font = dict! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
-        "Encoding" => "WinAnsiEncoding",
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Courier"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
     };
     if let Some(to_unicode) = to_unicode {
         font.set("ToUnicode", r(to_unicode));
@@ -75,7 +79,8 @@ fn two_pages() -> Vec<u8> {
         dict! { "Contents" => r(11), "Resources" => resources },
     ];
     let form = |content: &str, resources: Option<Dict>| {
-        let mut dict = dict! { "Type" => "XObject", "Subtype" => "Form" };
+        let mut dict =
+            dict! { "Type" => Object::name("XObject"), "Subtype" => Object::name("Form") };
         if let Some(resources) = resources {
             dict.set("Resources", resources);
         }
@@ -139,18 +144,18 @@ fn a_pages_text_is_the_strings_it_shows() {
 #[test]
 fn a_page_with_no_object_shows_its_text() {
     let page = dict! {
-        "Type" => "Page", "Parent" => r(2), "Contents" => r(10),
+        "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(10),
         "Resources" => dict! { "Font" => dict! { "F1" => r(20) } },
     };
     let objects = [
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (
             2,
             Body::from(
-                dict! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 },
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1 },
             ),
         ),
         (10, content_stream("BT /F1 9 Tf (A) Tj ET")),
@@ -225,16 +230,18 @@ fn a_locked_files_text_is_an_error() {
     let objects = [
         (
             1,
-            Body::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+            Body::from(dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) }),
         ),
         (
             2,
-            Body::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }),
+            Body::from(
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+            ),
         ),
         (
             3,
             Body::from(dict! {
-                "Type" => "Page", "Parent" => r(2), "Contents" => r(10),
+                "Type" => Object::name("Page"), "Parent" => r(2), "Contents" => r(10),
                 "Resources" => dict! { "Font" => dict! { "F1" => r(20) } },
             }),
         ),
@@ -293,7 +300,7 @@ fn a_stream_that_does_not_decode_is_read_as_none_and_said() {
     let fonts = dict! { "Font" => dict! { "F1" => r(20) } };
     for filter in ["Bogus", "FlateDecode", "DCTDecode"] {
         let undecoded = |data: &str| {
-            let dict = dict! { "Filter" => filter };
+            let dict = dict! { "Filter" => Object::name(filter) };
             Body::stream(dict, data.as_bytes())
         };
         let page = dict! {
@@ -303,7 +310,8 @@ fn a_stream_that_does_not_decode_is_read_as_none_and_said() {
                 "XObject" => dict! { "X" => r(13) },
             },
         };
-        let mut form = dict! { "Subtype" => "Form", "Filter" => filter };
+        let mut form =
+            dict! { "Subtype" => Object::name("Form"), "Filter" => Object::name(filter) };
         form.set("Resources", fonts.clone());
         let more = [
             (10, content_stream("BT /F1 9 Tf (AB) Tj ET")),

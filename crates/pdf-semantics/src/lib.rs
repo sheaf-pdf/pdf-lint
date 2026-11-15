@@ -1,9 +1,10 @@
 //! Read and write PDF document-level structures: dates, page trees, name and number trees,
 //! `/Info` dictionaries, and XMP conformance packets (ISO 32000-2, §7.7.3, §7.9, §14.3).
 //!
-//! `pdf-semantics` operates over any [`Resolve`] implementation (`&Reading`, `&Document`, or a
-//! closure) without performing file I/O directly. [`catalog`] locates the document catalog from a
-//! trailer dictionary, and [`follow`] resolves indirect reference chains.
+//! `pdf-semantics` operates over any [`Resolve`] implementation (`&Reading`, `&Document`,
+//! `&BTreeMap`, or [`resolve_fn`](pdf_objects::resolve_fn)) without performing file I/O directly.
+//! [`catalog`] locates the document catalog from a trailer dictionary, and [`follow`] resolves
+//! indirect reference chains.
 //!
 //! # Core Concepts
 //!
@@ -65,14 +66,13 @@
 //!     objects.insert(id, Object::from(node));
 //! }
 //! for (&page, &parent) in numbered.iter().zip(&written.parents) {
-//!     objects.insert(page, Object::from(dict! { "Type" => "Page", "Parent" => parent }));
+//!     objects.insert(page, Object::from(dict! { "Type" => Object::name("Page"), "Parent" => parent }));
 //! }
 //!
 //! // Read back by ISO's rules with nothing told, the last page's box its root's.
-//! let resolve = |id: ObjectId| objects.get(&id);
 //! let catalog = dict! { "Pages" => written.root };
 //! let mut faults = Vec::new();
-//! let table = pages::pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut faults).unwrap();
+//! let table = pages::pages(&objects, &catalog, Rules::Iso, &Limits::DEFAULT, &mut faults).unwrap();
 //! assert!(faults.is_empty());
 //! let last = table.get(2).unwrap();
 //! assert_eq!(last.id, Some(ObjectId::new(3, 0)));

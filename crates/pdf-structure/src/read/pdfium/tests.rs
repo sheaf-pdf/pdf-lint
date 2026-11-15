@@ -101,7 +101,7 @@ fn each_found_by_the_scan(doc: &Document, file: &[u8], numbers: &[u32]) {
         let record = doc.record(id).unwrap();
         assert_eq!(record.origin, Origin::Recovered, "{id}");
         assert_eq!(
-            record.at.start,
+            record.at.start(),
             last(file, format!("{n} 0 obj").as_bytes()),
             "{id}"
         );
@@ -230,7 +230,7 @@ fn a_first_object_not_at_its_row_is_found_before_a_later_xrefstm() {
     assert_eq!(one.origin, Origin::Shifted { by });
     let six = verified.record(ObjectId::new(6, 0)).unwrap();
     assert_eq!(six.origin, Origin::File);
-    assert_eq!(six.at.start, place(file, b"6 0 obj"));
+    assert_eq!(six.at.start(), place(file, b"6 0 obj"));
 }
 
 /// A `/Prev` of 0, and an update's `/XRefStm` of 0, the header's place,
@@ -245,7 +245,7 @@ fn a_prev_or_xrefstm_of_0_is_none_as_pdfium_reads_it() {
         assert_eq!(doc.trailer.unwritten, None);
         let six = doc.record(ObjectId::new(6, 0)).unwrap();
         assert_eq!(six.origin, Origin::File);
-        assert_eq!(six.at.start, place(file, b"6 0 obj"));
+        assert_eq!(six.at.start(), place(file, b"6 0 obj"));
         let said = (doc.faults().iter())
             .filter(|(_, f)| {
                 matches!(
@@ -296,7 +296,7 @@ fn what_the_scan_doesnt_find_is_read_where_the_sections_put_it_once_pdfium_read_
     let doc = as_pdfium(file);
     let hidden = doc.record(ObjectId::new(6, 0)).unwrap();
     assert_eq!(hidden.origin, Origin::File);
-    assert_eq!(hidden.at.start, place(file, b"6 0 obj"));
+    assert_eq!(hidden.at.start(), place(file, b"6 0 obj"));
     each_found_by_the_scan(&doc, file, &[1, 2, 3, 4]);
     assert_eq!(kids(&doc, 2), [Some(1), Some(6)]);
     let file = case!("update-prev-past-the-end-hidden");

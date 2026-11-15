@@ -143,17 +143,17 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             followed += 1;
             if followed == 2 {
                 // In the object that's a reference, which is on the path by now.
-                self.say(object.at, Fault::Chained);
+                self.say(object.at(), Fault::Chained);
             }
             if self.path.contains(&id) {
-                self.say(object.at, Fault::Loop);
+                self.say(object.at(), Fault::Loop);
                 return Ok(Reached::Stopped);
             }
             if self.path.len() > self.limits.space_depth {
-                self.say(object.at, Fault::TooDeep);
+                self.say(object.at(), Fault::TooDeep);
                 return Ok(Reached::Stopped);
             }
-            if !self.spend(object.at) {
+            if !self.spend(object.at()) {
                 return Ok(Reached::Stopped);
             }
             match self.objects.try_resolve(id) {
@@ -163,7 +163,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 }
                 Ok(None) => return Ok(Reached::Nothing),
                 Err(unreadable) if unreadable.why == Why::Damaged => {
-                    self.say(object.at, Fault::Damaged { id });
+                    self.say(object.at(), Fault::Damaged { id });
                     return Ok(Reached::Stopped);
                 }
                 Err(unreadable) => return Err(unreadable),
@@ -188,7 +188,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             Ok(Reached::Nothing) => {
                 self.path.truncate(mark);
                 if let Some(fault) = nothing {
-                    self.say(written.at, fault);
+                    self.say(written.at(), fault);
                 }
                 Ok(None)
             }
@@ -231,33 +231,33 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         depth: usize,
     ) -> Result<Option<Space<'o>>, Unreadable> {
         if depth > self.limits.space_depth {
-            self.say(written.at, Fault::TooDeep);
+            self.say(written.at(), Fault::TooDeep);
             return Ok(None);
         }
         self.entered(
             written,
             Some(Fault::NotASpace),
             |reader, object| match object.value() {
-                Value::Name(name) => reader.named(name, &[], object.at, depth),
+                Value::Name(name) => reader.named(name, &[], object.at(), depth),
                 Value::Array(parts) => {
                     let Some(first) = parts.first() else {
-                        reader.say(object.at, Fault::NotASpace);
+                        reader.say(object.at(), Fault::NotASpace);
                         return Ok(None);
                     };
                     let family =
                         reader.entered(first, Some(Fault::NotASpace), |reader, family| {
                             if family.as_name().is_none() {
-                                reader.say(family.at, Fault::NotASpace);
+                                reader.say(family.at(), Fault::NotASpace);
                             }
                             Ok(family.as_name())
                         })?;
                     let Some(name) = family else {
                         return Ok(None);
                     };
-                    reader.named(name, parts, object.at, depth)
+                    reader.named(name, parts, object.at(), depth)
                 }
                 _ => {
-                    reader.say(object.at, Fault::NotASpace);
+                    reader.say(object.at(), Fault::NotASpace);
                     Ok(None)
                 }
             },
@@ -289,7 +289,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             }
         };
         if let Some(extra) = parts.get(elements) {
-            self.say(extra.at, Fault::ExtraElements);
+            self.say(extra.at(), Fault::ExtraElements);
         }
         Ok(Some(match family {
             Family::DeviceGray => Space::DeviceGray,
@@ -335,7 +335,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 return Ok(None);
             }
             let Some(parts) = object.as_array().filter(|parts| parts.len() == count) else {
-                reader.say(object.at, fault);
+                reader.say(object.at(), fault);
                 return Ok(None);
             };
             let mut numbers = Vec::with_capacity(count);
@@ -344,7 +344,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                     return Ok(None);
                 };
                 if number.as_number().is_none() {
-                    reader.say(part.at, fault);
+                    reader.say(part.at(), fault);
                     return Ok(None);
                 }
                 numbers.push(number);
@@ -371,15 +371,15 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             let dict = match object.value() {
                 Value::Dict(dict) => dict,
                 Value::Stream(stream) => {
-                    reader.say(object.at, Fault::NotADictionary);
+                    reader.say(object.at(), Fault::NotADictionary);
                     &stream.dict
                 }
                 _ => {
-                    reader.say(object.at, Fault::NotADictionary);
+                    reader.say(object.at(), Fault::NotADictionary);
                     return Ok(None);
                 }
             };
-            let white_point = reader.white_point(dict, object.at)?;
+            let white_point = reader.white_point(dict, object.at())?;
             reader.check(|reader| reader.check_cie(family, dict));
             Ok(Some(Cie {
                 dict: Some(dict),
@@ -412,7 +412,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         let held = [number(x), number(y), number(z)];
         let above_zero = |object: &Object| number(object) > 0.0 && float(object) > 0.0;
         if !(above_zero(x) && number(y) == 1.0 && above_zero(z)) {
-            self.say(point.at, Fault::WhitePoint);
+            self.say(point.at(), Fault::WhitePoint);
         }
         Ok(Some(held))
     }
@@ -424,7 +424,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             && let Some(numbers) = self.numbers(point, 3, black, false)?
             && numbers.iter().any(|n| n.as_number() < Some(0.0))
         {
-            self.say(point.at, black);
+            self.say(point.at(), black);
         }
         match family {
             Family::CalGray => {
@@ -433,7 +433,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                     let holds =
                         |number: &Object| number.is_null() || number.as_number() > Some(0.0);
                     if !number.is_none_or(holds) {
-                        self.say(gamma.at, Fault::Gamma);
+                        self.say(gamma.at(), Fault::Gamma);
                     }
                 }
             }
@@ -451,7 +451,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 {
                     let number = |at: usize| numbers[at].as_number();
                     if number(0) > number(1) || number(2) > number(3) {
-                        self.say(range.at, Fault::LabRange);
+                        self.say(range.at(), Fault::LabRange);
                     }
                 }
             }
@@ -478,17 +478,17 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         };
         let read = self.entered(written, Some(Fault::IccNotStream), |reader, object| {
             let Some(stream) = object.as_stream() else {
-                reader.say(object.at, Fault::IccNotStream);
+                reader.say(object.at(), Fault::IccNotStream);
                 return Ok(None);
             };
-            let n = reader.icc_components(&stream.dict, object.at)?;
+            let n = reader.icc_components(&stream.dict, object.at())?;
             let mut alternate = None;
             if let Some(space) = entry_of(&stream.dict, b"Alternate") {
                 alternate = reader.space(space, depth + 1)?;
                 if let Some(alternate) = &alternate {
                     let pattern = alternate.family() == Family::Pattern;
                     if pattern || (n.is_some() && alternate.components() != n) {
-                        reader.say(space.at, Fault::IccAlternate);
+                        reader.say(space.at(), Fault::IccAlternate);
                     }
                 }
             }
@@ -530,7 +530,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 Some(3) => Ok(Some(3)),
                 Some(4) => Ok(Some(4)),
                 _ => {
-                    reader.say(number.at, Fault::IccComponents);
+                    reader.say(number.at(), Fault::IccComponents);
                     Ok(None)
                 }
             },
@@ -548,7 +548,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             Some(written) => {
                 let base = self.space(written, depth + 1)?;
                 if let Some(Family::Indexed | Family::Pattern) = base.as_ref().map(Space::family) {
-                    self.say(written.at, Fault::BaseSpecial);
+                    self.say(written.at(), Fault::BaseSpecial);
                 }
                 base
             }
@@ -577,7 +577,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         self.entered(written, Some(Fault::Hival), |reader, number| {
             let hival = number.as_integer().and_then(|n| u8::try_from(n).ok());
             if hival.is_none() {
-                reader.say(number.at, Fault::Hival);
+                reader.say(number.at(), Fault::Hival);
             }
             Ok(hival)
         })
@@ -595,7 +595,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 _ => None,
             };
             if lookup.is_none() {
-                reader.say(table.at, Fault::LookupKind);
+                reader.say(table.at(), Fault::LookupKind);
             }
             Ok(lookup)
         })
@@ -621,7 +621,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         };
         let long = u64::from(components) * (u64::from(hival) + 1);
         if bytes.len() as u64 != long {
-            self.say(written.and_then(|written| written.at), Fault::LookupLength);
+            self.say(written.and_then(Object::at), Fault::LookupLength);
         }
     }
 
@@ -636,7 +636,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         };
         let under = self.space(written, depth + 1)?;
         if under.as_ref().map(Space::family) == Some(Family::Pattern) {
-            self.say(written.at, Fault::UnderlyingPattern);
+            self.say(written.at(), Fault::UnderlyingPattern);
         }
         Ok(under.map(Box::new))
     }
@@ -671,7 +671,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         self.entered(written, Some(fault), |reader, name| {
             let bytes = name.as_name();
             if bytes.is_none() {
-                reader.say(name.at, fault);
+                reader.say(name.at(), fault);
             }
             Ok(bytes)
         })
@@ -689,7 +689,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         };
         let alternate = self.space(written, depth + 1)?;
         if alternate.as_ref().is_some_and(|a| a.family().is_special()) {
-            self.say(written.at, Fault::AlternateSpecial);
+            self.say(written.at(), Fault::AlternateSpecial);
         }
         Ok(alternate.map(Box::new))
     }
@@ -727,7 +727,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         let no_function = Fault::TintNotFunction;
         self.entered(written, Some(no_function), |reader, object| {
             if !matches!(object.value(), Value::Dict(_) | Value::Stream(_)) {
-                reader.say(object.at, no_function);
+                reader.say(object.at(), no_function);
                 return Ok(None::<()>);
             }
             let id = written.as_reference().and(reader.path.last().copied());
@@ -742,13 +742,13 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             let (spent, capped) = (walk.spent(), walk.capped());
             reader.checks = spent;
             if let Some(id) = damaged.get() {
-                reader.say(object.at, Fault::Damaged { id });
+                reader.say(object.at(), Fault::Damaged { id });
             }
             if capped {
                 if spent < reader.limits.space_visits {
-                    reader.say(object.at, Fault::TooDeep);
+                    reader.say(object.at(), Fault::TooDeep);
                 } else if !std::mem::replace(&mut reader.checks_told, true) {
-                    reader.say(object.at, Fault::TooManyVisits);
+                    reader.say(object.at(), Fault::TooManyVisits);
                 }
                 return Ok(None);
             }
@@ -757,7 +757,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                     && outputs.is_none_or(|outputs| shape.outputs == outputs)
             });
             if !holds {
-                reader.say(object.at, Fault::TintShape);
+                reader.say(object.at(), Fault::TintShape);
             }
             Ok(None)
         })?;
@@ -777,7 +777,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             None => None,
         };
         if read.as_ref().is_some_and(|read| read.elements == 0) {
-            self.say(written.and_then(|written| written.at), Fault::NamesEmpty);
+            self.say(written.and_then(Object::at), Fault::NamesEmpty);
         }
         let Names { names, elements } = read.unwrap_or_default();
         let components = u32::try_from(elements).ok().filter(|count| *count > 0);
@@ -814,12 +814,12 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
     ) -> Result<Option<Names<'o>>, Unreadable> {
         self.entered(written, Some(not_array), |reader, object| {
             let Some(parts) = object.as_array() else {
-                reader.say(object.at, not_array);
+                reader.say(object.at(), not_array);
                 return Ok(None);
             };
             let mut names = Vec::new();
             for part in parts {
-                if part.as_reference().is_none() && !reader.spend(part.at) {
+                if part.as_reference().is_none() && !reader.spend(part.at()) {
                     break;
                 }
                 names.push(reader.colorant(part, not_name)?);
@@ -836,7 +836,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         names: &[Option<&'o [u8]>],
         nchannel: bool,
     ) {
-        let at = written.and_then(|written| written.at);
+        let at = written.and_then(Object::at);
         let names: Vec<&'o [u8]> = names.iter().flatten().copied().collect();
         let is = |of: Colorant| names.iter().any(|name| Colorant::of(name) == of);
         if is(Colorant::All) {
@@ -868,7 +868,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 return Ok(None);
             }
             let Some(dict) = object.as_dict() else {
-                reader.say(object.at, Fault::NotADictionary);
+                reader.say(object.at(), Fault::NotADictionary);
                 return Ok(None);
             };
             let subtype = reader.subtype(dict)?;
@@ -884,7 +884,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 reader.check(|reader| {
                     reader.enter(colorants_in);
                     for entry in colorants.last_entries() {
-                        if !reader.spend(entry.value.at) {
+                        if !reader.spend(entry.value().at()) {
                             break;
                         }
                         reader.separation_entry(entry, depth + 1)?;
@@ -902,7 +902,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                         && colorants.is_none_or(|colorants| !colorants.has(name))
                 });
                 if undefined {
-                    reader.say(object.at, Fault::ColorantUndefined);
+                    reader.say(object.at(), Fault::ColorantUndefined);
                 }
             }
             Ok(Some(Attributes {
@@ -930,7 +930,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 _ => None,
             };
             if subtype.is_none() {
-                reader.say(name.at, Fault::AttributesSubtype);
+                reader.say(name.at(), Fault::AttributesSubtype);
             }
             Ok(subtype)
         })
@@ -952,7 +952,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
             }
             let held = object.as_dict();
             if held.is_none() {
-                reader.say(object.at, Fault::NotADictionary);
+                reader.say(object.at(), Fault::NotADictionary);
             }
             Ok(held.map(|held| (held, reader.path.last().copied())))
         })
@@ -977,7 +977,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 return Ok(None);
             }
             let Some(dict) = object.as_dict() else {
-                reader.say(object.at, Fault::NotADictionary);
+                reader.say(object.at(), Fault::NotADictionary);
                 return Ok(None);
             };
             let space = match entry_of(dict, b"ColorSpace") {
@@ -986,12 +986,12 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                     if space.as_ref().is_some_and(|space| {
                         space.family().is_special() || space.family() == Family::Lab
                     }) {
-                        reader.say(written.at, Fault::ProcessSpace);
+                        reader.say(written.at(), Fault::ProcessSpace);
                     }
                     space
                 }
                 None => {
-                    reader.say(object.at, Fault::ProcessSpace);
+                    reader.say(object.at(), Fault::ProcessSpace);
                     None
                 }
             };
@@ -1002,12 +1002,12 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                     if let Some(read) = reader.names(written, fault, fault)? {
                         let wanted = space.as_ref().and_then(Space::components);
                         if wanted.is_some_and(|n| n as usize != read.elements) {
-                            reader.say(written.at, fault);
+                            reader.say(written.at(), fault);
                         }
                         components = read.names;
                     }
                 }
-                None => reader.say(object.at, Fault::ProcessComponents),
+                None => reader.say(object.at(), Fault::ProcessComponents),
             }
             Ok(Some(Process {
                 space: space.map(Box::new),
@@ -1023,13 +1023,13 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         entry: &'o Entry,
         depth: usize,
     ) -> Result<Option<Space<'o>>, Unreadable> {
-        let space = self.space(&entry.value, depth)?;
+        let space = self.space(entry.value(), depth)?;
         let holds = match &space {
-            Some(Space::Separation(separation)) => separation.name == Some(entry.key.as_slice()),
+            Some(Space::Separation(separation)) => separation.name == Some(entry.key()),
             _ => false,
         };
         if !holds {
-            self.say(entry.value.at, Fault::ColorantNotSeparation);
+            self.say(entry.value().at(), Fault::ColorantNotSeparation);
         }
         Ok(space)
     }
@@ -1043,12 +1043,12 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         self.enter(object);
         let mut spaces = Vec::new();
         for entry in colorants.last_entries() {
-            if !self.spend(entry.value.at) {
+            if !self.spend(entry.value().at()) {
                 break;
             }
             let space = self.separation_entry(entry, 0)?;
             spaces.push(ColorantSpace {
-                name: &entry.key,
+                name: entry.key(),
                 space,
             });
         }

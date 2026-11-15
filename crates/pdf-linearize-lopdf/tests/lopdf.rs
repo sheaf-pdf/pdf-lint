@@ -81,8 +81,8 @@ fn alike(a: &Object, b: &Object) -> bool {
 fn dicts_alike(a: &pdf_objects::object::Dict, b: &pdf_objects::object::Dict) -> bool {
     let kept = |dict: &'_ pdf_objects::object::Dict| -> Vec<(Vec<u8>, Object)> {
         (dict.entries().iter())
-            .filter(|entry| entry.key != b"Length")
-            .map(|entry| (entry.key.to_vec(), entry.value.clone()))
+            .filter(|entry| entry.key() != b"Length")
+            .map(|entry| (entry.key().to_vec(), entry.value().clone()))
             .collect()
     };
     let (a, b) = (kept(a), kept(b));
@@ -116,7 +116,7 @@ fn hint_keys(file: &[u8]) -> Vec<Vec<u8>> {
     let last = doc.objects().map(|(id, _)| id).max().unwrap();
     let stream = object(&doc, last).as_stream().unwrap();
     let mut keys: Vec<Vec<u8>> = (stream.dict.entries().iter())
-        .map(|entry| entry.key.to_vec())
+        .map(|entry| entry.key().to_vec())
         .filter(|key| !matches!(&key[..], b"Length" | b"Filter" | b"DecodeParms"))
         .collect();
     keys.sort();

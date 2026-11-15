@@ -133,7 +133,7 @@ impl Document<'static> {
     pub fn new() -> Document<'static> {
         let trailer = dict! { "Root" => ObjectId::new(1, 0) };
         let mut doc = pdf_structure::Document::new(NEW, trailer);
-        doc.insert(1, dict! { "Type" => "Catalog" });
+        doc.insert(1, dict! { "Type" => Object::name("Catalog") });
         Document::of(doc, None, None, Limits::DEFAULT)
     }
 }
