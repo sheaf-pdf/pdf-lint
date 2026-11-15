@@ -144,7 +144,9 @@ const HOPS: usize = 32;
 #[non_exhaustive]
 pub struct Limits {
     /// How many levels below its root a name tree's `/Kids` are read
-    /// (`fn:InNameTree`): 2,048 by default.
+    /// (`fn:InNameTree`): 2,048 by default. Each node, and each `/Kids`
+    /// and `/Names` array however many nodes hold it, is read once, so its
+    /// depth costs nothing its nodes and the file's arrays don't.
     pub tree_depth: usize,
     /// How many of a name tree's nodes are read: 100,000 by default.
     pub tree_nodes: usize,
@@ -2492,17 +2494,21 @@ fn entry_id(p: &Path, cx: &Cx) -> Option<ObjectId> {
 /// The keys of the name tree at `root` (ISO 32000-2, 7.9.6): each node's
 /// `/Names` pairs' first, through its `/Kids`, each node once, as deep and
 /// as many as its file's [`Limits`] let (`tree_depth`, `tree_nodes`), a
-/// cap met counted before a node past it is read. Each reference in it
-/// is followed through [`deref_tried`]: one that doesn't read leaves the
-/// tree not whole, and the walk goes on beside it. A `/Names` or `/Kids`
-/// that's null, or a reference to nothing, is none, and a kid or a key
-/// that is, a part not read, as pdf-semantics' walk reads them.
+/// cap met counted before a node past it is read; and each `/Names` and
+/// `/Kids` array once, however many nodes hold it, so the walk costs what
+/// its nodes and the file's arrays do. Each reference in it is followed
+/// through [`deref_tried`]: one that doesn't read leaves the tree not
+/// whole, and the walk goes on beside it. A `/Names` or `/Kids` that's
+/// null, or a reference to nothing, is none, and a kid or a key that is, a
+/// part not read, as pdf-semantics' walk reads them.
 fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
     let mut tree = Tree {
         keys: HashSet::new(),
         whole: true,
     };
-    let mut seen = HashSet::new();
+    let address = |o: &Object| std::ptr::from_ref(o) as usize;
+    // The nodes read, and the arrays.
+    let (mut seen, mut arrays) = (HashSet::new(), HashSet::new());
     let limits = cx.file.limits;
     let mut nodes = vec![(root, 0)];
     while let Some((node, depth)) = nodes.pop() {
@@ -2510,19 +2516,26 @@ fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
             tree.whole = false;
             continue;
         }
-        if !seen.insert(std::ptr::from_ref(node) as usize) {
+        if !seen.insert(address(node)) {
             continue;
         }
         let Value::Dict(node) = node.value() else {
             tree.whole = false;
             continue;
         };
-        let array = |key: &[u8]| match node.get(key) {
-            Some(o) => deref_tried(o, cx).map(|o| o.map(Object::value)),
-            None => Ok(None),
+        // The array at `key`: none where there's none or it's been read
+        // already, and `Some(None)` where it isn't an array.
+        let mut array = |key: &[u8]| match node.get(key).map(|o| deref_tried(o, cx)) {
+            Some(Ok(Some(o))) => match o.value() {
+                Value::Array(array) if arrays.insert(address(o)) => Ok(Some(Some(&array[..]))),
+                Value::Array(_) => Ok(None),
+                _ => Ok(Some(None)),
+            },
+            Some(Ok(None)) | None => Ok(None),
+            Some(Err(Unread)) => Err(Unread),
         };
         match array(b"Names") {
-            Ok(Some(Value::Array(names))) => {
+            Ok(Some(Some(names))) => {
                 for key in names.iter().step_by(2) {
                     match deref_tried(key, cx).map(|o| o.map(Object::value)) {
                         Ok(Some(Value::String(Str::Bytes(key), _))) => {
@@ -2533,10 +2546,10 @@ fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
                 }
             }
             Ok(None) => {}
-            Ok(Some(_)) | Err(Unread) => tree.whole = false,
+            Ok(Some(None)) | Err(Unread) => tree.whole = false,
         }
         match array(b"Kids") {
-            Ok(Some(Value::Array(kids))) => {
+            Ok(Some(Some(kids))) => {
                 for kid in kids {
                     match deref_tried(kid, cx) {
                         Ok(Some(kid)) => nodes.push((kid, depth + 1)),
@@ -2545,7 +2558,7 @@ fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
                 }
             }
             Ok(None) => {}
-            Ok(Some(_)) | Err(Unread) => tree.whole = false,
+            Ok(Some(None)) | Err(Unread) => tree.whole = false,
         }
     }
     tree
@@ -4614,6 +4627,34 @@ mod tests {
         assert_eq!(said, [t.clone(), t.clone(), f.clone(), t.clone(), t, f]);
         assert_eq!(resolved[&ObjectId::new(3, 0)], 1, "the kid, read once");
         assert_eq!(resolved[&ObjectId::new(2, 0)], 12, "the root, twice a row");
+    }
+
+    #[test]
+    fn a_name_trees_array_is_read_once_however_many_nodes_hold_it() {
+        // 500 nodes, 10 to 509, each holding one /Kids array, 3, of all
+        // of them, and one /Names array, 4; the root, 2, holding the /Kids
+        // array too. Read once each, the arrays cost what they hold, where
+        // read with each node, they'd cost its square.
+        let n = 500;
+        let kids: Vec<Object> = (10..10 + n).map(Object::reference).collect();
+        let node = || dict! { "Kids" => Object::reference(3), "Names" => Object::reference(4) };
+        let catalog = dict! { "Type" => Object::name("Catalog"), "Names" => dict! { "Dests" => Object::reference(2) } };
+        let mut objects = vec![
+            (1, Object::from(catalog)),
+            (2, dict! { "Kids" => Object::reference(3) }.into()),
+            (3, kids.into()),
+            (4, vec![Object::text("k"), Object::from(0)].into()),
+        ];
+        objects.extend((10..10 + n).map(|n| (n, Object::from(node()))));
+        let file = File::new(dict! { "Root" => Object::reference(1) }, objects);
+        let tree = "trailer::Catalog::Names::Dests";
+        let (said, resolved) = file.counted("1.7", |file| in_tree(file, tree, &["k", "z"]));
+        assert_eq!(said, [Truth::True, Truth::False], "read whole");
+        for id in 10..10 + n {
+            assert_eq!(resolved[&ObjectId::new(id, 0)], 1, "{id}, read once");
+        }
+        let all: usize = resolved.values().sum();
+        assert!(all < 4 * n as usize, "{all} objects resolved");
     }
 
     #[test]
