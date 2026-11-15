@@ -2479,7 +2479,12 @@ fn items<'c>(cx: &Cx<'c, '_>) -> &'c Items {
 /// (OBJR, to their `/Obj`). An MCR or OBJR is told by its `/Type`, or
 /// without one by its `/MCID` or `/Obj` where an element would have `/S`.
 /// Each page and object is [`Known`] as its entry, `/Pg` or `/Obj`, names
-/// it. A file without a structure tree has no content items.
+/// it. A file without a structure tree has no content items. Each element
+/// is read once, and an array each time it's reached, under the page of
+/// the element it's reached from, as deep as [`TREE_DEPTH`] lets; and no
+/// more kids are looked at than [`TREE_NODES`], each entry of a `/K`
+/// counted each time it's reached, before it's looked at, so that an array
+/// that holds itself ends there, not read whole.
 fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     let mut items = Items {
         objects: Objects::new(),
@@ -2492,59 +2497,90 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
         return items;
     };
     let mut seen = HashSet::new();
-    // Each node, the page of the element it's a kid of, and its depth.
+    // Each node, the page of the element it's a kid of, and its depth; and
+    // how many kids have been looked at.
     let mut nodes: Vec<(&'c Object, Option<Known>, usize)> = Vec::new();
-    if let Some(kids) = value_at(root, At::Key(b"K"), cx) {
-        nodes.push((kids, None, 0));
-    }
-    while let Some((node, page, depth)) = nodes.pop() {
-        if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
-            items.objects.whole = false;
-            items.pages.whole = false;
-            continue;
-        }
-        match node.value() {
-            Value::Array(kids) => {
-                for kid in kids {
-                    if let Some(kid) = deref(kid, cx) {
-                        nodes.push((kid, page, depth + 1));
-                    }
-                }
+    let mut looked = 0;
+    let cut = 'walk: {
+        if let Some(kids) = entry(root, At::Key(b"K"), cx) {
+            if !look(&mut looked, TREE_NODES) {
+                break 'walk true;
             }
-            // A marked-content identifier, on the element's page.
-            Value::Integer(_) => match page {
-                Some(page) => items.pages.insert(page),
-                None => items.pages.whole = false,
-            },
-            Value::Dict(d) => {
-                if !seen.insert(address(node)) {
-                    continue;
-                }
-                let name = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)?.as_name());
-                let has = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)).is_some();
-                let own_page = d.get(b"Pg").and_then(|o| deref_known(o, cx));
-                let element = !has(b"S");
-                if name(b"Type") == Some(b"MCR") || (element && has(b"MCID")) {
-                    if has(b"Stm") {
-                        continue;
-                    }
-                    match own_page.or(page) {
+            if let Some(kids) = deref(kids, cx) {
+                nodes.push((kids, None, 0));
+            }
+        }
+        while let Some((node, page, depth)) = nodes.pop() {
+            if depth > TREE_DEPTH {
+                items.objects.whole = false;
+                items.pages.whole = false;
+                continue;
+            }
+            // The node's kids, and the page of the element they're kids of.
+            let (kids, on) = match node.value() {
+                Value::Array(kids) => (&kids[..], page),
+                // A marked-content identifier, on the element's page.
+                Value::Integer(_) => {
+                    match page {
                         Some(page) => items.pages.insert(page),
                         None => items.pages.whole = false,
                     }
-                } else if name(b"Type") == Some(b"OBJR") || (element && has(b"Obj")) {
-                    match d.get(b"Obj").and_then(|o| deref_known(o, cx)) {
-                        Some(object) => items.objects.insert(object),
-                        None => items.objects.whole = false,
+                    continue;
+                }
+                Value::Dict(d) => {
+                    if !seen.insert(address(node)) {
+                        continue;
                     }
-                } else if let Some(kids) = d.get(b"K").and_then(|o| deref(o, cx)) {
-                    nodes.push((kids, own_page, depth + 1));
+                    let name = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)?.as_name());
+                    let has = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)).is_some();
+                    let own_page = d.get(b"Pg").and_then(|o| deref_known(o, cx));
+                    let element = !has(b"S");
+                    if name(b"Type") == Some(b"MCR") || (element && has(b"MCID")) {
+                        if !has(b"Stm") {
+                            match own_page.or(page) {
+                                Some(page) => items.pages.insert(page),
+                                None => items.pages.whole = false,
+                            }
+                        }
+                        continue;
+                    } else if name(b"Type") == Some(b"OBJR") || (element && has(b"Obj")) {
+                        match d.get(b"Obj").and_then(|o| deref_known(o, cx)) {
+                            Some(object) => items.objects.insert(object),
+                            None => items.objects.whole = false,
+                        }
+                        continue;
+                    }
+                    match d.get(b"K") {
+                        Some(kids) => (std::slice::from_ref(kids), own_page),
+                        None => continue,
+                    }
+                }
+                _ => continue,
+            };
+            for kid in kids {
+                if !look(&mut looked, TREE_NODES) {
+                    break 'walk true;
+                }
+                if let Some(kid) = deref(kid, cx) {
+                    nodes.push((kid, on, depth + 1));
                 }
             }
-            _ => {}
         }
+        false
+    };
+    if cut {
+        items.objects.whole = false;
+        items.pages.whole = false;
     }
     items
+}
+
+/// Counts a kid a walk looks at, before it's looked at: false, counting
+/// none, where `cap` have been.
+fn look(looked: &mut usize, cap: usize) -> bool {
+    let room = *looked < cap;
+    *looked += usize::from(room);
+    room
 }
 
 /// Whether the row's own value, a name, is a key of the dictionary at
@@ -4880,6 +4916,41 @@ mod tests {
             [(1, catalog.into()), (2, page())],
         );
         assert_eq!(asks(&file, 2, pages), Truth::False);
+    }
+
+    #[test]
+    fn a_structure_tree_whose_array_holds_itself_is_read_no_further_than_its_cap() {
+        // The root's /K, 5, an array holding itself, twice or three times,
+        // and an element putting marked content on page 2: each time it's
+        // reached, it's read again, its kids counted, until the walk has
+        // looked at as many as it may.
+        for times in [1, 2, 3] {
+            let mut kids = vec![Object::reference(5); times];
+            kids.push(
+                dict! { "S" => Object::name("P"), "Pg" => Object::reference(2), "K" => 0 }.into(),
+            );
+            let root =
+                dict! { "Type" => Object::name("StructTreeRoot"), "K" => Object::reference(5) };
+            let catalog = dict! { "Type" => Object::name("Catalog"), "StructTreeRoot" => root };
+            let page = || Object::from(dict! { "Type" => Object::name("Page") });
+            let file = File::new(
+                dict! { "Root" => Object::reference(1) },
+                [
+                    (1, catalog.into()),
+                    (2, page()),
+                    (3, page()),
+                    (5, kids.into()),
+                ],
+            );
+            let asks = |n: u32| {
+                let container = file.objects.get(&ObjectId::new(n, 0)).unwrap();
+                let text = "fn:PageContainsStructContentItems()";
+                item_in(&file, container, Some(ObjectId::new(n, 0)), text)
+            };
+            assert_eq!(asks(2), Truth::True, "{times}");
+            let unknown = unknown("fn:PageContainsStructContentItems");
+            assert_eq!(asks(3), unknown, "{times}: not read whole");
+        }
     }
 
     /// `text`, a content item's function, held of `container` in `file`:
