@@ -16,11 +16,14 @@
 //! when placing glyphs, so re-interpreting the encoded output reproduces every
 //! glyph, path, image, shading, clip, and mark bit-for-bit.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Range};
 
-use pdf_content_streams::{Concat, ContentWriter, ImageStream, Operator, Operators, Reserved};
+use pdf_content_streams::{
+    Concat, ContentWriter, ImageStream, InlineImage, Operator, Operators, ResCx, Reserved,
+    operations,
+};
 use pdf_fonts::Fonts;
 use pdf_objects::fault::Sink;
 use pdf_objects::{Object, ObjectId, Resolve, Streams, serialize};
@@ -28,9 +31,10 @@ use pdf_objects::{Object, ObjectId, Resolve, Streams, serialize};
 use crate::error::{Error, Unwritable};
 use crate::fault::Fault;
 use crate::geom::{Matrix, Point};
-use crate::interp::{Event, Forms, Kind, Opts, Wants, interpret_with};
-use crate::limits::Limits;
+use crate::interp::{At, Event, Forms, Kind, Opts, Wants, interpret_with};
+use crate::limits::{Cap, Limits};
 use crate::phases::phase;
+use crate::state::nums;
 
 /// Re-encoded page content stream and Form XObject streams returned by
 /// [`encode`] and [`encode_with`].
@@ -105,10 +109,10 @@ where
         return Err(Error::PageStream(unreadable.clone()));
     }
 
-    let mut page = ContentWriter::new();
-    let mut forms: Vec<(ObjectId, ContentWriter)> = Vec::new();
-    let mut written = HashSet::new();
-    let mut uses: Vec<(ObjectId, Option<usize>)> = Vec::new();
+    let mut page = StreamOut::default();
+    let mut form_index: HashMap<ObjectId, usize> = HashMap::new();
+    let mut forms: Vec<(ObjectId, StreamOut)> = Vec::new();
+    let mut uses: Vec<UseFrame> = Vec::new();
     let mut stop_err: Option<Error> = None;
 
     let opts = Opts {
@@ -130,22 +134,52 @@ where
         |event| {
             match event.kind {
                 Kind::FormBegin(form) => {
-                    let first = written.insert(form.form).then(|| {
-                        forms.push((form.form, ContentWriter::new()));
-                        forms.len() - 1
+                    let (idx, first) = match form_index.get(&form.form) {
+                        Some(&idx) => (idx, false),
+                        None => {
+                            let idx = forms.len();
+                            form_index.insert(form.form, idx);
+                            forms.push((form.form, StreamOut::default()));
+                            (idx, true)
+                        }
+                    };
+                    uses.push(UseFrame {
+                        form: form.form,
+                        idx,
+                        first,
+                        inline_cursor: 0,
                     });
-                    uses.push((form.form, first));
                 }
                 Kind::FormEnd(_) => {
-                    uses.pop();
+                    if let Some(ended) = uses.pop()
+                        && !ended.first
+                    {
+                        let expected = &forms[ended.idx].1.inlines;
+                        if ended.inline_cursor != expected.len() {
+                            let at = expected.get(ended.inline_cursor).map_or(0, |s| s.orig_at);
+                            stop_err = Some(Error::Unwritable {
+                                form: Some(ended.form),
+                                at,
+                                why: Unwritable::InlineStream,
+                            });
+                            return ControlFlow::Break(());
+                        }
+                    }
                 }
                 Kind::Op => {
-                    let (form, out) = match uses.last() {
-                        None => (None, &mut page),
-                        Some(&(form, Some(i))) => (Some(form), &mut forms[i].1),
-                        Some((_, None)) => return ControlFlow::Continue(()),
+                    let res = match uses.last_mut() {
+                        None => write_op(&mut page, None, &event, limits),
+                        Some(u) if u.first => {
+                            write_op(&mut forms[u.idx].1, Some(u.form), &event, limits)
+                        }
+                        Some(u) => check_repeat_op(
+                            &mut forms[u.idx].1,
+                            u.form,
+                            &mut u.inline_cursor,
+                            &event.at,
+                        ),
                     };
-                    if let Err(err) = write_op(out, form, &event, limits) {
+                    if let Err(err) = res {
                         stop_err = Some(err);
                         return ControlFlow::Break(());
                     }
@@ -161,15 +195,216 @@ where
     }
 
     let reserved = Reserved::default();
-    let finish = |w: ContentWriter| w.finish(&reserved).0;
+    let mut verified_bytes = 0usize;
+    let content = finish_stream(page, None, &reserved, limits, &mut verified_bytes)?;
+    let mut out_forms = Vec::with_capacity(forms.len());
+    for (id, form_out) in forms {
+        let bytes = finish_stream(form_out, Some(id), &reserved, limits, &mut verified_bytes)?;
+        out_forms.push((id, bytes));
+    }
     Ok(Encoded {
-        content: finish(page),
-        forms: forms.into_iter().map(|(id, w)| (id, finish(w))).collect(),
+        content,
+        forms: out_forms,
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InlineSnap {
+    orig_at: usize,
+    raw_len: usize,
+    rel_data: Range<usize>,
+    rel_kept: Option<Range<usize>>,
+}
+
+impl InlineSnap {
+    fn of(image: &InlineImage<'_>) -> Self {
+        let base = image.at().start;
+        let rel = |r: Range<usize>| (r.start - base)..(r.end - base);
+        let rel_kept = match image.stream() {
+            ImageStream::Data(kept) => Some(rel(kept)),
+            _ => None,
+        };
+        Self {
+            orig_at: base,
+            raw_len: image.at().len(),
+            rel_data: rel(image.data()),
+            rel_kept,
+        }
+    }
+}
+
+#[derive(Default)]
+struct StreamOut {
+    writer: ContentWriter,
+    inlines: Vec<InlineSnap>,
+    res_list: Vec<ResCx>,
+}
+
+impl StreamOut {
+    fn record_res(&mut self, res: &ResCx) {
+        if !self.res_list.contains(res) {
+            self.res_list.push(res.clone());
+        }
+    }
+}
+
+struct UseFrame {
+    form: ObjectId,
+    idx: usize,
+    first: bool,
+    inline_cursor: usize,
+}
+
+fn validate_inline<'a>(
+    form: Option<ObjectId>,
+    start: usize,
+    content: &'a [u8],
+    image: &InlineImage<'a>,
+) -> Result<&'a [u8], Error> {
+    if image.capped() {
+        return Err(Error::CappedInlineImage { form, at: start });
+    }
+    let raw_inline = &content[image.at()];
+    if image.stream() == ImageStream::Missing || !raw_inline.ends_with(b"EI") {
+        return Err(Error::Unwritable {
+            form,
+            at: start,
+            why: Unwritable::InlineStream,
+        });
+    }
+    if let Some(given) = image.length()
+        && given != image.data().len() as u64
+    {
+        return Err(Error::Unwritable {
+            form,
+            at: start,
+            why: Unwritable::InlineLength,
+        });
+    }
+    Ok(raw_inline)
+}
+
+fn check_repeat_op(
+    out: &mut StreamOut,
+    form: ObjectId,
+    cursor: &mut usize,
+    at: &At<'_>,
+) -> Result<(), Error> {
+    let Some(step) = at.operation() else {
+        return Ok(());
+    };
+    let start = step.at().start;
+    if let Some(image) = step.inline_image() {
+        validate_inline(Some(form), start, at.content(), &image)?;
+        let snap = InlineSnap::of(&image);
+        if out.inlines.get(*cursor) != Some(&snap) {
+            return Err(Error::Unwritable {
+                form: Some(form),
+                at: start,
+                why: Unwritable::InlineStream,
+            });
+        }
+        *cursor += 1;
+        out.record_res(at.res);
+    } else if step.operator() == Operator::BeginInlineImage {
+        return Err(Error::Unwritable {
+            form: Some(form),
+            at: start,
+            why: Unwritable::LoneBi,
+        });
+    }
+    Ok(())
+}
+
+fn finish_stream(
+    out: StreamOut,
+    form: Option<ObjectId>,
+    reserved: &Reserved,
+    limits: &Limits,
+    verified_bytes: &mut usize,
+) -> Result<Vec<u8>, Error> {
+    let bytes = out.writer.finish(reserved).0;
+    if !out.inlines.is_empty() {
+        for res in &out.res_list {
+            *verified_bytes = verified_bytes.saturating_add(bytes.len());
+            if *verified_bytes > limits.interpreted {
+                return Err(Error::Limit(Cap::Interpreted));
+            }
+            verify_encoded_inlines(&bytes, &out.inlines, res, &limits.content, form)?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn verify_encoded_inlines(
+    bytes: &[u8],
+    expected: &[InlineSnap],
+    res: &ResCx,
+    content_limits: &pdf_content_streams::Limits,
+    form: Option<ObjectId>,
+) -> Result<(), Error> {
+    let fallback_at = expected.first().map_or(0, |s| s.orig_at);
+    let mut idx = 0usize;
+    for step in operations(bytes, res, content_limits) {
+        let Ok(step) = step else {
+            let at = expected.get(idx).map_or(fallback_at, |s| s.orig_at);
+            return Err(Error::Unwritable {
+                form,
+                at,
+                why: Unwritable::InlineStream,
+            });
+        };
+        if let Some(image) = step.inline_image() {
+            let Some(exp) = expected.get(idx) else {
+                return Err(Error::Unwritable {
+                    form,
+                    at: fallback_at,
+                    why: Unwritable::InlineStream,
+                });
+            };
+            if image.capped() {
+                return Err(Error::CappedInlineImage {
+                    form,
+                    at: exp.orig_at,
+                });
+            }
+            let raw = &bytes[image.at()];
+            let snap = InlineSnap::of(&image);
+            if image.stream() == ImageStream::Missing
+                || !raw.ends_with(b"EI")
+                || snap.raw_len != exp.raw_len
+                || snap.rel_data != exp.rel_data
+                || snap.rel_kept != exp.rel_kept
+            {
+                return Err(Error::Unwritable {
+                    form,
+                    at: exp.orig_at,
+                    why: Unwritable::InlineStream,
+                });
+            }
+            idx += 1;
+        } else if step.operator() == Operator::BeginInlineImage {
+            let at = expected.get(idx).map_or(fallback_at, |s| s.orig_at);
+            return Err(Error::Unwritable {
+                form,
+                at,
+                why: Unwritable::LoneBi,
+            });
+        }
+    }
+    if idx != expected.len() {
+        let at = expected.get(idx).map_or(fallback_at, |s| s.orig_at);
+        return Err(Error::Unwritable {
+            form,
+            at,
+            why: Unwritable::InlineStream,
+        });
+    }
+    Ok(())
+}
+
 fn write_op(
-    out: &mut ContentWriter,
+    out: &mut StreamOut,
     form: Option<ObjectId>,
     event: &Event<'_>,
     limits: &Limits,
@@ -181,31 +416,23 @@ fn write_op(
     let start = step.at().start;
 
     if let Some(image) = step.inline_image() {
-        if image.capped() {
-            return Err(Error::CappedInlineImage { form, at: start });
-        }
-        let raw_inline = &at.content()[image.at()];
-        if image.stream() == ImageStream::Missing || !raw_inline.ends_with(b"EI") {
-            return Err(Error::Unwritable {
-                form,
-                at: start,
-                why: Unwritable::InlineStream,
-            });
-        }
-        if let Some(given) = image.length()
-            && given != image.data().len() as u64
-        {
-            return Err(Error::Unwritable {
-                form,
-                at: start,
-                why: Unwritable::InlineLength,
-            });
-        }
-        out.operation(step.operands().map(|o| o.bytes()), raw_inline);
+        let raw_inline = validate_inline(form, start, at.content(), &image)?;
+        out.inlines.push(InlineSnap::of(&image));
+        out.record_res(at.res);
+        out.writer
+            .operation(step.operands().map(|o| o.bytes()), raw_inline);
         return Ok(());
     }
 
     let op = step.operator();
+    if op == Operator::BeginInlineImage {
+        return Err(Error::Unwritable {
+            form,
+            at: start,
+            why: Unwritable::LoneBi,
+        });
+    }
+
     if !matches!(
         op,
         Operator::MoveLine
@@ -214,7 +441,8 @@ fn write_op(
             | Operator::NextLineShow
             | Operator::NextLineShowSpaced
     ) {
-        out.operation(step.operands().map(|o| o.bytes()), step.name());
+        out.writer
+            .operation(step.operands().map(|o| o.bytes()), step.name());
         return Ok(());
     }
 
@@ -229,7 +457,8 @@ fn write_op(
         && after.line == before.line
         && after.pen == before.pen
     {
-        out.operation(step.operands().map(|o| o.bytes()), step.name());
+        out.writer
+            .operation(step.operands().map(|o| o.bytes()), step.name());
         return Ok(());
     }
 
@@ -241,9 +470,11 @@ fn write_op(
         })
     };
 
-    if op == Operator::NextLineShowSpaced {
-        out.operation([real_at(after.word_space)?.as_slice()], b"Tw");
-        out.operation([real_at(after.char_space)?.as_slice()], b"Tc");
+    if op == Operator::NextLineShowSpaced && nums::<3>(step).is_some() {
+        out.writer
+            .operation([real_at(after.word_space)?.as_slice()], b"Tw");
+        out.writer
+            .operation([real_at(after.char_space)?.as_slice()], b"Tc");
     }
 
     let Matrix { a, b, c, d, e, f } = after.matrix;
@@ -255,17 +486,17 @@ fn write_op(
         real_at(e)?,
         real_at(f)?,
     ];
-    out.operation(tm.iter().map(Vec::as_slice), b"Tm");
+    out.writer.operation(tm.iter().map(Vec::as_slice), b"Tm");
 
     if after.line != Point::ZERO {
         let td = [real_at(after.line.x)?, real_at(after.line.y)?];
-        out.operation(td.iter().map(Vec::as_slice), b"Td");
+        out.writer.operation(td.iter().map(Vec::as_slice), b"Td");
     }
 
     if matches!(op, Operator::NextLineShow | Operator::NextLineShowSpaced)
         && let Some(string) = step.arg(0)
     {
-        out.operation([string.bytes()], b"Tj");
+        out.writer.operation([string.bytes()], b"Tj");
     }
     Ok(())
 }

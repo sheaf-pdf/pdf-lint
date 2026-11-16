@@ -37,6 +37,10 @@ pub const SEEDS: &[&[u8]] = &[
     b"0 0 50 50 re W n /Fm1 Do\xff<< /XObject << /Fm1 1 0 R >> >>\xff<< /Subtype /Form /BBox [0 0 40 40] >>\nstream\n0 0 20 20 re S",
     b"BI /W 1 /H 1 /BPC 8 /CS /G ID x EI",
     b"/Span << /MCID 0 /ActualText (Hi) >> BDC 1 w 1 J 5 5 m h S EMC",
+    b"BI /W 1 /$\x00\"\x00\x00\x00\x00\x80\x00\x00x EI",
+    b"BI /SMask /None/W 1 / W* BI /W 1 /W n /Fm1 C\x01\x00\x00\x00\x00\x00\x00\"] I /CS /] ID x E\x01\x00\x00\x00\x00\x00\x00\x05KC 8 /CS /] ID x D x EIH;1 /BPKC 8 /CS /] ID x EI",
+    b"BI /F /Fl ID x EI\n\n",
+    b"1 Tw 2 Tc /Fm1 Do 5 Tw 6 Tc /Fm1 Do\xff<< /XObject << /Fm1 1 0 R >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>\xff<< /Subtype /Form /BBox [0 0 80 80] >>\nstream\nBT /F1 10 Tf 1e39 0 (Hi) \" ET",
 ];
 
 /// Runs `interpret`, `interpret_with`, `Wants::NONE`, and `encode` round-trip
@@ -152,50 +156,66 @@ pub fn check(data: &[u8]) {
     #[cfg(feature = "text-layout")]
     fuzz_text_layout(streams, &concat, resources.as_ref(), &limits, &fonts, data);
 
-    if res_all.is_ok()
-        && let Ok(Encoded {
-            content: enc_page,
-            forms: enc_forms,
-        }) = encode(streams, &concat, resources.as_ref(), &limits, &fonts)
-    {
-        let mut map2 = map.clone();
-        let mut sb2 = stream_bytes.clone();
-        for (fid, bytes) in enc_forms {
-            let dict = map2
-                .get(&fid)
-                .and_then(Object::as_stream)
-                .map_or_else(Dict::new, |s| s.dict.clone());
-            sb2.insert(fid, bytes.clone());
-            map2.insert(fid, Object::from(Stream::new(dict, bytes)));
-        }
-        let streams2 = WithStreams::new(&map2, |id: ObjectId, cap: usize| match sb2.get(&id) {
-            Some(bytes) if bytes.len() <= cap => Ok(bytes.clone()),
-            Some(_) => Err(Unreadable::new(id, Why::Limit, "past budget")),
-            None => Err(Unreadable::new(id, Why::Damaged, "missing stream")),
-        });
-        let concat2 = Concat::new(&[&enc_page]);
-        let mut events_after = Vec::new();
-        let again = interpret(
-            streams2,
-            &concat2,
+    if res_all.is_ok() {
+        let enc_plain = encode(streams, &concat, resources.as_ref(), &limits, &fonts);
+        let mut enc_faults = Vec::new();
+        let enc_sink = encode_with(
+            streams,
+            &concat,
             resources.as_ref(),
             &limits,
             &fonts,
-            Opts::default(),
-            |ev| {
-                if let Some(snap) = snapshot(&ev) {
-                    events_after.push(snap);
-                }
-                ControlFlow::Continue(())
-            },
+            &mut enc_faults,
         );
-        if again.is_ok() {
-            assert_eq!(events_before.len(), events_after.len());
-            for (a, b) in events_before.iter().zip(&events_after) {
-                assert_eq!(a.tag, b.tag);
-                assert_eq!(a.nums.len(), b.nums.len());
-                for (&x, &y) in a.nums.iter().zip(&b.nums) {
-                    assert!(x == y || (x.is_nan() && y.is_nan()));
+        assert_eq!(enc_plain, enc_sink);
+        for (_, fault) in &enc_faults {
+            let _ = format!("{fault:?}");
+        }
+
+        if let Ok(Encoded {
+            content: enc_page,
+            forms: enc_forms,
+        }) = enc_plain
+        {
+            let mut map2 = map.clone();
+            let mut sb2 = stream_bytes.clone();
+            for (fid, bytes) in enc_forms {
+                let dict = map2
+                    .get(&fid)
+                    .and_then(Object::as_stream)
+                    .map_or_else(Dict::new, |s| s.dict.clone());
+                sb2.insert(fid, bytes.clone());
+                map2.insert(fid, Object::from(Stream::new(dict, bytes)));
+            }
+            let streams2 = WithStreams::new(&map2, |id: ObjectId, cap: usize| match sb2.get(&id) {
+                Some(bytes) if bytes.len() <= cap => Ok(bytes.clone()),
+                Some(_) => Err(Unreadable::new(id, Why::Limit, "past budget")),
+                None => Err(Unreadable::new(id, Why::Damaged, "missing stream")),
+            });
+            let concat2 = Concat::new(&[&enc_page]);
+            let mut events_after = Vec::new();
+            let again = interpret(
+                streams2,
+                &concat2,
+                resources.as_ref(),
+                &limits,
+                &fonts,
+                Opts::default(),
+                |ev| {
+                    if let Some(snap) = snapshot(&ev) {
+                        events_after.push(snap);
+                    }
+                    ControlFlow::Continue(())
+                },
+            );
+            if again.is_ok() {
+                assert_eq!(events_before.len(), events_after.len());
+                for (a, b) in events_before.iter().zip(&events_after) {
+                    assert_eq!(a.tag, b.tag);
+                    assert_eq!(a.nums.len(), b.nums.len());
+                    for (&x, &y) in a.nums.iter().zip(&b.nums) {
+                        assert!(x == y || (x.is_nan() && y.is_nan()));
+                    }
                 }
             }
         }

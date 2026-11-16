@@ -124,6 +124,7 @@ pub struct At<'e> {
     /// Enclosing Form XObject invocation, or `None` in the page's own content
     /// stream.
     pub stream: Option<&'e UseId>,
+    pub(crate) res: &'e ResCx,
     content: &'e [u8],
     operation: Option<Operation<'e>>,
 }
@@ -536,6 +537,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         }
         let eof_at = At {
             stream: frame.stream,
+            res: frame.res,
             content: frame.content,
             operation: None,
         };
@@ -567,6 +569,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         let inline = step.inline_image();
         let at = At {
             stream: frame.stream,
+            res: frame.res,
             content: frame.content,
             operation: Some(step.clone()),
         };

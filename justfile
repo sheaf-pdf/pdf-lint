@@ -647,7 +647,8 @@ arlington-msrv:
 # components, its typed spaces and what a resources dictionary names; `fonts`,
 # pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
 # reading of a font, its program among them, on any parts and in a file;
-# `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
+# `gfx`, pdf-gfx's geometry, interpreter, text layout and content re-encoder on
+# any parts and in a file; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
 # through the facade, and written in the clear and encrypted, read locked and
 # unlocked; `arlington`, pdf-arlington's loader on any tables and its
@@ -655,12 +656,12 @@ arlington-msrv:
 # checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
-# `color`, `fonts`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make. The
+# `color`, `fonts`, `gfx`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'
 # SIMD, which `content` reaches (`just fuzz content 300 simd`); and
 # `predefined-cmaps`, Adobe's predefined CMaps from pdf-fonts' bundle,
-# which `fonts` reaches (`just fuzz fonts 300 predefined-cmaps`), and which
+# which `fonts` and `gfx` reach (`just fuzz gfx 300 predefined-cmaps`), and which
 # pdf-lint's binary, as `check` builds it, is without.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.

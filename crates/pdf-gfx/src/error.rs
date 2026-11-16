@@ -20,10 +20,16 @@ pub enum Unwritable {
     InlineLength,
     /// An inline image produced no stream in PDFium
     /// ([`ImageStream::Missing`](pdf_content_streams::ImageStream::Missing)),
-    /// meaning its end was recovered by scanning to `EI` rather than a bounded
-    /// filter or byte count.
+    /// or its stream end shifts when written out (for example, when a filter
+    /// peeks past `EI` or a Form XObject without `/Resources` is drawn under
+    /// conflicting inherited color-space component counts).
     #[error("inline image has no valid stream end")]
     InlineStream,
+    /// A `BI` operator begins no inline image because a non-`ID` keyword
+    /// appeared where a dictionary key was expected, so rewriting subsequent
+    /// operators could turn it into an inline image on read-back.
+    #[error("lone BI operator begins no inline image")]
+    LoneBi,
 }
 
 /// Why [`interpret`](crate::interpret) or [`encode`](crate::encode) stopped.

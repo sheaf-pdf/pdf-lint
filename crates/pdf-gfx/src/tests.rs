@@ -2093,3 +2093,186 @@ fn canvas_text_box_wrapping_alignment_autosize_comb_and_custom_fonts() {
     assert_eq!(cjk_laid.lines[0].codes, vec![0x00, 0x01]);
     assert_eq!(cjk_laid.lines[1].codes, vec![0x00, 0x02]);
 }
+
+#[test]
+fn encode_refuses_lone_bi_and_unstable_inline_image_ends() {
+    let store = Store::default();
+    let fonts = Fonts::default();
+
+    // 1. Lone `BI` followed by `"` (`NextLineShowSpaced`) must be refused with
+    //    `Unwritable::LoneBi` rather than turning into an inline image after `"`.
+    for raw in [
+        &b"BI /W 1 /$\x00\"\x00\x00\x00\x00\x80\x00\x00x EI"[..],
+        &b"BI /SMask /None/W 1 / W* BI /W 1 /W n /Fm1 C\x01\x00\x00\x00\x00\x00\x00\"] I /CS /] ID x E\x01\x00\x00\x00\x00\x00\x00\x05KC 8 /CS /] ID x D x EIH;1 /BPKC 8 /CS /] ID x EI"[..],
+    ] {
+        crate::fuzz::check(raw);
+        let err = encode(
+            store.as_streams(),
+            &Concat::new(&[raw]),
+            None,
+            &Limits::DEFAULT,
+            &fonts,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            Error::Unwritable {
+                form: None,
+                at: 0,
+                why: Unwritable::LoneBi,
+            }
+        );
+    }
+
+    // 2. Trailing Flate `FDICT` header (`x `) peeking 2 bytes past `EI`:
+    //    without trailing operations after `EI`, writing only `\n` drops the
+    //    stream on read-back -> refused with `Unwritable::InlineStream`.
+    let trailing_fdict = b"BI /F /Fl ID x EI\n\n";
+    crate::fuzz::check(trailing_fdict);
+    let err = encode(
+        store.as_streams(),
+        &Concat::new(&[trailing_fdict]),
+        None,
+        &Limits::DEFAULT,
+        &fonts,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        Error::Unwritable {
+            form: None,
+            at: 0,
+            why: Unwritable::InlineStream,
+        }
+    );
+
+    //    When followed by `q Q`, enough bytes remain past `EI` so `encode`
+    //    succeeds and preserves the inline image!
+    let followed_fdict = b"BI /F /Fl ID x EI q Q";
+    crate::fuzz::check(followed_fdict);
+    let enc = encode(
+        store.as_streams(),
+        &Concat::new(&[followed_fdict]),
+        None,
+        &Limits::DEFAULT,
+        &fonts,
+    )
+    .unwrap();
+    assert!(!enc.content.is_empty());
+
+    // 3. Form XObject without `/Resources` containing an inline image sized by
+    //    inherited `/CS1`: drawn first under 1-component `/DeviceGray` and then
+    //    inside a wrapper form whose `/CS1` is 3-component `/DeviceRGB`.
+    let mut store2 = Store::default();
+    let inner_form = store2.put_stream(
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(20), Object::from(20)],
+        },
+        b"BI /W 2 /H 1 /BPC 8 /CS /CS1 ID ab EI 1234 EI".to_vec(),
+    );
+    let outer_form = store2.put_stream(
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(20), Object::from(20)],
+            "Resources" => dict! {
+                "XObject" => dict! { "Inner" => inner_form },
+                "ColorSpace" => dict! { "CS1" => Object::name("DeviceRGB") },
+            },
+        },
+        b"/Inner Do".to_vec(),
+    );
+    let page_res = Object::from(dict! {
+        "XObject" => dict! {
+            "Inner" => inner_form,
+            "Outer" => outer_form,
+        },
+        "ColorSpace" => dict! { "CS1" => Object::name("DeviceGray") },
+    });
+    let err = encode(
+        store2.as_streams(),
+        &Concat::new(&[b"/Inner Do /Outer Do"]),
+        Some(&page_res),
+        &Limits::DEFAULT,
+        &fonts,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        Error::Unwritable {
+            form: Some(inner_form),
+            at: 0,
+            why: Unwritable::InlineStream,
+        }
+    );
+}
+
+#[test]
+fn encode_preserves_inherited_spacing_on_reused_form_with_nonfinite_quote_op() {
+    let mut store = Store::default();
+    let form_id = store.put_stream(
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(200), Object::from(50)],
+        },
+        b"BT /F1 10 Tf 1e39 0 (A B) \" ET".to_vec(),
+    );
+    let page_res = Object::from(dict! {
+        "XObject" => dict! { "Fm1" => form_id },
+        "Font" => dict! {
+            "F1" => dict! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type1"),
+                "BaseFont" => Object::name("Helvetica"),
+            },
+        },
+    });
+    let page_bytes = b"1 Tw 2 Tc /Fm1 Do 10 Tw 20 Tc /Fm1 Do";
+    let fonts = Fonts::default();
+    let concat = Concat::new(&[page_bytes]);
+
+    let collect_origins = |s_store: &Store, c: &Concat<'_>| -> Vec<f32> {
+        let mut xs = Vec::new();
+        interpret(
+            s_store.as_streams(),
+            c,
+            Some(&page_res),
+            &Limits::DEFAULT,
+            &fonts,
+            Opts::default(),
+            |ev| {
+                if let Kind::Text(show) = &ev.kind {
+                    xs.extend(show.glyphs().map(|g| g.origin.x));
+                }
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        xs
+    };
+
+    let before = collect_origins(&store, &concat);
+    let encoded = encode(
+        store.as_streams(),
+        &concat,
+        Some(&page_res),
+        &Limits::DEFAULT,
+        &fonts,
+    )
+    .unwrap();
+    for (fid, bytes) in encoded.forms {
+        store.streams.insert(fid, bytes.clone());
+        store.objects.insert(
+            fid,
+            Object::from(Stream::new(
+                dict! {
+                    "Subtype" => Object::name("Form"),
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(200), Object::from(50)],
+                },
+                bytes,
+            )),
+        );
+    }
+    let after = collect_origins(&store, &Concat::new(&[&encoded.content]));
+    assert_eq!(before, after);
+}
