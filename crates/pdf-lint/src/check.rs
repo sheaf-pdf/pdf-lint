@@ -1116,8 +1116,9 @@ pub enum Rule {
 /// A rule a held object breaks.
 ///
 /// Not exhaustive: read by its fields, and made only by a check, so a
-/// field more is a minor release.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// field more is a minor release. Its `Debug` shows none of the file's
+/// text, so a finding is compared by `==` or by its fields, not by that.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Finding {
     /// The indirect object it's in: none for a table's trailer, the file
@@ -1252,8 +1253,9 @@ pub struct Unchecked {
 /// What a check of a file found in its held objects.
 ///
 /// Not exhaustive: read by its fields, and made only by a check, so a
-/// field more is a minor release.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// field more is a minor release. Its `Debug` shows none of the file's
+/// text, as [`Finding`]'s doesn't.
+#[derive(Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Report {
     /// What it found, in the order the check found it.
@@ -5145,6 +5147,88 @@ impl fmt::Display for Finding {
     }
 }
 
+/// Its parts but the file's text, which may be decrypted: its value, which
+/// quotes the file's names, strings and content, and its path, whose step
+/// in a name or number tree is the tree's key (`{key}`), by their lengths
+/// in bytes. Its table, key, rule, object, bytes and revision, names and
+/// numbers the file never encrypts, as they are.
+impl fmt::Debug for Finding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Finding {
+            object,
+            made,
+            path,
+            table,
+            key,
+            rule,
+            value,
+            at,
+            revision,
+        } = self;
+        f.debug_struct("Finding")
+            .field("object", object)
+            .field("made", made)
+            .field("path", &format_args!("{} bytes", path.len()))
+            .field("table", table)
+            .field("key", key)
+            .field("rule", rule)
+            .field("value", &format_args!("{} bytes", value.len()))
+            .field("at", at)
+            .field("revision", revision)
+            .finish()
+    }
+}
+
+/// Its parts as they are, its findings as [`Finding`]'s `Debug` shows them,
+/// but its paths, which hold the keys of the name and number trees the walk
+/// went through, which may be decrypted, by their count.
+impl fmt::Debug for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Report {
+            findings,
+            checked,
+            keys,
+            unchecked,
+            unlisted,
+            deprecated,
+            ignored,
+            no_table,
+            ties,
+            truncated,
+            two_contexts,
+            extensions,
+            two_tables,
+            trailer,
+            paths,
+            content,
+            unused,
+            departures,
+            linearized,
+        } = self;
+        f.debug_struct("Report")
+            .field("findings", findings)
+            .field("checked", checked)
+            .field("keys", keys)
+            .field("unchecked", unchecked)
+            .field("unlisted", unlisted)
+            .field("deprecated", deprecated)
+            .field("ignored", ignored)
+            .field("no_table", no_table)
+            .field("ties", ties)
+            .field("truncated", truncated)
+            .field("two_contexts", two_contexts)
+            .field("extensions", extensions)
+            .field("two_tables", two_tables)
+            .field("trailer", trailer)
+            .field("paths", &format_args!("{} paths", paths.len()))
+            .field("content", content)
+            .field("unused", unused)
+            .field("departures", departures)
+            .field("linearized", linearized)
+            .finish()
+    }
+}
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let objects = self.objects();
@@ -6397,6 +6481,67 @@ mod tests {
             ],
             "{report}"
         );
+    }
+
+    /// A finding's value and path, and a report's paths, are the file's
+    /// text, decrypted: in an encrypted file, a name tree's key is a step
+    /// of the path to its value, and a value that's a string is quoted in
+    /// the finding of it. Neither `Debug` shows either, where the report's
+    /// text does.
+    #[test]
+    fn a_finding_and_a_report_show_no_text_of_the_file_in_their_debug() {
+        use pdf_crypt::writer::{Kind, Settings};
+        let (key, value) = ("SecretKeyText", "SecretValueText");
+        // A destination whose left is a string, where it's a number or null.
+        let dest = vec![r(3), Object::name("XYZ"), text(value), 0.into(), 0.into()];
+        let leaf = dict! {
+            "Names" => vec![text(key), dest.into()],
+            "Limits" => vec![text(key), text(key)],
+        };
+        let mut objects = changed(clean(), 1, |catalog| {
+            catalog.set("Names", dict! { "Dests" => dict! { "Kids" => vec![r(6)] } });
+        });
+        objects.push((6, leaf.into()));
+        let settings = Settings {
+            kind: Kind::Aes256,
+            user: b"",
+            owner: b"owner",
+            p: -4,
+            id: ID,
+            encrypt_metadata: true,
+        };
+        let file = fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) });
+        for text in [key, value] {
+            let written = file.windows(text.len()).any(|w| w == text.as_bytes());
+            assert!(!written, "{text} is written in the clear");
+        }
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
+        assert!(matches!(
+            doc.encryption(),
+            crate::source::Encryption::Opened { .. }
+        ));
+        let options = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let report = check(&doc, &Hold::All(Made::Built), &options);
+        let finding = (report.findings.iter())
+            .find(|f| f.value.contains(value))
+            .unwrap_or_else(|| panic!("no finding quotes the value: {report}"));
+        assert!(finding.path.contains(&format!("{{{key}}}")), "{report}");
+        assert!(report.paths.iter().any(|p| p.contains(key)), "{report}");
+        let shown = format!("{report}");
+        assert!(shown.contains(key) && shown.contains(value), "{shown}");
+        for debug in [format!("{finding:?}"), format!("{report:?}")] {
+            for text in [key, value] {
+                assert!(!debug.contains(text), "{text} is in {debug}");
+            }
+        }
+        let path = finding.path.len();
+        let debug = format!("{finding:?}");
+        assert!(debug.contains(&format!("path: {path} bytes")), "{debug}");
+        let n = report.paths.len();
+        assert!(format!("{report:?}").contains(&format!("paths: {n} paths")));
     }
 
     #[test]
