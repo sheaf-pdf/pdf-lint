@@ -5,7 +5,7 @@
 #[cfg(any(test, feature = "insecure-test-writer"))]
 use std::convert::Infallible;
 
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 
 use pdf_crypt::Password;
 use pdf_linearize::check::Verdict;
@@ -50,6 +50,9 @@ struct Content {
     stopped: bool,
     fonts: Result<Vec<(Vec<u8>, bool)>, String>,
     text: Text,
+    geom: pdf_gfx::PageGeom,
+    gfx: Result<pdf_gfx::Summary, String>,
+    encoded: Result<(usize, usize), String>,
 }
 
 /// A page's text: each string shown ([`Said`]); and how many things weren't
@@ -120,6 +123,40 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
                 (string.bytes.clone(), string.at.clone(), string.text(), form)
             });
             let _ = text.text();
+            let geom = page.geom();
+            let gfx = page
+                .interpret(pdf_gfx::Opts::default(), |_| ControlFlow::Continue(()))
+                .map_err(words);
+            let mut gfx_faults = Vec::new();
+            let gfx_with = page
+                .interpret_with(pdf_gfx::Opts::default(), &mut gfx_faults, |_| {
+                    ControlFlow::Continue(())
+                })
+                .map_err(words);
+            assert_eq!(gfx, gfx_with, "gfx fault sink invariance");
+            let encoded = page
+                .encode()
+                .map(|enc| (enc.content.len(), enc.forms.len()))
+                .map_err(words);
+            let mut enc_faults = Vec::new();
+            let encoded_with = page
+                .encode_with(&mut enc_faults)
+                .map(|enc| (enc.content.len(), enc.forms.len()))
+                .map_err(words);
+            assert_eq!(encoded, encoded_with, "encode fault sink invariance");
+            #[cfg(feature = "text-layout")]
+            {
+                let tp1 = page
+                    .text_page(pdf_gfx::TextPageOpts::default())
+                    .map(|tp| tp.text().to_owned())
+                    .map_err(words);
+                let mut tp_faults = Vec::new();
+                let tp2 = page
+                    .text_page_with(pdf_gfx::TextPageOpts::default(), &mut tp_faults)
+                    .map(|tp| tp.text().to_owned())
+                    .map_err(words);
+                assert_eq!(tp1, tp2, "text_page fault sink invariance");
+            }
             Ok(Content {
                 bytes: content.bytes().to_vec(),
                 streams: content.concat().stream_count(),
@@ -130,6 +167,9 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
                     strings: strings.collect(),
                     unread: text.unread.len(),
                 },
+                geom,
+                gfx,
+                encoded,
             })
         };
         let pages: Vec<Result<Content, String>> = pages.iter().map(read).collect();
@@ -177,6 +217,14 @@ fn small() -> Limits {
     limits.linearize.pages = 4;
     limits.fonts.forms = 2;
     limits.fonts.form_uses = 8;
+    limits.gfx.form_depth = 2;
+    limits.gfx.states = 4;
+    limits.gfx.operators = 32;
+    limits.gfx.glyphs = 32;
+    limits.gfx.segments = 64;
+    limits.gfx.marked = 4;
+    limits.gfx.interpreted = 256;
+    limits.gfx.decompressed = 1 << 12;
     limits.font_budget = 1 << 12;
     limits
 }

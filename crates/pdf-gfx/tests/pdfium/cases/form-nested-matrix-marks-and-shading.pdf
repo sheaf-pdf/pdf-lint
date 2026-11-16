@@ -1,0 +1,40 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >> >> /Shading << /Sh1 << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 10 10] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >> >> >> /XObject << /Fm1 10 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 41 >>
+stream
+/Outer BMC q 1 0 0 1 5 6 cm /Fm1 Do Q EMC
+endstream
+endobj
+10 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [2 0 0 2 10 20] /Length 94 >>
+stream
+/Inner << /MCID 3 >> BDC 2 w 1 J 1 j 0 0 m 10 0 l S BT /F0 10 Tf 3 4 Td (AB) Tj ET /Sh1 sh EMC
+endstream
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000501 00000 n 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000592 00000 n 
+trailer
+<< /Size 11 /Root 1 0 R >>
+startxref
+811
+%%EOF

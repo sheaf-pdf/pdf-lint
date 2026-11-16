@@ -32,6 +32,12 @@ pub struct Limits {
     /// from [`content`](Limits::content) at each call, whatever it's set to
     /// here.
     pub fonts: pdf_fonts::Limits,
+    /// What a page's graphics and text state machine and content re-encoder run
+    /// under (`pdf-gfx`'s): per-page caps on saved states, operators, glyphs,
+    /// path segments, nested marked content, interpreted bytes, Form XObject
+    /// depth, and decompressed bytes. Its `content` and `fonts` are taken from
+    /// [`content`](Limits::content) and [`fonts`](Limits::fonts) at each call.
+    pub gfx: pdf_gfx::Limits,
     /// What a file's linearization is checked under, and a document is
     /// linearized under (pdf-linearize's): the graph a plan is made of, and
     /// its hint tables. Its `page_depth`, `tree_depth` and `tree_nodes` are
@@ -56,6 +62,7 @@ impl Limits {
         content: pdf_content_streams::Limits::DEFAULT,
         semantics: pdf_semantics::Limits::DEFAULT,
         fonts: pdf_fonts::Limits::DEFAULT,
+        gfx: pdf_gfx::Limits::DEFAULT,
         linearize: pdf_linearize::Limits::DEFAULT,
         font_budget: 256 << 20,
     };
@@ -65,6 +72,15 @@ impl Limits {
         let mut fonts = self.fonts;
         fonts.content = self.content;
         fonts
+    }
+
+    /// [`gfx`](Limits::gfx), its `content` and `fonts` synced from
+    /// [`content`](Limits::content) and [`fonts`](Limits::fonts).
+    pub(crate) const fn reading_gfx(&self) -> pdf_gfx::Limits {
+        let mut gfx = self.gfx;
+        gfx.content = self.content;
+        gfx.fonts = self.reading_fonts();
+        gfx
     }
 
     /// [`linearize`](Limits::linearize), its walks' caps
@@ -102,6 +118,8 @@ mod tests {
         assert_eq!(limits.content, pdf_content_streams::Limits::DEFAULT);
         assert_eq!(limits.semantics, pdf_semantics::Limits::DEFAULT);
         assert_eq!(limits.fonts, pdf_fonts::Limits::DEFAULT);
+        assert_eq!(limits.gfx, pdf_gfx::Limits::DEFAULT);
+        assert_eq!(limits.reading_gfx(), pdf_gfx::Limits::DEFAULT);
         assert_eq!(limits.linearize, pdf_linearize::Limits::DEFAULT);
         assert_eq!(limits.font_budget, 256 << 20);
         assert_eq!(limits.linearizing(), pdf_linearize::Limits::DEFAULT);
@@ -125,5 +143,13 @@ mod tests {
         limits.fonts.forms = 3;
         let fonts = limits.reading_fonts();
         assert_eq!((fonts.content, fonts.forms), (limits.content, 3));
+        limits.gfx.content.operands = 77;
+        limits.gfx.fonts.forms = 88;
+        limits.gfx.operators = 42;
+        let gfx = limits.reading_gfx();
+        assert_eq!(
+            (gfx.content, gfx.fonts.forms, gfx.operators),
+            (limits.content, 3, 42)
+        );
     }
 }

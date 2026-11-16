@@ -63,6 +63,7 @@ See [crates/pdfs/README.md](crates/pdfs/README.md) for encryption, linearization
 | **[pdf-semantics](crates/pdf-semantics)** | High-level PDF data structures: dates, name/number trees, page trees (read via ISO or PDFium rules, written balanced), `/Info` dictionaries, and XMP conformance claims. |
 | **[pdf-color](crates/pdf-color)** | PDF color space parser, component counting (ISO 32000-2 and PDFium rules), colorant classification, and `/ColorSpace` resource lookup. |
 | **[pdf-fonts](crates/pdf-fonts)** | PDF font reader (character codes, CIDs, widths, encodings, CMaps, `/ToUnicode`, embedded font programs via `skrifa`), Standard 14 font metrics/encoding, and page text extraction. |
+| **[pdf-gfx](crates/pdf-gfx)** | PDF 2D geometry (`PageGeom`, `Matrix::onto`), bounded content-stream and Form XObject interpreter, position-independent text re-encoder (`encode`), spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`). |
 | **[pdf-linearize](crates/pdf-linearize)** | Model-agnostic engine and `pdf-structure` adapter for writing and validating linearized ("Fast Web View", Annex F) PDFs and hint tables. |
 | **[pdf-fixtures](crates/pdf-fixtures)** | *Internal (unpublished).* Test PDF builders and `qpdf` oracle runner shared across workspace test suites. |
 | **[pdf-linearize-lopdf](crates/pdf-linearize-lopdf)** | *Internal (unpublished).* Reference adapter demonstrating `pdf-linearize` on `lopdf` documents. |
@@ -88,10 +89,10 @@ just ci           # run the full local CI suite (all checks except cargo-semver-
 - **qpdf oracle (`just test-qpdf`):** Downloads a pinned `qpdf` binary on Linux x86_64 (or uses `PDF_LINT_QPDF`) to cross-check file reading, writing, encryption, and linearization.
 - **Full `just ci` prerequisites:** Requires `cargo-nextest`, Rust **1.92** (workspace MSRV), `nightly` with `rust-src` (for `pdf-tokenizer`'s `core`-only build), and targets `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`, and `wasm32-unknown-unknown`. Note that `*-package` recipes run `cargo publish --dry-run` and require network access.
 - **Semver checks (`just <crate>-semver`):** Uses [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) to check published crates against crates.io.
-- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
+- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `gfx`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
 
 ## License
 
-- `pdf-tokenizer`, `pdf-filters`, `pdf-crypt`, `pdf-objects`, `pdf-structure`, `pdf-content-streams`, `pdf-semantics`, `pdf-color`, `pdf-fonts`, `pdf-linearize`, `pdfs`, `pdf-fixtures`, and `pdf-linearize-lopdf` are dual-licensed under **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)) or **MIT** ([LICENSE-MIT](LICENSE-MIT)), at your option.
+- `pdf-tokenizer`, `pdf-filters`, `pdf-crypt`, `pdf-objects`, `pdf-structure`, `pdf-content-streams`, `pdf-semantics`, `pdf-color`, `pdf-fonts`, `pdf-gfx`, `pdf-linearize`, `pdfs`, `pdf-fixtures`, and `pdf-linearize-lopdf` are dual-licensed under **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)) or **MIT** ([LICENSE-MIT](LICENSE-MIT)), at your option.
 - `pdf-fonts` bundles Adobe Core 14 metrics, glyph lists, and code adapted from FreeType under their respective licenses, including [`FTL.TXT`](crates/pdf-fonts/FTL.TXT); see [crates/pdf-fonts/README.md](crates/pdf-fonts/README.md#license) for attribution requirements.
 - `pdf-lint` and `pdf-arlington` (along with the embedded Arlington PDF Model) are licensed under **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)).

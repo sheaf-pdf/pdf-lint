@@ -1,0 +1,2 @@
+# name	why pdf-gfx reads it otherwise than PDFium
+form-self-and-mutual-cycles	A Form XObject already on the active Do call chain is refused immediately (Refused::Cycle / Fault::FormCycle) so cyclic graphs cannot cause exponential blowup; PDFium has no cycle set and expands the cycle up to kMaxFormLevel (40).

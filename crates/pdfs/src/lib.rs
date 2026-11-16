@@ -11,18 +11,22 @@
 //!   or [`from_bytes`] (in-memory buffers or custom [`pdf_structure::ByteSource`]s),
 //!   configured with [`Options`]. Objects are parsed on demand and cached
 //!   safely across threads on [`Pdf`].
-//! - **Inspect pages and content** with [`Pdf::pages`] and [`Page::content`]
-//!   (decoded, concatenated content streams and parsed operators).
+//! - **Inspect pages, geometry, and graphics** with [`Pdf::pages`], [`Page::geom`],
+//!   [`Page::content`], [`Page::interpret`], and [`Page::encode`] (2D page
+//!   transforms, placed paths, glyph origins/quads, images, shadings, clips,
+//!   marked content, and position-independent content re-encoding).
 //! - **Extract text and fonts** with [`Page::text`] and [`Page::fonts`] in
-//!   content-stream order (following Form XObjects, matching PDFium's text
-//!   extraction without spatial layout).
+//!   content-stream order, or use `Page::text_page` and `Page::search`
+//!   (`text-layout` feature) for spatial reading order, `unicode-bidi` RTL
+//!   reordering, selection quads, and search.
 //! - **Read document metadata** including version, [`Pdf::encryption`], `/Info`
 //!   dictionary, XMP conformance claims, and linearization validity
 //!   ([`Pdf::linearized`]).
 //! - **Create, edit, encrypt, and linearize** documents via [`Document::new`]
-//!   or [`Pdf::edit`]: draw pages with [`standard_font`], attach XMP claims,
-//!   encrypt with AES-256, and save whole, linearized, or as an incremental
-//!   update.
+//!   or [`Pdf::edit`]: draw pages with [`standard_font`] and [`pdf_gfx::Canvas`]
+//!   (including multiline `Canvas::text_box` under `text-layout`), attach XMP
+//!   claims, encrypt with AES-256, and save whole, linearized, or as an
+//!   incremental update.
 //! - **Use standalone trait functions** in [`page`](mod@page),
 //!   [`file`](mod@file), and [`build`](mod@build) over your own
 //!   [`pdf_structure::Reading`] or [`pdf_structure::Document`]. Import common
@@ -36,9 +40,10 @@
 //!
 //! # Features
 //!
-//! - **`programs`** and **`clock`** *(enabled by default)*: parse embedded font
-//!   programs via `skrifa`, and enable `Date::now` / `Date::from_unix` in
-//!   `pdf-semantics`.
+//! - **`programs`**, **`text-layout`**, and **`clock`** *(enabled by default)*:
+//!   parse embedded font programs via `skrifa`, assemble `TextPage` spatial
+//!   reading order / search / multiline `Canvas` layout, and enable
+//!   `Date::now` / `Date::from_unix` in `pdf-semantics`.
 //! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
 //!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
 //!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
@@ -125,6 +130,9 @@ pub use pdf_semantics;
 /// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, and text extraction.
 pub use pdf_fonts;
 
+/// PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder, and vector/text canvas.
+pub use pdf_gfx;
+
 /// Linearized ("Fast Web View") PDF layout engine, hint tables, and validator.
 pub use pdf_linearize;
 
@@ -192,10 +200,85 @@ mod tests {
         shared::<crate::Content>();
         shared::<crate::NamedFont>();
         shared::<pdf_fonts::Shown>();
+        shared::<pdf_gfx::PageGeom>();
+        shared::<pdf_gfx::Summary>();
+        shared::<pdf_gfx::Encoded>();
+        shared::<pdf_gfx::Canvas>();
+        shared::<pdf_gfx::Limits>();
+        shared::<pdf_gfx::Error>();
+        #[cfg(feature = "text-layout")]
+        {
+            shared::<pdf_gfx::TextPage>();
+            shared::<pdf_gfx::TextMatch>();
+            shared::<pdf_gfx::LaidOutText>();
+        }
         shared::<crate::Document<'_>>();
         shared::<crate::Options<'_>>();
         shared::<crate::Limits>();
         shared::<crate::Error>();
+    }
+
+    #[test]
+    fn page_geom_interpret_encode_and_canvas_round_trip() {
+        use std::ops::ControlFlow;
+
+        use crate::pdf_gfx::{Kind, Opts};
+        use crate::prelude::*;
+
+        let mut doc = Document::new();
+        {
+            let mut canvas = Canvas::new();
+            canvas.fill_color(Color::Gray(0.2));
+            canvas.fill_rect(pdf_gfx::Rect::new(50.0, 60.0, 150.0, 110.0));
+            canvas.text_at(
+                standard_font(Std14::Helvetica),
+                14.0,
+                Point::new(72.0, 700.0),
+                &Std14::Helvetica.codes("Canvas Hi").unwrap(),
+            );
+            *doc.add_page(Rect::LETTER) = canvas.into_writer();
+        }
+        let pdf = crate::from_bytes(doc.to_bytes().unwrap()).unwrap();
+        let pages = pdf.pages().unwrap();
+        let page = pages.get(0).unwrap();
+
+        let geom = page.geom();
+        assert_eq!(geom.view_size().width, 612.0);
+        assert_eq!(geom.view_size().height, 792.0);
+        assert_eq!(geom.rotation, Rotation::R0);
+
+        let mut path_count = 0;
+        let mut glyphs = Vec::new();
+        let summary = page
+            .interpret(Opts::default(), |ev| {
+                match ev.kind {
+                    Kind::Path(_) => path_count += 1,
+                    Kind::Text(show) => {
+                        for g in show.glyphs() {
+                            glyphs.push((g.text().unwrap().into_owned(), g.origin));
+                        }
+                    }
+                    _ => {}
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(path_count, 1);
+        assert_eq!(summary.glyphs, 9);
+        assert_eq!(glyphs[0], ("C".to_string(), Point::new(72.0, 700.0)));
+
+        let encoded = page.encode().unwrap();
+        assert!(!encoded.content.is_empty());
+        assert!(encoded.forms.is_empty());
+
+        #[cfg(feature = "text-layout")]
+        {
+            let tp = page.text_page(TextPageOpts::default()).unwrap();
+            assert_eq!(tp.text(), "Canvas Hi");
+            let hits = page.search("canvas", SearchOpts::default()).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].chars, 0..6);
+        }
     }
 }
 
