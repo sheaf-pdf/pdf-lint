@@ -425,7 +425,7 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
     assert_eq!(code, Some(2), "{err}");
     assert_eq!(
         err,
-        format!("{locked}: it needs a password: give it with --password\n")
+        format!("{locked}: it needs a password: give it with --password-file or --password\n")
     );
     let (code, _, err) = said(&["--password", "wrong", locked]);
     assert_eq!(code, Some(2), "{err}");
@@ -450,9 +450,12 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
     // A baseline that won't open is refused; given its password, it reads.
     let (code, _, err) = said(&["--baseline", locked, open]);
     assert_eq!(code, Some(2), "{err}");
-    assert!(
-        err.contains("--baseline ") && err.contains("needs a password"),
-        "{err}"
+    assert_eq!(
+        err,
+        format!(
+            "pdf-lint: --baseline {locked}: \
+             it needs a password: give it with --password-file or --password\n"
+        )
     );
     let (code, out, _) = said(&["--password", "user", "--baseline", locked, locked]);
     assert_eq!(code, Some(0), "{out}");
@@ -462,7 +465,9 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
     let line: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         line.get("error"),
-        Some(&json!("it needs a password: give it with --password"))
+        Some(&json!(
+            "it needs a password: give it with --password-file or --password"
+        ))
     );
 }
 

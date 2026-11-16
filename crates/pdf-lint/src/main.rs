@@ -742,7 +742,7 @@ fn password(args: &Args) -> Option<Password<'_>> {
 fn locked(doc: &Document, args: &Args) -> Option<&'static str> {
     let by = args.password.as_ref().map(|given| given.by);
     (*doc.encryption() == Encryption::Locked).then_some(match by {
-        None => "it needs a password: give it with --password",
+        None => "it needs a password: give it with --password-file or --password",
         Some(By::Argument) => "the password --password gives doesn't open it",
         Some(By::File) => "the password --password-file gives doesn't open it",
     })
