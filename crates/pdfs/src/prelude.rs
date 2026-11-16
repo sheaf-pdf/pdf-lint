@@ -16,6 +16,10 @@ pub use pdf_content_streams::{Color, ContentWriter, Paint, Res};
 pub use pdf_crypt::{Encoded, Password, Permissions, Protection};
 pub use pdf_fonts::{Font, Shown, ShownString, Std14, Unread};
 pub use pdf_gfx::{Canvas, Matrix, PageGeom, Point, Quad, Rotation};
+#[cfg(feature = "text-layout")]
+pub use pdf_gfx::{
+    SearchOpts, TextAlign, TextBoxStyle, TextPage, TextPageOpts, VerticalAlign, WrapMode,
+};
 pub use pdf_linearize::check::Verdict;
 pub use pdf_objects::pdf_tokenizer::Rules;
 pub use pdf_objects::version::Version;

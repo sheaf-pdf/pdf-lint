@@ -772,4 +772,49 @@ impl<'a, S: ByteSource> Page<'a, S> {
         let pdf = self.pdf;
         page::encode_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, sink)
     }
+
+    /// Extracts reading-order text, line geometry, and search index
+    /// ([`pdf_gfx::TextPage`]) from the page (`text-layout` feature).
+    ///
+    /// # Errors
+    ///
+    /// As [`page::text_page`](fn@page::text_page) fails.
+    #[cfg(feature = "text-layout")]
+    pub fn text_page(&self, opts: pdf_gfx::TextPageOpts) -> Result<pdf_gfx::TextPage, Error> {
+        self.text_page_with(opts, &mut ())
+    }
+
+    /// [`Page::text_page`], reporting recoverable ISO 32000-2 departures to
+    /// `sink` ([`pdf_gfx::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::text_page`] fails.
+    #[cfg(feature = "text-layout")]
+    pub fn text_page_with<K: Sink<pdf_gfx::Fault> + ?Sized>(
+        &self,
+        opts: pdf_gfx::TextPageOpts,
+        sink: &mut K,
+    ) -> Result<pdf_gfx::TextPage, Error> {
+        let pdf = self.pdf;
+        page::text_page_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, opts, sink)
+    }
+
+    /// Searches reading-order text on the page for `query` under `opts`
+    /// (`text-layout` feature), returning every match with its character/byte
+    /// ranges and highlight [`Quad`](pdf_gfx::Quad)s.
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::text_page`] fails.
+    #[cfg(feature = "text-layout")]
+    pub fn search(
+        &self,
+        query: &str,
+        opts: pdf_gfx::SearchOpts,
+    ) -> Result<Vec<pdf_gfx::TextMatch>, Error> {
+        Ok(self
+            .text_page(pdf_gfx::TextPageOpts::default())?
+            .search(query, opts))
+    }
 }

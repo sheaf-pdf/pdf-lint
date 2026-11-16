@@ -78,6 +78,8 @@ clippy:
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-gfx --no-default-features --features programs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-gfx --no-default-features --features text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
@@ -130,6 +132,8 @@ test:
     cargo test --locked -p pdf-gfx --features predefined-cmaps,tracing --doc
     cargo nextest run --locked -p pdf-gfx --no-default-features
     cargo test --locked -p pdf-gfx --no-default-features --doc
+    cargo nextest run --locked -p pdf-gfx --no-default-features --features programs
+    cargo nextest run --locked -p pdf-gfx --no-default-features --features text-layout
     cargo nextest run --locked -p pdf-structure --features tracing
     cargo test --locked -p pdf-structure --features tracing --doc
     cargo nextest run --locked -p pdfs

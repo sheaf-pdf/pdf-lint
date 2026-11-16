@@ -16,15 +16,17 @@
 //!   transforms, placed paths, glyph origins/quads, images, shadings, clips,
 //!   marked content, and position-independent content re-encoding).
 //! - **Extract text and fonts** with [`Page::text`] and [`Page::fonts`] in
-//!   content-stream order (following Form XObjects, matching PDFium's text
-//!   extraction without spatial layout).
+//!   content-stream order, or use `Page::text_page` and `Page::search`
+//!   (`text-layout` feature) for spatial reading order, `unicode-bidi` RTL
+//!   reordering, selection quads, and search.
 //! - **Read document metadata** including version, [`Pdf::encryption`], `/Info`
 //!   dictionary, XMP conformance claims, and linearization validity
 //!   ([`Pdf::linearized`]).
 //! - **Create, edit, encrypt, and linearize** documents via [`Document::new`]
-//!   or [`Pdf::edit`]: draw pages with [`standard_font`], attach XMP claims,
-//!   encrypt with AES-256, and save whole, linearized, or as an incremental
-//!   update.
+//!   or [`Pdf::edit`]: draw pages with [`standard_font`] and [`pdf_gfx::Canvas`]
+//!   (including multiline `Canvas::text_box` under `text-layout`), attach XMP
+//!   claims, encrypt with AES-256, and save whole, linearized, or as an
+//!   incremental update.
 //! - **Use standalone trait functions** in [`page`](mod@page),
 //!   [`file`](mod@file), and [`build`](mod@build) over your own
 //!   [`pdf_structure::Reading`] or [`pdf_structure::Document`]. Import common
@@ -38,9 +40,10 @@
 //!
 //! # Features
 //!
-//! - **`programs`** and **`clock`** *(enabled by default)*: parse embedded font
-//!   programs via `skrifa`, and enable `Date::now` / `Date::from_unix` in
-//!   `pdf-semantics`.
+//! - **`programs`**, **`text-layout`**, and **`clock`** *(enabled by default)*:
+//!   parse embedded font programs via `skrifa`, assemble `TextPage` spatial
+//!   reading order / search / multiline `Canvas` layout, and enable
+//!   `Date::now` / `Date::from_unix` in `pdf-semantics`.
 //! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
 //!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
 //!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
@@ -203,6 +206,12 @@ mod tests {
         shared::<pdf_gfx::Canvas>();
         shared::<pdf_gfx::Limits>();
         shared::<pdf_gfx::Error>();
+        #[cfg(feature = "text-layout")]
+        {
+            shared::<pdf_gfx::TextPage>();
+            shared::<pdf_gfx::TextMatch>();
+            shared::<pdf_gfx::LaidOutText>();
+        }
         shared::<crate::Document<'_>>();
         shared::<crate::Options<'_>>();
         shared::<crate::Limits>();
@@ -261,6 +270,15 @@ mod tests {
         let encoded = page.encode().unwrap();
         assert!(!encoded.content.is_empty());
         assert!(encoded.forms.is_empty());
+
+        #[cfg(feature = "text-layout")]
+        {
+            let tp = page.text_page(TextPageOpts::default()).unwrap();
+            assert_eq!(tp.text(), "Canvas Hi");
+            let hits = page.search("canvas", SearchOpts::default()).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].chars, 0..6);
+        }
     }
 }
 

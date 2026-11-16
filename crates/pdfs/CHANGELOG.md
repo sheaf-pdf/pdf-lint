@@ -9,14 +9,14 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - The family re-exported whole: pdf-tokenizer `0.2`, pdf-objects, pdf-filters and pdf-crypt `=0.1.0-alpha.3`, pdf-color `=0.1.0-alpha.2`, and pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts, pdf-gfx and pdf-linearize `=0.1.0-alpha.1`.
 - `open`, `from_bytes` and `Options`: a file opened by its path or from any source, as a viewer reads it by default (PDFium's recovery and rules, zlib-rs, no fault looked for). `Pdf` reads each object when it's asked for. `Pdf::unlock` opens it by a password after.
 - `Pdf::pages`, `Page`, `Page::geom`, `Page::content`, `Page::interpret` and `Page::encode`: a file's pages, each with what it inherits, its 2D geometry (`PageGeom`), its streams joined (`Content`) with their operations, its graphics and text state interpreted (`Summary`), and its content and Form XObjects re-encoded (`pdf_gfx::Encoded`).
-- `Page::text` and `Page::fonts`: the strings a page's content shows, in its fonts, its forms followed, as PDFium reads them for its text (pdf-fonts' `Shown`), and the fonts its resources name (`NamedFont`), each read once a file.
+- `Page::text`, `Page::text_page`, `Page::search` and `Page::fonts`: the strings a page's content shows, in its fonts, its forms followed (`Shown`), spatial reading-order text, selection quads and search (`pdf_gfx::TextPage` and `TextMatch` under `text-layout`), and the fonts its resources name (`NamedFont`), each read once a file.
 - `Pdf::version`, `encryption`, `info`, `claims`, `linearized` and `stream`: what the file is and says of itself, and any stream's data decoded. `Pdf::reading` gives the reading, for the rest.
 - `Document`: a new document (`Document::new`) or a file edited (`Pdf::edit`), its pages added with a `ContentWriter` each (`add_page`), what they draw with written once a file, the standard 14 fonts by name (`standard_font`) and claims as XMP (`claim`).
 - `Document::save`, `save_with`, `save_linearized` and `save_update`: a document saved whole, linearized, or as an update appended to the file read, each with a `_to` form that writes into memory. `encrypt` and `decrypt` say how it's encrypted.
 - `page`, `file` and `build`: each recipe as a function over the family's traits, for a reading or a document of the caller's own.
 - `Limits`, every crate's caps in one value, with `font_budget`, and `Error`, every crate's error wrapped as it is.
-- `prelude`: the facade's types and calls, and the family's items they take and give: `Canvas`, `Color`, `ContentWriter`, `Matrix`, `PageGeom`, `Paint`, `Point`, `Quad`, `Res`, `Rotation`, `Std14`, `Font`, `Shown`, `ShownString`, `Unread`, `Rect`, `Claims`, `Info`, `Verdict`, `Encryption`, `Encoded`, `Password`, `Permissions`, `Protection`, `Rules`, `Version`, `Dict`, `Object`, `ObjectId` and `Why`.
-- Features, each the crates' own: `programs` and `clock` by default, and `image-ends`, `predefined-cmaps`, `simd` and `tracing`.
+- `prelude`: the facade's types and calls, and the family's items they take and give: `Canvas`, `Color`, `ContentWriter`, `Matrix`, `PageGeom`, `Paint`, `Point`, `Quad`, `Res`, `Rotation`, `SearchOpts`, `TextAlign`, `TextBoxStyle`, `TextPage`, `TextPageOpts`, `VerticalAlign`, `WrapMode`, `Std14`, `Font`, `Shown`, `ShownString`, `Unread`, `Rect`, `Claims`, `Info`, `Verdict`, `Encryption`, `Encoded`, `Password`, `Permissions`, `Protection`, `Rules`, `Version`, `Dict`, `Object`, `ObjectId` and `Why`.
+- Features, each the crates' own: `programs`, `text-layout` and `clock` by default, and `image-ends`, `predefined-cmaps`, `simd` and `tracing`.
 
 ### Security
 
@@ -33,4 +33,4 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - A page's or a form's stream that doesn't decode, damaged or through a filter the reader doesn't take, is read as none and said (`Concat::undecoded`, `Unread::Undecoded`), where PDFium reads its data as written.
 - A page's box is written as the content writer writes a number, one that isn't finite as 0.
 - `Options`, `Limits`, `Error` and `NamedFont` are `#[non_exhaustive]`, so each can grow in a minor release. The crates' own types keep their own policies.
-- What isn't here: layout, images, forms, signatures, font embedding, claims merged into a file's XMP, and a durable save.
+- What isn't here: raster images, forms, signatures, font embedding, claims merged into a file's XMP, and a durable save.

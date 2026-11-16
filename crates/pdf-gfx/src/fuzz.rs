@@ -149,6 +149,9 @@ pub fn check(data: &[u8]) {
     );
     assert_eq!(res_all, res_none);
 
+    #[cfg(feature = "text-layout")]
+    fuzz_text_layout(streams, &concat, resources.as_ref(), &limits, &fonts, data);
+
     if res_all.is_ok()
         && let Ok(Encoded {
             content: enc_page,
@@ -202,6 +205,73 @@ pub fn check(data: &[u8]) {
 fn split_once_bytes<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<(&'a [u8], &'a [u8])> {
     let pos = haystack.windows(needle.len()).position(|w| w == needle)?;
     Some((&haystack[..pos], &haystack[pos + needle.len()..]))
+}
+
+#[cfg(feature = "text-layout")]
+fn fuzz_text_layout<'a, S>(
+    streams: S,
+    concat: &Concat<'_>,
+    resources: Option<&'a Object>,
+    limits: &Limits,
+    fonts: &Fonts,
+    raw_data: &[u8],
+) where
+    S: Resolve<'a> + Streams + Copy,
+{
+    use pdf_fonts::Std14;
+
+    use crate::geom::Point;
+    use crate::layout::{SearchOpts, TextPage, TextPageOpts};
+    use crate::wrap::{TextAlign, TextBoxStyle, WrapMode, layout_text};
+
+    let r1 = TextPage::extract(
+        streams,
+        concat,
+        resources,
+        limits,
+        fonts,
+        TextPageOpts::default(),
+    );
+    let mut faults = Vec::new();
+    let r2 = TextPage::extract_with(
+        streams,
+        concat,
+        resources,
+        limits,
+        fonts,
+        TextPageOpts::default(),
+        &mut faults,
+    );
+    assert_eq!(r1, r2);
+
+    if let Ok(tp) = r1 {
+        let txt = tp.text();
+        for c in tp.chars() {
+            assert_eq!(&txt[c.byte_range()], c.ch.encode_utf8(&mut [0u8; 4]));
+        }
+        let _ = tp.text_dehyphenated();
+        let _ = tp.selection_quads(0..tp.len());
+        let _ = tp.selection_rects(0..tp.len());
+        let _ = tp.char_index_at(Point::new(50.0, 50.0), 8.0, 8.0);
+        let _ = tp.text_in_rect(Rect::new(0.0, 0.0, 200.0, 200.0));
+        let _ = tp.search("a", SearchOpts::default());
+        let _ = format!("{tp:?}");
+    }
+
+    if let Ok(sample) = std::str::from_utf8(&raw_data[..raw_data.len().min(96)]) {
+        let style = TextBoxStyle {
+            size: None,
+            align: TextAlign::Justify,
+            wrap: WrapMode::Word,
+            ..TextBoxStyle::default()
+        };
+        let _ = layout_text(
+            &Std14::Helvetica,
+            sample,
+            Rect::new(0.0, 0.0, 120.0, 60.0),
+            &style,
+        );
+    }
 }
 
 #[derive(Debug)]

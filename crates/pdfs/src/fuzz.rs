@@ -144,6 +144,19 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
                 .map(|enc| (enc.content.len(), enc.forms.len()))
                 .map_err(words);
             assert_eq!(encoded, encoded_with, "encode fault sink invariance");
+            #[cfg(feature = "text-layout")]
+            {
+                let tp1 = page
+                    .text_page(pdf_gfx::TextPageOpts::default())
+                    .map(|tp| tp.text().to_owned())
+                    .map_err(words);
+                let mut tp_faults = Vec::new();
+                let tp2 = page
+                    .text_page_with(pdf_gfx::TextPageOpts::default(), &mut tp_faults)
+                    .map(|tp| tp.text().to_owned())
+                    .map_err(words);
+                assert_eq!(tp1, tp2, "text_page fault sink invariance");
+            }
             Ok(Content {
                 bytes: content.bytes().to_vec(),
                 streams: content.concat().stream_count(),

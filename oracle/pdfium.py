@@ -219,6 +219,13 @@ class Pdfium:
             ("FPDFText_CountChars", I, [P]),
             ("FPDFText_GetUnicode", ctypes.c_uint, [P, I]),
             ("FPDFText_IsGenerated", I, [P, I]),
+            ("FPDFText_IsHyphen", I, [P, I]),
+            ("FPDFText_CountRects", I, [P, I, I]),
+            ("FPDFText_FindStart", P, [P, ctypes.POINTER(ctypes.c_ushort), U, I]),
+            ("FPDFText_FindNext", I, [P]),
+            ("FPDFText_GetSchResultIndex", I, [P]),
+            ("FPDFText_GetSchCount", I, [P]),
+            ("FPDFText_FindClose", None, [P]),
             ("FPDFText_GetCharOrigin", I, [P, I, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]),
             ("FPDFText_GetLooseCharBox", I, [P, I, ctypes.POINTER(FSRect)]),
             ("FPDFText_GetCharBox", I, [P, I, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
@@ -537,6 +544,73 @@ class Pdfium:
         lib.FPDF_CloseDocument(doc)
         return items
 
+    def gfx_text(self, data, queries=None):
+        """A page's CPDF_TextPage reading-order characters (collapsing generated
+        CRLF pairs into 000a:1:0 and marking soft-wrapped hyphens as 002d:0:1),
+        merged selection rect count (`FPDFText_CountRects`), and optional
+        `FPDFText_FindStart` search matches in logical character indices."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        page = lib.FPDF_LoadPage(doc, 0) if doc else None
+        if not page:
+            if doc:
+                lib.FPDF_CloseDocument(doc)
+            return None
+        tp = lib.FPDFText_LoadPage(page)
+        n = lib.FPDFText_CountChars(tp)
+        tokens = []
+        raw_to_logical = [0] * (max(n, 0) + 1)
+        i = 0
+        while i < n:
+            u = lib.FPDFText_GetUnicode(tp, i)
+            gen = 1 if lib.FPDFText_IsGenerated(tp, i) == 1 else 0
+            hyp = 1 if lib.FPDFText_IsHyphen(tp, i) == 1 else 0
+            idx = len(tokens)
+            if (gen == 1 and u == 0x0D and i + 1 < n
+                    and lib.FPDFText_GetUnicode(tp, i + 1) == 0x0A
+                    and lib.FPDFText_IsGenerated(tp, i + 1) == 1):
+                raw_to_logical[i] = idx
+                raw_to_logical[i + 1] = idx
+                tokens.append("000a:1:0")
+                i += 2
+            elif hyp == 1:
+                raw_to_logical[i] = idx
+                tokens.append("002d:0:1")
+                i += 1
+            else:
+                raw_to_logical[i] = idx
+                tokens.append("%04x:%d:0" % (u, gen))
+                i += 1
+        raw_to_logical[max(n, 0)] = len(tokens)
+        rc = max(lib.FPDFText_CountRects(tp, 0, -1), 0)
+        parts = ["chars " + (" ".join(tokens) if tokens else "none"), "rects %d" % rc]
+        if queries:
+            for line in queries.decode("utf-8").splitlines():
+                if not line:
+                    continue
+                q_str, fl_str = line.split("\t")
+                fl = int(fl_str)
+                u16_bytes = q_str.encode("utf-16-le")
+                u16 = [u16_bytes[k] | (u16_bytes[k + 1] << 8) for k in range(0, len(u16_bytes), 2)] + [0]
+                arr = (ctypes.c_ushort * len(u16))(*u16)
+                h = lib.FPDFText_FindStart(tp, arr, fl, 0)
+                hits = []
+                if h:
+                    while lib.FPDFText_FindNext(h):
+                        rs = lib.FPDFText_GetSchResultIndex(h)
+                        rcnt = lib.FPDFText_GetSchCount(h)
+                        if rcnt > 0:
+                            ls = raw_to_logical[rs]
+                            le = raw_to_logical[rs + rcnt - 1] + 1
+                            hits.append("%d..%d" % (ls, le))
+                    lib.FPDFText_FindClose(h)
+                parts.append("find %s %d %s" % (esc(q_str.encode("utf-8")), fl,
+                                                " ".join(hits) if hits else "none"))
+        lib.FPDFText_ClosePage(tp)
+        lib.FPDF_ClosePage(page)
+        lib.FPDF_CloseDocument(doc)
+        return parts
+
     def pages(self, data):
         """What a file's page tree comes to: the count PDFium gives, then, in
         order, each page to two past it, its width, height and quarter turns,
@@ -719,6 +793,8 @@ def answer(pdfium, kind, files):
         return "no-page" if geom is None else geom
     if kind == "gfx":
         return content_answer(pdfium.gfx(files["pdf"]))
+    if kind == "gfx-text":
+        return content_answer(pdfium.gfx_text(files["pdf"], files.get("queries")))
     raise SystemExit("unknown kind %r" % kind)
 
 

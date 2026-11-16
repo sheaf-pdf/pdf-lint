@@ -63,7 +63,7 @@ See [crates/pdfs/README.md](crates/pdfs/README.md) for encryption, linearization
 | **[pdf-semantics](crates/pdf-semantics)** | High-level PDF data structures: dates, name/number trees, page trees (read via ISO or PDFium rules, written balanced), `/Info` dictionaries, and XMP conformance claims. |
 | **[pdf-color](crates/pdf-color)** | PDF color space parser, component counting (ISO 32000-2 and PDFium rules), colorant classification, and `/ColorSpace` resource lookup. |
 | **[pdf-fonts](crates/pdf-fonts)** | PDF font reader (character codes, CIDs, widths, encodings, CMaps, `/ToUnicode`, embedded font programs via `skrifa`), Standard 14 font metrics/encoding, and page text extraction. |
-| **[pdf-gfx](crates/pdf-gfx)** | PDF 2D geometry (`PageGeom`, `Matrix::onto`), bounded content-stream and Form XObject interpreter, position-independent text re-encoder (`encode`), and vector/text `Canvas`. |
+| **[pdf-gfx](crates/pdf-gfx)** | PDF 2D geometry (`PageGeom`, `Matrix::onto`), bounded content-stream and Form XObject interpreter, position-independent text re-encoder (`encode`), spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`). |
 | **[pdf-linearize](crates/pdf-linearize)** | Model-agnostic engine and `pdf-structure` adapter for writing and validating linearized ("Fast Web View", Annex F) PDFs and hint tables. |
 | **[pdf-fixtures](crates/pdf-fixtures)** | *Internal (unpublished).* Test PDF builders and `qpdf` oracle runner shared across workspace test suites. |
 | **[pdf-linearize-lopdf](crates/pdf-linearize-lopdf)** | *Internal (unpublished).* Reference adapter demonstrating `pdf-linearize` on `lopdf` documents. |

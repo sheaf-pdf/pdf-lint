@@ -771,6 +771,7 @@ dependencies = [
  "pdf-structure",
  "thiserror",
  "tracing",
+ "unicode-bidi",
 ]
 
 [[package]]

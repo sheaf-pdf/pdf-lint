@@ -16,6 +16,9 @@ PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder
   - Rewrites relative line-moving text operators (`Td`, `TD`, `T*`, `'`, `"`) across a page stream and every Form XObject it draws into standalone `Tm` + `Td` pairs so lines no longer depend on `TL` or earlier lines, while round-tripping every placed glyph, path, clip, and mark bit-for-bit.
 - **Vector, XObject & text canvas (`Canvas`, `TextPiece`):**
   - Builds content streams with scoped `q`/`Q` state, inset borders, rounded rectangles, circles/ellipses, placed images/Form XObjects, marked content, and `TJ`-kerned text over `pdf-content-streams`' `ContentWriter` and deferred resource naming (`Res`, `Reserved`, `ResourceNeeds`).
+- **Positioned text page, search & multiline layout (`text-layout` feature):**
+  - `TextPage` (`PageChar`, `TextLine`, `TextPageOpts`, `SearchOpts`, `TextMatch`) assembles placed glyphs into reading-order lines matching PDFium's `CPDF_TextPage` as of chromium/8152: synthetic spaces and line breaks, faux-bold duplicate suppression, `/ActualText` replacement, `unicode-bidi` visual-to-logical RTL reordering, soft-hyphen wrap detection, merged per-line selection quads (`selection_quads`), hit-testing (`char_index_at`), rectangular text extraction (`text_in_rect`), and Unicode search (`search`).
+  - `layout_text` and `Canvas::text_box` (`LayoutFont`, `FontEncoder`, `TextBoxStyle`, `TextAlign`, `VerticalAlign`, `WrapMode`) perform word/character wrapping, horizontal/vertical alignment, `Tw` justification, automatic font sizing, and fixed-cell `comb` layout over `Std14`, `Font`, or multi-byte `FontEncoder`.
 
 ## Quickstart
 
@@ -83,6 +86,7 @@ assert!(in_view.y0 < 80.0);
 ## Cargo Features
 
 - **`programs`** *(default)*: Forwards `pdf-fonts/programs` so embedded TrueType, Type 1, CFF, and OpenType glyph outlines tighten `Glyph::quad` boxes.
+- **`text-layout`** *(default)*: Enables `TextPage` reading-order assembly, `unicode-bidi` reordering, selection quads, search, and multiline `layout_text` / `Canvas::text_box` layout.
 - **`predefined-cmaps`** *(optional)*: Forwards `pdf-fonts/predefined-cmaps` for bundled Adobe CJK CMaps and UCS-2 collections.
 - **`tracing`** *(optional)*: Emits numeric [tracing](https://crates.io/crates/tracing) spans around content interpretation and re-encoding.
 

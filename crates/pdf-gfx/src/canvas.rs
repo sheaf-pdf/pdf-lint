@@ -414,4 +414,92 @@ impl Canvas {
         f(self);
         self.writer.end_marked();
     }
+
+    #[cfg(feature = "text-layout")]
+    fn set_word_space(&mut self, tw: f32) {
+        let mut buf = Vec::with_capacity(12);
+        write_number(&mut buf, tw);
+        self.writer.operation([buf.as_slice()], b"Tw");
+    }
+
+    /// Emits a [`LaidOutText`](crate::LaidOutText) computed by
+    /// [`layout_text`](crate::layout_text) in `font` as position-independent
+    /// `Tm` + `Tj` (and `Tw` when justified) operations inside a single
+    /// `BT`..`ET` text object.
+    #[cfg(feature = "text-layout")]
+    pub fn draw_layout(&mut self, font: Res, layout: &crate::wrap::LaidOutText) {
+        let has_content = layout
+            .lines
+            .iter()
+            .any(|l| !l.codes.is_empty() || !l.cells.is_empty());
+        if !has_content {
+            return;
+        }
+        self.writer.begin_text();
+        self.writer.font(font, layout.font_size);
+        if layout.mode != TextMode::Fill {
+            self.writer.text_mode(layout.mode);
+        }
+        let mut active_tw = 0.0f32;
+        for line in &layout.lines {
+            if !line.cells.is_empty() {
+                if active_tw != 0.0 {
+                    self.set_word_space(0.0);
+                    active_tw = 0.0;
+                }
+                for (pt, cell_codes) in &line.cells {
+                    if !cell_codes.is_empty() {
+                        self.writer
+                            .text_matrix(Matrix::translate(pt.x, pt.y).to_array());
+                        self.writer.show(cell_codes);
+                    }
+                }
+                continue;
+            }
+            if line.codes.is_empty() {
+                continue;
+            }
+            if (line.word_space - active_tw).abs() > 1e-6 {
+                self.set_word_space(line.word_space);
+                active_tw = line.word_space;
+            }
+            self.writer
+                .text_matrix(Matrix::translate(line.origin.x, line.origin.y).to_array());
+            self.writer.show(&line.codes);
+        }
+        if active_tw != 0.0 {
+            self.set_word_space(0.0);
+        }
+        self.writer.end_text();
+    }
+
+    /// Lays out `text` inside `rect` with [`layout_text`](crate::layout_text)
+    /// and draws it onto `self` (clipping to `rect` inside `q`..`Q` when
+    /// `style.clip` is `true`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnencodableChar`](crate::UnencodableChar) without modifying
+    /// `self` if any character in `text` cannot be encoded by `font`.
+    #[cfg(feature = "text-layout")]
+    pub fn text_box<F: crate::wrap::LayoutFont + ?Sized>(
+        &mut self,
+        font_res: Res,
+        font: &F,
+        text: &str,
+        rect: Rect,
+        style: &crate::wrap::TextBoxStyle,
+    ) -> Result<crate::wrap::LaidOutText, crate::wrap::UnencodableChar> {
+        let laid = crate::wrap::layout_text(font, text, rect, style)?;
+        let norm = Rect::new(rect.x0, rect.y0, rect.x1, rect.y1);
+        if style.clip {
+            self.with_state(|c| {
+                c.clip_rect(norm);
+                c.draw_layout(font_res, &laid);
+            });
+        } else {
+            self.draw_layout(font_res, &laid);
+        }
+        Ok(laid)
+    }
 }

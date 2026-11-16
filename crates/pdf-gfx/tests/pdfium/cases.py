@@ -60,6 +60,29 @@ def add_gfx(name, content, resources=b"<< >>", extra=None, page_entries=b"/Media
     ROWS.append((name, "gfx", {"pdf": pdf}))
 
 
+def add_gfx_text(
+    name,
+    content,
+    resources=None,
+    extra=None,
+    page_entries=b"/MediaBox [0 0 400 800]",
+    queries=None,
+):
+    if resources is None:
+        resources = b"<< /Font << /F1 " + HELVETICA + b" /F2 " + COURIER + b" >> >>"
+    files = {
+        "pdf": build_pdf(
+            page_entries=page_entries,
+            content=content,
+            resources=resources,
+            extra=extra,
+        )
+    }
+    if queries:
+        files["queries"] = ("\n".join("%s\t%d" % (q, fl) for q, fl in queries) + "\n").encode("utf-8")
+    ROWS.append((name, "gfx-text", files))
+
+
 def geom_cases():
     add_geom("geom-letter-default", b"/MediaBox [0 0 612 792]")
     add_geom("geom-rotate-90", b"/MediaBox [0 0 200 300] /Rotate 90")
@@ -297,6 +320,91 @@ def xobject_and_marked_cases():
     )
 
 
+def text_layout_cases():
+    add_gfx_text(
+        "layout-two-lines-and-search",
+        b"BT /F1 12 Tf 72 700 Td (Hello) Tj 0 -16 Td (World) Tj ET",
+        queries=[("hello world", 0), ("Hello", 1), ("hello", 1), ("Hell", 2), ("World", 2)],
+    )
+    add_gfx_text(
+        "layout-tj-space-threshold-below",
+        b"BT /F1 10 Tf 72 700 Td [(A) -138 (B)] TJ ET",
+    )
+    add_gfx_text(
+        "layout-tj-space-threshold-at",
+        b"BT /F1 10 Tf 72 700 Td [(A) -139 (B)] TJ ET",
+    )
+    add_gfx_text(
+        "layout-separate-tm-word-gap",
+        b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (Hi) Tj 1 0 0 1 90 700 Tm (There) Tj ET",
+        queries=[("hi there", 0)],
+    )
+    add_gfx_text(
+        "layout-two-columns-table-row",
+        b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (Item) Tj 1 0 0 1 250 700 Tm ($10.00) Tj ET",
+        queries=[("item $10.00", 0)],
+    )
+    add_gfx_text(
+        "layout-same-line-reverse-x",
+        b"BT /F1 12 Tf 1 0 0 1 120 700 Tm (World) Tj 1 0 0 1 72 700 Tm (Hello) Tj ET",
+        queries=[("Hello World", 1)],
+    )
+    add_gfx_text(
+        "layout-faux-bold-across-tj",
+        b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (AB) Tj 1 0 0 1 72.3 700 Tm (AB) Tj ET",
+    )
+    add_gfx_text(
+        "layout-consecutive-spaces-collapsed",
+        b"BT /F1 12 Tf 72 700 Td (A   B) Tj ET",
+    )
+    add_gfx_text(
+        "layout-actual-text-single-and-multi-op",
+        b"/Span << /ActualText (Replaced) >> BDC BT /F1 12 Tf 72 700 Td (Orig) Tj ET EMC "
+        b"/Span << /ActualText (fi) >> BDC BT /F1 12 Tf 140 700 Td (f) Tj 5 0 Td (i) Tj ET EMC",
+        queries=[("replaced fi", 0)],
+    )
+    add_gfx_text(
+        "layout-hyphen-wrap-alpha-vs-digit",
+        b"BT /F1 12 Tf 72 700 Td (inter-) Tj 0 -16 Td (national) Tj 0 -16 Td (2024-) Tj 0 -16 Td (2025) Tj ET",
+        queries=[("inter", 0), ("national", 0), ("2024-", 0)],
+    )
+    add_gfx_text(
+        "layout-soft-hyphen-wrap",
+        b"BT /F1 12 Tf 72 700 Td (inter\\255) Tj 0 -16 Td (national) Tj ET",
+    )
+    add_gfx_text(
+        "layout-rotated-90-two-lines",
+        b"BT /F1 12 Tf 0 1 -1 0 100 200 Tm (Rot1) Tj 0 1 -1 0 116 200 Tm (Rot2) Tj ET",
+        queries=[("rot1 rot2", 0)],
+    )
+    add_gfx_text(
+        "layout-consecutive-overlap-search",
+        b"BT /F1 12 Tf 72 700 Td (aaaa) Tj ET",
+        queries=[("aa", 0), ("aa", 4)],
+    )
+    heb_cmap = stream(
+        b"",
+        b"1 begincodespacerange <00> <FF> endcodespacerange\n"
+        b"9 beginbfchar\n"
+        b"<01> <05DD>\n<02> <05D5>\n<03> <05DC>\n<04> <05E9>\n"
+        b"<20> <0020>\n<31> <0031>\n<32> <0032>\n<33> <0033>\n<41> <0041>\n"
+        b"endbfchar",
+    )
+    heb_widths = b"[" + b" ".join([b"500"] * 66) + b"]"
+    heb_font = (
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Widths "
+        + heb_widths
+        + b" /FirstChar 0 /LastChar 65 /ToUnicode 10 0 R >>"
+    )
+    add_gfx_text(
+        "layout-bidi-rtl-and-numbers",
+        b"BT /F1 12 Tf 72 700 Td <01020304> Tj 0 -16 Td <3132332001020304> Tj 0 -16 Td <4120010203042041> Tj ET",
+        resources=b"<< /Font << /F1 " + heb_font + b" >> >>",
+        extra={10: heb_cmap},
+        queries=[("\u05e9\u05dc\u05d5\u05dd 123", 0)],
+    )
+
+
 def cases():
     del ROWS[:]
     geom_cases()
@@ -304,4 +412,5 @@ def cases():
     clip_cases()
     text_cases()
     xobject_and_marked_cases()
+    text_layout_cases()
     return list(ROWS)

@@ -451,6 +451,65 @@ where
     )?)
 }
 
+/// Extracts reading-order text, lines, selection geometry, and search metadata
+/// (`pdf_gfx::TextPage`) from `page` without collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Content`] if `page`'s `/Contents` fails to join under
+/// `limits.content`, or [`Error::Gfx`] if interpretation fails.
+#[cfg(feature = "text-layout")]
+pub fn text_page<'o, O>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    opts: pdf_gfx::TextPageOpts,
+) -> Result<pdf_gfx::TextPage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    text_page_with(objects, fonts, page, limits, opts, &mut ())
+}
+
+/// [`text_page`](fn@text_page), reporting recoverable ISO 32000-2 departures to
+/// `sink` ([`pdf_gfx::Fault`]).
+///
+/// # Errors
+///
+/// As [`text_page`](fn@text_page) fails.
+#[cfg(feature = "text-layout")]
+pub fn text_page_with<'o, O, K>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    opts: pdf_gfx::TextPageOpts,
+    sink: &mut K,
+) -> Result<pdf_gfx::TextPage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_gfx::Fault> + ?Sized,
+{
+    phase!(DEBUG, "text_page");
+    let mut join = Join::new(&limits.content);
+    if let Some(contents) = page.dict.and_then(|dict| dict.get(b"Contents")) {
+        join.push_contents(objects, contents)?;
+    }
+    let concat = join.finish();
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let gfx_limits = limits.reading_gfx();
+    Ok(pdf_gfx::TextPage::extract_with(
+        objects,
+        &concat,
+        resources,
+        &gfx_limits,
+        fonts,
+        opts,
+        sink,
+    )?)
+}
+
 /// The dictionary `value` is, as PDFium reaches one (`GetDict`): its own, or a
 /// stream's, through two references at most; none for anything else, or past
 /// that, or for a reference to nothing or to an object that's damaged.

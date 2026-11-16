@@ -33,7 +33,7 @@ for page in &pages {
 }
 ```
 
-`Page::text` extracts strings in content-stream drawing order (including nested Form XObjects), matching PDFium's text extraction rules without spatial layout reconstruction. `Page::geom` computes normalized page boundary boxes and closed-form `PageSpace <-> ViewSpace` transforms, `Page::interpret` runs the bounded graphics/text state machine to stream placed paths, glyph origins/quads, images, shadings, clips, and marked content, `Page::encode` re-encodes streams into position-independent `Tm` + `Td` operations, and `Page::content` returns the page's decoded, concatenated content streams and parsed operators.
+`Page::text` extracts strings in content-stream drawing order (including nested Form XObjects), while `Page::text_page` and `Page::search` (`text-layout` feature, enabled by default) reconstruct spatial reading order with synthetic spaces/newlines, `unicode-bidi` RTL reordering, selection quads, and search. `Page::geom` computes normalized page boundary boxes and closed-form `PageSpace <-> ViewSpace` transforms, `Page::interpret` runs the bounded graphics/text state machine to stream placed paths, glyph origins/quads, images, shadings, clips, and marked content, `Page::encode` re-encodes streams into position-independent `Tm` + `Td` operations, and `Page::content` returns the page's decoded, concatenated content streams and parsed operators.
 
 ## Drawing Pages with Standard 14 Fonts
 
@@ -166,7 +166,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
 - **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, `/Info` dictionaries, and XMP conformance claims.
 - **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, and text extraction.
-- **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, and vector/text `Canvas`.
+- **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
 - **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — Linearized PDF layout engine, hint tables, and validator.
 
 ## Key Guarantees
@@ -180,6 +180,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 ## Cargo Features
 
 - **`programs`** *(default)* — Parse embedded font programs via `skrifa` for glyph bounding boxes, heights, and fallback character mappings.
+- **`text-layout`** *(default)* — Enable `Page::text_page`, `Page::search`, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas::text_box` layout via `pdf-gfx/text-layout`.
 - **`clock`** *(default)* — Enable `Date::now` and `Date::from_unix` in `pdf-semantics`.
 - **`image-ends`** — Find inline DCT (JPEG) and CCITTFax image boundaries by decoding image data, matching PDFium.
 - **`predefined-cmaps`** — Bundle Adobe predefined CJK CMaps (via `hayro-cmap`) for CJK fonts without `/ToUnicode`.
@@ -189,7 +190,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 
 ## Scope & Limitations
 
-- **No spatial text layout:** Text is returned in content-stream show order; Type 3 glyph streams and annotation appearances are not walked for text.
+- **Annotation & Type 3 streams:** `Page::text` and `Page::text_page` walk page `/Contents` and drawn Form XObjects; Type 3 glyph streams and annotation `/AP` streams are not walked automatically.
 - **No rendering, form filling, signing, or custom font embedding:** Rewriting a signed PDF whole or linearized invalidates existing byte-range signatures (use incremental updates carefully if preserving prior bytes).
 - **Standard 14 `/Widths` in PDF 2.0:** Standard 14 font dictionaries omit `/Widths` (valid in PDF 1.0–1.7; PDF 2.0 requires explicit `/Widths`).
 - **XMP replacement:** `Document::claim` writes a fresh XMP packet and refuses catalogs that already have a `/Metadata` stream.

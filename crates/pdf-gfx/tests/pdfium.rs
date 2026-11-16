@@ -455,6 +455,159 @@ fn gfx_answer_and_reencoded(bytes: &[u8]) -> (String, Result<String, Error>) {
     (direct, reencoded)
 }
 
+#[cfg(feature = "text-layout")]
+fn text_layout_answer(bytes: &[u8], queries: Option<&str>) -> String {
+    use pdf_gfx::{SearchOpts, TextPage, TextPageOpts};
+
+    let Ok(reading) = Reading::open(bytes, &Options::DEFAULT) else {
+        return "no-page".to_string();
+    };
+    let objects = &reading;
+    let Ok(Some(cat)) = catalog(objects, reading.trailer().dict()) else {
+        return "no-page".to_string();
+    };
+    let Ok(table) = pages(
+        objects,
+        cat,
+        Rules::Pdfium,
+        &SemanticsLimits::DEFAULT,
+        &mut (),
+    ) else {
+        return "no-page".to_string();
+    };
+    let Some(page) = table.get(0) else {
+        return "no-page".to_string();
+    };
+    let Some(page_dict) = page.dict else {
+        return "no-page".to_string();
+    };
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let mut join = Join::new(&Limits::DEFAULT.content);
+    if let Some(contents) = page_dict.get(b"Contents") {
+        join.push_contents(objects, contents)
+            .expect("page contents decode");
+    }
+    let content = join.finish();
+    let fonts = Fonts::default();
+    let tp = TextPage::extract(
+        objects,
+        &content,
+        resources,
+        &Limits::DEFAULT,
+        &fonts,
+        TextPageOpts::default(),
+    )
+    .expect("text page extracts");
+
+    // Also verify re-encoding preserves TextPage text and line structure.
+    let encoded = encode(objects, &content, resources, &Limits::DEFAULT, &fonts)
+        .expect("gfx-text case encodes");
+    let form_overrides: HashMap<ObjectId, Vec<u8>> = encoded.forms.into_iter().collect();
+    let patched = WithStreams::new(objects, |id, limit| {
+        if let Some(overridden) = form_overrides.get(&id) {
+            Ok(overridden.clone())
+        } else {
+            objects.decoded(id, limit).map(|b| b.into_owned())
+        }
+    });
+    let enc_content = Concat::new(&[encoded.content.as_slice()]);
+    let tp_reencoded = TextPage::extract(
+        patched,
+        &enc_content,
+        resources,
+        &Limits::DEFAULT,
+        &fonts,
+        TextPageOpts::default(),
+    )
+    .expect("reencoded text page extracts");
+    assert_eq!(
+        tp.text(),
+        tp_reencoded.text(),
+        "re-encoded TextPage text diverged"
+    );
+
+    let pcs = tp.chars();
+    let mut tokens = Vec::new();
+    let mut char_to_tok = vec![0usize; pcs.len() + 1];
+    let mut i = 0usize;
+    while i < pcs.len() {
+        let pc = &pcs[i];
+        let tid = tokens.len();
+        if pc.soft_hyphen {
+            char_to_tok[i] = tid;
+            tokens.push("002d:0:1".to_string());
+            if i + 1 < pcs.len() && pcs[i + 1].generated && pcs[i + 1].ch == '\n' {
+                char_to_tok[i + 1] = tid;
+                i += 2;
+                continue;
+            }
+            i += 1;
+        } else if pc.generated && pc.ch == '\n' {
+            char_to_tok[i] = tid;
+            tokens.push("000a:1:0".to_string());
+            i += 1;
+        } else {
+            char_to_tok[i] = tid;
+            tokens.push(format!(
+                "{:04x}:{}:0",
+                u32::from(pc.ch),
+                u8::from(pc.generated)
+            ));
+            i += 1;
+        }
+    }
+    char_to_tok[pcs.len()] = tokens.len();
+
+    let rect_count = tp.selection_rects(0..tp.len()).len();
+    let mut parts = vec![
+        format!(
+            "chars {}",
+            if tokens.is_empty() {
+                "none".to_string()
+            } else {
+                tokens.join(" ")
+            }
+        ),
+        format!("rects {rect_count}"),
+    ];
+
+    if let Some(q_text) = queries {
+        for line in q_text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let (q_str, fl_str) = line.split_once('\t').expect("query tab flags");
+            let fl: u32 = fl_str.parse().expect("flags int");
+            let opts = SearchOpts {
+                match_case: (fl & 1) != 0,
+                whole_word: (fl & 2) != 0,
+                consecutive: (fl & 4) != 0,
+                ignore_soft_hyphens: false,
+            };
+            let hits: Vec<String> = tp
+                .search(q_str, opts)
+                .into_iter()
+                .map(|m| {
+                    let s = char_to_tok[m.chars.start];
+                    let e = char_to_tok[m.chars.end - 1] + 1;
+                    format!("{s}..{e}")
+                })
+                .collect();
+            parts.push(format!(
+                "find {} {fl} {}",
+                esc(q_str.as_bytes()),
+                if hits.is_empty() {
+                    "none".to_string()
+                } else {
+                    hits.join(" ")
+                }
+            ));
+        }
+    }
+
+    parts.join(" ; ")
+}
+
 #[test]
 fn every_case_reads_and_reencodes_as_pdfium_reads_it() {
     let recorded = recorded();
@@ -468,6 +621,9 @@ fn every_case_reads_and_reencodes_as_pdfium_reads_it() {
 
     for case in &cases {
         let (name, kind) = (&case[0], &case[1]);
+        if kind == "gfx-text" && !cfg!(feature = "text-layout") {
+            continue;
+        }
         let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
         let ours = match kind.as_str() {
             "gfx-geom" => geom_answer(&bytes),
@@ -490,6 +646,12 @@ fn every_case_reads_and_reencodes_as_pdfium_reads_it() {
                     }
                 }
                 direct
+            }
+            #[cfg(feature = "text-layout")]
+            "gfx-text" => {
+                let q_path = set().join("cases").join(format!("{name}.queries"));
+                let q_str = fs::read_to_string(q_path).ok();
+                text_layout_answer(&bytes, q_str.as_deref())
             }
             other => panic!("{name}: unexpected case kind {other}"),
         };

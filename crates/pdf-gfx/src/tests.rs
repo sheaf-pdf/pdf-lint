@@ -114,6 +114,23 @@ fn public_types_are_send_and_sync() {
     check::<Summary>();
     check::<Encoded>();
     check::<Canvas>();
+    #[cfg(feature = "text-layout")]
+    {
+        check::<crate::PageChar>();
+        check::<crate::TextLine>();
+        check::<crate::SearchOpts>();
+        check::<crate::TextMatch>();
+        check::<crate::TextPage>();
+        check::<crate::TextPageOpts>();
+        check::<crate::FontEncoder<'static>>();
+        check::<crate::TextAlign>();
+        check::<crate::VerticalAlign>();
+        check::<crate::WrapMode>();
+        check::<crate::TextBoxStyle>();
+        check::<crate::UnencodableChar>();
+        check::<crate::LaidOutLine>();
+        check::<crate::LaidOutText>();
+    }
 }
 
 #[test]
@@ -251,6 +268,30 @@ fn debug_hygiene_never_leaks_plaintext_names_or_tags() {
     .unwrap();
     debugs.push(format!("{encoded:?}"));
     debugs.push(format!("{:?}", TextPiece::Codes(b"SECRET_PIECE")));
+    #[cfg(feature = "text-layout")]
+    {
+        let tp = crate::TextPage::extract(
+            store.as_streams(),
+            &concat,
+            Some(&resources),
+            &Limits::DEFAULT,
+            &fonts,
+            crate::TextPageOpts::default(),
+        )
+        .unwrap();
+        debugs.push(format!("{tp:?}"));
+        for ch in tp.chars() {
+            debugs.push(format!("{ch:?}"));
+        }
+        let laid = crate::layout_text(
+            &Std14::Helvetica,
+            "SECRET_GLYPH_STR",
+            Rect::new(0.0, 0.0, 200.0, 50.0),
+            &crate::TextBoxStyle::default(),
+        )
+        .unwrap();
+        debugs.push(format!("{laid:?}"));
+    }
 
     let all = debugs.join("\n");
     for secret in [
@@ -1794,4 +1835,261 @@ fn build_wide_truetype_a() -> Vec<u8> {
     }
     out.extend(data);
     out
+}
+
+#[cfg(feature = "text-layout")]
+#[test]
+fn text_page_dehyphenation_hit_testing_bounded_text_and_options() {
+    use crate::{SearchOpts, TextPage, TextPageOpts};
+
+    let mut store = Store::default();
+    let form_id = store.put_stream(
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(200), Object::from(200)],
+        },
+        b"BT /F1 12 Tf 72 620 Td (FormNote) Tj ET".to_vec(),
+    );
+    let resources = Object::from(dict! {
+        "Font" => dict! { "F1" => Std14::Helvetica.dict() },
+        "XObject" => dict! { "Fm1" => form_id },
+    });
+
+    let stream = br#"
+        BT
+        /F1 12 Tf
+        72 700 Td (inter-) Tj
+        0 -16 Td (national trade) Tj
+        3 Tr
+        0 -16 Td (HiddenOCR) Tj
+        0 Tr
+        ET
+        /Fm1 Do
+    "#;
+    let concat = Concat::new(&[stream]);
+    let fonts = Fonts::default();
+
+    let tp = TextPage::extract(
+        store.as_streams(),
+        &concat,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        TextPageOpts::default(),
+    )
+    .unwrap();
+
+    assert_eq!(tp.text(), "inter-\nnational trade\nHiddenOCR\nFormNote");
+    assert_eq!(
+        tp.text_dehyphenated(),
+        "international trade\nHiddenOCR\nFormNote"
+    );
+    assert_eq!(tp.lines().len(), 4);
+
+    // Default SearchOpts (`ignore_soft_hyphens: true`) matches across the line wrap
+    // and produces 2 selection quads (one on line 0, one on line 1)!
+    let hits = tp.search("international", SearchOpts::default());
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].quads.len(), 2);
+    assert!(tp.search("international", SearchOpts::PDFIUM).is_empty());
+
+    // Hit-testing finds `'i'` near `(73, 704)` and returns `None` far away.
+    let idx = tp
+        .char_index_at(Point::new(73.0, 704.0), 2.0, 2.0)
+        .expect("character hit at first glyph");
+    assert_eq!(tp.chars()[idx].ch, 'i');
+    assert_eq!(tp.char_index_at(Point::new(500.0, 500.0), 2.0, 2.0), None);
+
+    // Bounded rectangle query extracts only the top two lines.
+    assert_eq!(
+        tp.text_in_rect(Rect::new(60.0, 680.0, 250.0, 720.0)),
+        "inter-\nnational trade"
+    );
+
+    // `include_invisible: false` omits `3 Tr` OCR text, and `Forms::Skip` omits `/Fm1`.
+    let visible_top = TextPage::extract(
+        store.as_streams(),
+        &concat,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        TextPageOpts {
+            forms: Forms::Skip,
+            include_invisible: false,
+            ..TextPageOpts::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(visible_top.text(), "inter-\nnational trade");
+}
+
+#[cfg(feature = "text-layout")]
+#[test]
+fn canvas_text_box_wrapping_alignment_autosize_comb_and_custom_fonts() {
+    use crate::{
+        FontEncoder, TextAlign, TextBoxStyle, TextPage, TextPageOpts, VerticalAlign, WrapMode,
+        layout_text,
+    };
+
+    let font_res = Res::dict(Std14::Helvetica.dict()).unwrap();
+    let box_rect = Rect::from_xywh(36.0, 600.0, 140.0, 100.0);
+
+    // 1. Word-wrapped justified paragraph: wrapped lines carry `word_space > 0.0`,
+    //    while the paragraph's final line stays left-aligned (`word_space == 0.0`).
+    let para = "The quick brown fox jumps over the lazy dog.\nSecond short line.";
+    let justified_style = TextBoxStyle {
+        size: Some(11.0),
+        align: TextAlign::Justify,
+        vertical_align: VerticalAlign::Top,
+        wrap: WrapMode::Word,
+        padding: 4.0,
+        ..TextBoxStyle::default()
+    };
+    let mut canvas = Canvas::new();
+    let laid = canvas
+        .text_box(
+            font_res.clone(),
+            &Std14::Helvetica,
+            para,
+            box_rect,
+            &justified_style,
+        )
+        .unwrap();
+    assert!(!laid.overflowed);
+    assert!(laid.lines.len() >= 3);
+    assert!(laid.lines[0].word_space > 0.0);
+    assert_eq!(laid.lines.last().unwrap().word_space, 0.0);
+
+    // 2. Auto-sized (`size: None`) centered single-line banner inside a tight box.
+    let auto_style = TextBoxStyle {
+        size: None,
+        min_auto_size: 4.0,
+        max_auto_size: 18.0,
+        align: TextAlign::Center,
+        vertical_align: VerticalAlign::Middle,
+        wrap: WrapMode::NoWrap,
+        ..TextBoxStyle::default()
+    };
+    let auto_laid = canvas
+        .text_box(
+            font_res.clone(),
+            &Std14::Helvetica,
+            "Auto-fit title",
+            Rect::from_xywh(36.0, 540.0, 60.0, 20.0),
+            &auto_style,
+        )
+        .unwrap();
+    assert!(!auto_laid.overflowed);
+    assert!(auto_laid.font_size >= 4.0 && auto_laid.font_size < 18.0);
+
+    // 3. Right-aligned 6-cell comb field (`"42"` lands in cells 4 and 5).
+    let comb_style = TextBoxStyle {
+        size: Some(12.0),
+        align: TextAlign::Right,
+        vertical_align: VerticalAlign::Middle,
+        comb: Some(6),
+        ..TextBoxStyle::default()
+    };
+    let comb_rect = Rect::from_xywh(36.0, 500.0, 120.0, 24.0);
+    let comb_laid = canvas
+        .text_box(
+            font_res.clone(),
+            &Std14::Courier,
+            "42",
+            comb_rect,
+            &comb_style,
+        )
+        .unwrap();
+    assert!(!comb_laid.overflowed);
+    assert_eq!(comb_laid.lines[0].cells.len(), 2);
+    assert!(comb_laid.lines[0].cells[0].0.x > 36.0 + 80.0);
+
+    // 4. Unencodable character returns Err without mutating the canvas.
+    let (before_bytes, _) = canvas.named(&Reserved::default());
+    let err = canvas
+        .text_box(
+            font_res.clone(),
+            &Std14::Helvetica,
+            "ok \u{65E5}",
+            box_rect,
+            &TextBoxStyle::default(),
+        )
+        .unwrap_err();
+    assert_eq!(err.at, 3);
+    assert_eq!(err.character, '\u{65E5}');
+    let (after_bytes, needs) = canvas.finish(&Reserved::default());
+    assert_eq!(before_bytes, after_bytes);
+
+    // Round-trip the canvas back through `TextPage::extract`!
+    let mut font_dict = Dict::new();
+    for need in &needs.0 {
+        font_dict.set(need.name.clone(), Std14::Helvetica.dict());
+    }
+    let resources = Object::from(dict! { "Font" => font_dict });
+    let store = Store::default();
+    let tp = TextPage::extract(
+        store.as_streams(),
+        &Concat::new(&[&after_bytes]),
+        Some(&resources),
+        &Limits::DEFAULT,
+        &Fonts::default(),
+        TextPageOpts::default(),
+    )
+    .unwrap();
+    assert!(tp.text().contains("The quick brown fox"));
+    assert!(tp.text().contains("Second short line."));
+    assert!(tp.text().contains("Auto-fit title"));
+
+    // 5. `FontEncoder` over a 2-byte Type 0 CMap font with `/ToUnicode`.
+    let mut store2 = Store::default();
+    let to_uni = store2.put_stream(
+        dict! {},
+        b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+          2 beginbfchar\n<0001> <65E5>\n<0002> <672C>\nendbfchar"
+            .to_vec(),
+    );
+    let cid_font = store2.put(Object::from(dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("CIDFontType2"),
+        "BaseFont" => Object::name("TestJP"),
+        "CIDSystemInfo" => dict! {
+            "Registry" => Object::text("Adobe"),
+            "Ordering" => Object::text("Identity"),
+            "Supplement" => 0,
+        },
+        "DW" => 1000,
+    }));
+    let type0_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("TestJP"),
+        "Encoding" => Object::name("Identity-H"),
+        "DescendantFonts" => vec![Object::from(cid_font)],
+        "ToUnicode" => to_uni,
+    };
+    let mut budget = 1 << 20;
+    let parsed_type0 = pdf_fonts::Font::read(
+        store2.as_streams(),
+        &type0_dict,
+        &pdf_fonts::Limits::DEFAULT,
+        &mut budget,
+        &mut (),
+    )
+    .unwrap();
+    let encoder = FontEncoder::new(&parsed_type0);
+    let cjk_laid = layout_text(
+        &encoder,
+        "\u{65E5}\u{672C}",
+        Rect::from_xywh(0.0, 0.0, 30.0, 40.0),
+        &TextBoxStyle {
+            size: Some(20.0),
+            wrap: WrapMode::Char,
+            ..TextBoxStyle::default()
+        },
+    )
+    .unwrap();
+    // At size 20 with DW 1000, each glyph is 20pt wide -> wraps into 2 lines inside 30pt!
+    assert_eq!(cjk_laid.lines.len(), 2);
+    assert_eq!(cjk_laid.lines[0].codes, vec![0x00, 0x01]);
+    assert_eq!(cjk_laid.lines[1].codes, vec![0x00, 0x02]);
 }

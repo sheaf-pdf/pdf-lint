@@ -39,3 +39,17 @@ form-self-and-mutual-cycles	gfx	form-self-and-mutual-cycles.pdf
 images-xobject-and-inline	gfx	images-xobject-and-inline.pdf
 images-inline-broken-filter	gfx	images-inline-broken-filter.pdf
 marks-named-props-bad-bdc-and-unclosed	gfx	marks-named-props-bad-bdc-and-unclosed.pdf
+layout-two-lines-and-search	gfx-text	layout-two-lines-and-search.pdf,layout-two-lines-and-search.queries
+layout-tj-space-threshold-below	gfx-text	layout-tj-space-threshold-below.pdf
+layout-tj-space-threshold-at	gfx-text	layout-tj-space-threshold-at.pdf
+layout-separate-tm-word-gap	gfx-text	layout-separate-tm-word-gap.pdf,layout-separate-tm-word-gap.queries
+layout-two-columns-table-row	gfx-text	layout-two-columns-table-row.pdf,layout-two-columns-table-row.queries
+layout-same-line-reverse-x	gfx-text	layout-same-line-reverse-x.pdf,layout-same-line-reverse-x.queries
+layout-faux-bold-across-tj	gfx-text	layout-faux-bold-across-tj.pdf
+layout-consecutive-spaces-collapsed	gfx-text	layout-consecutive-spaces-collapsed.pdf
+layout-actual-text-single-and-multi-op	gfx-text	layout-actual-text-single-and-multi-op.pdf,layout-actual-text-single-and-multi-op.queries
+layout-hyphen-wrap-alpha-vs-digit	gfx-text	layout-hyphen-wrap-alpha-vs-digit.pdf,layout-hyphen-wrap-alpha-vs-digit.queries
+layout-soft-hyphen-wrap	gfx-text	layout-soft-hyphen-wrap.pdf
+layout-rotated-90-two-lines	gfx-text	layout-rotated-90-two-lines.pdf,layout-rotated-90-two-lines.queries
+layout-consecutive-overlap-search	gfx-text	layout-consecutive-overlap-search.pdf,layout-consecutive-overlap-search.queries
+layout-bidi-rtl-and-numbers	gfx-text	layout-bidi-rtl-and-numbers.pdf,layout-bidi-rtl-and-numbers.queries

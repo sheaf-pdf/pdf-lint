@@ -57,7 +57,7 @@ pub struct TextShow<'e> {
     /// writing) where this string begins (`0.0` for `Tj` / `'` / `"` and the
     /// first string of `TJ`).
     pub offset: f32,
-    text: &'e TextState,
+    pub(crate) text: &'e TextState,
 }
 
 impl fmt::Debug for TextShow<'_> {
@@ -284,8 +284,8 @@ pub struct Glyph<'e> {
     pub invisible: bool,
     /// Starting pen position of this glyph in the text matrix's space.
     pub pen: Point,
-    font: &'e Font,
-    text: &'e TextState,
+    pub(crate) font: &'e Font,
+    pub(crate) text: &'e TextState,
 }
 
 impl fmt::Debug for Glyph<'_> {

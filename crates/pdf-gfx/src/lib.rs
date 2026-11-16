@@ -29,12 +29,22 @@
 //!   Builds new content streams with scoped `q`/`Q` state, inset borders,
 //!   rounded rectangles, ellipses, placed images/Form XObjects, and
 //!   `TJ`-kerned text over [`ContentWriter`](pdf_content_streams::ContentWriter).
+//! - **Positioned text page, search & multiline layout (`text-layout` feature):**
+//!   `TextPage` assembles placed glyphs into reading-order lines with synthetic
+//!   spaces and line breaks, faux-bold deduplication, `/ActualText` replacement,
+//!   `unicode-bidi` visual-to-logical reordering, soft-hyphen detection,
+//!   selection quads, hit-testing, and search; `layout_text` and
+//!   `Canvas::text_box` wrap, align, justify, auto-size, and comb-place UTF-8
+//!   text over `Std14`, `Font`, or `FontEncoder`.
 //!
 //! # Cargo Features
 //!
 //! - **`programs`** *(default)*: Forwards `pdf-fonts/programs` so embedded
 //!   TrueType, Type 1, CFF, and OpenType glyph outlines tighten [`Glyph::quad`]
 //!   boxes.
+//! - **`text-layout`** *(default)*: Enables `TextPage` reading-order assembly,
+//!   `unicode-bidi` reordering, selection quads, search, and multiline/box
+//!   `layout_text` / `Canvas::text_box` drawing.
 //! - **`predefined-cmaps`** *(optional)*: Forwards `pdf-fonts/predefined-cmaps`
 //!   for bundled Adobe CJK CMaps and UCS-2 collections.
 //! - **`tracing`** *(optional)*: Emits numeric `tracing` spans (byte lengths
@@ -120,6 +130,8 @@ mod fault;
 pub mod fuzz;
 mod geom;
 mod interp;
+#[cfg(feature = "text-layout")]
+mod layout;
 mod limits;
 mod marked;
 mod path;
@@ -129,6 +141,8 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod text;
+#[cfg(feature = "text-layout")]
+mod wrap;
 mod xobject;
 
 pub use canvas::{Canvas, TextPiece};
@@ -138,6 +152,8 @@ pub use error::{Error, Unwritable};
 pub use fault::Fault;
 pub use geom::{Matrix, PageGeom, PageSize, Point, Quad, Rect, Rotation};
 pub use interp::{At, Event, Forms, Kind, Opts, Summary, Wants, interpret, interpret_with};
+#[cfg(feature = "text-layout")]
+pub use layout::{PageChar, SearchOpts, TextLine, TextMatch, TextPage, TextPageOpts};
 pub use limits::{Cap, Limits};
 pub use marked::{Mark, MarkProps, Marks, MarksIter};
 pub use path::{PathDrawn, Seg};
@@ -146,6 +162,11 @@ pub use state::{
     SoftMaskKind, State, TextState,
 };
 pub use text::{Glyph, Glyphs, TextShow};
+#[cfg(feature = "text-layout")]
+pub use wrap::{
+    FontEncoder, LaidOutLine, LaidOutText, LayoutFont, TextAlign, TextBoxStyle, UnencodableChar,
+    VerticalAlign, WrapMode, layout_text,
+};
 pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, UseId};
 
 /// The README's examples, run as doctests.
