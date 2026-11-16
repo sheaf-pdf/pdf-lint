@@ -87,6 +87,13 @@ pdf-fixtures = { path = "../pdf-fixtures" }
 # The tests' folders of their own, removed after.
 tempfile = "3"
 
+# The binary built with thin LTO, across the crates it's made of. Cargo
+# reads this only where the package is its own root, as `cargo install
+# pdf-lint` builds it; in the repository's workspace it's ignored, with a
+# warning on every build, and the workspace's Cargo.toml says the same.
+[profile.release]
+lto = "thin"
+
 [lints.rust]
 unsafe_code = "forbid"
 # cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
