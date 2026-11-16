@@ -1991,7 +1991,7 @@ mod tests {
             content_budget: budget,
             ..Options::default()
         };
-        check(&counting, hold, &options);
+        let _ = check(&counting, hold, &options);
         counting.asked.into_inner()
     }
 
@@ -2173,7 +2173,7 @@ mod tests {
             asked: RefCell::new(Vec::new()),
             without: None,
         };
-        check(&counting, &Hold::All(Made::Merged), &Options::default());
+        let _ = check(&counting, &Hold::All(Made::Merged), &Options::default());
         let room = Limits::DEFAULT.content;
         assert_eq!(counting.asked.into_inner(), [(ObjectId::new(10, 0), room)]);
     }

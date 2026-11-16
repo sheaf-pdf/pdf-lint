@@ -96,6 +96,7 @@ tempfile = "3"
 lto = "thin"
 
 [lints.rust]
+missing_docs = "warn"
 unsafe_code = "forbid"
 # cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

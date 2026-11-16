@@ -25,14 +25,20 @@ pub struct Allowances {
 
 /// A row of an allowances file: the findings of its table, key and rule,
 /// in one file or any, of a version and later or any.
+///
+/// Not exhaustive: read by its fields, and made only by
+/// [`Allowances::parse`], so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Allowance {
     /// The line of its file it's on.
     pub line: usize,
     /// A table of the model's, or `-`, as an unreached object's finding
     /// and a reader's have it.
     pub table: String,
+    /// The key, as findings write it, or `-`.
     pub key: String,
+    /// The rule.
     pub rule: Rule,
     /// The file whose findings alone it allows, as its caller names it;
     /// none for any file's.
@@ -43,6 +49,7 @@ pub struct Allowance {
     /// [`Options::version`](crate::Options::version) names; none for any
     /// version's.
     pub from: Option<Version>,
+    /// Why it's allowed, as its row says.
     pub reason: String,
 }
 
@@ -164,8 +171,12 @@ pub enum ReadError {
 }
 
 impl Allowances {
-    /// The allowances in the file `path`; a [`ReadError`] names the file
-    /// and, as [`Allowances::parse`] does, the line.
+    /// The allowances in the file `path`.
+    ///
+    /// # Errors
+    ///
+    /// A [`ReadError`] names the file, and why it can't be read or, as
+    /// [`Allowances::parse`] does, the line that doesn't read.
     pub fn read(path: &Path) -> Result<Allowances, ReadError> {
         let text = std::fs::read_to_string(path).map_err(|error| ReadError::Read {
             path: path.to_path_buf(),
@@ -177,10 +188,15 @@ impl Allowances {
         })
     }
 
-    /// The allowances in `text`. An [`AllowanceError`] names the line that
-    /// doesn't read: a row without its six fields, a table the model
-    /// hasn't, a rule there isn't, no file, a version that isn't one, no
-    /// reason, or a second row for a table, key, rule, file and version.
+    /// The allowances in `text`.
+    ///
+    /// # Errors
+    ///
+    /// An [`AllowanceError`] names the line that doesn't read: a row
+    /// without its six fields, a table the model hasn't, a rule there
+    /// isn't, no file, a version that isn't one, no reason, or a second row
+    /// for a table, key, rule, file and version; or that the text has no
+    /// header, or a `#` line among its rows.
     pub fn parse(text: &str) -> Result<Allowances, AllowanceError> {
         let header = (text.lines())
             .take_while(|line| line.starts_with('#'))
@@ -215,6 +231,7 @@ impl Allowances {
     /// The allowance for `finding`, in a file checked at `version` named
     /// `file` (none for a file of no name, which only rows for any file
     /// allow), if there's one; it's then used.
+    #[must_use]
     pub fn allows(
         &self,
         finding: &Finding,
@@ -240,6 +257,7 @@ impl Allowances {
     }
 
     /// The allowances that haven't allowed a finding.
+    #[must_use]
     pub fn unused(&self) -> Vec<&Allowance> {
         (self.list.iter().zip(&self.used))
             .filter(|(_, used)| !used.load(Ordering::Relaxed))

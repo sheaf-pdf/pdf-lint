@@ -284,6 +284,11 @@ pub const CONTENT_BUDGET: usize = 2 << 30;
 pub const FONT_BUDGET: usize = 256 << 20;
 
 /// How a writer made an object it wrote.
+///
+/// Exhaustive on purpose: an object a writer wrote is built whole or
+/// written over a source's, as a hold file says (`built`, `merged`), so a
+/// match on both is checked by the compiler; another would be a breaking
+/// release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Made {
     /// Built whole: every key in it is the writer's.
@@ -299,6 +304,10 @@ pub enum Made {
 /// ([`Hold::Only`]), a cross-reference stream's where its number is among
 /// them, as a hold names objects by number, and a table's never, as it
 /// has no number.
+///
+/// Exhaustive on purpose: a hold is every object or the ones it names, so
+/// a match on both is checked by the compiler; another would be a breaking
+/// release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hold {
     /// Every object in the file.
@@ -310,8 +319,12 @@ pub enum Hold {
 impl Hold {
     /// The objects a hold file names: a line each, its object's number,
     /// generation and how it was made (`12 0 built`, `3 0 merged`), and
-    /// `#` lines and blank ones besides. A [`HoldError`] names the line
-    /// that doesn't read, or that names an object a second time.
+    /// `#` lines and blank ones besides.
+    ///
+    /// # Errors
+    ///
+    /// A [`HoldError`] names the line that doesn't read, or that names an
+    /// object a second time.
     pub fn parse(text: &str) -> Result<Hold, HoldError> {
         let mut objects = BTreeMap::new();
         for (i, line) in text.lines().enumerate() {
@@ -461,6 +474,10 @@ pub struct Options {
 }
 
 /// Which held objects a key the model doesn't list is a finding in.
+///
+/// Exhaustive on purpose: built objects, every held one, or none, as the
+/// command line's `--unlisted` names them, so a match on the three is
+/// checked by the compiler; another would be a breaking release.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UnlistedIn {
     /// Built objects only: a merged object's may be its source's.
@@ -476,7 +493,8 @@ pub enum UnlistedIn {
 
 impl UnlistedIn {
     /// As the command line names it: `built`, `all` or `never`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             UnlistedIn::Built => "built",
             UnlistedIn::All => "all",
@@ -485,6 +503,7 @@ impl UnlistedIn {
     }
 
     /// The one `name` names.
+    #[must_use]
     pub fn named(name: &str) -> Option<UnlistedIn> {
         [UnlistedIn::Built, UnlistedIn::All, UnlistedIn::Never]
             .into_iter()
@@ -493,8 +512,14 @@ impl UnlistedIn {
 }
 
 /// A key a writer writes on purpose that the model doesn't list.
+///
+/// Exhaustive on purpose: a name and whether it's a prefix, which a caller
+/// may gather by hand as well as [`Exempt::parse`] reads them, so it's
+/// built by its fields; a field more would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exempt {
+    /// The key: a name's bytes, without its `/`, its `#xx` escapes
+    /// decoded.
     pub name: Vec<u8>,
     /// Whether any key it begins is exempt too.
     pub prefix: bool,
@@ -505,8 +530,11 @@ impl Exempt {
     /// writes one, its `#xx` escapes decoded (`/MyKey`), or with a `*`
     /// after it for every key it begins (`/My*`; a name that ends in a
     /// star is written `/My#2A`); and `#` lines and blank ones besides.
-    /// An [`ExemptError`] names the line that doesn't read, or that names
-    /// a key a second time.
+    ///
+    /// # Errors
+    ///
+    /// An [`ExemptError`] names the line that doesn't read, or that names a
+    /// key a second time.
     pub fn parse(text: &str) -> Result<Vec<Exempt>, ExemptError> {
         use pdf_tokenizer::decode::How;
         use pdf_tokenizer::{Kind, Tokenizer};
@@ -612,6 +640,9 @@ pub enum ExemptError {
 }
 
 /// What a finding breaks.
+///
+/// Not exhaustive: a rule can come in a minor release, so a match on them
+/// takes a wildcard. [`Rule::ALL`] lists every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Rule {
@@ -1083,6 +1114,9 @@ pub enum Rule {
 }
 
 /// A rule a held object breaks.
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Finding {
@@ -1090,6 +1124,8 @@ pub struct Finding {
     /// as a whole, or a linearization dictionary as first written whose
     /// number a later revision wrote again ([`Rule::Linearization`]).
     pub object: Option<ObjectId>,
+    /// How the writer made the object it's in, as the hold says; the
+    /// trailer's, an earlier revision's and the file's as a whole merged.
     pub made: Made,
     /// Where the walk reached it: from the trailer,
     /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer; from an
@@ -1107,7 +1143,9 @@ pub struct Finding {
     /// [`Rule::Resource`] or [`Rule::Unused`] one, `-` for the finding past
     /// a unit's 32 names.
     pub table: String,
+    /// The key of the row it breaks, as [`Finding::table`] says.
     pub key: String,
+    /// The rule it breaks.
     pub rule: Rule,
     /// The value as written (its first entries, names and strings cut
     /// short), and what's wrong with it; its display shows the first 80
@@ -1130,16 +1168,27 @@ pub struct Finding {
 
 /// A key or element of held objects that the model doesn't list: no row
 /// has it, and its table has no wildcard.
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct Unlisted {
+    /// The table of the object it's in.
     pub table: String,
+    /// The key, or an array's element's index, as findings write it.
     pub key: String,
+    /// What kind of name it is.
     pub class: Class,
 }
 
 /// What kind of name a key the model doesn't list is (ISO 32000-2 Annex
 /// E), as TestGrammar tells (`is_second_class_pdf_name` and
 /// `is_third_class_pdf_name`, `TestGrammar/src/Utils.cpp`).
+///
+/// Exhaustive on purpose: Annex E's second and third classes, a key the
+/// model has under an extension, and any other, so a match on the four is
+/// checked by the compiler; another would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Class {
     /// A second-class name: a registered prefix of four or five letters,
@@ -1169,7 +1218,11 @@ pub enum Class {
 /// `Metadata`; or a color space or a font not read whole for what isn't
 /// the file's fault, its column and key `-`, its table the space's or the
 /// font's.
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct Unchecked {
     /// The column whose cell it is.
     pub column: &'static str,
@@ -1188,14 +1241,22 @@ pub struct Unchecked {
     /// color space or a font, why it isn't read whole (an object of it that
     /// takes a password, a font's streams past the file's budget for them).
     pub why: String,
+    /// The table it's counted under: the row's whose check it is, or as
+    /// said above of each kind.
     pub table: String,
+    /// The key it's counted under: the row's whose check it is, or as said
+    /// above of each kind.
     pub key: String,
 }
 
 /// What a check of a file found in its held objects.
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Report {
+    /// What it found, in the order the check found it.
     pub findings: Vec<Finding>,
     /// Held objects checked, by table; tree nodes as `name-tree` and
     /// `number-tree`.
@@ -1277,6 +1338,9 @@ pub struct Report {
 
 /// What a file that says it's linearized is (ISO 32000-2, Annex F), as
 /// [`Report::linearized`] has it.
+///
+/// Not exhaustive: a check may come to tell another state of a
+/// linearization in a minor release, so a match on them takes a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Linearized {
@@ -1302,7 +1366,8 @@ pub enum Linearized {
 impl Linearized {
     /// Its name, as the JSON report writes it: `holds`, `fails`, `updated`
     /// or `not-taken`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Linearized::Holds => "holds",
             Linearized::Fails => "fails",
@@ -1342,6 +1407,7 @@ impl Linearized {
 /// what an earlier revision had at a number a later one wrote over or
 /// freed, and whether a linearized file's linearization holds,
 /// [`check_with_reading`] reads too.
+#[must_use]
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     check_in(source, None, hold, options)
 }
@@ -1374,6 +1440,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
 /// first written, judged so of the file's first bytes, up to where its
 /// `/L` says, read as a file of their own under the file's reading's own
 /// limits.
+#[must_use]
 pub fn check_with_reading<S: ByteSource>(
     file: &WithReading<S>,
     hold: &Hold,
@@ -1607,6 +1674,7 @@ fn walking<R>(
 impl Report {
     /// The held objects checked: those [`Report::checked`] counts, each
     /// once though it counts one checked as two tables as each.
+    #[must_use]
     pub fn objects(&self) -> usize {
         self.checked.values().sum::<usize>() - self.two_tables
     }
@@ -1636,6 +1704,7 @@ impl Report {
     /// for the file's version in it is carried when a source's trailer has
     /// one too: what's too new is the form, as a cross-reference stream
     /// below PDF 1.5 is, which an incremental update goes on writing.
+    #[must_use]
     pub fn beyond<'a>(&'a self, sources: &[&Report]) -> Vec<&'a Finding> {
         let carried: HashSet<_> = (sources.iter())
             .flat_map(|source| &source.findings)
@@ -1662,6 +1731,7 @@ impl Report {
     /// a like one in any of `before`'s trailers; one in the newest trailer
     /// only by one in `before`'s newest, so that a fault the update brings
     /// back, which the revision before it had mended, is the update's.
+    #[must_use]
     pub fn since<'a>(&'a self, before: &Report) -> Vec<&'a Finding> {
         let carried: HashSet<_> = (before.findings.iter())
             .map(|f| (before.place(f), like(f)))
@@ -1693,6 +1763,7 @@ impl Report {
     /// (`12 0 R/DecodeParms`), is no place a rewrite keeps, as it's the
     /// number it renumbers: a finding there is carried by a like one
     /// anywhere.
+    #[must_use]
     pub fn by_path<'a>(&'a self, baseline: &Report) -> Vec<&'a Finding> {
         let at_path: HashSet<_> = (baseline.findings.iter())
             .map(|f| (f.path.as_str(), like(f)))
@@ -1788,6 +1859,7 @@ const MODEL: [Rule; 8] = [
 
 /// The file's version: its header's (1.4 when it has none that reads), or
 /// its catalog's `/Version` when that's later.
+#[must_use]
 pub fn file_version(source: &dyn Source) -> Version {
     let header = source.header_version().unwrap_or(Version::new(1, 4));
     let catalog = (source.trailer().dict().get(b"Root"))
@@ -4797,11 +4869,13 @@ pub(crate) fn each_reference(o: &Object, mut f: impl FnMut(ObjectId)) {
 /// what follows the date and what else departs from the clause, and not a
 /// field out of its range. A test holds it to TestGrammar's
 /// `is_valid_pdf_date_string`.
+#[must_use]
 pub fn is_date(text: &str) -> bool {
     Date::read(text).is_ok()
 }
 
 /// `value` with each reference in it, `12 0 R`, as `R`.
+#[must_use]
 pub fn numberless(value: &str) -> String {
     let b = value.as_bytes();
     let digits = |from: usize| b[from..].iter().take_while(|c| c.is_ascii_digit()).count();
@@ -4911,7 +4985,10 @@ fn write_dictionary(out: &mut String, d: &Dict, depth: usize, stream: bool) {
 }
 
 impl Made {
-    pub fn name(self) -> &'static str {
+    /// Its name, as a hold file and findings write it: `built` or
+    /// `merged`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Made::Built => "built",
             Made::Merged => "merged",
@@ -4955,7 +5032,8 @@ impl Rule {
     ];
 
     /// Its name, as findings and allowances write it.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Rule::Type => "type",
             Rule::Missing => "missing",
@@ -4990,6 +5068,7 @@ impl Rule {
     }
 
     /// The rule named `name`.
+    #[must_use]
     pub fn named(name: &str) -> Option<Rule> {
         Rule::ALL.iter().copied().find(|r| r.name() == name)
     }
@@ -4999,6 +5078,7 @@ impl Class {
     /// The kind of name `key` is: [`Class::Second`] or [`Class::Third`] by
     /// TestGrammar's expressions for them (`^([a-zA-Z0-9_\-]{4,5}(_|:))`
     /// and `^XX`), else [`Class::Other`].
+    #[must_use]
     pub fn of(key: &[u8]) -> Class {
         let prefix = |n: usize| {
             key.len() > n

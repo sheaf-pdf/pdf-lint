@@ -94,9 +94,13 @@ pub mod grammar {
     ];
 
     /// The model every check reads: the one [`use_model`] chose, else the
-    /// embedded one ([`Grammar::embedded`]), read once. Panics, naming the
-    /// file and line, when the embedded one doesn't read, which its tests
-    /// rule out.
+    /// embedded one ([`Grammar::embedded`]), read once.
+    ///
+    /// # Panics
+    ///
+    /// When the embedded one doesn't read, naming the file and line, which
+    /// its tests rule out.
+    #[must_use]
     pub fn grammar() -> &'static Grammar {
         CHOSEN
             .get_or_init(|| None)
@@ -106,9 +110,12 @@ pub mod grammar {
 
     /// Makes `model` the one every check reads, in place of the embedded
     /// one: a newer checkout of upstream's `tsv/latest`, read with
-    /// [`Grammar::load`]. Before anything has read the model, and once. A
-    /// [`Refused`] says when something has, or when `model` lacks a table
-    /// the checker reads by name ([`NAMED`]).
+    /// [`Grammar::load`]. Before anything has read the model, and once.
+    ///
+    /// # Errors
+    ///
+    /// A [`Refused`] says when something has read the model already, or
+    /// when `model` lacks a table the checker reads by name ([`NAMED`]).
     pub fn use_model(model: Grammar) -> Result<(), Refused> {
         for &name in NAMED {
             if model.table(name).is_none() {
@@ -151,8 +158,9 @@ pub mod extension {
 
     /// Every extension the model names, in its cells and around its
     /// types, values and links: what a file can be checked under. It's
-    /// [`Grammar::extensions`](pdf_arlington::Grammar::extensions) of the model
-    /// every check reads, [`grammar()`](crate::grammar()).
+    /// [`Grammar::extensions`](pdf_arlington::Grammar::extensions) of the
+    /// model every check reads, [`grammar()`](crate::grammar()).
+    #[must_use]
     pub fn named() -> BTreeSet<String> {
         crate::grammar().extensions()
     }
@@ -164,6 +172,7 @@ pub mod extension {
     /// [`pdf_semantics::xmp::read`], so a claim is one in the namespace it's
     /// bound to; what a packet claims before anything that stops the read
     /// counts.
+    #[must_use]
     pub fn declared(source: &dyn Source) -> BTreeSet<String> {
         read(source).0
     }
@@ -516,7 +525,7 @@ mod tests {
     /// word for word.
     #[test]
     fn a_model_is_chosen_before_anything_reads_one_or_not_at_all() {
-        grammar();
+        let _ = grammar();
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-arlington/model/tsv/latest");
         let e = use_model(Grammar::load(&dir).unwrap()).unwrap_err();
         assert_eq!(
