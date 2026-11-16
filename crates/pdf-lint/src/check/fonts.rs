@@ -6,12 +6,15 @@
 //! streams' data, a `/ToUnicode`, an embedded CMap and those it uses, a
 //! Type 3 font's glyphs, comes decoded from the source as a viewer takes
 //! it ([`Streams::decoded`]), as a font reads a reading's ([`decoded`]),
-//! the file's fonts' within one budget. A source that gives no stream's
-//! data, as a document alone doesn't, leaves a font that asks one unread,
-//! as it leaves content. What the read tells is kept ([`Kept`]), each read
-//! run to its end; but once an object it reads doesn't read for what isn't
-//! the file's fault, a password or a cap, the read goes on as if it weren't
-//! there, and what it tells after isn't kept ([`Cut`]).
+//! the file's fonts' within one budget. A document alone gives the streams
+//! it holds as bytes, as one made in memory holds them, though it gives no
+//! content; a stream whose data is where its file wrote it, as a document
+//! read from a file has every stream but the object streams it decoded
+//! whole, it doesn't give, which leaves a font that asks one unread. What
+//! the read tells is kept ([`Kept`]), each read run to its end; but once an
+//! object it reads doesn't read for what isn't the file's fault, a password
+//! or a cap, the read goes on as if it weren't there, and what it tells
+//! after isn't kept ([`Cut`]).
 //!
 //! Of what it tells, what the walk can't say is a [`Rule::Font`] finding,
 //! where the walk found nothing by the model's rules in that object at that
@@ -275,9 +278,9 @@ struct Asked {
 /// that doesn't read ([`Objects`]). A stream through filters the reader
 /// doesn't take ([`Why::Filter`]) a font reads as none, which `asked`
 /// notes, so that what's read without it isn't taken for the file's; and a
-/// source that gives no stream's data, as a document alone doesn't
-/// ([`Why::Detached`]), or not these bytes ([`Why::Source`]), is noted too,
-/// as what a font reads then isn't the file's font.
+/// stream whose data the source doesn't hold, as a document read from a
+/// file doesn't ([`Why::Detached`]), or not these bytes ([`Why::Source`]),
+/// is noted too, as what a font reads then isn't the file's font.
 fn decoded(
     source: &dyn Source,
     id: ObjectId,
@@ -745,6 +748,8 @@ mod tests {
     use super::*;
     use crate::bytes::{self, ByteSource, Options, WithReading};
     use crate::check::{Hold, Made, Report, Rule, check};
+    use crate::source::Document;
+    use crate::version::Version;
 
     /// A `/ToUnicode`'s data, as each stream here holds it.
     const PLAIN: &[u8] = b"1 beginbfchar <41> <0041> endbfchar";
@@ -803,9 +808,9 @@ mod tests {
     }
 
     /// A stream within its limit is its data, with filters or without, and
-    /// past it past a cap, by a byte; a document alone gives none, detached,
-    /// noted, and a font that asks it isn't read, where a font that asks
-    /// none is.
+    /// past it past a cap, by a byte; the file's document alone gives none,
+    /// detached, noted, and a font that asks it isn't read, where a font
+    /// that asks none is.
     #[test]
     fn a_stream_s_data_within_its_limit_and_past_it() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
@@ -846,8 +851,8 @@ mod tests {
     }
 
     /// A font stopped by a stream's data not given is noted as such, the
-    /// source's, not the file's: where a document alone has nothing to read
-    /// it from, as where a source failed to give its bytes.
+    /// source's, not the file's: where a document read from a file has
+    /// nothing to read it from, as where a source failed to give its bytes.
     #[test]
     fn a_font_stopped_by_data_not_given_is_ungiven() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
@@ -1375,6 +1380,55 @@ mod tests {
             cap_height(&checked("1.7", &its_descriptor)),
             missing(4, "FontDescriptorTrueType")
         );
+    }
+
+    /// A document made in memory holds its streams as bytes, which it gives
+    /// a font as a viewer takes them, and gives no account of a stream's
+    /// decode, which content is read from: its font's `/ToUnicode` is read,
+    /// the text Latin, so its descriptor's `/CapHeight` is missing; and its
+    /// page's content isn't read. Its objects written to a file and read
+    /// back as a document hold no stream's data but where the file wrote
+    /// it: the font asks one and isn't read, so `/CapHeight` can't be told,
+    /// and no content is read; and beside its reading, both are.
+    #[test]
+    fn a_document_made_in_memory_gives_its_fonts_streams_and_no_content() {
+        let mut objects = on_a_page(
+            dict! { "F1" => r(4) },
+            vec![
+                (4, type0(5, Some(r(7))).into()),
+                (5, cid_font(6).into()),
+                (6, descriptor(4, false).into()),
+                (7, to_unicode(&[0x41])),
+                (8, Body::stream(dict! {}, b"BT /F1 12 Tf <0001> Tj ET")),
+            ],
+        );
+        if let Body::Object(page) = &mut objects[2].1 {
+            page.as_dict_mut().unwrap().set("Contents", r(8));
+        }
+        let trailer = dict! { "Root" => r(1) };
+        let mut made = Document::new(Version::new(1, 7), trailer.clone());
+        for (n, body) in &objects {
+            let object = match body {
+                Body::Object(object) => object.clone(),
+                Body::Stream(dict, data) => {
+                    crate::object::Stream::new(dict.clone(), data.clone()).into()
+                }
+            };
+            made.insert(*n, object);
+        }
+        let held = Hold::All(Made::Built);
+        let options = crate::check::Options::default();
+        let report = check(&made, &held, &options);
+        assert_eq!(cap_height(&report), missing(6, "FontDescriptorCIDType2"));
+        assert_eq!(report.content, 0, "{report}");
+        let file = fixture::file("1.7", &objects, trailer, Xref::Table);
+        let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
+        let alone = check(read.document(), &held, &options);
+        assert_eq!(cap_height(&alone), unmade("FontDescriptorCIDType2"));
+        assert_eq!(alone.content, 0, "{alone}");
+        let beside = check(&read, &held, &options);
+        assert_eq!(cap_height(&beside), missing(6, "FontDescriptorCIDType2"));
+        assert_eq!(beside.content, 1, "{beside}");
     }
 
     /// A font whose `/ToUnicode` takes a password that wasn't given isn't

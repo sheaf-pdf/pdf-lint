@@ -30,6 +30,50 @@
 //! - [`grammar()`] returns the active Arlington
 //!   [`Grammar`](pdf_arlington::Grammar) (embedded by default, or overridden
 //!   once at startup via [`use_model`]).
+//!
+//! The crates whose types these take and give are re-exported whole, at the
+//! versions this crate takes: [`pdf_objects`], [`pdf_structure`] and
+//! [`pdf_arlington`].
+//!
+//! # Example
+//!
+//! A document made in memory, whose page has a key the model doesn't list,
+//! checked with every object held as built, so that the key is a finding:
+//!
+//! ```
+//! use pdf_lint::pdf_objects::{Object, Version, dict};
+//! use pdf_lint::pdf_structure::Document;
+//! use pdf_lint::{Hold, Made, Options, Rule, check};
+//!
+//! let r = Object::reference;
+//! let trailer = dict! { "Size" => 4, "Root" => r(1) };
+//! let mut doc = Document::new(Version::new(1, 7), trailer);
+//! doc.insert(1, dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) });
+//! doc.insert(
+//!     2,
+//!     dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+//! );
+//! let media_box: Vec<Object> = [0, 0, 612, 792].map(Object::from).into();
+//! doc.insert(
+//!     3,
+//!     dict! {
+//!         "Type" => Object::name("Page"),
+//!         "Parent" => r(2),
+//!         "MediaBox" => media_box,
+//!         "Resources" => dict! {},
+//!         "MyKey" => true,
+//!     },
+//! );
+//!
+//! let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+//! let [finding] = report.findings.as_slice() else {
+//!     panic!("{report}");
+//! };
+//! assert_eq!(finding.rule, Rule::Unlisted);
+//! assert_eq!((finding.table.as_str(), finding.key.as_str()), ("PageObject", "MyKey"));
+//! assert_eq!(finding.path, "Root/Pages/Kids[0]");
+//! assert_eq!(finding.object.map(|id| id.number), Some(3));
+//! ```
 
 pub mod allowance;
 pub mod check;

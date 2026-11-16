@@ -54,7 +54,10 @@
 //! the reader's, or through filters it doesn't take, or past a cap of the
 //! check's own ([`LIMITS`]), and a file whose bytes the source didn't give,
 //! are counted as not checked, once each, where the dictionary is held, and
-//! never as a finding.
+//! never as a finding. Of a file no password given opens, pdf-linearize
+//! reads no page tree and so builds no graph of its objects: where each
+//! page's objects are isn't judged, the page tree counted as not checked;
+//! its sections are, and its hint data where that's in the clear.
 
 use std::collections::HashMap;
 

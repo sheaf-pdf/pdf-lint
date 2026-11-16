@@ -159,11 +159,11 @@ use pdf_content_streams::{
     CodedEnds, Concat, Error, Join, Limits, Operand, Operands, Operation, Operator, ResCx, ResKind,
     State, Type,
 };
+use pdf_structure::pdf_filters;
 
 use super::{Finding, Made, Rule, Step, TOKEN, Trail, Visit, Walk};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span, Value};
-use pdf_structure::pdf_filters;
 
 /// How many objects are looked up for one color space an inline image is
 /// drawn in, and how many subfunctions written in place are read, where
@@ -1648,7 +1648,13 @@ impl<'a> Walk<'a> {
 
     /// The streams of a page's `/Contents`: one, or each of an array's, a
     /// reference to either followed; an element that isn't a stream passed
-    /// over, as what `/Contents` holds is checked by the walk.
+    /// over, as what `/Contents` holds is checked by the walk, the index of
+    /// each that is kept as its place. pdf-content-streams'
+    /// `Join::push_contents` reads `/Contents` as PDFium does, which parts
+    /// from this at two edges: it follows a reference once, so one to
+    /// another reference names no stream, where this follows a chain of them
+    /// as the walk does; and it joins an element that isn't a stream as one
+    /// of no data, where this passes it over.
     fn contents(&self, page: &'a Dict) -> Vec<(ObjectId, Way<'a>)> {
         let stream = |raw: &'a Object| match self.resolve(raw) {
             Ok((Some(id), o)) if matches!(o.value(), Value::Stream(_)) => Some(id),
@@ -1701,7 +1707,13 @@ impl<'a> Walk<'a> {
     }
 
     /// `unit`'s streams decoded and joined, each asked for no more than
-    /// what's left of `budget`, and what each held spent from it.
+    /// what's left of `budget`, and what each held spent from it. Each
+    /// stream's data is the reader's own account of its decode
+    /// ([`Source::decoded_within`]), whose fault leaves the unit unread and
+    /// whose cut spends the budget, joined by `Join::push`: not by
+    /// `Join::push_from` or `push_contents`, which take a stream as a viewer
+    /// does ([`Streams::decoded`](pdf_objects::Streams::decoded)), a decode
+    /// a fault stopped read as far as it went.
     fn read(&self, unit: &Unit<'a>, limits: &Limits, budget: &mut Budget) -> Read {
         let mut join = Join::new(limits);
         for &(id, _) in &unit.streams {

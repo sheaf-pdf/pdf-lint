@@ -16,6 +16,12 @@
 //! tries more inputs. It's compiled only for tests and under cargo-fuzz's
 //! `--cfg fuzzing`; the files for the fuzzer to begin from, [`seeds`], only
 //! for the tests, which write them.
+//!
+//! It checks against the model every check reads
+//! ([`grammar()`](crate::grammar())), as the binary checks every file,
+//! which keeps what it parses of the model's predicates for the process:
+//! the predicates of the model's own rows, parsed from its cells, never an
+//! input's text, so what a run finds of one input rests on none before it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -375,17 +381,18 @@ fn reading_alone(beside: &Report, alone: &Report) {
     );
 }
 
-/// Whether `at` is inside what was read: the file, or the data of the
-/// stream it's in, which is read one of three ways: an object stream's as
-/// `doc` holds it; the catalog's metadata stream's, `metadata`, as
-/// [`Source::metadata`] gives it, in plain view, which the XMP check reads
-/// even in a file whose other streams are refused (one encrypted by a
-/// security handler the reader can't open, whose encryption dictionary says
-/// its metadata isn't encrypted); else as its reading decodes it, as
-/// content is read, each stream's length kept in `lengths` once it's
-/// decoded.
+/// Whether `at` is inside what was read of `source`, the file read beside
+/// its reading as the check read it: the file, or the data of the stream
+/// it's in, which is read one of three ways: an object stream's as `source`
+/// holds it ([`Source::held`]); the catalog's metadata stream's,
+/// `metadata`, as [`Source::metadata`] gives it, in plain view, which the
+/// XMP check reads even in a file whose other streams are refused (one
+/// encrypted by a security handler the reader can't open, whose encryption
+/// dictionary says its metadata isn't encrypted); else as `source` decodes
+/// it ([`Source::decoded_within`]), as content is read, each stream's
+/// length kept in `lengths` once it's decoded.
 fn within(
-    doc: &WithReading<&[u8]>,
+    source: &dyn Source,
     file: &[u8],
     at: Span,
     metadata: Option<ObjectId>,
@@ -394,14 +401,14 @@ fn within(
     let len = match at.stream() {
         None => Some(file.len()),
         Some(stream) => {
-            let held = doc.document().held(stream).map(<[u8]>::len);
+            let held = source.held(stream).map(<[u8]>::len);
             let plain = (metadata == Some(stream))
-                .then(|| Source::metadata(doc).map(|data| data.len()))
+                .then(|| source.metadata().map(|data| data.len()))
                 .flatten();
             held.or(plain).or_else(|| {
                 *lengths.entry(stream).or_insert_with(|| {
-                    let decoded = doc.reading().decoded_within(stream, usize::MAX);
-                    decoded.ok().map(|data| data.len())
+                    let decoded = source.decoded_within(stream, usize::MAX);
+                    decoded.and_then(Result::ok).map(|data| data.len())
                 })
             })
         }

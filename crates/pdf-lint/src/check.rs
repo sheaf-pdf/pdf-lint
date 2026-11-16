@@ -280,7 +280,8 @@ pub const CONTENT_BUDGET: usize = 2 << 30;
 /// How many bytes of fonts' streams a check of a file decodes in all, their
 /// `/ToUnicode`s, embedded CMaps and Type 3 glyphs, unless
 /// [`Options::font_budget`] says another: 256 MiB. A font whose streams
-/// decode past what's left of it isn't read.
+/// decode past what's left of it isn't read whole: what it told before the
+/// budget ran out is found, and it's counted as not checked.
 pub const FONT_BUDGET: usize = 256 << 20;
 
 /// How a writer made an object it wrote.
@@ -467,9 +468,9 @@ pub struct Options {
     /// walk reaches and those read before it to tell which have Latin
     /// characters, through a source that gives streams' data
     /// ([`Streams::decoded`](pdf_objects::Streams::decoded)): none for
-    /// [`FONT_BUDGET`]. A font whose
-    /// streams decode past what's left of it isn't read, and is counted as
-    /// not checked ([`Rule::Font`]).
+    /// [`FONT_BUDGET`]. A font whose streams decode past what's left of it
+    /// isn't read whole: what it told before the budget ran out is found
+    /// ([`Rule::Font`]), and it's counted as not checked.
     pub font_budget: Option<usize>,
 }
 
@@ -1045,8 +1046,8 @@ pub enum Rule {
     /// object it's written in, is held; what was read of it before is found
     /// all the same, but what's told once an object doesn't read, which the
     /// read goes on past as if it weren't there, isn't. A font that asks a
-    /// stream's data of a source that gives none, as a document alone,
-    /// isn't read, nor counted.
+    /// stream's data of a source that doesn't hold it, as a document read
+    /// from a file, isn't read, nor counted.
     Font,
     /// A linearized file that doesn't hold to ISO 32000-2's Annex F, as
     /// pdf-linearize's check judges it from the file's reading, where the
@@ -1094,7 +1095,10 @@ pub enum Rule {
     /// at or inside the array, whose elements the model checks each. A hint
     /// stream whose data is encrypted and not decrypted, so not read, is
     /// counted as not checked, its column and key `-`, where the dictionary
-    /// is held, as is a file whose bytes the source didn't give.
+    /// is held, as is a file whose bytes the source didn't give. Of a file
+    /// no password given opens, where each page's objects are isn't judged,
+    /// as its page tree isn't read, which is counted so too; its sections
+    /// are, and its hint data where that's in the clear.
     Linearization,
     /// A file linearized as first written and updated after, where the
     /// check has its reading ([`check_with_reading`]): its first object, a
@@ -1315,9 +1319,11 @@ pub struct Report {
     pub paths: BTreeSet<String>,
     /// Units of content read, of those held: a page's streams as one, or a
     /// form's, a pattern's or a Type 3 glyph's alone; none where the source
-    /// gives no stream's data ([`Source::decoded_within`]), so that none
-    /// read is told from none found in. One whose data doesn't decode
-    /// cleanly isn't read, and is counted in [`Report::unchecked`].
+    /// gives no account of a stream's decode ([`Source::decoded_within`]),
+    /// as a document alone doesn't, though it gives a font the streams it
+    /// holds as bytes ([`check`]), so that none read is told from none
+    /// found in. One whose data doesn't decode cleanly isn't read, and is
+    /// counted in [`Report::unchecked`].
     pub content: usize,
     /// Resources of held objects that nothing in the content read uses, by
     /// table and key, `Resource` and the category: findings too with
@@ -1400,15 +1406,31 @@ impl Linearized {
 /// ([`Rule::ColorSpace`]) and pdf-fonts ([`Rule::Font`]), the fonts'
 /// streams within [`Options::font_budget`], those whose descriptor lacks
 /// `/CapHeight` read before the walk, as the predicates read which fonts
-/// have Latin characters (`fn:FontHasLatinChars`). Where `source` gives no
-/// stream's data, as a document alone doesn't, a font that asks one isn't
-/// read, and nothing in the report counts it, where [`Report::content`]
-/// says that no content was read.
+/// have Latin characters (`fn:FontHasLatinChars`).
 /// A trailer the reader couldn't read so is a finding, and the walk starts
 /// from what it made of the file instead. What only a file's reading gives,
 /// what an earlier revision had at a number a later one wrote over or
 /// freed, and whether a linearized file's linearization holds,
 /// [`check_with_reading`] reads too.
+///
+/// What's read of streams is what `source` gives. Content is read from the
+/// reader's own account of a stream's decode, every fault of it
+/// ([`Source::decoded_within`]), which a file's reading gives, and a
+/// document read beside it ([`WithReading`]), and a document alone
+/// doesn't: of one, no content is read, which [`Report::content`] says, as
+/// 0. A font's streams are read as a viewer takes them
+/// ([`Streams::decoded`](pdf_objects::Streams::decoded)), which a document
+/// gives of each stream it holds as bytes, as one made in memory holds
+/// them, and not of a stream whose data is where its file wrote it, as a
+/// document read from a file has every stream but the object streams it
+/// decoded whole: a font that asks one of those isn't read, and nothing in
+/// the report counts it. A file's reading itself, a
+/// [`Reading`](crate::bytes::Reading) given here as the source, answers of
+/// what it has read when it's asked, not of the whole read: its faults
+/// ([`Source::faults`], the [`Rule::Reader`] findings) and an object
+/// stream's data ([`Source::held`]) are those of what it has read by then.
+/// The command line checks a [`WithReading`], the file read whole beside
+/// its reading, through [`check_with_reading`].
 #[must_use]
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     check_in(source, None, hold, options)
