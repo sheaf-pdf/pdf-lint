@@ -29,9 +29,13 @@
 //! is read whole, as PDFium reads it ([`checksummed`]), and that's found
 //! once a stream, however many units read it, as the reader's
 //! ([`Rule::Reader`]), in its words for that fault, at the stream's data as
-//! written, where the stream is held. Each unit is read as PDFium reads
-//! content, through pdf-content-streams, with every place ISO 32000-2 reads
-//! it otherwise kept as it's read.
+//! written, where the stream is held. A unit that may hold an inline image
+//! (its data has `BI`) isn't read either where a color space its resources
+//! name doesn't read for the reader's own reason (a password, a cap, the
+//! source), as an image's components, and so where its data ends, can't be
+//! told; one that doesn't parse is no space, as PDFium has it. Each unit is
+//! read as PDFium reads content, through pdf-content-streams, with every
+//! place ISO 32000-2 reads it otherwise kept as it's read.
 //!
 //! What a unit's reading finds, each kind of it once in each of the unit's
 //! streams it's found in, at its first place there, with how many times it's
@@ -198,6 +202,12 @@ const TOO_LARGE: &str = "content decoded past what's read of one unit";
 /// Why a unit isn't read: a stream of it doesn't decode cleanly, but for
 /// its Flate checksum alone ([`checksummed`]).
 const DECODE: &str = "a content stream that doesn't decode cleanly";
+
+/// Why a unit isn't read: it may hold an inline image, and a color space
+/// its resources name doesn't read for the reader's own reason (a password,
+/// a cap, the source), so how many components an image drawn in it has,
+/// and where its data ends, can't be told ([`ResCx::read`]'s error).
+const SPACES: &str = "content whose inline images' color spaces don't read";
 
 /// Why a unit isn't read: the source gives no data of a stream of it,
 /// though it gave another's.
@@ -1356,19 +1366,26 @@ impl<'a> Walk<'a> {
                 Read::NoData => return,
             };
             // Only an inline image is sized by the resources' color spaces,
-            // so they're read only where one may be, once for each.
+            // so they're read only where one may be, once for each; where
+            // one doesn't read for the reader's own reason, where an image's
+            // data ends can't be told, and the unit isn't read.
             let resources = unit.resources.and_then(Result::ok).map(|r| r.object);
             let res = match content.bytes().windows(2).any(|w| w == b"BI") {
-                false => &none,
+                false => Some(&none),
                 true => {
-                    let source = self.source;
-                    (spaces.entry(resources.map(ptr::from_ref))).or_insert_with(|| {
-                        // A closure can't say why an object doesn't read,
-                        // so this never fails.
-                        let objects = pdf_objects::resolve_fn(move |id| source.get(id).ok());
-                        ResCx::read(objects, resources, &limits).unwrap_or_default()
-                    })
+                    let objects = Objects(self.source);
+                    (spaces.entry(resources.map(ptr::from_ref)))
+                        .or_insert_with(|| ResCx::read(objects, resources, &limits).ok())
+                        .as_ref()
                 }
+            };
+            let Some(res) = res else {
+                if held {
+                    let key = way_key(unit.streams[0].1);
+                    self.unchecked("-", SPACES.to_string(), holder.table, &key);
+                }
+                categories.untell(lookup);
+                continue;
             };
             let mut untold = Vec::new();
             let mut look = |kind, name: &[u8]| categories.look(lookup, kind, name, &mut untold);
@@ -3921,6 +3938,57 @@ mod tests {
             named(Rule::Resource, &none),
             [lacks("Resource/Font", without, "/F1")]
         );
+    }
+
+    /// A unit that may hold an inline image, whose resources name a color
+    /// space that doesn't read for the reader's own reason, here nested past
+    /// the parser's cap, isn't read, as an image drawn in it can't be sized,
+    /// and so where its data ends can't be told: it's counted as not checked
+    /// for that, where its holder is held, and nothing in it is found. A
+    /// space that doesn't parse is no space, as PDFium has it, and the unit
+    /// is read; so is a unit with no `BI` in it, which no space sizes.
+    #[test]
+    fn content_whose_inline_images_spaces_dont_read_isnt_read() {
+        let capped = format!("{}{}", "[".repeat(300), "]".repeat(300));
+        let damaged = "[/Indexed /DeviceRGB 1 <000000> )";
+        let resources = "/Resources << /ColorSpace << /CS0 40 0 R >> >>";
+        let image = "q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID x EI";
+        let open = [lacks(
+            "PageObject/Contents",
+            "1 q left open at the end",
+            "q",
+        )];
+        let file = resourced(resources, stream("", image), &[(40, &capped)]);
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let why = Objects(&opened)
+            .try_resolve(ObjectId::new(40, 0))
+            .map(|_| ());
+        assert!(
+            matches!(
+                why,
+                Err(Unreadable {
+                    why: Why::Capped,
+                    ..
+                })
+            ),
+            "{why:?}"
+        );
+        let (found, report) = found_by(Rule::Balance, &file);
+        assert_eq!((found, report.content), (vec![], 0), "{report}");
+        let row = [("PageObject".to_string(), "Contents".to_string(), 1)];
+        assert_eq!(not_made(&report, SPACES), row, "{report}");
+        let other = Hold::Only([(ObjectId::new(40, 0), Made::Built)].into());
+        let report = check(&opened, &other, &Options::default());
+        assert_eq!(not_made(&report, SPACES), [], "{report}");
+        // Read: a space that doesn't parse, and content with no `BI`.
+        for file in [
+            resourced(resources, stream("", image), &[(40, damaged)]),
+            resourced(resources, stream("", "q"), &[(40, &capped)]),
+        ] {
+            let (_, report) = found_by(Rule::Balance, &file);
+            assert_eq!(named(Rule::Balance, &file), open, "{report}");
+            assert_eq!((report.content, not_made(&report, SPACES)), (1, vec![]));
+        }
     }
 
     /// A category the resources don't have, or that's null, lacks every
