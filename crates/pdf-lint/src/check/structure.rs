@@ -99,7 +99,8 @@
 //! what isn't the file's fault, isn't read, which is counted as not
 //! checked, once, where the stream is held, else where the catalog is; one
 //! whose only fault is its checksum is read whole, and the checksum found
-//! with content's ([`Walk::checksums`](super::Walk)).
+//! with content's ([`Walk::checksums`](super::Walk)). What it tells is kept
+//! each time it's told ([`Each`]), as pdf-semantics tells each fault once.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -115,7 +116,7 @@ use pdf_structure::pdf_filters;
 use pdf_tokenizer::Rules;
 
 use super::content::times;
-use super::kept::Kept;
+use super::kept::{Each, Kept};
 use super::{Finding, MODEL, Objects, REFERENCES, Rule, Trail, Visit, Walk, checksummed, entry_at};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span};
@@ -740,15 +741,16 @@ fn gives_data(source: &dyn Source) -> bool {
 /// What the catalog's XMP packet claims and tells, read once from
 /// `source`, whose trailer is `trailer`, as [`packet_data`] gives it: what
 /// it claims, before anything that stops the read; and the packet as read,
-/// what it told kept, and what stopped it, or why it isn't read. Nothing's
-/// claimed where there's none, or it isn't read.
+/// what it told kept, each fault counted, as pdf-semantics tells each once
+/// ([`Each`]), and what stopped it, or why it isn't read. Nothing's claimed
+/// where there's none, or it isn't read.
 pub(crate) fn read_packet(source: &dyn Source, trailer: &Dict) -> (xmp::Claims, Packet) {
     let (data, mut packet) = packet_data(source, trailer);
     let Some(xml) = data else {
         return (xmp::Claims::default(), packet);
     };
     packet.len = xml.len();
-    let read = xmp::read(&xml, packet.stream, &LIMITS, &mut packet.kept);
+    let read = xmp::read(&xml, packet.stream, &LIMITS, &mut Each(&mut packet.kept));
     match read {
         Ok(claims) => (claims, packet),
         Err(mut stopped) => {
@@ -3611,6 +3613,43 @@ mod tests {
         assert_eq!(packet_rows(&read), [], "{read}");
         let plain = way("4 0 R", false);
         assert!(a3(&beside(&plain, &default, &ALL)));
+    }
+
+    /// Two attributes, or two values, that don't read in one tag are two,
+    /// each told at the tag's bytes, as pdf-semantics tells each once:
+    /// counted, not taken for one told again; one is one.
+    #[test]
+    fn two_attributes_that_dont_read_in_one_tag_are_two() {
+        let shapes = [
+            (
+                r#"pdfaid:conformance="B""#,
+                "pdfaid:conformance=B",
+                ATTRIBUTE.to_string(),
+            ),
+            (
+                r#"pdfaid:part="2" pdfaid:conformance="B""#,
+                "pdfaid:part=2 pdfaid:conformance=B",
+                format!("{ATTRIBUTE}, 2 times"),
+            ),
+            (
+                r#"pdfaid:part="2""#,
+                r#"pdfaid:part="&two;""#,
+                VALUE.to_string(),
+            ),
+            (
+                r#"pdfaid:part="2" pdfaid:conformance="B""#,
+                r#"pdfaid:part="&two;" pdfaid:conformance="&b;""#,
+                format!("{VALUE}, 2 times"),
+            ),
+        ];
+        for (from, to, value) in shapes {
+            let data = xmp_with(from, to);
+            let file = metadata(&data, "");
+            let found = [packet_finding(&value, &description(&data))];
+            assert_eq!(xmp_found(&file, &data, &ALL), found, "{to}");
+            let read = beside(&file, &bytes::Options::DEFAULT, &ALL);
+            assert_eq!(xmp_of(&read, &data), found, "{to}");
+        }
     }
 
     /// Only an object that doesn't read is noted: the one fault PDFium's

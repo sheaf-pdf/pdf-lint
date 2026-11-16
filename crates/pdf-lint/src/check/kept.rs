@@ -112,6 +112,19 @@ impl<F> Sink<F> for Kept<F> {
     }
 }
 
+/// A sink that keeps each fault told in what it holds, counted however many
+/// times its kind is told at the same bytes ([`Kept::keep_each`]): for a
+/// read that tells each fault once, as pdf-semantics' read of an XMP packet
+/// does, where two attributes that don't read in one tag are told at the
+/// tag's bytes, and are two.
+pub(crate) struct Each<'k, F>(pub(crate) &'k mut Kept<F>);
+
+impl<F> Sink<F> for Each<'_, F> {
+    fn fault(&mut self, at: Place, fault: F) {
+        self.0.keep_each(at.into(), fault);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! What's kept of what each crate's reading tells: the same, whichever
