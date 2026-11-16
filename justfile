@@ -58,10 +58,10 @@ fmt:
 # without its adapter, and with its spans (`tracing`) and its test writer,
 # which nothing else turns on, and the lopdf adapter's library alone, where
 # pdf-linearize is that engine without `family`, which pdf-lint turns on in
-# every workspace build; then pdf-fonts with Adobe's predefined CMaps, its
-# spans (`tracing`) and what embeds a font (`embed`), which nothing else turns
-# on, with no feature at all, and with `embed` alone, without the reading's
-# programs; then pdf-structure with its spans (`tracing`), which nothing else
+# every workspace build; then pdf-fonts with Adobe's predefined CMaps and its
+# spans (`tracing`), which nothing else turns on, and what embeds a font
+# (`embed`), which pdfs turns on, with no feature at all, and with `embed`
+# alone, without the reading's programs; then pdf-structure with its spans (`tracing`), which nothing else
 # turns on; then pdfs as a user gets it, with no feature at all, with what
 # embeds a font (`embed`) alone, and with every feature it forwards, which
 # nothing else turns on all at once.
@@ -109,8 +109,8 @@ test-unit *args="--workspace":
 # turns on and only its tests read; then pdf-semantics' without its clock,
 # and with its spans, which only its tests read; then pdf-linearize's
 # engine, without its adapter, and with its spans, which only its tests
-# read; then pdf-fonts' with Adobe's predefined CMaps, its spans and what
-# embeds a font, which only its tests read, with no feature at all, and
+# read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
+# only its tests read, and what embeds a font, with no feature at all, and
 # with `embed` alone, without the reading's programs; then pdf-structure's
 # with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
@@ -290,8 +290,9 @@ fuzzing:
 # which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
 # pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
-# and with what embeds a font alone, then pdfs as it's published, and with no
-# feature, which a link to what only a feature has would fail.
+# and with what embeds a font alone, then pdfs as it's published, with no
+# feature, and with what embeds a font alone, which a link to what only a
+# feature has would fail.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
@@ -304,6 +305,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-annots --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features embed
 
 # Build this platform's release archive in dist/, and check it runs as
 # it's unpacked, as the release workflow does each

@@ -46,7 +46,7 @@ This document gives developers and coding agents a fast mental model of the work
                                └─────────────┘
 ```
 
-*(Internal workspace-only crates: `crates/pdf-fixtures` provides test PDF builders and `qpdf` oracle helpers; `crates/pdf-linearize-lopdf` tests `pdf-linearize`'s model-agnostic engine against `lopdf`.)*
+*(Internal workspace-only crates: `crates/pdf-fixtures` provides test PDF and TrueType program builders and `qpdf` oracle helpers; `crates/pdf-linearize-lopdf` tests `pdf-linearize`'s model-agnostic engine against `lopdf`.)*
 
 ## 2. Core Cross-Crate Concepts
 

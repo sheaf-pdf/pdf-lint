@@ -2,9 +2,9 @@
 //!
 //! Includes `pdfs`'s primary entry points (`Pdf`, `Document`, `Page`, `Options`,
 //! `Limits`, `open`, `from_bytes`, `standard_font`, and `EmbeddedFont` with
-//! `embed`) alongside frequently used
-//! types from the re-exported crate family (`Rect`, `Std14`, `Color`, `Paint`,
-//! `Password`, `Protection`, `Permissions`, `Encryption`, `Object`, `Dict`, etc.).
+//! `embed`) alongside frequently used types from the re-exported crate family
+//! (`Rect`, `Std14`, `Color`, `Paint`, `Password`, `Protection`, `Permissions`,
+//! `Encryption`, `Object`, `Dict`, etc.).
 
 #[cfg(feature = "embed")]
 pub use crate::EmbeddedFont;
