@@ -62,7 +62,9 @@
 use std::collections::HashMap;
 
 use pdf_linearize::Limits;
-use pdf_linearize::check::{Facts, Finding as Fault, Grade, Place, Raw, Sink, Unread, Verdict};
+use pdf_linearize::check::{
+    Facts, Finding as Fault, Grade, KeyName, Place, Raw, Sink, Unread, Verdict,
+};
 use pdf_linearize::hint::located;
 
 use super::content::times;
@@ -71,7 +73,7 @@ use super::told::Told;
 use super::{
     Finding, Hold, Linearized, Made, Rule, Walk, entry_at, first_object, linearization, object_path,
 };
-use crate::object::{Object, ObjectId, Span, Value};
+use crate::object::{Entry, Object, ObjectId, Span, Value};
 use crate::source::{Revision, Source};
 
 /// The table a linearization's findings are in: the model's for the
@@ -160,6 +162,24 @@ fn key(place: Option<Place>) -> String {
             | Place::Page(_),
         ) => "H".to_string(),
         _ => "-".to_string(),
+    }
+}
+
+/// The entry of a hint stream's dictionary, `entries`, that `key` is of: an
+/// uncut key's, the entry it holds the bytes of; a cut key's, which holds
+/// the key's first bytes alone ([`KeyName::cut`]), the one entry longer
+/// than them that begins with them, and none where no entry or more than
+/// one does, as which it's of can't be told.
+fn hint_entry(entries: &[Entry], key: KeyName) -> Option<&Entry> {
+    let held = key.as_bytes();
+    if !key.cut() {
+        return entries.iter().find(|e| e.key() == held);
+    }
+    let mut longer =
+        (entries.iter()).filter(|e| e.key().len() > held.len() && e.key().starts_with(held));
+    match (longer.next(), longer.next()) {
+        (Some(entry), None) => Some(entry),
+        _ => None,
     }
 }
 
@@ -384,9 +404,7 @@ impl<'a> Places<'a> {
                 let Value::Stream(stream) = written.value() else {
                     return None;
                 };
-                (stream.dict.entries().iter())
-                    .find(|e| e.key() == key.as_bytes())
-                    .and_then(entry_at)
+                hint_entry(stream.dict.entries(), key).and_then(entry_at)
             }
             Some(Place::Position(position)) => {
                 let (at, length) = self.stream;
@@ -2030,5 +2048,60 @@ mod tests {
                 crate::fuzz::check_file(&[&[a, b], &candidate[..]].concat());
             }
         }
+    }
+
+    /// Where a hint stream's key, as pdf-linearize holds it, is in the
+    /// stream's dictionary, the hint stream object 5 of a file whose
+    /// stream's dictionary has `entries`: the bytes of the entry found, its
+    /// key and value.
+    fn hint_key_at(entries: &str, key: &[u8]) -> Option<String> {
+        let stream = format!("<< {entries} /Length 0 >>\nstream\n\nendstream");
+        let objects: [(u32, &[u8]); 2] = [(1, b"<< /Type /Catalog >>"), (5, stream.as_bytes())];
+        let file = fixture::assembled("1.7", &objects, "<< /Size 6 /Root 1 0 R >>");
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let checked = Checked(&read);
+        let mut places = Places {
+            source: &checked,
+            after: None,
+            streams: HashMap::new(),
+            dict: None,
+            hint: Some(5),
+            data: None,
+            stream: (0, 0),
+            tables: Vec::new(),
+            numbers: None,
+            pages: Vec::new(),
+        };
+        let at = places.at(Some(Place::HintKey(KeyName::new(key))))?;
+        Some(String::from_utf8_lossy(&file[at.start()..at.end()]).into_owned())
+    }
+
+    /// A hint stream's key a finding is of is at its entry: a key of 15
+    /// bytes or fewer at the entry that is it; one longer, which
+    /// pdf-linearize holds the first 15 bytes of, cut
+    /// ([`KeyName::cut`]), at the one entry longer than those that begins
+    /// with them, though an entry is those bytes alone; and nowhere where
+    /// two entries begin with them, as which it's of can't be told, or
+    /// none does.
+    #[test]
+    fn a_hint_key_past_15_bytes_is_at_the_one_entry_it_begins() {
+        let (long, held) = (b"ABCDEFGHIJKLMNOP", b"ABCDEFGHIJKLMNO");
+        let entry = |text: &str| Some(text.to_string());
+        assert_eq!(hint_key_at("/S 0", b"S"), entry("/S 0"));
+        assert_eq!(
+            hint_key_at("/ABCDEFGHIJKLMNOP 1", long),
+            entry("/ABCDEFGHIJKLMNOP 1")
+        );
+        // Beside an entry that's the bytes held, each at its own.
+        let beside = "/ABCDEFGHIJKLMNO 2 /ABCDEFGHIJKLMNOP 1";
+        assert_eq!(hint_key_at(beside, long), entry("/ABCDEFGHIJKLMNOP 1"));
+        assert_eq!(hint_key_at(beside, held), entry("/ABCDEFGHIJKLMNO 2"));
+        // Two that begin with them: neither.
+        let two = "/ABCDEFGHIJKLMNOP 1 /ABCDEFGHIJKLMNOQ 2";
+        assert_eq!(hint_key_at(two, long), None);
+        assert_eq!(hint_key_at(two, b"ABCDEFGHIJKLMNOQ"), None);
+        // None that does: none, the bytes held alone an entry or not.
+        assert_eq!(hint_key_at("/ABCDEFGHIJKLMNO 2", long), None);
+        assert_eq!(hint_key_at("/S 0", long), None);
     }
 }
