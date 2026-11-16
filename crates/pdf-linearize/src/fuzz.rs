@@ -1742,8 +1742,10 @@ pub fn over(data: &[u8]) -> Vec<Vec<u8>> {
 /// What [`over`] holds of `doc`, read from `reading`, under caps on its trees
 /// that the input picks: a page tree's depth, and a name tree's depth and nodes
 /// (`Limits::page_depth`, `tree_depth` and `tree_nodes`). Laid out under them,
-/// it's refused for its page tree's depth where a walk of it under them stops
-/// there, and is otherwise held as [`written_back`] holds a write. And `out`,
+/// it's refused for an encryption the writer can't write as it is under the
+/// defaults, as that's refused before its page tree is walked; otherwise it's
+/// refused for its page tree's depth where a walk of it under them stops there,
+/// and is otherwise held as [`written_back`] holds a write. And `out`,
 /// what [`over`] wrote of it in the clear under the defaults, has its facts read
 /// under them: where a walk of its page tree under them stops at its depth, the
 /// page tree is told as not judged, and nothing that depends on it is judged;
@@ -1758,7 +1760,9 @@ fn under_lowered_caps<S: pdf_structure::ByteSource>(
 ) {
     use pdf_objects::pdf_tokenizer::Rules;
     use pdf_semantics::{catalog, pages};
+    use pdf_structure::Encryption;
     use pdf_structure::read::{self, Reading};
+    use pdf_structure::write;
 
     use crate::family;
 
@@ -1779,11 +1783,24 @@ fn under_lowered_caps<S: pdf_structure::ByteSource>(
         walk(&Limits::DEFAULT).is_ok() && matches!(walk(&lowered), Err(pages::Error::TooDeep))
     };
     let (_, written) = written_back(reading, doc, None, "", Kind::Table, &options);
-    if too_deep(doc) {
-        assert!(
+    match doc.encryption() {
+        // An encryption no password opened, or one that can't be opened, is
+        // refused before the page tree is walked, whatever the caps.
+        Encryption::Locked | Encryption::Plain => {
+            assert!(matches!(written, Err(family::Error::Locked)), "{written:?}");
+        }
+        Encryption::Unsupported(why) => assert!(
+            matches!(
+                &written,
+                Err(family::Error::Write(write::Error::Unsupported(was))) if was == why
+            ),
+            "{written:?}"
+        ),
+        _ if too_deep(doc) => assert!(
             matches!(written, Err(family::Error::Pages(pages::Error::TooDeep))),
             "{written:?}"
-        );
+        ),
+        _ => {}
     }
     let Some(file) = out.get(6..).filter(|file| !file.is_empty()) else {
         return;
@@ -2324,6 +2341,49 @@ mod tests {
             for cut in (0..seed.len()).step_by(61) {
                 over(&seed[..cut]);
             }
+        }
+    }
+
+    /// A file whose `/Encrypt` doesn't read, its page tree past every depth
+    /// [`over`] picks as a cap: refused for its encryption under the caps as
+    /// under the defaults, as that's refused before the page tree is walked.
+    /// At three lengths, as the caps are picked by it.
+    #[cfg(feature = "family")]
+    #[test]
+    fn an_encryption_that_doesnt_read_is_refused_before_the_page_tree() {
+        use pdf_structure::read::{self, Reading};
+        use pdf_structure::source::{Encryption, Uncrypt, Unsupported};
+
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] >>",
+            "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Count 1 >>",
+            "<< /Type /Pages /Parent 3 0 R /Kids [5 0 R] /Count 1 >>",
+            "<< /Type /Pages /Parent 4 0 R /Kids [6 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 5 0 R >>",
+        ];
+        for pad in 0..3 {
+            let mut file = format!("%PDF-1.7\n%{}\n", " ".repeat(pad)).into_bytes();
+            let mut rows = Vec::new();
+            for (number, object) in (1..).zip(objects) {
+                rows.push(file.len());
+                file.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
+            }
+            // Its /Encrypt, 7, at the header: no object.
+            rows.push(0);
+            let at = file.len();
+            file.extend_from_slice(b"xref\n0 8\n0000000000 65535 f \n");
+            for row in rows {
+                file.extend_from_slice(format!("{row:010} 00000 n \n").as_bytes());
+            }
+            let trailer = "trailer\n<< /Size 8 /Root 1 0 R /Encrypt 7 0 R >>\nstartxref\n";
+            file.extend_from_slice(format!("{trailer}{at}\n%%EOF\n").as_bytes());
+
+            let reading = Reading::open(&file[..], &read::Options::DEFAULT).unwrap();
+            let doc = reading.to_document().unwrap();
+            let unread = Unsupported::Encrypt(Uncrypt::Unread);
+            assert_eq!(doc.encryption(), &Encryption::Unsupported(unread));
+            over(&file);
         }
     }
 
