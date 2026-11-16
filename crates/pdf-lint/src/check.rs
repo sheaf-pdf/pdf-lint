@@ -3629,7 +3629,10 @@ impl<'a> Walk<'a> {
     /// `/Names` or `/Nums` pairs' values as the table of the type's links
     /// they fit best, as TestGrammar's `parse_name_tree` and
     /// `parse_number_tree` do. A node that breaks ISO 32000-2 7.9.6 or
-    /// 7.9.7 is a [`Rule::Tree`] finding.
+    /// 7.9.7 is a [`Rule::Tree`] finding. Each node is held, and found in,
+    /// as the object it's written in: its own, or for a kid written in place,
+    /// its parent's, which is the root's holder only for a kid of a root
+    /// written there.
     fn tree(
         &mut self,
         from: &Visit<'a>,
@@ -3649,8 +3652,9 @@ impl<'a> Walk<'a> {
         up.push(from.object);
         up.extend(parents.iter().take(PARENTS - 1));
         let depth = if id.is_some() { 0 } else { from.depth + 1 };
-        let mut nodes = vec![(root, id, depth, true)];
-        while let Some((node, node_id, depth, is_root)) = nodes.pop() {
+        // Each node with the object it's written in.
+        let mut nodes = vec![(root, id, id.or(from.holder), depth, true)];
+        while let Some((node, node_id, holder, depth, is_root)) = nodes.pop() {
             if let Some(n) = node_id {
                 // An earlier revision's trailer goes on to nothing indirect.
                 if self.revision.is_some() || self.reached.get(&n).copied().flatten().is_some() {
@@ -3663,7 +3667,7 @@ impl<'a> Walk<'a> {
             };
             let here = Visit {
                 object: node,
-                holder: node_id.or(from.holder),
+                holder,
                 table: from.table,
                 trail: Rc::new(Trail {
                     up: Some(from.trail.clone()),
@@ -3785,7 +3789,8 @@ impl<'a> Walk<'a> {
                                 Ok((kid_id, kid)) if matches!(kid.value(), Value::Dict(_)) => {
                                     let depth = if kid_id.is_some() { 0 } else { depth + 1 };
                                     if depth <= NESTING {
-                                        nodes.push((kid, kid_id, depth, false));
+                                        let kid_holder = kid_id.or(holder);
+                                        nodes.push((kid, kid_id, kid_holder, depth, false));
                                     } else if made.is_some() {
                                         self.report.truncated += 1;
                                     }
@@ -6584,6 +6589,58 @@ mod tests {
             ],
             "{report}"
         );
+    }
+
+    /// A tree's node is in the object it's written in, and held as that
+    /// is: a kid written in place in another node, 6 0 R, is found in 6 0 R,
+    /// and so is a value written in place in it, where they were the
+    /// catalog's, which the root is written in, as the tree's read again
+    /// finds the kid written in place there; a hold of 6 0 R alone holds
+    /// them, and one of the catalog alone doesn't.
+    #[test]
+    fn a_kid_written_in_place_is_found_in_the_object_its_written_in() {
+        // A destination whose left is a string, where it's a number or null.
+        let dest = vec![r(3), Object::name("XYZ"), text("x"), 0.into(), 0.into()];
+        let kid = dict! { "Names" => vec![text("a"), dest.into()] };
+        let node = dict! {
+            "Kids" => vec![Object::from(kid)],
+            "Limits" => vec![text("a"), text("a")],
+        };
+        let mut objects = changed(clean(), 1, |catalog| {
+            catalog.set("Names", dict! { "Dests" => dict! { "Kids" => vec![r(6)] } });
+        });
+        objects.push((6, node.into()));
+        let bytes = written("1.7", &objects, Xref::Table);
+        let report = checked_as(&bytes, &Hold::All(Made::Built));
+        let limits = "a node under the root without /Limits";
+        let in_six: Vec<_> = (found(&report).into_iter())
+            .map(|(object, table, key, rule, _)| (object, table, key, rule))
+            .collect();
+        assert_eq!(
+            in_six,
+            [
+                (Some(6), "Name", "Dests", Rule::Tree),
+                (Some(6), "DestXYZArray", "2", Rule::Type),
+                (Some(6), "Name", "Dests", Rule::Tree),
+            ],
+            "{report}"
+        );
+        assert_eq!(found(&report)[0].4, limits);
+        let direct = "a kid is written in place, not as a reference";
+        assert_eq!(found(&report)[2].4, direct);
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Built)].into());
+        let report = checked_as(&bytes, &only(6));
+        let held: Vec<_> = (found(&report).into_iter())
+            .map(|(object, _, _, rule, _)| (object, rule))
+            .collect();
+        let six = [
+            (Some(6), Rule::Tree),
+            (Some(6), Rule::Type),
+            (Some(6), Rule::Tree),
+        ];
+        assert_eq!(held, six);
+        let report = checked_as(&bytes, &only(1));
+        assert_eq!(found(&report), [], "{report}");
     }
 
     /// A finding's value and path, and a report's paths, are the file's
