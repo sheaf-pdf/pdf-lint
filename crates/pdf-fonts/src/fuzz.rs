@@ -1881,9 +1881,8 @@ mod tests {
         fewer.long_metrics = Some(3);
         let bearings = changed(&fewer, b"hmtx", |hmtx| hmtx.truncate(hmtx.len() - 2));
         seeds.push(("no-bearing", whole(&bearings, 0, 320), malformed("hmtx")));
-        let mut long = fixture_table(b"hhea");
-        long.extend([0; 4]);
-        seeds.push(("long-hhea", spliced(b"hhea", &long, 1), malformed("hhea")));
+        let long = changed(&sample, b"hhea", |hhea| hhea.extend([0; 4]));
+        seeds.push(("long-hhea", whole(&long, 0, 300), malformed("hhea")));
         let count = &fixture_table(b"maxp")[4..6];
         let mut maxp = 0x0000_5000u32.to_be_bytes().to_vec();
         maxp.extend(count);
