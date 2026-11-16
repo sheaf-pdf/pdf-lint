@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser};
+use pdf_lint::check::checksummed;
 use pdf_lint::pdf_arlington::{self, Grammar};
 use pdf_lint::pdf_objects::{ObjectId, Span, Version};
 use pdf_lint::pdf_structure::pdf_crypt::Password;
@@ -840,13 +841,14 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
                 Some(stream) => {
                     // An object stream's data, which the document holds; else a
                     // content stream's or the metadata stream's, which the
-                    // reading decodes again, as content was read.
+                    // reading decodes again, as content was read: one whose
+                    // only fault is its checksum whole.
                     let decoded = match doc.document().held(stream) {
                         Some(decoded) => Some(decoded),
                         None => {
                             if content.as_ref().is_none_or(|(id, _)| *id != stream) {
                                 content = (doc.decoded_within(stream, usize::MAX))
-                                    .and_then(Result::ok)
+                                    .and_then(|decoded| decoded.or_else(checksummed).ok())
                                     .map(|data| (stream, data));
                             }
                             content.as_ref().map(|(_, data)| &data[..])

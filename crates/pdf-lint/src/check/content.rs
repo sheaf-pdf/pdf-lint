@@ -24,7 +24,12 @@
 //! past it, no more is read. A unit whose data doesn't decode cleanly, or
 //! that the source doesn't give, or past the budget, isn't read, and is
 //! counted as not checked ([`Report::unchecked`]), its column `-`: a part of
-//! it would find what the rest undoes. Each unit is read as PDFium reads
+//! it would find what the rest undoes. But a stream whose only fault is
+//! that its Flate data's checksum doesn't match, which leaves nothing out,
+//! is read whole, as PDFium reads it ([`checksummed`]), and that's found
+//! once a stream, however many units read it, as the reader's
+//! ([`Rule::Reader`]), in its words for that fault, at the stream's data as
+//! written, where the stream is held. Each unit is read as PDFium reads
 //! content, through pdf-content-streams, with every place ISO 32000-2 reads
 //! it otherwise kept as it's read.
 //!
@@ -142,6 +147,7 @@
 //! [`Rule::Marked`]: super::Rule::Marked
 //! [`Rule::Operands`]: super::Rule::Operands
 //! [`Rule::Operator`]: super::Rule::Operator
+//! [`Rule::Reader`]: super::Rule::Reader
 //! [`Rule::Resource`]: super::Rule::Resource
 //! [`Rule::Unused`]: super::Rule::Unused
 //! [`Source::decoded_within`]: crate::source::Source::decoded_within
@@ -161,7 +167,7 @@ use pdf_content_streams::{
 };
 use pdf_structure::pdf_filters;
 
-use super::{Finding, Made, Rule, Step, TOKEN, Trail, Visit, Walk};
+use super::{Finding, Made, Rule, Step, TOKEN, Trail, Visit, Walk, checksummed};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span, Value};
 
@@ -186,7 +192,8 @@ const BUDGET: &str = "content past the file's budget of decoded content";
 /// reading takes of one unit.
 const TOO_LARGE: &str = "content decoded past what's read of one unit";
 
-/// Why a unit isn't read: a stream of it doesn't decode cleanly.
+/// Why a unit isn't read: a stream of it doesn't decode cleanly, but for
+/// its Flate checksum alone ([`checksummed`]).
 const DECODE: &str = "a content stream that doesn't decode cleanly";
 
 /// Why a unit isn't read: the source gives no data of a stream of it,
@@ -1713,8 +1720,11 @@ impl<'a> Walk<'a> {
     /// whose cut spends the budget, joined by `Join::push`: not by
     /// `Join::push_from` or `push_contents`, which take a stream as a viewer
     /// does ([`Streams::decoded`](pdf_objects::Streams::decoded)), a decode
-    /// a fault stopped read as far as it went.
-    fn read(&self, unit: &Unit<'a>, limits: &Limits, budget: &mut Budget) -> Read {
+    /// a fault stopped read as far as it went. But a stream whose only
+    /// fault is its Flate checksum, which leaves nothing out, is read whole
+    /// ([`checksummed`]), its budget spent as a clean one's, and kept to
+    /// have its checksum found ([`Walk::checksums`](super::Walk)).
+    fn read(&mut self, unit: &Unit<'a>, limits: &Limits, budget: &mut Budget) -> Read {
         let mut join = Join::new(limits);
         for &(id, _) in &unit.streams {
             // Once the source is known to give streams' data, none is asked
@@ -1731,6 +1741,11 @@ impl<'a> Walk<'a> {
                 Some(decoded) => decoded,
             };
             budget.gives = true;
+            let decoded = decoded.or_else(|error| {
+                let data = checksummed(error)?;
+                self.checksums.push(id);
+                Ok(data)
+            });
             let data = match decoded {
                 Ok(data) if data.len() <= within => data,
                 // More than it was asked for is cut off at the limit, as a
@@ -1857,7 +1872,7 @@ mod tests {
     //! found in them, where, and as whose.
 
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use pdf_fixtures::fixture;
     use pdf_objects::{Streams, Unreadable, Why};
@@ -2201,7 +2216,7 @@ mod tests {
             .map(|f| {
                 let at = f.at.unwrap();
                 let data = opened.decoded_within(at.stream().unwrap(), usize::MAX);
-                let data = data.unwrap().unwrap();
+                let data = data.unwrap().or_else(checksummed).unwrap();
                 let bytes = String::from_utf8_lossy(&data[at.start()..at.end()]).into_owned();
                 let object = f.object.unwrap().number;
                 (
@@ -3362,6 +3377,114 @@ mod tests {
         assert_eq!(columns, ["-"]);
     }
 
+    /// A content stream whose only fault is its Flate checksum, which
+    /// leaves nothing out, is read whole: what's in it is found at its bytes
+    /// in its data, and the checksum a `reader` finding of the stream, in
+    /// the reader's words, its filter named whatever `/Filter` lists before
+    /// it, at the stream's data as written, once, though two pages, two
+    /// units, read it; held where the stream is, and not of a page alone.
+    /// Its data spends the budget as a clean stream's would. Beside another
+    /// fault, a hex stream with no `>`, the unit isn't read, as any whose
+    /// stream doesn't decode cleanly, and nothing of the checksum is found.
+    #[test]
+    fn a_stream_whose_only_fault_is_its_checksum_is_read_and_found_once() {
+        let flate = "/Filter [/ASCIIHexDecode /FlateDecode]";
+        let shared = |data: &str| {
+            let mut objects = tree("3 0 R 4 0 R", "");
+            objects.extend([
+                (3, page("/Contents 10 0 R /Resources << >>")),
+                (4, page("/Contents 10 0 R /Resources << /ProcSet [/PDF] >>")),
+                (10, stream(flate, data)),
+            ]);
+            file(&objects)
+        };
+        let content = "q 0 0 9 9 re f";
+        let file = shared(&crate::fuzz::checksum_off(content));
+        let open = "1 q left open at the end";
+        let kids = |i| format!("Root/Pages/Kids[{i}]/Contents");
+        assert_eq!(
+            found(&file),
+            [
+                (
+                    Rule::Balance,
+                    10,
+                    kids(0),
+                    open.to_string(),
+                    "q".to_string()
+                ),
+                (
+                    Rule::Balance,
+                    10,
+                    kids(1),
+                    open.to_string(),
+                    "q".to_string()
+                ),
+            ]
+        );
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let reader = |hold: &Hold| {
+            let report = check(&opened, hold, &Options::default());
+            let told: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| (f.object, f.made, f.value.clone(), f.at))
+                .collect();
+            (told, report.content, report.unchecked.len())
+        };
+        let data = match opened.get(ObjectId::new(10, 0)).map(Object::value) {
+            Ok(Value::Stream(stream)) => stream.data.at(),
+            _ => None,
+        };
+        let hex = &file[data.unwrap().start()..data.unwrap().end()];
+        assert!(hex.ends_with(b">") && hex.len() > 2 * content.len());
+        let checksum = "its data doesn't decode cleanly through /FlateDecode: \
+                        the Adler-32 checksum doesn't match";
+        let ten = Some(ObjectId::new(10, 0));
+        let once = vec![(ten, Made::Merged, checksum.to_string(), data)];
+        assert_eq!(reader(&Hold::All(Made::Merged)), (once, 2, 0));
+        let only = |n, made| Hold::Only([(ObjectId::new(n, 0), made)].into());
+        let built = vec![(ten, Made::Built, checksum.to_string(), data)];
+        assert_eq!(reader(&only(10, Made::Built)), (built, 2, 0));
+        assert_eq!(reader(&only(3, Made::Built)), (vec![], 1, 0));
+        // Spent as a clean stream's, the same data through the same filters.
+        let deflated = pdf_fixtures::fixture::zlib(content.as_bytes());
+        let hex: String = deflated.iter().map(|b| format!("{b:02x}")).collect();
+        let clean = shared(&format!("{hex}>"));
+        let clean = WithReading::new(&clean[..], &bytes::Options::DEFAULT).unwrap();
+        let budget = |source: &dyn Source, n| {
+            let options = Options {
+                content_budget: Some(n),
+                ..Options::default()
+            };
+            let report = check(source, &Hold::All(Made::Merged), &options);
+            (report.content, report.unchecked)
+        };
+        let mut read = BTreeSet::new();
+        for n in 0..=3 * content.len() {
+            assert_eq!(budget(&opened, n), budget(&clean, n), "{n}");
+            read.insert(budget(&clean, n).0);
+        }
+        assert_eq!(read.into_iter().collect::<Vec<_>>(), [0, 1, 2]);
+        // Beside another fault, not read.
+        let unended = crate::fuzz::checksum_off(content).replace('>', "");
+        let file = shared(&unended);
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let Some(Err(bytes::Error::Decode(cut))) = opened.decoded_within(ObjectId::new(10, 0), 99)
+        else {
+            panic!("the stream doesn't decode cleanly");
+        };
+        let faults: Vec<_> = cut.faults.iter().map(|&(_, f)| f).collect();
+        let checksum_fault = pdf_filters::Fault::Checksum;
+        assert_eq!(faults, [pdf_filters::Fault::NoEnd, checksum_fault]);
+        assert_eq!(found(&file), []);
+        let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
+        assert!(
+            report.findings.iter().all(|f| f.rule != Rule::Reader),
+            "{report}"
+        );
+        let row = ("PageObject".to_string(), "Contents".to_string(), 2);
+        assert_eq!(not_made(&report, DECODE), [row]);
+    }
+
     /// An encrypted file's content is read as the reader decrypts it: its
     /// finding's bytes are its plaintext, and none of its document alone,
     /// which gives no stream's data.
@@ -3458,7 +3581,8 @@ mod tests {
                 let bytes = match f.at {
                     Some(at) => match at.stream() {
                         Some(id) => {
-                            let data = opened.decoded_within(id, usize::MAX).unwrap().unwrap();
+                            let data = opened.decoded_within(id, usize::MAX).unwrap();
+                            let data = data.or_else(checksummed).unwrap();
                             data[at.start()..at.end()].to_vec()
                         }
                         None => file[at.start()..at.end()].to_vec(),

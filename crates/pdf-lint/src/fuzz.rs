@@ -34,8 +34,8 @@ use pdf_structure::write;
 
 use crate::bytes::{self, WithReading};
 use crate::check::{
-    Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn, WRITTEN_OVER, check,
-    check_with_reading,
+    CHECKSUM, Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn,
+    WRITTEN_OVER, check, check_with_reading, checksummed,
 };
 #[cfg(test)]
 use crate::object::Object;
@@ -202,14 +202,17 @@ fn latin_row(row: &Unchecked) -> bool {
 ///
 /// What streams' data tells: content's own, what a font's `/ToUnicode`,
 /// embedded CMap or glyphs say of whether it has Latin characters, and
-/// what the read of a font that asks one finds, which alone doesn't read.
-/// The same findings but content's rules', `font`'s and a font
-/// descriptor's `missing CapHeight`, in the same order, and alone's of the
-/// last beside too; the same rows not checked, but content's and the
-/// fonts', their column `-`, added, and `fn:FontHasLatinChars`'s, as many
-/// or fewer; and the same counts, but units of content read and unused
-/// resources, which `alone` has none of. Nor color spaces, which no
-/// stream's data says.
+/// what the read of a font that asks one finds, which alone doesn't read;
+/// and that a content stream's Flate checksum doesn't match, which the
+/// content pass, reading it whole past that ([`checksummed`]), finds in
+/// the reader's words, a [`Rule::Reader`] finding, where the reader tells
+/// it only of an object stream it decodes. The same findings but content's
+/// rules', `font`'s, a font descriptor's `missing CapHeight` and the
+/// checksum's, in the same order, and alone's of the last two beside too;
+/// the same rows not checked, but content's and the fonts', their column
+/// `-`, added, and `fn:FontHasLatinChars`'s, as many or fewer; and the same
+/// counts, but units of content read and unused resources, which `alone`
+/// has none of. Nor color spaces, which no stream's data says.
 ///
 /// What an earlier revision's objects that a later revision wrote over or
 /// freed tell, read as that revision had them, only in an earlier trailer,
@@ -248,9 +251,13 @@ fn reading_alone(beside: &Report, alone: &Report) {
     let earlier = |f: &Finding| {
         f.revision.is_some() && (read_at(&f.table, &f.key) || f.rule == Rule::Unlisted)
     };
+    // A stream's checksum, the reader's words for it.
+    let checksum = CHECKSUM.to_string();
+    let checksum = |f: &Finding| f.rule == Rule::Reader && f.value == checksum;
     let others = |report: &Report| -> Vec<Finding> {
         (report.findings.iter())
             .filter(|f| !CONTENT.contains(&f.rule) && f.rule != Rule::Font && !cap_height(f))
+            .filter(|f| !checksum(f))
             .filter(|f| !matches!(f.rule, Rule::Linearization | Rule::Updated))
             .filter(|f| !earlier(f))
             .cloned()
@@ -288,6 +295,12 @@ fn reading_alone(beside: &Report, alone: &Report) {
         assert!(
             beside.findings.contains(finding),
             "{finding}: found alone, where the fonts' streams aren't read"
+        );
+    }
+    for finding in alone.findings.iter().filter(|f| checksum(f)) {
+        assert!(
+            beside.findings.contains(finding),
+            "{finding}: the reader's, found alone and not beside"
         );
     }
     assert_eq!(
@@ -389,7 +402,8 @@ fn reading_alone(beside: &Report, alone: &Report) {
 /// XMP check reads even in a file whose other streams are refused (one
 /// encrypted by a security handler the reader can't open, whose encryption
 /// dictionary says its metadata isn't encrypted); else as `source` decodes
-/// it ([`Source::decoded_within`]), as content is read, each stream's
+/// it ([`Source::decoded_within`]), as content is read, one whose only
+/// fault is its Flate checksum whole ([`checksummed`]), each stream's
 /// length kept in `lengths` once it's decoded.
 fn within(
     source: &dyn Source,
@@ -408,7 +422,8 @@ fn within(
             held.or(plain).or_else(|| {
                 *lengths.entry(stream).or_insert_with(|| {
                     let decoded = source.decoded_within(stream, usize::MAX);
-                    decoded.and_then(Result::ok).map(|data| data.len())
+                    let data = decoded.and_then(|decoded| decoded.or_else(checksummed).ok());
+                    data.map(|data| data.len())
                 })
             })
         }
@@ -439,7 +454,8 @@ fn metadata_stream(doc: &WithReading<&[u8]>) -> Option<ObjectId> {
 /// to find, and the model's functions of colorants and Latin characters;
 /// content of each kind the check reads, two pages sharing an array of
 /// streams, a form, a pattern and a Type 3 font's glyphs, with something in
-/// it for each rule of content to find, and a page's content encrypted; a
+/// it for each rule of content to find, a page's content encrypted, and a
+/// page's content whose Flate checksum doesn't match, read whole; a
 /// cross-reference stream with extensions declared and XMP metadata; an
 /// object stream whose header starts two objects inside another's bytes; an
 /// incremental update, and one that writes again the information dictionary
@@ -603,6 +619,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("graphics", file(&graphics, "").0),
         ("content", content()),
         ("content-encrypted", encrypted_content()),
+        ("content-checksummed", checksummed_content()),
         ("xref-stream", xref_stream()),
         ("object-streams", object_streams(true)),
         ("object-streams-lzw", object_streams(false)),
@@ -1077,6 +1094,36 @@ fn content() -> Vec<u8> {
     file(&objects, "").0
 }
 
+/// `data` as Flate data whose Adler-32 checksum is one off, in
+/// `ASCIIHexDecode`'s hex, ended by `>`: data for `/Filter [/ASCIIHexDecode
+/// /FlateDecode]` that decodes whole, its checksum the one fault.
+#[cfg(test)]
+pub(crate) fn checksum_off(data: &str) -> String {
+    let mut deflated = pdf_fixtures::fixture::zlib(data.as_bytes());
+    if let Some(last) = deflated.last_mut() {
+        *last ^= 1;
+    }
+    hex(&deflated) + ">"
+}
+
+/// A file whose page's content is Flate data whose checksum doesn't match
+/// ([`checksum_off`]), read whole, a `q` left open among it.
+#[cfg(test)]
+fn checksummed_content() -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> \
+         /Contents 4 0 R >>"
+            .to_string(),
+        stream(
+            "/Filter [/ASCIIHexDecode /FlateDecode]",
+            &checksum_off("q 0 0 9 9 re f"),
+        ),
+    ];
+    file(&objects, "").0
+}
+
 /// A file encrypted as AES-128 with the empty user password, so that it
 /// opens, whose page's content is compressed and encrypted, a `Q` with
 /// nothing saved among it.
@@ -1409,10 +1456,11 @@ mod tests {
             );
             // The page's content and its annotation's appearance; the
             // structure's page; the two pages' one unit, the form, the
-            // pattern and the two glyphs; the encrypted page.
+            // pattern and the two glyphs; the encrypted page; the page whose
+            // checksum doesn't match.
             let read = match name {
                 "page" | "linearized" | "linearized-updated" => 2,
-                "structure" | "content-encrypted" => 1,
+                "structure" | "content-encrypted" | "content-checksummed" => 1,
                 "content" => 5,
                 _ => 0,
             };
@@ -1448,7 +1496,7 @@ mod tests {
                 "content" => &[
                     "balance", "content", "marked", "operands", "operator", "resource", "unused",
                 ],
-                "content-encrypted" => &["balance"],
+                "content-encrypted" | "content-checksummed" => &["balance"],
                 _ => &[],
             };
             assert_eq!(

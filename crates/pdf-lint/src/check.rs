@@ -223,10 +223,11 @@ use std::rc::Rc;
 
 use pdf_objects::{Resolve, Unreadable};
 use pdf_semantics::date::Date;
+use pdf_structure::pdf_filters;
 use pdf_structure::write::KeptOut;
 
 use crate::bytes::Fault;
-use crate::bytes::{ByteSource, WithReading};
+use crate::bytes::{self, ByteSource, WithReading};
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
@@ -722,7 +723,10 @@ pub enum Rule {
     /// isn't `%%EOF` alone, an object an object stream's header starts
     /// inside another's bytes, and the like ([`Fault`]), in its words. Not
     /// bytes before the header, which ISO 32000-2 allows (7.5.2): the file's
-    /// offsets count from the header, so nothing is chosen there.
+    /// offsets count from the header, so nothing is chosen there. And a
+    /// content stream whose Flate checksum doesn't match, which the check
+    /// reads whole past that ([`checksummed`]), in the reader's words for
+    /// it.
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
@@ -1163,7 +1167,8 @@ pub struct Finding {
     /// stream, or what's wrong in an XMP packet in its metadata stream, at
     /// its bytes in the stream's decoded data, which
     /// [`Source::decoded_within`] gives (where [`Source::held`] gives an
-    /// object stream's).
+    /// object stream's), and of a stream whose only fault is its Flate
+    /// checksum, [`checksummed`] of its error.
     pub at: Option<Span>,
     /// The earlier revision whose trailer it's in, a table's or a
     /// cross-reference stream, or in what's direct in it, counted from the
@@ -1416,7 +1421,8 @@ impl Linearized {
 ///
 /// What's read of streams is what `source` gives. Content is read from the
 /// reader's own account of a stream's decode, every fault of it
-/// ([`Source::decoded_within`]), which a file's reading gives, and a
+/// ([`Source::decoded_within`]), a stream whose only fault is its Flate
+/// checksum read whole ([`checksummed`]), which a file's reading gives, and a
 /// document read beside it ([`WithReading`]), and a document alone
 /// doesn't: of one, no content is read, which [`Report::content`] says, as
 /// 0. A font's streams are read as a viewer takes them
@@ -1657,6 +1663,7 @@ fn walking<R>(
         containers: Vec::new(),
         holders: Vec::new(),
         resources_at: HashMap::new(),
+        checksums: Vec::new(),
         page_tree,
         page_tree_at: HashMap::new(),
         roots: Vec::new(),
@@ -1900,6 +1907,34 @@ pub fn file_version(source: &dyn Source) -> Version {
         .and_then(|name| Version::parse(&name));
     header.max(catalog.unwrap_or(header))
 }
+
+/// A stream's data as a check reads it, where its decode
+/// ([`Source::decoded_within`]) gave `error`: of a stream whose every fault
+/// is that its Flate data's Adler-32 checksum doesn't match what it
+/// decompressed to (pdf-filters' `Fault::Checksum`), which leaves nothing
+/// out, the data whole, as content is read and as a viewer reads it, the
+/// checksum found as a [`Rule::Reader`] finding of the stream; else `error`,
+/// given back. So a finding's bytes in such a stream ([`Finding::at`]) are
+/// in what this gives.
+pub fn checksummed(error: bytes::Error) -> Result<Vec<u8>, bytes::Error> {
+    match error {
+        bytes::Error::Decode(cut)
+            if !cut.faults.is_empty()
+                && (cut.faults.iter()).all(|&(_, f)| f == pdf_filters::Fault::Checksum) =>
+        {
+            Ok(cut.data)
+        }
+        error => Err(error),
+    }
+}
+
+/// The fault the reader tells of a stream it decodes whose Flate data's
+/// checksum doesn't match, in its words, which a check tells of a stream it
+/// read past that ([`checksummed`]).
+pub(crate) const CHECKSUM: Fault = Fault::Decode {
+    filter: "FlateDecode",
+    fault: pdf_filters::Fault::Checksum,
+};
 
 /// A file's objects, as the predicates resolve a reference: an object that
 /// doesn't read is none, as one the file hasn't is. Asked why, as the
@@ -2163,6 +2198,10 @@ struct Walk<'a> {
     /// Where the walk reached each resources dictionary, by where the
     /// source holds it, which [`Walk::content`] tells `unused` by.
     resources_at: HashMap<*const Object, content::Reached<'a>>,
+    /// The streams whose data a pass read whole though its Flate checksum
+    /// doesn't match ([`checksummed`]), each once, in the order first read,
+    /// which [`Walk::read_as`] finds.
+    checksums: Vec<ObjectId>,
     /// What the page tree's walk by ISO's rules told, and where the walk by
     /// PDFium's parts from it, which [`Walk::structures`] finds in.
     page_tree: structure::PageTree<'a>,
@@ -4470,7 +4509,11 @@ impl<'a> Walk<'a> {
     /// whole as the trailer's, each a [`Rule::Reader`] finding in its
     /// words; but bytes before the header (`HeaderAt`), which ISO 32000-2
     /// allows (7.5.2), and which the reader reads past, counting the
-    /// file's offsets from the header, with nothing to choose.
+    /// file's offsets from the header, with nothing to choose. Then each
+    /// held stream a pass read whole past its checksum
+    /// ([`Walk::checksums`]), once, in the reader's words for that fault,
+    /// at the stream's data as written, where the reader places it too, but
+    /// one the reader told itself.
     fn read_as(&mut self, faults: &[(pdf_objects::fault::Place, Fault)]) {
         for (place, fault) in faults {
             if let Fault::HeaderAt { .. } = fault {
@@ -4488,6 +4531,38 @@ impl<'a> Walk<'a> {
                 rule: Rule::Reader,
                 value: fault.to_string(),
                 at: place.at,
+                revision: None,
+            });
+        }
+        // Each once, and none the reader told.
+        let checksums = std::mem::take(&mut self.checksums);
+        let mut seen: HashSet<ObjectId> = match checksums.is_empty() {
+            true => HashSet::new(),
+            false => (faults.iter())
+                .filter(|(_, fault)| *fault == CHECKSUM)
+                .filter_map(|(place, _)| place.object)
+                .collect(),
+        };
+        for id in checksums {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(made) = self.made(Some(id)) else {
+                continue;
+            };
+            let at = match self.source.get(id).map(Object::value) {
+                Ok(Value::Stream(stream)) => stream.data.at(),
+                _ => None,
+            };
+            self.report.findings.push(Finding {
+                object: Some(id),
+                made,
+                path: "-".to_string(),
+                table: "-".to_string(),
+                key: "-".to_string(),
+                rule: Rule::Reader,
+                value: CHECKSUM.to_string(),
+                at,
                 revision: None,
             });
         }

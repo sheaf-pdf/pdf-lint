@@ -2424,6 +2424,58 @@ fn content_findings_are_set_against_what_came_before_as_any() {
     assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
 }
 
+/// A page whose content stream's Flate checksum doesn't match, which the
+/// check reads whole: its finding is printed with its bytes there, decoded
+/// as the check read it, and the checksum is a `reader` finding, in the
+/// reader's words, printed with the stream's data as written.
+#[test]
+fn content_whose_checksum_doesnt_match_is_printed_with_its_bytes() {
+    let dir = folder();
+    let page =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contents 4 0 R >>";
+    let mut deflated = pdf_fixtures::fixture::zlib(b"q 0 0 m S");
+    if let Some(last) = deflated.last_mut() {
+        *last ^= 1;
+    }
+    let hex: String = deflated.iter().map(|b| format!("{b:02x}")).collect();
+    let data = format!("{hex}>");
+    let content = format!(
+        "<< /Filter [/ASCIIHexDecode /FlateDecode] /Length {} >>\nstream\n{data}\nendstream",
+        data.len()
+    );
+    let bytes = file(&[CATALOG, PAGES, page, &content]);
+    let path = written(&dir, "checksum.pdf", &bytes);
+    let out = run(&[path.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let open = "- balance: PageObject/Contents at Root/Pages/Kids[0]/Contents, in 4 0 R (merged): \
+                1 q left open at the end [bytes 0..1 of 4 0 R's data]\n    \
+                | q   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.contains(open), "{stdout}");
+    let at = (bytes.windows(data.len()))
+        .position(|w| w == data.as_bytes())
+        .unwrap();
+    // Its words cut at 80 characters, as every value is shown.
+    let checksum = format!(
+        "- reader: -/- at -, in 4 0 R (merged): its data doesn't decode cleanly through \
+         /FlateDecode: the Adler-32 checksum doe… [bytes {at}..{}]\n    | {data}\n",
+        at + data.len()
+    );
+    assert!(stdout.contains(&checksum), "{stdout}");
+    assert!(stdout.contains("objects checked, 2 findings\n"), "{stdout}");
+    let out = run(&["--format", "json", path.to_str().unwrap()]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let reader = &report["findings"][1];
+    assert_eq!(reader["rule"], json!("reader"));
+    assert_eq!(
+        reader["value"],
+        json!(
+            "its data doesn't decode cleanly through /FlateDecode: the Adler-32 checksum doesn't match"
+        )
+    );
+    assert_eq!(report["content_read"], json!(1));
+}
+
 /// A name content uses that its resources lack is a finding, in the content
 /// stream, at the name; a resource nothing uses is counted, in `--full` and
 /// the JSON, and with `--unused` a finding too, at its key, which a
