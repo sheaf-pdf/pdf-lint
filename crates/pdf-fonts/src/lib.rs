@@ -37,6 +37,9 @@
 //!   (otherwise reporting [`Fault::PredefinedNotBuilt`]).
 //! - **`tracing`** *(optional)*: Emits numeric `tracing` spans over font reads, program/CMap/CharProc
 //!   parsing, and [`shown`] walks.
+//! - **`embed`** *(optional)*: Opens a TrueType program for embedding (the `embed` module): the
+//!   codes text is drawn in, the glyphs a document draws, and the program cut to them via
+//!   `subsetter`, read through `skrifa`.
 //!
 //! # Example
 //!
@@ -111,6 +114,8 @@ pub use std14::{Std14, Unencodable};
 
 mod afm;
 mod cmap;
+#[cfg(feature = "embed")]
+pub mod embed;
 mod encoding;
 mod error;
 mod fault;

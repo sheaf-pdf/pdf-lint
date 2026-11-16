@@ -24,6 +24,10 @@ hayro-cmap = { version = "0.1", optional = true }
 # With `programs`: a font's program read, TrueType's by skrifa, CFF's and Type 1's by
 # what it has of read-fonts, Type 1's behind its `type1` feature.
 skrifa = { version = "0.50", default-features = false, features = ["std", "type1"], optional = true }
+# With `embed`: a TrueType program cut to the glyphs a document draws, without
+# its default `variable-fonts`, which would bring a second skrifa and
+# read-fonts; so a variable font is cut at its default instance.
+subsetter = { version = "0.2.6", default-features = false, optional = true }
 # The spans of a font's reading, with the `tracing` feature: without its
 # default features, so without the proc macros of `attributes`; `std`, for
 # its spans' guards.
@@ -37,6 +41,11 @@ predefined-cmaps = ["dep:hayro-cmap"]
 # A font's program read, for its glyphs' boxes and its heights, and the text of what its
 # encoding leaves to it. Without it, as `Fonts::for_text` reads.
 programs = ["dep:skrifa"]
+# A TrueType program embedded: opened through skrifa, the glyphs a string
+# draws found by its `cmap`, and the program cut to the glyphs drawn by
+# subsetter. Off by default, and apart from `programs`, which is the
+# reading's.
+embed = ["dep:skrifa", "dep:subsetter"]
 # Spans through `tracing`: a font read, and within it its program's opening,
 # its embedded CMap's and its `/ToUnicode`'s parsing, and a Type 3 font's
 # CharProcs; and a walk of the strings content shows. A code, a width, a
@@ -71,10 +80,10 @@ pdf-fixtures = { path = "../pdf-fixtures" }
 name = "fonts"
 harness = false
 
-# docs.rs documents what `predefined-cmaps` adds, beside the default, and
-# the spans.
+# docs.rs documents what `predefined-cmaps` adds, beside the default, the
+# spans and what embeds a font.
 [package.metadata.docs.rs]
-features = ["predefined-cmaps", "tracing"]
+features = ["predefined-cmaps", "tracing", "embed"]
 
 [lints.rust]
 unsafe_code = "forbid"

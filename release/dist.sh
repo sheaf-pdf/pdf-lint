@@ -84,13 +84,16 @@ crates=$(cargo tree --locked -e normal,no-proc-macro --target "$target" -p pdf-l
 # pdf-fonts as pdf-lint's build compiles it, by the features it's built
 # with: neither `programs`, whose code is in part FreeType's, under the
 # FTL, and which brings in skrifa, nor `predefined-cmaps`, which brings in
-# hayro-cmap's CMaps. Their notices aren't taken here, so a build that
-# turns either on stops here until they are.
+# hayro-cmap's CMaps, nor `embed`, which brings in skrifa too, and with it
+# read-fonts' Adobe Glyph List, whose BSD terms are in its data and source,
+# not in a file at its package's root, which is all the loop below takes.
+# Their notices aren't taken here, so a build that turns any on stops here
+# until they are.
 features=$(cargo tree --locked -e normal --target "$target" -p pdf-lint -i pdf-fonts --depth 0 --format '{f}') ||
     fail "pdf-fonts isn't in pdf-lint's build"
 case ",$features," in
-*,programs,* | *,predefined-cmaps,*)
-    fail "pdf-lint's build turns on pdf-fonts' features $features, whose notices (FreeType's, skrifa's, hayro-cmap's) aren't taken" ;;
+*,programs,* | *,predefined-cmaps,* | *,embed,*)
+    fail "pdf-lint's build turns on pdf-fonts' features $features, whose notices (FreeType's, skrifa's, read-fonts' glyph list's, hayro-cmap's) aren't taken" ;;
 esac
 
 # pdf-crypt, pdf-structure and pdf-linearize as pdf-lint's build compiles

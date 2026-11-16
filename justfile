@@ -57,9 +57,10 @@ fmt:
 # without its adapter, and with its spans (`tracing`) and its test writer,
 # which nothing else turns on, and the lopdf adapter's library alone, where
 # pdf-linearize is that engine without `family`, which pdf-lint turns on in
-# every workspace build; then pdf-fonts with Adobe's predefined CMaps and
-# its spans (`tracing`), which nothing else turns on, and with no feature at
-# all; then pdf-structure with its spans (`tracing`), which nothing else
+# every workspace build; then pdf-fonts with Adobe's predefined CMaps, its
+# spans (`tracing`) and what embeds a font (`embed`), which nothing else turns
+# on, with no feature at all, and with `embed` alone, without the reading's
+# programs; then pdf-structure with its spans (`tracing`), which nothing else
 # turns on; then pdfs as a user gets it, with no feature at all, and with
 # every feature it forwards, which nothing else turns on all at once.
 clippy:
@@ -74,8 +75,9 @@ clippy:
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features tracing,insecure-test-writer --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize-lopdf --lib -- -D warnings
-    cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing,embed --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-fonts --no-default-features --features embed --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --features programs --all-targets -- -D warnings
@@ -100,8 +102,9 @@ test-unit *args="--workspace":
 # turns on and only its tests read; then pdf-semantics' without its clock,
 # and with its spans, which only its tests read; then pdf-linearize's
 # engine, without its adapter, and with its spans, which only its tests
-# read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
-# only its tests read, and with no feature at all; then pdf-structure's
+# read; then pdf-fonts' with Adobe's predefined CMaps, its spans and what
+# embeds a font, which only its tests read, with no feature at all, and
+# with `embed` alone, without the reading's programs; then pdf-structure's
 # with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
 # and with every feature it forwards but its test writer.
@@ -124,10 +127,11 @@ test:
     cargo test --locked -p pdf-linearize --no-default-features --doc
     cargo nextest run --locked -p pdf-linearize --features tracing
     cargo test --locked -p pdf-linearize --features tracing --doc
-    cargo nextest run --locked -p pdf-fonts --features predefined-cmaps,tracing
-    cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing --doc
+    cargo nextest run --locked -p pdf-fonts --features predefined-cmaps,tracing,embed
+    cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing,embed --doc
     cargo nextest run --locked -p pdf-fonts --no-default-features
     cargo test --locked -p pdf-fonts --no-default-features --doc
+    cargo nextest run --locked -p pdf-fonts --no-default-features --features embed
     cargo nextest run --locked -p pdf-gfx --features predefined-cmaps,tracing
     cargo test --locked -p pdf-gfx --features predefined-cmaps,tracing --doc
     cargo nextest run --locked -p pdf-gfx --no-default-features
@@ -267,7 +271,7 @@ fuzzing:
 # which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
 # pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
-# then pdfs as it's published.
+# and with what embeds a font alone, then pdfs as it's published.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
@@ -275,6 +279,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features --features embed
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
 
@@ -571,7 +576,8 @@ color-msrv:
     cargo +{{ color_msrv }} test --locked -p pdf-color --doc
 
 # Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it,
-# with no feature, and with its spans, which must be installed.
+# with no feature, with its spans, and with what embeds a font, subsetter among
+# it, which must be installed.
 fonts-msrv:
     cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --doc
@@ -579,6 +585,8 @@ fonts-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --no-default-features --doc
     cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts --features tracing
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features tracing --doc
+    cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts --features embed
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features embed --doc
 
 # Test pdf-fonts with `predefined-cmaps` on that feature's oldest Rust, which must
 # be installed.

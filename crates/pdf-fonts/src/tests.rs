@@ -8,6 +8,8 @@ use super::fixture;
 use super::type1::Refusal::{Capped, Malformed};
 use super::*;
 
+#[cfg(feature = "embed")]
+mod embed;
 mod fonts;
 mod shown;
 
