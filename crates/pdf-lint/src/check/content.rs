@@ -884,13 +884,37 @@ fn object(state: State) -> Option<&'static str> {
     }
 }
 
-/// A word as a finding shows it: its first [`TOKEN`] bytes, `…` where
-/// there are more.
+/// A word as a finding shows it: its first [`TOKEN`] bytes, read as UTF-8,
+/// a byte that isn't read as U+FFFD; and where there are more, `…` after
+/// them, a character the cut would split left out before it, as
+/// pdf-content-streams' faults show what's written. So a finding never shows
+/// half a character the word was written with.
 fn word(written: &[u8]) -> String {
-    let shown = String::from_utf8_lossy(&written[..written.len().min(TOKEN)]);
-    match written.len() > TOKEN {
-        true => format!("{shown}…"),
-        false => shown.into_owned(),
+    if written.len() <= TOKEN {
+        return String::from_utf8_lossy(written).into_owned();
+    }
+    let mut shown = String::from_utf8_lossy(&written[..cut(written)]).into_owned();
+    shown.push('…');
+    shown
+}
+
+/// Where [`word`] cuts a word of more than [`TOKEN`] bytes: at [`TOKEN`],
+/// or before it, where a character written with a byte past it starts.
+/// Where the bytes at the cut are no character's, it's at [`TOKEN`], and
+/// they're each U+FFFD, as everywhere else.
+fn cut(written: &[u8]) -> usize {
+    // A character the cut splits ends the first bytes unfinished: what
+    // reading them as UTF-8 finds at their end, not a byte that's wrong.
+    let last = written[..TOKEN].utf8_chunks().last();
+    let Some(open) = last.map(|chunk| chunk.invalid()).filter(|i| !i.is_empty()) else {
+        return TOKEN;
+    };
+    let start = TOKEN - open.len();
+    match std::str::from_utf8(&written[start..]) {
+        // The character starts there and ends past the cut.
+        Ok(_) => start,
+        Err(e) if e.valid_up_to() > 0 => start,
+        Err(_) => TOKEN,
     }
 }
 
@@ -2909,6 +2933,34 @@ mod tests {
             value.starts_with(&format!("{shown}, an operator")),
             "{value}"
         );
+    }
+
+    /// A word past 80 bytes is shown as its first 80 and `…`, cut before a
+    /// character that runs past them, so that a finding never shows half a
+    /// character it was written with; one that ends at the cut is kept, and
+    /// a byte at the cut that's no character's is U+FFFD, as anywhere.
+    #[test]
+    fn a_long_word_is_cut_at_a_character() {
+        let a = |n: usize| "a".repeat(n);
+        assert_eq!(TOKEN, 80);
+        for before in [78, 79] {
+            let across = format!("{}€b", a(before));
+            assert_eq!(word(across.as_bytes()), format!("{}…", a(before)));
+        }
+        let ends = format!("{}€b", a(77));
+        assert_eq!(word(ends.as_bytes()), format!("{}€…", a(77)));
+        let four = format!("{}😀b", a(77));
+        assert_eq!(word(four.as_bytes()), format!("{}…", a(77)));
+        let mut loose = a(79).into_bytes();
+        loose.extend([0xFF, b'b']);
+        assert_eq!(word(&loose), format!("{}\u{FFFD}…", a(79)));
+        let whole = format!("{}é", a(78));
+        assert_eq!(word(whole.as_bytes()), whole);
+        // As a finding says it: an operator's name.
+        let long = format!("{}€b", a(79));
+        let value = &in_page(Rule::Operator, &long)[0].0;
+        let shown = format!("{}…, an operator ISO 32000-2 doesn't define", a(79));
+        assert!(value.starts_with(&shown), "{value}");
     }
 
     /// A glyph description's first operator is `d0` or `d1`, and they're
