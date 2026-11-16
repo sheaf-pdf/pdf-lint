@@ -2579,6 +2579,37 @@ fn an_xmp_finding_is_printed_with_the_packets_bytes() {
     assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
 }
 
+/// A packet through filters, which the reading decodes, is read too: what's
+/// wrong in it is a finding in its metadata stream, printed with its bytes
+/// in the stream's decoded data.
+#[test]
+fn an_xmp_finding_in_a_filtered_packet_is_printed_with_its_decoded_bytes() {
+    let dir = folder();
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description pdfaid:part=3/></x:xmpmeta>"#;
+    let deflated = pdf_fixtures::fixture::zlib(xmp.as_bytes());
+    let hex: String = deflated.iter().map(|b| format!("{b:02x}")).collect();
+    let data = format!("{hex}>");
+    let metadata = format!(
+        "<< /Type /Metadata /Subtype /XML /Filter [/ASCIIHexDecode /FlateDecode] /Length {} >>\n\
+         stream\n{data}\nendstream",
+        data.len()
+    );
+    let catalog = "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>";
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(
+        &dir,
+        "filtered.pdf",
+        &file(&[catalog, PAGES, page, &metadata]),
+    );
+    let out = run(&[path.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let found = "- xmp: Metadata/- at Root/Metadata, in 4 0 R (merged): an attribute in XMP \
+                 metadata doesn't read [bytes 36..68 of 4 0 R's data]\n    \
+                 | <rdf:Description pdfaid:part=3/>   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(found), "{stdout}");
+}
+
 /// A file of one page linearized by pdf-linearize, its hint stream's row
 /// and object at generation 1, where Annex F has all at 0: a departure
 /// readers get past (ISO 32000-2, F.3.1), and the linearization holds.

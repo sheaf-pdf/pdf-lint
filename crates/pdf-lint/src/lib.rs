@@ -195,9 +195,8 @@ pub mod extension {
     use std::collections::BTreeSet;
 
     use pdf_arlington::extension::Claims;
-    use pdf_semantics::{Limits, xmp};
 
-    use crate::check::{Objects, Packet};
+    use crate::check::{Packet, read_packet};
     use crate::source::Source;
 
     /// Every extension the model names, in its cells and around its
@@ -210,63 +209,55 @@ pub mod extension {
     }
 
     /// The extensions `source` declares, as the model names them, from its
-    /// trailer's `/Root` and its metadata ([`Source::metadata`]), as
-    /// pdf-arlington's [`declared`](pdf_arlington::extension::declared)
-    /// reads them. Its metadata is read as XML by
-    /// [`pdf_semantics::xmp::read`], so a claim is one in the namespace it's
-    /// bound to; what a packet claims before anything that stops the read
-    /// counts.
+    /// trailer's `/Root` and its catalog's XMP packet, as pdf-arlington's
+    /// [`declared`](pdf_arlington::extension::declared) reads them. The
+    /// packet is read as XML by [`pdf_semantics::xmp::read`], so a claim is
+    /// one in the namespace it's bound to; what a packet claims before
+    /// anything that stops the read counts.
+    ///
+    /// Which packet is read depends on the source. Where it gives the
+    /// reader's own account of a stream's data ([`Source::decoded_within`]),
+    /// as a file's reading does, it's the data of the catalog's metadata
+    /// stream ([`metadata_stream`](pdf_semantics::xmp::metadata_stream)),
+    /// decrypted and decoded through its filters, as content is read: one
+    /// whose only fault is its Flate checksum is read whole
+    /// ([`checksummed`](crate::check::checksummed)), and one whose data
+    /// doesn't come whole (another fault, filters the reader doesn't take,
+    /// a password, the reader's own cap on a stream's data) claims nothing.
+    /// Where it gives no stream's data so, as a document alone doesn't, it's
+    /// the packet the document holds in plain view, unfiltered and not
+    /// encrypted ([`Source::metadata`]), as one read from a file holds it
+    /// and one made in memory is given it
+    /// ([`Document::set_metadata`](pdf_structure::Document::set_metadata)).
     #[must_use]
     pub fn declared(source: &dyn Source) -> BTreeSet<String> {
         read(source).0
     }
 
-    /// What `source`'s metadata says, its packet read once: the extensions
-    /// it declares, as [`declared`] gives them; and the packet as read: the
-    /// catalog's metadata stream it's the data of, where that's known
-    /// ([`xmp::metadata_stream`]), what [`xmp::read`] told of it, kept,
-    /// each place naming that stream, at bytes of its data, and what stopped
-    /// the read, if anything did, after which nothing counts. An object on
-    /// the way to the stream that doesn't read leaves it not known.
+    /// What `source`'s metadata says, its packet read once, as [`declared`]
+    /// reads it ([`read_packet`]): the extensions it declares, as
+    /// [`declared`] gives them; and the packet as read: the catalog's
+    /// metadata stream it's the data of, where that's known
+    /// ([`metadata_stream`](pdf_semantics::xmp::metadata_stream)), what
+    /// [`xmp::read`](pdf_semantics::xmp::read) told of it, kept,
+    /// each place naming that stream, at bytes of its data, and what
+    /// stopped the read, if anything did, after which nothing counts; or
+    /// why it isn't read.
     pub(crate) fn read(source: &dyn Source) -> (BTreeSet<String>, Packet) {
         let resolve = |id| source.get(id).ok().cloned();
         let trailer = source.trailer().dict();
-        let mut packet = Packet::default();
-        let result = match source.metadata().as_deref() {
-            Some(xml) => {
-                let catalog = pdf_semantics::catalog(Objects(source), trailer)
-                    .ok()
-                    .flatten();
-                packet.stream = catalog
-                    .and_then(|catalog| xmp::metadata_stream(Objects(source), catalog).ok())
-                    .flatten();
-                packet.len = xml.len();
-                Some(xmp::read(
-                    xml,
-                    packet.stream,
-                    &Limits::DEFAULT,
-                    &mut packet.kept,
-                ))
-            }
-            None => None,
-        };
-        let read = match &result {
-            Some(Ok(claims)) => Some(claims),
-            Some(Err(error)) => Some(&error.read),
-            None => None,
-        };
+        let (read, packet) = read_packet(source, trailer);
         let mut claims = Claims::default();
-        claims.pdfa_part = read.and_then(|read| read.pdfa_part.as_deref());
-        claims.pdfvt_version = read.and_then(|read| read.pdfvt_version.as_deref());
+        claims.pdfa_part = read.pdfa_part.as_deref();
+        claims.pdfvt_version = read.pdfvt_version.as_deref();
         let declared = pdf_arlington::extension::declared(trailer.get(b"Root"), claims, &resolve);
-        packet.stopped = result.and_then(Result::err);
         (declared, packet)
     }
 
     #[cfg(test)]
     mod tests {
         use pdf_objects::dict;
-        use pdf_semantics::Fault;
+        use pdf_semantics::{Fault, Limits, xmp};
 
         use super::*;
         use crate::object::{Object, ObjectId};

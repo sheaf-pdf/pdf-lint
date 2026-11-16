@@ -107,11 +107,16 @@
 //! read, or a password or a cap stops PDFium's walk alone, the two aren't
 //! set side by side, which is counted as not checked.
 //! Last, the catalog's XMP packet, as it's read for the extensions the
-//! file declares (14.3.2): what that read tells of it, and XML that stops
-//! it, a [`Rule::Xmp`] finding in its metadata stream, at the bytes in its
-//! data, each kind once; a packet longer, deeper or binding more
-//! namespaces at once than is read counted as not checked, as is one whose
-//! stream isn't known.
+//! file declares (14.3.2): its metadata stream's data decrypted and
+//! decoded through its filters, where the source gives that, as a reading
+//! does, else the packet a document holds in plain view
+//! ([`extension::declared`](crate::extension::declared)). What that read
+//! tells of it, and XML that stops it, a [`Rule::Xmp`] finding in its
+//! metadata stream, at the bytes in its data, each kind once; a packet
+//! longer, deeper or binding more namespaces at once than is read counted
+//! as not checked, as is one whose stream isn't known, and one not read for
+//! what isn't the file's fault, its stream's data not given whole or the
+//! way to it not read.
 //!
 //! Then each color space and font the walk reached in the newest revision,
 //! as one of the model's color space or font tables, is read again, in the
@@ -247,7 +252,7 @@ mod told;
 
 use reading::{Readings, Reads};
 use rows::{Rows, rows};
-pub(crate) use structure::Packet;
+pub(crate) use structure::{Packet, read_packet};
 
 /// How deeply direct objects may nest in an indirect one before the walk
 /// stops going in. A real file nests a few.
@@ -724,9 +729,9 @@ pub enum Rule {
     /// inside another's bytes, and the like ([`Fault`]), in its words. Not
     /// bytes before the header, which ISO 32000-2 allows (7.5.2): the file's
     /// offsets count from the header, so nothing is chosen there. And a
-    /// content stream whose Flate checksum doesn't match, which the check
-    /// reads whole past that ([`checksummed`]), in the reader's words for
-    /// it.
+    /// content or metadata stream whose Flate checksum doesn't match, which
+    /// the check reads whole past that ([`checksummed`]), in the reader's
+    /// words for it.
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
@@ -897,8 +902,12 @@ pub enum Rule {
     Viewer,
     /// XMP metadata that breaks ISO 32000-2 14.3.2, as pdf-semantics reads
     /// the packet of the catalog's metadata stream for the extensions a
-    /// file declares, where the stream is in plain view, unfiltered and
-    /// unencrypted, whatever the file's version, as content is: an encoding
+    /// file declares, whatever the file's version, as content is: the
+    /// stream's data decrypted and decoded through its filters, where the
+    /// source gives that, as a reading does, a stream whose only fault is
+    /// its Flate checksum whole ([`checksummed`]); else the packet a
+    /// document holds in plain view, unfiltered and not encrypted
+    /// ([`extension::declared`](crate::extension::declared)). An encoding
     /// other than UTF-8, where it's to be UTF-8 (with its erratum 296), as a
     /// mark of UTF-16 or UTF-32 it begins with says, or a zero byte among
     /// its first four, at those bytes, after which nothing of it is read; an
@@ -914,11 +923,18 @@ pub enum Rule {
     /// longer, nested deeper or binding more namespaces at once than
     /// pdf-semantics reads is counted as not checked, its column and key
     /// `-`, its table `Metadata`, where the stream is held, and what was read
-    /// before is found all the same. A packet whose stream isn't known, as a
-    /// document's given its packet with no `/Metadata` to name the stream,
-    /// has what it tells counted so, once, and what stops it too, where the
-    /// catalog is held, never found in no object. What it claims is read the
-    /// same whatever it tells.
+    /// before is found all the same. One not read, for what isn't the
+    /// file's fault, is counted so too, where the stream is held, else
+    /// where the catalog is: its stream's data not given whole (a fault but
+    /// its checksum, filters the reader doesn't take, a password, or the
+    /// reader's own cap on a stream's data, which cuts it off no further
+    /// than what's read of a packet), or an object on the way to it, the
+    /// catalog among them, not read for a password, a cap or the source. A
+    /// packet whose stream isn't known, as a document's given its packet
+    /// with no `/Metadata` to name the stream, has what it tells counted
+    /// so, once, and what stops it too, where the catalog is held, never
+    /// found in no object. What it claims is read the same whatever it
+    /// tells.
     Xmp,
     /// A color space that breaks ISO 32000-2 (8.6.3 to 8.6.6.5, 8.7.3.3),
     /// as pdf-color reads each the walk reached in the newest revision as
@@ -1224,11 +1240,11 @@ pub enum Class {
 /// or number tree not read whole for what isn't the file's fault, its
 /// column `-`, its table and key the row's whose value its root is; or the
 /// page tree not read so, or a viewer's pages not set beside it, its column
-/// and key `-`, its table `PageTreeNodeRoot`; or an XMP packet not read
-/// whole, or whose stream isn't known, its column and key `-`, its table
-/// `Metadata`; or a color space or a font not read whole for what isn't
-/// the file's fault, its column and key `-`, its table the space's or the
-/// font's.
+/// and key `-`, its table `PageTreeNodeRoot`; or an XMP packet not read,
+/// or not read whole, or whose stream isn't known, its column and key `-`,
+/// its table `Metadata`; or a color space or a font not read whole for what
+/// isn't the file's fault, its column and key `-`, its table the space's or
+/// the font's.
 ///
 /// Not exhaustive: read by its fields, and made only by a check, so a
 /// field more is a minor release.
@@ -1247,10 +1263,12 @@ pub struct Unchecked {
     /// for a tree, or the page tree, why it isn't read whole (an object of
     /// it that takes a password), or why a viewer's pages aren't set beside
     /// the page tree's (an object of it that doesn't read); for an XMP
-    /// packet, why it isn't read whole (it nests deeper than is read), or
-    /// that what it tells can't be placed, its stream not known; for a
-    /// color space or a font, why it isn't read whole (an object of it that
-    /// takes a password, a font's streams past the file's budget for them).
+    /// packet, why it isn't read (its stream's data doesn't decode cleanly,
+    /// an object on the way to it takes a password), or isn't read whole
+    /// (it nests deeper than is read), or that what it tells can't be
+    /// placed, its stream not known; for a color space or a font, why it
+    /// isn't read whole (an object of it that takes a password, a font's
+    /// streams past the file's budget for them).
     pub why: String,
     /// The table it's counted under: the row's whose check it is, or as
     /// said above of each kind.
@@ -1281,10 +1299,11 @@ pub struct Report {
     /// looked up, and resources that can't be told used or not; name and
     /// number trees whose roots are held not read whole for what isn't the
     /// file's fault, and the page tree, or a viewer's pages not set beside
-    /// it, where its catalog is held; the XMP packet not read whole, where
-    /// its stream is held, or whose stream isn't known, where the catalog
-    /// is; and color spaces and fonts not read whole for what isn't the
-    /// file's fault, where each, or what it's written in, is held; by why.
+    /// it, where its catalog is held; the XMP packet not read, or not read
+    /// whole, where its stream is held, else where the catalog is, or whose
+    /// stream isn't known, where the catalog is; and color spaces and fonts
+    /// not read whole for what isn't the file's fault, where each, or what
+    /// it's written in, is held; by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -1425,7 +1444,12 @@ impl Linearized {
 /// checksum read whole ([`checksummed`]), which a file's reading gives, and a
 /// document read beside it ([`WithReading`]), and a document alone
 /// doesn't: of one, no content is read, which [`Report::content`] says, as
-/// 0. A font's streams are read as a viewer takes them
+/// 0. So is the catalog's XMP packet, decrypted and decoded through its
+/// filters; of a document alone, the packet it holds in plain view,
+/// unfiltered and not encrypted, as one read from a file holds it and one
+/// made in memory is given it
+/// ([`extension::declared`](crate::extension::declared)). A font's streams
+/// are read as a viewer takes them
 /// ([`Streams::decoded`](pdf_objects::Streams::decoded)), which a document
 /// gives of each stream it holds as bytes, as one made in memory holds
 /// them, and not of a stream whose data is where its file wrote it, as a
@@ -1663,7 +1687,11 @@ fn walking<R>(
         containers: Vec::new(),
         holders: Vec::new(),
         resources_at: HashMap::new(),
-        checksums: Vec::new(),
+        // The packet's stream, read whole past its checksum, is found so
+        // with content's.
+        checksums: (packet.stream.filter(|_| packet.checksummed))
+            .into_iter()
+            .collect(),
         page_tree,
         page_tree_at: HashMap::new(),
         roots: Vec::new(),
@@ -1912,8 +1940,9 @@ pub fn file_version(source: &dyn Source) -> Version {
 /// ([`Source::decoded_within`]) gave `error`: of a stream whose every fault
 /// is that its Flate data's Adler-32 checksum doesn't match what it
 /// decompressed to (pdf-filters' `Fault::Checksum`), which leaves nothing
-/// out, the data whole, as content is read and as a viewer reads it, the
-/// checksum found as a [`Rule::Reader`] finding of the stream; else `error`,
+/// out, the data whole, as content and the XMP packet are read and as a
+/// viewer reads it, the checksum found as a [`Rule::Reader`] finding of the
+/// stream; else `error`,
 /// given back. So a finding's bytes in such a stream ([`Finding::at`]) are
 /// in what this gives.
 pub fn checksummed(error: bytes::Error) -> Result<Vec<u8>, bytes::Error> {

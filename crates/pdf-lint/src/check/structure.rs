@@ -90,7 +90,18 @@
 //! isn't known, as for a document given its packet with no `/Metadata`,
 //! what the packet tells has no object to be in, and is counted so, once,
 //! where the catalog is held.
+//!
+//! The packet is the catalog's metadata stream's data as the source decodes
+//! it, decrypted and through its filters, where it gives that, as a
+//! reading does; else the packet the source holds in plain view, as a
+//! document alone does ([`read_packet`]). One whose stream's data doesn't
+//! come whole, but for its Flate checksum, or whose way doesn't read for
+//! what isn't the file's fault, isn't read, which is counted as not
+//! checked, once, where the stream is held, else where the catalog is; one
+//! whose only fault is its checksum is read whole, and the checksum found
+//! with content's ([`Walk::checksums`](super::Walk)).
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::mem::{self, Discriminant};
 use std::rc::Rc;
@@ -100,11 +111,13 @@ use pdf_objects::{Unreadable, Why};
 use pdf_semantics::pages::{self, Page, Pages, Rect, pages};
 use pdf_semantics::tree::{names, numbers};
 use pdf_semantics::{Fault, Limits, xmp};
+use pdf_structure::pdf_filters;
 use pdf_tokenizer::Rules;
 
 use super::content::times;
 use super::kept::Kept;
-use super::{Finding, MODEL, Objects, REFERENCES, Rule, Trail, Visit, Walk, entry_at};
+use super::{Finding, MODEL, Objects, REFERENCES, Rule, Trail, Visit, Walk, checksummed, entry_at};
+use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span};
 use crate::source::Source;
 
@@ -620,7 +633,8 @@ const KEYS: [&str; 4] = ["Parent", "Type", "Kids", "Count"];
 pub(crate) struct Packet {
     /// The stream it's the data of, as [`xmp::metadata_stream`] names it:
     /// none where that isn't known, as for a document given its packet with
-    /// no `/Metadata` to name the stream, or where there's no packet.
+    /// no `/Metadata` to name the stream, or where the way to it doesn't
+    /// read, or where there's no packet.
     pub(crate) stream: Option<ObjectId>,
     /// Its length.
     pub(crate) len: usize,
@@ -628,6 +642,14 @@ pub(crate) struct Packet {
     pub(crate) kept: Kept<Fault>,
     /// What stopped it being read, if anything did.
     pub(crate) stopped: Option<xmp::Error>,
+    /// Why it isn't read at all, where its stream's data didn't come whole,
+    /// or the way to its stream didn't read, for what isn't the file's
+    /// fault ([`packet_data`]).
+    pub(crate) unread: Option<&'static str>,
+    /// Whether its stream's Flate checksum doesn't match, its data read
+    /// whole past that ([`checksummed`]), which is found as content's is
+    /// ([`Walk::checksums`](super::Walk)).
+    pub(crate) checksummed: bool,
 }
 
 /// Why a packet isn't read whole, other than for the file's faults: it's
@@ -648,6 +670,177 @@ const XMP_UNREAD: &str = "a packet read no further, for another reason";
 /// Why what a packet tells isn't found: the stream it's the data of isn't
 /// known, so it has no object to be in.
 const XMP_UNPLACED: &str = "the packet's stream isn't known";
+
+/// Why a packet isn't read: its stream's data decodes past a cap the
+/// reader reads under
+/// ([`Limits::stream`](crate::pdf_structure::read::Limits::stream)) no
+/// further than what's read of a packet, so what came may not be all of it.
+const XMP_CAPPED: &str = "a metadata stream decoded past a cap it's read under";
+
+/// Why a packet isn't read: the source gives no data of its stream, though
+/// it gives streams' data.
+const XMP_UNGIVEN: &str = "a metadata stream whose data the source doesn't give";
+
+/// Why a packet isn't read, other than for the file's faults: an object on
+/// the way to its stream, the catalog among them, takes a password the
+/// reader wasn't given.
+const WAY_LOCKED: &str = "a metadata stream through an object that takes a password";
+
+/// Why a packet isn't read: an object on the way to its stream is past a
+/// cap the reader reads under, or a chain of references to it is longer
+/// than is followed.
+const WAY_CAPPED: &str = "a metadata stream through an object past a cap it's read under";
+
+/// Why a packet isn't read: the source didn't give the bytes of an object
+/// on the way to its stream.
+const WAY_UNGIVEN: &str = "a metadata stream through an object whose bytes the source didn't give";
+
+/// Why a packet isn't read: an object on the way to its stream doesn't
+/// read, for another reason a reader gives.
+const WAY_UNREAD: &str = "a metadata stream through an object that doesn't read";
+
+/// Why a packet isn't read, given why an object on the way to its stream,
+/// the catalog among them, didn't read: none where that's the file's
+/// fault, an object that doesn't parse, which the walk finds, as
+/// [`pages_unread`] has it of the page tree.
+fn way_unread(why: Why) -> Option<&'static str> {
+    match why {
+        Why::Damaged => None,
+        Why::Locked => Some(WAY_LOCKED),
+        Why::Limit | Why::Capped => Some(WAY_CAPPED),
+        Why::Source | Why::Detached => Some(WAY_UNGIVEN),
+        _ => Some(WAY_UNREAD),
+    }
+}
+
+/// Why a packet isn't read, given why its stream's data didn't come
+/// ([`Source::decoded_within`]'s error): content's words for the same
+/// error, of a metadata stream.
+fn data_unread(error: &bytes::Error) -> &'static str {
+    match error {
+        bytes::Error::Decode(_) => "a metadata stream that doesn't decode cleanly",
+        bytes::Error::Filters(_) => "a metadata stream through filters the reader doesn't take",
+        bytes::Error::Decrypt(_) => "a metadata stream that doesn't decrypt cleanly",
+        bytes::Error::Encrypted | bytes::Error::Locked | bytes::Error::Unsupported => {
+            "a metadata stream the reader doesn't decrypt"
+        }
+        bytes::Error::Io(_) => "a metadata stream the file doesn't give",
+        _ => "a metadata stream that doesn't read",
+    }
+}
+
+/// Whether `source` gives the reader's own account of a stream's data
+/// ([`Source::decoded_within`]), as a reading does and a document alone
+/// doesn't, which it says of every stream alike: so asked of object 0,
+/// which is never an object (ISO 32000-2, 7.5.4), for none of its data.
+fn gives_data(source: &dyn Source) -> bool {
+    source.decoded_within(ObjectId::new(0, 0), 0).is_some()
+}
+
+/// What the catalog's XMP packet claims and tells, read once from
+/// `source`, whose trailer is `trailer`, as [`packet_data`] gives it: what
+/// it claims, before anything that stops the read; and the packet as read,
+/// what it told kept, and what stopped it, or why it isn't read. Nothing's
+/// claimed where there's none, or it isn't read.
+pub(crate) fn read_packet(source: &dyn Source, trailer: &Dict) -> (xmp::Claims, Packet) {
+    let (data, mut packet) = packet_data(source, trailer);
+    let Some(xml) = data else {
+        return (xmp::Claims::default(), packet);
+    };
+    packet.len = xml.len();
+    let read = xmp::read(&xml, packet.stream, &LIMITS, &mut packet.kept);
+    match read {
+        Ok(claims) => (claims, packet),
+        Err(mut stopped) => {
+            let claims = mem::take(&mut stopped.read);
+            packet.stopped = Some(stopped);
+            (claims, packet)
+        }
+    }
+}
+
+/// The catalog's XMP packet as a check reads it from `source`, whose
+/// trailer is `trailer`, and what's known of it before it's read: its
+/// stream, and why it isn't read, where it isn't.
+///
+/// Where `source` gives the reader's own account of a stream's data
+/// ([`Source::decoded_within`]), as a reading does, it's the data of the
+/// catalog's metadata stream ([`xmp::metadata_stream`]) so, decrypted and
+/// decoded through its filters, as content is read, asked for no further
+/// than a byte past what's read of a packet ([`Limits::xmp_bytes`]): a
+/// longer one is read to there, and said to be longer ([`xmp::read`]),
+/// where data cut off no further than that is the reader's own cap on a
+/// stream, and may not be the whole packet. One whose only fault is its
+/// Flate checksum is read whole ([`checksummed`]). It isn't read where its
+/// data doesn't come so: another fault, filters the reader doesn't take, a
+/// password, the reader's cap, or no data given; nor where an object on the
+/// way to it doesn't read but by the file's fault ([`way_unread`]), nor
+/// where there's none.
+///
+/// Where `source` gives no stream's data so, as a document alone doesn't,
+/// it's the packet the source holds in plain view, unfiltered and not
+/// encrypted ([`Source::metadata`]), its stream as
+/// [`xmp::metadata_stream`] names it, where that's known.
+fn packet_data<'s>(source: &'s dyn Source, trailer: &'s Dict) -> (Option<Cow<'s, [u8]>>, Packet) {
+    let mut packet = Packet::default();
+    if !gives_data(source) {
+        let data = source.metadata();
+        if data.is_some() {
+            let catalog = pdf_semantics::catalog(Objects(source), trailer)
+                .ok()
+                .flatten();
+            packet.stream = catalog
+                .and_then(|catalog| xmp::metadata_stream(Objects(source), catalog).ok())
+                .flatten();
+        }
+        return (data, packet);
+    }
+    let way = match pdf_semantics::catalog(Objects(source), trailer) {
+        Ok(Some(catalog)) => xmp::metadata_stream(Objects(source), catalog),
+        Ok(None) => Ok(None),
+        Err(unreadable) => Err(unreadable),
+    };
+    let id = match way {
+        Ok(Some(id)) => id,
+        Ok(None) => return (None, packet),
+        Err(unreadable) => {
+            packet.unread = way_unread(unreadable.why);
+            return (None, packet);
+        }
+    };
+    packet.stream = Some(id);
+    let error = match source.decoded_within(id, LIMITS.xmp_bytes.saturating_add(1)) {
+        Some(Ok(data)) => return (Some(Cow::Owned(data)), packet),
+        Some(Err(error)) => error,
+        None => {
+            packet.unread = Some(XMP_UNGIVEN);
+            return (None, packet);
+        }
+    };
+    let data = match checksummed(error) {
+        Ok(data) => {
+            packet.checksummed = true;
+            data
+        }
+        // Cut off at the limit alone: past what's read of a packet, it's
+        // read to there; else it's the reader's own cap.
+        Err(bytes::Error::Decode(cut))
+            if !cut.faults.is_empty()
+                && (cut.faults.iter()).all(|&(_, f)| f == pdf_filters::Fault::Limit) =>
+        {
+            if cut.data.len() <= LIMITS.xmp_bytes {
+                packet.unread = Some(XMP_CAPPED);
+                return (None, packet);
+            }
+            cut.data
+        }
+        Err(error) => {
+            packet.unread = Some(data_unread(&error));
+            return (None, packet);
+        }
+    };
+    (Some(Cow::Owned(data)), packet)
+}
 
 impl<'a> Walk<'a> {
     /// Keeps `root`, the visit of a name tree's root when `names`, else a
@@ -969,14 +1162,17 @@ impl<'a> Walk<'a> {
     /// Finds what the XMP packet's read told, `packet`, each kind once, and
     /// XML that stopped it, at the byte it stopped at, a [`Rule::Xmp`]
     /// finding in the packet's stream, held where that is; and counts what
-    /// else stopped it, a cap, as not checked, where the stream is held, and
-    /// what it told where its stream isn't known, once, where `catalog` is.
+    /// else stopped it, a cap, or kept it unread, as not checked, where the
+    /// stream is held, else where `catalog` is, and what it told where its
+    /// stream isn't known, once, where `catalog` is.
     fn packet_told(&mut self, packet: Packet, catalog: Option<ObjectId>) {
         let Packet {
             stream,
             len,
             kept,
             stopped,
+            unread,
+            checksummed: _,
         } = packet;
         let mut told: Vec<(Option<Span>, String)> = (kept.told().iter())
             .filter(|(_, fault, _)| {
@@ -987,7 +1183,7 @@ impl<'a> Walk<'a> {
             })
             .map(|(place, fault, n)| (place.at, times(&fault.to_string(), *n)))
             .collect();
-        let mut unread = None;
+        let mut unread = unread;
         if let Some(stopped) = stopped {
             match stopped.why {
                 xmp::XmpWhy::Xml(words) => {
@@ -1048,9 +1244,13 @@ mod tests {
     use pdf_fixtures::fixture;
     use pdf_objects::dict;
 
-    use super::super::{Hold, Made, Options, Report, check};
+    use pdf_structure::pdf_crypt::Password;
+    use pdf_structure::pdf_crypt::writer::{Kind, Settings};
+
+    use super::super::tests::Sections;
+    use super::super::{CHECKSUM, Hold, Made, Options, Report, check, check_with_reading};
     use super::*;
-    use crate::bytes;
+    use crate::bytes::{self, WithReading};
     use crate::source::Document;
     use crate::version::Version;
 
@@ -2728,7 +2928,11 @@ mod tests {
     /// [`found`] gives a tree finding, but its bytes those of `data`, the
     /// packet, in its stream, 4 0 R.
     fn xmp_found(file: &[u8], data: &[u8], hold: &Hold) -> Vec<Found> {
-        let report = checked(file, hold, &Options::default());
+        xmp_of(&checked(file, hold, &Options::default()), data)
+    }
+
+    /// Each XMP finding of `report`, as [`xmp_found`] gives them.
+    fn xmp_of(report: &Report, data: &[u8]) -> Vec<Found> {
         (report.findings.iter())
             .filter(|f| f.rule == Rule::Xmp)
             .map(|f| {
@@ -3042,6 +3246,371 @@ mod tests {
         assert_eq!(values(other.since(&once)), [VALUE]);
         assert_eq!(values(other.by_path(&once)), [VALUE]);
         assert_eq!(values(other.beyond(&[&once])), [VALUE]);
+    }
+
+    /// `file` read beside its reading under `options`, as the command line
+    /// reads it, and checked so, holding what `hold` does.
+    fn beside(file: &[u8], options: &bytes::Options, hold: &Hold) -> Report {
+        let opened = WithReading::new(file, options).expect("a file in memory reads");
+        check_with_reading(&opened, hold, &Options::default())
+    }
+
+    /// The packet's rows not checked, their column and key `-` and their
+    /// table `Metadata`: why, and how many.
+    fn packet_rows(report: &Report) -> Vec<(String, usize)> {
+        (report.unchecked.iter())
+            .filter(|(u, _)| (u.column, u.table.as_str(), u.key.as_str()) == ("-", "Metadata", "-"))
+            .map(|(u, &n)| (u.why.clone(), n))
+            .collect()
+    }
+
+    /// Whether `report`'s file is checked under PDF/A-3.
+    fn a3(report: &Report) -> bool {
+        report.extensions.contains("ISO_19005_3")
+    }
+
+    /// Only object `n` held, as merged.
+    fn only(n: u32) -> Hold {
+        Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into())
+    }
+
+    /// The `rdf:Description` tag of `xmp`, an [`XMP`] changed, as written.
+    fn description(xmp: &[u8]) -> String {
+        let xmp = String::from_utf8_lossy(xmp).into_owned();
+        let start = xmp.find("<rdf:Description").unwrap();
+        let end = start + xmp[start..].find("/>").unwrap() + 2;
+        xmp[start..end].to_string()
+    }
+
+    /// [`XMP`] claiming PDF/A-3, with an attribute that doesn't read; and
+    /// its finding, at the tag.
+    fn faulty() -> (Vec<u8>, Found) {
+        let data = xmp_with(r#"pdfaid:part="2""#, r#"pdfaid:part="3" x=y"#);
+        let finding = packet_finding(ATTRIBUTE, &description(&data));
+        (data, finding)
+    }
+
+    /// A packet a file's reading decodes, filtered or encrypted, is read
+    /// beside it as one in plain view is: what it tells found at its bytes
+    /// in the decoded data, in its stream, and what it claims declared;
+    /// the document alone, which holds a packet only in plain view, reads
+    /// neither, as before. One in plain view reads the same either way. One
+    /// encrypted in a file no password given opens isn't read, which is
+    /// counted as not checked, where its stream is held; given the password,
+    /// it's read.
+    #[test]
+    fn a_packet_a_reading_decodes_is_read_beside_it() {
+        let (data, finding) = faulty();
+        let default = bytes::Options::DEFAULT;
+        let alone = |file: &[u8]| checked(file, &ALL, &Options::default());
+        // In plain view, the same either way.
+        let plain = metadata(&data, "");
+        let (read, doc) = (beside(&plain, &default, &ALL), alone(&plain));
+        assert_eq!(
+            xmp_of(&read, &data),
+            std::slice::from_ref(&finding),
+            "{read}"
+        );
+        assert_eq!(xmp_of(&doc, &data), std::slice::from_ref(&finding), "{doc}");
+        assert!(a3(&read) && a3(&doc));
+        assert_eq!((packet_rows(&read), packet_rows(&doc)), (vec![], vec![]));
+        // Through a filter, beside the reading alone.
+        let filtered = metadata(&fixture::zlib(&data), "/Filter /FlateDecode");
+        let read = beside(&filtered, &default, &ALL);
+        assert_eq!(
+            xmp_of(&read, &data),
+            std::slice::from_ref(&finding),
+            "{read}"
+        );
+        assert!(a3(&read), "{read}");
+        assert_eq!(packet_rows(&read), []);
+        let opened = WithReading::new(&filtered[..], &default).unwrap();
+        assert!(crate::extension::declared(&opened).contains("ISO_19005_3"));
+        assert!(!crate::extension::declared(opened.document()).contains("ISO_19005_3"));
+        let doc = alone(&filtered);
+        assert_eq!((xmp_of(&doc, &data), a3(&doc)), (vec![], false), "{doc}");
+        // Encrypted, its metadata too: in a file that opens by the empty
+        // password, and in one that takes another.
+        let r = Object::reference;
+        let media_box: Vec<Object> = [0, 0, 612, 792].map(Object::from).into();
+        let objects = [
+            (
+                1,
+                fixture::Body::from(dict! {
+                    "Type" => Object::name("Catalog"),
+                    "Pages" => r(2),
+                    "Metadata" => r(4),
+                }),
+            ),
+            (
+                2,
+                dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 }
+                    .into(),
+            ),
+            (
+                3,
+                dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => r(2),
+                    "MediaBox" => media_box,
+                    "Resources" => dict! {},
+                }
+                .into(),
+            ),
+            (
+                4,
+                fixture::Body::stream(
+                    dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
+                    &data,
+                ),
+            ),
+        ];
+        let encrypted = |user: &[u8]| {
+            let settings = Settings {
+                kind: Kind::Aes128,
+                user,
+                owner: b"owner",
+                p: -4,
+                id: b"0123456789abcdef",
+                encrypt_metadata: true,
+            };
+            fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) })
+        };
+        let opens = encrypted(b"");
+        let read = beside(&opens, &default, &ALL);
+        assert_eq!(
+            xmp_of(&read, &data),
+            std::slice::from_ref(&finding),
+            "{read}"
+        );
+        assert!(a3(&read), "{read}");
+        let doc = alone(&opens);
+        assert_eq!((xmp_of(&doc, &data), a3(&doc)), (vec![], false), "{doc}");
+        let locked = encrypted(b"user");
+        let read = beside(&locked, &default, &ALL);
+        assert_eq!((xmp_of(&read, &data), a3(&read)), (vec![], false), "{read}");
+        let row = "a metadata stream the reader doesn't decrypt".to_string();
+        assert_eq!(packet_rows(&read), [(row, 1)], "{read}");
+        assert_eq!(packet_rows(&beside(&locked, &default, &only(4))).len(), 1);
+        assert_eq!(packet_rows(&beside(&locked, &default, &only(1))), []);
+        let user = [Password("user")];
+        let mut given = bytes::Options::DEFAULT;
+        given.passwords = &user;
+        let read = beside(&locked, &given, &ALL);
+        assert_eq!(xmp_of(&read, &data), [finding], "{read}");
+        assert!(a3(&read) && packet_rows(&read).is_empty(), "{read}");
+    }
+
+    /// A packet whose stream's only fault is its Flate checksum is read
+    /// whole beside its reading, as content is, and the checksum found
+    /// once, a `reader` finding in the reader's words, at the stream's data
+    /// as written, where the stream is held.
+    #[test]
+    fn a_packet_whose_only_fault_is_its_checksum_is_read_and_found() {
+        let (data, finding) = faulty();
+        let off = crate::fuzz::checksum_off(std::str::from_utf8(&data).unwrap());
+        let file = metadata(off.as_bytes(), "/Filter [/ASCIIHexDecode /FlateDecode]");
+        let checksums = |report: &Report| -> Vec<(Option<ObjectId>, Vec<u8>)> {
+            let words = CHECKSUM.to_string();
+            (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader && f.value == words)
+                .map(|f| {
+                    let at = f.at.expect("at the stream's data");
+                    (f.object, file[at.start()..at.end()].to_vec())
+                })
+                .collect()
+        };
+        let read = beside(&file, &bytes::Options::DEFAULT, &ALL);
+        assert_eq!(xmp_of(&read, &data), [finding], "{read}");
+        assert!(a3(&read) && packet_rows(&read).is_empty(), "{read}");
+        let stream = (Some(ObjectId::new(4, 0)), off.as_bytes().to_vec());
+        assert_eq!(checksums(&read), std::slice::from_ref(&stream), "{read}");
+        let held = beside(&file, &bytes::Options::DEFAULT, &only(4));
+        assert_eq!(checksums(&held), [stream]);
+        assert_eq!(
+            checksums(&beside(&file, &bytes::Options::DEFAULT, &only(1))),
+            []
+        );
+    }
+
+    /// A packet longer than is read (16 MiB) is read to there beside its
+    /// reading, filtered or not, as one in plain view is: what it claims
+    /// before counted, and it's counted as not checked; one of that length
+    /// exactly, filtered, is read whole. One the reader's own cap on a
+    /// stream's data cuts off at or before that isn't read, as what came
+    /// may not be the whole packet, which is counted as not checked, where
+    /// its stream is held: never read as whole, to find XML that stops at
+    /// the cut, where the whole packet reads.
+    #[test]
+    fn a_packet_past_what_s_read_is_read_to_there_and_one_the_reader_cut_isnt() {
+        let xmp_bytes = LIMITS.xmp_bytes;
+        let default = bytes::Options::DEFAULT;
+        let claims = xmp_with(r#"pdfaid:part="2""#, r#"pdfaid:part="3""#);
+        let long = [claims.clone(), vec![b' '; xmp_bytes]].concat();
+        let flate = "/Filter /FlateDecode";
+        for file in [metadata(&long, ""), metadata(&fixture::zlib(&long), flate)] {
+            let read = beside(&file, &default, &ALL);
+            assert_eq!(packet_rows(&read), [(XMP_LONG.to_string(), 1)]);
+            assert!(a3(&read) && xmp_of(&read, &long).is_empty());
+        }
+        let exact = [claims.clone(), vec![b' '; xmp_bytes - claims.len()]].concat();
+        let read = beside(&metadata(&fixture::zlib(&exact), flate), &default, &ALL);
+        assert!(a3(&read) && packet_rows(&read).is_empty(), "{read}");
+        // Cut off by a cap of 1 KiB inside an attribute's value, after the
+        // claim.
+        let at = claims.len() - "</rdf:RDF></x:xmpmeta>".len();
+        let value = format!("<e xmlns=\"a:b\" a=\"{}\"/>", "a".repeat(2 << 10));
+        let cut = [&claims[..at], value.as_bytes(), &claims[at..]].concat();
+        let mut capped = default;
+        capped.limits.stream = 1 << 10;
+        for file in [metadata(&cut, ""), metadata(&fixture::zlib(&cut), flate)] {
+            let read = beside(&file, &capped, &ALL);
+            assert_eq!(xmp_of(&read, &cut), [], "{read}");
+            assert_eq!(packet_rows(&read), [(XMP_CAPPED.to_string(), 1)]);
+            assert!(!a3(&read), "{read}");
+            assert_eq!(packet_rows(&beside(&file, &capped, &only(4))).len(), 1);
+            assert_eq!(packet_rows(&beside(&file, &capped, &only(1))), []);
+            let whole = beside(&file, &default, &ALL);
+            assert!(a3(&whole) && xmp_of(&whole, &cut).is_empty(), "{whole}");
+            assert_eq!(packet_rows(&whole), []);
+        }
+    }
+
+    /// A file of a page whose catalog's `/Metadata` is a chain of `n`
+    /// references, objects 10 on, to a metadata stream of `data`, 4 0 R.
+    fn chained(n: u32, data: &[u8]) -> Vec<u8> {
+        let mut file = Sections::new("1.7");
+        let first = match n {
+            0 => 4,
+            _ => 10,
+        };
+        file.object(
+            1,
+            &format!("<< /Type /Catalog /Pages 2 0 R /Metadata {first} 0 R >>"),
+        );
+        file.object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+        file.object(3, &page("2 0 R"));
+        let length = data.len();
+        let head = format!("<< /Type /Metadata /Subtype /XML /Length {length} >>\nstream\n");
+        file.object(
+            4,
+            &(head + std::str::from_utf8(data).unwrap() + "\nendstream"),
+        );
+        let mut numbers = vec![0, 1, 2, 3, 4];
+        for k in 0..n {
+            let to = if k + 1 == n { 4 } else { 11 + k };
+            file.object(10 + k, &format!("{to} 0 R"));
+            numbers.push(10 + k);
+        }
+        let at = file.table(&numbers, &format!("/Size {} /Root 1 0 R", 10 + n.max(1)));
+        file.end(at);
+        file.out
+    }
+
+    /// A packet's stream through more references than the reader follows
+    /// to keep one in plain view (8) is read beside the reading, which
+    /// follows as many as pdf-semantics does (32), where the document alone
+    /// has none; past those, it isn't read, which is counted as not
+    /// checked, where the catalog is held.
+    #[test]
+    fn a_packet_through_more_references_than_the_reader_follows_is_read() {
+        let (data, finding) = faulty();
+        let default = bytes::Options::DEFAULT;
+        let values = |found: Vec<Found>| -> Vec<(String, String)> {
+            found.into_iter().map(|f| (f.3, f.4)).collect()
+        };
+        let want = values(vec![finding]);
+        for n in [0, 1, 12] {
+            let file = chained(n, &data);
+            let read = beside(&file, &default, &ALL);
+            assert_eq!(values(xmp_of(&read, &data)), want, "{n}: {read}");
+            assert!(a3(&read) && packet_rows(&read).is_empty(), "{n}: {read}");
+            let doc = checked(&file, &ALL, &Options::default());
+            assert_eq!(a3(&doc), n < 8, "{n}: {doc}");
+        }
+        let file = chained(40, &data);
+        let read = beside(&file, &default, &ALL);
+        assert_eq!((xmp_of(&read, &data), a3(&read)), (vec![], false), "{read}");
+        assert_eq!(packet_rows(&read), [(WAY_CAPPED.to_string(), 1)], "{read}");
+        assert_eq!(packet_rows(&beside(&file, &default, &only(1))).len(), 1);
+        assert_eq!(packet_rows(&beside(&file, &default, &only(4))), []);
+    }
+
+    /// A packet whose stream's data doesn't come whole beside its reading
+    /// isn't read, which is counted as not checked, where its stream is
+    /// held, in content's words for the same: data that doesn't decode
+    /// cleanly, and filters the reader doesn't take.
+    #[test]
+    fn a_packet_whose_stream_doesnt_decode_isnt_read() {
+        let (data, _) = faulty();
+        let default = bytes::Options::DEFAULT;
+        // Hex data without its `>`, all of it decoded, and a fault.
+        let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+        let shapes = [
+            (
+                metadata(hex.as_bytes(), "/Filter /ASCIIHexDecode"),
+                "a metadata stream that doesn't decode cleanly",
+            ),
+            (
+                metadata(&data, "/Filter /JBIG2Decode"),
+                "a metadata stream through filters the reader doesn't take",
+            ),
+        ];
+        for (file, why) in shapes {
+            let read = beside(&file, &default, &ALL);
+            assert_eq!((xmp_of(&read, &data), a3(&read)), (vec![], false), "{read}");
+            assert_eq!(packet_rows(&read), [(why.to_string(), 1)], "{read}");
+            assert_eq!(packet_rows(&beside(&file, &default, &only(4))).len(), 1);
+            assert_eq!(packet_rows(&beside(&file, &default, &only(1))), []);
+        }
+    }
+
+    /// A packet whose way doesn't read for what isn't the file's fault, a
+    /// password the reader wasn't given, isn't read, which is counted as
+    /// not checked, where the catalog is held; one whose way doesn't parse
+    /// is the file's fault, which the walk finds, and isn't counted, as
+    /// the page tree's isn't.
+    #[test]
+    fn a_packet_whose_way_doesnt_read_isnt_read() {
+        let (data, _) = faulty();
+        let way = |seven: &str, locked: bool| {
+            let mut file = Sections::new("1.7");
+            file.object(1, "<< /Type /Catalog /Pages 2 0 R /Metadata 7 0 R >>");
+            file.object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+            file.object(3, &page("2 0 R"));
+            let length = data.len();
+            let head = format!("<< /Type /Metadata /Subtype /XML /Length {length} >>\nstream\n");
+            file.object(
+                4,
+                &(head + std::str::from_utf8(&data).unwrap() + "\nendstream"),
+            );
+            let mut trailer = "/Root 1 0 R".to_string();
+            match locked {
+                true => {
+                    file.object_stream(10, "", &[(7, seven)]);
+                    trailer.push_str(" /Encrypt << /Filter /Standard /V 2 >>");
+                }
+                false => {
+                    file.object(7, seven);
+                }
+            }
+            let at = file.stream(11, &[0, 1, 2, 3, 4, 7, 10], &trailer);
+            file.end(at);
+            file.out
+        };
+        let default = bytes::Options::DEFAULT;
+        let locked = way("4 0 R", true);
+        let read = beside(&locked, &default, &ALL);
+        assert_eq!((xmp_of(&read, &data), a3(&read)), (vec![], false), "{read}");
+        assert_eq!(packet_rows(&read), [(WAY_LOCKED.to_string(), 1)], "{read}");
+        assert_eq!(packet_rows(&beside(&locked, &default, &only(1))).len(), 1);
+        assert_eq!(packet_rows(&beside(&locked, &default, &only(4))), []);
+        let damaged = way("<< /A [ >>", false);
+        let read = beside(&damaged, &default, &ALL);
+        assert_eq!((xmp_of(&read, &data), a3(&read)), (vec![], false), "{read}");
+        assert_eq!(packet_rows(&read), [], "{read}");
+        let plain = way("4 0 R", false);
+        assert!(a3(&beside(&plain, &default, &ALL)));
     }
 
     /// Only an object that doesn't read is noted: the one fault PDFium's

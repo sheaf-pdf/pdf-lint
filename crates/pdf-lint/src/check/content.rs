@@ -1977,7 +1977,9 @@ mod tests {
 
     /// A source that answers as the one it wraps, and keeps each stream it's
     /// asked the data of, either way, and within how much; but gives none of
-    /// `without`'s.
+    /// `without`'s. Not object 0, which is never one, whose data the XMP
+    /// packet's read asks for to learn whether the source gives streams'
+    /// data, as it says of all alike (`structure::gives_data`).
     struct Counting<'s> {
         source: &'s dyn Source,
         asked: RefCell<Vec<(ObjectId, usize)>>,
@@ -2048,7 +2050,9 @@ mod tests {
             id: ObjectId,
             limit: usize,
         ) -> Option<Result<Vec<u8>, bytes::Error>> {
-            self.asked.borrow_mut().push((id, limit));
+            if id.number != 0 {
+                self.asked.borrow_mut().push((id, limit));
+            }
             match Some(id) == self.without {
                 true => None,
                 false => self.source.decoded_within(id, limit),
