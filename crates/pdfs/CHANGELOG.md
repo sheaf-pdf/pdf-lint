@@ -6,16 +6,16 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 
 ### Added
 
-- The family re-exported whole: pdf-tokenizer `0.2`, pdf-objects, pdf-filters and pdf-crypt `=0.1.0-alpha.3`, pdf-color `=0.1.0-alpha.2`, and pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts and pdf-linearize `=0.1.0-alpha.1`.
+- The family re-exported whole: pdf-tokenizer `0.2`, pdf-objects, pdf-filters and pdf-crypt `=0.1.0-alpha.3`, pdf-color `=0.1.0-alpha.2`, and pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts, pdf-gfx and pdf-linearize `=0.1.0-alpha.1`.
 - `open`, `from_bytes` and `Options`: a file opened by its path or from any source, as a viewer reads it by default (PDFium's recovery and rules, zlib-rs, no fault looked for). `Pdf` reads each object when it's asked for. `Pdf::unlock` opens it by a password after.
-- `Pdf::pages`, `Page` and `Page::content`: a file's pages, each with what it inherits, and a page's streams joined (`Content`), with their operations.
+- `Pdf::pages`, `Page`, `Page::geom`, `Page::content`, `Page::interpret` and `Page::encode`: a file's pages, each with what it inherits, its 2D geometry (`PageGeom`), its streams joined (`Content`) with their operations, its graphics and text state interpreted (`Summary`), and its content and Form XObjects re-encoded (`pdf_gfx::Encoded`).
 - `Page::text` and `Page::fonts`: the strings a page's content shows, in its fonts, its forms followed, as PDFium reads them for its text (pdf-fonts' `Shown`), and the fonts its resources name (`NamedFont`), each read once a file.
 - `Pdf::version`, `encryption`, `info`, `claims`, `linearized` and `stream`: what the file is and says of itself, and any stream's data decoded. `Pdf::reading` gives the reading, for the rest.
 - `Document`: a new document (`Document::new`) or a file edited (`Pdf::edit`), its pages added with a `ContentWriter` each (`add_page`), what they draw with written once a file, the standard 14 fonts by name (`standard_font`) and claims as XMP (`claim`).
 - `Document::save`, `save_with`, `save_linearized` and `save_update`: a document saved whole, linearized, or as an update appended to the file read, each with a `_to` form that writes into memory. `encrypt` and `decrypt` say how it's encrypted.
 - `page`, `file` and `build`: each recipe as a function over the family's traits, for a reading or a document of the caller's own.
 - `Limits`, every crate's caps in one value, with `font_budget`, and `Error`, every crate's error wrapped as it is.
-- `prelude`: the facade's types and calls, and the family's items they take and give: `Color`, `ContentWriter`, `Paint`, `Res`, `Std14`, `Font`, `Shown`, `ShownString`, `Unread`, `Rect`, `Claims`, `Info`, `Verdict`, `Encryption`, `Encoded`, `Password`, `Permissions`, `Protection`, `Rules`, `Version`, `Dict`, `Object`, `ObjectId` and `Why`.
+- `prelude`: the facade's types and calls, and the family's items they take and give: `Canvas`, `Color`, `ContentWriter`, `Matrix`, `PageGeom`, `Paint`, `Point`, `Quad`, `Res`, `Rotation`, `Std14`, `Font`, `Shown`, `ShownString`, `Unread`, `Rect`, `Claims`, `Info`, `Verdict`, `Encryption`, `Encoded`, `Password`, `Permissions`, `Protection`, `Rules`, `Version`, `Dict`, `Object`, `ObjectId` and `Why`.
 - Features, each the crates' own: `programs` and `clock` by default, and `image-ends`, `predefined-cmaps`, `simd` and `tracing`.
 
 ### Security

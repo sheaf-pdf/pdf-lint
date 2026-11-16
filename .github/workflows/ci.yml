@@ -394,6 +394,21 @@ jobs:
       - name: Package, and check what the package holds
         run: just fonts-package
 
+  # pdf-gfx packaged as a publish would: in a fresh target directory, and what
+  # the package holds checked, its sources, README, CHANGELOG, manifest and
+  # lock, nothing else, no benchmark among them.
+  gfx-package:
+    name: Gfx packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just gfx-package
+
   # pdf-linearize packaged as a publish would, as the tokenizer, pdf-objects,
   # the filters, pdf-crypt, pdf-color, pdf-structure, pdf-content-streams,
   # pdf-semantics and pdf-fonts are: in a fresh target directory, and what
@@ -611,6 +626,25 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Test
         run: just fonts-msrv fonts-cmaps-msrv
+
+  gfx-msrv:
+    name: Gfx on its minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-gfx/Cargo.toml, which
+      # `just gfx-msrv` reads, as published, with no feature and with
+      # `tracing`, and `just gfx-cmaps-msrv` (the `predefined-cmaps`
+      # feature's).
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just gfx-msrv gfx-cmaps-msrv
 
   linearize-msrv:
     name: Linearization on its minimum Rust

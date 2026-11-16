@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::iter::FusedIterator;
+use std::ops::ControlFlow;
 
 use pdf_crypt::{Encoded, Refused};
 use pdf_fonts::{Fonts, Shown};
@@ -619,6 +620,15 @@ impl<'a, S: ByteSource> Page<'a, S> {
         self.page
     }
 
+    /// Its 2D page geometry ([`pdf_gfx::PageGeom`]): normalized `/MediaBox`,
+    /// visible `/CropBox`, `/Rotate`, `/UserUnit`, optional `/BleedBox` /
+    /// `/TrimBox` / `/ArtBox`, and closed-form transforms between PageSpace and
+    /// ViewSpace.
+    #[must_use]
+    pub fn geom(&self) -> pdf_gfx::PageGeom {
+        page::geom(&self.pdf.reading, self.page)
+    }
+
     /// Its content: its streams decoded and joined under
     /// [`Limits::content`], as [`page::content`](fn@page::content) joins
     /// them, and the color spaces its resources name. A stream whose data
@@ -696,5 +706,70 @@ impl<'a, S: ByteSource> Page<'a, S> {
             &pdf.limits,
             &mut budget,
         )
+    }
+
+    /// Interprets its content stream and drawn Form XObjects (`Do`) under
+    /// [`Limits::gfx`], streaming placed paths, glyph origins/quads, images,
+    /// shadings, clips, and marked content to `visit`
+    /// ([`page::interpret`](fn@page::interpret)).
+    ///
+    /// # Errors
+    ///
+    /// As [`page::interpret`](fn@page::interpret) fails.
+    pub fn interpret(
+        &self,
+        opts: pdf_gfx::Opts,
+        visit: impl FnMut(pdf_gfx::Event<'_>) -> ControlFlow<()>,
+    ) -> Result<pdf_gfx::Summary, Error> {
+        self.interpret_with(opts, &mut (), visit)
+    }
+
+    /// [`Page::interpret`], reporting recoverable ISO 32000-2 departures to
+    /// `sink` ([`pdf_gfx::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::interpret`] fails.
+    pub fn interpret_with<K: Sink<pdf_gfx::Fault> + ?Sized>(
+        &self,
+        opts: pdf_gfx::Opts,
+        sink: &mut K,
+        visit: impl FnMut(pdf_gfx::Event<'_>) -> ControlFlow<()>,
+    ) -> Result<pdf_gfx::Summary, Error> {
+        let pdf = self.pdf;
+        page::interpret_with(
+            &pdf.reading,
+            &pdf.fonts,
+            self.page,
+            &pdf.limits,
+            opts,
+            sink,
+            visit,
+        )
+    }
+
+    /// Re-encodes its content stream and every Form XObject drawn on it into
+    /// position-independent `Tm` + `Td` text operations
+    /// ([`page::encode`](fn@page::encode)).
+    ///
+    /// # Errors
+    ///
+    /// As [`page::encode`](fn@page::encode) fails.
+    pub fn encode(&self) -> Result<pdf_gfx::Encoded, Error> {
+        self.encode_with(&mut ())
+    }
+
+    /// [`Page::encode`], reporting recoverable ISO 32000-2 departures to `sink`
+    /// ([`pdf_gfx::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::encode`] fails.
+    pub fn encode_with<K: Sink<pdf_gfx::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<pdf_gfx::Encoded, Error> {
+        let pdf = self.pdf;
+        page::encode_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, sink)
     }
 }

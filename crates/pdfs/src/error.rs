@@ -50,6 +50,10 @@ pub enum Error {
     /// kept.
     #[error("{0}")]
     Content(Pushed<Unreadable>),
+    /// A page's content stream or Form XObject failed graphics interpretation
+    /// or re-encoding (`pdf-gfx`'s).
+    #[error("{0}")]
+    Gfx(pdf_gfx::Error),
     /// The metadata stream's packet wasn't read (pdf-semantics'). Boxed, as
     /// it holds what was read, which would make every result of the facade's
     /// as large. Its `Debug` gives the claims read and the XML reader's words
@@ -133,6 +137,12 @@ impl From<pages::Error> for Error {
 impl From<Pushed<Unreadable>> for Error {
     fn from(pushed: Pushed<Unreadable>) -> Error {
         Error::Content(pushed)
+    }
+}
+
+impl From<pdf_gfx::Error> for Error {
+    fn from(error: pdf_gfx::Error) -> Error {
+        Error::Gfx(error)
     }
 }
 

@@ -15,6 +15,7 @@ pub use crate::{
 pub use pdf_content_streams::{Color, ContentWriter, Paint, Res};
 pub use pdf_crypt::{Encoded, Password, Permissions, Protection};
 pub use pdf_fonts::{Font, Shown, ShownString, Std14, Unread};
+pub use pdf_gfx::{Canvas, Matrix, PageGeom, Point, Quad, Rotation};
 pub use pdf_linearize::check::Verdict;
 pub use pdf_objects::pdf_tokenizer::Rules;
 pub use pdf_objects::version::Version;

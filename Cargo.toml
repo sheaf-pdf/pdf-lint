@@ -24,6 +24,7 @@ members = [
     "crates/pdf-semantics",
     "crates/pdf-color",
     "crates/pdf-fonts",
+    "crates/pdf-gfx",
     "crates/pdf-linearize",
     "crates/pdf-linearize-lopdf",
     "crates/pdfs",
@@ -62,6 +63,7 @@ pdf-color = { path = "crates/pdf-color", version = "=0.1.0-alpha.2" }
 pdf-content-streams = { path = "crates/pdf-content-streams", version = "=0.1.0-alpha.1" }
 pdf-semantics = { path = "crates/pdf-semantics", version = "=0.1.0-alpha.1", default-features = false }
 pdf-fonts = { path = "crates/pdf-fonts", version = "=0.1.0-alpha.1", default-features = false }
+pdf-gfx = { path = "crates/pdf-gfx", version = "=0.1.0-alpha.1", default-features = false }
 pdf-linearize = { path = "crates/pdf-linearize", version = "=0.1.0-alpha.1", default-features = false }
 pdf-arlington = { path = "crates/pdf-arlington", version = "=0.1.0-alpha.1" }
 

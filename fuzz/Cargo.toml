@@ -3,8 +3,8 @@
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
 # `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz linearize`, `just fuzz pdfs`, `just fuzz arlington` or
-# `just fuzz check`, or:
+# `just fuzz gfx`, `just fuzz linearize`, `just fuzz pdfs`,
+# `just fuzz arlington` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -214,6 +214,7 @@ pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # as the binary does: pdf-lint reads fonts for text, which reads no program
 # whatever the features. The feature of that name below turns it on.
 pdf-fonts = { path = "../crates/pdf-fonts" }
+pdf-gfx = { path = "../crates/pdf-gfx" }
 # With the test writer, so the linearize target's new encryptions are drawn
 # from the input and every write's IVs derived: an input writes the same
 # bytes each run, and a saved one reruns as it ran. `check` reads as the
@@ -237,7 +238,7 @@ pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 simd = ["pdf-content-streams/simd"]
 # Adobe's predefined CMaps, from pdf-fonts' bundle, so a name that's one
 # reaches it.
-predefined-cmaps = ["pdf-fonts/predefined-cmaps"]
+predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps"]
 
 [[bin]]
 name = "tokenize"
@@ -305,6 +306,13 @@ bench = false
 [[bin]]
 name = "fonts"
 path = "fuzz_targets/fonts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gfx"
+path = "fuzz_targets/gfx.rs"
 test = false
 doc = false
 bench = false

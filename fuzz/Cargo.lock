@@ -437,6 +437,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-gfx"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "pdf-color",
+ "pdf-content-streams",
+ "pdf-fonts",
+ "pdf-objects",
+ "pdf-semantics",
+ "thiserror",
+]
+
+[[package]]
 name = "pdf-linearize"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -516,6 +528,7 @@ dependencies = [
  "pdf-crypt",
  "pdf-filters",
  "pdf-fonts",
+ "pdf-gfx",
  "pdf-linearize",
  "pdf-lint",
  "pdf-objects",
@@ -534,6 +547,7 @@ dependencies = [
  "pdf-crypt",
  "pdf-filters",
  "pdf-fonts",
+ "pdf-gfx",
  "pdf-linearize",
  "pdf-objects",
  "pdf-semantics",

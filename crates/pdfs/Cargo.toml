@@ -30,6 +30,8 @@ pdf-content-streams.workspace = true
 pdf-semantics.workspace = true
 # Without reading fonts' programs unless `programs` (below) turns it on.
 pdf-fonts.workspace = true
+# 2D page geometry, bounded graphics/text interpreter, re-encoder, and canvas.
+pdf-gfx.workspace = true
 # A pdf-structure document linearized and a file's linearization checked
 # (`family`), and pdf-filters' zlib-rs through it.
 pdf-linearize = { workspace = true, features = ["family", "zlib-rs"] }
@@ -42,7 +44,7 @@ tracing = { version = "0.1.41", default-features = false, features = ["std"], op
 default = ["programs", "clock"]
 # pdf-fonts' `programs`: a font's program read, for its glyphs' boxes and
 # its heights, and the text of what its encoding leaves to it.
-programs = ["pdf-fonts/programs"]
+programs = ["pdf-fonts/programs", "pdf-gfx/programs"]
 # pdf-semantics' `clock`: `Date::now` and `Date::from_unix`.
 clock = ["pdf-semantics/clock"]
 # pdf-content-streams' `image-ends`: an inline image's DCT and CCITTFax
@@ -51,7 +53,7 @@ clock = ["pdf-semantics/clock"]
 image-ends = ["pdf-content-streams/image-ends"]
 # pdf-fonts' `predefined-cmaps`: Adobe's predefined CMaps, from hayro-cmap's
 # bundle.
-predefined-cmaps = ["pdf-fonts/predefined-cmaps"]
+predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps"]
 # pdf-content-streams' `simd`: its dependencies' SIMD, chosen as it runs by
 # what the CPU has.
 simd = ["pdf-content-streams/simd"]
@@ -63,6 +65,7 @@ tracing = [
     "pdf-content-streams/tracing",
     "pdf-semantics/tracing",
     "pdf-fonts/tracing",
+    "pdf-gfx/tracing",
     "pdf-linearize/tracing",
 ]
 # pdf-structure's and pdf-linearize's test writer: a new file's encryption

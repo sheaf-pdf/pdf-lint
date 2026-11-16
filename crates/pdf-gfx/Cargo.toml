@@ -1,0 +1,58 @@
+[package]
+name = "pdf-gfx"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-gfx"
+description = "PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder, and vector/text canvas"
+keywords = ["pdf", "graphics", "geometry", "interpreter", "canvas"]
+categories = ["graphics", "parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-color.workspace = true
+pdf-content-streams.workspace = true
+pdf-fonts.workspace = true
+pdf-objects.workspace = true
+pdf-semantics.workspace = true
+thiserror = "2"
+# Optional numeric spans for page interpretation and content re-encoding;
+# without proc macros (`default-features = false`) and with `std` for span guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = ["programs"]
+# Forwards `pdf-fonts/programs` so `Fonts::default()` reads embedded font
+# programs for glyph outline boxes and metrics.
+programs = ["pdf-fonts/programs"]
+# Forwards `pdf-fonts/predefined-cmaps` so Type 0 fonts using Adobe's
+# predefined CJK CMaps resolve character codes and CIDs from the bundle.
+predefined-cmaps = ["pdf-fonts/predefined-cmaps"]
+# Emits `debug`-level `tracing` spans with numeric counts and byte lengths
+# (never file plaintext or stream bytes).
+tracing = [
+    "dep:tracing",
+    "pdf-content-streams/tracing",
+    "pdf-fonts/tracing",
+    "pdf-semantics/tracing",
+]
+
+[package.metadata.docs.rs]
+features = ["predefined-cmaps", "tracing"]
+
+[lib]
+bench = false
+
+[dev-dependencies]
+# Path-only dev-dependencies omitted from the published package manifest so
+# `pdf-gfx` packages cleanly over its zero-I/O library dependencies alone.
+pdf-fixtures = { path = "../pdf-fixtures" }
+pdf-structure = { path = "../pdf-structure" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

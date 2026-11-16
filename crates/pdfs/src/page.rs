@@ -6,10 +6,12 @@
 //! [`pdf_objects::WithStreams`].
 
 use std::fmt;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use pdf_content_streams::{Concat, Join, Limits as ContentLimits, Operations, ResCx};
 use pdf_fonts::{Font, Fonts, Shown};
+use pdf_objects::fault::Sink;
 use pdf_objects::object::Value;
 use pdf_objects::{Dict, Object, Resolve, Streams, Unreadable};
 use pdf_semantics::pages::{self, Inheritable};
@@ -315,6 +317,138 @@ where
         &limits.reading_fonts(),
         budget,
     ))
+}
+
+/// Computes `page`'s 2D geometry ([`pdf_gfx::PageGeom`]): normalized
+/// `/MediaBox` and visible `/CropBox`, `/Rotate` quarter-turn, `/UserUnit`,
+/// optional `/BleedBox`, `/TrimBox`, and `/ArtBox` (resolving indirect array
+/// references via `objects`), and closed-form transforms between PageSpace and
+/// ViewSpace.
+#[must_use]
+pub fn geom<'o, O: Resolve<'o>>(objects: O, page: &pages::Page<'o>) -> pdf_gfx::PageGeom {
+    let base = pdf_gfx::PageGeom::from_page(page);
+    match page.dict {
+        Some(dict) => base.with_page_boxes(objects, dict),
+        None => base,
+    }
+}
+
+/// Interprets `page`'s content stream and drawn Form XObjects (`Do`) under
+/// `limits.gfx` (with `content` and `fonts` synced from `limits`), streaming
+/// typed [`pdf_gfx::Event`]s to `visit` without collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Content`] if `page`'s `/Contents` fails to join under
+/// `limits.content`, or [`Error::Gfx`] if interpretation hits a cap, overflows
+/// `f32`, fails to lex, or encounters an unreadable indirect object/stream.
+pub fn interpret<'o, O>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    opts: pdf_gfx::Opts,
+    visit: impl FnMut(pdf_gfx::Event<'_>) -> ControlFlow<()>,
+) -> Result<pdf_gfx::Summary, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    interpret_with(objects, fonts, page, limits, opts, &mut (), visit)
+}
+
+/// [`interpret`](fn@interpret), reporting recoverable ISO 32000-2 departures
+/// to `sink` ([`pdf_gfx::Fault`]).
+///
+/// # Errors
+///
+/// As [`interpret`](fn@interpret) fails.
+pub fn interpret_with<'o, O, K>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    opts: pdf_gfx::Opts,
+    sink: &mut K,
+    visit: impl FnMut(pdf_gfx::Event<'_>) -> ControlFlow<()>,
+) -> Result<pdf_gfx::Summary, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_gfx::Fault> + ?Sized,
+{
+    phase!(DEBUG, "interpret");
+    let mut join = Join::new(&limits.content);
+    if let Some(contents) = page.dict.and_then(|dict| dict.get(b"Contents")) {
+        join.push_contents(objects, contents)?;
+    }
+    let concat = join.finish();
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let gfx_limits = limits.reading_gfx();
+    Ok(pdf_gfx::interpret_with(
+        objects,
+        &concat,
+        resources,
+        &gfx_limits,
+        fonts,
+        opts,
+        sink,
+        visit,
+    )?)
+}
+
+/// Re-encodes `page`'s content stream and every Form XObject drawn on it into
+/// position-independent `Tm` + `Td` operations ([`pdf_gfx::Encoded`]), without
+/// collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Content`] if `page`'s `/Contents` fails to join under
+/// `limits.content`, or [`Error::Gfx`] if `page` has undecoded streams, capped
+/// inline images, unwritable constructs, or interpretation fails.
+pub fn encode<'o, O>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+) -> Result<pdf_gfx::Encoded, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    encode_with(objects, fonts, page, limits, &mut ())
+}
+
+/// [`encode`](fn@encode), reporting recoverable ISO 32000-2 departures to
+/// `sink` ([`pdf_gfx::Fault`]).
+///
+/// # Errors
+///
+/// As [`encode`](fn@encode) fails.
+pub fn encode_with<'o, O, K>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<pdf_gfx::Encoded, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_gfx::Fault> + ?Sized,
+{
+    phase!(DEBUG, "encode");
+    let mut join = Join::new(&limits.content);
+    if let Some(contents) = page.dict.and_then(|dict| dict.get(b"Contents")) {
+        join.push_contents(objects, contents)?;
+    }
+    let concat = join.finish();
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let gfx_limits = limits.reading_gfx();
+    Ok(pdf_gfx::encode_with(
+        objects,
+        &concat,
+        resources,
+        &gfx_limits,
+        fonts,
+        sink,
+    )?)
 }
 
 /// The dictionary `value` is, as PDFium reaches one (`GetDict`): its own, or a

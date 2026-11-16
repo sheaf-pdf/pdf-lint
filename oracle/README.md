@@ -9,6 +9,7 @@ Several crates emulate PDFium's forgiving behavior when reading real-world PDFsâ
 - `pdf-semantics` (`pages::pages` under `Rules::Pdfium`)
 - `pdf-color` (`components`)
 - `pdf-fonts` (`Font`, `shown`)
+- `pdf-gfx` (`PageGeom`, `interpret`, `encode`)
 - `pdf-linearize` (checked against PDFium's `FPDFAvail_*` incremental-loading API)
 
 To keep behavior reproducible without linking PDFium into any crate, each crate stores small synthetic test cases alongside recorded answers from a pinned PDFium build in `crates/<crate>/tests/pdfium/`.
@@ -63,6 +64,7 @@ Each crate's `tests/pdfium/` directory (excluded from published crates.io packag
 - **`avail`:** Complete `.pdf` (+ optional `.password`) fed incrementally to `FPDFAvail_*` starting from the first 1,024 bytes -> linearization status, bytes fetched per stage, and per-page availability.
 - **`spaces`:** Complete `.pdf` drawing 8x1 unfiltered inline images in named `/ColorSpace`s -> inferred component count from raw image byte length.
 - **`fonts`, `fonts-heights`, `fonts-boxes`:** Complete `.pdf` showing a test string at 1000 pt -> `FPDFText_GetUnicode`, character origins, loose boxes, and outline boxes.
+- **`gfx-geom`, `gfx`:** Complete `.pdf` -> page view dimensions, quarter-turn rotation, and `FPDF_PageToDevice` probes (`gfx-geom`); flattened page and Form XObject leaf objects in PageSpace (paths with stroke styles/dashes, placed image quads, shadings, text render modes, top-level clip paths, nested marked-content stacks) plus non-generated `FPDFText_GetCharOrigin` positions (`gfx`).
 
 ## Bumping the PDFium Pin
 

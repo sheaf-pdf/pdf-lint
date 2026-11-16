@@ -1,0 +1,37 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >> /Bad << /Type /Font /Subtype /Type0 /BaseFont /Bad >> >> /ExtGState << /GSRef << /Font [10 0 R 14] >> /GSName << /Font [/F0 12] >> /GSBad << /Font [/Bad 8] >> >> >> >>
+endobj
+4 0 obj
+<< /Length 106 >>
+stream
+BT /GSRef gs 10 140 Td (AB) Tj /GSName gs 0 -20 Td (CD) Tj /Bad 9 Tf 0 -20 Td (EF) Tj /GSBad gs (GH) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000474 00000 n 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000631 00000 n 
+trailer
+<< /Size 11 /Root 1 0 R >>
+startxref
+727
+%%EOF

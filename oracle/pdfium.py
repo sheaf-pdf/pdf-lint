@@ -51,6 +51,33 @@ def esc(data):
     return "".join(chr(b) if 0x21 <= b <= 0x7E and b != 0x25 else "%%%02X" % b for b in data)
 
 
+def f32(x):
+    """A Python float rounded to IEEE-754 binary32, as PDFium's C++ floats are."""
+    return struct.unpack("<f", struct.pack("<f", float(x)))[0]
+
+
+def mat_mul(l, r):
+    a, b, c, d, e, f = l
+    ra, rb, rc, rd, re, rf = r
+    return (
+        f32(f32(a * ra) + f32(b * rc)),
+        f32(f32(a * rb) + f32(b * rd)),
+        f32(f32(c * ra) + f32(d * rc)),
+        f32(f32(c * rb) + f32(d * rd)),
+        f32(f32(f32(e * ra) + f32(f * rc)) + re),
+        f32(f32(f32(e * rb) + f32(f * rd)) + rf),
+    )
+
+
+def mat_apply(m, x, y):
+    a, b, c, d, e, f = m
+    x, y = f32(x), f32(y)
+    return (
+        f32(f32(f32(a * x) + f32(c * y)) + e),
+        f32(f32(f32(b * x) + f32(d * y)) + f),
+    )
+
+
 def num(x):
     """A number as nine significant digits, which read back to the same
     f32."""
@@ -159,6 +186,7 @@ class Pdfium:
             ("FPDF_GetPageHeightF", F, [P]),
             ("FPDF_GetPageCount", I, [P]),
             ("FPDFPage_GetRotation", I, [P]),
+            ("FPDF_PageToDevice", I, [P, I, I, I, I, I, ctypes.c_double, ctypes.c_double, pi, pi]),
             ("FPDF_GetMetaText", U, [P, ctypes.c_char_p, P, U]),
             ("FPDFPage_CountObjects", I, [P]),
             ("FPDFPage_GetObject", P, [P, I]),
@@ -166,8 +194,16 @@ class Pdfium:
             ("FPDFFormObj_CountObjects", I, [P]),
             ("FPDFFormObj_GetObject", P, [P, U]),
             ("FPDFPageObj_GetMatrix", I, [P, ctypes.POINTER(M)]),
+            ("FPDFPageObj_GetStrokeWidth", I, [P, pf]),
+            ("FPDFPageObj_GetLineCap", I, [P]),
+            ("FPDFPageObj_GetLineJoin", I, [P]),
+            ("FPDFPageObj_GetClipPath", P, [P]),
+            ("FPDFClipPath_CountPaths", I, [P]),
+            ("FPDFClipPath_CountPathSegments", I, [P, I]),
+            ("FPDFClipPath_GetPathSegment", P, [P, I, I]),
             ("FPDFPageObj_CountMarks", I, [P]),
             ("FPDFPageObj_GetMark", P, [P, U]),
+            ("FPDFPageObjMark_GetName", I, [P, P, U, ctypes.POINTER(U)]),
             ("FPDFPageObjMark_GetParamIntValue", I, [P, ctypes.c_char_p, pi]),
             ("FPDFPageObj_GetDashCount", I, [P]),
             ("FPDFPageObj_GetDashArray", I, [P, pf, S]),
@@ -182,15 +218,18 @@ class Pdfium:
             ("FPDFText_ClosePage", None, [P]),
             ("FPDFText_CountChars", I, [P]),
             ("FPDFText_GetUnicode", ctypes.c_uint, [P, I]),
+            ("FPDFText_IsGenerated", I, [P, I]),
             ("FPDFText_GetCharOrigin", I, [P, I, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]),
             ("FPDFText_GetLooseCharBox", I, [P, I, ctypes.POINTER(FSRect)]),
             ("FPDFText_GetCharBox", I, [P, I, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
                                         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]),
             ("FPDFTextObj_GetText", U, [P, P, P, U]),
             ("FPDFTextObj_GetFontSize", I, [P, pf]),
+            ("FPDFTextObj_GetTextRenderMode", I, [P]),
             ("FPDFTextObj_GetFont", P, [P]),
             ("FPDFFont_GetBaseFontName", S, [P, P, S]),
             ("FPDFImageObj_GetImageDataRaw", U, [P, P, U]),
+            ("FPDFImageObj_GetImagePixelSize", I, [P, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]),
             ("FPDFAvail_Create", P, [ctypes.POINTER(FileAvail), ctypes.POINTER(FileAccess)]),
             ("FPDFAvail_Destroy", None, [P]),
             ("FPDFAvail_IsLinearized", I, [P]),
@@ -355,6 +394,148 @@ class Pdfium:
         lib.FPDF_ClosePage(page)
         lib.FPDF_CloseDocument(doc)
         return out
+
+    def gfx_geom(self, data):
+        """Page 0's effective view dimensions, quarter-turn rotation, and
+        FPDF_PageToDevice coordinates at four probe points; None where the
+        page doesn't load."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        page = lib.FPDF_LoadPage(doc, 0) if doc else None
+        if not page:
+            if doc:
+                lib.FPDF_CloseDocument(doc)
+            return None
+        w = lib.FPDF_GetPageWidthF(page)
+        h = lib.FPDF_GetPageHeightF(page)
+        rot = lib.FPDFPage_GetRotation(page)
+        iw, ih = max(int(round(w)), 1), max(int(round(h)), 1)
+        out = ["size", num(w), num(h), "rot", str(rot), "dev"]
+        for px, py in ((0.0, 0.0), (50.0, 80.0), (120.0, 180.0), (220.0, 330.0)):
+            dx, dy = ctypes.c_int(), ctypes.c_int()
+            lib.FPDF_PageToDevice(page, 0, 0, iw, ih, 0, px, py, ctypes.byref(dx), ctypes.byref(dy))
+            out += [str(dx.value), str(dy.value)]
+        lib.FPDF_ClosePage(page)
+        lib.FPDF_CloseDocument(doc)
+        return " ".join(out)
+
+    def gfx(self, data):
+        """Page 0's flattened leaf page objects (recursing into Form XObjects,
+        transforming path segments and image quads into PageSpace, with stroke
+        style, top-level clip paths, and nested marked-content stacks) followed
+        by its text page's placed character origins; None where the page
+        doesn't load."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        page = lib.FPDF_LoadPage(doc, 0) if doc else None
+        if not page:
+            if doc:
+                lib.FPDF_CloseDocument(doc)
+            return None
+        items = []
+
+        def obj_marks(o):
+            res = []
+            for k in range(max(lib.FPDFPageObj_CountMarks(o), 0)):
+                mk = lib.FPDFPageObj_GetMark(o, k)
+                ln = ctypes.c_ulong()
+                tag = b""
+                if lib.FPDFPageObjMark_GetName(mk, None, 0, ctypes.byref(ln)) and ln.value >= 2:
+                    raw = ctypes.create_string_buffer(ln.value)
+                    lib.FPDFPageObjMark_GetName(mk, raw, ln.value, ctypes.byref(ln))
+                    tag = raw.raw[:ln.value - 2].decode("utf-16le", "replace").encode("utf-8")
+                v = ctypes.c_int()
+                mcid = str(v.value) if lib.FPDFPageObjMark_GetParamIntValue(mk, b"MCID", ctypes.byref(v)) else "-"
+                res.append("%s:%s" % (esc(tag), mcid))
+            return res
+
+        def top_clips(o):
+            cp = lib.FPDFPageObj_GetClipPath(o)
+            n = lib.FPDFClipPath_CountPaths(cp) if cp else -1
+            if n < 0:
+                return []
+            words = ["clips", str(n)]
+            for pi in range(n):
+                words.append("[")
+                for si in range(max(lib.FPDFClipPath_CountPathSegments(cp, pi), 0)):
+                    s = lib.FPDFClipPath_GetPathSegment(cp, pi, si)
+                    x, y = ctypes.c_float(), ctypes.c_float()
+                    lib.FPDFPathSegment_GetPoint(s, ctypes.byref(x), ctypes.byref(y))
+                    words += [SEGMENTS.get(lib.FPDFPathSegment_GetType(s), "?"), num(x.value), num(y.value)]
+                    if lib.FPDFPathSegment_GetClose(s):
+                        words.append("h")
+                words.append("]")
+            return words
+
+        def walk(o, parent_m, parent_marks, top):
+            t = TYPES.get(lib.FPDFPageObj_GetType(o), "unknown")
+            m = M()
+            lib.FPDFPageObj_GetMatrix(o, ctypes.byref(m))
+            own_m = (m.a, m.b, m.c, m.d, m.e, m.f)
+            marks = parent_marks + obj_marks(o)
+            if t == "form":
+                world = mat_mul(own_m, parent_m)
+                for i in range(max(lib.FPDFFormObj_CountObjects(o), 0)):
+                    walk(lib.FPDFFormObj_GetObject(o, i), world, marks, False)
+                return
+            world = mat_mul(own_m, parent_m)
+            words = [t]
+            if t == "path":
+                fill, stroke = ctypes.c_int(), ctypes.c_int()
+                lib.FPDFPath_GetDrawMode(o, ctypes.byref(fill), ctypes.byref(stroke))
+                st = int(bool(stroke.value))
+                words += ["fill", str(fill.value), "stroke", str(st)]
+                if st:
+                    w = ctypes.c_float()
+                    lib.FPDFPageObj_GetStrokeWidth(o, ctypes.byref(w))
+                    words += ["w", num(w.value), "cap", str(lib.FPDFPageObj_GetLineCap(o)),
+                              "join", str(lib.FPDFPageObj_GetLineJoin(o))]
+                    dn = lib.FPDFPageObj_GetDashCount(o)
+                    if dn > 0:
+                        dash = (ctypes.c_float * dn)()
+                        lib.FPDFPageObj_GetDashArray(o, dash, dn)
+                        phase = ctypes.c_float()
+                        lib.FPDFPageObj_GetDashPhase(o, ctypes.byref(phase))
+                        words += ["dash"] + [num(x) for x in dash] + ["phase", num(phase.value)]
+                for i in range(lib.FPDFPath_CountSegments(o)):
+                    s = lib.FPDFPath_GetPathSegment(o, i)
+                    x, y = ctypes.c_float(), ctypes.c_float()
+                    lib.FPDFPathSegment_GetPoint(s, ctypes.byref(x), ctypes.byref(y))
+                    px, py = mat_apply(world, x.value, y.value)
+                    words += [SEGMENTS.get(lib.FPDFPathSegment_GetType(s), "?"), num(px), num(py)]
+                    if lib.FPDFPathSegment_GetClose(s):
+                        words.append("h")
+            elif t == "image":
+                pw, ph = ctypes.c_uint(), ctypes.c_uint()
+                lib.FPDFImageObj_GetImagePixelSize(o, ctypes.byref(pw), ctypes.byref(ph))
+                words += ["px", str(pw.value), str(ph.value), "quad"]
+                for ux, uy in ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)):
+                    qx, qy = mat_apply(world, ux, uy)
+                    words += [num(qx), num(qy)]
+            elif t == "text":
+                sz = ctypes.c_float()
+                lib.FPDFTextObj_GetFontSize(o, ctypes.byref(sz))
+                words += ["size", num(sz.value), "mode", str(lib.FPDFTextObj_GetTextRenderMode(o))]
+            if top:
+                words += top_clips(o)
+            if marks:
+                words += ["marks"] + marks
+            items.append(" ".join(words))
+
+        ident = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        for i in range(lib.FPDFPage_CountObjects(page)):
+            walk(lib.FPDFPage_GetObject(page, i), ident, [], True)
+        tp = lib.FPDFText_LoadPage(page)
+        for i in range(lib.FPDFText_CountChars(tp)):
+            if lib.FPDFText_IsGenerated(tp, i) == 1:
+                continue
+            x, y = ctypes.c_double(), ctypes.c_double()
+            lib.FPDFText_GetCharOrigin(tp, i, ctypes.byref(x), ctypes.byref(y))
+            items.append("char %04x %s %s" % (lib.FPDFText_GetUnicode(tp, i), num(x.value), num(y.value)))
+        lib.FPDFText_ClosePage(tp)
+        lib.FPDF_ClosePage(page)
+        lib.FPDF_CloseDocument(doc)
+        return items
 
     def pages(self, data):
         """What a file's page tree comes to: the count PDFium gives, then, in
@@ -533,6 +714,11 @@ def answer(pdfium, kind, files):
         return spaces_answer(pdfium.image_sizes(files["pdf"]))
     if kind in ("fonts", "fonts-heights", "fonts-boxes"):
         return content_answer(pdfium.text_chars(files["pdf"], kind == "fonts-heights", kind == "fonts-boxes"))
+    if kind == "gfx-geom":
+        geom = pdfium.gfx_geom(files["pdf"])
+        return "no-page" if geom is None else geom
+    if kind == "gfx":
+        return content_answer(pdfium.gfx(files["pdf"]))
     raise SystemExit("unknown kind %r" % kind)
 
 

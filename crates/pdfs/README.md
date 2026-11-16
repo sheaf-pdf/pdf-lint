@@ -33,7 +33,7 @@ for page in &pages {
 }
 ```
 
-`Page::text` extracts strings in content-stream drawing order (including nested Form XObjects), matching PDFium's text extraction rules without spatial layout reconstruction. `Page::content` returns the page's decoded, concatenated content streams and parsed operators.
+`Page::text` extracts strings in content-stream drawing order (including nested Form XObjects), matching PDFium's text extraction rules without spatial layout reconstruction. `Page::geom` computes normalized page boundary boxes and closed-form `PageSpace <-> ViewSpace` transforms, `Page::interpret` runs the bounded graphics/text state machine to stream placed paths, glyph origins/quads, images, shadings, clips, and marked content, `Page::encode` re-encodes streams into position-independent `Tm` + `Td` operations, and `Page::content` returns the page's decoded, concatenated content streams and parsed operators.
 
 ## Drawing Pages with Standard 14 Fonts
 
@@ -166,6 +166,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
 - **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, `/Info` dictionaries, and XMP conformance claims.
 - **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, and text extraction.
+- **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, and vector/text `Canvas`.
 - **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — Linearized PDF layout engine, hint tables, and validator.
 
 ## Key Guarantees
