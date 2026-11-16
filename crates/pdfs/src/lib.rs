@@ -11,10 +11,11 @@
 //!   or [`from_bytes`] (in-memory buffers or custom [`pdf_structure::ByteSource`]s),
 //!   configured with [`Options`]. Objects are parsed on demand and cached
 //!   safely across threads on [`Pdf`].
-//! - **Inspect pages, geometry, and graphics** with [`Pdf::pages`], [`Page::geom`],
-//!   [`Page::content`], [`Page::interpret`], and [`Page::encode`] (2D page
-//!   transforms, placed paths, glyph origins/quads, images, shadings, clips,
-//!   marked content, and position-independent content re-encoding).
+//! - **Inspect pages, geometry, annotations, and graphics** with [`Pdf::pages`],
+//!   [`Page::geom`], [`Page::annots`], [`Page::content`], [`Page::interpret`],
+//!   and [`Page::encode`] (2D page transforms, annotations/links/destinations,
+//!   placed paths, glyph origins/quads, images, shadings, clips, marked
+//!   content, and position-independent content re-encoding).
 //! - **Extract text and fonts** with [`Page::text`] and [`Page::fonts`] in
 //!   content-stream order, or use `Page::text_page` and `Page::search`
 //!   (`text-layout` feature) for spatial reading order, `unicode-bidi` RTL
@@ -124,7 +125,7 @@ pub use pdf_color;
 /// PDF content stream lexing, typed operators, graphics-state checks, splicing, and writing.
 pub use pdf_content_streams;
 
-/// Common PDF structures: dates, name/number trees, page trees, `/Info`, and XMP claims.
+/// Common PDF structures: dates, name/number trees, page trees, destinations, actions, `/Info`, and XMP claims.
 pub use pdf_semantics;
 
 /// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, and text extraction.
@@ -132,6 +133,9 @@ pub use pdf_fonts;
 
 /// PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder, and vector/text canvas.
 pub use pdf_gfx;
+
+/// PDF annotations, appearance synthesis, builders, reply threads, and zero-I/O page flattening.
+pub use pdf_annots;
 
 /// Linearized ("Fast Web View") PDF layout engine, hint tables, and validator.
 pub use pdf_linearize;
@@ -206,6 +210,11 @@ mod tests {
         shared::<pdf_gfx::Canvas>();
         shared::<pdf_gfx::Limits>();
         shared::<pdf_gfx::Error>();
+        shared::<pdf_annots::Annot<'static>>();
+        shared::<pdf_annots::BuiltAnnot>();
+        shared::<pdf_annots::FlattenPlan>();
+        shared::<pdf_annots::Limits>();
+        shared::<pdf_annots::Error>();
         #[cfg(feature = "text-layout")]
         {
             shared::<pdf_gfx::TextPage>();
@@ -279,6 +288,86 @@ mod tests {
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].chars, 0..6);
         }
+    }
+
+    #[test]
+    fn annotations_destinations_and_incremental_flattening_round_trip() {
+        use std::ops::ControlFlow;
+
+        use crate::pdf_gfx::{Kind, Opts};
+        use crate::prelude::*;
+
+        let mut doc = Document::new();
+        {
+            let p1 = doc.add_page(Rect::LETTER);
+            p1.begin_text();
+            p1.font(standard_font(Std14::Helvetica), 14.0);
+            p1.text_move(72.0, 700.0);
+            p1.show(&Std14::Helvetica.codes("See page 2").unwrap());
+            p1.end_text();
+        }
+        doc.add_page(Rect::LETTER);
+
+        let ids = doc.page_ids().unwrap();
+        let (p1_id, p2_id) = (ids[0].unwrap(), ids[1].unwrap());
+        doc.add_annot(
+            p1_id,
+            BuiltAnnot::link_dest(
+                pdf_gfx::Rect::new(72.0, 696.0, 160.0, 716.0),
+                &Dest::fit(p2_id),
+            ),
+        )
+        .unwrap();
+        doc.add_annot(
+            p1_id,
+            BuiltAnnot::text_markup(
+                TextMarkupKind::Highlight,
+                &[QuadPoints([
+                    72.0, 716.0, 160.0, 716.0, 72.0, 696.0, 160.0, 696.0,
+                ])],
+                AnnotColor::Rgb([1.0, 0.95, 0.2]),
+                0.6,
+            ),
+        )
+        .unwrap();
+
+        let base_bytes = doc.to_bytes().unwrap();
+        let pdf = crate::from_bytes(&base_bytes[..]).unwrap();
+        let pages = pdf.pages().unwrap();
+        let dests = pages.dests().unwrap();
+        let page0 = pages.get(0).unwrap();
+        let annots = page0.annots().unwrap();
+        assert_eq!(annots.len(), 2);
+        let TypedAnnot::Link(lnk) = annots[0].typed() else {
+            panic!("expected Link");
+        };
+        let resolved = dests
+            .resolve(lnk.effective_dest().unwrap(), Rules::Pdfium, &mut ())
+            .unwrap();
+        assert_eq!(resolved.page_index, 1);
+
+        // Edit and flatten via an incremental update!
+        let mut edited = pdf.edit().unwrap();
+        let plan = edited.flatten_page(p1_id, FlattenOpts::DEFAULT).unwrap();
+        assert_eq!(plan.drawn_count, 1);
+        assert_eq!(plan.removed_count, 2);
+        let mut update = Vec::new();
+        edited.save_update_to(&mut update).unwrap();
+
+        let flattened_pdf = crate::from_bytes([&base_bytes[..], &update[..]].concat()).unwrap();
+        let fpages = flattened_pdf.pages().unwrap();
+        let fp0 = fpages.get(0).unwrap();
+        assert!(fp0.annots().unwrap().is_empty());
+        assert_eq!(fp0.text().unwrap().text(), "See page 2");
+        let mut paths = 0;
+        fp0.interpret(Opts::default(), |ev| {
+            if matches!(ev.kind, Kind::Path(_)) {
+                paths += 1;
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        assert_eq!(paths, 1);
     }
 }
 

@@ -13,6 +13,7 @@ use pdf_content_streams::{Concat, Join, Limits as ContentLimits, Operations, Res
 use pdf_fonts::{Font, Fonts, Shown};
 use pdf_objects::fault::Sink;
 use pdf_objects::object::Value;
+use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, Object, Resolve, Streams, Unreadable};
 use pdf_semantics::pages::{self, Inheritable};
 
@@ -331,6 +332,80 @@ pub fn geom<'o, O: Resolve<'o>>(objects: O, page: &pages::Page<'o>) -> pdf_gfx::
         Some(dict) => base.with_page_boxes(objects, dict),
         None => base,
     }
+}
+
+/// Reads `page`'s `/Annots` array under `rules` and `limits.annots` without
+/// collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Annots`] if an annotation or action chain exceeds a cap or hits a
+/// locked/unreadable object.
+pub fn annots<'o, O: Resolve<'o>>(
+    objects: O,
+    page: &pages::Page<'o>,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<Vec<pdf_annots::Annot<'o>>, Error> {
+    annots_with(objects, page, rules, limits, &mut ())
+}
+
+/// [`annots`](fn@annots), reporting recoverable ISO 32000-2 departures to
+/// `sink` ([`pdf_annots::Fault`]).
+///
+/// # Errors
+///
+/// As [`annots`](fn@annots) fails.
+pub fn annots_with<'o, O, K>(
+    objects: O,
+    page: &pages::Page<'o>,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<Vec<pdf_annots::Annot<'o>>, Error>
+where
+    O: Resolve<'o>,
+    K: Sink<pdf_annots::Fault> + ?Sized,
+{
+    let Some(dict) = page.dict else {
+        return Ok(Vec::new());
+    };
+    let annots_limits = limits.reading_annots();
+    Ok(pdf_annots::page_annots_with(
+        objects,
+        dict,
+        page.id,
+        rules,
+        &annots_limits,
+        sink,
+    )?)
+}
+
+/// Plans flattening of `page`'s annotations according to `opts`
+/// ([`pdf_annots::plan_flatten`]).
+///
+/// # Errors
+///
+/// [`Error::Annots`] if `/Annots` or an appearance Form XObject fails to read.
+pub fn plan_flatten<'o, O: Resolve<'o> + Copy>(
+    objects: O,
+    page: &pages::Page<'o>,
+    opts: pdf_annots::FlattenOpts,
+    limits: &Limits,
+) -> Result<pdf_annots::FlattenPlan, Error> {
+    let Some(dict) = page.dict else {
+        return Ok(pdf_annots::FlattenPlan::default());
+    };
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let annots_limits = limits.reading_annots();
+    Ok(pdf_annots::plan_flatten(
+        objects,
+        dict,
+        page.id,
+        resources,
+        opts,
+        &annots_limits,
+    )?)
 }
 
 /// Interprets `page`'s content stream and drawn Form XObjects (`Do`) under

@@ -54,6 +54,10 @@ pub enum Error {
     /// or re-encoding (`pdf-gfx`'s).
     #[error("{0}")]
     Gfx(pdf_gfx::Error),
+    /// Reading or flattening annotations, destinations, or actions failed
+    /// (`pdf-annots`'s / `pdf-semantics`'s).
+    #[error("{0}")]
+    Annots(pdf_annots::Error),
     /// The metadata stream's packet wasn't read (pdf-semantics'). Boxed, as
     /// it holds what was read, which would make every result of the facade's
     /// as large. Its `Debug` gives the claims read and the XML reader's words
@@ -143,6 +147,24 @@ impl From<Pushed<Unreadable>> for Error {
 impl From<pdf_gfx::Error> for Error {
     fn from(error: pdf_gfx::Error) -> Error {
         Error::Gfx(error)
+    }
+}
+
+impl From<pdf_annots::Error> for Error {
+    fn from(error: pdf_annots::Error) -> Error {
+        Error::Annots(error)
+    }
+}
+
+impl From<pdf_semantics::dest::Error> for Error {
+    fn from(error: pdf_semantics::dest::Error) -> Error {
+        Error::Annots(pdf_annots::Error::from(error))
+    }
+}
+
+impl From<pdf_semantics::action::Error> for Error {
+    fn from(error: pdf_semantics::action::Error) -> Error {
+        Error::Annots(pdf_annots::Error::from(error))
     }
 }
 

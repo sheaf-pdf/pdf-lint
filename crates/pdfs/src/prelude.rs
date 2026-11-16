@@ -12,6 +12,10 @@ pub use crate::{
     standard_font,
 };
 
+pub use pdf_annots::{
+    Annot, AnnotColor, AnnotFlags, AnnotMut, AnnotSubtype, BuiltAnnot, FlattenOpts, FlattenTarget,
+    PaintStyle, QuadPoints, TextMarkupKind, TypedAnnot,
+};
 pub use pdf_content_streams::{Color, ContentWriter, Paint, Res};
 pub use pdf_crypt::{Encoded, Password, Permissions, Protection};
 pub use pdf_fonts::{Font, Shown, ShownString, Std14, Unread};
@@ -24,6 +28,8 @@ pub use pdf_linearize::check::Verdict;
 pub use pdf_objects::pdf_tokenizer::Rules;
 pub use pdf_objects::version::Version;
 pub use pdf_objects::{Dict, Object, ObjectId, Why};
+pub use pdf_semantics::action::{Action, OpenAction};
+pub use pdf_semantics::dest::{Dest, DestFit, DestTable, ResolvedDest};
 pub use pdf_semantics::info::Info;
 pub use pdf_semantics::pages::Rect;
 pub use pdf_semantics::xmp::Claims;

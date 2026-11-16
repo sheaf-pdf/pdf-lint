@@ -224,6 +224,62 @@ impl<'p> Document<'p> {
         &mut self.added[at].writer
     }
 
+    /// Returns the indirect `ObjectId`s of all pages currently in the document
+    /// (flushing any newly added pages into the in-memory page tree first).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if flushing added pages fails or the catalog/page tree
+    /// cannot be walked.
+    pub fn page_ids(&mut self) -> Result<Vec<Option<ObjectId>>, Error> {
+        self.place(deflate())?;
+        let catalog = self.doc.catalog().ok_or(Error::NoCatalog)?;
+        let table = pages::pages(
+            &self.doc,
+            catalog,
+            pdf_objects::pdf_tokenizer::Rules::Pdfium,
+            &self.limits.semantics,
+            &mut (),
+        )?;
+        Ok(table.iter().map(|p| p.id).collect())
+    }
+
+    /// Writes `built` (and any synthesized `/AP /N` / `/RO` streams, deflated)
+    /// into the document and appends it to `page_id`'s `/Annots` array
+    /// ([`build::add_annot`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`build::add_annot`] fails, or if flushing pending added pages fails.
+    pub fn add_annot(
+        &mut self,
+        page_id: ObjectId,
+        built: pdf_annots::BuiltAnnot,
+    ) -> Result<ObjectId, Error> {
+        if !self.added.is_empty() {
+            self.place(deflate())?;
+        }
+        build::add_annot(&mut self.doc, page_id, built, deflate())
+    }
+
+    /// Flattens eligible annotations on `page_id` into its page content stream
+    /// according to `opts` ([`build::flatten_page`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`build::flatten_page`] fails, or if flushing pending added pages
+    /// fails.
+    pub fn flatten_page(
+        &mut self,
+        page_id: ObjectId,
+        opts: pdf_annots::FlattenOpts,
+    ) -> Result<pdf_annots::FlattenPlan, Error> {
+        if !self.added.is_empty() {
+            self.place(deflate())?;
+        }
+        build::flatten_page(&mut self.doc, page_id, opts, &self.limits, deflate())
+    }
+
     /// What `claims` says written as its catalog's metadata stream, an XMP
     /// packet, as [`build::claim`] writes it.
     ///

@@ -284,6 +284,29 @@ impl<S: ByteSource> Pdf<S> {
         file::claims(&self.reading, &self.limits.semantics, sink)
     }
 
+    /// Reads the catalog's `/OpenAction` entry (ISO 32000-2, 7.7.2, Table 29),
+    /// if present, without collecting non-fatal faults.
+    ///
+    /// # Errors
+    ///
+    /// As [`file::open_action`] fails.
+    pub fn open_action(&self) -> Result<Option<pdf_semantics::action::OpenAction>, Error> {
+        self.open_action_with(&mut ())
+    }
+
+    /// [`Pdf::open_action`], reporting recoverable ISO 32000-2 departures to
+    /// `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::open_action`] fails.
+    pub fn open_action_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Option<pdf_semantics::action::OpenAction>, Error> {
+        file::open_action(&self.reading, self.rules, &self.limits.semantics, sink)
+    }
+
     /// Its pages, in order, as its page tree lists them by its rules, each
     /// with what it inherits and from where (pdf-semantics'
     /// [`pages::pages`]). Nothing departing from the clause is told:
@@ -494,6 +517,36 @@ impl<'p, S: ByteSource> Pages<'p, S> {
     pub fn into_table(self) -> pages::Pages<'p> {
         self.table
     }
+
+    /// Builds a [`DestTable`](pdf_semantics::dest::DestTable) indexing named and
+    /// page-reference destinations across the document without collecting
+    /// non-fatal faults.
+    ///
+    /// # Errors
+    ///
+    /// As [`file::dests`] fails.
+    pub fn dests(&self) -> Result<pdf_semantics::dest::DestTable, Error> {
+        self.dests_with(&mut ())
+    }
+
+    /// [`Pages::dests`], reporting recoverable ISO 32000-2 departures to
+    /// `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pages::dests`] fails.
+    pub fn dests_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<pdf_semantics::dest::DestTable, Error> {
+        file::dests(
+            &self.pdf.reading,
+            &self.table,
+            self.pdf.rules,
+            &self.pdf.limits.semantics,
+            sink,
+        )
+    }
 }
 
 impl<'a, S: ByteSource> IntoIterator for &'a Pages<'_, S> {
@@ -627,6 +680,43 @@ impl<'a, S: ByteSource> Page<'a, S> {
     #[must_use]
     pub fn geom(&self) -> pdf_gfx::PageGeom {
         page::geom(&self.pdf.reading, self.page)
+    }
+
+    /// Reads the page's `/Annots` array under the file's rules and
+    /// [`Limits::annots`] without collecting non-fatal faults.
+    ///
+    /// # Errors
+    ///
+    /// As [`page::annots`](fn@page::annots) fails.
+    pub fn annots(&self) -> Result<Vec<pdf_annots::Annot<'a>>, Error> {
+        self.annots_with(&mut ())
+    }
+
+    /// [`Page::annots`], reporting recoverable ISO 32000-2 departures to `sink`
+    /// ([`pdf_annots::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::annots`] fails.
+    pub fn annots_with<K: Sink<pdf_annots::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Vec<pdf_annots::Annot<'a>>, Error> {
+        let pdf = self.pdf;
+        page::annots_with(&pdf.reading, self.page, pdf.rules, &pdf.limits, sink)
+    }
+
+    /// Plans flattening of eligible annotations on this page according to
+    /// `opts` ([`page::plan_flatten`](fn@page::plan_flatten)).
+    ///
+    /// # Errors
+    ///
+    /// As [`page::plan_flatten`](fn@page::plan_flatten) fails.
+    pub fn plan_flatten(
+        &self,
+        opts: pdf_annots::FlattenOpts,
+    ) -> Result<pdf_annots::FlattenPlan, Error> {
+        page::plan_flatten(&self.pdf.reading, self.page, opts, &self.pdf.limits)
     }
 
     /// Its content: its streams decoded and joined under

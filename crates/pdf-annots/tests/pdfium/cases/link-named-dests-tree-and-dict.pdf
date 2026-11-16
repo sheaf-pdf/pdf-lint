@@ -1,0 +1,29 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names [(chap1) << /D [4 0 R /XYZ 0 700 null] >> (in_tree_by_name) [4 0 R /FitB] (shared) [4 0 R /Fit]] >> >> /Dests << /legacy_sec [5 0 R /FitH 500] /shared [5 0 R /Fit] /in_dict_by_str << /D [5 0 R /FitV 36] >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Subtype /Link /Rect [0 0 10 10] /Dest (chap1) >> << /Subtype /Link /Rect [0 0 10 10] /Dest /legacy_sec >> << /Subtype /Link /Rect [0 0 10 10] /Dest (shared) >> << /Subtype /Link /Rect [0 0 10 10] /Dest /in_tree_by_name >> << /Subtype /Link /Rect [0 0 10 10] /Dest (in_dict_by_str) >> << /Subtype /Link /Rect [0 0 10 10] /Dest (missing_dest) >>] >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000294 00000 n 
+0000000363 00000 n 
+0000000792 00000 n 
+0000000863 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+934
+%%EOF

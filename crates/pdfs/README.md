@@ -164,9 +164,10 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **[pdf-structure](https://crates.io/crates/pdf-structure)** — Cross-reference tables/streams, object streams, lazy `Reading`, in-memory `Document`, and full/incremental writers (`Pdf::reading`, `Document::structure`).
 - **[pdf-color](https://crates.io/crates/pdf-color)** — Color space parsing and component counting.
 - **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
-- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, `/Info` dictionaries, and XMP conformance claims.
+- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, destinations, actions, `/Info` dictionaries, and XMP conformance claims.
 - **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, and text extraction.
 - **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
+- **[pdf-annots](https://crates.io/crates/pdf-annots)** — Page annotations (`Page::annots`), typed subtype inspection, `/AP` placement and synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`Document::flatten_page`).
 - **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — Linearized PDF layout engine, hint tables, and validator.
 
 ## Key Guarantees
