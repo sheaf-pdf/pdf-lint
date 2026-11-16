@@ -720,7 +720,9 @@ pub enum Rule {
     /// object without `endobj`, a name's stray `#` or `#00`, a
     /// cross-reference table's rows not 20 bytes, a file whose last line
     /// isn't `%%EOF` alone, an object an object stream's header starts
-    /// inside another's bytes, and the like ([`Fault`]), in its words.
+    /// inside another's bytes, and the like ([`Fault`]), in its words. Not
+    /// bytes before the header, which ISO 32000-2 allows (7.5.2): the file's
+    /// offsets count from the header, so nothing is chosen there.
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
@@ -4466,9 +4468,14 @@ impl<'a> Walk<'a> {
 
     /// The reader's faults in held objects, and those of the file as a
     /// whole as the trailer's, each a [`Rule::Reader`] finding in its
-    /// words.
+    /// words; but bytes before the header (`HeaderAt`), which ISO 32000-2
+    /// allows (7.5.2), and which the reader reads past, counting the
+    /// file's offsets from the header, with nothing to choose.
     fn read_as(&mut self, faults: &[(pdf_objects::fault::Place, Fault)]) {
         for (place, fault) in faults {
+            if let Fault::HeaderAt { .. } = fault {
+                continue;
+            }
             let Some(made) = self.made(place.object) else {
                 continue;
             };
@@ -10776,6 +10783,52 @@ mod tests {
             report.findings.iter().all(|f| f.rule != Rule::Reader),
             "{report}"
         );
+    }
+
+    /// Bytes before `%PDF-`, which ISO 32000-2 allows (7.5.2), are no
+    /// finding, though the reader tells where the header is: it counts the
+    /// file's offsets from there, so nothing is chosen. What it had to
+    /// choose beside them, a lone CR after `stream`, is found as without
+    /// them, its bytes past them.
+    #[test]
+    fn bytes_before_the_header_are_no_finding() {
+        let file = fixture::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                (
+                    3,
+                    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
+                      /Contents 4 0 R >>",
+                ),
+                (4, b"<< /Length 3 >>stream\rq Q\nendstream"),
+            ],
+            "<< /Size 5 /Root 1 0 R >>",
+        );
+        let junk = b"junk the header is past\n";
+        let after = [&junk[..], &file].concat();
+        let doc = bytes::document(&after, &bytes::Options::DEFAULT);
+        let told = (doc.faults().iter()).any(|(_, f)| *f == Fault::HeaderAt { at: junk.len() });
+        assert!(told, "{:?}", doc.faults());
+        let read = |bytes: &[u8]| -> Vec<(Option<ObjectId>, String, String)> {
+            let report = checked_as(bytes, &Hold::All(Made::Built));
+            (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| (f.object, f.value.clone(), bytes_at(bytes, f).to_string()))
+                .collect()
+        };
+        let lone = "a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF";
+        let found = [(
+            Some(ObjectId::new(4, 0)),
+            lone.to_string(),
+            "\r".to_string(),
+        )];
+        assert_eq!(read(&file), found);
+        assert_eq!(read(&after), found);
+        let report = checked_as(&after, &Hold::All(Made::Built));
+        let at = (report.findings.iter()).find_map(|f| f.at).unwrap();
+        assert_eq!(at.start(), junk.len() + find(&file, b"stream\r") + 6);
     }
 
     /// A real too small for 64 bits, its digits not all zero, which the
