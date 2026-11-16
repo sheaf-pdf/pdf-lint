@@ -108,6 +108,14 @@ pub enum Error {
     /// nothing was written.
     #[error("the file is the one the document is read from, by position, so it isn't written over")]
     SameFile,
+    /// A font program wasn't embedded (pdf-fonts'): it isn't a TrueType
+    /// program it opens, or its licence doesn't let it be embedded
+    /// ([`Document::embed_font`](crate::Document::embed_font)); or, at a
+    /// save, the font wasn't written, its program not cut to the glyphs
+    /// drawn in it. Nothing was written.
+    #[cfg(feature = "embed")]
+    #[error("{0}")]
+    Embed(pdf_fonts::embed::Error),
 }
 
 impl From<io::Error> for Error {
@@ -161,6 +169,13 @@ impl From<pdf_linearize::family::Error> for Error {
 impl From<write::Error> for Error {
     fn from(error: write::Error) -> Error {
         Error::Write(error)
+    }
+}
+
+#[cfg(feature = "embed")]
+impl From<pdf_fonts::embed::Error> for Error {
+    fn from(error: pdf_fonts::embed::Error) -> Error {
+        Error::Embed(error)
     }
 }
 

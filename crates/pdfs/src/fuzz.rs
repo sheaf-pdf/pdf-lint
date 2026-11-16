@@ -21,6 +21,18 @@ use pdf_content_streams::Reserved;
 use pdf_semantics::pages::Rect;
 use pdf_structure::XrefKind;
 
+#[cfg(feature = "embed")]
+use std::collections::BTreeMap;
+
+#[cfg(feature = "embed")]
+use pdf_content_streams::ContentWriter;
+#[cfg(feature = "embed")]
+use pdf_fonts::embed;
+#[cfg(feature = "embed")]
+use pdf_objects::{Dict, Object, Resolve, Streams};
+#[cfg(feature = "embed")]
+use pdf_semantics::pages::Inheritable;
+
 use crate::{Document, Error, Limits, Options, Pdf};
 
 /// The password of what [`read`] writes under a new encryption.
@@ -382,6 +394,15 @@ fn encrypted(data: &[u8], pdf: &Pdf<&[u8]>, reached: &mut Reached) {
 /// How many of an input's pages [`write`] writes a document of.
 const WRITTEN: usize = 3;
 
+/// How many characters of a page's text [`write`] draws in the font it
+/// embeds, at most.
+#[cfg(feature = "embed")]
+const DRAWN: usize = 64;
+
+/// How long a program [`write`] embeds is, at most, decoded.
+#[cfg(feature = "embed")]
+const PROGRAM: usize = 1 << 20;
+
 /// What [`write`] wrote of an input, for the tests to say each kind was met.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Wrote {
@@ -394,11 +415,24 @@ pub struct Wrote {
     pub unlocked: usize,
     /// Documents of no page, refused.
     pub refused: usize,
+    /// Inputs whose own program a font was embedded from.
+    pub fonts: usize,
+    /// Pages that drew text in it, read back as drawn.
+    pub embedded: usize,
 }
 
 /// A page read back: its box and its text, by its strings' text and how many
 /// things weren't read.
 type Back = (Rect, Result<(String, usize), String>);
+
+/// A page [`write`] wrote: its content, and what it drew first in the font
+/// embedded from the input's program, its codes and their text, where it
+/// drew any.
+#[derive(Debug)]
+struct Written {
+    content: Vec<u8>,
+    embedded: Option<(Vec<u8>, String)>,
+}
 
 /// `data` read as a file by the facade, and a new document written of its
 /// first pages, each of its box, a box not finite Letter's, and its content
@@ -410,6 +444,15 @@ type Back = (Rect, Result<(String, usize), String>);
 /// whole; the encrypted one locked with no password, and unlocked by the
 /// password as in the clear. A document of no page is refused, nothing
 /// written. The new encryption is as [`read`]'s.
+///
+/// With `embed`, the first TrueType program its first pages' fonts embed
+/// (`/FontFile2`, a simple font's or a Type 0 font's CIDFont's), decoded, is
+/// embedded in the new document, whatever its licence says, and each page's
+/// text, as much as it draws with glyphs of their own, drawn in it first on
+/// the page by its codes: the font written at every save, the document saved
+/// whole twice the same bytes, and in each kind the first string each page
+/// shows its codes, read back as the text drawn. Or the save is refused for
+/// the font, nothing written.
 pub fn write(data: &[u8]) -> Wrote {
     let mut wrote = Wrote::default();
     let pdf = Options::DEFAULT
@@ -417,6 +460,12 @@ pub fn write(data: &[u8]) -> Wrote {
         .expect("bytes in memory open");
     let mut doc = Document::new();
     let mut written = Vec::new();
+    #[cfg(feature = "embed")]
+    let mut font = Embedded::of(&pdf, &mut doc);
+    #[cfg(feature = "embed")]
+    {
+        wrote.fonts = usize::from(font.is_some());
+    }
     if let Ok(pages) = pdf.pages() {
         for page in pages.iter().take(WRITTEN) {
             let Ok(content) = page.content() else {
@@ -426,6 +475,10 @@ pub fn write(data: &[u8]) -> Wrote {
             let finite = media_box.0.iter().all(|x| x.is_finite());
             let media_box = if finite { media_box } else { Rect::LETTER };
             let writer = doc.add_page(media_box);
+            #[cfg(feature = "embed")]
+            let embedded = font.as_mut().and_then(|font| font.draw(writer, page));
+            #[cfg(not(feature = "embed"))]
+            let embedded = None;
             for operation in content.operations() {
                 let Ok(operation) = operation else {
                     break;
@@ -436,7 +489,8 @@ pub fn write(data: &[u8]) -> Wrote {
                     None => writer.operation(operands, operation.name()),
                 }
             }
-            written.push(writer.named(&Reserved::default()).0);
+            let content = writer.named(&Reserved::default()).0;
+            written.push(Written { content, embedded });
         }
     }
     wrote.pages = written.len();
@@ -448,7 +502,21 @@ pub fn write(data: &[u8]) -> Wrote {
         wrote.refused += 1;
         return wrote;
     }
-    let whole = doc.to_bytes().expect("a document of pages is written");
+    let whole = match doc.save_to(&mut out) {
+        Ok(_) => out.split_off(b"before".len()),
+        // The input's program, not cut to the glyphs drawn.
+        #[cfg(feature = "embed")]
+        Err(Error::Embed(_)) if font.is_some() => {
+            assert_eq!(out, b"before", "nothing written");
+            return wrote;
+        }
+        Err(error) => panic!("a document of pages is written: {error}"),
+    };
+    #[cfg(feature = "embed")]
+    if font.is_some() {
+        let again = doc.to_bytes().expect("a document written is written again");
+        assert!(again == whole, "saved again otherwise");
+    }
     let mut options = doc.save_options();
     options.kind = XrefKind::Table;
     options.pack = None;
@@ -464,6 +532,10 @@ pub fn write(data: &[u8]) -> Wrote {
     for file in [&table, &linearized] {
         assert_eq!(back(file, &written), wanted, "read back otherwise");
     }
+    wrote.embedded = written
+        .iter()
+        .filter(|page| page.embedded.is_some())
+        .count();
     let verdict = Options::DEFAULT
         .from_bytes(&linearized[..])
         .unwrap()
@@ -498,7 +570,7 @@ pub fn write(data: &[u8]) -> Wrote {
 }
 
 /// `file`'s pages read back, held to have the content `written` is.
-fn back(file: &[u8], written: &[Vec<u8>]) -> Vec<Back> {
+fn back(file: &[u8], written: &[Written]) -> Vec<Back> {
     let pdf = Options::DEFAULT
         .from_bytes(file)
         .expect("bytes in memory open");
@@ -506,18 +578,144 @@ fn back(file: &[u8], written: &[Vec<u8>]) -> Vec<Back> {
 }
 
 /// `pdf`'s pages read back, held to be as many as `written` and each its
-/// content.
-fn read_back<S: ByteSource>(pdf: &Pdf<S>, written: &[Vec<u8>]) -> Vec<Back> {
+/// content; a page that drew text in an embedded font first, its first
+/// string those codes, read as the text drawn.
+fn read_back<S: ByteSource>(pdf: &Pdf<S>, written: &[Written]) -> Vec<Back> {
     let pages = pdf.pages().expect("a page tree written reads");
     assert_eq!(pages.len(), written.len(), "the pages written");
-    let read = |(page, written): (crate::Page<'_, S>, &Vec<u8>)| {
+    let read = |(page, written): (crate::Page<'_, S>, &Written)| {
         let content = page.content().expect("content written reads");
-        assert_eq!(content.bytes(), &written[..], "the content written");
+        assert_eq!(content.bytes(), &written.content[..], "the content written");
         let text = page.text().map_err(|error| error.to_string());
+        if let Some((codes, drawn)) = &written.embedded {
+            let shown = text.as_ref().expect("text drawn reads");
+            let first = shown.strings.first().expect("the text drawn is shown");
+            assert_eq!(&first.bytes, codes, "the codes drawn first");
+            assert_eq!(
+                first.text().as_ref(),
+                Some(drawn),
+                "read otherwise than drawn"
+            );
+        }
         let text = text.map(|text| (text.text(), text.unread.len()));
         (page.attributes().media_box().value, text)
     };
     pages.iter().zip(written).map(read).collect()
+}
+
+/// The font [`write`] draws an input's text in: the input's program
+/// embedded in the document written, and the character each glyph drawn
+/// draws, so that no other is drawn with it, as text is kept a glyph.
+#[cfg(feature = "embed")]
+struct Embedded {
+    font: crate::EmbeddedFont,
+    drawn: BTreeMap<u16, char>,
+}
+
+#[cfg(feature = "embed")]
+impl Embedded {
+    /// The program `pdf`'s first pages' fonts embed first, embedded in `doc`
+    /// whatever its licence says; none where there's none, or it isn't one
+    /// a font is embedded from.
+    fn of<S: ByteSource>(pdf: &Pdf<S>, doc: &mut Document<'_>) -> Option<Embedded> {
+        let program = program(pdf)?;
+        let mut options = embed::Options::default();
+        options.restricted = true;
+        let font = doc.embed_font_with(program, 0, &options).ok()?;
+        Some(Embedded {
+            font,
+            drawn: BTreeMap::new(),
+        })
+    }
+
+    /// `page`'s text, its first [`DRAWN`] characters, as much as the program
+    /// draws with glyphs no other character drew, drawn in the font on
+    /// `writer`, which has nothing yet: the codes drawn and their text, none
+    /// where nothing is. U+FFFF alone is left out, as it reads as no text.
+    fn draw<S: ByteSource>(
+        &mut self,
+        writer: &mut ContentWriter,
+        page: crate::Page<'_, S>,
+    ) -> Option<(Vec<u8>, String)> {
+        let text = page.text().ok()?.text();
+        let program = self.font.program();
+        let mut kept = String::new();
+        for c in text.chars().take(DRAWN).filter(|&c| c != '\u{FFFF}') {
+            let Some(glyph) = program.glyph(c) else {
+                continue;
+            };
+            if *self.drawn.entry(glyph).or_insert(c) == c {
+                kept.push(c);
+            }
+        }
+        if kept.is_empty() {
+            return None;
+        }
+        let codes = self.font.codes(&kept).expect("characters it maps drawn");
+        writer.begin_text();
+        writer.font(self.font.res(), 12.0);
+        writer.show(&codes);
+        writer.end_text();
+        Some((codes, kept))
+    }
+}
+
+/// The program the first of `pdf`'s first pages' fonts that embeds a
+/// TrueType one (`/FontFile2`) embeds, decoded within [`PROGRAM`] bytes: a
+/// simple font's descriptor's, or a Type 0 font's CIDFont's.
+#[cfg(feature = "embed")]
+fn program<S: ByteSource>(pdf: &Pdf<S>) -> Option<Vec<u8>> {
+    let reading = pdf.reading();
+    let pages = pdf.pages().ok()?;
+    for page in pages.iter().take(WRITTEN) {
+        let resources = page.attributes().attribute(Inheritable::Resources);
+        let resources = resources.and_then(|resources| dict(reading, resources.written));
+        let Some(fonts) = resources.and_then(|r| dict(reading, r.get(b"Font")?)) else {
+            continue;
+        };
+        for (_, font) in fonts.iter() {
+            let Some(mut font) = dict(reading, font) else {
+                continue;
+            };
+            let descendants = font.get(b"DescendantFonts");
+            let descendants = descendants.and_then(|d| followed(reading, d)?.as_array());
+            if let Some(descendants) = descendants {
+                match descendants.first().and_then(|cid| dict(reading, cid)) {
+                    Some(cid) => font = cid,
+                    None => continue,
+                }
+            }
+            let descriptor = font.get(b"FontDescriptor");
+            let descriptor = descriptor.and_then(|d| dict(reading, d));
+            let file = descriptor.and_then(|d| d.get(b"FontFile2")?.as_reference());
+            if let Some(file) = file
+                && let Ok(program) = Streams::decoded(&reading, file, PROGRAM)
+            {
+                return Some(program.into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// What `value` is, a reference followed through `objects` twice at most,
+/// as PDFium reaches a font's dictionaries.
+#[cfg(feature = "embed")]
+fn followed<'o>(objects: impl Resolve<'o>, value: &'o Object) -> Option<&'o Object> {
+    let mut value = value;
+    for _ in 0..2 {
+        let Some(id) = value.as_reference() else {
+            break;
+        };
+        value = objects.resolve(id)?;
+    }
+    Some(value)
+}
+
+/// The dictionary `value` is, or names ([`followed`]).
+#[cfg(feature = "embed")]
+fn dict<'o>(objects: impl Resolve<'o>, value: &'o Object) -> Option<&'o Dict> {
+    followed(objects, value)?.as_dict()
 }
 
 /// A random number generator for [`read`]'s new encryption alone: the
@@ -687,6 +885,57 @@ mod tests {
         doc
     }
 
+    /// What the font seeds show: a text in each script the sample program
+    /// of pdf-fixtures draws, each character on a glyph of its own.
+    #[cfg(feature = "embed")]
+    const SCRIPTS: &str = "Ag H\u{C4}\u{1DE} \u{4E2D}\u{6587}\u{4E16}\u{754C} \u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{633}\u{644}\u{627}\u{645} \u{1D11E}";
+
+    /// A page that shows [`SCRIPTS`] in a Type 0 font over the sample program
+    /// as it is, its `cmap` kept, where a font written for a file has none:
+    /// a program [`write`] draws the text it reads in.
+    #[cfg(feature = "embed")]
+    fn embedded_whole() -> Document {
+        use pdf_fonts::embed::{self, Glyphs, Program};
+
+        let bytes = pdf_fixtures::font::sample(1000).build();
+        let program = Program::open(bytes.clone(), 0).unwrap();
+        let mut glyphs = Glyphs::new();
+        let codes = glyphs.add(&program, SCRIPTS).unwrap();
+        let mut options = embed::Options::default();
+        options.whole = true;
+        let mut objects = embed::write(&program, &glyphs, &options).unwrap();
+        let length = bytes.len() as i64;
+        let file = Stream::new(dict! { "Length1" => length }, bytes);
+        objects[3] = Object::new(Value::Stream(Box::new(file)));
+        let mut doc = one_page();
+        let page = doc.get_dict_mut(pdf_objects::ObjectId::new(3, 0)).unwrap();
+        page.set("Resources", dict! { "Font" => dict! { "F1" => r(10) } });
+        let hex: String = codes.iter().map(|byte| format!("{byte:02X}")).collect();
+        doc.insert(4, stream(&format!("BT /F1 12 Tf 72 700 Td <{hex}> Tj ET")));
+        for (i, mut object) in (10..).zip(objects) {
+            object.renumber(|to| Some(pdf_objects::ObjectId::new(10 + to.number, 0)));
+            doc.insert(i, object);
+        }
+        doc
+    }
+
+    /// A file the facade writes, its page showing [`SCRIPTS`] in the sample
+    /// program embedded: cut to the glyphs drawn, with no `cmap`, so
+    /// [`write`] embeds it and draws nothing in it.
+    #[cfg(feature = "embed")]
+    fn embedded_subset() -> Vec<u8> {
+        let mut doc = crate::Document::new();
+        let font = doc.embed_font(pdf_fixtures::font::sample(1000).build());
+        let font = font.unwrap();
+        let page = doc.add_page(Rect::LETTER);
+        page.begin_text();
+        page.font(font.res(), 12.0);
+        page.text_move(72.0, 700.0);
+        page.show(&font.codes(SCRIPTS).unwrap());
+        page.end_text();
+        doc.to_bytes().unwrap()
+    }
+
     /// `doc` written whole in `kind`, packed where asked, under `encryptor`.
     fn written(
         doc: &Document,
@@ -705,7 +954,9 @@ mod tests {
 
     /// Files of what the facade reads apart: a page, pages with their
     /// `/Contents` of each shape, what a file says and claims, packed in
-    /// object streams, linearized, and encrypted.
+    /// object streams, linearized, and encrypted; and with `embed`, a page
+    /// drawn in a font over a TrueType program as it is, and one the facade
+    /// wrote, drawn in a program it embedded.
     fn seeds() -> Vec<Vec<u8>> {
         let one = written(&one_page(), XrefKind::Table, false, None);
         let three = written(&three_pages(), XrefKind::Table, false, None);
@@ -717,7 +968,12 @@ mod tests {
             .unwrap()
             .with_test_ivs(pdf_crypt::Ivs::derived);
         let encrypted = written(&three_pages(), XrefKind::Table, false, Some(&encryptor));
-        vec![one, three, packed, linearized, encrypted]
+        let seeds = vec![one, three, packed, linearized, encrypted];
+        #[cfg(feature = "embed")]
+        let whole = written(&embedded_whole(), XrefKind::Table, false, None);
+        #[cfg(feature = "embed")]
+        let seeds = [seeds, vec![whole, embedded_subset()]].concat();
+        seeds
     }
 
     /// A mutation of `seed`, from `random`, as a fuzzer might make it.
@@ -803,7 +1059,9 @@ mod tests {
 
     /// Every seed's first pages are written as a document of each kind and
     /// read back as written, a document unlocked by its password among them;
-    /// and a file of no page writes a document of none, refused.
+    /// and a file of no page writes a document of none, refused. With
+    /// `embed`, a seed's text is drawn in the program its font embeds, and
+    /// read back as drawn.
     #[test]
     fn the_seeds_write_documents_read_back_as_written() {
         let mut all = Wrote::default();
@@ -813,9 +1071,13 @@ mod tests {
             all.files += wrote.files;
             all.unlocked += wrote.unlocked;
             all.refused += wrote.refused;
+            all.fonts += wrote.fonts;
+            all.embedded += wrote.embedded;
         }
         assert!(all.pages >= 10 && all.files >= 16, "{all:?}");
         assert!(all.unlocked >= 4, "{all:?}");
+        #[cfg(feature = "embed")]
+        assert!(all.fonts == 2 && all.embedded == 1, "{all:?}");
         assert_eq!(write(b"%PDF-1.7\n%%EOF\n").refused, 1);
     }
 

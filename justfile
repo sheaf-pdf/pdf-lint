@@ -61,8 +61,9 @@ fmt:
 # spans (`tracing`) and what embeds a font (`embed`), which nothing else turns
 # on, with no feature at all, and with `embed` alone, without the reading's
 # programs; then pdf-structure with its spans (`tracing`), which nothing else
-# turns on; then pdfs as a user gets it, with no feature at all, and with
-# every feature it forwards, which nothing else turns on all at once.
+# turns on; then pdfs as a user gets it, with no feature at all, with what
+# embeds a font (`embed`) alone, and with every feature it forwards, which
+# nothing else turns on all at once.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -85,6 +86,7 @@ clippy:
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --no-default-features --features embed --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
 
 # Workspace unit and integration tests through cargo-nextest (no doctests;
@@ -107,7 +109,8 @@ test-unit *args="--workspace":
 # with `embed` alone, without the reading's programs; then pdf-structure's
 # with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
-# and with every feature it forwards but its test writer.
+# with what embeds a font alone, and with every feature it forwards but its
+# test writer.
 test:
     cargo nextest run --locked --workspace
     cargo test --locked --workspace --doc
@@ -144,6 +147,7 @@ test:
     cargo test --locked -p pdfs --doc
     cargo nextest run --locked -p pdfs --no-default-features
     cargo test --locked -p pdfs --no-default-features --doc
+    cargo nextest run --locked -p pdfs --no-default-features --features embed
     cargo nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
     cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
 
@@ -274,7 +278,8 @@ fuzzing:
 # which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
 # pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
-# and with what embeds a font alone, then pdfs as it's published.
+# and with what embeds a font alone, then pdfs as it's published, and with no
+# feature, which a link to what only a feature has would fail.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
@@ -285,6 +290,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features --features embed
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features
 
 # Build this platform's release archive in dist/, and check it runs as
 # it's unpacked, as the release workflow does each

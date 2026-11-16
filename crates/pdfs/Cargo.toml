@@ -28,7 +28,8 @@ pdf-color.workspace = true
 pdf-content-streams.workspace = true
 # Without its clock unless `clock` (below) turns it on.
 pdf-semantics.workspace = true
-# Without reading fonts' programs unless `programs` (below) turns it on.
+# Without reading fonts' programs unless `programs` (below) turns it on, nor
+# embedding one unless `embed` does.
 pdf-fonts.workspace = true
 # 2D page geometry, bounded graphics/text interpreter, re-encoder, and canvas.
 pdf-gfx.workspace = true
@@ -41,7 +42,7 @@ thiserror = "2"
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 [features]
-default = ["programs", "text-layout", "clock"]
+default = ["programs", "text-layout", "clock", "embed"]
 # pdf-fonts' `programs`: a font's program read, for its glyphs' boxes and
 # its heights, and the text of what its encoding leaves to it.
 programs = ["pdf-fonts/programs", "pdf-gfx/programs"]
@@ -51,6 +52,10 @@ programs = ["pdf-fonts/programs", "pdf-gfx/programs"]
 text-layout = ["pdf-gfx/text-layout"]
 # pdf-semantics' `clock`: `Date::now` and `Date::from_unix`.
 clock = ["pdf-semantics/clock"]
+# pdf-fonts' `embed`: a TrueType program embedded in a document, cut to the
+# glyphs its pages draw, so that they draw Unicode text in it
+# (`Document::embed_font`).
+embed = ["pdf-fonts/embed"]
 # pdf-content-streams' `image-ends`: an inline image's DCT and CCITTFax
 # data ended by decoding it, as PDFium's decoders end it, for a reading
 # that asks for that.

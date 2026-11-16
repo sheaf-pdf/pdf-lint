@@ -280,7 +280,7 @@ pub fn claim(doc: &mut Document, claims: &Claims) -> Result<ObjectId, Error> {
 
 /// `stream`'s data deflated by `deflate`, and `/Filter /FlateDecode`, where
 /// it's held in memory and names no filter; else it's left as it is.
-fn deflated(stream: &mut Stream, deflate: Deflate) -> Result<(), write::Error> {
+pub(crate) fn deflated(stream: &mut Stream, deflate: Deflate) -> Result<(), write::Error> {
     if stream.dict.has(b"Filter") {
         return Ok(());
     }

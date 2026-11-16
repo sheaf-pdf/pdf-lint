@@ -44,6 +44,9 @@
 //!   parse embedded font programs via `skrifa`, assemble `TextPage` spatial
 //!   reading order / search / multiline `Canvas` layout, and enable
 //!   `Date::now` / `Date::from_unix` in `pdf-semantics`.
+//! - **`embed`** *(enabled by default)*: embed a TrueType program in a
+//!   document, subset to the glyphs its pages draw, and draw Unicode text in
+//!   it (`Document::embed_font`, `EmbeddedFont`), through pdf-fonts' `embed`.
 //! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
 //!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
 //!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
@@ -81,6 +84,8 @@
 
 pub use build::standard_font;
 pub use document::Document;
+#[cfg(feature = "embed")]
+pub use embed::EmbeddedFont;
 pub use error::Error;
 pub use limits::Limits;
 #[cfg(any(unix, windows))]
@@ -91,6 +96,8 @@ pub use pdf::{Page, Pages, PagesIter, Pdf};
 
 pub mod build;
 mod document;
+#[cfg(feature = "embed")]
+mod embed;
 mod error;
 pub mod file;
 #[cfg(any(test, fuzzing))]
@@ -213,6 +220,8 @@ mod tests {
             shared::<pdf_gfx::LaidOutText>();
         }
         shared::<crate::Document<'_>>();
+        #[cfg(feature = "embed")]
+        shared::<crate::EmbeddedFont>();
         shared::<crate::Options<'_>>();
         shared::<crate::Limits>();
         shared::<crate::Error>();
