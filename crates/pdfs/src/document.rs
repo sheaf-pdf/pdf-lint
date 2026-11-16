@@ -321,7 +321,9 @@ impl<'p> Document<'p> {
     /// [`Program::open`](embed::Program::open) refuses the program (bytes that
     /// aren't a TrueType or OpenType font or a collection of them, a face
     /// past its faces, outlines that aren't TrueType's, a table it needs
-    /// that's malformed); and [`embed::Error::Restricted`] for a program whose
+    /// that's malformed, or one no cut of it could take whole), so that every
+    /// save can write a font it takes; and [`embed::Error::Restricted`] for a
+    /// program whose
     /// licence (its `OS/2` table's `fsType`) restricts it to its owner's leave
     /// or to its bitmaps, unless `options` says the caller has the right
     /// ([`embed::Options::licensed`]), as [`embed::write`] would refuse it at
@@ -659,7 +661,8 @@ impl<'p> Document<'p> {
     /// one has no page tree to add a page to, or one whose `/Count` can't
     /// count the pages added; `Error::Embed` (with `embed`) where a font
     /// embedded in it isn't written, its program not cut to the glyphs drawn
-    /// in it (pdf-fonts' `embed::write`); and [`Error::Write`] where
+    /// in it (pdf-fonts' `embed::write`), which it has no reason to be of a
+    /// program `embed_font` took; and [`Error::Write`] where
     /// pdf-structure's writer refuses, its file changed since it was read
     /// among it ([`write::Error::Changed`]).
     pub fn save_with_to(

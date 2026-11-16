@@ -470,10 +470,11 @@ struct Written {
 /// (`/FontFile2`, a simple font's or a Type 0 font's CIDFont's), decoded, is
 /// embedded in the new document, whatever its licence says, and each page's
 /// text, as much as it draws with glyphs of their own, drawn in it first on
-/// the page by its codes: the font written at every save, the document saved
-/// whole twice the same bytes, and in each kind the first string each page
-/// shows its codes, read back as the text drawn. Or the save is refused for
-/// the font, nothing written.
+/// the page by its codes: the font written at every save, as any program a
+/// font is embedded from is cut, the document saved whole twice the same
+/// bytes, and in each kind the first string each page shows its codes, read
+/// back as the text drawn. A document of no page with a font embedded is
+/// refused for its pages alone.
 pub fn write(data: &[u8]) -> Wrote {
     let mut wrote = Wrote::default();
     let pdf = Options::DEFAULT
@@ -525,12 +526,6 @@ pub fn write(data: &[u8]) -> Wrote {
     }
     let whole = match doc.save_to(&mut out) {
         Ok(_) => out.split_off(b"before".len()),
-        // The input's program, not cut to the glyphs drawn.
-        #[cfg(feature = "embed")]
-        Err(Error::Embed(_)) if font.is_some() => {
-            assert_eq!(out, b"before", "nothing written");
-            return wrote;
-        }
         Err(error) => panic!("a document of pages is written: {error}"),
     };
     #[cfg(feature = "embed")]
@@ -940,6 +935,18 @@ mod tests {
         doc
     }
 
+    /// [`embedded_whole`] with its page's content one that doesn't read, its
+    /// filters past the 25 a stream is read through: a document of no page,
+    /// a font embedded in it, which [`write`] refuses for its pages.
+    #[cfg(feature = "embed")]
+    fn embedded_unread() -> Document {
+        let mut doc = embedded_whole();
+        let filters = vec![Object::name("ASCIIHexDecode"); 26];
+        let content = Stream::new(dict! { "Filter" => filters }, b"<>".to_vec());
+        doc.insert(4, Object::new(Value::Stream(Box::new(content))));
+        doc
+    }
+
     /// A file the facade writes, its page showing [`SCRIPTS`] in the sample
     /// program embedded: cut to the glyphs drawn, with no `cmap`, so
     /// [`write`] embeds it and draws nothing in it.
@@ -977,7 +984,8 @@ mod tests {
     /// `/Contents` of each shape, what a file says and claims, packed in
     /// object streams, linearized, and encrypted; and with `embed`, a page
     /// drawn in a font over a TrueType program as it is, and one the facade
-    /// wrote, drawn in a program it embedded.
+    /// wrote, drawn in a program it embedded, and a page drawn in one whose
+    /// content doesn't read.
     fn seeds() -> Vec<Vec<u8>> {
         let one = written(&one_page(), XrefKind::Table, false, None);
         let three = written(&three_pages(), XrefKind::Table, false, None);
@@ -993,7 +1001,9 @@ mod tests {
         #[cfg(feature = "embed")]
         let whole = written(&embedded_whole(), XrefKind::Table, false, None);
         #[cfg(feature = "embed")]
-        let seeds = [seeds, vec![whole, embedded_subset()]].concat();
+        let unread = written(&embedded_unread(), XrefKind::Table, false, None);
+        #[cfg(feature = "embed")]
+        let seeds = [seeds, vec![whole, embedded_subset(), unread]].concat();
         seeds
     }
 
@@ -1082,7 +1092,8 @@ mod tests {
     /// read back as written, a document unlocked by its password among them;
     /// and a file of no page writes a document of none, refused. With
     /// `embed`, a seed's text is drawn in the program its font embeds, and
-    /// read back as drawn.
+    /// read back as drawn, and a seed whose page doesn't read embeds its
+    /// font in a document refused for its pages.
     #[test]
     fn the_seeds_write_documents_read_back_as_written() {
         let mut all = Wrote::default();
@@ -1098,8 +1109,38 @@ mod tests {
         assert!(all.pages >= 10 && all.files >= 16, "{all:?}");
         assert!(all.unlocked >= 4, "{all:?}");
         #[cfg(feature = "embed")]
-        assert!(all.fonts == 2 && all.embedded == 1, "{all:?}");
+        assert!(all.fonts == 3 && all.embedded == 1, "{all:?}");
+        #[cfg(feature = "embed")]
+        {
+            let unread = write(&seeds()[7]);
+            let (pages, fonts, refused) = (unread.pages, unread.fonts, unread.refused);
+            assert!(pages == 0 && fonts == 1 && refused == 1, "{unread:?}");
+        }
         assert_eq!(write(b"%PDF-1.7\n%%EOF\n").refused, 1);
+    }
+
+    /// A page that doesn't read, drawn in a font whose program no cut could
+    /// take whole, `.notdef`'s `loca` entries reversed: no font is embedded
+    /// from it, and the document, of no page, is refused for its pages.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn a_page_unread_in_a_program_no_cut_takes_writes_nothing() {
+        use pdf_fixtures::font::{self, TRUETYPE};
+
+        let mut sample = font::sample(1000);
+        sample.long_loca = true;
+        let mut tables = sample.tables();
+        let loca = &mut tables.iter_mut().find(|t| &t.0 == b"loca").unwrap().1;
+        let end = u32::from_be_bytes([loca[4], loca[5], loca[6], loca[7]]);
+        loca[..4].copy_from_slice(&(end + 2).to_be_bytes());
+        let program = font::sfnt(TRUETYPE, &tables);
+        let mut doc = embedded_unread();
+        let length = program.len() as i64;
+        let file = Stream::new(dict! { "Length1" => length }, program);
+        doc.insert(13, Object::new(Value::Stream(Box::new(file))));
+        let wrote = write(&written(&doc, XrefKind::Table, false, None));
+        let (pages, fonts, refused) = (wrote.pages, wrote.fonts, wrote.refused);
+        assert!(pages == 0 && fonts == 0 && refused == 1, "{wrote:?}");
     }
 
     #[test]
