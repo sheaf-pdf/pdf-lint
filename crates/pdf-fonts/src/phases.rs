@@ -1,15 +1,18 @@
-//! The spans a font's reading runs in, with the `tracing` feature: one macro, so
-//! that a phase is a line where it starts, and nothing of it is compiled without the
-//! feature. A phase is a call a font, or a part of one, is read in once: a font read,
-//! its program opened, an embedded CMap's chain, its `/ToUnicode` and a Type 3 font's
-//! CharProcs; and a walk of the strings content shows, within which the fonts it
-//! reads are read. A part read from a stream has its span once the stream is decompressed,
-//! so that its fields say how much was read, and the decompressing is its font's
-//! span's. But a Type 3 font's CharProcs are decompressed within their span, whose
-//! field, how many the font has, is known before any is. A font looked up where it was
-//! read before has none, nor has a code, a width, a string's text or a glyph's box, as
-//! their loop is the caller's, nor a glyph's name or a standard 14 font's, each a
-//! lookup; and no fault is told as an event: faults are the sink's.
+//! The spans a font's reading runs in, and its writing, with the `tracing` feature:
+//! one macro, so that a phase is a line where it starts, and nothing of it is compiled
+//! without the feature. A phase is a call a font, or a part of one, is read in once: a
+//! font read, its program opened, an embedded CMap's chain, its `/ToUnicode` and a Type
+//! 3 font's CharProcs; a walk of the strings content shows, within which the fonts it
+//! reads are read; and, with `embed`, a font written, its program cut within it, whose
+//! fields, the glyphs drawn and the program's bytes, are known as it starts. A part
+//! read from a stream has its span once the stream is decompressed, so that its fields
+//! say how much was read, and the decompressing is its font's span's. But a Type 3
+//! font's CharProcs are decompressed within their span, whose field, how many the font
+//! has, is known before any is. A font looked up where it was read before has none, nor
+//! has a code, a width, a string's text or a glyph's box, as their loop is the
+//! caller's, nor a glyph's name or a standard 14 font's, each a lookup, nor a program
+//! opened for embedding or a string's codes in it; and no fault is told as an event:
+//! faults are the sink's.
 
 /// Enters a span at `$level` (`DEBUG`) named `$name`, held to the end of the block
 /// it's in, its fields numbers alone (a length, a count, a flag), each cast to a
@@ -373,6 +376,26 @@ mod tests {
                 ("read", Level::DEBUG, vec![("programs", 0)]),
             ]
         );
+    }
+
+    /// A font written for embedding is a span, with how many glyphs are drawn in it and
+    /// how many bytes its program is; its program opened and its codes have none.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn a_font_written_is_a_span() {
+        use crate::embed::{Glyphs, Options, Program, write};
+
+        let bytes = pdf_fixtures::font::sample(1000).build();
+        let len = bytes.len() as u64;
+        let made = spans(|| {
+            let program = Program::open(bytes, 0).unwrap();
+            let mut glyphs = Glyphs::new();
+            glyphs.add(&program, "AgH").unwrap();
+            let written = write(&program, &glyphs, &Options::default()).unwrap();
+            assert_eq!(written.len(), 6);
+        });
+        let fields = vec![("glyphs", 3), ("bytes", len)];
+        assert_eq!(named(&made), [("embed", Level::DEBUG, fields)]);
     }
 
     /// What's asked of a font read has none, its loop being the caller's: its codes,

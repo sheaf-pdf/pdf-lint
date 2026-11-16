@@ -1241,3 +1241,11 @@ program-cid-vertical-space	fonts-boxes	program-cid-vertical-space.pdf
 program-cid-vertical-empty	fonts-boxes	program-cid-vertical-empty.pdf
 program-tt-ascent-under	fonts-boxes	program-tt-ascent-under.pdf
 program-tt-ascent-under-far	fonts-boxes	program-tt-ascent-under-far.pdf
+program-embed-arabic	fonts-boxes	program-embed-arabic.pdf
+program-embed-cid-set	fonts-boxes	program-embed-cid-set.pdf
+program-embed-cjk	fonts-boxes	program-embed-cjk.pdf
+program-embed-clef	fonts-boxes	program-embed-clef.pdf
+program-embed-hebrew	fonts-boxes	program-embed-hebrew.pdf
+program-embed-latin-2048	fonts-boxes	program-embed-latin-2048.pdf
+program-embed-latin	fonts-boxes	program-embed-latin.pdf
+program-embed-whole	fonts-boxes	program-embed-whole.pdf

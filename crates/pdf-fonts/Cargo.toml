@@ -32,6 +32,10 @@ subsetter = { version = "0.2.6", default-features = false, optional = true }
 # default features, so without the proc macros of `attributes`; `std`, for
 # its spans' guards.
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+# With `embed`: the tag a subset's name begins with, from a digest of the
+# program and the glyphs it's cut to; XXH3-128 alone, without `std`, as
+# pdf-content-streams names its resources.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"], optional = true }
 
 [features]
 default = ["programs"]
@@ -42,15 +46,16 @@ predefined-cmaps = ["dep:hayro-cmap"]
 # encoding leaves to it. Without it, as `Fonts::for_text` reads.
 programs = ["dep:skrifa"]
 # A TrueType program embedded: opened through skrifa, the glyphs a string
-# draws found by its `cmap`, and the program cut to the glyphs drawn by
-# subsetter. Off by default, and apart from `programs`, which is the
+# draws found by its `cmap`, the program cut to the glyphs drawn by
+# subsetter, and the font written as a Type 0 font, its subset named by a
+# twox-hash digest. Off by default, and apart from `programs`, which is the
 # reading's.
-embed = ["dep:skrifa", "dep:subsetter"]
+embed = ["dep:skrifa", "dep:subsetter", "dep:twox-hash"]
 # Spans through `tracing`: a font read, and within it its program's opening,
 # its embedded CMap's and its `/ToUnicode`'s parsing, and a Type 3 font's
-# CharProcs; and a walk of the strings content shows. A code, a width, a
-# string's text and a glyph's box have none. Off by default; without it, none
-# is compiled.
+# CharProcs; a walk of the strings content shows; and, with `embed`, a font
+# written for embedding. A code, a width, a string's text and a glyph's box
+# have none. Off by default; without it, none is compiled.
 tracing = ["dep:tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in

@@ -157,9 +157,9 @@ fn an_unmapped_character_is_refused() {
     );
 }
 
-/// A glyph's width is its advance a thousand times over the units per em: exact at
-/// 1000 units and at 2048; a glyph past `hmtx`'s advances takes the last's, and one past
-/// the count is 0.
+/// A glyph's width is its advance a thousand times over the units per em, to the
+/// nearest whole: at 1000 units and at 2048, half a thousandth up; a glyph past `hmtx`'s
+/// advances takes the last's, and one past the count is 0.
 #[test]
 fn widths_are_thousandths_of_an_em() {
     let program = sample();
@@ -180,13 +180,20 @@ fn widths_are_thousandths_of_an_em() {
     let wide = font::sample(2048);
     let advances: Vec<u16> = wide.glyphs.iter().map(|g| g.1).collect();
     let wide = Program::open(wide.build(), 0).unwrap();
-    // 600 at 2048 is 1229 units, and back 600.09765625, which f32 holds exactly.
+    // 600 at 2048 is 1229 units, and back 600.09765625, so 600.
     assert_eq!(advances[2], 1229);
-    assert_eq!(wide.width(2), 600.097_66);
+    assert_eq!(wide.width(2), 600.0);
     for (glyph, &advance) in advances.iter().enumerate() {
-        let width = f32::from(advance) * 1000.0 / 2048.0;
+        let width = (f64::from(advance) * 1000.0 / 2048.0).round() as f32;
         assert_eq!(wide.width(glyph as u16), width, "{glyph}");
     }
+    // 1023 units is 499.51 thousandths, 1 is 0.49, 3 is 1.46 and 1025 is 500.49.
+    let mut odd = TrueType::new(2048);
+    for advance in [1023, 1, 3, 1025] {
+        odd.glyph(Glyph::Empty, advance);
+    }
+    let odd = Program::open(odd.build(), 0).unwrap();
+    assert_eq!([1, 2, 3, 4].map(|g| odd.width(g)), [500.0, 0.0, 1.0, 500.0]);
 
     let mut short = font::sample(1000);
     short.long_metrics = Some(3);
@@ -302,9 +309,10 @@ fn what_isnt_a_program_or_its_face_is_refused() {
     );
     let other = font::sample(2048).build();
     let pair = font::collection(&[program, other]);
-    let second = Program::open(pair.clone(), 1).unwrap();
-    assert_eq!(second.width(2), 600.097_66);
-    assert_eq!(Program::open(pair.clone(), 0).unwrap().width(2), 600.0);
+    // Told apart by their boxes' left: 10 thousandths at 1000 units, 20 units at 2048.
+    let left = |program: Program| program.metrics().bbox.unwrap().x0;
+    assert_eq!(left(Program::open(pair.clone(), 1).unwrap()), 9.765_625);
+    assert_eq!(left(Program::open(pair.clone(), 0).unwrap()), 10.0);
     for index in [2, u32::MAX] {
         let refused = Program::open(pair.clone(), index).unwrap_err();
         assert_eq!(refused, Error::Index { index, faces: 2 });
@@ -340,7 +348,8 @@ fn a_face_two_lists_put_apart_is_refused() {
     assert_eq!(Program::open(file.clone(), 0).unwrap_err(), Error::NotSfnt);
     // Where both lists put it in one place, it's taken.
     file[12..16].copy_from_slice(&(at_second as u32).to_be_bytes());
-    assert_eq!(Program::open(file, 0).unwrap().width(2), 600.097_66);
+    let bbox = Program::open(file, 0).unwrap().metrics().bbox.unwrap();
+    assert_eq!(bbox.x0, 9.765_625);
 }
 
 /// A program whose outlines aren't TrueType's is refused, saying whose they are; one

@@ -38,8 +38,8 @@
 //! - **`tracing`** *(optional)*: Emits numeric `tracing` spans over font reads, program/CMap/CharProc
 //!   parsing, and [`shown`] walks.
 //! - **`embed`** *(optional)*: Opens a TrueType program for embedding (the `embed` module): the
-//!   codes text is drawn in, the glyphs a document draws, and the program cut to them via
-//!   `subsetter`, read through `skrifa`.
+//!   codes text is drawn in, the glyphs a document draws, and the font written as a Type 0 font
+//!   over `/Identity-H`, its program cut to them via `subsetter`, read through `skrifa`.
 //!
 //! # Example
 //!

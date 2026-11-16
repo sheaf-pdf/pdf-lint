@@ -12,6 +12,8 @@ use super::*;
 mod embed;
 mod fonts;
 mod shown;
+#[cfg(feature = "embed")]
+mod written;
 
 /// An AFM's widths and codes, read here as plainly as it can be: each
 /// `C <code> ; WX <width> ; N <name>` line.

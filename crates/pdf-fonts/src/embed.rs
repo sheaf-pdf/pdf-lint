@@ -1,5 +1,5 @@
 //! A TrueType program embedded in a PDF (ISO 32000-2, 9.9): opened for it, the codes a
-//! string is drawn in, and the glyphs a document draws.
+//! string is drawn in, the glyphs a document draws, and the font written.
 //!
 //! A [`Program`] is a TrueType or OpenType font's bytes whose outlines are TrueType's
 //! (`glyf`), opened once. Text is drawn in it as a Type 0 font over `/Identity-H`, each
@@ -10,7 +10,9 @@
 //! the font is written again. There's no shaping: each character is a glyph of its own,
 //! in the order given, and one the program has no glyph for is refused ([`Unmapped`]),
 //! never drawn as another. [`Glyphs`] keeps the glyphs a document draws, each with the
-//! text it stands for.
+//! text it stands for, and [`write()`] writes the font: a Type 0 font over `/Identity-H`,
+//! its CIDFont's program the one given cut to the glyphs drawn, and a `/ToUnicode` that
+//! reads each code back as the text its glyph was drawn for.
 //!
 //! A program is a caller's bytes, but it may be anyone's font, so it's checked as it's
 //! opened for what the subset it's cut to would otherwise make of it: a composite
@@ -52,14 +54,10 @@ use skrifa::{MetadataProvider, charmap::Charmap};
 use crate::{FontMetrics, Rect};
 
 mod sfnt;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a font's writing, still to come, cuts its program"
-    )
-)]
 mod subset;
+mod write;
+
+pub use write::{Options, write};
 
 /// A TrueType program opened for embedding: its bytes, shared, and what's read of them
 /// once. A clone shares the bytes. Its `Debug` gives its length, its glyphs' count, its
@@ -197,9 +195,11 @@ impl Program {
         (glyph != 0 && glyph < self.glyphs).then_some(glyph)
     }
 
-    /// Glyph `glyph`'s advance in thousandths of an em, as a font's `/W` gives it
-    /// (ISO 32000-2, 9.7.4.3): its advance in `hmtx`, a thousand times over the
-    /// program's units per em. 0 for a glyph past its count.
+    /// Glyph `glyph`'s advance in thousandths of an em, as the font [`write()`] writes
+    /// gives it in its `/W` (ISO 32000-2, 9.7.4.3): its advance in `hmtx`, a thousand
+    /// times over the program's units per em, to the nearest whole thousandth, as PDFium
+    /// reads a CIDFont's widths as integers. So text laid out by it is where every
+    /// reader draws it. 0 for a glyph past its count.
     #[must_use]
     pub fn width(&self, glyph: u16) -> f32 {
         if glyph >= self.glyphs {
@@ -211,7 +211,7 @@ impl Program {
             .data
             .get(entry..entry + 2)
             .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
-        (f64::from(advance) * 1000.0 / f64::from(self.upem)) as f32
+        (f64::from(advance) * 1000.0 / f64::from(self.upem)).round() as f32
     }
 
     /// Its heights and box, in thousandths of an em, as a layout measures a line by:
@@ -315,7 +315,8 @@ pub enum Level {
 }
 
 /// The glyphs a document draws in a program, each with the text it stands for, which
-/// its `/ToUnicode` gives back. Its `Debug` says how many, never which or their text.
+/// the `/ToUnicode` of the font [`write()`] writes gives back. Its `Debug` says how many,
+/// never which or their text.
 ///
 /// Text is kept a glyph, not a character: two characters a program draws with one
 /// glyph (a no-break space and a space, in some fonts) show one code, and read back as
@@ -384,7 +385,7 @@ impl fmt::Debug for Glyphs {
     }
 }
 
-/// Why a program isn't opened for embedding, or isn't cut to the glyphs drawn.
+/// Why a program isn't opened for embedding, or the font isn't written ([`write()`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -413,7 +414,8 @@ pub enum Error {
     #[error("the font program's outlines are {0}, not TrueType's")]
     Outlines(Outlines),
     /// The program's licence doesn't let it be embedded ([`Embedding`]): restricted to
-    /// its owner's leave, or to its bitmaps alone.
+    /// its owner's leave, or to its bitmaps alone, where [`Options::restricted`] doesn't
+    /// say the caller has the right.
     #[error("the font program's licence doesn't let its outlines be embedded")]
     Restricted(Embedding),
     /// A glyph a [`Glyphs`] keeps at or past the program's count: a `Glyphs` of another
