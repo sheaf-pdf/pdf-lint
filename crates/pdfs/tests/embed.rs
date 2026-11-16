@@ -354,6 +354,23 @@ fn a_font_never_drawn_in_is_written() {
     assert_eq!(widths(&file, &font), Vec::<Object>::new());
 }
 
+/// The pages a document's page ids place are placed without the font: it's
+/// written at the save, with what's drawn after, which then reads back.
+#[test]
+fn page_ids_place_the_pages_but_not_the_font() {
+    let mut doc = Document::new();
+    let font = doc.embed_font(program(1000)).unwrap();
+    add(&mut doc, drawn_at(&font, &TEXTS[..1]));
+    assert_eq!(doc.page_ids().unwrap().len(), 1);
+    assert!(
+        doc.structure().resolve(number(&font)).is_none(),
+        "not written"
+    );
+    add(&mut doc, drawn_at(&font, &TEXTS[1..]));
+    let file = doc.to_bytes().unwrap();
+    assert_eq!(texts(&file), [TEXTS[0].to_owned(), TEXTS[1..].concat()]);
+}
+
 /// `font`'s CIDFont's `/W` in `file`.
 fn widths(file: &[u8], font: &EmbeddedFont) -> Vec<Object> {
     let pdf = pdfs::from_bytes(file).unwrap();

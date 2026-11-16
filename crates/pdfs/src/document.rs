@@ -346,13 +346,15 @@ impl<'p> Document<'p> {
 
     /// Returns the indirect `ObjectId`s of all pages currently in the document
     /// (flushing any newly added pages into the in-memory page tree first).
+    /// A font embedded in it isn't written here but at a save, as the glyphs
+    /// drawn by then say.
     ///
     /// # Errors
     ///
     /// Returns [`Error`] if flushing added pages fails or the catalog/page tree
     /// cannot be walked.
     pub fn page_ids(&mut self) -> Result<Vec<Option<ObjectId>>, Error> {
-        self.place(deflate())?;
+        self.place_pages(deflate())?;
         let catalog = self.doc.catalog().ok_or(Error::NoCatalog)?;
         let table = pages::pages(
             &self.doc,
@@ -377,7 +379,7 @@ impl<'p> Document<'p> {
         built: pdf_annots::BuiltAnnot,
     ) -> Result<ObjectId, Error> {
         if !self.added.is_empty() {
-            self.place(deflate())?;
+            self.place_pages(deflate())?;
         }
         build::add_annot(&mut self.doc, page_id, built, deflate())
     }
@@ -395,7 +397,7 @@ impl<'p> Document<'p> {
         opts: pdf_annots::FlattenOpts,
     ) -> Result<pdf_annots::FlattenPlan, Error> {
         if !self.added.is_empty() {
-            self.place(deflate())?;
+            self.place_pages(deflate())?;
         }
         build::flatten_page(&mut self.doc, page_id, opts, &self.limits, deflate())
     }
@@ -844,18 +846,25 @@ impl<'p> Document<'p> {
         Ok(())
     }
 
-    /// The fonts embedded in it written, each as its glyphs drawn by now
-    /// say, at the numbers it was written at before (`Kept::write`); then
-    /// the pages added written in, as their content deflated by `deflate`:
-    /// a new document's page tree written anew over every page, or an edited
-    /// one's added as kids of its page tree's root. A font refused leaves the
-    /// pages added. Each page is written in alone, so one refused leaves
-    /// those before it in and the rest added.
+    /// What a save writes in before it writes the file: the fonts embedded
+    /// in it, each as its glyphs drawn by now say, at the numbers it was
+    /// written at before (`Kept::write`); then the pages added
+    /// (`place_pages`). A font refused leaves the pages added.
     fn place(&mut self, deflate: Deflate) -> Result<(), Error> {
         #[cfg(feature = "embed")]
         for font in &mut self.fonts {
             font.write(&mut self.doc, deflate)?;
         }
+        self.place_pages(deflate)
+    }
+
+    /// The pages added written in, as their content deflated by `deflate`:
+    /// a new document's page tree written anew over every page, or an edited
+    /// one's added as kids of its page tree's root. Each page is written in
+    /// alone, so one refused leaves those before it in and the rest added.
+    /// The fonts embedded in it aren't written: a save writes them, as their
+    /// glyphs drawn by then say.
+    fn place_pages(&mut self, deflate: Deflate) -> Result<(), Error> {
         match self.read {
             None => self.place_new(deflate),
             Some(_) => self.place_edited(deflate),
