@@ -21,6 +21,12 @@
 //!   PDFium aliases ([`Std14::named`]) with Adobe metrics, and builds Standard 14 font
 //!   dictionaries ([`Std14::dict`]) and encoded strings ([`Std14::codes`], [`Encoding::code`],
 //!   refusing unmapped characters via [`Unencodable`]).
+//! - **Font embedding (the `embed` module, with the `embed` feature):** Opens a TrueType
+//!   program for embedding, encodes strings as two-byte codes for a Type 0 font over
+//!   `/Identity-H` (each the glyph's number in the program, unshaped), records the glyphs a
+//!   document draws with their text, and writes the font: its program subset to those glyphs
+//!   as `/FontFile2` (ISO 32000-2, 9.9), with `/W`, `/CIDToGIDMap`, a descriptor and a
+//!   `/ToUnicode` CMap, as `pdf-objects` values.
 //!
 //! Spec departures emit [`Fault`]s to a [`Sink`](pdf_objects::fault::Sink) (skipped when `()` is
 //! passed). Reads enforce [`Limits`] and caller byte budgets without panicking, failing only when
@@ -36,10 +42,12 @@
 //! - **`predefined-cmaps`** *(optional)*: Bundles Adobe's predefined CJK CMaps via `hayro-cmap`
 //!   (otherwise reporting [`Fault::PredefinedNotBuilt`]).
 //! - **`tracing`** *(optional)*: Emits numeric `tracing` spans over font reads, program/CMap/CharProc
-//!   parsing, and [`shown`] walks.
+//!   parsing, [`shown`] walks, and (with `embed`) font writes.
 //! - **`embed`** *(optional)*: Opens a TrueType program for embedding (the `embed` module): the
 //!   codes text is drawn in, the glyphs a document draws, and the font written as a Type 0 font
-//!   over `/Identity-H`, its program cut to them via `subsetter`, read through `skrifa`.
+//!   over `/Identity-H`, its program cut to them via `subsetter`, read through `skrifa`. CFF,
+//!   CFF2 and bitmap-only programs are refused. Independent of `programs`, which is the
+//!   reading's.
 //!
 //! # Example
 //!

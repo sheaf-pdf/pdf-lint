@@ -24,9 +24,11 @@
 //!   ([`Pdf::linearized`]).
 //! - **Create, edit, encrypt, and linearize** documents via [`Document::new`]
 //!   or [`Pdf::edit`]: draw pages with [`standard_font`] and [`pdf_gfx::Canvas`]
-//!   (including multiline `Canvas::text_box` under `text-layout`), attach XMP
-//!   claims, encrypt with AES-256, and save whole, linearized, or as an
-//!   incremental update.
+//!   (including multiline `Canvas::text_box` under `text-layout`), draw Unicode
+//!   text in a TrueType font embedded with `Document::embed_font` (`embed`
+//!   feature) and subset to the glyphs drawn at each save, attach XMP claims,
+//!   encrypt with AES-256, and save whole, linearized, or as an incremental
+//!   update.
 //! - **Use standalone trait functions** in [`page`](mod@page),
 //!   [`file`](mod@file), and [`build`](mod@build) over your own
 //!   [`pdf_structure::Reading`] or [`pdf_structure::Document`]. Import common
@@ -47,6 +49,9 @@
 //! - **`embed`** *(enabled by default)*: embed a TrueType program in a
 //!   document, subset to the glyphs its pages draw, and draw Unicode text in
 //!   it (`Document::embed_font`, `EmbeddedFont`), through pdf-fonts' `embed`.
+//!   Programs with CFF, CFF2 or bitmap-only outlines are refused, text is
+//!   drawn a character at a time without shaping, and justified text in an
+//!   embedded font is laid out flush left.
 //! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
 //!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
 //!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
@@ -134,7 +139,7 @@ pub use pdf_content_streams;
 /// Common PDF structures: dates, name/number trees, page trees, `/Info`, and XMP claims.
 pub use pdf_semantics;
 
-/// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, and text extraction.
+/// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, text extraction, and TrueType font embedding.
 pub use pdf_fonts;
 
 /// PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder, and vector/text canvas.

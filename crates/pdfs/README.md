@@ -2,7 +2,7 @@
 
 Read, inspect, edit, and write PDF files through a single Rust dependency.
 
-`pdfs` combines a modular family of PDF crates behind an ergonomic, viewer-compatible API: open files lazily from disk or memory, inspect pages and metadata, extract text and fonts, draw new pages, encrypt with AES-256, linearize for fast web viewing, or append incremental updates. Every underlying crate in the family is also re-exported at the root (`pdfs::pdf_structure`, `pdfs::pdf_objects`, etc.) at matching versions when you need low-level control.
+`pdfs` combines a modular family of PDF crates behind an ergonomic, viewer-compatible API: open files lazily from disk or memory, inspect pages and metadata, extract text and fonts, draw new pages in Standard 14 or embedded TrueType fonts, encrypt with AES-256, linearize for fast web viewing, or append incremental updates. Every underlying crate in the family is also re-exported at the root (`pdfs::pdf_structure`, `pdfs::pdf_objects`, etc.) at matching versions when you need low-level control.
 
 ## Quickstart: Write and Read Page Text
 
@@ -65,6 +65,8 @@ let titles: Vec<String> = (pages.iter())
     .collect();
 assert_eq!(titles, ["Größe", "Café €5"]);
 ```
+
+For text beyond a Standard 14 font's single-byte encoding (CJK, Hebrew, Arabic, symbols past the Basic Multilingual Plane), `Document::embed_font` (`embed` feature, enabled by default) embeds a TrueType program: `EmbeddedFont::codes` encodes any string its `cmap` maps, `Canvas::text_box` lays text out in it, and each save writes the program subset to the glyphs drawn, with a `/ToUnicode` map so the text reads back.
 
 `Document::save(path)` writes compressed PDF 1.7 output (Flate-encoded cross-reference and object streams by default; customizable via `Document::save_options`). `Document::claim` attaches XMP conformance metadata (PDF/A, PDF/UA, PDF/VT).
 
@@ -165,7 +167,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **[pdf-color](https://crates.io/crates/pdf-color)** — Color space parsing and component counting.
 - **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
 - **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, `/Info` dictionaries, and XMP conformance claims.
-- **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, and text extraction.
+- **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, text extraction, and TrueType font subsetting and embedding.
 - **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
 - **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — Linearized PDF layout engine, hint tables, and validator.
 
@@ -175,13 +177,14 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **Unified resource caps (`Limits`):** One `Limits` struct bounds stream decompression, object nesting, tree depth, and per-call `font_budget`. Untrusted or hostile files return typed errors or partial-read markers (`Shown::unread`, `Verdict::judged_whole`) and never panic.
 - **Opt-in spec diagnostics:** Methods with `_with` suffixes (`pages_with`, `info_with`, `claims_with`, `linearized_with`) stream recoverable spec departures to any `fault::Sink`.
 - **Explicit lock & decode states:** Password-locked streams fail with `Why::Locked` (never returning raw ciphertext as text), and damaged/unsupported content streams are recorded explicitly (`Concat::undecoded`, `Unread::Undecoded`). Document permission flags (`Permissions`) are reported to the caller rather than enforced by `edit` or `save`.
-- **Thread-safe & secret-safe:** `Pdf`, `Content`, `Document`, and `Shown` are `Send + Sync`. `Debug` implementations and `tracing` spans never expose passwords, keys, or document text.
+- **Thread-safe & secret-safe:** `Pdf`, `Content`, `Document`, `EmbeddedFont`, and `Shown` are `Send + Sync`. `Debug` implementations and `tracing` spans never expose passwords, keys, or document text.
 
 ## Cargo Features
 
 - **`programs`** *(default)* — Parse embedded font programs via `skrifa` for glyph bounding boxes, heights, and fallback character mappings.
 - **`text-layout`** *(default)* — Enable `Page::text_page`, `Page::search`, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas::text_box` layout via `pdf-gfx/text-layout`.
 - **`clock`** *(default)* — Enable `Date::now` and `Date::from_unix` in `pdf-semantics`.
+- **`embed`** *(default)* — Enable `Document::embed_font` and `EmbeddedFont`: embed a TrueType program, subset to the glyphs drawn, to draw Unicode text in, via `pdf-fonts/embed` (which brings in `subsetter`).
 - **`image-ends`** — Find inline DCT (JPEG) and CCITTFax image boundaries by decoding image data, matching PDFium.
 - **`predefined-cmaps`** — Bundle Adobe predefined CJK CMaps (via `hayro-cmap`) for CJK fonts without `/ToUnicode`.
 - **`simd`** — Enable runtime SIMD dispatch in `pdf-content-streams` dependencies.
@@ -191,7 +194,8 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 ## Scope & Limitations
 
 - **Annotation & Type 3 streams:** `Page::text` and `Page::text_page` walk page `/Contents` and drawn Form XObjects; Type 3 glyph streams and annotation `/AP` streams are not walked automatically.
-- **No rendering, form filling, signing, or custom font embedding:** Rewriting a signed PDF whole or linearized invalidates existing byte-range signatures (use incremental updates carefully if preserving prior bytes).
+- **No rendering, form filling, or signing:** Rewriting a signed PDF whole or linearized invalidates existing byte-range signatures (use incremental updates carefully if preserving prior bytes).
+- **Font embedding is TrueType only, without shaping:** `Document::embed_font` takes programs with TrueType (`glyf`) outlines; CFF- and CFF2-outline OpenType fonts (most `.otf` files and CJK `.ttc` collections) and bitmap-only fonts are refused, as are fonts whose licence restricts embedding unless the caller says it has the right. Text is drawn one glyph per character in the order given (no ligatures, kerning, or right-to-left reordering), and justified `text_box` lines in an embedded font are laid out flush left, since PDF word spacing applies only to single-byte codes.
 - **Standard 14 `/Widths` in PDF 2.0:** Standard 14 font dictionaries omit `/Widths` (valid in PDF 1.0–1.7; PDF 2.0 requires explicit `/Widths`).
 - **XMP replacement:** `Document::claim` writes a fresh XMP packet and refuses catalogs that already have a `/Metadata` stream.
 

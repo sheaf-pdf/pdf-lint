@@ -89,7 +89,7 @@ Run development checks via [`just`](justfile):
 Several automated tests enforce strict consistency across code and documentation:
 
 1. **Feature-matrix compilation & rustdoc (`just clippy`, `just test`, `just doc`):**
-   Crates are tested and documented with `--no-default-features` (e.g., `pdf-semantics` without `clock`, `pdf-linearize` without `family`, `pdf-fonts` without `programs`, `pdf-gfx` without `programs`/`text-layout`, `pdfs` without `programs`/`text-layout`/`clock`, `pdf-filters` with only `zlib-rs`). Avoid unguarded `[`intra_doc_links`]` or doctests that reference feature-gated items when those features are off.
+   Crates are tested and documented with `--no-default-features` (e.g., `pdf-semantics` without `clock`, `pdf-linearize` without `family`, `pdf-fonts` without `programs` and with `embed` alone, `pdf-gfx` without `programs`/`text-layout`, `pdfs` without `programs`/`text-layout`/`clock`/`embed` and with `embed` alone, `pdf-filters` with only `zlib-rs`). Avoid unguarded `[`intra_doc_links`]` or doctests that reference feature-gated items when those features are off.
 2. **README doctests & `lib.rs` first-example parity:**
    Each library crate compiles its `README.md` via `#[cfg(doctest)] #[doc = include_str!("../README.md")]`. In `pdfs`, `pdf-gfx`, `pdf-fonts`, `pdf-crypt`, `pdf-linearize`, `pdf-semantics`, and `pdf-content-streams`, a unit test asserts that the **first** ` ```rust ` block in `README.md` matches the **first** ` ``` ` block in `src/lib.rs` (`//!`) line-for-line.
 3. **README URLs & license links:**
