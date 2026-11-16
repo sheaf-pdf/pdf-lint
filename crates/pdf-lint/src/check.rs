@@ -5141,10 +5141,11 @@ mod tests {
     //! bounded, on cycles and on deep nesting.
 
     use pdf_fixtures::fixture::{self, Body, Xref};
+    use pdf_objects::dict;
+    use pdf_structure::pdf_crypt;
 
     use super::*;
     use crate::bytes;
-    use crate::dict;
     use crate::source::Document;
 
     /// `objects`, the catalog object 1, written at `version` with a
@@ -8644,8 +8645,8 @@ mod tests {
 
     /// An encryption dictionary for [`ID`], of `kind`, its user password
     /// empty, its streams and strings encrypted as `stm_f` and `str_f` say.
-    fn encryption(kind: crate::pdf_crypt::writer::Kind, stm_f: &str, str_f: &str) -> String {
-        let settings = crate::pdf_crypt::writer::Settings {
+    fn encryption(kind: pdf_crypt::writer::Kind, stm_f: &str, str_f: &str) -> String {
+        let settings = pdf_crypt::writer::Settings {
             kind,
             user: b"",
             owner: b"owner",
@@ -8653,7 +8654,7 @@ mod tests {
             id: ID,
             encrypt_metadata: true,
         };
-        let values = crate::pdf_crypt::writer::dictionary(&settings);
+        let values = pdf_crypt::writer::dictionary(&settings);
         let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
         if let Some(length) = values.length {
@@ -8686,7 +8687,7 @@ mod tests {
     /// nor where the file's strings aren't encrypted either.
     #[test]
     fn strings_an_object_stream_leaves_in_the_clear_are_found() {
-        use crate::pdf_crypt::writer::Kind;
+        use pdf_crypt::writer::Kind;
         let file = |encrypt: &str, members: &[(u32, &str)]| {
             let mut file = Sections::new("1.7");
             file.object(7, encrypt);
@@ -10859,7 +10860,7 @@ mod tests {
     #[derive(Clone, Copy)]
     struct Failing<'a> {
         objects: &'a BTreeMap<ObjectId, Object>,
-        fails: &'a [(u32, crate::Why)],
+        fails: &'a [(u32, pdf_objects::Why)],
     }
 
     impl<'a> Resolve<'a> for Failing<'a> {
@@ -10900,7 +10901,7 @@ mod tests {
             (Some(7), "a kid"),
             (Some(6), "a key"),
         ];
-        for why in [crate::Why::Damaged, crate::Why::Locked] {
+        for why in [pdf_objects::Why::Damaged, pdf_objects::Why::Locked] {
             for (part, what) in parts {
                 let fails: Vec<_> = part.map(|n| (n, why)).into_iter().collect();
                 let resolve = Failing {
@@ -11031,7 +11032,7 @@ mod tests {
     /// why, as the predicates ask, each is none but the one that reads.
     #[test]
     fn the_objects_say_why_one_doesnt_read_as_a_document_does() {
-        use crate::Why;
+        use pdf_objects::Why;
         let mut file = Sections::new("1.7");
         file.object(1, CATALOG);
         file.object(2, PAGES);

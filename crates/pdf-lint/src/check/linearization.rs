@@ -699,7 +699,10 @@ mod tests {
     use pdf_linearize::check::HintData;
     use pdf_linearize::family::{self, linearize_bytes};
     use pdf_linearize::hint::{PageOffsets, SharedObjects};
+    use pdf_objects::dict;
     use pdf_structure::XrefKind;
+    use pdf_structure::pdf_crypt;
+    use pdf_structure::pdf_filters::{Level, Prediction};
     use pdf_structure::write::{self, Base, Deflate};
 
     use super::*;
@@ -707,8 +710,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::check::{Hold, Made, Options, Report, check, check_with_reading};
-    use crate::dict;
-    use crate::pdf_filters::{Level, Prediction};
 
     fn r(n: u32) -> Object {
         Object::reference(n)
@@ -786,7 +787,7 @@ mod tests {
 
     /// `file` opened by `passwords` and linearized, its hint stream's data
     /// stored as it is.
-    fn linearized(file: &[u8], passwords: &[crate::pdf_crypt::Password]) -> Vec<u8> {
+    fn linearized(file: &[u8], passwords: &[pdf_crypt::Password]) -> Vec<u8> {
         let mut options = family::Options::DEFAULT;
         options.deflate = stored();
         options.read.passwords = passwords;
@@ -1291,11 +1292,7 @@ mod tests {
     /// `file` linearized, its hint stream's data stored as it is, as
     /// [`linearized`], under its cross-reference streams with what may be
     /// packed in object streams where `pack` says.
-    fn linearized_packed(
-        file: &[u8],
-        passwords: &[crate::pdf_crypt::Password],
-        pack: bool,
-    ) -> Vec<u8> {
+    fn linearized_packed(file: &[u8], passwords: &[pdf_crypt::Password], pack: bool) -> Vec<u8> {
         let mut options = family::Options::DEFAULT;
         options.deflate = stored();
         options.kind = XrefKind::Stream;
@@ -1326,8 +1323,8 @@ mod tests {
     #[test]
     fn an_encrypted_linearized_files_hint_data_is_decrypted() {
         let id = b"0123456789abcdef";
-        let settings = crate::pdf_crypt::writer::Settings {
-            kind: crate::pdf_crypt::writer::Kind::Aes128,
+        let settings = pdf_crypt::writer::Settings {
+            kind: pdf_crypt::writer::Kind::Aes128,
             user: b"user",
             owner: b"owner",
             p: -4,
@@ -1341,7 +1338,7 @@ mod tests {
             .map(|id| (id.number, Body::from(doc.get(id).unwrap().clone())))
             .collect();
         let encrypted = fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) });
-        let user = [crate::pdf_crypt::Password("user")];
+        let user = [pdf_crypt::Password("user")];
         let file = linearized(&encrypted, &user);
         let mut options = bytes::Options::DEFAULT;
         options.passwords = &user;

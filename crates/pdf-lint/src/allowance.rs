@@ -313,8 +313,8 @@ impl Allowance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ObjectId;
     use crate::check::Made;
+    use crate::object::ObjectId;
 
     fn finding(table: &str, key: &str, rule: Rule) -> Finding {
         Finding {

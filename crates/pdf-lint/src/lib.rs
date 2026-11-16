@@ -17,19 +17,24 @@
 //!
 //! # Entry Points
 //!
-//! - [`check()`] validates any [`Source`] (such as an in-memory [`Document`]).
-//! - [`check_with_reading`] takes a [`bytes::WithReading`] so it can also
-//!   decode content/font/metadata streams, inspect overwritten objects in
+//! - [`check()`] validates any [`Source`](pdf_structure::Source) (such as an
+//!   in-memory [`Document`](pdf_structure::Document)).
+//! - [`check_with_reading`] takes a
+//!   [`WithReading`](pdf_structure::WithReading) so it can also decode
+//!   content/font/metadata streams, inspect overwritten objects in
 //!   historical revisions, and verify Annex F linearization.
-//! - [`Report`] holds all [`Finding`]s (with exact byte [`Span`]s) and summary
-//!   counts, and supports baseline diffing via [`Report::since`],
-//!   [`Report::by_path`], and [`Report::beyond`].
-//! - [`grammar()`] returns the active Arlington [`Grammar`] (embedded by
-//!   default, or overridden once at startup via [`use_model`]).
+//! - [`Report`] holds all [`Finding`]s (with exact byte
+//!   [`Span`](pdf_objects::Span)s) and summary counts, and supports baseline
+//!   diffing via [`Report::since`], [`Report::by_path`], and
+//!   [`Report::beyond`].
+//! - [`grammar()`] returns the active Arlington
+//!   [`Grammar`](pdf_arlington::Grammar) (embedded by default, or overridden
+//!   once at startup via [`use_model`]).
 
 pub mod allowance;
 pub mod check;
 #[cfg(any(test, fuzzing))]
+#[doc(hidden)]
 pub mod fuzz;
 
 pub use allowance::{Allowance, AllowanceError, Allowances};
@@ -38,42 +43,34 @@ pub use check::{
     Unchecked, Unlisted, UnlistedIn, check, check_with_reading, file_version,
 };
 // `grammar` is the module and the function both.
-pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
-pub use object::{
-    Data, Dict, Entry, Form, Name, Object, ObjectId, SmallBytes, Span, Str, Stream, Value,
-};
-// The model, its tables and predicates, and the commit it's at, are
-// pdf-arlington's; which model every check reads is this crate's.
-pub use pdf_arlington::{COMMIT, predicate};
-// The objects, `dict!`, versions, what resolves a reference and what gives
-// a stream's data are pdf-objects': re-exported whole too, so that what
-// the reader's faults name (`fault::Place`, and the `fault::Sink` a
-// `Source` tells them to) is named at the version this crate takes.
+pub use grammar::{grammar, use_model};
+// The crates whose types this crate's API names, each re-exported whole, at
+// the version this crate takes: the model, its tables and predicates are
+// pdf-arlington's (`grammar()`'s `Grammar`); the objects, their ids, spans
+// and versions pdf-objects' (`Finding::object` and `at`,
+// `Options::version`); and the reader, what it reads a file into, the
+// passwords it's given and the faults its filters tell, pdf-structure's
+// (`check`'s `Source`, `check_with_reading`'s `WithReading`), pdf-crypt and
+// pdf-filters under it.
+pub use pdf_arlington;
 pub use pdf_objects;
-pub use pdf_objects::{
-    Resolve, ResolveFn, Streams, Unreadable, Why, dict, object, resolve_fn, version,
-};
-// The reader, and what it reads a file into, are pdf-structure's: its
-// `read` module is this crate's `bytes`, the name it has had here; the
-// error a stream's data that doesn't decode cleanly gives is pdf-filters',
-// and the passwords a reader is given and its security handler are
-// pdf-crypt's.
-pub use pdf_structure::read as bytes;
-pub use pdf_structure::{pdf_crypt, pdf_filters, source};
-// The rules a reader reads by, ISO 32000-2's or PDFium's, are
-// pdf-tokenizer's.
-pub use pdf_tokenizer::Rules;
-pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
-pub use source::{Document, Encryption, Revision, Source, Trailer, Update};
-pub use version::Version;
+pub use pdf_structure;
 
-/// The model's tables, pdf-arlington's [`grammar`](pdf_arlington::grammar)
-/// module, and which model every check reads: the embedded one, or one
-/// [`use_model`] chose.
+// The names this crate's modules reach the family's by: pdf-structure's
+// `read` module is `bytes` here, the name it has had.
+use pdf_arlington::predicate;
+use pdf_objects::{object, text, version};
+use pdf_structure::read as bytes;
+use pdf_structure::source;
+
+/// Which model every check reads: the embedded one, or one [`use_model`]
+/// chose. The model's tables are pdf-arlington's
+/// ([`pdf_arlington::grammar`]).
 pub mod grammar {
     use std::sync::OnceLock;
 
-    pub use pdf_arlington::grammar::*;
+    // The model's types, as this crate's modules name them.
+    pub(crate) use pdf_arlington::grammar::*;
 
     /// The model [`use_model`] chose; none once anything has read the
     /// embedded one instead.
@@ -138,62 +135,13 @@ pub mod grammar {
     }
 }
 
-/// Text strings, pdf-objects' [`text`](pdf_objects::text).
-pub mod text {
-    pub use pdf_objects::text::*;
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use crate::pdf_crypt::{Encoding, Password};
-
-        /// A password's encodings (pdf-crypt's [`Password::encodings`])
-        /// take [`pdfium::pdf_doc_char`] for PDFDocEncoding exactly, though
-        /// pdf-crypt keeps a copy of its own. With `Ł` after it, 0x95 in
-        /// PDFDocEncoding and in neither WinAnsiEncoding nor
-        /// MacRomanEncoding, a character a byte decodes to has its UTF-8
-        /// and that byte's PDFDocEncoding, no more; the Latin-1 characters
-        /// at the three bytes the table leaves undefined have their UTF-8
-        /// alone. Their SASLprep forms, where they have one (˘'s is a space
-        /// and a breve), are no table's, and left aside.
-        #[test]
-        fn the_pdfdoc_encoding_matches_this_table() {
-            let forms = |typed: &str| -> Vec<(Encoding, Vec<u8>)> {
-                (Password(typed).encodings().iter())
-                    .filter(|e| e.encoding() != Encoding::Saslprep)
-                    .map(|e| (e.encoding(), e.as_bytes().to_vec()))
-                    .collect()
-            };
-            for b in 0..=255 {
-                if let Some(c) = pdf_doc_char(b) {
-                    assert_eq!(pdfium::pdf_doc_char(b), Some(c), "{b:#x}");
-                }
-                if let Some(c) = pdfium::pdf_doc_char(b) {
-                    let typed = format!("{c}Ł");
-                    let want = [
-                        (Encoding::Utf8, typed.as_bytes().to_vec()),
-                        (Encoding::PdfDoc, vec![b, 0x95]),
-                    ];
-                    assert_eq!(forms(&typed), want, "{b:#x}");
-                }
-            }
-            for c in ['\u{7F}', '\u{9F}', '\u{AD}'] {
-                let typed = format!("{c}Ł");
-                let want = [(Encoding::Utf8, typed.as_bytes().to_vec())];
-                assert_eq!(forms(&typed), want, "{c:?}");
-            }
-        }
-    }
-}
-
-/// The extensions a file declares, read from a [`Source`]
+/// The extensions a file declares, read from a
+/// [`Source`](pdf_structure::Source)
 /// ([`declared`](extension::declared)), and those the model names
 /// ([`named`](extension::named)): pdf-arlington's
 /// [`extension`](pdf_arlington::extension).
 pub mod extension {
     use std::collections::BTreeSet;
-
-    pub use pdf_arlington::extension::ISO;
 
     use pdf_arlington::extension::Claims;
     use pdf_semantics::{Limits, xmp};
@@ -203,7 +151,7 @@ pub mod extension {
 
     /// Every extension the model names, in its cells and around its
     /// types, values and links: what a file can be checked under. It's
-    /// [`Grammar::extensions`](crate::Grammar::extensions) of the model
+    /// [`Grammar::extensions`](pdf_arlington::Grammar::extensions) of the model
     /// every check reads, [`grammar()`](crate::grammar()).
     pub fn named() -> BTreeSet<String> {
         crate::grammar().extensions()
@@ -264,10 +212,10 @@ pub mod extension {
 
     #[cfg(test)]
     mod tests {
+        use pdf_objects::dict;
         use pdf_semantics::Fault;
 
         use super::*;
-        use crate::dict;
         use crate::object::{Object, ObjectId};
         use crate::source::Document;
         use crate::version::Version;
@@ -469,7 +417,11 @@ pub struct ReadmeDoctests;
 mod tests {
     use std::path::Path;
 
-    use crate::{Grammar, grammar, use_model};
+    use pdf_objects::text::{pdf_doc_char, pdfium};
+    use pdf_structure::pdf_crypt::{Encoding, Password};
+
+    use crate::grammar::Grammar;
+    use crate::{grammar, use_model};
 
     /// The README is shown on crates.io and docs.rs, where a path beside the
     /// crate reaches nothing: its licence link is the repository's URL, the
@@ -571,5 +523,42 @@ mod tests {
             format!("{e:#}"),
             "the model is chosen already: something has read it"
         );
+    }
+
+    /// A password's encodings (pdf-crypt's [`Password::encodings`])
+    /// take [`pdfium::pdf_doc_char`] for PDFDocEncoding exactly, though
+    /// pdf-crypt keeps a copy of its own. With `Ł` after it, 0x95 in
+    /// PDFDocEncoding and in neither WinAnsiEncoding nor
+    /// MacRomanEncoding, a character a byte decodes to has its UTF-8
+    /// and that byte's PDFDocEncoding, no more; the Latin-1 characters
+    /// at the three bytes the table leaves undefined have their UTF-8
+    /// alone. Their SASLprep forms, where they have one (˘'s is a space
+    /// and a breve), are no table's, and left aside.
+    #[test]
+    fn the_pdfdoc_encoding_matches_this_table() {
+        let forms = |typed: &str| -> Vec<(Encoding, Vec<u8>)> {
+            (Password(typed).encodings().iter())
+                .filter(|e| e.encoding() != Encoding::Saslprep)
+                .map(|e| (e.encoding(), e.as_bytes().to_vec()))
+                .collect()
+        };
+        for b in 0..=255 {
+            if let Some(c) = pdf_doc_char(b) {
+                assert_eq!(pdfium::pdf_doc_char(b), Some(c), "{b:#x}");
+            }
+            if let Some(c) = pdfium::pdf_doc_char(b) {
+                let typed = format!("{c}Ł");
+                let want = [
+                    (Encoding::Utf8, typed.as_bytes().to_vec()),
+                    (Encoding::PdfDoc, vec![b, 0x95]),
+                ];
+                assert_eq!(forms(&typed), want, "{b:#x}");
+            }
+        }
+        for c in ['\u{7F}', '\u{9F}', '\u{AD}'] {
+            let typed = format!("{c}Ł");
+            let want = [(Encoding::Utf8, typed.as_bytes().to_vec())];
+            assert_eq!(forms(&typed), want, "{c:?}");
+        }
     }
 }

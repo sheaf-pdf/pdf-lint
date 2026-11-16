@@ -301,6 +301,8 @@ mod tests {
     //! that revision had it, within the caps, and counted where it isn't.
 
     use pdf_fixtures::fixture;
+    use pdf_objects::dict;
+    use pdf_structure::pdf_crypt::Password;
 
     use super::*;
     use crate::bytes;
@@ -308,9 +310,7 @@ mod tests {
     use crate::check::{
         self, Hold, Made, Options, Report, Rule, WRITTEN_OVER, check, check_with_reading,
     };
-    use crate::dict;
     use crate::object::{Str, Value};
-    use crate::pdf_crypt::Password;
     use crate::source::RevisionEnd;
 
     /// `file` read beside its reading under `options`, and checked so and

@@ -20,6 +20,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
+use pdf_structure::pdf_crypt;
+#[cfg(test)]
+use pdf_structure::pdf_crypt::writer::{Kind, Settings};
+#[cfg(test)]
 use pdf_structure::write;
 
 use crate::bytes::{self, WithReading};
@@ -30,10 +34,6 @@ use crate::check::{
 #[cfg(test)]
 use crate::object::Object;
 use crate::object::{ObjectId, Span};
-#[cfg(test)]
-use crate::pdf_crypt;
-#[cfg(test)]
-use crate::pdf_crypt::writer::{Kind, Settings};
 use crate::source::{Document, RevisionEnd, Source, Update};
 use crate::version::Version;
 
@@ -1460,8 +1460,8 @@ mod tests {
     #[test]
     fn a_font_s_text_read_beside_its_reading_and_alone() {
         use pdf_fixtures::fixture::{self, Body, Xref};
+        use pdf_objects::dict;
 
-        use crate::dict;
         use crate::object::Object;
 
         let r = Object::reference;

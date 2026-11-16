@@ -163,7 +163,7 @@ use pdf_content_streams::{
 use super::{Finding, Made, Rule, Step, TOKEN, Trail, Visit, Walk};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span, Value};
-use crate::pdf_filters;
+use pdf_structure::pdf_filters;
 
 /// How many objects are looked up for one color space an inline image is
 /// drawn in, and how many subfunctions written in place are read, where
@@ -1848,9 +1848,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use pdf_fixtures::fixture;
-    use pdf_objects::Streams;
-
-    use crate::{Unreadable, Why};
+    use pdf_objects::{Streams, Unreadable, Why};
 
     use pdf_content_streams::{Balance, ErrorKind, MarkedNest, Properties};
 
@@ -3357,8 +3355,8 @@ mod tests {
     /// which gives no stream's data.
     #[test]
     fn an_encrypted_files_content_is_read_decrypted() {
-        use crate::pdf_crypt::writer::{self, Kind, Settings};
-        use crate::pdf_crypt::{Encoded, Handler};
+        use pdf_structure::pdf_crypt::writer::{self, Kind, Settings};
+        use pdf_structure::pdf_crypt::{Encoded, Handler};
 
         let id = b"0123456789abcdef";
         let settings = Settings {

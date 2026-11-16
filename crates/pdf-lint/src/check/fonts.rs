@@ -53,7 +53,7 @@
 //! evaluated. What's read then is the pass's after the walk, each font read
 //! once.
 //!
-//! [`FileCx::latin`]: crate::FileCx::latin
+//! [`FileCx::latin`]: crate::predicate::FileCx::latin
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -62,9 +62,10 @@ use std::mem::{self, Discriminant};
 use std::ops::RangeInclusive;
 use std::ptr;
 
+use pdf_arlington::Latin;
 use pdf_fonts::{Error, Fault, Font, Limits};
 use pdf_objects::fault::{Place, Sink};
-use pdf_objects::{Streams, WithStreams};
+use pdf_objects::{Resolve, Streams, Unreadable, Why, WithStreams};
 use unicode_script::{Script, UnicodeScript};
 
 use super::content::times;
@@ -73,7 +74,6 @@ use super::told::{Keyed, Told, holding, written_at};
 use super::{Finding, Graphic, Made, NESTING, Objects, REFERENCES, Rule, Walk};
 use crate::object::{Dict, Object, ObjectId, Span, Value};
 use crate::source::Source;
-use crate::{Latin, Resolve, Unreadable, Why};
 
 /// The model's font tables: what the walk reaches as one is a font, read
 /// again after it. A Type 0 font's CIDFont, descriptor and CMap are read as
@@ -739,12 +739,12 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pdf_fixtures::fixture::{self, Body, Xref};
+    use pdf_objects::dict;
+    use pdf_structure::pdf_crypt::writer::{Kind, Settings};
 
     use super::*;
     use crate::bytes::{self, ByteSource, Options, WithReading};
     use crate::check::{Hold, Made, Report, Rule, check};
-    use crate::dict;
-    use crate::pdf_crypt::writer::{Kind, Settings};
 
     /// A `/ToUnicode`'s data, as each stream here holds it.
     const PLAIN: &[u8] = b"1 beginbfchar <41> <0041> endbfchar";

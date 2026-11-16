@@ -1305,7 +1305,7 @@ fn a_model_refused_is_said_word_for_word() {
     let one = |name: &str, row: &str| {
         let dir = dir.path().join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        let header = pdf_lint::grammar::HEADER.join("\t");
+        let header = pdf_lint::pdf_arlington::grammar::HEADER.join("\t");
         std::fs::write(dir.join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
         dir
     };
@@ -1407,7 +1407,7 @@ fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
     assert_eq!(out.status.code(), Some(2));
     let out = run(&["--version"]);
     assert_eq!(out.status.code(), Some(0));
-    assert!(text(&out.stdout).contains(pdf_lint::COMMIT));
+    assert!(text(&out.stdout).contains(pdf_lint::pdf_arlington::COMMIT));
 }
 
 #[test]
@@ -1643,12 +1643,12 @@ fn a_file_beginning_with_a_dash_follows_two_dashes() {
 #[test]
 fn the_version_is_two_lines_naming_the_model() {
     let hash = pdf_lint::grammar().digest();
-    let n = pdf_lint::grammar::corrections().len();
-    let m = pdf_lint::grammar::additions().len();
+    let n = pdf_lint::pdf_arlington::grammar::corrections().len();
+    let m = pdf_lint::pdf_arlington::grammar::additions().len();
     let version = format!(
         "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (sha256 {hash})\n",
         env!("CARGO_PKG_VERSION"),
-        pdf_lint::COMMIT
+        pdf_lint::pdf_arlington::COMMIT
     );
     // Where it's met, the rest unread: a file before it, and a word after
     // it that's no option. The model is the embedded one, `--model`'s
@@ -2634,8 +2634,9 @@ fn linearized_wrongly() -> (Vec<u8>, u32, usize) {
 /// where `listed` gives the linearization dictionary's number and where it
 /// is, that number listed there, so that `--last-update` holds it.
 fn linearized_updated(file: &[u8], listed: Option<(u32, usize)>) -> Vec<u8> {
-    use pdf_lint::Source;
-    let doc = pdf_lint::bytes::document(file, &pdf_lint::bytes::Options::DEFAULT);
+    use pdf_lint::pdf_structure::Source;
+    use pdf_lint::pdf_structure::read::{Options, document};
+    let doc = document(file, &Options::DEFAULT);
     let trailer = doc.trailer().dict();
     let root = trailer.get(b"Root").and_then(|r| r.as_reference()).unwrap();
     let pages = (doc.get(root).unwrap().as_dict().unwrap().get(b"Pages"))

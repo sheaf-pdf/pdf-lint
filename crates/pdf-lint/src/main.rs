@@ -18,12 +18,14 @@ use anyhow::{Context, Result, bail};
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser};
-use pdf_lint::bytes::WithReading;
-use pdf_lint::pdf_crypt::Password;
+use pdf_lint::pdf_arlington::{self, Grammar};
+use pdf_lint::pdf_objects::{ObjectId, Span, Version};
+use pdf_lint::pdf_structure::pdf_crypt::Password;
+use pdf_lint::pdf_structure::read::{self as bytes, WithReading};
+use pdf_lint::pdf_structure::{Document, Encryption, Source};
 use pdf_lint::{
-    Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, ObjectId,
-    Options, Report, Source, Span, UnlistedIn, Version, bytes, check_with_reading, file_version,
-    use_model,
+    Allowances, Class, Exempt, Finding, Hold, Made, Options, Report, UnlistedIn,
+    check_with_reading, file_version, use_model,
 };
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
@@ -253,7 +255,7 @@ fn jobs(n: &str) -> Result<NonZero<usize>, &'static str> {
 
 /// `--pdf-version`'s version, which reads no model.
 fn pdf_version(v: &str) -> Result<Version, &'static str> {
-    pdf_lint::grammar::version(v).ok_or("not a PDF version, 1.0 to 1.7 or 2.0")
+    pdf_arlington::grammar::version(v).ok_or("not a PDF version, 1.0 to 1.7 or 2.0")
 }
 
 /// `--unlisted`'s objects.
@@ -501,12 +503,12 @@ fn joined(command: &clap::Command, words: impl IntoIterator<Item = OsString>) ->
 /// commit, its corrections and additions, and its hash.
 fn version() -> String {
     let hash = pdf_lint::grammar().digest();
-    let n = pdf_lint::grammar::corrections().len();
-    let m = pdf_lint::grammar::additions().len();
+    let n = pdf_arlington::grammar::corrections().len();
+    let m = pdf_arlington::grammar::additions().len();
     format!(
         "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (sha256 {hash})\n",
         env!("CARGO_PKG_VERSION"),
-        pdf_lint::COMMIT
+        pdf_arlington::COMMIT
     )
 }
 

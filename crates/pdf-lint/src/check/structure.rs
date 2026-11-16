@@ -96,16 +96,17 @@ use std::mem::{self, Discriminant};
 use std::rc::Rc;
 
 use pdf_objects::fault::{Place, Sink};
+use pdf_objects::{Unreadable, Why};
 use pdf_semantics::pages::{self, Page, Pages, Rect, pages};
 use pdf_semantics::tree::{names, numbers};
 use pdf_semantics::{Fault, Limits, xmp};
+use pdf_tokenizer::Rules;
 
 use super::content::times;
 use super::kept::Kept;
 use super::{Finding, MODEL, Objects, REFERENCES, Rule, Trail, Visit, Walk, entry_at};
 use crate::object::{Dict, Object, ObjectId, Span};
 use crate::source::Source;
-use crate::{Rules, Unreadable, Why};
 
 /// What the structures are read under: pdf-semantics' caps, which ISO
 /// 32000-2 doesn't set.
@@ -1045,11 +1046,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use pdf_fixtures::fixture;
+    use pdf_objects::dict;
 
     use super::super::{Hold, Made, Options, Report, check};
     use super::*;
     use crate::bytes;
-    use crate::dict;
     use crate::source::Document;
     use crate::version::Version;
 
