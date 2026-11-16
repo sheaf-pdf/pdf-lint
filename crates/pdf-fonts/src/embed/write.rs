@@ -85,7 +85,8 @@ pub struct Options {
 ///    glyphs their composites draw, `/Length1` its length.
 /// 4. Its `/ToUnicode` CMap (9.10.3): each glyph drawn's text, as `glyphs` keeps it, in
 ///    blocks of at most 100; a character past the Basic Multilingual Plane is its UTF-16
-///    surrogate pair, one code's, and a glyph kept with no text has none.
+///    surrogate pair, one code's, and a glyph kept with no text has none. A text of
+///    U+FFFF alone, a noncharacter, is written as it is, which PDFium reads as no text.
 /// 5. Where the program is cut, its `/CIDToGIDMap`: two bytes a CID, from 0 to the last
 ///    glyph kept, the glyph in the cut program that CID's glyph in `program` is. A code's
 ///    CID is the glyph's number in `program` ([`Program::codes`]), not in the cut, so

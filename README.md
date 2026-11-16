@@ -89,7 +89,7 @@ just ci           # run the full local CI suite (all checks except cargo-semver-
 - **qpdf oracle (`just test-qpdf`):** Downloads a pinned `qpdf` binary on Linux x86_64 (or uses `PDF_LINT_QPDF`) to cross-check file reading, writing, encryption, and linearization.
 - **Full `just ci` prerequisites:** Requires `cargo-nextest`, Rust **1.92** (workspace MSRV), `nightly` with `rust-src` (for `pdf-tokenizer`'s `core`-only build), and targets `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`, and `wasm32-unknown-unknown`. Note that `*-package` recipes run `cargo publish --dry-run` and require network access.
 - **Semver checks (`just <crate>-semver`):** Uses [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) to check published crates against crates.io.
-- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `gfx`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
+- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `embed`, `gfx`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
 
 ## License
 

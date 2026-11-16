@@ -1,7 +1,9 @@
-//! What the fuzz target checks, which unit tests check too: the promises a Type 1
+//! What the fuzz targets check, which unit tests check too: the promises a Type 1
 //! program's scan, a glyph's or a font's name, text written in a standard 14 font, a
 //! font's reading, its program's included, and the strings content shows make, on any
-//! input. It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! input; and, with `embed`, those a TrueType program opened for embedding and the font
+//! written of it make. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`.
 
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -1017,6 +1019,368 @@ pub fn fixtures() -> Vec<Vec<u8>> {
     .collect()
 }
 
+/// The tables an input's bytes may be spliced into [`truetype_program`] as ([`embed`]),
+/// in place of its own of the tag or beside them: its eight; `name`, `OS/2` and the
+/// hinting tables, which it hasn't; and those that say a program's outlines aren't
+/// TrueType's.
+#[cfg(feature = "embed")]
+pub const TABLES: [[u8; 4]; 18] = [
+    *b"cmap", *b"glyf", *b"head", *b"hhea", *b"hmtx", *b"loca", *b"maxp", *b"post", *b"name",
+    *b"OS/2", *b"cvt ", *b"fpgm", *b"prep", *b"CFF ", *b"CFF2", *b"EBDT", *b"CBDT", *b"sbix",
+];
+
+/// How many bytes before an input's program say how it's read ([`embed`]).
+#[cfg(feature = "embed")]
+pub const HEADER: usize = 4;
+
+/// How many of an input's last bytes are read as a text ([`embed`]): drawn, and the
+/// text of the glyph it names.
+#[cfg(feature = "embed")]
+const TAIL: usize = 32;
+
+/// How many of the characters a program's `cmap` maps are drawn ([`embed`]): those of a
+/// few of its segments, and few enough for a run to try many programs.
+#[cfg(feature = "embed")]
+const MAPPINGS: usize = 64;
+
+/// What's drawn in every program ([`embed`]): the fixture programs' characters (Latin,
+/// a composite of two glyphs and one of composites among them, Hebrew, Arabic and
+/// Chinese letters, and one past the Basic Multilingual Plane), and what a program has
+/// no glyph for, or may have: a noncharacter, a control character, a line feed and a
+/// variation selector.
+#[cfg(feature = "embed")]
+const DRAWN: &str =
+    "ABC g Ag H\u{C4}\u{1DE}\u{A8}\u{AF} שלום سلام 中文世界 𝄞 \u{FFFF}\u{0}\n\u{FE0F}";
+
+/// What a font written for embedding is read back within ([`embed`]): more than any
+/// program an input can be cut to.
+#[cfg(feature = "embed")]
+const EMBEDDED_BUDGET: usize = 1 << 26;
+
+/// The program `data` is ([`embed`]), and the face of it asked for. Past its [`HEADER`],
+/// where its first byte is even, its bytes, whole, face 0 to 3 as its second byte says;
+/// where it's odd, its bytes as one table of [`truetype_program`]'s, the one of
+/// [`TABLES`] its second byte picks, put in its place or among them, so that what's
+/// mutated is one table of a program whose others read.
+#[cfg(feature = "embed")]
+fn embedded(data: &[u8]) -> (Vec<u8>, u32) {
+    let (mode, pick) = (data.first().copied(), data.get(1).copied().unwrap_or(0));
+    let rest = data.get(HEADER..).unwrap_or_default();
+    if mode.unwrap_or(0) % 2 == 0 {
+        return (rest.to_vec(), u32::from(pick % 4));
+    }
+    let tag = TABLES[usize::from(pick) % TABLES.len()];
+    let mut tables = crate::fixture::truetype_tables();
+    match tables.iter_mut().find(|table| table.0 == tag) {
+        Some(table) => table.1 = rest.to_vec(),
+        None => tables.push((tag, rest.to_vec())),
+    }
+    (crate::fixture::sfnt(&mut tables), 0)
+}
+
+/// `data` as a TrueType program embedded ([`crate::embed`]), as [`embedded`] reads it:
+/// opened, or refused, saying why. Opened: its widths whole thousandths, none past its
+/// glyphs, and its heights finite. A fixed text, the input's last [`TAIL`] bytes as
+/// text and the first characters its `cmap` maps drawn in it: each character its
+/// glyph's code, or, where it has none, refused where it is, nothing of the text kept,
+/// and what's after it drawn on; the glyphs kept the same whatever order the texts are
+/// drawn in. The font of what's drawn written under each choice of
+/// [`Options`](crate::embed::Options), each twice the same, and refused only where the
+/// program's licence restricts it and the right isn't given, or for a glyph that can't
+/// be cut: the right changing nothing else, a `/CIDSet` one more object and nothing
+/// else, and a program whose licence asks to be embedded whole the same cut or not.
+/// Each font written read back by [`Font::read`] with no fault: each glyph's width the
+/// program's, and its text the one the [`Glyphs`](crate::embed::Glyphs) kept, so each
+/// string's text its glyphs'; with `programs`, its program read, and each glyph's box
+/// the same cut as whole. Then the glyph the input's third and fourth bytes name drawn
+/// too, its text the tail: refused where it's past the program's glyphs, else read
+/// back so. How many fonts were written and read back.
+///
+/// # Errors
+///
+/// Why the program wasn't opened.
+#[cfg(feature = "embed")]
+pub fn embed(data: &[u8]) -> Result<usize, crate::embed::Error> {
+    use crate::embed::{Error as Refused, Glyphs, Level, Options, Program, write};
+
+    let (bytes, index) = embedded(data);
+    let program = match Program::open(bytes, index) {
+        Ok(program) => program,
+        Err(error) => {
+            assert!(!error.to_string().is_empty());
+            return Err(error);
+        }
+    };
+    let count = program.glyph_count();
+    assert!(count > 0);
+    for glyph in [0, 1, count - 1, count, u16::MAX] {
+        let width = program.width(glyph);
+        assert!(width >= 0.0 && width.fract() == 0.0, "{glyph}: {width}");
+        assert!(glyph < count || width == 0.0, "{glyph}: {width}");
+    }
+    let metrics = program.metrics();
+    let bbox = metrics.bbox.unwrap_or_default();
+    for v in [
+        metrics.ascent,
+        metrics.descent,
+        bbox.x0,
+        bbox.y0,
+        bbox.x1,
+        bbox.y1,
+    ] {
+        assert!(v.is_finite(), "{metrics:?}");
+    }
+
+    let tail = String::from_utf8_lossy(&data[data.len().saturating_sub(TAIL)..]);
+    let mapped = mapped(&program, index);
+    let mut glyphs = Glyphs::new();
+    let mut strings = Vec::new();
+    for text in [DRAWN, &*tail, &*mapped] {
+        strings.extend(drawn(&program, &mut glyphs, text));
+    }
+    // Drawn in another order, the same glyphs and texts.
+    let mut again = Glyphs::new();
+    for text in [&*mapped, &*tail, DRAWN] {
+        drawn(&program, &mut again, text);
+    }
+    assert_eq!(again.texts, glyphs.texts);
+
+    let embedding = program.embedding();
+    let restricted = embedding.level == Level::Restricted || embedding.bitmaps_only;
+    let options = |bits: usize| Options {
+        cid_set: bits & 1 != 0,
+        whole: bits & 2 != 0,
+        restricted: bits & 4 != 0,
+    };
+    let fonts: [Result<Vec<Object>, Refused>; 8] = std::array::from_fn(|bits| {
+        let options = options(bits);
+        let written = write(&program, &glyphs, &options);
+        assert_eq!(write(&program, &glyphs, &options), written, "{options:?}");
+        match &written {
+            Err(Refused::Restricted(refused)) => {
+                assert!(restricted && !options.restricted, "{options:?}");
+                assert_eq!(*refused, embedding);
+            }
+            Err(Refused::Malformed { table: "loca" } | Refused::Subset(_)) => {}
+            Err(other) => panic!("{options:?}: {other:?}"),
+            Ok(_) => assert!(!restricted || options.restricted, "{options:?}"),
+        }
+        written
+    });
+    for bits in 0..8 {
+        // The right to embed a restricted program changes nothing else.
+        if bits & 4 == 0 && !matches!(fonts[bits], Err(Refused::Restricted(_))) {
+            assert_eq!(fonts[bits], fonts[bits | 4]);
+        }
+        // A program whose licence asks to be embedded whole is, either way.
+        if bits & 2 == 0 && !embedding.subsetting {
+            assert_eq!(fonts[bits], fonts[bits | 2]);
+        }
+        // A `/CIDSet` is one more object, its descriptor naming it, and nothing else.
+        if bits & 1 == 0 {
+            match (&fonts[bits], &fonts[bits | 1]) {
+                (Ok(without), Ok(with)) => with_cid_set(without, with),
+                (without, with) => assert_eq!(without.as_ref().err(), with.as_ref().err()),
+            }
+        }
+    }
+
+    let mut read = 0;
+    let mut cut_and_whole = [None, None];
+    for (bits, font) in fonts.iter().enumerate() {
+        let Ok(objects) = font else {
+            continue;
+        };
+        let font = read_back(&program, &glyphs, &strings, objects);
+        if bits == 0 {
+            digest(&font);
+        }
+        if bits < 4 && bits & 1 == 0 {
+            cut_and_whole[bits / 2] = Some(font);
+        }
+        read += 1;
+    }
+    // Each glyph's box the same cut as whole, with `programs`: the subsetter's glyphs
+    // the program's, by the reader's own outlines. Without, neither has one.
+    if let [Some(cut), Some(whole)] = &cut_and_whole {
+        for &glyph in glyphs.texts.keys() {
+            let code = u32::from(glyph);
+            assert_eq!(cut.char_box(code), whole.char_box(code), "glyph {glyph}");
+        }
+    }
+
+    // A glyph the input names, its tail its text; refused where it's past the glyphs.
+    let named = u16::from_be_bytes([data.get(2), data.get(3)].map(|b| b.copied().unwrap_or(0)));
+    glyphs.insert(named, &tail);
+    let right = Options {
+        restricted: true,
+        ..Options::default()
+    };
+    let written = write(&program, &glyphs, &right);
+    match &written {
+        _ if named >= count => {
+            let (&glyph, _) = glyphs.texts.last_key_value().unwrap();
+            assert_eq!(written, Err(Refused::Glyph { glyph, count }));
+        }
+        Ok(objects) => {
+            read_back(&program, &glyphs, &strings, objects);
+            read += 1;
+        }
+        Err(Refused::Malformed { table: "loca" } | Refused::Subset(_)) => {}
+        Err(other) => panic!("glyph {named}: {other:?}"),
+    }
+    Ok(read)
+}
+
+/// The characters `program`'s `cmap`, face `index`'s, maps first: at most [`MAPPINGS`].
+#[cfg(feature = "embed")]
+fn mapped(program: &crate::embed::Program, index: u32) -> String {
+    use skrifa::MetadataProvider;
+    use skrifa::raw::FontRef;
+
+    let Ok(font) = FontRef::from_index(&program.data, index) else {
+        return String::new();
+    };
+    let mappings = font.charmap().mappings().take(MAPPINGS);
+    mappings.filter_map(|(c, _)| char::from_u32(c)).collect()
+}
+
+/// `text` drawn in `program`, its glyphs kept in `glyphs`: each run of characters the
+/// program has glyphs for, its codes each character's glyph; each character it hasn't
+/// refused where it is, as the first of what's left, nothing of that kept. Each run's
+/// codes.
+#[cfg(feature = "embed")]
+fn drawn(
+    program: &crate::embed::Program,
+    glyphs: &mut crate::embed::Glyphs,
+    text: &str,
+) -> Vec<Vec<u8>> {
+    let mut strings = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let kept = glyphs.texts.clone();
+        let refused = match glyphs.add(program, rest) {
+            Ok(codes) => {
+                assert_eq!(program.codes(rest).as_ref(), Ok(&codes));
+                let pairs = codes.as_chunks::<2>().0;
+                assert_eq!(pairs.len(), rest.chars().count(), "a code a character");
+                for (c, &code) in rest.chars().zip(pairs) {
+                    let glyph = u16::from_be_bytes(code);
+                    assert_eq!(program.glyph(c), Some(glyph));
+                    let text = glyphs.texts.get(&glyph).map(String::as_str);
+                    assert!(text.is_some_and(|text| text <= &*c.encode_utf8(&mut [0; 4])));
+                }
+                strings.push(codes);
+                break;
+            }
+            Err(refused) => refused,
+        };
+        assert_eq!(glyphs.texts, kept, "nothing of a text refused kept");
+        assert_eq!(program.codes(rest), Err(refused));
+        assert_eq!(rest[refused.at..].chars().next(), Some(refused.character));
+        assert_eq!(program.glyph(refused.character), None);
+        let (run, after) = rest.split_at(refused.at);
+        if !run.is_empty() {
+            strings.push(glyphs.add(program, run).expect("what's before it is drawn"));
+        }
+        rest = &after[refused.character.len_utf8()..];
+    }
+    strings
+}
+
+/// `with`, a font written with a `/CIDSet`, holds what `without` does, the same font
+/// written without one, and the `/CIDSet` after it, its descriptor naming it.
+#[cfg(feature = "embed")]
+fn with_cid_set(without: &[Object], with: &[Object]) {
+    assert_eq!(with.len(), without.len() + 1);
+    for (i, (with, without)) in with.iter().zip(without).enumerate() {
+        if i != 2 {
+            assert_eq!(with, without, "object {i}");
+        }
+    }
+    let mut descriptor = without[2].as_dict().unwrap().clone();
+    descriptor.push("CIDSet", Object::reference(without.len() as u32));
+    assert_eq!(with[2].as_dict(), Some(&descriptor));
+    assert!(with.last().and_then(Object::as_stream).is_some());
+}
+
+/// `objects`, a font as [`write`](crate::embed::write) gives it, numbered from 1: each
+/// reference `(i, 0)` among them made `(i + 1, 0)`.
+#[cfg(feature = "embed")]
+fn numbered(objects: &[Object]) -> BTreeMap<ObjectId, Object> {
+    fn renumber(object: &mut Object) {
+        match object.value_mut() {
+            pdf_objects::Value::Ref(id) => *id = ObjectId::new(id.number + 1, 0),
+            pdf_objects::Value::Array(items) => items.iter_mut().for_each(renumber),
+            pdf_objects::Value::Dict(dict) => dict.iter_mut().for_each(|(_, o)| renumber(o)),
+            pdf_objects::Value::Stream(stream) => {
+                stream.dict.iter_mut().for_each(|(_, o)| renumber(o));
+            }
+            _ => {}
+        }
+    }
+    (1..)
+        .zip(objects)
+        .map(|(n, object)| {
+            let mut object = object.clone();
+            renumber(&mut object);
+            (ObjectId::new(n, 0), object)
+        })
+        .collect()
+}
+
+/// `objects`, a font written of `glyphs` in `program`, read: without a fault; each
+/// glyph's width `program`'s, and its text the one `glyphs` keeps, where it keeps one,
+/// but U+FFFF alone, which PDFium, and so this crate's reader, takes for no text; each
+/// of `strings`, codes drawn, the texts of its glyphs; its program read, with `programs`.
+#[cfg(feature = "embed")]
+fn read_back(
+    program: &crate::embed::Program,
+    glyphs: &crate::embed::Glyphs,
+    strings: &[Vec<u8>],
+    objects: &[Object],
+) -> Font {
+    let objects = numbered(objects);
+    let dict = objects[&ObjectId::new(1, 0)].as_dict().unwrap();
+    let mut budget = EMBEDDED_BUDGET;
+    let mut told: Vec<(Place, Fault)> = Vec::new();
+    let font = Font::read(
+        Map(&objects),
+        dict,
+        &Limits::DEFAULT,
+        &mut budget,
+        &mut told,
+    );
+    let font = font.expect("a font written reads");
+    assert!(told.is_empty(), "{told:?}");
+    let text_of = |glyph: u16| {
+        let text = glyphs.texts.get(&glyph).map(String::as_str);
+        text.filter(|text| !matches!(*text, "" | "\u{FFFF}"))
+    };
+    for &glyph in glyphs.texts.keys() {
+        let code = u32::from(glyph);
+        assert_eq!(font.width(code), program.width(glyph), "glyph {glyph}");
+        if let Some(text) = text_of(glyph) {
+            assert_eq!(font.code_text(code).as_deref(), Some(text), "glyph {glyph}");
+        }
+    }
+    for codes in strings {
+        let pairs = codes.as_chunks::<2>().0.iter();
+        let text: Option<String> = pairs
+            .map(|&code| text_of(u16::from_be_bytes(code)))
+            .collect();
+        if let Some(text) = text {
+            assert_eq!(font.text(codes), Some(text));
+        }
+    }
+    let read = match cfg!(feature = "programs") {
+        true => crate::FontProgram::Read,
+        false => crate::FontProgram::None,
+    };
+    assert_eq!(font.program(), read);
+    font
+}
+
 #[cfg(test)]
 mod tests {
     use pdf_fixtures::fixture::{self, Body, Xref};
@@ -1228,6 +1592,370 @@ mod tests {
         }
         for (i, seed) in font_fixtures().into_iter().enumerate() {
             std::fs::write(dir.join(format!("file-{i}")), file_of(&seed)).unwrap();
+        }
+    }
+
+    /// An input of `program` whole, face `face`, naming `glyph` ([`embed`]).
+    #[cfg(feature = "embed")]
+    fn whole(program: &[u8], face: u8, glyph: u16) -> Vec<u8> {
+        [&[0, face][..], &glyph.to_be_bytes(), program].concat()
+    }
+
+    /// An input of `table` as the fixture program's table `tag`, naming `glyph`
+    /// ([`embed`]).
+    #[cfg(feature = "embed")]
+    fn spliced(tag: &[u8; 4], table: &[u8], glyph: u16) -> Vec<u8> {
+        let pick = TABLES.iter().position(|t| t == tag).unwrap() as u8;
+        [&[1, pick][..], &glyph.to_be_bytes(), table].concat()
+    }
+
+    /// The fixture program's table `tag`.
+    #[cfg(feature = "embed")]
+    fn fixture_table(tag: &[u8; 4]) -> Vec<u8> {
+        let tables = crate::fixture::truetype_tables();
+        tables.into_iter().find(|t| &t.0 == tag).unwrap().1
+    }
+
+    /// `font`'s program with its table `tag` made what `change` makes of it.
+    #[cfg(feature = "embed")]
+    fn changed(
+        font: &pdf_fixtures::font::TrueType,
+        tag: &[u8; 4],
+        change: impl FnOnce(&mut Vec<u8>),
+    ) -> Vec<u8> {
+        use pdf_fixtures::font::{TRUETYPE, sfnt};
+        let mut tables = font.tables();
+        let table = tables.iter_mut().find(|t| &t.0 == tag).unwrap();
+        change(&mut table.1);
+        sfnt(TRUETYPE, &tables)
+    }
+
+    /// The programs the embedding's fuzzing begins from ([`embed`]), each named, with
+    /// what it comes to: pdf-fixtures' programs and this crate's, whole, each of the
+    /// fixture program's tables, and the sample's it hasn't, spliced; and programs built
+    /// to be hostile, each refused for what it holds or cut where it can be.
+    #[cfg(feature = "embed")]
+    fn embed_seeds() -> Vec<(&'static str, Vec<u8>, Result<usize, crate::embed::Error>)> {
+        use crate::embed::{Error::*, Outlines};
+        use pdf_fixtures::font::{self, Glyph, Os2, TrueType};
+
+        let sample = font::sample(1000);
+        let with = |change: &dyn Fn(&mut TrueType)| {
+            let mut font = font::sample(1000);
+            change(&mut font);
+            font.build()
+        };
+        let licence = |fs_type: u16| {
+            with(&|font| {
+                let mut os2 = Os2::new(1000);
+                os2.fs_type = fs_type;
+                font.os2 = Some(os2);
+            })
+        };
+        // Text after the program, which the input's tail is.
+        let text = "Ag \u{1DE} \u{4E2D}\u{1D11E}".as_bytes();
+        let mut seeds = vec![
+            (
+                "sample",
+                [&whole(&sample.build(), 0, 2), text].concat(),
+                Ok(9),
+            ),
+            (
+                "sample-2048",
+                whole(&font::sample(2048).build(), 0, 320),
+                Ok(9),
+            ),
+            (
+                "format-4",
+                whole(&with(&|font| font.format_12 = false), 0, 0),
+                Ok(9),
+            ),
+            (
+                "format-12",
+                whole(&with(&|font| font.format_4 = false), 0, 6),
+                Ok(9),
+            ),
+            (
+                "named-glyphs",
+                whole(
+                    &with(&|font| {
+                        font.post.names = true;
+                        font.long_loca = true;
+                        font.hinting = false;
+                    }),
+                    0,
+                    8,
+                ),
+                Ok(9),
+            ),
+            ("restricted", whole(&licence(0x0002), 0, 2), Ok(5)),
+            ("whole", whole(&licence(0x0100), 0, 2), Ok(9)),
+            ("bitmaps-only", whole(&licence(0x0200), 0, 2), Ok(5)),
+            (
+                "no-os2",
+                whole(
+                    &with(&|font| {
+                        font.os2 = None;
+                        font.mac_style = 2;
+                        font.post.fixed_pitch = true;
+                        font.post.italic_angle = -12 << 16;
+                    }),
+                    0,
+                    3,
+                ),
+                Ok(9),
+            ),
+            (
+                "old-os2",
+                whole(
+                    &with(&|font| {
+                        let mut os2 = Os2::new(1000);
+                        (os2.version, os2.weight, os2.family_class) = (1, 700, 0x0105);
+                        font.os2 = Some(os2);
+                    }),
+                    0,
+                    4,
+                ),
+                Ok(9),
+            ),
+            (
+                "fewer-metrics",
+                whole(&with(&|font| font.long_metrics = Some(3)), 0, 300),
+                Ok(9),
+            ),
+            (
+                "collection",
+                whole(
+                    &font::collection(&[sample.build(), font::sample(2048).build()]),
+                    1,
+                    2,
+                ),
+                Ok(9),
+            ),
+            ("past-the-glyphs", whole(&sample.build(), 0, 321), Ok(8)),
+            ("past-the-most", whole(&sample.build(), 0, u16::MAX), Ok(8)),
+            ("fixture", whole(&truetype_program(), 0, 5), Ok(9)),
+            (
+                "composite-bomb",
+                whole(&composite_bomb_program(), 0, 1),
+                Ok(9),
+            ),
+            (
+                "composite-of",
+                whole(&composite_of_program(2, 3, 2), 0, 2),
+                Ok(9),
+            ),
+            (
+                "opentype",
+                whole(
+                    &opentype_program(OpenType {
+                        post_names: false,
+                        cmap: true,
+                    }),
+                    0,
+                    1,
+                ),
+                Err(Outlines(Outlines::Cff)),
+            ),
+            (
+                "loca-past-end",
+                whole(&loca_past_end_program(), 0, 1),
+                Err(Outlines(Outlines::Cff)),
+            ),
+        ];
+
+        // A composite naming every glyph number, in a program of 65,535 glyphs.
+        let mut most = TrueType::new(1000);
+        let mut composite = vec![0xFF, 0xFF, 0, 0, 0, 0, 0, 100, 0, 100];
+        for glyph in 0..=u16::MAX {
+            let flags: u16 = if glyph < u16::MAX { 0x0022 } else { 0x0002 };
+            composite.extend(flags.to_be_bytes());
+            composite.extend(glyph.to_be_bytes());
+            composite.extend([0, 0]);
+        }
+        most.glyph(Glyph::Raw(composite), 500);
+        while most.glyphs.len() < 65_535 {
+            most.glyph(Glyph::Empty, 500);
+        }
+        let malformed = |table| Err(Malformed { table });
+        seeds.push((
+            "every-component",
+            whole(&most.build(), 0, 1),
+            malformed("glyf"),
+        ));
+
+        // `name` tables a subset couldn't write: a record past 65,535 bytes, more
+        // records than a table holds, and strings past 65,535 bytes together.
+        let storage: Vec<u8> = (0..=0xFFFFu32).map(|i| (i % 251) as u8).collect();
+        let kept = |id: u16, length: u16, offset: u16| [3, 1, 0x409, id, length, offset];
+        let names = [
+            ("past-the-end", vec![kept(1, 1, 0xFFFF)], &storage[..]),
+            ("records", [kept(1, 2, 0)].repeat(5461), &storage[..2]),
+            (
+                "strings",
+                vec![kept(1, 40_000, 0), kept(4, 30_000, 35_535)],
+                &storage[..],
+            ),
+        ];
+        for (name, records, storage) in names {
+            let table = font::name_table(&records, storage);
+            seeds.push((name, spliced(b"name", &table, 1), malformed("name")));
+        }
+
+        // A `loca` placing every even glyph on all of `glyf`, every odd one backwards.
+        let glyf = fixture_table(b"glyf").len() as u32;
+        let zigzag: Vec<u8> = (0..7u32)
+            .flat_map(|i| (if i % 2 == 0 { 0 } else { glyf }).to_be_bytes())
+            .collect();
+        seeds.push(("zigzag", spliced(b"loca", &zigzag, 1), malformed("loca")));
+        // A `loca` out of order, `A`'s end before its start, so that the glyphs on
+        // each side of it take its bytes too.
+        let backwards = changed(&sample, b"loca", |loca| {
+            loca.as_chunks_mut::<2>().0.swap(2, 3)
+        });
+        seeds.push((
+            "loca-out-of-order",
+            whole(&backwards, 0, 3),
+            malformed("loca"),
+        ));
+        // `loca` placing the glyphs past `B` past the end of `glyf`, which open as
+        // glyphs of nothing, and aren't cut.
+        let past = changed(&sample, b"loca", |loca| {
+            let past = (u16::MAX / 2).to_be_bytes();
+            loca.as_chunks_mut::<2>().0[10..].fill(past);
+        });
+        seeds.push(("glyf-past-the-table", whole(&past, 0, 2), Ok(0)));
+
+        // Units per em outside OpenType's range, of which FreeType loads no program,
+        // and each end of it.
+        for (name, units, outcome) in [
+            ("units-per-em-15", 15u16, malformed("head")),
+            ("units-per-em-16", 16, Ok(9)),
+            ("units-per-em-16384", 16_384, Ok(9)),
+            ("units-per-em-16385", 16_385, malformed("head")),
+        ] {
+            let program = changed(&sample, b"head", |head| {
+                head[18..20].copy_from_slice(&units.to_be_bytes());
+            });
+            seeds.push((name, whole(&program, 0, 2), outcome));
+        }
+
+        // `hhea` with no advance in `hmtx`, and one cut short.
+        let mut no_advances = fixture_table(b"hhea");
+        no_advances[34..36].fill(0);
+        seeds.push((
+            "no-advances",
+            spliced(b"hhea", &no_advances, 1),
+            malformed("hhea"),
+        ));
+        let short = &fixture_table(b"hhea")[..30];
+        seeds.push(("cut-short", spliced(b"hhea", short, 1), malformed("hhea")));
+
+        // A format 12 `cmap` claiming 2^32 - 1 groups, of which it holds one.
+        let mut cmap = [0u16, 1, 3, 10].map(u16::to_be_bytes).concat();
+        cmap.extend(12u32.to_be_bytes());
+        cmap.extend([12u16, 0].map(u16::to_be_bytes).concat());
+        cmap.extend(
+            [28, 0, u32::MAX, 0x41, 0x5A, 1]
+                .map(u32::to_be_bytes)
+                .concat(),
+        );
+        seeds.push(("groups", spliced(b"cmap", &cmap, 1), Ok(9)));
+
+        // A collection whose one face is the collection itself.
+        let mut ring = b"ttcf".to_vec();
+        ring.extend([0x0001_0000u32, 1, 0].map(u32::to_be_bytes).concat());
+        seeds.push(("collection-loop", whole(&ring, 0, 1), Err(NotSfnt)));
+
+        // Each of the fixture program's tables as itself, and the sample's others.
+        for (tag, table) in crate::fixture::truetype_tables() {
+            seeds.push(("fixture", spliced(&tag, &table, 2), Ok(9)));
+        }
+        for (tag, table) in sample.tables() {
+            if [*b"name", *b"OS/2", *b"cvt ", *b"fpgm", *b"prep"].contains(&tag) {
+                seeds.push(("sample", spliced(&tag, &table, 2), Ok(9)));
+            }
+        }
+        seeds
+    }
+
+    /// Each program among the embedding's seeds comes to what it's built for: each
+    /// fixture program written under every choice, its named glyph too, and read back,
+    /// fewer where its licence restricts it or the glyph it names is past its own, none
+    /// where the glyphs drawn can't be cut; each hostile one refused for what it holds.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn the_embed_seeds_come_to_what_they_hold() {
+        for (i, (name, seed, outcome)) in embed_seeds().into_iter().enumerate() {
+            assert_eq!(embed(&seed), outcome, "{i} {name}");
+        }
+    }
+
+    /// `seed` changed as a fuzzer might change a program past its header: a byte set, a
+    /// word set to a value at an edge, a run cut out or doubled, or its end cut off.
+    #[cfg(feature = "embed")]
+    fn flipped(seed: &[u8], random: &mut impl FnMut() -> usize) -> Vec<u8> {
+        const WORDS: [u16; 6] = [0, 1, 0x7FFF, 0x8000, 0xFFFE, 0xFFFF];
+        let mut data = seed.to_vec();
+        for _ in 0..1 + random() % 3 {
+            let at = HEADER + random() % data.len().saturating_sub(HEADER).max(1);
+            let at = at.min(data.len());
+            let end = data.len().min(at + 1 + random() % 64);
+            match random() % 5 {
+                0 if at < data.len() => data[at] = random() as u8,
+                1 if at + 2 <= data.len() => {
+                    let word = WORDS[random() % WORDS.len()].to_be_bytes();
+                    data[at..at + 2].copy_from_slice(&word);
+                }
+                2 => drop(data.drain(at..end)),
+                3 => {
+                    let run = data[at..end].to_vec();
+                    data.splice(at..at, run);
+                }
+                _ => data.truncate(at),
+            }
+        }
+        data
+    }
+
+    /// The embedding's seeds of a few KiB, mutated, keep every promise ([`embed`]).
+    #[cfg(feature = "embed")]
+    #[test]
+    fn mutated_programs_keep_every_promise() {
+        let mut random = generator(0xE3BED);
+        let mut opened = 0;
+        for (_, seed, _) in embed_seeds() {
+            if seed.len() > 16 << 10 {
+                continue;
+            }
+            for _ in 0..16 {
+                opened += usize::from(embed(&flipped(&seed, &mut random)).is_ok());
+            }
+        }
+        assert!(opened >= 100, "the mutations reach what's opened: {opened}");
+    }
+
+    /// `PDF_FONTS_FUZZ_SEEDS` names a folder: writes the embedding's seeds there, each
+    /// by its number and its name, and a table's by its tag too, for the fuzzer to begin
+    /// from (`just fuzz embed`).
+    #[cfg(feature = "embed")]
+    #[test]
+    #[ignore = "needs PDF_FONTS_FUZZ_SEEDS, a folder to write the seeds to"]
+    fn the_embed_seeds_are_written() {
+        let dir =
+            std::env::var_os("PDF_FONTS_FUZZ_SEEDS").expect("PDF_FONTS_FUZZ_SEEDS names a folder");
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        for (i, (name, seed, _)) in embed_seeds().into_iter().enumerate() {
+            let file = match seed[0] % 2 {
+                0 => format!("{i:02}-{name}"),
+                _ => {
+                    let tag = TABLES[usize::from(seed[1]) % TABLES.len()];
+                    let tag = String::from_utf8_lossy(&tag).replace(['/', ' '], "");
+                    format!("{i:02}-{tag}-{name}")
+                }
+            };
+            std::fs::write(dir.join(file), seed).unwrap();
         }
     }
 }

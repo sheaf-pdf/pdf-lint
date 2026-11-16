@@ -17,6 +17,11 @@
 /// is 0..700 × -200..800 and its `hhea` ascender and descender 800 and
 /// -200; it names no glyph (`post` 3).
 pub fn truetype_program() -> Vec<u8> {
+    sfnt(&mut truetype_tables())
+}
+
+/// [`truetype_program`]'s tables, each with its tag, in order of their tags.
+pub fn truetype_tables() -> Vec<([u8; 4], Vec<u8>)> {
     let rect = |x0: i16, y0: i16, x1: i16, y1: i16| {
         vec![
             (x0, y0, true),
@@ -66,7 +71,7 @@ pub fn truetype_program() -> Vec<u8> {
     ]
     .concat();
     let hmtx: Vec<u8> = metrics.iter().flat_map(|&(w, lsb)| be(&[w, lsb])).collect();
-    sfnt(&mut [
+    vec![
         (
             *b"cmap",
             cmap(&[(0x20, 3), (0x41, 1), (0x42, 4), (0x43, 5), (0x67, 2)]),
@@ -78,7 +83,7 @@ pub fn truetype_program() -> Vec<u8> {
         (*b"loca", loca),
         (*b"maxp", maxp),
         (*b"post", post_3()),
-    ])
+    ]
 }
 
 /// A `head` of 1000 units an em, its box 0..700 × -200..800.
@@ -228,7 +233,7 @@ fn cmap(map: &[(u16, u16)]) -> Vec<u8> {
 }
 
 /// A TrueType SFNT of `tables`, in order of their tags.
-fn sfnt(tables: &mut [([u8; 4], Vec<u8>)]) -> Vec<u8> {
+pub fn sfnt(tables: &mut [([u8; 4], Vec<u8>)]) -> Vec<u8> {
     sfnt_tagged(0x0001_0000u32.to_be_bytes(), tables)
 }
 

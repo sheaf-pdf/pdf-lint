@@ -102,9 +102,11 @@ impl Program {
     /// - [`Error::Outlines`] for a program whose outlines are CFF's, CFF2's or bitmaps
     ///   alone.
     /// - [`Error::Malformed`], with its table's tag, for a table it needs that's
-    ///   missing or doesn't read (`head`, `maxp`, `hhea`, `hmtx`, `loca`), a `loca`
-    ///   whose glyphs overlap, a composite glyph naming a glyph past its count
-    ///   (`glyf`), or a `name` table a subset couldn't write.
+    ///   missing or doesn't read (`head`, `maxp`, `hhea`, `hmtx`, `loca`), units per em
+    ///   outside the 16 to 16,384 OpenType allows, which FreeType, and so PDFium, takes
+    ///   for no program (`head`), a `loca` whose glyphs overlap, a composite glyph
+    ///   naming a glyph past its count (`glyf`), or a `name` table a subset couldn't
+    ///   write.
     pub fn open(data: impl Into<Arc<[u8]>>, index: u32) -> Result<Program, Error> {
         let data: Arc<[u8]> = data.into();
         let font = face(&data, index)?;
@@ -112,8 +114,9 @@ impl Program {
         tables.outlines()?;
         let malformed = |table| Error::Malformed { table };
         let head = font.head().map_err(|_| malformed("head"))?;
+        // OpenType's range, outside which FreeType, and so PDFium, loads no program.
         let upem = head.units_per_em();
-        if upem == 0 {
+        if !(16..=16384).contains(&upem) {
             return Err(malformed("head"));
         }
         let glyphs = font.maxp().map_err(|_| malformed("maxp"))?.num_glyphs();

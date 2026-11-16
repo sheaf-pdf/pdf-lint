@@ -436,6 +436,34 @@ fn a_malformed_table_is_refused() {
     );
 }
 
+/// Units per em outside the 16 to 16,384 OpenType allows, of which FreeType, and so
+/// PDFium, loads no program, are refused as it's opened, so that no font is written
+/// whose glyphs a viewer draws in another; each end of the range is taken, its widths
+/// a thousand times its advances over it.
+#[test]
+fn units_per_em_outside_opentypes_range_are_refused() {
+    let font = font::sample(1000);
+    let head = font
+        .tables()
+        .into_iter()
+        .find(|t| &t.0 == b"head")
+        .unwrap()
+        .1;
+    let at = |units: u16| {
+        let mut head = head.clone();
+        head[18..20].copy_from_slice(&units.to_be_bytes());
+        with(&font, b"head", head)
+    };
+    for units in [0, 1, 15, 16_385, 65_136, u16::MAX] {
+        let refused = Program::open(at(units), 0).unwrap_err();
+        assert_eq!(refused, Error::Malformed { table: "head" }, "{units}");
+    }
+    for (units, width) in [(16, 37_500.0), (16_384, 37.0)] {
+        let program = Program::open(at(units), 0).unwrap();
+        assert_eq!(program.width(2), width, "{units}");
+    }
+}
+
 /// A composite naming every glyph number to 65,535, in a program of 65,535 glyphs, is
 /// refused as it's opened: cut, the subsetter would number past 65,535 glyphs.
 #[test]
