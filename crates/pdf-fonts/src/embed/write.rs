@@ -89,7 +89,7 @@ pub struct Options {
 ///    glyphs their composites draw, `/Length1` its length. Cut or whole, it holds the
 ///    tables a CIDFont's TrueType program is drawn by (9.9.1), `glyf`, `head`, `hhea`,
 ///    `hmtx`, `loca` and `maxp`, and `cvt `, `fpgm` and `prep` where it has them, and
-///    its `name` and `post`; not its `cmap`, which a CIDFont's program goes without,
+///    its `name` and `post`; not its `cmap`, which a CIDFont's program mustn't hold,
 ///    nor its `OS/2`, its licence's bits among it, nor any other table.
 /// 4. Its `/ToUnicode` CMap (9.10.3): each glyph drawn's text, as `glyphs` keeps it, in
 ///    blocks of at most 100; a character past the Basic Multilingual Plane is its UTF-16

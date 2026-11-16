@@ -303,11 +303,10 @@ pub struct Embedding {
 }
 
 impl Embedding {
-    /// Whether a program this licence is a program's is embedded under `options`: not
-    /// where it's restricted to its owner's leave ([`Level::Restricted`]) or to its
-    /// bitmaps, unless they say the caller has the right ([`Options::licensed`]). What
-    /// [`write()`] refuses with [`Error::Restricted`], for a caller to ask before
-    /// drawing.
+    /// Whether [`write()`] embeds a program of this licence under `options`: not one
+    /// restricted to its owner's leave ([`Level::Restricted`]) or to its bitmaps, which
+    /// it refuses with [`Error::Restricted`], unless they say the caller has the right
+    /// ([`Options::licensed`]). For a caller to ask before drawing.
     #[must_use]
     pub fn allows(&self, options: &Options) -> bool {
         let restricted = self.level == Level::Restricted || self.bitmaps_only;
