@@ -10,7 +10,7 @@ use skrifa::raw::{FontRef, TableProvider};
 use skrifa::string::StringId;
 
 use super::subset::Subset;
-use super::{Error, Glyphs, Level, Program, face, sfnt};
+use super::{Error, Glyphs, Program, face, sfnt};
 use crate::phases::phase;
 
 /// The most bytes of a program's name a font's name is given: with a subset's tag and
@@ -61,12 +61,16 @@ pub struct Options {
     pub cid_set: bool,
     /// Whether the program is embedded whole, every glyph, not cut to the glyphs drawn.
     /// A program whose licence asks to be embedded whole is, whatever this says
-    /// ([`Embedding::subsetting`](super::Embedding::subsetting)).
+    /// ([`Embedding::subsetting`](super::Embedding::subsetting)). Whole or cut, it's
+    /// written with the tables a CIDFont's TrueType program is drawn by, and its `name`
+    /// and `post` ([`write()`]): not its `cmap`, nor its `OS/2`, nor its tables for
+    /// layout or variations, so a reader can't draw new text in it by character.
     pub whole: bool,
     /// Whether the caller has the right to embed a program whose licence restricts it
     /// to its owner's leave, or to its bitmaps ([`Embedding`](super::Embedding)):
-    /// without it, such a program is refused.
-    pub restricted: bool,
+    /// without it, such a program is refused
+    /// ([`Embedding::allows`](super::Embedding::allows)).
+    pub licensed: bool,
 }
 
 /// The font text drawn in `program` shows in, as a PDF writes it: a Type 0 font over
@@ -82,7 +86,11 @@ pub struct Options {
 /// 2. Its descriptor (9.8): the same `/FontName`, and the program's flags, box, italic
 ///    angle, heights and stem, as below.
 /// 3. Its `/FontFile2` (9.9): the program cut to the glyphs drawn, `.notdef` and the
-///    glyphs their composites draw, `/Length1` its length.
+///    glyphs their composites draw, `/Length1` its length. Cut or whole, it holds the
+///    tables a CIDFont's TrueType program is drawn by (9.9.1), `glyf`, `head`, `hhea`,
+///    `hmtx`, `loca` and `maxp`, and `cvt `, `fpgm` and `prep` where it has them, and
+///    its `name` and `post`; not its `cmap`, which a CIDFont's program goes without,
+///    nor its `OS/2`, its licence's bits among it, nor any other table.
 /// 4. Its `/ToUnicode` CMap (9.10.3): each glyph drawn's text, as `glyphs` keeps it, in
 ///    blocks of at most 100; a character past the Basic Multilingual Plane is its UTF-16
 ///    surrogate pair, one code's, and a glyph kept with no text has none. A text of
@@ -94,7 +102,9 @@ pub struct Options {
 ///    Where it's embedded whole, the CIDFont's `/CIDToGIDMap` is `/Identity`, and there's
 ///    none.
 /// 6. Where `options` asks for it, its `/CIDSet` (9.8.3.1): a bit a CID, CID 0's the
-///    first byte's high bit, set for each glyph the program written holds.
+///    first byte's high bit, set for each glyph the program written holds. It's the
+///    last object: the 6th where the program is cut, and the 5th where it's embedded
+///    whole, as there's no `/CIDToGIDMap` before it.
 ///
 /// Streams are unfiltered, as filtering is for what writes the file. A cut program's
 /// name is a tag and `+` before the program's PostScript name (9.9.2): six capitals from
@@ -147,7 +157,8 @@ pub struct Options {
 /// # Errors
 ///
 /// - [`Error::Restricted`] for a program whose licence restricts it to its owner's leave
-///   or to its bitmaps, unless `options` says the caller has the right.
+///   or to its bitmaps, unless `options` says the caller has the right
+///   ([`Embedding::allows`](super::Embedding::allows)).
 /// - [`Error::Glyph`] for a glyph `glyphs` keeps at or past the program's count: one of
 ///   another program's, or given [`Glyphs::insert`].
 /// - [`Error::Subset`] where the subsetter refuses to cut the program, which it has no
@@ -160,8 +171,7 @@ pub fn write(program: &Program, glyphs: &Glyphs, options: &Options) -> Result<Ve
         bytes = program.data.len()
     );
     let embedding = program.embedding;
-    let restricted = embedding.level == Level::Restricted || embedding.bitmaps_only;
-    if restricted && !options.restricted {
+    if !embedding.allows(options) {
         return Err(Error::Restricted(embedding));
     }
     let count = program.glyphs;

@@ -641,7 +641,7 @@ impl Embedded {
     fn of<S: ByteSource>(pdf: &Pdf<S>, doc: &mut Document<'_>) -> Option<Embedded> {
         let program = program(pdf)?;
         let mut options = embed::Options::default();
-        options.restricted = true;
+        options.licensed = true;
         let font = doc.embed_font_with(program, 0, &options).ok()?;
         Some(Embedded {
             font,

@@ -309,7 +309,7 @@ impl<'p> Document<'p> {
     /// assert!(matches!(refused, pdfs::Error::Embed(embed::Error::Restricted(_))));
     /// // The caller has it, and says so: embedded, with a `/CIDSet`.
     /// let mut options = embed::Options::default();
-    /// options.restricted = true;
+    /// options.licensed = true;
     /// options.cid_set = true;
     /// let font = doc.embed_font_with(program, 0, &options).unwrap();
     /// assert_eq!(font.program().embedding().level, Level::Restricted);
@@ -324,8 +324,8 @@ impl<'p> Document<'p> {
     /// that's malformed); and [`embed::Error::Restricted`] for a program whose
     /// licence (its `OS/2` table's `fsType`) restricts it to its owner's leave
     /// or to its bitmaps, unless `options` says the caller has the right
-    /// ([`embed::Options::restricted`]), as [`embed::write`] would refuse it at
-    /// every save.
+    /// ([`embed::Options::licensed`]), as [`embed::write`] would refuse it at
+    /// every save ([`embed::Embedding::allows`]).
     #[cfg(feature = "embed")]
     pub fn embed_font_with(
         &mut self,
@@ -335,8 +335,7 @@ impl<'p> Document<'p> {
     ) -> Result<EmbeddedFont, Error> {
         let program = embed::Program::open(program, index)?;
         let embedding = program.embedding();
-        let restricted = embedding.level == embed::Level::Restricted || embedding.bitmaps_only;
-        if restricted && !options.restricted {
+        if !embedding.allows(options) {
             return Err(Error::Embed(embed::Error::Restricted(embedding)));
         }
         let (kept, font) = Kept::new(&mut self.doc, program, options);

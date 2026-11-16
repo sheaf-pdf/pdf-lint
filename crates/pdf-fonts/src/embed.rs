@@ -187,6 +187,10 @@ impl Program {
     /// byte first, the number of its glyph in the program ([`Program::glyph`]). A
     /// character past the Basic Multilingual Plane is one glyph, so two bytes, like any.
     ///
+    /// Nothing is kept: a code draws its glyph only in a font written of [`Glyphs`]
+    /// that keep it, and shows `.notdef` in one that don't. [`Glyphs::add`] gives the
+    /// same codes, and keeps their glyphs.
+    ///
     /// # Errors
     ///
     /// [`Unmapped`] for the first character the program has no glyph for, with where it
@@ -299,6 +303,17 @@ pub struct Embedding {
 }
 
 impl Embedding {
+    /// Whether a program this licence is a program's is embedded under `options`: not
+    /// where it's restricted to its owner's leave ([`Level::Restricted`]) or to its
+    /// bitmaps, unless they say the caller has the right ([`Options::licensed`]). What
+    /// [`write()`] refuses with [`Error::Restricted`], for a caller to ask before
+    /// drawing.
+    #[must_use]
+    pub fn allows(&self, options: &Options) -> bool {
+        let restricted = self.level == Level::Restricted || self.bitmaps_only;
+        !restricted || options.licensed
+    }
+
     /// What `fs_type`, an `OS/2` table's, allows. Where more than one of the usage bits
     /// is set, the least restrictive is taken, as OpenType has it.
     pub(crate) fn of(fs_type: u16) -> Embedding {
@@ -317,8 +332,8 @@ impl Embedding {
 }
 
 /// What a document a program is embedded in may be used for ([`Embedding`]), least
-/// restrictive first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// restrictive first, so that one compares less than one more restrictive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Level {
     /// Anything, the font installed from it among it: no usage bit set.
@@ -437,8 +452,8 @@ pub enum Error {
     #[error("the font program's outlines are {0}, not TrueType's")]
     Outlines(Outlines),
     /// The program's licence doesn't let it be embedded ([`Embedding`]): restricted to
-    /// its owner's leave, or to its bitmaps alone, where [`Options::restricted`] doesn't
-    /// say the caller has the right.
+    /// its owner's leave, or to its bitmaps alone, where [`Options::licensed`] doesn't
+    /// say the caller has the right ([`Embedding::allows`]).
     #[error("the font program's licence doesn't let its outlines be embedded")]
     Restricted(Embedding),
     /// A glyph a [`Glyphs`] keeps at or past the program's count: a `Glyphs` of another

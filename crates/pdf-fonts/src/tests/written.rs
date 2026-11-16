@@ -487,6 +487,8 @@ fn a_program_is_embedded_whole_where_asked() {
         assert_eq!(dict(&objects, 1).get("CIDToGIDMap"), Some(&identity));
         let cut = FontRef::new(data(&objects, 3)).unwrap();
         assert_eq!(cut.maxp().unwrap().num_glyphs(), 321);
+        // Every glyph, but not every table: none to draw text in it by character.
+        assert!(cut.cmap().is_err() && cut.os2().is_err());
         assert_eq!(data(&objects, 3), program.whole().unwrap().program);
         let font = read(&placed(&objects, 1), 1);
         assert_eq!(font.text(&codes).as_deref(), Some("Ag中"));
@@ -506,7 +508,7 @@ fn a_program_is_embedded_whole_where_asked() {
 #[test]
 fn a_restricted_licence_is_refused_unless_given() {
     let given = Options {
-        restricted: true,
+        licensed: true,
         ..Options::default()
     };
     for (fs_type, refused) in [
@@ -531,6 +533,9 @@ fn a_restricted_licence_is_refused_unless_given() {
             ),
             false => assert_eq!(written.unwrap().len(), 6, "{fs_type:#06x}"),
         }
+        let embedding = program.embedding();
+        assert_eq!(embedding.allows(&Options::default()), !refused);
+        assert!(embedding.allows(&given));
         assert_eq!(write(&program, &glyphs, &given).unwrap().len(), 6);
     }
     assert_eq!(
@@ -708,10 +713,10 @@ fn a_font_is_named_by_its_program() {
 #[test]
 fn options_are_off_by_default() {
     let options = Options::default();
-    assert!(!options.cid_set && !options.whole && !options.restricted);
+    assert!(!options.cid_set && !options.whole && !options.licensed);
     assert_eq!(
         format!("{options:?}"),
-        "Options { cid_set: false, whole: false, restricted: false }"
+        "Options { cid_set: false, whole: false, licensed: false }"
     );
 }
 

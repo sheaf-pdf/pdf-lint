@@ -400,7 +400,7 @@ fn a_restricted_program_is_embedded_only_when_the_caller_says_so() {
         );
         assert_eq!(doc.structure().max_id(), before, "nothing reserved");
         let mut options = embed::Options::default();
-        options.restricted = true;
+        options.licensed = true;
         let font = doc.embed_font_with(restricted, 0, &options).unwrap();
         add(&mut doc, drawn_at(&font, &TEXTS));
         assert_eq!(texts(&doc.to_bytes().unwrap()), [TEXTS.concat()]);

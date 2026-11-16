@@ -26,8 +26,10 @@ hayro-cmap = { version = "0.1", optional = true }
 skrifa = { version = "0.50", default-features = false, features = ["std", "type1"], optional = true }
 # With `embed`: a TrueType program cut to the glyphs a document draws, without
 # its default `variable-fonts`, which would bring a second skrifa and
-# read-fonts; so a variable font is cut at its default instance.
-subsetter = { version = "0.2.6", default-features = false, optional = true }
+# read-fonts; so a variable font is cut at its default instance. Pinned, as
+# `Program::open` checks a program as this version reads it: another comes
+# with a release of this crate, its checks read against it again.
+subsetter = { version = "=0.2.6", default-features = false, optional = true }
 # The spans of a font's reading, with the `tracing` feature: without its
 # default features, so without the proc macros of `attributes`; `std`, for
 # its spans' guards.

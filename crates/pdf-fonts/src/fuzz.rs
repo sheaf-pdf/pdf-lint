@@ -1151,19 +1151,20 @@ pub fn embed(data: &[u8]) -> Result<usize, crate::embed::Error> {
     let options = |bits: usize| Options {
         cid_set: bits & 1 != 0,
         whole: bits & 2 != 0,
-        restricted: bits & 4 != 0,
+        licensed: bits & 4 != 0,
     };
     let fonts: [Result<Vec<Object>, Refused>; 8] = std::array::from_fn(|bits| {
         let options = options(bits);
         let written = write(&program, &glyphs, &options);
         assert_eq!(write(&program, &glyphs, &options), written, "{options:?}");
+        assert_eq!(embedding.allows(&options), !restricted || options.licensed);
         match &written {
             Err(Refused::Restricted(refused)) => {
-                assert!(restricted && !options.restricted, "{options:?}");
+                assert!(restricted && !options.licensed, "{options:?}");
                 assert_eq!(*refused, embedding);
             }
             Err(other) => panic!("{options:?}: {other:?}"),
-            Ok(_) => assert!(!restricted || options.restricted, "{options:?}"),
+            Ok(_) => assert!(!restricted || options.licensed, "{options:?}"),
         }
         written
     });
@@ -1231,7 +1232,7 @@ pub fn embed(data: &[u8]) -> Result<usize, crate::embed::Error> {
     let named = u16::from_be_bytes([data.get(2), data.get(3)].map(|b| b.copied().unwrap_or(0)));
     glyphs.insert(named, &tail);
     let right = Options {
-        restricted: true,
+        licensed: true,
         ..Options::default()
     };
     let written = write(&program, &glyphs, &right);
