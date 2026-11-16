@@ -1044,8 +1044,7 @@ pub enum Rule {
     /// isn't read whole, is counted as not checked, once for each, its
     /// column and key `-`, its table the font's, where the font, or the
     /// object it's written in, is held; what was read of it before is found
-    /// all the same, but what's told once an object doesn't read, which the
-    /// read goes on past as if it weren't there, isn't. A font that asks a
+    /// all the same, and pdf-fonts tells nothing after. A font that asks a
     /// stream's data of a source that doesn't hold it, as a document read
     /// from a file, isn't read, nor counted.
     Font,
