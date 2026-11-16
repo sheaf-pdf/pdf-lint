@@ -9,7 +9,10 @@ use pdf_objects::fault::Sink;
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::version::Version;
 use pdf_objects::{Unreadable, Why};
+use pdf_semantics::action::{self, OpenAction};
+use pdf_semantics::dest::DestTable;
 use pdf_semantics::info::{self, Info};
+use pdf_semantics::pages::Pages;
 use pdf_semantics::xmp::{self, Claims};
 use pdf_semantics::{Fault, catalog};
 use pdf_structure::read::{ByteSource, Reading};
@@ -175,4 +178,48 @@ pub fn linearized<S: ByteSource, K: check::Sink + ?Sized>(
 ) -> Result<Verdict, pdf_linearize::family::Error> {
     phase!(DEBUG, "linearized", bytes = reading.size());
     pdf_linearize::family::check(reading, &limits.linearizing(), sink)
+}
+
+/// Builds a [`DestTable`] from `reading`'s catalog (`/Names/Dests` and `/Dests`)
+/// and `pages` under `rules` and `limits`.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Annots`] /
+/// [`Error::Unreadable`] if `/Names/Dests` exceeds `limits` or hits a locked /
+/// unreadable object.
+pub fn dests<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    pages: &Pages<'_>,
+    rules: Rules,
+    limits: &pdf_semantics::Limits,
+    sink: &mut K,
+) -> Result<DestTable, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(DestTable::read(
+        reading,
+        Some(root),
+        pages,
+        rules,
+        limits,
+        sink,
+    )?)
+}
+
+/// Reads the document catalog's `/OpenAction` entry (ISO 32000-2, 7.7.2, Table
+/// 29), if present.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Annots`] /
+/// [`Error::Unreadable`] if `/OpenAction` exceeds `limits.action_chain` or hits
+/// a locked/unreadable object.
+pub fn open_action<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    rules: Rules,
+    limits: &pdf_semantics::Limits,
+    sink: &mut K,
+) -> Result<Option<OpenAction>, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(action::open_action(reading, root, rules, limits, sink)?)
 }

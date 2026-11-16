@@ -227,6 +227,7 @@ pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # of that name below turns it on.
 pdf-fonts = { path = "../crates/pdf-fonts", features = ["embed"] }
 pdf-gfx = { path = "../crates/pdf-gfx" }
+pdf-annots = { path = "../crates/pdf-annots" }
 # With the test writer, so the linearize target's new encryptions are drawn
 # from the input and every write's IVs derived: an input writes the same
 # bytes each run, and a saved one reruns as it ran. `check` reads as the
@@ -250,7 +251,7 @@ pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 simd = ["pdf-content-streams/simd"]
 # Adobe's predefined CMaps, from pdf-fonts' bundle, so a name that's one
 # reaches it.
-predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps"]
+predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps", "pdf-annots/predefined-cmaps"]
 
 [[bin]]
 name = "tokenize"
@@ -332,6 +333,13 @@ bench = false
 [[bin]]
 name = "gfx"
 path = "fuzz_targets/gfx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "annots"
+path = "fuzz_targets/annots.rs"
 test = false
 doc = false
 bench = false

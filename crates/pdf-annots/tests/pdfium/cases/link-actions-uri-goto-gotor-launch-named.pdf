@@ -1,0 +1,25 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Subtype /Link /Rect [0 0 20 20] /A << /S /URI /URI (https://example.org/doc?a=1&b=2) >> >> << /Subtype /Link /Rect [0 0 20 20] /A << /S /GoTo /D [4 0 R /XYZ 10 20 0] >> >> << /Subtype /Link /Rect [0 0 20 20] /A << /S /GoToR /F (other.pdf) /D [0 /Fit] >> >> << /Subtype /Link /Rect [0 0 20 20] /A << /S /Launch /F << /Type /Filespec /UF (report.pdf) /F (rep.pdf) >> >> >> << /Subtype /Link /Rect [0 0 20 20] /A << /S /Named /N /NextPage >> >>] >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+endobj
+xref
+0 5
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000648 00000 n 
+trailer
+<< /Size 5 /Root 1 0 R >>
+startxref
+719
+%%EOF

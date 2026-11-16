@@ -364,6 +364,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "pdf-annots"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "pdf-content-streams",
+ "pdf-fonts",
+ "pdf-gfx",
+ "pdf-objects",
+ "pdf-semantics",
+ "thiserror",
+]
+
+[[package]]
 name = "pdf-arlington"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -525,6 +537,7 @@ name = "pdf-tokenizer-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "pdf-annots",
  "pdf-arlington",
  "pdf-color",
  "pdf-content-streams",
@@ -545,6 +558,7 @@ dependencies = [
 name = "pdfs"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "pdf-annots",
  "pdf-color",
  "pdf-content-streams",
  "pdf-crypt",

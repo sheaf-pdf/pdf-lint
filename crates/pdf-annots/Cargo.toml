@@ -1,0 +1,61 @@
+[package]
+name = "pdf-annots"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-annots"
+description = "PDF annotations, appearance synthesis and flattening, destinations, and actions"
+keywords = ["pdf", "annotations", "links", "destinations", "iso-32000"]
+categories = ["parser-implementations", "graphics"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-content-streams.workspace = true
+pdf-fonts.workspace = true
+pdf-gfx.workspace = true
+pdf-objects.workspace = true
+pdf-semantics.workspace = true
+thiserror = "2"
+# Optional numeric spans for annotation and destination resolution; without proc
+# macros (`default-features = false`) and with `std` for span guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = ["programs", "text-layout"]
+# Forwards `pdf-gfx/programs` and `pdf-fonts/programs` for embedded font program
+# metrics.
+programs = ["pdf-gfx/programs", "pdf-fonts/programs"]
+# Forwards `pdf-gfx/text-layout` so multiline FreeText and Redact overlay
+# appearance synthesis can word-wrap and align text.
+text-layout = ["pdf-gfx/text-layout"]
+# Forwards `pdf-gfx/predefined-cmaps` and `pdf-fonts/predefined-cmaps`.
+predefined-cmaps = ["pdf-gfx/predefined-cmaps", "pdf-fonts/predefined-cmaps"]
+# Emits `debug`-level `tracing` spans with numeric counts and byte lengths
+# (never file plaintext or annotation text).
+tracing = [
+    "dep:tracing",
+    "pdf-content-streams/tracing",
+    "pdf-fonts/tracing",
+    "pdf-gfx/tracing",
+    "pdf-semantics/tracing",
+]
+
+[package.metadata.docs.rs]
+features = ["predefined-cmaps", "tracing"]
+
+[lib]
+bench = false
+
+[dev-dependencies]
+# Path-only dev-dependencies omitted from the published package manifest so
+# `pdf-annots` packages cleanly over its zero-I/O library dependencies alone.
+pdf-fixtures = { path = "../pdf-fixtures" }
+pdf-structure = { path = "../pdf-structure" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

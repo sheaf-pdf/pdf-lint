@@ -17,6 +17,7 @@ use pdf_structure::Document;
 use pdf_structure::write::{self, Deflate};
 
 use crate::error::Error;
+use crate::limits::Limits;
 
 /// The resource a standard 14 font is, to draw text in it
 /// ([`ContentWriter::font`]): its dictionary, pdf-fonts'
@@ -276,6 +277,161 @@ pub fn claim(doc: &mut Document, claims: &Claims) -> Result<ObjectId, Error> {
         catalog.set("Metadata", id);
     }
     Ok(id)
+}
+
+/// Writes `built` (and any synthesized `/AP /N` and `/RO` Form XObject streams,
+/// deflated by `deflate`) into `doc`, appends its `ObjectId` to `page_id`'s
+/// `/Annots` array (copying an indirect `/Annots` array into `page_id` so shared
+/// arrays are never mutated behind other pages' backs), and returns the new
+/// annotation `ObjectId`.
+///
+/// # Errors
+///
+/// [`Error::Write`] if deflating an appearance stream fails, or
+/// [`Error::NoPageTree`] if `page_id` is not a dictionary in `doc`.
+pub fn add_annot(
+    doc: &mut Document,
+    page_id: ObjectId,
+    mut built: pdf_annots::BuiltAnnot,
+    deflate: Deflate,
+) -> Result<ObjectId, Error> {
+    if doc.get_dict(page_id).is_none() {
+        return Err(Error::NoPageTree);
+    }
+    if let Some(ro) = built.redact_overlay.take() {
+        let mut s = ro.to_stream();
+        deflated(&mut s, deflate)?;
+        let ro_id = doc.add(Object::from(s));
+        built.dict.set("RO", ro_id);
+    }
+    if let Some(ap) = built.normal_ap.take() {
+        let mut s = ap.to_stream();
+        deflated(&mut s, deflate)?;
+        let ap_id = doc.add(Object::from(s));
+        pdf_annots::AnnotMut::new(&mut built.dict).set_normal_appearance(ap_id);
+    }
+    let annot_id = doc.add(Object::from(built.dict));
+    let existing_annots = doc
+        .get_dict(page_id)
+        .and_then(|p| p.get(b"Annots"))
+        .and_then(|v| doc.dereference(v))
+        .and_then(|(_, o)| o.as_array())
+        .map(<[Object]>::to_vec);
+    if let Some(page_mut) = doc.get_dict_mut(page_id) {
+        let mut items = existing_annots.unwrap_or_default();
+        items.push(Object::from(annot_id));
+        page_mut.set("Annots", items);
+    }
+    Ok(annot_id)
+}
+
+/// Flattens eligible annotations on `page_id` in `doc` according to `opts` and
+/// `limits`, isolating any existing `/Contents` streams inside `q ... Q`
+/// without decompressing untouched base streams (so copy-on-write and
+/// incremental updates remain intact), binding new `/Resources/XObject` entries,
+/// and updating `/Annots`.
+///
+/// # Errors
+///
+/// [`Error::NoPageTree`] if `page_id` is not a dictionary in `doc`,
+/// [`Error::Annots`] if `plan_flatten` fails, or [`Error::Write`] if deflating
+/// the overlay content stream fails.
+pub fn flatten_page(
+    doc: &mut Document,
+    page_id: ObjectId,
+    opts: pdf_annots::FlattenOpts,
+    limits: &Limits,
+    deflate: Deflate,
+) -> Result<pdf_annots::FlattenPlan, Error> {
+    let annots_limits = limits.reading_annots();
+    let plan = {
+        let page_dict = doc.get_dict(page_id).ok_or(Error::NoPageTree)?;
+        let res = inherited_resources(doc, page_dict);
+        pdf_annots::plan_flatten(&*doc, page_dict, Some(page_id), res, opts, &annots_limits)?
+    };
+    if !plan.changed() {
+        return Ok(plan);
+    }
+
+    let mut page_res = {
+        let page_dict = doc.get_dict(page_id).ok_or(Error::NoPageTree)?;
+        owned(doc, inherited_resources(doc, page_dict))
+    };
+    if !plan.xobject_bindings.is_empty() {
+        let mut xo = owned(doc, page_res.get(b"XObject"));
+        for (name, form_id) in &plan.xobject_bindings {
+            xo.set(name, *form_id);
+        }
+        page_res.set("XObject", xo);
+    }
+
+    // Collect existing `/Contents` stream references without decoding them.
+    let existing_refs: Vec<Object> = {
+        let page_dict = doc.get_dict(page_id).ok_or(Error::NoPageTree)?;
+        match page_dict.get(b"Contents") {
+            None => Vec::new(),
+            Some(raw) => match doc.dereference(raw) {
+                Some((_, obj)) => match obj.as_array() {
+                    Some(arr) => arr.to_vec(),
+                    None if obj.as_stream().is_some() => vec![raw.clone()],
+                    None => Vec::new(),
+                },
+                None => Vec::new(),
+            },
+        }
+    };
+
+    let new_contents: Option<Object> = if plan.overlay_content.is_empty() {
+        None
+    } else if existing_refs.is_empty() {
+        let mut s = Stream::new(Dict::new(), plan.overlay_content.clone());
+        deflated(&mut s, deflate)?;
+        Some(Object::from(doc.add(Object::from(s))))
+    } else {
+        let mut push_q = Stream::new(Dict::new(), b"q\n".to_vec());
+        deflated(&mut push_q, deflate)?;
+        let q_id = doc.add(Object::from(push_q));
+
+        let mut pop_and_overlay = Vec::with_capacity(plan.overlay_content.len() + 3);
+        pop_and_overlay.extend_from_slice(b"\nQ\n");
+        pop_and_overlay.extend_from_slice(&plan.overlay_content);
+        let mut overlay_s = Stream::new(Dict::new(), pop_and_overlay);
+        deflated(&mut overlay_s, deflate)?;
+        let ov_id = doc.add(Object::from(overlay_s));
+
+        let mut seq = Vec::with_capacity(existing_refs.len() + 2);
+        seq.push(Object::from(q_id));
+        seq.extend(existing_refs);
+        seq.push(Object::from(ov_id));
+        Some(Object::from(seq))
+    };
+
+    if let Some(page_mut) = doc.get_dict_mut(page_id) {
+        if !plan.xobject_bindings.is_empty() {
+            page_mut.set("Resources", page_res);
+        }
+        if let Some(c) = new_contents {
+            page_mut.set("Contents", c);
+        }
+        if plan.kept_annots.is_empty() {
+            page_mut.remove(b"Annots");
+        } else {
+            page_mut.set("Annots", plan.kept_annots.clone());
+        }
+    }
+    Ok(plan)
+}
+
+fn inherited_resources<'d>(doc: &'d Document, mut cur: &'d Dict) -> Option<&'d Object> {
+    for _ in 0..64 {
+        if let Some(res) = cur.get(b"Resources") {
+            return Some(res);
+        }
+        let parent = cur.get(b"Parent")?;
+        let (_, obj) = doc.dereference(parent)?;
+        cur = obj.as_dict()?;
+    }
+    None
 }
 
 /// `stream`'s data deflated by `deflate`, and `/Filter /FlateDecode`, where

@@ -65,6 +65,7 @@ struct Content {
     geom: pdf_gfx::PageGeom,
     gfx: Result<pdf_gfx::Summary, String>,
     encoded: Result<(usize, usize), String>,
+    annots: Result<usize, String>,
 }
 
 /// A page's text: each string shown ([`Said`]); and how many things weren't
@@ -103,7 +104,18 @@ pub struct Reached {
 /// its operations walked to their end.
 fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
     let words = |error: Error| error.to_string();
+    let oa1 = pdf.open_action().map_err(words);
+    let mut oa_faults = Vec::new();
+    let oa2 = pdf.open_action_with(&mut oa_faults).map_err(words);
+    assert_eq!(oa1, oa2, "open_action fault sink invariance");
     let pages = pdf.pages().map_err(words).map(|pages| {
+        let dt1 = pages.dests().map(|d| d.named_len()).map_err(words);
+        let mut dt_faults = Vec::new();
+        let dt2 = pages
+            .dests_with(&mut dt_faults)
+            .map(|d| d.named_len())
+            .map_err(words);
+        assert_eq!(dt1, dt2, "dests fault sink invariance");
         let cap = pdf.limits().content.content;
         let read = |page: crate::Page<'_, S>| {
             let text = page.text().map_err(words);
@@ -156,6 +168,14 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
                 .map(|enc| (enc.content.len(), enc.forms.len()))
                 .map_err(words);
             assert_eq!(encoded, encoded_with, "encode fault sink invariance");
+            let annots = page.annots().map(|a| a.len()).map_err(words);
+            let mut annot_faults = Vec::new();
+            let annots_with = page
+                .annots_with(&mut annot_faults)
+                .map(|a| a.len())
+                .map_err(words);
+            assert_eq!(annots, annots_with, "annots fault sink invariance");
+            let _ = page.plan_flatten(pdf_annots::FlattenOpts::DEFAULT);
             #[cfg(feature = "text-layout")]
             {
                 let tp1 = page
@@ -182,6 +202,7 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
                 geom,
                 gfx,
                 encoded,
+                annots,
             })
         };
         let pages: Vec<Result<Content, String>> = pages.iter().map(read).collect();

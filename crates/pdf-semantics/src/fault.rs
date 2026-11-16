@@ -250,6 +250,32 @@ pub enum Fault {
     /// it's read as none.
     #[error("/Trapped isn't /True, /False or /Unknown")]
     InfoTrapped,
+    /// A destination value or entry that isn't a well-formed destination
+    /// array, name, byte string, or `/D` dictionary (12.3.2).
+    #[error("a destination isn't an array, a name or a byte string")]
+    DestInvalid,
+    /// A destination within the current document whose explicit array names
+    /// its target page by a 0-based integer index rather than an indirect
+    /// page reference (12.3.2.2, Table 149; tolerated under `Rules::Pdfium`).
+    #[error("a destination in this document names its page by number, not by reference")]
+    DestIntegerPage,
+    /// A named destination written as a name resolved in `/Names/Dests` or
+    /// written as a string resolved in `/Dests` (12.3.2.3; tolerated under
+    /// `Rules::Pdfium`).
+    #[error("a named destination was found in the other table of destinations")]
+    DestCrossResolved,
+    /// An action entry that isn't a dictionary with `/S` and its required
+    /// entries, or whose `/Next` chain revisits an indirect action (12.6.2,
+    /// 12.6.4).
+    #[error("an action isn't a dictionary with /S, or its /Next chain loops")]
+    ActionInvalid,
+    /// An entry inside an action or file specification dictionary that isn't
+    /// of the type ISO 32000-2 requires (7.11.3, 12.6.4).
+    #[error("/{key} of an action or file specification isn't of its type")]
+    ActionWrongType {
+        /// Which dictionary key.
+        key: &'static str,
+    },
 }
 
 /// What [`Fault::PageTreeParent`] says: the node that lists it, by its number,
