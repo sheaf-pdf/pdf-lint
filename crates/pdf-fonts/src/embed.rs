@@ -18,9 +18,12 @@
 //! opened for what the subset it's cut to would otherwise make of it: a composite
 //! glyph naming a glyph the program hasn't, `loca` entries whose glyphs overlap, and
 //! `name` records whose lengths overflow the table they'd be written in are refused
-//! ([`Error::Malformed`]). What's done with an opened program is then bounded by its
-//! size: each glyph's data is read at most twice, and what a subset of it holds is at
-//! most what it holds, and a constant.
+//! ([`Error::Malformed`]), and so is any glyph, metric or table that a cut would
+//! refuse or write wrong. What's done with an opened program is then bounded by its
+//! size: each glyph's data is read at most three times, and what a subset of it holds
+//! is at most what it holds, and a constant. And any glyphs of it are cut: what
+//! [`write()`] refuses of a program opened is a [`Glyphs`] past its glyphs, or what its
+//! licence restricts.
 //!
 //! ```
 //! use pdf_fonts::embed::{Glyphs, Program, Unmapped};
@@ -92,11 +95,19 @@ impl Program {
     /// Its glyphs are read in two passes, so opening it is linear in its size, and so is
     /// all that's done with it after: there's no cap to set.
     ///
+    /// And they're checked so that any of its glyphs are cut, as each table a cut takes
+    /// is read for each glyph it keeps, and some are rewritten: every glyph placed by
+    /// its `loca`, its data a whole glyph's, every composite's records whole; a left
+    /// side bearing in `hmtx` for every glyph; an `hhea` of the 36 bytes OpenType gives
+    /// it; a `maxp` of version 1.0; and a `post` of version 2.0 naming every glyph.
+    ///
     /// # Errors
     ///
     /// - [`Error::NotSfnt`] for bytes that aren't a TrueType or OpenType font, or a
-    ///   collection of them, or a face whose table directory isn't in order of its
-    ///   tables' tags.
+    ///   collection of them.
+    /// - [`Error::Directory`] for a face whose table directory isn't in order of its
+    ///   tables' tags, is cut short, or isn't where its collection's first list of faces
+    ///   puts it.
     /// - [`Error::Index`] for an `index` past a collection's faces, or other than 0
     ///   where it isn't one.
     /// - [`Error::Outlines`] for a program whose outlines are CFF's, CFF2's or bitmaps
@@ -104,9 +115,11 @@ impl Program {
     /// - [`Error::Malformed`], with its table's tag, for a table it needs that's
     ///   missing or doesn't read (`head`, `maxp`, `hhea`, `hmtx`, `loca`), units per em
     ///   outside the 16 to 16,384 OpenType allows, which FreeType, and so PDFium, takes
-    ///   for no program (`head`), a `loca` whose glyphs overlap, a composite glyph
-    ///   naming a glyph past its count (`glyf`), or a `name` table a subset couldn't
-    ///   write.
+    ///   for no program (`head`), a `loca` that doesn't place a glyph or whose glyphs
+    ///   overlap, a glyph whose data isn't a whole glyph's or a composite glyph naming
+    ///   a glyph past its count (`glyf`), an `hmtx` without a glyph's side bearing, an
+    ///   `hhea` past its 36 bytes, a `maxp` of a version but 1.0, a `post` of version
+    ///   2.0 that doesn't name every glyph, or a `name` table a subset couldn't write.
     pub fn open(data: impl Into<Arc<[u8]>>, index: u32) -> Result<Program, Error> {
         let data: Arc<[u8]> = data.into();
         let font = face(&data, index)?;
@@ -128,9 +141,10 @@ impl Program {
         if long == 0 {
             return Err(malformed("hhea"));
         }
-        let hmtx = tables.hmtx(long).ok_or(malformed("hmtx"))?;
+        let hmtx = tables.hmtx(long, glyphs).ok_or(malformed("hmtx"))?;
         let outlines = tables.glyf()?;
         outlines.check(glyphs)?;
+        tables.check_rewritten(glyphs)?;
         tables.check_name()?;
         let embedding = tables.embedding();
 
@@ -393,11 +407,17 @@ impl fmt::Debug for Glyphs {
 #[non_exhaustive]
 pub enum Error {
     /// The bytes aren't a TrueType or OpenType font, nor a collection of them, or the
-    /// face asked for has a table directory that doesn't read, isn't in order of its
-    /// tables' tags, as OpenType asks, or isn't where a collection's first list of
-    /// faces puts it.
+    /// face asked for has a table directory that doesn't read.
     #[error("not a TrueType or OpenType font program, nor a collection of them")]
     NotSfnt,
+    /// The face's table directory isn't in order of its tables' tags, as OpenType asks
+    /// and the subsetter finds them by, holds fewer tables than it counts, or isn't
+    /// where a collection's first list of faces puts it, the one the subsetter reads.
+    #[error(
+        "the font program's table directory isn't in order of its tags, is cut short, \
+         or isn't where its collection lists it"
+    )]
+    Directory,
     /// A table the program needs is missing or doesn't read as one, or holds what
     /// embedding it can't take: the table's tag.
     #[error("the font program's `{table}` table is missing or malformed")]

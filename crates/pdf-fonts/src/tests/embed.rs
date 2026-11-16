@@ -276,8 +276,9 @@ fn embedding_is_the_fs_type() {
     assert_eq!(none.embedding().level, Level::Installable);
 }
 
-/// Bytes that aren't an SFNT, or a face of one with its table directory out of order,
-/// are refused; so is a face other than one a program has.
+/// Bytes that aren't an SFNT are refused as such; a face of one with its table
+/// directory out of order or cut short for its directory, said so, as a viewer may
+/// read it; and a face other than one a program has.
 #[test]
 fn what_isnt_a_program_or_its_face_is_refused() {
     let program = font::sample(1000).build();
@@ -297,11 +298,20 @@ fn what_isnt_a_program_or_its_face_is_refused() {
     tables.swap(1, 2);
     let unsorted = font::sfnt(TRUETYPE, &tables);
     assert!(FontRef::new(&unsorted).unwrap().head().is_ok());
-    assert_eq!(Program::open(unsorted, 0).unwrap_err(), Error::NotSfnt);
+    assert_eq!(Program::open(unsorted, 0).unwrap_err(), Error::Directory);
     // A directory counting more tables than it holds.
     let mut short = program.clone();
     short.truncate(12 + 16 * 3);
-    assert_eq!(Program::open(short, 0).unwrap_err(), Error::NotSfnt);
+    assert_eq!(Program::open(short, 0).unwrap_err(), Error::Directory);
+    assert_eq!(
+        Error::Directory.to_string(),
+        "the font program's table directory isn't in order of its tags, is cut short, \
+         or isn't where its collection lists it"
+    );
+    assert_eq!(
+        Error::NotSfnt.to_string(),
+        "not a TrueType or OpenType font program, nor a collection of them"
+    );
 
     assert_eq!(
         Program::open(program.clone(), 1).unwrap_err(),
@@ -345,7 +355,10 @@ fn a_face_two_lists_put_apart_is_refused() {
     // read-fonts takes the second list's face, at 2048 units an em.
     let read = FontRef::from_index(&file, 0).unwrap();
     assert_eq!(read.head().unwrap().units_per_em(), 2048);
-    assert_eq!(Program::open(file.clone(), 0).unwrap_err(), Error::NotSfnt);
+    assert_eq!(
+        Program::open(file.clone(), 0).unwrap_err(),
+        Error::Directory
+    );
     // Where both lists put it in one place, it's taken.
     file[12..16].copy_from_slice(&(at_second as u32).to_be_bytes());
     let bbox = Program::open(file, 0).unwrap().metrics().bbox.unwrap();
@@ -674,41 +687,113 @@ fn glyphs_past_the_count_are_refused() {
     );
 }
 
-/// A drawn glyph whose `loca` entries don't place it is refused as it's cut; a
-/// composite cut short after its component's number the subsetter refuses, said in
-/// this crate's words.
+/// A glyph a cut couldn't take, drawn or not, is refused as the program is opened, so
+/// that every glyph of a program opened is cut: a composite cut short after its
+/// component's number, or before its records; a glyph of one byte; a `loca` without
+/// the last glyph's end; and `.notdef`'s entries reversed, which every cut keeps.
 #[test]
-fn a_glyph_that_cant_be_cut_is_refused() {
-    let mut font = font::sample(1000);
-    let short = font.glyph(
-        Glyph::Raw(vec![0xFF, 0xFF, 0, 0, 0, 0, 0, 9, 0, 9, 0, 0x21, 0, 2]),
-        500,
-    );
-    let program = Program::open(font.build(), 0).unwrap();
-    let mut glyphs = Glyphs::new();
-    glyphs.insert(short, "x");
-    let error = program.subset(&glyphs).unwrap_err();
-    assert_eq!(error, Error::Subset("a table it rewrites doesn't read"));
-    assert_eq!(
-        error.to_string(),
-        "the font program couldn't be cut to the glyphs drawn: a table it rewrites doesn't read"
-    );
+fn a_glyph_a_cut_couldnt_take_is_refused() {
+    let raw = [
+        vec![0xFF, 0xFF, 0, 0, 0, 0, 0, 9, 0, 9, 0, 0x21, 0, 2],
+        vec![0xFF, 0xFF, 0, 0, 0, 0],
+    ];
+    for data in raw {
+        let mut font = font::sample(1000);
+        let glyph = font.glyph(Glyph::Raw(data), 500);
+        let error = refused(font.build(), [glyph]);
+        assert_eq!(error, Error::Malformed { table: "glyf" });
+    }
 
-    // A `loca` shorter than the glyphs: the last glyph has no end.
-    let font = font::sample(1000);
+    let mut font = font::sample(1000);
+    font.long_loca = true;
     let tables = font.tables();
-    let mut loca = tables.iter().find(|t| &t.0 == b"loca").unwrap().1.clone();
-    loca.truncate(loca.len() - 2);
-    let program = Program::open(with(&font, b"loca", loca), 0).unwrap();
-    let mut clef = Glyphs::new();
-    clef.add(&program, "A𝄞").unwrap();
-    assert_eq!(
-        program.subset(&clef).unwrap_err(),
-        Error::Malformed { table: "loca" }
-    );
-    let mut a = Glyphs::new();
-    a.add(&program, "A").unwrap();
-    assert!(program.subset(&a).is_ok());
+    let loca = tables.iter().find(|t| &t.0 == b"loca").unwrap().1.clone();
+    // The last glyph one byte long.
+    let mut one = loca.clone();
+    let start = u32::from_be_bytes(one[4 * 320..4 * 321].try_into().unwrap());
+    one[4 * 321..].copy_from_slice(&(start + 1).to_be_bytes());
+    let error = refused(with(&font, b"loca", one), [320]);
+    assert_eq!(error, Error::Malformed { table: "glyf" });
+    // The last glyph has no end.
+    let mut short = loca.clone();
+    short.truncate(loca.len() - 4);
+    let error = refused(with(&font, b"loca", short), [2, 320]);
+    assert_eq!(error, Error::Malformed { table: "loca" });
+    // `.notdef` starts past where it ends.
+    let mut reversed = loca;
+    let end = u32::from_be_bytes(reversed[4..8].try_into().unwrap());
+    reversed[..4].copy_from_slice(&(end + 2).to_be_bytes());
+    let error = refused(with(&font, b"loca", reversed), []);
+    assert_eq!(error, Error::Malformed { table: "loca" });
+}
+
+/// A table a cut rewrites is refused as the program is opened where the cut would
+/// refuse it or write it wrong: an `hmtx` without the last glyph's side bearing; an
+/// `hhea` past its 36 bytes, over whose last two the advances' count is written; a
+/// `maxp` of version 0.5, written as 1.0 over its six bytes; a `post` too short for
+/// its version, its header or its names, or of version 2.0 naming fewer glyphs than
+/// the program has. Each as OpenType has it is taken, and a `post` of version 3.
+#[test]
+fn a_table_a_cut_couldnt_rewrite_is_refused() {
+    let mut font = font::sample(1000);
+    font.long_metrics = Some(300);
+    font.post.names = true;
+    let tables = font.tables();
+    let table = |tag: &[u8; 4]| tables.iter().find(|t| &t.0 == tag).unwrap().1.clone();
+    let mut hmtx = table(b"hmtx");
+    assert_eq!(hmtx.len(), 4 * 300 + 2 * 21);
+    hmtx.truncate(hmtx.len() - 2);
+    let mut hhea = table(b"hhea");
+    hhea.extend([0, 0, 0, 0]);
+    let mut maxp = table(b"maxp");
+    maxp.truncate(6);
+    maxp[..4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
+    let post = table(b"post");
+    let mut fewer = post[..34].to_vec();
+    fewer[32..34].copy_from_slice(&3u16.to_be_bytes());
+    fewer.extend([0, 0, 0, 1, 0, 2]);
+    let mut past = post[..34].to_vec();
+    past.extend([0, 0]);
+    let cases = [
+        (b"hmtx", hmtx, "hmtx"),
+        (b"hhea", hhea, "hhea"),
+        (b"maxp", maxp, "maxp"),
+        (b"post", post[..33].to_vec(), "post"),
+        (b"post", past, "post"),
+        (b"post", fewer, "post"),
+        (b"post", vec![0, 2], "post"),
+    ];
+    for (tag, data, table) in cases {
+        let error = refused(with(&font, tag, data), [2, 4, 320]);
+        assert_eq!(error, Error::Malformed { table }, "{table}");
+    }
+    let mut version_3 = post[..32].to_vec();
+    version_3[..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+    for program in [font.build(), with(&font, b"post", version_3)] {
+        let program = Program::open(program, 0).unwrap();
+        assert_eq!(program.whole().unwrap().glyphs.len(), 321);
+    }
+}
+
+/// A `post` naming more glyphs by names of its own than the 65,278 a cut numbers them
+/// to in 16 bits is refused as the program is opened; one naming that many is cut
+/// whole.
+#[test]
+fn a_post_naming_more_than_a_cut_numbers_is_refused() {
+    let most = most_glyphs();
+    let post = |own: usize| {
+        let mut post = 0x0002_0000u32.to_be_bytes().to_vec();
+        post.extend([0; 28]);
+        post.extend(65_535u16.to_be_bytes());
+        // An index past the 258 standard names, a name of its own, then `.notdef`'s.
+        let indexes = std::iter::repeat_n(258u16, own).chain(std::iter::repeat(0));
+        post.extend(indexes.take(65_535).flat_map(u16::to_be_bytes));
+        post
+    };
+    let error = refused(with(most, b"post", post(65_279)), 0..u16::MAX);
+    assert_eq!(error, Error::Malformed { table: "post" });
+    let program = Program::open(with(most, b"post", post(65_278)), 0).unwrap();
+    assert_eq!(program.whole().unwrap().glyphs.len(), 65_535);
 }
 
 /// A pen that keeps each command an outline draws.

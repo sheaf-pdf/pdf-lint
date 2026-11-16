@@ -61,9 +61,9 @@ impl Program {
             }
         }
         while let Some(glyph) = work.pop() {
+            // Each placed, its components within the count, as `open` checked.
             let data = outlines.glyph(glyph);
             let data = data.ok_or(Error::Malformed { table: "loca" })?;
-            // Each within the count, as `open` checked.
             for component in sfnt::components(data) {
                 if let Some(slot) = kept.get_mut(usize::from(component))
                     && !mem::replace(slot, true)

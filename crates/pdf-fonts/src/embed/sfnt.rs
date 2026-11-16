@@ -1,13 +1,15 @@
 //! A face's tables as the subsetter reads them, and the checks that keep what it does
-//! with them bounded by their size.
+//! with them bounded by their size, and every cut of them one it writes.
 //!
 //! The subsetter reads a face otherwise than skrifa and read-fonts do: its table
 //! directory by a binary search, so only in order of its tags; a collection's face
 //! where the collection's first list of faces puts it; a glyph's data as `loca`
 //! places it, unchecked for order; a composite glyph's components as far as their
-//! glyphs' numbers read; and its `name` records' lengths summed in 16 bits. So what's
-//! checked here is read its way, from the same bytes, and what passes is what it's
-//! given.
+//! glyphs' numbers read; and its `name` records' lengths summed in 16 bits. And it
+//! refuses a cut holding a glyph whose data, metrics or name it can't read, and
+//! writes some tables it rewrites wrong where they aren't as OpenType has them. So
+//! what's checked here is read its way, from the same bytes, every glyph of it, and
+//! what passes is what it's given.
 
 use std::collections::HashSet;
 
@@ -32,7 +34,7 @@ impl<'a> Tables<'a> {
             .windows(2)
             .all(|pair| pair[0].tag().to_be_bytes() < pair[1].tag().to_be_bytes());
         if records.len() != usize::from(directory.num_tables()) || !ordered {
-            return Err(Error::NotSfnt);
+            return Err(Error::Directory);
         }
         if let Some(index) = font.ttc_index() {
             let directory = directory.offset_data().as_bytes().as_ptr() as usize;
@@ -42,7 +44,7 @@ impl<'a> Tables<'a> {
                 .and_then(|i| data.get(12 + i..16 + i))
                 .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
             if listed.is_none() || listed != at {
-                return Err(Error::NotSfnt);
+                return Err(Error::Directory);
             }
         }
         Ok(Tables { data, records })
@@ -77,10 +79,12 @@ impl<'a> Tables<'a> {
     }
 
     /// Where its `hmtx` begins, where it holds the `long` advances its `hhea` says it
-    /// does.
-    pub(super) fn hmtx(&self, long: u16) -> Option<usize> {
+    /// does, and a left side bearing for each of its `glyphs` after them, as OpenType
+    /// has it and the subsetter reads each glyph it keeps.
+    pub(super) fn hmtx(&self, long: u16, glyphs: u16) -> Option<usize> {
         let (at, hmtx) = self.table(b"hmtx")?;
-        (hmtx.len() >= 4 * usize::from(long)).then_some(at)
+        let bearings = usize::from(glyphs.saturating_sub(long));
+        (hmtx.len() >= 4 * usize::from(long) + 2 * bearings).then_some(at)
     }
 
     /// Its `glyf` and `loca`, and `loca`'s format, as its `head` gives it.
@@ -151,6 +155,46 @@ impl<'a> Tables<'a> {
         }
     }
 
+    /// Refused where a table the subsetter rewrites, to the glyphs it keeps, would be
+    /// written wrong or refused for some of its `glyphs`: an `hhea` longer than the 36
+    /// bytes OpenType gives it, as the subsetter writes the advances' count over its
+    /// last two; a `maxp` of a version but 1.0, which a TrueType program's is and the
+    /// subsetter writes it as, over what follows; and a `post` too short for its
+    /// version, or of version 2.0 and too short for its header and its glyphs' names,
+    /// naming fewer glyphs than the program has, or naming more glyphs by names of its
+    /// own than the 65,278 the subsetter numbers them to in 16 bits.
+    pub(super) fn check_rewritten(&self, glyphs: u16) -> Result<(), Error> {
+        let malformed = |table| Error::Malformed { table };
+        if self.table(b"hhea").is_some_and(|(_, hhea)| hhea.len() > 36) {
+            return Err(malformed("hhea"));
+        }
+        let maxp = self.table(b"maxp").and_then(|(_, maxp)| maxp.get(..4));
+        if maxp != Some(&[0, 1, 0, 0][..]) {
+            return Err(malformed("maxp"));
+        }
+        let Some((_, post)) = self.table(b"post") else {
+            return Ok(());
+        };
+        match post.get(..4) {
+            Some([0, 2, 0, 0]) => {}
+            Some(_) => return Ok(()),
+            None => return Err(malformed("post")),
+        }
+        let named = post.get(32..34).map(|b| u16::from_be_bytes([b[0], b[1]]));
+        let named = named.ok_or(malformed("post"))?;
+        let indexes = post.get(34..34 + 2 * usize::from(named));
+        let indexes = indexes.ok_or(malformed("post"))?;
+        // Indexes past the 258 standard names are the program's own.
+        let own = indexes.as_chunks::<2>().0.iter().take(usize::from(glyphs));
+        let own = own
+            .filter(|&&index| u16::from_be_bytes(index) >= 258)
+            .count();
+        match named >= glyphs && own <= 65_278 {
+            true => Ok(()),
+            false => Err(malformed("post")),
+        }
+    }
+
     /// What its licence allows: its `OS/2` table's `fsType`, where it has one long
     /// enough to hold it.
     pub(super) fn embedding(&self) -> Embedding {
@@ -184,28 +228,68 @@ impl<'a> Glyf<'a> {
         self.glyf.get(entry(at)?..entry(at + 1)?)
     }
 
-    /// Refused where the face's `count` glyphs' data, as `loca` places it, comes to
-    /// more than its `glyf` holds, so that two glyphs share bytes and a subset of them
-    /// would hold more than the program does (`loca`), or where a composite glyph names
-    /// a glyph past `count` (`glyf`), which a subset would take on, past the 65,535 its
-    /// glyphs are numbered in. The glyphs' data is summed first, so that each
-    /// composite's components after it are read once, in all no more than `glyf`.
+    /// Refused where one of the face's `count` glyphs isn't placed by `loca`, or
+    /// their data, as `loca` places it, comes to more than its `glyf` holds, so that
+    /// two glyphs share bytes and a subset of them would hold more than the program
+    /// does (`loca`); or where a glyph's data doesn't read as the subsetter writes it
+    /// ([`whole`]), or a composite glyph names a glyph past `count`, which a subset
+    /// would take on, past the 65,535 its glyphs are numbered in (`glyf`). The glyphs'
+    /// data is summed first, so that each composite's components after it are read
+    /// twice at most, in all no more than `glyf`.
     pub(super) fn check(&self, count: u16) -> Result<(), Error> {
         let mut drawn = 0;
         for glyph in 0..count {
-            drawn += self.glyph(glyph).map_or(0, <[u8]>::len);
+            let data = self.glyph(glyph);
+            drawn += data.ok_or(Error::Malformed { table: "loca" })?.len();
             if drawn > self.glyf.len() {
                 return Err(Error::Malformed { table: "loca" });
             }
         }
         for glyph in 0..count {
-            let mut components = self.glyph(glyph).into_iter().flat_map(components);
-            if components.any(|component| component >= count) {
+            let data = self.glyph(glyph).unwrap_or_default();
+            if !whole(data) || components(data).any(|component| component >= count) {
                 return Err(Error::Malformed { table: "glyf" });
             }
         }
         Ok(())
     }
+}
+
+/// How many bytes a composite glyph's record of `flags` takes: its flags and glyph,
+/// its offsets in words or bytes, and a scale, an x and y scale, or a 2 by 2.
+fn record(flags: u16) -> usize {
+    let arguments = if flags & 0x0001 != 0 { 4 } else { 2 };
+    let transform = match flags {
+        f if f & 0x0008 != 0 => 2,
+        f if f & 0x0040 != 0 => 4,
+        f if f & 0x0080 != 0 => 8,
+        _ => 0,
+    };
+    4 + arguments + transform
+}
+
+/// Whether a glyph's `data` reads as the subsetter writes a glyph it keeps: none, or
+/// its contours' count, and, for a composite, its header and every record, to the
+/// one that says it's the last.
+fn whole(data: &[u8]) -> bool {
+    let Some(&[high, low]) = data.get(..2) else {
+        return data.is_empty();
+    };
+    if i16::from_be_bytes([high, low]) >= 0 {
+        return true;
+    }
+    let mut at = 10;
+    while let Some(flags) = data.get(at..at + 2) {
+        let flags = u16::from_be_bytes([flags[0], flags[1]]);
+        at += record(flags);
+        if at > data.len() {
+            return false;
+        }
+        if flags & 0x0020 == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// The glyphs a glyph's `data` names, where it's a composite, read as the subsetter
@@ -226,15 +310,7 @@ pub(super) fn components(data: &[u8]) -> impl Iterator<Item = u16> + '_ {
             return None;
         }
         let (flags, glyph) = word(at).zip(word(at + 2))?;
-        // Words or bytes for its offsets; a scale, an x and y scale, or a 2 by 2.
-        let arguments = if flags & 0x0001 != 0 { 4 } else { 2 };
-        let transform = match flags {
-            f if f & 0x0008 != 0 => 2,
-            f if f & 0x0040 != 0 => 4,
-            f if f & 0x0080 != 0 => 8,
-            _ => 0,
-        };
-        at += 4 + arguments + transform;
+        at += record(flags);
         last = flags & 0x0020 == 0;
         Some(glyph)
     })

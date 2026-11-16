@@ -1086,15 +1086,16 @@ fn embedded(data: &[u8]) -> (Vec<u8>, u32) {
 /// and what's after it drawn on; the glyphs kept the same whatever order the texts are
 /// drawn in. The font of what's drawn written under each choice of
 /// [`Options`](crate::embed::Options), each twice the same, and refused only where the
-/// program's licence restricts it and the right isn't given, or for a glyph that can't
-/// be cut: the right changing nothing else, a `/CIDSet` one more object and nothing
-/// else, and a program whose licence asks to be embedded whole the same cut or not.
-/// Each font written read back by [`Font::read`] with no fault: each glyph's width the
-/// program's, and its text the one the [`Glyphs`](crate::embed::Glyphs) kept, so each
-/// string's text its glyphs'; with `programs`, its program read, and each glyph's box
-/// the same cut as whole. Then the glyph the input's third and fourth bytes name drawn
-/// too, its text the tail: refused where it's past the program's glyphs, else read
-/// back so. How many fonts were written and read back.
+/// program's licence restricts it and the right isn't given, as every glyph of a
+/// program opened is cut: the right changing nothing else, a `/CIDSet` one more object
+/// and nothing else, and a program whose licence asks to be embedded whole the same cut
+/// or not. Each font written read back by [`Font::read`] with no fault: each glyph's
+/// width the program's, and its text the one the [`Glyphs`](crate::embed::Glyphs)
+/// kept, so each string's text its glyphs'; with `programs`, its program read, and
+/// each glyph's box the same cut as whole, and as the program given reads it, where it
+/// reads one. Then the glyph the input's third and fourth bytes name drawn too, its
+/// text the tail: refused where it's past the program's glyphs, else read back so. How
+/// many fonts were written and read back.
 ///
 /// # Errors
 ///
@@ -1161,7 +1162,6 @@ pub fn embed(data: &[u8]) -> Result<usize, crate::embed::Error> {
                 assert!(restricted && !options.restricted, "{options:?}");
                 assert_eq!(*refused, embedding);
             }
-            Err(Refused::Malformed { table: "loca" } | Refused::Subset(_)) => {}
             Err(other) => panic!("{options:?}: {other:?}"),
             Ok(_) => assert!(!restricted || options.restricted, "{options:?}"),
         }
@@ -1208,6 +1208,24 @@ pub fn embed(data: &[u8]) -> Result<usize, crate::embed::Error> {
             assert_eq!(cut.char_box(code), whole.char_box(code), "glyph {glyph}");
         }
     }
+    // And the program's as given, where it draws one with an area: so a table the cut
+    // takes from it and writes wrong shows, which it doesn't between two cuts. A glyph
+    // drawn as nothing, or none, may be one of the program's whose bytes the cut keeps
+    // only as far as they're a glyph's, which the reader, as FreeType, takes otherwise.
+    #[cfg(feature = "programs")]
+    if let (Some(cut), Ok(written)) = (&cut_and_whole[0], &fonts[6])
+        && let Some(given) = given(&program, index, written)
+    {
+        for &glyph in glyphs.texts.keys() {
+            let code = u32::from(glyph);
+            let given = given
+                .char_box(code)
+                .filter(|b| *b != crate::Rect::default());
+            if let Some(given) = given {
+                assert_eq!(cut.char_box(code), Some(given), "glyph {glyph} given");
+            }
+        }
+    }
 
     // A glyph the input names, its tail its text; refused where it's past the glyphs.
     let named = u16::from_be_bytes([data.get(2), data.get(3)].map(|b| b.copied().unwrap_or(0)));
@@ -1226,10 +1244,34 @@ pub fn embed(data: &[u8]) -> Result<usize, crate::embed::Error> {
             read_back(&program, &glyphs, &strings, objects);
             read += 1;
         }
-        Err(Refused::Malformed { table: "loca" } | Refused::Subset(_)) => {}
         Err(other) => panic!("glyph {named}: {other:?}"),
     }
     Ok(read)
+}
+
+/// The font `written`, `program` written whole, is with its `/FontFile2` the program as
+/// it's given, read: none where it's face `index` of a collection, or its `loca`'s
+/// format is one read-fonts, and so this crate's reader, reads otherwise than the
+/// subsetter and FreeType (any but 0 or 1), as then it's the cut that's read as they
+/// read it.
+#[cfg(all(feature = "embed", feature = "programs"))]
+fn given(program: &crate::embed::Program, index: u32, written: &[Object]) -> Option<Font> {
+    use skrifa::raw::{FontRef, TableProvider};
+
+    let font = FontRef::new(&program.data).ok()?;
+    let format = font.head().ok()?.index_to_loc_format();
+    if index != 0 || !matches!(format, 0 | 1) {
+        return None;
+    }
+    let mut objects = written.to_vec();
+    let length = program.data.len() as i64;
+    let file = Stream::new(dict! { "Length1" => length }, program.data.to_vec());
+    objects[3] = Object::from(file);
+    let objects = numbered(&objects);
+    let dict = objects[&ObjectId::new(1, 0)].as_dict()?;
+    let mut budget = EMBEDDED_BUDGET;
+    let read = Font::read(Map(&objects), dict, &Limits::DEFAULT, &mut budget, &mut ());
+    read.ok()
 }
 
 /// The characters `program`'s `cmap`, face `index`'s, maps first: at most [`MAPPINGS`].
@@ -1818,13 +1860,44 @@ mod tests {
             whole(&backwards, 0, 3),
             malformed("loca"),
         ));
-        // `loca` placing the glyphs past `B` past the end of `glyf`, which open as
-        // glyphs of nothing, and aren't cut.
+        // `loca` placing the glyphs past `B` past the end of `glyf`, and `.notdef`'s
+        // start past its end, which no cut could take.
         let past = changed(&sample, b"loca", |loca| {
             let past = (u16::MAX / 2).to_be_bytes();
             loca.as_chunks_mut::<2>().0[10..].fill(past);
         });
-        seeds.push(("glyf-past-the-table", whole(&past, 0, 2), Ok(0)));
+        seeds.push(("glyf-past-the-table", whole(&past, 0, 2), malformed("loca")));
+        let notdef = changed(&sample, b"loca", |loca| {
+            let end = u16::from_be_bytes([loca[2], loca[3]]);
+            loca[..2].copy_from_slice(&(end + 1).to_be_bytes());
+        });
+        seeds.push(("notdef-reversed", whole(&notdef, 0, 2), malformed("loca")));
+
+        // Tables a cut rewrites wrong, or refuses for some glyph: an `hmtx` without
+        // the last glyph's side bearing, an `hhea` past its 36 bytes, a `maxp` of
+        // version 0.5, a `post` naming three glyphs; and that `post` naming them all.
+        let mut fewer = font::sample(1000);
+        fewer.long_metrics = Some(3);
+        let bearings = changed(&fewer, b"hmtx", |hmtx| hmtx.truncate(hmtx.len() - 2));
+        seeds.push(("no-bearing", whole(&bearings, 0, 320), malformed("hmtx")));
+        let mut long = fixture_table(b"hhea");
+        long.extend([0; 4]);
+        seeds.push(("long-hhea", spliced(b"hhea", &long, 1), malformed("hhea")));
+        let count = &fixture_table(b"maxp")[4..6];
+        let mut maxp = 0x0000_5000u32.to_be_bytes().to_vec();
+        maxp.extend(count);
+        seeds.push(("maxp-0.5", spliced(b"maxp", &maxp, 1), malformed("maxp")));
+        let count = u16::from_be_bytes([count[0], count[1]]);
+        let post = |named: u16| {
+            let mut post = 0x0002_0000u32.to_be_bytes().to_vec();
+            post.extend([0; 28]);
+            post.extend(named.to_be_bytes());
+            post.extend((0..named).flat_map(u16::to_be_bytes));
+            post
+        };
+        let short = post(count - 1);
+        seeds.push(("post-short", spliced(b"post", &short, 1), malformed("post")));
+        seeds.push(("post-names", spliced(b"post", &post(count), 1), Ok(9)));
 
         // Units per em outside OpenType's range, of which FreeType loads no program,
         // and each end of it.
@@ -1881,8 +1954,8 @@ mod tests {
 
     /// Each program among the embedding's seeds comes to what it's built for: each
     /// fixture program written under every choice, its named glyph too, and read back,
-    /// fewer where its licence restricts it or the glyph it names is past its own, none
-    /// where the glyphs drawn can't be cut; each hostile one refused for what it holds.
+    /// fewer where its licence restricts it or the glyph it names is past its own; each
+    /// hostile one, and each a cut couldn't take whole, refused for what it holds.
     #[cfg(feature = "embed")]
     #[test]
     fn the_embed_seeds_come_to_what_they_hold() {

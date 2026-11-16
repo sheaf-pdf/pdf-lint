@@ -150,9 +150,8 @@ pub struct Options {
 ///   or to its bitmaps, unless `options` says the caller has the right.
 /// - [`Error::Glyph`] for a glyph `glyphs` keeps at or past the program's count: one of
 ///   another program's, or given [`Glyphs::insert`].
-/// - [`Error::Malformed`], `loca`, for a glyph drawn, or one a composite among them
-///   draws, whose `loca` entries don't place it; [`Error::Subset`] where the subsetter
-///   refuses to cut the program.
+/// - [`Error::Subset`] where the subsetter refuses to cut the program, which it has no
+///   reason to of a program [`Program::open`] took.
 pub fn write(program: &Program, glyphs: &Glyphs, options: &Options) -> Result<Vec<Object>, Error> {
     phase!(
         DEBUG,
