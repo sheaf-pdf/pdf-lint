@@ -82,10 +82,12 @@
 //!   isn't there, and one that refers to nothing is, the walk finding the
 //!   reference. Where what a name is in can't be told, a form's, a
 //!   pattern's or a glyph's with no resources of its own, which would use
-//!   its page's, or resources or a category that isn't a dictionary or
-//!   refers to nothing, no name lacks, and the unit is counted as not
-//!   checked. Each name once, at its first use, as written: an inline
-//!   image's `/I` is `I`, which PDFium looks up as `Indexed`.
+//!   its page's, resources that are there and don't read, as they don't
+//!   parse or for the reader's own reason (a password, a cap), which are
+//!   never none, or resources or a category that isn't a dictionary, or a
+//!   category that refers to nothing, no name lacks, and the unit is
+//!   counted as not checked. Each name once, at its first use, as written:
+//!   an inline image's `/I` is `I`, which PDFium looks up as `Indexed`.
 //! - **Each place ISO 32000-2 reads the content otherwise** than PDFium does
 //!   ([`Rule::Content`]), by the kind of [`Fault`], its text the first's: the
 //!   tokens' and the operations' own, 0x80 and 0xFF read as white-space
@@ -165,9 +167,10 @@ use pdf_content_streams::{
     CodedEnds, Concat, Error, Join, Limits, Operand, Operands, Operation, Operator, ResCx, ResKind,
     State, Type,
 };
+use pdf_objects::Resolve;
 use pdf_structure::pdf_filters;
 
-use super::{Finding, Made, Rule, Step, TOKEN, Trail, Visit, Walk, checksummed};
+use super::{Finding, Made, Objects, Rule, Step, TOKEN, Trail, Visit, Walk, checksummed};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span, Value};
 
@@ -207,6 +210,11 @@ const UNOWNED: &str = "a resource name in content with no resources of its own";
 /// Why a resource name isn't looked up: its unit's resources aren't a
 /// dictionary.
 const DAMAGED: &str = "a resource name in resources that aren't a dictionary";
+
+/// Why a resource name isn't looked up: its unit's resources are there and
+/// don't read, as they don't parse or for the reader's own reason (a
+/// password, a cap), or through more references than are followed.
+const UNREAD: &str = "a resource name in resources that don't read";
 
 /// Why a resource name isn't looked up: its category isn't a dictionary, or
 /// refers to nothing.
@@ -265,7 +273,9 @@ enum Way<'a> {
 /// starts.
 struct Unit<'a> {
     streams: Vec<(ObjectId, Way<'a>)>,
-    resources: Option<Resources<'a>>,
+    /// None for none; the number of the object they're in where they're
+    /// there and don't read ([`Walk::resources`]).
+    resources: Option<Result<Resources<'a>, ObjectId>>,
     start: State,
 }
 
@@ -453,7 +463,7 @@ impl<'a> Categories<'a> {
 #[derive(PartialEq, Eq, Hash)]
 struct Key {
     streams: Vec<ObjectId>,
-    resources: Option<*const Object>,
+    resources: Option<Result<*const Object, ObjectId>>,
     start: State,
 }
 
@@ -461,7 +471,7 @@ impl Unit<'_> {
     fn key(&self) -> Key {
         Key {
             streams: self.streams.iter().map(|&(id, _)| id).collect(),
-            resources: self.resources.map(|r| ptr::from_ref(r.object)),
+            resources: (self.resources).map(|r| r.map(|r| ptr::from_ref(r.object))),
             start: self.start,
         }
     }
@@ -1347,7 +1357,7 @@ impl<'a> Walk<'a> {
             };
             // Only an inline image is sized by the resources' color spaces,
             // so they're read only where one may be, once for each.
-            let resources = unit.resources.map(|r| r.object);
+            let resources = unit.resources.and_then(Result::ok).map(|r| r.object);
             let res = match content.bytes().windows(2).any(|w| w == b"BI") {
                 false => &none,
                 true => {
@@ -1459,7 +1469,8 @@ impl<'a> Walk<'a> {
     /// categories added to `categories` as they're met, in its resources'
     /// order: none for a page with no resources at all, and none that can be
     /// told for a form's, a pattern's or a glyph's with none of its own, as
-    /// it would use the page's, or for resources that aren't a dictionary;
+    /// it would use the page's, for resources that don't read, or for
+    /// resources that aren't a dictionary;
     /// a category, its references followed, that isn't a dictionary or
     /// refers to nothing can't be told, and one that's null is as if it
     /// weren't there (ISO 32000-2, 7.3.7).
@@ -1469,11 +1480,15 @@ impl<'a> Walk<'a> {
         unit: &Unit<'a>,
         categories: &mut Categories<'a>,
     ) -> Lookup {
-        let Some(resources) = unit.resources else {
-            return match holder.kind {
-                Kind::Page => Lookup::Without,
-                Kind::Own(_) | Kind::Glyphs => Lookup::Untold(UNOWNED),
-            };
+        let resources = match unit.resources {
+            Some(Ok(resources)) => resources,
+            Some(Err(_)) => return Lookup::Untold(UNREAD),
+            None => {
+                return match holder.kind {
+                    Kind::Page => Lookup::Without,
+                    Kind::Own(_) | Kind::Glyphs => Lookup::Untold(UNOWNED),
+                };
+            }
         };
         let Value::Dict(dict) = resources.object.value() else {
             return Lookup::Untold(DAMAGED);
@@ -1683,26 +1698,38 @@ impl<'a> Walk<'a> {
 
     /// `dict`'s own `/Resources`, its references followed, and the object
     /// they are where they're indirect; a null is none, and so is a
-    /// reference to nothing.
-    fn resources(&self, dict: &'a Dict) -> Option<Resources<'a>> {
+    /// reference to nothing (ISO 32000-2, 7.3.10). Resources that are there
+    /// and don't read, as an object on the way doesn't parse or doesn't
+    /// read for the reader's own reason (a password, a cap), or through
+    /// more references than are followed, are the number of the object
+    /// that doesn't, never none: what they name can't be told.
+    fn resources(&self, dict: &'a Dict) -> Option<Result<Resources<'a>, ObjectId>> {
         let raw = dict.get(b"Resources")?;
-        let (id, object) = self.resolve(raw).ok()?;
-        (!object.is_null()).then_some(Resources { id, object })
+        match self.resolve(raw) {
+            Ok((id, object)) => (!object.is_null()).then_some(Ok(Resources { id, object })),
+            Err(id) => match Objects(self.source).try_resolve(id) {
+                Ok(None) => None,
+                Ok(Some(_)) | Err(_) => Some(Err(id)),
+            },
+        }
     }
 
     /// Whether an object `unit`'s resources are written in, as `lookup` has
     /// them in `categories`, is held: its `/Resources`' own, else the one
     /// the walk reached them in (a page tree node's, for resources a page
-    /// inherits), and each category's.
+    /// inherits), or the one that doesn't read, and each category's.
     fn resources_held(
         &self,
         unit: &Unit<'a>,
         lookup: &Lookup,
         categories: &Categories<'a>,
     ) -> bool {
-        let own = unit.resources.and_then(|resources| {
-            let reached = self.resources_at.get(&ptr::from_ref(resources.object));
-            (resources.id).or_else(|| reached.and_then(|reached| reached.holder))
+        let own = unit.resources.and_then(|resources| match resources {
+            Ok(resources) => {
+                let reached = self.resources_at.get(&ptr::from_ref(resources.object));
+                (resources.id).or_else(|| reached.and_then(|reached| reached.holder))
+            }
+            Err(unread) => Some(unread),
         });
         let each = match lookup {
             Lookup::In(found) => found.as_slice(),
@@ -3785,6 +3812,115 @@ mod tests {
             let counted = [("PageObject".to_string(), "Resources".to_string(), 1)];
             assert_eq!(not_made(&report, why), counted, "{resources}");
         }
+    }
+
+    /// Resources that are there and don't read, an object that doesn't
+    /// parse or one nested past the parser's cap, are never none: what they
+    /// name can't be told, so no name is found lacking, and each unit that
+    /// looks one up is counted as not checked for that, as for resources
+    /// that aren't a dictionary; a page's own or what it inherits, a form's
+    /// or a glyph's. A page whose own don't read inherits none, and a
+    /// glyph whose own don't read takes none of its font's. A reference to
+    /// nothing is none, as ISO 32000-2 reads one (7.3.10): a page then
+    /// inherits, or has no resources at all and lacks every name. The unit
+    /// is held where the object that doesn't read is.
+    #[test]
+    fn resources_that_dont_read_are_never_none() {
+        let tf = || stream("", "/F1 9 Tf");
+        let fonts = "<< /Font << /F1 50 0 R >> >>";
+        let broken = "<< /Font << /F1 50 0 R >> /X ) >>";
+        let deep = format!(
+            "<< /Font << /F1 50 0 R >> /X {}{} >>",
+            "[".repeat(300),
+            "]".repeat(300)
+        );
+        let unread = [("PageObject".to_string(), "Resources".to_string(), 1)];
+        for body in [broken, deep.as_str()] {
+            let file = resourced("/Resources 40 0 R", tf(), &[(40, body), (50, FONT)]);
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+            let id = ObjectId::new(40, 0);
+            let why = match Objects(&opened).try_resolve(id) {
+                Err(unreadable) => unreadable.why,
+                Ok(read) => panic!("40 0 R reads: {read:?}"),
+            };
+            let why_wanted = match body == broken {
+                true => Why::Damaged,
+                false => Why::Capped,
+            };
+            assert_eq!(why, why_wanted);
+            let (found, report) = found_by(Rule::Resource, &file);
+            assert_eq!(found, [], "{report}");
+            assert_eq!(not_made(&report, UNREAD), unread, "{report}");
+            // Held by that object alone, as merged.
+            let only = Hold::Only([(ObjectId::new(40, 0), Made::Built)].into());
+            let report = check(&opened, &only, &Options::default());
+            assert_eq!(not_made(&report, UNREAD), unread, "{report}");
+            assert_eq!(report.content, 1, "{report}");
+        }
+        // Inherited; and a page's own that don't read, though its tree's
+        // do: none inherited.
+        let page_own = |more: &str, tree_resources: &str| {
+            let mut objects = tree("3 0 R", tree_resources);
+            objects.extend([
+                (3, page(&format!("/Contents 10 0 R {more}"))),
+                (10, tf()),
+                (40, broken.to_string()),
+                (41, fonts.to_string()),
+                (50, FONT.to_string()),
+            ]);
+            file(&objects)
+        };
+        for file in [
+            page_own("", "/Resources 40 0 R"),
+            page_own("/Resources 40 0 R", "/Resources 41 0 R"),
+        ] {
+            let (found, report) = found_by(Rule::Resource, &file);
+            assert_eq!(found, [], "{report}");
+            assert_eq!(not_made(&report, UNREAD), unread, "{report}");
+        }
+        // A form's, and a glyph's whose font's read.
+        let form = stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 9 9] /Resources 40 0 R",
+            "/F1 9 Tf",
+        );
+        let file = resourced(
+            "/Resources << /XObject << /Fm 20 0 R >> >>",
+            stream("", "/Fm Do"),
+            &[(20, &form), (40, broken), (50, FONT)],
+        );
+        let (found, report) = found_by(Rule::Resource, &file);
+        assert_eq!(found, [], "{report}");
+        let form_row = [("XObjectFormType1".to_string(), "Resources".to_string(), 1)];
+        assert_eq!(not_made(&report, UNREAD), form_row, "{report}");
+        let type3 = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 9 9] \
+                     /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 31 0 R >> \
+                     /Encoding << /Type /Encoding /Differences [97 /a] >> /FirstChar 97 \
+                     /LastChar 97 /Widths [9] /Resources 41 0 R >>";
+        let glyph = stream("/Resources 40 0 R", "9 0 d0 /F1 9 Tf");
+        let file = resourced(
+            "/Resources << /Font << /T3 30 0 R >> >>",
+            stream("", "BT /T3 9 Tf (a) Tj ET"),
+            &[
+                (30, type3),
+                (31, &glyph),
+                (40, broken),
+                (41, fonts),
+                (50, FONT),
+            ],
+        );
+        let (found, report) = found_by(Rule::Resource, &file);
+        assert_eq!(found, [], "{report}");
+        let glyph_row = [("FontType3".to_string(), "Resources".to_string(), 1)];
+        assert_eq!(not_made(&report, UNREAD), glyph_row, "{report}");
+        // A reference to nothing: none, so inherited, or lacking.
+        let none = page_own("/Resources 99 0 R", "/Resources 41 0 R");
+        assert_eq!(named(Rule::Resource, &none), []);
+        let none = resourced("/Resources 99 0 R", tf(), &[(50, FONT)]);
+        let without = "/F1 (Tf), and it has no resources";
+        assert_eq!(
+            named(Rule::Resource, &none),
+            [lacks("Resource/Font", without, "/F1")]
+        );
     }
 
     /// A category the resources don't have, or that's null, lacks every
