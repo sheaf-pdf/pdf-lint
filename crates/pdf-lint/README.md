@@ -54,65 +54,75 @@ Arguments:
   <FILE>...  a file to check; - is standard input
 
 Options:
-      --hold <FILE>      hold only the objects FILE names, a line each:
-                         `12 0 built` or `3 0 merged`
-      --built            hold every object as built, so that a key the model
-                         doesn't list is a finding (by default, as merged)
-      --exempt <FILE>    keys a built object may have though the model doesn't
-                         list them, a name a line: `/MyKey`, or `/My*` for every
-                         key it begins
-      --unlisted <W>     which held objects a key the model doesn't list is a
-                         finding in: built (the default), all, or never; it's
-                         counted in any
-      --deprecations     find what the version checked at deprecates: a key, a
-                         type or a value (by default, counted only)
-      --unused           find each resource the content read never uses, as a
-                         font or an image its resources name for nothing (by
-                         default, counted only); not --unlisted's keys
-      --departures       find a linearized file's departures from Annex F
-                         that readers get past, as its errors are (by default,
-                         counted only)
-      --extensions <E>   check each FILE under these extensions too, besides
-                         those it declares: the model's names for them, a comma
-                         between (Malforms,AAPL)
-      --last-update      hold only the objects the newest incremental update
-                         wrote: those it rewrote as merged, new ones as built;
-                         and leave out what a rewritten object, or the trailer,
-                         already had in the revision it updates
-      --baseline <FILE>  leave out the findings FILE, the file each FILE was
-                         written from, already had: an incremental update of it
-                         object by object, a rewrite of it by where each finding
-                         is, or, where FILE has nothing there, anywhere in it
-      --pdf-version <V>  check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as
-                         the version its header and catalog give, and what it's
-                         set against, a baseline or the revision before an
-                         update, as V too
-      --model <DIR>      check against the tables in DIR, a checkout of the
-                         Arlington model's tsv/latest, as they are, not the
-                         embedded ones, whose cells that contradict ISO 32000-2
-                         are corrected
-      --one-table        check each object as one table, as TestGrammar does:
-                         a field and its widget merged in one dictionary as
-                         one of the two (by default, as both), and a key
-                         unlisted by the first table that reaches an object
-                         though another that does lists it
-      --allow <TSV>      leave out the findings TSV allows: a # header, then
-                         table, key, rule, file, version and reason, tab apart;
-                         a version, as the file is checked as
-      --full             print the whole report: tables, checks not made, keys
-                         the model doesn't list
-      --password <PW>    the files' password, user or owner, when it isn't
-                         empty: tried in its SASLprep form (RFC 4013) and as
-                         UTF-8, then in PDFDocEncoding, WinAnsiEncoding and
-                         MacRomanEncoding
-      --jobs <N>         check N files at once (by default, as many as there
-                         are CPUs); the report is in the files' order all the
-                         same
-      --format <F>       text (the default), or json: a line of JSON for each
-                         file, with its findings and the whole report's counts
-  -V, --version          print the version, and the model's commit,
-                         corrections, additions and hash
-  -h, --help             print this
+      --hold <FILE>           hold only the objects FILE names, a line each:
+                              `12 0 built` or `3 0 merged`
+      --built                 hold every object as built, so that a key the
+                              model doesn't list is a finding
+                              (by default, as merged)
+      --exempt <FILE>         keys a built object may have though the model
+                              doesn't list them, a name a line: `/MyKey`, or
+                              `/My*` for every key it begins
+      --unlisted <W>          which held objects a key the model doesn't list is
+                              a finding in: built (the default), all, or never;
+                              it's counted in any
+      --deprecations          find what the version checked at deprecates: a
+                              key, a type or a value (by default, counted only)
+      --unused                find each resource the content read never uses, as
+                              a font or an image its resources name for nothing
+                              (by default, counted only); not --unlisted's keys
+      --departures            find a linearized file's departures from Annex F
+                              that readers get past, as its errors are
+                              (by default, counted only)
+      --extensions <E>        check each FILE under these extensions too,
+                              besides those it declares: the model's names for
+                              them, a comma between (Malforms,AAPL)
+      --last-update           hold only the objects the newest incremental
+                              update wrote: those it rewrote as merged, new
+                              ones as built; and leave out what a rewritten
+                              object, or the trailer, already had in the
+                              revision it updates
+      --baseline <FILE>       leave out the findings FILE, the file each FILE
+                              was written from, already had: an incremental
+                              update of it object by object, a rewrite of it by
+                              where each finding is, or, where FILE has nothing
+                              there, anywhere in it
+      --pdf-version <V>       check each FILE as PDF V, 1.0 to 1.7 or 2.0, not
+                              as the version its header and catalog give, and
+                              what it's set against, a baseline or the revision
+                              before an update, as V too
+      --model <DIR>           check against the tables in DIR, a checkout of the
+                              Arlington model's tsv/latest, as they are, not the
+                              embedded ones, whose cells that contradict
+                              ISO 32000-2 are corrected
+      --one-table             check each object as one table, as TestGrammar
+                              does: a field and its widget merged in one
+                              dictionary as one of the two (by default, as
+                              both), and a key unlisted by the first table
+                              that reaches an object though another that
+                              does lists it
+      --allow <TSV>           leave out the findings TSV allows: a # header,
+                              then table, key, rule, file, version and reason,
+                              tab apart; a version, as the file is checked as
+      --full                  print the whole report: tables, checks not made,
+                              keys the model doesn't list
+      --password <PW>         the files' password, user or owner, when it isn't
+                              empty: tried in its SASLprep form (RFC 4013) and
+                              as UTF-8, then in PDFDocEncoding, WinAnsiEncoding
+                              and MacRomanEncoding; it's in the process's
+                              arguments, which others on the machine may read:
+                              --password-file keeps it out
+      --password-file <FILE>  the files' password, as --password takes it, but
+                              read from FILE's first line, its line end off, and
+                              no further; - is standard input
+      --jobs <N>              check N files at once (by default, as many as
+                              there are CPUs); the report is in the files' order
+                              all the same
+      --format <F>            text (the default), or json: a line of JSON for
+                              each file, with its findings and the whole
+                              report's counts
+  -V, --version               print the version, and the model's commit,
+                              corrections, additions and hash
+  -h, --help                  print this
 
 It exits 0 when every file is clean, 1 when there are findings, and 2
 when a file can't be read or the command line is wrong.

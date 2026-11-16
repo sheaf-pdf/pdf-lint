@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io::{self, Read as _, Write as _};
+use std::mem;
 use std::num::NonZero;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ use pdf_lint::{
 };
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 /// What `--help` says before the usage. clap wraps nothing, so this and
 /// each option's help are broken by hand, within 80 columns.
@@ -82,8 +84,9 @@ struct Cli {
     hold: Option<PathBuf>,
     #[arg(
         long,
-        help = "hold every object as built, so that a key the model\n\
-                doesn't list is a finding (by default, as merged)"
+        help = "hold every object as built, so that a key the\n\
+                model doesn't list is a finding\n\
+                (by default, as merged)"
     )]
     built: bool,
     #[arg(
@@ -91,9 +94,9 @@ struct Cli {
         value_name = "FILE",
         allow_hyphen_values = true,
         value_parser = path(),
-        help = "keys a built object may have though the model doesn't\n\
-                list them, a name a line: `/MyKey`, or `/My*` for every\n\
-                key it begins"
+        help = "keys a built object may have though the model\n\
+                doesn't list them, a name a line: `/MyKey`, or\n\
+                `/My*` for every key it begins"
     )]
     exempt: Option<PathBuf>,
     #[arg(
@@ -101,46 +104,47 @@ struct Cli {
         value_name = "W",
         allow_hyphen_values = true,
         value_parser = unlisted,
-        help = "which held objects a key the model doesn't list is a\n\
-                finding in: built (the default), all, or never; it's\n\
-                counted in any"
+        help = "which held objects a key the model doesn't list is\n\
+                a finding in: built (the default), all, or never;\n\
+                it's counted in any"
     )]
     unlisted: Option<UnlistedIn>,
     #[arg(
         long,
-        help = "find what the version checked at deprecates: a key, a\n\
-                type or a value (by default, counted only)"
+        help = "find what the version checked at deprecates: a\n\
+                key, a type or a value (by default, counted only)"
     )]
     deprecations: bool,
     #[arg(
         long,
-        help = "find each resource the content read never uses, as a\n\
-                font or an image its resources name for nothing (by\n\
-                default, counted only); not --unlisted's keys"
+        help = "find each resource the content read never uses, as\n\
+                a font or an image its resources name for nothing\n\
+                (by default, counted only); not --unlisted's keys"
     )]
     unused: bool,
     #[arg(
         long,
         help = "find a linearized file's departures from Annex F\n\
-                that readers get past, as its errors are (by default,\n\
-                counted only)"
+                that readers get past, as its errors are\n\
+                (by default, counted only)"
     )]
     departures: bool,
     #[arg(
         long,
         value_name = "E",
         allow_hyphen_values = true,
-        help = "check each FILE under these extensions too, besides\n\
-                those it declares: the model's names for them, a comma\n\
-                between (Malforms,AAPL)"
+        help = "check each FILE under these extensions too,\n\
+                besides those it declares: the model's names for\n\
+                them, a comma between (Malforms,AAPL)"
     )]
     extensions: Option<String>,
     #[arg(
         long,
-        help = "hold only the objects the newest incremental update\n\
-                wrote: those it rewrote as merged, new ones as built;\n\
-                and leave out what a rewritten object, or the trailer,\n\
-                already had in the revision it updates"
+        help = "hold only the objects the newest incremental\n\
+                update wrote: those it rewrote as merged, new\n\
+                ones as built; and leave out what a rewritten\n\
+                object, or the trailer, already had in the\n\
+                revision it updates"
     )]
     last_update: bool,
     #[arg(
@@ -148,10 +152,11 @@ struct Cli {
         value_name = "FILE",
         allow_hyphen_values = true,
         value_parser = path(),
-        help = "leave out the findings FILE, the file each FILE was\n\
-                written from, already had: an incremental update of it\n\
-                object by object, a rewrite of it by where each finding\n\
-                is, or, where FILE has nothing there, anywhere in it"
+        help = "leave out the findings FILE, the file each FILE\n\
+                was written from, already had: an incremental\n\
+                update of it object by object, a rewrite of it by\n\
+                where each finding is, or, where FILE has nothing\n\
+                there, anywhere in it"
     )]
     baseline: Option<PathBuf>,
     #[arg(
@@ -159,10 +164,10 @@ struct Cli {
         value_name = "V",
         allow_hyphen_values = true,
         value_parser = pdf_version,
-        help = "check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as\n\
-                the version its header and catalog give, and what it's\n\
-                set against, a baseline or the revision before an\n\
-                update, as V too"
+        help = "check each FILE as PDF V, 1.0 to 1.7 or 2.0, not\n\
+                as the version its header and catalog give, and\n\
+                what it's set against, a baseline or the revision\n\
+                before an update, as V too"
     )]
     pdf_version: Option<Version>,
     #[arg(
@@ -172,17 +177,18 @@ struct Cli {
         value_parser = path(),
         help = "check against the tables in DIR, a checkout of the\n\
                 Arlington model's tsv/latest, as they are, not the\n\
-                embedded ones, whose cells that contradict ISO 32000-2\n\
-                are corrected"
+                embedded ones, whose cells that contradict\n\
+                ISO 32000-2 are corrected"
     )]
     model: Option<PathBuf>,
     #[arg(
         long,
-        help = "check each object as one table, as TestGrammar does:\n\
-                a field and its widget merged in one dictionary as\n\
-                one of the two (by default, as both), and a key\n\
-                unlisted by the first table that reaches an object\n\
-                though another that does lists it"
+        help = "check each object as one table, as TestGrammar\n\
+                does: a field and its widget merged in one\n\
+                dictionary as one of the two (by default, as\n\
+                both), and a key unlisted by the first table\n\
+                that reaches an object though another that\n\
+                does lists it"
     )]
     one_table: bool,
     #[arg(
@@ -190,15 +196,15 @@ struct Cli {
         value_name = "TSV",
         allow_hyphen_values = true,
         value_parser = path(),
-        help = "leave out the findings TSV allows: a # header, then\n\
-                table, key, rule, file, version and reason, tab apart;\n\
-                a version, as the file is checked as"
+        help = "leave out the findings TSV allows: a # header,\n\
+                then table, key, rule, file, version and reason,\n\
+                tab apart; a version, as the file is checked as"
     )]
     allow: Option<PathBuf>,
     #[arg(
         long,
-        help = "print the whole report: tables, checks not made, keys\n\
-                the model doesn't list"
+        help = "print the whole report: tables, checks not made,\n\
+                keys the model doesn't list"
     )]
     full: bool,
     #[arg(
@@ -206,19 +212,32 @@ struct Cli {
         value_name = "PW",
         allow_hyphen_values = true,
         help = "the files' password, user or owner, when it isn't\n\
-                empty: tried in its SASLprep form (RFC 4013) and as\n\
-                UTF-8, then in PDFDocEncoding, WinAnsiEncoding and\n\
-                MacRomanEncoding"
+                empty: tried in its SASLprep form (RFC 4013) and\n\
+                as UTF-8, then in PDFDocEncoding, WinAnsiEncoding\n\
+                and MacRomanEncoding; it's in the process's\n\
+                arguments, which others on the machine may read:\n\
+                --password-file keeps it out"
     )]
     password: Option<String>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        conflicts_with = "password",
+        help = "the files' password, as --password takes it, but\n\
+                read from FILE's first line, its line end off, and\n\
+                no further; - is standard input"
+    )]
+    password_file: Option<PathBuf>,
     #[arg(
         long,
         value_name = "N",
         allow_hyphen_values = true,
         value_parser = jobs,
-        help = "check N files at once (by default, as many as there\n\
-                are CPUs); the report is in the files' order all the\n\
-                same"
+        help = "check N files at once (by default, as many as\n\
+                there are CPUs); the report is in the files' order\n\
+                all the same"
     )]
     jobs: Option<NonZero<usize>>,
     #[arg(
@@ -226,8 +245,9 @@ struct Cli {
         value_name = "F",
         allow_hyphen_values = true,
         value_parser = json_format,
-        help = "text (the default), or json: a line of JSON for each\n\
-                file, with its findings and the whole report's counts"
+        help = "text (the default), or json: a line of JSON for\n\
+                each file, with its findings and the whole\n\
+                report's counts"
     )]
     format: Option<bool>,
     // Stops the parse where it's met; `main` prints the version.
@@ -293,11 +313,30 @@ struct Args {
     named: BTreeSet<String>,
     allow: Option<PathBuf>,
     full: bool,
-    /// `--password`'s, taken from clap's `String` as it's parsed, and wiped
-    /// when it's dropped.
-    password: Option<Zeroizing<String>>,
+    /// The password `--password` gives, taken from clap's `String` as it's
+    /// parsed, or `--password-file`'s, once [`run`] has read it; wiped when
+    /// it's dropped.
+    password: Option<Given>,
+    /// `--password-file`'s file, until [`run`] reads it.
+    password_file: Option<PathBuf>,
     jobs: Option<NonZero<usize>>,
     json: bool,
+}
+
+/// A password given, and the option that gave it, which a file it doesn't
+/// open is said to be unread by.
+struct Given {
+    password: Zeroizing<String>,
+    by: By,
+}
+
+/// The option that gave a password.
+#[derive(Clone, Copy)]
+enum By {
+    /// `--password`, in the process's arguments.
+    Argument,
+    /// `--password-file`, read from its file or standard input.
+    File,
 }
 
 /// What every file is checked with.
@@ -405,8 +444,14 @@ fn args() -> Result<Args, clap::Error> {
     };
     let refused = |reason: &str| Cli::command().error(ErrorKind::ArgumentConflict, reason);
     let stdins = (cli.files.iter()).filter(|path| *path == Path::new("-"));
-    if stdins.count() > 1 {
+    let stdins = stdins.count();
+    if stdins > 1 {
         return Err(refused("- more than once: standard input is read once"));
+    }
+    if stdins > 0 && cli.password_file.as_deref() == Some(Path::new("-")) {
+        return Err(refused(
+            "--password-file - and a FILE -: standard input is read once",
+        ));
     }
     if cli.hold.is_some() && cli.built {
         return Err(refused(
@@ -461,7 +506,11 @@ fn args() -> Result<Args, clap::Error> {
         named: BTreeSet::new(),
         allow: cli.allow,
         full: cli.full,
-        password: cli.password.map(Zeroizing::new),
+        password: cli.password.map(|password| Given {
+            password: Zeroizing::new(password),
+            by: By::Argument,
+        }),
+        password_file: cli.password_file,
         jobs: cli.jobs,
         json: cli.format.unwrap_or(false),
     })
@@ -538,6 +587,15 @@ fn run(mut args: Args) -> Result<ExitCode> {
         }
         args.named = args.extensions.iter().cloned().collect();
     }
+    // Before any file the password opens is read.
+    if let Some(path) = args.password_file.take() {
+        let password =
+            password_file(&path).with_context(|| format!("--password-file {}", path.display()))?;
+        args.password = Some(Given {
+            password,
+            by: By::File,
+        });
+    }
     let hold = match &args.hold {
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -561,7 +619,7 @@ fn run(mut args: Args) -> Result<ExitCode> {
             let data =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
             let file = with_reading(data, password(&args).as_slice(), &bytes::Options::DEFAULT);
-            if let Some(why) = locked(file.document(), args.password.is_some()) {
+            if let Some(why) = locked(file.document(), &args) {
                 bail!("--baseline {}: {why}", path.display());
             }
             let reports = Mutex::new(BTreeMap::new());
@@ -670,21 +728,112 @@ fn with_reading<S: bytes::ByteSource>(
     WithReading::new(data, &options).expect("a file in memory reads")
 }
 
-/// `--password`'s, as the reader takes it, which tries it in each of its
-/// encodings; none without it.
+/// The password given, `--password`'s or `--password-file`'s, as the
+/// reader takes it, which tries it in each of its encodings; none without
+/// it.
 fn password(args: &Args) -> Option<Password<'_>> {
-    (args.password.as_deref()).map(|password| Password(password.as_str()))
+    (args.password.as_ref()).map(|given| Password(given.password.as_str()))
 }
 
-/// Why `doc` isn't checked, when it's encrypted and no password it was
-/// given opens it (`password` says whether one was), though it encrypts
-/// its strings or streams: what's in its object streams would be missing,
-/// its content unread, and its strings ciphertext.
-fn locked(doc: &Document, password: bool) -> Option<&'static str> {
-    (*doc.encryption() == Encryption::Locked).then_some(match password {
-        false => "it needs a password: give it with --password",
-        true => "the password --password gives doesn't open it",
+/// Why `doc` isn't checked, when it's encrypted and no password `args`
+/// give opens it, though it encrypts its strings or streams: what's in its
+/// object streams would be missing, its content unread, and its strings
+/// ciphertext.
+fn locked(doc: &Document, args: &Args) -> Option<&'static str> {
+    let by = args.password.as_ref().map(|given| given.by);
+    (*doc.encryption() == Encryption::Locked).then_some(match by {
+        None => "it needs a password: give it with --password",
+        Some(By::Argument) => "the password --password gives doesn't open it",
+        Some(By::File) => "the password --password-file gives doesn't open it",
     })
+}
+
+/// The most bytes `--password-file`'s first line may hold before its LF:
+/// far more than a password is (pdf-crypt takes 127 bytes of one at most),
+/// and so a file or a device that never ends a line is read no further.
+const PASSWORD_BYTES: usize = 64 * 1024;
+
+/// `--password-file`'s password: the first line of the file at `path`, or
+/// of standard input for `-`, its line end, LF or CR LF, off.
+fn password_file(path: &Path) -> Result<Zeroizing<String>> {
+    let file = match path == Path::new("-") {
+        true => stdin_file(),
+        false => File::open(path),
+    };
+    first_line(file?)
+}
+
+/// Standard input as a file of its own, over a duplicate of its descriptor,
+/// so that what's read of it goes straight to the caller's buffer and not
+/// through std's `Stdin`, whose buffer would keep a copy for the process's
+/// life.
+#[cfg(unix)]
+fn stdin_file() -> io::Result<File> {
+    use std::os::fd::AsFd as _;
+    io::stdin().as_fd().try_clone_to_owned().map(File::from)
+}
+
+/// Standard input as a file of its own, over a duplicate of its handle,
+/// so that what's read of it goes straight to the caller's buffer and not
+/// through std's `Stdin`, whose buffer would keep a copy for the process's
+/// life.
+#[cfg(windows)]
+fn stdin_file() -> io::Result<File> {
+    use std::os::windows::io::AsHandle as _;
+    io::stdin().as_handle().try_clone_to_owned().map(File::from)
+}
+
+/// Where standard input has no descriptor or handle to duplicate, it isn't
+/// read for a password.
+#[cfg(not(any(unix, windows)))]
+fn stdin_file() -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "standard input isn't read as a file here",
+    ))
+}
+
+/// The first line `file` gives, its line end, LF or CR LF, off: the whole
+/// of it where no line ends. It's read unbuffered, straight into room made
+/// for [`PASSWORD_BYTES`] and one more up front, a chunk at a time, until
+/// a line end, the end, or past that many, which is refused: so a
+/// terminal's Enter ends it, nothing past the chunk that holds the line
+/// end is read, and nothing moves the password and leaves a copy behind.
+/// What's read past the line is wiped at once, the rest when it's dropped,
+/// and so are the bytes of a line that isn't UTF-8.
+fn first_line(mut file: File) -> Result<Zeroizing<String>> {
+    let mut room = Zeroizing::new(vec![0; PASSWORD_BYTES + 1]);
+    let mut filled = 0;
+    let line = loop {
+        if filled == room.len() {
+            bail!("its first line is longer than 64 KiB");
+        }
+        let n = match file.read(&mut room[filled..]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let start = filled;
+        filled += n;
+        match room[start..filled].iter().position(|&b| b == b'\n') {
+            // Its CR off too, which may be the chunk before's last byte.
+            Some(lf) => {
+                let end = start + lf;
+                break end - usize::from(end > 0 && room[end - 1] == b'\r');
+            }
+            None if n == 0 => break filled,
+            None => {}
+        }
+    };
+    room[line..filled].zeroize();
+    room.truncate(line);
+    match String::from_utf8(mem::take(&mut *room)) {
+        Ok(password) => Ok(Zeroizing::new(password)),
+        Err(e) => {
+            drop(Zeroizing::new(e.into_bytes()));
+            bail!("its first line isn't UTF-8")
+        }
+    }
 }
 
 /// One file read and checked, with what's to print about it.
@@ -715,7 +864,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         password(args).as_slice(),
         &bytes::Options::DEFAULT,
     );
-    if let Some(why) = locked(doc.document(), args.password.is_some()) {
+    if let Some(why) = locked(doc.document(), args) {
         return unread(path, why, args.json);
     }
     let version = file_version(&doc);
