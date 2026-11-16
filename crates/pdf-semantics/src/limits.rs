@@ -36,6 +36,9 @@ pub struct Limits {
     /// through those bound. Together with [`xmp_bytes`](Limits::xmp_bytes)
     /// that's what a packet can cost.
     pub xmp_bindings: usize,
+    /// How many actions a `/Next` action chain or tree may visit
+    /// ([`action`](crate::action)): 256 by default.
+    pub action_chain: usize,
 }
 
 impl Limits {
@@ -48,6 +51,7 @@ impl Limits {
         xmp_bytes: 16 << 20,
         xmp_depth: 256,
         xmp_bindings: 128,
+        action_chain: 256,
     };
 }
 

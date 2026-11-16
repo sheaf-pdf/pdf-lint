@@ -1,5 +1,6 @@
 //! Read and write PDF document-level structures: dates, page trees, name and number trees,
-//! `/Info` dictionaries, and XMP conformance packets (ISO 32000-2, §7.7.3, §7.9, §14.3).
+//! destinations, actions, `/Info` dictionaries, and XMP conformance packets (ISO 32000-2,
+//! §7.7.3, §7.9, §12.3.2, §12.6, §14.3).
 //!
 //! `pdf-semantics` operates over any [`Resolve`] implementation (`&Reading`, `&Document`,
 //! `&BTreeMap`, or [`resolve_fn`](pdf_objects::resolve_fn)) without performing file I/O directly.
@@ -20,6 +21,9 @@
 //!   write namespace-verified PDF/A, PDF/UA, and PDF/VT conformance claims.
 //! - **Document `/Info` dictionaries ([`info::read`]):** Decode `/Info` text fields (under ISO or
 //!   PDFium rules) and dates.
+//! - **Destinations & actions ([`dest`], [`action`]):** Resolve explicit and named destinations
+//!   across `/Names/Dests` and `/Dests` ([`dest::DestTable`]) and walk bounded `/A`, `/Next`,
+//!   `/AA`, and `/OpenAction` action chains ([`action::read_chain`], [`action::open_action`]).
 //!
 //! Spec departures are reported as [`Fault`]s to a [`Sink`](pdf_objects::fault::Sink) (skipped
 //! when `()` is passed). All walks enforce [`Limits`] without panicking: reader caps and locked
@@ -101,7 +105,9 @@ pub use limits::Limits;
 
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Why};
 
+pub mod action;
 pub mod date;
+pub mod dest;
 mod fault;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]

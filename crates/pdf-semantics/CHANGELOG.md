@@ -14,6 +14,8 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - `xmp::read` and `xmp::read_from`: what an XMP packet claims of PDF/A, PDF/UA and PDF/VT (14.3.2), from its bytes or through a file's streams. `xmp::metadata_stream` names the stream that holds a file's packet, for a caller that decodes it. `Claims::conformance` reads PDF/A's and PDF/UA's as `PdfA` and `PdfUa`.
 - `xmp::write`: a packet of claims that `xmp::read` reads back as they are.
 - `info::read`: a document information dictionary (14.3.3) read as `info::Info`, its text decoded by ISO's rules or PDFium's, its dates read (`info::Dated`, one that doesn't read kept as its text) and `/Trapped` named (`info::Trapped`).
+- `dest::Dest`, `dest::DestTable`, `dest::resolve_dest`, and `dest::read`: explicit and named destinations (12.3.2) resolved across `/Names/Dests` and `/Dests` by ISO's rules or PDFium's.
+- `action::Action`, `action::NamedAction`, `action::AdditionalActions`, `action::OpenAction`, `action::read_chain`, `action::read_additional`, `action::open_action`, and `action::read_file_spec`: bounded `/A`, `/Next`, `/AA`, and `/OpenAction` action chains (7.7.2, 12.6).
 - `Fault` and `Limits`: where a file departs from the standard, told with its place to pdf-objects' `fault::Sink`, and the caps every walk and read is under. With `()` as the sink, no fault is looked for.
 - `follow` and `catalog`: a reference followed, and the catalog a trailer leads to.
 - The `clock` feature, on by default: `Date::now` and `Date::from_unix`, on chrono. The `tracing` feature, off by default: a span over a page tree walked, counted or written, and over a packet read.

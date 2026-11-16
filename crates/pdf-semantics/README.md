@@ -1,6 +1,6 @@
 # pdf-semantics
 
-Read and write PDF document-level data structures—dates, page trees, name and number trees, `/Info` metadata, and XMP conformance packets (ISO 32000-2, §7.7.3, §7.9, §14.3).
+Read and write PDF document-level data structures—dates, page trees, name and number trees, destinations, actions, `/Info` metadata, and XMP conformance packets (ISO 32000-2, §7.7.3, §7.9, §12.3.2, §12.6, §14.3).
 
 `pdf-semantics` operates over any [pdf-objects](https://crates.io/crates/pdf-objects) `Resolve` (and `Streams` for XMP streams), such as a `pdf-structure` `&Reading`, `&Document`, `&BTreeMap`, or `resolve_fn` closure, without performing file I/O directly. `pdf-objects` is re-exported at `pdf_semantics::pdf_objects`.
 
@@ -14,6 +14,7 @@ Read and write PDF document-level data structures—dates, page trees, name and 
 - **Dates (`date::Date`):** Parse (`Date::read`) and format (`Date::write`) PDF `D:...` date strings, tracking omitted fields and legacy syntax `Quirk`s (such as trailing PDF 1.7 apostrophes). With the default `clock` feature, `Date::now` and `Date::from_unix` construct dates from timestamps.
 - **XMP conformance claims (`xmp`):** `xmp::read` and `xmp::read_from` extract namespace-verified PDF/A, PDF/UA, and PDF/VT conformance claims (`Claims::conformance` -> `PdfA`, `PdfUa`) without entity expansion or `DOCTYPE` processing; `xmp::write` serializes conformance claims back into a valid XMP packet.
 - **Document `/Info` dictionaries (`info`):** `info::read` decodes standard `/Info` text strings (under ISO or PDFium rules) and dates (`info::Dated`).
+- **Destinations & actions (`dest`, `action`):** `dest::DestTable`, `dest::resolve_dest`, and `dest::read` resolve explicit and named destinations across Catalog `/Names/Dests` and `/Dests`; `action::read_chain`, `action::read_additional`, and `action::open_action` walk bounded `/A`, `/Next`, `/AA`, and `/OpenAction` action chains.
 - **Diagnostics & safety (`Fault`, `Limits`):** Spec departures are reported with byte spans to a `pdf-objects` `fault::Sink<Fault>` (skipped at zero cost when `()` is passed). `Limits` bounds tree depth, node counts, page counts, and XMP packet sizes; locked or capped objects fail explicitly with `Unreadable` rather than silently truncating results.
 
 ## Quickstart

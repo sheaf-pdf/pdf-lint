@@ -1,0 +1,19 @@
+# name	kind	files
+annots-absent	annots	annots-absent.pdf
+annots-empty-array	annots	annots-empty-array.pdf
+annots-not-array	annots	annots-not-array.pdf
+annots-skip-null-scalar-and-dangling	annots	annots-skip-null-scalar-and-dangling.pdf
+annots-indirect-array-and-duplicate-ref	annots	annots-indirect-array-and-duplicate-ref.pdf
+subtypes-core-catalog	annots	subtypes-core-catalog.pdf
+rect-inverted-missing-and-short	annots	rect-inverted-missing-and-short.pdf
+border-legacy-three-four-and-short	annots	border-legacy-three-four-and-short.pdf
+strings-ascii-utf16be-and-name	annots	strings-ascii-utf16be-and-name.pdf
+quadpoints-text-markup-and-link	annots	quadpoints-text-markup-and-link.pdf
+geom-line-present-and-missing	annots	geom-line-present-and-missing.pdf
+geom-polygon-and-polyline-vertices	annots	geom-polygon-and-polyline-vertices.pdf
+geom-ink-multiple-strokes	annots	geom-ink-multiple-strokes.pdf
+link-explicit-dest-fit-modes	annots	link-explicit-dest-fit-modes.pdf
+link-named-dests-tree-and-dict	annots	link-named-dests-tree-and-dict.pdf
+link-actions-uri-goto-gotor-launch-named	annots	link-actions-uri-goto-gotor-launch-named.pdf
+flatten-display-matrix-isolation-and-state	annots-flatten-display	flatten-display-matrix-isolation-and-state.pdf
+flatten-print-flags-and-state	annots-flatten-print	flatten-print-flags-and-state.pdf

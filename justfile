@@ -16,6 +16,7 @@ semantics_msrv := `grep -m1 '^rust-version' crates/pdf-semantics/Cargo.toml | cu
 color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' -f2`
 fonts_msrv := `grep -m1 '^rust-version' crates/pdf-fonts/Cargo.toml | cut -d'"' -f2`
 gfx_msrv := `grep -m1 '^rust-version' crates/pdf-gfx/Cargo.toml | cut -d'"' -f2`
+annots_msrv := `grep -m1 '^rust-version' crates/pdf-annots/Cargo.toml | cut -d'"' -f2`
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
 pdfs_msrv := `grep -m1 '^rust-version' crates/pdfs/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
@@ -29,7 +30,7 @@ fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 pdfium_build := "8152"
 
 # The crates' PDFium cases, each a crate's tests/pdfium.
-pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-structure/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-fonts/tests/pdfium crates/pdf-gfx/tests/pdfium crates/pdf-linearize/tests/pdfium"
+pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-structure/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-fonts/tests/pdfium crates/pdf-gfx/tests/pdfium crates/pdf-annots/tests/pdfium crates/pdf-linearize/tests/pdfium"
 
 # List the recipes.
 default:
@@ -38,7 +39,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package linearize-package pdfs-package arlington-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -80,6 +81,10 @@ clippy:
     cargo clippy --locked -p pdf-gfx --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --features programs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --features text-layout --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-annots --features predefined-cmaps,tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-annots --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-annots --no-default-features --features programs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-annots --no-default-features --features text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
@@ -134,6 +139,12 @@ test:
     cargo test --locked -p pdf-gfx --no-default-features --doc
     cargo nextest run --locked -p pdf-gfx --no-default-features --features programs
     cargo nextest run --locked -p pdf-gfx --no-default-features --features text-layout
+    cargo nextest run --locked -p pdf-annots --features predefined-cmaps,tracing
+    cargo test --locked -p pdf-annots --features predefined-cmaps,tracing --doc
+    cargo nextest run --locked -p pdf-annots --no-default-features
+    cargo test --locked -p pdf-annots --no-default-features --doc
+    cargo nextest run --locked -p pdf-annots --no-default-features --features programs
+    cargo nextest run --locked -p pdf-annots --no-default-features --features text-layout
     cargo nextest run --locked -p pdf-structure --features tracing
     cargo test --locked -p pdf-structure --features tracing --doc
     cargo nextest run --locked -p pdfs
@@ -176,6 +187,7 @@ test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fixtures -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-semantics --test qpdf -- --ignored
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-annots --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize-lopdf --test qpdf -- --ignored
@@ -276,6 +288,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-annots --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
 
 # Build this platform's release archive in dist/, and check it runs as
@@ -345,11 +358,26 @@ _package crate *beside:
     # A crate of the family the package depends on at a version not yet on
     # crates.io (an alpha, named exactly) is packaged beside it, as a publish
     # in order would: cargo verifies the package against that one, through a
-    # registry of its own, instead of asking crates.io for it.
+    # registry of its own, instead of asking crates.io for it. Cargo unpacks
+    # that local registry into `$CARGO_HOME/registry/src/-*` keyed by `$dir`
+    # and reuses an earlier unpack at the same version without checking the
+    # `.crate` bytes, so give the run a fresh `CARGO_HOME` under `$dir` that
+    # shares only crates.io's index, cache, and unpacked sources.
+    cargo_home=${CARGO_HOME:-$HOME/.cargo}
+    mkdir -p "$dir/cargo-home/registry/src"
+    for f in config.toml config; do
+        if [ -e "$cargo_home/$f" ]; then ln -s "$cargo_home/$f" "$dir/cargo-home/$f"; fi
+    done
+    for d in index cache; do
+        if [ -d "$cargo_home/registry/$d" ]; then ln -s "$cargo_home/registry/$d" "$dir/cargo-home/registry/$d"; fi
+    done
+    for s in "$cargo_home"/registry/src/index.*; do
+        if [ -e "$s" ]; then ln -s "$s" "$dir/cargo-home/registry/src/"; fi
+    done
     packages=(-p "$crate")
     for b in {{ beside }}; do packages+=(-p "$b"); done
-    CARGO_TARGET_DIR="$dir" cargo publish --dry-run --locked "${packages[@]}"
-    CARGO_TARGET_DIR="$dir" cargo package --list --locked -p "$crate" > "$dir/files.txt"
+    CARGO_HOME="$dir/cargo-home" CARGO_TARGET_DIR="$dir" cargo publish --dry-run --locked "${packages[@]}"
+    CARGO_HOME="$dir/cargo-home" CARGO_TARGET_DIR="$dir" cargo package --list --locked -p "$crate" > "$dir/files.txt"
     # What a crate's package holds beside those, file by file, so that a file
     # added beside them still fails: pdf-fonts' data, each file with its
     # terms (Adobe's metrics and their notice, the two glyph lists), and the
@@ -456,6 +484,12 @@ fonts-package: (_package "pdf-fonts" "pdf-objects" "pdf-color" "pdf-content-stre
 # the versions it and they name aren't published; `_package` says what's checked.
 gfx-package: (_package "pdf-gfx" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-filters")
 
+# Package pdf-annots as a publish would, pdf-objects, pdf-color,
+# pdf-content-streams, pdf-semantics, pdf-fonts, pdf-gfx and pdf-filters beside
+# it while the versions it and they name aren't published; `_package` says
+# what's checked.
+annots-package: (_package "pdf-annots" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-filters")
+
 # Package pdf-linearize as a publish would, pdf-objects, pdf-crypt,
 # pdf-structure, pdf-semantics and pdf-filters beside it while the versions it
 # and they name aren't published; `_package` says what's checked.
@@ -463,9 +497,9 @@ linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-crypt" "pdf-stru
 
 # Package pdfs as a publish would, pdf-objects, pdf-crypt, pdf-color,
 # pdf-filters, pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts,
-# pdf-gfx and pdf-linearize beside it while the versions it names aren't
-# published; `_package` says what's checked.
-pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-linearize")
+# pdf-gfx, pdf-annots and pdf-linearize beside it while the versions it names
+# aren't published; `_package` says what's checked.
+pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-linearize")
 
 # Package pdf-arlington as a publish would, the model it embeds with its
 # licence and notice beside its sources, and pdf-objects and pdf-color
@@ -602,6 +636,22 @@ gfx-cmaps-msrv:
     cargo +{{ gfx_msrv }} nextest run --locked -p pdf-gfx --features predefined-cmaps
     cargo +{{ gfx_msrv }} test --locked -p pdf-gfx --features predefined-cmaps --doc
 
+# Test pdf-annots on its oldest supported Rust, as it's published, with no
+# feature, and with its spans (`tracing`), which must be installed.
+annots-msrv:
+    cargo +{{ annots_msrv }} nextest run --locked -p pdf-annots
+    cargo +{{ annots_msrv }} test --locked -p pdf-annots --doc
+    cargo +{{ annots_msrv }} nextest run --locked -p pdf-annots --no-default-features
+    cargo +{{ annots_msrv }} test --locked -p pdf-annots --no-default-features --doc
+    cargo +{{ annots_msrv }} nextest run --locked -p pdf-annots --features tracing
+    cargo +{{ annots_msrv }} test --locked -p pdf-annots --features tracing --doc
+
+# Test pdf-annots with `predefined-cmaps` on that feature's oldest Rust, which
+# must be installed.
+annots-cmaps-msrv:
+    cargo +{{ annots_msrv }} nextest run --locked -p pdf-annots --features predefined-cmaps
+    cargo +{{ annots_msrv }} test --locked -p pdf-annots --features predefined-cmaps --doc
+
 # Test pdf-linearize on its oldest supported Rust, which must be installed,
 # with its adapter and without, and with its spans (`tracing`); and the lopdf
 # adapter's crate, never published, on the same Rust, which its manifest names.
@@ -719,6 +769,11 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/gfx
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" gfx fuzz/corpus/gfx fuzz/seeds/gfx -- -dict=fuzz/gfx.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    annots)
+        PDF_ANNOTS_FUZZ_SEEDS="$PWD/fuzz/seeds/annots" cargo test --locked -q -p pdf-annots --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/annots
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" annots fuzz/corpus/annots fuzz/seeds/annots -- -dict=fuzz/annots.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     linearize)
         PDF_LINEARIZE_FUZZ_SEEDS="$PWD/fuzz/seeds/linearize" cargo test --locked -q -p pdf-linearize --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/linearize
@@ -740,7 +795,7 @@ fuzz target="tokenize" seconds="60" features="":
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, gfx, linearize, pdfs, arlington or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, gfx, annots, linearize, pdfs, arlington or check" >&2
         exit 2
         ;;
     esac

@@ -6,10 +6,11 @@ Several crates emulate PDFium's forgiving behavior when reading real-world PDFsâ
 - `pdf-objects` (`Parser::rules`, `text::decode_with`)
 - `pdf-structure` (`Recovery::Pdfium`)
 - `pdf-content-streams` (content stream lexing, inline images, `/Contents` joining)
-- `pdf-semantics` (`pages::pages` under `Rules::Pdfium`)
+- `pdf-semantics` (`pages::pages`, `dest::DestTable`, and `action` under `Rules::Pdfium`)
 - `pdf-color` (`components`)
 - `pdf-fonts` (`Font`, `shown`)
 - `pdf-gfx` (`PageGeom`, `interpret`, `encode`, `TextPage`)
+- `pdf-annots` (`page_annots`, `TypedAnnot`, `plan_flatten`)
 - `pdf-linearize` (checked against PDFium's `FPDFAvail_*` incremental-loading API)
 
 To keep behavior reproducible without linking PDFium into any crate, each crate stores small synthetic test cases alongside recorded answers from a pinned PDFium build in `crates/<crate>/tests/pdfium/`.
@@ -65,6 +66,7 @@ Each crate's `tests/pdfium/` directory (excluded from published crates.io packag
 - **`spaces`:** Complete `.pdf` drawing 8x1 unfiltered inline images in named `/ColorSpace`s -> inferred component count from raw image byte length.
 - **`fonts`, `fonts-heights`, `fonts-boxes`:** Complete `.pdf` showing a test string at 1000 pt -> `FPDFText_GetUnicode`, character origins, loose boxes, and outline boxes.
 - **`gfx-geom`, `gfx`, `gfx-text`:** Complete `.pdf` -> page view dimensions, quarter-turn rotation, and `FPDF_PageToDevice` probes (`gfx-geom`); flattened page and Form XObject leaf objects in PageSpace (paths with stroke styles/dashes, placed image quads, shadings, text render modes, top-level clip paths, nested marked-content stacks) plus non-generated `FPDFText_GetCharOrigin` positions (`gfx`); and `CPDF_TextPage` reading-order characters, generated spaces/newlines, soft-wrapped hyphens, `FPDFText_CountRects` merged selection count, and `FPDFText_FindStart` search matches (`gfx-text`).
+- **`annots`, `annots-flatten-display`, `annots-flatten-print`:** Complete `.pdf` -> page 0 annotation slots (`FPDFAnnot_*`), legacy borders, decoded text strings, `QuadPoints`, line/polygon/ink geometry, link destinations (`FPDFLink_GetDest`), and actions (`FPDFAction_*`) (`annots`); and `FPDFPage_Flatten` (`FLAT_NORMALDISPLAY` vs. `FLAT_PRINT`) status, remaining `/Annots` count, and flattened PageSpace path segments (`annots-flatten-*`).
 
 ## Bumping the PDFium Pin
 

@@ -38,6 +38,11 @@ pub struct Limits {
     /// depth, and decompressed bytes. Its `content` and `fonts` are taken from
     /// [`content`](Limits::content) and [`fonts`](Limits::fonts) at each call.
     pub gfx: pdf_gfx::Limits,
+    /// What page annotations, reply threads, and flattening run under
+    /// (`pdf-annots`'s). Its `content` and `semantics` are synced from
+    /// [`content`](Limits::content) and [`semantics`](Limits::semantics) at each
+    /// call.
+    pub annots: pdf_annots::Limits,
     /// What a file's linearization is checked under, and a document is
     /// linearized under (pdf-linearize's): the graph a plan is made of, and
     /// its hint tables. Its `page_depth`, `tree_depth` and `tree_nodes` are
@@ -63,6 +68,7 @@ impl Limits {
         semantics: pdf_semantics::Limits::DEFAULT,
         fonts: pdf_fonts::Limits::DEFAULT,
         gfx: pdf_gfx::Limits::DEFAULT,
+        annots: pdf_annots::Limits::DEFAULT,
         linearize: pdf_linearize::Limits::DEFAULT,
         font_budget: 256 << 20,
     };
@@ -81,6 +87,15 @@ impl Limits {
         gfx.content = self.content;
         gfx.fonts = self.reading_fonts();
         gfx
+    }
+
+    /// [`annots`](Limits::annots), its `content` and `semantics` synced from
+    /// [`content`](Limits::content) and [`semantics`](Limits::semantics).
+    pub(crate) const fn reading_annots(&self) -> pdf_annots::Limits {
+        let mut annots = self.annots;
+        annots.content = self.content;
+        annots.semantics = self.semantics;
+        annots
     }
 
     /// [`linearize`](Limits::linearize), its walks' caps
@@ -120,6 +135,8 @@ mod tests {
         assert_eq!(limits.fonts, pdf_fonts::Limits::DEFAULT);
         assert_eq!(limits.gfx, pdf_gfx::Limits::DEFAULT);
         assert_eq!(limits.reading_gfx(), pdf_gfx::Limits::DEFAULT);
+        assert_eq!(limits.annots, pdf_annots::Limits::DEFAULT);
+        assert_eq!(limits.reading_annots(), pdf_annots::Limits::DEFAULT);
         assert_eq!(limits.linearize, pdf_linearize::Limits::DEFAULT);
         assert_eq!(limits.font_budget, 256 << 20);
         assert_eq!(limits.linearizing(), pdf_linearize::Limits::DEFAULT);

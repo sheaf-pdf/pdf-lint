@@ -144,6 +144,14 @@ class FSRect(ctypes.Structure):
     _fields_ = [(n, ctypes.c_float) for n in ("left", "top", "right", "bottom")]
 
 
+class FSPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float)]
+
+
+class FSQuadPoints(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_float) for n in ("x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4")]
+
+
 class FileAvail(ctypes.Structure):
     pass
 
@@ -244,6 +252,31 @@ class Pdfium:
             ("FPDFAvail_GetDocument", P, [P, ctypes.c_char_p]),
             ("FPDFAvail_GetFirstPageNum", I, [P]),
             ("FPDFAvail_IsPageAvail", I, [P, I, ctypes.POINTER(DownloadHints)]),
+            ("FPDFPage_GetAnnotCount", I, [P]),
+            ("FPDFPage_GetAnnot", P, [P, I]),
+            ("FPDFPage_CloseAnnot", None, [P]),
+            ("FPDFAnnot_GetSubtype", I, [P]),
+            ("FPDFAnnot_GetFlags", I, [P]),
+            ("FPDFAnnot_GetRect", I, [P, ctypes.POINTER(FSRect)]),
+            ("FPDFAnnot_GetBorder", I, [P, pf, pf, pf]),
+            ("FPDFAnnot_GetStringValue", U, [P, ctypes.c_char_p, P, U]),
+            ("FPDFAnnot_HasAttachmentPoints", I, [P]),
+            ("FPDFAnnot_CountAttachmentPoints", S, [P]),
+            ("FPDFAnnot_GetAttachmentPoints", I, [P, S, ctypes.POINTER(FSQuadPoints)]),
+            ("FPDFAnnot_GetLine", I, [P, ctypes.POINTER(FSPoint), ctypes.POINTER(FSPoint)]),
+            ("FPDFAnnot_GetVertices", U, [P, ctypes.POINTER(FSPoint), U]),
+            ("FPDFAnnot_GetInkListCount", U, [P]),
+            ("FPDFAnnot_GetInkListPath", U, [P, U, ctypes.POINTER(FSPoint), U]),
+            ("FPDFAnnot_GetLink", P, [P]),
+            ("FPDFLink_GetDest", P, [P, P]),
+            ("FPDFLink_GetAction", P, [P]),
+            ("FPDFDest_GetDestPageIndex", I, [P, P]),
+            ("FPDFDest_GetView", U, [P, ctypes.POINTER(U), pf]),
+            ("FPDFDest_GetLocationInPage", I, [P, pi, pi, pi, pf, pf, pf]),
+            ("FPDFAction_GetType", U, [P]),
+            ("FPDFAction_GetURIPath", U, [P, P, P, U]),
+            ("FPDFAction_GetFilePath", U, [P, P, U]),
+            ("FPDFPage_Flatten", I, [P, I]),
         ]:
             f = getattr(lib, name)
             f.restype, f.argtypes = res, args
@@ -611,6 +644,175 @@ class Pdfium:
         lib.FPDF_CloseDocument(doc)
         return parts
 
+    def annots(self, data):
+        """Page 0's annotations, links, destinations, and actions as PDFium
+        exposes them via fpdf_annot.h and fpdf_doc.h."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        page = lib.FPDF_LoadPage(doc, 0) if doc else None
+        if not page:
+            if doc:
+                lib.FPDF_CloseDocument(doc)
+            return None
+        out = []
+        count = lib.FPDFPage_GetAnnotCount(page)
+        for i in range(count):
+            a = lib.FPDFPage_GetAnnot(page, i)
+            if not a:
+                continue
+            r = FSRect()
+            lib.FPDFAnnot_GetRect(a, ctypes.byref(r))
+            sub = lib.FPDFAnnot_GetSubtype(a)
+            flags = lib.FPDFAnnot_GetFlags(a) & 0xFFFFFFFF
+            words = ["idx", str(i), "sub", str(sub), "flags", str(flags),
+                     "rect", num(r.left), num(r.bottom), num(r.right), num(r.top)]
+            hr, vr, bw = ctypes.c_float(), ctypes.c_float(), ctypes.c_float()
+            if lib.FPDFAnnot_GetBorder(a, ctypes.byref(hr), ctypes.byref(vr), ctypes.byref(bw)):
+                words += ["border", num(hr.value), num(vr.value), num(bw.value)]
+            for key, label in ((b"Contents", "contents"), (b"T", "author"), (b"NM", "nm")):
+                slen = lib.FPDFAnnot_GetStringValue(a, key, None, 0)
+                if slen > 2:
+                    sbuf = ctypes.create_string_buffer(slen)
+                    lib.FPDFAnnot_GetStringValue(a, key, sbuf, slen)
+                    txt = sbuf.raw[:slen - 2].decode("utf-16le", "replace").encode("utf-8")
+                    if txt:
+                        words += [label, esc(txt)]
+            if lib.FPDFAnnot_HasAttachmentPoints(a):
+                qc = lib.FPDFAnnot_CountAttachmentPoints(a)
+                if qc > 0:
+                    words += ["quads", str(qc)]
+                    for qi in range(qc):
+                        q = FSQuadPoints()
+                        lib.FPDFAnnot_GetAttachmentPoints(a, qi, ctypes.byref(q))
+                        words += [num(q.x1), num(q.y1), num(q.x2), num(q.y2),
+                                  num(q.x3), num(q.y3), num(q.x4), num(q.y4)]
+            sp, ep = FSPoint(), FSPoint()
+            if lib.FPDFAnnot_GetLine(a, ctypes.byref(sp), ctypes.byref(ep)):
+                words += ["line", num(sp.x), num(sp.y), num(ep.x), num(ep.y)]
+            vc = lib.FPDFAnnot_GetVertices(a, None, 0)
+            if vc > 0:
+                vbuf = (FSPoint * vc)()
+                lib.FPDFAnnot_GetVertices(a, vbuf, vc)
+                words += ["verts", str(vc)]
+                for k in range(vc):
+                    words += [num(vbuf[k].x), num(vbuf[k].y)]
+            ic = lib.FPDFAnnot_GetInkListCount(a)
+            if ic > 0:
+                words += ["ink", str(ic)]
+                for si in range(ic):
+                    pc = lib.FPDFAnnot_GetInkListPath(a, si, None, 0)
+                    pbuf = (FSPoint * max(pc, 1))()
+                    if pc > 0:
+                        lib.FPDFAnnot_GetInkListPath(a, si, pbuf, pc)
+                    words += ["stroke", str(pc)]
+                    for k in range(pc):
+                        words += [num(pbuf[k].x), num(pbuf[k].y)]
+            lnk = lib.FPDFAnnot_GetLink(a)
+            if lnk:
+                d = lib.FPDFLink_GetDest(doc, lnk)
+                if d:
+                    pidx = lib.FPDFDest_GetDestPageIndex(doc, d)
+                    np = ctypes.c_ulong()
+                    params = (ctypes.c_float * 4)()
+                    vw = lib.FPDFDest_GetView(d, ctypes.byref(np), params)
+                    words += ["dest", str(pidx), str(vw)]
+                    if vw == 1:
+                        hx, hy, hz = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+                        vx, vy, vz = ctypes.c_float(), ctypes.c_float(), ctypes.c_float()
+                        lib.FPDFDest_GetLocationInPage(d, ctypes.byref(hx), ctypes.byref(hy), ctypes.byref(hz),
+                                                       ctypes.byref(vx), ctypes.byref(vy), ctypes.byref(vz))
+                        words += [num(vx.value) if hx.value else "null",
+                                  num(vy.value) if hy.value else "null",
+                                  num(vz.value) if hz.value else "null"]
+                    elif vw in (3, 4, 7, 8):
+                        words += [num(params[0]) if np.value >= 1 else "none"]
+                    elif vw == 5 and np.value >= 4:
+                        r0, r1 = min(params[0], params[2]), min(params[1], params[3])
+                        r2, r3 = max(params[0], params[2]), max(params[1], params[3])
+                        words += [num(r0), num(r1), num(r2), num(r3)]
+                act = lib.FPDFLink_GetAction(lnk)
+                if act:
+                    at = lib.FPDFAction_GetType(act)
+                    words += ["act", str(at)]
+                    if at == 3:
+                        ulen = lib.FPDFAction_GetURIPath(doc, act, None, 0)
+                        if ulen > 1:
+                            ubuf = ctypes.create_string_buffer(ulen)
+                            lib.FPDFAction_GetURIPath(doc, act, ubuf, ulen)
+                            words += ["uri", esc(ubuf.raw[:ulen - 1])]
+                    elif at in (2, 4):
+                        flen = lib.FPDFAction_GetFilePath(act, None, 0)
+                        if flen > 1:
+                            fbuf = ctypes.create_string_buffer(flen)
+                            lib.FPDFAction_GetFilePath(act, fbuf, flen)
+                            words += ["file", esc(fbuf.raw[:flen - 1])]
+            lib.FPDFPage_CloseAnnot(a)
+            out.append(" ".join(words))
+        lib.FPDF_ClosePage(page)
+        lib.FPDF_CloseDocument(doc)
+        return out
+
+    def annots_flatten(self, data, print_flag):
+        """Flattens page 0 via `FPDFPage_Flatten(page, flag)` (`0` = display,
+        `1` = print), reloads page 0, and returns the flatten status, remaining
+        `/Annots` count, and world-space path segments of every flattened object."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        page = lib.FPDF_LoadPage(doc, 0) if doc else None
+        if not page:
+            if doc:
+                lib.FPDF_CloseDocument(doc)
+            return None
+        status = lib.FPDFPage_Flatten(page, 1 if print_flag else 0)
+        lib.FPDF_ClosePage(page)
+        page = lib.FPDF_LoadPage(doc, 0)
+        rem = lib.FPDFPage_GetAnnotCount(page)
+
+        def mat_mul(a, b):
+            return (
+                a[0] * b[0] + a[1] * b[2],
+                a[0] * b[1] + a[1] * b[3],
+                a[2] * b[0] + a[3] * b[2],
+                a[2] * b[1] + a[3] * b[3],
+                a[4] * b[0] + a[5] * b[2] + b[4],
+                a[4] * b[1] + a[5] * b[3] + b[5],
+            )
+
+        def mat_apply(m, x, y):
+            return (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+
+        items = ["status %d rem %d" % (status, rem)]
+
+        def walk(o, parent_m):
+            t = TYPES.get(lib.FPDFPageObj_GetType(o), "unknown")
+            m = M()
+            lib.FPDFPageObj_GetMatrix(o, ctypes.byref(m))
+            world = mat_mul((m.a, m.b, m.c, m.d, m.e, m.f), parent_m)
+            if t == "form":
+                for i in range(max(lib.FPDFFormObj_CountObjects(o), 0)):
+                    walk(lib.FPDFFormObj_GetObject(o, i), world)
+                return
+            if t == "path":
+                fill, stroke = ctypes.c_int(), ctypes.c_int()
+                lib.FPDFPath_GetDrawMode(o, ctypes.byref(fill), ctypes.byref(stroke))
+                words = ["path", "fill", str(fill.value), "stroke", str(int(bool(stroke.value)))]
+                for i in range(lib.FPDFPath_CountSegments(o)):
+                    s = lib.FPDFPath_GetPathSegment(o, i)
+                    x, y = ctypes.c_float(), ctypes.c_float()
+                    lib.FPDFPathSegment_GetPoint(s, ctypes.byref(x), ctypes.byref(y))
+                    px, py = mat_apply(world, x.value, y.value)
+                    words += [SEGMENTS.get(lib.FPDFPathSegment_GetType(s), "?"), num(px), num(py)]
+                    if lib.FPDFPathSegment_GetClose(s):
+                        words.append("h")
+                items.append(" ".join(words))
+
+        ident = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        for i in range(lib.FPDFPage_CountObjects(page)):
+            walk(lib.FPDFPage_GetObject(page, i), ident)
+        lib.FPDF_ClosePage(page)
+        lib.FPDF_CloseDocument(doc)
+        return items
+
     def pages(self, data):
         """What a file's page tree comes to: the count PDFium gives, then, in
         order, each page to two past it, its width, height and quarter turns,
@@ -795,6 +997,10 @@ def answer(pdfium, kind, files):
         return content_answer(pdfium.gfx(files["pdf"]))
     if kind == "gfx-text":
         return content_answer(pdfium.gfx_text(files["pdf"], files.get("queries")))
+    if kind == "annots":
+        return content_answer(pdfium.annots(files["pdf"]))
+    if kind in ("annots-flatten-display", "annots-flatten-print"):
+        return content_answer(pdfium.annots_flatten(files["pdf"], kind == "annots-flatten-print"))
     raise SystemExit("unknown kind %r" % kind)
 
 

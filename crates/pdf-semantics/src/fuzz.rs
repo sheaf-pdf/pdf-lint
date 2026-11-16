@@ -13,7 +13,9 @@ use pdf_objects::{
     serialize,
 };
 
+use crate::action::{self, Action};
 use crate::date::{Date, Quirk};
+use crate::dest::{self, DestTable};
 use crate::info::{self, Dated, Info};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
@@ -733,9 +735,67 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Over<'o
     let trees = (roots.into_iter().take(ROOTS))
         .map(|(kind, root)| a_tree(objects, root, kind))
         .collect();
+    let pages_pair = both_tables(objects, catalog);
+    for (idx, rules) in [Rules::Iso, Rules::Pdfium].into_iter().enumerate() {
+        let mut kept = Kept::default();
+        let oa = action::open_action(objects, catalog, rules, &Limits::DEFAULT, &mut kept);
+        assert_eq!(
+            action::open_action(objects, catalog, rules, &Limits::DEFAULT, &mut ()),
+            oa
+        );
+        assert_eq!(
+            action::open_action(objects, catalog, rules, &Limits::DEFAULT, &mut Unwanted),
+            oa
+        );
+        let aa =
+            action::read_additional(objects, catalog, None, rules, &Limits::DEFAULT, &mut kept);
+        assert_eq!(
+            action::read_additional(objects, catalog, None, rules, &Limits::DEFAULT, &mut ()),
+            aa
+        );
+        if let Ok(table) = &pages_pair[idx] {
+            let dt = DestTable::read(
+                objects,
+                Some(catalog),
+                table,
+                rules,
+                &Limits::DEFAULT,
+                &mut kept,
+            );
+            assert_eq!(
+                DestTable::read(
+                    objects,
+                    Some(catalog),
+                    table,
+                    rules,
+                    &Limits::DEFAULT,
+                    &mut ()
+                ),
+                dt
+            );
+            assert_eq!(
+                DestTable::read(
+                    objects,
+                    Some(catalog),
+                    table,
+                    rules,
+                    &Limits::DEFAULT,
+                    &mut Unwanted
+                ),
+                dt
+            );
+            if let (Ok(dt), Ok(Some(action::OpenAction::Actions(acts)))) = (&dt, &oa) {
+                for act in acts {
+                    if let Action::GoTo { dest: Some(d) } = act {
+                        let _ = dt.resolve(d, rules, &mut ());
+                    }
+                }
+            }
+        }
+    }
     Over {
         trees,
-        pages: Some(both_tables(objects, catalog)),
+        pages: Some(pages_pair),
         metadata: Some(metadata_stream(objects, catalog).map_err(|unreadable| unreadable.why)),
         info,
     }
@@ -781,6 +841,25 @@ pub fn walks(data: &[u8]) {
         a_tree(resolve, root, Kind::Names);
         a_tree(resolve, root, Kind::Numbers);
         let _ = an_info(resolve, root);
+        for rules in [Rules::Iso, Rules::Pdfium] {
+            let mut kept = Kept::default();
+            let d = dest::read(resolve, root, None, true, rules, &mut kept);
+            assert_eq!(dest::read(resolve, root, None, true, rules, &mut ()), d);
+            assert_eq!(
+                dest::read(resolve, root, None, true, rules, &mut Unwanted),
+                d
+            );
+            let mut akept = Kept::default();
+            let ch = action::read_chain(resolve, root, None, rules, &Limits::DEFAULT, &mut akept);
+            assert_eq!(
+                action::read_chain(resolve, root, None, rules, &Limits::DEFAULT, &mut ()),
+                ch
+            );
+            assert_eq!(
+                action::read_chain(resolve, root, None, rules, &Limits::DEFAULT, &mut Unwanted),
+                ch
+            );
+        }
         if let Some(catalog) = root.as_dict() {
             let _ = both_tables(resolve, catalog);
         }
