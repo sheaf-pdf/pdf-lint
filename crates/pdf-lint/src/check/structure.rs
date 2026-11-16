@@ -3478,8 +3478,9 @@ mod tests {
         }
     }
 
-    /// A file of a page whose catalog's `/Metadata` is a chain of `n`
-    /// references, objects 10 on, to a metadata stream of `data`, 4 0 R.
+    /// A file of a page whose catalog's `/Metadata` leads to a metadata
+    /// stream of `data`, 4 0 R, through `n` objects 10 on that are each a
+    /// reference: through `n + 1` references, its own among them.
     fn chained(n: u32, data: &[u8]) -> Vec<u8> {
         let mut file = Sections::new("1.7");
         let first = match n {
@@ -3510,8 +3511,8 @@ mod tests {
     }
 
     /// A packet's stream through more references than the reader follows
-    /// to keep one in plain view (8) is read beside the reading, which
-    /// follows as many as pdf-semantics does (32), where the document alone
+    /// to keep one in plain view (7) is read beside the reading, which
+    /// follows as many as pdf-semantics does (31), where the document alone
     /// has none; past those, it isn't read, which is counted as not
     /// checked, where the catalog is held.
     #[test]
@@ -3522,20 +3523,32 @@ mod tests {
             found.into_iter().map(|f| (f.3, f.4)).collect()
         };
         let want = values(vec![finding]);
-        for n in [0, 1, 12] {
+        // Through 1, 2, 7, 8, 13 and 31 references.
+        for n in [0, 1, 6, 7, 12, 30] {
             let file = chained(n, &data);
             let read = beside(&file, &default, &ALL);
             assert_eq!(values(xmp_of(&read, &data)), want, "{n}: {read}");
             assert!(a3(&read) && packet_rows(&read).is_empty(), "{n}: {read}");
             let doc = checked(&file, &ALL, &Options::default());
-            assert_eq!(a3(&doc), n < 8, "{n}: {doc}");
+            assert_eq!(a3(&doc), n < 7, "{n}: {doc}");
         }
-        let file = chained(40, &data);
-        let read = beside(&file, &default, &ALL);
-        assert_eq!((xmp_of(&read, &data), a3(&read)), (vec![], false), "{read}");
-        assert_eq!(packet_rows(&read), [(WAY_CAPPED.to_string(), 1)], "{read}");
-        assert_eq!(packet_rows(&beside(&file, &default, &only(1))).len(), 1);
-        assert_eq!(packet_rows(&beside(&file, &default, &only(4))), []);
+        // Through 32 and 41.
+        for n in [31, 40] {
+            let file = chained(n, &data);
+            let read = beside(&file, &default, &ALL);
+            assert_eq!(
+                (xmp_of(&read, &data), a3(&read)),
+                (vec![], false),
+                "{n}: {read}"
+            );
+            assert_eq!(
+                packet_rows(&read),
+                [(WAY_CAPPED.to_string(), 1)],
+                "{n}: {read}"
+            );
+            assert_eq!(packet_rows(&beside(&file, &default, &only(1))).len(), 1);
+            assert_eq!(packet_rows(&beside(&file, &default, &only(4))), []);
+        }
     }
 
     /// A packet whose stream's data doesn't come whole beside its reading

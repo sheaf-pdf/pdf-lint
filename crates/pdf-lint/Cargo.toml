@@ -18,7 +18,9 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 # The command line's, main.rs's alone: the library's errors are its own.
-anyhow = { version = "1", optional = true }
+# At least 1.0.34, the first whose `bail!` ending a block isn't a warning
+# that a later Rust makes an error.
+anyhow = { version = "1.0.34", optional = true }
 # The command line's too: its arguments, their errors and the help, plain,
 # without colour and without wrapping, so nothing asks the terminal; the
 # help's lines are broken by hand. The README's help and the tests' pins of
@@ -47,8 +49,10 @@ pdf-objects.workspace = true
 pdf-semantics.workspace = true
 pdf-structure.workspace = true
 pdf-tokenizer.workspace = true
-# The command line's too: its JSON reports.
-serde = { version = "1", features = ["derive"], optional = true }
+# The command line's too: its JSON reports. At least 1.0.113, the first
+# whose derive builds the reports' types without a warning: an older one's
+# warns, or takes a derive newer than it that doesn't build.
+serde = { version = "1.0.113", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = "2"
 # Unicode's Script property: which scripts a font's text is in, as a
