@@ -7,6 +7,7 @@ rust-version = "1.92"
 # As the model it embeds and the parts adapted from TestGrammar are.
 license = "Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-lint"
 description = "PDF validator CLI and library checking files against the Arlington PDF Model and ISO 32000-2 with byte-accurate spans"
 keywords = ["pdf", "lint", "validation", "arlington", "iso-32000"]
 categories = ["command-line-utilities", "development-tools::testing"]

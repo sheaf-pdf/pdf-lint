@@ -460,11 +460,42 @@ pub mod extension {
     }
 }
 
+/// The README's examples, run as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use crate::{Grammar, grammar, use_model};
+
+    /// The README is shown on crates.io and docs.rs, where a path beside the
+    /// crate reaches nothing: its licence link is the repository's URL, the
+    /// manifest's `repository` and the file, and every link it has is a URL,
+    /// so none is a path such as `../` (the crates it names are linked by
+    /// their folders in the repository). The crate is Apache-2.0 alone, as
+    /// the model it embeds and the parts adapted from TestGrammar are, so the
+    /// link is to `LICENSE-APACHE` alone.
+    #[test]
+    fn the_readmes_licence_link_reaches_the_file() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        let link = format!("[LICENSE-APACHE]({repository}/blob/main/LICENSE-APACHE)");
+        assert!(
+            readme.contains(&link),
+            "LICENSE-APACHE's link isn't the repository's URL"
+        );
+        for (at, _) in readme.match_indices("](") {
+            let target = &readme[at + 2..];
+            let target = &target[..target.find(')').unwrap_or(target.len())];
+            assert!(
+                target.starts_with("https://"),
+                "a link isn't a URL: {target}"
+            );
+        }
+    }
 
     /// A model that lacks a table the checker reads by name is refused,
     /// and the refusal names the table, word for word.

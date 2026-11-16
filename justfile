@@ -4,8 +4,10 @@
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
 # pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts,
-# pdf-gfx, pdf-linearize, pdfs and pdf-arlington support, from their Cargo.toml. Only the libraries promise one:
-# the checker ships as a binary built with stable Rust.
+# pdf-gfx, pdf-annots, pdf-linearize, pdfs, pdf-arlington and pdf-lint
+# support, from their Cargo.toml. pdf-lint's is its library's, and the
+# binary's as `cargo install` builds it; its release archives are built with
+# stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
 crypt_msrv := `grep -m1 '^rust-version' crates/pdf-crypt/Cargo.toml | cut -d'"' -f2`
@@ -20,6 +22,7 @@ annots_msrv := `grep -m1 '^rust-version' crates/pdf-annots/Cargo.toml | cut -d'"
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
 pdfs_msrv := `grep -m1 '^rust-version' crates/pdfs/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
+lint_msrv := `grep -m1 '^rust-version' crates/pdf-lint/Cargo.toml | cut -d'"' -f2`
 
 # The nightly the fuzz targets build on: `nightly`, or the toolchain
 # FUZZ_TOOLCHAIN names, as CI's fuzzing pins one.
@@ -39,7 +42,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package lint-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -524,11 +527,27 @@ pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filter
 # sources.
 arlington-package: (_package "pdf-arlington" "pdf-objects" "pdf-color")
 
+# Package pdf-lint as a publish would, pdf-objects, pdf-filters, pdf-crypt,
+# pdf-color, pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts,
+# pdf-linearize and pdf-arlington beside it while the versions it and they
+# name aren't published; pdf-tokenizer is verified against crates.io's, as
+# the version they name is published. `_package` says what's checked. The
+# package's own tests don't build from it, as its manifest says: their file
+# writer, pdf-fixtures, is never published.
+lint-package: (_package "pdf-lint" "pdf-objects" "pdf-filters" "pdf-crypt" "pdf-color" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize" "pdf-arlington")
+
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
 # a pinned build): a break the version doesn't allow fails.
 tokenizer-semver:
     cargo semver-checks check-release -p pdf-tokenizer
+
+# Check pdf-lint's public API against the version published on crates.io,
+# as `tokenizer-semver` holds the tokenizer's: pdf-lint is on a release line
+# of its own, not an alpha's, so the tool holds each version to what its
+# number allows.
+lint-semver:
+    cargo semver-checks check-release -p pdf-lint
 
 # An alpha's public API against the version crates.io has, with
 # cargo-semver-checks (installed as `tokenizer-semver` needs it). While the
@@ -699,6 +718,15 @@ pdfs-msrv:
 arlington-msrv:
     cargo +{{ arlington_msrv }} nextest run --locked -p pdf-arlington
     cargo +{{ arlington_msrv }} test --locked -p pdf-arlington --doc
+
+# Test pdf-lint on its oldest supported Rust, which must be installed, as
+# it's published, the command line among it, and its library alone, without
+# the command line's dependencies.
+lint-msrv:
+    cargo +{{ lint_msrv }} nextest run --locked -p pdf-lint
+    cargo +{{ lint_msrv }} test --locked -p pdf-lint --doc
+    cargo +{{ lint_msrv }} nextest run --locked -p pdf-lint --no-default-features
+    cargo +{{ lint_msrv }} test --locked -p pdf-lint --no-default-features --doc
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
