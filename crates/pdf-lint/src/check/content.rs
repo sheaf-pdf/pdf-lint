@@ -31,11 +31,13 @@
 //! ([`Rule::Reader`]), in its words for that fault, at the stream's data as
 //! written, where the stream is held. A unit that may hold an inline image
 //! (its data has `BI`) isn't read either where a color space its resources
-//! name doesn't read for the reader's own reason (a password, a cap, the
-//! source), as an image's components, and so where its data ends, can't be
-//! told; one that doesn't parse is no space, as PDFium has it. Each unit is
-//! read as PDFium reads content, through pdf-content-streams, with every
-//! place ISO 32000-2 reads it otherwise kept as it's read.
+//! name, or the resources themselves, don't read for the reader's own
+//! reason (a password, a cap, the source), or the resources are through
+//! more references than are followed, as an image's components, and so
+//! where its data ends, can't be told; a space or resources that don't
+//! parse are none, as PDFium has them. Each unit is read as PDFium reads
+//! content, through pdf-content-streams, with every place ISO 32000-2
+//! reads it otherwise kept as it's read.
 //!
 //! What a unit's reading finds, each kind of it once in each of the unit's
 //! streams it's found in, at its first place there, with how many times it's
@@ -171,7 +173,7 @@ use pdf_content_streams::{
     CodedEnds, Concat, Error, Join, Limits, Operand, Operands, Operation, Operator, ResCx, ResKind,
     State, Type,
 };
-use pdf_objects::Resolve;
+use pdf_objects::{Resolve, Why};
 use pdf_structure::pdf_filters;
 
 use super::{Finding, Made, Objects, Rule, Step, TOKEN, Trail, Visit, Walk, checksummed};
@@ -204,9 +206,11 @@ const TOO_LARGE: &str = "content decoded past what's read of one unit";
 const DECODE: &str = "a content stream that doesn't decode cleanly";
 
 /// Why a unit isn't read: it may hold an inline image, and a color space
-/// its resources name doesn't read for the reader's own reason (a password,
-/// a cap, the source), so how many components an image drawn in it has,
-/// and where its data ends, can't be told ([`ResCx::read`]'s error).
+/// its resources name, or the resources themselves, don't read for the
+/// reader's own reason (a password, a cap, the source), or the resources
+/// are through more references than are followed, so how many components
+/// an image drawn in it has, and where its data ends, can't be told
+/// ([`ResCx::read`]'s error, [`Walk::damaged`]).
 const SPACES: &str = "content whose inline images' color spaces don't read";
 
 /// Why a unit isn't read: the source gives no data of a stream of it,
@@ -1391,12 +1395,16 @@ impl<'a> Walk<'a> {
             };
             // Only an inline image is sized by the resources' color spaces,
             // so they're read only where one may be, once for each; where
-            // one doesn't read for the reader's own reason, where an image's
-            // data ends can't be told, and the unit isn't read.
-            let resources = unit.resources.and_then(Result::ok).map(|r| r.object);
-            let res = match content.bytes().windows(2).any(|w| w == b"BI") {
-                false => Some(&none),
-                true => {
+            // one doesn't read for the reader's own reason, or the resources
+            // themselves don't but by damage, where an image's data ends
+            // can't be told, and the unit isn't read. Resources that don't
+            // parse name no space, as `ResCx::read` has a damaged object.
+            let image = content.bytes().windows(2).any(|w| w == b"BI");
+            let res = match (image, unit.resources) {
+                (false, _) => Some(&none),
+                (true, Some(Err(id))) if !self.damaged(id) => None,
+                (true, resources) => {
+                    let resources = resources.and_then(Result::ok).map(|r| r.object);
                     let objects = Objects(self.source);
                     (spaces.entry(resources.map(ptr::from_ref)))
                         .or_insert_with(|| ResCx::read(objects, resources, &limits).ok())
@@ -1753,6 +1761,17 @@ impl<'a> Walk<'a> {
                 Ok(Some(_)) | Err(_) => Some(Err(id)),
             },
         }
+    }
+
+    /// Whether `id`, the object resources that don't read stop at
+    /// ([`Walk::resources`]), doesn't parse: then they name no color space,
+    /// as `ResCx::read` and PDFium have a damaged object. Not where it
+    /// doesn't read for the reader's own reason (a password, a cap, the
+    /// source), or reads, as it does at the end of more references than
+    /// are followed: what spaces they name can't be told.
+    fn damaged(&self, id: ObjectId) -> bool {
+        let why = Objects(self.source).try_resolve(id).err().map(|e| e.why);
+        why == Some(Why::Damaged)
     }
 
     /// Whether an object `unit`'s resources are written in, as `lookup` has
@@ -4036,6 +4055,61 @@ mod tests {
         for file in [
             resourced(resources, stream("", image), &[(40, damaged)]),
             resourced(resources, stream("", "q"), &[(40, &capped)]),
+        ] {
+            let (_, report) = found_by(Rule::Balance, &file);
+            assert_eq!(named(Rule::Balance, &file), open, "{report}");
+            assert_eq!((report.content, not_made(&report, SPACES)), (1, vec![]));
+        }
+    }
+
+    /// So too where the unit's resources themselves don't read for the
+    /// reader's own reason, here nested past the parser's cap, or are
+    /// through more references than are followed: what spaces they name
+    /// can't be told, so a unit that may hold an inline image isn't read,
+    /// and is counted as not checked for that where its holder, or the
+    /// object that doesn't read, is held. Resources that don't parse name no
+    /// space, as PDFium has a damaged object, and the unit is read; so is a
+    /// unit with no `BI` in it.
+    #[test]
+    fn content_whose_resources_dont_read_isnt_read_where_an_image_may_be() {
+        let spaces = "/ColorSpace << /CS0 /DeviceRGB >>";
+        let capped = format!("<< {spaces} /X {}{} >>", "[".repeat(300), "]".repeat(300));
+        let damaged = format!("<< {spaces} /X ) >>");
+        // 20 0 R to 89 0 R, each a reference to the next: more than are
+        // followed.
+        let mut chain: Vec<(u32, String)> =
+            (20..90).map(|n| (n, format!("{} 0 R", n + 1))).collect();
+        chain.push((90, format!("<< {spaces} >>")));
+        let chain: Vec<(u32, &str)> = (chain.iter())
+            .map(|(n, body)| (*n, body.as_str()))
+            .collect();
+        let image = || stream("", "q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID x EI");
+        let row = [("PageObject".to_string(), "Contents".to_string(), 1)];
+        for (resources, objects) in [
+            ("/Resources 40 0 R", &[(40, capped.as_str())][..]),
+            ("/Resources 20 0 R", &chain),
+        ] {
+            let file = resourced(resources, image(), objects);
+            let (found, report) = found_by(Rule::Balance, &file);
+            assert_eq!((found, report.content), (vec![], 0), "{report}");
+            assert_eq!(not_made(&report, SPACES), row, "{report}");
+        }
+        // Held by the object that doesn't read alone, as merged.
+        let file = resourced("/Resources 40 0 R", image(), &[(40, &capped)]);
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let only = Hold::Only([(ObjectId::new(40, 0), Made::Built)].into());
+        let report = check(&opened, &only, &Options::default());
+        assert_eq!(not_made(&report, SPACES), row, "{report}");
+        // Read: resources that don't parse, and content with no `BI`.
+        let open = [lacks(
+            "PageObject/Contents",
+            "1 q left open at the end",
+            "q",
+        )];
+        for file in [
+            resourced("/Resources 40 0 R", image(), &[(40, &damaged)]),
+            resourced("/Resources 40 0 R", stream("", "q"), &[(40, &capped)]),
+            resourced("/Resources 20 0 R", stream("", "q"), &chain),
         ] {
             let (_, report) = found_by(Rule::Balance, &file);
             assert_eq!(named(Rule::Balance, &file), open, "{report}");
