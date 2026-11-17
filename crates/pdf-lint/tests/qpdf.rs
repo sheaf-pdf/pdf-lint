@@ -10,11 +10,11 @@ use std::thread;
 use std::time::Instant;
 
 use pdf_fixtures::qpdf::Qpdf;
-use pdf_lint::bytes::{self, WithReading};
-use pdf_lint::{
-    Document, Finding, Hold, Linearized, Made, Options, Rule, check, check_with_reading,
-};
-use pdf_structure::write;
+use pdf_lint::pdf_objects::Object;
+use pdf_lint::pdf_structure::Document;
+use pdf_lint::pdf_structure::read::{self as bytes, WithReading};
+use pdf_lint::pdf_structure::write;
+use pdf_lint::{Finding, Hold, Linearized, Made, Options, Rule, check, check_with_reading};
 
 /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
 /// `PATH`. They're ignored, so that `cargo test` needs no qpdf, and run by
@@ -151,7 +151,7 @@ fn what_qpdf_linearizes_then_updated_is_found_so() {
             catalog
                 .as_dict_mut()
                 .unwrap()
-                .set("PageLayout", pdf_lint::Object::name("SinglePage"));
+                .set("PageLayout", Object::name("SinglePage"));
             let base = write::Base::of(&reading).unwrap();
             let bodies = [(root, write::Body::from(&catalog))];
             let options = write::Options::DEFAULT;

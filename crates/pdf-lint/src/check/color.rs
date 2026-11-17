@@ -42,13 +42,13 @@ use std::mem::{self, Discriminant};
 
 use pdf_color::{Fault, Limits, Space};
 use pdf_objects::fault::{Place, Sink};
+use pdf_objects::{Unreadable, Why};
 
 use super::content::times;
 use super::kept::Kept;
 use super::told::{Keyed, Told, holding};
 use super::{Finding, Graphic, Made, Objects, REFERENCES, Rule, Walk};
 use crate::object::{Object, ObjectId, Span};
-use crate::{Unreadable, Why};
 
 /// The model's color space tables: what the walk reaches as one is a color
 /// space, read again after it.
@@ -349,11 +349,11 @@ pub(super) mod tests {
     //! them.
 
     use pdf_fixtures::fixture::{self, Body, Xref};
+    use pdf_objects::dict;
 
     use super::*;
     use crate::bytes::{Options, WithReading};
     use crate::check::{Hold, Made, Report, Rule, check};
-    use crate::dict;
     use crate::object::Dict;
 
     /// Every table the walk names a color space by is the model's, so a

@@ -6,12 +6,15 @@
 //! streams' data, a `/ToUnicode`, an embedded CMap and those it uses, a
 //! Type 3 font's glyphs, comes decoded from the source as a viewer takes
 //! it ([`Streams::decoded`]), as a font reads a reading's ([`decoded`]),
-//! the file's fonts' within one budget. A source that gives no stream's
-//! data, as a document alone doesn't, leaves a font that asks one unread,
-//! as it leaves content. What the read tells is kept ([`Kept`]), each read
-//! run to its end; but once an object it reads doesn't read for what isn't
-//! the file's fault, a password or a cap, the read goes on as if it weren't
-//! there, and what it tells after isn't kept ([`Cut`]).
+//! the file's fonts' within one budget. A document alone gives the streams
+//! it holds as bytes, as one made in memory holds them, though it gives no
+//! content; a stream whose data is where its file wrote it, as a document
+//! read from a file has every stream but the object streams it decoded
+//! whole, it doesn't give, which leaves a font that asks one unread. What
+//! the read tells is kept ([`Kept`]), each read run to its end, or to where
+//! an object or a stream it reads doesn't read for what isn't the file's
+//! fault, a password or a cap, after which pdf-fonts tells nothing
+//! ([`Font::read`]'s errors).
 //!
 //! Of what it tells, what the walk can't say is a [`Rule::Font`] finding,
 //! where the walk found nothing by the model's rules in that object at that
@@ -53,7 +56,7 @@
 //! evaluated. What's read then is the pass's after the walk, each font read
 //! once.
 //!
-//! [`FileCx::latin`]: crate::FileCx::latin
+//! [`FileCx::latin`]: crate::predicate::FileCx::latin
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -62,9 +65,9 @@ use std::mem::{self, Discriminant};
 use std::ops::RangeInclusive;
 use std::ptr;
 
+use pdf_arlington::Latin;
 use pdf_fonts::{Error, Fault, Font, Limits};
-use pdf_objects::fault::{Place, Sink};
-use pdf_objects::{Streams, WithStreams};
+use pdf_objects::{Resolve, Streams, Unreadable, Why, WithStreams};
 use unicode_script::{Script, UnicodeScript};
 
 use super::content::times;
@@ -73,7 +76,6 @@ use super::told::{Keyed, Told, holding, written_at};
 use super::{Finding, Graphic, Made, NESTING, Objects, REFERENCES, Rule, Walk};
 use crate::object::{Dict, Object, ObjectId, Span, Value};
 use crate::source::Source;
-use crate::{Latin, Resolve, Unreadable, Why};
 
 /// The model's font tables: what the walk reaches as one is a font, read
 /// again after it. A Type 0 font's CIDFont, descriptor and CMap are read as
@@ -206,55 +208,11 @@ fn subtype<'a>(source: &'a dyn Source, font: &'a Dict) -> Result<Option<&'a [u8]
 /// of the font the walk took it for, whose `/Subtype` the walk says: of a
 /// Type 0 font, its `/Widths` missing and its CMap no encoding. Where the
 /// reference leads to an object that doesn't read for what isn't the
-/// file's fault, the font is read, which goes on past it, and is counted
-/// ([`Cut`]).
+/// file's fault, the font is read, which stops there, and is counted.
 fn of_a_kind(source: &dyn Source, font: &Dict) -> bool {
     match subtype(source, font) {
         Ok(kind) => kind.is_some_and(|kind| KINDS.contains(&kind)),
         Err(_) => true,
-    }
-}
-
-/// The file's objects as [`Objects`] gives them, `failed` set where one
-/// doesn't read for what isn't the file's fault, which a font's read goes
-/// on past as if it weren't there ([`Error::Unreadable`]).
-#[derive(Clone, Copy)]
-struct Noting<'a, 'c> {
-    objects: Objects<'a>,
-    failed: &'c Cell<bool>,
-}
-
-impl<'a> Resolve<'a> for Noting<'a, '_> {
-    fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
-        self.try_resolve(id).ok().flatten()
-    }
-
-    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
-        let resolved = self.objects.try_resolve(id);
-        if let Err(unreadable) = &resolved
-            && unreadable.why != Why::Damaged
-        {
-            self.failed.set(true);
-        }
-        resolved
-    }
-}
-
-/// What a font's read tells, kept ([`Kept`]), until an object it reads
-/// doesn't read for what isn't the file's fault (`failed`): its read goes
-/// on as if the object weren't there, so what it tells after, a
-/// `/ToUnicode` that takes a password told as one that doesn't decode, is
-/// of a font without it, and isn't kept.
-struct Cut<'c> {
-    kept: &'c mut Kept<Fault>,
-    failed: &'c Cell<bool>,
-}
-
-impl Sink<Fault> for Cut<'_> {
-    fn fault(&mut self, at: Place, fault: Fault) {
-        if !self.failed.get() {
-            self.kept.fault(at, fault);
-        }
     }
 }
 
@@ -275,9 +233,9 @@ struct Asked {
 /// that doesn't read ([`Objects`]). A stream through filters the reader
 /// doesn't take ([`Why::Filter`]) a font reads as none, which `asked`
 /// notes, so that what's read without it isn't taken for the file's; and a
-/// source that gives no stream's data, as a document alone doesn't
-/// ([`Why::Detached`]), or not these bytes ([`Why::Source`]), is noted too,
-/// as what a font reads then isn't the file's font.
+/// stream whose data the source doesn't hold, as a document read from a
+/// file doesn't ([`Why::Detached`]), or not these bytes ([`Why::Source`]),
+/// is noted too, as what a font reads then isn't the file's font.
 fn decoded(
     source: &dyn Source,
     id: ObjectId,
@@ -305,38 +263,18 @@ pub(super) struct Taken {
 }
 
 /// `font`, a font dictionary of `source`'s, read for text within what's
-/// left of `budget`, what it tells kept until an object it reads doesn't
-/// read for what isn't the file's fault ([`Cut`]); none where it asked a
+/// left of `budget`, what it tells kept, up to where an object or a stream
+/// it reads doesn't read for what isn't the file's fault, after which
+/// pdf-fonts tells nothing ([`Font::read`]'s errors); none where it asked a
 /// stream's data of a source that gives none ([`decoded`]), as what it read
 /// then isn't the file's font.
 fn read<'a>(source: &'a dyn Source, font: &'a Dict, budget: &mut usize) -> Option<Taken> {
-    let (asked, failed) = (Asked::default(), Cell::new(false));
-    let objects = Noting {
-        objects: Objects(source),
-        failed: &failed,
-    };
-    let streams = WithStreams::new(objects, |id, limit| {
-        let decoded = decoded(source, id, limit, &asked);
-        // What takes a password or is past a cap, which isn't the file's
-        // fault; not what's damaged or through filters the reader doesn't
-        // take, which a font reads as none, nor what the source didn't give,
-        // after which the font isn't read.
-        if let Err(unreadable) = &decoded
-            && !matches!(
-                unreadable.why,
-                Why::Damaged | Why::Filter | Why::Source | Why::Detached
-            )
-        {
-            failed.set(true);
-        }
-        decoded
+    let asked = Asked::default();
+    let streams = WithStreams::new(Objects(source), |id, limit| {
+        decoded(source, id, limit, &asked)
     });
     let mut kept = Kept::default();
-    let mut cut = Cut {
-        kept: &mut kept,
-        failed: &failed,
-    };
-    let read = Font::read_for_text(streams, font, &LIMITS, budget, &mut cut);
+    let read = Font::read_for_text(streams, font, &LIMITS, budget, &mut kept);
     (!asked.ungiven.get()).then(|| Taken {
         font: read,
         kept,
@@ -739,12 +677,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pdf_fixtures::fixture::{self, Body, Xref};
+    use pdf_objects::dict;
+    use pdf_structure::pdf_crypt::writer::{Kind, Settings};
 
     use super::*;
     use crate::bytes::{self, ByteSource, Options, WithReading};
     use crate::check::{Hold, Made, Report, Rule, check};
-    use crate::dict;
-    use crate::pdf_crypt::writer::{Kind, Settings};
+    use crate::source::Document;
+    use crate::version::Version;
 
     /// A `/ToUnicode`'s data, as each stream here holds it.
     const PLAIN: &[u8] = b"1 beginbfchar <41> <0041> endbfchar";
@@ -803,9 +743,9 @@ mod tests {
     }
 
     /// A stream within its limit is its data, with filters or without, and
-    /// past it past a cap, by a byte; a document alone gives none, detached,
-    /// noted, and a font that asks it isn't read, where a font that asks
-    /// none is.
+    /// past it past a cap, by a byte; the file's document alone gives none,
+    /// detached, noted, and a font that asks it isn't read, where a font
+    /// that asks none is.
     #[test]
     fn a_stream_s_data_within_its_limit_and_past_it() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
@@ -846,8 +786,8 @@ mod tests {
     }
 
     /// A font stopped by a stream's data not given is noted as such, the
-    /// source's, not the file's: where a document alone has nothing to read
-    /// it from, as where a source failed to give its bytes.
+    /// source's, not the file's: where a document read from a file has
+    /// nothing to read it from, as where a source failed to give its bytes.
     #[test]
     fn a_font_stopped_by_data_not_given_is_ungiven() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
@@ -1375,6 +1315,55 @@ mod tests {
             cap_height(&checked("1.7", &its_descriptor)),
             missing(4, "FontDescriptorTrueType")
         );
+    }
+
+    /// A document made in memory holds its streams as bytes, which it gives
+    /// a font as a viewer takes them, and gives no account of a stream's
+    /// decode, which content is read from: its font's `/ToUnicode` is read,
+    /// the text Latin, so its descriptor's `/CapHeight` is missing; and its
+    /// page's content isn't read. Its objects written to a file and read
+    /// back as a document hold no stream's data but where the file wrote
+    /// it: the font asks one and isn't read, so `/CapHeight` can't be told,
+    /// and no content is read; and beside its reading, both are.
+    #[test]
+    fn a_document_made_in_memory_gives_its_fonts_streams_and_no_content() {
+        let mut objects = on_a_page(
+            dict! { "F1" => r(4) },
+            vec![
+                (4, type0(5, Some(r(7))).into()),
+                (5, cid_font(6).into()),
+                (6, descriptor(4, false).into()),
+                (7, to_unicode(&[0x41])),
+                (8, Body::stream(dict! {}, b"BT /F1 12 Tf <0001> Tj ET")),
+            ],
+        );
+        if let Body::Object(page) = &mut objects[2].1 {
+            page.as_dict_mut().unwrap().set("Contents", r(8));
+        }
+        let trailer = dict! { "Root" => r(1) };
+        let mut made = Document::new(Version::new(1, 7), trailer.clone());
+        for (n, body) in &objects {
+            let object = match body {
+                Body::Object(object) => object.clone(),
+                Body::Stream(dict, data) => {
+                    crate::object::Stream::new(dict.clone(), data.clone()).into()
+                }
+            };
+            made.insert(*n, object);
+        }
+        let held = Hold::All(Made::Built);
+        let options = crate::check::Options::default();
+        let report = check(&made, &held, &options);
+        assert_eq!(cap_height(&report), missing(6, "FontDescriptorCIDType2"));
+        assert_eq!(report.content, 0, "{report}");
+        let file = fixture::file("1.7", &objects, trailer, Xref::Table);
+        let read = WithReading::new(&file[..], &Options::DEFAULT).unwrap();
+        let alone = check(read.document(), &held, &options);
+        assert_eq!(cap_height(&alone), unmade("FontDescriptorCIDType2"));
+        assert_eq!(alone.content, 0, "{alone}");
+        let beside = check(&read, &held, &options);
+        assert_eq!(cap_height(&beside), missing(6, "FontDescriptorCIDType2"));
+        assert_eq!(beside.content, 1, "{beside}");
     }
 
     /// A font whose `/ToUnicode` takes a password that wasn't given isn't
@@ -2163,13 +2152,91 @@ mod tests {
         );
     }
 
+    /// What a font's read tells after an object or a stream of it doesn't
+    /// read for what isn't the file's fault isn't found: pdf-fonts tells
+    /// nothing once its read fails so, which this crate keeps as told. A
+    /// TrueType font read in the order of its `/Differences`, its
+    /// `/ToUnicode` and its `/FirstChar`, past 255, so that what's wrong with
+    /// the last is told only by a read that gets past the second: whose
+    /// `/ToUnicode` is an object in an object stream no key opens (an
+    /// object's answer, locked), a stream through more filters than the
+    /// reader takes (a stream's, past a cap), or a stream of a file no key
+    /// opens (a stream's, locked); each counted as not checked, and what was
+    /// read before it found. With a `/ToUnicode` that reads, both are found.
+    #[test]
+    fn a_font_s_read_tells_nothing_after_what_doesnt_read() {
+        let font = calibri(
+            "TrueType",
+            "/FirstChar 300 /LastChar 300 /Widths [500] /Encoding 6 0 R /ToUnicode 11 0 R",
+        );
+        let encoding = "<< /Type /Encoding /Differences [300 /A] >>";
+        let plain = stream("", "1 beginbfchar <41> <0041> endbfchar");
+        let before = told(
+            6,
+            "F1/Encoding/Differences",
+            "ArrayOfDifferences/1",
+            Fault::Differences,
+            "/A",
+        );
+        // The /ToUnicode reads: what's wrong with /FirstChar is told too.
+        let objects = [(4, font.as_str()), DESCRIPTOR, (6, encoding), (11, &plain)];
+        let clean = fonts("1.7", "/F1 4 0 R", &objects);
+        let read = found(&clean, &ALL);
+        assert_eq!(read.len(), 2, "{read:?}");
+        assert_eq!(read[0], before);
+        let after = read[1].clone();
+        assert_eq!(unread_fonts(&report(&clean, &ALL)), []);
+        // An object's answer: the /ToUnicode in an object stream no key opens.
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << \
+                    /Font << /F1 4 0 R >> >> >>";
+        let objects = [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, page),
+            (4, &font),
+            DESCRIPTOR,
+            (6, encoding),
+        ];
+        let locked = "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>";
+        let object = super::super::color::tests::packed(&objects, &[(11, &plain)], locked);
+        // A stream's, past a cap: 26 filters, where the reader takes 25.
+        let filters = format!("/Filter [{}]", ["/AHx"; 26].join(" "));
+        let past = stream(&filters, "41>");
+        let objects = [(4, font.as_str()), DESCRIPTOR, (6, encoding), (11, &past)];
+        let capped = fonts("1.7", "/F1 4 0 R", &objects);
+        // A stream's, locked: the same font, its /ToUnicode written in a
+        // file no key opens.
+        let mut all: Vec<(u32, &[u8])> = vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, page.as_bytes()),
+            (4, font.as_bytes()),
+            (DESCRIPTOR.0, DESCRIPTOR.1.as_bytes()),
+            (6, encoding.as_bytes()),
+            (11, plain.as_bytes()),
+        ];
+        all.sort_by_key(|&(n, _)| n);
+        let trailer = format!("<< /Size 12 {locked} >>");
+        let stream_locked = fixture::assembled("1.7", &all, &trailer);
+        for (file, why) in [(object, LOCKED), (capped, CAPPED), (stream_locked, LOCKED)] {
+            let checked = report(&file, &ALL);
+            assert_eq!(
+                unread_fonts(&checked),
+                [(why, "FontTrueType", 1)],
+                "{checked}"
+            );
+            let found = found_in(&file, &checked);
+            assert_eq!(found, std::slice::from_ref(&before), "{after:?}");
+        }
+    }
+
     /// A font not read whole for what isn't the file's fault is counted as
     /// not checked, once, its table the font's, where the font or what it's
     /// written in is held, and what was read of it before is found all the
     /// same: one whose `/ToUnicode` is in an object stream of a file the
-    /// reader can't open, whose read goes on as if it weren't there, and
-    /// what it tells after isn't found; a CMap chain past 512; and fonts
-    /// past the file's budget for their streams, those before it read.
+    /// reader can't open, whose read stops there, and nothing after it
+    /// found; a CMap chain past 512; and fonts past the file's budget for
+    /// their streams, those before it read.
     #[test]
     fn a_font_not_read_whole_for_what_isnt_the_file_s_fault_is_counted() {
         let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << \

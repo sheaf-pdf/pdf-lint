@@ -24,9 +24,20 @@
 //! past it, no more is read. A unit whose data doesn't decode cleanly, or
 //! that the source doesn't give, or past the budget, isn't read, and is
 //! counted as not checked ([`Report::unchecked`]), its column `-`: a part of
-//! it would find what the rest undoes. Each unit is read as PDFium reads
-//! content, through pdf-content-streams, with every place ISO 32000-2 reads
-//! it otherwise kept as it's read.
+//! it would find what the rest undoes. But a stream whose only fault is
+//! that its Flate data's checksum doesn't match, which leaves nothing out,
+//! is read whole, as PDFium reads it ([`checksummed`]), and that's found
+//! where its unit is read, once a stream however many units read it, as
+//! the reader's ([`Rule::Reader`]), in its words for that fault, at the
+//! stream's data as written, where the stream is held. A unit that may
+//! hold an inline image (its data has `BI`) isn't read either where a
+//! color space its resources name, or the resources themselves, don't read
+//! for the reader's own reason (a password, a cap, the source), or the
+//! resources are through more references than are followed, as an image's
+//! components, and so where its data ends, can't be told; a space or
+//! resources that don't parse are none, as PDFium has them. Each unit is
+//! read as PDFium reads content, through pdf-content-streams, with every
+//! place ISO 32000-2 reads it otherwise kept as it's read.
 //!
 //! What a unit's reading finds, each kind of it once in each of the unit's
 //! streams it's found in, at its first place there, with how many times it's
@@ -77,10 +88,12 @@
 //!   isn't there, and one that refers to nothing is, the walk finding the
 //!   reference. Where what a name is in can't be told, a form's, a
 //!   pattern's or a glyph's with no resources of its own, which would use
-//!   its page's, or resources or a category that isn't a dictionary or
-//!   refers to nothing, no name lacks, and the unit is counted as not
-//!   checked. Each name once, at its first use, as written: an inline
-//!   image's `/I` is `I`, which PDFium looks up as `Indexed`.
+//!   its page's, resources that are there and don't read, as they don't
+//!   parse or for the reader's own reason (a password, a cap), which are
+//!   never none, or resources or a category that isn't a dictionary, or a
+//!   category that refers to nothing, no name lacks, and the unit is
+//!   counted as not checked. Each name once, at its first use, as written:
+//!   an inline image's `/I` is `I`, which PDFium looks up as `Indexed`.
 //! - **Each place ISO 32000-2 reads the content otherwise** than PDFium does
 //!   ([`Rule::Content`]), by the kind of [`Fault`], its text the first's: the
 //!   tokens' and the operations' own, 0x80 and 0xFF read as white-space
@@ -142,6 +155,7 @@
 //! [`Rule::Marked`]: super::Rule::Marked
 //! [`Rule::Operands`]: super::Rule::Operands
 //! [`Rule::Operator`]: super::Rule::Operator
+//! [`Rule::Reader`]: super::Rule::Reader
 //! [`Rule::Resource`]: super::Rule::Resource
 //! [`Rule::Unused`]: super::Rule::Unused
 //! [`Source::decoded_within`]: crate::source::Source::decoded_within
@@ -159,11 +173,12 @@ use pdf_content_streams::{
     CodedEnds, Concat, Error, Join, Limits, Operand, Operands, Operation, Operator, ResCx, ResKind,
     State, Type,
 };
+use pdf_objects::{Resolve, Why};
+use pdf_structure::pdf_filters;
 
-use super::{Finding, Made, Rule, Step, TOKEN, Trail, Visit, Walk};
+use super::{Finding, Made, Objects, Rule, Step, TOKEN, Trail, Visit, Walk, checksummed};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span, Value};
-use crate::pdf_filters;
 
 /// How many objects are looked up for one color space an inline image is
 /// drawn in, and how many subfunctions written in place are read, where
@@ -186,8 +201,17 @@ const BUDGET: &str = "content past the file's budget of decoded content";
 /// reading takes of one unit.
 const TOO_LARGE: &str = "content decoded past what's read of one unit";
 
-/// Why a unit isn't read: a stream of it doesn't decode cleanly.
+/// Why a unit isn't read: a stream of it doesn't decode cleanly, but for
+/// its Flate checksum alone ([`checksummed`]).
 const DECODE: &str = "a content stream that doesn't decode cleanly";
+
+/// Why a unit isn't read: it may hold an inline image, and a color space
+/// its resources name, or the resources themselves, don't read for the
+/// reader's own reason (a password, a cap, the source), or the resources
+/// are through more references than are followed, so how many components
+/// an image drawn in it has, and where its data ends, can't be told
+/// ([`ResCx::read`]'s error, [`Walk::damaged`]).
+const SPACES: &str = "content whose inline images' color spaces don't read";
 
 /// Why a unit isn't read: the source gives no data of a stream of it,
 /// though it gave another's.
@@ -200,6 +224,11 @@ const UNOWNED: &str = "a resource name in content with no resources of its own";
 /// Why a resource name isn't looked up: its unit's resources aren't a
 /// dictionary.
 const DAMAGED: &str = "a resource name in resources that aren't a dictionary";
+
+/// Why a resource name isn't looked up: its unit's resources are there and
+/// don't read, as they don't parse or for the reader's own reason (a
+/// password, a cap), or through more references than are followed.
+const UNREAD: &str = "a resource name in resources that don't read";
 
 /// Why a resource name isn't looked up: its category isn't a dictionary, or
 /// refers to nothing.
@@ -258,7 +287,9 @@ enum Way<'a> {
 /// starts.
 struct Unit<'a> {
     streams: Vec<(ObjectId, Way<'a>)>,
-    resources: Option<Resources<'a>>,
+    /// None for none; the number of the object they're in where they're
+    /// there and don't read ([`Walk::resources`]).
+    resources: Option<Result<Resources<'a>, ObjectId>>,
     start: State,
 }
 
@@ -446,7 +477,7 @@ impl<'a> Categories<'a> {
 #[derive(PartialEq, Eq, Hash)]
 struct Key {
     streams: Vec<ObjectId>,
-    resources: Option<*const Object>,
+    resources: Option<Result<*const Object, ObjectId>>,
     start: State,
 }
 
@@ -454,7 +485,7 @@ impl Unit<'_> {
     fn key(&self) -> Key {
         Key {
             streams: self.streams.iter().map(|&(id, _)| id).collect(),
-            resources: self.resources.map(|r| ptr::from_ref(r.object)),
+            resources: (self.resources).map(|r| r.map(|r| ptr::from_ref(r.object))),
             start: self.start,
         }
     }
@@ -462,8 +493,10 @@ impl Unit<'_> {
 
 /// A unit's streams as read.
 enum Read {
-    /// Decoded, and joined.
-    Joined(Concat<'static>),
+    /// Decoded, and joined; and those of them read whole past their Flate
+    /// checksum ([`checksummed`]), whose checksum is found where the unit
+    /// is read.
+    Joined(Concat<'static>, Vec<ObjectId>),
     /// Not read, and why: a stream doesn't decode cleanly, or the source
     /// doesn't give it, or the unit is past the budget, or past what
     /// content's reading joins.
@@ -857,13 +890,37 @@ fn object(state: State) -> Option<&'static str> {
     }
 }
 
-/// A word as a finding shows it: its first [`TOKEN`] bytes, `…` where
-/// there are more.
+/// A word as a finding shows it: its first [`TOKEN`] bytes, read as UTF-8,
+/// a byte that isn't read as U+FFFD; and where there are more, `…` after
+/// them, a character the cut would split left out before it, as
+/// pdf-content-streams' faults show what's written. So a finding never shows
+/// half a character the word was written with.
 fn word(written: &[u8]) -> String {
-    let shown = String::from_utf8_lossy(&written[..written.len().min(TOKEN)]);
-    match written.len() > TOKEN {
-        true => format!("{shown}…"),
-        false => shown.into_owned(),
+    if written.len() <= TOKEN {
+        return String::from_utf8_lossy(written).into_owned();
+    }
+    let mut shown = String::from_utf8_lossy(&written[..cut(written)]).into_owned();
+    shown.push('…');
+    shown
+}
+
+/// Where [`word`] cuts a word of more than [`TOKEN`] bytes: at [`TOKEN`],
+/// or before it, where a character written with a byte past it starts.
+/// Where the bytes at the cut are no character's, it's at [`TOKEN`], and
+/// they're each U+FFFD, as everywhere else.
+fn cut(written: &[u8]) -> usize {
+    // A character the cut splits ends the first bytes unfinished: what
+    // reading them as UTF-8 finds at their end, not a byte that's wrong.
+    let last = written[..TOKEN].utf8_chunks().last();
+    let Some(open) = last.map(|chunk| chunk.invalid()).filter(|i| !i.is_empty()) else {
+        return TOKEN;
+    };
+    let start = TOKEN - open.len();
+    match std::str::from_utf8(&written[start..]) {
+        // The character starts there and ends past the cut.
+        Ok(_) => start,
+        Err(e) if e.valid_up_to() > 0 => start,
+        Err(_) => TOKEN,
     }
 }
 
@@ -1326,8 +1383,8 @@ impl<'a> Walk<'a> {
                     }
                 }
             }
-            let content = match self.read(unit, &limits, &mut budget) {
-                Read::Joined(content) => content,
+            let (content, checksums) = match self.read(unit, &limits, &mut budget) {
+                Read::Joined(content, checksums) => (content, checksums),
                 Read::Unread(why) => {
                     if held {
                         let key = way_key(unit.streams[0].1);
@@ -1339,20 +1396,33 @@ impl<'a> Walk<'a> {
                 Read::NoData => return,
             };
             // Only an inline image is sized by the resources' color spaces,
-            // so they're read only where one may be, once for each.
-            let resources = unit.resources.map(|r| r.object);
-            let res = match content.bytes().windows(2).any(|w| w == b"BI") {
-                false => &none,
-                true => {
-                    let source = self.source;
-                    (spaces.entry(resources.map(ptr::from_ref))).or_insert_with(|| {
-                        // A closure can't say why an object doesn't read,
-                        // so this never fails.
-                        let objects = pdf_objects::resolve_fn(move |id| source.get(id).ok());
-                        ResCx::read(objects, resources, &limits).unwrap_or_default()
-                    })
+            // so they're read only where one may be, once for each; where
+            // one doesn't read for the reader's own reason, or the resources
+            // themselves don't but by damage, where an image's data ends
+            // can't be told, and the unit isn't read. Resources that don't
+            // parse name no space, as `ResCx::read` has a damaged object.
+            let image = content.bytes().windows(2).any(|w| w == b"BI");
+            let res = match (image, unit.resources) {
+                (false, _) => Some(&none),
+                (true, Some(Err(id))) if !self.damaged(id) => None,
+                (true, resources) => {
+                    let resources = resources.and_then(Result::ok).map(|r| r.object);
+                    let objects = Objects(self.source);
+                    (spaces.entry(resources.map(ptr::from_ref)))
+                        .or_insert_with(|| ResCx::read(objects, resources, &limits).ok())
+                        .as_ref()
                 }
             };
+            let Some(res) = res else {
+                if held {
+                    let key = way_key(unit.streams[0].1);
+                    self.unchecked("-", SPACES.to_string(), holder.table, &key);
+                }
+                categories.untell(lookup);
+                continue;
+            };
+            // Read, so what of it was read past its checksum is found.
+            self.checksums.extend(checksums);
             let mut untold = Vec::new();
             let mut look = |kind, name: &[u8]| categories.look(lookup, kind, name, &mut untold);
             let found = pass(&content, unit.start, res, &limits, &mut look);
@@ -1452,21 +1522,25 @@ impl<'a> Walk<'a> {
     /// categories added to `categories` as they're met, in its resources'
     /// order: none for a page with no resources at all, and none that can be
     /// told for a form's, a pattern's or a glyph's with none of its own, as
-    /// it would use the page's, or for resources that aren't a dictionary;
-    /// a category, its references followed, that isn't a dictionary or
-    /// refers to nothing can't be told, and one that's null is as if it
-    /// weren't there (ISO 32000-2, 7.3.7).
+    /// it would use the page's, for resources that don't read, or for
+    /// resources that aren't a dictionary; a category, its references
+    /// followed, that isn't a dictionary or refers to nothing can't be told,
+    /// and one that's null is as if it weren't there (ISO 32000-2, 7.3.7).
     fn lookup(
         &self,
         holder: &Holder<'a>,
         unit: &Unit<'a>,
         categories: &mut Categories<'a>,
     ) -> Lookup {
-        let Some(resources) = unit.resources else {
-            return match holder.kind {
-                Kind::Page => Lookup::Without,
-                Kind::Own(_) | Kind::Glyphs => Lookup::Untold(UNOWNED),
-            };
+        let resources = match unit.resources {
+            Some(Ok(resources)) => resources,
+            Some(Err(_)) => return Lookup::Untold(UNREAD),
+            None => {
+                return match holder.kind {
+                    Kind::Page => Lookup::Without,
+                    Kind::Own(_) | Kind::Glyphs => Lookup::Untold(UNOWNED),
+                };
+            }
         };
         let Value::Dict(dict) = resources.object.value() else {
             return Lookup::Untold(DAMAGED);
@@ -1648,7 +1722,13 @@ impl<'a> Walk<'a> {
 
     /// The streams of a page's `/Contents`: one, or each of an array's, a
     /// reference to either followed; an element that isn't a stream passed
-    /// over, as what `/Contents` holds is checked by the walk.
+    /// over, as what `/Contents` holds is checked by the walk, the index of
+    /// each that is kept as its place. pdf-content-streams'
+    /// `Join::push_contents` reads `/Contents` as PDFium does, which parts
+    /// from this at two edges: it follows a reference once, so one to
+    /// another reference names no stream, where this follows a chain of them
+    /// as the walk does; and it joins an element that isn't a stream as one
+    /// of no data, where this passes it over.
     fn contents(&self, page: &'a Dict) -> Vec<(ObjectId, Way<'a>)> {
         let stream = |raw: &'a Object| match self.resolve(raw) {
             Ok((Some(id), o)) if matches!(o.value(), Value::Stream(_)) => Some(id),
@@ -1670,26 +1750,49 @@ impl<'a> Walk<'a> {
 
     /// `dict`'s own `/Resources`, its references followed, and the object
     /// they are where they're indirect; a null is none, and so is a
-    /// reference to nothing.
-    fn resources(&self, dict: &'a Dict) -> Option<Resources<'a>> {
+    /// reference to nothing (ISO 32000-2, 7.3.10). Resources that are there
+    /// and don't read, as an object on the way doesn't parse or doesn't
+    /// read for the reader's own reason (a password, a cap), or through
+    /// more references than are followed, are the number of the object
+    /// that doesn't, never none: what they name can't be told.
+    fn resources(&self, dict: &'a Dict) -> Option<Result<Resources<'a>, ObjectId>> {
         let raw = dict.get(b"Resources")?;
-        let (id, object) = self.resolve(raw).ok()?;
-        (!object.is_null()).then_some(Resources { id, object })
+        match self.resolve(raw) {
+            Ok((id, object)) => (!object.is_null()).then_some(Ok(Resources { id, object })),
+            Err(id) => match Objects(self.source).try_resolve(id) {
+                Ok(None) => None,
+                Ok(Some(_)) | Err(_) => Some(Err(id)),
+            },
+        }
+    }
+
+    /// Whether `id`, the object resources that don't read stop at
+    /// ([`Walk::resources`]), doesn't parse: then they name no color space,
+    /// as `ResCx::read` and PDFium have a damaged object. Not where it
+    /// doesn't read for the reader's own reason (a password, a cap, the
+    /// source), or reads, as it does at the end of more references than
+    /// are followed: what spaces they name can't be told.
+    fn damaged(&self, id: ObjectId) -> bool {
+        let why = Objects(self.source).try_resolve(id).err().map(|e| e.why);
+        why == Some(Why::Damaged)
     }
 
     /// Whether an object `unit`'s resources are written in, as `lookup` has
     /// them in `categories`, is held: its `/Resources`' own, else the one
     /// the walk reached them in (a page tree node's, for resources a page
-    /// inherits), and each category's.
+    /// inherits), or the one that doesn't read, and each category's.
     fn resources_held(
         &self,
         unit: &Unit<'a>,
         lookup: &Lookup,
         categories: &Categories<'a>,
     ) -> bool {
-        let own = unit.resources.and_then(|resources| {
-            let reached = self.resources_at.get(&ptr::from_ref(resources.object));
-            (resources.id).or_else(|| reached.and_then(|reached| reached.holder))
+        let own = unit.resources.and_then(|resources| match resources {
+            Ok(resources) => {
+                let reached = self.resources_at.get(&ptr::from_ref(resources.object));
+                (resources.id).or_else(|| reached.and_then(|reached| reached.holder))
+            }
+            Err(unread) => Some(unread),
         });
         let each = match lookup {
             Lookup::In(found) => found.as_slice(),
@@ -1701,9 +1804,23 @@ impl<'a> Walk<'a> {
     }
 
     /// `unit`'s streams decoded and joined, each asked for no more than
-    /// what's left of `budget`, and what each held spent from it.
+    /// what's left of `budget`, and what each held spent from it. Each
+    /// stream's data is the reader's own account of its decode
+    /// ([`Source::decoded_within`](crate::source::Source::decoded_within)),
+    /// whose fault leaves the unit unread and whose cut spends the budget,
+    /// joined by `Join::push`: not by `Join::push_from` or `push_contents`,
+    /// which take a stream as a viewer does
+    /// ([`Streams::decoded`](pdf_objects::Streams::decoded)), a decode a
+    /// fault stopped read as far as it went. But a stream whose only fault
+    /// is its Flate checksum, which leaves nothing out, is read whole
+    /// ([`checksummed`]), its budget spent as a clean one's, and given back
+    /// with the data, to have its checksum found where the unit is read
+    /// ([`Walk::checksums`](super::Walk)): not where a stream after it, or
+    /// the join, or the color spaces of its inline images leave the unit
+    /// unread, as nothing of it is read then.
     fn read(&self, unit: &Unit<'a>, limits: &Limits, budget: &mut Budget) -> Read {
         let mut join = Join::new(limits);
+        let mut checksums = Vec::new();
         for &(id, _) in &unit.streams {
             // Once the source is known to give streams' data, none is asked
             // for past the budget.
@@ -1719,6 +1836,11 @@ impl<'a> Walk<'a> {
                 Some(decoded) => decoded,
             };
             budget.gives = true;
+            let decoded = decoded.or_else(|error| {
+                let data = checksummed(error)?;
+                checksums.push(id);
+                Ok(data)
+            });
             let data = match decoded {
                 Ok(data) if data.len() <= within => data,
                 // More than it was asked for is cut off at the limit, as a
@@ -1745,7 +1867,7 @@ impl<'a> Walk<'a> {
                 return Read::Unread(TOO_LARGE);
             }
         }
-        Read::Joined(join.finish())
+        Read::Joined(join.finish(), checksums)
     }
 }
 
@@ -1845,12 +1967,10 @@ mod tests {
     //! found in them, where, and as whose.
 
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use pdf_fixtures::fixture;
-    use pdf_objects::Streams;
-
-    use crate::{Unreadable, Why};
+    use pdf_objects::{Streams, Unreadable, Why};
 
     use pdf_content_streams::{Balance, ErrorKind, MarkedNest, Properties};
 
@@ -1865,7 +1985,9 @@ mod tests {
 
     /// A source that answers as the one it wraps, and keeps each stream it's
     /// asked the data of, either way, and within how much; but gives none of
-    /// `without`'s.
+    /// `without`'s. Not object 0, which is never one, whose data the XMP
+    /// packet's read asks for to learn whether the source gives streams'
+    /// data, as it says of all alike (`structure::gives_data`).
     struct Counting<'s> {
         source: &'s dyn Source,
         asked: RefCell<Vec<(ObjectId, usize)>>,
@@ -1936,7 +2058,9 @@ mod tests {
             id: ObjectId,
             limit: usize,
         ) -> Option<Result<Vec<u8>, bytes::Error>> {
-            self.asked.borrow_mut().push((id, limit));
+            if id.number != 0 {
+                self.asked.borrow_mut().push((id, limit));
+            }
             match Some(id) == self.without {
                 true => None,
                 false => self.source.decoded_within(id, limit),
@@ -1993,7 +2117,7 @@ mod tests {
             content_budget: budget,
             ..Options::default()
         };
-        check(&counting, hold, &options);
+        let _ = check(&counting, hold, &options);
         counting.asked.into_inner()
     }
 
@@ -2175,7 +2299,7 @@ mod tests {
             asked: RefCell::new(Vec::new()),
             without: None,
         };
-        check(&counting, &Hold::All(Made::Merged), &Options::default());
+        let _ = check(&counting, &Hold::All(Made::Merged), &Options::default());
         let room = Limits::DEFAULT.content;
         assert_eq!(counting.asked.into_inner(), [(ObjectId::new(10, 0), room)]);
     }
@@ -2191,7 +2315,7 @@ mod tests {
             .map(|f| {
                 let at = f.at.unwrap();
                 let data = opened.decoded_within(at.stream().unwrap(), usize::MAX);
-                let data = data.unwrap().unwrap();
+                let data = data.unwrap().or_else(checksummed).unwrap();
                 let bytes = String::from_utf8_lossy(&data[at.start()..at.end()]).into_owned();
                 let object = f.object.unwrap().number;
                 (
@@ -2842,6 +2966,34 @@ mod tests {
         );
     }
 
+    /// A word past 80 bytes is shown as its first 80 and `…`, cut before a
+    /// character that runs past them, so that a finding never shows half a
+    /// character it was written with; one that ends at the cut is kept, and
+    /// a byte at the cut that's no character's is U+FFFD, as anywhere.
+    #[test]
+    fn a_long_word_is_cut_at_a_character() {
+        let a = |n: usize| "a".repeat(n);
+        assert_eq!(TOKEN, 80);
+        for before in [78, 79] {
+            let across = format!("{}€b", a(before));
+            assert_eq!(word(across.as_bytes()), format!("{}…", a(before)));
+        }
+        let ends = format!("{}€b", a(77));
+        assert_eq!(word(ends.as_bytes()), format!("{}€…", a(77)));
+        let four = format!("{}😀b", a(77));
+        assert_eq!(word(four.as_bytes()), format!("{}…", a(77)));
+        let mut loose = a(79).into_bytes();
+        loose.extend([0xFF, b'b']);
+        assert_eq!(word(&loose), format!("{}\u{FFFD}…", a(79)));
+        let whole = format!("{}é", a(78));
+        assert_eq!(word(whole.as_bytes()), whole);
+        // As a finding says it: an operator's name.
+        let long = format!("{}€b", a(79));
+        let value = &in_page(Rule::Operator, &long)[0].0;
+        let shown = format!("{}…, an operator ISO 32000-2 doesn't define", a(79));
+        assert!(value.starts_with(&shown), "{value}");
+    }
+
     /// A glyph description's first operator is `d0` or `d1`, and they're
     /// allowed nowhere else: one that begins otherwise is refused at its
     /// first, and goes on at the content stream level, as after `d0`; one
@@ -3352,13 +3504,164 @@ mod tests {
         assert_eq!(columns, ["-"]);
     }
 
+    /// A content stream whose only fault is its Flate checksum, which
+    /// leaves nothing out, is read whole: what's in it is found at its bytes
+    /// in its data, and the checksum a `reader` finding of the stream, in
+    /// the reader's words, its filter named whatever `/Filter` lists before
+    /// it, at the stream's data as written, once, though two pages, two
+    /// units, read it; held where the stream is, and not of a page alone.
+    /// Its data spends the budget as a clean stream's would. Beside another
+    /// fault, a hex stream with no `>`, the unit isn't read, as any whose
+    /// stream doesn't decode cleanly, and nothing of the checksum is found.
+    #[test]
+    fn a_stream_whose_only_fault_is_its_checksum_is_read_and_found_once() {
+        let flate = "/Filter [/ASCIIHexDecode /FlateDecode]";
+        let shared = |data: &str| {
+            let mut objects = tree("3 0 R 4 0 R", "");
+            objects.extend([
+                (3, page("/Contents 10 0 R /Resources << >>")),
+                (4, page("/Contents 10 0 R /Resources << /ProcSet [/PDF] >>")),
+                (10, stream(flate, data)),
+            ]);
+            file(&objects)
+        };
+        let content = "q 0 0 9 9 re f";
+        let file = shared(&crate::fuzz::checksum_off(content));
+        let open = "1 q left open at the end";
+        let kids = |i| format!("Root/Pages/Kids[{i}]/Contents");
+        assert_eq!(
+            found(&file),
+            [
+                (
+                    Rule::Balance,
+                    10,
+                    kids(0),
+                    open.to_string(),
+                    "q".to_string()
+                ),
+                (
+                    Rule::Balance,
+                    10,
+                    kids(1),
+                    open.to_string(),
+                    "q".to_string()
+                ),
+            ]
+        );
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let reader = |hold: &Hold| {
+            let report = check(&opened, hold, &Options::default());
+            let told: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| (f.object, f.made, f.value.clone(), f.at))
+                .collect();
+            (told, report.content, report.unchecked.len())
+        };
+        let data = match opened.get(ObjectId::new(10, 0)).map(Object::value) {
+            Ok(Value::Stream(stream)) => stream.data.at(),
+            _ => None,
+        };
+        let hex = &file[data.unwrap().start()..data.unwrap().end()];
+        assert!(hex.ends_with(b">") && hex.len() > 2 * content.len());
+        let checksum = "its data doesn't decode cleanly through /FlateDecode: \
+                        the Adler-32 checksum doesn't match";
+        let ten = Some(ObjectId::new(10, 0));
+        let once = vec![(ten, Made::Merged, checksum.to_string(), data)];
+        assert_eq!(reader(&Hold::All(Made::Merged)), (once, 2, 0));
+        let only = |n, made| Hold::Only([(ObjectId::new(n, 0), made)].into());
+        let built = vec![(ten, Made::Built, checksum.to_string(), data)];
+        assert_eq!(reader(&only(10, Made::Built)), (built, 2, 0));
+        assert_eq!(reader(&only(3, Made::Built)), (vec![], 1, 0));
+        // Spent as a clean stream's, the same data through the same filters.
+        let deflated = pdf_fixtures::fixture::zlib(content.as_bytes());
+        let hex: String = deflated.iter().map(|b| format!("{b:02x}")).collect();
+        let clean = shared(&format!("{hex}>"));
+        let clean = WithReading::new(&clean[..], &bytes::Options::DEFAULT).unwrap();
+        let budget = |source: &dyn Source, n| {
+            let options = Options {
+                content_budget: Some(n),
+                ..Options::default()
+            };
+            let report = check(source, &Hold::All(Made::Merged), &options);
+            (report.content, report.unchecked)
+        };
+        let mut read = BTreeSet::new();
+        for n in 0..=3 * content.len() {
+            assert_eq!(budget(&opened, n), budget(&clean, n), "{n}");
+            read.insert(budget(&clean, n).0);
+        }
+        assert_eq!(read.into_iter().collect::<Vec<_>>(), [0, 1, 2]);
+        // Beside another fault, not read.
+        let unended = crate::fuzz::checksum_off(content).replace('>', "");
+        let file = shared(&unended);
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let Some(Err(bytes::Error::Decode(cut))) = opened.decoded_within(ObjectId::new(10, 0), 99)
+        else {
+            panic!("the stream doesn't decode cleanly");
+        };
+        let faults: Vec<_> = cut.faults.iter().map(|&(_, f)| f).collect();
+        let checksum_fault = pdf_filters::Fault::Checksum;
+        assert_eq!(faults, [pdf_filters::Fault::NoEnd, checksum_fault]);
+        assert_eq!(found(&file), []);
+        let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
+        assert!(
+            report.findings.iter().all(|f| f.rule != Rule::Reader),
+            "{report}"
+        );
+        let row = ("PageObject".to_string(), "Contents".to_string(), 2);
+        assert_eq!(not_made(&report, DECODE), [row]);
+    }
+
+    /// A stream whose only fault is its Flate checksum, in a unit that
+    /// isn't read, as another stream of it doesn't decode cleanly or the
+    /// color spaces its inline images may use don't read, isn't read
+    /// either, and nothing of its checksum is found, whichever order the
+    /// page's `/Contents` lists the streams in; read alone, it's found.
+    #[test]
+    fn a_checksum_is_found_only_where_its_unit_is_read() {
+        let flate = "/Filter [/ASCIIHexDecode /FlateDecode]";
+        let checksummed = |data| stream(flate, &crate::fuzz::checksum_off(data));
+        // Hex data without its `>`: decoded whole, and a fault.
+        let damaged = stream("/Filter /ASCIIHexDecode", "7120");
+        let reader = |file: &[u8], why| {
+            let opened = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
+            let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
+            let told: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| f.object)
+                .collect();
+            (told, report.content, not_made(&report, why))
+        };
+        let row = vec![("PageObject".to_string(), "Contents".to_string(), 1)];
+        let ten = Some(ObjectId::new(10, 0));
+        for (contents, want) in [
+            ("10 0 R", (vec![ten], 1, vec![])),
+            ("[10 0 R 11 0 R]", (vec![], 0, row.clone())),
+            ("[11 0 R 10 0 R]", (vec![], 0, row.clone())),
+        ] {
+            let mut objects = tree("3 0 R", "");
+            objects.extend([
+                (3, page(&format!("/Contents {contents} /Resources << >>"))),
+                (10, checksummed("q 0 0 9 9 re f")),
+                (11, damaged.clone()),
+            ]);
+            assert_eq!(reader(&file(&objects), DECODE), want, "{contents}");
+        }
+        // Its inline image's space past the parser's cap.
+        let capped = format!("{}{}", "[".repeat(300), "]".repeat(300));
+        let resources = "/Resources << /ColorSpace << /CS0 40 0 R >> >>";
+        let image = checksummed("q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID x EI");
+        let file = resourced(resources, image, &[(40, &capped)]);
+        assert_eq!(reader(&file, SPACES), (vec![], 0, row));
+    }
+
     /// An encrypted file's content is read as the reader decrypts it: its
     /// finding's bytes are its plaintext, and none of its document alone,
     /// which gives no stream's data.
     #[test]
     fn an_encrypted_files_content_is_read_decrypted() {
-        use crate::pdf_crypt::writer::{self, Kind, Settings};
-        use crate::pdf_crypt::{Encoded, Handler};
+        use pdf_structure::pdf_crypt::writer::{self, Kind, Settings};
+        use pdf_structure::pdf_crypt::{Encoded, Handler};
 
         let id = b"0123456789abcdef";
         let settings = Settings {
@@ -3448,7 +3751,8 @@ mod tests {
                 let bytes = match f.at {
                     Some(at) => match at.stream() {
                         Some(id) => {
-                            let data = opened.decoded_within(id, usize::MAX).unwrap().unwrap();
+                            let data = opened.decoded_within(id, usize::MAX).unwrap();
+                            let data = data.or_else(checksummed).unwrap();
                             data[at.start()..at.end()].to_vec()
                         }
                         None => file[at.start()..at.end()].to_vec(),
@@ -3650,6 +3954,221 @@ mod tests {
             assert_eq!(found, [], "{resources}");
             let counted = [("PageObject".to_string(), "Resources".to_string(), 1)];
             assert_eq!(not_made(&report, why), counted, "{resources}");
+        }
+    }
+
+    /// Resources that are there and don't read, an object that doesn't
+    /// parse or one nested past the parser's cap, are never none: what they
+    /// name can't be told, so no name is found lacking, and each unit that
+    /// looks one up is counted as not checked for that, as for resources
+    /// that aren't a dictionary; a page's own or what it inherits, a form's
+    /// or a glyph's. A page whose own don't read inherits none, and a
+    /// glyph whose own don't read takes none of its font's. A reference to
+    /// nothing is none, as ISO 32000-2 reads one (7.3.10): a page then
+    /// inherits, or has no resources at all and lacks every name. The unit
+    /// is held where the object that doesn't read is.
+    #[test]
+    fn resources_that_dont_read_are_never_none() {
+        let tf = || stream("", "/F1 9 Tf");
+        let fonts = "<< /Font << /F1 50 0 R >> >>";
+        let broken = "<< /Font << /F1 50 0 R >> /X ) >>";
+        let deep = format!(
+            "<< /Font << /F1 50 0 R >> /X {}{} >>",
+            "[".repeat(300),
+            "]".repeat(300)
+        );
+        let unread = [("PageObject".to_string(), "Resources".to_string(), 1)];
+        for body in [broken, deep.as_str()] {
+            let file = resourced("/Resources 40 0 R", tf(), &[(40, body), (50, FONT)]);
+            let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+            let id = ObjectId::new(40, 0);
+            let why = match Objects(&opened).try_resolve(id) {
+                Err(unreadable) => unreadable.why,
+                Ok(read) => panic!("40 0 R reads: {read:?}"),
+            };
+            let why_wanted = match body == broken {
+                true => Why::Damaged,
+                false => Why::Capped,
+            };
+            assert_eq!(why, why_wanted);
+            let (found, report) = found_by(Rule::Resource, &file);
+            assert_eq!(found, [], "{report}");
+            assert_eq!(not_made(&report, UNREAD), unread, "{report}");
+            // Held by that object alone, as merged.
+            let only = Hold::Only([(ObjectId::new(40, 0), Made::Built)].into());
+            let report = check(&opened, &only, &Options::default());
+            assert_eq!(not_made(&report, UNREAD), unread, "{report}");
+            assert_eq!(report.content, 1, "{report}");
+        }
+        // Inherited; and a page's own that don't read, though its tree's
+        // do: none inherited.
+        let page_own = |more: &str, tree_resources: &str| {
+            let mut objects = tree("3 0 R", tree_resources);
+            objects.extend([
+                (3, page(&format!("/Contents 10 0 R {more}"))),
+                (10, tf()),
+                (40, broken.to_string()),
+                (41, fonts.to_string()),
+                (50, FONT.to_string()),
+            ]);
+            file(&objects)
+        };
+        for file in [
+            page_own("", "/Resources 40 0 R"),
+            page_own("/Resources 40 0 R", "/Resources 41 0 R"),
+        ] {
+            let (found, report) = found_by(Rule::Resource, &file);
+            assert_eq!(found, [], "{report}");
+            assert_eq!(not_made(&report, UNREAD), unread, "{report}");
+        }
+        // A form's, and a glyph's whose font's read.
+        let form = stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 9 9] /Resources 40 0 R",
+            "/F1 9 Tf",
+        );
+        let file = resourced(
+            "/Resources << /XObject << /Fm 20 0 R >> >>",
+            stream("", "/Fm Do"),
+            &[(20, &form), (40, broken), (50, FONT)],
+        );
+        let (found, report) = found_by(Rule::Resource, &file);
+        assert_eq!(found, [], "{report}");
+        let form_row = [("XObjectFormType1".to_string(), "Resources".to_string(), 1)];
+        assert_eq!(not_made(&report, UNREAD), form_row, "{report}");
+        let type3 = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 9 9] \
+                     /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 31 0 R >> \
+                     /Encoding << /Type /Encoding /Differences [97 /a] >> /FirstChar 97 \
+                     /LastChar 97 /Widths [9] /Resources 41 0 R >>";
+        let glyph = stream("/Resources 40 0 R", "9 0 d0 /F1 9 Tf");
+        let file = resourced(
+            "/Resources << /Font << /T3 30 0 R >> >>",
+            stream("", "BT /T3 9 Tf (a) Tj ET"),
+            &[
+                (30, type3),
+                (31, &glyph),
+                (40, broken),
+                (41, fonts),
+                (50, FONT),
+            ],
+        );
+        let (found, report) = found_by(Rule::Resource, &file);
+        assert_eq!(found, [], "{report}");
+        let glyph_row = [("FontType3".to_string(), "Resources".to_string(), 1)];
+        assert_eq!(not_made(&report, UNREAD), glyph_row, "{report}");
+        // A reference to nothing: none, so inherited, or lacking.
+        let none = page_own("/Resources 99 0 R", "/Resources 41 0 R");
+        assert_eq!(named(Rule::Resource, &none), []);
+        let none = resourced("/Resources 99 0 R", tf(), &[(50, FONT)]);
+        let without = "/F1 (Tf), and it has no resources";
+        assert_eq!(
+            named(Rule::Resource, &none),
+            [lacks("Resource/Font", without, "/F1")]
+        );
+    }
+
+    /// A unit that may hold an inline image, whose resources name a color
+    /// space that doesn't read for the reader's own reason, here nested past
+    /// the parser's cap, isn't read, as an image drawn in it can't be sized,
+    /// and so where its data ends can't be told: it's counted as not checked
+    /// for that, where its holder is held, and nothing in it is found. A
+    /// space that doesn't parse is no space, as PDFium has it, and the unit
+    /// is read; so is a unit with no `BI` in it, which no space sizes.
+    #[test]
+    fn content_whose_inline_images_spaces_dont_read_isnt_read() {
+        let capped = format!("{}{}", "[".repeat(300), "]".repeat(300));
+        let damaged = "[/Indexed /DeviceRGB 1 <000000> )";
+        let resources = "/Resources << /ColorSpace << /CS0 40 0 R >> >>";
+        let image = "q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID x EI";
+        let open = [lacks(
+            "PageObject/Contents",
+            "1 q left open at the end",
+            "q",
+        )];
+        let file = resourced(resources, stream("", image), &[(40, &capped)]);
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let why = Objects(&opened)
+            .try_resolve(ObjectId::new(40, 0))
+            .map(|_| ());
+        assert!(
+            matches!(
+                why,
+                Err(Unreadable {
+                    why: Why::Capped,
+                    ..
+                })
+            ),
+            "{why:?}"
+        );
+        let (found, report) = found_by(Rule::Balance, &file);
+        assert_eq!((found, report.content), (vec![], 0), "{report}");
+        let row = [("PageObject".to_string(), "Contents".to_string(), 1)];
+        assert_eq!(not_made(&report, SPACES), row, "{report}");
+        let other = Hold::Only([(ObjectId::new(40, 0), Made::Built)].into());
+        let report = check(&opened, &other, &Options::default());
+        assert_eq!(not_made(&report, SPACES), [], "{report}");
+        // Read: a space that doesn't parse, and content with no `BI`.
+        for file in [
+            resourced(resources, stream("", image), &[(40, damaged)]),
+            resourced(resources, stream("", "q"), &[(40, &capped)]),
+        ] {
+            let (_, report) = found_by(Rule::Balance, &file);
+            assert_eq!(named(Rule::Balance, &file), open, "{report}");
+            assert_eq!((report.content, not_made(&report, SPACES)), (1, vec![]));
+        }
+    }
+
+    /// So too where the unit's resources themselves don't read for the
+    /// reader's own reason, here nested past the parser's cap, or are
+    /// through more references than are followed: what spaces they name
+    /// can't be told, so a unit that may hold an inline image isn't read,
+    /// and is counted as not checked for that where its holder, or the
+    /// object that doesn't read, is held. Resources that don't parse name no
+    /// space, as PDFium has a damaged object, and the unit is read; so is a
+    /// unit with no `BI` in it.
+    #[test]
+    fn content_whose_resources_dont_read_isnt_read_where_an_image_may_be() {
+        let spaces = "/ColorSpace << /CS0 /DeviceRGB >>";
+        let capped = format!("<< {spaces} /X {}{} >>", "[".repeat(300), "]".repeat(300));
+        let damaged = format!("<< {spaces} /X ) >>");
+        // 20 0 R to 89 0 R, each a reference to the next: more than are
+        // followed.
+        let mut chain: Vec<(u32, String)> =
+            (20..90).map(|n| (n, format!("{} 0 R", n + 1))).collect();
+        chain.push((90, format!("<< {spaces} >>")));
+        let chain: Vec<(u32, &str)> = (chain.iter())
+            .map(|(n, body)| (*n, body.as_str()))
+            .collect();
+        let image = || stream("", "q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID x EI");
+        let row = [("PageObject".to_string(), "Contents".to_string(), 1)];
+        for (resources, objects) in [
+            ("/Resources 40 0 R", &[(40, capped.as_str())][..]),
+            ("/Resources 20 0 R", &chain),
+        ] {
+            let file = resourced(resources, image(), objects);
+            let (found, report) = found_by(Rule::Balance, &file);
+            assert_eq!((found, report.content), (vec![], 0), "{report}");
+            assert_eq!(not_made(&report, SPACES), row, "{report}");
+        }
+        // Held by the object that doesn't read alone, as merged.
+        let file = resourced("/Resources 40 0 R", image(), &[(40, &capped)]);
+        let opened = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let only = Hold::Only([(ObjectId::new(40, 0), Made::Built)].into());
+        let report = check(&opened, &only, &Options::default());
+        assert_eq!(not_made(&report, SPACES), row, "{report}");
+        // Read: resources that don't parse, and content with no `BI`.
+        let open = [lacks(
+            "PageObject/Contents",
+            "1 q left open at the end",
+            "q",
+        )];
+        for file in [
+            resourced("/Resources 40 0 R", image(), &[(40, &damaged)]),
+            resourced("/Resources 40 0 R", stream("", "q"), &[(40, &capped)]),
+            resourced("/Resources 20 0 R", stream("", "q"), &chain),
+        ] {
+            let (_, report) = found_by(Rule::Balance, &file);
+            assert_eq!(named(Rule::Balance, &file), open, "{report}");
+            assert_eq!((report.content, not_made(&report, SPACES)), (1, vec![]));
         }
     }
 

@@ -192,9 +192,11 @@
 # (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, what only the
-# reading gives (content, fonts' streams, earlier revisions' objects and the
-# linearization) read beside the document and moving nothing else a check of
-# the document alone finds, which a stable unit test
+# reading gives (content, fonts' streams, the catalog's XMP packet as the
+# reading decodes it, a stream whose only fault is its Flate checksum read
+# whole, earlier revisions' objects and the linearization) read beside the
+# document and moving nothing else a check of the document alone finds,
+# which a stable unit test
 # (`mutated_files_check_within_their_bytes_the_same_twice`) runs on mutated
 # seeds.
 [package]

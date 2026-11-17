@@ -129,3 +129,20 @@ opt-level = 3
 # a second.
 [profile.dev.package.pdf-content-streams]
 opt-level = 1
+
+# The checker's binary is built with thin LTO, across the crates it's made
+# of, which takes back what splitting it into them cost. Said twice: here,
+# as cargo reads only the workspace's profiles in a workspace (and warns,
+# on every build, that crates/pdf-lint's own is ignored), and in
+# crates/pdf-lint/Cargo.toml, which its package keeps, so that `cargo
+# install pdf-lint`, which builds the package as its own root, takes it
+# too.
+[profile.release]
+lto = "thin"
+
+# The benchmarks keep measuring a build without LTO, as a crate that
+# depends on one of these gets by default, not the checker's release
+# profile, which `bench` would otherwise inherit;
+# CARGO_PROFILE_BENCH_LTO=thin measures them under the checker's.
+[profile.bench]
+lto = false

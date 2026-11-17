@@ -8,7 +8,9 @@
 
 use std::fmt;
 use std::io;
+use std::iter::FusedIterator;
 use std::path::{Path, PathBuf};
+use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::check::{Finding, Rule};
@@ -25,14 +27,20 @@ pub struct Allowances {
 
 /// A row of an allowances file: the findings of its table, key and rule,
 /// in one file or any, of a version and later or any.
+///
+/// Not exhaustive: read by its fields, and made only by
+/// [`Allowances::parse`], so a field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Allowance {
     /// The line of its file it's on.
     pub line: usize,
     /// A table of the model's, or `-`, as an unreached object's finding
     /// and a reader's have it.
     pub table: String,
+    /// The key, as findings write it, or `-`.
     pub key: String,
+    /// The rule.
     pub rule: Rule,
     /// The file whose findings alone it allows, as its caller names it;
     /// none for any file's.
@@ -43,6 +51,7 @@ pub struct Allowance {
     /// [`Options::version`](crate::Options::version) names; none for any
     /// version's.
     pub from: Option<Version>,
+    /// Why it's allowed, as its row says.
     pub reason: String,
 }
 
@@ -164,8 +173,13 @@ pub enum ReadError {
 }
 
 impl Allowances {
-    /// The allowances in the file `path`; a [`ReadError`] names the file
-    /// and, as [`Allowances::parse`] does, the line.
+    /// The allowances in the file `path`, read as [`Allowances::parse`]
+    /// reads them, against the model every check reads, which that fixes.
+    ///
+    /// # Errors
+    ///
+    /// A [`ReadError`] names the file, and why it can't be read or, as
+    /// [`Allowances::parse`] does, the line that doesn't read.
     pub fn read(path: &Path) -> Result<Allowances, ReadError> {
         let text = std::fs::read_to_string(path).map_err(|error| ReadError::Read {
             path: path.to_path_buf(),
@@ -177,10 +191,18 @@ impl Allowances {
         })
     }
 
-    /// The allowances in `text`. An [`AllowanceError`] names the line that
-    /// doesn't read: a row without its six fields, a table the model
-    /// hasn't, a rule there isn't, no file, a version that isn't one, no
-    /// reason, or a second row for a table, key, rule, file and version.
+    /// The allowances in `text`. Each row's table is one of the model's
+    /// every check reads ([`grammar()`](crate::grammar())), which reading
+    /// it fixes, so a model of one's own is chosen first
+    /// ([`use_model`](crate::use_model)).
+    ///
+    /// # Errors
+    ///
+    /// An [`AllowanceError`] names the line that doesn't read: a row
+    /// without its six fields, a table the model hasn't, a rule there
+    /// isn't, no file, a version that isn't one, no reason, or a second row
+    /// for a table, key, rule, file and version; or that the text has no
+    /// header, or a `#` line among its rows.
     pub fn parse(text: &str) -> Result<Allowances, AllowanceError> {
         let header = (text.lines())
             .take_while(|line| line.starts_with('#'))
@@ -215,6 +237,7 @@ impl Allowances {
     /// The allowance for `finding`, in a file checked at `version` named
     /// `file` (none for a file of no name, which only rows for any file
     /// allow), if there's one; it's then used.
+    #[must_use]
     pub fn allows(
         &self,
         finding: &Finding,
@@ -235,11 +258,14 @@ impl Allowances {
     }
 
     /// Every allowance, in the file's order.
-    pub fn rows(&self) -> impl Iterator<Item = &Allowance> {
-        self.list.iter()
+    pub fn rows(&self) -> Rows<'_> {
+        Rows {
+            rows: self.list.iter(),
+        }
     }
 
     /// The allowances that haven't allowed a finding.
+    #[must_use]
     pub fn unused(&self) -> Vec<&Allowance> {
         (self.list.iter().zip(&self.used))
             .filter(|(_, used)| !used.load(Ordering::Relaxed))
@@ -247,6 +273,63 @@ impl Allowances {
             .collect()
     }
 }
+
+/// A file's allowances, in its order: what [`Allowances::rows`] gives. It
+/// knows how many are left, walks from either end, and a `count`,
+/// `for_each` or `fold` over it goes through them in one pass.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct Rows<'a> {
+    rows: slice::Iter<'a, Allowance>,
+}
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = &'a Allowance;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a Allowance> {
+        self.rows.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.rows.size_hint()
+    }
+
+    /// The last, from the list's end, not by walking to it.
+    #[inline]
+    fn last(self) -> Option<&'a Allowance> {
+        self.rows.last()
+    }
+
+    /// One pass over the rows, as `count`, `for_each` and `sum` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, &'a Allowance) -> B>(self, init: B, f: F) -> B {
+        self.rows.fold(init, f)
+    }
+}
+
+impl<'a> DoubleEndedIterator for Rows<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'a Allowance> {
+        self.rows.next_back()
+    }
+
+    /// One pass over the rows from the last, as `rev` folds.
+    #[inline]
+    fn rfold<B, F: FnMut(B, &'a Allowance) -> B>(self, init: B, f: F) -> B {
+        self.rows.rfold(init, f)
+    }
+}
+
+impl ExactSizeIterator for Rows<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+impl FusedIterator for Rows<'_> {}
 
 impl Allowance {
     fn parse(line: usize, text: &str) -> Result<Allowance, AllowanceError> {
@@ -313,8 +396,8 @@ impl Allowance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ObjectId;
     use crate::check::Made;
+    use crate::object::ObjectId;
 
     fn finding(table: &str, key: &str, rule: Rule) -> Finding {
         Finding {
@@ -406,6 +489,58 @@ mod tests {
             panic!("no header, read");
         };
         assert!(format!("{e:#}").contains("line 1: no # header"), "{e:#}");
+    }
+
+    /// The rows walked by `next` and by `fold` alike, in the file's order;
+    /// from the last by `next_back` and by `rfold`, and from both ends at
+    /// once; each walk knowing how many are left, and giving none after its
+    /// last.
+    #[test]
+    fn the_rows_are_walked_alike_every_way() {
+        let rows = "FieldTx\tDA\tmissing\t*\t*\ta\n\
+                    -\t-\tunreached\t*\t*\tb\n\
+                    FieldTx\tFT\tmissing\tforms/a.pdf\t*\tc\n\
+                    FieldTx\tV\ttype\t*\t2.0\td\n\
+                    FieldTx\tTU\ttype\t*\t*\te\n";
+        let held = Allowances::parse(&format!("# Held.\n{rows}")).unwrap();
+        let lines = [2, 3, 4, 5, 6];
+        let n = lines.len();
+        let backwards: Vec<usize> = lines.iter().rev().copied().collect();
+        let push = |mut all: Vec<usize>, a: &Allowance| {
+            all.push(a.line);
+            all
+        };
+        let mut walk = held.rows();
+        assert_eq!((walk.len(), walk.size_hint()), (n, (n, Some(n))));
+        // By `next` alone, as `from_fn` asks for each.
+        let by_next: Vec<usize> = std::iter::from_fn(|| walk.next()).map(|a| a.line).collect();
+        assert_eq!(by_next, lines);
+        assert_eq!((walk.len(), walk.size_hint()), (0, (0, Some(0))));
+        assert!(walk.next().is_none() && walk.next_back().is_none());
+        assert_eq!(held.rows().fold(Vec::new(), push), lines);
+        let mut back = held.rows();
+        let by_next_back: Vec<usize> = std::iter::from_fn(|| back.next_back())
+            .map(|a| a.line)
+            .collect();
+        assert_eq!(by_next_back, backwards);
+        assert_eq!(held.rows().rfold(Vec::new(), push), backwards);
+        assert_eq!(held.rows().rev().fold(Vec::new(), push), backwards);
+        assert_eq!(held.rows().count(), n);
+        assert_eq!(held.rows().last().map(|a| a.line), Some(6));
+        assert_eq!(held.rows().nth(2).map(|a| a.line), Some(4));
+        // From both ends at once, a clone going on alone.
+        let mut both = held.rows();
+        assert_eq!(both.next().map(|a| a.line), Some(2));
+        assert_eq!(both.next_back().map(|a| a.line), Some(6));
+        assert_eq!(both.len(), n - 2);
+        let rest = both.clone();
+        assert_eq!(both.fold(Vec::new(), push), [3, 4, 5]);
+        assert_eq!(rest.len(), n - 2);
+        // Each row as the list holds it.
+        for (row, line) in held.rows().zip(lines) {
+            assert_eq!(row.line, line);
+            assert!(std::ptr::eq(row, &held.list[line - 2]));
+        }
     }
 
     /// Each line that doesn't read is said word for word: its number and

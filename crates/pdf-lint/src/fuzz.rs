@@ -5,35 +5,43 @@
 //! object stream's as the document holds it and a content stream's or the
 //! metadata stream's as the reading decodes it again; what its content
 //! finds, what its fonts' streams say of their text and what their reads
-//! find, what an earlier revision's objects that a later one wrote over or
-//! freed tell, read as that revision was written, and what a linearized
-//! file's linearization is, or was before an update voided it, moving
-//! nothing else a check of its document alone finds, which reads no stream's
-//! data, no earlier revision and no linearization ([`reading_alone`]); and
-//! set against its previous revision, read as it was written, when it has an
-//! incremental update. It reads under small limits ([`options`], and 4 MiB
-//! of content and 4 MiB of fonts' streams in [`setting`]), so that a run
-//! tries more inputs. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`; the files for the fuzzer to begin from, [`seeds`], only
-//! for the tests, which write them.
+//! find, what its catalog's XMP packet tells where the reading decodes it,
+//! what an earlier revision's objects that a later one wrote over or freed
+//! tell, read as that revision was written, and what a linearized file's
+//! linearization is, or was before an update voided it, moving nothing else
+//! a check of its document alone finds, which reads no stream's data but a
+//! packet in plain view, no earlier revision and no linearization, under the
+//! extensions the reading's check declares too ([`alone`],
+//! [`reading_alone`]); and set against its previous revision, read as it
+//! was written, when it has an incremental update. It reads under small
+//! limits ([`options`], and 4 MiB of content and 4 MiB of fonts' streams in
+//! [`setting`]), so that a run tries more inputs. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`; the files for the fuzzer
+//! to begin from, [`seeds`], only for the tests, which write them.
+//!
+//! It checks against the model every check reads
+//! ([`grammar()`](crate::grammar())), as the binary checks every file,
+//! which keeps what it parses of the model's predicates for the process:
+//! the predicates of the model's own rows, parsed from its cells, never an
+//! input's text, so what a run finds of one input rests on none before it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+use pdf_structure::pdf_crypt;
+#[cfg(test)]
+use pdf_structure::pdf_crypt::writer::{Kind, Settings};
 #[cfg(test)]
 use pdf_structure::write;
 
 use crate::bytes::{self, WithReading};
 use crate::check::{
-    Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn, WRITTEN_OVER, check,
-    check_with_reading,
+    CHECKSUM, Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn,
+    WRITTEN_OVER, check, check_with_reading, checksummed,
 };
 #[cfg(test)]
 use crate::object::Object;
 use crate::object::{ObjectId, Span};
-#[cfg(test)]
-use crate::pdf_crypt;
-#[cfg(test)]
-use crate::pdf_crypt::writer::{Kind, Settings};
 use crate::source::{Document, RevisionEnd, Source, Update};
 use crate::version::Version;
 
@@ -77,7 +85,6 @@ pub fn check_file(data: &[u8]) {
         _ => (0, data),
     };
     let doc = read(file, None);
-    let metadata = metadata_stream(&doc);
     let (hold, options) = setting(choice, doc.document());
     let report = check_with_reading(&doc, &hold, &options);
     assert_eq!(
@@ -85,12 +92,13 @@ pub fn check_file(data: &[u8]) {
         check_with_reading(&doc, &hold, &options),
         "a check is the same twice"
     );
-    reading_alone(&report, &check(doc.document(), &hold, &options));
+    let (alone, again) = alone(&doc, &hold, &options, &report);
+    reading_alone(again.as_ref().unwrap_or(&report), &alone);
     let mut lengths = BTreeMap::new();
     for finding in &report.findings {
         if let Some(at) = finding.at {
             assert!(
-                within(&doc, file, at, metadata, &mut lengths),
+                within(&doc, file, at, &mut lengths),
                 "{finding}: its bytes are out of what was read"
             );
         }
@@ -164,6 +172,30 @@ pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
     (hold, options)
 }
 
+/// `doc`'s document checked alone, holding what `hold` does, under
+/// `options` and the extensions `beside`, its check beside its reading,
+/// declares, so that the two walks read the model alike where a packet
+/// only the reading decodes, filtered or encrypted, declares one; and,
+/// where the document alone declares more still, as a packet it holds in
+/// plain view that the reading doesn't read whole does (one past the
+/// reading's cap on a stream's data), the check beside its reading again
+/// under those, else none.
+fn alone(
+    doc: &WithReading<&[u8]>,
+    hold: &Hold,
+    options: &Options,
+    beside: &Report,
+) -> (Report, Option<Report>) {
+    let under = |extensions: &BTreeSet<String>| Options {
+        extensions: options.extensions.union(extensions).cloned().collect(),
+        ..options.clone()
+    };
+    let alone = check(doc.document(), hold, &under(&beside.extensions));
+    let again = (alone.extensions != beside.extensions)
+        .then(|| check_with_reading(doc, hold, &under(&alone.extensions)));
+    (alone, again)
+}
+
 /// The rules that find what's in content, and nothing else.
 const CONTENT: [Rule; 7] = [
     Rule::Balance,
@@ -189,19 +221,35 @@ fn latin_row(row: &Unchecked) -> bool {
     row.why == "fn:FontHasLatinChars"
 }
 
+/// Whether `row` is the catalog's XMP packet's: not read whole, or at all,
+/// or what it tells not placed.
+fn packet_row(row: &Unchecked) -> bool {
+    (row.column, row.table.as_str(), row.key.as_str()) == ("-", "Metadata", "-")
+}
+
 /// That `beside`, a check of a file beside its reading
 /// ([`check_with_reading`]), is `alone`, a check of its document alone,
 /// which reads no stream's data, no earlier revision's objects and no
 /// linearization, and what those tell.
 ///
 /// What streams' data tells: content's own, what a font's `/ToUnicode`,
-/// embedded CMap or glyphs say of whether it has Latin characters, and
-/// what the read of a font that asks one finds, which alone doesn't read.
-/// The same findings but content's rules', `font`'s and a font
-/// descriptor's `missing CapHeight`, in the same order, and alone's of the
-/// last beside too; the same rows not checked, but content's and the
-/// fonts', their column `-`, added, and `fn:FontHasLatinChars`'s, as many
-/// or fewer; and the same counts, but units of content read and unused
+/// embedded CMap or glyphs say of whether it has Latin characters, and what
+/// the read of a font that asks one finds, which alone doesn't read; that a
+/// content or metadata stream's Flate checksum doesn't match, which the
+/// content pass and the packet's read, reading it whole past that
+/// ([`checksummed`]), find in the reader's words, a [`Rule::Reader`]
+/// finding, where the reader tells it only of an object stream it decodes;
+/// and what the catalog's XMP packet tells, which the reading decodes,
+/// filtered or encrypted, where alone reads one only in plain view, and so
+/// one past the reading's cap on a stream's data that the reading doesn't:
+/// its [`Rule::Xmp`] findings, and its rows not checked (`Metadata`, `-`
+/// and `-`), either way. What it declares, `alone` is checked under too
+/// ([`alone`]). The same findings but content's rules', `font`'s, a font
+/// descriptor's `missing CapHeight`, the checksum's and `xmp`'s, in the
+/// same order, and alone's `missing CapHeight` and checksum beside too; the
+/// same rows not checked, but content's and the fonts', their column `-`,
+/// added, the packet's either way, and `fn:FontHasLatinChars`'s, as many or
+/// fewer; and the same counts, but units of content read and unused
 /// resources, which `alone` has none of. Nor color spaces, which no
 /// stream's data says.
 ///
@@ -242,9 +290,13 @@ fn reading_alone(beside: &Report, alone: &Report) {
     let earlier = |f: &Finding| {
         f.revision.is_some() && (read_at(&f.table, &f.key) || f.rule == Rule::Unlisted)
     };
+    // A stream's checksum, the reader's words for it.
+    let checksum = CHECKSUM.to_string();
+    let checksum = |f: &Finding| f.rule == Rule::Reader && f.value == checksum;
     let others = |report: &Report| -> Vec<Finding> {
         (report.findings.iter())
             .filter(|f| !CONTENT.contains(&f.rule) && f.rule != Rule::Font && !cap_height(f))
+            .filter(|f| !checksum(f) && f.rule != Rule::Xmp)
             .filter(|f| !matches!(f.rule, Rule::Linearization | Rule::Updated))
             .filter(|f| !earlier(f))
             .cloned()
@@ -284,6 +336,12 @@ fn reading_alone(beside: &Report, alone: &Report) {
             "{finding}: found alone, where the fonts' streams aren't read"
         );
     }
+    for finding in alone.findings.iter().filter(|f| checksum(f)) {
+        assert!(
+            beside.findings.contains(finding),
+            "{finding}: the reader's, found alone and not beside"
+        );
+    }
     assert_eq!(
         (alone.content, alone.unused.len()),
         (0, 0),
@@ -314,6 +372,7 @@ fn reading_alone(beside: &Report, alone: &Report) {
         assert!(
             beside.unchecked.contains_key(row)
                 || latin_row(row)
+                || packet_row(row)
                 || row.why == WRITTEN_OVER
                 || read_at(&row.table, &row.key),
             "{row:?} not checked alone"
@@ -375,49 +434,37 @@ fn reading_alone(beside: &Report, alone: &Report) {
     );
 }
 
-/// Whether `at` is inside what was read: the file, or the data of the
-/// stream it's in, which is read one of three ways: an object stream's as
-/// `doc` holds it; the catalog's metadata stream's, `metadata`, as
-/// [`Source::metadata`] gives it, in plain view, which the XMP check reads
-/// even in a file whose other streams are refused (one encrypted by a
-/// security handler the reader can't open, whose encryption dictionary says
-/// its metadata isn't encrypted); else as its reading decodes it, as
-/// content is read, each stream's length kept in `lengths` once it's
-/// decoded.
+/// Whether `at` is inside what was read of `source`, the file read beside
+/// its reading as the check read it: the file, or the data of the stream
+/// it's in, which is read one of two ways: an object stream's as `source`
+/// holds it ([`Source::held`]); else as `source` decodes it
+/// ([`Source::decoded_within`]), as content and the catalog's XMP packet
+/// are read, one whose only fault is its Flate checksum whole
+/// ([`checksummed`]), each stream's length kept in `lengths` once it's
+/// decoded. The packet's data is asked for no further than a byte past
+/// what's read of one (16 MiB), which is past the reading's own cap on a
+/// stream's data here ([`options`]), so it's this data. A file encrypted by
+/// a security handler the reader can't open, whose encryption dictionary
+/// says its metadata isn't encrypted, has its packet so too: the reader
+/// leaves the catalog's metadata stream in the clear, where every other
+/// stream is refused.
 fn within(
-    doc: &WithReading<&[u8]>,
+    source: &dyn Source,
     file: &[u8],
     at: Span,
-    metadata: Option<ObjectId>,
     lengths: &mut BTreeMap<ObjectId, Option<usize>>,
 ) -> bool {
     let len = match at.stream() {
         None => Some(file.len()),
-        Some(stream) => {
-            let held = doc.document().held(stream).map(<[u8]>::len);
-            let plain = (metadata == Some(stream))
-                .then(|| Source::metadata(doc).map(|data| data.len()))
-                .flatten();
-            held.or(plain).or_else(|| {
-                *lengths.entry(stream).or_insert_with(|| {
-                    let decoded = doc.reading().decoded_within(stream, usize::MAX);
-                    decoded.ok().map(|data| data.len())
-                })
+        Some(stream) => source.held(stream).map(<[u8]>::len).or_else(|| {
+            *lengths.entry(stream).or_insert_with(|| {
+                let decoded = source.decoded_within(stream, usize::MAX);
+                let data = decoded.and_then(|decoded| decoded.or_else(checksummed).ok());
+                data.map(|data| data.len())
             })
-        }
+        }),
     };
     len.is_some_and(|len| at.start() <= at.end() && at.end() <= len)
-}
-
-/// The catalog's metadata stream, as the XMP check names it
-/// ([`xmp::metadata_stream`](pdf_semantics::xmp::metadata_stream)): where a
-/// finding in the packet's bytes is placed.
-fn metadata_stream(doc: &WithReading<&[u8]>) -> Option<ObjectId> {
-    let trailer = Source::trailer(doc).dict();
-    let catalog = pdf_semantics::catalog(doc, trailer).ok().flatten()?;
-    pdf_semantics::xmp::metadata_stream(doc, catalog)
-        .ok()
-        .flatten()
 }
 
 /// Files for the fuzzer to begin from, each with its name, made for it: a
@@ -426,24 +473,26 @@ fn metadata_stream(doc: &WithReading<&[u8]>) -> Option<ObjectId> {
 /// structure tree, a name tree and a number tree; a page tree with each
 /// fault the walk can't say that ISO's reading of it tells, but a tree of
 /// no pages; a page tree a viewer reads otherwise, by its count, a page and
-/// a page's box; a name tree whose keys are out of order; XMP metadata with
-/// an attribute that doesn't read; a color space, a font, a DeviceN space
-/// and a halftone with something in each for the color space and font rules
-/// to find, and the model's functions of colorants and Latin characters;
-/// content of each kind the check reads, two pages sharing an array of
-/// streams, a form, a pattern and a Type 3 font's glyphs, with something in
-/// it for each rule of content to find, and a page's content encrypted; a
-/// cross-reference stream with extensions declared and XMP metadata; an
-/// object stream whose header starts two objects inside another's bytes; an
-/// incremental update, and one that writes again the information dictionary
-/// the earlier trailer names; the page linearized, its linearization
-/// holding, and then updated, which voids it; a file whose security
-/// handler isn't known but whose metadata is in plain view, with XML that
-/// doesn't read; and encrypted files, one of
-/// them with an object stream whose data isn't encrypted, so that its
-/// objects' strings are in the clear. Each begins with the two bytes that
-/// choose how it's checked, all clear, as the `check` and `structure`
-/// targets take them; the `write` target's take a third ([`write_seeds`]).
+/// a page's box; a name tree whose keys are out of order; XMP metadata
+/// declaring PDF/A-3 with an attribute that doesn't read, in plain view and
+/// through filters, which only a reading decodes; a color space, a font, a
+/// DeviceN space and a halftone with something in each for the color space
+/// and font rules to find, and the model's functions of colorants and Latin
+/// characters; content of each kind the check reads, two pages sharing an
+/// array of streams, a form, a pattern and a Type 3 font's glyphs, with
+/// something in it for each rule of content to find, a page's content
+/// encrypted, and a page's content whose Flate checksum doesn't match, read
+/// whole; a cross-reference stream with extensions declared and XMP
+/// metadata; an object stream whose header starts two objects inside
+/// another's bytes; an incremental update, and one that writes again the
+/// information dictionary the earlier trailer names; the page linearized,
+/// its linearization holding, and then updated, which voids it; a file
+/// whose security handler isn't known but whose metadata is in plain view,
+/// with XML that doesn't read; and encrypted files, one of them with an
+/// object stream whose data isn't encrypted, so that its objects' strings
+/// are in the clear. Each begins with the two bytes that choose how it's
+/// checked, all clear, as the `check` and `structure` targets take them;
+/// the `write` target's take a third ([`write_seeds`]).
 #[cfg(test)]
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
@@ -542,6 +591,19 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         leaf("2 0 R"),
         stream("/Type /Metadata /Subtype /XML", xmp),
     ];
+    // The same packet through Flate, in ASCIIHexDecode's hex, which only a
+    // reading decodes: beside it, PDF/A-3 is declared, and its attribute
+    // that doesn't read found; alone, neither.
+    let deflated = hex(&pdf_fixtures::fixture::zlib(xmp.as_bytes())) + ">";
+    let filtered_metadata = [
+        "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        leaf("2 0 R"),
+        stream(
+            "/Type /Metadata /Subtype /XML /Filter [/ASCIIHexDecode /FlateDecode]",
+            &deflated,
+        ),
+    ];
     // A TrueType font of 94 widths for 95 codes, drawing Latin letters,
     // whose descriptor lacks /CapHeight; an Indexed space's table of 3
     // bytes for 6; an NChannel space of a spot colorant without /Colorants;
@@ -569,8 +631,9 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     ];
     // A file encrypted by a security handler the reader can't open, whose
     // encryption dictionary says its metadata isn't encrypted: the XMP is
-    // read in plain view, its attribute that doesn't read found, where every
-    // other stream is refused.
+    // read, in plain view, and as the reading decodes it, which leaves it in
+    // the clear, its attribute that doesn't read found, where every other
+    // stream is refused.
     let locked_metadata = [
         "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
@@ -593,9 +656,11 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("viewer", file(&viewer, "").0),
         ("name-tree", file(&name_tree, "").0),
         ("xmp", file(&metadata, "").0),
+        ("xmp-filtered", file(&filtered_metadata, "").0),
         ("graphics", file(&graphics, "").0),
         ("content", content()),
         ("content-encrypted", encrypted_content()),
+        ("content-checksummed", checksummed_content()),
         ("xref-stream", xref_stream()),
         ("object-streams", object_streams(true)),
         ("object-streams-lzw", object_streams(false)),
@@ -1070,6 +1135,36 @@ fn content() -> Vec<u8> {
     file(&objects, "").0
 }
 
+/// `data` as Flate data whose Adler-32 checksum is one off, in
+/// `ASCIIHexDecode`'s hex, ended by `>`: data for `/Filter [/ASCIIHexDecode
+/// /FlateDecode]` that decodes whole, its checksum the one fault.
+#[cfg(test)]
+pub(crate) fn checksum_off(data: &str) -> String {
+    let mut deflated = pdf_fixtures::fixture::zlib(data.as_bytes());
+    if let Some(last) = deflated.last_mut() {
+        *last ^= 1;
+    }
+    hex(&deflated) + ">"
+}
+
+/// A file whose page's content is Flate data whose checksum doesn't match
+/// ([`checksum_off`]), read whole, a `q` left open among it.
+#[cfg(test)]
+fn checksummed_content() -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> \
+         /Contents 4 0 R >>"
+            .to_string(),
+        stream(
+            "/Filter [/ASCIIHexDecode /FlateDecode]",
+            &checksum_off("q 0 0 9 9 re f"),
+        ),
+    ];
+    file(&objects, "").0
+}
+
 /// A file encrypted as AES-128 with the empty user password, so that it
 /// opens, whose page's content is compressed and encrypted, a `Q` with
 /// nothing saved among it.
@@ -1370,13 +1465,18 @@ mod tests {
     /// `bytes::document` reads it, and under the fuzz target's limits as a
     /// reading taken whole reads it; and checked beside its reading
     /// ([`check_with_reading`]), its streams' data read, a check finds what
-    /// one of its document alone finds and content's own and what its
-    /// fonts' streams say ([`reading_alone`]), and says how many units of
-    /// content it read, where one of its document alone reads none. The
-    /// content seeds' content has each rule of content finding something;
-    /// the rest is clean. Beside its reading, the linearized seed holds,
-    /// the one updated after has that found, and the earlier trailers'
-    /// objects written again since are read as their revisions had them.
+    /// one of its document alone finds, under the extensions it declares
+    /// ([`alone`]), and content's own, what its fonts' streams say and what
+    /// a packet only the reading decodes tells ([`reading_alone`]), and says
+    /// how many units of content it read, where one of its document alone
+    /// reads none. The content seeds' content has each rule of content
+    /// finding something; the XMP seeds' packet, read beside the reading
+    /// whether filtered or not, declares PDF/A-3 and has an attribute that
+    /// doesn't read, which the document alone of the filtered one neither
+    /// declares nor finds; the rest is clean. Beside its reading, the
+    /// linearized seed holds, the one updated after has that found, and the
+    /// earlier trailers' objects written again since are read as their
+    /// revisions had them.
     #[test]
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
@@ -1396,16 +1496,16 @@ mod tests {
                 unused: true,
                 ..Options::default()
             };
-            let (beside, alone) = (
-                check_with_reading(&opened, &hold, &options),
-                check(opened.document(), &hold, &options),
-            );
+            let beside = check_with_reading(&opened, &hold, &options);
+            let (alone, again) = alone(&opened, &hold, &options, &beside);
+            assert!(again.is_none(), "{name}: {alone}");
             // The page's content and its annotation's appearance; the
             // structure's page; the two pages' one unit, the form, the
-            // pattern and the two glyphs; the encrypted page.
+            // pattern and the two glyphs; the encrypted page; the page whose
+            // checksum doesn't match.
             let read = match name {
                 "page" | "linearized" | "linearized-updated" => 2,
-                "structure" | "content-encrypted" => 1,
+                "structure" | "content-encrypted" | "content-checksummed" => 1,
                 "content" => 5,
                 _ => 0,
             };
@@ -1441,7 +1541,7 @@ mod tests {
                 "content" => &[
                     "balance", "content", "marked", "operands", "operator", "resource", "unused",
                 ],
-                "content-encrypted" => &["balance"],
+                "content-encrypted" | "content-checksummed" => &["balance"],
                 _ => &[],
             };
             assert_eq!(
@@ -1449,6 +1549,32 @@ mod tests {
                 want,
                 "{name}: {beside}"
             );
+            // The packet, whether it's filtered or not, read beside the
+            // reading; the filtered one not by the document alone.
+            let xmp = |report: &Report| {
+                (report.findings.iter())
+                    .filter(|f| f.rule == Rule::Xmp)
+                    .map(|f| f.value.clone())
+                    .collect::<Vec<_>>()
+            };
+            let a3 = |report: &Report| report.extensions.contains("ISO_19005_3");
+            let attribute = ["an attribute in XMP metadata doesn't read".to_string()];
+            let packets = ["xmp", "xmp-filtered", "locked-plain-metadata"];
+            if packets.contains(&name) {
+                assert!(a3(&beside) && a3(&alone), "{name}: {beside}");
+                assert_eq!(xmp(&beside), attribute, "{name}: {beside}");
+            }
+            let declared = crate::extension::declared(opened.document());
+            let filtered = name == "xmp-filtered";
+            assert_eq!(
+                declared.contains("ISO_19005_3"),
+                packets.contains(&name) && !filtered || name == "xref-stream",
+                "{name}"
+            );
+            if filtered {
+                assert_eq!(xmp(&alone), Vec::<String>::new(), "{name}: {alone}");
+                assert!(crate::extension::declared(&opened).contains("ISO_19005_3"));
+            }
         }
     }
 
@@ -1460,8 +1586,8 @@ mod tests {
     #[test]
     fn a_font_s_text_read_beside_its_reading_and_alone() {
         use pdf_fixtures::fixture::{self, Body, Xref};
+        use pdf_objects::dict;
 
-        use crate::dict;
         use crate::object::Object;
 
         let r = Object::reference;
@@ -1701,6 +1827,52 @@ mod tests {
         for choice in [0u16, 1, 2, 3, 1 << 9, 1 << 12, 1 << 12 | 1] {
             check_file(&[&choice.to_le_bytes()[..], &linearized].concat());
         }
+    }
+
+    /// A packet in plain view past the reading's own cap on a stream's data
+    /// (1 MiB here) is read by the document alone and not beside the
+    /// reading, which counts it as not checked: what alone finds of it, its
+    /// rows and what it declares, are what streams' data tells
+    /// ([`reading_alone`]), and the check beside the reading is made again
+    /// under what alone declares ([`alone`]), so the two walks read the
+    /// model alike.
+    #[test]
+    fn a_packet_past_the_readings_cap_is_read_alone_and_not_beside_it() {
+        let claim = "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
+                     pdfaid:part=\"3\"/>";
+        let (open, close) = ("<e>".repeat(300), "</e>".repeat(300));
+        let packet = format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">{claim}{}{open}{close}</x:xmpmeta>",
+            " ".repeat(2 << 20)
+        );
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>".to_string(),
+            stream("/Type /Metadata /Subtype /XML", &packet),
+        ];
+        let file = file(&objects, "").0;
+        let doc = read(&file, None);
+        let (hold, options) = setting(0, doc.document());
+        let beside = check_with_reading(&doc, &hold, &options);
+        let (alone, again) = alone(&doc, &hold, &options, &beside);
+        let rows = |report: &Report| -> Vec<String> {
+            (report.unchecked.keys())
+                .filter(|row| packet_row(row))
+                .map(|row| row.why.clone())
+                .collect()
+        };
+        let capped = "a metadata stream decoded past a cap it's read under";
+        let deep = "a packet nested deeper than it's read";
+        assert_eq!(rows(&beside), [capped], "{beside}");
+        assert_eq!(rows(&alone), [deep], "{alone}");
+        assert!(!beside.extensions.contains("ISO_19005_3"), "{beside}");
+        assert!(alone.extensions.contains("ISO_19005_3"), "{alone}");
+        let again = again.expect("checked again under what alone declares");
+        assert_eq!(again.extensions, alone.extensions);
+        assert_eq!(rows(&again), [capped], "{again}");
+        reading_alone(&again, &alone);
+        check_file(&[&[0, 0][..], &file].concat());
     }
 
     /// The fuzz target's checks on the seeds, each mutated many times as a

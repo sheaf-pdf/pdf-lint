@@ -7,6 +7,7 @@ rust-version = "1.92"
 # As the model it embeds and the parts adapted from TestGrammar are.
 license = "Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-lint"
 description = "PDF validator CLI and library checking files against the Arlington PDF Model and ISO 32000-2 with byte-accurate spans"
 keywords = ["pdf", "lint", "validation", "arlington", "iso-32000"]
 categories = ["command-line-utilities", "development-tools::testing"]
@@ -17,7 +18,9 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 # The command line's, main.rs's alone: the library's errors are its own.
-anyhow = { version = "1", optional = true }
+# At least 1.0.34, the first whose `bail!` ending a block isn't a warning
+# that a later Rust makes an error.
+anyhow = { version = "1.0.34", optional = true }
 # The command line's too: its arguments, their errors and the help, plain,
 # without colour and without wrapping, so nothing asks the terminal; the
 # help's lines are broken by hand. The README's help and the tests' pins of
@@ -46,8 +49,10 @@ pdf-objects.workspace = true
 pdf-semantics.workspace = true
 pdf-structure.workspace = true
 pdf-tokenizer.workspace = true
-# The command line's too: its JSON reports.
-serde = { version = "1", features = ["derive"], optional = true }
+# The command line's too: its JSON reports. At least 1.0.113, the first
+# whose derive builds the reports' types without a warning: an older one's
+# warns, or takes a derive newer than it that doesn't build.
+serde = { version = "1.0.113", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = "2"
 # Unicode's Script property: which scripts a font's text is in, as a
@@ -87,7 +92,15 @@ pdf-fixtures = { path = "../pdf-fixtures" }
 # The tests' folders of their own, removed after.
 tempfile = "3"
 
+# The binary built with thin LTO, across the crates it's made of. Cargo
+# reads this only where the package is its own root, as `cargo install
+# pdf-lint` builds it; in the repository's workspace it's ignored, with a
+# warning on every build, and the workspace's Cargo.toml says the same.
+[profile.release]
+lto = "thin"
+
 [lints.rust]
+missing_docs = "warn"
 unsafe_code = "forbid"
 # cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

@@ -17,19 +17,69 @@
 //!
 //! # Entry Points
 //!
-//! - [`check()`] validates any [`Source`] (such as an in-memory [`Document`]).
-//! - [`check_with_reading`] takes a [`bytes::WithReading`] so it can also
-//!   decode content/font/metadata streams, inspect overwritten objects in
-//!   historical revisions, and verify Annex F linearization.
-//! - [`Report`] holds all [`Finding`]s (with exact byte [`Span`]s) and summary
-//!   counts, and supports baseline diffing via [`Report::since`],
-//!   [`Report::by_path`], and [`Report::beyond`].
-//! - [`grammar()`] returns the active Arlington [`Grammar`] (embedded by
-//!   default, or overridden once at startup via [`use_model`]).
+//! - [`check()`] validates any [`Source`](pdf_structure::Source) (such as an
+//!   in-memory [`Document`](pdf_structure::Document)), and the
+//!   content/font/metadata streams it gives decoded.
+//! - [`check_with_reading`] takes a
+//!   [`WithReading`](pdf_structure::WithReading) so it can also inspect
+//!   overwritten objects in historical revisions and verify Annex F
+//!   linearization, which only a file's reading gives.
+//! - [`Report`] holds all [`Finding`]s (with exact byte
+//!   [`Span`](pdf_objects::Span)s) and summary counts, and supports baseline
+//!   diffing via [`Report::since`], [`Report::by_path`], and
+//!   [`Report::beyond`].
+//! - [`grammar()`] returns the active Arlington
+//!   [`Grammar`](pdf_arlington::Grammar) (embedded by default, or overridden
+//!   once at startup via [`use_model`]).
+//!
+//! The crates whose types these take and give are re-exported whole, at the
+//! versions this crate takes: [`pdf_objects`], [`pdf_structure`] and
+//! [`pdf_arlington`].
+//!
+//! # Example
+//!
+//! A document made in memory, whose page has a key the model doesn't list,
+//! checked with every object held as built, so that the key is a finding:
+//!
+//! ```
+//! use pdf_lint::pdf_objects::{Object, Version, dict};
+//! use pdf_lint::pdf_structure::Document;
+//! use pdf_lint::{Hold, Made, Options, Rule, check};
+//!
+//! let r = Object::reference;
+//! let trailer = dict! { "Size" => 4, "Root" => r(1) };
+//! let mut doc = Document::new(Version::new(1, 7), trailer);
+//! doc.insert(1, dict! { "Type" => Object::name("Catalog"), "Pages" => r(2) });
+//! doc.insert(
+//!     2,
+//!     dict! { "Type" => Object::name("Pages"), "Kids" => vec![r(3)], "Count" => 1 },
+//! );
+//! let media_box: Vec<Object> = [0, 0, 612, 792].map(Object::from).into();
+//! doc.insert(
+//!     3,
+//!     dict! {
+//!         "Type" => Object::name("Page"),
+//!         "Parent" => r(2),
+//!         "MediaBox" => media_box,
+//!         "Resources" => dict! {},
+//!         "MyKey" => true,
+//!     },
+//! );
+//!
+//! let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+//! let [finding] = report.findings.as_slice() else {
+//!     panic!("{report}");
+//! };
+//! assert_eq!(finding.rule, Rule::Unlisted);
+//! assert_eq!((finding.table.as_str(), finding.key.as_str()), ("PageObject", "MyKey"));
+//! assert_eq!(finding.path, "Root/Pages/Kids[0]");
+//! assert_eq!(finding.object.map(|id| id.number), Some(3));
+//! ```
 
 pub mod allowance;
 pub mod check;
 #[cfg(any(test, fuzzing))]
+#[doc(hidden)]
 pub mod fuzz;
 
 pub use allowance::{Allowance, AllowanceError, Allowances};
@@ -38,42 +88,34 @@ pub use check::{
     Unchecked, Unlisted, UnlistedIn, check, check_with_reading, file_version,
 };
 // `grammar` is the module and the function both.
-pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
-pub use object::{
-    Data, Dict, Entry, Form, Name, Object, ObjectId, SmallBytes, Span, Str, Stream, Value,
-};
-// The model, its tables and predicates, and the commit it's at, are
-// pdf-arlington's; which model every check reads is this crate's.
-pub use pdf_arlington::{COMMIT, predicate};
-// The objects, `dict!`, versions, what resolves a reference and what gives
-// a stream's data are pdf-objects': re-exported whole too, so that what
-// the reader's faults name (`fault::Place`, and the `fault::Sink` a
-// `Source` tells them to) is named at the version this crate takes.
+pub use grammar::{grammar, use_model};
+// The crates whose types this crate's API names, each re-exported whole, at
+// the version this crate takes: the model, its tables and predicates are
+// pdf-arlington's (`grammar()`'s `Grammar`); the objects, their ids, spans
+// and versions pdf-objects' (`Finding::object` and `at`,
+// `Options::version`); and the reader, what it reads a file into, the
+// passwords it's given and the faults its filters tell, pdf-structure's
+// (`check`'s `Source`, `check_with_reading`'s `WithReading`), pdf-crypt and
+// pdf-filters under it.
+pub use pdf_arlington;
 pub use pdf_objects;
-pub use pdf_objects::{
-    Resolve, ResolveFn, Streams, Unreadable, Why, dict, object, resolve_fn, version,
-};
-// The reader, and what it reads a file into, are pdf-structure's: its
-// `read` module is this crate's `bytes`, the name it has had here; the
-// error a stream's data that doesn't decode cleanly gives is pdf-filters',
-// and the passwords a reader is given and its security handler are
-// pdf-crypt's.
-pub use pdf_structure::read as bytes;
-pub use pdf_structure::{pdf_crypt, pdf_filters, source};
-// The rules a reader reads by, ISO 32000-2's or PDFium's, are
-// pdf-tokenizer's.
-pub use pdf_tokenizer::Rules;
-pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
-pub use source::{Document, Encryption, Revision, Source, Trailer, Update};
-pub use version::Version;
+pub use pdf_structure;
 
-/// The model's tables, pdf-arlington's [`grammar`](pdf_arlington::grammar)
-/// module, and which model every check reads: the embedded one, or one
-/// [`use_model`] chose.
+// The names this crate's modules reach the family's by: pdf-structure's
+// `read` module is `bytes` here, the name it has had.
+use pdf_arlington::predicate;
+use pdf_objects::{object, text, version};
+use pdf_structure::read as bytes;
+use pdf_structure::source;
+
+/// Which model every check reads: the embedded one, or one [`use_model`]
+/// chose. The model's tables are pdf-arlington's
+/// ([`pdf_arlington::grammar`]).
 pub mod grammar {
     use std::sync::OnceLock;
 
-    pub use pdf_arlington::grammar::*;
+    // The model's types, as this crate's modules name them.
+    pub(crate) use pdf_arlington::grammar::*;
 
     /// The model [`use_model`] chose; none once anything has read the
     /// embedded one instead.
@@ -97,9 +139,13 @@ pub mod grammar {
     ];
 
     /// The model every check reads: the one [`use_model`] chose, else the
-    /// embedded one ([`Grammar::embedded`]), read once. Panics, naming the
-    /// file and line, when the embedded one doesn't read, which its tests
-    /// rule out.
+    /// embedded one ([`Grammar::embedded`]), read once.
+    ///
+    /// # Panics
+    ///
+    /// When the embedded one doesn't read, naming the file and line, which
+    /// its tests rule out.
+    #[must_use]
     pub fn grammar() -> &'static Grammar {
         CHOSEN
             .get_or_init(|| None)
@@ -109,9 +155,19 @@ pub mod grammar {
 
     /// Makes `model` the one every check reads, in place of the embedded
     /// one: a newer checkout of upstream's `tsv/latest`, read with
-    /// [`Grammar::load`]. Before anything has read the model, and once. A
-    /// [`Refused`] says when something has, or when `model` lacks a table
-    /// the checker reads by name ([`NAMED`]).
+    /// [`Grammar::load`]. Before anything has read the model, and once:
+    /// [`grammar()`] reads it, and so do a check
+    /// ([`check()`](crate::check()) or
+    /// [`check_with_reading`](crate::check_with_reading)),
+    /// [`extension::named`](crate::extension::named), and
+    /// [`Allowances::parse`](crate::Allowances::parse) and
+    /// [`read`](crate::Allowances::read) of a row that names a table, each
+    /// fixing the embedded one where nothing chose another.
+    ///
+    /// # Errors
+    ///
+    /// A [`Refused`] says when something has read the model already, or
+    /// when `model` lacks a table the checker reads by name ([`NAMED`]).
     pub fn use_model(model: Grammar) -> Result<(), Refused> {
         for &name in NAMED {
             if model.table(name).is_none() {
@@ -138,136 +194,80 @@ pub mod grammar {
     }
 }
 
-/// Text strings, pdf-objects' [`text`](pdf_objects::text).
-pub mod text {
-    pub use pdf_objects::text::*;
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use crate::pdf_crypt::{Encoding, Password};
-
-        /// A password's encodings (pdf-crypt's [`Password::encodings`])
-        /// take [`pdfium::pdf_doc_char`] for PDFDocEncoding exactly, though
-        /// pdf-crypt keeps a copy of its own. With `Ł` after it, 0x95 in
-        /// PDFDocEncoding and in neither WinAnsiEncoding nor
-        /// MacRomanEncoding, a character a byte decodes to has its UTF-8
-        /// and that byte's PDFDocEncoding, no more; the Latin-1 characters
-        /// at the three bytes the table leaves undefined have their UTF-8
-        /// alone. Their SASLprep forms, where they have one (˘'s is a space
-        /// and a breve), are no table's, and left aside.
-        #[test]
-        fn the_pdfdoc_encoding_matches_this_table() {
-            let forms = |typed: &str| -> Vec<(Encoding, Vec<u8>)> {
-                (Password(typed).encodings().iter())
-                    .filter(|e| e.encoding() != Encoding::Saslprep)
-                    .map(|e| (e.encoding(), e.as_bytes().to_vec()))
-                    .collect()
-            };
-            for b in 0..=255 {
-                if let Some(c) = pdf_doc_char(b) {
-                    assert_eq!(pdfium::pdf_doc_char(b), Some(c), "{b:#x}");
-                }
-                if let Some(c) = pdfium::pdf_doc_char(b) {
-                    let typed = format!("{c}Ł");
-                    let want = [
-                        (Encoding::Utf8, typed.as_bytes().to_vec()),
-                        (Encoding::PdfDoc, vec![b, 0x95]),
-                    ];
-                    assert_eq!(forms(&typed), want, "{b:#x}");
-                }
-            }
-            for c in ['\u{7F}', '\u{9F}', '\u{AD}'] {
-                let typed = format!("{c}Ł");
-                let want = [(Encoding::Utf8, typed.as_bytes().to_vec())];
-                assert_eq!(forms(&typed), want, "{c:?}");
-            }
-        }
-    }
-}
-
-/// The extensions a file declares, read from a [`Source`]
+/// The extensions a file declares, read from a
+/// [`Source`](pdf_structure::Source)
 /// ([`declared`](extension::declared)), and those the model names
 /// ([`named`](extension::named)): pdf-arlington's
 /// [`extension`](pdf_arlington::extension).
 pub mod extension {
     use std::collections::BTreeSet;
 
-    pub use pdf_arlington::extension::ISO;
-
     use pdf_arlington::extension::Claims;
-    use pdf_semantics::{Limits, xmp};
 
-    use crate::check::{Objects, Packet};
+    use crate::check::{Packet, read_packet};
     use crate::source::Source;
 
     /// Every extension the model names, in its cells and around its
     /// types, values and links: what a file can be checked under. It's
-    /// [`Grammar::extensions`](crate::Grammar::extensions) of the model
-    /// every check reads, [`grammar()`](crate::grammar()).
+    /// [`Grammar::extensions`](pdf_arlington::Grammar::extensions) of the
+    /// model every check reads, [`grammar()`](crate::grammar()).
+    #[must_use]
     pub fn named() -> BTreeSet<String> {
         crate::grammar().extensions()
     }
 
     /// The extensions `source` declares, as the model names them, from its
-    /// trailer's `/Root` and its metadata ([`Source::metadata`]), as
-    /// pdf-arlington's [`declared`](pdf_arlington::extension::declared)
-    /// reads them. Its metadata is read as XML by
-    /// [`pdf_semantics::xmp::read`], so a claim is one in the namespace it's
-    /// bound to; what a packet claims before anything that stops the read
-    /// counts.
+    /// trailer's `/Root` and its catalog's XMP packet, as pdf-arlington's
+    /// [`declared`](pdf_arlington::extension::declared) reads them. The
+    /// packet is read as XML by [`pdf_semantics::xmp::read`], so a claim is
+    /// one in the namespace it's bound to; what a packet claims before
+    /// anything that stops the read counts.
+    ///
+    /// Which packet is read depends on the source. Where it gives the
+    /// reader's own account of a stream's data ([`Source::decoded_within`]),
+    /// as a file's reading does, it's the data of the catalog's metadata
+    /// stream ([`metadata_stream`](pdf_semantics::xmp::metadata_stream)),
+    /// decrypted and decoded through its filters, as content is read: one
+    /// whose only fault is its Flate checksum is read whole
+    /// ([`checksummed`](crate::check::checksummed)), and one whose data
+    /// doesn't come whole (another fault, filters the reader doesn't take,
+    /// a password, the reader's own cap on a stream's data) claims nothing.
+    /// Where it gives no stream's data so, as a document alone doesn't, it's
+    /// the packet the document holds in plain view, unfiltered and not
+    /// encrypted ([`Source::metadata`]), as one read from a file holds it
+    /// and one made in memory is given it
+    /// ([`Document::set_metadata`](pdf_structure::Document::set_metadata)).
+    #[must_use]
     pub fn declared(source: &dyn Source) -> BTreeSet<String> {
         read(source).0
     }
 
-    /// What `source`'s metadata says, its packet read once: the extensions
-    /// it declares, as [`declared`] gives them; and the packet as read: the
-    /// catalog's metadata stream it's the data of, where that's known
-    /// ([`xmp::metadata_stream`]), what [`xmp::read`] told of it, kept,
-    /// each place naming that stream, at bytes of its data, and what stopped
-    /// the read, if anything did, after which nothing counts. An object on
-    /// the way to the stream that doesn't read leaves it not known.
+    /// What `source`'s metadata says, its packet read once, as [`declared`]
+    /// reads it ([`read_packet`]): the extensions it declares, as
+    /// [`declared`] gives them; and the packet as read: the catalog's
+    /// metadata stream it's the data of, where that's known
+    /// ([`metadata_stream`](pdf_semantics::xmp::metadata_stream)), what
+    /// [`xmp::read`](pdf_semantics::xmp::read) told of it, kept,
+    /// each place naming that stream, at bytes of its data, and what
+    /// stopped the read, if anything did, after which nothing counts; or
+    /// why it isn't read.
     pub(crate) fn read(source: &dyn Source) -> (BTreeSet<String>, Packet) {
         let resolve = |id| source.get(id).ok().cloned();
         let trailer = source.trailer().dict();
-        let mut packet = Packet::default();
-        let result = match source.metadata().as_deref() {
-            Some(xml) => {
-                let catalog = pdf_semantics::catalog(Objects(source), trailer)
-                    .ok()
-                    .flatten();
-                packet.stream = catalog
-                    .and_then(|catalog| xmp::metadata_stream(Objects(source), catalog).ok())
-                    .flatten();
-                packet.len = xml.len();
-                Some(xmp::read(
-                    xml,
-                    packet.stream,
-                    &Limits::DEFAULT,
-                    &mut packet.kept,
-                ))
-            }
-            None => None,
-        };
-        let read = match &result {
-            Some(Ok(claims)) => Some(claims),
-            Some(Err(error)) => Some(&error.read),
-            None => None,
-        };
+        let (read, packet) = read_packet(source, trailer);
         let mut claims = Claims::default();
-        claims.pdfa_part = read.and_then(|read| read.pdfa_part.as_deref());
-        claims.pdfvt_version = read.and_then(|read| read.pdfvt_version.as_deref());
+        claims.pdfa_part = read.pdfa_part.as_deref();
+        claims.pdfvt_version = read.pdfvt_version.as_deref();
         let declared = pdf_arlington::extension::declared(trailer.get(b"Root"), claims, &resolve);
-        packet.stopped = result.and_then(Result::err);
         (declared, packet)
     }
 
     #[cfg(test)]
     mod tests {
-        use pdf_semantics::Fault;
+        use pdf_objects::dict;
+        use pdf_semantics::{Fault, Limits, xmp};
 
         use super::*;
-        use crate::dict;
         use crate::object::{Object, ObjectId};
         use crate::source::Document;
         use crate::version::Version;
@@ -460,11 +460,63 @@ pub mod extension {
     }
 }
 
+/// The README's examples, run as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use crate::{Grammar, grammar, use_model};
+    use pdf_objects::text::{pdf_doc_char, pdfium};
+    use pdf_structure::pdf_crypt::{Encoding, Password};
+
+    use crate::grammar::Grammar;
+    use crate::{grammar, use_model};
+
+    /// The README is shown on crates.io and docs.rs, where a path beside the
+    /// crate reaches nothing: its licence link is the repository's URL, the
+    /// manifest's `repository` and the file, and every link it has is a URL,
+    /// so none is a path such as `../` (the crates it names are linked by
+    /// their folders in the repository). The crate is Apache-2.0 alone, as
+    /// the model it embeds and the parts adapted from TestGrammar are, so the
+    /// link is to `LICENSE-APACHE` alone. Nor is an item linked by
+    /// reference, `` [`name`] `` with no target, which rustdoc resolves and
+    /// crates.io shows as its brackets; a reference the README defines is a
+    /// URL too.
+    #[test]
+    fn the_readmes_licence_link_reaches_the_file() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        let link = format!("[LICENSE-APACHE]({repository}/blob/main/LICENSE-APACHE)");
+        assert!(
+            readme.contains(&link),
+            "LICENSE-APACHE's link isn't the repository's URL"
+        );
+        for (at, _) in readme.match_indices("](") {
+            let target = &readme[at + 2..];
+            let target = &target[..target.find(')').unwrap_or(target.len())];
+            assert!(
+                target.starts_with("https://"),
+                "a link isn't a URL: {target}"
+            );
+        }
+        for (at, _) in readme.match_indices("`]") {
+            let line = readme[..at].rsplit('\n').next().unwrap_or_default();
+            assert!(
+                readme[at + 2..].starts_with(['(', ':']),
+                "an item linked by reference: {line}`]"
+            );
+        }
+        let defined = (readme.lines()).filter_map(|line| line.split_once("]: "));
+        for (name, target) in defined.filter(|(name, _)| name.starts_with('[')) {
+            assert!(
+                target.starts_with("https://"),
+                "{name}]'s reference isn't a URL: {target}"
+            );
+        }
+    }
 
     /// A model that lacks a table the checker reads by name is refused,
     /// and the refusal names the table, word for word.
@@ -533,12 +585,49 @@ mod tests {
     /// word for word.
     #[test]
     fn a_model_is_chosen_before_anything_reads_one_or_not_at_all() {
-        grammar();
+        let _ = grammar();
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-arlington/model/tsv/latest");
         let e = use_model(Grammar::load(&dir).unwrap()).unwrap_err();
         assert_eq!(
             format!("{e:#}"),
             "the model is chosen already: something has read it"
         );
+    }
+
+    /// A password's encodings (pdf-crypt's [`Password::encodings`])
+    /// take [`pdfium::pdf_doc_char`] for PDFDocEncoding exactly, though
+    /// pdf-crypt keeps a copy of its own. With `Ł` after it, 0x95 in
+    /// PDFDocEncoding and in neither WinAnsiEncoding nor
+    /// MacRomanEncoding, a character a byte decodes to has its UTF-8
+    /// and that byte's PDFDocEncoding, no more; the Latin-1 characters
+    /// at the three bytes the table leaves undefined have their UTF-8
+    /// alone. Their SASLprep forms, where they have one (˘'s is a space
+    /// and a breve), are no table's, and left aside.
+    #[test]
+    fn the_pdfdoc_encoding_matches_this_table() {
+        let forms = |typed: &str| -> Vec<(Encoding, Vec<u8>)> {
+            (Password(typed).encodings().iter())
+                .filter(|e| e.encoding() != Encoding::Saslprep)
+                .map(|e| (e.encoding(), e.as_bytes().to_vec()))
+                .collect()
+        };
+        for b in 0..=255 {
+            if let Some(c) = pdf_doc_char(b) {
+                assert_eq!(pdfium::pdf_doc_char(b), Some(c), "{b:#x}");
+            }
+            if let Some(c) = pdfium::pdf_doc_char(b) {
+                let typed = format!("{c}Ł");
+                let want = [
+                    (Encoding::Utf8, typed.as_bytes().to_vec()),
+                    (Encoding::PdfDoc, vec![b, 0x95]),
+                ];
+                assert_eq!(forms(&typed), want, "{b:#x}");
+            }
+        }
+        for c in ['\u{7F}', '\u{9F}', '\u{AD}'] {
+            let typed = format!("{c}Ł");
+            let want = [(Encoding::Utf8, typed.as_bytes().to_vec())];
+            assert_eq!(forms(&typed), want, "{c:?}");
+        }
     }
 }

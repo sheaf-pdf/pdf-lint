@@ -97,6 +97,16 @@ impl KeyName {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
+
+    /// Whether the key was cut: longer than the bytes it holds, which are
+    /// then its first ([`as_bytes`](KeyName::as_bytes)), as its `Display`
+    /// marks with `…`. So a caller finds the key it's of in the hint
+    /// stream's dictionary as the one entry that begins with them and is
+    /// longer, where an uncut key is the entry equal to them.
+    #[must_use]
+    pub const fn cut(&self) -> bool {
+        self.cut
+    }
 }
 
 /// How many of `key`'s bytes a [`KeyName`] holds: all of them up to

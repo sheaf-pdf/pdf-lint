@@ -54,12 +54,17 @@
 //! the reader's, or through filters it doesn't take, or past a cap of the
 //! check's own ([`LIMITS`]), and a file whose bytes the source didn't give,
 //! are counted as not checked, once each, where the dictionary is held, and
-//! never as a finding.
+//! never as a finding. Of a file no password given opens, pdf-linearize
+//! reads no page tree and so builds no graph of its objects: where each
+//! page's objects are isn't judged, the page tree counted as not checked;
+//! its sections are, and its hint data where that's in the clear.
 
 use std::collections::HashMap;
 
 use pdf_linearize::Limits;
-use pdf_linearize::check::{Facts, Finding as Fault, Grade, Place, Raw, Sink, Unread, Verdict};
+use pdf_linearize::check::{
+    Facts, Finding as Fault, Grade, KeyName, Place, Raw, Sink, Unread, Verdict,
+};
 use pdf_linearize::hint::located;
 
 use super::content::times;
@@ -68,7 +73,7 @@ use super::told::Told;
 use super::{
     Finding, Hold, Linearized, Made, Rule, Walk, entry_at, first_object, linearization, object_path,
 };
-use crate::object::{Object, ObjectId, Span, Value};
+use crate::object::{Entry, Object, ObjectId, Span, Value};
 use crate::source::{Revision, Source};
 
 /// The table a linearization's findings are in: the model's for the
@@ -157,6 +162,24 @@ fn key(place: Option<Place>) -> String {
             | Place::Page(_),
         ) => "H".to_string(),
         _ => "-".to_string(),
+    }
+}
+
+/// The entry of a hint stream's dictionary, `entries`, that `key` is of: an
+/// uncut key's, the entry it holds the bytes of; a cut key's, which holds
+/// the key's first bytes alone ([`KeyName::cut`]), the one entry longer
+/// than them that begins with them, and none where no entry or more than
+/// one does, as which it's of can't be told.
+fn hint_entry(entries: &[Entry], key: KeyName) -> Option<&Entry> {
+    let held = key.as_bytes();
+    if !key.cut() {
+        return entries.iter().find(|e| e.key() == held);
+    }
+    let mut longer =
+        (entries.iter()).filter(|e| e.key().len() > held.len() && e.key().starts_with(held));
+    match (longer.next(), longer.next()) {
+        (Some(entry), None) => Some(entry),
+        _ => None,
     }
 }
 
@@ -381,9 +404,7 @@ impl<'a> Places<'a> {
                 let Value::Stream(stream) = written.value() else {
                     return None;
                 };
-                (stream.dict.entries().iter())
-                    .find(|e| e.key() == key.as_bytes())
-                    .and_then(entry_at)
+                hint_entry(stream.dict.entries(), key).and_then(entry_at)
             }
             Some(Place::Position(position)) => {
                 let (at, length) = self.stream;
@@ -699,7 +720,10 @@ mod tests {
     use pdf_linearize::check::HintData;
     use pdf_linearize::family::{self, linearize_bytes};
     use pdf_linearize::hint::{PageOffsets, SharedObjects};
+    use pdf_objects::dict;
     use pdf_structure::XrefKind;
+    use pdf_structure::pdf_crypt;
+    use pdf_structure::pdf_filters::{Level, Prediction};
     use pdf_structure::write::{self, Base, Deflate};
 
     use super::*;
@@ -707,8 +731,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::check::{Hold, Made, Options, Report, check, check_with_reading};
-    use crate::dict;
-    use crate::pdf_filters::{Level, Prediction};
 
     fn r(n: u32) -> Object {
         Object::reference(n)
@@ -786,7 +808,7 @@ mod tests {
 
     /// `file` opened by `passwords` and linearized, its hint stream's data
     /// stored as it is.
-    fn linearized(file: &[u8], passwords: &[crate::pdf_crypt::Password]) -> Vec<u8> {
+    fn linearized(file: &[u8], passwords: &[pdf_crypt::Password]) -> Vec<u8> {
         let mut options = family::Options::DEFAULT;
         options.deflate = stored();
         options.read.passwords = passwords;
@@ -1291,11 +1313,7 @@ mod tests {
     /// `file` linearized, its hint stream's data stored as it is, as
     /// [`linearized`], under its cross-reference streams with what may be
     /// packed in object streams where `pack` says.
-    fn linearized_packed(
-        file: &[u8],
-        passwords: &[crate::pdf_crypt::Password],
-        pack: bool,
-    ) -> Vec<u8> {
+    fn linearized_packed(file: &[u8], passwords: &[pdf_crypt::Password], pack: bool) -> Vec<u8> {
         let mut options = family::Options::DEFAULT;
         options.deflate = stored();
         options.kind = XrefKind::Stream;
@@ -1326,8 +1344,8 @@ mod tests {
     #[test]
     fn an_encrypted_linearized_files_hint_data_is_decrypted() {
         let id = b"0123456789abcdef";
-        let settings = crate::pdf_crypt::writer::Settings {
-            kind: crate::pdf_crypt::writer::Kind::Aes128,
+        let settings = pdf_crypt::writer::Settings {
+            kind: pdf_crypt::writer::Kind::Aes128,
             user: b"user",
             owner: b"owner",
             p: -4,
@@ -1341,7 +1359,7 @@ mod tests {
             .map(|id| (id.number, Body::from(doc.get(id).unwrap().clone())))
             .collect();
         let encrypted = fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) });
-        let user = [crate::pdf_crypt::Password("user")];
+        let user = [pdf_crypt::Password("user")];
         let file = linearized(&encrypted, &user);
         let mut options = bytes::Options::DEFAULT;
         options.passwords = &user;
@@ -2030,5 +2048,60 @@ mod tests {
                 crate::fuzz::check_file(&[&[a, b], &candidate[..]].concat());
             }
         }
+    }
+
+    /// Where a hint stream's key, as pdf-linearize holds it, is in the
+    /// stream's dictionary, the hint stream object 5 of a file whose
+    /// stream's dictionary has `entries`: the bytes of the entry found, its
+    /// key and value.
+    fn hint_key_at(entries: &str, key: &[u8]) -> Option<String> {
+        let stream = format!("<< {entries} /Length 0 >>\nstream\n\nendstream");
+        let objects: [(u32, &[u8]); 2] = [(1, b"<< /Type /Catalog >>"), (5, stream.as_bytes())];
+        let file = fixture::assembled("1.7", &objects, "<< /Size 6 /Root 1 0 R >>");
+        let read = WithReading::new(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let checked = Checked(&read);
+        let mut places = Places {
+            source: &checked,
+            after: None,
+            streams: HashMap::new(),
+            dict: None,
+            hint: Some(5),
+            data: None,
+            stream: (0, 0),
+            tables: Vec::new(),
+            numbers: None,
+            pages: Vec::new(),
+        };
+        let at = places.at(Some(Place::HintKey(KeyName::new(key))))?;
+        Some(String::from_utf8_lossy(&file[at.start()..at.end()]).into_owned())
+    }
+
+    /// A hint stream's key a finding is of is at its entry: a key of 15
+    /// bytes or fewer at the entry that is it; one longer, which
+    /// pdf-linearize holds the first 15 bytes of, cut
+    /// ([`KeyName::cut`]), at the one entry longer than those that begins
+    /// with them, though an entry is those bytes alone; and nowhere where
+    /// two entries begin with them, as which it's of can't be told, or
+    /// none does.
+    #[test]
+    fn a_hint_key_past_15_bytes_is_at_the_one_entry_it_begins() {
+        let (long, held) = (b"ABCDEFGHIJKLMNOP", b"ABCDEFGHIJKLMNO");
+        let entry = |text: &str| Some(text.to_string());
+        assert_eq!(hint_key_at("/S 0", b"S"), entry("/S 0"));
+        assert_eq!(
+            hint_key_at("/ABCDEFGHIJKLMNOP 1", long),
+            entry("/ABCDEFGHIJKLMNOP 1")
+        );
+        // Beside an entry that's the bytes held, each at its own.
+        let beside = "/ABCDEFGHIJKLMNO 2 /ABCDEFGHIJKLMNOP 1";
+        assert_eq!(hint_key_at(beside, long), entry("/ABCDEFGHIJKLMNOP 1"));
+        assert_eq!(hint_key_at(beside, held), entry("/ABCDEFGHIJKLMNO 2"));
+        // Two that begin with them: neither.
+        let two = "/ABCDEFGHIJKLMNOP 1 /ABCDEFGHIJKLMNOQ 2";
+        assert_eq!(hint_key_at(two, long), None);
+        assert_eq!(hint_key_at(two, b"ABCDEFGHIJKLMNOQ"), None);
+        // None that does: none, the bytes held alone an entry or not.
+        assert_eq!(hint_key_at("/ABCDEFGHIJKLMNO 2", long), None);
+        assert_eq!(hint_key_at("/S 0", long), None);
     }
 }

@@ -29,14 +29,14 @@ Most real-world PDFs already contain minor spec violations. If your software edi
 - **Arlington object grammar:** Key types, direct vs. indirect requirements, required keys (including inherited page attributes), allowed values, special-case predicates, PDF version introductions/deprecations (`--deprecations`), broken references, unlisted keys, and duplicate dictionary keys.
 - **Merged form fields & widgets:** Dictionaries that combine a single form field and widget annotation (ISO 32000-2 §12.5.6.19) are validated against both Arlington tables simultaneously unless `--one-table` is passed.
 - **Declared extensions:** Automatically enables extensions declared in `/Extensions` (`ADBE_Extn3`, `ETSI_PAdES`, `/ISO_` specs) or XMP metadata (`ISO_19005_3`, `PDF_VT2`), plus any passed via `--extensions` (such as `AAPL`, `OpenOffice`, `Malforms`).
-- **Page trees & viewer divergences (`page-tree`, `viewer`):** Validates `/Kids`, `/Parent`, `/Count`, cycles, and empty trees via [pdf-semantics](../pdf-semantics), and flags cases where a PDFium-based viewer sees a different page count, page object, or page box/rotation than strict ISO 32000-2 rules.
+- **Page trees & viewer divergences (`page-tree`, `viewer`):** Validates `/Kids`, `/Parent`, `/Count`, cycles, and empty trees via [pdf-semantics](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-semantics), and flags cases where a PDFium-based viewer sees a different page count, page object, or page box/rotation than strict ISO 32000-2 rules.
 - **Name and number trees (`tree`):** Checks `/Limits`, key ordering, duplicate/looping nodes, and empty intermediate nodes.
-- **XMP metadata (`xmp`):** Validates UTF-8 encoding and well-formed XML structure on uncompressed, unencrypted catalog metadata streams.
-- **Color spaces & fonts (`color-space`, `font`):** Validates Indexed lookup table lengths, ICC `/Alternate` component counts, Separation/DeviceN colorants, simple font `/Widths`, CIDFont `/DescendantFonts` and `/W` arrays, `/ToUnicode` and `/UseCMap` streams, and `/CapHeight` requirements on Latin fonts via [pdf-color](../pdf-color) and [pdf-fonts](../pdf-fonts).
+- **XMP metadata (`xmp`):** Validates UTF-8 encoding and well-formed XML structure of the catalog's metadata stream, decompressed and decrypted as content streams are.
+- **Color spaces & fonts (`color-space`, `font`):** Validates Indexed lookup table lengths, ICC `/Alternate` component counts, Separation/DeviceN colorants, simple font `/Widths`, CIDFont `/DescendantFonts` and `/W` arrays, `/ToUnicode` and `/UseCMap` streams, and `/CapHeight` requirements on Latin fonts via [pdf-color](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-color) and [pdf-fonts](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-fonts).
 - **Object streams (`packed`):** Flags prohibited entries inside object streams (nested streams, `/Encrypt`, `/Length` targets, linearization dictionaries, and unencrypted strings in encrypted files).
-- **Content streams (`balance`, `marked`, `operator`, `operands`, `resource`, `content`, `unused`):** Validates `q`/`Q` graphics-state balance, `BMC`/`BDC`/`EMC` nesting, allowed operator states (ISO 32000-2 Figure 9), Annex A operand counts/types, missing `/Resources` entries, lexical divergences between ISO 32000-2 and PDFium, and optionally `--unused` resources via [pdf-content-streams](../pdf-content-streams).
-- **Linearization (`linearization`, `updated`):** Validates Annex F layout, offsets, and hint tables via [pdf-linearize](../pdf-linearize) (with `--departures` for minor real-world deviations), and flags linearized files whose linearization was voided by a later incremental update.
-- **Low-level syntax & structure (`reader`):** Flags stream `/Length` mismatches, missing `endobj`, non-20-byte xref rows, trailing bytes past `%%EOF`, overlapping object-stream offsets, and filter/decryption faults via [pdf-structure](../pdf-structure).
+- **Content streams (`balance`, `marked`, `operator`, `operands`, `resource`, `content`, `unused`):** Validates `q`/`Q` graphics-state balance, `BMC`/`BDC`/`EMC` nesting, allowed operator states (ISO 32000-2 Figure 9), Annex A operand counts/types, missing `/Resources` entries, lexical divergences between ISO 32000-2 and PDFium, and optionally `--unused` resources via [pdf-content-streams](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-content-streams).
+- **Linearization (`linearization`, `updated`):** Validates Annex F layout, offsets, and hint tables via [pdf-linearize](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-linearize) (with `--departures` for minor real-world deviations), and flags linearized files whose linearization was voided by a later incremental update.
+- **Low-level syntax & structure (`reader`):** Flags stream `/Length` mismatches, missing `endobj`, non-20-byte xref rows, trailing bytes past `%%EOF`, overlapping object-stream offsets, and filter/decryption faults via [pdf-structure](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-structure).
 
 Checks that cannot be completed due to missing passwords, unsupported security handlers/filters, or resource caps are recorded in `not_checked` counts rather than guessed.
 
@@ -54,65 +54,75 @@ Arguments:
   <FILE>...  a file to check; - is standard input
 
 Options:
-      --hold <FILE>      hold only the objects FILE names, a line each:
-                         `12 0 built` or `3 0 merged`
-      --built            hold every object as built, so that a key the model
-                         doesn't list is a finding (by default, as merged)
-      --exempt <FILE>    keys a built object may have though the model doesn't
-                         list them, a name a line: `/MyKey`, or `/My*` for every
-                         key it begins
-      --unlisted <W>     which held objects a key the model doesn't list is a
-                         finding in: built (the default), all, or never; it's
-                         counted in any
-      --deprecations     find what the version checked at deprecates: a key, a
-                         type or a value (by default, counted only)
-      --unused           find each resource the content read never uses, as a
-                         font or an image its resources name for nothing (by
-                         default, counted only); not --unlisted's keys
-      --departures       find a linearized file's departures from Annex F
-                         that readers get past, as its errors are (by default,
-                         counted only)
-      --extensions <E>   check each FILE under these extensions too, besides
-                         those it declares: the model's names for them, a comma
-                         between (Malforms,AAPL)
-      --last-update      hold only the objects the newest incremental update
-                         wrote: those it rewrote as merged, new ones as built;
-                         and leave out what a rewritten object, or the trailer,
-                         already had in the revision it updates
-      --baseline <FILE>  leave out the findings FILE, the file each FILE was
-                         written from, already had: an incremental update of it
-                         object by object, a rewrite of it by where each finding
-                         is, or, where FILE has nothing there, anywhere in it
-      --pdf-version <V>  check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as
-                         the version its header and catalog give, and what it's
-                         set against, a baseline or the revision before an
-                         update, as V too
-      --model <DIR>      check against the tables in DIR, a checkout of the
-                         Arlington model's tsv/latest, as they are, not the
-                         embedded ones, whose cells that contradict ISO 32000-2
-                         are corrected
-      --one-table        check each object as one table, as TestGrammar does:
-                         a field and its widget merged in one dictionary as
-                         one of the two (by default, as both), and a key
-                         unlisted by the first table that reaches an object
-                         though another that does lists it
-      --allow <TSV>      leave out the findings TSV allows: a # header, then
-                         table, key, rule, file, version and reason, tab apart;
-                         a version, as the file is checked as
-      --full             print the whole report: tables, checks not made, keys
-                         the model doesn't list
-      --password <PW>    the files' password, user or owner, when it isn't
-                         empty: tried in its SASLprep form (RFC 4013) and as
-                         UTF-8, then in PDFDocEncoding, WinAnsiEncoding and
-                         MacRomanEncoding
-      --jobs <N>         check N files at once (by default, as many as there
-                         are CPUs); the report is in the files' order all the
-                         same
-      --format <F>       text (the default), or json: a line of JSON for each
-                         file, with its findings and the whole report's counts
-  -V, --version          print the version, and the model's commit,
-                         corrections, additions and hash
-  -h, --help             print this
+      --hold <FILE>           hold only the objects FILE names, a line each:
+                              `12 0 built` or `3 0 merged`
+      --built                 hold every object as built, so that a key the
+                              model doesn't list is a finding
+                              (by default, as merged)
+      --exempt <FILE>         keys a built object may have though the model
+                              doesn't list them, a name a line: `/MyKey`, or
+                              `/My*` for every key it begins
+      --unlisted <W>          which held objects a key the model doesn't list is
+                              a finding in: built (the default), all, or never;
+                              it's counted in any
+      --deprecations          find what the version checked at deprecates: a
+                              key, a type or a value (by default, counted only)
+      --unused                find each resource the content read never uses, as
+                              a font or an image its resources name for nothing
+                              (by default, counted only); not --unlisted's keys
+      --departures            find a linearized file's departures from Annex F
+                              that readers get past, as its errors are
+                              (by default, counted only)
+      --extensions <E>        check each FILE under these extensions too,
+                              besides those it declares: the model's names for
+                              them, a comma between (Malforms,AAPL)
+      --last-update           hold only the objects the newest incremental
+                              update wrote: those it rewrote as merged, new
+                              ones as built; and leave out what a rewritten
+                              object, or the trailer, already had in the
+                              revision it updates
+      --baseline <FILE>       leave out the findings FILE, the file each FILE
+                              was written from, already had: an incremental
+                              update of it object by object, a rewrite of it by
+                              where each finding is, or, where FILE has nothing
+                              there, anywhere in it
+      --pdf-version <V>       check each FILE as PDF V, 1.0 to 1.7 or 2.0, not
+                              as the version its header and catalog give, and
+                              what it's set against, a baseline or the revision
+                              before an update, as V too
+      --model <DIR>           check against the tables in DIR, a checkout of the
+                              Arlington model's tsv/latest, as they are, not the
+                              embedded ones, whose cells that contradict
+                              ISO 32000-2 are corrected
+      --one-table             check each object as one table, as TestGrammar
+                              does: a field and its widget merged in one
+                              dictionary as one of the two (by default, as
+                              both), and a key unlisted by the first table
+                              that reaches an object though another that
+                              does lists it
+      --allow <TSV>           leave out the findings TSV allows: a # header,
+                              then table, key, rule, file, version and reason,
+                              tab apart; a version, as the file is checked as
+      --full                  print the whole report: tables, checks not made,
+                              keys the model doesn't list
+      --password <PW>         the files' password, user or owner, when it isn't
+                              empty: tried in its SASLprep form (RFC 4013) and
+                              as UTF-8, then in PDFDocEncoding, WinAnsiEncoding
+                              and MacRomanEncoding; it's in the process's
+                              arguments, which others on the machine may read:
+                              --password-file keeps it out
+      --password-file <FILE>  the files' password, as --password takes it, but
+                              read from FILE's first line, its line end off, and
+                              no further; - is standard input
+      --jobs <N>              check N files at once (by default, as many as
+                              there are CPUs); the report is in the files' order
+                              all the same
+      --format <F>            text (the default), or json: a line of JSON for
+                              each file, with its findings and the whole
+                              report's counts
+  -V, --version               print the version, and the model's commit,
+                              corrections, additions and hash
+  -h, --help                  print this
 
 It exits 0 when every file is clean, 1 when there are findings, and 2
 when a file can't be read or the command line is wrong.
@@ -145,17 +155,18 @@ cargo install --locked --path crates/pdf-lint
 
 Depend on `pdf-lint` with `default-features = false` to omit CLI-only dependencies (`clap`, `serde`, `serde_json`, `anyhow`):
 
-- **`pdf_lint::check(&source, &options)`** validates any [`pdf_structure::Source`] implementation (such as an in-memory `Document`).
-- **`pdf_lint::check_with_reading(&with_reading, &options)`** additionally inspects decoded streams, historical revision prefixes, and Annex F linearization using `bytes::WithReading`.
+- **`pdf_lint::check(&source, &hold, &options)`** validates the objects `hold` names in any `pdf_structure::Source` implementation (such as an in-memory `Document`), and the content, font, and metadata streams it gives decoded.
+- **`pdf_lint::check_with_reading(&file, &hold, &options)`** additionally inspects historical revision prefixes and Annex F linearization using `pdf_structure::WithReading`.
+- **`pdf_lint::pdf_structure`**, **`pdf_lint::pdf_objects`**, and **`pdf_lint::pdf_arlington`** re-export the crates whose types these take and give, at the exact alpha versions `pdf-lint` uses: a `pdf-lint` release that takes a new alpha of one is a minor one, so name them through these re-exports, or at those versions.
 - **`Report::since`**, **`Report::by_path`**, and **`Report::beyond`** provide programmatic baseline and incremental filtering.
-- **`use_model(Grammar::load(dir)?)`** overrides the embedded Arlington grammar before the first check runs.
+- **`use_model(pdf_arlington::Grammar::load(dir)?)`** overrides the embedded Arlington grammar before the first check runs.
 
 ## Embedded Arlington Model & Corrections
 
-[pdf-arlington](../pdf-arlington) embeds upstream's `tsv/latest` tables at a pinned commit (`pdf_lint::COMMIT`) and applies a small set of spec-backed corrections (`grammar::corrections()`) and additions (`grammar::additions()`) where upstream contradicts ISO 32000-2 (for example: `/DA` on non-variable-text button fields, `fn:IsFullyQualifiedFieldName` on hide actions, optional `/DecodeParms` length checks, `SMaskInData` defaults, legacy PDF 1.4 `/DR` on fields, and PDF 1.0 `EncodingMap` dictionaries). Pass `--model <DIR>` to check against an unmodified upstream `tsv/latest` directory instead.
+[pdf-arlington](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-arlington) embeds upstream's `tsv/latest` tables at a pinned commit (`pdf_arlington::COMMIT`) and applies a small set of spec-backed corrections (`pdf_arlington::grammar::corrections()`) and additions (`pdf_arlington::grammar::additions()`) where upstream contradicts ISO 32000-2 (for example: `/DA` on non-variable-text button fields, `fn:IsFullyQualifiedFieldName` on hide actions, optional `/DecodeParms` length checks, `SMaskInData` defaults, legacy PDF 1.4 `/DR` on fields, and PDF 1.0 `EncodingMap` dictionaries). Pass `--model <DIR>` to check against an unmodified upstream `tsv/latest` directory instead.
 
 ## License
 
-Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)).
+Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)).
 
 The embedded Arlington PDF Model and logic adapted from upstream `TestGrammar` (Copyright 2020–2022 PDF Association, Inc.) are also licensed under Apache-2.0; release archives bundle `ARLINGTON-NOTICE.txt`, `THIRD-PARTY-NOTICES.txt`, and font metric notices.

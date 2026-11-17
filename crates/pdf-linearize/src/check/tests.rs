@@ -2706,6 +2706,33 @@ fn a_keys_name_is_cut_at_a_character_and_marked() {
     assert_eq!(format!("{key:?}"), format!("/{}…", a(14)));
 }
 
+/// A key's name says whether it was cut: a key of 15 bytes or fewer isn't,
+/// one longer is, though the bytes it holds are as many, or fewer where a
+/// character runs past the 15th; and two keys that differ only past them
+/// hold the same bytes, both cut.
+#[test]
+fn a_keys_name_says_whether_its_cut() {
+    let a = |n: usize| "a".repeat(n);
+    for n in [0, 1, 14, 15] {
+        let name = KeyName::new(a(n).as_bytes());
+        assert!(!name.cut(), "{n} bytes");
+        assert_eq!(name.as_bytes(), a(n).as_bytes());
+    }
+    let long = KeyName::new(a(16).as_bytes());
+    assert!(long.cut());
+    let whole = KeyName::new(a(15).as_bytes());
+    assert_eq!(long.as_bytes(), whole.as_bytes());
+    assert_ne!(long, whole, "the same bytes, one cut");
+    let across = KeyName::new(format!("{}€", a(14)).as_bytes());
+    assert_eq!((across.as_bytes(), across.cut()), (a(14).as_bytes(), true));
+    let (one, two) = (format!("{}b", a(15)), format!("{}c", a(15)));
+    let (one, two) = (KeyName::new(one.as_bytes()), KeyName::new(two.as_bytes()));
+    assert_eq!(one, two);
+    assert!(one.cut() && two.cut());
+    // In a constant too.
+    const { assert!(!KeyName::new(b"S").cut()) };
+}
+
 /// The attributes are listed in the order they're declared, as a table
 /// indexed by them has them; each says its key, and is shown with its slash,
 /// as a finding of one says it.

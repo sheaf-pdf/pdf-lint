@@ -85,9 +85,14 @@
 //! be used ([`Rule::Operator`]) and with the operands it takes
 //! ([`Rule::Operands`]), each resource name it uses in its resources
 //! ([`Rule::Resource`]), and read as ISO reads it, to its end
-//! ([`Rule::Content`]). One that isn't read, its data not decoded cleanly,
-//! is counted as not checked. Then what the resources of the content read
-//! hold that none of it uses ([`Rule::Unused`]), when asked for
+//! ([`Rule::Content`]). One that isn't read is counted as not checked: its
+//! data not given, or past the budget or what's read of one unit, or not
+//! decoded cleanly, but for a Flate checksum alone, which is read past and
+//! found as the reader's ([`checksummed`], [`Rule::Reader`]); or, where it
+//! may hold an inline image, the color spaces it may use, or its resources,
+//! not read for the reader's own reason, so that where an image's data
+//! ends can't be told. Then what the resources of the content read hold
+//! that none of it uses ([`Rule::Unused`]), when asked for
 //! ([`Options::unused`]), else counted only ([`Report::unused`]).
 //!
 //! The common structures are read through pdf-semantics: before the walk,
@@ -107,11 +112,16 @@
 //! read, or a password or a cap stops PDFium's walk alone, the two aren't
 //! set side by side, which is counted as not checked.
 //! Last, the catalog's XMP packet, as it's read for the extensions the
-//! file declares (14.3.2): what that read tells of it, and XML that stops
-//! it, a [`Rule::Xmp`] finding in its metadata stream, at the bytes in its
-//! data, each kind once; a packet longer, deeper or binding more
-//! namespaces at once than is read counted as not checked, as is one whose
-//! stream isn't known.
+//! file declares (14.3.2): its metadata stream's data decrypted and
+//! decoded through its filters, where the source gives that, as a reading
+//! does, else the packet a document holds in plain view
+//! ([`extension::declared`](crate::extension::declared)). What that read
+//! tells of it, and XML that stops it, a [`Rule::Xmp`] finding in its
+//! metadata stream, at the bytes in its data, each kind once; a packet
+//! longer, deeper or binding more namespaces at once than is read counted
+//! as not checked, as is one whose stream isn't known, and one not read for
+//! what isn't the file's fault, its stream's data not given whole or the
+//! way to it not read.
 //!
 //! Then each color space and font the walk reached in the newest revision,
 //! as one of the model's color space or font tables, is read again, in the
@@ -223,10 +233,11 @@ use std::rc::Rc;
 
 use pdf_objects::{Resolve, Unreadable};
 use pdf_semantics::date::Date;
+use pdf_structure::pdf_filters;
 use pdf_structure::write::KeptOut;
 
 use crate::bytes::Fault;
-use crate::bytes::{ByteSource, WithReading};
+use crate::bytes::{self, ByteSource, WithReading};
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
@@ -246,7 +257,7 @@ mod told;
 
 use reading::{Readings, Reads};
 use rows::{Rows, rows};
-pub(crate) use structure::Packet;
+pub(crate) use structure::{Packet, read_packet};
 
 /// How deeply direct objects may nest in an indirect one before the walk
 /// stops going in. A real file nests a few.
@@ -280,10 +291,16 @@ pub const CONTENT_BUDGET: usize = 2 << 30;
 /// How many bytes of fonts' streams a check of a file decodes in all, their
 /// `/ToUnicode`s, embedded CMaps and Type 3 glyphs, unless
 /// [`Options::font_budget`] says another: 256 MiB. A font whose streams
-/// decode past what's left of it isn't read.
+/// decode past what's left of it isn't read whole: what it told before the
+/// budget ran out is found, and it's counted as not checked.
 pub const FONT_BUDGET: usize = 256 << 20;
 
 /// How a writer made an object it wrote.
+///
+/// Exhaustive on purpose: an object a writer wrote is built whole or
+/// written over a source's, as a hold file says (`built`, `merged`), so a
+/// match on both is checked by the compiler; another would be a breaking
+/// release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Made {
     /// Built whole: every key in it is the writer's.
@@ -299,6 +316,10 @@ pub enum Made {
 /// ([`Hold::Only`]), a cross-reference stream's where its number is among
 /// them, as a hold names objects by number, and a table's never, as it
 /// has no number.
+///
+/// Exhaustive on purpose: a hold is every object or the ones it names, so
+/// a match on both is checked by the compiler; another would be a breaking
+/// release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hold {
     /// Every object in the file.
@@ -310,8 +331,12 @@ pub enum Hold {
 impl Hold {
     /// The objects a hold file names: a line each, its object's number,
     /// generation and how it was made (`12 0 built`, `3 0 merged`), and
-    /// `#` lines and blank ones besides. A [`HoldError`] names the line
-    /// that doesn't read, or that names an object a second time.
+    /// `#` lines and blank ones besides.
+    ///
+    /// # Errors
+    ///
+    /// A [`HoldError`] names the line that doesn't read, or that names an
+    /// object a second time.
     pub fn parse(text: &str) -> Result<Hold, HoldError> {
         let mut objects = BTreeMap::new();
         for (i, line) in text.lines().enumerate() {
@@ -454,13 +479,17 @@ pub struct Options {
     /// walk reaches and those read before it to tell which have Latin
     /// characters, through a source that gives streams' data
     /// ([`Streams::decoded`](pdf_objects::Streams::decoded)): none for
-    /// [`FONT_BUDGET`]. A font whose
-    /// streams decode past what's left of it isn't read, and is counted as
-    /// not checked ([`Rule::Font`]).
+    /// [`FONT_BUDGET`]. A font whose streams decode past what's left of it
+    /// isn't read whole: what it told before the budget ran out is found
+    /// ([`Rule::Font`]), and it's counted as not checked.
     pub font_budget: Option<usize>,
 }
 
 /// Which held objects a key the model doesn't list is a finding in.
+///
+/// Exhaustive on purpose: built objects, every held one, or none, as the
+/// command line's `--unlisted` names them, so a match on the three is
+/// checked by the compiler; another would be a breaking release.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UnlistedIn {
     /// Built objects only: a merged object's may be its source's.
@@ -476,7 +505,8 @@ pub enum UnlistedIn {
 
 impl UnlistedIn {
     /// As the command line names it: `built`, `all` or `never`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             UnlistedIn::Built => "built",
             UnlistedIn::All => "all",
@@ -485,6 +515,7 @@ impl UnlistedIn {
     }
 
     /// The one `name` names.
+    #[must_use]
     pub fn named(name: &str) -> Option<UnlistedIn> {
         [UnlistedIn::Built, UnlistedIn::All, UnlistedIn::Never]
             .into_iter()
@@ -493,8 +524,14 @@ impl UnlistedIn {
 }
 
 /// A key a writer writes on purpose that the model doesn't list.
+///
+/// Exhaustive on purpose: a name and whether it's a prefix, which a caller
+/// may gather by hand as well as [`Exempt::parse`] reads them, so it's
+/// built by its fields; a field more would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exempt {
+    /// The key: a name's bytes, without its `/`, its `#xx` escapes
+    /// decoded.
     pub name: Vec<u8>,
     /// Whether any key it begins is exempt too.
     pub prefix: bool,
@@ -505,8 +542,11 @@ impl Exempt {
     /// writes one, its `#xx` escapes decoded (`/MyKey`), or with a `*`
     /// after it for every key it begins (`/My*`; a name that ends in a
     /// star is written `/My#2A`); and `#` lines and blank ones besides.
-    /// An [`ExemptError`] names the line that doesn't read, or that names
-    /// a key a second time.
+    ///
+    /// # Errors
+    ///
+    /// An [`ExemptError`] names the line that doesn't read, or that names a
+    /// key a second time.
     pub fn parse(text: &str) -> Result<Vec<Exempt>, ExemptError> {
         use pdf_tokenizer::decode::How;
         use pdf_tokenizer::{Kind, Tokenizer};
@@ -612,6 +652,9 @@ pub enum ExemptError {
 }
 
 /// What a finding breaks.
+///
+/// Not exhaustive: a rule can come in a minor release, so a match on them
+/// takes a wildcard. [`Rule::ALL`] lists every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Rule {
@@ -688,7 +731,13 @@ pub enum Rule {
     /// object without `endobj`, a name's stray `#` or `#00`, a
     /// cross-reference table's rows not 20 bytes, a file whose last line
     /// isn't `%%EOF` alone, an object an object stream's header starts
-    /// inside another's bytes, and the like ([`Fault`]), in its words.
+    /// inside another's bytes, and the like ([`Fault`]), in its words. Not
+    /// bytes before the header, which ISO 32000-2 allows (7.5.2): the file's
+    /// offsets count from the header, so nothing is chosen there. And a
+    /// content or metadata stream whose Flate checksum doesn't match, which
+    /// the check reads whole past that ([`checksummed`]), in the reader's
+    /// words for it, where the check reads it: a content stream where its
+    /// unit is read, not where another fault leaves the unit unread.
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
@@ -859,8 +908,12 @@ pub enum Rule {
     Viewer,
     /// XMP metadata that breaks ISO 32000-2 14.3.2, as pdf-semantics reads
     /// the packet of the catalog's metadata stream for the extensions a
-    /// file declares, where the stream is in plain view, unfiltered and
-    /// unencrypted, whatever the file's version, as content is: an encoding
+    /// file declares, whatever the file's version, as content is: the
+    /// stream's data decrypted and decoded through its filters, where the
+    /// source gives that, as a reading does, a stream whose only fault is
+    /// its Flate checksum whole ([`checksummed`]); else the packet a
+    /// document holds in plain view, unfiltered and not encrypted
+    /// ([`extension::declared`](crate::extension::declared)). An encoding
     /// other than UTF-8, where it's to be UTF-8 (with its erratum 296), as a
     /// mark of UTF-16 or UTF-32 it begins with says, or a zero byte among
     /// its first four, at those bytes, after which nothing of it is read; an
@@ -876,11 +929,18 @@ pub enum Rule {
     /// longer, nested deeper or binding more namespaces at once than
     /// pdf-semantics reads is counted as not checked, its column and key
     /// `-`, its table `Metadata`, where the stream is held, and what was read
-    /// before is found all the same. A packet whose stream isn't known, as a
-    /// document's given its packet with no `/Metadata` to name the stream,
-    /// has what it tells counted so, once, and what stops it too, where the
-    /// catalog is held, never found in no object. What it claims is read the
-    /// same whatever it tells.
+    /// before is found all the same. One not read, for what isn't the
+    /// file's fault, is counted so too, where the stream is held, else
+    /// where the catalog is: its stream's data not given whole (a fault but
+    /// its checksum, filters the reader doesn't take, a password, or the
+    /// reader's own cap on a stream's data, which cuts it off no further
+    /// than what's read of a packet), or an object on the way to it, the
+    /// catalog among them, not read for a password, a cap or the source. A
+    /// packet whose stream isn't known, as a document's given its packet
+    /// with no `/Metadata` to name the stream, has what it tells counted
+    /// so, once, and what stops it too, where the catalog is held, never
+    /// found in no object. What it claims is read the same whatever it
+    /// tells.
     Xmp,
     /// A color space that breaks ISO 32000-2 (8.6.3 to 8.6.6.5, 8.7.3.3),
     /// as pdf-color reads each the walk reached in the newest revision as
@@ -1012,10 +1072,9 @@ pub enum Rule {
     /// isn't read whole, is counted as not checked, once for each, its
     /// column and key `-`, its table the font's, where the font, or the
     /// object it's written in, is held; what was read of it before is found
-    /// all the same, but what's told once an object doesn't read, which the
-    /// read goes on past as if it weren't there, isn't. A font that asks a
-    /// stream's data of a source that gives none, as a document alone,
-    /// isn't read, nor counted.
+    /// all the same, and pdf-fonts tells nothing after. A font that asks a
+    /// stream's data of a source that doesn't hold it, as a document read
+    /// from a file, isn't read, nor counted.
     Font,
     /// A linearized file that doesn't hold to ISO 32000-2's Annex F, as
     /// pdf-linearize's check judges it from the file's reading, where the
@@ -1063,7 +1122,10 @@ pub enum Rule {
     /// at or inside the array, whose elements the model checks each. A hint
     /// stream whose data is encrypted and not decrypted, so not read, is
     /// counted as not checked, its column and key `-`, where the dictionary
-    /// is held, as is a file whose bytes the source didn't give.
+    /// is held, as is a file whose bytes the source didn't give. Of a file
+    /// no password given opens, where each page's objects are isn't judged,
+    /// as its page tree isn't read, which is counted so too; its sections
+    /// are, and its hint data where that's in the clear.
     Linearization,
     /// A file linearized as first written and updated after, where the
     /// check has its reading ([`check_with_reading`]): its first object, a
@@ -1083,13 +1145,19 @@ pub enum Rule {
 }
 
 /// A rule a held object breaks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release. Its `Debug` shows none of the file's
+/// text, so a finding is compared by `==` or by its fields, not by that.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Finding {
     /// The indirect object it's in: none for a table's trailer, the file
     /// as a whole, or a linearization dictionary as first written whose
     /// number a later revision wrote again ([`Rule::Linearization`]).
     pub object: Option<ObjectId>,
+    /// How the writer made the object it's in, as the hold says; the
+    /// trailer's, an earlier revision's and the file's as a whole merged.
     pub made: Made,
     /// Where the walk reached it: from the trailer,
     /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer; from an
@@ -1107,7 +1175,9 @@ pub struct Finding {
     /// [`Rule::Resource`] or [`Rule::Unused`] one, `-` for the finding past
     /// a unit's 32 names.
     pub table: String,
+    /// The key of the row it breaks, as [`Finding::table`] says.
     pub key: String,
+    /// The rule it breaks.
     pub rule: Rule,
     /// The value as written (its first entries, names and strings cut
     /// short), and what's wrong with it; its display shows the first 80
@@ -1119,7 +1189,8 @@ pub struct Finding {
     /// stream, or what's wrong in an XMP packet in its metadata stream, at
     /// its bytes in the stream's decoded data, which
     /// [`Source::decoded_within`] gives (where [`Source::held`] gives an
-    /// object stream's).
+    /// object stream's), and of a stream whose only fault is its Flate
+    /// checksum, [`checksummed`] of its error.
     pub at: Option<Span>,
     /// The earlier revision whose trailer it's in, a table's or a
     /// cross-reference stream, or in what's direct in it, counted from the
@@ -1130,16 +1201,27 @@ pub struct Finding {
 
 /// A key or element of held objects that the model doesn't list: no row
 /// has it, and its table has no wildcard.
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct Unlisted {
+    /// The table of the object it's in.
     pub table: String,
+    /// The key, or an array's element's index, as findings write it.
     pub key: String,
+    /// What kind of name it is.
     pub class: Class,
 }
 
 /// What kind of name a key the model doesn't list is (ISO 32000-2 Annex
 /// E), as TestGrammar tells (`is_second_class_pdf_name` and
 /// `is_third_class_pdf_name`, `TestGrammar/src/Utils.cpp`).
+///
+/// Exhaustive on purpose: Annex E's second and third classes, a key the
+/// model has under an extension, and any other, so a match on the four is
+/// checked by the compiler; another would be a breaking release.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Class {
     /// A second-class name: a registered prefix of four or five letters,
@@ -1164,12 +1246,16 @@ pub enum Class {
 /// or number tree not read whole for what isn't the file's fault, its
 /// column `-`, its table and key the row's whose value its root is; or the
 /// page tree not read so, or a viewer's pages not set beside it, its column
-/// and key `-`, its table `PageTreeNodeRoot`; or an XMP packet not read
-/// whole, or whose stream isn't known, its column and key `-`, its table
-/// `Metadata`; or a color space or a font not read whole for what isn't
-/// the file's fault, its column and key `-`, its table the space's or the
-/// font's.
+/// and key `-`, its table `PageTreeNodeRoot`; or an XMP packet not read,
+/// or not read whole, or whose stream isn't known, its column and key `-`,
+/// its table `Metadata`; or a color space or a font not read whole for what
+/// isn't the file's fault, its column and key `-`, its table the space's or
+/// the font's.
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct Unchecked {
     /// The column whose cell it is.
     pub column: &'static str,
@@ -1183,19 +1269,30 @@ pub struct Unchecked {
     /// for a tree, or the page tree, why it isn't read whole (an object of
     /// it that takes a password), or why a viewer's pages aren't set beside
     /// the page tree's (an object of it that doesn't read); for an XMP
-    /// packet, why it isn't read whole (it nests deeper than is read), or
-    /// that what it tells can't be placed, its stream not known; for a
-    /// color space or a font, why it isn't read whole (an object of it that
-    /// takes a password, a font's streams past the file's budget for them).
+    /// packet, why it isn't read (its stream's data doesn't decode cleanly,
+    /// an object on the way to it takes a password), or isn't read whole
+    /// (it nests deeper than is read), or that what it tells can't be
+    /// placed, its stream not known; for a color space or a font, why it
+    /// isn't read whole (an object of it that takes a password, a font's
+    /// streams past the file's budget for them).
     pub why: String,
+    /// The table it's counted under: the row's whose check it is, or as
+    /// said above of each kind.
     pub table: String,
+    /// The key it's counted under: the row's whose check it is, or as said
+    /// above of each kind.
     pub key: String,
 }
 
 /// What a check of a file found in its held objects.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+///
+/// Not exhaustive: read by its fields, and made only by a check, so a
+/// field more is a minor release. Its `Debug` shows none of the file's
+/// text, as [`Finding`]'s doesn't.
+#[derive(Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Report {
+    /// What it found, in the order the check found it.
     pub findings: Vec<Finding>,
     /// Held objects checked, by table; tree nodes as `name-tree` and
     /// `number-tree`.
@@ -1208,10 +1305,11 @@ pub struct Report {
     /// looked up, and resources that can't be told used or not; name and
     /// number trees whose roots are held not read whole for what isn't the
     /// file's fault, and the page tree, or a viewer's pages not set beside
-    /// it, where its catalog is held; the XMP packet not read whole, where
-    /// its stream is held, or whose stream isn't known, where the catalog
-    /// is; and color spaces and fonts not read whole for what isn't the
-    /// file's fault, where each, or what it's written in, is held; by why.
+    /// it, where its catalog is held; the XMP packet not read, or not read
+    /// whole, where its stream is held, else where the catalog is, or whose
+    /// stream isn't known, where the catalog is; and color spaces and fonts
+    /// not read whole for what isn't the file's fault, where each, or what
+    /// it's written in, is held; by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -1252,9 +1350,18 @@ pub struct Report {
     pub paths: BTreeSet<String>,
     /// Units of content read, of those held: a page's streams as one, or a
     /// form's, a pattern's or a Type 3 glyph's alone; none where the source
-    /// gives no stream's data ([`Source::decoded_within`]), so that none
-    /// read is told from none found in. One whose data doesn't decode
-    /// cleanly isn't read, and is counted in [`Report::unchecked`].
+    /// gives no account of a stream's decode ([`Source::decoded_within`]),
+    /// as a document alone doesn't, though it gives a font the streams it
+    /// holds as bytes ([`check`]), so that none read is told from none
+    /// found in. One isn't read, and is counted in [`Report::unchecked`],
+    /// where a stream of it doesn't decode cleanly, but for its Flate
+    /// checksum alone ([`checksummed`]), or isn't given, or it's past what's
+    /// read of one unit or past [`Options::content_budget`]; or where it may
+    /// hold an inline image, and the color spaces its resources name, or
+    /// the resources themselves, don't read for the reader's own reason (a
+    /// password, a cap, the source), so where an image's data ends can't be
+    /// told. Resources that don't read otherwise leave it read, its names
+    /// not looked up, which is counted there too.
     pub content: usize,
     /// Resources of held objects that nothing in the content read uses, by
     /// table and key, `Resource` and the category: findings too with
@@ -1277,6 +1384,9 @@ pub struct Report {
 
 /// What a file that says it's linearized is (ISO 32000-2, Annex F), as
 /// [`Report::linearized`] has it.
+///
+/// Not exhaustive: a check may come to tell another state of a
+/// linearization in a minor release, so a match on them takes a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Linearized {
@@ -1302,7 +1412,8 @@ pub enum Linearized {
 impl Linearized {
     /// Its name, as the JSON report writes it: `holds`, `fails`, `updated`
     /// or `not-taken`.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Linearized::Holds => "holds",
             Linearized::Fails => "fails",
@@ -1333,15 +1444,38 @@ impl Linearized {
 /// ([`Rule::ColorSpace`]) and pdf-fonts ([`Rule::Font`]), the fonts'
 /// streams within [`Options::font_budget`], those whose descriptor lacks
 /// `/CapHeight` read before the walk, as the predicates read which fonts
-/// have Latin characters (`fn:FontHasLatinChars`). Where `source` gives no
-/// stream's data, as a document alone doesn't, a font that asks one isn't
-/// read, and nothing in the report counts it, where [`Report::content`]
-/// says that no content was read.
+/// have Latin characters (`fn:FontHasLatinChars`).
 /// A trailer the reader couldn't read so is a finding, and the walk starts
 /// from what it made of the file instead. What only a file's reading gives,
 /// what an earlier revision had at a number a later one wrote over or
 /// freed, and whether a linearized file's linearization holds,
 /// [`check_with_reading`] reads too.
+///
+/// What's read of streams is what `source` gives. Content is read from the
+/// reader's own account of a stream's decode, every fault of it
+/// ([`Source::decoded_within`]), a stream whose only fault is its Flate
+/// checksum read whole ([`checksummed`]), which a file's reading gives, and a
+/// document read beside it ([`WithReading`]), and a document alone
+/// doesn't: of one, no content is read, which [`Report::content`] says, as
+/// 0. So is the catalog's XMP packet, decrypted and decoded through its
+/// filters; of a document alone, the packet it holds in plain view,
+/// unfiltered and not encrypted, as one read from a file holds it and one
+/// made in memory is given it
+/// ([`extension::declared`](crate::extension::declared)). A font's streams
+/// are read as a viewer takes them
+/// ([`Streams::decoded`](pdf_objects::Streams::decoded)), which a document
+/// gives of each stream it holds as bytes, as one made in memory holds
+/// them, and not of a stream whose data is where its file wrote it, as a
+/// document read from a file has every stream but the object streams it
+/// decoded whole: a font that asks one of those isn't read, and nothing in
+/// the report counts it. A file's reading itself, a
+/// [`Reading`](crate::bytes::Reading) given here as the source, answers of
+/// what it has read when it's asked, not of the whole read: its faults
+/// ([`Source::faults`], the [`Rule::Reader`] findings) and an object
+/// stream's data ([`Source::held`]) are those of what it has read by then.
+/// The command line checks a [`WithReading`], the file read whole beside
+/// its reading, through [`check_with_reading`].
+#[must_use]
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     check_in(source, None, hold, options)
 }
@@ -1374,6 +1508,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
 /// first written, judged so of the file's first bytes, up to where its
 /// `/L` says, read as a file of their own under the file's reading's own
 /// limits.
+#[must_use]
 pub fn check_with_reading<S: ByteSource>(
     file: &WithReading<S>,
     hold: &Hold,
@@ -1565,6 +1700,11 @@ fn walking<R>(
         containers: Vec::new(),
         holders: Vec::new(),
         resources_at: HashMap::new(),
+        // The packet's stream, read whole past its checksum, is found so
+        // with content's.
+        checksums: (packet.stream.filter(|_| packet.checksummed))
+            .into_iter()
+            .collect(),
         page_tree,
         page_tree_at: HashMap::new(),
         roots: Vec::new(),
@@ -1607,6 +1747,7 @@ fn walking<R>(
 impl Report {
     /// The held objects checked: those [`Report::checked`] counts, each
     /// once though it counts one checked as two tables as each.
+    #[must_use]
     pub fn objects(&self) -> usize {
         self.checked.values().sum::<usize>() - self.two_tables
     }
@@ -1636,6 +1777,7 @@ impl Report {
     /// for the file's version in it is carried when a source's trailer has
     /// one too: what's too new is the form, as a cross-reference stream
     /// below PDF 1.5 is, which an incremental update goes on writing.
+    #[must_use]
     pub fn beyond<'a>(&'a self, sources: &[&Report]) -> Vec<&'a Finding> {
         let carried: HashSet<_> = (sources.iter())
             .flat_map(|source| &source.findings)
@@ -1662,6 +1804,7 @@ impl Report {
     /// a like one in any of `before`'s trailers; one in the newest trailer
     /// only by one in `before`'s newest, so that a fault the update brings
     /// back, which the revision before it had mended, is the update's.
+    #[must_use]
     pub fn since<'a>(&'a self, before: &Report) -> Vec<&'a Finding> {
         let carried: HashSet<_> = (before.findings.iter())
             .map(|f| (before.place(f), like(f)))
@@ -1693,6 +1836,7 @@ impl Report {
     /// (`12 0 R/DecodeParms`), is no place a rewrite keeps, as it's the
     /// number it renumbers: a finding there is carried by a like one
     /// anywhere.
+    #[must_use]
     pub fn by_path<'a>(&'a self, baseline: &Report) -> Vec<&'a Finding> {
         let at_path: HashSet<_> = (baseline.findings.iter())
             .map(|f| (f.path.as_str(), like(f)))
@@ -1788,6 +1932,7 @@ const MODEL: [Rule; 8] = [
 
 /// The file's version: its header's (1.4 when it has none that reads), or
 /// its catalog's `/Version` when that's later.
+#[must_use]
 pub fn file_version(source: &dyn Source) -> Version {
     let header = source.header_version().unwrap_or(Version::new(1, 4));
     let catalog = (source.trailer().dict().get(b"Root"))
@@ -1803,6 +1948,40 @@ pub fn file_version(source: &dyn Source) -> Version {
         .and_then(|name| Version::parse(&name));
     header.max(catalog.unwrap_or(header))
 }
+
+/// A stream's data as a check reads it, where its decode
+/// ([`Source::decoded_within`]) gave `error`: of a stream whose every fault
+/// is that its Flate data's Adler-32 checksum doesn't match what it
+/// decompressed to (pdf-filters' `Fault::Checksum`), which leaves nothing
+/// out, the data whole, as a viewer reads it. A check reads content and the
+/// XMP packet so, past the checksum, which it finds of the stream as a
+/// [`Rule::Reader`] finding; so a finding's bytes in such a stream
+/// ([`Finding::at`]) are in what this gives.
+///
+/// # Errors
+///
+/// `error` itself, given back, where it isn't a decode's
+/// ([`Error::Decode`](crate::pdf_structure::read::Error::Decode)), or a
+/// fault besides the checksum is among its faults.
+pub fn checksummed(error: bytes::Error) -> Result<Vec<u8>, bytes::Error> {
+    match error {
+        bytes::Error::Decode(cut)
+            if !cut.faults.is_empty()
+                && (cut.faults.iter()).all(|&(_, f)| f == pdf_filters::Fault::Checksum) =>
+        {
+            Ok(cut.data)
+        }
+        error => Err(error),
+    }
+}
+
+/// The fault the reader tells of a stream it decodes whose Flate data's
+/// checksum doesn't match, in its words, which a check tells of a stream it
+/// read past that ([`checksummed`]).
+pub(crate) const CHECKSUM: Fault = Fault::Decode {
+    filter: "FlateDecode",
+    fault: pdf_filters::Fault::Checksum,
+};
 
 /// A file's objects, as the predicates resolve a reference: an object that
 /// doesn't read is none, as one the file hasn't is. Asked why, as the
@@ -2066,6 +2245,11 @@ struct Walk<'a> {
     /// Where the walk reached each resources dictionary, by where the
     /// source holds it, which [`Walk::content`] tells `unused` by.
     resources_at: HashMap<*const Object, content::Reached<'a>>,
+    /// The streams whose data a pass read whole though its Flate checksum
+    /// doesn't match ([`checksummed`]), of the units of content it read and
+    /// the XMP packet, in the order first read, which [`Walk::read_as`]
+    /// finds, each once.
+    checksums: Vec<ObjectId>,
     /// What the page tree's walk by ISO's rules told, and where the walk by
     /// PDFium's parts from it, which [`Walk::structures`] finds in.
     page_tree: structure::PageTree<'a>,
@@ -3493,7 +3677,10 @@ impl<'a> Walk<'a> {
     /// `/Names` or `/Nums` pairs' values as the table of the type's links
     /// they fit best, as TestGrammar's `parse_name_tree` and
     /// `parse_number_tree` do. A node that breaks ISO 32000-2 7.9.6 or
-    /// 7.9.7 is a [`Rule::Tree`] finding.
+    /// 7.9.7 is a [`Rule::Tree`] finding. Each node is held, and found in,
+    /// as the object it's written in: its own, or for a kid written in place,
+    /// its parent's, which is the root's holder only for a kid of a root
+    /// written there.
     fn tree(
         &mut self,
         from: &Visit<'a>,
@@ -3513,8 +3700,9 @@ impl<'a> Walk<'a> {
         up.push(from.object);
         up.extend(parents.iter().take(PARENTS - 1));
         let depth = if id.is_some() { 0 } else { from.depth + 1 };
-        let mut nodes = vec![(root, id, depth, true)];
-        while let Some((node, node_id, depth, is_root)) = nodes.pop() {
+        // Each node with the object it's written in.
+        let mut nodes = vec![(root, id, id.or(from.holder), depth, true)];
+        while let Some((node, node_id, holder, depth, is_root)) = nodes.pop() {
             if let Some(n) = node_id {
                 // An earlier revision's trailer goes on to nothing indirect.
                 if self.revision.is_some() || self.reached.get(&n).copied().flatten().is_some() {
@@ -3527,7 +3715,7 @@ impl<'a> Walk<'a> {
             };
             let here = Visit {
                 object: node,
-                holder: node_id.or(from.holder),
+                holder,
                 table: from.table,
                 trail: Rc::new(Trail {
                     up: Some(from.trail.clone()),
@@ -3649,7 +3837,8 @@ impl<'a> Walk<'a> {
                                 Ok((kid_id, kid)) if matches!(kid.value(), Value::Dict(_)) => {
                                     let depth = if kid_id.is_some() { 0 } else { depth + 1 };
                                     if depth <= NESTING {
-                                        nodes.push((kid, kid_id, depth, false));
+                                        let kid_holder = kid_id.or(holder);
+                                        nodes.push((kid, kid_id, kid_holder, depth, false));
                                     } else if made.is_some() {
                                         self.report.truncated += 1;
                                     }
@@ -4371,9 +4560,18 @@ impl<'a> Walk<'a> {
 
     /// The reader's faults in held objects, and those of the file as a
     /// whole as the trailer's, each a [`Rule::Reader`] finding in its
-    /// words.
+    /// words; but bytes before the header (`HeaderAt`), which ISO 32000-2
+    /// allows (7.5.2), and which the reader reads past, counting the
+    /// file's offsets from the header, with nothing to choose. Then each
+    /// held stream a pass read whole past its checksum
+    /// ([`Walk::checksums`]), once, in the reader's words for that fault,
+    /// at the stream's data as written, where the reader places it too, but
+    /// one the reader told itself.
     fn read_as(&mut self, faults: &[(pdf_objects::fault::Place, Fault)]) {
         for (place, fault) in faults {
+            if let Fault::HeaderAt { .. } = fault {
+                continue;
+            }
             let Some(made) = self.made(place.object) else {
                 continue;
             };
@@ -4386,6 +4584,38 @@ impl<'a> Walk<'a> {
                 rule: Rule::Reader,
                 value: fault.to_string(),
                 at: place.at,
+                revision: None,
+            });
+        }
+        // Each once, and none the reader told.
+        let checksums = std::mem::take(&mut self.checksums);
+        let mut seen: HashSet<ObjectId> = match checksums.is_empty() {
+            true => HashSet::new(),
+            false => (faults.iter())
+                .filter(|(_, fault)| *fault == CHECKSUM)
+                .filter_map(|(place, _)| place.object)
+                .collect(),
+        };
+        for id in checksums {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(made) = self.made(Some(id)) else {
+                continue;
+            };
+            let at = match self.source.get(id).map(Object::value) {
+                Ok(Value::Stream(stream)) => stream.data.at(),
+                _ => None,
+            };
+            self.report.findings.push(Finding {
+                object: Some(id),
+                made,
+                path: "-".to_string(),
+                table: "-".to_string(),
+                key: "-".to_string(),
+                rule: Rule::Reader,
+                value: CHECKSUM.to_string(),
+                at,
                 revision: None,
             });
         }
@@ -4797,11 +5027,13 @@ pub(crate) fn each_reference(o: &Object, mut f: impl FnMut(ObjectId)) {
 /// what follows the date and what else departs from the clause, and not a
 /// field out of its range. A test holds it to TestGrammar's
 /// `is_valid_pdf_date_string`.
+#[must_use]
 pub fn is_date(text: &str) -> bool {
     Date::read(text).is_ok()
 }
 
 /// `value` with each reference in it, `12 0 R`, as `R`.
+#[must_use]
 pub fn numberless(value: &str) -> String {
     let b = value.as_bytes();
     let digits = |from: usize| b[from..].iter().take_while(|c| c.is_ascii_digit()).count();
@@ -4911,7 +5143,10 @@ fn write_dictionary(out: &mut String, d: &Dict, depth: usize, stream: bool) {
 }
 
 impl Made {
-    pub fn name(self) -> &'static str {
+    /// Its name, as a hold file and findings write it: `built` or
+    /// `merged`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Made::Built => "built",
             Made::Merged => "merged",
@@ -4955,7 +5190,8 @@ impl Rule {
     ];
 
     /// Its name, as findings and allowances write it.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Rule::Type => "type",
             Rule::Missing => "missing",
@@ -4990,6 +5226,7 @@ impl Rule {
     }
 
     /// The rule named `name`.
+    #[must_use]
     pub fn named(name: &str) -> Option<Rule> {
         Rule::ALL.iter().copied().find(|r| r.name() == name)
     }
@@ -4999,6 +5236,7 @@ impl Class {
     /// The kind of name `key` is: [`Class::Second`] or [`Class::Third`] by
     /// TestGrammar's expressions for them (`^([a-zA-Z0-9_\-]{4,5}(_|:))`
     /// and `^XX`), else [`Class::Other`].
+    #[must_use]
     pub fn of(key: &[u8]) -> Class {
         let prefix = |n: usize| {
             key.len() > n
@@ -5062,6 +5300,88 @@ impl fmt::Display for Finding {
             }
         }
         Ok(())
+    }
+}
+
+/// Its parts but the file's text, which may be decrypted: its value, which
+/// quotes the file's names, strings and content, and its path, whose step
+/// in a name or number tree is the tree's key (`{key}`), by their lengths
+/// in bytes. Its table, key, rule, object, bytes and revision, names and
+/// numbers the file never encrypts, as they are.
+impl fmt::Debug for Finding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Finding {
+            object,
+            made,
+            path,
+            table,
+            key,
+            rule,
+            value,
+            at,
+            revision,
+        } = self;
+        f.debug_struct("Finding")
+            .field("object", object)
+            .field("made", made)
+            .field("path", &format_args!("{} bytes", path.len()))
+            .field("table", table)
+            .field("key", key)
+            .field("rule", rule)
+            .field("value", &format_args!("{} bytes", value.len()))
+            .field("at", at)
+            .field("revision", revision)
+            .finish()
+    }
+}
+
+/// Its parts as they are, its findings as [`Finding`]'s `Debug` shows them,
+/// but its paths, which hold the keys of the name and number trees the walk
+/// went through, which may be decrypted, by their count.
+impl fmt::Debug for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Report {
+            findings,
+            checked,
+            keys,
+            unchecked,
+            unlisted,
+            deprecated,
+            ignored,
+            no_table,
+            ties,
+            truncated,
+            two_contexts,
+            extensions,
+            two_tables,
+            trailer,
+            paths,
+            content,
+            unused,
+            departures,
+            linearized,
+        } = self;
+        f.debug_struct("Report")
+            .field("findings", findings)
+            .field("checked", checked)
+            .field("keys", keys)
+            .field("unchecked", unchecked)
+            .field("unlisted", unlisted)
+            .field("deprecated", deprecated)
+            .field("ignored", ignored)
+            .field("no_table", no_table)
+            .field("ties", ties)
+            .field("truncated", truncated)
+            .field("two_contexts", two_contexts)
+            .field("extensions", extensions)
+            .field("two_tables", two_tables)
+            .field("trailer", trailer)
+            .field("paths", &format_args!("{} paths", paths.len()))
+            .field("content", content)
+            .field("unused", unused)
+            .field("departures", departures)
+            .field("linearized", linearized)
+            .finish()
     }
 }
 
@@ -5141,10 +5461,11 @@ mod tests {
     //! bounded, on cycles and on deep nesting.
 
     use pdf_fixtures::fixture::{self, Body, Xref};
+    use pdf_objects::dict;
+    use pdf_structure::pdf_crypt;
 
     use super::*;
     use crate::bytes;
-    use crate::dict;
     use crate::source::Document;
 
     /// `objects`, the catalog object 1, written at `version` with a
@@ -6316,6 +6637,119 @@ mod tests {
             ],
             "{report}"
         );
+    }
+
+    /// A tree's node is in the object it's written in, and held as that
+    /// is: a kid written in place in another node, 6 0 R, is found in 6 0 R,
+    /// and so is a value written in place in it, where they were the
+    /// catalog's, which the root is written in, as the tree's read again
+    /// finds the kid written in place there; a hold of 6 0 R alone holds
+    /// them, and one of the catalog alone doesn't.
+    #[test]
+    fn a_kid_written_in_place_is_found_in_the_object_its_written_in() {
+        // A destination whose left is a string, where it's a number or null.
+        let dest = vec![r(3), Object::name("XYZ"), text("x"), 0.into(), 0.into()];
+        let kid = dict! { "Names" => vec![text("a"), dest.into()] };
+        let node = dict! {
+            "Kids" => vec![Object::from(kid)],
+            "Limits" => vec![text("a"), text("a")],
+        };
+        let mut objects = changed(clean(), 1, |catalog| {
+            catalog.set("Names", dict! { "Dests" => dict! { "Kids" => vec![r(6)] } });
+        });
+        objects.push((6, node.into()));
+        let bytes = written("1.7", &objects, Xref::Table);
+        let report = checked_as(&bytes, &Hold::All(Made::Built));
+        let limits = "a node under the root without /Limits";
+        let in_six: Vec<_> = (found(&report).into_iter())
+            .map(|(object, table, key, rule, _)| (object, table, key, rule))
+            .collect();
+        assert_eq!(
+            in_six,
+            [
+                (Some(6), "Name", "Dests", Rule::Tree),
+                (Some(6), "DestXYZArray", "2", Rule::Type),
+                (Some(6), "Name", "Dests", Rule::Tree),
+            ],
+            "{report}"
+        );
+        assert_eq!(found(&report)[0].4, limits);
+        let direct = "a kid is written in place, not as a reference";
+        assert_eq!(found(&report)[2].4, direct);
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Built)].into());
+        let report = checked_as(&bytes, &only(6));
+        let held: Vec<_> = (found(&report).into_iter())
+            .map(|(object, _, _, rule, _)| (object, rule))
+            .collect();
+        let six = [
+            (Some(6), Rule::Tree),
+            (Some(6), Rule::Type),
+            (Some(6), Rule::Tree),
+        ];
+        assert_eq!(held, six);
+        let report = checked_as(&bytes, &only(1));
+        assert_eq!(found(&report), [], "{report}");
+    }
+
+    /// A finding's value and path, and a report's paths, are the file's
+    /// text, decrypted: in an encrypted file, a name tree's key is a step
+    /// of the path to its value, and a value that's a string is quoted in
+    /// the finding of it. Neither `Debug` shows either, where the report's
+    /// text does.
+    #[test]
+    fn a_finding_and_a_report_show_no_text_of_the_file_in_their_debug() {
+        use pdf_crypt::writer::{Kind, Settings};
+        let (key, value) = ("SecretKeyText", "SecretValueText");
+        // A destination whose left is a string, where it's a number or null.
+        let dest = vec![r(3), Object::name("XYZ"), text(value), 0.into(), 0.into()];
+        let leaf = dict! {
+            "Names" => vec![text(key), dest.into()],
+            "Limits" => vec![text(key), text(key)],
+        };
+        let mut objects = changed(clean(), 1, |catalog| {
+            catalog.set("Names", dict! { "Dests" => dict! { "Kids" => vec![r(6)] } });
+        });
+        objects.push((6, leaf.into()));
+        let settings = Settings {
+            kind: Kind::Aes256,
+            user: b"",
+            owner: b"owner",
+            p: -4,
+            id: ID,
+            encrypt_metadata: true,
+        };
+        let file = fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) });
+        for text in [key, value] {
+            let written = file.windows(text.len()).any(|w| w == text.as_bytes());
+            assert!(!written, "{text} is written in the clear");
+        }
+        let doc = bytes::document(&file, &bytes::Options::DEFAULT);
+        assert!(matches!(
+            doc.encryption(),
+            crate::source::Encryption::Opened { .. }
+        ));
+        let options = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let report = check(&doc, &Hold::All(Made::Built), &options);
+        let finding = (report.findings.iter())
+            .find(|f| f.value.contains(value))
+            .unwrap_or_else(|| panic!("no finding quotes the value: {report}"));
+        assert!(finding.path.contains(&format!("{{{key}}}")), "{report}");
+        assert!(report.paths.iter().any(|p| p.contains(key)), "{report}");
+        let shown = format!("{report}");
+        assert!(shown.contains(key) && shown.contains(value), "{shown}");
+        for debug in [format!("{finding:?}"), format!("{report:?}")] {
+            for text in [key, value] {
+                assert!(!debug.contains(text), "{text} is in {debug}");
+            }
+        }
+        let path = finding.path.len();
+        let debug = format!("{finding:?}");
+        assert!(debug.contains(&format!("path: {path} bytes")), "{debug}");
+        let n = report.paths.len();
+        assert!(format!("{report:?}").contains(&format!("paths: {n} paths")));
     }
 
     #[test]
@@ -8644,8 +9078,8 @@ mod tests {
 
     /// An encryption dictionary for [`ID`], of `kind`, its user password
     /// empty, its streams and strings encrypted as `stm_f` and `str_f` say.
-    fn encryption(kind: crate::pdf_crypt::writer::Kind, stm_f: &str, str_f: &str) -> String {
-        let settings = crate::pdf_crypt::writer::Settings {
+    fn encryption(kind: pdf_crypt::writer::Kind, stm_f: &str, str_f: &str) -> String {
+        let settings = pdf_crypt::writer::Settings {
             kind,
             user: b"",
             owner: b"owner",
@@ -8653,7 +9087,7 @@ mod tests {
             id: ID,
             encrypt_metadata: true,
         };
-        let values = crate::pdf_crypt::writer::dictionary(&settings);
+        let values = pdf_crypt::writer::dictionary(&settings);
         let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
         if let Some(length) = values.length {
@@ -8686,7 +9120,7 @@ mod tests {
     /// nor where the file's strings aren't encrypted either.
     #[test]
     fn strings_an_object_stream_leaves_in_the_clear_are_found() {
-        use crate::pdf_crypt::writer::Kind;
+        use pdf_crypt::writer::Kind;
         let file = |encrypt: &str, members: &[(u32, &str)]| {
             let mut file = Sections::new("1.7");
             file.object(7, encrypt);
@@ -10531,6 +10965,52 @@ mod tests {
         );
     }
 
+    /// Bytes before `%PDF-`, which ISO 32000-2 allows (7.5.2), are no
+    /// finding, though the reader tells where the header is: it counts the
+    /// file's offsets from there, so nothing is chosen. What it had to
+    /// choose beside them, a lone CR after `stream`, is found as without
+    /// them, its bytes past them.
+    #[test]
+    fn bytes_before_the_header_are_no_finding() {
+        let file = fixture::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                (
+                    3,
+                    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
+                      /Contents 4 0 R >>",
+                ),
+                (4, b"<< /Length 3 >>stream\rq Q\nendstream"),
+            ],
+            "<< /Size 5 /Root 1 0 R >>",
+        );
+        let junk = b"junk the header is past\n";
+        let after = [&junk[..], &file].concat();
+        let doc = bytes::document(&after, &bytes::Options::DEFAULT);
+        let told = (doc.faults().iter()).any(|(_, f)| *f == Fault::HeaderAt { at: junk.len() });
+        assert!(told, "{:?}", doc.faults());
+        let read = |bytes: &[u8]| -> Vec<(Option<ObjectId>, String, String)> {
+            let report = checked_as(bytes, &Hold::All(Made::Built));
+            (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| (f.object, f.value.clone(), bytes_at(bytes, f).to_string()))
+                .collect()
+        };
+        let lone = "a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF";
+        let found = [(
+            Some(ObjectId::new(4, 0)),
+            lone.to_string(),
+            "\r".to_string(),
+        )];
+        assert_eq!(read(&file), found);
+        assert_eq!(read(&after), found);
+        let report = checked_as(&after, &Hold::All(Made::Built));
+        let at = (report.findings.iter()).find_map(|f| f.at).unwrap();
+        assert_eq!(at.start(), junk.len() + find(&file, b"stream\r") + 6);
+    }
+
     /// A real too small for 64 bits, its digits not all zero, which the
     /// parser reads as 0, is a `reader` finding at its bytes, in the
     /// parser's words.
@@ -10859,7 +11339,7 @@ mod tests {
     #[derive(Clone, Copy)]
     struct Failing<'a> {
         objects: &'a BTreeMap<ObjectId, Object>,
-        fails: &'a [(u32, crate::Why)],
+        fails: &'a [(u32, pdf_objects::Why)],
     }
 
     impl<'a> Resolve<'a> for Failing<'a> {
@@ -10900,7 +11380,7 @@ mod tests {
             (Some(7), "a kid"),
             (Some(6), "a key"),
         ];
-        for why in [crate::Why::Damaged, crate::Why::Locked] {
+        for why in [pdf_objects::Why::Damaged, pdf_objects::Why::Locked] {
             for (part, what) in parts {
                 let fails: Vec<_> = part.map(|n| (n, why)).into_iter().collect();
                 let resolve = Failing {
@@ -11031,7 +11511,7 @@ mod tests {
     /// why, as the predicates ask, each is none but the one that reads.
     #[test]
     fn the_objects_say_why_one_doesnt_read_as_a_document_does() {
-        use crate::Why;
+        use pdf_objects::Why;
         let mut file = Sections::new("1.7");
         file.object(1, CATALOG);
         file.object(2, PAGES);

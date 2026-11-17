@@ -5,11 +5,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pdf_lint::bytes::{self, WithReading};
-use pdf_lint::pdf_crypt::{Encoding, Password};
-use pdf_lint::{
-    Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check, check_with_reading,
-};
+use pdf_lint::pdf_objects::{Form, Object, Str, Value};
+use pdf_lint::pdf_structure::pdf_crypt::{Encoding, Password};
+use pdf_lint::pdf_structure::read::{self as bytes, WithReading};
+use pdf_lint::pdf_structure::{Document, Encryption};
+use pdf_lint::{Hold, Made, Options, check, check_with_reading};
 
 /// `data` read whole, opened by `passwords` where it's encrypted.
 fn read_by(data: &[u8], passwords: &[Password]) -> Document {

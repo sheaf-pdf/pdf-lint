@@ -87,6 +87,23 @@ jobs:
       - name: Lint for x86_64-pc-windows-gnu and wasm32-unknown-unknown
         run: just structure-cross
 
+  # pdf-lint built for Windows and for wasm32-wasip1, whose reads of
+  # standard input for `--password-file -` are code of their own, which no
+  # other job here builds.
+  lint-cross:
+    name: pdf-lint for Windows and wasm32-wasip1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu, wasm32-wasip1
+      - uses: extractions/setup-just@v4
+      - name: Build for x86_64-pc-windows-gnu and wasm32-wasip1
+        run: just lint-cross
+
   # pdf-structure's tests run on Windows, where a file is read by position
   # and its identity held by code of its own (same-file's), which no other
   # job runs. Its one step is cargo's, not a recipe's: `just ci` runs where
@@ -487,6 +504,27 @@ jobs:
       - name: Package, and check what the package holds
         run: just arlington-package
 
+  # pdf-lint packaged as a publish would, as every crate of the family it
+  # takes is: in a fresh target directory, and what the package holds
+  # checked, its sources, README, CHANGELOG, manifest and lock, nothing
+  # else. pdf-objects, pdf-filters, pdf-crypt, pdf-color, pdf-structure,
+  # pdf-content-streams, pdf-semantics, pdf-fonts, pdf-linearize and
+  # pdf-arlington are packaged beside it, since pdf-lint names versions of
+  # them that may not be on crates.io yet, and cargo verifies the package
+  # against those; pdf-tokenizer, the one other crate of the family it
+  # names, is on crates.io.
+  lint-package:
+    name: pdf-lint packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just lint-package
+
   # pdf-objects', the filters', pdf-crypt's and pdf-color's public API
   # against their version on crates.io, as the tokenizer's job holds its
   # own, with the same pinned tool on the same pinned Rust. Each is an alpha, which the tool takes to
@@ -552,6 +590,28 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Check the API against the version published
         run: just color-semver
+
+  # pdf-lint's public API against the version published on crates.io, as the
+  # tokenizer's job holds its own, with the same pinned tool on the same
+  # pinned Rust: pdf-lint is on a release line of its own, not an alpha, so
+  # a break of its own items its version doesn't allow fails. The crates it
+  # re-exports whole the tool doesn't follow: a new exact requirement of
+  # one in its manifest is a minor version on 0.x, set by hand (the
+  # justfile's `lint-semver`).
+  lint-semver:
+    name: pdf-lint against its published API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - uses: extractions/setup-just@v4
+      - name: Check the API against the version published
+        run: just lint-semver
 
   structure-msrv:
     name: Structure on its minimum Rust
@@ -733,3 +793,21 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Test
         run: just arlington-msrv
+
+  lint-msrv:
+    name: pdf-lint on its minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-lint/Cargo.toml, which
+      # `just lint-msrv` reads, as published, the command line among it, and
+      # its library alone.
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just lint-msrv

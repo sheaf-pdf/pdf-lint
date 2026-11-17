@@ -1,7 +1,11 @@
 //! The command line, run as a user runs it.
 
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use pdf_crypt::writer::{self, Kind, Settings};
 use pdf_crypt::{Dictionary, Encoded, Handler};
@@ -421,7 +425,7 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
     assert_eq!(code, Some(2), "{err}");
     assert_eq!(
         err,
-        format!("{locked}: it needs a password: give it with --password\n")
+        format!("{locked}: it needs a password: give it with --password-file or --password\n")
     );
     let (code, _, err) = said(&["--password", "wrong", locked]);
     assert_eq!(code, Some(2), "{err}");
@@ -446,9 +450,12 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
     // A baseline that won't open is refused; given its password, it reads.
     let (code, _, err) = said(&["--baseline", locked, open]);
     assert_eq!(code, Some(2), "{err}");
-    assert!(
-        err.contains("--baseline ") && err.contains("needs a password"),
-        "{err}"
+    assert_eq!(
+        err,
+        format!(
+            "pdf-lint: --baseline {locked}: \
+             it needs a password: give it with --password-file or --password\n"
+        )
     );
     let (code, out, _) = said(&["--password", "user", "--baseline", locked, locked]);
     assert_eq!(code, Some(0), "{out}");
@@ -458,7 +465,9 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
     let line: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         line.get("error"),
-        Some(&json!("it needs a password: give it with --password"))
+        Some(&json!(
+            "it needs a password: give it with --password-file or --password"
+        ))
     );
 }
 
@@ -545,6 +554,271 @@ fn an_encrypted_files_last_update_is_read_with_its_password() {
     let out = run(&["--last-update", path]);
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("it needs a password"));
+}
+
+/// pdf-lint run with `input` on its standard input, closed once it's
+/// written.
+fn piped(args: &[&str], input: &[u8]) -> Output {
+    let mut child = (pdf_lint().args(args))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // pdf-lint may be done before it's read any, as when it's refused.
+    let _ = child.stdin.take().unwrap().write_all(input);
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn a_password_file_gives_its_first_line() {
+    let dir = folder();
+    let locked = written(&dir, "password-locked.pdf", &crypted(Kind::Aes256, b"user"));
+    let locked = locked.to_str().unwrap();
+    let open = written(&dir, "password-open.pdf", &crypted(Kind::Aes128, b""));
+    let open = open.to_str().unwrap();
+    let said = |password: &[u8], args: &[&str]| {
+        let file = written(&dir, "password.txt", password);
+        let out = run(&[&["--password-file", file.to_str().unwrap()], args].concat());
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    };
+    // The first line, its line end, LF or CR LF, off, or the whole file
+    // where no line ends; the user's or the owner's, as --password's.
+    let lines = [
+        &b"user\n"[..],
+        b"user\r\n",
+        b"user",
+        b"owner\n",
+        b"user\nwrong\n",
+        b"user\r\nwrong",
+        b"user\n\xFF\xFE",
+    ];
+    for password in lines {
+        let (code, out, err) = said(password, &[locked]);
+        assert_eq!((code, err.as_str()), (Some(1), ""), "{password:?}: {out}");
+        assert!(out.contains("EncryptionStandard/R"), "{out}");
+        assert!(!out.contains("unresolved"), "{out}");
+        assert_eq!(out, text(&run(&["--password", "user", locked]).stdout));
+    }
+    // Nothing else is: not the line after, a line end on its own, a CR
+    // that ends no line, or the spaces about it.
+    let unopened = format!("{locked}: the password --password-file gives doesn't open it\n");
+    let others = [
+        &b"wrong\nuser\n"[..],
+        b"\nuser\n",
+        b"user\r",
+        b"user\r\r\n",
+        b"user \n",
+        b" user\n",
+        b"",
+    ];
+    for password in others {
+        let (code, out, err) = said(password, &[locked]);
+        assert_eq!((code, out.as_str()), (Some(2), ""), "{password:?}");
+        assert_eq!(err, unopened, "{password:?}");
+    }
+    // An empty first line, or an empty file, is the empty password, which
+    // opens a file whose user password is empty; a wrong one doesn't.
+    for password in [&b"\n"[..], b"\r\n", b"", b"\nwrong\n"] {
+        let (code, out, err) = said(password, &[open]);
+        assert_eq!((code, err.as_str()), (Some(0), ""), "{password:?}: {out}");
+    }
+    let (code, _, err) = said(b"wrong\n", &[open]);
+    assert_eq!(code, Some(2));
+    assert_eq!(
+        err,
+        format!("{open}: the password --password-file gives doesn't open it\n")
+    );
+    // The JSON report says so too.
+    let (code, out, _) = said(b"wrong\n", &["--format", "json", locked]);
+    assert_eq!(code, Some(2));
+    let line: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        line.get("error"),
+        Some(&json!("the password --password-file gives doesn't open it"))
+    );
+    // A baseline, and the revision before an update, are opened by it.
+    let (code, out, err) = said(b"user\n", &["--baseline", locked, locked]);
+    assert_eq!((code, err.as_str()), (Some(0), ""), "{out}");
+    assert!(out.contains("0 findings, 4 carried"), "{out}");
+    let (code, out, err) = said(b"wrong\n", &["--baseline", locked, open]);
+    assert_eq!((code, out.as_str()), (Some(2), ""));
+    assert_eq!(
+        err,
+        format!(
+            "pdf-lint: --baseline {locked}: the password --password-file gives doesn't open it\n"
+        )
+    );
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate /B >>";
+    let base = crypted_with(Kind::Aes128, b"user", &object_stream_with(page).0);
+    let trailer = encryption(&writer::dictionary(&settings(Kind::Aes128, b"user")));
+    let update = updated_under(&base, &[(3, page)], &trailer);
+    let updated = written(&dir, "updated-encrypted.pdf", &update);
+    let updated = updated.to_str().unwrap();
+    let (code, out, err) = said(b"user\r\n", &["--last-update", updated]);
+    assert_eq!((code, err.as_str()), (Some(0), ""), "{out}");
+    assert!(out.contains("0 findings, 1 carried"), "{out}");
+}
+
+#[test]
+fn a_password_file_of_dash_is_standard_input_read_to_its_lines_end() {
+    let dir = folder();
+    let locked = written(&dir, "password-locked.pdf", &crypted(Kind::Aes256, b"user"));
+    let locked = locked.to_str().unwrap();
+    let by_argument = run(&["--password", "user", locked]);
+    assert_eq!(by_argument.status.code(), Some(1));
+    for input in [&b"user\n"[..], b"user\r\nwrong\n", b"user"] {
+        let out = piped(&["--password-file", "-", locked], input);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        assert_eq!(text(&out.stdout), text(&by_argument.stdout));
+    }
+    let out = piped(&["--password-file", "-", locked], b"wrong\nuser\n");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{locked}: the password --password-file gives doesn't open it\n")
+    );
+    // Its line end ends the read: standard input still open after it, as a
+    // terminal's is after Enter, isn't waited on.
+    let mut child = (pdf_lint().args(["--password-file", "-", locked]))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"user\n").unwrap();
+    let (done, waited) = mpsc::channel::<()>();
+    let held = thread::spawn(move || {
+        // Closed after a minute only if pdf-lint is still reading it.
+        let waiting = waited.recv_timeout(Duration::from_secs(60)).is_err();
+        drop(input);
+        waiting
+    });
+    let out = child.wait_with_output().unwrap();
+    let _ = done.send(());
+    assert!(!held.join().unwrap(), "pdf-lint read past the line's end");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), text(&by_argument.stdout));
+    // Standard input is read once: not for a FILE of - too.
+    let out = piped(&["--password-file", "-", "-"], b"user\n");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "error: --password-file - and a FILE -: standard input is read once\n\n{USAGE}{MORE}"
+        )
+    );
+}
+
+#[test]
+fn a_password_file_that_doesnt_give_a_line_of_utf_8_within_64_kib_is_refused() {
+    let dir = folder();
+    let locked = written(&dir, "password-locked.pdf", &crypted(Kind::Aes256, b"user"));
+    let locked = locked.to_str().unwrap();
+    // Each refusal names the file and none of its bytes, exit 2, before any
+    // file is read.
+    let refused = |path: &str, why: &str| {
+        let out = run(&["--password-file", path, locked]);
+        assert_eq!(out.status.code(), Some(2), "{path}");
+        assert_eq!(text(&out.stdout), "", "{path}");
+        assert_eq!(
+            text(&out.stderr),
+            format!("pdf-lint: --password-file {path}: {why}\n")
+        );
+    };
+    let missing = dir.path().join("missing.txt");
+    let missing = missing.to_str().unwrap();
+    refused(
+        missing,
+        &std::fs::File::open(missing).unwrap_err().to_string(),
+    );
+    refused("", &std::fs::File::open("").unwrap_err().to_string());
+    let folder = dir.path().to_str().unwrap();
+    let unread = std::fs::File::open(folder).and_then(|mut f| f.read(&mut [0; 16]));
+    refused(folder, &unread.unwrap_err().to_string());
+    // Not UTF-8: pdf-crypt's password is text.
+    for bytes in [&b"secret\xFF\n"[..], b"secret\xC3", b"\xE9secret\r\n"] {
+        let file = written(&dir, "latin.txt", bytes);
+        refused(file.to_str().unwrap(), "its first line isn't UTF-8");
+    }
+    // A first line of 64 KiB is read, its line end apart; one longer isn't,
+    // with or without a line end after it.
+    let kib = 64 * 1024;
+    for (bytes, read) in [(kib, true), (kib + 1, false)] {
+        let line = "secret".repeat(bytes / 6 + 1)[..bytes].to_string();
+        for end in ["\n", ""] {
+            let file = written(&dir, "long.txt", format!("{line}{end}").as_bytes());
+            let path = file.to_str().unwrap();
+            if read {
+                let out = run(&["--password-file", path, locked]);
+                assert_eq!(out.status.code(), Some(2), "{bytes} {end:?}");
+                assert_eq!(
+                    text(&out.stderr),
+                    format!("{locked}: the password --password-file gives doesn't open it\n")
+                );
+            } else {
+                refused(path, "its first line is longer than 64 KiB");
+            }
+        }
+    }
+    let out = piped(&["--password-file", "-", locked], &[b'x'; 64 * 1024 + 1]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "pdf-lint: --password-file -: its first line is longer than 64 KiB\n"
+    );
+    // A device that never ends a line is read no further.
+    #[cfg(unix)]
+    refused("/dev/zero", "its first line is longer than 64 KiB");
+}
+
+#[test]
+fn a_password_file_beside_a_password_is_refused_saying_neither() {
+    let dir = folder();
+    let file = written(&dir, "password.txt", b"secret-in-the-file\n");
+    let file = file.to_str().unwrap();
+    let conflict = |first: &str, second: &str| {
+        format!(
+            "error: the argument '{first}' cannot be used with '{second}'\n\n\
+             Usage: pdf-lint {first} <FILE>...\n\n{MORE}"
+        )
+    };
+    let given = "--password <PW>";
+    let from_file = "--password-file <FILE>";
+    for (args, said) in [
+        (
+            vec![
+                "--password",
+                "secret-given",
+                "--password-file",
+                file,
+                "a.pdf",
+            ],
+            conflict(given, from_file),
+        ),
+        (
+            vec!["--password-file", file, "--password=secret-given", "a.pdf"],
+            conflict(from_file, given),
+        ),
+        (
+            vec![
+                "--password-file",
+                "-",
+                "--password",
+                "secret-given",
+                "a.pdf",
+            ],
+            conflict(from_file, given),
+        ),
+    ] {
+        let out = piped(&args, b"secret-piped\n");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(text(&out.stdout), "", "{args:?}");
+        assert_eq!(text(&out.stderr), said, "{args:?}");
+        assert!(!text(&out.stderr).contains("secret"), "{args:?}");
+    }
 }
 
 /// What [`in_an_object_stream`]'s object stream holds, a catalog, page
@@ -1305,7 +1579,7 @@ fn a_model_refused_is_said_word_for_word() {
     let one = |name: &str, row: &str| {
         let dir = dir.path().join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        let header = pdf_lint::grammar::HEADER.join("\t");
+        let header = pdf_lint::pdf_arlington::grammar::HEADER.join("\t");
         std::fs::write(dir.join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
         dir
     };
@@ -1407,7 +1681,7 @@ fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
     assert_eq!(out.status.code(), Some(2));
     let out = run(&["--version"]);
     assert_eq!(out.status.code(), Some(0));
-    assert!(text(&out.stdout).contains(pdf_lint::COMMIT));
+    assert!(text(&out.stdout).contains(pdf_lint::pdf_arlington::COMMIT));
 }
 
 #[test]
@@ -1643,12 +1917,12 @@ fn a_file_beginning_with_a_dash_follows_two_dashes() {
 #[test]
 fn the_version_is_two_lines_naming_the_model() {
     let hash = pdf_lint::grammar().digest();
-    let n = pdf_lint::grammar::corrections().len();
-    let m = pdf_lint::grammar::additions().len();
+    let n = pdf_lint::pdf_arlington::grammar::corrections().len();
+    let m = pdf_lint::pdf_arlington::grammar::additions().len();
     let version = format!(
         "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (sha256 {hash})\n",
         env!("CARGO_PKG_VERSION"),
-        pdf_lint::COMMIT
+        pdf_lint::pdf_arlington::COMMIT
     );
     // Where it's met, the rest unread: a file before it, and a word after
     // it that's no option. The model is the embedded one, `--model`'s
@@ -1806,6 +2080,18 @@ fn each_argument_error_exits_2_as_clap_says_it() {
             vec!["--last-update", "--baseline", "b", "a.pdf"],
             ours("--last-update and --baseline: the update's baseline is the revision before it"),
         ),
+        (
+            vec!["--password-file", "-", "-"],
+            ours("--password-file - and a FILE -: standard input is read once"),
+        ),
+        (
+            vec!["--password", "p", "--password-file", "f", "a.pdf"],
+            format!(
+                "error: the argument '--password <PW>' cannot be used with \
+                 '--password-file <FILE>'\n\n\
+                 Usage: pdf-lint --password <PW> <FILE>...\n\n{MORE}"
+            ),
+        ),
     ];
     for (flag, value) in [
         ("--hold", "FILE"),
@@ -1814,6 +2100,7 @@ fn each_argument_error_exits_2_as_clap_says_it() {
         ("--model", "DIR"),
         ("--baseline", "FILE"),
         ("--password", "PW"),
+        ("--password-file", "FILE"),
         ("--jobs", "N"),
         ("--pdf-version", "V"),
         ("--unlisted", "W"),
@@ -2424,6 +2711,58 @@ fn content_findings_are_set_against_what_came_before_as_any() {
     assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
 }
 
+/// A page whose content stream's Flate checksum doesn't match, which the
+/// check reads whole: its finding is printed with its bytes there, decoded
+/// as the check read it, and the checksum is a `reader` finding, in the
+/// reader's words, printed with the stream's data as written.
+#[test]
+fn content_whose_checksum_doesnt_match_is_printed_with_its_bytes() {
+    let dir = folder();
+    let page =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contents 4 0 R >>";
+    let mut deflated = pdf_fixtures::fixture::zlib(b"q 0 0 m S");
+    if let Some(last) = deflated.last_mut() {
+        *last ^= 1;
+    }
+    let hex: String = deflated.iter().map(|b| format!("{b:02x}")).collect();
+    let data = format!("{hex}>");
+    let content = format!(
+        "<< /Filter [/ASCIIHexDecode /FlateDecode] /Length {} >>\nstream\n{data}\nendstream",
+        data.len()
+    );
+    let bytes = file(&[CATALOG, PAGES, page, &content]);
+    let path = written(&dir, "checksum.pdf", &bytes);
+    let out = run(&[path.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let open = "- balance: PageObject/Contents at Root/Pages/Kids[0]/Contents, in 4 0 R (merged): \
+                1 q left open at the end [bytes 0..1 of 4 0 R's data]\n    \
+                | q   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.contains(open), "{stdout}");
+    let at = (bytes.windows(data.len()))
+        .position(|w| w == data.as_bytes())
+        .unwrap();
+    // Its words cut at 80 characters, as every value is shown.
+    let checksum = format!(
+        "- reader: -/- at -, in 4 0 R (merged): its data doesn't decode cleanly through \
+         /FlateDecode: the Adler-32 checksum doe… [bytes {at}..{}]\n    | {data}\n",
+        at + data.len()
+    );
+    assert!(stdout.contains(&checksum), "{stdout}");
+    assert!(stdout.contains("objects checked, 2 findings\n"), "{stdout}");
+    let out = run(&["--format", "json", path.to_str().unwrap()]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let reader = &report["findings"][1];
+    assert_eq!(reader["rule"], json!("reader"));
+    assert_eq!(
+        reader["value"],
+        json!(
+            "its data doesn't decode cleanly through /FlateDecode: the Adler-32 checksum doesn't match"
+        )
+    );
+    assert_eq!(report["content_read"], json!(1));
+}
+
 /// A name content uses that its resources lack is a finding, in the content
 /// stream, at the name; a resource nothing uses is counted, in `--full` and
 /// the JSON, and with `--unused` a finding too, at its key, which a
@@ -2525,6 +2864,37 @@ fn an_xmp_finding_is_printed_with_the_packets_bytes() {
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+}
+
+/// A packet through filters, which the reading decodes, is read too: what's
+/// wrong in it is a finding in its metadata stream, printed with its bytes
+/// in the stream's decoded data.
+#[test]
+fn an_xmp_finding_in_a_filtered_packet_is_printed_with_its_decoded_bytes() {
+    let dir = folder();
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description pdfaid:part=3/></x:xmpmeta>"#;
+    let deflated = pdf_fixtures::fixture::zlib(xmp.as_bytes());
+    let hex: String = deflated.iter().map(|b| format!("{b:02x}")).collect();
+    let data = format!("{hex}>");
+    let metadata = format!(
+        "<< /Type /Metadata /Subtype /XML /Filter [/ASCIIHexDecode /FlateDecode] /Length {} >>\n\
+         stream\n{data}\nendstream",
+        data.len()
+    );
+    let catalog = "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>";
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(
+        &dir,
+        "filtered.pdf",
+        &file(&[catalog, PAGES, page, &metadata]),
+    );
+    let out = run(&[path.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let found = "- xmp: Metadata/- at Root/Metadata, in 4 0 R (merged): an attribute in XMP \
+                 metadata doesn't read [bytes 36..68 of 4 0 R's data]\n    \
+                 | <rdf:Description pdfaid:part=3/>   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(found), "{stdout}");
 }
 
 /// A file of one page linearized by pdf-linearize, its hint stream's row
@@ -2634,8 +3004,9 @@ fn linearized_wrongly() -> (Vec<u8>, u32, usize) {
 /// where `listed` gives the linearization dictionary's number and where it
 /// is, that number listed there, so that `--last-update` holds it.
 fn linearized_updated(file: &[u8], listed: Option<(u32, usize)>) -> Vec<u8> {
-    use pdf_lint::Source;
-    let doc = pdf_lint::bytes::document(file, &pdf_lint::bytes::Options::DEFAULT);
+    use pdf_lint::pdf_structure::Source;
+    use pdf_lint::pdf_structure::read::{Options, document};
+    let doc = document(file, &Options::DEFAULT);
     let trailer = doc.trailer().dict();
     let root = trailer.get(b"Root").and_then(|r| r.as_reference()).unwrap();
     let pages = (doc.get(root).unwrap().as_dict().unwrap().get(b"Pages"))
