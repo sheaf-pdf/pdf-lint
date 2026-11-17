@@ -387,6 +387,71 @@ mod tests {
     }
 
     #[test]
+    fn a_redaction_is_added_with_its_overlay_as_its_rollover_appearance() {
+        use crate::pdf_annots::{AppearanceMode, RedactMark};
+        use crate::prelude::*;
+
+        let mut doc = Document::new();
+        doc.add_page(Rect::LETTER);
+        let page_id = doc.page_ids().unwrap()[0].unwrap();
+        let quads = [
+            QuadPoints::from_rect(Rect::new(72.0, 700.0, 200.0, 716.0)),
+            QuadPoints([210.0, 682.0, 290.0, 686.0, 285.0, 706.0, 205.0, 701.0]),
+        ];
+        let mark = RedactMark::new()
+            .with_quads(&quads)
+            .with_interior_color(Color::Gray(0.0).into())
+            .with_overlay_text("REDACTED");
+        let built = BuiltAnnot::redact_quads(&mark).unwrap();
+        let (mark_form, overlay_form) = (
+            built.normal_ap.clone().unwrap(),
+            built.redact_overlay.clone().unwrap(),
+        );
+        doc.add_annot(page_id, built).unwrap();
+
+        let bytes = doc.to_bytes().unwrap();
+        let pdf = crate::from_bytes(&bytes[..]).unwrap();
+        let pages = pdf.pages().unwrap();
+        let page = pages.get(0).unwrap();
+        let annots = page.annots().unwrap();
+        assert_eq!(annots.len(), 1);
+        assert_eq!(annots[0].rect(), Rect::new(72.0, 682.0, 290.0, 716.0));
+        let TypedAnnot::Redact(rd) = annots[0].typed() else {
+            panic!("expected Redact");
+        };
+        assert_eq!(rd.quad_points, quads);
+        // /AP holds /N and /R, and /R is the /RO overlay.
+        let overlay = rd.overlay_form.expect("/RO");
+        let aps = annots[0].appearances().expect("/AP");
+        let normal = aps
+            .stream(AppearanceMode::Normal, false, false)
+            .expect("/AP /N");
+        assert_eq!(
+            aps.stream(AppearanceMode::Rollover, false, false),
+            Some(overlay)
+        );
+        assert_ne!(normal, overlay);
+        // Each stream is the one that was built.
+        let reading = pdf.reading();
+        let decoded = |id| {
+            crate::pdf_objects::Streams::decoded(&reading, id, usize::MAX)
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(decoded(normal), mark_form.content);
+        assert_eq!(decoded(overlay), overlay_form.content);
+
+        // Flattening leaves the mark on the page, undrawn, unless asked.
+        let mut edited = pdf.edit().unwrap();
+        let plan = edited.flatten_page(page_id, FlattenOpts::DEFAULT).unwrap();
+        assert_eq!((plan.drawn_count, plan.removed_count), (0, 0));
+        let plan = edited
+            .flatten_page(page_id, FlattenOpts::DEFAULT.with_redactions(true))
+            .unwrap();
+        assert_eq!((plan.drawn_count, plan.removed_count), (1, 1));
+    }
+
+    #[test]
     fn document_structures_outlines_labels_attachments_viewer_and_metadata_round_trip() {
         use crate::pdf_semantics::date::Date;
         use crate::pdf_semantics::info::Dated;

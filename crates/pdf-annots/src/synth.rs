@@ -7,7 +7,7 @@ use pdf_content_streams::{
     Blend, Color, GState, LineCap, LineJoin, Paint, Res, ResBody, Reserved, ResourceNeeds,
 };
 use pdf_fonts::{Encoding, Std14};
-use pdf_gfx::{Canvas, Point, Rect};
+use pdf_gfx::{Canvas, Point, Quad, Rect};
 use pdf_objects::{Dict, Object, Stream, dict};
 
 use crate::annot::Annot;
@@ -786,26 +786,195 @@ pub fn synth_free_text(
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
-/// Synthesizes `/AP /N` (pre-apply redaction mark) and `/RO` (post-apply
-/// overlay Form XObject) for a `/Redact` annotation.
+/// What a `/Redact` mark's appearances are drawn from (ISO 32000-2,
+/// 12.5.6.23): the regions to redact and how the mark and its overlay look.
+///
+/// It borrows what it holds and is `Copy`, so a mark read from a file is
+/// drawn without cloning its quadrilaterals or its text. Built with
+/// [`RedactMark::new`] and the `with_*` methods.
+///
+/// Its `Debug` implementation reports the quadrilaterals' count and the
+/// overlay text's length, never the text.
+#[derive(Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct RedactMark<'a> {
+    /// `/QuadPoints`: the regions to redact, in the page's default user
+    /// space. Empty: the whole `/Rect`.
+    pub quads: &'a [QuadPoints],
+    /// `/C`: the color of the mark's outline and wash before it's applied (a
+    /// red where `None`).
+    pub stroke_color: Option<AnnotColor>,
+    /// `/IC`: the color that fills each region once the mark is applied.
+    pub interior_color: Option<AnnotColor>,
+    /// `/OverlayText`: the label drawn over each region once the mark is
+    /// applied.
+    pub overlay_text: Option<&'a str>,
+    /// `/Repeat`: whether the overlay text repeats across each region.
+    pub repeat: bool,
+    /// `/DA`: the overlay text's color and size.
+    pub da: Option<&'a DefaultAppearance>,
+    /// `/Q`: the overlay text's justification.
+    pub quadding: Quadding,
+}
+
+impl fmt::Debug for RedactMark<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedactMark")
+            .field("quads", &self.quads.len())
+            .field("stroke_color", &self.stroke_color)
+            .field("interior_color", &self.interior_color)
+            .field("overlay_text_len", &self.overlay_text.map(str::len))
+            .field("repeat", &self.repeat)
+            .field("da", &self.da)
+            .field("quadding", &self.quadding)
+            .finish()
+    }
+}
+
+impl Default for RedactMark<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> RedactMark<'a> {
+    /// A mark over its whole `/Rect`: no quadrilaterals, colors, or text.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            quads: &[],
+            stroke_color: None,
+            interior_color: None,
+            overlay_text: None,
+            repeat: false,
+            da: None,
+            quadding: Quadding::Left,
+        }
+    }
+
+    /// Sets the regions to redact.
+    #[must_use]
+    pub const fn with_quads(mut self, quads: &'a [QuadPoints]) -> Self {
+        self.quads = quads;
+        self
+    }
+
+    /// Sets the color of the mark's outline and wash.
+    #[must_use]
+    pub const fn with_stroke_color(mut self, color: AnnotColor) -> Self {
+        self.stroke_color = Some(color);
+        self
+    }
+
+    /// Sets the color that fills each region once the mark is applied.
+    #[must_use]
+    pub const fn with_interior_color(mut self, color: AnnotColor) -> Self {
+        self.interior_color = Some(color);
+        self
+    }
+
+    /// Sets the label drawn over each region once the mark is applied.
+    #[must_use]
+    pub const fn with_overlay_text(mut self, text: &'a str) -> Self {
+        self.overlay_text = Some(text);
+        self
+    }
+
+    /// Sets whether the overlay text repeats across each region.
+    #[must_use]
+    pub const fn with_repeat(mut self, repeat: bool) -> Self {
+        self.repeat = repeat;
+        self
+    }
+
+    /// Sets the overlay text's color and size.
+    #[must_use]
+    pub const fn with_default_appearance(mut self, da: &'a DefaultAppearance) -> Self {
+        self.da = Some(da);
+        self
+    }
+
+    /// Sets the overlay text's justification.
+    #[must_use]
+    pub const fn with_quadding(mut self, quadding: Quadding) -> Self {
+        self.quadding = quadding;
+        self
+    }
+
+    /// The smallest rectangle that holds every quadrilateral, one with a
+    /// number that isn't finite left out; `None` where none is left.
+    #[must_use]
+    pub fn bounds(&self) -> Option<Rect> {
+        self.quads
+            .iter()
+            .filter(|q| q.0.iter().all(|v| v.is_finite()))
+            .map(|q| q.bounds())
+            .reduce(Rect::union)
+    }
+
+    /// The quadrilaterals that can be drawn, each in perimeter order and
+    /// moved into the form space of an annotation whose `/Rect` is `rect`:
+    /// one that isn't finite there is left out.
+    fn local_quads(&self, rect: Rect) -> impl Iterator<Item = Quad> + '_ {
+        self.quads
+            .iter()
+            .map(move |q| {
+                Quad(
+                    q.to_quad()
+                        .0
+                        .map(|p| Point::new(p.x - rect.x0, p.y - rect.y0)),
+                )
+            })
+            .filter(Quad::is_finite)
+    }
+}
+
+/// The rectangle `quad` is, where its sides run along the axes.
+fn quad_as_rect(quad: &Quad) -> Option<Rect> {
+    let [a, b, c, d] = quad.0;
+    let level = |p: Point, q: Point| p.y == q.y;
+    let upright = |p: Point, q: Point| p.x == q.x;
+    let along = (level(a, b) && upright(b, c) && level(c, d) && upright(d, a))
+        || (upright(a, b) && level(b, c) && upright(c, d) && level(d, a));
+    along.then(|| quad.bounds())
+}
+
+/// Synthesizes `/AP /N` (the mark before it's applied) and `/RO` (the overlay
+/// Form XObject that applying it leaves) for a `/Redact` annotation whose
+/// `/Rect` is `rect`.
+///
+/// With no quadrilateral in `mark` (or none whose numbers are all finite),
+/// both cover the whole box. Otherwise each quadrilateral, moved into the
+/// form's space, is drawn alone:
+///
+/// - `/AP /N`: a translucent wash over the quadrilateral and its outline, at
+///   a width of `1.0`: inside the quadrilateral where it's a rectangle along
+///   the axes (as `pdf_gfx::Canvas::border_rect` draws it, so an edge on the
+///   form's `/BBox` isn't cut in half), along its edges otherwise.
+/// - `/RO`: the interior color over the quadrilateral, then the overlay text
+///   laid out, unrotated, in the quadrilateral's bounding box, repeated there
+///   under [`RedactMark::repeat`].
+///
+/// The overlay holds the text once for each quadrilateral (more under
+/// `repeat`): its size grows with the two together. Returns `None` where
+/// `rect` has no width or no height.
 #[must_use]
-pub fn synth_redact(
-    rect: Rect,
-    stroke_color: Option<AnnotColor>,
-    interior_color: Option<AnnotColor>,
-    overlay_text: Option<&str>,
-    repeat: bool,
-    da: Option<&DefaultAppearance>,
-    quadding: Quadding,
-) -> Option<(SynthesizedAp, SynthesizedAp)> {
+pub fn synth_redact(rect: Rect, mark: &RedactMark<'_>) -> Option<(SynthesizedAp, SynthesizedAp)> {
+    Some((redact_mark_ap(rect, mark)?, redact_overlay_ap(rect, mark)?))
+}
+
+/// `/AP /N` of a `/Redact`: a crisp outline and a faint translucent wash over
+/// each region.
+fn redact_mark_ap(rect: Rect, mark: &RedactMark<'_>) -> Option<SynthesizedAp> {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return None;
     }
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let whole = mark.local_quads(rect).next().is_none();
 
-    // 1. Pre-apply `/AP /N`: crisp redaction outline + faint translucent wash.
     let mut mark_cv = Canvas::new();
-    let outline = stroke_color
+    let outline = mark
+        .stroke_color
         .and_then(AnnotColor::to_content_color)
         .unwrap_or(Color::Rgb([0.85, 0.1, 0.1]));
     mark_cv.with_state(|cv| {
@@ -813,44 +982,92 @@ pub fn synth_redact(
         gs.fill_alpha = Some(0.15);
         cv.gstate(gs);
         cv.fill_color(outline);
-        cv.fill_rect(bbox);
-    });
-    mark_cv.with_state(|cv| {
-        cv.stroke_color(outline);
-        cv.border_rect(bbox, 1.0);
-    });
-
-    // 2. Post-apply `/RO`: opaque interior fill + optional `/OverlayText`.
-    let mut ro_cv = Canvas::new();
-    ro_cv.with_state(|cv| {
-        let fill = interior_color
-            .and_then(AnnotColor::to_content_color)
-            .unwrap_or(Color::Gray(0.0));
-        cv.fill_color(fill);
-        cv.fill_rect(bbox);
-
-        if let Some(txt) = overlay_text.filter(|t| !t.is_empty()) {
-            let text_color = da.and_then(|d| d.color).unwrap_or(Color::Gray(1.0));
-            let font_size = da
-                .and_then(|d| d.font_size)
-                .filter(|&s| s > 0.0)
-                .unwrap_or_else(|| (bbox.height() * 0.55).clamp(6.0, 14.0));
-            let shown = if repeat {
-                let reps = ((bbox.width() / (font_size * 3.0)).ceil() as usize).clamp(2, 32);
-                vec![txt; reps].join(" ")
-            } else {
-                txt.to_string()
-            };
-            if let Some(inner) = bbox.inset(2.0, 1.0) {
-                draw_box_text(cv, inner, &shown, font_size, quadding, text_color);
+        if whole {
+            cv.fill_rect(bbox);
+        }
+        for quad in mark.local_quads(rect) {
+            match quad_as_rect(&quad) {
+                Some(r) => cv.fill_rect(r),
+                None => cv.polyline(&quad.0, true, Paint::Fill),
             }
         }
     });
+    mark_cv.with_state(|cv| {
+        cv.stroke_color(outline);
+        if whole {
+            cv.border_rect(bbox, 1.0);
+        }
+        for quad in mark.local_quads(rect) {
+            match quad_as_rect(&quad) {
+                Some(r) => cv.border_rect(r, 1.0),
+                None => cv.with_state(|c| {
+                    c.line_width(1.0);
+                    c.polyline(&quad.0, true, Paint::Stroke);
+                }),
+            }
+        }
+    });
+    Some(SynthesizedAp::from_canvas(bbox, mark_cv))
+}
 
-    Some((
-        SynthesizedAp::from_canvas(bbox, mark_cv),
-        SynthesizedAp::from_canvas(bbox, ro_cv),
-    ))
+/// `/RO` of a `/Redact`: the opaque interior fill of each region, then the
+/// `/OverlayText` in each.
+fn redact_overlay_ap(rect: Rect, mark: &RedactMark<'_>) -> Option<SynthesizedAp> {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return None;
+    }
+    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let whole = mark.local_quads(rect).next().is_none();
+
+    let mut ro_cv = Canvas::new();
+    ro_cv.with_state(|cv| {
+        let fill = mark
+            .interior_color
+            .and_then(AnnotColor::to_content_color)
+            .unwrap_or(Color::Gray(0.0));
+        cv.fill_color(fill);
+        if whole {
+            cv.fill_rect(bbox);
+        }
+        // Every fill before any text: the text sets its own fill color, and
+        // no region's fill then covers another's label.
+        for quad in mark.local_quads(rect) {
+            match quad_as_rect(&quad) {
+                Some(r) => cv.fill_rect(r),
+                None => cv.polyline(&quad.0, true, Paint::Fill),
+            }
+        }
+
+        if let Some(txt) = mark.overlay_text.filter(|t| !t.is_empty()) {
+            if whole {
+                draw_overlay_text(cv, bbox, txt, mark);
+            }
+            for quad in mark.local_quads(rect) {
+                draw_overlay_text(cv, quad.bounds(), txt, mark);
+            }
+        }
+    });
+    Some(SynthesizedAp::from_canvas(bbox, ro_cv))
+}
+
+/// Draws a redaction's overlay text in `region`, repeated across it under
+/// `/Repeat`.
+fn draw_overlay_text(cv: &mut Canvas, region: Rect, txt: &str, mark: &RedactMark<'_>) {
+    let text_color = mark.da.and_then(|d| d.color).unwrap_or(Color::Gray(1.0));
+    let font_size = mark
+        .da
+        .and_then(|d| d.font_size)
+        .filter(|&s| s > 0.0)
+        .unwrap_or_else(|| (region.height() * 0.55).clamp(6.0, 14.0));
+    let shown = if mark.repeat {
+        let reps = ((region.width() / (font_size * 3.0)).ceil() as usize).clamp(2, 32);
+        vec![txt; reps].join(" ")
+    } else {
+        txt.to_string()
+    };
+    if let Some(inner) = region.inset(2.0, 1.0) {
+        draw_box_text(cv, inner, &shown, font_size, mark.quadding, text_color);
+    }
 }
 
 #[cfg(feature = "text-layout")]
@@ -1019,16 +1236,16 @@ pub fn synth_annot(annot: &Annot<'_>) -> Option<SynthesizedAp> {
             annot.color().unwrap_or(AnnotColor::Rgb([0.75, 0.1, 0.1])),
             opacity,
         ),
-        TypedAnnot::Redact(rd) => synth_redact(
+        // The mark alone: its overlay isn't an appearance of the annotation.
+        TypedAnnot::Redact(rd) => redact_mark_ap(
             rect,
-            annot.color(),
-            rd.interior_color,
-            rd.overlay_text.as_deref(),
-            rd.repeat,
-            rd.da.as_ref(),
-            rd.quadding,
-        )
-        .map(|(ap, _)| ap),
+            &RedactMark {
+                quads: &rd.quad_points,
+                stroke_color: annot.color(),
+                interior_color: rd.interior_color,
+                ..RedactMark::new()
+            },
+        ),
         _ => None,
     }
 }

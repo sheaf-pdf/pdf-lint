@@ -38,6 +38,10 @@
 //!     dashed, beveled, inset, underline), constructs or mutates annotation dictionaries without
 //!     file I/O, and plans graphics-state-isolated page flattening with collision-free
 //!     `/Resources/XObject` names.
+//!   - Authors `/Redact` marks whole ([`RedactMark`], [`synth_redact`],
+//!     [`BuiltAnnot::redact_mark`], [`BuiltAnnot::redact_quads`]): the mark and its `/RO` overlay
+//!     drawn over each `/QuadPoints` quadrilateral, the overlay also bound as `/AP /R`, with
+//!     [`AnnotMut`] setters for `/RO`, `/OverlayText`, and `/Repeat`.
 //!   - Flattening keeps `/Redact` marks on the page, undrawn, unless
 //!     [`FlattenOpts::with_redactions`] asks for them: it never removes the content under a
 //!     mark, so a mark painted onto the page would only look like a redaction.
@@ -193,6 +197,6 @@ pub use subtypes::{
     TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
 };
 pub use synth::{
-    SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact,
-    synth_shape, synth_stamp, synth_text_markup, synth_text_note,
+    RedactMark, SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly,
+    synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };

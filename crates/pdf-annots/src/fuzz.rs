@@ -7,6 +7,8 @@
 //!    `Result<Vec<Annot>, Error>` under both `Rules::Iso` and `Rules::Pdfium`.
 //! 3. `Debug` formatting never panics on any parsed `Annot`, `DestTable`,
 //!    `AnnotThread`, or `Fault`.
+//! 4. A `/Redact` mark synthesized from what was read (its quadrilaterals and
+//!    overlay text) never panics, and its mark is `synth_annot`'s.
 
 use std::collections::BTreeMap;
 
@@ -18,12 +20,13 @@ use pdf_semantics::pages;
 
 use crate::annot::{page_annots, page_annots_with, page_tabs};
 use crate::ap::{AppearanceMode, stream_placement_matrix};
+use crate::build::BuiltAnnot;
 use crate::flatten::{FlattenOpts, FlattenTarget, plan_flatten};
 use crate::limits::Limits;
 use crate::replies::resolve_threads;
 use crate::style::DefaultAppearance;
 use crate::subtypes::TypedAnnot;
-use crate::synth::synth_annot;
+use crate::synth::{RedactMark, synth_annot, synth_redact};
 
 /// Built-in seed inputs exercising links, destinations, action chains, text
 /// markup, geometric annotations, ink, redaction, replies/review states, and
@@ -33,6 +36,7 @@ pub const SEEDS: &[&[u8]] = &[
     b"<< /Annots [1 0 R 2 0 R] /Tabs /S >>\xff<< /Type /Catalog /Pages 3 0 R /Names << /Dests << /Names [(sec1) [4 0 R /XYZ 0 700 null]] >> >> >>\xff<< /Subtype /Link /Rect [10 20 100 40] /Dest (sec1) /Border [0 0 1] /F 4 >>\xff<< /Subtype /Highlight /Rect [10 50 120 70] /QuadPoints [10 70 120 70 10 50 120 50] /C [1 1 0] /T (Alice) /Contents (Check this) >>\xff<< /Type /Pages /Kids [4 0 R] /Count 1 >>\xff<< /Type /Page /Parent 3 0 R /MediaBox [0 0 612 792] >>",
     b"<< /Annots [1 0 R 2 0 R 3 0 R] >>\xff<< /Type /Catalog /Pages 4 0 R >>\xff<< /Subtype /Text /Rect [20 20 40 40] /Name /Comment /T (Bob) /M (D:20261115120000Z) >>\xff<< /Subtype /Text /Rect [20 20 40 40] /IRT 1 0 R /StateModel (Review) /State (Accepted) >>\xff<< /Subtype /FreeText /Rect [50 50 200 100] /DA (/Helv 12 Tf 0 0 1 rg) /Q 1 /CL [50 50 30 30] /LE /OpenArrow >>\xff<< /Type /Pages /Kids [5 0 R] /Count 1 >>\xff<< /Type /Page /Parent 4 0 R /MediaBox [0 0 200 200] >>",
     b"<< /Annots [1 0 R 2 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Ink /Rect [0 0 100 100] /InkList [[10 10 20 30 40 25]] /BS << /W 2 /S /D /D [4 2] >> >>\xff<< /Subtype /Redact /Rect [10 10 80 30] /IC [0 0 0] /OverlayText (REDACTED) /DA (/Helv 10 Tf 1 g) /AP << /N 3 0 R >> >>\xff<< /Subtype /Form /BBox [0 0 70 20] >>\nstream\n0 g 0 0 70 20 re f",
+    b"<< /Annots [1 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Redact /Rect [100 500 300 540] /C [0 0 1] /IC [0.5] /QuadPoints [100 540 200 540 100 520 200 520 210 502 290 506 285 526 205 521] /OverlayText (b\\(5\\)) /Repeat true /DA (/Helv 6 Tf 1 g) /Q 1 >>",
 ];
 
 /// Runs annotation, destination, action, and reply-thread checks over an
@@ -125,8 +129,38 @@ pub fn check(data: &[u8]) {
                 {
                     let _ = stream_placement_matrix(&map, sid, a.rect(), &limits);
                 }
-                if let Some(syn) = synth_annot(a) {
+                let syn = synth_annot(a);
+                if let Some(syn) = &syn {
                     let _ = format!("{syn:?}");
+                }
+                // A redaction mark as it was read, its quadrilaterals and
+                // its overlay text among what's drawn: the mark's own
+                // appearance is the one `synth_annot` gives.
+                if let TypedAnnot::Redact(rd) = a.typed() {
+                    let mark = RedactMark {
+                        quads: &rd.quad_points,
+                        stroke_color: a.color(),
+                        interior_color: rd.interior_color,
+                        overlay_text: rd.overlay_text.as_deref(),
+                        repeat: rd.repeat,
+                        da: rd.da.as_ref(),
+                        quadding: rd.quadding,
+                    };
+                    let _ = format!("{mark:?}");
+                    let both = synth_redact(a.rect(), &mark);
+                    if a.has_valid_rect() {
+                        assert_eq!(both.as_ref().map(|(ap, _)| ap), syn.as_ref());
+                    }
+                    if let Some((_, overlay)) = &both {
+                        let _ = format!("{overlay:?}");
+                    }
+                    assert_eq!(mark.bounds().is_none(), {
+                        let finite = |q: &crate::QuadPoints| q.0.iter().all(|v| v.is_finite());
+                        !rd.quad_points.iter().any(finite)
+                    });
+                    if let Some(built) = BuiltAnnot::redact_quads(&mark) {
+                        let _ = format!("{built:?}");
+                    }
                 }
             }
             for target in [FlattenTarget::Display, FlattenTarget::Print] {

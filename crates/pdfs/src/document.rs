@@ -368,7 +368,8 @@ impl<'p> Document<'p> {
 
     /// Writes `built` (and any synthesized `/AP /N` / `/RO` streams, deflated)
     /// into the document and appends it to `page_id`'s `/Annots` array
-    /// ([`build::add_annot`]).
+    /// ([`build::add_annot`]). A redaction's `/RO` overlay is also bound as
+    /// `/AP /R`.
     ///
     /// # Errors
     ///

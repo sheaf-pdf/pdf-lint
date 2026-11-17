@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use pdf_content_streams::Color;
 use pdf_gfx::{Point, Rect};
 use pdf_objects::{Dict, Object, ObjectId, dict};
 use pdf_semantics::action::Action;
@@ -17,8 +18,8 @@ use crate::style::{
 };
 use crate::subtypes::{AnnotSubtype, PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind};
 use crate::synth::{
-    SynthesizedAp, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact, synth_shape,
-    synth_stamp, synth_text_markup, synth_text_note,
+    RedactMark, SynthesizedAp, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact,
+    synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
 
 /// Zero-I/O mutable wrapper around an annotation [`Dict`] (standalone
@@ -203,6 +204,45 @@ impl<'a> AnnotMut<'a> {
         self
     }
 
+    /// Binds `/AP << /R form_id >>`, the rollover appearance shown while the
+    /// pointer is over the annotation (ISO 32000-2, 12.5.5, Table 170),
+    /// keeping `/AP`'s other entries.
+    pub fn set_rollover_appearance(&mut self, form_id: ObjectId) -> &mut Self {
+        if let Some(ap) = self.dict.get_mut(b"AP").and_then(Object::as_dict_mut) {
+            ap.set("R", form_id);
+        } else {
+            self.dict.set("AP", dict! { "R" => form_id });
+        }
+        self
+    }
+
+    /// Sets `/RO`, the Form XObject that applying a `/Redact` mark leaves
+    /// over its regions (ISO 32000-2, 12.5.6.23, Table 195).
+    pub fn set_redact_overlay(&mut self, form_id: ObjectId) -> &mut Self {
+        self.dict.set("RO", form_id);
+        self
+    }
+
+    /// Sets `/OverlayText`, the label that applying a `/Redact` mark draws
+    /// over its regions. The table asks for a `/DA` beside it
+    /// ([`Self::set_default_appearance`]).
+    pub fn set_overlay_text(&mut self, text: &str) -> &mut Self {
+        self.dict.set("OverlayText", Object::text(text));
+        self
+    }
+
+    /// Sets `/Repeat`, whether a `/Redact` mark's overlay text repeats across
+    /// each region: `true` is written, and the key removed for `false`, its
+    /// default.
+    pub fn set_repeat(&mut self, repeat: bool) -> &mut Self {
+        if repeat {
+            self.dict.set("Repeat", true);
+        } else {
+            self.dict.remove(b"Repeat");
+        }
+        self
+    }
+
     /// Removes `/AP` and `/AS` from this annotation.
     pub fn clear_appearances(&mut self) -> &mut Self {
         self.dict.remove(b"AP");
@@ -266,14 +306,23 @@ impl BuiltAnnot {
     /// Allocates any synthesized `/AP /N` and `/RO` streams via `alloc`, wires
     /// their indirect `ObjectId`s into `self.dict`, and allocates and returns
     /// the annotation's own `ObjectId`.
+    ///
+    /// A redaction's overlay is also bound as `/AP /R` beside `/N`, so a
+    /// viewer shows what applying the mark leaves while the pointer is over
+    /// it.
     pub fn write_into(mut self, mut alloc: impl FnMut(Object) -> ObjectId) -> ObjectId {
-        if let Some(ro) = self.redact_overlay {
+        let ro_id = self.redact_overlay.map(|ro| {
             let ro_id = alloc(Object::from(ro.to_stream()));
-            self.dict.set("RO", ro_id);
-        }
+            AnnotMut::new(&mut self.dict).set_redact_overlay(ro_id);
+            ro_id
+        });
         if let Some(ap) = self.normal_ap {
             let ap_id = alloc(Object::from(ap.to_stream()));
-            AnnotMut::new(&mut self.dict).set_normal_appearance(ap_id);
+            let mut m = AnnotMut::new(&mut self.dict);
+            m.set_normal_appearance(ap_id);
+            if let Some(ro_id) = ro_id {
+                m.set_rollover_appearance(ro_id);
+            }
         }
         alloc(Object::from(self.dict))
     }
@@ -566,7 +615,11 @@ impl BuiltAnnot {
     }
 
     /// Builds a standard `/Redact` annotation with synthesized `/AP /N` and
-    /// `/RO` overlay Form XObject.
+    /// `/RO` overlay Form XObject, both drawn over `quads` where there are
+    /// any ([`synth_redact`]).
+    ///
+    /// [`Self::redact_mark`] over a [`RedactMark`] of these values and no
+    /// outline color.
     #[must_use]
     pub fn redact(
         rect: Rect,
@@ -577,32 +630,64 @@ impl BuiltAnnot {
         da: Option<&DefaultAppearance>,
         quadding: Quadding,
     ) -> Self {
+        Self::redact_mark(
+            rect,
+            &RedactMark {
+                quads,
+                interior_color: Some(interior_color),
+                overlay_text,
+                repeat,
+                da,
+                quadding,
+                ..RedactMark::new()
+            },
+        )
+    }
+
+    /// Builds a `/Redact` annotation over `rect` from `mark`, with
+    /// synthesized `/AP /N` and `/RO` overlay Form XObject ([`synth_redact`]).
+    ///
+    /// The dictionary gets `/C` and `/IC` where the mark has those colors
+    /// (`/IC` as three `DeviceRGB` numbers whatever the color's space, as ISO
+    /// 32000-2, 12.5.6.23, Table 195 has it; none for a transparent one),
+    /// `/QuadPoints` where it has quadrilaterals, `/Q`, `/OverlayText`,
+    /// `/Repeat`, and `/DA`: the mark's, or beside overlay text with none
+    /// given, the one the overlay was drawn with (`/Helv 0 Tf 1 g`), as the
+    /// table asks for a `/DA` there.
+    #[must_use]
+    pub fn redact_mark(rect: Rect, mark: &RedactMark<'_>) -> Self {
         let mut d = base_annot_dict(&AnnotSubtype::Redact, rect, AnnotFlags::PRINT);
         {
             let mut m = AnnotMut::new(&mut d);
-            m.set_interior_color(interior_color).set_quadding(quadding);
-            if !quads.is_empty() {
-                m.set_quad_points(quads);
+            if let Some(c) = mark.stroke_color {
+                m.set_color(c);
             }
-            if let Some(da_val) = da {
-                m.set_default_appearance(da_val);
+            if let Some(rgb) = mark.interior_color.and_then(device_rgb) {
+                m.set_interior_color(AnnotColor::Rgb(rgb));
             }
+            m.set_quadding(mark.quadding);
+            if !mark.quads.is_empty() {
+                m.set_quad_points(mark.quads);
+            }
+            match (mark.da, mark.overlay_text) {
+                (Some(da), _) => {
+                    m.set_default_appearance(da);
+                }
+                (None, Some(_)) => {
+                    m.set_default_appearance(&DefaultAppearance::new(
+                        b"Helv".to_vec(),
+                        0.0,
+                        Some(Color::Gray(1.0)),
+                    ));
+                }
+                (None, None) => {}
+            }
+            if let Some(txt) = mark.overlay_text {
+                m.set_overlay_text(txt);
+            }
+            m.set_repeat(mark.repeat);
         }
-        if let Some(txt) = overlay_text {
-            d.set("OverlayText", Object::text(txt));
-        }
-        if repeat {
-            d.set("Repeat", true);
-        }
-        let (normal_ap, redact_overlay) = match synth_redact(
-            rect,
-            None,
-            Some(interior_color),
-            overlay_text,
-            repeat,
-            da,
-            quadding,
-        ) {
+        let (normal_ap, redact_overlay) = match synth_redact(rect, mark) {
             Some((ap, ro)) => (Some(ap), Some(ro)),
             None => (None, None),
         };
@@ -610,6 +695,32 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay,
+        }
+    }
+
+    /// Builds a `/Redact` annotation from `mark` whose `/Rect` is the
+    /// smallest rectangle that holds the mark's quadrilaterals
+    /// ([`RedactMark::bounds`]), as [`Self::redact_mark`] builds it.
+    ///
+    /// Returns `None` where the mark has no usable quadrilateral, or they
+    /// span no width or no height.
+    #[must_use]
+    pub fn redact_quads(mark: &RedactMark<'_>) -> Option<Self> {
+        let rect = mark.bounds()?;
+        (rect.width() > 0.0 && rect.height() > 0.0).then(|| Self::redact_mark(rect, mark))
+    }
+}
+
+/// `color` as `DeviceRGB` components: gray three times, CMYK by the device
+/// formula (ISO 32000-2, 10.4.2.4); `None` for a transparent color.
+fn device_rgb(color: AnnotColor) -> Option<[f32; 3]> {
+    match color {
+        AnnotColor::Transparent => None,
+        AnnotColor::Gray(g) => Some([g, g, g]),
+        AnnotColor::Rgb(rgb) => Some(rgb),
+        AnnotColor::Cmyk([c, m, y, k]) => {
+            let ink = |v: f32| 1.0 - (v.clamp(0.0, 1.0) + k.clamp(0.0, 1.0)).min(1.0);
+            Some([ink(c), ink(m), ink(y)])
         }
     }
 }

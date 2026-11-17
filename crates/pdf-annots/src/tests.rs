@@ -15,12 +15,12 @@ use crate::{
     DestNameKind, DestTable, Error, ExplicitDest, Fault, FileAttachmentAnnot, FlattenOpts,
     FlattenPlan, FlattenTarget, FreeTextAnnot, FreeTextIntent, HighlightMode, InkAnnot, Limits,
     LineAnnot, LineEnding, LinkAnnot, MarkedState, MarkupInfo, NamedAction, OpenAction, PageTarget,
-    PaintStyle, PolyAnnot, PolyKind, PopupAnnot, QuadPoints, Quadding, RedactAnnot, ReplyKind,
-    ResolvedDest, ReviewState, ShapeAnnot, ShapeKind, StampAnnot, StampName, SynthesizedAp,
-    TabOrder, TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot, fuzz,
-    page_annots, page_annots_with, page_tabs, placement_matrix, plan_flatten,
+    PaintStyle, PolyAnnot, PolyKind, PopupAnnot, QuadPoints, Quadding, RedactAnnot, RedactMark,
+    ReplyKind, ResolvedDest, ReviewState, ShapeAnnot, ShapeKind, StampAnnot, StampName,
+    SynthesizedAp, TabOrder, TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot,
+    WidgetAnnot, fuzz, page_annots, page_annots_with, page_tabs, placement_matrix, plan_flatten,
     plan_flatten_filtered, push_page_annot, resolve_dest, resolve_threads, stream_placement_matrix,
-    synth_annot,
+    synth_annot, synth_redact,
 };
 
 #[derive(Default)]
@@ -1628,4 +1628,520 @@ fn flattening_keeps_redaction_marks_unless_asked() {
     assert!(push_page_annot(&mut other, lower));
     let p = plan(&other, FlattenOpts::DEFAULT);
     assert_eq!((p.drawn_count, p.removed_count), (1, 1));
+}
+
+/// The name of the one resource `ap` has under `category`.
+fn only_resource(ap: &SynthesizedAp, category: &str) -> String {
+    let dict = ap
+        .resources
+        .get(category.as_bytes())
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    assert_eq!(dict.len(), 1);
+    let (name, _) = dict.iter().next().unwrap();
+    String::from_utf8(name.to_vec()).unwrap()
+}
+
+/// A mark over `[100 500 300 540]`: a rectangle in Z order along the box's
+/// top and left edges, and a turned quadrilateral in perimeter order.
+const MARK_RECT: Rect = Rect::new(100.0, 500.0, 300.0, 540.0);
+const MARK_QUADS: [QuadPoints; 2] = [
+    QuadPoints([100.0, 540.0, 200.0, 540.0, 100.0, 520.0, 200.0, 520.0]),
+    QuadPoints([210.0, 502.0, 290.0, 506.0, 285.0, 526.0, 205.0, 521.0]),
+];
+const TURNED_PATH: &str = "110 2 m\n190 6 l\n185 26 l\n105 21 l\nh\n";
+
+#[test]
+fn a_redaction_with_no_quad_covers_its_whole_box_as_before() {
+    let da = DefaultAppearance::new(b"Helv".to_vec(), 10.0, Some(Color::Gray(1.0)));
+    let mark = RedactMark::new()
+        .with_interior_color(AnnotColor::Rgb([0.0, 0.0, 0.0]))
+        .with_overlay_text("REDACTED")
+        .with_default_appearance(&da);
+    let (ap, ro) = synth_redact(MARK_RECT, &mark).unwrap();
+    let gs = only_resource(&ap, "ExtGState");
+    assert_eq!(
+        content_text(&ap),
+        format!(
+            "q\n/{gs} gs\n0.85 0.1 0.1 rg\n0 0 200 40 re\nf\nQ\n\
+             q\n0.85 0.1 0.1 RG\nq\n1 w\n0.5 0.5 199 39 re\nS\nQ\nQ\n"
+        )
+    );
+    let font = only_resource(&ro, "Font");
+    let text = if cfg!(feature = "text-layout") {
+        format!(
+            "1 g\nq\n2 1 196 38 re\nW\nn\nBT\n/{font} 10 Tf\n1 0 0 1 2 31.82 Tm\n\
+             (REDACTED) Tj\nET\nQ\n"
+        )
+    } else {
+        format!(
+            "q\n2 1 196 38 re\nW\nn\n1 g\nBT\n/{font} 10 Tf\n1 0 0 1 2 29 Tm\n\
+             (REDACTED) Tj\nET\nQ\n"
+        )
+    };
+    assert_eq!(
+        content_text(&ro),
+        format!("q\n0 0 0 rg\n0 0 200 40 re\nf\n{text}Q\n")
+    );
+    assert_eq!(read_back(&ap), (2, 0));
+    assert_eq!(read_back(&ro), (1, 8));
+
+    // The builder that takes the values one by one draws the same two.
+    let built = BuiltAnnot::redact(
+        MARK_RECT,
+        &[],
+        AnnotColor::Rgb([0.0, 0.0, 0.0]),
+        Some("REDACTED"),
+        false,
+        Some(&da),
+        Quadding::Left,
+    );
+    assert_eq!(built.normal_ap.as_ref(), Some(&ap));
+    assert_eq!(built.redact_overlay.as_ref(), Some(&ro));
+    assert_eq!(built, BuiltAnnot::redact_mark(MARK_RECT, &mark));
+
+    // A quadrilateral that can't be drawn is passed over: alone, the whole
+    // box is drawn; beside another, the other alone.
+    let nan = QuadPoints([100.0, 540.0, f32::NAN, 540.0, 100.0, 520.0, 200.0, 520.0]);
+    let inf = QuadPoints([
+        100.0,
+        540.0,
+        200.0,
+        f32::INFINITY,
+        100.0,
+        520.0,
+        200.0,
+        520.0,
+    ]);
+    let unusable = [nan, inf];
+    assert_eq!(
+        synth_redact(MARK_RECT, &mark.with_quads(&unusable)),
+        Some((ap.clone(), ro.clone()))
+    );
+    let mixed = [nan, MARK_QUADS[0], inf];
+    assert_eq!(
+        synth_redact(MARK_RECT, &mark.with_quads(&mixed)),
+        synth_redact(MARK_RECT, &mark.with_quads(&MARK_QUADS[..1]))
+    );
+    assert_ne!(
+        synth_redact(MARK_RECT, &mark.with_quads(&mixed)),
+        Some((ap, ro))
+    );
+    // One whose move into the form's space overflows is passed over too.
+    let far = Rect::new(-3.0e38, 0.0, 0.0, 10.0);
+    let overflowing = [QuadPoints([
+        3.0e38, 10.0, 3.0e38, 0.0, 2.0e38, 0.0, 2.0e38, 10.0,
+    ])];
+    assert_eq!(
+        synth_redact(far, &RedactMark::new().with_quads(&overflowing)),
+        synth_redact(far, &RedactMark::new())
+    );
+
+    // No box, no appearance.
+    assert_eq!(synth_redact(Rect::new(10.0, 10.0, 10.0, 40.0), &mark), None);
+    assert_eq!(synth_redact(Rect::new(10.0, 10.0, 40.0, 10.0), &mark), None);
+}
+
+#[test]
+fn a_redaction_is_drawn_over_each_of_its_quads() {
+    let da = DefaultAppearance::new(b"Helv".to_vec(), 10.0, Some(Color::Gray(1.0)));
+    let mark = RedactMark::new()
+        .with_quads(&MARK_QUADS)
+        .with_stroke_color(AnnotColor::Rgb([0.0, 0.0, 1.0]))
+        .with_interior_color(AnnotColor::Gray(0.25));
+
+    // /AP /N: a wash over each, then each one's outline: inside a rectangle,
+    // along a turned quadrilateral's edges.
+    let (ap, ro) = synth_redact(MARK_RECT, &mark).unwrap();
+    assert_eq!(ap.bbox, Rect::new(0.0, 0.0, 200.0, 40.0));
+    assert_eq!(ro.bbox, ap.bbox);
+    let gs = only_resource(&ap, "ExtGState");
+    assert_eq!(
+        content_text(&ap),
+        format!(
+            "q\n/{gs} gs\n0 0 1 rg\n0 20 100 20 re\nf\n{TURNED_PATH}f\nQ\n\
+             q\n0 0 1 RG\nq\n1 w\n0.5 20.5 99 19 re\nS\nQ\nq\n1 w\n{TURNED_PATH}S\nQ\nQ\n"
+        )
+    );
+    assert_eq!(read_back(&ap), (4, 0));
+
+    // The builder that takes the values one by one passes its quads on.
+    let by_values = BuiltAnnot::redact(
+        MARK_RECT,
+        &MARK_QUADS,
+        AnnotColor::Gray(0.25),
+        None,
+        false,
+        None,
+        Quadding::Left,
+    );
+    assert_eq!(by_values.redact_overlay.as_ref(), Some(&ro));
+    assert_ne!(by_values.normal_ap.as_ref(), Some(&ap), "no outline color");
+    assert_eq!(
+        by_values,
+        BuiltAnnot::redact_mark(
+            MARK_RECT,
+            &RedactMark::new()
+                .with_quads(&MARK_QUADS)
+                .with_interior_color(AnnotColor::Gray(0.25))
+        )
+    );
+
+    // /RO: the interior color over each, and nothing else without text.
+    assert_eq!(
+        content_text(&ro),
+        format!("q\n0.25 g\n0 20 100 20 re\nf\n{TURNED_PATH}f\nQ\n")
+    );
+    assert!(ro.resources.is_empty());
+    assert_eq!(read_back(&ro), (2, 0));
+
+    // With text: both fills first, then the text in each one's bounding box
+    // (less 2 across and 1 up and down).
+    let with_text = mark.with_overlay_text("AB").with_default_appearance(&da);
+    let (ap_text, ro_text) = synth_redact(MARK_RECT, &with_text).unwrap();
+    assert_eq!(ap_text, ap, "the text isn't the mark's");
+    let text = content_text(&ro_text);
+    let fills = format!("q\n0.25 g\n0 20 100 20 re\nf\n{TURNED_PATH}f\n");
+    assert!(text.starts_with(&fills), "{text}");
+    let after = &text[fills.len()..];
+    assert!(!after.contains("\nf\n"), "no fill after a text: {after}");
+    let first = after.find("2 21 96 18 re\nW\nn\n").expect("the first box");
+    let second = after
+        .find("107 3 81 22 re\nW\nn\n")
+        .expect("the second box");
+    assert!(first < second);
+    assert_eq!(after.matches("(AB) Tj").count(), 2);
+    assert_eq!(after.matches("1 g\n").count(), 2, "each text in its color");
+    assert_eq!(read_back(&ro_text), (2, 4));
+
+    // Under /Repeat the text is repeated to each one's own width: 100 and 85
+    // at a size of 6 are six and five times.
+    let small = DefaultAppearance::new(b"Helv".to_vec(), 6.0, Some(Color::Gray(1.0)));
+    let repeated = mark
+        .with_overlay_text("X")
+        .with_repeat(true)
+        .with_default_appearance(&small);
+    let (_, ro_rep) = synth_redact(MARK_RECT, &repeated).unwrap();
+    let text = content_text(&ro_rep);
+    assert_eq!(text.matches("(X X X X X X) Tj").count(), 1, "{text}");
+    assert_eq!(text.matches("(X X X X X) Tj").count(), 1, "{text}");
+    assert_eq!(read_back(&ro_rep), (2, 20));
+
+    // With no /DA the size follows each one's own height (0.55 of it, within
+    // 6 and 14): 11 in the box of 20, 13.2 in the one of 24.
+    let (_, ro_auto) = synth_redact(MARK_RECT, &mark.with_overlay_text("AB")).unwrap();
+    let text = content_text(&ro_auto);
+    assert!(text.contains(" 11 Tf\n"), "{text}");
+    assert!(text.contains(" 13.2 Tf\n"), "{text}");
+
+    // An empty text is none.
+    assert_eq!(
+        synth_redact(MARK_RECT, &mark.with_overlay_text("")),
+        Some((ap.clone(), ro.clone()))
+    );
+
+    // A rectangle written in perimeter order, or turned a quarter, is a
+    // rectangle still.
+    for points in [
+        [100.0, 520.0, 200.0, 520.0, 200.0, 540.0, 100.0, 540.0],
+        [200.0, 520.0, 200.0, 540.0, 100.0, 540.0, 100.0, 520.0],
+    ] {
+        let quads = [QuadPoints(points)];
+        let (n, o) = synth_redact(MARK_RECT, &RedactMark::new().with_quads(&quads)).unwrap();
+        let n = content_text(&n);
+        assert!(n.contains("\n0 20 100 20 re\nf\n"), "{n}");
+        assert!(n.contains("\n0.5 20.5 99 19 re\nS\n"), "{n}");
+        assert_eq!(content_text(&o), "q\n0 g\n0 20 100 20 re\nf\nQ\n");
+    }
+
+    // A mark whose /Rect is its quads' bounds: a rectangle's outline stays
+    // whole inside the form's /BBox (`read_back` holds it).
+    let rects = [
+        QuadPoints::from_rect(Rect::new(100.0, 520.0, 200.0, 540.0)),
+        QuadPoints::from_rect(Rect::new(150.0, 500.0, 300.0, 518.0)),
+    ];
+    let of_rects = RedactMark::new().with_quads(&rects);
+    assert_eq!(of_rects.bounds(), Some(MARK_RECT));
+    let built = BuiltAnnot::redact_quads(&of_rects).unwrap();
+    assert_eq!(
+        built.dict.get(b"Rect"),
+        BuiltAnnot::redact_mark(MARK_RECT, &of_rects)
+            .dict
+            .get(b"Rect")
+    );
+    assert_eq!(built, BuiltAnnot::redact_mark(MARK_RECT, &of_rects));
+    assert_eq!(read_back(built.normal_ap.as_ref().unwrap()), (4, 0));
+    assert_eq!(read_back(built.redact_overlay.as_ref().unwrap()), (2, 0));
+}
+
+#[test]
+fn a_redaction_marks_bounds_and_debug() {
+    // bounds(): the union of the quads' bounds, whatever their order.
+    assert_eq!(RedactMark::new().bounds(), None);
+    assert_eq!(RedactMark::default(), RedactMark::new());
+    assert_eq!(
+        RedactMark::new().with_quads(&MARK_QUADS).bounds(),
+        Some(Rect::new(100.0, 502.0, 290.0, 540.0))
+    );
+    assert_eq!(
+        RedactMark::new().with_quads(&MARK_QUADS[1..]).bounds(),
+        Some(Rect::new(205.0, 502.0, 290.0, 526.0))
+    );
+    // One with a number that isn't finite is left out; alone, there's none.
+    let nan = QuadPoints([f32::NAN; 8]);
+    let inf = QuadPoints([0.0, 0.0, f32::INFINITY, 0.0, 0.0, 9.0, 9.0, 9.0]);
+    assert_eq!(RedactMark::new().with_quads(&[nan, inf]).bounds(), None);
+    assert_eq!(
+        RedactMark::new()
+            .with_quads(&[nan, MARK_QUADS[1], inf])
+            .bounds(),
+        Some(Rect::new(205.0, 502.0, 290.0, 526.0))
+    );
+
+    // redact_quads: /Rect from the bounds; none without a usable quad or
+    // where they span no width or no height.
+    assert!(BuiltAnnot::redact_quads(&RedactMark::new()).is_none());
+    assert!(BuiltAnnot::redact_quads(&RedactMark::new().with_quads(&[nan])).is_none());
+    let flat = [QuadPoints([10.0, 20.0, 50.0, 20.0, 10.0, 20.0, 50.0, 20.0])];
+    assert!(BuiltAnnot::redact_quads(&RedactMark::new().with_quads(&flat)).is_none());
+    let thin = [QuadPoints([10.0, 20.0, 10.0, 40.0, 10.0, 20.0, 10.0, 40.0])];
+    assert!(BuiltAnnot::redact_quads(&RedactMark::new().with_quads(&thin)).is_none());
+    let built = BuiltAnnot::redact_quads(&RedactMark::new().with_quads(&MARK_QUADS)).unwrap();
+    assert_eq!(
+        built.dict.get(b"Rect"),
+        Some(&Object::from(vec![
+            Object::from(100.0),
+            Object::from(502.0),
+            Object::from(290.0),
+            Object::from(540.0),
+        ]))
+    );
+    assert_eq!(
+        built.normal_ap.as_ref().unwrap().bbox,
+        Rect::new(0.0, 0.0, 190.0, 38.0)
+    );
+
+    // Debug: counts and lengths, never the text or the /DA's font name.
+    let da = DefaultAppearance::new(b"SecretFont".to_vec(), 9.0, None);
+    let mark = RedactMark::new()
+        .with_quads(&MARK_QUADS)
+        .with_overlay_text("TOP SECRET LABEL")
+        .with_repeat(true)
+        .with_default_appearance(&da)
+        .with_quadding(Quadding::Right);
+    let shown = format!("{mark:?}");
+    assert!(shown.contains("quads: 2"), "{shown}");
+    assert!(shown.contains("overlay_text_len: Some(16)"), "{shown}");
+    assert!(shown.contains("repeat: true"), "{shown}");
+    assert!(shown.contains("Right"), "{shown}");
+    assert!(!shown.contains("SECRET"), "{shown}");
+    assert!(!shown.contains("SecretFont"), "{shown}");
+    assert!(!shown.contains("540"), "{shown}");
+    let built = BuiltAnnot::redact_mark(MARK_RECT, &mark);
+    assert!(!format!("{built:?}").contains("SECRET"));
+
+    fn check<T: Send + Sync + Copy>() {}
+    check::<RedactMark<'static>>();
+}
+
+#[test]
+fn annot_mut_sets_a_redactions_entries_and_the_rollover_appearance() {
+    let (ro, n, r) = (
+        ObjectId::new(7, 0),
+        ObjectId::new(8, 0),
+        ObjectId::new(9, 0),
+    );
+    let mut d = Dict::new();
+    let mut m = AnnotMut::new(&mut d);
+    m.set_redact_overlay(ro)
+        .set_overlay_text("Caf\u{e9} \u{20ac}")
+        .set_repeat(true)
+        .set_rollover_appearance(r);
+    assert_eq!(d.get(b"RO"), Some(&Object::from(ro)));
+    assert_eq!(
+        d.get(b"OverlayText")
+            .and_then(Object::as_str)
+            .and_then(Str::text)
+            .as_deref(),
+        Some("Caf\u{e9} \u{20ac}")
+    );
+    assert_eq!(d.get(b"Repeat"), Some(&Object::from(true)));
+    // With no /AP there's one now, of /R alone.
+    assert_eq!(d.get(b"AP"), Some(&Object::from(dict! { "R" => r })));
+
+    // false is /Repeat's default: the key goes.
+    AnnotMut::new(&mut d).set_repeat(false);
+    assert_eq!(d.get(b"Repeat"), None);
+    AnnotMut::new(&mut d).set_repeat(false);
+    assert_eq!(d.get(b"Repeat"), None);
+
+    // /R beside /N, either set first; each kept by the other, and replaced
+    // by its own setter.
+    let mut d = Dict::new();
+    AnnotMut::new(&mut d)
+        .set_normal_appearance(n)
+        .set_rollover_appearance(r);
+    assert_eq!(
+        d.get(b"AP"),
+        Some(&Object::from(dict! { "N" => n, "R" => r }))
+    );
+    AnnotMut::new(&mut d)
+        .set_rollover_appearance(ro)
+        .set_normal_appearance(r);
+    assert_eq!(
+        d.get(b"AP"),
+        Some(&Object::from(dict! { "N" => r, "R" => ro }))
+    );
+    assert_eq!(d.len(), 1);
+}
+
+#[test]
+fn a_built_redaction_is_written_with_its_overlay_and_reads_back() {
+    let da = DefaultAppearance::new(b"Helv".to_vec(), 9.0, Some(Color::Rgb([1.0, 1.0, 0.0])));
+    let mark = RedactMark::new()
+        .with_quads(&MARK_QUADS)
+        .with_stroke_color(AnnotColor::Rgb([0.0, 0.0, 1.0]))
+        .with_interior_color(AnnotColor::Rgb([0.25, 0.5, 0.75]))
+        .with_overlay_text("b(5) \u{2014} withheld")
+        .with_repeat(true)
+        .with_default_appearance(&da)
+        .with_quadding(Quadding::Center);
+    let built = BuiltAnnot::redact_mark(MARK_RECT, &mark);
+    let (ap, ro) = synth_redact(MARK_RECT, &mark).unwrap();
+    assert_eq!(built.normal_ap.as_ref(), Some(&ap));
+    assert_eq!(built.redact_overlay.as_ref(), Some(&ro));
+
+    // Written: the overlay first, then the mark, then the annotation, with
+    // /RO, and /AP holding /N and /R, /R the overlay.
+    let mut store = Store::default();
+    let id = built.write_into(|obj| store.put(obj));
+    let (ro_id, ap_id) = (ObjectId::new(1, 0), ObjectId::new(2, 0));
+    assert_eq!(id, ObjectId::new(3, 0));
+    let written = store.objects[&id].as_dict().unwrap();
+    assert_eq!(written.get(b"RO"), Some(&Object::from(ro_id)));
+    assert_eq!(
+        written.get(b"AP"),
+        Some(&Object::from(dict! { "N" => ap_id, "R" => ro_id }))
+    );
+    assert_eq!(store.objects[&ro_id].as_stream().unwrap(), &ro.to_stream());
+    assert_eq!(store.objects[&ap_id].as_stream().unwrap(), &ap.to_stream());
+
+    // Read back: what was given.
+    let mut page = Dict::new();
+    assert!(push_page_annot(&mut page, id));
+    let mut faults = Vec::new();
+    let annots = page_annots_with(
+        &store.objects,
+        &page,
+        None,
+        Rules::Iso,
+        &Limits::DEFAULT,
+        &mut faults,
+    )
+    .unwrap();
+    assert_eq!(faults, Vec::new());
+    let annot = &annots[0];
+    assert_eq!(*annot.subtype(), AnnotSubtype::Redact);
+    assert_eq!(annot.rect(), MARK_RECT);
+    assert_eq!(annot.color(), Some(AnnotColor::Rgb([0.0, 0.0, 1.0])));
+    let TypedAnnot::Redact(rd) = annot.typed() else {
+        panic!("a /Redact");
+    };
+    assert_eq!(rd.quad_points, MARK_QUADS);
+    assert_eq!(rd.interior_color, Some(AnnotColor::Rgb([0.25, 0.5, 0.75])));
+    assert_eq!(rd.overlay_form, Some(ro_id));
+    assert_eq!(rd.overlay_text.as_deref(), Some("b(5) \u{2014} withheld"));
+    assert!(rd.repeat);
+    assert_eq!(rd.da.as_ref(), Some(&da));
+    assert_eq!(rd.quadding, Quadding::Center);
+    let aps = annot.appearances().unwrap();
+    assert_eq!(
+        aps.stream(AppearanceMode::Normal, false, false),
+        Some(ap_id)
+    );
+    assert_eq!(
+        aps.stream(AppearanceMode::Rollover, false, false),
+        Some(ro_id)
+    );
+    assert_eq!(aps.stream(AppearanceMode::Down, false, false), None);
+    // What's read draws the mark it was written with: the quads reach
+    // `synth_annot`.
+    assert_eq!(synth_annot(annot), Some(ap));
+
+    // Without an overlay there's no /RO and no /R; without a mark, no /AP
+    // (a rollover appearance needs a normal one).
+    let mut bare = BuiltAnnot::redact_mark(MARK_RECT, &mark);
+    bare.redact_overlay = None;
+    let mut store = Store::default();
+    let id = bare.write_into(|obj| store.put(obj));
+    let written = store.objects[&id].as_dict().unwrap();
+    assert_eq!(written.get(b"RO"), None);
+    assert_eq!(
+        written.get(b"AP"),
+        Some(&Object::from(dict! { "N" => ObjectId::new(1, 0) }))
+    );
+    let mut bare = BuiltAnnot::redact_mark(MARK_RECT, &mark);
+    bare.normal_ap = None;
+    let mut store = Store::default();
+    let id = bare.write_into(|obj| store.put(obj));
+    let written = store.objects[&id].as_dict().unwrap();
+    assert_eq!(written.get(b"RO"), Some(&Object::from(ObjectId::new(1, 0))));
+    assert_eq!(written.get(b"AP"), None);
+
+    // /IC is three DeviceRGB numbers whatever the color's space (ISO 32000-2,
+    // 12.5.6.23, Table 195): gray three times, CMYK by the device formula; a
+    // transparent color writes none. The overlay keeps the color as given.
+    let rgb = |c: [f64; 3]| Object::from(c.map(Object::from).to_vec());
+    for (color, written, drawn) in [
+        (AnnotColor::Gray(0.5), Some(rgb([0.5, 0.5, 0.5])), "0.5 g"),
+        (
+            AnnotColor::Rgb([0.25, 0.5, 0.75]),
+            Some(rgb([0.25, 0.5, 0.75])),
+            "0.25 0.5 0.75 rg",
+        ),
+        (
+            AnnotColor::Cmyk([0.25, 0.5, 1.0, 0.25]),
+            Some(rgb([0.5, 0.25, 0.0])),
+            "0.25 0.5 1 0.25 k",
+        ),
+        (AnnotColor::Transparent, None, "0 g"),
+    ] {
+        let built =
+            BuiltAnnot::redact_mark(MARK_RECT, &RedactMark::new().with_interior_color(color));
+        assert_eq!(built.dict.get(b"IC"), written.as_ref(), "{color:?}");
+        let ro = content_text(built.redact_overlay.as_ref().unwrap());
+        assert!(ro.starts_with(&format!("q\n{drawn}\n")), "{color:?}: {ro}");
+        let by_values =
+            BuiltAnnot::redact(MARK_RECT, &[], color, None, false, None, Quadding::Left);
+        assert_eq!(by_values.dict.get(b"IC"), written.as_ref(), "{color:?}");
+    }
+    let plain = BuiltAnnot::redact_mark(MARK_RECT, &RedactMark::new());
+    for key in ["IC", "C", "QuadPoints", "DA", "OverlayText", "Repeat"] {
+        assert_eq!(plain.dict.get(key.as_bytes()), None, "{key}");
+    }
+    assert_eq!(plain.dict.get(b"Q"), Some(&Object::from(0)));
+
+    // Overlay text with no /DA given gets the one it was drawn with, which
+    // the table asks for beside /OverlayText; read back, it draws the same.
+    let no_da = RedactMark::new().with_overlay_text("NO DA");
+    let built = BuiltAnnot::redact_mark(MARK_RECT, &no_da);
+    assert_eq!(
+        built.dict.get(b"DA").and_then(Object::as_bytes),
+        Some(&b"/Helv 0 Tf 1 g"[..])
+    );
+    let read = DefaultAppearance::parse(b"/Helv 0 Tf 1 g", &Limits::DEFAULT.content).unwrap();
+    assert_eq!(
+        synth_redact(MARK_RECT, &no_da.with_default_appearance(&read)),
+        synth_redact(MARK_RECT, &no_da)
+    );
+    // A /DA given is the one written; none without text.
+    let built = BuiltAnnot::redact_mark(MARK_RECT, &no_da.with_default_appearance(&da));
+    assert_eq!(
+        built.dict.get(b"DA").and_then(Object::as_bytes),
+        Some(&b"/Helv 9 Tf 1 1 0 rg"[..])
+    );
+    let built = BuiltAnnot::redact_mark(MARK_RECT, &RedactMark::new().with_default_appearance(&da));
+    assert!(built.dict.get(b"DA").is_some());
+    assert_eq!(built.dict.get(b"OverlayText"), None);
 }

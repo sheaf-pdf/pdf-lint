@@ -10,7 +10,8 @@ use pdf_annots::pdf_objects::{Dict, Object, Stream, Version, dict};
 use pdf_annots::pdf_semantics::pages::{FANOUT, write};
 use pdf_annots::{
     AnnotColor, Border, BuiltAnnot, DefaultAppearance, Dest, FlattenOpts, LineEnding, PaintStyle,
-    QuadPoints, Quadding, ShapeKind, StampName, TextMarkupKind, plan_flatten, push_page_annot,
+    QuadPoints, Quadding, RedactMark, ShapeKind, StampName, TextMarkupKind, plan_flatten,
+    push_page_annot,
 };
 use pdf_fixtures::qpdf::Qpdf;
 use pdf_structure::Source;
@@ -113,6 +114,19 @@ fn qpdf_accepts_synthesized_annotations_and_flattened_pages() {
             )
             .with_border(Border::default()),
         ),
+        // A redaction mark over two regions, one of them turned: its /Rect
+        // from the regions, its overlay written as /RO and /AP /R.
+        BuiltAnnot::redact_quads(
+            &RedactMark::new()
+                .with_quads(&[
+                    QuadPoints([72.0, 300.0, 200.0, 300.0, 72.0, 284.0, 200.0, 284.0]),
+                    QuadPoints([210.0, 262.0, 290.0, 266.0, 285.0, 286.0, 205.0, 281.0]),
+                ])
+                .with_interior_color(AnnotColor::Gray(0.0))
+                .with_overlay_text("REDACTED")
+                .with_repeat(true),
+        )
+        .unwrap(),
     ] {
         let aid = built.write_into(|obj| doc.add(obj));
         assert!(push_page_annot(&mut page1, aid));
@@ -147,12 +161,14 @@ fn qpdf_accepts_synthesized_annotations_and_flattened_pages() {
         )
         .unwrap()
     };
+    // The redaction mark isn't flattened: it stays on the page.
     assert_eq!(plan.drawn_count, 5);
+    assert_eq!(plan.kept_annots.len(), 1);
     let combined = plan.combine_with_page(b"0.2 g 50 700 100 20 re f\n");
     let new_content_id = doc.add(Stream::new(dict! {}, combined));
     let p1_mut = doc.get_mut(p1).unwrap().as_dict_mut().unwrap();
     p1_mut.set("Contents", new_content_id);
-    p1_mut.remove(b"Annots");
+    p1_mut.set("Annots", plan.kept_annots);
     let mut xo = Dict::new();
     for (name, id) in plan.xobject_bindings {
         xo.set(name, id);

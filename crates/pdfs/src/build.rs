@@ -446,6 +446,9 @@ pub fn add_embedded_file(
 /// arrays are never mutated behind other pages' backs), and returns the new
 /// annotation `ObjectId`.
 ///
+/// A redaction's `/RO` overlay is also bound as `/AP /R` beside `/N`, so a
+/// viewer shows what applying the mark leaves while the pointer is over it.
+///
 /// # Errors
 ///
 /// [`Error::Write`] if deflating an appearance stream fails, or
@@ -459,17 +462,23 @@ pub fn add_annot(
     if doc.get_dict(page_id).is_none() {
         return Err(Error::NoPageTree);
     }
+    let mut ro_id = None;
     if let Some(ro) = built.redact_overlay.take() {
         let mut s = ro.to_stream();
         deflated(&mut s, deflate)?;
-        let ro_id = doc.add(Object::from(s));
-        built.dict.set("RO", ro_id);
+        let id = doc.add(Object::from(s));
+        pdf_annots::AnnotMut::new(&mut built.dict).set_redact_overlay(id);
+        ro_id = Some(id);
     }
     if let Some(ap) = built.normal_ap.take() {
         let mut s = ap.to_stream();
         deflated(&mut s, deflate)?;
         let ap_id = doc.add(Object::from(s));
-        pdf_annots::AnnotMut::new(&mut built.dict).set_normal_appearance(ap_id);
+        let mut m = pdf_annots::AnnotMut::new(&mut built.dict);
+        m.set_normal_appearance(ap_id);
+        if let Some(ro_id) = ro_id {
+            m.set_rollover_appearance(ro_id);
+        }
     }
     let annot_id = doc.add(Object::from(built.dict));
     let existing_annots = doc
