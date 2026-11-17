@@ -39,10 +39,9 @@ pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfiu
 default:
     @just --list --unsorted
 
-# Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
-# installed, and pdf-structure's tests on Windows, which CI's
-# `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross lint-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package lint-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
+# Everything CI runs, but `semver`, which needs cargo-semver-checks installed,
+# and pdf-structure's tests on Windows, which CI's `structure-windows` job runs.
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing targets package msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -368,6 +367,9 @@ tokenizer-no-std:
 tokenizer-core-only:
     cargo +nightly build --locked -p pdf-tokenizer --target thumbv6m-none-eabi -Z build-std=core
 
+# Cross-platform, no_std, core-only and release-archive builds.
+targets: dist structure-cross lint-cross tokenizer-no-std tokenizer-core-only
+
 # Package a crate as a publish would, in a target directory of its own,
 # target/<the crate's name without `pdf-`>-package, made fresh each time (a
 # stale one passes or fails falsely), and check what the package holds: its
@@ -471,6 +473,7 @@ _package crate *beside:
         echo "the packaged manifest declares a benchmark the package doesn't hold" >&2
         exit 1
     fi
+    rm -rf "$dir"
 
 # Package the tokenizer as a publish would; `_package` says what's checked.
 tokenizer-package: (_package "pdf-tokenizer")
@@ -546,6 +549,9 @@ arlington-package: (_package "pdf-arlington" "pdf-objects" "pdf-color")
 # writer, pdf-fixtures, is never published.
 lint-package: (_package "pdf-lint" "pdf-objects" "pdf-filters" "pdf-crypt" "pdf-color" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize" "pdf-arlington")
 
+# Package every published crate as a publish would; `_package` says what's checked.
+package: tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package lint-package
+
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
 # a pinned build): a break the version doesn't allow fails.
@@ -597,6 +603,9 @@ crypt-semver: (_semver "pdf-crypt")
 # Check pdf-color's public API against its version on crates.io; `_semver`
 # says how an alpha is held.
 color-semver: (_semver "pdf-color")
+
+# Check every published crate's public API against crates.io.
+semver: tokenizer-semver objects-semver filters-semver crypt-semver color-semver lint-semver
 
 # Test the tokenizer on its oldest supported Rust, which must be installed.
 tokenizer-msrv:
@@ -741,6 +750,9 @@ lint-msrv:
     cargo +{{ lint_msrv }} test --locked -p pdf-lint --doc
     cargo +{{ lint_msrv }} nextest run --locked -p pdf-lint --no-default-features
     cargo +{{ lint_msrv }} test --locked -p pdf-lint --no-default-features --doc
+
+# Test every crate on its oldest supported Rust.
+msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
