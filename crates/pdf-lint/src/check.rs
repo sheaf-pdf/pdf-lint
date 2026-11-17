@@ -731,7 +731,8 @@ pub enum Rule {
     /// offsets count from the header, so nothing is chosen there. And a
     /// content or metadata stream whose Flate checksum doesn't match, which
     /// the check reads whole past that ([`checksummed`]), in the reader's
-    /// words for it.
+    /// words for it, where the check reads it: a content stream where its
+    /// unit is read, not where another fault leaves the unit unread.
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
@@ -2228,8 +2229,9 @@ struct Walk<'a> {
     /// source holds it, which [`Walk::content`] tells `unused` by.
     resources_at: HashMap<*const Object, content::Reached<'a>>,
     /// The streams whose data a pass read whole though its Flate checksum
-    /// doesn't match ([`checksummed`]), each once, in the order first read,
-    /// which [`Walk::read_as`] finds.
+    /// doesn't match ([`checksummed`]), of the units of content it read and
+    /// the XMP packet, in the order first read, which [`Walk::read_as`]
+    /// finds, each once.
     checksums: Vec<ObjectId>,
     /// What the page tree's walk by ISO's rules told, and where the walk by
     /// PDFium's parts from it, which [`Walk::structures`] finds in.

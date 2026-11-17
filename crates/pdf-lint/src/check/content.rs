@@ -27,17 +27,17 @@
 //! it would find what the rest undoes. But a stream whose only fault is
 //! that its Flate data's checksum doesn't match, which leaves nothing out,
 //! is read whole, as PDFium reads it ([`checksummed`]), and that's found
-//! once a stream, however many units read it, as the reader's
-//! ([`Rule::Reader`]), in its words for that fault, at the stream's data as
-//! written, where the stream is held. A unit that may hold an inline image
-//! (its data has `BI`) isn't read either where a color space its resources
-//! name, or the resources themselves, don't read for the reader's own
-//! reason (a password, a cap, the source), or the resources are through
-//! more references than are followed, as an image's components, and so
-//! where its data ends, can't be told; a space or resources that don't
-//! parse are none, as PDFium has them. Each unit is read as PDFium reads
-//! content, through pdf-content-streams, with every place ISO 32000-2
-//! reads it otherwise kept as it's read.
+//! where its unit is read, once a stream however many units read it, as
+//! the reader's ([`Rule::Reader`]), in its words for that fault, at the
+//! stream's data as written, where the stream is held. A unit that may
+//! hold an inline image (its data has `BI`) isn't read either where a
+//! color space its resources name, or the resources themselves, don't read
+//! for the reader's own reason (a password, a cap, the source), or the
+//! resources are through more references than are followed, as an image's
+//! components, and so where its data ends, can't be told; a space or
+//! resources that don't parse are none, as PDFium has them. Each unit is
+//! read as PDFium reads content, through pdf-content-streams, with every
+//! place ISO 32000-2 reads it otherwise kept as it's read.
 //!
 //! What a unit's reading finds, each kind of it once in each of the unit's
 //! streams it's found in, at its first place there, with how many times it's
@@ -493,8 +493,10 @@ impl Unit<'_> {
 
 /// A unit's streams as read.
 enum Read {
-    /// Decoded, and joined.
-    Joined(Concat<'static>),
+    /// Decoded, and joined; and those of them read whole past their Flate
+    /// checksum ([`checksummed`]), whose checksum is found where the unit
+    /// is read.
+    Joined(Concat<'static>, Vec<ObjectId>),
     /// Not read, and why: a stream doesn't decode cleanly, or the source
     /// doesn't give it, or the unit is past the budget, or past what
     /// content's reading joins.
@@ -1381,8 +1383,8 @@ impl<'a> Walk<'a> {
                     }
                 }
             }
-            let content = match self.read(unit, &limits, &mut budget) {
-                Read::Joined(content) => content,
+            let (content, checksums) = match self.read(unit, &limits, &mut budget) {
+                Read::Joined(content, checksums) => (content, checksums),
                 Read::Unread(why) => {
                     if held {
                         let key = way_key(unit.streams[0].1);
@@ -1419,6 +1421,8 @@ impl<'a> Walk<'a> {
                 categories.untell(lookup);
                 continue;
             };
+            // Read, so what of it was read past its checksum is found.
+            self.checksums.extend(checksums);
             let mut untold = Vec::new();
             let mut look = |kind, name: &[u8]| categories.look(lookup, kind, name, &mut untold);
             let found = pass(&content, unit.start, res, &limits, &mut look);
@@ -1803,16 +1807,21 @@ impl<'a> Walk<'a> {
     /// `unit`'s streams decoded and joined, each asked for no more than
     /// what's left of `budget`, and what each held spent from it. Each
     /// stream's data is the reader's own account of its decode
-    /// ([`Source::decoded_within`]), whose fault leaves the unit unread and
-    /// whose cut spends the budget, joined by `Join::push`: not by
-    /// `Join::push_from` or `push_contents`, which take a stream as a viewer
-    /// does ([`Streams::decoded`](pdf_objects::Streams::decoded)), a decode
-    /// a fault stopped read as far as it went. But a stream whose only
-    /// fault is its Flate checksum, which leaves nothing out, is read whole
-    /// ([`checksummed`]), its budget spent as a clean one's, and kept to
-    /// have its checksum found ([`Walk::checksums`](super::Walk)).
-    fn read(&mut self, unit: &Unit<'a>, limits: &Limits, budget: &mut Budget) -> Read {
+    /// ([`Source::decoded_within`](crate::source::Source::decoded_within)),
+    /// whose fault leaves the unit unread and whose cut spends the budget,
+    /// joined by `Join::push`: not by `Join::push_from` or `push_contents`,
+    /// which take a stream as a viewer does
+    /// ([`Streams::decoded`](pdf_objects::Streams::decoded)), a decode a
+    /// fault stopped read as far as it went. But a stream whose only fault
+    /// is its Flate checksum, which leaves nothing out, is read whole
+    /// ([`checksummed`]), its budget spent as a clean one's, and given back
+    /// with the data, to have its checksum found where the unit is read
+    /// ([`Walk::checksums`](super::Walk)): not where a stream after it, or
+    /// the join, or the color spaces of its inline images leave the unit
+    /// unread, as nothing of it is read then.
+    fn read(&self, unit: &Unit<'a>, limits: &Limits, budget: &mut Budget) -> Read {
         let mut join = Join::new(limits);
+        let mut checksums = Vec::new();
         for &(id, _) in &unit.streams {
             // Once the source is known to give streams' data, none is asked
             // for past the budget.
@@ -1830,7 +1839,7 @@ impl<'a> Walk<'a> {
             budget.gives = true;
             let decoded = decoded.or_else(|error| {
                 let data = checksummed(error)?;
-                self.checksums.push(id);
+                checksums.push(id);
                 Ok(data)
             });
             let data = match decoded {
@@ -1859,7 +1868,7 @@ impl<'a> Walk<'a> {
                 return Read::Unread(TOO_LARGE);
             }
         }
-        Read::Joined(join.finish())
+        Read::Joined(join.finish(), checksums)
     }
 }
 
@@ -3602,6 +3611,49 @@ mod tests {
         );
         let row = ("PageObject".to_string(), "Contents".to_string(), 2);
         assert_eq!(not_made(&report, DECODE), [row]);
+    }
+
+    /// A stream whose only fault is its Flate checksum, in a unit that
+    /// isn't read, as another stream of it doesn't decode cleanly or the
+    /// color spaces its inline images may use don't read, isn't read
+    /// either, and nothing of its checksum is found, whichever order the
+    /// page's `/Contents` lists the streams in; read alone, it's found.
+    #[test]
+    fn a_checksum_is_found_only_where_its_unit_is_read() {
+        let flate = "/Filter [/ASCIIHexDecode /FlateDecode]";
+        let checksummed = |data| stream(flate, &crate::fuzz::checksum_off(data));
+        // Hex data without its `>`: decoded whole, and a fault.
+        let damaged = stream("/Filter /ASCIIHexDecode", "7120");
+        let reader = |file: &[u8], why| {
+            let opened = WithReading::new(file, &bytes::Options::DEFAULT).unwrap();
+            let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
+            let told: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| f.object)
+                .collect();
+            (told, report.content, not_made(&report, why))
+        };
+        let row = vec![("PageObject".to_string(), "Contents".to_string(), 1)];
+        let ten = Some(ObjectId::new(10, 0));
+        for (contents, want) in [
+            ("10 0 R", (vec![ten], 1, vec![])),
+            ("[10 0 R 11 0 R]", (vec![], 0, row.clone())),
+            ("[11 0 R 10 0 R]", (vec![], 0, row.clone())),
+        ] {
+            let mut objects = tree("3 0 R", "");
+            objects.extend([
+                (3, page(&format!("/Contents {contents} /Resources << >>"))),
+                (10, checksummed("q 0 0 9 9 re f")),
+                (11, damaged.clone()),
+            ]);
+            assert_eq!(reader(&file(&objects), DECODE), want, "{contents}");
+        }
+        // Its inline image's space past the parser's cap.
+        let capped = format!("{}{}", "[".repeat(300), "]".repeat(300));
+        let resources = "/Resources << /ColorSpace << /CS0 40 0 R >> >>";
+        let image = checksummed("q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID x EI");
+        let file = resourced(resources, image, &[(40, &capped)]);
+        assert_eq!(reader(&file, SPACES), (vec![], 0, row));
     }
 
     /// An encrypted file's content is read as the reader decrypts it: its
