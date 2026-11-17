@@ -995,7 +995,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// # Errors
     ///
     /// As [`page::encode`](fn@page::encode) fails.
-    pub fn encode(&self) -> Result<pdf_gfx::Encoded, Error> {
+    pub fn encode(&self) -> Result<pdf_gfx::EncodedPage, Error> {
         self.encode_with(&mut ())
     }
 
@@ -1008,7 +1008,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
     pub fn encode_with<K: Sink<pdf_gfx::Fault> + ?Sized>(
         &self,
         sink: &mut K,
-    ) -> Result<pdf_gfx::Encoded, Error> {
+    ) -> Result<pdf_gfx::EncodedPage, Error> {
         let pdf = self.pdf;
         page::encode_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, sink)
     }

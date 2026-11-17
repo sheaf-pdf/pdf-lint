@@ -18,7 +18,7 @@ use pdfs::pdf_objects::object::Stream;
 use pdfs::pdf_objects::version::Version;
 use pdfs::pdf_objects::{Dict, Object, ObjectId, Why, dict};
 use pdfs::pdf_semantics::info::{Dated, Trapped};
-use pdfs::pdf_semantics::pages::{Inheritable, Origin, Rect};
+use pdfs::pdf_semantics::pages::{Inheritable, Origin, PdfBox};
 use pdfs::pdf_semantics::xmp::{self, Claims};
 use pdfs::pdf_structure::read::{ByteSource, Faults, Identity, Recovery};
 use pdfs::pdf_structure::write::{self, Encryptor, Pack};
@@ -189,7 +189,7 @@ fn pages_are_walked_alike_every_way() {
         (90, Origin::Own)
     );
     let media = third.media_box();
-    assert_eq!(media.value, Rect([0.0, 0.0, 612.0, 792.0]));
+    assert_eq!(media.value, PdfBox([0.0, 0.0, 612.0, 792.0]));
     assert_eq!(media.origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
     assert_eq!(table.table().len(), 5);
 }

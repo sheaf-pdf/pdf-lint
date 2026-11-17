@@ -22,7 +22,7 @@ use pdf_objects::{
 };
 use pdf_semantics::pages::{self, Inheritable};
 
-use crate::encode::{Encoded, encode, encode_with};
+use crate::encode::{EncodedPage, encode, encode_with};
 use crate::geom::{Matrix, PageGeom, Rect};
 use crate::interp::{Event, Forms, Kind, Opts, Wants, interpret, interpret_with};
 use crate::limits::Limits;
@@ -172,7 +172,7 @@ pub fn check(data: &[u8]) {
             let _ = format!("{fault:?}");
         }
 
-        if let Ok(Encoded {
+        if let Ok(EncodedPage {
             content: enc_page,
             forms: enc_forms,
         }) = enc_plain

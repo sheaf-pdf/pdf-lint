@@ -55,7 +55,7 @@ use pdf_fonts::pdf_objects::fault::Place;
 use pdf_fonts::pdf_objects::object::Stream;
 use pdf_fonts::pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dict};
 use pdf_fonts::{
-    Descendant, Encoding, Fault, Font, FontKind, Fonts, Limits, Rect, Std14, glyph_text,
+    Descendant, Encoding, Fault, Font, FontKind, Fonts, GlyphBox, Limits, Std14, glyph_text,
     name_code_point, shown,
 };
 
@@ -161,7 +161,7 @@ struct Inputs {
     /// codespace of a byte and of two.
     unknown: (Pdf, Dict),
     /// A Type 3 font of 256 CharProcs, and each code's box.
-    type3: (Pdf, Dict, Vec<Rect>),
+    type3: (Pdf, Dict, Vec<GlyphBox>),
 }
 
 /// A width for each code or CID, from a pattern.
@@ -339,7 +339,7 @@ fn inputs() -> Inputs {
         let name = format!("g{code}");
         procs.set(name.as_str(), pdf.stream(proc));
         names.push(Object::name(name.as_str()));
-        boxes.push(Rect::new(x0 as f32, y0 as f32, x1 as f32, y1 as f32));
+        boxes.push(GlyphBox::new(x0 as f32, y0 as f32, x1 as f32, y1 as f32));
     }
     let type3_widths: Vec<f32> = (0..256).map(width_of).collect();
     let type3 = dict! {
@@ -532,7 +532,7 @@ fn read_group(c: &mut Criterion) {
 /// codes 32 to 103, in WinAnsiEncoding, the descriptor nonsymbolic with its
 /// heights and box.
 #[cfg(feature = "programs")]
-fn programs() -> Vec<(&'static str, Pdf, Dict, Rect)> {
+fn programs() -> Vec<(&'static str, Pdf, Dict, GlyphBox)> {
     let truetype = include_bytes!("../tests/pdfium/programs/truetype");
     let cff = include_bytes!("../tests/pdfium/programs/cff");
     let type1 = include_bytes!("../tests/pdfium/programs/type1");
@@ -542,21 +542,21 @@ fn programs() -> Vec<(&'static str, Pdf, Dict, Rect)> {
             "TrueType",
             "FontFile2",
             &truetype[..],
-            Rect::new(0.0, 0.0, 600.0, 750.0),
+            GlyphBox::new(0.0, 0.0, 600.0, 750.0),
         ),
         (
             "cff",
             "Type1",
             "FontFile3",
             &cff[..],
-            Rect::new(0.0, 0.0, 600.0, 750.0),
+            GlyphBox::new(0.0, 0.0, 600.0, 750.0),
         ),
         (
             "type1",
             "Type1",
             "FontFile",
             &type1[..],
-            Rect::new(0.0, 0.0, 600.0, 750.0),
+            GlyphBox::new(0.0, 0.0, 600.0, 750.0),
         ),
     ];
     let widths = [500; 72];

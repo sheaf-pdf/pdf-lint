@@ -666,7 +666,8 @@ fn dest_iso_vs_pdfium_action_cycle_and_reply_threads() {
     assert_eq!(threads[0].group_members, vec![3]);
     assert_eq!(threads[0].review, ReviewState::Completed);
 
-    // Z-order QuadPoints uncrosses cleanly into a non-self-intersecting Quad.
+    // Z-order QuadPoints uncrosses cleanly into a non-self-intersecting Quad,
+    // and QuadPoints::from_quad / from_rect round-trip both axis-aligned and rotated quads.
     let zq = QuadPoints([10.0, 40.0, 50.0, 40.0, 10.0, 20.0, 50.0, 20.0]);
     assert_eq!(zq.bounds(), Rect::new(10.0, 20.0, 50.0, 40.0));
     let uq = zq.to_quad();
@@ -679,6 +680,25 @@ fn dest_iso_vs_pdfium_action_cycle_and_reply_threads() {
             Point::new(10.0, 40.0),
         ]
     );
+    assert_eq!(QuadPoints::from(uq), zq);
+    assert_eq!(QuadPoints::from(Rect::new(10.0, 20.0, 50.0, 40.0)), zq);
+
+    let rotated = pdf_gfx::Quad([
+        Point::new(10.0, 10.0),
+        Point::new(30.0, 20.0),
+        Point::new(25.0, 30.0),
+        Point::new(5.0, 20.0),
+    ]);
+    assert_eq!(QuadPoints::from_quad(rotated).to_quad(), rotated);
+
+    // AnnotColor <-> pdf_content_streams::Color round-trip.
+    for c in [
+        pdf_content_streams::Color::Gray(0.4),
+        pdf_content_streams::Color::rgb8([20, 40, 80]),
+        pdf_content_streams::Color::Cmyk([0.1, 0.2, 0.3, 0.4]),
+    ] {
+        assert_eq!(AnnotColor::from(c).to_content_color(), Some(c));
+    }
 }
 
 #[test]

@@ -54,8 +54,8 @@ struct Held {
     repeat: u32,
     loads: bool,
     parents: Vec<ObjectId>,
-    media: Sourced<Rect>,
-    crop: Sourced<Rect>,
+    media: Sourced<PdfBox>,
+    crop: Sourced<PdfBox>,
     rotate: Sourced<i64>,
     unit: Sourced<f64>,
     resources: Option<(Origin, Object)>,
@@ -613,7 +613,7 @@ fn a_page_listed_twice_is_two_pages() {
         read.iter().map(|page| page.loads).collect::<Vec<_>>(),
         [false, false, false, true, false]
     );
-    assert_eq!(media(&read[1]), Rect::LETTER.0);
+    assert_eq!(media(&read[1]), PdfBox::LETTER.0);
     assert!(read[3].parents.is_empty());
     // A root without /Kids is the one page.
     let one = [
@@ -875,7 +875,7 @@ fn a_broken_object_every_page_names_is_read_once() {
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
     assert_eq!(table.len(), 1000);
     let last = table.get(999).unwrap();
-    assert_eq!(last.media_box().value, Rect::LETTER);
+    assert_eq!(last.media_box().value, PdfBox::LETTER);
     assert_eq!(last.media_box().origin, Origin::Default);
     // Said, each time a page names it.
     assert_eq!(kept.faults().len(), 1000);
@@ -1002,14 +1002,14 @@ fn inherited_boxes_and_rotation_read_as_pdfium_reads_them() {
     assert_eq!(
         read[0].media,
         Sourced {
-            value: Rect([0.0, 0.0, 600.0, 800.0]),
+            value: PdfBox([0.0, 0.0, 600.0, 800.0]),
             origin: two
         }
     );
     assert_eq!(
         read[0].crop,
         Sourced {
-            value: Rect([50.0, 50.0, 550.0, 750.0]),
+            value: PdfBox([50.0, 50.0, 550.0, 750.0]),
             origin: three
         }
     );
@@ -1039,18 +1039,18 @@ fn inherited_boxes_and_rotation_read_as_pdfium_reads_them() {
     assert_eq!(
         read[1].media,
         Sourced {
-            value: Rect([300.0, 400.0, 0.0, 0.0]),
+            value: PdfBox([300.0, 400.0, 0.0, 0.0]),
             origin: Origin::Own
         }
     );
     assert_eq!(read[1].crop.origin, three);
 
-    assert_eq!(read[2].media.value, Rect([0.0, 0.0, 0.0, 0.0]));
+    assert_eq!(read[2].media.value, PdfBox([0.0, 0.0, 0.0, 0.0]));
     assert_eq!(read[2].media.origin, Origin::Own);
-    assert_eq!(read[2].crop.value, Rect([-100.0, -100.0, 300.0, 300.0]));
+    assert_eq!(read[2].crop.value, PdfBox([-100.0, -100.0, 300.0, 300.0]));
     assert_eq!(read[2].rotate.value, 45);
 
-    assert_eq!(read[3].crop.value, Rect([700.0, 0.0, 900.0, 100.0]));
+    assert_eq!(read[3].crop.value, PdfBox([700.0, 0.0, 900.0, 100.0]));
 
     assert_eq!(
         read[4].unit,
@@ -1060,13 +1060,13 @@ fn inherited_boxes_and_rotation_read_as_pdfium_reads_them() {
         }
     );
 
-    assert_eq!(read[5].crop.value, Rect([50.0, 50.0, 550.0, 750.0]));
+    assert_eq!(read[5].crop.value, PdfBox([50.0, 50.0, 550.0, 750.0]));
     assert_eq!(read[5].crop.origin, three);
 
     assert_eq!(
         read[6].media,
         Sourced {
-            value: Rect::LETTER,
+            value: PdfBox::LETTER,
             origin: Origin::Default
         }
     );
@@ -1081,7 +1081,7 @@ fn inherited_boxes_and_rotation_read_as_pdfium_reads_them() {
     assert_eq!(
         read[7].crop,
         Sourced {
-            value: Rect([0.0, 0.0, 600.0, 800.0]),
+            value: PdfBox([0.0, 0.0, 600.0, 800.0]),
             origin: Origin::Default
         }
     );
@@ -1097,7 +1097,7 @@ fn inherited_boxes_and_rotation_read_as_pdfium_reads_them() {
     let iso = open_with(&objects, Rules::Iso, &Limits::DEFAULT)
         .pages
         .unwrap();
-    assert_eq!(iso[7].crop.value, Rect([50.0, 50.0, 550.0, 750.0]));
+    assert_eq!(iso[7].crop.value, PdfBox([50.0, 50.0, 550.0, 750.0]));
     assert_eq!(iso[7].crop.origin, three);
 }
 
@@ -1454,7 +1454,7 @@ fn inheritance_goes_up_parent_not_the_path_walked() {
     ];
     for rules in [Rules::Pdfium, Rules::Iso] {
         let read = open_with(&objects, rules, &Limits::DEFAULT).pages.unwrap();
-        assert_eq!(read[0].media.value, Rect([0.0, 0.0, 41.0, 42.0]));
+        assert_eq!(read[0].media.value, PdfBox([0.0, 0.0, 41.0, 42.0]));
         assert_eq!(
             read[0].media.origin,
             Origin::Ancestor(Some(ObjectId::new(4, 0)))
@@ -1482,12 +1482,12 @@ fn a_parent_is_read_written_in_place_and_through_a_chain() {
     };
     // In place, with no number, and given none.
     let direct = read("<< /MediaBox [0 0 31 32] >>", vec![]);
-    assert_eq!(direct.media.value, Rect([0.0, 0.0, 31.0, 32.0]));
+    assert_eq!(direct.media.value, PdfBox([0.0, 0.0, 31.0, 32.0]));
     assert_eq!(direct.media.origin, Origin::Ancestor(None));
     assert!(direct.parents.is_empty());
     // And on up from there.
     let up = read("<< /Parent 2 0 R >>", vec![]);
-    assert_eq!(up.media.value, Rect([0.0, 0.0, 21.0, 22.0]));
+    assert_eq!(up.media.value, PdfBox([0.0, 0.0, 21.0, 22.0]));
     assert_eq!(up.media.origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
     assert_eq!(up.parents, [ObjectId::new(2, 0)]);
     // A chain of two, as far as PDFium goes.
@@ -1516,7 +1516,7 @@ fn a_parent_is_read_written_in_place_and_through_a_chain() {
             "<< /MediaBox [0 0 31 32] /Length 1 >>\nstream\nx\nendstream",
         )],
     );
-    assert_eq!(stream.media.value, Rect([0.0, 0.0, 31.0, 32.0]));
+    assert_eq!(stream.media.value, PdfBox([0.0, 0.0, 31.0, 32.0]));
 }
 
 #[test]
@@ -1599,7 +1599,7 @@ fn a_value_by_reference_is_found_as_each_set_of_rules_finds_it() {
     let page = read("10 0 R", Rules::Pdfium);
     assert_eq!(page.media.origin, Origin::Default);
     let page = read("10 0 R", Rules::Iso);
-    assert_eq!(page.media.value, Rect([0.0, 0.0, 31.0, 32.0]));
+    assert_eq!(page.media.value, PdfBox([0.0, 0.0, 31.0, 32.0]));
     assert_eq!(page.media.origin, Origin::Own);
     // A /Rotate by a chain is, by either; a longer one by ISO's alone.
     assert_eq!(read("12 0 R", Rules::Pdfium).rotate.value, 180);
@@ -1643,8 +1643,8 @@ fn a_value_by_reference_is_found_as_each_set_of_rules_finds_it() {
             .media
             .value
     };
-    assert_eq!(number(Rules::Pdfium), Rect([0.0, 0.0, 0.0, 200.0]));
-    assert_eq!(number(Rules::Iso), Rect([0.0, 0.0, 3.0, 200.0]));
+    assert_eq!(number(Rules::Pdfium), PdfBox([0.0, 0.0, 0.0, 200.0]));
+    assert_eq!(number(Rules::Iso), PdfBox([0.0, 0.0, 3.0, 200.0]));
 }
 
 #[test]
@@ -1701,15 +1701,15 @@ fn a_box_is_a_box_only_as_four_numbers() {
         ];
         open(&objects).unwrap().remove(0).media
     };
-    assert_eq!(read("[1 2.5 3 9 0 R]").value, Rect([1.0, 2.5, 3.0, 3.0]));
+    assert_eq!(read("[1 2.5 3 9 0 R]").value, PdfBox([1.0, 2.5, 3.0, 3.0]));
     // What's no number reads as 0, as PDFium's does.
-    assert_eq!(read("[0 (a) null 5]").value, Rect([0.0, 0.0, 0.0, 5.0]));
+    assert_eq!(read("[0 (a) null 5]").value, PdfBox([0.0, 0.0, 0.0, 5.0]));
     for value in ["[0 0 3]", "[0 0 3 4 5]", "[]", "7", "(a)"] {
         let media = read(value);
         assert_eq!(
             media,
             Sourced {
-                value: Rect::LETTER,
+                value: PdfBox::LETTER,
                 origin: Origin::Default
             },
             "{value}"

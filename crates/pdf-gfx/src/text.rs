@@ -14,7 +14,7 @@ use std::iter::FusedIterator;
 use std::ops::Range;
 
 use pdf_content_streams::TextMode;
-use pdf_fonts::{Codes, Font, FontApprox, FontKind};
+use pdf_fonts::{Codes, Font, FontApprox, FontKind, GlyphBox};
 
 use crate::geom::{Matrix, Point, Quad, Rect};
 use crate::state::{State, TextState};
@@ -189,9 +189,7 @@ impl<'e> Iterator for Glyphs<'e> {
         let size = text.size / 1000.0;
         let metrics = font.metrics();
         let guessed = font.width_guessed(laid.code);
-        let outline = outlined
-            .then(|| font.char_box(laid.code).map(Rect::from))
-            .flatten();
+        let outline = outlined.then(|| font.char_box(laid.code)).flatten();
         let mut approx = font.approx();
         approx.widths |= g.moved || guessed;
         approx.boxes |= outlined && outline.is_none();
@@ -243,7 +241,7 @@ impl<'e> Iterator for Glyphs<'e> {
 
 impl FusedIterator for Glyphs<'_> {}
 
-fn outline_box(r: Rect, origin: Point, size: f32, width: f32) -> Rect {
+fn outline_box(r: GlyphBox, origin: Point, size: f32, width: f32) -> Rect {
     let (x0, y0) = (r.x0 * size + origin.x, r.y0 * size + origin.y);
     let (mut x1, mut y1) = (r.x1 * size + origin.x, r.y1 * size + origin.y);
     if (y1 - y0).abs() < SIZE_EPSILON {

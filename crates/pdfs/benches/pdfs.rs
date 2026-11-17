@@ -341,7 +341,7 @@ fn draw(page: &mut ContentWriter, i: u32, font: &Res, line: &[u8]) {
 fn facade_save(font: &Res, line: &[u8]) -> Vec<u8> {
     let mut doc = pdfs::Document::new();
     for i in 0..PAGES {
-        draw(doc.add_page(pages::Rect::LETTER), i, font, line);
+        draw(doc.add_page(pdfs::Rect::LETTER), i, font, line);
     }
     doc.to_bytes().unwrap()
 }

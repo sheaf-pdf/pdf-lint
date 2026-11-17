@@ -54,7 +54,7 @@ use skrifa::instance::{LocationRef, Size};
 use skrifa::raw::{FileRef, FontRef, TableProvider};
 use skrifa::{MetadataProvider, charmap::Charmap};
 
-use crate::{FontMetrics, Rect};
+use crate::{FontMetrics, GlyphBox};
 
 mod sfnt;
 mod subset;
@@ -154,7 +154,7 @@ impl Program {
         let metrics = FontMetrics::new(
             scale(skrifa.ascent),
             scale(skrifa.descent),
-            Some(Rect::new(
+            Some(GlyphBox::new(
                 units(head.x_min()),
                 units(head.y_min()),
                 units(head.x_max()),

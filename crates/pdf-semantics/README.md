@@ -26,7 +26,7 @@ Write a balanced page tree for three pages and read it back, round-trip a PDF/A-
 use std::collections::BTreeMap;
 
 use pdf_semantics::date::Date;
-use pdf_semantics::pages::{self, Origin, Rect};
+use pdf_semantics::pages::{self, Origin, PdfBox};
 use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
 use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
 use pdf_semantics::{Limits, xmp};
@@ -60,7 +60,7 @@ let table = pages::pages(&objects, &catalog, Rules::Iso, &Limits::DEFAULT, &mut 
 assert!(faults.is_empty());
 let last = table.get(2).unwrap();
 assert_eq!(last.id, Some(ObjectId::new(3, 0)));
-assert_eq!(last.media_box().value, Rect([0.0, 0.0, 612.0, 792.0]));
+assert_eq!(last.media_box().value, PdfBox([0.0, 0.0, 612.0, 792.0]));
 assert_eq!(last.media_box().origin, Origin::Ancestor(Some(written.root)));
 assert_eq!(last.parents().collect::<Vec<_>>(), [ObjectId::new(12, 0), written.root]);
 

@@ -21,7 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_fonts::pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
-use pdf_fonts::{Fault, Font, FontKind, Limits, Rect};
+use pdf_fonts::{Fault, Font, FontKind, GlyphBox, Limits};
 use pdf_objects::{ObjectId, Resolve};
 use pdf_structure::read::{Options, Reading};
 
@@ -111,7 +111,7 @@ fn characters(font: &Font, shown: &[u8], tw: f32) -> Vec<Character> {
 
 /// The box PDFium has for `code`, its glyph's own, where it's known: a Type 3 font's, or
 /// that of a program it read.
-fn own_box(font: &Font, code: u32) -> Option<Rect> {
+fn own_box(font: &Font, code: u32) -> Option<GlyphBox> {
     match font.outlined() {
         true => font.char_box(code),
         false => font.glyph_box(code),

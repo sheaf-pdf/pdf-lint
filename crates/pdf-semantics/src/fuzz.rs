@@ -21,7 +21,7 @@ use crate::info::{self, Dated, Info};
 use crate::labels;
 use crate::ocg;
 use crate::outlines;
-use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
+use crate::pages::{Error, Inheritable, Origin, Page, Pages, PdfBox, pages};
 use crate::tree::{self, names, numbers};
 use crate::viewer;
 use crate::xmp::{self, Claims, WriteError, XmpWhy, metadata_stream};
@@ -562,7 +562,7 @@ fn let_it_hold(table: &Pages, limits: &Limits, rules: Rules) {
         }
         let media = page.media_box();
         if media.origin == Origin::Default {
-            assert_eq!(media.value, Rect::LETTER);
+            assert_eq!(media.value, PdfBox::LETTER);
         }
         let crop = page.crop_box();
         if crop.origin == Origin::Default {

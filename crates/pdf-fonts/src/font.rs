@@ -58,13 +58,13 @@ use crate::reader::Reader;
 use crate::type1::Refusal;
 use crate::{Encoding, Error, Fault, Limits, Std14, glyph_text};
 
-/// A rectangle, in glyph units unless it says otherwise: thousandths of text
-/// space at a font size of 1. Normalized, `x0 <= x1` and `y0 <= y1`, as this crate
-/// gives one and as [`Rect::new`] makes one; one written by its fields is as its
-/// maker wrote it. Exhaustive on purpose: a rectangle is its four sides, and a caller
-/// may write one.
+/// A glyph or font bounding box, in glyph units unless it says otherwise:
+/// thousandths of text space at a font size of 1. Normalized, `x0 <= x1` and
+/// `y0 <= y1`, as this crate gives one and as [`GlyphBox::new`] makes one; one
+/// written by its fields is as its maker wrote it. Exhaustive on purpose: a
+/// box is its four sides, and a caller may write one.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Rect {
+pub struct GlyphBox {
     /// Its left.
     pub x0: f32,
     /// Its bottom.
@@ -75,11 +75,11 @@ pub struct Rect {
     pub y1: f32,
 }
 
-impl Rect {
-    /// The rectangle with corners `(a, b)` and `(c, d)`, in either order.
+impl GlyphBox {
+    /// The box with corners `(a, b)` and `(c, d)`, in either order.
     #[must_use]
-    pub const fn new(a: f32, b: f32, c: f32, d: f32) -> Rect {
-        Rect {
+    pub const fn new(a: f32, b: f32, c: f32, d: f32) -> GlyphBox {
+        GlyphBox {
             x0: a.min(c),
             y0: b.min(d),
             x1: a.max(c),
@@ -102,13 +102,13 @@ pub struct FontMetrics {
     /// keeps it, so a `/Descent` of 10 or less isn't negated.
     pub descent: f32,
     /// The box all its glyphs fit in, where it has one.
-    pub bbox: Option<Rect>,
+    pub bbox: Option<GlyphBox>,
 }
 
 impl FontMetrics {
     /// Metrics of these heights and this box, for what gives a font's metrics of its own.
     #[must_use]
-    pub const fn new(ascent: f32, descent: f32, bbox: Option<Rect>) -> FontMetrics {
+    pub const fn new(ascent: f32, descent: f32, bbox: Option<GlyphBox>) -> FontMetrics {
         FontMetrics {
             ascent,
             descent,
@@ -140,7 +140,7 @@ impl Affine {
 
     /// The smallest rectangle that holds the image of `r`: its four corners'
     /// images, bounded.
-    fn bounds(self, r: Rect) -> Rect {
+    fn bounds(self, r: GlyphBox) -> GlyphBox {
         let corners = [(r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y1)].map(|(x, y)| {
             (
                 self.a * x + self.c * y + self.e,
@@ -150,7 +150,7 @@ impl Affine {
         let low = |f: fn(&(f32, f32)) -> f32| corners.iter().map(f).fold(f32::INFINITY, f32::min);
         let high =
             |f: fn(&(f32, f32)) -> f32| corners.iter().map(f).fold(f32::NEG_INFINITY, f32::max);
-        Rect {
+        GlyphBox {
             x0: low(|p| p.0),
             y0: low(|p| p.1),
             x1: high(|p| p.0),
@@ -291,7 +291,7 @@ pub struct Font {
     metrics: FontMetrics,
     /// A simple font's glyphs' outline boxes by code, where they're known: a Type 3
     /// font's, and a standard 14 font's drawn without a program.
-    boxes: Option<Box<[Option<Rect>; 256]>>,
+    boxes: Option<Box<[Option<GlyphBox>; 256]>>,
     /// What was read of its program.
     program: FontProgram,
     /// The boxes its program gives its glyphs, as PDFium has them.
@@ -318,7 +318,7 @@ enum Outlines {
     /// It has no program that was read.
     None,
     /// A simple font's, by code.
-    Codes(Box<[Option<Rect>; 256]>),
+    Codes(Box<[Option<GlyphBox>; 256]>),
     /// A CIDFont's, drawn as they're asked for.
     Glyphs(Box<CidGlyphs>),
 }
@@ -379,7 +379,7 @@ pub(crate) type OwnText = Vec<Option<Option<String>>>;
 /// What PDFium has of a simple font once it's mapped its codes to its program's glyphs.
 pub(crate) struct SimpleMap {
     /// Each code's box, where that can be said.
-    pub(crate) boxes: Box<[Option<Rect>; 256]>,
+    pub(crate) boxes: Box<[Option<GlyphBox>; 256]>,
     /// What drawing them cost.
     pub(crate) cost: usize,
     /// The lower case of a font of capitals that takes its capital's glyph, having
@@ -778,7 +778,7 @@ impl Font {
     /// Adobe's AFM, but one whose width is guessed ([`Font::width_guessed`]). None
     /// where only a font program says.
     #[must_use]
-    pub fn glyph_box(&self, code: u32) -> Option<Rect> {
+    pub fn glyph_box(&self, code: u32) -> Option<GlyphBox> {
         *self.boxes.as_ref()?.get(code as usize)?
     }
 
@@ -791,7 +791,7 @@ impl Font {
     /// is can't be said.
     #[inline]
     #[must_use]
-    pub fn char_box(&self, code: u32) -> Option<Rect> {
+    pub fn char_box(&self, code: u32) -> Option<GlyphBox> {
         match &self.outlines {
             Outlines::None => None,
             Outlines::Codes(boxes) => *boxes.get(code as usize)?,
@@ -1168,14 +1168,14 @@ struct ProgramHeights {
     sides: [f32; 4],
     ascent: f32,
     descent: f32,
-    a: Option<Rect>,
-    g: Option<Rect>,
+    a: Option<GlyphBox>,
+    g: Option<GlyphBox>,
 }
 
 impl ProgramHeights {
     /// `face`'s, the codes `A` and `g` boxed as `a` and `g`; None where its glyph space
     /// is scaled otherwise than is modelled here.
-    fn of(face: &Face, a: Option<Rect>, g: Option<Rect>) -> Option<ProgramHeights> {
+    fn of(face: &Face, a: Option<GlyphBox>, g: Option<GlyphBox>) -> Option<ProgramHeights> {
         let (sides, ascent, descent) = face.heights()?;
         Some(ProgramHeights {
             sides,
@@ -1337,7 +1337,7 @@ where
             let name = encoded.glyph_in(code, own)?;
             let bbox = std14.glyph_box(name)?;
             let drawn =
-                (name == "space" || bbox != Rect::default()) && !std14.drawn_otherwise(name);
+                (name == "space" || bbox != GlyphBox::default()) && !std14.drawn_otherwise(name);
             Some((std14.glyph_width(name)?, drawn.then_some(bbox)))
         };
         let space = glyph(b' ').map_or((0.0, None), |(width, _)| (width, None));
@@ -1562,7 +1562,7 @@ where
             })
         })
         .filter(|sides| *sides != [0.0; 4]);
-    let bbox = given.map(|[l, b, r, t]| Rect::new(l, b, r, t));
+    let bbox = given.map(|[l, b, r, t]| GlyphBox::new(l, b, r, t));
     let mut approx = FontApprox::default();
     // Each code's CharProc, None where it has none: each stream read once however many
     // codes and names draw it.
@@ -1630,7 +1630,7 @@ where
     // the two.
     let metrics = match given {
         Some([_, bottom, _, top]) => {
-            let mut edge = |code: usize, side: fn(Rect) -> f32, of_box: f32| match procs[code] {
+            let mut edge = |code: usize, side: fn(GlyphBox) -> f32, of_box: f32| match procs[code] {
                 None => of_box,
                 Some(proc) => match proc.and_then(|p| glyph_units(matrix, p.bbox)) {
                     Some(r) => side(r),
@@ -1659,7 +1659,7 @@ where
         }
     };
     let boxes = procs.map(|proc| match proc {
-        None => Some(Rect::default()),
+        None => Some(GlyphBox::default()),
         Some(proc) => match proc.and_then(|p| glyph_units(matrix, p.bbox)) {
             Some(b) => Some(b),
             None => {
@@ -1700,13 +1700,13 @@ struct CharProc {
 /// (`CPDF_Type3Char`): its numbers in thousandths, rounded, through `matrix`, the
 /// font's, its translation as it is, and rounded again. None where the numbers rounded
 /// have no area between them, as PDFium takes such a box for none.
-fn glyph_units(matrix: Affine, d1: [f32; 4]) -> Option<Rect> {
+fn glyph_units(matrix: Affine, d1: [f32; 4]) -> Option<GlyphBox> {
     let [l, b, r, t] = d1.map(|v| (v * 1000.0).round());
     if r <= l || b >= t {
         return None;
     }
-    let to = matrix.bounds(Rect::new(l, b, r, t));
-    Some(Rect::new(
+    let to = matrix.bounds(GlyphBox::new(l, b, r, t));
+    Some(GlyphBox::new(
         to.x0.round(),
         to.y0.round(),
         to.x1.round(),
@@ -1930,7 +1930,7 @@ where
             let (a, g) = (drawn(b'A'), drawn(b'g'));
             let cost = [a, g].iter().flatten().map(|&(_, cost)| cost).sum();
             *budget = budget.checked_sub(cost).ok_or(Error::TooLarge)?;
-            let found = |d: Option<(Option<Rect>, usize)>| d.and_then(|(found, _)| found);
+            let found = |d: Option<(Option<GlyphBox>, usize)>| d.and_then(|(found, _)| found);
             ProgramHeights::of(glyphs.face(), found(a), found(g))
         }
         _ => None,
@@ -2005,7 +2005,7 @@ where
         let metrics = FontMetrics {
             ascent,
             descent,
-            bbox: Some(Rect::new(left, bottom, right, top)),
+            bbox: Some(GlyphBox::new(left, bottom, right, top)),
         };
         return (metrics, guessed || ascent == descent);
     }
@@ -2013,7 +2013,7 @@ where
         Some([_, bottom, _, top]) if top > bottom => (ascent.min(top), descent.max(bottom)),
         _ => (ascent, descent),
     };
-    let own_box = own.map(|[l, b, r, t]| Rect::new(l, b, r, t));
+    let own_box = own.map(|[l, b, r, t]| GlyphBox::new(l, b, r, t));
     let bbox = own_box.or(std14.and_then(|f| f.metrics().bbox));
     let (ascent, descent) = match (own_box, given, std14) {
         (Some(_), true, _) => within((ascent, descent)),

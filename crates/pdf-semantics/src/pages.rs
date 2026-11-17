@@ -49,7 +49,7 @@
 //! use std::collections::BTreeMap;
 //!
 //! use pdf_semantics::Limits;
-//! use pdf_semantics::pages::{Origin, Rect, pages};
+//! use pdf_semantics::pages::{Origin, PdfBox, pages};
 //! use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
 //! use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
 //!
@@ -72,7 +72,7 @@
 //! let page = table.get(0).unwrap();
 //! assert_eq!(page.id, Some(ObjectId::new(3, 0)));
 //! let media = page.media_box();
-//! assert_eq!(media.value, Rect([0.0, 0.0, 100.0, 200.0]));
+//! assert_eq!(media.value, PdfBox([0.0, 0.0, 100.0, 200.0]));
 //! assert_eq!(media.origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
 //! assert_eq!(page.rotate().origin, Origin::Default);
 //! ```
@@ -248,7 +248,7 @@ impl<'a, 'o> IntoIterator for &'a Pages<'o> {
 /// use std::collections::BTreeMap;
 ///
 /// use pdf_semantics::Limits;
-/// use pdf_semantics::pages::{Inheritable, Origin, Rect, pages};
+/// use pdf_semantics::pages::{Inheritable, Origin, PdfBox, pages};
 /// use pdf_semantics::pdf_objects::pdf_tokenizer::Rules;
 /// use pdf_semantics::pdf_objects::{Object, ObjectId, dict};
 ///
@@ -277,7 +277,7 @@ impl<'a, 'o> IntoIterator for &'a Pages<'o> {
 /// // Its own, inherited, or what stands for it.
 /// assert_eq!(second.rotate().value, 90);
 /// assert_eq!(second.rotate().origin, Origin::Own);
-/// assert_eq!(second.media_box().value, Rect([0.0, 0.0, 100.0, 200.0]));
+/// assert_eq!(second.media_box().value, PdfBox([0.0, 0.0, 100.0, 200.0]));
 /// assert_eq!(second.media_box().origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
 /// assert_eq!(second.crop_box().origin, Origin::Default);
 /// assert!(second.attribute(Inheritable::Resources).is_none());
@@ -296,8 +296,8 @@ pub struct Page<'o> {
     pub repeat: u32,
     parent: Option<Arc<Parent>>,
     attributes: [Option<Attribute<'o>>; 4],
-    media_box: Sourced<Rect>,
-    crop_box: Sourced<Rect>,
+    media_box: Sourced<PdfBox>,
+    crop_box: Sourced<PdfBox>,
     rotate: Sourced<i64>,
     user_unit: Sourced<f64>,
 }
@@ -315,8 +315,8 @@ impl<'o> Page<'o> {
             repeat: 0,
             parent: None,
             attributes: [None; 4],
-            media_box: default(Rect::LETTER),
-            crop_box: default(Rect::LETTER),
+            media_box: default(PdfBox::LETTER),
+            crop_box: default(PdfBox::LETTER),
             rotate: Sourced {
                 value: 0,
                 origin: Origin::Default,
@@ -350,14 +350,14 @@ impl<'o> Page<'o> {
     /// [`Origin::Default`]: ISO 32000-2 gives none, requiring one, and it's
     /// what PDFium makes of none. An empty box is given as written.
     #[must_use]
-    pub const fn media_box(&self) -> Sourced<Rect> {
+    pub const fn media_box(&self) -> Sourced<PdfBox> {
         self.media_box
     }
 
     /// Its `/CropBox`, as [`media_box`](Self::media_box) reads one; otherwise
     /// the media box, of [`Origin::Default`] (7.7.3.3).
     #[must_use]
-    pub const fn crop_box(&self) -> Sourced<Rect> {
+    pub const fn crop_box(&self) -> Sourced<PdfBox> {
         self.crop_box
     }
 
@@ -504,14 +504,14 @@ pub enum Origin {
     Default,
 }
 
-/// A rectangle, its four numbers in the order they're written (ISO 32000-2,
-/// 7.9.5): any two opposite corners, not put in order.
+/// A raw 4-number PDF rectangle array, its four numbers in the order they're
+/// written (ISO 32000-2, 7.9.5): any two opposite corners, not put in order.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect(pub [f64; 4]);
+pub struct PdfBox(pub [f64; 4]);
 
-impl Rect {
+impl PdfBox {
     /// What a page with no box reads as: US Letter, 612 by 792.
-    pub const LETTER: Rect = Rect([0.0, 0.0, 612.0, 792.0]);
+    pub const LETTER: PdfBox = PdfBox([0.0, 0.0, 612.0, 792.0]);
 }
 
 /// Why a file has no table of pages.
@@ -1118,7 +1118,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                     self.say(at, Fault::PageNoMediaBox);
                 }
                 Sourced {
-                    value: Rect::LETTER,
+                    value: PdfBox::LETTER,
                     origin: Origin::Default,
                 }
             }
@@ -1255,7 +1255,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
 
     /// A box as a value, where it's an array of four: a number's references
     /// followed, what's no number 0.
-    fn rect(&mut self, attribute: Option<Attribute<'o>>) -> Result<Option<Sourced<Rect>>, Error> {
+    fn rect(&mut self, attribute: Option<Attribute<'o>>) -> Result<Option<Sourced<PdfBox>>, Error> {
         let Some(attribute) = attribute else {
             return Ok(None);
         };
@@ -1270,7 +1270,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
             }
         }
         Ok(Some(Sourced {
-            value: Rect(corners),
+            value: PdfBox(corners),
             origin: attribute.origin,
         }))
     }

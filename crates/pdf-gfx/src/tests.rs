@@ -12,11 +12,11 @@ use pdf_objects::{Dict, Object, ObjectId, Stream, Unreadable, Why, WithStreams, 
 use pdf_semantics::pages;
 
 use crate::{
-    ActiveColorSpace, BlendState, Canvas, Cap, Clip, ClipPart, ColorValues, DashPattern, Encoded,
-    Error, Fault, FormUse, Forms, ImageDrawn, ImageOf, Kind, Limits, Mark, MarkProps, Marks,
-    Matrix, Opts, PageGeom, PathDrawn, Point, Quad, Rect, Refused, RenderingIntent, Rotation, Seg,
-    ShadingDrawn, SoftMask, SoftMaskKind, State, Summary, TextPiece, TextState, Unwritable, UseId,
-    Wants, encode, encode_with, fuzz, interpret, interpret_with,
+    ActiveColorSpace, BlendState, Canvas, Cap, Clip, ClipPart, ColorValues, DashPattern,
+    EncodedPage, Error, Fault, FormUse, Forms, ImageDrawn, ImageOf, Kind, Limits, Mark, MarkProps,
+    Marks, Matrix, Opts, PageGeom, PathDrawn, Point, Quad, Rect, Refused, RenderingIntent,
+    Rotation, Seg, ShadingDrawn, SoftMask, SoftMaskKind, State, Summary, TextPiece, TextState,
+    Unwritable, UseId, Wants, encode, encode_with, fuzz, interpret, interpret_with,
 };
 
 #[derive(Default)]
@@ -112,7 +112,7 @@ fn public_types_are_send_and_sync() {
     check::<UseId>();
     check::<Refused>();
     check::<Summary>();
-    check::<Encoded>();
+    check::<EncodedPage>();
     check::<Canvas>();
     #[cfg(feature = "text-layout")]
     {

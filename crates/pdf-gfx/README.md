@@ -12,7 +12,7 @@ PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder
 - **Bounded content & Form XObject interpreter (`interpret`, `interpret_with`, `Event`, `State`):**
   - Steps through content streams and nested Form XObjects (`Do` under `Forms::Descend` or shallow `Forms::Skip`), tracking the CTM stack (`q`/`Q`/`cm`), line style, active color spaces & patterns (`ActiveColorSpace`, `ColorValues`), `ExtGState` parameters (`gs`), paths & stroked bounds (`PathDrawn`, `Seg`), path/text/form clipping (`Clip`), placed images & effective DPI (`ImageDrawn`), shadings (`ShadingDrawn`), marked content (`Mark`, `MarkProps`, `Marks`), and placed text glyphs (`TextShow`, `Glyph`).
   - `Opts` (`Wants`) skips unselected event construction while keeping `Summary` counts and errors identical; `interpret_with` reports recoverable departures (`Fault`) to any `pdf-objects` `fault::Sink<Fault>` at zero cost when `()` is passed.
-- **Position-independent content re-encoding (`encode`, `encode_with`, `Encoded`):**
+- **Position-independent content re-encoding (`encode`, `encode_with`, `EncodedPage`):**
   - Rewrites relative line-moving text operators (`Td`, `TD`, `T*`, `'`, `"`) across a page stream and every Form XObject it draws into standalone `Tm` + `Td` pairs so lines no longer depend on `TL` or earlier lines, while round-tripping every placed glyph, path, clip, and mark bit-for-bit.
 - **Vector, XObject & text canvas (`Canvas`, `TextPiece`):**
   - Builds content streams with scoped `q`/`Q` state, inset borders, rounded rectangles, circles/ellipses, placed images/Form XObjects, marked content, and `TJ`-kerned text over `pdf-content-streams`' `ContentWriter` and deferred resource naming (`Res`, `Reserved`, `ResourceNeeds`).

@@ -73,8 +73,8 @@ const OUTLINES: FontApprox = FontApprox {
     boxes: true,
 };
 
-fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
-    Rect { x0, y0, x1, y1 }
+fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> GlyphBox {
+    GlyphBox { x0, y0, x1, y1 }
 }
 
 /// A simple font's widths: `/Widths` from `/FirstChar` to `/LastChar`,
@@ -142,7 +142,7 @@ fn standard_14_without_widths() {
         helvetica.glyph_box(b'A'.into()),
         Some(rect(14.0, 0.0, 654.0, 718.0))
     );
-    assert_eq!(helvetica.glyph_box(b' '.into()), Some(Rect::default()));
+    assert_eq!(helvetica.glyph_box(b' '.into()), Some(GlyphBox::default()));
     assert_eq!(helvetica.glyph_box(0x01), None);
     // Those StandardEncoding names no glyph for, or one PDFium's face is
     // another width of, and only those.
@@ -1066,7 +1066,7 @@ fn type3_through_its_font_matrix() {
     assert_eq!(font.glyph_box(65), Some(rect(100.0, 0.0, 600.0, 800.0)));
     assert_eq!(font.glyph_box(66), Some(whole));
     assert_eq!(font.glyph_box(67), Some(whole));
-    assert_eq!(font.glyph_box(68), Some(Rect::default()));
+    assert_eq!(font.glyph_box(68), Some(GlyphBox::default()));
     // `A`'s top, its `d1`'s, and the box's bottom, as there's no `g`.
     let metrics = font.metrics();
     assert_eq!((metrics.ascent, metrics.descent), (800.0, -99.0));
@@ -3595,7 +3595,7 @@ fn outline_boxes_are_the_program_s() {
         char_box(&truetype, b'g'),
         Some(rect(20.0, -199.0, 480.0, 560.0))
     );
-    assert_eq!(char_box(&truetype, b' '), Some(Rect::default()));
+    assert_eq!(char_box(&truetype, b' '), Some(GlyphBox::default()));
     // Drawn from its side bearing, not its outline's left.
     assert_eq!(
         char_box(&truetype, b'B'),
@@ -3620,17 +3620,17 @@ fn outline_boxes_are_the_program_s() {
             char_box(&font, b'g'),
             Some(rect(20.0, -199.0, 480.0, 560.0))
         );
-        assert_eq!(char_box(&font, b' '), Some(Rect::default()));
-        assert_eq!(char_box(&font, b'D'), Some(Rect::default()), "{name:?}");
+        assert_eq!(char_box(&font, b' '), Some(GlyphBox::default()));
+        assert_eq!(char_box(&font, b'D'), Some(GlyphBox::default()), "{name:?}");
         assert_eq!(char_box(&font, 1), Some(rect(-1.0, -1.0, -1.0, -1.0)));
     }
     let cid = program_font(&f, "PI", true);
     assert_eq!(cid.char_box(1), Some(rect(0.0, 0.0, 600.0, 761.0)));
     assert_eq!(cid.char_box(2), Some(rect(20.0, -199.0, 480.0, 568.0)));
-    assert_eq!(cid.char_box(3), Some(Rect::default()));
+    assert_eq!(cid.char_box(3), Some(GlyphBox::default()));
     assert_eq!(cid.char_box(4), Some(rect(50.0, 0.0, 350.0, 304.0)));
     assert_eq!(cid.char_box(5), Some(rect(100.0, 50.0, 700.0, 812.0)));
-    assert_eq!(cid.char_box(9), Some(Rect::default()));
+    assert_eq!(cid.char_box(9), Some(GlyphBox::default()));
     // Read for text, it has none.
     let text = program_font(&f, "PT", false);
     assert_eq!(
@@ -3946,7 +3946,7 @@ fn a_program_is_charged_to_the_budget() {
     // CID 1 draws glyph 2, CID 2 glyph 1, and CID 3 is past the map.
     assert_eq!(mapped.char_box(1), Some(rect(20.0, -199.0, 480.0, 568.0)));
     assert_eq!(mapped.char_box(2), Some(rect(0.0, 0.0, 600.0, 761.0)));
-    assert_eq!(mapped.char_box(3), Some(Rect::default()));
+    assert_eq!(mapped.char_box(3), Some(GlyphBox::default()));
     let mut budget = program + 5;
     assert_eq!(
         Font::read(&pdf, &cid, lim, &mut budget, &mut ()).err(),
@@ -4133,9 +4133,9 @@ fn a_cid_keyed_cff_s_glyphs_are_its_charset_s() {
     assert_eq!(font.program(), FontProgram::Read);
     assert_eq!(font.char_box(5), Some(rect(0.0, 0.0, 600.0, 761.0)));
     assert_eq!(font.char_box(7), Some(rect(0.0, 0.0, 600.0, 761.0)));
-    assert_eq!(font.char_box(2), Some(Rect::default()));
-    assert_eq!(font.char_box(0), Some(Rect::default()));
-    assert_eq!(font.char_box(1000), Some(Rect::default()));
+    assert_eq!(font.char_box(2), Some(GlyphBox::default()));
+    assert_eq!(font.char_box(0), Some(GlyphBox::default()));
+    assert_eq!(font.char_box(1000), Some(GlyphBox::default()));
 }
 
 /// A TrueType font FreeType draws hinted for PDFium, by its name, has no box said of any
@@ -4643,7 +4643,7 @@ fn what_skrifa_reads_otherwise_is_unknown() {
     program[glyf + len - 7] = 3;
     let mut pdf = Pdf::default();
     let font = identity_truetype(&mut pdf, program);
-    assert_eq!(font_of(&pdf, font).char_box(5), Some(Rect::default()));
+    assert_eq!(font_of(&pdf, font).char_box(5), Some(GlyphBox::default()));
     // Glyph 1's contours past what it holds: still a font of boxes, this one unknown.
     let (exact, first, second) = patched(&|p| {
         let (glyf, _) = sfnt_table(p, b"glyf");

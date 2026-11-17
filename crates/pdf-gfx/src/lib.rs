@@ -20,7 +20,7 @@
 //!   DPI ([`ImageDrawn`]), shadings ([`ShadingDrawn`]), marked content
 //!   ([`Mark`], [`Marks`]), and placed text glyphs ([`TextShow`], [`Glyph`])
 //!   under strict per-page [`Limits`].
-//! - **Position-independent content re-encoding ([`encode`], [`encode_with`], [`Encoded`]):**
+//! - **Position-independent content re-encoding ([`encode`], [`encode_with`], [`EncodedPage`]):**
 //!   Rewrites relative line-moving text operators (`Td`, `TD`, `T*`, `'`, `"`)
 //!   into standalone `Tm` + `Td` pairs so lines no longer depend on `TL` or
 //!   earlier lines, while round-tripping every placed glyph, path, clip, and
@@ -147,7 +147,7 @@ mod xobject;
 
 pub use canvas::{Canvas, TextPiece};
 pub use clip::{Clip, ClipPart, ClipParts};
-pub use encode::{Encoded, encode, encode_with};
+pub use encode::{EncodedPage, encode, encode_with};
 pub use error::{Error, Unwritable};
 pub use fault::Fault;
 pub use geom::{Matrix, PageGeom, PageSize, Point, Quad, Rect, Rotation};

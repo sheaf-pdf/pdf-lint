@@ -26,7 +26,7 @@ use pdf_objects::{Object, ObjectId};
 use pdf_semantics::action::Action;
 use pdf_semantics::dest::DestTable;
 use pdf_semantics::outlines::OutlineItem;
-use pdf_semantics::pages::{Error, FANOUT, Origin, Page, Pages, Rect, counted, pages, write};
+use pdf_semantics::pages::{Error, FANOUT, Origin, Page, Pages, PdfBox, counted, pages, write};
 use pdf_semantics::{Limits, catalog, files, labels, outlines, viewer};
 use pdf_structure::read::{self, Options, Reading};
 
@@ -79,7 +79,7 @@ fn recorded() -> HashMap<String, String> {
 }
 
 /// A box, as PDFium holds one: its corners in order, in `f32`s.
-fn ordered(rect: Rect) -> [f32; 4] {
+fn ordered(rect: PdfBox) -> [f32; 4] {
     let [a, b, c, d] = rect.0.map(|n| n as f32);
     [a.min(c), b.min(d), a.max(c), b.max(d)]
 }
@@ -94,7 +94,7 @@ fn is_empty(rect: [f32; 4]) -> bool {
 fn shown(page: &Page) -> String {
     let media = page.media_box();
     let media = if media.origin == Origin::Default || is_empty(ordered(media.value)) {
-        ordered(Rect::LETTER)
+        ordered(PdfBox::LETTER)
     } else {
         ordered(media.value)
     };

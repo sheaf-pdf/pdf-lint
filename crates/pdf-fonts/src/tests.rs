@@ -366,16 +366,19 @@ fn metrics_are_the_afm_s() {
     assert_eq!((helvetica.ascent, helvetica.descent), (718.0, -207.0));
     assert_eq!(
         helvetica.bbox,
-        Some(Rect::new(-166.0, -225.0, 1000.0, 931.0))
+        Some(GlyphBox::new(-166.0, -225.0, 1000.0, 931.0))
     );
     let symbol = Std14::Symbol.metrics();
     assert_eq!((symbol.ascent, symbol.descent), (1010.0, -293.0));
     assert_eq!(
         Std14::Helvetica.glyph_box("A"),
-        Some(Rect::new(14.0, 0.0, 654.0, 718.0))
+        Some(GlyphBox::new(14.0, 0.0, 654.0, 718.0))
     );
     assert_eq!(Std14::Helvetica.glyph_box("no such glyph"), None);
-    assert_eq!(Rect::new(3.0, 4.0, 1.0, 2.0), Rect::new(1.0, 2.0, 3.0, 4.0));
+    assert_eq!(
+        GlyphBox::new(3.0, 4.0, 1.0, 2.0),
+        GlyphBox::new(1.0, 2.0, 3.0, 4.0)
+    );
 }
 
 /// The space and the glyphs PDFium's own faces draw otherwise: Latin, not
@@ -391,7 +394,10 @@ fn glyphs_drawn_otherwise() {
     assert!(!Std14::Helvetica.drawn_otherwise("A"));
     // The Euro is told by its box, which Adobe's metrics leave empty.
     assert!(!Std14::Helvetica.drawn_otherwise("Euro"));
-    assert_eq!(Std14::Helvetica.glyph_box("Euro"), Some(Rect::default()));
+    assert_eq!(
+        Std14::Helvetica.glyph_box("Euro"),
+        Some(GlyphBox::default())
+    );
 }
 
 /// Glyph names read by the Adobe Glyph List's rules: a name's own text, the parts
@@ -429,8 +435,8 @@ fn the_crate_s_names_are_there() {
     #[allow(unused_imports)]
     use crate::{
         Codes, Descendant, Encoding, Error, Fault, Font, FontApprox, FontId, FontKind, FontMetrics,
-        FontProgram, FontScope, Fonts, Limits, Rect, Std14, VerticalMetrics, cp1252, glyph_text,
-        name_code_point,
+        FontProgram, FontScope, Fonts, GlyphBox, Limits, Std14, VerticalMetrics, cp1252,
+        glyph_text, name_code_point,
     };
     fn same<T>(_: fn(&T) -> &T) {}
     same::<pdf_objects::Dict>(|d: &crate::pdf_objects::Dict| d);
@@ -458,7 +464,7 @@ fn all_14_are_in_the_order_of_their_discriminants() {
 /// standard font's name, a Windows-1252 character and an encoding by its name.
 #[test]
 fn const_fns_make_constants() {
-    const BOX: Rect = Rect::new(10.0, 5.0, -10.0, -5.0);
+    const BOX: GlyphBox = GlyphBox::new(10.0, 5.0, -10.0, -5.0);
     const METRICS: FontMetrics = FontMetrics::new(800.0, -200.0, Some(BOX));
     const EXACT: FontApprox = FontApprox {
         codes: false,

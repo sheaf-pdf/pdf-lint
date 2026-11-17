@@ -86,7 +86,7 @@
 //! let pages = pdf.pages().unwrap();
 //! assert_eq!(pages.len(), 1);
 //! for page in &pages {
-//!     assert_eq!(page.attributes().media_box().value, Rect::LETTER);
+//!     assert_eq!(page.geom().media_box, Rect::LETTER);
 //!     let shown = page.text().unwrap();
 //!     assert_eq!(shown.text(), "Hello, world");
 //!     assert!(shown.is_whole());
@@ -104,6 +104,7 @@ pub use open::open;
 pub use open::{Options, from_bytes};
 pub use page::{Content, NamedFont};
 pub use pdf::{Page, Pages, PagesIter, Pdf};
+pub use pdf_gfx::Rect;
 
 pub mod build;
 mod document;
@@ -221,9 +222,10 @@ mod tests {
         shared::<crate::Content>();
         shared::<crate::NamedFont>();
         shared::<pdf_fonts::Shown>();
+        shared::<crate::Rect>();
         shared::<pdf_gfx::PageGeom>();
         shared::<pdf_gfx::Summary>();
-        shared::<pdf_gfx::Encoded>();
+        shared::<pdf_gfx::EncodedPage>();
         shared::<pdf_gfx::Canvas>();
         shared::<pdf_gfx::Limits>();
         shared::<pdf_gfx::Error>();
@@ -257,7 +259,7 @@ mod tests {
         {
             let mut canvas = Canvas::new();
             canvas.fill_color(Color::Gray(0.2));
-            canvas.fill_rect(pdf_gfx::Rect::new(50.0, 60.0, 150.0, 110.0));
+            canvas.fill_rect(Rect::new(50.0, 60.0, 150.0, 110.0));
             canvas.text_at(
                 standard_font(Std14::Helvetica),
                 14.0,
@@ -331,20 +333,15 @@ mod tests {
         let (p1_id, p2_id) = (ids[0].unwrap(), ids[1].unwrap());
         doc.add_annot(
             p1_id,
-            BuiltAnnot::link_dest(
-                pdf_gfx::Rect::new(72.0, 696.0, 160.0, 716.0),
-                &Dest::fit(p2_id),
-            ),
+            BuiltAnnot::link_dest(Rect::new(72.0, 696.0, 160.0, 716.0), &Dest::fit(p2_id)),
         )
         .unwrap();
         doc.add_annot(
             p1_id,
             BuiltAnnot::text_markup(
                 TextMarkupKind::Highlight,
-                &[QuadPoints([
-                    72.0, 716.0, 160.0, 716.0, 72.0, 696.0, 160.0, 696.0,
-                ])],
-                AnnotColor::Rgb([1.0, 0.95, 0.2]),
+                &[QuadPoints::from_rect(Rect::new(72.0, 696.0, 160.0, 716.0))],
+                Color::Rgb([1.0, 0.95, 0.2]).into(),
                 0.6,
             ),
         )
