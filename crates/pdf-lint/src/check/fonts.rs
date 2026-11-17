@@ -2235,8 +2235,8 @@ mod tests {
     /// written in is held, and what was read of it before is found all the
     /// same: one whose `/ToUnicode` is in an object stream of a file the
     /// reader can't open, whose read stops there, and nothing after it
-    /// found; a CMap chain past 512; and fonts
-    /// past the file's budget for their streams, those before it read.
+    /// found; a CMap chain past 512; and fonts past the file's budget for
+    /// their streams, those before it read.
     #[test]
     fn a_font_not_read_whole_for_what_isnt_the_file_s_fault_is_counted() {
         let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << \

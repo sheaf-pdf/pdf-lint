@@ -1523,10 +1523,9 @@ impl<'a> Walk<'a> {
     /// order: none for a page with no resources at all, and none that can be
     /// told for a form's, a pattern's or a glyph's with none of its own, as
     /// it would use the page's, for resources that don't read, or for
-    /// resources that aren't a dictionary;
-    /// a category, its references followed, that isn't a dictionary or
-    /// refers to nothing can't be told, and one that's null is as if it
-    /// weren't there (ISO 32000-2, 7.3.7).
+    /// resources that aren't a dictionary; a category, its references
+    /// followed, that isn't a dictionary or refers to nothing can't be told,
+    /// and one that's null is as if it weren't there (ISO 32000-2, 7.3.7).
     fn lookup(
         &self,
         holder: &Holder<'a>,

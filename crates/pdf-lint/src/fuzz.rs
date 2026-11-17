@@ -1837,7 +1837,7 @@ mod tests {
     /// under what alone declares ([`alone`]), so the two walks read the
     /// model alike.
     #[test]
-    fn a_packet_past_the_readings_cap_is_read_alone_alone() {
+    fn a_packet_past_the_readings_cap_is_read_alone_and_not_beside_it() {
         let claim = "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
                      pdfaid:part=\"3\"/>";
         let (open, close) = ("<e>".repeat(300), "</e>".repeat(300));
