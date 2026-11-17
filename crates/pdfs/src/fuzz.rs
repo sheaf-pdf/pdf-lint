@@ -176,6 +176,7 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
                 .map_err(words);
             assert_eq!(annots, annots_with, "annots fault sink invariance");
             let _ = page.plan_flatten(pdf_annots::FlattenOpts::DEFAULT);
+            let _ = page.plan_flatten(pdf_annots::FlattenOpts::DEFAULT.with_redactions(true));
             #[cfg(feature = "text-layout")]
             {
                 let tp1 = page

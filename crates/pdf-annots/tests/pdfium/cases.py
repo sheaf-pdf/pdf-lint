@@ -270,4 +270,28 @@ def cases():
         kind="annots-flatten-print",
     )
 
+    # 10. A redaction mark flattened by `FPDFPage_Flatten`: a `/Redact` with an `/AP /N` beside
+    #     a `/Square`, both printed and shown, over page content the mark covers
+    add(
+        "flatten-display-redact-mark",
+        annots=(
+            b"[<< /Subtype /Redact /Rect [100 500 220 520] /F 4 /AP << /N 11 0 R >> >> "
+            b"<< /Subtype /Square /Rect [300 500 340 540] /F 4 /AP << /N 12 0 R >> >>]"
+        ),
+        extra_objs={
+            10: stream_obj(b"<<", b"100 500 120 20 re f"),
+            11: stream_obj(
+                b"<< /Type /XObject /Subtype /Form /BBox [0 0 120 20]",
+                b"0 0 120 20 re S",
+            ),
+            12: stream_obj(
+                b"<< /Type /XObject /Subtype /Form /BBox [0 0 40 40]",
+                b"0 0 40 40 re f",
+            ),
+        },
+        page_extra=b"/Contents 10 0 R",
+        page_count=1,
+        kind="annots-flatten-display",
+    )
+
     return list(ROWS)

@@ -492,6 +492,11 @@ pub fn add_annot(
 /// incremental updates remain intact), binding new `/Resources/XObject` entries,
 /// and updating `/Annots`.
 ///
+/// `/Redact` marks stay on the page, undrawn, unless `opts` sets
+/// [`include_redactions`](pdf_annots::FlattenOpts::include_redactions):
+/// flattening never removes the content under a mark, so drawing one would
+/// only make the page look redacted.
+///
 /// # Errors
 ///
 /// [`Error::NoPageTree`] if `page_id` is not a dictionary in `doc`,

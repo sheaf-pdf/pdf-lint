@@ -812,10 +812,14 @@ fn builders_appearance_synthesis_and_page_flattening_roundtrip() {
         ),
     ];
 
+    // The `/Redact` is the last built item.
+    let mut redact_id = None;
     for b in built_items {
         let aid = b.write_into(|obj| store.put(obj));
         assert!(push_page_annot(&mut page_dict, aid));
+        redact_id = Some(aid);
     }
+    let redact_id = redact_id.unwrap();
 
     // Add a screen-only annotation (`F = 0`, no PRINT flag) with `/AP /N` and a `/Widget`.
     let screen_only_ap = store.put_stream(
@@ -875,10 +879,30 @@ fn builders_appearance_synthesis_and_page_flattening_roundtrip() {
     )
     .unwrap();
     assert!(disp_plan.changed());
-    // 10 visual markups + 1 screen-only square = 11 drawn; 2 links have no `/AP` so removed without drawing; 1 widget kept!
-    assert_eq!(disp_plan.drawn_count, 11);
-    assert_eq!(disp_plan.removed_count, 13);
-    assert_eq!(disp_plan.kept_annots, vec![Object::from(widget_id)]);
+    // 9 visual markups + 1 screen-only square = 10 drawn; 2 links have no `/AP` so removed without
+    // drawing; the `/Redact` mark (kept unless `with_redactions(true)`) and the widget stay.
+    assert_eq!(disp_plan.drawn_count, 10);
+    assert_eq!(disp_plan.removed_count, 12);
+    assert_eq!(
+        disp_plan.kept_annots,
+        vec![Object::from(redact_id), Object::from(widget_id)]
+    );
+    assert!(!disp_plan.removed_ids.contains(&redact_id));
+
+    // With redactions asked for, the mark is drawn and removed as it was before the option.
+    let with_marks = plan_flatten(
+        &store.objects,
+        &page_dict,
+        None,
+        page_dict.get(b"Resources"),
+        disp_opts.with_redactions(true),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(with_marks.drawn_count, 11);
+    assert_eq!(with_marks.removed_count, 13);
+    assert_eq!(with_marks.kept_annots, vec![Object::from(widget_id)]);
+    assert!(with_marks.removed_ids.contains(&redact_id));
     assert!(
         disp_plan
             .xobject_bindings
@@ -897,8 +921,8 @@ fn builders_appearance_synthesis_and_page_flattening_roundtrip() {
         &Limits::DEFAULT,
     )
     .unwrap();
-    assert_eq!(print_plan.drawn_count, 11); // 10 printable markups + 1 printable widget; screen_only skipped!
-    assert!(print_plan.kept_annots.is_empty());
+    assert_eq!(print_plan.drawn_count, 10); // 9 printable markups + 1 printable widget; screen_only skipped!
+    assert_eq!(print_plan.kept_annots, vec![Object::from(redact_id)]);
 
     // `plan_flatten_filtered`: keep everything except the `/Stamp`.
     let filtered = plan_flatten_filtered(
@@ -912,7 +936,7 @@ fn builders_appearance_synthesis_and_page_flattening_roundtrip() {
     )
     .unwrap();
     assert_eq!(filtered.drawn_count, 1);
-    assert_eq!(filtered.kept_annots.len(), 13);
+    assert_eq!(filtered.kept_annots.len(), 13); // the `/Redact` among them, as before
 
     // Verify `combine_with_page` + `pdf_gfx::interpret` executes every synthesized `/AP /N` stream
     // cleanly without error even when the original page stream leaves an unclosed `10 0 0 10 0 0 cm`!
@@ -1439,4 +1463,169 @@ fn a_dashed_border_built_with_no_array_is_dashed_by_threes() {
     };
     assert!(circle(&black(&[])).contains("2 w\n[3] 0 d\n"));
     assert_eq!(circle(&black(&[])), circle(&black(&[3.0])));
+}
+
+/// A 10 by 10 form that fills its box, for an `/AP /N`.
+fn filled_form(store: &mut Store) -> ObjectId {
+    store.put_stream(
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+        },
+        b"0 g 0 0 10 10 re f".to_vec(),
+    )
+}
+
+/// An annotation of `subtype` with an `/AP /N`, printed and shown.
+fn flat_annot(store: &mut Store, subtype: &str, x: i64) -> ObjectId {
+    let ap = filled_form(store);
+    store.put(dict! {
+        "Subtype" => Object::name(subtype),
+        "Rect" => vec![Object::from(x), Object::from(0), Object::from(x + 10), Object::from(10)],
+        "F" => AnnotFlags::PRINT.bits() as i64,
+        "AP" => dict! { "N" => ap },
+    })
+}
+
+#[test]
+fn flattening_keeps_redaction_marks_unless_asked() {
+    let mut store = Store::default();
+    let redact = flat_annot(&mut store, "Redact", 0);
+    let square = flat_annot(&mut store, "Square", 20);
+    let widget = flat_annot(&mut store, "Widget", 40);
+    let second = flat_annot(&mut store, "Redact", 60);
+    let lower = flat_annot(&mut store, "redact", 80);
+    let mut page = dict! { "Type" => Object::name("Page") };
+    for id in [redact, square, widget] {
+        assert!(push_page_annot(&mut page, id));
+    }
+    let plan = |page: &Dict, opts: FlattenOpts| {
+        plan_flatten(&store.objects, page, None, None, opts, &Limits::DEFAULT).unwrap()
+    };
+    let ids = |ids: &[ObjectId]| ids.iter().map(|&id| Object::from(id)).collect::<Vec<_>>();
+
+    // The default keeps redaction marks and takes widgets.
+    let default = FlattenOpts::default();
+    assert_eq!(default, FlattenOpts::DEFAULT);
+    assert!(!default.include_redactions);
+    assert!(default.include_widgets);
+    assert!(
+        !FlattenOpts::for_target(FlattenTarget::Print).include_redactions,
+        "for_target starts from the default"
+    );
+    let on = FlattenOpts::DEFAULT.with_redactions(true);
+    assert!(on.include_redactions);
+    assert_eq!(on.with_redactions(false), FlattenOpts::DEFAULT);
+
+    // The two flags' four settings: (widgets, redactions) -> drawn, removed, kept.
+    type Case<'a> = (bool, bool, usize, &'a [ObjectId], &'a [ObjectId]);
+    let cases: [Case<'_>; 4] = [
+        (true, false, 2, &[square, widget], &[redact]),
+        (false, false, 1, &[square], &[redact, widget]),
+        (true, true, 3, &[redact, square, widget], &[]),
+        (false, true, 2, &[redact, square], &[widget]),
+    ];
+    for (widgets, redactions, drawn, removed, kept) in cases {
+        for target in [FlattenTarget::Display, FlattenTarget::Print] {
+            let opts = FlattenOpts::for_target(target)
+                .with_widgets(widgets)
+                .with_redactions(redactions);
+            let p = plan(&page, opts);
+            let what = format!("widgets {widgets} redactions {redactions} {target:?}");
+            assert_eq!(p.drawn_count, drawn, "{what}");
+            assert_eq!(p.removed_count, removed.len(), "{what}");
+            assert_eq!(p.removed_ids, removed, "{what}");
+            assert_eq!(p.kept_annots, ids(kept), "{what}");
+            assert_eq!(p.xobject_bindings.len(), drawn, "{what}");
+            assert!(p.changed(), "{what}");
+        }
+    }
+    // What the mark would draw is in the overlay only when it's asked for.
+    let redact_ap = store.objects[&redact]
+        .as_dict()
+        .and_then(|d| d.get(b"AP"))
+        .and_then(Object::as_dict)
+        .and_then(|ap| ap.get(b"N"))
+        .and_then(Object::as_reference)
+        .unwrap();
+    let draws_mark =
+        |p: &crate::FlattenPlan| p.xobject_bindings.iter().any(|(_, id)| *id == redact_ap);
+    assert!(!draws_mark(&plan(&page, FlattenOpts::DEFAULT)));
+    assert!(draws_mark(&plan(&page, on)));
+
+    // A `select` that asks for the mark alone gets nothing by default, and is never asked
+    // about it; with the option set it is asked, and gets it.
+    for (opts, asked_redact, drawn) in [(FlattenOpts::DEFAULT, false, 0), (on, true, 1)] {
+        let mut asked = Vec::new();
+        let p = plan_flatten_filtered(
+            &store.objects,
+            &page,
+            None,
+            None,
+            opts,
+            &Limits::DEFAULT,
+            |a| {
+                asked.push(a.subtype().clone());
+                *a.subtype() == AnnotSubtype::Redact
+            },
+        )
+        .unwrap();
+        assert_eq!(asked.contains(&AnnotSubtype::Redact), asked_redact);
+        assert_eq!(asked.len(), if asked_redact { 3 } else { 2 });
+        assert_eq!(p.drawn_count, drawn);
+        assert_eq!(p.removed_count, drawn);
+        assert_eq!(p.changed(), asked_redact);
+        if asked_redact {
+            assert_eq!(p.removed_ids, [redact]);
+            assert_eq!(p.kept_annots, ids(&[square, widget]));
+        } else {
+            assert!(p.removed_ids.is_empty());
+            assert_eq!(p.kept_annots, ids(&[redact, square, widget]));
+        }
+    }
+    // A `select` that refuses the mark keeps it under the option too.
+    let p = plan_flatten_filtered(
+        &store.objects,
+        &page,
+        None,
+        None,
+        on,
+        &Limits::DEFAULT,
+        |a| *a.subtype() != AnnotSubtype::Redact,
+    )
+    .unwrap();
+    assert_eq!((p.drawn_count, p.removed_count), (2, 2));
+    assert_eq!(p.kept_annots, ids(&[redact]));
+
+    // A page of redaction marks alone: nothing changes, every mark is kept, in order.
+    let mut marks = dict! { "Type" => Object::name("Page") };
+    for id in [redact, second] {
+        assert!(push_page_annot(&mut marks, id));
+    }
+    let p = plan_flatten(
+        &store.objects,
+        &marks,
+        None,
+        None,
+        FlattenOpts::DEFAULT,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert!(!p.changed());
+    assert_eq!((p.drawn_count, p.removed_count), (0, 0));
+    assert!(p.overlay_content.is_empty());
+    assert!(p.xobject_bindings.is_empty());
+    assert!(p.removed_ids.is_empty());
+    assert_eq!(p.kept_annots, ids(&[redact, second]));
+    assert_eq!(p.combine_with_page(b"0 0 1 1 re f"), b"0 0 1 1 re f");
+    let p = plan_flatten(&store.objects, &marks, None, None, on, &Limits::DEFAULT).unwrap();
+    assert!(p.changed());
+    assert_eq!((p.drawn_count, p.removed_count), (2, 2));
+    assert!(p.kept_annots.is_empty());
+
+    // Only the subtype `/Redact` is a mark: another spelling is flattened like any annotation.
+    let mut other = dict! { "Type" => Object::name("Page") };
+    assert!(push_page_annot(&mut other, lower));
+    let p = plan(&other, FlattenOpts::DEFAULT);
+    assert_eq!((p.drawn_count, p.removed_count), (1, 1));
 }

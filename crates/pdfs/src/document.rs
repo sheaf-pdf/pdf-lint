@@ -387,6 +387,11 @@ impl<'p> Document<'p> {
     /// Flattens eligible annotations on `page_id` into its page content stream
     /// according to `opts` ([`build::flatten_page`]).
     ///
+    /// `/Redact` marks stay on the page, undrawn, unless `opts` sets
+    /// [`include_redactions`](pdf_annots::FlattenOpts::include_redactions):
+    /// flattening never removes the content under a mark, so drawing one would
+    /// only make the page look redacted.
+    ///
     /// # Errors
     ///
     /// As [`build::flatten_page`] fails, or if flushing pending added pages

@@ -38,6 +38,9 @@
 //!     dashed, beveled, inset, underline), constructs or mutates annotation dictionaries without
 //!     file I/O, and plans graphics-state-isolated page flattening with collision-free
 //!     `/Resources/XObject` names.
+//!   - Flattening keeps `/Redact` marks on the page, undrawn, unless
+//!     [`FlattenOpts::with_redactions`] asks for them: it never removes the content under a
+//!     mark, so a mark painted onto the page would only look like a redaction.
 //!
 //! # Quickstart
 //!

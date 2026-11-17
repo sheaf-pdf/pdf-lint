@@ -139,6 +139,21 @@ pub fn check(data: &[u8]) {
                     &limits,
                 ) {
                     let _ = format!("{plan:?}");
+                    // With redaction marks flattened too (a mark's own
+                    // appearance may fail to read), nothing that was drawn
+                    // or removed without them is kept back.
+                    if let Ok(with_marks) = plan_flatten(
+                        &map,
+                        &page_dict,
+                        None,
+                        page_dict.get(b"Resources"),
+                        FlattenOpts::for_target(target).with_redactions(true),
+                        &limits,
+                    ) {
+                        assert!(with_marks.drawn_count >= plan.drawn_count);
+                        assert!(with_marks.removed_count >= plan.removed_count);
+                        assert!(with_marks.kept_annots.len() <= plan.kept_annots.len());
+                    }
                 }
             }
             let mut rfaults = Vec::new();
@@ -212,6 +227,15 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) {
             page.attribute(pdf_semantics::pages::Inheritable::Resources)
                 .map(|a| a.written),
             FlattenOpts::default(),
+            &limits,
+        );
+        let _ = plan_flatten(
+            objects,
+            pdict,
+            page.id,
+            page.attribute(pdf_semantics::pages::Inheritable::Resources)
+                .map(|a| a.written),
+            FlattenOpts::default().with_redactions(true),
             &limits,
         );
         if let Ok(annots) = p1 {

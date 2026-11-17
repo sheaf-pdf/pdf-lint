@@ -344,12 +344,14 @@ fn flatten_answer(bytes: &[u8], target: FlattenTarget) -> String {
     };
     let page_res = page0.attribute(Inheritable::Resources).map(|a| a.written);
 
+    // `FPDFPage_Flatten` draws and removes a `/Redact` mark like any other annotation
+    // (`flatten-display-redact-mark`), which `plan_flatten` does only when asked.
     let plan = plan_flatten(
         &reading,
         page_dict,
         page0.id,
         page_res,
-        FlattenOpts::for_target(target),
+        FlattenOpts::for_target(target).with_redactions(true),
         &Limits::DEFAULT,
     )
     .unwrap();
