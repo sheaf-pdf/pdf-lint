@@ -683,34 +683,60 @@ const XMP_CAPPED: &str = "a metadata stream decoded past a cap it's read under";
 const XMP_UNGIVEN: &str = "a metadata stream whose data the source doesn't give";
 
 /// Why a packet isn't read, other than for the file's faults: an object on
-/// the way to its stream, the catalog among them, takes a password the
-/// reader wasn't given.
+/// the way to its stream past the catalog, which names one, takes a
+/// password the reader wasn't given.
 const WAY_LOCKED: &str = "a metadata stream through an object that takes a password";
 
-/// Why a packet isn't read: an object on the way to its stream is past a
-/// cap the reader reads under, or a chain of references to it is longer
-/// than is followed.
+/// Why a packet isn't read: an object on the way to its stream past the
+/// catalog is past a cap the reader reads under, or a chain of references
+/// to it is longer than is followed.
 const WAY_CAPPED: &str = "a metadata stream through an object past a cap it's read under";
 
 /// Why a packet isn't read: the source didn't give the bytes of an object
-/// on the way to its stream.
+/// on the way to its stream past the catalog.
 const WAY_UNGIVEN: &str = "a metadata stream through an object whose bytes the source didn't give";
 
-/// Why a packet isn't read: an object on the way to its stream doesn't
-/// read, for another reason a reader gives.
+/// Why a packet isn't read: an object on the way to its stream past the
+/// catalog doesn't read, for another reason a reader gives.
 const WAY_UNREAD: &str = "a metadata stream through an object that doesn't read";
 
-/// Why a packet isn't read, given why an object on the way to its stream,
-/// the catalog among them, didn't read: none where that's the file's
-/// fault, an object that doesn't parse, which the walk finds, as
-/// [`pages_unread`] has it of the page tree.
-fn way_unread(why: Why) -> Option<&'static str> {
+/// Why a packet isn't read, other than for the file's faults: the catalog,
+/// which may name no metadata stream at all, takes a password the reader
+/// wasn't given.
+const CATALOG_LOCKED: &str = "XMP metadata of a catalog that takes a password";
+
+/// Why a packet isn't read: the catalog is past a cap the reader reads
+/// under, or through a chain of references longer than is followed.
+const CATALOG_CAPPED: &str = "XMP metadata of a catalog past a cap it's read under";
+
+/// Why a packet isn't read: the source didn't give the catalog's bytes.
+const CATALOG_UNGIVEN: &str = "XMP metadata of a catalog whose bytes the source didn't give";
+
+/// Why a packet isn't read: the catalog doesn't read, for another reason a
+/// reader gives.
+const CATALOG_UNREAD: &str = "XMP metadata of a catalog that doesn't read";
+
+/// Why a packet isn't read, given why an object on the way to its stream
+/// didn't read, the `catalog` itself or one past it: none where that's the
+/// file's fault, an object that doesn't parse, which the walk finds, as
+/// [`pages_unread`] has it of the page tree. A catalog that doesn't read
+/// may name no stream, which its words don't say it does.
+fn way_unread(why: Why, catalog: bool) -> Option<&'static str> {
+    let words = match catalog {
+        true => [
+            CATALOG_LOCKED,
+            CATALOG_CAPPED,
+            CATALOG_UNGIVEN,
+            CATALOG_UNREAD,
+        ],
+        false => [WAY_LOCKED, WAY_CAPPED, WAY_UNGIVEN, WAY_UNREAD],
+    };
     match why {
         Why::Damaged => None,
-        Why::Locked => Some(WAY_LOCKED),
-        Why::Limit | Why::Capped => Some(WAY_CAPPED),
-        Why::Source | Why::Detached => Some(WAY_UNGIVEN),
-        _ => Some(WAY_UNREAD),
+        Why::Locked => Some(words[0]),
+        Why::Limit | Why::Capped => Some(words[1]),
+        Why::Source | Why::Detached => Some(words[2]),
+        _ => Some(words[3]),
     }
 }
 
@@ -800,13 +826,16 @@ fn packet_data<'s>(source: &'s dyn Source, trailer: &'s Dict) -> (Option<Cow<'s,
     let way = match pdf_semantics::catalog(Objects(source), trailer) {
         Ok(Some(catalog)) => xmp::metadata_stream(Objects(source), catalog),
         Ok(None) => Ok(None),
-        Err(unreadable) => Err(unreadable),
+        Err(unreadable) => {
+            packet.unread = way_unread(unreadable.why, true);
+            return (None, packet);
+        }
     };
     let id = match way {
         Ok(Some(id)) => id,
         Ok(None) => return (None, packet),
         Err(unreadable) => {
-            packet.unread = way_unread(unreadable.why);
+            packet.unread = way_unread(unreadable.why, false);
             return (None, packet);
         }
     };
@@ -3626,6 +3655,37 @@ mod tests {
         assert_eq!(packet_rows(&read), [], "{read}");
         let plain = way("4 0 R", false);
         assert!(a3(&beside(&plain, &default, &ALL)));
+    }
+
+    /// A catalog that doesn't read for what isn't the file's fault, here
+    /// nested past the parser's cap, can't say whether it names a metadata
+    /// stream at all: the packet is counted as not checked where the
+    /// catalog is held, in words of the catalog's own, which claim no
+    /// stream, where they'd be a stream's past the catalog.
+    #[test]
+    fn a_catalog_that_doesnt_read_is_counted_in_its_own_words() {
+        let nested = format!("{}{}", "[".repeat(300), "]".repeat(300));
+        let catalog = |metadata: &str| {
+            let mut file = Sections::new("1.7");
+            file.object(
+                1,
+                &format!("<< /Type /Catalog /Pages 2 0 R {metadata} /X {nested} >>"),
+            );
+            file.object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+            file.object(3, &page("2 0 R"));
+            let at = file.stream(11, &[0, 1, 2, 3], "/Root 1 0 R");
+            file.end(at);
+            file.out
+        };
+        let default = bytes::Options::DEFAULT;
+        for metadata in ["", "/Metadata 4 0 R"] {
+            let file = catalog(metadata);
+            let read = beside(&file, &default, &ALL);
+            let row = [(CATALOG_CAPPED.to_string(), 1)];
+            assert_eq!(packet_rows(&read), row, "{metadata}: {read}");
+            assert_eq!(packet_rows(&beside(&file, &default, &only(1))).len(), 1);
+            assert_eq!(packet_rows(&beside(&file, &default, &only(3))), []);
+        }
     }
 
     /// Two attributes, or two values, that don't read in one tag are two,
