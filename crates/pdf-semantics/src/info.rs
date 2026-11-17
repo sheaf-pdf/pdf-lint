@@ -48,7 +48,7 @@ use std::fmt;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_objects::{Object, ObjectId, Resolve, Str, Unreadable, Value, Why, text};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Unreadable, Value, Why, dict, text};
 
 use crate::date::Date;
 use crate::fault::Fault;
@@ -355,4 +355,52 @@ impl fmt::Debug for Dated {
             Dated::Text(text) => f.debug_tuple("Text").field(&Len(text.len())).finish(),
         }
     }
+}
+
+/// Serializes `info` into a `/Info` document information dictionary (ISO 32000-2
+/// §14.3.3 Table 349), omitting fields that are `None`.
+#[must_use]
+pub fn write(info: &Info) -> Dict {
+    let mut out = dict! {};
+    if let Some(title) = &info.title {
+        out.set("Title", Object::text(title));
+    }
+    if let Some(author) = &info.author {
+        out.set("Author", Object::text(author));
+    }
+    if let Some(subject) = &info.subject {
+        out.set("Subject", Object::text(subject));
+    }
+    if let Some(keywords) = &info.keywords {
+        out.set("Keywords", Object::text(keywords));
+    }
+    if let Some(creator) = &info.creator {
+        out.set("Creator", Object::text(creator));
+    }
+    if let Some(producer) = &info.producer {
+        out.set("Producer", Object::text(producer));
+    }
+    if let Some(created) = &info.created {
+        let s = match created {
+            Dated::Date(d) => d.write(),
+            Dated::Text(t) => t.clone(),
+        };
+        out.set("CreationDate", Object::text(&s));
+    }
+    if let Some(modified) = &info.modified {
+        let s = match modified {
+            Dated::Date(d) => d.write(),
+            Dated::Text(t) => t.clone(),
+        };
+        out.set("ModDate", Object::text(&s));
+    }
+    if let Some(trapped) = info.trapped {
+        let name = match trapped {
+            Trapped::True => "True",
+            Trapped::False => "False",
+            Trapped::Unknown => "Unknown",
+        };
+        out.set("Trapped", Object::name(name));
+    }
+    out
 }

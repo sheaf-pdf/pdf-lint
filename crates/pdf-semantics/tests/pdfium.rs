@@ -23,8 +23,11 @@ use std::path::{Path, PathBuf};
 
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Object, ObjectId};
+use pdf_semantics::action::Action;
+use pdf_semantics::dest::DestTable;
+use pdf_semantics::outlines::OutlineItem;
 use pdf_semantics::pages::{Error, FANOUT, Origin, Page, Pages, Rect, counted, pages, write};
-use pdf_semantics::{Limits, catalog};
+use pdf_semantics::{Limits, catalog, files, labels, outlines, viewer};
 use pdf_structure::read::{self, Options, Reading};
 
 /// How many pages of a file the oracle asks for, as `oracle/pdfium.py` has it.
@@ -137,8 +140,32 @@ fn answer(table: &Pages) -> String {
     format!("count {count} : {}", each.join(" ; "))
 }
 
-/// The answer for the file `bytes`.
-fn ours(bytes: &[u8]) -> String {
+/// Encodes bytes as one word matching `oracle/pdfium.py`'s `esc(data)`.
+fn esc(data: &[u8]) -> String {
+    if data.is_empty() {
+        return "%".to_string();
+    }
+    if data.len() > 64 {
+        let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+        for &b in data {
+            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3);
+        }
+        return format!("#{}:{h:016x}", data.len());
+    }
+    let mut out = String::new();
+    for &b in data {
+        if (0x21..=0x7E).contains(&b) && b != b'%' {
+            out.push(char::from(b));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// The answer for the `pages` case `bytes`.
+fn ours_pages(bytes: &[u8]) -> String {
     let Ok(reading) = Reading::open(bytes, &Options::DEFAULT) else {
         return "no-document".to_string();
     };
@@ -153,6 +180,226 @@ fn ours(bytes: &[u8]) -> String {
     }
 }
 
+fn ours_outlines(bytes: &[u8]) -> String {
+    let Ok(reading) = Reading::open(bytes, &Options::DEFAULT) else {
+        return "no-document".to_string();
+    };
+    let Ok(Some(cat)) = catalog(&reading, reading.trailer().dict()) else {
+        return "none".to_string();
+    };
+    let Ok(page_table) = pages(&reading, cat, Rules::Pdfium, &Limits::DEFAULT, &mut ()) else {
+        return "none".to_string();
+    };
+    let Ok(dests) = DestTable::read(
+        &reading,
+        Some(cat),
+        &page_table,
+        Rules::Pdfium,
+        &Limits::DEFAULT,
+        &mut (),
+    ) else {
+        return "none".to_string();
+    };
+    let Ok(Some(items)) = outlines::read(&reading, cat, Rules::Pdfium, &Limits::DEFAULT, &mut ())
+    else {
+        return "none".to_string();
+    };
+    let mut rows = Vec::new();
+    fn emit(items: &[OutlineItem], depth: usize, dests: &DestTable, rows: &mut Vec<String>) {
+        for item in items {
+            let count = item.raw_count.unwrap_or(0);
+            let style = item.flags.bits();
+            let mut words = vec![
+                "bm".to_string(),
+                "depth".to_string(),
+                depth.to_string(),
+                "title".to_string(),
+                esc(item.title.as_bytes()),
+                "count".to_string(),
+                count.to_string(),
+                "style".to_string(),
+                style.to_string(),
+            ];
+            if let Some([r, g, b]) = item.color {
+                words.push("color".to_string());
+                words.push(format!("{r}"));
+                words.push(format!("{g}"));
+                words.push(format!("{b}"));
+            }
+            // `FPDFBookmark_GetDest` checks `/Dest`, or `/A` when `/S /GoTo`.
+            let effective_dest = item.dest.as_ref().or_else(|| {
+                item.actions.first().and_then(|a| match a {
+                    Action::GoTo { dest } => dest.as_ref(),
+                    _ => None,
+                })
+            });
+            if let Some(d) = effective_dest {
+                let page_idx = dests
+                    .resolve(d, Rules::Pdfium, &mut ())
+                    .map_or(-1i64, |rd| i64::try_from(rd.page_index).unwrap_or(-1));
+                words.push("dest_page".to_string());
+                words.push(page_idx.to_string());
+            }
+            if let Some(act) = item.actions.first() {
+                let code = match act {
+                    Action::GoTo { .. } => 1,
+                    Action::GoToR { .. } => 2,
+                    Action::Uri { .. } => 3,
+                    Action::Launch { .. } => 4,
+                    Action::GoToE { .. } => 5,
+                    _ => 0,
+                };
+                words.push("act".to_string());
+                words.push(code.to_string());
+                if let Action::Uri { uri, .. } = act
+                    && !uri.is_empty()
+                {
+                    words.push("uri".to_string());
+                    words.push(esc(uri));
+                }
+            }
+            rows.push(words.join(" "));
+            emit(&item.children, depth + 1, dests, rows);
+        }
+    }
+    emit(&items, 0, &dests, &mut rows);
+    if rows.is_empty() {
+        "none".to_string()
+    } else {
+        rows.join(" ; ")
+    }
+}
+
+fn ours_labels(bytes: &[u8]) -> String {
+    let Ok(reading) = Reading::open(bytes, &Options::DEFAULT) else {
+        return "no-document".to_string();
+    };
+    let Ok(Some(cat)) = catalog(&reading, reading.trailer().dict()) else {
+        return "count 0 : null".to_string();
+    };
+    let count = counted(&reading, cat, &Limits::DEFAULT).unwrap_or(0);
+    let tbl = labels::read(&reading, cat, Rules::Pdfium, &Limits::DEFAULT, &mut ())
+        .ok()
+        .flatten();
+    let each: Vec<String> = (0..count.min(PAGES) + 1)
+        .map(|idx| {
+            if idx >= count {
+                "null".to_string()
+            } else {
+                match &tbl {
+                    None => "null".to_string(),
+                    Some(lbls) => esc(lbls.format(idx).as_bytes()),
+                }
+            }
+        })
+        .collect();
+    format!("count {count} : {}", each.join(" ; "))
+}
+
+fn ours_attachments(bytes: &[u8]) -> String {
+    let Ok(reading) = Reading::open(bytes, &Options::DEFAULT) else {
+        return "no-document".to_string();
+    };
+    let Ok(Some(cat)) = catalog(&reading, reading.trailer().dict()) else {
+        return "none".to_string();
+    };
+    let Ok(specs) = files::embedded_files(&reading, cat, Rules::Pdfium, &Limits::DEFAULT, &mut ())
+    else {
+        return "none".to_string();
+    };
+    if specs.is_empty() {
+        return "none".to_string();
+    }
+    specs
+        .iter()
+        .enumerate()
+        .map(|(i, sp)| {
+            let desc = sp.description.as_deref().unwrap_or("");
+            let sub = sp
+                .embedded
+                .as_ref()
+                .and_then(|e| e.subtype.as_deref())
+                .unwrap_or("");
+            let rel = sp
+                .relationship
+                .as_ref()
+                .map_or(&b""[..], files::AfRelationship::as_bytes);
+            let data_word = match &sp.embedded {
+                Some(emb) => match emb.bytes(&reading, Limits::DEFAULT.embedded_bytes) {
+                    Ok(b) => esc(&b),
+                    Err(_) => "unreadable".to_string(),
+                },
+                None => "unreadable".to_string(),
+            };
+            format!(
+                "att {i} name {} desc {} sub {} rel {} data {data_word}",
+                esc(sp.name.as_bytes()),
+                esc(desc.as_bytes()),
+                esc(sub.as_bytes()),
+                esc(rel),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
+
+fn ours_viewer(bytes: &[u8]) -> String {
+    let Ok(reading) = Reading::open(bytes, &Options::DEFAULT) else {
+        return "no-document".to_string();
+    };
+    let Ok(Some(cat)) = catalog(&reading, reading.trailer().dict()) else {
+        return "no-document".to_string();
+    };
+    let Ok(view) = viewer::read(&reading, cat, Rules::Pdfium, &mut ()) else {
+        return "no-document".to_string();
+    };
+    let vp = view.viewer_prefs.unwrap_or_default();
+    let scaling = i32::from(vp.print_scaling_enabled());
+    let copies = vp.effective_num_copies();
+    let duplex = vp.duplex.map_or(0, viewer::Duplex::pdfium_code);
+    let range = if vp.print_page_range.is_empty() {
+        "none".to_string()
+    } else {
+        vp.print_page_range
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut words = vec![
+        "scaling".to_string(),
+        scaling.to_string(),
+        "copies".to_string(),
+        copies.to_string(),
+        "duplex".to_string(),
+        duplex.to_string(),
+        "range".to_string(),
+        range,
+    ];
+    if let Some(d) = vp.direction {
+        words.push("Direction".to_string());
+        words.push(esc(d.as_name().as_bytes()));
+    }
+    if let Some(m) = vp.non_full_screen_page_mode {
+        words.push("NonFullScreenPageMode".to_string());
+        words.push(esc(m.as_name().as_bytes()));
+    }
+    if let Some(b) = vp.view_area {
+        words.push("ViewArea".to_string());
+        words.push(esc(b.as_name().as_bytes()));
+    }
+    if let Some(b) = vp.print_area {
+        words.push("PrintArea".to_string());
+        words.push(esc(b.as_name().as_bytes()));
+    }
+    // `FPDFCatalog_GetLanguage` returns an empty UTF-16 string (`2` bytes -> `esc(b"") == "%"`)
+    // when `/Lang` is absent or not a string.
+    let lang = view.lang.as_deref().unwrap_or("");
+    words.push("lang".to_string());
+    words.push(esc(lang.as_bytes()));
+    words.join(" ")
+}
+
 #[test]
 fn every_case_reads_as_pdfium_reads_it() {
     let recorded = recorded();
@@ -164,9 +411,15 @@ fn every_case_reads_as_pdfium_reads_it() {
     assert!(!cases.is_empty());
     for case in &cases {
         let (name, kind) = (&case[0], &case[1]);
-        assert_eq!(kind, "pages", "{name}: a kind this test doesn't read");
         let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
-        let ours = ours(&bytes);
+        let ours = match kind.as_str() {
+            "pages" => ours_pages(&bytes),
+            "outlines" => ours_outlines(&bytes),
+            "labels" => ours_labels(&bytes),
+            "attachments" => ours_attachments(&bytes),
+            "viewer" => ours_viewer(&bytes),
+            other => panic!("{name}: unknown kind {other}"),
+        };
         let pdfium = recorded
             .get(name)
             .unwrap_or_else(|| panic!("{name}: no answer recorded"));
@@ -202,6 +455,9 @@ fn where_no_page_is_under_the_root_the_count_is_pdfiums() {
     let mut wrong = Vec::new();
     let mut none_under = 0;
     for case in rows(&set().join("cases.tsv")) {
+        if case[1] != "pages" {
+            continue;
+        }
         let name = &case[0];
         let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
         let Ok(reading) = Reading::open(&bytes[..], &Options::DEFAULT) else {

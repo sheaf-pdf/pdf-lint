@@ -68,7 +68,7 @@ assert_eq!(titles, ["Größe", "Café €5"]);
 
 For text beyond a Standard 14 font's single-byte encoding (CJK, Hebrew, Arabic, symbols past the Basic Multilingual Plane), `Document::embed_font` (`embed` feature, enabled by default) embeds a TrueType program: `EmbeddedFont::codes` encodes any string its `cmap` maps, `Canvas::text_box` lays text out in it, and each save writes the program subset to the glyphs drawn, with a `/ToUnicode` map so the text reads back.
 
-`Document::save(path)` writes compressed PDF 1.7 output (Flate-encoded cross-reference and object streams by default; customizable via `Document::save_options`). `Document::claim` attaches XMP conformance metadata (PDF/A, PDF/UA, PDF/VT).
+`Document::save(path)` writes compressed PDF 1.7 output (Flate-encoded cross-reference and object streams by default; customizable via `Document::save_options`). `Document::claim` and `Document::set_metadata` attach XMP metadata and conformance claims, while `Document::set_info`, `Document::set_outlines`, `Document::set_page_labels`, `Document::add_embedded_file`, and `Document::set_catalog_view` author `/Info` dictionaries, bookmarks, page labels, embedded/associated files, and viewer preferences (read back via `Pdf::metadata`, `Pdf::outlines`, `Pdf::page_labels`, `Pdf::embedded_files`, `Pdf::associated_files`, `Pdf::optional_content`, and `Pdf::catalog_view`).
 
 ## Encryption and Linearization
 
@@ -166,7 +166,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **[pdf-structure](https://crates.io/crates/pdf-structure)** — Cross-reference tables/streams, object streams, lazy `Reading`, in-memory `Document`, and full/incremental writers (`Pdf::reading`, `Document::structure`).
 - **[pdf-color](https://crates.io/crates/pdf-color)** — Color space parsing and component counting.
 - **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
-- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, destinations, actions, `/Info` dictionaries, and XMP conformance claims.
+- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, destinations, actions, outlines, page labels, embedded/associated files, optional content groups, viewer preferences, `/Info` dictionaries, and XMP metadata/conformance packets.
 - **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, text extraction, and TrueType font subsetting and embedding.
 - **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
 - **[pdf-annots](https://crates.io/crates/pdf-annots)** — Page annotations (`Page::annots`), typed subtype inspection, `/AP` placement and synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`Document::flatten_page`).

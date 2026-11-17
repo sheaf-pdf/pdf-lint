@@ -277,6 +277,30 @@ class Pdfium:
             ("FPDFAction_GetURIPath", U, [P, P, P, U]),
             ("FPDFAction_GetFilePath", U, [P, P, U]),
             ("FPDFPage_Flatten", I, [P, I]),
+            ("FPDFBookmark_GetFirstChild", P, [P, P]),
+            ("FPDFBookmark_GetNextSibling", P, [P, P]),
+            ("FPDFBookmark_GetTitle", U, [P, P, U]),
+            ("FPDFBookmark_GetCount", I, [P]),
+            ("FPDFBookmark_GetDest", P, [P, P]),
+            ("FPDFBookmark_GetAction", P, [P]),
+            ("FPDFBookmark_GetColor", I, [P, pf, pf, pf]),
+            ("FPDFBookmark_GetStyle", I, [P]),
+            ("FPDF_GetPageLabel", U, [P, I, P, U]),
+            ("FPDFDoc_GetAttachmentCount", I, [P]),
+            ("FPDFDoc_GetAttachment", P, [P, I]),
+            ("FPDFAttachment_GetName", U, [P, P, U]),
+            ("FPDFAttachment_GetDescription", U, [P, P, U]),
+            ("FPDFAttachment_GetSubtype", U, [P, P, U]),
+            ("FPDFAttachment_GetAFRelationship", U, [P, P, U]),
+            ("FPDFAttachment_GetFile", I, [P, P, U, ctypes.POINTER(U)]),
+            ("FPDF_VIEWERREF_GetPrintScaling", I, [P]),
+            ("FPDF_VIEWERREF_GetNumCopies", I, [P]),
+            ("FPDF_VIEWERREF_GetDuplex", I, [P]),
+            ("FPDF_VIEWERREF_GetPrintPageRange", P, [P]),
+            ("FPDF_VIEWERREF_GetPrintPageRangeCount", S, [P]),
+            ("FPDF_VIEWERREF_GetPrintPageRangeElement", I, [P, S]),
+            ("FPDF_VIEWERREF_GetName", U, [P, ctypes.c_char_p, ctypes.c_char_p, U]),
+            ("FPDFCatalog_GetLanguage", U, [P, P, U]),
         ]:
             f = getattr(lib, name)
             f.restype, f.argtypes = res, args
@@ -813,6 +837,123 @@ class Pdfium:
         lib.FPDF_CloseDocument(doc)
         return items
 
+    def _u16(self, fn, *args):
+        n = fn(*args, None, 0)
+        if n == 0:
+            return None
+        b = ctypes.create_string_buffer(max(n, 2))
+        fn(*args, b, n)
+        return b.raw[:max(n - 2, 0)].decode("utf-16le", "replace").encode("utf-8")
+
+    def outlines(self, data):
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        out = []
+        seen = set()
+
+        def walk_siblings(parent, depth):
+            if depth >= 32:
+                return
+            bm = lib.FPDFBookmark_GetFirstChild(doc, parent)
+            while bm and bm not in seen and len(out) < 256:
+                seen.add(bm)
+                title = self._u16(lib.FPDFBookmark_GetTitle, bm) or b""
+                count = lib.FPDFBookmark_GetCount(bm)
+                style = lib.FPDFBookmark_GetStyle(bm)
+                words = ["bm", "depth", str(depth), "title", esc(title), "count", str(count), "style", str(style)]
+                r, g, b = ctypes.c_float(), ctypes.c_float(), ctypes.c_float()
+                if lib.FPDFBookmark_GetColor(bm, ctypes.byref(r), ctypes.byref(g), ctypes.byref(b)):
+                    words += ["color", num(r.value), num(g.value), num(b.value)]
+                d = lib.FPDFBookmark_GetDest(doc, bm)
+                if d:
+                    words += ["dest_page", str(lib.FPDFDest_GetDestPageIndex(doc, d))]
+                act = lib.FPDFBookmark_GetAction(bm)
+                if act:
+                    at = lib.FPDFAction_GetType(act)
+                    words += ["act", str(at)]
+                    if at == 3:
+                        ulen = lib.FPDFAction_GetURIPath(doc, act, None, 0)
+                        if ulen > 1:
+                            ubuf = ctypes.create_string_buffer(ulen)
+                            lib.FPDFAction_GetURIPath(doc, act, ubuf, ulen)
+                            words += ["uri", esc(ubuf.raw[:ulen - 1])]
+                out.append(" ".join(words))
+                walk_siblings(bm, depth + 1)
+                bm = lib.FPDFBookmark_GetNextSibling(doc, bm)
+
+        walk_siblings(None, 0)
+        lib.FPDF_CloseDocument(doc)
+        return out
+
+    def labels(self, data):
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        count = lib.FPDF_GetPageCount(doc)
+        each = []
+        for idx in range(min(count, PAGES) + 1):
+            lbl = self._u16(lib.FPDF_GetPageLabel, doc, idx)
+            each.append("null" if lbl is None else esc(lbl))
+        lib.FPDF_CloseDocument(doc)
+        return "count %d : %s" % (count, " ; ".join(each))
+
+    def attachments(self, data):
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        n = lib.FPDFDoc_GetAttachmentCount(doc)
+        out = []
+        for i in range(max(n, 0)):
+            att = lib.FPDFDoc_GetAttachment(doc, i)
+            if not att:
+                out.append("att %d null" % i)
+                continue
+            name = self._u16(lib.FPDFAttachment_GetName, att) or b""
+            desc = self._u16(lib.FPDFAttachment_GetDescription, att) or b""
+            sub = self._u16(lib.FPDFAttachment_GetSubtype, att) or b""
+            rel = self._u16(lib.FPDFAttachment_GetAFRelationship, att) or b""
+            olen = ctypes.c_ulong(0)
+            if lib.FPDFAttachment_GetFile(att, None, 0, ctypes.byref(olen)):
+                fbuf = ctypes.create_string_buffer(max(olen.value, 1))
+                lib.FPDFAttachment_GetFile(att, fbuf, olen.value, ctypes.byref(olen))
+                fword = esc(fbuf.raw[:olen.value])
+            else:
+                fword = "unreadable"
+            out.append("att %d name %s desc %s sub %s rel %s data %s" % (
+                i, esc(name), esc(desc), esc(sub), esc(rel), fword))
+        lib.FPDF_CloseDocument(doc)
+        return out
+
+    def viewer(self, data):
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        scaling = lib.FPDF_VIEWERREF_GetPrintScaling(doc)
+        copies = lib.FPDF_VIEWERREF_GetNumCopies(doc)
+        duplex = lib.FPDF_VIEWERREF_GetDuplex(doc)
+        pr = lib.FPDF_VIEWERREF_GetPrintPageRange(doc)
+        pr_elems = []
+        if pr:
+            prc = lib.FPDF_VIEWERREF_GetPrintPageRangeCount(pr)
+            pr_elems = [str(lib.FPDF_VIEWERREF_GetPrintPageRangeElement(pr, i)) for i in range(prc)]
+        words = ["scaling", str(scaling), "copies", str(copies), "duplex", str(duplex),
+                 "range", ",".join(pr_elems) if pr_elems else "none"]
+        for key in (b"Direction", b"NonFullScreenPageMode", b"ViewArea", b"PrintArea"):
+            nb = lib.FPDF_VIEWERREF_GetName(doc, key, None, 0)
+            if nb > 1:
+                cbuf = ctypes.create_string_buffer(nb)
+                lib.FPDF_VIEWERREF_GetName(doc, key, cbuf, nb)
+                words += [key.decode("ascii"), esc(cbuf.raw[:nb - 1])]
+        lang = self._u16(lib.FPDFCatalog_GetLanguage, doc)
+        words += ["lang", "null" if lang is None else esc(lang)]
+        lib.FPDF_CloseDocument(doc)
+        return " ".join(words)
+
     def pages(self, data):
         """What a file's page tree comes to: the count PDFium gives, then, in
         order, each page to two past it, its width, height and quarter turns,
@@ -1001,6 +1142,18 @@ def answer(pdfium, kind, files):
         return content_answer(pdfium.annots(files["pdf"]))
     if kind in ("annots-flatten-display", "annots-flatten-print"):
         return content_answer(pdfium.annots_flatten(files["pdf"], kind == "annots-flatten-print"))
+    if kind == "outlines":
+        ans = pdfium.outlines(files["pdf"])
+        return "no-document" if ans is None else (" ; ".join(ans) or "none")
+    if kind == "labels":
+        ans = pdfium.labels(files["pdf"])
+        return "no-document" if ans is None else ans
+    if kind == "attachments":
+        ans = pdfium.attachments(files["pdf"])
+        return "no-document" if ans is None else (" ; ".join(ans) or "none")
+    if kind == "viewer":
+        ans = pdfium.viewer(files["pdf"])
+        return "no-document" if ans is None else ans
     raise SystemExit("unknown kind %r" % kind)
 
 

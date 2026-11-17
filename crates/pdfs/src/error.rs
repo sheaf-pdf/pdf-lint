@@ -5,7 +5,7 @@ use std::io;
 use pdf_content_streams::Pushed;
 use pdf_crypt::Unusable;
 use pdf_objects::Unreadable;
-use pdf_semantics::{pages, xmp};
+use pdf_semantics::{labels, outlines, pages, tree, xmp};
 use pdf_structure::write;
 
 /// Unified error returned by `pdfs` read, edit, and save operations.
@@ -58,6 +58,18 @@ pub enum Error {
     /// (`pdf-annots`'s / `pdf-semantics`'s).
     #[error("{0}")]
     Annots(pdf_annots::Error),
+    /// Reading the document outline (`/Outlines`) failed (`pdf-semantics`'s).
+    #[error("{0}")]
+    Outlines(outlines::Error),
+    /// Writing a document outline (`/Outlines`) failed (`pdf-semantics`'s).
+    #[error("{0}")]
+    OutlinesWrite(outlines::WriteError),
+    /// Writing a `/PageLabels` table failed (`pdf-semantics`'s).
+    #[error("{0}")]
+    PageLabelsWrite(labels::WriteError),
+    /// Writing a name or number tree failed (`pdf-semantics`'s).
+    #[error("{0}")]
+    TreeWrite(tree::WriteError),
     /// The metadata stream's packet wasn't read (pdf-semantics'). Boxed, as
     /// it holds what was read, which would make every result of the facade's
     /// as large. Its `Debug` gives the claims read and the XML reader's words
@@ -204,5 +216,29 @@ impl From<pdf_fonts::embed::Error> for Error {
 impl From<pages::WriteError> for Error {
     fn from(error: pages::WriteError) -> Error {
         Error::PageTree(error)
+    }
+}
+
+impl From<outlines::Error> for Error {
+    fn from(error: outlines::Error) -> Error {
+        Error::Outlines(error)
+    }
+}
+
+impl From<outlines::WriteError> for Error {
+    fn from(error: outlines::WriteError) -> Error {
+        Error::OutlinesWrite(error)
+    }
+}
+
+impl From<labels::WriteError> for Error {
+    fn from(error: labels::WriteError) -> Error {
+        Error::PageLabelsWrite(error)
+    }
+}
+
+impl From<tree::WriteError> for Error {
+    fn from(error: tree::WriteError) -> Error {
+        Error::TreeWrite(error)
     }
 }

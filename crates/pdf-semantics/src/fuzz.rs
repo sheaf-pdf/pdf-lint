@@ -16,9 +16,14 @@ use pdf_objects::{
 use crate::action::{self, Action};
 use crate::date::{Date, Quirk};
 use crate::dest::{self, DestTable};
+use crate::files;
 use crate::info::{self, Dated, Info};
+use crate::labels;
+use crate::ocg;
+use crate::outlines;
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
+use crate::viewer;
 use crate::xmp::{self, Claims, WriteError, XmpWhy, metadata_stream};
 use crate::{Fault, HOPS, Limits, catalog, follow};
 
@@ -792,6 +797,88 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Over<'o
                 }
             }
         }
+        let mut okept = Kept::default();
+        let ol = outlines::read(objects, catalog, rules, &Limits::DEFAULT, &mut okept);
+        assert_eq!(
+            outlines::read(objects, catalog, rules, &Limits::DEFAULT, &mut ()),
+            ol
+        );
+        assert_eq!(
+            outlines::read(objects, catalog, rules, &Limits::DEFAULT, &mut Unwanted),
+            ol
+        );
+        let mut small_ol = Limits::DEFAULT;
+        small_ol.outline_depth = 2;
+        small_ol.outline_items = 4;
+        let _ = outlines::read(objects, catalog, rules, &small_ol, &mut Kept::default());
+
+        let mut lkept = Kept::default();
+        let lb = labels::read(objects, catalog, rules, &Limits::DEFAULT, &mut lkept);
+        assert_eq!(
+            labels::read(objects, catalog, rules, &Limits::DEFAULT, &mut ()),
+            lb
+        );
+        assert_eq!(
+            labels::read(objects, catalog, rules, &Limits::DEFAULT, &mut Unwanted),
+            lb
+        );
+        if let Ok(Some(lbls)) = &lb {
+            for idx in [0usize, 1, 2, 27, 500] {
+                let _ = lbls.format(idx);
+            }
+        }
+
+        let mut fkept = Kept::default();
+        let ef = files::embedded_files(objects, catalog, rules, &Limits::DEFAULT, &mut fkept);
+        assert_eq!(
+            files::embedded_files(objects, catalog, rules, &Limits::DEFAULT, &mut ()),
+            ef
+        );
+        assert_eq!(
+            files::embedded_files(objects, catalog, rules, &Limits::DEFAULT, &mut Unwanted),
+            ef
+        );
+        let mut afkept = Kept::default();
+        let af = files::associated_files(objects, catalog, None, rules, &mut afkept);
+        assert_eq!(
+            files::associated_files(objects, catalog, None, rules, &mut ()),
+            af
+        );
+        assert_eq!(
+            files::associated_files(objects, catalog, None, rules, &mut Unwanted),
+            af
+        );
+
+        let mut ockept = Kept::default();
+        let ocp = ocg::read(objects, catalog, rules, &Limits::DEFAULT, &mut ockept);
+        assert_eq!(
+            ocg::read(objects, catalog, rules, &Limits::DEFAULT, &mut ()),
+            ocp
+        );
+        assert_eq!(
+            ocg::read(objects, catalog, rules, &Limits::DEFAULT, &mut Unwanted),
+            ocp
+        );
+        if let Ok(Some(props)) = &ocp {
+            let state = props.default_state();
+            for obj in &props.groups {
+                let _ = state.is_ocg_on(obj.id);
+            }
+        }
+
+        let mut vkept = Kept::default();
+        let vw = viewer::read(objects, catalog, rules, &mut vkept);
+        assert_eq!(viewer::read(objects, catalog, rules, &mut ()), vw);
+        assert_eq!(viewer::read(objects, catalog, rules, &mut Unwanted), vw);
+        if let Ok(view) = &vw {
+            let mut round = Dict::new();
+            viewer::apply_catalog(&mut round, view);
+            if view.lang.as_deref().is_none_or(|s| !s.contains('\u{1B}')) {
+                let empty: BTreeMap<ObjectId, Object> = BTreeMap::new();
+                let reread = viewer::read(&empty, &round, Rules::Iso, &mut ()).unwrap();
+                assert_eq!(&reread, view);
+            }
+        }
     }
     Over {
         trees,
@@ -858,6 +945,13 @@ pub fn walks(data: &[u8]) {
             assert_eq!(
                 action::read_chain(resolve, root, None, rules, &Limits::DEFAULT, &mut Unwanted),
                 ch
+            );
+            let mut fkept = Kept::default();
+            let sp = files::read_spec(resolve, root, None, rules, &mut fkept);
+            assert_eq!(files::read_spec(resolve, root, None, rules, &mut ()), sp);
+            assert_eq!(
+                files::read_spec(resolve, root, None, rules, &mut Unwanted),
+                sp
             );
         }
         if let Some(catalog) = root.as_dict() {
@@ -1199,6 +1293,21 @@ pub fn xmp(data: &[u8]) {
             assert!(under.is_none() || under == all, "{under:?} {all:?}");
         }
     }
+
+    let mut meta_heard = Heard::default();
+    let meta_res = xmp::read_metadata(data, Some(PACKET), &limits, &mut meta_heard);
+    assert_eq!(xmp::read_metadata(data, None, &limits, &mut ()), meta_res);
+    assert_eq!(
+        xmp::read_metadata(data, None, &limits, &mut Unwanted),
+        meta_res
+    );
+    if let (Ok(c), Ok(m)) = (&read, &meta_res) {
+        assert_eq!(&m.claims, c);
+        if let Ok(serialized) = xmp::write_metadata(m) {
+            let back = xmp::read_metadata(serialized.as_bytes(), None, &limits, &mut ()).unwrap();
+            assert_eq!(&back, m);
+        }
+    }
 }
 
 /// `data` as the data of a file's metadata stream, 9 0, read through a
@@ -1488,6 +1597,22 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         "3|B|2012|1|2014|PDF/VT-2",
         "a&b<c>d|\r\n|&#13;||]]>|\u{a0}\u{fffd}",
         " 3|b\u{1}|\u{fffe}",
+        // Outlines, page labels, embedded/associated files, optional content, and viewer prefs.
+        "<< /Root 2 0 R >> \
+         << /Type /Catalog /Pages 3 0 R /Outlines 5 0 R /PageLabels << /Nums [0 << /S /r >> 2 << /S /D /P (Ch-) /St 1 >>] >> \
+            /Names << /EmbeddedFiles << /Names [(doc.xml) 8 0 R] >> >> /AF [8 0 R] \
+            /OCProperties << /OCGs [10 0 R] /D << /BaseState /ON /OFF [10 0 R] /Order [[(Layers) 10 0 R]] >> >> \
+            /Lang (en-US) /PageLayout /TwoPageLeft /PageMode /UseOutlines \
+            /ViewerPreferences << /DisplayDocTitle true /Direction /R2L /PrintScaling /None /Duplex /Simplex /PrintPageRange [1 2] /NumCopies 2 >> >> \
+         << /Type /Pages /Kids [4 0 R 4 0 R 4 0 R] /Count 3 /MediaBox [0 0 200 200] >> \
+         << /Type /Page /Parent 3 0 R >> \
+         << /Type /Outlines /First 6 0 R /Last 6 0 R /Count 2 >> \
+         << /Title (Part I) /Parent 5 0 R /First 7 0 R /Last 7 0 R /Count 1 /Dest [4 0 R /Fit] /C [0 0.5 1] /F 2 >> \
+         << /Title (Chapter 1) /Parent 6 0 R /A << /S /URI /URI (https://example.org) >> >> \
+         << /Type /Filespec /F (doc.xml) /UF (doc.xml) /Desc (Data) /AFRelationship /Data /EF << /F 9 0 R >> >> \
+         << /Type /EmbeddedFile /Subtype /text#2Fxml /Params << /Size 4 /ModDate (D:20261115120000Z) >> >> \
+         << /Type /OCG /Name (Draft) /Intent /View >>",
+        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:pdf="http://ns.adobe.com/pdf/1.3/" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="2" pdfaid:conformance="B"><dc:title><rdf:Alt><rdf:li xml:lang="x-default">Report</rdf:li></rdf:Alt></dc:title><dc:creator><rdf:Seq><rdf:li>Alice</rdf:li></rdf:Seq></dc:creator><xmp:CreateDate>2026-11-15T12:00:00Z</xmp:CreateDate><pdf:Producer>pdf-semantics</pdf:Producer></rdf:Description></rdf:RDF></x:xmpmeta>"#,
     ];
     let mut seeds: Vec<Vec<u8>> = trees.map(|seed| seed.as_bytes().to_vec()).to_vec();
     seeds.push(1_792_800_000i64.to_le_bytes().to_vec());

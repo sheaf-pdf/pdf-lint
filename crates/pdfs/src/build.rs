@@ -10,9 +10,15 @@ use pdf_content_streams::{ContentWriter, Res, ResBody, Reserved, ResourceNeeds};
 use pdf_filters::Prediction;
 use pdf_fonts::Std14;
 use pdf_objects::object::{Data, Stream, Value};
-use pdf_objects::{Dict, Object, ObjectId, dict};
+use pdf_objects::{Dict, Object, ObjectId, dict, text};
+use pdf_semantics::files::{NewEmbeddedFile, write_embedded};
+use pdf_semantics::info::{self, Info};
+use pdf_semantics::labels::{self, LabelRange};
+use pdf_semantics::outlines::{self, OutlineNode};
 use pdf_semantics::pages::Rect;
-use pdf_semantics::xmp::{self, Claims};
+use pdf_semantics::tree::{names, write_names};
+use pdf_semantics::viewer::{self, CatalogView};
+use pdf_semantics::xmp::{self, Claims, Metadata};
 use pdf_structure::Document;
 use pdf_structure::write::{self, Deflate};
 
@@ -277,6 +283,160 @@ pub fn claim(doc: &mut Document, claims: &Claims) -> Result<ObjectId, Error> {
         catalog.set("Metadata", id);
     }
     Ok(id)
+}
+
+/// Writes `info` as an indirect `/Info` dictionary in `doc` and sets `doc`'s
+/// trailer `/Info` reference to it, returning the allocated [`ObjectId`].
+pub fn set_info(doc: &mut Document, info: &Info) -> ObjectId {
+    let id = doc.add(info::write(info));
+    doc.trailer_mut().dict_mut().set("Info", id);
+    id
+}
+
+/// Writes `meta` as an unfiltered `/Type /Metadata /Subtype /XML` XMP packet
+/// stream in `doc` and sets its catalog's `/Metadata` reference to it.
+///
+/// Unlike [`claim`] (which writes conformance claims alone and refuses when
+/// `/Metadata` is already set), [`set_metadata`] writes the complete [`Metadata`]
+/// record and replaces any existing catalog `/Metadata` pointer.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Claims`] if a
+/// metadata value cannot be represented identically in XML 1.0.
+pub fn set_metadata(doc: &mut Document, meta: &Metadata) -> Result<ObjectId, Error> {
+    if doc.catalog().is_none() {
+        return Err(Error::NoCatalog);
+    }
+    let packet = xmp::write_metadata(meta).map_err(Error::Claims)?;
+    let stream = Stream::new(
+        dict! { "Type" => Object::name("Metadata"), "Subtype" => Object::name("XML") },
+        packet.into_bytes(),
+    );
+    let id = doc.add(Object::from(stream));
+    if let Some(catalog) = doc.catalog_mut() {
+        catalog.set("Metadata", id);
+    }
+    Ok(id)
+}
+
+/// Writes `items` into `doc` as a doubly-linked `/Outlines` hierarchy and sets
+/// its catalog's `/Outlines` reference to the new root.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::OutlinesWrite`]
+/// if `items` exceeds `limits` or contains an invalid RGB color.
+pub fn set_outlines(
+    doc: &mut Document,
+    items: &[OutlineNode],
+    limits: &pdf_semantics::Limits,
+) -> Result<ObjectId, Error> {
+    if doc.catalog().is_none() {
+        return Err(Error::NoCatalog);
+    }
+    let written = outlines::write(items, limits, || doc.new_id())?;
+    for (id, node) in written.nodes {
+        doc.set(id, node);
+    }
+    if let Some(catalog) = doc.catalog_mut() {
+        catalog.set("Outlines", written.root);
+    }
+    Ok(written.root)
+}
+
+/// Writes `ranges` as `doc`'s catalog `/PageLabels` number tree.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or
+/// [`Error::PageLabelsWrite`] if any range is invalid or duplicated.
+pub fn set_page_labels(doc: &mut Document, ranges: &[LabelRange]) -> Result<(), Error> {
+    if doc.catalog().is_none() {
+        return Err(Error::NoCatalog);
+    }
+    let tree = labels::write(ranges)?;
+    if let Some(catalog) = doc.catalog_mut() {
+        catalog.set("PageLabels", tree);
+    }
+    Ok(())
+}
+
+/// Applies `view` (`/PageLayout`, `/PageMode`, `/Lang`, and `/ViewerPreferences`)
+/// onto `doc`'s catalog dictionary.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog.
+pub fn set_catalog_view(doc: &mut Document, view: &CatalogView) -> Result<(), Error> {
+    let catalog = doc.catalog_mut().ok_or(Error::NoCatalog)?;
+    viewer::apply_catalog(catalog, view);
+    Ok(())
+}
+
+/// Embeds `data` into `doc` according to `spec` (deflating the `/EmbeddedFile`
+/// stream with `deflate`), registers its `/Filespec` in `doc`'s catalog
+/// `/Names /EmbeddedFiles` name tree (preserving any existing entries), and—when
+/// `spec.relationship.is_some()`—appends the `/Filespec` reference to the
+/// catalog's `/AF` array. Returns the `/Filespec` [`ObjectId`].
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, [`Error::Write`] if
+/// deflating `data` fails, or [`Error::Unreadable`] / [`Error::TreeWrite`] if
+/// reading or rewriting `/Names /EmbeddedFiles` fails.
+pub fn add_embedded_file(
+    doc: &mut Document,
+    spec: &NewEmbeddedFile,
+    data: Vec<u8>,
+    limits: &pdf_semantics::Limits,
+    deflate: Deflate,
+) -> Result<ObjectId, Error> {
+    let mut existing_entries: Vec<(Vec<u8>, Object)> = Vec::new();
+    let (mut names_dict, mut existing_af) = {
+        let catalog = doc.catalog().ok_or(Error::NoCatalog)?;
+        let names_d = owned(doc, catalog.get(b"Names"));
+        if let Some(ef_root) = names_d.get(b"EmbeddedFiles") {
+            for item in names(&*doc, ef_root, limits, ()) {
+                let (k, v) = item?;
+                existing_entries.push((k.to_vec(), v.clone()));
+            }
+        }
+        let af_vec = catalog
+            .get(b"AF")
+            .and_then(|v| doc.dereference(v))
+            .and_then(|(_, o)| o.as_array())
+            .map(<[Object]>::to_vec)
+            .unwrap_or_default();
+        (names_d, af_vec)
+    };
+
+    let mut actual_spec = spec.clone();
+    actual_spec.size = data.len();
+    let stream_id = doc.new_id();
+    let written = write_embedded(&actual_spec, stream_id);
+    let mut ef_stream = Stream::new(written.stream_dict, data);
+    deflated(&mut ef_stream, deflate)?;
+    doc.set(stream_id, Object::from(ef_stream));
+    let filespec_id = doc.add(written.filespec_dict);
+
+    let new_key = text::encode(&actual_spec.name);
+    existing_entries.retain(|(k, _)| *k != new_key);
+    existing_entries.push((new_key, Object::from(filespec_id)));
+    let ef_tree = write_names(existing_entries)?;
+    names_dict.set("EmbeddedFiles", ef_tree);
+
+    if actual_spec.relationship.is_some() {
+        existing_af.push(Object::from(filespec_id));
+    }
+
+    if let Some(catalog) = doc.catalog_mut() {
+        catalog.set("Names", names_dict);
+        if actual_spec.relationship.is_some() {
+            catalog.set("AF", existing_af);
+        }
+    }
+    Ok(filespec_id)
 }
 
 /// Writes `built` (and any synthesized `/AP /N` and `/RO` Form XObject streams,

@@ -39,6 +39,18 @@ pub struct Limits {
     /// How many actions a `/Next` action chain or tree may visit
     /// ([`action`](crate::action)): 256 by default.
     pub action_chain: usize,
+    /// How many levels deep a document outline (`/Outlines`) hierarchy is read
+    /// or written ([`outlines`](crate::outlines)): 256 by default.
+    pub outline_depth: usize,
+    /// How many items of a document outline (`/Outlines`) hierarchy are read or
+    /// written ([`outlines`](crate::outlines)): 100,000 by default.
+    pub outline_items: usize,
+    /// How many decoded bytes of an embedded file stream are read by default
+    /// ([`files`](crate::files)): 64 MiB by default.
+    pub embedded_bytes: usize,
+    /// How many levels deep an optional content UI `/Order` array or `/VE`
+    /// visibility expression is read ([`ocg`](crate::ocg)): 64 by default.
+    pub oc_depth: usize,
 }
 
 impl Limits {
@@ -52,6 +64,10 @@ impl Limits {
         xmp_depth: 256,
         xmp_bindings: 128,
         action_chain: 256,
+        outline_depth: 256,
+        outline_items: 100_000,
+        embedded_bytes: 64 << 20,
+        oc_depth: 64,
     };
 }
 

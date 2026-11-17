@@ -276,6 +276,110 @@ pub enum Fault {
         /// Which dictionary key.
         key: &'static str,
     },
+    /// A catalog `/Outlines` root or outline item that isn't a dictionary, or
+    /// lacks a required `/Title` entry (12.3.3, Tables 150 and 151).
+    #[error("an outline dictionary isn't a dictionary, or an item has no /Title")]
+    OutlineInvalid,
+    /// An entry of an outline root or item dictionary that isn't of the type
+    /// ISO 32000-2 requires (12.3.3, Tables 150 and 151).
+    #[error("/{key} of an outline dictionary isn't of its type")]
+    OutlineWrongType {
+        /// Which dictionary key.
+        key: &'static str,
+    },
+    /// An outline item specifying both `/Dest` and `/A`, which ISO 32000-2
+    /// makes mutually exclusive (12.3.3, Table 151).
+    #[error("an outline item has both /Dest and /A")]
+    OutlineBothDestAndAction,
+    /// An outline dictionary's `/Count` that disagrees with the visible items
+    /// under it (12.3.3, Tables 150 and 151).
+    #[error("an outline's /Count is {count:?}, where {expected} was expected")]
+    OutlineCount {
+        /// The `/Count` written on the outline dictionary, if an integer.
+        count: Option<i64>,
+        /// The signed `/Count` expected from the item's open state and
+        /// descendants.
+        expected: i64,
+    },
+    /// An indirect outline item reached more than once via `/First` or `/Next`
+    /// (12.3.3): skipped on repeat so traversal terminates.
+    #[error("the document outline reaches {id} R again")]
+    OutlineCycle {
+        /// The repeated outline item object.
+        id: ObjectId,
+    },
+    /// An outline item nested deeper than
+    /// [`Limits::outline_depth`](crate::Limits::outline_depth).
+    #[error("the document outline goes deeper than it's read")]
+    OutlineTooDeep,
+    /// More outline items than
+    /// [`Limits::outline_items`](crate::Limits::outline_items).
+    #[error("the document outline has more items than are read")]
+    OutlineTooManyItems,
+    /// A catalog `/PageLabels` entry or label range value that isn't a
+    /// dictionary (12.4.2, Table 161), or lacks a range starting at page `0`.
+    #[error("a page-label entry isn't a dictionary, or page 0 has no range")]
+    PageLabelsInvalid,
+    /// A `/PageLabels` number-tree key less than `0` (12.4.2).
+    #[error("a page-label range starts at a negative page index")]
+    PageLabelNegativeKey,
+    /// A page-label `/St` value less than `1` (12.4.2, Table 161).
+    #[error("a page-label /St is less than 1")]
+    PageLabelInvalidStart,
+    /// An entry of a page-label dictionary that isn't of its required type or
+    /// standard `/S` name (12.4.2, Table 161).
+    #[error("/{key} of a page-label dictionary isn't of its type")]
+    PageLabelWrongType {
+        /// Which dictionary key.
+        key: &'static str,
+    },
+    /// A file specification or `/AF` entry that isn't a string or file
+    /// specification dictionary (7.11, 14.13).
+    #[error("a file specification isn't a string or dictionary")]
+    FileSpecInvalid,
+    /// An entry of a file specification or embedded-file stream dictionary
+    /// that isn't of its required type (7.11.3, 7.11.4, Tables 43–45).
+    #[error("/{key} of a file specification isn't of its type")]
+    FileSpecWrongType {
+        /// Which dictionary key.
+        key: &'static str,
+    },
+    /// A date entry in an embedded file's `/Params` dictionary that doesn't
+    /// parse as a PDF date (7.9.4; 7.11.4, Table 45).
+    #[error("/{key} of an embedded file's /Params isn't a date: {error}")]
+    FileSpecDate {
+        /// Which entry: `CreationDate` or `ModDate`.
+        key: &'static str,
+        /// Why it didn't parse.
+        error: crate::date::Error,
+    },
+    /// A catalog `/OCProperties`, `/OCG`, or `/OCMD` object that isn't a
+    /// valid dictionary with its required entries (8.11.2, 8.11.4).
+    #[error("an optional-content dictionary is malformed")]
+    OcInvalid,
+    /// An entry of an optional-content dictionary that isn't of its required
+    /// type (8.11.2, 8.11.4, Tables 96–100).
+    #[error("/{key} of an optional-content dictionary isn't of its type")]
+    OcWrongType {
+        /// Which dictionary key.
+        key: &'static str,
+    },
+    /// An optional-content `/Order` array or `/VE` visibility expression
+    /// nested deeper than [`Limits::oc_depth`](crate::Limits::oc_depth).
+    #[error("an optional-content expression or /Order array nests deeper than it's read")]
+    OcTooDeep,
+    /// A catalog `/ViewerPreferences` entry that isn't a dictionary, or a
+    /// `/PrintPageRange` with invalid bounds (12.2, Table 147).
+    #[error("the catalog's /ViewerPreferences or /PrintPageRange is malformed")]
+    ViewerPrefInvalid,
+    /// An entry of `/ViewerPreferences` or a catalog display key (`/PageLayout`,
+    /// `/PageMode`, `/Lang`) that isn't of its required type or name (7.7.2,
+    /// 12.2).
+    #[error("/{key} of the catalog or /ViewerPreferences isn't of its type")]
+    ViewerPrefWrongType {
+        /// Which dictionary key.
+        key: &'static str,
+    },
 }
 
 /// What [`Fault::PageTreeParent`] says: the node that lists it, by its number,

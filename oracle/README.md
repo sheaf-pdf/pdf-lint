@@ -6,7 +6,7 @@ Several crates emulate PDFium's forgiving behavior when reading real-world PDFsâ
 - `pdf-objects` (`Parser::rules`, `text::decode_with`)
 - `pdf-structure` (`Recovery::Pdfium`)
 - `pdf-content-streams` (content stream lexing, inline images, `/Contents` joining)
-- `pdf-semantics` (`pages::pages`, `dest::DestTable`, and `action` under `Rules::Pdfium`)
+- `pdf-semantics` (`pages::pages`, `dest::DestTable`, `action`, `outlines`, `labels`, `files`, and `viewer` under `Rules::Pdfium`)
 - `pdf-color` (`components`)
 - `pdf-fonts` (`Font`, `shown`)
 - `pdf-gfx` (`PageGeom`, `interpret`, `encode`, `TextPage`)
@@ -61,7 +61,7 @@ Each crate's `tests/pdfium/` directory (excluded from published crates.io packag
 - **`mediabox`:** Page `/MediaBox` (`.obj`) -> page width and height.
 - **`info`:** Trailer `/Info` dictionary (`.obj`) + key (`.tag`) -> decoded metadata string.
 - **`kids`:** Page tree `/Kids` array (`.obj`) -> page dimensions or `no-page`.
-- **`pages`:** Complete `.pdf` -> `FPDF_GetPageCount` plus width, height, and rotation for up to 64 pages (and two past the count).
+- **`pages`, `outlines`, `labels`, `attachments`, `viewer`:** Complete `.pdf` -> `FPDF_GetPageCount` plus width, height, and rotation for up to 64 pages (`pages`); bookmark hierarchy (`FPDFBookmark_*`) (`outlines`); per-page `FPDF_GetPageLabel` strings (`labels`); `/Names /EmbeddedFiles` attachments (`FPDFDoc_GetAttachment*` / `FPDFAttachment_*`) (`attachments`); and `FPDF_VIEWERREF_*` + `FPDFCatalog_GetLanguage` (`viewer`).
 - **`avail`:** Complete `.pdf` (+ optional `.password`) fed incrementally to `FPDFAvail_*` starting from the first 1,024 bytes -> linearization status, bytes fetched per stage, and per-page availability.
 - **`spaces`:** Complete `.pdf` drawing 8x1 unfiltered inline images in named `/ColorSpace`s -> inferred component count from raw image byte length.
 - **`fonts`, `fonts-heights`, `fonts-boxes`:** Complete `.pdf` showing a test string at 1000 pt -> `FPDFText_GetUnicode`, character origins, loose boxes, and outline boxes.
