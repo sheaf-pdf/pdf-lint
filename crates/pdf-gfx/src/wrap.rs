@@ -254,7 +254,8 @@ pub enum WrapMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextBoxStyle {
     /// Fixed font size in points, or `None` (or `Some(0.0)`) to auto-size
-    /// within `[min_auto_size, max_auto_size]` so the text fits inside the box.
+    /// within `[min_auto_size, max_auto_size]` so the text fits inside the
+    /// box: `max_auto_size` exactly where the text fits at it.
     pub size: Option<f32>,
     /// Minimum font size chosen when `size` is auto-sized (`4.0` by default).
     pub min_auto_size: f32,
@@ -598,6 +599,18 @@ fn choose_auto_size(
     let max_s = style.max_auto_size.max(min_s);
     if inner.width() <= 0.0 || inner.height() <= 0.0 {
         return min_s;
+    }
+
+    // The ceiling itself where the text fits at it: the search below only
+    // closes on it from under.
+    let fits = |size: f32| {
+        !build_lines_at_size(
+            paragraphs, inner, style, size, ascent_em, descent_em, height_em,
+        )
+        .overflowed
+    };
+    if fits(max_s) {
+        return max_s;
     }
 
     let mut lo = min_s;

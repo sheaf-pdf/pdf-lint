@@ -2457,7 +2457,9 @@ fn default_appearance_text_box_style_maps_the_size_alone() {
     assert_eq!(fixed.mode, TextMode::Fill);
     assert_eq!(fixed.line_height, None);
 
-    for auto in [&b"/Helv 0 Tf"[..], b"/Helv -1 Tf", b"0 g", b""] {
+    // Exactly 0 asks for auto-sizing, a negative zero among its spellings.
+    for auto in [&b"/Helv 0 Tf"[..], b"/Helv -0 Tf", b"/Helv 0.0 Tf"] {
+        assert!(parse_da(auto).auto_sized(), "{auto:?}");
         assert_eq!(
             parse_da(auto).text_box_style(),
             TextBoxStyle {
@@ -2466,6 +2468,52 @@ fn default_appearance_text_box_style_maps_the_size_alone() {
             }
         );
     }
+    // No `Tf`, or a size that says nothing: the default style, at its 12.
+    assert_eq!(TextBoxStyle::default().size, Some(12.0));
+    for unsaid in [&b"/Helv -1 Tf"[..], b"0 g", b""] {
+        assert!(!parse_da(unsaid).auto_sized(), "{unsaid:?}");
+        assert_eq!(parse_da(unsaid).size(), None);
+        assert_eq!(parse_da(unsaid).text_box_style(), TextBoxStyle::default());
+    }
+    for size in [f32::NAN, f32::INFINITY] {
+        let da = DefaultAppearance::new("F", size, None);
+        assert!(!da.auto_sized());
+        assert_eq!(da.text_box_style(), TextBoxStyle::default());
+    }
+    assert!(!parse_da(b"/Helv 9 Tf").auto_sized());
+}
+
+/// Auto-sized text that fits at the ceiling is drawn at the ceiling itself,
+/// not a search's step under it.
+#[cfg(feature = "text-layout")]
+#[test]
+fn auto_size_takes_its_ceiling_where_the_text_fits() {
+    use crate::{TextBoxStyle, layout_text};
+
+    let style = TextBoxStyle {
+        size: None,
+        ..TextBoxStyle::default()
+    };
+    let roomy = Rect::new(0.0, 0.0, 194.0, 54.0);
+    let laid = layout_text(&Std14::Helvetica, "Hi", roomy, &style).unwrap();
+    assert!(!laid.overflowed);
+    assert_eq!(laid.font_size, 12.0);
+    let wider = TextBoxStyle {
+        max_auto_size: 30.0,
+        ..style
+    };
+    let laid = layout_text(&Std14::Helvetica, "Hi", roomy, &wider).unwrap();
+    assert_eq!(laid.font_size, 30.0);
+
+    // Text that doesn't fit at the ceiling is still searched for under it.
+    let tight = Rect::new(0.0, 0.0, 60.0, 12.0);
+    let laid = layout_text(&Std14::Helvetica, "Auto-fit title", tight, &style).unwrap();
+    assert!(!laid.overflowed);
+    assert!(
+        laid.font_size > 4.0 && laid.font_size < 12.0,
+        "{}",
+        laid.font_size
+    );
 }
 
 #[test]
@@ -2508,6 +2556,19 @@ fn default_appearance_round_trips_what_it_writes() {
     assert_eq!(nul.font_name.as_deref(), Some(&b"A\0B"[..]));
     assert_eq!(nul.to_bytes(), b"/Helv 7 Tf 1 g");
     assert_eq!(again(b"/A#00B 7 Tf 1 g"), b"/Helv 7 Tf 1 g");
+
+    // A color set out of range by hand is written clamped, as it is read.
+    let out_of_range = DefaultAppearance::new("Helv", 12.0, Some(Color::Gray(5.0)));
+    assert_eq!(out_of_range.to_bytes(), b"/Helv 12 Tf 1 g");
+    assert_eq!(again(&out_of_range.to_bytes()), b"/Helv 12 Tf 1 g");
+    let rgb = DefaultAppearance::new("F", 1.0, Some(Color::Rgb([-1.0, 0.5, f32::NAN])));
+    assert_eq!(rgb.to_bytes(), b"/F 1 Tf 0 0.5 0 rg");
+    assert_eq!(again(&rgb.to_bytes()), b"/F 1 Tf 0 0.5 0 rg");
+    // A size with no name isn't written: `Tf` takes both.
+    let mut sized = DefaultAppearance::new("F", 9.0, None);
+    sized.font_name = None;
+    sized.rise = Some(1.0);
+    assert_eq!(sized.to_bytes(), b"1 Ts");
 
     // A content parser keeps a word's first 255 bytes, so a name whose
     // written form is longer reads back cut short: the one case outside the
@@ -2728,8 +2789,13 @@ fn box_border_solid_and_dashed_stroke_the_inset_frame() {
     let plain = String::from_utf8(plain.finish(&Reserved::default()).0).unwrap();
     assert_eq!(plain, "q\n2 w\n11 21 98 48 re\nS\nQ\n");
     let solid = box_border_text(rect, &BoxBorder::solid(2.0), red, None);
-    assert_eq!(solid, "q\n1 0 0 RG\n2 w\n11 21 98 48 re\nS\nQ\n");
-    assert_eq!(solid.replacen("1 0 0 RG\n", "", 1), plain);
+    assert_eq!(solid, "q\n1 0 0 RG\n2 w\n[] 0 d\n11 21 98 48 re\nS\nQ\n");
+    assert_eq!(
+        solid
+            .replacen("1 0 0 RG\n", "", 1)
+            .replacen("[] 0 d\n", "", 1),
+        plain
+    );
     // The fill hint and a dash array are a solid border's to ignore.
     assert_eq!(
         box_border_text(
@@ -2754,7 +2820,7 @@ fn box_border_solid_and_dashed_stroke_the_inset_frame() {
             red,
             None
         ),
-        "q\n1 0 0 RG\n2 w\n1 1 0 7 re\nS\nQ\n"
+        "q\n1 0 0 RG\n2 w\n[] 0 d\n1 1 0 7 re\nS\nQ\n"
     );
     assert_eq!(
         box_border_text(
@@ -2819,13 +2885,57 @@ fn box_border_solid_and_dashed_stroke_the_inset_frame() {
     );
 }
 
+/// Every style draws the same whatever dash the caller left set: only a
+/// dashed border is dashed, and by its own array.
+#[test]
+fn box_border_sets_its_own_dash() {
+    let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
+    let dash = [4.0, 1.0];
+    for style in [
+        BoxBorderStyle::Solid,
+        BoxBorderStyle::Dashed,
+        BoxBorderStyle::Beveled,
+        BoxBorderStyle::Inset,
+        BoxBorderStyle::Underline,
+    ] {
+        let border = BoxBorder::new(2.0, style).with_dash(&dash);
+        let alone = box_border_text(rect, &border, Color::Gray(0.0), None);
+        let mut after = Canvas::new();
+        after.dash(&[2.0, 2.0], 1.0);
+        after.box_border(rect, &border, Color::Gray(0.0), None);
+        let after = String::from_utf8(after.finish(&Reserved::default()).0).unwrap();
+        assert_eq!(after, format!("[2 2] 1 d\n{alone}"), "{style:?}");
+        let expected = if style == BoxBorderStyle::Dashed {
+            "[4 1] 0 d"
+        } else {
+            "[] 0 d"
+        };
+        assert_eq!(alone.matches(" d\n").count(), 1, "{style:?}");
+        assert!(
+            alone.contains(&format!("\n{expected}\n")),
+            "{style:?}: {alone}"
+        );
+        // Under the caller's dash every stroke is still read with the border's own.
+        for path in painted_paths(after.as_bytes()) {
+            if matches!(path.paint, Paint::Stroke) {
+                let own: &[f32] = if style == BoxBorderStyle::Dashed {
+                    &dash
+                } else {
+                    &[]
+                };
+                assert_eq!(&path.state.dash.array[..], own, "{style:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn box_border_underline_is_one_segment_along_the_bottom() {
     let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
     let underline = BoxBorder::new(3.0, BoxBorderStyle::Underline).with_dash(&[1.0]);
     assert_eq!(
         box_border_text(rect, &underline, Color::Cmyk([0.0, 1.0, 1.0, 0.0]), None),
-        "q\n0 1 1 0 K\n3 w\n10 21.5 m\n110 21.5 l\nS\nQ\n"
+        "q\n0 1 1 0 K\n3 w\n[] 0 d\n10 21.5 m\n110 21.5 l\nS\nQ\n"
     );
     // A box as tall as the line takes it; a shorter one, or one with no
     // width, takes nothing.
@@ -2836,7 +2946,7 @@ fn box_border_underline_is_one_segment_along_the_bottom() {
             Color::Gray(0.0),
             None
         ),
-        "q\n0 G\n3 w\n0 1.5 m\n50 1.5 l\nS\nQ\n"
+        "q\n0 G\n3 w\n[] 0 d\n0 1.5 m\n50 1.5 l\nS\nQ\n"
     );
     assert_eq!(
         box_border_text(
@@ -2867,7 +2977,7 @@ fn box_border_bevels_fill_two_mitered_bands_inside_the_frame() {
     // 24..66). The first runs up the left and along the top, the second along
     // the bottom and up the right; both start at the bottom left and miter at
     // the two shared corners.
-    let frame = "q\n0 0 1 RG\n2 w\n11 21 98 48 re\nS\n";
+    let frame = "q\n0 0 1 RG\n2 w\n[] 0 d\n11 21 98 48 re\nS\n";
     let top_left = "12 22 m\n12 68 l\n108 68 l\n106 66 l\n14 66 l\n14 24 l\nh\nf\n";
     let bottom_right = "12 22 m\n108 22 l\n108 68 l\n106 66 l\n106 24 l\n14 24 l\nh\nf\n";
     let bevel =
@@ -2923,7 +3033,7 @@ fn box_border_bevels_fill_two_mitered_bands_inside_the_frame() {
         // A box of exactly four widths holds bands that meet in the middle.
         let text = box_border_text(Rect::new(0.0, 0.0, 8.0, 8.0), &border, blue, None);
         assert!(
-            text.starts_with("q\n0 0 1 RG\n2 w\n1 1 6 6 re\nS\n"),
+            text.starts_with("q\n0 0 1 RG\n2 w\n[] 0 d\n1 1 6 6 re\nS\n"),
             "{text}"
         );
         assert!(
@@ -2941,7 +3051,7 @@ fn box_border_bevels_fill_two_mitered_bands_inside_the_frame() {
             Rect::new(0.0, 0.0, 4.0, 4.0),
         ] {
             let text = box_border_text(small, &border, blue, None);
-            assert!(text.starts_with("q\n0 0 1 RG\n2 w\n1 1 "), "{text}");
+            assert!(text.starts_with("q\n0 0 1 RG\n2 w\n[] 0 d\n1 1 "), "{text}");
             assert!(text.ends_with(" re\nS\nQ\n"), "{text}");
             assert!(!text.contains('f') && !text.contains('g'), "{text}");
         }

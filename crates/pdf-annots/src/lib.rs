@@ -191,9 +191,10 @@ pub use pdf_semantics::dest::{
 };
 pub use replies::{AnnotThread, MarkedState, ReplyKind, ReviewState, resolve_threads};
 pub use resolve::QuadPoints;
+#[doc(inline)]
+pub use style::DefaultAppearance;
 pub use style::{
-    AnnotColor, AppearanceChars, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle,
-    Quadding,
+    AnnotColor, AppearanceChars, Border, BorderStyle, LineEnding, PaintStyle, Quadding,
 };
 pub use subtypes::{
     AnnotSubtype, AttachmentIcon, CaretAnnot, CaretSymbol, FileAttachmentAnnot, FreeTextAnnot,

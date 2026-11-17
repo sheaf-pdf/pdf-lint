@@ -9,6 +9,15 @@
 //!    `AnnotThread`, or `Fault`.
 //! 4. A `/Redact` mark synthesized from what was read (its quadrilaterals and
 //!    overlay text) never panics, and its mark is `synth_annot`'s.
+//! 5. Flattening with redaction marks drawn never keeps back what was drawn
+//!    or removed without them: it draws and removes at least as many
+//!    annotations, and keeps no more.
+//! 6. Under `text-layout`, a `/FreeText`'s text and a `/Redact`'s overlay
+//!    text drawn in a font given (the `*_with_font` synthesizers and
+//!    builders) never panic; in Helvetica they give what the defaults give
+//!    wherever the font can draw the text, a builder builds exactly where its
+//!    synthesizer succeeds, and in a font that can't draw the text the error
+//!    leaves nothing built.
 
 use std::collections::BTreeMap;
 
@@ -27,6 +36,11 @@ use crate::replies::resolve_threads;
 use crate::style::DefaultAppearance;
 use crate::subtypes::TypedAnnot;
 use crate::synth::{RedactMark, synth_annot, synth_redact};
+#[cfg(feature = "text-layout")]
+use crate::{
+    style::PaintStyle,
+    synth::{synth_free_text, synth_free_text_with_font, synth_redact_with_font},
+};
 
 /// Built-in seed inputs exercising links, destinations, action chains, text
 /// markup, geometric annotations, ink, redaction, replies/review states, and
@@ -37,6 +51,7 @@ pub const SEEDS: &[&[u8]] = &[
     b"<< /Annots [1 0 R 2 0 R 3 0 R] >>\xff<< /Type /Catalog /Pages 4 0 R >>\xff<< /Subtype /Text /Rect [20 20 40 40] /Name /Comment /T (Bob) /M (D:20261115120000Z) >>\xff<< /Subtype /Text /Rect [20 20 40 40] /IRT 1 0 R /StateModel (Review) /State (Accepted) >>\xff<< /Subtype /FreeText /Rect [50 50 200 100] /DA (/Helv 12 Tf 0 0 1 rg) /Q 1 /CL [50 50 30 30] /LE /OpenArrow >>\xff<< /Type /Pages /Kids [5 0 R] /Count 1 >>\xff<< /Type /Page /Parent 4 0 R /MediaBox [0 0 200 200] >>",
     b"<< /Annots [1 0 R 2 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Ink /Rect [0 0 100 100] /InkList [[10 10 20 30 40 25]] /BS << /W 2 /S /D /D [4 2] >> >>\xff<< /Subtype /Redact /Rect [10 10 80 30] /IC [0 0 0] /OverlayText (REDACTED) /DA (/Helv 10 Tf 1 g) /AP << /N 3 0 R >> >>\xff<< /Subtype /Form /BBox [0 0 70 20] >>\nstream\n0 g 0 0 70 20 re f",
     b"<< /Annots [1 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Redact /Rect [100 500 300 540] /C [0 0 1] /IC [0.5] /QuadPoints [100 540 200 540 100 520 200 520 210 502 290 506 285 526 205 521] /OverlayText (b\\(5\\)) /Repeat true /DA (/Helv 6 Tf 1 g) /Q 1 >>",
+    b"<< /Annots [1 0 R 2 0 R 3 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Redact /Rect [10 10 80 30] /Popup 2 0 R /OverlayText (\\251 x) /Repeat true /RO 4 0 R /AP << /N 4 0 R >> >>\xff<< /Subtype /Popup /Rect [90 10 190 60] /Parent 1 0 R /Open true >>\xff<< /Subtype /FreeText /Rect [50 50 200 100] /DA (/Helv 0 Tf 0 g) /Contents (Caf\\351 \\(1\\)) /Q 2 >>\xff<< /Subtype /Form /BBox [0 0 70 20] >>\nstream\n0 g 0 0 70 20 re f",
 ];
 
 /// Runs annotation, destination, action, and reply-thread checks over an
@@ -161,6 +176,17 @@ pub fn check(data: &[u8]) {
                     if let Some(built) = BuiltAnnot::redact_quads(&mark) {
                         let _ = format!("{built:?}");
                     }
+                    #[cfg(feature = "text-layout")]
+                    redact_in_fonts(a.rect(), &mark, both.as_ref());
+                }
+                #[cfg(feature = "text-layout")]
+                if let TypedAnnot::FreeText(ft) = a.typed() {
+                    free_text_in_fonts(
+                        a.rect(),
+                        a.contents().unwrap_or(""),
+                        ft.da.as_ref(),
+                        ft.quadding,
+                    );
                 }
             }
             for target in [FlattenTarget::Display, FlattenTarget::Print] {
@@ -209,6 +235,99 @@ pub fn check(data: &[u8]) {
                         let _ = dests.resolve(d, rules, &mut ());
                     }
                 }
+            }
+        }
+    }
+}
+
+/// The fonts the `*_with_font` entry points are driven with: Helvetica, the
+/// defaults' own, and Symbol, whose encoding has none of the Latin letters
+/// most text holds, so the error is reached.
+#[cfg(feature = "text-layout")]
+const FONTS: [pdf_fonts::Std14; 2] = [pdf_fonts::Std14::Helvetica, pdf_fonts::Std14::Symbol];
+
+/// Draws a redaction's overlay text in each of [`FONTS`]; `default` is what
+/// [`synth_redact`] gave for the same mark.
+#[cfg(feature = "text-layout")]
+fn redact_in_fonts(
+    rect: pdf_gfx::Rect,
+    mark: &RedactMark<'_>,
+    default: Option<&(crate::SynthesizedAp, crate::SynthesizedAp)>,
+) {
+    use pdf_content_streams::Res;
+
+    for font in FONTS {
+        let Ok(res) = Res::dict(font.dict()) else {
+            continue;
+        };
+        let drawn = synth_redact_with_font(rect, mark, res.clone(), &font);
+        let built = BuiltAnnot::redact_with_font(rect, mark, res, &font);
+        match (&drawn, &built) {
+            (Ok(forms), Ok(built)) => {
+                assert_eq!(forms.as_ref().map(|f| &f.0), built.normal_ap.as_ref());
+                assert_eq!(forms.as_ref().map(|f| &f.1), built.redact_overlay.as_ref());
+                assert_eq!(built.dict, BuiltAnnot::redact_mark(rect, mark).dict);
+                // The mark never depends on the font; in the defaults' own
+                // font, neither does the overlay.
+                assert_eq!(
+                    forms.as_ref().map(|f| &f.0),
+                    default.map(|f| &f.0),
+                    "the mark is the default's"
+                );
+                if font == pdf_fonts::Std14::Helvetica {
+                    assert_eq!(forms.as_ref(), default);
+                }
+                let _ = format!("{built:?}");
+            }
+            (Err(a), Err(b)) => {
+                assert_eq!(a, b);
+                assert!(mark.overlay_text.is_some_and(|t| !t.is_empty()));
+            }
+            _ => panic!("the builder and the synthesizer disagree"),
+        }
+    }
+}
+
+/// Draws a `/FreeText`'s text in each of [`FONTS`].
+#[cfg(feature = "text-layout")]
+fn free_text_in_fonts(
+    rect: pdf_gfx::Rect,
+    contents: &str,
+    da: Option<&DefaultAppearance>,
+    quadding: crate::Quadding,
+) {
+    use pdf_content_streams::Res;
+
+    let style = PaintStyle::default();
+    let default = synth_free_text(rect, contents, da, quadding, &style);
+    for font in FONTS {
+        let Ok(res) = Res::dict(font.dict()) else {
+            continue;
+        };
+        let drawn =
+            synth_free_text_with_font(rect, contents, da, quadding, &style, res.clone(), &font);
+        match &drawn {
+            Ok(ap) => {
+                assert_eq!(ap.is_some(), default.is_some());
+                if font == pdf_fonts::Std14::Helvetica {
+                    assert_eq!(ap, &default);
+                }
+            }
+            Err(_) => assert!(!contents.is_empty()),
+        }
+        if let Some(da) = da {
+            let built =
+                BuiltAnnot::free_text_with_font(rect, contents, da, quadding, &style, res, &font);
+            match (&drawn, &built) {
+                (Ok(ap), Ok(built)) => {
+                    assert_eq!(ap, &built.normal_ap);
+                    assert_eq!(
+                        built.dict,
+                        BuiltAnnot::free_text(rect, contents, da, quadding, &style).dict
+                    );
+                }
+                (Err(a), Err(b)) => assert_eq!(a, b),
+                _ => panic!("the builder and the synthesizer disagree"),
             }
         }
     }

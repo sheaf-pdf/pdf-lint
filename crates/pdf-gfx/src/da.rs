@@ -36,10 +36,14 @@ use pdf_objects::serialize;
 #[non_exhaustive]
 pub struct DefaultAppearance {
     /// Font resource name selected by `Tf` (decoded without leading `/`, e.g.
-    /// `b"Helv"`), if `Tf` was present.
+    /// `b"Helv"`), if `Tf` was present. A name can't hold a NUL byte: for
+    /// one set by hand that does, [`to_bytes`](Self::to_bytes) writes
+    /// `/Helv` in its place.
     pub font_name: Option<Vec<u8>>,
-    /// Font size selected by `Tf` (`0.0` indicates auto-sizing, see
-    /// [`size`](Self::size)).
+    /// Font size selected by `Tf` (`0.0` asks for auto-sizing, see
+    /// [`auto_sized`](Self::auto_sized) and [`size`](Self::size)). `Tf`
+    /// takes a name and a size together, so a size set by hand with no
+    /// `font_name` isn't written by [`to_bytes`](Self::to_bytes).
     pub font_size: Option<f32>,
     /// Text color set by `g`/`G`, `rg`/`RG`, or `k`/`K` in `/DA`, its
     /// components clamped to `0.0..=1.0`.
@@ -169,9 +173,11 @@ impl DefaultAppearance {
     /// Deterministic, in one order whatever order the operators were read in:
     /// `Tf` (where a font name is set; `/Helv` where the name holds a NUL byte
     /// and so can't be written, and size `0` where none is set), the color
-    /// (`g`, `rg`, or `k`), then `Tc`, `Tw`, `Tz`, `TL`, `Tr`, and `Ts`, each
-    /// only where set, separated by single spaces. Numbers are written as
-    /// content numbers, a value that isn't finite as `0`.
+    /// (`g`, `rg`, or `k`, its components clamped to `0.0..=1.0` as
+    /// [`parse`](Self::parse) reads them), then `Tc`, `Tw`, `Tz`, `TL`, `Tr`,
+    /// and `Ts`, each only where set, separated by single spaces. Numbers are
+    /// written as content numbers, a value that isn't finite as `0`. A size
+    /// with no font name is left out, as `Tf` needs both.
     ///
     /// What it writes parses back ([`parse`](Self::parse)) to an appearance
     /// that writes the same bytes again, as long as the font name's written
@@ -210,7 +216,7 @@ impl DefaultAppearance {
                 Color::Cmyk(cmyk) => (cmyk, b"k"),
             };
             for &c in components {
-                write_number(&mut out, c);
+                write_number(&mut out, c.clamp(0.0, 1.0));
                 out.push(b' ');
             }
             out.extend_from_slice(operator);
@@ -228,17 +234,32 @@ impl DefaultAppearance {
         out
     }
 
-    /// The fixed font size to draw at: `Tf`'s size where it is finite and
-    /// above `0`, and `None` (auto-size: fit the text to its box) where `Tf`
-    /// is absent or its size is `0`, negative, or not finite.
+    /// The fixed font size `Tf` asks for: its size where that is finite and
+    /// above `0`, else `None`.
+    ///
+    /// `None` covers two cases a caller tells apart with
+    /// [`auto_sized`](Self::auto_sized): a size of exactly `0`, which asks
+    /// for the text to be fitted to its box, and a `Tf` that is absent or
+    /// whose size is negative or not finite, which asks for nothing and is
+    /// left to the caller's default.
     #[must_use]
     pub fn size(&self) -> Option<f32> {
         self.font_size.filter(|s| s.is_finite() && *s > 0.0)
     }
 
+    /// Whether `Tf` asks for auto-sizing: a size of exactly `0`
+    /// (ISO 32000-2 §12.7.4.3). A `/DA` with no `Tf`, or with a negative
+    /// size, doesn't: the standard gives those no meaning.
+    #[must_use]
+    pub fn auto_sized(&self) -> bool {
+        self.font_size == Some(0.0)
+    }
+
     /// A [`TextBoxStyle`](crate::TextBoxStyle) drawing at this appearance's
-    /// [`size`](Self::size), auto-sized where that is `None`, and otherwise
-    /// the default style.
+    /// [`size`](Self::size), auto-sized where it is
+    /// [`auto_sized`](Self::auto_sized), and otherwise the default style
+    /// (so at the default style's size, `12`, where `Tf` is absent or its
+    /// size is negative or not finite).
     ///
     /// Only the size is mapped: the text-state scalars (`Tc`, `Tw`, `Tz`,
     /// `TL`, `Tr`, `Ts`) are kept for writing back and aren't applied to the
@@ -246,9 +267,14 @@ impl DefaultAppearance {
     #[cfg(feature = "text-layout")]
     #[must_use]
     pub fn text_box_style(&self) -> crate::wrap::TextBoxStyle {
+        let default = crate::wrap::TextBoxStyle::default();
         crate::wrap::TextBoxStyle {
-            size: self.size(),
-            ..crate::wrap::TextBoxStyle::default()
+            size: if self.auto_sized() {
+                None
+            } else {
+                self.size().or(default.size)
+            },
+            ..default
         }
     }
 }

@@ -1153,19 +1153,37 @@ fn free_text_and_square_borders_are_drawn_in_each_of_the_five_styles() {
         assert_eq!(read_back(&ft), (1 + border_paths, 2), "{style:?}");
 
         // Square: the interior over the box less `/RD`, then the border
-        // inside that.
+        // inside that; a solid or dashed frame and the interior are one
+        // path along the frame's center line, filled and stroked together.
         let sq = crate::synth_shape(ShapeKind::Square, rect, &paint, Some([1.0, 2.0, 3.0, 4.0]))
             .unwrap();
         let inner = Rect::new(1.0, 2.0, 97.0, 46.0);
-        assert_eq!(
-            content_text(&sq),
-            format!(
-                "q\n0.8 g\n1 2 96 44 re\nf\n{}Q\n",
-                border_text(inner, &paint)
-            ),
-            "{style:?}"
-        );
-        assert_eq!(read_back(&sq), (1 + border_paths, 0), "{style:?}");
+        match style {
+            BorderStyle::Solid | BorderStyle::Dashed => {
+                let dash = if style == BorderStyle::Dashed {
+                    "[3] 0 d\n"
+                } else {
+                    ""
+                };
+                assert_eq!(
+                    content_text(&sq),
+                    format!("q\n1 0 0 RG\n2 w\n{dash}0.8 g\n2 3 94 42 re\nB\nQ\n"),
+                    "{style:?}"
+                );
+                assert_eq!(read_back(&sq), (1, 0), "{style:?}");
+            }
+            _ => {
+                assert_eq!(
+                    content_text(&sq),
+                    format!(
+                        "q\n0.8 g\n1 2 96 44 re\nf\n{}Q\n",
+                        border_text(inner, &paint)
+                    ),
+                    "{style:?}"
+                );
+                assert_eq!(read_back(&sq), (1 + border_paths, 0), "{style:?}");
+            }
+        }
 
         // With no interior color the border stands alone, a bevel's shade
         // the hintless gray.
@@ -1198,15 +1216,18 @@ fn free_text_and_square_borders_are_drawn_in_each_of_the_five_styles() {
         )
     };
     let fill = "q\n0.8 g\n0 0 100 50 re\nf\n";
-    let frame = "q\n1 0 0 RG\n1 w\n0.5 0.5 99 49 re\nS\n";
-    assert_eq!(square(BorderStyle::Solid), format!("{fill}{frame}Q\nQ\n"));
+    let frame = "q\n1 0 0 RG\n1 w\n[] 0 d\n0.5 0.5 99 49 re\nS\n";
+    assert_eq!(
+        square(BorderStyle::Solid),
+        "q\n1 0 0 RG\n1 w\n0.8 g\n0.5 0.5 99 49 re\nB\nQ\n"
+    );
     assert_eq!(
         square(BorderStyle::Dashed),
-        format!("{fill}q\n1 0 0 RG\n1 w\n[3] 0 d\n0.5 0.5 99 49 re\nS\nQ\nQ\n")
+        "q\n1 0 0 RG\n1 w\n[3] 0 d\n0.8 g\n0.5 0.5 99 49 re\nB\nQ\n"
     );
     assert_eq!(
         square(BorderStyle::Underline),
-        format!("{fill}q\n1 0 0 RG\n1 w\n0 0.5 m\n100 0.5 l\nS\nQ\nQ\n")
+        format!("{fill}q\n1 0 0 RG\n1 w\n[] 0 d\n0 0.5 m\n100 0.5 l\nS\nQ\nQ\n")
     );
     let bands = |light: &str, dark: &str| {
         format!(
@@ -1223,15 +1244,47 @@ fn free_text_and_square_borders_are_drawn_in_each_of_the_five_styles() {
     let mut dashed = bordered(1.0, BorderStyle::Dashed);
     dashed.border.dash = vec![4.0, 2.0];
     let sq = crate::synth_shape(ShapeKind::Square, rect, &dashed, None).unwrap();
-    assert!(content_text(&sq).contains("1 w\n[4 2] 0 d\n0.5 0.5 99 49 re\nS\n"));
+    assert!(content_text(&sq).contains("1 w\n[4 2] 0 d\n0.8 g\n0.5 0.5 99 49 re\nB\n"));
     let ft = crate::synth_free_text(rect, "Hi", None, Quadding::Left, &dashed).unwrap();
     assert!(content_text(&ft).contains("1 w\n[4 2] 0 d\n0.5 0.5 99 49 re\nS\n"));
 
-    // Under an opacity the fill and the border share one graphics state.
+    // Under an opacity a solid frame and the interior are one path painted
+    // once, as a circle's are, so the border's band shows the border's color
+    // alone and not that color over the interior's.
+    let translucent = bordered(20.0, BorderStyle::Solid).with_opacity(0.5);
+    let sq = crate::synth_shape(ShapeKind::Square, rect, &translucent, None).unwrap();
+    let text = content_text(&sq);
+    assert!(
+        text.starts_with("q\n/")
+            && text.ends_with(" gs\n1 0 0 RG\n20 w\n0.8 g\n10 10 80 30 re\nB\nQ\n"),
+        "{text}"
+    );
+    assert_eq!(read_back(&sq), (1, 0));
+    let circle = crate::synth_shape(ShapeKind::Circle, rect, &translucent, None).unwrap();
+    let circle = content_text(&circle);
+    assert!(circle.ends_with("\nB\nQ\n"), "{circle}");
+    assert_eq!(
+        text.split_once(" gs\n")
+            .unwrap()
+            .1
+            .split_once("0.8 g\n")
+            .unwrap()
+            .0,
+        circle
+            .split_once(" gs\n")
+            .unwrap()
+            .1
+            .split_once("0.8 g\n")
+            .unwrap()
+            .0,
+        "one stroke setup for both"
+    );
+    // The styles that are more than a frame are drawn over the filled box,
+    // in the same graphics state.
     let sq = crate::synth_shape(
         ShapeKind::Square,
         rect,
-        &bordered(1.0, BorderStyle::Solid).with_opacity(0.5),
+        &bordered(1.0, BorderStyle::Underline).with_opacity(0.5),
         None,
     )
     .unwrap();
@@ -1240,6 +1293,15 @@ fn free_text_and_square_borders_are_drawn_in_each_of_the_five_styles() {
         text.starts_with("q\n/") && text.contains(" gs\n0.8 g\n0 0 100 50 re\nf\nq\n1 0 0 RG\n")
     );
     assert_eq!(read_back(&sq), (2, 0));
+    // A box too small for its frame keeps its interior.
+    let sq = crate::synth_shape(
+        ShapeKind::Square,
+        Rect::new(0.0, 0.0, 4.0, 4.0),
+        &bordered(6.0, BorderStyle::Solid),
+        None,
+    )
+    .unwrap();
+    assert_eq!(content_text(&sq), "q\n0.8 g\n0 0 4 4 re\nf\nQ\n");
 }
 
 #[test]
@@ -1305,10 +1367,10 @@ fn free_text_text_clears_its_border_and_stays_put_for_a_solid_one() {
     let now = free_text(&bordered(1.0, BorderStyle::Solid));
     assert_eq!(
         now,
-        format!("{background}q\n1 0 0 RG\n1 w\n0.5 0.5 99 49 re\nS\nQ\n{text_1}")
+        format!("{background}q\n1 0 0 RG\n1 w\n[] 0 d\n0.5 0.5 99 49 re\nS\nQ\n{text_1}")
     );
     assert_eq!(
-        now.replacen("q\n1 0 0 RG\n1 w\n", "1 0 0 RG\nq\n1 w\n", 1),
+        now.replacen("q\n1 0 0 RG\n1 w\n[] 0 d\n", "1 0 0 RG\nq\n1 w\n", 1),
         format!("{background}1 0 0 RG\nq\n1 w\n0.5 0.5 99 49 re\nS\nQ\n{text_1}")
     );
     for width in [0.0, -1.0] {
@@ -1630,6 +1692,90 @@ fn flattening_keeps_redaction_marks_unless_asked() {
     assert_eq!((p.drawn_count, p.removed_count), (1, 1));
 }
 
+#[test]
+fn flattening_keeps_a_kept_redaction_marks_popup() {
+    let mut store = Store::default();
+    let popup_of = |store: &mut Store, parent: Option<ObjectId>| {
+        let mut d = dict! {
+            "Subtype" => Object::name("Popup"),
+            "Rect" => vec![Object::from(0), Object::from(20), Object::from(10), Object::from(30)],
+        };
+        if let Some(parent) = parent {
+            d.set("Parent", parent);
+        }
+        store.put(d)
+    };
+    let name_popup = |store: &mut Store, annot: ObjectId, popup: ObjectId| {
+        let d = store.objects.get_mut(&annot).unwrap();
+        d.as_dict_mut().unwrap().set("Popup", popup);
+    };
+    // A mark and its pop-up tied both ways, a pop-up only the mark names, a pop-up that
+    // only names its mark, and a square with a pop-up of its own.
+    let both = flat_annot(&mut store, "Redact", 0);
+    let both_popup = popup_of(&mut store, Some(both));
+    name_popup(&mut store, both, both_popup);
+    let named = flat_annot(&mut store, "Redact", 20);
+    let named_popup = popup_of(&mut store, None);
+    name_popup(&mut store, named, named_popup);
+    let parent = flat_annot(&mut store, "Redact", 40);
+    let parent_popup = popup_of(&mut store, Some(parent));
+    let square = flat_annot(&mut store, "Square", 60);
+    let square_popup = popup_of(&mut store, Some(square));
+    name_popup(&mut store, square, square_popup);
+
+    let ids = |ids: &[ObjectId]| ids.iter().map(|&id| Object::from(id)).collect::<Vec<_>>();
+    let marks_and_popups = [both, both_popup, named, named_popup, parent_popup, parent];
+    let mut marks = dict! { "Type" => Object::name("Page") };
+    for id in marks_and_popups {
+        assert!(push_page_annot(&mut marks, id));
+    }
+    // Marks and their pop-ups alone: nothing changes, and `select` is asked about none.
+    let mut asked = 0;
+    let p = plan_flatten_filtered(
+        &store.objects,
+        &marks,
+        None,
+        None,
+        FlattenOpts::DEFAULT,
+        &Limits::DEFAULT,
+        |_| {
+            asked += 1;
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(asked, 0);
+    assert!(!p.changed());
+    assert_eq!((p.drawn_count, p.removed_count), (0, 0));
+    assert!(p.removed_ids.is_empty());
+    assert_eq!(p.kept_annots, ids(&marks_and_popups));
+
+    // With the marks asked for, their pop-ups go with them.
+    let on = FlattenOpts::DEFAULT.with_redactions(true);
+    let p = plan_flatten(&store.objects, &marks, None, None, on, &Limits::DEFAULT).unwrap();
+    assert_eq!((p.drawn_count, p.removed_count), (3, 6));
+    assert_eq!(p.removed_ids, marks_and_popups);
+    assert!(p.kept_annots.is_empty());
+
+    // Another annotation's pop-up is still removed with it.
+    let mut page = dict! { "Type" => Object::name("Page") };
+    for id in [both, both_popup, square, square_popup] {
+        assert!(push_page_annot(&mut page, id));
+    }
+    let p = plan_flatten(
+        &store.objects,
+        &page,
+        None,
+        None,
+        FlattenOpts::DEFAULT,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!((p.drawn_count, p.removed_count), (1, 2));
+    assert_eq!(p.removed_ids, [square, square_popup]);
+    assert_eq!(p.kept_annots, ids(&[both, both_popup]));
+}
+
 /// The name of the one resource `ap` has under `category`.
 fn only_resource(ap: &SynthesizedAp, category: &str) -> String {
     let dict = ap
@@ -1848,7 +1994,10 @@ fn a_redaction_is_drawn_over_each_of_its_quads() {
         [200.0, 520.0, 200.0, 540.0, 100.0, 540.0, 100.0, 520.0],
     ] {
         let quads = [QuadPoints(points)];
-        let (n, o) = synth_redact(MARK_RECT, &RedactMark::new().with_quads(&quads)).unwrap();
+        let black = RedactMark::new()
+            .with_quads(&quads)
+            .with_interior_color(AnnotColor::Gray(0.0));
+        let (n, o) = synth_redact(MARK_RECT, &black).unwrap();
         let n = content_text(&n);
         assert!(n.contains("\n0 20 100 20 re\nf\n"), "{n}");
         assert!(n.contains("\n0.5 20.5 99 19 re\nS\n"), "{n}");
@@ -1872,7 +2021,12 @@ fn a_redaction_is_drawn_over_each_of_its_quads() {
     );
     assert_eq!(built, BuiltAnnot::redact_mark(MARK_RECT, &of_rects));
     assert_eq!(read_back(built.normal_ap.as_ref().unwrap()), (4, 0));
-    assert_eq!(read_back(built.redact_overlay.as_ref().unwrap()), (2, 0));
+    // With no interior color the overlay fills nothing.
+    assert_eq!(read_back(built.redact_overlay.as_ref().unwrap()), (0, 0));
+    let filled = BuiltAnnot::redact_quads(&of_rects.with_interior_color(AnnotColor::Gray(0.0)));
+    let filled = filled.unwrap();
+    assert_eq!(filled.normal_ap, built.normal_ap);
+    assert_eq!(read_back(filled.redact_overlay.as_ref().unwrap()), (2, 0));
 }
 
 #[test]
@@ -1994,6 +2148,92 @@ fn annot_mut_sets_a_redactions_entries_and_the_rollover_appearance() {
         Some(&Object::from(dict! { "N" => r, "R" => ro }))
     );
     assert_eq!(d.len(), 1);
+    assert!(AnnotMut::new(&mut d).has_direct_appearance());
+
+    // An /AP that is an indirect reference (as files often have it) is left
+    // alone by the rollover setter: replacing it would drop the /N it names.
+    let ap = ObjectId::new(7, 0);
+    let mut d = dict! { "AP" => ap };
+    assert!(!AnnotMut::new(&mut d).has_direct_appearance());
+    AnnotMut::new(&mut d).set_rollover_appearance(r);
+    assert_eq!(d.get(b"AP"), Some(&Object::from(ap)));
+    // So is one that isn't a dictionary at all.
+    let mut d = dict! { "AP" => 3 };
+    AnnotMut::new(&mut d).set_rollover_appearance(r);
+    assert_eq!(d.get(b"AP"), Some(&Object::from(3)));
+    // The normal appearance is the required one, and replaces either, as
+    // its docs say.
+    let mut d = dict! { "AP" => ap };
+    AnnotMut::new(&mut d).set_normal_appearance(n);
+    assert_eq!(d.get(b"AP"), Some(&Object::from(dict! { "N" => n })));
+    assert!(!AnnotMut::new(&mut Dict::new()).has_direct_appearance());
+}
+
+/// A region is drawn as far as it lies inside `/Rect`: one wholly outside
+/// isn't drawn, and where none reaches inside, the mark covers its box.
+#[test]
+fn a_redactions_quads_outside_its_rect_are_not_drawn() {
+    let rect = Rect::new(50.0, 600.0, 250.0, 660.0);
+    let black = AnnotColor::Gray(0.0);
+    let whole = synth_redact(rect, &RedactMark::new().with_interior_color(black)).unwrap();
+    assert!(content_text(&whole.0).contains("\n0 0 200 60 re\nf\n"));
+    assert_eq!(content_text(&whole.1), "q\n0 g\n0 0 200 60 re\nf\nQ\n");
+
+    // Every quad outside (beside the box, and touching its edge from
+    // outside): the whole box, as with no quad.
+    let outside = [
+        QuadPoints([300.0, 700.0, 400.0, 700.0, 300.0, 680.0, 400.0, 680.0]),
+        QuadPoints::from_rect(Rect::new(250.0, 600.0, 300.0, 660.0)),
+    ];
+    let mark = RedactMark::new()
+        .with_quads(&outside)
+        .with_interior_color(black);
+    assert_eq!(synth_redact(rect, &mark).unwrap(), whole);
+    assert_eq!(read_back(&whole.0), (2, 0));
+
+    // As read from a file: the mark `synth_annot` draws is the whole box's.
+    let mut store = Store::default();
+    let id = store.put(dict! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("Redact"),
+        "Rect" => vec![Object::from(50), Object::from(600), Object::from(250), Object::from(660)],
+        "QuadPoints" => outside[0].0.iter().map(|&v| Object::from(f64::from(v))).collect::<Vec<_>>(),
+    });
+    let page = dict! { "Annots" => vec![Object::from(id)] };
+    let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
+    assert_eq!(crate::synth_annot(&annots[0]).as_ref(), Some(&whole.0));
+
+    // One inside and one outside: the one inside alone.
+    let inside = QuadPoints::from_rect(Rect::new(60.0, 610.0, 160.0, 630.0));
+    let mixed = [outside[0], inside];
+    let (ap, ro) = synth_redact(rect, &mark.with_quads(&mixed)).unwrap();
+    assert_eq!(
+        (ap.clone(), ro.clone()),
+        synth_redact(rect, &mark.with_quads(&[inside])).unwrap()
+    );
+    assert_eq!(content_text(&ro), "q\n0 g\n10 10 100 20 re\nf\nQ\n");
+    assert_eq!(read_back(&ap), (2, 0));
+
+    // One partly outside is drawn where it is, and cut by the form's /BBox.
+    let partly = [QuadPoints([
+        40.0, 670.0, 100.0, 670.0, 40.0, 650.0, 100.0, 650.0,
+    ])];
+    let (ap, ro) = synth_redact(rect, &mark.with_quads(&partly)).unwrap();
+    assert!(content_text(&ap).contains("\n-10 50 60 20 re\nf\n"));
+    assert_eq!(content_text(&ro), "q\n0 g\n-10 50 60 20 re\nf\nQ\n");
+    assert_eq!(ap.bbox, Rect::new(0.0, 0.0, 200.0, 60.0));
+
+    // The builder writes /QuadPoints as given, whatever is drawn.
+    let built = BuiltAnnot::redact_mark(rect, &mark);
+    assert_eq!(
+        built
+            .dict
+            .get(b"QuadPoints")
+            .and_then(Object::as_array)
+            .map(<[Object]>::len),
+        Some(16)
+    );
+    assert_eq!(built.normal_ap.as_ref(), Some(&whole.0));
 }
 
 #[test]
@@ -2089,8 +2329,8 @@ fn a_built_redaction_is_written_with_its_overlay_and_reads_back() {
     assert_eq!(written.get(b"RO"), Some(&Object::from(ObjectId::new(1, 0))));
     assert_eq!(written.get(b"AP"), None);
 
-    // /IC is three DeviceRGB numbers whatever the color's space (ISO 32000-2,
-    // 12.5.6.23, Table 195): gray three times, CMYK by the device formula; a
+    // /IC is three DeviceRGB numbers whatever the color's space (ISO 32000-2
+    // §12.5.6.23 Table 195): gray three times, CMYK by the device formula; a
     // transparent color writes none. The overlay keeps the color as given.
     let rgb = |c: [f64; 3]| Object::from(c.map(Object::from).to_vec());
     for (color, written, drawn) in [
@@ -2105,13 +2345,16 @@ fn a_built_redaction_is_written_with_its_overlay_and_reads_back() {
             Some(rgb([0.5, 0.25, 0.0])),
             "0.25 0.5 1 0.25 k",
         ),
-        (AnnotColor::Transparent, None, "0 g"),
     ] {
         let built =
             BuiltAnnot::redact_mark(MARK_RECT, &RedactMark::new().with_interior_color(color));
         assert_eq!(built.dict.get(b"IC"), written.as_ref(), "{color:?}");
         let ro = content_text(built.redact_overlay.as_ref().unwrap());
-        assert!(ro.starts_with(&format!("q\n{drawn}\n")), "{color:?}: {ro}");
+        assert_eq!(
+            ro,
+            format!("q\n{drawn}\n0 0 200 40 re\nf\nQ\n"),
+            "{color:?}"
+        );
         let by_values =
             BuiltAnnot::redact(MARK_RECT, &[], color, None, false, None, Quadding::Left);
         assert_eq!(by_values.dict.get(b"IC"), written.as_ref(), "{color:?}");
@@ -2122,9 +2365,56 @@ fn a_built_redaction_is_written_with_its_overlay_and_reads_back() {
     }
     assert_eq!(plain.dict.get(b"Q"), Some(&Object::from(0)));
 
+    // No interior color, or a transparent one: no /IC, and an overlay that
+    // fills nothing, so the dictionary and the overlay say the same (with
+    // /IC absent the region is left transparent). The label is then black,
+    // in the stream and in the /DA written beside it.
+    for unfilled in [
+        RedactMark::new(),
+        RedactMark::new().with_interior_color(AnnotColor::Transparent),
+    ] {
+        let built = BuiltAnnot::redact_mark(MARK_RECT, &unfilled);
+        assert_eq!(built.dict.get(b"IC"), None);
+        let ro = built.redact_overlay.as_ref().unwrap();
+        assert_eq!(content_text(ro), "q\nQ\n");
+        assert_eq!(read_back(ro), (0, 0));
+        // The mark itself is drawn as ever.
+        assert_eq!(
+            built.normal_ap,
+            BuiltAnnot::redact_mark(
+                MARK_RECT,
+                &unfilled.with_interior_color(AnnotColor::Gray(0.0))
+            )
+            .normal_ap
+        );
+
+        let labelled = unfilled.with_overlay_text("X");
+        let built = BuiltAnnot::redact_mark(MARK_RECT, &labelled);
+        assert_eq!(built.dict.get(b"IC"), None);
+        assert_eq!(
+            built.dict.get(b"DA").and_then(Object::as_bytes),
+            Some(&b"/Helv 0 Tf 0 g"[..])
+        );
+        let ro = content_text(built.redact_overlay.as_ref().unwrap());
+        assert!(
+            ro.starts_with("q\n0 g\nq\n") || ro.starts_with("q\nq\n"),
+            "{ro}"
+        );
+        assert!(!ro.contains(" re\nf\n"), "{ro}");
+        assert!(!ro.contains("1 g\n"), "{ro}");
+        assert!(ro.contains("(X) Tj"), "{ro}");
+        // A color given in /DA is the text's, filled or not.
+        let white = DefaultAppearance::new(b"Helv".to_vec(), 9.0, Some(Color::Gray(1.0)));
+        let built = BuiltAnnot::redact_mark(MARK_RECT, &labelled.with_default_appearance(&white));
+        let ro = content_text(built.redact_overlay.as_ref().unwrap());
+        assert!(ro.contains("1 g\n") && !ro.contains(" re\nf\n"), "{ro}");
+    }
+
     // Overlay text with no /DA given gets the one it was drawn with, which
     // the table asks for beside /OverlayText; read back, it draws the same.
-    let no_da = RedactMark::new().with_overlay_text("NO DA");
+    let no_da = RedactMark::new()
+        .with_interior_color(AnnotColor::Gray(0.0))
+        .with_overlay_text("NO DA");
     let built = BuiltAnnot::redact_mark(MARK_RECT, &no_da);
     assert_eq!(
         built.dict.get(b"DA").and_then(Object::as_bytes),
@@ -2338,7 +2628,9 @@ fn free_text_and_overlay_text_are_drawn_in_the_font_given() {
     assert_eq!(built.redact_overlay.as_ref(), Some(&ro));
     assert_eq!(built.dict, BuiltAnnot::redact_mark(MARK_RECT, &mark).dict);
     // With no /DA given the dictionary gets the default one, unrenamed.
-    let bare = RedactMark::new().with_overlay_text("\u{3B1}");
+    let bare = RedactMark::new()
+        .with_interior_color(AnnotColor::Gray(0.0))
+        .with_overlay_text("\u{3B1}");
     let built = BuiltAnnot::redact_with_font(MARK_RECT, &bare, res(), &greek).unwrap();
     assert_eq!(
         built.dict.get(b"DA").and_then(Object::as_bytes),
@@ -2385,7 +2677,9 @@ fn free_text_and_overlay_text_are_drawn_in_the_font_given() {
         synth_redact_with_font(MARK_RECT, &bad_mark.with_quads(&low), res(), &greek),
         Err(refused)
     );
-    // The space between repeats is the font's to draw as well.
+    // The space between repeats is the font's to draw as well: the offset
+    // counts into the copies joined by spaces, so the label's own length
+    // (4 bytes here) is the first joining space.
     let spaceless = Greek { space: false };
     assert_eq!(
         synth_redact_with_font(MARK_RECT, &mark, res(), &spaceless),
@@ -2463,8 +2757,9 @@ fn free_text_is_sized_to_its_box_only_for_a_size_of_zero() {
         let small = draw(long, Some(&sized(size)));
         assert_eq!(read_back(&auto).1, read_back(&small).1);
         assert!(read_back(&auto).1 > read_back(&twelve).1 || read_back(&twelve).1 == 0);
-        let size = tf_size(&short);
-        assert!((11.9..=12.0).contains(&size), "{size}");
+        // Text that fits at the upper bound is drawn at it, exactly.
+        assert_eq!(tf_size(&short), 12.0);
+        assert!(content_text(&short).contains(" 12 Tf\n"));
         assert_eq!(tf_size(&draw(long, Some(&sized(-0.0)))), tf_size(&auto));
     } else {
         assert_eq!(auto, twelve);
@@ -2494,7 +2789,9 @@ fn free_text_is_sized_to_its_box_only_for_a_size_of_zero() {
     }
 
     // A redaction's label keeps its own default for 0: its region's height.
-    let mark = RedactMark::new().with_overlay_text("LABEL");
+    let mark = RedactMark::new()
+        .with_interior_color(AnnotColor::Gray(0.0))
+        .with_overlay_text("LABEL");
     let (_, by_default) = synth_redact(MARK_RECT, &mark).unwrap();
     let zero = DefaultAppearance::new(b"Helv".to_vec(), 0.0, Some(Color::Gray(1.0)));
     let (_, by_zero) = synth_redact(MARK_RECT, &mark.with_default_appearance(&zero)).unwrap();

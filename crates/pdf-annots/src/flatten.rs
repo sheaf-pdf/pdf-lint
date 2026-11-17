@@ -12,7 +12,7 @@ use crate::ap::{AppearanceMode, stream_placement_matrix};
 use crate::error::Error;
 use crate::limits::Limits;
 use crate::phases::phase;
-use crate::subtypes::AnnotSubtype;
+use crate::subtypes::{AnnotSubtype, TypedAnnot};
 
 /// Target medium when flattening annotations onto page content (matching
 /// PDFium's `FLAT_NORMALDISPLAY` vs. `FLAT_PRINT`).
@@ -42,13 +42,15 @@ pub struct FlattenOpts {
     pub include_widgets: bool,
     /// Whether `/Subtype /Redact` marks are flattened (`false` by default).
     ///
-    /// A redaction mark only says what is to be removed (ISO 32000-2,
-    /// 12.5.6.23): until it is applied, the glyphs, paths and pixels under
+    /// A redaction mark only says what is to be removed (ISO 32000-2
+    /// §12.5.6.23): until it is applied, the glyphs, paths and pixels under
     /// it are still in the file. Flattening paints the mark's appearance
     /// over them and takes the mark off the page, which leaves a page that
     /// looks redacted and isn't. So a mark is passed over by default: it is
     /// neither drawn nor removed, it stays in [`FlattenPlan::kept_annots`],
-    /// and a `select` closure is never asked about it.
+    /// and a `select` closure is never asked about it. Its `/Popup` (the
+    /// pop-up it names, or one whose `/Parent` is the mark) is kept with it
+    /// in the same way.
     ///
     /// Set `true` only to draw the marks anyway. That is what PDFium's
     /// `FPDFPage_Flatten` does (as of chromium/8152): it draws and removes a
@@ -217,7 +219,7 @@ pub fn plan_flatten<'o, R: Resolve<'o> + Copy>(
 /// returns `true` (keeping unselected annotations in `FlattenPlan::kept_annots`).
 ///
 /// `select` is not asked about a widget that [`FlattenOpts::include_widgets`]
-/// leaves out, nor about a `/Redact` mark unless
+/// leaves out, nor about a `/Redact` mark or its pop-up unless
 /// [`FlattenOpts::include_redactions`] is set: those are kept whatever it
 /// would answer.
 ///
@@ -257,6 +259,19 @@ where
     let mut drawn_count = 0usize;
     let mut removed_count = 0usize;
 
+    // The pop-ups of the redaction marks that are passed over: the ones a
+    // mark's `/Popup` names, and the ones whose `/Parent` is a mark.
+    let mut mark_ids = Vec::new();
+    let mut mark_popups = Vec::new();
+    if !opts.include_redactions {
+        for annot in &annots {
+            if *annot.subtype() == AnnotSubtype::Redact {
+                mark_ids.extend(annot.id());
+                mark_popups.extend(annot.markup().and_then(|m| m.popup));
+            }
+        }
+    }
+
     for annot in &annots {
         let is_widget = *annot.subtype() == AnnotSubtype::Widget;
         if is_widget && !opts.include_widgets {
@@ -266,6 +281,14 @@ where
         // would hide content that is still in the file.
         let is_redaction = *annot.subtype() == AnnotSubtype::Redact;
         if is_redaction && !opts.include_redactions {
+            continue;
+        }
+        // A kept mark keeps its pop-up, so its `/Popup` still names an
+        // annotation of the page.
+        if let TypedAnnot::Popup(popup) = annot.typed()
+            && (annot.id().is_some_and(|id| mark_popups.contains(&id))
+                || popup.parent.is_some_and(|id| mark_ids.contains(&id)))
+        {
             continue;
         }
         if !select(annot) {

@@ -3,7 +3,6 @@
 
 use std::fmt;
 
-use pdf_content_streams::Color;
 #[cfg(feature = "text-layout")]
 use pdf_content_streams::Res;
 #[cfg(feature = "text-layout")]
@@ -22,8 +21,8 @@ use crate::style::{
 };
 use crate::subtypes::{AnnotSubtype, PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind};
 use crate::synth::{
-    RedactMark, SynthesizedAp, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact,
-    synth_shape, synth_stamp, synth_text_markup, synth_text_note,
+    RedactMark, SynthesizedAp, overlay_text_color, synth_free_text, synth_ink, synth_line,
+    synth_poly, synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
 #[cfg(feature = "text-layout")]
 use crate::synth::{synth_free_text_with_font, synth_redact_with_font};
@@ -200,7 +199,13 @@ impl<'a> AnnotMut<'a> {
         self
     }
 
-    /// Binds `/AP << /N form_id >>` on this annotation.
+    /// Binds `/AP << /N form_id >>` on this annotation, keeping the other
+    /// entries of an `/AP` that is a direct dictionary.
+    ///
+    /// An `/AP` that is anything else, an indirect reference among them, is
+    /// replaced by a new dictionary of `/N` alone: nothing here can follow
+    /// a reference, so a caller who means to keep the dictionary it names
+    /// changes that object itself.
     pub fn set_normal_appearance(&mut self, form_id: ObjectId) -> &mut Self {
         if let Some(ap) = self.dict.get_mut(b"AP").and_then(Object::as_dict_mut) {
             ap.set("N", form_id);
@@ -211,19 +216,45 @@ impl<'a> AnnotMut<'a> {
     }
 
     /// Binds `/AP << /R form_id >>`, the rollover appearance shown while the
-    /// pointer is over the annotation (ISO 32000-2, 12.5.5, Table 170),
-    /// keeping `/AP`'s other entries.
+    /// pointer is over the annotation (ISO 32000-2 §12.5.5 Table 170),
+    /// keeping the other entries of an `/AP` that is a direct dictionary.
+    ///
+    /// With no `/AP` a new one of `/R` alone is made. An `/AP` that is
+    /// there and isn't a direct dictionary (an indirect reference, as files
+    /// often have it) is left as it is and nothing is bound: replacing it
+    /// would drop the `/N` it names, and nothing here can follow the
+    /// reference. [`Self::has_direct_appearance`] tells the two apart
+    /// beforehand; for an indirect `/AP`, set `/R` in the object it names.
     pub fn set_rollover_appearance(&mut self, form_id: ObjectId) -> &mut Self {
-        if let Some(ap) = self.dict.get_mut(b"AP").and_then(Object::as_dict_mut) {
-            ap.set("R", form_id);
-        } else {
-            self.dict.set("AP", dict! { "R" => form_id });
+        match self.dict.get_mut(b"AP") {
+            None => {
+                self.dict.set("AP", dict! { "R" => form_id });
+            }
+            Some(ap) => {
+                // Asked first, so that an `/AP` left alone keeps its span.
+                if ap.as_dict().is_some()
+                    && let Some(ap) = ap.as_dict_mut()
+                {
+                    ap.set("R", form_id);
+                }
+            }
         }
         self
     }
 
+    /// Whether `/AP` is a direct dictionary, one whose entries
+    /// [`Self::set_normal_appearance`] and [`Self::set_rollover_appearance`]
+    /// keep. `false` with no `/AP`, and for one that is an indirect
+    /// reference or not a dictionary.
+    #[must_use]
+    pub fn has_direct_appearance(&self) -> bool {
+        self.dict
+            .get(b"AP")
+            .is_some_and(|ap| ap.as_dict().is_some())
+    }
+
     /// Sets `/RO`, the Form XObject that applying a `/Redact` mark leaves
-    /// over its regions (ISO 32000-2, 12.5.6.23, Table 195).
+    /// over its regions (ISO 32000-2 §12.5.6.23 Table 195).
     pub fn set_redact_overlay(&mut self, form_id: ObjectId) -> &mut Self {
         self.dict.set("RO", form_id);
         self
@@ -618,7 +649,8 @@ impl BuiltAnnot {
     /// # Errors
     ///
     /// [`UnencodableChar`] for the first character of `contents` that `font`
-    /// can't draw: nothing is built.
+    /// can't draw: nothing is built. The error holds that one character of
+    /// the text, as [`synth_free_text_with_font`] says.
     #[cfg(feature = "text-layout")]
     pub fn free_text_with_font<F: LayoutFont + ?Sized>(
         rect: Rect,
@@ -702,8 +734,14 @@ impl BuiltAnnot {
     /// 32000-2, 12.5.6.23, Table 195 has it; none for a transparent one),
     /// `/QuadPoints` where it has quadrilaterals, `/Q`, `/OverlayText`,
     /// `/Repeat`, and `/DA`: the mark's, or beside overlay text with none
-    /// given, the one the overlay was drawn with (`/Helv 0 Tf 1 g`), as the
-    /// table asks for a `/DA` there.
+    /// given, the one the overlay was drawn with (`/Helv 0 Tf 1 g`, white
+    /// over the interior color, or `/Helv 0 Tf 0 g` with no interior color),
+    /// as the table asks for a `/DA` there.
+    ///
+    /// With no interior color, or a transparent one, there is no `/IC` and
+    /// the `/RO` fills nothing, so the two say the same: the regions are
+    /// left transparent. `/QuadPoints` are written as given, though the
+    /// appearances draw only what of them lies inside `rect`.
     #[must_use]
     pub fn redact_mark(rect: Rect, mark: &RedactMark<'_>) -> Self {
         Self::redact_over(rect, mark, synth_redact(rect, mark))
@@ -717,7 +755,8 @@ impl BuiltAnnot {
     /// [`RedactMark::bounds`].
     ///
     /// The dictionary is [`Self::redact_mark`]'s: a `/DA` is written as
-    /// given, or `/Helv 0 Tf 1 g` beside overlay text with none given, its
+    /// given, or `/Helv 0 Tf 1 g` (`0 g` with no interior color) beside
+    /// overlay text with none given, its
     /// font name never changed to `font`, and nothing is added to the
     /// document's `/AcroForm /DR`. A viewer that applies the mark with its
     /// `/RO` leaves the text as laid out here; one that draws the label
@@ -726,7 +765,8 @@ impl BuiltAnnot {
     /// # Errors
     ///
     /// [`UnencodableChar`] for the first character of the overlay text that
-    /// `font` can't draw: nothing is built.
+    /// `font` can't draw: nothing is built. Its offset and what it holds of
+    /// the text are as [`synth_redact_with_font`] says.
     #[cfg(feature = "text-layout")]
     pub fn redact_with_font<F: LayoutFont + ?Sized>(
         rect: Rect,
@@ -766,7 +806,7 @@ impl BuiltAnnot {
                     m.set_default_appearance(&DefaultAppearance::new(
                         b"Helv".to_vec(),
                         0.0,
-                        Some(Color::Gray(1.0)),
+                        Some(overlay_text_color(mark)),
                     ));
                 }
                 (None, None) => {}
@@ -801,7 +841,7 @@ impl BuiltAnnot {
 }
 
 /// `color` as `DeviceRGB` components: gray three times, CMYK by the device
-/// formula (ISO 32000-2, 10.4.2.4); `None` for a transparent color.
+/// formula (ISO 32000-2 §10.4.2.4); `None` for a transparent color.
 fn device_rgb(color: AnnotColor) -> Option<[f32; 3]> {
     match color {
         AnnotColor::Transparent => None,

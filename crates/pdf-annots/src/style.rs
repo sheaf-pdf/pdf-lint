@@ -17,6 +17,7 @@ use crate::resolve::Reader;
 /// type, re-exported so annotations and other variable text share one parser
 /// and serializer. Its color is a `pdf-content-streams` [`Color`]
 /// ([`AnnotColor::to_content_color`] converts one).
+#[doc(inline)]
 pub use pdf_gfx::DefaultAppearance;
 
 /// Device color array used in `/C`, `/IC`, `/MK/BC`, and `/MK/BG`
@@ -224,7 +225,7 @@ pub struct Border {
     pub style: BorderStyle,
     /// Dash array when `style == BorderStyle::Dashed`. A reader fills in
     /// `[3.0]` where the file gives none, and a dashed border built by hand
-    /// with an empty array is drawn with `[3.0]` too (ISO 32000-2, 12.5.4,
+    /// with an empty array is drawn with `[3.0]` too (ISO 32000-2 §12.5.4
     /// Table 168).
     pub dash: Vec<f32>,
     /// Horizontal corner radius from legacy `/Border` (`0.0` when `/BS` is

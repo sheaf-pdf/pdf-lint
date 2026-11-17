@@ -43,7 +43,7 @@ impl std::fmt::Debug for TextPiece<'_> {
 }
 
 /// How [`Canvas::box_border`] draws a rectangle's border: the five styles a
-/// border style dictionary can ask for (ISO 32000-2, 12.5.4, Table 168).
+/// border style dictionary can ask for (ISO 32000-2, §12.5.4, Table 168).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BoxBorderStyle {
@@ -78,7 +78,7 @@ pub struct BoxBorder<'a> {
     /// The dash array of a [`BoxBorderStyle::Dashed`] border (dashes and gaps
     /// in user units, starting with a dash); the other styles ignore it.
     /// `[3.0]` is drawn where it's empty, holds a negative or non-finite
-    /// number, or is all zeros (ISO 32000-2, 12.5.4, Table 168 and 8.4.3.6).
+    /// number, or is all zeros (ISO 32000-2, §12.5.4, Table 168 and §8.4.3.6).
     pub dash: &'a [f32],
 }
 
@@ -125,14 +125,14 @@ impl<'a> BoxBorder<'a> {
     }
 }
 
-/// The dash array a dashed border falls back to (ISO 32000-2, 12.5.4,
+/// The dash array a dashed border falls back to (ISO 32000-2, §12.5.4,
 /// Table 168).
 const DEFAULT_BORDER_DASH: [f32; 1] = [3.0];
 
 /// `color` at half its brightness, for a bevel's shaded side: a gray level or
 /// RGB components halved; CMYK's cyan, magenta and yellow halved and its black
 /// moved halfway to full, which halves each of the red, green and blue the
-/// device formula gives (ISO 32000-2, 10.4.2.4).
+/// device formula gives (ISO 32000-2, §10.4.2.4).
 fn darkened(color: Color) -> Color {
     match color {
         Color::Gray(g) => Color::Gray(g / 2.0),
@@ -303,6 +303,8 @@ impl Canvas {
     /// Does nothing if `width <= 0.0` or `rect` is narrower/shorter than
     /// `width`. The stroke takes the current color and dash;
     /// [`Canvas::box_border`] sets both and draws the other border styles.
+    /// Nothing here keeps `rect` and `width` within what a stroke's extent
+    /// can be bounded in, as [`Canvas::box_border`] does.
     pub fn border_rect(&mut self, rect: Rect, width: f32) {
         if !(width > 0.0 && width.is_finite()) {
             return;
@@ -318,10 +320,13 @@ impl Canvas {
     }
 
     /// Draws `border` strictly inside `rect` in one of the five border styles
-    /// (ISO 32000-2, 12.5.4, Table 168), `stroke` its color.
+    /// (ISO 32000-2, §12.5.4, Table 168), `stroke` its color.
     ///
-    /// Everything is drawn inside one `q`..`Q` scope with its colors set
-    /// there, so the caller's graphics state is as it was. Nothing is drawn
+    /// Everything is drawn inside one `q`..`Q` scope with its colors, width
+    /// and dash set there (a solid line for every style but `Dashed`,
+    /// whatever dash the caller left set), so the caller's graphics state is
+    /// as it was. The line cap, the line join and the miter limit are taken
+    /// as they are: the defaults, unless the caller set others. Nothing is drawn
     /// where the border's width isn't finite and above `0.0`, or `rect` isn't
     /// finite, or `rect` grown by `5.0 * w` on every side isn't: numbers so
     /// near `f32`'s largest that a stroke's extent (as far as a miter at the
@@ -386,6 +391,8 @@ impl Canvas {
                             &DEFAULT_BORDER_DASH
                         };
                         c.dash(dash, 0.0);
+                    } else {
+                        c.dash(&[], 0.0);
                     }
                     c.stroke_rect(frame);
                 });
@@ -398,6 +405,7 @@ impl Canvas {
                 self.with_state(|c| {
                     c.stroke_color(stroke);
                     c.line_width(w);
+                    c.dash(&[], 0.0);
                     c.line(Point::new(rect.x0, y), Point::new(rect.x1, y));
                 });
             }
@@ -424,6 +432,7 @@ impl Canvas {
                 self.with_state(|c| {
                     c.stroke_color(stroke);
                     c.line_width(w);
+                    c.dash(&[], 0.0);
                     c.stroke_rect(frame);
                     let Some(inner) = inner else {
                         return;
