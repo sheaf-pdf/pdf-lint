@@ -15,7 +15,7 @@ use pdf_semantics::files::{NewEmbeddedFile, write_embedded};
 use pdf_semantics::info::{self, Info};
 use pdf_semantics::labels::{self, LabelRange};
 use pdf_semantics::outlines::{self, OutlineNode};
-use pdf_semantics::pages::Rect;
+use pdf_semantics::pages::PdfBox;
 use pdf_semantics::tree::{names, write_names};
 use pdf_semantics::viewer::{self, CatalogView};
 use pdf_semantics::xmp::{self, Claims, Metadata};
@@ -194,9 +194,9 @@ pub fn bind(
 /// ```
 /// use std::collections::HashMap;
 ///
+/// use pdfs::Rect;
 /// use pdfs::pdf_content_streams::{ContentWriter, Paint};
 /// use pdfs::pdf_objects::{Object, dict, version::Version};
-/// use pdfs::pdf_semantics::pages::Rect;
 /// use pdfs::pdf_structure::{Document, write::Deflate};
 ///
 /// let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
@@ -221,10 +221,11 @@ pub fn bind(
 pub fn page(
     doc: &mut Document,
     written: &mut HashMap<Res, ObjectId>,
-    media_box: Rect,
+    media_box: impl Into<PdfBox>,
     writer: &ContentWriter,
     deflate: Deflate,
 ) -> Result<Dict, write::Error> {
+    let media_box = media_box.into();
     let (content, needs) = writer.named(&Reserved::default());
     let mut stream = Stream::new(Dict::new(), content);
     deflated(&mut stream, deflate)?;
@@ -624,7 +625,7 @@ fn owned(doc: &Document, value: Option<&Object>) -> Dict {
 /// bits, as a reader reads it either way, else a real; and one that isn't
 /// finite, which no file can hold, 0, as pdf-content-streams' writer writes
 /// one.
-pub(crate) fn rect(rect: Rect) -> Object {
+pub(crate) fn rect(rect: PdfBox) -> Object {
     let number = |x: f64| {
         let x = if x.is_finite() { x } else { 0.0 };
         let whole = x.fract() == 0.0 && (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&x);

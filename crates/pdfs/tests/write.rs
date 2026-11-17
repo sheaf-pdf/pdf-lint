@@ -14,7 +14,7 @@ use pdfs::pdf_fonts::Std14;
 use pdfs::pdf_linearize::family::{self, Rc4};
 use pdfs::pdf_objects::version::Version;
 use pdfs::pdf_objects::{Dict, Object, ObjectId, dict};
-use pdfs::pdf_semantics::pages::{Inheritable, Origin, Rect};
+use pdfs::pdf_semantics::pages::{Inheritable, Origin, PdfBox};
 use pdfs::pdf_semantics::xmp::{self, Claims};
 use pdfs::pdf_structure::write::{self, Deflate, Unencryptable};
 use pdfs::pdf_structure::{Encryption, Source as _};
@@ -24,7 +24,7 @@ fn r(n: u32) -> Object {
     Object::reference(n)
 }
 
-const LETTER: Rect = Rect([0.0, 0.0, 612.0, 792.0]);
+const LETTER: PdfBox = PdfBox([0.0, 0.0, 612.0, 792.0]);
 
 /// Page `i`'s text.
 fn line(i: usize) -> String {
@@ -48,7 +48,7 @@ fn new_document(n: usize) -> (Document<'static>, Vec<Vec<u8>>) {
     let mut doc = Document::new();
     let mut contents = Vec::new();
     for i in 0..n {
-        let page = doc.add_page(Rect([0.0, 0.0, 300.0 + i as f64, 400.5]));
+        let page = doc.add_page(PdfBox([0.0, 0.0, 300.0 + i as f64, 400.5]));
         draw(page, i);
         contents.push(page.named(&Reserved::default()).0);
     }
@@ -58,7 +58,7 @@ fn new_document(n: usize) -> (Document<'static>, Vec<Vec<u8>>) {
 /// `pdf`'s pages each as its box, its content and its text.
 fn read_back<S: pdfs::pdf_structure::read::ByteSource>(
     pdf: &Pdf<S>,
-) -> Vec<(Rect, Vec<u8>, String)> {
+) -> Vec<(PdfBox, Vec<u8>, String)> {
     let pages = pdf.pages().unwrap();
     let read = |page: pdfs::Page<'_, S>| {
         let content = page.content().unwrap().bytes().to_vec();
@@ -84,7 +84,7 @@ fn a_new_document_reads_back_as_written() {
         assert!(faults.is_empty(), "{faults:?}");
         let read = read_back(&pdf);
         for (i, (media_box, content, text)) in read.into_iter().enumerate() {
-            assert_eq!(media_box, Rect([0.0, 0.0, 300.0 + i as f64, 400.5]));
+            assert_eq!(media_box, PdfBox([0.0, 0.0, 300.0 + i as f64, 400.5]));
             assert_eq!(content, contents[i]);
             assert_eq!(text, line(i));
         }
@@ -426,7 +426,7 @@ fn a_page_added_to_an_edited_file_inherits_nothing() {
     let file = two_pages("1.7");
     let pdf = pdfs::from_bytes(&file[..]).unwrap();
     let mut doc = pdf.edit().unwrap();
-    draw(doc.add_page(Rect([0.0, 0.0, 200.0, 300.0])), 2);
+    draw(doc.add_page(PdfBox([0.0, 0.0, 200.0, 300.0])), 2);
     let saved = doc.to_bytes().unwrap();
     let pdf = pdfs::from_bytes(&saved[..]).unwrap();
     let mut faults = Vec::new();
@@ -436,7 +436,7 @@ fn a_page_added_to_an_edited_file_inherits_nothing() {
     assert_eq!(pages.counted(), 3);
     let added = pages.get(2).unwrap();
     let attributes = added.attributes();
-    let small = Rect([0.0, 0.0, 200.0, 300.0]);
+    let small = PdfBox([0.0, 0.0, 200.0, 300.0]);
     assert_eq!(
         (attributes.media_box().value, attributes.media_box().origin),
         (small, Origin::Own)
@@ -942,7 +942,7 @@ fn a_linearized_save_walks_under_the_files_caps() {
 #[test]
 fn a_box_that_isnt_finite_is_written_as_0() {
     let mut doc = Document::new();
-    doc.add_page(Rect([0.0, f64::NAN, f64::INFINITY, 792.0]));
+    doc.add_page(PdfBox([0.0, f64::NAN, f64::INFINITY, 792.0]));
     let file = doc.to_bytes().unwrap();
     assert_eq!(doc.to_bytes().unwrap(), file);
     let pdf = pdfs::from_bytes(&file[..]).unwrap();

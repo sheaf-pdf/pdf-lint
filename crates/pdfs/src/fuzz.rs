@@ -18,7 +18,7 @@ use pdf_structure::read::{ByteSource, Faults};
 use pdf_structure::write::{self, Encryptor};
 
 use pdf_content_streams::Reserved;
-use pdf_semantics::pages::Rect;
+use pdf_semantics::pages::PdfBox;
 use pdf_structure::XrefKind;
 
 #[cfg(feature = "embed")]
@@ -345,7 +345,7 @@ fn edited<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) {
     let Ok(mut doc) = pdf.edit() else {
         return;
     };
-    doc.add_page(Rect::LETTER);
+    doc.add_page(PdfBox::LETTER);
     if let Ok(file) = doc.to_bytes() {
         let saved = Options::DEFAULT.from_bytes(&file[..]);
         let saved = saved.expect("bytes in memory open");
@@ -468,7 +468,7 @@ pub struct Wrote {
 
 /// A page read back: its box and its text, by its strings' text and how many
 /// things weren't read.
-type Back = (Rect, Result<(String, usize), String>);
+type Back = (PdfBox, Result<(String, usize), String>);
 
 /// A page [`write`] wrote: its content, and what it drew first in the font
 /// embedded from the input's program, its codes and their text, where it
@@ -519,7 +519,7 @@ pub fn write(data: &[u8]) -> Wrote {
             };
             let media_box = page.attributes().media_box().value;
             let finite = media_box.0.iter().all(|x| x.is_finite());
-            let media_box = if finite { media_box } else { Rect::LETTER };
+            let media_box = if finite { media_box } else { PdfBox::LETTER };
             let writer = doc.add_page(media_box);
             #[cfg(feature = "embed")]
             let embedded = font.as_mut().and_then(|font| font.draw(writer, page));
@@ -979,7 +979,7 @@ mod tests {
         let mut doc = crate::Document::new();
         let font = doc.embed_font(pdf_fixtures::font::sample(1000).build());
         let font = font.unwrap();
-        let page = doc.add_page(Rect::LETTER);
+        let page = doc.add_page(PdfBox::LETTER);
         page.begin_text();
         page.font(font.res(), 12.0);
         page.text_move(72.0, 700.0);

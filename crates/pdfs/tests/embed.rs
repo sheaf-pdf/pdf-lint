@@ -124,7 +124,7 @@ fn text_drawn_in_an_embedded_font_reads_back() {
         let mut doc = Document::new();
         let font = doc.embed_font(program(2048)).unwrap();
         let mut canvas = Canvas::new();
-        let rect = pdfs::pdf_gfx::Rect::new(72.0, 72.0, 540.0, 720.0);
+        let rect = Rect::new(72.0, 72.0, 540.0, 720.0);
         let style = TextBoxStyle::default();
         let laid = canvas.text_box(font.res(), &font, &TEXTS.join("\n"), rect, &style);
         assert_eq!(laid.unwrap().lines.len(), 5);
@@ -427,7 +427,7 @@ fn a_character_the_program_has_no_glyph_for_is_refused() {
     #[cfg(feature = "text-layout")]
     {
         let mut canvas = Canvas::new();
-        let rect = pdfs::pdf_gfx::Rect::new(72.0, 72.0, 540.0, 720.0);
+        let rect = Rect::new(72.0, 72.0, 540.0, 720.0);
         let refused = canvas
             .text_box(
                 font.res(),

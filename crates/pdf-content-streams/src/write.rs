@@ -19,8 +19,10 @@ use crate::unprinted::Len;
 
 /// A color in a device color space, each component from 0 to 1, as the
 /// color operators set it (8.6.8).
+///
+/// Exhaustive on purpose: ISO 32000-2 §8.6.8 defines only `DeviceGray`,
+/// `DeviceRGB`, and `DeviceCMYK` device color spaces.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
 pub enum Color {
     /// A gray level: `g`, `G`.
     Gray(f32),

@@ -159,7 +159,7 @@ pub fn claims<S: ByteSource, K: Sink<Fault> + ?Sized>(
 /// // A file of two pages, laid out for reading over a network.
 /// let mut doc = Document::new();
 /// doc.add_page(Rect::LETTER);
-/// doc.add_page(Rect([0.0, 0.0, 595.0, 842.0]));
+/// doc.add_page(Rect::new(0.0, 0.0, 595.0, 842.0));
 /// let mut file = Vec::new();
 /// let options = doc.linearize_options();
 /// doc.save_linearized_to(&mut file, &options).unwrap();

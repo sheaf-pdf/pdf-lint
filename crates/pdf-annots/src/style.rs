@@ -100,6 +100,16 @@ impl AnnotColor {
     }
 }
 
+impl From<Color> for AnnotColor {
+    fn from(color: Color) -> Self {
+        match color {
+            Color::Gray(g) => Self::Gray(g),
+            Color::Rgb(rgb) => Self::Rgb(rgb),
+            Color::Cmyk(cmyk) => Self::Cmyk(cmyk),
+        }
+    }
+}
+
 pub(crate) fn read_color<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     reader: &mut Reader<'_, R, S>,
     dict: &'o Dict,

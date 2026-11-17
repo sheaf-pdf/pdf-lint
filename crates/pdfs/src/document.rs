@@ -15,7 +15,7 @@ use pdf_fonts::embed;
 use pdf_linearize::family::{self, Linearized};
 use pdf_objects::version::Version;
 use pdf_objects::{Object, ObjectId, dict};
-use pdf_semantics::pages::{self, Rect};
+use pdf_semantics::pages::{self, PdfBox};
 use pdf_semantics::xmp::Claims;
 use pdf_structure::XrefKind;
 use pdf_structure::read::Identity;
@@ -54,11 +54,11 @@ const STREAMS: Version = Version::new(1, 5);
 /// without exposing document content.
 ///
 /// ```
+/// use pdfs::Rect;
 /// use pdfs::pdf_fonts::Std14;
-/// use pdfs::pdf_semantics::pages::Rect;
 ///
 /// let mut doc = pdfs::Document::new();
-/// let page = doc.add_page(Rect([0.0, 0.0, 612.0, 792.0]));
+/// let page = doc.add_page(Rect::new(0.0, 0.0, 612.0, 792.0));
 /// page.begin_text();
 /// page.font(pdfs::standard_font(Std14::Helvetica), 24.0);
 /// page.text_move(72.0, 700.0);
@@ -99,7 +99,7 @@ pub struct Document<'p> {
 
 /// A page added: its box, and its content's writer.
 struct Added {
-    media_box: Rect,
+    media_box: PdfBox,
     writer: ContentWriter,
 }
 
@@ -226,16 +226,15 @@ impl<'p> Document<'p> {
     /// attribute a page inherits its own (`/MediaBox`, `/CropBox` the same
     /// box, `/Rotate 0`, `/Resources`), so nothing above it changes it.
     ///
-    /// The box is written as the content writer writes a number: a whole one
-    /// within 32 bits as an integer, else a real, and one that isn't finite,
-    /// NaN or an infinity, as 0, which no file can hold. Its numbers are
-    /// pdf-semantics' `f64`, where the writer's are `f32`
-    /// ([`ContentWriter::rect`], say), so a layout reckoned in one is cast to
-    /// the other.
-    pub fn add_page(&mut self, media_box: Rect) -> &mut ContentWriter {
+    /// The box (`media_box`, a [`Rect`](crate::Rect) or
+    /// [`PdfBox`](pdf_semantics::pages::PdfBox)) is written as the content
+    /// writer writes a number: a whole one within 32 bits as an integer, else a
+    /// real, and one that isn't finite, NaN or an infinity, as 0, which no file
+    /// can hold.
+    pub fn add_page(&mut self, media_box: impl Into<PdfBox>) -> &mut ContentWriter {
         let at = self.added.len();
         self.added.push_back(Added {
-            media_box,
+            media_box: media_box.into(),
             writer: ContentWriter::new(),
         });
         &mut self.added[at].writer

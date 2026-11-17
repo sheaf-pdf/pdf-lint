@@ -45,6 +45,22 @@ impl QuadPoints {
         Rect::new(x0, y0, x1, y1)
     }
 
+    /// Converts a perimeter-ordered [`Quad`] (`[bottom_left, bottom_right,
+    /// top_right, top_left]`) into Z-order `/QuadPoints`
+    /// (`[top_left, top_right, bottom_left, bottom_right]`), matching Acrobat
+    /// and PDFium's `/QuadPoints` vertex convention and round-tripping through
+    /// [`Self::to_quad`] for any non-degenerate convex quad.
+    #[must_use]
+    pub const fn from_quad(Quad([bl, br, tr, tl]): Quad) -> Self {
+        Self([tl.x, tl.y, tr.x, tr.y, bl.x, bl.y, br.x, br.y])
+    }
+
+    /// Converts an axis-aligned [`Rect`] into Z-order `/QuadPoints`.
+    #[must_use]
+    pub const fn from_rect(r: Rect) -> Self {
+        Self::from_quad(Quad::from_rect(r))
+    }
+
     /// Converts these points into a perimeter-ordered [`Quad`]
     /// (`[bottom_left, bottom_right, top_right, top_left]`).
     ///
@@ -61,6 +77,18 @@ impl QuadPoints {
         } else {
             Quad([p1, p2, p3, p4])
         }
+    }
+}
+
+impl From<Quad> for QuadPoints {
+    fn from(q: Quad) -> Self {
+        Self::from_quad(q)
+    }
+}
+
+impl From<Rect> for QuadPoints {
+    fn from(r: Rect) -> Self {
+        Self::from_rect(r)
     }
 }
 

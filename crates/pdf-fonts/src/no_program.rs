@@ -3,7 +3,7 @@
 
 use crate::font::{Simple, SimpleMap};
 use crate::type1::Refusal;
-use crate::{Limits, Rect};
+use crate::{GlyphBox, Limits};
 
 /// A font's program, open: there's never one.
 #[allow(dead_code)]
@@ -45,11 +45,11 @@ impl CidGlyphs {
         &Face(())
     }
 
-    pub(crate) fn char_box(&self, _: u32) -> Option<Rect> {
+    pub(crate) fn char_box(&self, _: u32) -> Option<GlyphBox> {
         None
     }
 
-    pub(crate) fn drawn(&self, _: u32) -> (u32, Option<Rect>, usize) {
+    pub(crate) fn drawn(&self, _: u32) -> (u32, Option<GlyphBox>, usize) {
         (0, None, 0)
     }
 }

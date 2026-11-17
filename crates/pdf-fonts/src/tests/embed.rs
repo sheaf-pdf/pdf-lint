@@ -12,7 +12,7 @@ use skrifa::raw::types::{GlyphId, Tag};
 use skrifa::raw::{FontRef, TableProvider};
 
 use crate::embed::{Embedding, Error, Glyphs, Level, Outlines, Program, Unmapped};
-use crate::{FontMetrics, Rect};
+use crate::{FontMetrics, GlyphBox};
 
 /// The sample program's glyphs: the character each draws, as `font::sample` lays them.
 const SAMPLE: [(char, u16); 20] = [
@@ -209,7 +209,7 @@ fn widths_are_thousandths_of_an_em() {
 #[test]
 fn metrics_are_thousandths_of_an_em() {
     let program = sample();
-    let bbox = Rect::new(10.0, -400.0, 960.0, 1100.0);
+    let bbox = GlyphBox::new(10.0, -400.0, 960.0, 1100.0);
     assert_eq!(
         program.metrics(),
         FontMetrics::new(800.0, -200.0, Some(bbox))

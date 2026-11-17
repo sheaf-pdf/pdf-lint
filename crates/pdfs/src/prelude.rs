@@ -11,7 +11,7 @@ pub use crate::EmbeddedFont;
 #[cfg(any(unix, windows))]
 pub use crate::open;
 pub use crate::{
-    Content, Document, Error, Limits, NamedFont, Options, Page, Pages, Pdf, from_bytes,
+    Content, Document, Error, Limits, NamedFont, Options, Page, Pages, Pdf, Rect, from_bytes,
     standard_font,
 };
 
@@ -22,7 +22,7 @@ pub use pdf_annots::{
 pub use pdf_content_streams::{Color, ContentWriter, Paint, Res};
 pub use pdf_crypt::{Encoded, Password, Permissions, Protection};
 pub use pdf_fonts::{Font, Shown, ShownString, Std14, Unread};
-pub use pdf_gfx::{Canvas, Matrix, PageGeom, Point, Quad, Rotation};
+pub use pdf_gfx::{Canvas, EncodedPage, Matrix, PageGeom, Point, Quad, Rotation};
 #[cfg(feature = "text-layout")]
 pub use pdf_gfx::{
     SearchOpts, TextAlign, TextBoxStyle, TextPage, TextPageOpts, VerticalAlign, WrapMode,
@@ -38,7 +38,7 @@ pub use pdf_semantics::info::Info;
 pub use pdf_semantics::labels::{LabelRange, LabelStyle, PageLabels};
 pub use pdf_semantics::ocg::{OcConfig, OcProperties, OcState, Ocg};
 pub use pdf_semantics::outlines::{OutlineFlags, OutlineItem, OutlineNode};
-pub use pdf_semantics::pages::Rect;
+pub use pdf_semantics::pages::PdfBox;
 pub use pdf_semantics::viewer::{
     CatalogView, Direction, Duplex, PageLayout, PageMode, PrintScaling, ViewerPrefs,
 };

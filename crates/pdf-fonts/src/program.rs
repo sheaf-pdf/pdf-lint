@@ -54,7 +54,7 @@ use skrifa::raw::{FileRef, FontRead, FontRef, TableProvider};
 
 use crate::font::{Base, OwnText, Simple, SimpleMap};
 use crate::type1::Refusal;
-use crate::{Encoding, Limits, Rect, glyph_text, name_code_point, type1};
+use crate::{Encoding, GlyphBox, Limits, glyph_text, name_code_point, type1};
 
 /// A font's program, read, as FreeType opens it: its format, its units per
 /// em, what its face says of its heights, and what drawing its glyphs
@@ -340,11 +340,11 @@ impl Face {
     /// box, normalized; `-1` on every side where FreeType can't load it, as
     /// PDFium leaves it. None where that can't be said. With it, what drawing
     /// it cost ([`Face::draw`]).
-    fn simple_box(&self, view: &View<'_>, gid: u32) -> (Option<Rect>, usize) {
+    fn simple_box(&self, view: &View<'_>, gid: u32) -> (Option<GlyphBox>, usize) {
         let (drawn, cost) = self.draw(view, gid);
         let found = match drawn {
             Drawn::Box(b) => Some(self.normalized(b)),
-            Drawn::Missing => Some(Rect::new(-1.0, -1.0, -1.0, -1.0)),
+            Drawn::Missing => Some(GlyphBox::new(-1.0, -1.0, -1.0, -1.0)),
             Drawn::Unknown => None,
         };
         (found, cost)
@@ -355,9 +355,9 @@ impl Face {
     /// its top raised by a 64th of itself, as PDFium raises it; all 0 where
     /// FreeType can't load it, or it's no glyph. None where that can't be said.
     /// With it, what drawing it cost ([`Face::draw`]).
-    fn cid_box(&self, view: &View<'_>, gid: Option<u32>) -> (Option<Rect>, usize) {
+    fn cid_box(&self, view: &View<'_>, gid: Option<u32>) -> (Option<GlyphBox>, usize) {
         let Some(gid) = gid else {
-            return (Some(Rect::default()), 0);
+            return (Some(GlyphBox::default()), 0);
         };
         let (drawn, cost) = self.draw(view, gid);
         let found = match drawn {
@@ -368,17 +368,17 @@ impl Face {
                     true => y1.saturating_add(y1 / 64),
                     false => i32::MAX,
                 };
-                Some(Rect::new(x0 as f32, y0 as f32, x1 as f32, top as f32))
+                Some(GlyphBox::new(x0 as f32, y0 as f32, x1 as f32, top as f32))
             }
-            Drawn::Missing => Some(Rect::default()),
+            Drawn::Missing => Some(GlyphBox::default()),
             Drawn::Unknown => None,
         };
         (found, cost)
     }
 
-    fn normalized(&self, b: [i32; 4]) -> Rect {
+    fn normalized(&self, b: [i32; 4]) -> GlyphBox {
         let [x0, y0, x1, y1] = b.map(|v| normalize(i64::from(v), self.upem) as f32);
-        Rect::new(x0, y0, x1, y1)
+        GlyphBox::new(x0, y0, x1, y1)
     }
 
     /// Glyph `gid` drawn as FreeType loads it unscaled
@@ -428,7 +428,7 @@ pub(crate) struct CidGlyphs {
     /// big-endian. None where it has none, and each CID is its glyph.
     to_gid: Option<Box<[u8]>>,
     /// The boxes drawn so far, by glyph, each with what drawing it cost.
-    drawn: Mutex<HashMap<u32, (Option<Rect>, usize)>>,
+    drawn: Mutex<HashMap<u32, (Option<GlyphBox>, usize)>>,
 }
 
 impl std::fmt::Debug for CidGlyphs {
@@ -457,7 +457,7 @@ impl CidGlyphs {
     /// it, none past the map's end, or the CID itself, as PDFium maps an
     /// embedded program's (`GlyphFromCharCode`), the CID kept in 16 bits as
     /// PDFium keeps it.
-    pub(crate) fn char_box(&self, cid: u32) -> Option<Rect> {
+    pub(crate) fn char_box(&self, cid: u32) -> Option<GlyphBox> {
         self.drawn(cid).1
     }
 
@@ -465,7 +465,7 @@ impl CidGlyphs {
     /// box, and what drawing it cost ([`Face::draw`]): drawn the first time
     /// it's asked for, and the same whoever asks first, so the cost can be
     /// charged to each page that shows it.
-    pub(crate) fn drawn(&self, cid: u32) -> (u32, Option<Rect>, usize) {
+    pub(crate) fn drawn(&self, cid: u32) -> (u32, Option<GlyphBox>, usize) {
         let cid = usize::from(cid as u16);
         let gid = match &self.to_gid {
             Some(map) => map
@@ -1263,7 +1263,7 @@ impl Face {
         if !self.exact {
             return map;
         }
-        let mut drawn: HashMap<u16, Option<Rect>> = HashMap::new();
+        let mut drawn: HashMap<u16, Option<GlyphBox>> = HashMap::new();
         let mut cost = 0usize;
         for (slot, gid) in map.boxes.iter_mut().zip(gids) {
             *slot = match gid {
@@ -1272,7 +1272,7 @@ impl Face {
                     cost = cost.saturating_add(spent);
                     found
                 }),
-                Gid::None => Some(Rect::new(-1.0, -1.0, -1.0, -1.0)),
+                Gid::None => Some(GlyphBox::new(-1.0, -1.0, -1.0, -1.0)),
                 Gid::Unknown => None,
             };
         }

@@ -1221,7 +1221,7 @@ pub fn embed(data: &[u8]) -> Result<usize, crate::embed::Error> {
             let code = u32::from(glyph);
             let given = given
                 .char_box(code)
-                .filter(|b| *b != crate::Rect::default());
+                .filter(|b| *b != crate::GlyphBox::default());
             if let Some(given) = given {
                 assert_eq!(cut.char_box(code), Some(given), "glyph {glyph} given");
             }

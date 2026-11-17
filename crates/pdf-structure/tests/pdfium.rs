@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_semantics::pages::{Error, Origin, Page, Pages, Rect, pages};
+use pdf_semantics::pages::{Error, Origin, Page, Pages, PdfBox, pages};
 use pdf_semantics::{Limits, catalog};
 use pdf_structure::read::{Options, Reading, Recovery};
 
@@ -80,7 +80,7 @@ fn recorded() -> HashMap<String, String> {
 }
 
 /// A box, as PDFium holds one: its corners in order, in `f32`s.
-fn ordered(rect: Rect) -> [f32; 4] {
+fn ordered(rect: PdfBox) -> [f32; 4] {
     let [a, b, c, d] = rect.0.map(|n| n as f32);
     [a.min(c), b.min(d), a.max(c), b.max(d)]
 }
@@ -96,7 +96,7 @@ fn is_empty(rect: [f32; 4]) -> bool {
 fn shown(page: &Page) -> String {
     let media = page.media_box();
     let media = if media.origin == Origin::Default || is_empty(ordered(media.value)) {
-        ordered(Rect::LETTER)
+        ordered(PdfBox::LETTER)
     } else {
         ordered(media.value)
     };

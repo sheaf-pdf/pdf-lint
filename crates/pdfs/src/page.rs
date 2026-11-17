@@ -471,7 +471,7 @@ where
 }
 
 /// Re-encodes `page`'s content stream and every Form XObject drawn on it into
-/// position-independent `Tm` + `Td` operations ([`pdf_gfx::Encoded`]), without
+/// position-independent `Tm` + `Td` operations ([`pdf_gfx::EncodedPage`]), without
 /// collecting non-fatal faults.
 ///
 /// # Errors
@@ -484,7 +484,7 @@ pub fn encode<'o, O>(
     fonts: &Fonts,
     page: &pages::Page<'o>,
     limits: &Limits,
-) -> Result<pdf_gfx::Encoded, Error>
+) -> Result<pdf_gfx::EncodedPage, Error>
 where
     O: Resolve<'o> + Streams + Copy,
 {
@@ -503,7 +503,7 @@ pub fn encode_with<'o, O, K>(
     page: &pages::Page<'o>,
     limits: &Limits,
     sink: &mut K,
-) -> Result<pdf_gfx::Encoded, Error>
+) -> Result<pdf_gfx::EncodedPage, Error>
 where
     O: Resolve<'o> + Streams + Copy,
     K: Sink<pdf_gfx::Fault> + ?Sized,

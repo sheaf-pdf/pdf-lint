@@ -9,7 +9,7 @@ use pdf_objects::{Dict, Object, dict};
 
 use crate::afm::Afm;
 use crate::encoding::Encoding;
-use crate::font::{FontMetrics, Rect};
+use crate::font::{FontMetrics, GlyphBox};
 
 /// A standard 14 font. Exhaustive on purpose: the standard's 14 are fixed (ISO 32000-2,
 /// 9.6.2.2), and a caller matches every one; [`Std14::ALL`] lists them, in the order
@@ -127,7 +127,7 @@ impl Std14 {
         FontMetrics {
             ascent: afm.ascender.map_or(top, f32::from),
             descent: afm.descender.map_or(bottom, f32::from),
-            bbox: Some(Rect::new(left, bottom, right, top)),
+            bbox: Some(GlyphBox::new(left, bottom, right, top)),
         }
     }
 
@@ -141,9 +141,9 @@ impl Std14 {
     /// The box glyph `name`'s outline fits in, from its origin, per 1000
     /// em, from its AFM; None for a glyph it hasn't.
     #[must_use]
-    pub fn glyph_box(self, name: &str) -> Option<Rect> {
+    pub fn glyph_box(self, name: &str) -> Option<GlyphBox> {
         let [left, bottom, right, top] = self.afm().glyph_box(name)?.map(f32::from);
-        Some(Rect::new(left, bottom, right, top))
+        Some(GlyphBox::new(left, bottom, right, top))
     }
 
     /// Whether glyph `name`'s width, where a file draws the font without

@@ -109,7 +109,7 @@ use std::rc::Rc;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Unreadable, Why};
-use pdf_semantics::pages::{self, Page, Pages, Rect, pages};
+use pdf_semantics::pages::{self, Page, Pages, PdfBox, pages};
 use pdf_semantics::tree::{names, numbers};
 use pdf_semantics::{Fault, Limits, xmp};
 use pdf_structure::pdf_filters;
@@ -552,15 +552,15 @@ fn sizes(
     page: &Page<'_>,
     theirs: &Page<'_>,
 ) -> Option<(&'static str, &'static str, String, String)> {
-    let shown = |rect: Rect, or: Rect| if no_area(rect) { or } else { rect };
-    let their_media = shown(theirs.media_box().value, Rect::LETTER);
+    let shown = |rect: PdfBox, or: PdfBox| if no_area(rect) { or } else { rect };
+    let their_media = shown(theirs.media_box().value, PdfBox::LETTER);
     let media = (page.media_box().value, their_media);
     let crop = (
         page.crop_box().value,
         shown(theirs.crop_box().value, their_media),
     );
     let rotate = (page.rotate().value, theirs.rotate().value);
-    let rect = |rect: Rect| rect.0.map(|n| n.to_string()).join(" ");
+    let rect = |rect: PdfBox| rect.0.map(|n| n.to_string()).join(" ");
     Some(if media.0 != media.1 {
         ("MediaBox", "media box", rect(media.0), rect(media.1))
     } else if crop.0 != crop.1 {
@@ -575,7 +575,7 @@ fn sizes(
 
 /// Whether `rect` has no area, as PDFium holds a box, in `f32`s: its two
 /// edges across or its two up and down at one place.
-fn no_area(Rect([a, b, c, d]): Rect) -> bool {
+fn no_area(PdfBox([a, b, c, d]): PdfBox) -> bool {
     let at = |x: f64, y: f64| x as f32 == y as f32;
     at(a, c) || at(b, d)
 }

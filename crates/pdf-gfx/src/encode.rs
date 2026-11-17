@@ -43,7 +43,7 @@ use crate::state::nums;
 /// stream bytes.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Encoded {
+pub struct EncodedPage {
     /// Re-encoded page content stream (all page `/Contents` streams joined as
     /// one).
     pub content: Vec<u8>,
@@ -53,11 +53,11 @@ pub struct Encoded {
     pub forms: Vec<(ObjectId, Vec<u8>)>,
 }
 
-impl fmt::Debug for Encoded {
+impl fmt::Debug for EncodedPage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let form_lens: Vec<(ObjectId, usize)> =
             self.forms.iter().map(|(id, b)| (*id, b.len())).collect();
-        f.debug_struct("Encoded")
+        f.debug_struct("EncodedPage")
             .field("content_len", &self.content.len())
             .field("forms", &form_lens)
             .finish()
@@ -79,7 +79,7 @@ pub fn encode<'o, O>(
     resources: Option<&'o Object>,
     limits: &Limits,
     fonts: &Fonts,
-) -> Result<Encoded, Error>
+) -> Result<EncodedPage, Error>
 where
     O: Resolve<'o> + Streams + Copy,
 {
@@ -99,7 +99,7 @@ pub fn encode_with<'o, O, S>(
     limits: &Limits,
     fonts: &Fonts,
     sink: &mut S,
-) -> Result<Encoded, Error>
+) -> Result<EncodedPage, Error>
 where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
@@ -202,7 +202,7 @@ where
         let bytes = finish_stream(form_out, Some(id), &reserved, limits, &mut verified_bytes)?;
         out_forms.push((id, bytes));
     }
-    Ok(Encoded {
+    Ok(EncodedPage {
         content,
         forms: out_forms,
     })

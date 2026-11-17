@@ -26,7 +26,7 @@ let pdf = pdfs::from_bytes(file).unwrap();
 let pages = pdf.pages().unwrap();
 assert_eq!(pages.len(), 1);
 for page in &pages {
-    assert_eq!(page.attributes().media_box().value, Rect::LETTER);
+    assert_eq!(page.geom().media_box, Rect::LETTER);
     let shown = page.text().unwrap();
     assert_eq!(shown.text(), "Hello, world");
     assert!(shown.is_whole());
@@ -136,7 +136,7 @@ let file = doc.to_bytes().unwrap();
 // Edit the existing PDF and emit only the incremental update bytes.
 let read = pdfs::from_bytes(&file[..]).unwrap();
 let mut edited = read.edit().unwrap();
-let page = edited.add_page(Rect([0.0, 0.0, 400.0, 300.0]));
+let page = edited.add_page(Rect::new(0.0, 0.0, 400.0, 300.0));
 page.begin_text();
 page.font(standard_font(Std14::Courier), 12.0);
 page.show(&Std14::Courier.codes("Second").unwrap());

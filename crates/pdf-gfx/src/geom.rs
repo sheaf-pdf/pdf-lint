@@ -244,37 +244,15 @@ impl Rect {
     }
 }
 
-impl From<pdf_fonts::Rect> for Rect {
-    fn from(r: pdf_fonts::Rect) -> Rect {
-        Rect {
-            x0: r.x0,
-            y0: r.y0,
-            x1: r.x1,
-            y1: r.y1,
-        }
-    }
-}
-
-impl From<Rect> for pdf_fonts::Rect {
-    fn from(r: Rect) -> pdf_fonts::Rect {
-        pdf_fonts::Rect {
-            x0: r.x0,
-            y0: r.y0,
-            x1: r.x1,
-            y1: r.y1,
-        }
-    }
-}
-
-impl From<pages::Rect> for Rect {
-    fn from(pages::Rect([a, b, c, d]): pages::Rect) -> Rect {
+impl From<pages::PdfBox> for Rect {
+    fn from(pages::PdfBox([a, b, c, d]): pages::PdfBox) -> Rect {
         Rect::new(a as f32, b as f32, c as f32, d as f32)
     }
 }
 
-impl From<Rect> for pages::Rect {
-    fn from(r: Rect) -> pages::Rect {
-        pages::Rect([
+impl From<Rect> for pages::PdfBox {
+    fn from(r: Rect) -> pages::PdfBox {
+        pages::PdfBox([
             f64::from(r.x0),
             f64::from(r.y0),
             f64::from(r.x1),
