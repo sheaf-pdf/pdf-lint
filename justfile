@@ -42,7 +42,7 @@ default:
 # Everything CI runs, but the `-semver` recipes, which need cargo-semver-checks
 # installed, and pdf-structure's tests on Windows, which CI's
 # `structure-windows` job runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package lint-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross lint-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package lint-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -346,6 +346,16 @@ structure-cross:
     cargo clippy --locked -p pdf-structure --all-targets --target x86_64-pc-windows-gnu -- -D warnings
     RUSTFLAGS='--cfg getrandom_backend="unsupported"' cargo clippy --locked -p pdf-structure --lib --target wasm32-unknown-unknown -- -D warnings
 
+# Build pdf-lint's library and binary for Windows and for a target with
+# files that's neither Unix nor Windows (wasm32-wasip1), each of which reads
+# standard input for `--password-file -` by code of its own: the only
+# builds of that code, as `just dist` builds for Linux alone. Both targets
+# must be installed (`rustup target add x86_64-pc-windows-gnu
+# wasm32-wasip1`).
+lint-cross:
+    cargo check --locked -p pdf-lint --bins --target x86_64-pc-windows-gnu
+    cargo check --locked -p pdf-lint --bins --target wasm32-wasip1
+
 # Build the tokenizer for a target without std, which must be installed
 # (`rustup target add thumbv6m-none-eabi`).
 tokenizer-no-std:
@@ -545,7 +555,11 @@ tokenizer-semver:
 # Check pdf-lint's public API against the version published on crates.io,
 # as `tokenizer-semver` holds the tokenizer's: pdf-lint is on a release line
 # of its own, not an alpha's, so the tool holds each version to what its
-# number allows.
+# number allows, of pdf-lint's own items. It doesn't follow the crates
+# pdf-lint re-exports whole (pdf-objects, pdf-structure, pdf-arlington), so
+# a change of any exact (`=`) requirement in pdf-lint's manifest, a new
+# alpha, which moves what they re-export, is a minor version on 0.x, set
+# by hand: nothing here fails it.
 lint-semver:
     cargo semver-checks check-release -p pdf-lint
 
