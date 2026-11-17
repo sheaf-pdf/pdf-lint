@@ -4,10 +4,14 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io;
 use std::path::Path;
+#[cfg(feature = "embed")]
+use std::sync::Arc;
 
 use pdf_content_streams::{ContentWriter, Res};
 use pdf_crypt::Protection;
 use pdf_filters::{Backend, Level};
+#[cfg(feature = "embed")]
+use pdf_fonts::embed;
 use pdf_linearize::family::{self, Linearized};
 use pdf_objects::version::Version;
 use pdf_objects::{Object, ObjectId, dict};
@@ -18,6 +22,8 @@ use pdf_structure::read::Identity;
 use pdf_structure::write::{self, Base, Deflate, Encryptor, Pack, ReadFrom, Written};
 
 use crate::build;
+#[cfg(feature = "embed")]
+use crate::embed::{EmbeddedFont, Kept};
 use crate::error::Error;
 use crate::limits::Limits;
 use crate::phases::phase;
@@ -34,10 +40,12 @@ const STREAMS: Version = Version::new(1, 5);
 /// for modification with [`Pdf::edit`](crate::Pdf::edit) (which borrows the source
 /// reading `'p` so unchanged objects can be copied directly). Add pages with
 /// [`Document::add_page`]—shared resources such as fonts are automatically
-/// deduplicated across pages—and write output via [`Document::save`],
-/// [`Document::save_linearized`], or [`Document::save_update`]. For direct object
-/// manipulation, access the underlying [`pdf_structure::Document`] via
-/// [`Document::structure`] and [`Document::structure_mut`].
+/// deduplicated across pages, and Unicode text is drawn in a TrueType font
+/// embedded with `Document::embed_font` (`embed`)—and write output via
+/// [`Document::save`], [`Document::save_linearized`], or
+/// [`Document::save_update`]. For direct object manipulation, access the
+/// underlying [`pdf_structure::Document`] via [`Document::structure`] and
+/// [`Document::structure_mut`].
 ///
 /// Saves serialize into memory before writing to disk so a failed save leaves any
 /// target file untouched (use the `_to` methods or [`Document::to_bytes`] to write
@@ -84,6 +92,9 @@ pub struct Document<'p> {
     /// The caps the file it was read from was read under, which a linearized
     /// save walks its trees under; each crate's defaults for a new one.
     limits: Limits,
+    /// The fonts embedded in it, in order, each written at every save.
+    #[cfg(feature = "embed")]
+    fonts: Vec<Kept>,
 }
 
 /// A page added: its box, and its content's writer.
@@ -106,11 +117,13 @@ struct Read<'p> {
 
 impl fmt::Debug for Document<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Document")
-            .field("added", &self.added.len())
+        let mut f = f.debug_struct("Document");
+        f.field("added", &self.added.len())
             .field("pages", &self.placed.len())
-            .field("resources", &self.written.len())
-            .field("encrypted", &self.encryptor.is_some())
+            .field("resources", &self.written.len());
+        #[cfg(feature = "embed")]
+        f.field("fonts", &self.fonts.len());
+        f.field("encrypted", &self.encryptor.is_some())
             .field("edited", &self.read.is_some())
             .finish_non_exhaustive()
     }
@@ -157,6 +170,8 @@ impl<'p> Document<'p> {
             encryptor,
             read,
             limits,
+            #[cfg(feature = "embed")]
+            fonts: Vec::new(),
         }
     }
 
@@ -181,7 +196,8 @@ impl<'p> Document<'p> {
 
     /// pdf-structure's document, which is written: its objects, its trailer
     /// and its header's version. Pages added are in it once a save has
-    /// written them in.
+    /// written them in, and so is a font embedded in it, as its glyphs drawn
+    /// by then say: before, there's nothing at the number reserved for it.
     #[must_use]
     pub const fn structure(&self) -> &pdf_structure::Document {
         &self.doc
@@ -194,7 +210,8 @@ impl<'p> Document<'p> {
     }
 
     /// pdf-structure's document, taken, without the pages added since the
-    /// last save, which a save writes in.
+    /// last save, which a save writes in, nor what's drawn since in a font
+    /// embedded in it: a font no save wrote is nothing at its number.
     #[must_use]
     pub fn into_structure(self) -> pdf_structure::Document {
         self.doc
@@ -224,15 +241,121 @@ impl<'p> Document<'p> {
         &mut self.added[at].writer
     }
 
+    /// `program`, a TrueType program's bytes, embedded in it to draw Unicode
+    /// text in, as [`Document::embed_font_with`] embeds face 0 of it under
+    /// pdf-fonts' default [`embed::Options`]: cut to the glyphs drawn,
+    /// without a `/CIDSet`, and refused where its licence restricts it.
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// # let program = pdf_fixtures::font::sample(1000).build();
+    /// // A TrueType program's bytes, embedded.
+    /// let mut doc = Document::new();
+    /// let font = doc.embed_font(program).unwrap();
+    /// let text = "Ag \u{4E2D}\u{6587} \u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{1D11E}";
+    /// let mut canvas = Canvas::new();
+    /// canvas.text_at(font.res(), 24.0, Point::new(72.0, 700.0), &font.codes(text).unwrap());
+    /// *doc.add_page(Rect::LETTER) = canvas.into_writer();
+    /// // The font is written here, cut to the glyphs drawn.
+    /// let file = doc.to_bytes().unwrap();
+    ///
+    /// let pdf = pdfs::from_bytes(file).unwrap();
+    /// let shown = pdf.pages().unwrap().get(0).unwrap().text().unwrap();
+    /// assert_eq!(shown.text(), text);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::embed_font_with`] refuses.
+    #[cfg(feature = "embed")]
+    pub fn embed_font(&mut self, program: impl Into<Arc<[u8]>>) -> Result<EmbeddedFont, Error> {
+        self.embed_font_with(program, 0, &embed::Options::default())
+    }
+
+    /// Face `index` of `program` (0 unless it's a collection, `.ttc`), a
+    /// TrueType or OpenType font's bytes whose outlines are TrueType's,
+    /// embedded in it to draw Unicode text in, to be written as `options`
+    /// say (pdf-fonts' [`embed::Options`]): the font a page draws in
+    /// ([`EmbeddedFont`]), at a number the document reserves for it now
+    /// ([`pdf_structure::Document::new_id`]). An `Arc` given is kept, never
+    /// copied.
+    ///
+    /// The font is written at each save, before the pages added: a Type 0
+    /// font over `/Identity-H`, its CIDFont's program cut to the glyphs drawn
+    /// in it by then (pdf-fonts' [`embed::write`]), each of its streams
+    /// deflated as the save deflates the rest. Its first save takes numbers
+    /// for its objects past the first, which each save after writes it at
+    /// again: so a save after more text is drawn rewrites the same objects,
+    /// the program cut to more glyphs, and the codes drawn before still show
+    /// theirs. A font embedded and never drawn in is written all the same,
+    /// its `.notdef` alone.
+    ///
+    /// Text is drawn in it a character at a time, without shaping, and kept a
+    /// glyph, not a character ([`EmbeddedFont`]); justified text in it is
+    /// laid out flush left, as word spacing applies to no two-byte code
+    /// (its `LayoutFont`, with `text-layout`).
+    ///
+    /// ```
+    /// use pdfs::pdf_fonts::embed::{self, Level};
+    /// use pdfs::prelude::*;
+    ///
+    /// # let mut fixture = pdf_fixtures::font::sample(1000);
+    /// # fixture.os2.as_mut().unwrap().fs_type = 0x0002;
+    /// # let program = fixture.build();
+    /// // A program whose licence restricts it to its owner's leave.
+    /// let mut doc = Document::new();
+    /// let refused = doc.embed_font(program.clone()).unwrap_err();
+    /// assert!(matches!(refused, pdfs::Error::Embed(embed::Error::Restricted(_))));
+    /// // The caller has it, and says so: embedded, with a `/CIDSet`.
+    /// let mut options = embed::Options::default();
+    /// options.licensed = true;
+    /// options.cid_set = true;
+    /// let font = doc.embed_font_with(program, 0, &options).unwrap();
+    /// assert_eq!(font.program().embedding().level, Level::Restricted);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Embed`], with nothing changed: as pdf-fonts'
+    /// [`Program::open`](embed::Program::open) refuses the program (bytes that
+    /// aren't a TrueType or OpenType font or a collection of them, a face
+    /// past its faces, outlines that aren't TrueType's, a table it needs
+    /// that's malformed, or one no cut of it could take whole), so that every
+    /// save can write a font it takes; and [`embed::Error::Restricted`] for a
+    /// program whose
+    /// licence (its `OS/2` table's `fsType`) restricts it to its owner's leave
+    /// or to its bitmaps, unless `options` says the caller has the right
+    /// ([`embed::Options::licensed`]), as [`embed::write`] would refuse it at
+    /// every save ([`embed::Embedding::allows`]).
+    #[cfg(feature = "embed")]
+    pub fn embed_font_with(
+        &mut self,
+        program: impl Into<Arc<[u8]>>,
+        index: u32,
+        options: &embed::Options,
+    ) -> Result<EmbeddedFont, Error> {
+        let program = embed::Program::open(program, index)?;
+        let embedding = program.embedding();
+        if !embedding.allows(options) {
+            return Err(Error::Embed(embed::Error::Restricted(embedding)));
+        }
+        let (kept, font) = Kept::new(&mut self.doc, program, options);
+        self.fonts.push(kept);
+        Ok(font)
+    }
+
     /// Returns the indirect `ObjectId`s of all pages currently in the document
     /// (flushing any newly added pages into the in-memory page tree first).
+    /// A font embedded in it isn't written here but at a save, as the glyphs
+    /// drawn by then say.
     ///
     /// # Errors
     ///
     /// Returns [`Error`] if flushing added pages fails or the catalog/page tree
     /// cannot be walked.
     pub fn page_ids(&mut self) -> Result<Vec<Option<ObjectId>>, Error> {
-        self.place(deflate())?;
+        self.place_pages(deflate())?;
         let catalog = self.doc.catalog().ok_or(Error::NoCatalog)?;
         let table = pages::pages(
             &self.doc,
@@ -257,7 +380,7 @@ impl<'p> Document<'p> {
         built: pdf_annots::BuiltAnnot,
     ) -> Result<ObjectId, Error> {
         if !self.added.is_empty() {
-            self.place(deflate())?;
+            self.place_pages(deflate())?;
         }
         build::add_annot(&mut self.doc, page_id, built, deflate())
     }
@@ -275,7 +398,7 @@ impl<'p> Document<'p> {
         opts: pdf_annots::FlattenOpts,
     ) -> Result<pdf_annots::FlattenPlan, Error> {
         if !self.added.is_empty() {
-            self.place(deflate())?;
+            self.place_pages(deflate())?;
         }
         build::flatten_page(&mut self.doc, page_id, opts, &self.limits, deflate())
     }
@@ -536,7 +659,10 @@ impl<'p> Document<'p> {
     /// document has no page, or more than pdf-semantics' default cap on a
     /// tree; [`Error::NoCatalog`] and [`Error::NoPageTree`] where an edited
     /// one has no page tree to add a page to, or one whose `/Count` can't
-    /// count the pages added; and [`Error::Write`] where
+    /// count the pages added; `Error::Embed` (with `embed`) where a font
+    /// embedded in it isn't written, its program not cut to the glyphs drawn
+    /// in it (pdf-fonts' `embed::write`), which it has no reason to be of a
+    /// program `embed_font` took; and [`Error::Write`] where
     /// pdf-structure's writer refuses, its file changed since it was read
     /// among it ([`write::Error::Changed`]).
     pub fn save_with_to(
@@ -588,7 +714,8 @@ impl<'p> Document<'p> {
     /// # Errors
     ///
     /// Refused, with nothing written, as a whole save is
-    /// ([`Document::save_with_to`]) for its pages, and as
+    /// ([`Document::save_with_to`]) for its pages and the fonts embedded in
+    /// it (`Error::Embed`), and as
     /// [`family::linearize`] refuses ([`Error::Linearize`]), a string or
     /// stream at a keystream an RC4 file used among it.
     pub fn save_linearized_to(
@@ -668,7 +795,8 @@ impl<'p> Document<'p> {
     /// after [`Document::encrypt`], and under the file's own RC4 encryption a
     /// string or stream that would be new at a keystream the file used,
     /// unless [`Document::reuse_rc4_keystreams`] said so; and as a whole save
-    /// is ([`Document::save_with_to`]) for its pages.
+    /// is ([`Document::save_with_to`]) for its pages and the fonts embedded
+    /// in it (`Error::Embed`).
     pub fn save_update_to(&mut self, out: &mut Vec<u8>) -> Result<Option<Written>, Error> {
         phase!(DEBUG, "save_update", pages = self.added.len());
         let base = self.base()?;
@@ -720,11 +848,25 @@ impl<'p> Document<'p> {
         Ok(())
     }
 
+    /// What a save writes in before it writes the file: the fonts embedded
+    /// in it, each as its glyphs drawn by now say, at the numbers it was
+    /// written at before (`Kept::write`); then the pages added
+    /// (`place_pages`). A font refused leaves the pages added.
+    fn place(&mut self, deflate: Deflate) -> Result<(), Error> {
+        #[cfg(feature = "embed")]
+        for font in &mut self.fonts {
+            font.write(&mut self.doc, deflate)?;
+        }
+        self.place_pages(deflate)
+    }
+
     /// The pages added written in, as their content deflated by `deflate`:
     /// a new document's page tree written anew over every page, or an edited
     /// one's added as kids of its page tree's root. Each page is written in
     /// alone, so one refused leaves those before it in and the rest added.
-    fn place(&mut self, deflate: Deflate) -> Result<(), Error> {
+    /// The fonts embedded in it aren't written: a save writes them, as their
+    /// glyphs drawn by then say.
+    fn place_pages(&mut self, deflate: Deflate) -> Result<(), Error> {
         match self.read {
             None => self.place_new(deflate),
             Some(_) => self.place_edited(deflate),

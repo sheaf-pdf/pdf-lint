@@ -8,8 +8,12 @@ use super::fixture;
 use super::type1::Refusal::{Capped, Malformed};
 use super::*;
 
+#[cfg(feature = "embed")]
+mod embed;
 mod fonts;
 mod shown;
+#[cfg(feature = "embed")]
+mod written;
 
 /// An AFM's widths and codes, read here as plainly as it can be: each
 /// `C <code> ; WX <width> ; N <name>` line.

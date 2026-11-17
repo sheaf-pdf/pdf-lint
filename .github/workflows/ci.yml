@@ -631,9 +631,9 @@ jobs:
         with:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-fonts/Cargo.toml, which
-      # `just fonts-msrv` reads, as published, with no feature and with
-      # `tracing`, and `just fonts-cmaps-msrv` (the `predefined-cmaps`
-      # feature's).
+      # `just fonts-msrv` reads, as published, with no feature, with
+      # `tracing` and with `embed`, and `just fonts-cmaps-msrv` (the
+      # `predefined-cmaps` feature's).
       - uses: dtolnay/rust-toolchain@1.92
       - uses: taiki-e/install-action@v2
         with:

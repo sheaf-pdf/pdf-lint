@@ -63,3 +63,6 @@ program-tt-hmetrics-past	skrifa has no glyph's side bearing where the long metri
 program-tt-hmetrics-far-past	As program-tt-hmetrics-past.
 program-tt-glyph-broken	A glyph with data that draws no point doesn't parse here, and its box is unknown, none: FreeType fails this one, as PDFium's box of no glyph says, but whether it fails each such isn't told.
 program-tt-cmap-count	read-fonts refuses a `cmap` whose records don't fit, where FreeType reads on as far as the table goes, so which glyph a code draws isn't known: every box is unknown here, none, and said (`approx().boxes`).
+program-embed-hebrew	PDFium's text page gives the characters of a text object whose text is right to left last first, as it reads them, each at its own origin with its own boxes; here they're in the order the content draws them, which is the order the text was given, unshaped and not reordered. Reversed, each character's text, origin and boxes are PDFium's.
+program-embed-arabic	As program-embed-hebrew.
+program-embed-clef	As tu-pair: the /ToUnicode the writer writes gives a character past the Basic Multilingual Plane as its surrogate pair, one code's, which is the one character here and two in PDFium's text page, of the same text, each at the code's origin with its box.

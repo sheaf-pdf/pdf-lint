@@ -445,7 +445,9 @@ dependencies = [
  "pdf-content-streams",
  "pdf-objects",
  "skrifa",
+ "subsetter",
  "thiserror",
+ "twox-hash",
 ]
 
 [[package]]
@@ -699,6 +701,15 @@ dependencies = [
  "unicode-bidi",
  "unicode-normalization",
  "unicode-properties",
+]
+
+[[package]]
+name = "subsetter"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38803281d1c23166c5ebcb455439a5d2afe711cc909cf88af72448c297756ad6"
+dependencies = [
+ "rustc-hash",
 ]
 
 [[package]]

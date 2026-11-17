@@ -25,9 +25,11 @@
 //!   ([`Pdf::linearized`]).
 //! - **Create, edit, encrypt, and linearize** documents via [`Document::new`]
 //!   or [`Pdf::edit`]: draw pages with [`standard_font`] and [`pdf_gfx::Canvas`]
-//!   (including multiline `Canvas::text_box` under `text-layout`), attach XMP
-//!   claims, encrypt with AES-256, and save whole, linearized, or as an
-//!   incremental update.
+//!   (including multiline `Canvas::text_box` under `text-layout`), draw Unicode
+//!   text in a TrueType font embedded with `Document::embed_font` (`embed`
+//!   feature) and subset to the glyphs drawn at each save, attach XMP claims,
+//!   encrypt with AES-256, and save whole, linearized, or as an incremental
+//!   update.
 //! - **Use standalone trait functions** in [`page`](mod@page),
 //!   [`file`](mod@file), and [`build`](mod@build) over your own
 //!   [`pdf_structure::Reading`] or [`pdf_structure::Document`]. Import common
@@ -45,6 +47,12 @@
 //!   parse embedded font programs via `skrifa`, assemble `TextPage` spatial
 //!   reading order / search / multiline `Canvas` layout, and enable
 //!   `Date::now` / `Date::from_unix` in `pdf-semantics`.
+//! - **`embed`** *(enabled by default)*: embed a TrueType program in a
+//!   document, subset to the glyphs its pages draw, and draw Unicode text in
+//!   it (`Document::embed_font`, `EmbeddedFont`), through pdf-fonts' `embed`.
+//!   Programs with CFF, CFF2 or bitmap-only outlines are refused, text is
+//!   drawn a character at a time without shaping, and justified text in an
+//!   embedded font is laid out flush left.
 //! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
 //!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
 //!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
@@ -82,6 +90,8 @@
 
 pub use build::standard_font;
 pub use document::Document;
+#[cfg(feature = "embed")]
+pub use embed::EmbeddedFont;
 pub use error::Error;
 pub use limits::Limits;
 #[cfg(any(unix, windows))]
@@ -92,6 +102,8 @@ pub use pdf::{Page, Pages, PagesIter, Pdf};
 
 pub mod build;
 mod document;
+#[cfg(feature = "embed")]
+mod embed;
 mod error;
 pub mod file;
 #[cfg(any(test, fuzzing))]
@@ -128,7 +140,7 @@ pub use pdf_content_streams;
 /// Common PDF structures: dates, name/number trees, page trees, destinations, actions, `/Info`, and XMP claims.
 pub use pdf_semantics;
 
-/// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, and text extraction.
+/// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, text extraction, and TrueType font embedding.
 pub use pdf_fonts;
 
 /// PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder, and vector/text canvas.
@@ -222,6 +234,8 @@ mod tests {
             shared::<pdf_gfx::LaidOutText>();
         }
         shared::<crate::Document<'_>>();
+        #[cfg(feature = "embed")]
+        shared::<crate::EmbeddedFont>();
         shared::<crate::Options<'_>>();
         shared::<crate::Limits>();
         shared::<crate::Error>();

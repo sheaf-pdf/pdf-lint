@@ -6,7 +6,7 @@ rust-version = "1.92"
 license = "(MIT OR Apache-2.0) AND FTL"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-fonts"
-description = "PDF font reader, text decoder, Standard 14 metrics, CMap interpreter, and glyph bbox extractor"
+description = "PDF font reader, text decoder, Standard 14 metrics, CMap interpreter, glyph bbox extractor, and TrueType font embedder"
 keywords = ["pdf", "font", "encoding", "cmap", "iso-32000"]
 categories = ["parser-implementations", "text-processing"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -24,10 +24,20 @@ hayro-cmap = { version = "0.1", optional = true }
 # With `programs`: a font's program read, TrueType's by skrifa, CFF's and Type 1's by
 # what it has of read-fonts, Type 1's behind its `type1` feature.
 skrifa = { version = "0.50", default-features = false, features = ["std", "type1"], optional = true }
+# With `embed`: a TrueType program cut to the glyphs a document draws, without
+# its default `variable-fonts`, which would bring a second skrifa and
+# read-fonts; so a variable font is cut at its default instance. Pinned, as
+# `Program::open` checks a program as this version reads it: another comes
+# with a release of this crate, its checks read against it again.
+subsetter = { version = "=0.2.6", default-features = false, optional = true }
 # The spans of a font's reading, with the `tracing` feature: without its
 # default features, so without the proc macros of `attributes`; `std`, for
 # its spans' guards.
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+# With `embed`: the tag a subset's name begins with, from a digest of the
+# program and the glyphs it's cut to; XXH3-128 alone, without `std`, as
+# pdf-content-streams names its resources.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"], optional = true }
 
 [features]
 default = ["programs"]
@@ -37,11 +47,17 @@ predefined-cmaps = ["dep:hayro-cmap"]
 # A font's program read, for its glyphs' boxes and its heights, and the text of what its
 # encoding leaves to it. Without it, as `Fonts::for_text` reads.
 programs = ["dep:skrifa"]
+# A TrueType program embedded: opened through skrifa, the glyphs a string
+# draws found by its `cmap`, the program cut to the glyphs drawn by
+# subsetter, and the font written as a Type 0 font, its subset named by a
+# twox-hash digest. Off by default, and apart from `programs`, which is the
+# reading's.
+embed = ["dep:skrifa", "dep:subsetter", "dep:twox-hash"]
 # Spans through `tracing`: a font read, and within it its program's opening,
 # its embedded CMap's and its `/ToUnicode`'s parsing, and a Type 3 font's
-# CharProcs; and a walk of the strings content shows. A code, a width, a
-# string's text and a glyph's box have none. Off by default; without it, none
-# is compiled.
+# CharProcs; a walk of the strings content shows; and, with `embed`, a font
+# written for embedding. A code, a width, a string's text and a glyph's box
+# have none. Off by default; without it, none is compiled.
 tracing = ["dep:tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
@@ -71,10 +87,10 @@ pdf-fixtures = { path = "../pdf-fixtures" }
 name = "fonts"
 harness = false
 
-# docs.rs documents what `predefined-cmaps` adds, beside the default, and
-# the spans.
+# docs.rs documents what `predefined-cmaps` adds, beside the default, the
+# spans and what embeds a font.
 [package.metadata.docs.rs]
-features = ["predefined-cmaps", "tracing"]
+features = ["predefined-cmaps", "tracing", "embed"]
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -5,6 +5,6 @@ coverage
 
 # What `just fuzz check`, `just fuzz structure`, `just fuzz write`,
 # `just fuzz content`, `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz linearize`, `just fuzz pdfs` and `just fuzz arlington` write for the
-# fuzzer to begin from.
+# `just fuzz embed`, `just fuzz gfx`, `just fuzz annots`, `just fuzz linearize`,
+# `just fuzz pdfs` and `just fuzz arlington` write for the fuzzer to begin from.
 seeds

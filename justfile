@@ -58,11 +58,13 @@ fmt:
 # without its adapter, and with its spans (`tracing`) and its test writer,
 # which nothing else turns on, and the lopdf adapter's library alone, where
 # pdf-linearize is that engine without `family`, which pdf-lint turns on in
-# every workspace build; then pdf-fonts with Adobe's predefined CMaps and
-# its spans (`tracing`), which nothing else turns on, and with no feature at
-# all; then pdf-structure with its spans (`tracing`), which nothing else
-# turns on; then pdfs as a user gets it, with no feature at all, and with
-# every feature it forwards, which nothing else turns on all at once.
+# every workspace build; then pdf-fonts with Adobe's predefined CMaps and its
+# spans (`tracing`), which nothing else turns on, and what embeds a font
+# (`embed`), which pdfs turns on, with no feature at all, and with `embed`
+# alone, without the reading's programs; then pdf-structure with its spans (`tracing`), which nothing else
+# turns on; then pdfs as a user gets it, with no feature at all, with what
+# embeds a font (`embed`) alone, and with every feature it forwards, which
+# nothing else turns on all at once.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -75,8 +77,9 @@ clippy:
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features tracing,insecure-test-writer --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize-lopdf --lib -- -D warnings
-    cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-fonts --features predefined-cmaps,tracing,embed --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-fonts --no-default-features --features embed --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --features programs --all-targets -- -D warnings
@@ -88,6 +91,7 @@ clippy:
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --no-default-features --features embed --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
 
 # Workspace unit and integration tests through cargo-nextest (no doctests;
@@ -106,10 +110,12 @@ test-unit *args="--workspace":
 # and with its spans, which only its tests read; then pdf-linearize's
 # engine, without its adapter, and with its spans, which only its tests
 # read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
-# only its tests read, and with no feature at all; then pdf-structure's
+# only its tests read, and what embeds a font, with no feature at all, and
+# with `embed` alone, without the reading's programs; then pdf-structure's
 # with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
-# and with every feature it forwards but its test writer.
+# with what embeds a font alone, and with every feature it forwards but its
+# test writer.
 test:
     cargo nextest run --locked --workspace
     cargo test --locked --workspace --doc
@@ -129,10 +135,11 @@ test:
     cargo test --locked -p pdf-linearize --no-default-features --doc
     cargo nextest run --locked -p pdf-linearize --features tracing
     cargo test --locked -p pdf-linearize --features tracing --doc
-    cargo nextest run --locked -p pdf-fonts --features predefined-cmaps,tracing
-    cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing --doc
+    cargo nextest run --locked -p pdf-fonts --features predefined-cmaps,tracing,embed
+    cargo test --locked -p pdf-fonts --features predefined-cmaps,tracing,embed --doc
     cargo nextest run --locked -p pdf-fonts --no-default-features
     cargo test --locked -p pdf-fonts --no-default-features --doc
+    cargo nextest run --locked -p pdf-fonts --no-default-features --features embed
     cargo nextest run --locked -p pdf-gfx --features predefined-cmaps,tracing
     cargo test --locked -p pdf-gfx --features predefined-cmaps,tracing --doc
     cargo nextest run --locked -p pdf-gfx --no-default-features
@@ -151,6 +158,7 @@ test:
     cargo test --locked -p pdfs --doc
     cargo nextest run --locked -p pdfs --no-default-features
     cargo test --locked -p pdfs --no-default-features --doc
+    cargo nextest run --locked -p pdfs --no-default-features --features embed
     cargo nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
     cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
 
@@ -180,13 +188,16 @@ _qpdf:
 
 # The tests of qpdf as the tests run it, pdf-fixtures'; then the tests that
 # set the reader, and what the writer writes, beside qpdf, pdf-structure's,
-# then the page trees pdf-semantics writes, then the checker's in pdf-lint,
+# then the page trees pdf-semantics writes, then the fonts pdf-fonts embeds
+# (with `embed`, which a `-p` build has only where it's named, and what qpdf
+# says of each printed), then the checker's in pdf-lint,
 # then what pdf-linearize lays out, and its lopdf adapter, which `just test`
 # leaves out as ignored, against the pinned qpdf (the corpus tests aside).
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fixtures -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-semantics --test qpdf -- --ignored
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fonts --features embed --lib tests::written::qpdf_checks_the_written_cases_clean -- --ignored --exact --nocapture
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-annots --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
@@ -279,7 +290,9 @@ fuzzing:
 # which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
 # pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
-# then pdfs as it's published.
+# and with what embeds a font alone, then pdfs as it's published, with no
+# feature, and with what embeds a font alone, which a link to what only a
+# feature has would fail.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
@@ -287,9 +300,12 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features --features embed
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-annots --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features embed
 
 # Build this platform's release archive in dist/, and check it runs as
 # it's unpacked, as the release workflow does each
@@ -605,7 +621,8 @@ color-msrv:
     cargo +{{ color_msrv }} test --locked -p pdf-color --doc
 
 # Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it,
-# with no feature, and with its spans, which must be installed.
+# with no feature, with its spans, and with what embeds a font, subsetter among
+# it, which must be installed.
 fonts-msrv:
     cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --doc
@@ -613,6 +630,8 @@ fonts-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --no-default-features --doc
     cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts --features tracing
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features tracing --doc
+    cargo +{{ fonts_msrv }} nextest run --locked -p pdf-fonts --features embed
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features embed --doc
 
 # Test pdf-fonts with `predefined-cmaps` on that feature's oldest Rust, which must
 # be installed.
@@ -697,6 +716,8 @@ arlington-msrv:
 # components, its typed spaces and what a resources dictionary names; `fonts`,
 # pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
 # reading of a font, its program among them, on any parts and in a file;
+# `embed`, pdf-fonts' embedding of a TrueType program, whole or one table of a
+# fixture program, the font it writes read back;
 # `gfx`, pdf-gfx's geometry, interpreter, text layout and content re-encoder on
 # any parts and in a file; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
@@ -706,7 +727,8 @@ arlington-msrv:
 # checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
-# `color`, `fonts`, `gfx`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make. The
+# `color`, `fonts`, `embed`, `gfx`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make,
+# `embed`'s by pdf-fonts with its `embed` feature, without which it has none. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'
 # SIMD, which `content` reaches (`just fuzz content 300 simd`); and
@@ -764,6 +786,11 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/fonts
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" fonts fuzz/corpus/fonts fuzz/seeds/fonts -- -dict=fuzz/fonts.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    embed)
+        PDF_FONTS_FUZZ_SEEDS="$PWD/fuzz/seeds/embed" cargo test --locked -q -p pdf-fonts --features embed --lib fuzz::tests::the_embed_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/embed
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" embed fuzz/corpus/embed fuzz/seeds/embed -- -dict=fuzz/embed.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     gfx)
         PDF_GFX_FUZZ_SEEDS="$PWD/fuzz/seeds/gfx" cargo test --locked -q -p pdf-gfx --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/gfx
@@ -795,7 +822,7 @@ fuzz target="tokenize" seconds="60" features="":
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, gfx, annots, linearize, pdfs, arlington or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, linearize, pdfs, arlington or check" >&2
         exit 2
         ;;
     esac

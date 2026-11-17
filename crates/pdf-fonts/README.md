@@ -1,6 +1,6 @@
 # pdf-fonts
 
-PDF font reader, page text extractor, Standard 14 font metrics, CMap interpreter, and glyph bounding-box reader (ISO 32000-2, §9), matching PDFium's behavior as of chromium/8152.
+PDF font reader, page text extractor, Standard 14 font metrics, CMap interpreter, and glyph bounding-box reader (ISO 32000-2, §9), matching PDFium's behavior as of chromium/8152; and, with `embed`, a TrueType font subsetter and embedder.
 
 `pdf-fonts` reads fonts through any [pdf-objects](https://crates.io/crates/pdf-objects) `Resolve` and `Streams` provider (such as a `pdf-structure` `&Reading` or `WithStreams`) without performing file I/O or rasterizing glyphs. Both [pdf-objects](https://crates.io/crates/pdf-objects) and [pdf-content-streams](https://crates.io/crates/pdf-content-streams) are re-exported at the crate root.
 
@@ -14,6 +14,10 @@ PDF font reader, page text extractor, Standard 14 font metrics, CMap interpreter
 - **Standard 14 fonts & encodings (`Std14`, `Encoding`):**
   - `Std14::named` matches the 14 standard PDF fonts and PDFium's 75 alias names (such as `Arial,Bold`), providing Adobe AFM widths/boxes and building Standard 14 font dictionaries (`Std14::dict`) and encoded byte strings (`Std14::codes`, rejecting unencodable characters via `Unencodable`).
   - `Encoding`, `glyph_text`, `name_code_point`, and `cp1252` map character codes and glyph names to Unicode per the Adobe Glyph List and Windows-1252.
+- **Font embedding (`embed` feature: `embed::Program`, `embed::Glyphs`, `embed::write`):**
+  - `Program::open` opens a TrueType program (or a face of a `.ttc` collection) for embedding, refusing CFF, CFF2, and bitmap-only outlines (`Outlines`) and tables a subset couldn't be cut from safely or whole (`Error::Malformed`), so later work is linear in the program's size and any glyphs of it are cut. `Program::embedding` reports what its licence (`OS/2` `fsType`) allows; restricted programs are refused at write time unless `Options::licensed` says the caller has the right (`Embedding::allows`, to ask first).
+  - `Program::codes` encodes Unicode strings as two-byte codes for a Type 0 font over `/Identity-H`, each code the glyph's number in the program, so codes never change as more text is drawn. There is no shaping (one glyph per character, in the order given), and characters without a glyph are rejected (`Unmapped`).
+  - `Glyphs` records the glyphs a document draws with their text; `embed::write` writes the Type 0 font, its CIDFontType2 (`/W`, `/CIDToGIDMap`), `/FontDescriptor`, the program subset to the drawn glyphs as `/FontFile2` (ISO 32000-2, §9.9), a `/ToUnicode` CMap, and an optional `/CIDSet`, as `pdf-objects` values ready for `Res::of`. The subset's tag is derived from the program and its glyphs, so output is deterministic; streams are left unfiltered for the file writer to compress.
 - **Diagnostics & resource budgets (`Fault`, `Limits`):** Spec departures emit `Fault`s to a `pdf-objects` `fault::Sink<Fault>` (skipped at zero cost when `()` is passed). `Limits` and caller byte budgets bound CMap chains, Type 1 scans, glyph counts, form recursion, and decompressed stream sizes (`Error::TooLarge`, `Error::Unreadable`) without panicking on untrusted files.
 
 ## Quickstart
@@ -71,7 +75,8 @@ assert_eq!(budget, 1 << 20);
 
 - **`programs`** *(default)*: Parses embedded TrueType, CFF, and Type 1 font programs via [skrifa](https://crates.io/crates/skrifa) for glyph outline boxes (`Font::char_box`), fallback heights, and program-derived character mappings (`Font::read_for_text` and `Fonts::for_text` skip program parsing even when enabled).
 - **`predefined-cmaps`** *(optional)*: Bundles Adobe's predefined CJK CMaps via [hayro-cmap](https://crates.io/crates/hayro-cmap). Without it, predefined CMaps fall back to approximate code widths and report `Fault::PredefinedNotBuilt`.
-- **`tracing`** *(optional)*: Emits numeric [tracing](https://crates.io/crates/tracing) spans around font reads, program/CMap/CharProc parsing, and `shown` walks.
+- **`tracing`** *(optional)*: Emits numeric [tracing](https://crates.io/crates/tracing) spans around font reads, program/CMap/CharProc parsing, `shown` walks, and (with `embed`) font writes.
+- **`embed`** *(optional)*: Enables the `embed` module: opens TrueType programs via [skrifa](https://crates.io/crates/skrifa), subsets them to the glyphs drawn via [subsetter](https://crates.io/crates/subsetter) (without its `variable-fonts` feature, so variable fonts are embedded at their default instance), and writes them as Type 0 fonts. Independent of `programs`, which is for reading.
 
 ## License
 
@@ -83,6 +88,7 @@ Bundled font data and derived components carry their own license terms, which do
 - **`assets/glyphlist.txt` and `assets/zapfdingbats.txt`:** Adobe Glyph List and ITC Zapf Dingbats Glyph List under the BSD 3-Clause license (reproduced in each file's header).
 - **With `predefined-cmaps`:** Adobe CMaps from `hayro-cmap` (BSD 3-Clause) and transitive `brotli` / `brotli-decompressor` / `alloc-no-stdlib` / `alloc-stdlib` notices (BSD 3-Clause / MIT).
 - **With `programs` (default):** `skrifa` and its dependencies (`MIT OR Apache-2.0`, `Unicode-3.0` for `yoke`/`zerofrom`, `Zlib` for `foldhash`, and BSD 3-Clause Adobe Glyph List in `read-fonts`).
+- **With `embed`:** `subsetter` (`MIT OR Apache-2.0`), whose `NOTICE` credits code adapted from `ttf-parser` and `fonttools` under the MIT license, and its dependency `rustc-hash` (`Apache-2.0 OR MIT`); and `skrifa` with the same notices as `programs`, as `embed` takes it too.
 
 Portions of `src/program.rs` are translated into Rust from FreeType (copyright David Turner, Robert Wilhelm, and Werner Lemberg) under the FreeType Project License in [`FTL.TXT`](https://github.com/sheaf-pdf/pdf-lint/blob/main/crates/pdf-fonts/FTL.TXT) (reflected in the package's `(MIT OR Apache-2.0) AND FTL` license expression):
 

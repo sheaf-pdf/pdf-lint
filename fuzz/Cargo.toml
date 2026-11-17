@@ -3,8 +3,8 @@
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
 # `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz gfx`, `just fuzz linearize`, `just fuzz pdfs`,
-# `just fuzz arlington` or `just fuzz check`, or:
+# `just fuzz embed`, `just fuzz gfx`, `just fuzz linearize`,
+# `just fuzz pdfs`, `just fuzz arlington` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -123,6 +123,15 @@
 # `random_bytes_keep_every_promise`, `the_fonts_among_the_seeds_read`,
 # `the_contents_among_the_seeds_show_strings`,
 # `files_read_alike_through_a_reading_and_a_map`) run;
+# `embed` calls `pdf_fonts::fuzz::embed`, its bytes as a TrueType program
+# opened for embedding, whole or as one table of a fixture program, refused
+# or opened, text drawn in it, each character its glyph or refused where it
+# is, and the font written under each choice, each twice the same, refused
+# only for its licence or a glyph it can't cut, and read back by pdf-fonts'
+# reader without a fault, each glyph's width and text as drawn, its program
+# read and its glyphs' boxes the same cut as whole; which two stable unit
+# tests (`the_embed_seeds_come_to_what_they_hold` and
+# `mutated_programs_keep_every_promise`) run, with `embed`;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
 # of it, and `tables`, the same bytes as a hint stream, which a stable unit test
@@ -148,9 +157,10 @@
 # encryption, its key drawn from the input, read locked, each page's content
 # refused as locked, and unlocked by its password, read as in the clear; and
 # `pdfs::fuzz::write`, a new document of its first pages, their content
-# written again, saved whole, with a table, linearized and under a new
-# encryption, each read back as written; which four stable unit tests
-# (`the_seeds_keep_every_promise_and_reach_each`,
+# written again, and their text drawn in the first TrueType program their
+# fonts embed, embedded in it, saved whole, with a table, linearized and
+# under a new encryption, each read back as written; which four stable
+# unit tests (`the_seeds_keep_every_promise_and_reach_each`,
 # `the_seeds_write_documents_read_back_as_written`,
 # `mutated_seeds_keep_every_promise` and `random_bytes_keep_every_promise`)
 # run on its seeds, mutated seeds and random bytes.
@@ -209,11 +219,13 @@ pdf-color = { path = "../crates/pdf-color" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["insecure-test-writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
-# With its defaults, `programs` among them, so `fonts` reads programs. Without
-# `predefined-cmaps`, as pdf-lint's binary is built, so `check` reads a font
-# as the binary does: pdf-lint reads fonts for text, which reads no program
-# whatever the features. The feature of that name below turns it on.
-pdf-fonts = { path = "../crates/pdf-fonts" }
+# With its defaults, `programs` among them, so `fonts` reads programs, and
+# `embed`, so `embed` writes fonts, which adds what embeds a font and moves
+# nothing a font's reading does. Without `predefined-cmaps`, as pdf-lint's
+# binary is built, so `check` reads a font as the binary does: pdf-lint reads
+# fonts for text, which reads no program whatever the features. The feature
+# of that name below turns it on.
+pdf-fonts = { path = "../crates/pdf-fonts", features = ["embed"] }
 pdf-gfx = { path = "../crates/pdf-gfx" }
 pdf-annots = { path = "../crates/pdf-annots" }
 # With the test writer, so the linearize target's new encryptions are drawn
@@ -307,6 +319,13 @@ bench = false
 [[bin]]
 name = "fonts"
 path = "fuzz_targets/fonts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "embed"
+path = "fuzz_targets/embed.rs"
 test = false
 doc = false
 bench = false

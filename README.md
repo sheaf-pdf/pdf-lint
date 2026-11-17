@@ -51,7 +51,7 @@ See [crates/pdfs/README.md](crates/pdfs/README.md) for encryption, linearization
 
 | Crate | Role |
 |---|---|
-| **[pdfs](crates/pdfs)** | High-level facade for opening, reading text/fonts/metadata, creating, editing, encrypting, and linearizing PDFs; re-exports the library family below. |
+| **[pdfs](crates/pdfs)** | High-level facade for opening, reading text/fonts/metadata, creating (with Standard 14 or embedded TrueType fonts), editing, encrypting, and linearizing PDFs; re-exports the library family below. |
 | **[pdf-lint](crates/pdf-lint)** | PDF validator CLI and library built on the Arlington PDF Model and ISO 32000-2 checks, with byte-accurate spans and baseline/incremental filtering. |
 | **[pdf-arlington](crates/pdf-arlington)** | Embedded Arlington PDF Model TSV grammar and predicate evaluator over `pdf-objects`. |
 | **[pdf-tokenizer](crates/pdf-tokenizer)** | Lossless, zero-copy, `no_std` / zero-alloc PDF lexer supporting both ISO 32000-2 and PDFium lexical rules. |
@@ -62,11 +62,11 @@ See [crates/pdfs/README.md](crates/pdfs/README.md) for encryption, linearization
 | **[pdf-content-streams](crates/pdf-content-streams)** | Content stream reader, typed Annex A operator model, `q`/`Q` and marked-content analysis, safe byte-range splicing, and deterministic `ContentWriter`. |
 | **[pdf-semantics](crates/pdf-semantics)** | High-level PDF data structures: dates, name/number trees, page trees (read via ISO or PDFium rules, written balanced), destinations, actions, `/Info` dictionaries, and XMP conformance claims. |
 | **[pdf-color](crates/pdf-color)** | PDF color space parser, component counting (ISO 32000-2 and PDFium rules), colorant classification, and `/ColorSpace` resource lookup. |
-| **[pdf-fonts](crates/pdf-fonts)** | PDF font reader (character codes, CIDs, widths, encodings, CMaps, `/ToUnicode`, embedded font programs via `skrifa`), Standard 14 font metrics/encoding, and page text extraction. |
+| **[pdf-fonts](crates/pdf-fonts)** | PDF font reader (character codes, CIDs, widths, encodings, CMaps, `/ToUnicode`, embedded font programs via `skrifa`), Standard 14 font metrics/encoding, page text extraction, and (with `embed`) TrueType font subsetting and embedding via `subsetter`. |
 | **[pdf-gfx](crates/pdf-gfx)** | PDF 2D geometry (`PageGeom`, `Matrix::onto`), bounded content-stream and Form XObject interpreter, position-independent text re-encoder (`encode`), spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`). |
 | **[pdf-annots](crates/pdf-annots)** | PDF annotations (`Annot`, `TypedAnnot`), ISO 32000-2 §12.5.5 `/AP` placement and Form XObject synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`plan_flatten`). |
 | **[pdf-linearize](crates/pdf-linearize)** | Model-agnostic engine and `pdf-structure` adapter for writing and validating linearized ("Fast Web View", Annex F) PDFs and hint tables. |
-| **[pdf-fixtures](crates/pdf-fixtures)** | *Internal (unpublished).* Test PDF builders and `qpdf` oracle runner shared across workspace test suites. |
+| **[pdf-fixtures](crates/pdf-fixtures)** | *Internal (unpublished).* Test PDF and TrueType program builders and `qpdf` oracle runner shared across workspace test suites. |
 | **[pdf-linearize-lopdf](crates/pdf-linearize-lopdf)** | *Internal (unpublished).* Reference adapter demonstrating `pdf-linearize` on `lopdf` documents. |
 
 For an architectural map of how these crates connect and conventions for contributors/agents, see [AGENTS.md](AGENTS.md).
@@ -90,7 +90,7 @@ just ci           # run the full local CI suite (all checks except cargo-semver-
 - **qpdf oracle (`just test-qpdf`):** Downloads a pinned `qpdf` binary on Linux x86_64 (or uses `PDF_LINT_QPDF`) to cross-check file reading, writing, encryption, and linearization.
 - **Full `just ci` prerequisites:** Requires `cargo-nextest`, Rust **1.92** (workspace MSRV), `nightly` with `rust-src` (for `pdf-tokenizer`'s `core`-only build), and targets `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`, and `wasm32-unknown-unknown`. Note that `*-package` recipes run `cargo publish --dry-run` and require network access.
 - **Semver checks (`just <crate>-semver`):** Uses [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) to check published crates against crates.io.
-- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `gfx`, `annots`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
+- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `embed`, `gfx`, `annots`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
 
 ## License
 

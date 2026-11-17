@@ -14,7 +14,9 @@ own face only for the standard 14; nothing here rests on the system's fonts.
 
 `programs()` reads the programs built by hand from programs/, beside this file: the
 crate's `the_programs_are_written` writes them, and `the_programs_are_the_builders`
-holds them to what builds them."""
+holds them to what builds them. `written()` reads the files of fonts the crate's
+writer embeds from written/: `the_written_cases_are_written` writes them, and
+`the_written_cases_are_the_writer` holds them to what the writer writes."""
 
 import os
 import struct
@@ -1415,6 +1417,18 @@ def programs():
     font("tt-ascent-under-far", b"TrueType", b"FontFile2", tt, b"/Flags 32 /FontBBox [0 -1200 700 1000] /Ascent -1000 /Descent 0 ")
 
 
+def written():
+    # Each file of a font the crate embeds, as written/ has it: a Type 0 font over
+    # Identity-H at object 10, its CIDFontType2's program a subset of one built by hand,
+    # each CID the glyph's number in the program it's cut from, by its /CIDToGIDMap. Each
+    # by what a code draws of it, its box and its loose box.
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "written")
+    for name in sorted(os.listdir(folder)):
+        if name.endswith(".pdf"):
+            with open(os.path.join(folder, name), "rb") as f:
+                ROWS.append(("program-embed-" + name[:-len(".pdf")], "fonts-boxes", {"pdf": f.read()}))
+
+
 def cases():
     del ROWS[:]
     simple()
@@ -1422,4 +1436,5 @@ def cases():
     type0()
     type3()
     programs()
+    written()
     return list(ROWS)

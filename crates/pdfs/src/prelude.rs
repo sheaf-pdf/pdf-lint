@@ -1,10 +1,13 @@
 //! Convenience re-exports for common PDF reading and writing workflows (`use pdfs::prelude::*;`).
 //!
 //! Includes `pdfs`'s primary entry points (`Pdf`, `Document`, `Page`, `Options`,
-//! `Limits`, `open`, `from_bytes`, `standard_font`) alongside frequently used
-//! types from the re-exported crate family (`Rect`, `Std14`, `Color`, `Paint`,
-//! `Password`, `Protection`, `Permissions`, `Encryption`, `Object`, `Dict`, etc.).
+//! `Limits`, `open`, `from_bytes`, `standard_font`, and `EmbeddedFont` with
+//! `embed`) alongside frequently used types from the re-exported crate family
+//! (`Rect`, `Std14`, `Color`, `Paint`, `Password`, `Protection`, `Permissions`,
+//! `Encryption`, `Object`, `Dict`, etc.).
 
+#[cfg(feature = "embed")]
+pub use crate::EmbeddedFont;
 #[cfg(any(unix, windows))]
 pub use crate::open;
 pub use crate::{
