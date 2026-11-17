@@ -18,11 +18,12 @@
 //! # Entry Points
 //!
 //! - [`check()`] validates any [`Source`](pdf_structure::Source) (such as an
-//!   in-memory [`Document`](pdf_structure::Document)).
+//!   in-memory [`Document`](pdf_structure::Document)), and the
+//!   content/font/metadata streams it gives decoded.
 //! - [`check_with_reading`] takes a
-//!   [`WithReading`](pdf_structure::WithReading) so it can also decode
-//!   content/font/metadata streams, inspect overwritten objects in
-//!   historical revisions, and verify Annex F linearization.
+//!   [`WithReading`](pdf_structure::WithReading) so it can also inspect
+//!   overwritten objects in historical revisions and verify Annex F
+//!   linearization, which only a file's reading gives.
 //! - [`Report`] holds all [`Finding`]s (with exact byte
 //!   [`Span`](pdf_objects::Span)s) and summary counts, and supports baseline
 //!   diffing via [`Report::since`], [`Report::by_path`], and
@@ -154,7 +155,14 @@ pub mod grammar {
 
     /// Makes `model` the one every check reads, in place of the embedded
     /// one: a newer checkout of upstream's `tsv/latest`, read with
-    /// [`Grammar::load`]. Before anything has read the model, and once.
+    /// [`Grammar::load`]. Before anything has read the model, and once:
+    /// [`grammar()`] reads it, and so do a check
+    /// ([`check()`](crate::check()) or
+    /// [`check_with_reading`](crate::check_with_reading)),
+    /// [`extension::named`](crate::extension::named), and
+    /// [`Allowances::parse`](crate::Allowances::parse) and
+    /// [`read`](crate::Allowances::read) of a row that names a table, each
+    /// fixing the embedded one where nothing chose another.
     ///
     /// # Errors
     ///
@@ -473,7 +481,10 @@ mod tests {
     /// so none is a path such as `../` (the crates it names are linked by
     /// their folders in the repository). The crate is Apache-2.0 alone, as
     /// the model it embeds and the parts adapted from TestGrammar are, so the
-    /// link is to `LICENSE-APACHE` alone.
+    /// link is to `LICENSE-APACHE` alone. Nor is an item linked by
+    /// reference, `` [`name`] `` with no target, which rustdoc resolves and
+    /// crates.io shows as its brackets; a reference the README defines is a
+    /// URL too.
     #[test]
     fn the_readmes_licence_link_reaches_the_file() {
         let readme = include_str!("../README.md");
@@ -489,6 +500,20 @@ mod tests {
             assert!(
                 target.starts_with("https://"),
                 "a link isn't a URL: {target}"
+            );
+        }
+        for (at, _) in readme.match_indices("`]") {
+            let line = readme[..at].rsplit('\n').next().unwrap_or_default();
+            assert!(
+                readme[at + 2..].starts_with(['(', ':']),
+                "an item linked by reference: {line}`]"
+            );
+        }
+        let defined = (readme.lines()).filter_map(|line| line.split_once("]: "));
+        for (name, target) in defined.filter(|(name, _)| name.starts_with('[')) {
+            assert!(
+                target.starts_with("https://"),
+                "{name}]'s reference isn't a URL: {target}"
             );
         }
     }

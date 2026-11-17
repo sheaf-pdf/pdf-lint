@@ -155,15 +155,15 @@ cargo install --locked --path crates/pdf-lint
 
 Depend on `pdf-lint` with `default-features = false` to omit CLI-only dependencies (`clap`, `serde`, `serde_json`, `anyhow`):
 
-- **`pdf_lint::check(&source, &hold, &options)`** validates the objects `hold` names in any [`pdf_structure::Source`] implementation (such as an in-memory `Document`).
-- **`pdf_lint::check_with_reading(&file, &hold, &options)`** additionally inspects decoded streams, historical revision prefixes, and Annex F linearization using `pdf_structure::WithReading`.
-- **`pdf_lint::pdf_structure`**, **`pdf_lint::pdf_objects`**, and **`pdf_lint::pdf_arlington`** re-export the crates whose types these take and give, at the versions `pdf-lint` uses.
+- **`pdf_lint::check(&source, &hold, &options)`** validates the objects `hold` names in any `pdf_structure::Source` implementation (such as an in-memory `Document`), and the content, font, and metadata streams it gives decoded.
+- **`pdf_lint::check_with_reading(&file, &hold, &options)`** additionally inspects historical revision prefixes and Annex F linearization using `pdf_structure::WithReading`.
+- **`pdf_lint::pdf_structure`**, **`pdf_lint::pdf_objects`**, and **`pdf_lint::pdf_arlington`** re-export the crates whose types these take and give, at the exact alpha versions `pdf-lint` uses: a `pdf-lint` release that takes a new alpha of one is a minor one, so name them through these re-exports, or at those versions.
 - **`Report::since`**, **`Report::by_path`**, and **`Report::beyond`** provide programmatic baseline and incremental filtering.
-- **`use_model(Grammar::load(dir)?)`** overrides the embedded Arlington grammar before the first check runs.
+- **`use_model(pdf_arlington::Grammar::load(dir)?)`** overrides the embedded Arlington grammar before the first check runs.
 
 ## Embedded Arlington Model & Corrections
 
-[pdf-arlington](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-arlington) embeds upstream's `tsv/latest` tables at a pinned commit (`pdf_arlington::COMMIT`) and applies a small set of spec-backed corrections (`grammar::corrections()`) and additions (`grammar::additions()`) where upstream contradicts ISO 32000-2 (for example: `/DA` on non-variable-text button fields, `fn:IsFullyQualifiedFieldName` on hide actions, optional `/DecodeParms` length checks, `SMaskInData` defaults, legacy PDF 1.4 `/DR` on fields, and PDF 1.0 `EncodingMap` dictionaries). Pass `--model <DIR>` to check against an unmodified upstream `tsv/latest` directory instead.
+[pdf-arlington](https://github.com/sheaf-pdf/pdf-lint/tree/main/crates/pdf-arlington) embeds upstream's `tsv/latest` tables at a pinned commit (`pdf_arlington::COMMIT`) and applies a small set of spec-backed corrections (`pdf_arlington::grammar::corrections()`) and additions (`pdf_arlington::grammar::additions()`) where upstream contradicts ISO 32000-2 (for example: `/DA` on non-variable-text button fields, `fn:IsFullyQualifiedFieldName` on hide actions, optional `/DecodeParms` length checks, `SMaskInData` defaults, legacy PDF 1.4 `/DR` on fields, and PDF 1.0 `EncodingMap` dictionaries). Pass `--model <DIR>` to check against an unmodified upstream `tsv/latest` directory instead.
 
 ## License
 

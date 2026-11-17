@@ -173,7 +173,8 @@ pub enum ReadError {
 }
 
 impl Allowances {
-    /// The allowances in the file `path`.
+    /// The allowances in the file `path`, read as [`Allowances::parse`]
+    /// reads them, against the model every check reads, which that fixes.
     ///
     /// # Errors
     ///
@@ -190,7 +191,10 @@ impl Allowances {
         })
     }
 
-    /// The allowances in `text`.
+    /// The allowances in `text`. Each row's table is one of the model's
+    /// every check reads ([`grammar()`](crate::grammar())), which reading
+    /// it fixes, so a model of one's own is chosen first
+    /// ([`use_model`](crate::use_model)).
     ///
     /// # Errors
     ///

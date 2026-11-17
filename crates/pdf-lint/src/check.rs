@@ -85,9 +85,14 @@
 //! be used ([`Rule::Operator`]) and with the operands it takes
 //! ([`Rule::Operands`]), each resource name it uses in its resources
 //! ([`Rule::Resource`]), and read as ISO reads it, to its end
-//! ([`Rule::Content`]). One that isn't read, its data not decoded cleanly,
-//! is counted as not checked. Then what the resources of the content read
-//! hold that none of it uses ([`Rule::Unused`]), when asked for
+//! ([`Rule::Content`]). One that isn't read is counted as not checked: its
+//! data not given, or past the budget or what's read of one unit, or not
+//! decoded cleanly, but for a Flate checksum alone, which is read past and
+//! found as the reader's ([`checksummed`], [`Rule::Reader`]); or, where it
+//! may hold an inline image, the color spaces it may use, or its resources,
+//! not read for the reader's own reason, so that where an image's data
+//! ends can't be told. Then what the resources of the content read hold
+//! that none of it uses ([`Rule::Unused`]), when asked for
 //! ([`Options::unused`]), else counted only ([`Report::unused`]).
 //!
 //! The common structures are read through pdf-semantics: before the walk,
@@ -1348,8 +1353,15 @@ pub struct Report {
     /// gives no account of a stream's decode ([`Source::decoded_within`]),
     /// as a document alone doesn't, though it gives a font the streams it
     /// holds as bytes ([`check`]), so that none read is told from none
-    /// found in. One whose data doesn't decode cleanly isn't read, and is
-    /// counted in [`Report::unchecked`].
+    /// found in. One isn't read, and is counted in [`Report::unchecked`],
+    /// where a stream of it doesn't decode cleanly, but for its Flate
+    /// checksum alone ([`checksummed`]), or isn't given, or it's past what's
+    /// read of one unit or past [`Options::content_budget`]; or where it may
+    /// hold an inline image, and the color spaces its resources name, or
+    /// the resources themselves, don't read for the reader's own reason (a
+    /// password, a cap, the source), so where an image's data ends can't be
+    /// told. Resources that don't read otherwise leave it read, its names
+    /// not looked up, which is counted there too.
     pub content: usize,
     /// Resources of held objects that nothing in the content read uses, by
     /// table and key, `Resource` and the category: findings too with
@@ -1941,11 +1953,16 @@ pub fn file_version(source: &dyn Source) -> Version {
 /// ([`Source::decoded_within`]) gave `error`: of a stream whose every fault
 /// is that its Flate data's Adler-32 checksum doesn't match what it
 /// decompressed to (pdf-filters' `Fault::Checksum`), which leaves nothing
-/// out, the data whole, as content and the XMP packet are read and as a
-/// viewer reads it, the checksum found as a [`Rule::Reader`] finding of the
-/// stream; else `error`,
-/// given back. So a finding's bytes in such a stream ([`Finding::at`]) are
-/// in what this gives.
+/// out, the data whole, as a viewer reads it. A check reads content and the
+/// XMP packet so, past the checksum, which it finds of the stream as a
+/// [`Rule::Reader`] finding; so a finding's bytes in such a stream
+/// ([`Finding::at`]) are in what this gives.
+///
+/// # Errors
+///
+/// `error` itself, given back, where it isn't a decode's
+/// ([`Error::Decode`](crate::pdf_structure::read::Error::Decode)), or a
+/// fault besides the checksum is among its faults.
 pub fn checksummed(error: bytes::Error) -> Result<Vec<u8>, bytes::Error> {
     match error {
         bytes::Error::Decode(cut)
