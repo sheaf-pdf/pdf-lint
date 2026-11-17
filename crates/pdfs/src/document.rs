@@ -430,6 +430,79 @@ impl<'p> Document<'p> {
         build::claim(&mut self.doc, claims).map(|_| ())
     }
 
+    /// Writes `info` as an indirect `/Info` dictionary and binds it in the
+    /// trailer ([`build::set_info`]).
+    pub fn set_info(&mut self, info: &pdf_semantics::info::Info) -> ObjectId {
+        build::set_info(&mut self.doc, info)
+    }
+
+    /// Writes `meta` as the catalog's `/Metadata` XMP packet stream
+    /// ([`build::set_metadata`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`build::set_metadata`] fails.
+    pub fn set_metadata(&mut self, meta: &pdf_semantics::xmp::Metadata) -> Result<ObjectId, Error> {
+        build::set_metadata(&mut self.doc, meta)
+    }
+
+    /// Flushes any pending added pages and writes `items` as the catalog's
+    /// `/Outlines` bookmark hierarchy ([`build::set_outlines`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`build::set_outlines`] fails, or if flushing pending pages fails.
+    pub fn set_outlines(
+        &mut self,
+        items: &[pdf_semantics::outlines::OutlineNode],
+    ) -> Result<ObjectId, Error> {
+        if !self.added.is_empty() {
+            self.place_pages(deflate())?;
+        }
+        build::set_outlines(&mut self.doc, items, &self.limits.semantics)
+    }
+
+    /// Writes `ranges` as the catalog's `/PageLabels` number tree
+    /// ([`build::set_page_labels`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`build::set_page_labels`] fails.
+    pub fn set_page_labels(
+        &mut self,
+        ranges: &[pdf_semantics::labels::LabelRange],
+    ) -> Result<(), Error> {
+        build::set_page_labels(&mut self.doc, ranges)
+    }
+
+    /// Applies `view` (`/PageLayout`, `/PageMode`, `/Lang`, and
+    /// `/ViewerPreferences`) onto the catalog ([`build::set_catalog_view`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`build::set_catalog_view`] fails.
+    pub fn set_catalog_view(
+        &mut self,
+        view: &pdf_semantics::viewer::CatalogView,
+    ) -> Result<(), Error> {
+        build::set_catalog_view(&mut self.doc, view)
+    }
+
+    /// Embeds `data` into the document under `/Names /EmbeddedFiles` (and `/AF`
+    /// when `spec.relationship.is_some()`), returning the `/Filespec`
+    /// [`ObjectId`] ([`build::add_embedded_file`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`build::add_embedded_file`] fails.
+    pub fn add_embedded_file(
+        &mut self,
+        spec: &pdf_semantics::files::NewEmbeddedFile,
+        data: Vec<u8>,
+    ) -> Result<ObjectId, Error> {
+        build::add_embedded_file(&mut self.doc, spec, data, &self.limits.semantics, deflate())
+    }
+
     /// Each save after this encrypted as `protection` says, under a new
     /// encryption of revision 6, AES-256, its key and salts from the operating
     /// system (pdf-structure's [`Encryptor::create`]), whatever it was

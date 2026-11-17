@@ -11,9 +11,14 @@ use pdf_objects::version::Version;
 use pdf_objects::{Unreadable, Why};
 use pdf_semantics::action::{self, OpenAction};
 use pdf_semantics::dest::DestTable;
+use pdf_semantics::files::{self, FileSpec};
 use pdf_semantics::info::{self, Info};
+use pdf_semantics::labels::{self, PageLabels};
+use pdf_semantics::ocg::{self, OcProperties};
+use pdf_semantics::outlines::{self, OutlineItem};
 use pdf_semantics::pages::Pages;
-use pdf_semantics::xmp::{self, Claims};
+use pdf_semantics::viewer::{self, CatalogView};
+use pdf_semantics::xmp::{self, Claims, Metadata};
 use pdf_semantics::{Fault, catalog};
 use pdf_structure::read::{ByteSource, Reading};
 
@@ -222,4 +227,115 @@ pub fn open_action<S: ByteSource, K: Sink<Fault> + ?Sized>(
 ) -> Result<Option<OpenAction>, Error> {
     let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
     Ok(action::open_action(reading, root, rules, limits, sink)?)
+}
+
+/// Reads standard Dublin Core, XMP Basic, Adobe PDF, and conformance metadata
+/// from `reading`'s catalog `/Metadata` stream under `limits`.
+///
+/// # Errors
+///
+/// Same error conditions as [`claims`].
+pub fn metadata<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    limits: &pdf_semantics::Limits,
+    sink: &mut K,
+) -> Result<Option<Metadata>, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(xmp::read_metadata_from(reading, root, limits, sink)?)
+}
+
+/// Reads the document outline (`/Outlines`) hierarchy from `reading`'s catalog.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Outlines`] on
+/// unreadable/locked objects or excessive `/A` chains.
+pub fn outlines<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    rules: Rules,
+    limits: &pdf_semantics::Limits,
+    sink: &mut K,
+) -> Result<Option<Vec<OutlineItem>>, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(outlines::read(reading, root, rules, limits, sink)?)
+}
+
+/// Reads the document's `/PageLabels` numbering table from `reading`'s catalog.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Unreadable`]
+/// on locked/unreadable objects.
+pub fn page_labels<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    rules: Rules,
+    limits: &pdf_semantics::Limits,
+    sink: &mut K,
+) -> Result<Option<PageLabels>, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(labels::read(reading, root, rules, limits, sink)?)
+}
+
+/// Reads all attachments from `reading`'s catalog `/Names /EmbeddedFiles` name
+/// tree.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Unreadable`]
+/// on locked/unreadable objects.
+pub fn embedded_files<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    rules: Rules,
+    limits: &pdf_semantics::Limits,
+    sink: &mut K,
+) -> Result<Vec<FileSpec>, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(files::embedded_files(reading, root, rules, limits, sink)?)
+}
+
+/// Reads catalog-level `/AF` Associated Files from `reading`'s catalog.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Unreadable`]
+/// on locked/unreadable objects.
+pub fn associated_files<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    rules: Rules,
+    sink: &mut K,
+) -> Result<Vec<FileSpec>, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(files::associated_files(reading, root, None, rules, sink)?)
+}
+
+/// Reads `reading`'s catalog `/OCProperties` optional content configuration.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Unreadable`]
+/// on locked/unreadable objects.
+pub fn optional_content<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    rules: Rules,
+    limits: &pdf_semantics::Limits,
+    sink: &mut K,
+) -> Result<Option<OcProperties>, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(ocg::read(reading, root, rules, limits, sink)?)
+}
+
+/// Reads catalog display properties (`/PageLayout`, `/PageMode`, `/Lang`, and
+/// `/ViewerPreferences`) from `reading`'s catalog.
+///
+/// # Errors
+///
+/// [`Error::NoCatalog`] if `/Root` names no catalog, or [`Error::Unreadable`]
+/// on locked/unreadable objects.
+pub fn catalog_view<S: ByteSource, K: Sink<Fault> + ?Sized>(
+    reading: &Reading<S>,
+    rules: Rules,
+    sink: &mut K,
+) -> Result<CatalogView, Error> {
+    let root = catalog(reading, reading.trailer().dict())?.ok_or(Error::NoCatalog)?;
+    Ok(viewer::read(reading, root, rules, sink)?)
 }

@@ -1,6 +1,7 @@
 //! Read and write PDF document-level structures: dates, page trees, name and number trees,
-//! destinations, actions, `/Info` dictionaries, and XMP conformance packets (ISO 32000-2,
-//! §7.7.3, §7.9, §12.3.2, §12.6, §14.3).
+//! destinations, actions, outlines, page labels, file specifications and embedded/associated
+//! files, optional content groups, viewer preferences, `/Info` dictionaries, and XMP metadata
+//! packets (ISO 32000-2, §7.7, §7.9, §7.11, §8.11, §12.2–12.4, §12.6, §14.3, §14.13).
 //!
 //! `pdf-semantics` operates over any [`Resolve`] implementation (`&Reading`, `&Document`,
 //! `&BTreeMap`, or [`resolve_fn`](pdf_objects::resolve_fn)) without performing file I/O directly.
@@ -17,13 +18,20 @@
 //! - **Name and number trees ([`tree::names`], [`tree::numbers`]):** Lazily iterate entries in
 //!   key order with cycle and depth bounds, or serialize flat trees ([`tree::write_names`],
 //!   [`tree::write_numbers`]).
-//! - **XMP conformance claims ([`xmp::read`], [`xmp::read_from`], [`xmp::write`]):** Extract and
-//!   write namespace-verified PDF/A, PDF/UA, and PDF/VT conformance claims.
-//! - **Document `/Info` dictionaries ([`info::read`]):** Decode `/Info` text fields (under ISO or
-//!   PDFium rules) and dates.
-//! - **Destinations & actions ([`dest`], [`action`]):** Resolve explicit and named destinations
-//!   across `/Names/Dests` and `/Dests` ([`dest::DestTable`]) and walk bounded `/A`, `/Next`,
-//!   `/AA`, and `/OpenAction` action chains ([`action::read_chain`], [`action::open_action`]).
+//! - **XMP metadata & conformance ([`xmp::read`], [`xmp::read_metadata`], [`xmp::write`],
+//!   [`xmp::write_metadata`], [`xmp::check_info_sync`]):** Extract and write namespace-verified
+//!   PDF/A, PDF/UA, PDF/VT, PDF/X, and PDF/E claims plus Dublin Core, XMP Basic, and Adobe PDF
+//!   properties, and check `/Info` synchronization.
+//! - **Document `/Info` dictionaries ([`info::read`], [`info::write`]):** Decode and serialize
+//!   `/Info` text fields and dates.
+//! - **Destinations, actions & outlines ([`dest`], [`action`], [`outlines`]):** Resolve explicit
+//!   and named destinations ([`dest::DestTable`]), walk bounded `/A`, `/Next`, `/AA`, and
+//!   `/OpenAction` chains ([`action::read_chain`], [`action::open_action`]), and read or write
+//!   `/Outlines` bookmark hierarchies ([`outlines::read`], [`outlines::write`]).
+//! - **Page labels, embedded files, optional content & viewer preferences ([`labels`], [`files`],
+//!   [`ocg`], [`viewer`]):** Format `/PageLabels` ranges, inspect and construct `/EmbeddedFiles`
+//!   and `/AF` associated files, evaluate `/OCProperties` (`/OCG` and `/OCMD`) layer visibility,
+//!   and read or write `/ViewerPreferences` and catalog display properties.
 //!
 //! Spec departures are reported as [`Fault`]s to a [`Sink`](pdf_objects::fault::Sink) (skipped
 //! when `()` is passed). All walks enforce [`Limits`] without panicking: reader caps and locked
@@ -109,18 +117,37 @@ pub mod action;
 pub mod date;
 pub mod dest;
 mod fault;
+pub mod files;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
 pub mod info;
+pub mod labels;
 mod limits;
+pub mod ocg;
+pub mod outlines;
 pub mod pages;
 mod phases;
 pub mod tree;
+pub mod viewer;
 pub mod xmp;
 
 /// How many references a value may go through to its object.
 const HOPS: usize = 32;
+
+/// Reborrows a [`Resolve`] value by shared reference (`Resolve` cannot have a
+/// blanket `&R` impl because closure resolvers implement `Resolve` directly).
+pub(crate) struct ByRef<'a, R>(pub(crate) &'a R);
+
+impl<'o, R: Resolve<'o>> Resolve<'o> for ByRef<'_, R> {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        self.0.resolve(id)
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        self.0.try_resolve(id)
+    }
+}
 
 /// `value` with its references followed: none for null, or for a reference
 /// to an object the file hasn't, which is null (ISO 32000-2, 7.3.10).

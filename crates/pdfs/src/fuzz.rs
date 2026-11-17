@@ -223,6 +223,30 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
             "judged, not linearized"
         );
     }
+    let meta = pdf.metadata().map_err(words);
+    let mut meta_faults = Vec::new();
+    assert_eq!(meta, pdf.metadata_with(&mut meta_faults).map_err(words));
+    let ol = pdf.outlines().map_err(words);
+    let mut ol_faults = Vec::new();
+    assert_eq!(ol, pdf.outlines_with(&mut ol_faults).map_err(words));
+    let lbls = pdf.page_labels().map_err(words);
+    let mut lbl_faults = Vec::new();
+    assert_eq!(lbls, pdf.page_labels_with(&mut lbl_faults).map_err(words));
+    let ef = pdf.embedded_files().map_err(words);
+    let mut ef_faults = Vec::new();
+    assert_eq!(ef, pdf.embedded_files_with(&mut ef_faults).map_err(words));
+    let af = pdf.associated_files().map_err(words);
+    let mut af_faults = Vec::new();
+    assert_eq!(af, pdf.associated_files_with(&mut af_faults).map_err(words));
+    let ocp = pdf.optional_content().map_err(words);
+    let mut ocp_faults = Vec::new();
+    assert_eq!(
+        ocp,
+        pdf.optional_content_with(&mut ocp_faults).map_err(words)
+    );
+    let vw = pdf.catalog_view().map_err(words);
+    let mut vw_faults = Vec::new();
+    assert_eq!(vw, pdf.catalog_view_with(&mut vw_faults).map_err(words));
     Answers {
         version: pdf.version().map_err(words),
         catalog: pdf.catalog().map(|_| ()).map_err(words),

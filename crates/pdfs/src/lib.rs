@@ -20,16 +20,21 @@
 //!   content-stream order, or use `Page::text_page` and `Page::search`
 //!   (`text-layout` feature) for spatial reading order, `unicode-bidi` RTL
 //!   reordering, selection quads, and search.
-//! - **Read document metadata** including version, [`Pdf::encryption`], `/Info`
-//!   dictionary, XMP conformance claims, and linearization validity
+//! - **Read document metadata and catalog structures** including version,
+//!   [`Pdf::encryption`], `/Info` dictionary, XMP metadata and conformance
+//!   claims, bookmarks ([`Pdf::outlines`]), page labels ([`Pdf::page_labels`]),
+//!   embedded/associated files ([`Pdf::embedded_files`],
+//!   [`Pdf::associated_files`]), optional content ([`Pdf::optional_content`]),
+//!   viewer preferences ([`Pdf::catalog_view`]), and linearization validity
 //!   ([`Pdf::linearized`]).
 //! - **Create, edit, encrypt, and linearize** documents via [`Document::new`]
 //!   or [`Pdf::edit`]: draw pages with [`standard_font`] and [`pdf_gfx::Canvas`]
 //!   (including multiline `Canvas::text_box` under `text-layout`), draw Unicode
 //!   text in a TrueType font embedded with `Document::embed_font` (`embed`
-//!   feature) and subset to the glyphs drawn at each save, attach XMP claims,
-//!   encrypt with AES-256, and save whole, linearized, or as an incremental
-//!   update.
+//!   feature) and subset to the glyphs drawn at each save, author `/Info`, XMP
+//!   metadata/claims, bookmarks, page labels, attachments, and viewer
+//!   preferences, encrypt with AES-256, and save whole, linearized, or as an
+//!   incremental update.
 //! - **Use standalone trait functions** in [`page`](mod@page),
 //!   [`file`](mod@file), and [`build`](mod@build) over your own
 //!   [`pdf_structure::Reading`] or [`pdf_structure::Document`]. Import common
@@ -382,6 +387,105 @@ mod tests {
         })
         .unwrap();
         assert_eq!(paths, 1);
+    }
+
+    #[test]
+    fn document_structures_outlines_labels_attachments_viewer_and_metadata_round_trip() {
+        use crate::pdf_semantics::date::Date;
+        use crate::pdf_semantics::info::Dated;
+        use crate::pdf_semantics::xmp::check_info_sync;
+        use crate::prelude::*;
+
+        let mut doc = Document::new();
+        for n in 1..=3 {
+            let p = doc.add_page(Rect::LETTER);
+            p.begin_text();
+            p.font(standard_font(Std14::Helvetica), 14.0);
+            p.text_move(72.0, 700.0);
+            p.show(&Std14::Helvetica.codes(&format!("Page {n}")).unwrap());
+            p.end_text();
+        }
+        let ids = doc.page_ids().unwrap();
+        let (p0, p2) = (ids[0].unwrap(), ids[2].unwrap());
+
+        doc.set_outlines(&[
+            OutlineNode::new("Cover").with_dest(Dest::fit(p0)),
+            OutlineNode::new("Summary")
+                .with_flags(OutlineFlags::BOLD)
+                .with_children([OutlineNode::new("Conclusion").with_dest(Dest::fit(p2))]),
+        ])
+        .unwrap();
+
+        doc.set_page_labels(&[
+            LabelRange::new(0, Some(LabelStyle::LowerRoman)),
+            LabelRange::new(1, Some(LabelStyle::Decimal)).with_prefix("Sec-"),
+        ])
+        .unwrap();
+
+        let xml_payload = b"<summary>ok</summary>".to_vec();
+        doc.add_embedded_file(
+            &NewEmbeddedFile::new("summary.xml", xml_payload.len())
+                .with_subtype("application/xml")
+                .with_description("Summary XML")
+                .with_relationship(AfRelationship::Data),
+            xml_payload.clone(),
+        )
+        .unwrap();
+
+        let mut info = Info::default();
+        info.title = Some("Annual Binder".into());
+        info.author = Some("Jane Doe".into());
+        info.created = Some(Dated::Date(Date::read("D:20261115100000Z").unwrap()));
+        doc.set_info(&info);
+        let mut meta = Metadata::from_info(&info);
+        meta.claims.pdfa_part = Some("3".into());
+        meta.claims.pdfa_conformance = Some("B".into());
+        doc.set_metadata(&meta).unwrap();
+
+        let mut vp = ViewerPrefs::default();
+        vp.display_doc_title = true;
+        vp.print_scaling = Some(PrintScaling::None);
+        vp.duplex = Some(Duplex::Simplex);
+        vp.num_copies = Some(2);
+        let mut view = CatalogView::default();
+        view.page_mode = Some(PageMode::UseOutlines);
+        view.lang = Some("en-US".into());
+        view.viewer_prefs = Some(vp);
+        doc.set_catalog_view(&view).unwrap();
+
+        let bytes = doc.to_bytes().unwrap();
+        let pdf = crate::from_bytes(&bytes[..]).unwrap();
+
+        let outlines = pdf.outlines().unwrap().unwrap();
+        assert_eq!(outlines.len(), 2);
+        assert_eq!(outlines[0].title, "Cover");
+        assert_eq!(outlines[1].children[0].title, "Conclusion");
+
+        let labels = pdf.page_labels().unwrap().unwrap();
+        assert_eq!(labels.format(0), "i");
+        assert_eq!(labels.format(1), "Sec-1");
+        assert_eq!(labels.format(2), "Sec-2");
+
+        let efs = pdf.embedded_files().unwrap();
+        assert_eq!(efs.len(), 1);
+        assert_eq!(efs[0].name, "summary.xml");
+        assert_eq!(
+            efs[0]
+                .embedded
+                .as_ref()
+                .unwrap()
+                .bytes(pdf.reading(), 1024)
+                .unwrap(),
+            xml_payload
+        );
+        assert_eq!(pdf.associated_files().unwrap().len(), 1);
+
+        let read_info = pdf.info().unwrap().unwrap();
+        let read_meta = pdf.metadata().unwrap().unwrap();
+        assert_eq!(read_info, info);
+        assert_eq!(read_meta, meta);
+        assert!(check_info_sync(&read_meta, &read_info).is_empty());
+        assert_eq!(pdf.catalog_view().unwrap(), view);
     }
 }
 

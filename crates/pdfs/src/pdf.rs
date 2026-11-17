@@ -307,6 +307,156 @@ impl<S: ByteSource> Pdf<S> {
         file::open_action(&self.reading, self.rules, &self.limits.semantics, sink)
     }
 
+    /// Reads standard Dublin Core, XMP Basic, Adobe PDF, and conformance
+    /// metadata from the catalog's `/Metadata` stream ([`file::metadata`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`file::metadata`] fails.
+    pub fn metadata(&self) -> Result<Option<pdf_semantics::xmp::Metadata>, Error> {
+        self.metadata_with(&mut ())
+    }
+
+    /// [`Pdf::metadata`], reporting recoverable XMP departures to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::metadata`] fails.
+    pub fn metadata_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Option<pdf_semantics::xmp::Metadata>, Error> {
+        file::metadata(&self.reading, &self.limits.semantics, sink)
+    }
+
+    /// Reads the document outline (`/Outlines`) hierarchy ([`file::outlines`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`file::outlines`] fails.
+    pub fn outlines(&self) -> Result<Option<Vec<pdf_semantics::outlines::OutlineItem>>, Error> {
+        self.outlines_with(&mut ())
+    }
+
+    /// [`Pdf::outlines`], reporting recoverable ISO 32000-2 departures to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::outlines`] fails.
+    pub fn outlines_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Option<Vec<pdf_semantics::outlines::OutlineItem>>, Error> {
+        file::outlines(&self.reading, self.rules, &self.limits.semantics, sink)
+    }
+
+    /// Reads the catalog's `/PageLabels` table ([`file::page_labels`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`file::page_labels`] fails.
+    pub fn page_labels(&self) -> Result<Option<pdf_semantics::labels::PageLabels>, Error> {
+        self.page_labels_with(&mut ())
+    }
+
+    /// [`Pdf::page_labels`], reporting recoverable ISO 32000-2 departures to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::page_labels`] fails.
+    pub fn page_labels_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Option<pdf_semantics::labels::PageLabels>, Error> {
+        file::page_labels(&self.reading, self.rules, &self.limits.semantics, sink)
+    }
+
+    /// Reads embedded file attachments from `/Names /EmbeddedFiles`
+    /// ([`file::embedded_files`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`file::embedded_files`] fails.
+    pub fn embedded_files(&self) -> Result<Vec<pdf_semantics::files::FileSpec>, Error> {
+        self.embedded_files_with(&mut ())
+    }
+
+    /// [`Pdf::embedded_files`], reporting recoverable ISO 32000-2 departures to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::embedded_files`] fails.
+    pub fn embedded_files_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Vec<pdf_semantics::files::FileSpec>, Error> {
+        file::embedded_files(&self.reading, self.rules, &self.limits.semantics, sink)
+    }
+
+    /// Reads catalog-level `/AF` Associated Files ([`file::associated_files`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`file::associated_files`] fails.
+    pub fn associated_files(&self) -> Result<Vec<pdf_semantics::files::FileSpec>, Error> {
+        self.associated_files_with(&mut ())
+    }
+
+    /// [`Pdf::associated_files`], reporting recoverable ISO 32000-2 departures to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::associated_files`] fails.
+    pub fn associated_files_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Vec<pdf_semantics::files::FileSpec>, Error> {
+        file::associated_files(&self.reading, self.rules, sink)
+    }
+
+    /// Reads optional content configuration (`/OCProperties`, [`file::optional_content`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`file::optional_content`] fails.
+    pub fn optional_content(&self) -> Result<Option<pdf_semantics::ocg::OcProperties>, Error> {
+        self.optional_content_with(&mut ())
+    }
+
+    /// [`Pdf::optional_content`], reporting recoverable ISO 32000-2 departures to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::optional_content`] fails.
+    pub fn optional_content_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Option<pdf_semantics::ocg::OcProperties>, Error> {
+        file::optional_content(&self.reading, self.rules, &self.limits.semantics, sink)
+    }
+
+    /// Reads catalog display settings (`/PageLayout`, `/PageMode`, `/Lang`, and
+    /// `/ViewerPreferences`, [`file::catalog_view`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`file::catalog_view`] fails.
+    pub fn catalog_view(&self) -> Result<pdf_semantics::viewer::CatalogView, Error> {
+        self.catalog_view_with(&mut ())
+    }
+
+    /// [`Pdf::catalog_view`], reporting recoverable ISO 32000-2 departures to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pdf::catalog_view`] fails.
+    pub fn catalog_view_with<K: Sink<pdf_semantics::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<pdf_semantics::viewer::CatalogView, Error> {
+        file::catalog_view(&self.reading, self.rules, sink)
+    }
+
     /// Its pages, in order, as its page tree lists them by its rules, each
     /// with what it inherits and from where (pdf-semantics'
     /// [`pages::pages`]). Nothing departing from the clause is told:

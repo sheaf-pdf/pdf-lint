@@ -42,8 +42,14 @@ use crate::info::{Len, len};
 use crate::phases::phase;
 use crate::{Fault, HOPS, Limits, too_long};
 
+mod metadata;
 #[cfg(test)]
 mod tests;
+
+pub use metadata::{
+    InfoField, Metadata, check_info_sync, date_to_xmp, read_metadata, read_metadata_from,
+    write_metadata, xmp_to_date,
+};
 
 /// PDF/A's namespace, by which its claims are read, and which a packet
 /// written binds.

@@ -410,6 +410,102 @@ CASES = {
 }
 
 
+OUTLINES_CASES = {
+    "absent": {1: CATALOG, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", 3: page(3)},
+    "nested-dest-action-color-style": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names [(sec2) [4 0 R /Fit]] >> >> /Outlines 5 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        3: page(3),
+        4: page(4),
+        5: b"<< /Type /Outlines /First 6 0 R /Last 8 0 R /Count 2 >>",
+        6: b"<< /Title <FEFF005000610072007400200031> /Parent 5 0 R /Next 8 0 R /First 7 0 R /Last 7 0 R /Count -1 /Dest [3 0 R /Fit] /C [0.25 0.5 1.0] /F 3 >>",
+        7: b"<< /Title (Child 1.1) /Parent 6 0 R /Dest (sec2) /F 1 >>",
+        8: b"<< /Title (Web Link) /Parent 5 0 R /Prev 6 0 R /A << /S /URI /URI (https://example.org/doc) >> /C [2.0 0 0] /F 2 >>",
+    },
+    "missing-title-and-bad-count": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: page(3),
+        4: b"<< /Type /Outlines /First 5 0 R /Last 6 0 R >>",
+        5: b"<< /Next 6 0 R /First 7 0 R /Last 7 0 R >>",
+        6: b"<< /Title (Leaf) /Prev 5 0 R /Count 5 >>",
+        7: b"<< /Title (Sub) /A << /S /GoTo /D [3 0 R /XYZ 0 100 null] >> >>",
+    },
+    "sibling-cycle": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: page(3),
+        4: b"<< /Type /Outlines /First 5 0 R /Last 6 0 R /Count 2 >>",
+        5: b"<< /Title (First) /Next 6 0 R >>",
+        6: b"<< /Title (Second) /Next 5 0 R >>",
+    },
+}
+
+LABELS_CASES = {
+    "absent": {
+        1: CATALOG,
+        2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        3: page(3),
+        4: page(4),
+    },
+    "styles-roman-alpha-decimal-prefix": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /r >> 2 << /S /D /P (Ch-) /St 10 >> 4 << /S /A /St 26 >> 6 << /P (Cover) >>] >> >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 3 0 R 3 0 R 3 0 R 3 0 R 3 0 R 3 0 R] /Count 7 >>",
+        3: page(3),
+    },
+    "missing-zero-and-negative-key": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [-2 << /S /R >> 2 << /S /R /St 4 >>] >> >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 3 0 R 3 0 R 3 0 R] /Count 4 >>",
+        3: page(3),
+    },
+    "zero-start-and-high-caps": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D /St 0 >> 1 << /S /R /St 0 >> 2 << /S /A /St 0 >> 3 << /S /Foo /P (X) /St 5 >> 4 << /S /R /St 3999 >> 6 << /S /R /St 1000000 >>] >> >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 3 0 R 3 0 R 3 0 R 3 0 R 3 0 R 3 0 R 3 0 R] /Count 8 >>",
+        3: page(3),
+    },
+}
+
+ATTACHMENTS_CASES = {
+    "absent": {1: CATALOG, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", 3: page(3)},
+    "uf-desc-subtype-relationship": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(01.txt) 4 0 R (02.xml) 6 0 R] >> >> >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: page(3),
+        4: b"<< /Type /Filespec /F (fallback.txt) /UF (unicode.txt) /Desc (Readme note) /AFRelationship /Source /EF << /F 5 0 R >> >>",
+        5: b"<< /Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size 5 >> /Length 5 >>\nstream\nhello\nendstream",
+        6: b"<< /Type /Filespec /F (data.xml) /AFRelationship /Data /EF << /UF 7 0 R >> >>",
+        7: b"<< /Type /EmbeddedFile /Subtype /application#2Fxml /Length 6 >>\nstream\n<ok/>\n\nendstream",
+    },
+    "fallback-dos-and-missing-ef": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(a) 4 0 R (b) 5 0 R] >> >> >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: page(3),
+        4: b"<< /Type /Filespec /DOS (OLD.DAT) /EF << /DOS 6 0 R >> >>",
+        5: b"<< /Type /Filespec /F (external.bin) /Desc (No stream) >>",
+        6: b"<< /Type /EmbeddedFile /Length 3 >>\nstream\nxyz\nendstream",
+    },
+}
+
+VIEWER_CASES = {
+    "defaults": {1: CATALOG, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", 3: page(3)},
+    "print-duplex-direction-lang": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Lang (fr-CA) /PageLayout /TwoPageLeft /PageMode /UseOutlines /ViewerPreferences << /DisplayDocTitle true /PrintScaling /None /NumCopies 4 /Duplex /DuplexFlipShortEdge /PrintPageRange [1 3 5 7] /Direction /R2L /NonFullScreenPageMode /UseOutlines /ViewArea /TrimBox /PrintArea /BleedBox >> >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: page(3),
+    },
+    "invalid-types-and-appdefault": {
+        1: b"<< /Type /Catalog /Pages 2 0 R /Lang 42 /ViewerPreferences << /PrintScaling /AppDefault /NumCopies -3 /Duplex /Simplex >> >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: page(3),
+    },
+}
+
+
 def cases():
     made = [("pages-" + name, "pages", {"pdf": build(objects)}) for name, objects in CASES.items()]
-    return made + [("pages-linearized-header", "pages", {"pdf": linearized()})]
+    made += [("pages-linearized-header", "pages", {"pdf": linearized()})]
+    made += [("outlines-" + name, "outlines", {"pdf": build(objects)}) for name, objects in OUTLINES_CASES.items()]
+    made += [("labels-" + name, "labels", {"pdf": build(objects)}) for name, objects in LABELS_CASES.items()]
+    made += [("attachments-" + name, "attachments", {"pdf": build(objects)}) for name, objects in ATTACHMENTS_CASES.items()]
+    made += [("viewer-" + name, "viewer", {"pdf": build(objects)}) for name, objects in VIEWER_CASES.items()]
+    return made

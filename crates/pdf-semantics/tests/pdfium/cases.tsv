@@ -221,3 +221,17 @@ pages-written-33	pages	pages-written-33.pdf
 pages-written-64-by-3	pages	pages-written-64-by-3.pdf
 pages-written-1025	pages	pages-written-1025.pdf
 pages-linearized-header	pages	pages-linearized-header.pdf
+outlines-absent	outlines	outlines-absent.pdf
+outlines-nested-dest-action-color-style	outlines	outlines-nested-dest-action-color-style.pdf
+outlines-missing-title-and-bad-count	outlines	outlines-missing-title-and-bad-count.pdf
+outlines-sibling-cycle	outlines	outlines-sibling-cycle.pdf
+labels-absent	labels	labels-absent.pdf
+labels-styles-roman-alpha-decimal-prefix	labels	labels-styles-roman-alpha-decimal-prefix.pdf
+labels-missing-zero-and-negative-key	labels	labels-missing-zero-and-negative-key.pdf
+labels-zero-start-and-high-caps	labels	labels-zero-start-and-high-caps.pdf
+attachments-absent	attachments	attachments-absent.pdf
+attachments-uf-desc-subtype-relationship	attachments	attachments-uf-desc-subtype-relationship.pdf
+attachments-fallback-dos-and-missing-ef	attachments	attachments-fallback-dos-and-missing-ef.pdf
+viewer-defaults	viewer	viewer-defaults.pdf
+viewer-print-duplex-direction-lang	viewer	viewer-print-duplex-direction-lang.pdf
+viewer-invalid-types-and-appdefault	viewer	viewer-invalid-types-and-appdefault.pdf

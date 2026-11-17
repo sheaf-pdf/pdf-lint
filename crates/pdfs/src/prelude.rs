@@ -33,7 +33,14 @@ pub use pdf_objects::version::Version;
 pub use pdf_objects::{Dict, Object, ObjectId, Why};
 pub use pdf_semantics::action::{Action, OpenAction};
 pub use pdf_semantics::dest::{Dest, DestFit, DestTable, ResolvedDest};
+pub use pdf_semantics::files::{AfRelationship, EmbeddedFile, FileSpec, NewEmbeddedFile};
 pub use pdf_semantics::info::Info;
+pub use pdf_semantics::labels::{LabelRange, LabelStyle, PageLabels};
+pub use pdf_semantics::ocg::{OcConfig, OcProperties, OcState, Ocg};
+pub use pdf_semantics::outlines::{OutlineFlags, OutlineItem, OutlineNode};
 pub use pdf_semantics::pages::Rect;
-pub use pdf_semantics::xmp::Claims;
+pub use pdf_semantics::viewer::{
+    CatalogView, Direction, Duplex, PageLayout, PageMode, PrintScaling, ViewerPrefs,
+};
+pub use pdf_semantics::xmp::{Claims, Metadata};
 pub use pdf_structure::Encryption;

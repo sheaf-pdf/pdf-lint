@@ -1,0 +1,41 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names [(sec2) [4 0 R /Fit]] >> >> /Outlines 5 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 3 200] >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 200] >>
+endobj
+5 0 obj
+<< /Type /Outlines /First 6 0 R /Last 8 0 R /Count 2 >>
+endobj
+6 0 obj
+<< /Title <FEFF005000610072007400200031> /Parent 5 0 R /Next 8 0 R /First 7 0 R /Last 7 0 R /Count -1 /Dest [3 0 R /Fit] /C [0.25 0.5 1.0] /F 3 >>
+endobj
+7 0 obj
+<< /Title (Child 1.1) /Parent 6 0 R /Dest (sec2) /F 1 >>
+endobj
+8 0 obj
+<< /Title (Web Link) /Parent 5 0 R /Prev 6 0 R /A << /S /URI /URI (https://example.org/doc) >> /C [2.0 0 0] /F 2 >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000129 00000 n 
+0000000192 00000 n 
+0000000261 00000 n 
+0000000330 00000 n 
+0000000401 00000 n 
+0000000563 00000 n 
+0000000635 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+766
+%%EOF
