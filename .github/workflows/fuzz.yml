@@ -1,15 +1,17 @@
 name: Fuzz
 
 # Each fuzz target under libFuzzer, through `just fuzz` as it runs locally.
-# On pull requests and pushes to main, two minutes a target, from the
-# corpus the scheduled runs keep. Twice a week, half an hour a target, the
-# corpus minimized and kept in the cache for the next run. `content` runs
-# twice, the second time built with `simd`, the dependencies' SIMD, and
-# `fonts` twice, the second time built with `predefined-cmaps`, Adobe's
-# predefined CMaps, which pdf-lint's binary is built without, each from the
-# same corpus, which only the first keeps. CI's `just test` runs each fuzz
-# body too, as stable unit tests on fixed inputs; here is where new inputs
-# are found.
+# On pull requests and pushes to main, the 21 target/feature runs are grouped
+# into 5 buckets (two minutes a target, from the corpus the scheduled runs
+# keep) so shared dependencies build with AddressSanitizer once per bucket
+# rather than 21 times. Twice a week (and on manual `workflow_dispatch`), the
+# full 21-way matrix runs in parallel (half an hour a target on schedule, the
+# corpus minimized and kept in the cache for the next run). `content` runs
+# twice, the second time built with `simd`, and `fonts`, `gfx` and `annots`
+# twice, the second time built with `predefined-cmaps`, each from the same
+# corpus, which only the run without extra features saves. CI's `just test`
+# runs each fuzz body too, as stable unit tests on fixed inputs; here is where
+# new inputs are found.
 on:
   push:
     branches: [main]
@@ -28,7 +30,124 @@ env:
   FUZZ_TOOLCHAIN: nightly-2026-10-16
 
 jobs:
+  fuzz-pr:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    name: Fuzz (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core
+            label: tokenize, filters, crypt, objects
+            t1: tokenize
+            t2: filters
+            t3: crypt
+            t4: objects
+            t5: ""
+            runs: tokenize filters crypt objects
+          - group: structure
+            label: structure, write, semantics, linearize
+            t1: structure
+            t2: write
+            t3: semantics
+            t4: linearize
+            t5: ""
+            runs: structure write semantics linearize
+          - group: fonts
+            label: content, color, fonts, embed
+            t1: content
+            t2: color
+            t3: fonts
+            t4: embed
+            t5: ""
+            runs: content color fonts embed
+          - group: upper
+            label: gfx, annots, pdfs, arlington, check
+            t1: gfx
+            t2: annots
+            t3: pdfs
+            t4: arlington
+            t5: check
+            runs: gfx annots pdfs arlington check
+          - group: features
+            label: simd and predefined-cmaps
+            t1: content
+            t2: fonts
+            t3: gfx
+            t4: annots
+            t5: ""
+            runs: content:simd fonts:predefined-cmaps gfx:predefined-cmaps annots:predefined-cmaps
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - uses: extractions/setup-just@v4
+      - name: Restore corpus (${{ matrix.t1 }})
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.t1 }}
+          key: fuzz-corpus-${{ matrix.t1 }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.t1 }}-
+      - name: Restore corpus (${{ matrix.t2 }})
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.t2 }}
+          key: fuzz-corpus-${{ matrix.t2 }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.t2 }}-
+      - name: Restore corpus (${{ matrix.t3 }})
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.t3 }}
+          key: fuzz-corpus-${{ matrix.t3 }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.t3 }}-
+      - name: Restore corpus (${{ matrix.t4 }})
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.t4 }}
+          key: fuzz-corpus-${{ matrix.t4 }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.t4 }}-
+      - name: Restore corpus (${{ matrix.t5 }})
+        if: matrix.t5 != ''
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.t5 }}
+          key: fuzz-corpus-${{ matrix.t5 }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.t5 }}-
+      - name: Fuzz
+        run: |
+          status=0
+          for spec in ${{ matrix.runs }}; do
+            target=${spec%%:*}
+            if [[ "$spec" == *:* ]]; then
+              features=${spec#*:}
+            else
+              features=""
+            fi
+            echo "::group::Fuzz $target${features:+ with $features}"
+            if ! just fuzz "$target" 120 "$features"; then
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+      - name: Keep what it found
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.group }}
+          path: fuzz/artifacts
+          retention-days: 30
+
   fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Fuzz ${{ matrix.target }}${{ matrix.features && format(' with {0}', matrix.features) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60

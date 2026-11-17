@@ -14,7 +14,8 @@ env:
   CARGO_TERM_COLOR: always
 
 # Each step runs a recipe from the justfile, so `just ci` locally checks the
-# same things, but `structure-windows`'s, which is cargo's on Windows.
+# same things, but `structure-windows`'s, which is cargo's on Windows, and
+# `semver`'s, which needs cargo-semver-checks.
 jobs:
   check:
     name: Rust checks
@@ -53,56 +54,44 @@ jobs:
       - name: Build documentation
         run: just doc
 
-  # The release archive for Linux x86_64, as the release workflow builds
-  # each platform's, checked to run as it's unpacked.
-  dist:
-    name: Release archive
+  # Cross-target, no_std, core-only, and static Linux release-archive builds:
+  # - `dist`: the release archive for Linux x86_64 (x86_64-unknown-linux-musl),
+  #   checked to run as it's unpacked.
+  # - `structure-cross`: pdf-structure linted for Windows
+  #   (x86_64-pc-windows-gnu) and for a 32-bit target without files
+  #   (wasm32-unknown-unknown).
+  # - `lint-cross`: pdf-lint built for Windows and for wasm32-wasip1, whose
+  #   reads of standard input for `--password-file -` are code of their own.
+  # - `tokenizer-no-std` and `tokenizer-core-only`: pdf-tokenizer built for
+  #   thumbv6m-none-eabi on stable, and against core alone (-Z build-std=core)
+  #   on nightly.
+  targets:
+    name: Cross targets, no_std, and release archive
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      # Install nightly first so stable installed second remains the default
+      # toolchain, while `cargo +nightly` reaches nightly's rust-src.
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: x86_64-unknown-linux-musl
-      - uses: extractions/setup-just@v4
-      - name: Build and check the archive
-        run: just dist
-
-  # pdf-structure linted for Windows, the code of its own that
-  # `structure-windows` runs there, and for a 32-bit target without files,
-  # which nothing else here builds.
-  structure-cross:
-    name: pdf-structure for Windows and wasm32
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+          components: rust-src
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: x86_64-pc-windows-gnu, wasm32-unknown-unknown
+          targets: x86_64-unknown-linux-musl, x86_64-pc-windows-gnu, wasm32-unknown-unknown, wasm32-wasip1, thumbv6m-none-eabi
       - uses: extractions/setup-just@v4
-      - name: Lint for x86_64-pc-windows-gnu and wasm32-unknown-unknown
+      - name: Build and check the release archive
+        run: just dist
+      - name: Lint pdf-structure for Windows and wasm32-unknown-unknown
         run: just structure-cross
-
-  # pdf-lint built for Windows and for wasm32-wasip1, whose reads of
-  # standard input for `--password-file -` are code of their own, which no
-  # other job here builds.
-  lint-cross:
-    name: pdf-lint for Windows and wasm32-wasip1
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu, wasm32-wasip1
-      - uses: extractions/setup-just@v4
-      - name: Build for x86_64-pc-windows-gnu and wasm32-wasip1
+      - name: Build pdf-lint for Windows and wasm32-wasip1
         run: just lint-cross
+      - name: Build pdf-tokenizer without std
+        run: just tokenizer-no-std
+      - name: Build pdf-tokenizer on core alone
+        run: just tokenizer-core-only
 
   # pdf-structure's tests run on Windows, where a file is read by position
   # and its identity held by code of its own (same-file's), which no other
@@ -124,152 +113,64 @@ jobs:
           cargo nextest run --locked -p pdf-structure
           cargo test --locked -p pdf-structure --doc
 
-  # The tokenizer's own promises: no std, no alloc, its oldest Rust, what
-  # its package holds, and its API against the version published. None of
-  # these jobs needs qpdf, and none ever will.
-  tokenizer-no-std:
-    name: Tokenizer without std
+  # Every crate tested on its oldest supported Rust (`rust-version` in its
+  # Cargo.toml), sharing one target directory so common dependencies build
+  # once. Each `*-msrv` recipe invokes `cargo +<msrv>` directly, and the setup
+  # step installs every unique `rust-version` declared across `crates/*`.
+  msrv:
+    name: Minimum supported Rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv6m-none-eabi
-      - uses: extractions/setup-just@v4
-      - name: Build for thumbv6m-none-eabi
-        run: just tokenizer-no-std
-
-  # thumbv6m-none-eabi ships alloc, so a build against core alone, built
-  # from source, is what shows the tokenizer needs nothing more.
-  tokenizer-core-only:
-    name: Tokenizer on core alone
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-      - uses: extractions/setup-just@v4
-      - name: Build against core alone for thumbv6m-none-eabi
-        run: just tokenizer-core-only
-
-  tokenizer-msrv:
-    name: Tokenizer on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-tokenizer/Cargo.toml,
-      # which `just tokenizer-msrv` reads.
       - uses: dtolnay/rust-toolchain@1.92
+      - name: Ensure all crate rust-version toolchains are installed
+        run: |
+          for tc in $(sed -n 's/^rust-version = "\(.*\)"$/\1/p' crates/*/Cargo.toml | sort -u); do
+            rustup toolchain install "$tc" --profile minimal --no-self-update
+          done
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.152
       - uses: extractions/setup-just@v4
-      - name: Test
+      - name: pdf-tokenizer
         run: just tokenizer-msrv
-
-  # The tokenizer packaged as a publish would, in a fresh target directory,
-  # and what the package holds checked: its sources, README, CHANGELOG,
-  # manifest and lock, nothing else, no benchmark among them.
-  tokenizer-package:
-    name: Tokenizer packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
-        run: just tokenizer-package
-
-  # The tokenizer's public API against the version published on crates.io:
-  # a break the version doesn't allow fails. cargo-semver-checks comes as a
-  # prebuilt binary at a pinned version, as the fuzz workflow's cargo-fuzz
-  # does, so its own Rust requirement binds nothing of the crate's. It
-  # reads rustdoc's JSON, whose format moves with Rust, and each release of
-  # it reads the formats current when it was built, so the toolchain is
-  # pinned beside it, as the fuzz workflow pins nightly beside cargo-fuzz:
-  # the two pins move together, the tool to its newest release and the
-  # toolchain to the stable that release was built against.
-  tokenizer-semver:
-    name: Tokenizer against its published API
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.99
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@0.51.0
-      - uses: extractions/setup-just@v4
-      - name: Check the API against the version published
-        run: just tokenizer-semver
-
-  filters-msrv:
-    name: Filters on their minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-filters/Cargo.toml,
-      # which `just filters-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
+      - name: pdf-filters
         run: just filters-msrv
-
-  crypt-msrv:
-    name: Crypt on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-crypt/Cargo.toml,
-      # which `just crypt-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
+      - name: pdf-crypt
         run: just crypt-msrv
-
-  objects-msrv:
-    name: Objects on their minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-objects/Cargo.toml,
-      # which `just objects-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
+      - name: pdf-objects
         run: just objects-msrv
+      - name: pdf-structure
+        run: just structure-msrv
+      - name: pdf-content-streams
+        run: just content-msrv
+      - name: pdf-semantics
+        run: just semantics-msrv
+      - name: pdf-color
+        run: just color-msrv
+      - name: pdf-fonts
+        run: just fonts-msrv fonts-cmaps-msrv
+      - name: pdf-gfx
+        run: just gfx-msrv gfx-cmaps-msrv
+      - name: pdf-annots
+        run: just annots-msrv annots-cmaps-msrv
+      - name: pdf-linearize
+        run: just linearize-msrv
+      - name: pdfs
+        run: just pdfs-msrv
+      - name: pdf-arlington
+        run: just arlington-msrv
+      - name: pdf-lint
+        run: just lint-msrv
 
-  # pdf-objects packaged as a publish would, as the tokenizer is: in a fresh
-  # target directory, and what the package holds checked, its sources,
-  # README, CHANGELOG, manifest and lock, nothing else, no benchmark among
-  # them.
-  objects-package:
-    name: Objects packaged as a publish would
+  # Every published crate packaged as a publish would, each in an isolated
+  # target directory and CARGO_HOME (`justfile`'s `_package`), checking that
+  # the package builds against crates.io (and any unpublished alpha crates of
+  # the family beside it) and holds only its allowed files and no benchmarks.
+  package:
+    name: Published packages
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -277,262 +178,45 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-tokenizer
+        run: just tokenizer-package
+      - name: pdf-objects
         run: just objects-package
-
-  # The filters packaged as a publish would, as the tokenizer and pdf-objects
-  # are: in a fresh target directory, and what the package holds checked,
-  # its sources, README, CHANGELOG, manifest and lock, nothing else, no
-  # benchmark among them.
-  filters-package:
-    name: Filters packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-filters
         run: just filters-package
-
-  # pdf-crypt packaged as a publish would, as the tokenizer, pdf-objects and
-  # the filters are: in a fresh target directory, and what the package holds
-  # checked, its sources, README, CHANGELOG, manifest and lock, nothing
-  # else, no benchmark among them.
-  crypt-package:
-    name: Crypt packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-crypt
         run: just crypt-package
-
-  # pdf-color packaged as a publish would, as the tokenizer, pdf-objects,
-  # the filters and pdf-crypt are: in a fresh target directory, and what the
-  # package holds checked, its sources, README, CHANGELOG, manifest and
-  # lock, nothing else, no benchmark among them. pdf-objects is packaged
-  # beside it, since pdf-color names a version of it that may not be on
-  # crates.io yet, and cargo verifies the package against that one.
-  color-package:
-    name: Color packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-color
         run: just color-package
-
-  # pdf-structure packaged as a publish would, as the tokenizer, pdf-objects,
-  # the filters, pdf-crypt and pdf-color are: in a fresh target directory,
-  # and what the package holds checked, its sources, README, CHANGELOG,
-  # manifest and lock, nothing else, no benchmark among them. pdf-crypt and
-  # pdf-filters are packaged beside it, since pdf-structure names versions
-  # of them that may not be on crates.io yet, and cargo verifies the package
-  # against those; every other crate of the family it names is on
-  # crates.io.
-  structure-package:
-    name: Structure packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-structure
         run: just structure-package
-
-  # pdf-content-streams packaged as a publish would, as the tokenizer,
-  # pdf-objects, the filters, pdf-crypt, pdf-color and pdf-structure are: in
-  # a fresh target directory, and what the package holds checked, its
-  # sources, README, CHANGELOG, manifest and lock, nothing else, no
-  # benchmark among them. pdf-filters is packaged beside it, since
-  # pdf-content-streams names a version of it that may not be on crates.io
-  # yet, and cargo verifies the package against that one; every other crate
-  # of the family it names is on crates.io.
-  content-streams-package:
-    name: Content streams packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-content-streams
         run: just content-streams-package
-
-  # pdf-semantics packaged as a publish would, as the tokenizer, pdf-objects,
-  # the filters, pdf-crypt, pdf-color, pdf-structure and pdf-content-streams
-  # are: in a fresh target directory, and what the package holds checked,
-  # its sources, README, CHANGELOG, manifest and lock, nothing else, no
-  # benchmark among them. Every crate of the family it names is on
-  # crates.io, so nothing is packaged beside it.
-  semantics-package:
-    name: Semantics packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-semantics
         run: just semantics-package
-
-  # pdf-fonts packaged as a publish would, as the tokenizer, pdf-objects, the
-  # filters, pdf-crypt, pdf-color, pdf-structure, pdf-content-streams and
-  # pdf-semantics are: in a fresh target directory, and what the package
-  # holds checked, its sources, README, CHANGELOG, manifest and lock, and its
-  # data with its terms, Adobe's metrics and their notice, the glyph lists
-  # and the FreeType Project License, file by file, nothing else, no
-  # benchmark among them. pdf-content-streams and pdf-filters are packaged
-  # beside it, since pdf-fonts names a version of pdf-content-streams, and
-  # that names one of pdf-filters, that may not be on crates.io yet, and
-  # cargo verifies the package against those; every other crate of the
-  # family they name is on crates.io.
-  fonts-package:
-    name: Fonts packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-fonts
         run: just fonts-package
-
-  # pdf-gfx packaged as a publish would: in a fresh target directory, and what
-  # the package holds checked, its sources, README, CHANGELOG, manifest and
-  # lock, nothing else, no benchmark among them.
-  gfx-package:
-    name: Gfx packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-gfx
         run: just gfx-package
-
-  # pdf-annots packaged as a publish would: in a fresh target directory, and
-  # what the package holds checked, its sources, README, CHANGELOG, manifest and
-  # lock, nothing else, no benchmark among them.
-  annots-package:
-    name: Annots packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-annots
         run: just annots-package
-
-  # pdf-linearize packaged as a publish would, as the tokenizer, pdf-objects,
-  # the filters, pdf-crypt, pdf-color, pdf-structure, pdf-content-streams,
-  # pdf-semantics and pdf-fonts are: in a fresh target directory, and what
-  # the package holds checked, its sources, README, CHANGELOG, manifest and
-  # lock, nothing else, no benchmark among them. pdf-structure, pdf-semantics
-  # and pdf-filters are packaged beside it, since pdf-linearize names a
-  # version of pdf-structure and of pdf-semantics, and pdf-structure one of
-  # pdf-filters, that may not be on crates.io yet, and cargo verifies the
-  # package against those; every other crate of the family they name is on
-  # crates.io.
-  linearize-package:
-    name: Linearize packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-linearize
         run: just linearize-package
-
-  # pdfs packaged as a publish would, as every crate of the family it takes
-  # is: in a fresh target directory, and what the package holds checked,
-  # its sources, README, CHANGELOG, manifest and lock, nothing else, no
-  # benchmark among them. pdf-filters, pdf-structure, pdf-content-streams,
-  # pdf-semantics, pdf-fonts and pdf-linearize are packaged beside it, since
-  # pdfs names versions of them that may not be on crates.io yet, and cargo
-  # verifies the package against those; every other crate of the family it
-  # names is on crates.io.
-  pdfs-package:
-    name: pdfs packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdfs
         run: just pdfs-package
-
-  # pdf-arlington packaged as a publish would, as the other crates of the
-  # family are: in a fresh target directory, and what the package holds
-  # checked, its sources, README, CHANGELOG, manifest and lock, and its
-  # build script and the model it embeds, the model's licence and notice,
-  # where it's from, its corrections and additions file by file, and its
-  # tables by where they are and how many, nothing else, no benchmark among
-  # them. pdf-objects and pdf-color are packaged beside it, since
-  # pdf-arlington names versions of them that may not be on crates.io yet,
-  # and cargo verifies the package against those.
-  arlington-package:
-    name: Arlington packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-arlington
         run: just arlington-package
-
-  # pdf-lint packaged as a publish would, as every crate of the family it
-  # takes is: in a fresh target directory, and what the package holds
-  # checked, its sources, README, CHANGELOG, manifest and lock, nothing
-  # else. pdf-objects, pdf-filters, pdf-crypt, pdf-color, pdf-structure,
-  # pdf-content-streams, pdf-semantics, pdf-fonts, pdf-linearize and
-  # pdf-arlington are packaged beside it, since pdf-lint names versions of
-  # them that may not be on crates.io yet, and cargo verifies the package
-  # against those; pdf-tokenizer, the one other crate of the family it
-  # names, is on crates.io.
-  lint-package:
-    name: pdf-lint packaged as a publish would
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
-      - name: Package, and check what the package holds
+      - name: pdf-lint
         run: just lint-package
 
-  # pdf-objects', the filters', pdf-crypt's and pdf-color's public API
-  # against their version on crates.io, as the tokenizer's job holds its
-  # own, with the same pinned tool on the same pinned Rust. Each is an alpha, which the tool takes to
-  # allow anything, so the recipe holds it another way: while the manifest
-  # names a published version, no change of the API passes; a version not
-  # published yet is the next alpha, held by nothing here.
-  objects-semver:
-    name: Objects against their published API
+  # Each published crate's public API checked against its version on crates.io.
+  # cargo-semver-checks comes as a prebuilt binary at a pinned version beside
+  # the Rust toolchain whose rustdoc JSON format it reads. Release-line crates
+  # (`pdf-tokenizer`, `pdf-lint`) are held to semver; alpha crates are held by
+  # `justfile`'s `_semver` so a published alpha version may not move its API,
+  # while an unpublished next alpha passes.
+  semver:
+    name: Published API
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -543,271 +227,15 @@ jobs:
         with:
           tool: cargo-semver-checks@0.51.0
       - uses: extractions/setup-just@v4
-      - name: Check the API against the version published
+      - name: pdf-tokenizer
+        run: just tokenizer-semver
+      - name: pdf-objects
         run: just objects-semver
-
-  filters-semver:
-    name: Filters against their published API
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.99
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@0.51.0
-      - uses: extractions/setup-just@v4
-      - name: Check the API against the version published
+      - name: pdf-filters
         run: just filters-semver
-
-  crypt-semver:
-    name: Crypt against its published API
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.99
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@0.51.0
-      - uses: extractions/setup-just@v4
-      - name: Check the API against the version published
+      - name: pdf-crypt
         run: just crypt-semver
-
-  color-semver:
-    name: Color against its published API
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.99
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@0.51.0
-      - uses: extractions/setup-just@v4
-      - name: Check the API against the version published
+      - name: pdf-color
         run: just color-semver
-
-  # pdf-lint's public API against the version published on crates.io, as the
-  # tokenizer's job holds its own, with the same pinned tool on the same
-  # pinned Rust: pdf-lint is on a release line of its own, not an alpha, so
-  # a break of its own items its version doesn't allow fails. The crates it
-  # re-exports whole the tool doesn't follow: a new exact requirement of
-  # one in its manifest is a minor version on 0.x, set by hand (the
-  # justfile's `lint-semver`).
-  lint-semver:
-    name: pdf-lint against its published API
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.99
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@0.51.0
-      - uses: extractions/setup-just@v4
-      - name: Check the API against the version published
+      - name: pdf-lint
         run: just lint-semver
-
-  structure-msrv:
-    name: Structure on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-structure/Cargo.toml,
-      # which `just structure-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just structure-msrv
-
-  content-msrv:
-    name: Content streams on their minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in
-      # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
-      # reads, with and without the `image-ends` feature, and with it,
-      # `simd` and `tracing`.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just content-msrv
-
-  semantics-msrv:
-    name: Common structures on their minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-semantics/Cargo.toml,
-      # which `just semantics-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just semantics-msrv
-
-  color-msrv:
-    name: Color spaces on their minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-color/Cargo.toml,
-      # which `just color-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just color-msrv
-
-  fonts-msrv:
-    name: Fonts on their minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-fonts/Cargo.toml, which
-      # `just fonts-msrv` reads, as published, with no feature, with
-      # `tracing` and with `embed`, and `just fonts-cmaps-msrv` (the
-      # `predefined-cmaps` feature's).
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just fonts-msrv fonts-cmaps-msrv
-
-  gfx-msrv:
-    name: Gfx on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-gfx/Cargo.toml, which
-      # `just gfx-msrv` reads, as published, with no feature and with
-      # `tracing`, and `just gfx-cmaps-msrv` (the `predefined-cmaps`
-      # feature's).
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just gfx-msrv gfx-cmaps-msrv
-
-  annots-msrv:
-    name: Annots on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-annots/Cargo.toml, which
-      # `just annots-msrv` reads, as published, with no feature and with
-      # `tracing`, and `just annots-cmaps-msrv` (the `predefined-cmaps`
-      # feature's).
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just annots-msrv annots-cmaps-msrv
-
-  linearize-msrv:
-    name: Linearization on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-linearize/Cargo.toml and
-      # crates/pdf-linearize-lopdf/Cargo.toml, which `just linearize-msrv`
-      # reads, with and without `family`, and with `tracing`, and the lopdf
-      # adapter's crate.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just linearize-msrv
-
-  pdfs-msrv:
-    name: pdfs on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdfs/Cargo.toml, which
-      # `just pdfs-msrv` reads, as published, with no feature, and with every
-      # feature it forwards but its test writer.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just pdfs-msrv
-
-  arlington-msrv:
-    name: Arlington on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-arlington/Cargo.toml,
-      # which `just arlington-msrv` reads.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just arlington-msrv
-
-  lint-msrv:
-    name: pdf-lint on its minimum Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-lint/Cargo.toml, which
-      # `just lint-msrv` reads, as published, the command line among it, and
-      # its library alone.
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
-      - uses: extractions/setup-just@v4
-      - name: Test
-        run: just lint-msrv
