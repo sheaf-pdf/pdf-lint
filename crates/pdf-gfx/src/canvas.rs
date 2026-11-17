@@ -2,7 +2,8 @@
 //! [`ContentWriter`].
 //!
 //! [`Canvas`] layers [`Point`], [`Rect`], [`Matrix`], [`Rotation`], [`Seg`],
-//! scoped `q`/`Q` and marked-content helpers, inset borders, rounded
+//! scoped `q`/`Q` and marked-content helpers, inset borders in the five
+//! border styles ([`BoxBorder`], [`BoxBorderStyle`]), rounded
 //! rectangles, circles/ellipses, placed images/Form XObjects, and `TJ`-kerned
 //! text on top of `pdf-content-streams`'s [`ContentWriter`] while preserving
 //! collision-free deferred resource naming ([`Res`], [`Reserved`],
@@ -38,6 +39,105 @@ impl std::fmt::Debug for TextPiece<'_> {
             TextPiece::Codes(b) => f.debug_struct("Codes").field("len", &b.len()).finish(),
             TextPiece::Adjust(n) => f.debug_tuple("Adjust").field(n).finish(),
         }
+    }
+}
+
+/// How [`Canvas::box_border`] draws a rectangle's border: the five styles a
+/// border style dictionary can ask for (ISO 32000-2, 12.5.4, Table 168).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BoxBorderStyle {
+    /// A solid frame.
+    #[default]
+    Solid,
+    /// A dashed frame, by [`BoxBorder::dash`].
+    Dashed,
+    /// A frame with an embossed look: a light band along the top and left
+    /// inside it, a dark one along the bottom and right.
+    Beveled,
+    /// A frame with an engraved look: a dark band along the top and left
+    /// inside it, a lighter one along the bottom and right.
+    Inset,
+    /// One line along the bottom of the rectangle.
+    Underline,
+}
+
+/// A rectangle's border for [`Canvas::box_border`]: its width, its style and,
+/// for [`BoxBorderStyle::Dashed`], its dash array.
+///
+/// It borrows the dash array and is `Copy`, so a border read from a file is
+/// drawn without cloning it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct BoxBorder<'a> {
+    /// The border's width in user units. Nothing is drawn unless it's finite
+    /// and above `0.0`.
+    pub width: f32,
+    /// The border's style.
+    pub style: BoxBorderStyle,
+    /// The dash array of a [`BoxBorderStyle::Dashed`] border (dashes and gaps
+    /// in user units, starting with a dash); the other styles ignore it.
+    /// `[3.0]` is drawn where it's empty, holds a negative or non-finite
+    /// number, or is all zeros (ISO 32000-2, 12.5.4, Table 168 and 8.4.3.6).
+    pub dash: &'a [f32],
+}
+
+impl<'a> BoxBorder<'a> {
+    /// A border of `width` in `style`, with no dash array.
+    #[must_use]
+    pub const fn new(width: f32, style: BoxBorderStyle) -> Self {
+        Self {
+            width,
+            style,
+            dash: &[],
+        }
+    }
+
+    /// A solid border of `width`.
+    #[must_use]
+    pub const fn solid(width: f32) -> Self {
+        Self::new(width, BoxBorderStyle::Solid)
+    }
+
+    /// Sets the dash array a [`BoxBorderStyle::Dashed`] border is drawn with.
+    #[must_use]
+    pub const fn with_dash(mut self, dash: &'a [f32]) -> Self {
+        self.dash = dash;
+        self
+    }
+
+    /// How far the border reaches into its rectangle from each edge, for a
+    /// caller that pads what it draws inside: the width, or twice the width
+    /// for [`BoxBorderStyle::Beveled`] and [`BoxBorderStyle::Inset`] (the
+    /// frame, then the band inside it). `0.0` where the width isn't finite and
+    /// above `0.0`, as nothing is drawn then.
+    #[must_use]
+    pub fn inset(&self) -> f32 {
+        if !(self.width > 0.0 && self.width.is_finite()) {
+            return 0.0;
+        }
+        match self.style {
+            BoxBorderStyle::Beveled | BoxBorderStyle::Inset => 2.0 * self.width,
+            BoxBorderStyle::Solid | BoxBorderStyle::Dashed | BoxBorderStyle::Underline => {
+                self.width
+            }
+        }
+    }
+}
+
+/// The dash array a dashed border falls back to (ISO 32000-2, 12.5.4,
+/// Table 168).
+const DEFAULT_BORDER_DASH: [f32; 1] = [3.0];
+
+/// `color` at half its brightness, for a bevel's shaded side: a gray level or
+/// RGB components halved; CMYK's cyan, magenta and yellow halved and its black
+/// moved halfway to full, which halves each of the red, green and blue the
+/// device formula gives (ISO 32000-2, 10.4.2.4).
+fn darkened(color: Color) -> Color {
+    match color {
+        Color::Gray(g) => Color::Gray(g / 2.0),
+        Color::Rgb(c) => Color::Rgb(c.map(|v| v / 2.0)),
+        Color::Cmyk([c, m, y, k]) => Color::Cmyk([c / 2.0, m / 2.0, y / 2.0, (k + 1.0) / 2.0]),
     }
 }
 
@@ -201,7 +301,8 @@ impl Canvas {
     /// Draws an inset border of thickness `width` strictly inside `rect` (by
     /// insetting the stroked path by `width / 2.0` inside a `q`..`Q` scope).
     /// Does nothing if `width <= 0.0` or `rect` is narrower/shorter than
-    /// `width`.
+    /// `width`. The stroke takes the current color and dash;
+    /// [`Canvas::box_border`] sets both and draws the other border styles.
     pub fn border_rect(&mut self, rect: Rect, width: f32) {
         if !(width > 0.0 && width.is_finite()) {
             return;
@@ -214,6 +315,135 @@ impl Canvas {
             c.line_width(width);
             c.stroke_rect(inner);
         });
+    }
+
+    /// Draws `border` strictly inside `rect` in one of the five border styles
+    /// (ISO 32000-2, 12.5.4, Table 168), `stroke` its color.
+    ///
+    /// Everything is drawn inside one `q`..`Q` scope with its colors set
+    /// there, so the caller's graphics state is as it was. Nothing is drawn
+    /// where the border's width isn't finite and above `0.0`, or `rect` isn't
+    /// finite. With `w` the width:
+    ///
+    /// - [`BoxBorderStyle::Solid`]: the rectangle inset by `w / 2.0`, stroked
+    ///   at `w` (what [`Canvas::border_rect`] draws). Nothing where `rect` is
+    ///   narrower or shorter than `w`.
+    /// - [`BoxBorderStyle::Dashed`]: the same under [`BoxBorder::dash`] at
+    ///   phase `0`, or under `[3.0]` where that array can't be used.
+    /// - [`BoxBorderStyle::Underline`]: one segment along the bottom, at
+    ///   `rect.y0 + w / 2.0`, stroked at `w`. Nothing where `rect` is shorter
+    ///   than `w` or has no width.
+    /// - [`BoxBorderStyle::Beveled`] and [`BoxBorderStyle::Inset`]: the solid
+    ///   frame, then two mitered bands of thickness `w` just inside it, filled:
+    ///   the top and left one, then the bottom and right one. Beveled fills the
+    ///   first white and the second with `fill_hint` at half its brightness
+    ///   (a middle gray without a hint); Inset fills the first a middle gray
+    ///   and the second a light gray. Nothing where `rect` is narrower or
+    ///   shorter than `2.0 * w`; the frame alone where it's narrower or shorter
+    ///   than `4.0 * w`. [`BoxBorder::inset`] says how far the whole reaches.
+    ///
+    /// `fill_hint` is the color behind the border (a widget's background, a
+    /// box's interior), used only by `Beveled`.
+    pub fn box_border(
+        &mut self,
+        rect: Rect,
+        border: &BoxBorder<'_>,
+        stroke: Color,
+        fill_hint: Option<Color>,
+    ) {
+        let w = border.width;
+        if !(w > 0.0 && w.is_finite() && rect.is_finite()) {
+            return;
+        }
+        let half = w / 2.0;
+        match border.style {
+            BoxBorderStyle::Solid | BoxBorderStyle::Dashed => {
+                let Some(frame) = rect.inset(half, half) else {
+                    return;
+                };
+                self.with_state(|c| {
+                    c.stroke_color(stroke);
+                    c.line_width(w);
+                    if border.style == BoxBorderStyle::Dashed {
+                        let usable = border.dash.iter().all(|d| d.is_finite() && *d >= 0.0)
+                            && border.dash.iter().any(|d| *d > 0.0);
+                        let dash = if usable {
+                            border.dash
+                        } else {
+                            &DEFAULT_BORDER_DASH
+                        };
+                        c.dash(dash, 0.0);
+                    }
+                    c.stroke_rect(frame);
+                });
+            }
+            BoxBorderStyle::Underline => {
+                if !(rect.x0 < rect.x1 && rect.y1 - rect.y0 >= w) {
+                    return;
+                }
+                let y = rect.y0 + half;
+                self.with_state(|c| {
+                    c.stroke_color(stroke);
+                    c.line_width(w);
+                    c.line(Point::new(rect.x0, y), Point::new(rect.x1, y));
+                });
+            }
+            BoxBorderStyle::Beveled | BoxBorderStyle::Inset => {
+                let Some(frame) = rect.inset(half, half) else {
+                    return;
+                };
+                // The bands' outer edge (the frame's inner one) and their
+                // inner edge. No outer edge: the box is under `2 * w`, where
+                // nothing is drawn. No inner edge: under `4 * w`, the frame
+                // alone.
+                let Some(outer) = rect.inset(w, w) else {
+                    return;
+                };
+                let inner = rect.inset(2.0 * w, 2.0 * w);
+                let (top_left, bottom_right) = if border.style == BoxBorderStyle::Beveled {
+                    (
+                        Color::Gray(1.0),
+                        fill_hint.map_or(Color::Gray(0.5), darkened),
+                    )
+                } else {
+                    (Color::Gray(0.5), Color::Gray(0.75))
+                };
+                self.with_state(|c| {
+                    c.stroke_color(stroke);
+                    c.line_width(w);
+                    c.stroke_rect(frame);
+                    let Some(inner) = inner else {
+                        return;
+                    };
+                    c.fill_color(top_left);
+                    c.polyline(
+                        &[
+                            Point::new(outer.x0, outer.y0),
+                            Point::new(outer.x0, outer.y1),
+                            Point::new(outer.x1, outer.y1),
+                            Point::new(inner.x1, inner.y1),
+                            Point::new(inner.x0, inner.y1),
+                            Point::new(inner.x0, inner.y0),
+                        ],
+                        true,
+                        Paint::Fill,
+                    );
+                    c.fill_color(bottom_right);
+                    c.polyline(
+                        &[
+                            Point::new(outer.x0, outer.y0),
+                            Point::new(outer.x1, outer.y0),
+                            Point::new(outer.x1, outer.y1),
+                            Point::new(inner.x1, inner.y1),
+                            Point::new(inner.x1, inner.y0),
+                            Point::new(inner.x0, inner.y0),
+                        ],
+                        true,
+                        Paint::Fill,
+                    );
+                });
+            }
+        }
     }
 
     /// Strokes a single line segment from `from` to `to` (`m l S`).

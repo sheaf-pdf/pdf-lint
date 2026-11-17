@@ -12,11 +12,15 @@
 //! 5. `/DA` round-trip invariance: whenever `DefaultAppearance::parse` reads the
 //!    page content, what `to_bytes` writes parses again and writes the same
 //!    bytes again.
+//! 6. Box borders: `Canvas::box_border` over a box, width, dash array, and
+//!    colors taken from the input's raw bytes draws nothing for a width or box
+//!    it can't use, and otherwise one balanced `q`..`Q` scope that interprets
+//!    without an error or a fault into at most three painted paths.
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
-use pdf_content_streams::{Concat, Join};
+use pdf_content_streams::{Color, Concat, Join, Reserved};
 use pdf_fonts::Fonts;
 use pdf_objects::parse::Parser;
 use pdf_objects::pdf_tokenizer::Rules;
@@ -25,6 +29,7 @@ use pdf_objects::{
 };
 use pdf_semantics::pages::{self, Inheritable};
 
+use crate::canvas::{BoxBorder, BoxBorderStyle, Canvas};
 use crate::da::DefaultAppearance;
 use crate::encode::{EncodedPage, encode, encode_with};
 use crate::geom::{Matrix, PageGeom, Rect};
@@ -45,6 +50,9 @@ pub const SEEDS: &[&[u8]] = &[
     b"BI /SMask /None/W 1 / W* BI /W 1 /W n /Fm1 C\x01\x00\x00\x00\x00\x00\x00\"] I /CS /] ID x E\x01\x00\x00\x00\x00\x00\x00\x05KC 8 /CS /] ID x D x EIH;1 /BPKC 8 /CS /] ID x EI",
     b"BI /F /Fl ID x EI\n\n",
     b"/Helv 0 Tf 0.2 0.4 0.6 rg 0.5 G 0 0 0 1 k 1.5 Tc -2 Tw 90 Tz 14 TL 2 Tr 3 Ts",
+    // A box border's numbers, as `check_box_border` reads them: the box
+    // 0 0 100 50, a width of 2, the dash array [3 1], a hint of 0.5 0.25 1.
+    b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc8\x42\x00\x00\x48\x42\x00\x00\x00\x40\x00\x00\x40\x40\x00\x00\x80\x3f\x00\x00\x00\x3f\x00\x00\x80\x3e\x00\x00\x80\x3f",
     b"1 Tw 2 Tc /Fm1 Do 5 Tw 6 Tc /Fm1 Do\xff<< /XObject << /Fm1 1 0 R >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>\xff<< /Subtype /Form /BBox [0 0 80 80] >>\nstream\nBT /F1 10 Tf 1e39 0 (Hi) \" ET",
 ];
 
@@ -57,6 +65,7 @@ pub fn check(data: &[u8]) {
     let res_bytes = parts.next().unwrap_or_default();
 
     check_default_appearance(page_bytes);
+    check_box_border(data);
 
     let mut parse_limits = pdf_objects::Limits::DEFAULT;
     parse_limits.nesting = 16;
@@ -256,6 +265,81 @@ fn check_default_appearance(da: &[u8]) {
         .unwrap_or(written.len());
     if parsed.font_name.is_none() || name_word <= 255 {
         assert_eq!(again.to_bytes(), written);
+    }
+}
+
+/// Draws a border in each of the five styles from numbers read off `data`'s
+/// raw bytes (any bit pattern: NaN, infinities, and subnormals among them) and
+/// holds what `Canvas::box_border` promises of the stream.
+fn check_box_border(data: &[u8]) {
+    let mut numbers = data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c));
+    let mut next = || numbers.next().unwrap_or(0.0);
+    // As given, not put in order: an inverted box is one too small to draw in.
+    let rect = Rect {
+        x0: next(),
+        y0: next(),
+        x1: next(),
+        y1: next(),
+    };
+    let width = next();
+    let dash = [next(), next()];
+    let hint = Color::Rgb([next(), next(), next()]);
+    let usable = width > 0.0 && width.is_finite() && rect.is_finite();
+
+    let store: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let streams = WithStreams::new(&store, |id: ObjectId, _cap: usize| {
+        Err(Unreadable::new(id, Why::Damaged, "missing stream"))
+    });
+    for style in [
+        BoxBorderStyle::Solid,
+        BoxBorderStyle::Dashed,
+        BoxBorderStyle::Beveled,
+        BoxBorderStyle::Inset,
+        BoxBorderStyle::Underline,
+    ] {
+        let border = BoxBorder::new(width, style).with_dash(&dash);
+        let _ = format!("{border:?}");
+        let inset = border.inset();
+        assert!(inset >= 0.0);
+        assert_eq!(inset == 0.0, !(width > 0.0 && width.is_finite()));
+
+        let mut canvas = Canvas::new();
+        canvas.box_border(rect, &border, Color::Gray(0.0), Some(hint));
+        let (bytes, needs) = canvas.finish(&Reserved::default());
+        assert!(needs.0.is_empty());
+        if bytes.is_empty() {
+            continue;
+        }
+        assert!(usable, "a border drawn for a width or box that can't be");
+        let words = || bytes.split(u8::is_ascii_whitespace);
+        assert!(bytes.starts_with(b"q\n") && bytes.ends_with(b"Q\n"));
+        assert_eq!(words().filter(|w| w == b"q").count(), 1);
+        assert_eq!(words().filter(|w| w == b"Q").count(), 1);
+
+        let mut faults = Vec::new();
+        let mut paths = 0usize;
+        let summary = interpret_with(
+            streams,
+            &Concat::new(&[&bytes]),
+            None,
+            &Limits::DEFAULT,
+            &Fonts::default(),
+            Opts::default(),
+            &mut faults,
+            |ev| {
+                if matches!(ev.kind, Kind::Path(_)) {
+                    paths += 1;
+                }
+                ControlFlow::Continue(())
+            },
+        );
+        assert!(summary.is_ok(), "a written border must interpret");
+        assert!(faults.is_empty(), "a written border reads without a fault");
+        assert!(paths <= 3);
     }
 }
 

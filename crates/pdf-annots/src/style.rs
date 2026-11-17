@@ -4,6 +4,7 @@
 use std::fmt;
 
 use pdf_content_streams::Color;
+use pdf_gfx::{BoxBorder, BoxBorderStyle};
 use pdf_objects::fault::Sink;
 use pdf_objects::{Dict, Object, ObjectId, Resolve};
 
@@ -198,6 +199,19 @@ impl BorderStyle {
     }
 }
 
+impl From<BorderStyle> for BoxBorderStyle {
+    /// The drawing style of a `/BS /S` border style.
+    fn from(style: BorderStyle) -> Self {
+        match style {
+            BorderStyle::Solid => Self::Solid,
+            BorderStyle::Dashed => Self::Dashed,
+            BorderStyle::Beveled => Self::Beveled,
+            BorderStyle::Inset => Self::Inset,
+            BorderStyle::Underline => Self::Underline,
+        }
+    }
+}
+
 /// Effective border specification resolved from `/BS` or legacy `/Border`
 /// (ISO 32000-2 §12.5.4).
 #[derive(Debug, Clone, PartialEq)]
@@ -208,7 +222,10 @@ pub struct Border {
     /// Border style (`Solid` by default, or `Dashed` when a 4-element `/Border`
     /// supplies a dash array).
     pub style: BorderStyle,
-    /// Dash array when `style == BorderStyle::Dashed` (`[3.0]` by default).
+    /// Dash array when `style == BorderStyle::Dashed`. A reader fills in
+    /// `[3.0]` where the file gives none, and a dashed border built by hand
+    /// with an empty array is drawn with `[3.0]` too (ISO 32000-2, 12.5.4,
+    /// Table 168).
     pub dash: Vec<f32>,
     /// Horizontal corner radius from legacy `/Border` (`0.0` when `/BS` is
     /// used).
@@ -230,6 +247,17 @@ impl Default for Border {
             vertical_radius: 0.0,
             cloudy_intensity: None,
         }
+    }
+}
+
+impl Border {
+    /// This border's width, style, and dash array as a [`BoxBorder`], for
+    /// `pdf_gfx::Canvas::box_border` to draw around a rectangle (an
+    /// annotation's box, a widget's). The corner radii and the cloudy effect
+    /// aren't a rectangle's and are left out.
+    #[must_use]
+    pub fn to_box_border(&self) -> BoxBorder<'_> {
+        BoxBorder::new(self.width, self.style.into()).with_dash(&self.dash)
     }
 }
 

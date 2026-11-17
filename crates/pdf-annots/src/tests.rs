@@ -972,3 +972,471 @@ fn default_appearance_is_pdf_gfxs_type() {
     // A transparent annotation color is no `/DA` color.
     assert_eq!(AnnotColor::Transparent.to_content_color(), None);
 }
+
+const BORDER_STYLES: [BorderStyle; 5] = [
+    BorderStyle::Solid,
+    BorderStyle::Dashed,
+    BorderStyle::Beveled,
+    BorderStyle::Inset,
+    BorderStyle::Underline,
+];
+
+/// A red border of `width` in `style` over a light gray interior.
+fn bordered(width: f32, style: BorderStyle) -> PaintStyle {
+    PaintStyle::new(
+        Some(AnnotColor::Rgb([1.0, 0.0, 0.0])),
+        Some(AnnotColor::Gray(0.8)),
+    )
+    .with_border(Border {
+        width,
+        style,
+        ..Border::default()
+    })
+}
+
+fn content_text(ap: &SynthesizedAp) -> String {
+    String::from_utf8(ap.content.clone()).unwrap()
+}
+
+/// What `pdf_gfx::Canvas::box_border` writes for `style`'s border around
+/// `rect`.
+fn border_text(rect: Rect, style: &PaintStyle) -> String {
+    let mut canvas = pdf_gfx::Canvas::new();
+    canvas.box_border(
+        rect,
+        &style.border.to_box_border(),
+        style.stroke.and_then(AnnotColor::to_content_color).unwrap(),
+        style.fill.and_then(AnnotColor::to_content_color),
+    );
+    String::from_utf8(canvas.finish(&pdf_content_streams::Reserved::default()).0).unwrap()
+}
+
+/// Interprets a synthesized appearance over its own resources, holding that
+/// it reads without a fault, that its `q` and `Q` balance, and that every
+/// painted path lies inside its `/BBox` (a stroke's half width added). Returns
+/// the painted paths' count and the glyphs'.
+fn read_back(ap: &SynthesizedAp) -> (usize, usize) {
+    use std::ops::ControlFlow;
+
+    use pdf_content_streams::Paint;
+    use pdf_gfx::{Kind, Seg};
+
+    let words = || ap.content.split(u8::is_ascii_whitespace);
+    assert_eq!(
+        words().filter(|w| w == b"q").count(),
+        words().filter(|w| w == b"Q").count(),
+        "q and Q balance"
+    );
+    let objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let streams = pdf_objects::WithStreams::new(&objects, |id: ObjectId, _limit: usize| {
+        Err(pdf_objects::Unreadable::new(id, Why::Damaged, "missing"))
+    });
+    let resources = Object::from(ap.resources.clone());
+    let slices = [&ap.content[..]];
+    let mut faults = Vec::new();
+    let mut painted = 0usize;
+    let summary = pdf_gfx::interpret_with(
+        streams,
+        &pdf_content_streams::Concat::new(&slices),
+        Some(&resources),
+        &pdf_gfx::Limits::DEFAULT,
+        &pdf_fonts::Fonts::default(),
+        pdf_gfx::Opts::default(),
+        &mut faults,
+        |ev| {
+            if let Kind::Path(path) = &ev.kind
+                && !matches!(path.paint, Paint::None)
+            {
+                painted += 1;
+                let half = if matches!(path.paint, Paint::Stroke) {
+                    ev.state.line_width / 2.0
+                } else {
+                    0.0
+                };
+                // A single level segment is an underline: butt caps, so its
+                // width reaches up and down only.
+                let side = if matches!(path.segments, [Seg::Move(a), Seg::Line(b)] if a.y == b.y) {
+                    0.0
+                } else {
+                    half
+                };
+                for p in path.segments.iter().flat_map(Seg::points) {
+                    assert!(
+                        p.x - side >= ap.bbox.x0 - 1e-3
+                            && p.x + side <= ap.bbox.x1 + 1e-3
+                            && p.y - half >= ap.bbox.y0 - 1e-3
+                            && p.y + half <= ap.bbox.y1 + 1e-3,
+                        "{p:?} with a half width of {half} is outside {:?}",
+                        ap.bbox
+                    );
+                }
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(faults.is_empty(), "no fault (an extra Q among them)");
+    (painted, summary.glyphs)
+}
+
+#[test]
+fn free_text_and_square_borders_are_drawn_in_each_of_the_five_styles() {
+    use pdf_gfx::{BoxBorder, BoxBorderStyle};
+
+    // A border style is its drawing style, and a border carries its width
+    // and dash array to the canvas.
+    for (read, drawn) in [
+        (BorderStyle::Solid, BoxBorderStyle::Solid),
+        (BorderStyle::Dashed, BoxBorderStyle::Dashed),
+        (BorderStyle::Beveled, BoxBorderStyle::Beveled),
+        (BorderStyle::Inset, BoxBorderStyle::Inset),
+        (BorderStyle::Underline, BoxBorderStyle::Underline),
+    ] {
+        assert_eq!(BoxBorderStyle::from(read), drawn);
+        let border = Border {
+            width: 1.5,
+            style: read,
+            dash: vec![4.0, 2.0],
+            ..Border::default()
+        };
+        assert_eq!(
+            border.to_box_border(),
+            BoxBorder::new(1.5, drawn).with_dash(&[4.0, 2.0])
+        );
+    }
+
+    let rect = Rect::new(100.0, 200.0, 200.0, 250.0);
+    let bbox = Rect::new(0.0, 0.0, 100.0, 50.0);
+    for style in BORDER_STYLES {
+        let paint = bordered(2.0, style);
+        // Painted paths of the border alone: its frame or line, and a
+        // bevel's two bands.
+        let border_paths = match style {
+            BorderStyle::Beveled | BorderStyle::Inset => 3,
+            _ => 1,
+        };
+
+        // FreeText: the background over the whole box, then the canvas's
+        // border around it (the background its bevel's hint), then the text.
+        let ft = crate::synth_free_text(rect, "Hi", None, Quadding::Left, &paint).unwrap();
+        let text = content_text(&ft);
+        let border = border_text(bbox, &paint);
+        assert!(!border.is_empty());
+        assert!(
+            text.starts_with(&format!("q\n0.8 g\n0 0 100 50 re\nf\n{border}")),
+            "{style:?}: {text}"
+        );
+        assert_eq!(read_back(&ft), (1 + border_paths, 2), "{style:?}");
+
+        // Square: the interior over the box less `/RD`, then the border
+        // inside that.
+        let sq = crate::synth_shape(ShapeKind::Square, rect, &paint, Some([1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        let inner = Rect::new(1.0, 2.0, 97.0, 46.0);
+        assert_eq!(
+            content_text(&sq),
+            format!(
+                "q\n0.8 g\n1 2 96 44 re\nf\n{}Q\n",
+                border_text(inner, &paint)
+            ),
+            "{style:?}"
+        );
+        assert_eq!(read_back(&sq), (1 + border_paths, 0), "{style:?}");
+
+        // With no interior color the border stands alone, a bevel's shade
+        // the hintless gray.
+        let mut hollow = paint.clone();
+        hollow.fill = None;
+        let sq = crate::synth_shape(ShapeKind::Square, rect, &hollow, None).unwrap();
+        assert_eq!(
+            content_text(&sq),
+            format!("q\n{}Q\n", border_text(bbox, &hollow)),
+            "{style:?}"
+        );
+        // With no border color, or no width, the interior alone.
+        let mut plain = paint.clone();
+        plain.stroke = None;
+        let sq = crate::synth_shape(ShapeKind::Square, rect, &plain, None).unwrap();
+        assert_eq!(content_text(&sq), "q\n0.8 g\n0 0 100 50 re\nf\nQ\n");
+        let sq = crate::synth_shape(ShapeKind::Square, rect, &bordered(0.0, style), None).unwrap();
+        assert_eq!(content_text(&sq), "q\n0.8 g\n0 0 100 50 re\nf\nQ\n");
+        // With neither, nothing.
+        let mut neither = hollow.clone();
+        neither.stroke = None;
+        let sq = crate::synth_shape(ShapeKind::Square, rect, &neither, None).unwrap();
+        assert_eq!(content_text(&sq), "");
+    }
+
+    // The styles' own operators, once each, on a square of width 1.
+    let square = |style| {
+        content_text(
+            &crate::synth_shape(ShapeKind::Square, rect, &bordered(1.0, style), None).unwrap(),
+        )
+    };
+    let fill = "q\n0.8 g\n0 0 100 50 re\nf\n";
+    let frame = "q\n1 0 0 RG\n1 w\n0.5 0.5 99 49 re\nS\n";
+    assert_eq!(square(BorderStyle::Solid), format!("{fill}{frame}Q\nQ\n"));
+    assert_eq!(
+        square(BorderStyle::Dashed),
+        format!("{fill}q\n1 0 0 RG\n1 w\n[3] 0 d\n0.5 0.5 99 49 re\nS\nQ\nQ\n")
+    );
+    assert_eq!(
+        square(BorderStyle::Underline),
+        format!("{fill}q\n1 0 0 RG\n1 w\n0 0.5 m\n100 0.5 l\nS\nQ\nQ\n")
+    );
+    let bands = |light: &str, dark: &str| {
+        format!(
+            "{fill}{frame}{light}\n1 1 m\n1 49 l\n99 49 l\n98 48 l\n2 48 l\n2 2 l\nh\nf\n\
+             {dark}\n1 1 m\n99 1 l\n99 49 l\n98 48 l\n98 2 l\n2 2 l\nh\nf\nQ\nQ\n"
+        )
+    };
+    // Beveled: the interior color (0.8 gray) at half its brightness below
+    // and to the right.
+    assert_eq!(square(BorderStyle::Beveled), bands("1 g", "0.4 g"));
+    assert_eq!(square(BorderStyle::Inset), bands("0.5 g", "0.75 g"));
+
+    // A dashed border's own array is drawn as given.
+    let mut dashed = bordered(1.0, BorderStyle::Dashed);
+    dashed.border.dash = vec![4.0, 2.0];
+    let sq = crate::synth_shape(ShapeKind::Square, rect, &dashed, None).unwrap();
+    assert!(content_text(&sq).contains("1 w\n[4 2] 0 d\n0.5 0.5 99 49 re\nS\n"));
+    let ft = crate::synth_free_text(rect, "Hi", None, Quadding::Left, &dashed).unwrap();
+    assert!(content_text(&ft).contains("1 w\n[4 2] 0 d\n0.5 0.5 99 49 re\nS\n"));
+
+    // Under an opacity the fill and the border share one graphics state.
+    let sq = crate::synth_shape(
+        ShapeKind::Square,
+        rect,
+        &bordered(1.0, BorderStyle::Solid).with_opacity(0.5),
+        None,
+    )
+    .unwrap();
+    let text = content_text(&sq);
+    assert!(
+        text.starts_with("q\n/") && text.contains(" gs\n0.8 g\n0 0 100 50 re\nf\nq\n1 0 0 RG\n")
+    );
+    assert_eq!(read_back(&sq), (2, 0));
+}
+
+#[test]
+fn free_text_text_clears_its_border_and_stays_put_for_a_solid_one() {
+    let rect = Rect::new(100.0, 200.0, 200.0, 250.0);
+    let free_text = |style: &PaintStyle| {
+        content_text(&crate::synth_free_text(rect, "Hi", None, Quadding::Left, style).unwrap())
+    };
+    // The box the text is laid out and clipped in.
+    let text_box = |style: &PaintStyle| {
+        let text = free_text(style);
+        let clip = text.find(" re\nW\nn\n").expect("the text's clip");
+        let start = text[..clip].rfind('\n').unwrap() + 1;
+        text[start..clip].to_owned()
+    };
+
+    // A solid, dashed or underline border: its width and 2 more, as before
+    // the other styles were drawn; a width of 0 or below: 2.
+    for style in [
+        BorderStyle::Solid,
+        BorderStyle::Dashed,
+        BorderStyle::Underline,
+    ] {
+        assert_eq!(text_box(&bordered(1.0, style)), "3 3 94 44", "{style:?}");
+        assert_eq!(
+            text_box(&bordered(3.5, style)),
+            "5.5 5.5 89 39",
+            "{style:?}"
+        );
+    }
+    for style in BORDER_STYLES {
+        for width in [0.0, -1.0, f32::NAN] {
+            assert_eq!(text_box(&bordered(width, style)), "2 2 96 46", "{style:?}");
+            assert!(!free_text(&bordered(width, style)).contains("RG"));
+        }
+    }
+    // A bevel takes twice its width (the frame, then the band), and the text
+    // clears both.
+    for style in [BorderStyle::Beveled, BorderStyle::Inset] {
+        assert_eq!(text_box(&bordered(1.0, style)), "4 4 92 42", "{style:?}");
+        assert_eq!(text_box(&bordered(3.0, style)), "8 8 84 34", "{style:?}");
+    }
+    // The padding counts the border whether or not a color draws it.
+    let mut uncolored = bordered(3.0, BorderStyle::Solid);
+    uncolored.stroke = None;
+    assert_eq!(text_box(&uncolored), "5 5 90 40");
+    assert!(!free_text(&uncolored).contains("RG"));
+
+    // A solid border's whole stream, at widths 1, 0 and -1: what it was when
+    // the border was `border_rect`'s under a color set outside its `q`, but
+    // for where that color stands.
+    #[cfg(feature = "text-layout")]
+    let (text_1, text_0) = (
+        "0 g\nq\n3 3 94 44 re\nW\nn\nBT\n/ShWMNLLO 12 Tf\n1 0 0 1 3 38.384 Tm\n(Hi) Tj\nET\nQ\nQ\n",
+        "0 g\nq\n2 2 96 46 re\nW\nn\nBT\n/ShWMNLLO 12 Tf\n1 0 0 1 2 39.384 Tm\n(Hi) Tj\nET\nQ\nQ\n",
+    );
+    #[cfg(not(feature = "text-layout"))]
+    let (text_1, text_0) = (
+        "q\n3 3 94 44 re\nW\nn\n0 g\nBT\n/ShWMNLLO 12 Tf\n1 0 0 1 3 35 Tm\n(Hi) Tj\nET\nQ\nQ\n",
+        "q\n2 2 96 46 re\nW\nn\n0 g\nBT\n/ShWMNLLO 12 Tf\n1 0 0 1 2 36 Tm\n(Hi) Tj\nET\nQ\nQ\n",
+    );
+    let background = "q\n0.8 g\n0 0 100 50 re\nf\n";
+    let now = free_text(&bordered(1.0, BorderStyle::Solid));
+    assert_eq!(
+        now,
+        format!("{background}q\n1 0 0 RG\n1 w\n0.5 0.5 99 49 re\nS\nQ\n{text_1}")
+    );
+    assert_eq!(
+        now.replacen("q\n1 0 0 RG\n1 w\n", "1 0 0 RG\nq\n1 w\n", 1),
+        format!("{background}1 0 0 RG\nq\n1 w\n0.5 0.5 99 49 re\nS\nQ\n{text_1}")
+    );
+    for width in [0.0, -1.0] {
+        assert_eq!(
+            free_text(&bordered(width, BorderStyle::Solid)),
+            format!("{background}{text_0}"),
+            "{width}"
+        );
+    }
+}
+
+#[test]
+fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
+    let rect = Rect::new(100.0, 200.0, 200.0, 250.0);
+    let shape = |kind, style: &PaintStyle| {
+        let ap = crate::synth_shape(kind, rect, style, None).unwrap();
+        assert_eq!(read_back(&ap), (1, 0));
+        content_text(&ap)
+    };
+    let rounded = |style| {
+        let mut paint = bordered(2.0, style);
+        paint.border.horizontal_radius = 5.0;
+        paint.border.vertical_radius = 5.0;
+        paint
+    };
+    let cloudy = |style| {
+        let mut paint = bordered(2.0, style);
+        paint.border.cloudy_intensity = Some(1.0);
+        paint
+    };
+
+    // One path along the border's center line, filled and stroked.
+    let circle = shape(ShapeKind::Circle, &bordered(2.0, BorderStyle::Solid));
+    assert_eq!(
+        circle,
+        "q\n1 0 0 RG\n2 w\n0.8 g\n99 25 m\n99 38.2548 77.062 49 50 49 c\n\
+         22.938 49 1 38.2548 1 25 c\n1 11.7452 22.938 1 50 1 c\n\
+         77.062 1 99 11.7452 99 25 c\nh\nB\nQ\n"
+    );
+    let round = shape(ShapeKind::Square, &rounded(BorderStyle::Solid));
+    assert!(
+        round.starts_with("q\n1 0 0 RG\n2 w\n0.8 g\n6 1 m\n94 1 l\n96.7614 1 99 3.2386 99 6 c\n"),
+        "{round}"
+    );
+    assert!(round.ends_with("h\nB\nQ\n"));
+    let cloud = shape(ShapeKind::Square, &cloudy(BorderStyle::Solid));
+    assert_eq!(cloud, "q\n1 0 0 RG\n2 w\n0.8 g\n1 1 98 48 re\nB\nQ\n");
+
+    // The bevels and the underline are a plain rectangle's: here they come
+    // out solid.
+    for style in [
+        BorderStyle::Beveled,
+        BorderStyle::Inset,
+        BorderStyle::Underline,
+    ] {
+        assert_eq!(
+            shape(ShapeKind::Circle, &bordered(2.0, style)),
+            circle,
+            "{style:?}"
+        );
+        assert_eq!(
+            shape(ShapeKind::Square, &rounded(style)),
+            round,
+            "{style:?}"
+        );
+        assert_eq!(shape(ShapeKind::Square, &cloudy(style)), cloud, "{style:?}");
+    }
+    // A dashed one is the same path under its dash array.
+    let dash = "q\n1 0 0 RG\n2 w\n[3] 0 d\n0.8 g\n";
+    let solid = "q\n1 0 0 RG\n2 w\n0.8 g\n";
+    assert_eq!(
+        shape(ShapeKind::Circle, &bordered(2.0, BorderStyle::Dashed)),
+        circle.replacen(solid, dash, 1)
+    );
+    assert_eq!(
+        shape(ShapeKind::Square, &rounded(BorderStyle::Dashed)),
+        round.replacen(solid, dash, 1)
+    );
+    assert_eq!(
+        shape(ShapeKind::Square, &cloudy(BorderStyle::Dashed)),
+        cloud.replacen(solid, dash, 1)
+    );
+}
+
+#[test]
+fn a_dashed_border_built_with_no_array_is_dashed_by_threes() {
+    let rect = Rect::new(100.0, 200.0, 200.0, 250.0);
+    let border = |dash: &[f32]| Border {
+        width: 2.0,
+        style: BorderStyle::Dashed,
+        dash: dash.to_vec(),
+        ..Border::default()
+    };
+    let black =
+        |dash: &[f32]| PaintStyle::new(Some(AnnotColor::Gray(0.0)), None).with_border(border(dash));
+    let pts = [
+        Point::new(110.0, 210.0),
+        Point::new(190.0, 240.0),
+        Point::new(150.0, 245.0),
+    ];
+    let line = |style: &PaintStyle| {
+        content_text(
+            &crate::synth_line(
+                rect,
+                pts[0],
+                pts[1],
+                (LineEnding::None, LineEnding::None),
+                style,
+            )
+            .unwrap(),
+        )
+    };
+
+    // A line: Table 168's default array where the border has none (a border
+    // read from a file already has it; one built by hand need not).
+    assert_eq!(
+        line(&black(&[])),
+        "q\n0 G\n0 g\n2 w\n[3] 0 d\n2 w\n10 10 m\n90 40 l\nS\n[] 0 d\nQ\n"
+    );
+    assert_eq!(line(&black(&[])), line(&black(&[3.0])));
+    assert!(line(&black(&[5.0, 1.0])).contains("2 w\n[5 1] 0 d\n2 w\n"));
+    // A solid border sets no dash for its line.
+    let solid = PaintStyle::new(Some(AnnotColor::Gray(0.0)), None);
+    assert!(!line(&solid).contains("[3]"));
+
+    // And everywhere else a border's path is stroked.
+    for kind in [PolyKind::Polygon, PolyKind::PolyLine] {
+        let poly = |style: &PaintStyle| {
+            content_text(
+                &crate::synth_poly(
+                    kind,
+                    rect,
+                    &pts,
+                    (LineEnding::None, LineEnding::None),
+                    style,
+                )
+                .unwrap(),
+            )
+        };
+        assert!(poly(&black(&[])).contains("[3] 0 d\n"), "{kind:?}");
+        assert_eq!(poly(&black(&[])), poly(&black(&[3.0])), "{kind:?}");
+    }
+    let ink = |border: &Border| {
+        content_text(
+            &crate::synth_ink(rect, &[pts.to_vec()], AnnotColor::Gray(0.0), border, 1.0).unwrap(),
+        )
+    };
+    assert!(ink(&border(&[])).contains("[3] 0 d\n"));
+    assert_eq!(ink(&border(&[])), ink(&border(&[3.0])));
+    let circle = |style: &PaintStyle| {
+        content_text(&crate::synth_shape(ShapeKind::Circle, rect, style, None).unwrap())
+    };
+    assert!(circle(&black(&[])).contains("2 w\n[3] 0 d\n"));
+    assert_eq!(circle(&black(&[])), circle(&black(&[3.0])));
+}

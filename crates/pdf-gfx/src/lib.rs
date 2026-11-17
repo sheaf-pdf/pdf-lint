@@ -26,8 +26,10 @@
 //!   earlier lines, while round-tripping every placed glyph, path, clip, and
 //!   mark bit-for-bit.
 //! - **Vector, XObject & text canvas ([`Canvas`], [`TextPiece`]):**
-//!   Builds new content streams with scoped `q`/`Q` state, inset borders,
-//!   rounded rectangles, ellipses, placed images/Form XObjects, and
+//!   Builds new content streams with scoped `q`/`Q` state, inset borders in
+//!   the five border styles of ISO 32000-2, §12.5.4 ([`Canvas::box_border`]
+//!   with [`BoxBorder`] and [`BoxBorderStyle`]: solid, dashed, beveled, inset,
+//!   underline), rounded rectangles, ellipses, placed images/Form XObjects, and
 //!   `TJ`-kerned text over [`ContentWriter`](pdf_content_streams::ContentWriter).
 //! - **Default appearance strings ([`DefaultAppearance`]):**
 //!   Parses a `/DA` string (ISO 32000-2, §12.7.4.3) under
@@ -152,7 +154,7 @@ mod text;
 mod wrap;
 mod xobject;
 
-pub use canvas::{Canvas, TextPiece};
+pub use canvas::{BoxBorder, BoxBorderStyle, Canvas, TextPiece};
 pub use clip::{Clip, ClipPart, ClipParts};
 pub use da::DefaultAppearance;
 pub use encode::{EncodedPage, encode, encode_with};

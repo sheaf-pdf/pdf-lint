@@ -16,7 +16,7 @@ PDF annotations, appearance placement, destinations, and actions (ISO 32000-2, Â
 - **Destinations, actions & reply threads (`Dest`, `DestTable`, `Action`, `resolve_threads`):**
   - Re-exports `pdf_semantics::dest` and `pdf_semantics::action` for explicit/named destinations across Catalog `/Names/Dests` and `/Dests` and bounded `/A`, `/Next`, `/AA`, and `/OpenAction` chains, and resolves `/IRT` reply/group hierarchies with effective `MarkedState` and `ReviewState` tracking.
 - **Appearance synthesis, builders & zero-I/O flattening (`SynthesizedAp`, `BuiltAnnot`, `AnnotMut`, `plan_flatten`):**
-  - Deterministically synthesizes `/AP /N` (and `/Redact` `/RO`) Form XObjects over `pdf_gfx::Canvas`, constructs or mutates annotation dictionaries without file I/O, and plans graphics-state-isolated page flattening with collision-free `/Resources/XObject` names.
+  - Deterministically synthesizes `/AP /N` (and `/Redact` `/RO`) Form XObjects over `pdf_gfx::Canvas` (FreeText and plain `/Square` borders in all five `/BS` styles: solid, dashed, beveled, inset, underline), constructs or mutates annotation dictionaries without file I/O, and plans graphics-state-isolated page flattening with collision-free `/Resources/XObject` names.
 
 ## Quickstart
 

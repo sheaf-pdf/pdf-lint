@@ -12,12 +12,12 @@ use pdf_objects::{Dict, Object, ObjectId, Stream, Unreadable, Why, WithStreams, 
 use pdf_semantics::pages;
 
 use crate::{
-    ActiveColorSpace, BlendState, Canvas, Cap, Clip, ClipPart, ColorValues, DashPattern,
-    DefaultAppearance, EncodedPage, Error, Fault, FormUse, Forms, ImageDrawn, ImageOf, Kind,
-    Limits, Mark, MarkProps, Marks, Matrix, Opts, PageGeom, PathDrawn, Point, Quad, Rect, Refused,
-    RenderingIntent, Rotation, Seg, ShadingDrawn, SoftMask, SoftMaskKind, State, Summary,
-    TextPiece, TextState, Unwritable, UseId, Wants, encode, encode_with, fuzz, interpret,
-    interpret_with,
+    ActiveColorSpace, BlendState, BoxBorder, BoxBorderStyle, Canvas, Cap, Clip, ClipPart,
+    ColorValues, DashPattern, DefaultAppearance, EncodedPage, Error, Fault, FormUse, Forms,
+    ImageDrawn, ImageOf, Kind, Limits, Mark, MarkProps, Marks, Matrix, Opts, PageGeom, PathDrawn,
+    Point, Quad, Rect, Refused, RenderingIntent, Rotation, Seg, ShadingDrawn, SoftMask,
+    SoftMaskKind, State, Summary, TextPiece, TextState, Unwritable, UseId, Wants, encode,
+    encode_with, fuzz, interpret, interpret_with,
 };
 
 #[derive(Default)]
@@ -115,6 +115,8 @@ fn public_types_are_send_and_sync() {
     check::<Summary>();
     check::<EncodedPage>();
     check::<Canvas>();
+    check::<BoxBorder<'static>>();
+    check::<BoxBorderStyle>();
     #[cfg(feature = "text-layout")]
     {
         check::<crate::PageChar>();
@@ -2613,4 +2615,551 @@ fn default_appearance_parse_is_refused_past_a_content_cap() {
         ),
         None
     );
+}
+
+const BOX_BORDER_STYLES: [BoxBorderStyle; 5] = [
+    BoxBorderStyle::Solid,
+    BoxBorderStyle::Dashed,
+    BoxBorderStyle::Beveled,
+    BoxBorderStyle::Inset,
+    BoxBorderStyle::Underline,
+];
+
+/// What `Canvas::box_border` writes for one border, as text.
+fn box_border_text(
+    rect: Rect,
+    border: &BoxBorder<'_>,
+    stroke: Color,
+    fill_hint: Option<Color>,
+) -> String {
+    let mut canvas = Canvas::new();
+    canvas.box_border(rect, border, stroke, fill_hint);
+    let (bytes, needs) = canvas.finish(&Reserved::default());
+    assert!(needs.0.is_empty(), "a border needs no resource");
+    String::from_utf8(bytes).unwrap()
+}
+
+/// One painted path of an interpreted stream: how it was painted, the state it
+/// was painted under, and the box its paint covers (a stroke's half width
+/// added: on every side of a closed path's mitered corners, across a single
+/// horizontal segment's butt-capped line only).
+struct Painted {
+    paint: Paint,
+    state: State,
+    points: Vec<Point>,
+    covers: Rect,
+}
+
+/// Interprets `content` with no resources, holding that it reads without a
+/// fault and that its `q` and `Q` balance, and returns its painted paths.
+fn painted_paths(content: &[u8]) -> Vec<Painted> {
+    let words = || content.split(u8::is_ascii_whitespace);
+    assert_eq!(
+        words().filter(|w| w == b"q").count(),
+        words().filter(|w| w == b"Q").count(),
+        "q and Q balance"
+    );
+    let store = Store::default();
+    let mut faults = Vec::new();
+    let mut out = Vec::new();
+    let summary = interpret_with(
+        store.as_streams(),
+        &Concat::new(&[content]),
+        None,
+        &Limits::DEFAULT,
+        &Fonts::default(),
+        Opts::default(),
+        &mut faults,
+        |ev| {
+            if let Kind::Path(path) = &ev.kind {
+                let points: Vec<Point> = path.segments.iter().flat_map(Seg::points).collect();
+                let mut covers = points.iter().fold(
+                    Rect {
+                        x0: f32::INFINITY,
+                        y0: f32::INFINITY,
+                        x1: f32::NEG_INFINITY,
+                        y1: f32::NEG_INFINITY,
+                    },
+                    |r, p| Rect {
+                        x0: r.x0.min(p.x),
+                        y0: r.y0.min(p.y),
+                        x1: r.x1.max(p.x),
+                        y1: r.y1.max(p.y),
+                    },
+                );
+                if matches!(path.paint, Paint::Stroke) {
+                    let half = ev.state.line_width / 2.0;
+                    covers.y0 -= half;
+                    covers.y1 += half;
+                    let one_level_segment = matches!(
+                        path.segments,
+                        [Seg::Move(a), Seg::Line(b)] if a.y == b.y
+                    );
+                    if !one_level_segment {
+                        covers.x0 -= half;
+                        covers.x1 += half;
+                    }
+                }
+                out.push(Painted {
+                    paint: path.paint,
+                    state: ev.state.clone(),
+                    points,
+                    covers,
+                });
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(faults.is_empty(), "no fault (an extra Q among them)");
+    assert!(summary.deepest_q <= 1);
+    out
+}
+
+#[test]
+fn box_border_solid_and_dashed_stroke_the_inset_frame() {
+    let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
+    let red = Color::Rgb([1.0, 0.0, 0.0]);
+
+    // A solid border is `border_rect`'s drawing with its color set inside
+    // the `q`.
+    let mut plain = Canvas::new();
+    plain.border_rect(rect, 2.0);
+    let plain = String::from_utf8(plain.finish(&Reserved::default()).0).unwrap();
+    assert_eq!(plain, "q\n2 w\n11 21 98 48 re\nS\nQ\n");
+    let solid = box_border_text(rect, &BoxBorder::solid(2.0), red, None);
+    assert_eq!(solid, "q\n1 0 0 RG\n2 w\n11 21 98 48 re\nS\nQ\n");
+    assert_eq!(solid.replacen("1 0 0 RG\n", "", 1), plain);
+    // The fill hint and a dash array are a solid border's to ignore.
+    assert_eq!(
+        box_border_text(
+            rect,
+            &BoxBorder::solid(2.0).with_dash(&[1.0, 2.0]),
+            red,
+            Some(Color::Gray(0.3))
+        ),
+        solid
+    );
+    assert_eq!(
+        BoxBorder::solid(2.0),
+        BoxBorder::new(2.0, BoxBorderStyle::Solid)
+    );
+    assert_eq!(BoxBorderStyle::default(), BoxBorderStyle::Solid);
+    // A box exactly as wide as the border still takes it; a narrower or
+    // shorter one takes nothing.
+    assert_eq!(
+        box_border_text(
+            Rect::new(0.0, 0.0, 2.0, 9.0),
+            &BoxBorder::solid(2.0),
+            red,
+            None
+        ),
+        "q\n1 0 0 RG\n2 w\n1 1 0 7 re\nS\nQ\n"
+    );
+    assert_eq!(
+        box_border_text(
+            Rect::new(0.0, 0.0, 1.9, 9.0),
+            &BoxBorder::solid(2.0),
+            red,
+            None
+        ),
+        ""
+    );
+    assert_eq!(
+        box_border_text(
+            Rect::new(0.0, 0.0, 9.0, 1.9),
+            &BoxBorder::solid(2.0),
+            red,
+            None
+        ),
+        ""
+    );
+
+    // Dashed: the same frame under the array, phase 0.
+    let dashed = BoxBorder::new(2.0, BoxBorderStyle::Dashed);
+    assert_eq!(
+        box_border_text(
+            rect,
+            &dashed.with_dash(&[4.0, 1.5]),
+            Color::Gray(0.25),
+            None
+        ),
+        "q\n0.25 G\n2 w\n[4 1.5] 0 d\n11 21 98 48 re\nS\nQ\n"
+    );
+    // A zero among positive numbers is a usable array.
+    assert_eq!(
+        box_border_text(
+            rect,
+            &dashed.with_dash(&[0.0, 2.0]),
+            Color::Gray(0.25),
+            None
+        ),
+        "q\n0.25 G\n2 w\n[0 2] 0 d\n11 21 98 48 re\nS\nQ\n"
+    );
+    // `[3]` where there is no array, or one a stroke can't take: a negative
+    // or non-finite number, or all zeros.
+    let fallback = "q\n0.25 G\n2 w\n[3] 0 d\n11 21 98 48 re\nS\nQ\n";
+    for unusable in [
+        &[][..],
+        &[4.0, -1.0],
+        &[f32::NAN, 2.0],
+        &[2.0, f32::INFINITY],
+        &[0.0],
+        &[0.0, 0.0],
+    ] {
+        assert_eq!(
+            box_border_text(rect, &dashed.with_dash(unusable), Color::Gray(0.25), None),
+            fallback,
+            "{unusable:?}"
+        );
+    }
+    assert_eq!(
+        box_border_text(Rect::new(0.0, 0.0, 1.9, 9.0), &dashed, red, None),
+        ""
+    );
+}
+
+#[test]
+fn box_border_underline_is_one_segment_along_the_bottom() {
+    let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
+    let underline = BoxBorder::new(3.0, BoxBorderStyle::Underline).with_dash(&[1.0]);
+    assert_eq!(
+        box_border_text(rect, &underline, Color::Cmyk([0.0, 1.0, 1.0, 0.0]), None),
+        "q\n0 1 1 0 K\n3 w\n10 21.5 m\n110 21.5 l\nS\nQ\n"
+    );
+    // A box as tall as the line takes it; a shorter one, or one with no
+    // width, takes nothing.
+    assert_eq!(
+        box_border_text(
+            Rect::new(0.0, 0.0, 50.0, 3.0),
+            &underline,
+            Color::Gray(0.0),
+            None
+        ),
+        "q\n0 G\n3 w\n0 1.5 m\n50 1.5 l\nS\nQ\n"
+    );
+    assert_eq!(
+        box_border_text(
+            Rect::new(0.0, 0.0, 50.0, 2.9),
+            &underline,
+            Color::Gray(0.0),
+            None
+        ),
+        ""
+    );
+    assert_eq!(
+        box_border_text(
+            Rect::new(5.0, 0.0, 5.0, 30.0),
+            &underline,
+            Color::Gray(0.0),
+            None
+        ),
+        ""
+    );
+}
+
+#[test]
+fn box_border_bevels_fill_two_mitered_bands_inside_the_frame() {
+    let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
+    let blue = Color::Rgb([0.0, 0.0, 1.0]);
+    // Width 2: the frame is stroked along 11..109 by 21..69; the bands lie
+    // between the box inset by 2 (12..108 by 22..68) and by 4 (14..106 by
+    // 24..66). The first runs up the left and along the top, the second along
+    // the bottom and up the right; both start at the bottom left and miter at
+    // the two shared corners.
+    let frame = "q\n0 0 1 RG\n2 w\n11 21 98 48 re\nS\n";
+    let top_left = "12 22 m\n12 68 l\n108 68 l\n106 66 l\n14 66 l\n14 24 l\nh\nf\n";
+    let bottom_right = "12 22 m\n108 22 l\n108 68 l\n106 66 l\n106 24 l\n14 24 l\nh\nf\n";
+    let bevel =
+        |light: &str, dark: &str| format!("{frame}{light}\n{top_left}{dark}\n{bottom_right}Q\n");
+
+    let beveled = BoxBorder::new(2.0, BoxBorderStyle::Beveled);
+    // Beveled: white above and to the left; below and to the right the hint
+    // at half its brightness, a middle gray without one.
+    assert_eq!(
+        box_border_text(rect, &beveled, blue, None),
+        bevel("1 g", "0.5 g")
+    );
+    assert_eq!(
+        box_border_text(rect, &beveled, blue, Some(Color::Gray(0.8))),
+        bevel("1 g", "0.4 g")
+    );
+    assert_eq!(
+        box_border_text(rect, &beveled, blue, Some(Color::Rgb([1.0, 0.5, 0.2]))),
+        bevel("1 g", "0.5 0.25 0.1 rg")
+    );
+    // CMYK: the three inks halved and black moved halfway to full, which
+    // halves the red, green and blue the device formula gives
+    // (1 - 0.2 - 0.2 = 0.6 red becomes 1 - 0.1 - 0.6 = 0.3).
+    assert_eq!(
+        box_border_text(
+            rect,
+            &beveled,
+            blue,
+            Some(Color::Cmyk([0.2, 0.4, 0.0, 0.2]))
+        ),
+        bevel("1 g", "0.1 0.2 0 0.6 k")
+    );
+    // The dash array is a dashed border's alone.
+    assert_eq!(
+        box_border_text(rect, &beveled.with_dash(&[1.0]), blue, None),
+        bevel("1 g", "0.5 g")
+    );
+
+    // Inset: a middle gray above and to the left, a light gray below and to
+    // the right, whatever the hint.
+    let inset = BoxBorder::new(2.0, BoxBorderStyle::Inset);
+    assert_eq!(
+        box_border_text(rect, &inset, blue, None),
+        bevel("0.5 g", "0.75 g")
+    );
+    assert_eq!(
+        box_border_text(rect, &inset, blue, Some(Color::Rgb([1.0, 0.5, 0.2]))),
+        bevel("0.5 g", "0.75 g")
+    );
+
+    for style in [BoxBorderStyle::Beveled, BoxBorderStyle::Inset] {
+        let border = BoxBorder::new(2.0, style);
+        // A box of exactly four widths holds bands that meet in the middle.
+        let text = box_border_text(Rect::new(0.0, 0.0, 8.0, 8.0), &border, blue, None);
+        assert!(
+            text.starts_with("q\n0 0 1 RG\n2 w\n1 1 6 6 re\nS\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("2 2 m\n2 6 l\n6 6 l\n4 4 l\n4 4 l\n4 4 l\nh\nf\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("2 2 m\n6 2 l\n6 6 l\n4 4 l\n4 4 l\n4 4 l\nh\nf\n"),
+            "{text}"
+        );
+        // Between two and four widths, either way: the frame alone.
+        for small in [
+            Rect::new(0.0, 0.0, 7.9, 30.0),
+            Rect::new(0.0, 0.0, 30.0, 7.9),
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+        ] {
+            let text = box_border_text(small, &border, blue, None);
+            assert!(text.starts_with("q\n0 0 1 RG\n2 w\n1 1 "), "{text}");
+            assert!(text.ends_with(" re\nS\nQ\n"), "{text}");
+            assert!(!text.contains('f') && !text.contains('g'), "{text}");
+        }
+        // Under two widths, either way: nothing.
+        for tiny in [
+            Rect::new(0.0, 0.0, 3.9, 30.0),
+            Rect::new(0.0, 0.0, 30.0, 3.9),
+        ] {
+            assert_eq!(box_border_text(tiny, &border, blue, None), "");
+        }
+    }
+}
+
+#[test]
+fn box_border_draws_nothing_for_an_unusable_width_or_box() {
+    let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
+    for style in BOX_BORDER_STYLES {
+        for width in [0.0, -0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let border = BoxBorder::new(width, style).with_dash(&[2.0]);
+            assert_eq!(
+                box_border_text(rect, &border, Color::Gray(0.0), Some(Color::Gray(1.0))),
+                "",
+                "{style:?} at {width}"
+            );
+            // A border that draws nothing takes no room.
+            assert_eq!(border.inset(), 0.0, "{style:?} at {width}");
+        }
+        let border = BoxBorder::new(1.0, style);
+        for bad in [
+            Rect {
+                x0: f32::NAN,
+                ..rect
+            },
+            Rect {
+                y0: f32::NEG_INFINITY,
+                ..rect
+            },
+            Rect {
+                x1: f32::INFINITY,
+                ..rect
+            },
+            Rect {
+                y1: f32::NAN,
+                ..rect
+            },
+            // An inverted box is smaller than any border.
+            Rect {
+                x0: 110.0,
+                x1: 10.0,
+                ..rect
+            },
+            Rect {
+                y0: 70.0,
+                y1: 20.0,
+                ..rect
+            },
+        ] {
+            assert_eq!(
+                box_border_text(bad, &border, Color::Gray(0.0), None),
+                "",
+                "{style:?} in {bad:?}"
+            );
+        }
+    }
+
+    // What a border takes inside its box: its width, twice that with a bevel.
+    assert_eq!(BoxBorder::solid(1.5).inset(), 1.5);
+    assert_eq!(BoxBorder::new(1.5, BoxBorderStyle::Dashed).inset(), 1.5);
+    assert_eq!(BoxBorder::new(1.5, BoxBorderStyle::Underline).inset(), 1.5);
+    assert_eq!(BoxBorder::new(1.5, BoxBorderStyle::Beveled).inset(), 3.0);
+    assert_eq!(BoxBorder::new(1.5, BoxBorderStyle::Inset).inset(), 3.0);
+
+    // `Debug` is the numbers and the style.
+    assert_eq!(
+        format!(
+            "{:?}",
+            BoxBorder::new(2.0, BoxBorderStyle::Inset).with_dash(&[3.0, 1.0])
+        ),
+        "BoxBorder { width: 2.0, style: Inset, dash: [3.0, 1.0] }"
+    );
+}
+
+#[test]
+fn box_border_streams_read_back_balanced_and_inside_the_box() {
+    let stroke = Color::Rgb([0.2, 0.4, 0.6]);
+    let hint = Color::Cmyk([0.1, 0.2, 0.3, 0.4]);
+    let boxes = [
+        Rect::new(10.0, 20.0, 110.0, 70.0),
+        Rect::new(-40.5, -30.25, -10.5, 12.75),
+        Rect::new(0.0, 0.0, 12.0, 12.0),
+        Rect::new(0.0, 0.0, 7.0, 300.0),
+        Rect::new(100.0, 100.0, 103.0, 103.0),
+    ];
+    for style in BOX_BORDER_STYLES {
+        for rect in boxes {
+            for width in [0.5, 1.0, 3.0, 6.0] {
+                let border = BoxBorder::new(width, style).with_dash(&[2.0, 1.0]);
+                let mut canvas = Canvas::new();
+                canvas.box_border(rect, &border, stroke, Some(hint));
+                // A path of the caller's after the border, to see the state
+                // the border left.
+                canvas.stroke_rect(Rect::new(0.0, 0.0, 1.0, 1.0));
+                let (bytes, _) = canvas.finish(&Reserved::default());
+                let mut paths = painted_paths(&bytes);
+                let what = format!("{style:?} of {width} in {rect:?}");
+
+                let after = paths.pop().expect("the caller's own path");
+                assert_eq!(after.state.line_width, 1.0, "{what}");
+                assert!(after.state.dash.is_solid(), "{what}");
+                assert_eq!(after.state.stroke_color.as_slice(), &[0.0], "{what}");
+                assert_eq!(after.state.fill_color.as_slice(), &[0.0], "{what}");
+                assert_eq!(after.state.stroke_color_space, ActiveColorSpace::DeviceGray);
+
+                let (fits_frame, fits_bands) = match style {
+                    BoxBorderStyle::Solid | BoxBorderStyle::Dashed => {
+                        (rect.width() >= width && rect.height() >= width, false)
+                    }
+                    BoxBorderStyle::Underline => (rect.height() >= width, false),
+                    _ => (
+                        rect.width() >= 2.0 * width && rect.height() >= 2.0 * width,
+                        rect.width() >= 4.0 * width && rect.height() >= 4.0 * width,
+                    ),
+                };
+                let expected = match (fits_frame, fits_bands) {
+                    (false, _) => 0,
+                    (true, false) => 1,
+                    (true, true) => 3,
+                };
+                assert_eq!(paths.len(), expected, "{what}");
+
+                for (i, path) in paths.iter().enumerate() {
+                    // Nothing is painted outside the box (a rounding's worth
+                    // of slack on the written numbers).
+                    assert!(
+                        rect.expand(1e-3).contains_rect(path.covers),
+                        "{what}: path {i} covers {:?}",
+                        path.covers
+                    );
+                    if i == 0 {
+                        assert_eq!(path.paint, Paint::Stroke, "{what}");
+                        assert_eq!(path.state.line_width, width, "{what}");
+                        assert_eq!(path.state.stroke_color_space, ActiveColorSpace::DeviceRgb);
+                        assert_eq!(path.state.stroke_color.as_slice(), &[0.2, 0.4, 0.6]);
+                        assert_eq!(
+                            &path.state.dash.array[..],
+                            if style == BoxBorderStyle::Dashed {
+                                &[2.0, 1.0][..]
+                            } else {
+                                &[][..]
+                            },
+                            "{what}"
+                        );
+                    } else {
+                        // A band: filled, six corners, a border's width inside
+                        // the frame.
+                        assert_eq!(path.paint, Paint::Fill, "{what}");
+                        let band = Rect::new(
+                            rect.x0 + width,
+                            rect.y0 + width,
+                            rect.x1 - width,
+                            rect.y1 - width,
+                        );
+                        assert!(band.expand(1e-3).contains_rect(path.covers), "{what}");
+                        let corners: Vec<Point> = path.points[..6].to_vec();
+                        assert_eq!(corners[0], Point::new(band.x0, band.y0), "{what}");
+                        assert_eq!(corners[2], Point::new(band.x1, band.y1), "{what}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn box_border_fuzz_body_holds_over_extreme_numbers() {
+    // The fuzz body's border check over numbers of every kind (a small
+    // xorshift's raw bit patterns, and each special value in each place).
+    let specials = [
+        0.0_f32,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        3.0,
+        1e-30,
+        f32::MIN_POSITIVE / 2.0,
+        1e30,
+        f32::MAX,
+        f32::MIN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+    let base = [0.0_f32, 0.0, 100.0, 50.0, 2.0, 3.0, 1.0, 0.5, 0.25, 1.0];
+    let bytes_of =
+        |numbers: &[f32]| -> Vec<u8> { numbers.iter().flat_map(|n| n.to_le_bytes()).collect() };
+    fuzz::check(&bytes_of(&base));
+    for place in 0..base.len() {
+        for special in specials {
+            let mut numbers = base;
+            numbers[place] = special;
+            fuzz::check(&bytes_of(&numbers));
+        }
+    }
+    let mut x = 0x2545_f491_u32;
+    for _ in 0..4096 {
+        let mut data = Vec::with_capacity(40);
+        for i in 0..10 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            // Half the numbers small and plain, so that borders are drawn.
+            if (x >> 7) & 1 == 0 || i >= 7 {
+                data.extend_from_slice(&x.to_le_bytes());
+            } else {
+                data.extend_from_slice(&((x % 4000) as f32 / 16.0).to_le_bytes());
+            }
+        }
+        fuzz::check(&data);
+    }
 }

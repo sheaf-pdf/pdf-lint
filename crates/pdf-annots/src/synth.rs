@@ -122,10 +122,16 @@ fn apply_opacity(canvas: &mut Canvas, stroke_alpha: f32, fill_alpha: f32, multip
     canvas.gstate(gs);
 }
 
+/// Sets the line width and, for a dashed border, the dash array of a stroked
+/// path: `[3]` where the border has none (ISO 32000-2, 12.5.4, Table 168).
 fn apply_border_stroke(canvas: &mut Canvas, border: &Border) {
     canvas.line_width(border.width.max(0.0));
-    if border.style == BorderStyle::Dashed && !border.dash.is_empty() {
-        canvas.dash(&border.dash, 0.0);
+    if border.style == BorderStyle::Dashed {
+        if border.dash.is_empty() {
+            canvas.dash(&[3.0], 0.0);
+        } else {
+            canvas.dash(&border.dash, 0.0);
+        }
     }
 }
 
@@ -213,6 +219,13 @@ pub fn synth_text_markup(
 }
 
 /// Synthesizes `/AP /N` for `/Square` or `/Circle` annotations.
+///
+/// A plain `/Square` (no corner radius, no cloudy effect) fills its box, less
+/// `rect_diff`, and draws its border inside it in any of the five border
+/// styles (`pdf_gfx::Canvas::box_border`). A `/Circle`, and a `/Square` with
+/// corner radii or a cloudy effect, is one path stroked along the border's
+/// center line, solid or dashed: the beveled, inset, and underline styles are
+/// a rectangle's, and come out solid there.
 #[must_use]
 pub fn synth_shape(
     kind: ShapeKind,
@@ -225,12 +238,49 @@ pub fn synth_shape(
     }
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
     let [dl, db, dr, dt] = rect_diff.unwrap_or([0.0; 4]);
-    let half_w = if style.border.width > 0.0
-        && style
-            .stroke
-            .and_then(AnnotColor::to_content_color)
-            .is_some()
-    {
+    let sc = style
+        .stroke
+        .and_then(AnnotColor::to_content_color)
+        .filter(|_| style.border.width > 0.0);
+    let fc = style.fill.and_then(AnnotColor::to_content_color);
+    let mut canvas = Canvas::new();
+
+    let radius = style
+        .border
+        .horizontal_radius
+        .min(style.border.vertical_radius);
+    let plain_square = kind == ShapeKind::Square
+        && radius.max(0.0) == 0.0
+        && style.border.cloudy_intensity.is_none();
+    if plain_square {
+        let outer = Rect::new(
+            dl.min(bbox.x1),
+            db.min(bbox.y1),
+            (bbox.x1 - dr).max(0.0),
+            (bbox.y1 - dt).max(0.0),
+        );
+        if outer.width() <= 0.0 || outer.height() <= 0.0 || (fc.is_none() && sc.is_none()) {
+            return Some(SynthesizedAp::from_canvas(bbox, canvas));
+        }
+        canvas.with_state(|cv| {
+            apply_opacity(
+                cv,
+                style.opacity,
+                style.fill_opacity.unwrap_or(style.opacity),
+                false,
+            );
+            if let Some(c) = fc {
+                cv.fill_color(c);
+                cv.fill_rect(outer);
+            }
+            if let Some(c) = sc {
+                cv.box_border(outer, &style.border.to_box_border(), c, fc);
+            }
+        });
+        return Some(SynthesizedAp::from_canvas(bbox, canvas));
+    }
+
+    let half_w = if sc.is_some() {
         style.border.width / 2.0
     } else {
         0.0
@@ -241,16 +291,10 @@ pub fn synth_shape(
         (bbox.x1 - dr - half_w).max(0.0),
         (bbox.y1 - dt - half_w).max(0.0),
     );
-    let mut canvas = Canvas::new();
     if inner.width() <= 0.0 || inner.height() <= 0.0 {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
     }
 
-    let sc = style
-        .stroke
-        .and_then(AnnotColor::to_content_color)
-        .filter(|_| style.border.width > 0.0);
-    let fc = style.fill.and_then(AnnotColor::to_content_color);
     let paint = match (fc, sc) {
         (Some(_), Some(_)) => Paint::FillStroke,
         (Some(_), None) => Paint::Fill,
@@ -273,13 +317,7 @@ pub fn synth_shape(
             cv.fill_color(c);
         }
         match kind {
-            ShapeKind::Square => {
-                let rad = style
-                    .border
-                    .horizontal_radius
-                    .min(style.border.vertical_radius);
-                cv.rounded_rect(inner, rad, paint);
-            }
+            ShapeKind::Square => cv.rounded_rect(inner, radius, paint),
             ShapeKind::Circle => cv.ellipse(inner, paint),
         }
     });
@@ -696,7 +734,10 @@ pub fn synth_text_note(
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
-/// Synthesizes `/AP /N` for `/FreeText` box annotations.
+/// Synthesizes `/AP /N` for `/FreeText` box annotations: the background, the
+/// border inside the box in any of the five border styles
+/// (`pdf_gfx::Canvas::box_border`, the background its bevel's hint), and the
+/// text, padded to clear the border.
 #[must_use]
 pub fn synth_free_text(
     rect: Rect,
@@ -724,17 +765,18 @@ pub fn synth_free_text(
             style.fill_opacity.unwrap_or(style.opacity),
             false,
         );
-        if let Some(bg) = style.fill.and_then(AnnotColor::to_content_color) {
+        let background = style.fill.and_then(AnnotColor::to_content_color);
+        if let Some(bg) = background {
             cv.fill_color(bg);
             cv.fill_rect(bbox);
         }
-        if style.border.width > 0.0
-            && let Some(bc) = style.stroke.and_then(AnnotColor::to_content_color)
-        {
-            cv.stroke_color(bc);
-            cv.border_rect(bbox, style.border.width);
+        let border = style.border.to_box_border();
+        if let Some(bc) = style.stroke.and_then(AnnotColor::to_content_color) {
+            cv.box_border(bbox, &border, bc, background);
         }
-        let pad = (style.border.width + 2.0).max(2.0);
+        // The text clears the border (a bevel's band too), whether or not a
+        // stroke color draws it.
+        let pad = (border.inset() + 2.0).max(2.0);
         let Some(inner) = bbox.inset(pad, pad) else {
             return;
         };
