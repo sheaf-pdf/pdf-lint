@@ -4,7 +4,9 @@
 //! `Limits`, `open`, `from_bytes`, `standard_font`, and `EmbeddedFont` with
 //! `embed`) alongside frequently used types from the re-exported crate family
 //! (`Rect`, `Std14`, `Color`, `Paint`, `Password`, `Protection`, `Permissions`,
-//! `Encryption`, `Object`, `Dict`, etc.).
+//! `Encryption`, `Object`, `Dict`, etc.), those the annotation builders take
+//! among them (`BuiltAnnot`, `RedactMark`, `DefaultAppearance`, `Quadding`,
+//! `QuadPoints`, `PaintStyle`).
 
 #[cfg(feature = "embed")]
 pub use crate::EmbeddedFont;
@@ -16,8 +18,9 @@ pub use crate::{
 };
 
 pub use pdf_annots::{
-    Annot, AnnotColor, AnnotFlags, AnnotMut, AnnotSubtype, BuiltAnnot, FlattenOpts, FlattenTarget,
-    PaintStyle, QuadPoints, TextMarkupKind, TypedAnnot,
+    Annot, AnnotColor, AnnotFlags, AnnotMut, AnnotSubtype, BuiltAnnot, DefaultAppearance,
+    FlattenOpts, FlattenTarget, PaintStyle, QuadPoints, Quadding, RedactMark, TextMarkupKind,
+    TypedAnnot,
 };
 pub use pdf_content_streams::{Color, ContentWriter, Paint, Res};
 pub use pdf_crypt::{Encoded, Password, Permissions, Protection};

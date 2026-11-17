@@ -48,6 +48,27 @@
 //! [`fault::Sink`](pdf_objects::fault::Sink), while plain methods skip fault
 //! collection at zero cost.
 //!
+//! # Crates
+//!
+//! Every crate of the family is re-exported at the root under two names, its
+//! own and the one without `pdf_`; both name the same crate, so an item
+//! reached through either path is the same item.
+//!
+//! | Short name | Crate | What it holds |
+//! |---|---|---|
+//! | [`tokenizer`] | [`pdf_tokenizer`] | The lossless, zero-copy `no_std` lexer, under ISO 32000-2's rules and PDFium's. |
+//! | [`objects`] | [`pdf_objects`] | Object values with byte spans, the object parser and writer, text string codecs. |
+//! | [`filters`] | [`pdf_filters`] | The standard stream filter decoders and the Flate encoder. |
+//! | [`crypt`] | [`pdf_crypt`] | The standard security handler: decrypting and password-encrypting files. |
+//! | [`structure`] | [`pdf_structure`] | File structure: lazy positional reading, in-memory documents, full and incremental writers. |
+//! | [`color`] | [`pdf_color`] | Color space parsing, component counting, and resource lookup. |
+//! | [`content_streams`] | [`pdf_content_streams`] | Content stream lexing, typed operators, graphics-state checks, splicing, and writing. |
+//! | [`semantics`] | [`pdf_semantics`] | Dates, name and number trees, page trees, destinations, actions, `/Info`, and XMP claims. |
+//! | [`fonts`] | [`pdf_fonts`] | Font dictionaries, encodings, CMaps, font programs, Standard 14 metrics, text extraction, TrueType embedding. |
+//! | [`gfx`] | [`pdf_gfx`] | 2D geometry, the graphics and text state interpreter, the content re-encoder, the canvas, `/DA` strings. |
+//! | [`annots`] | [`pdf_annots`] | Annotations, appearance synthesis, builders, reply threads, and page flattening. |
+//! | [`linearize`] | [`pdf_linearize`] | The linearized ("Fast Web View") layout engine, hint tables, and validator. |
+//!
 //! # Features
 //!
 //! - **`programs`**, **`text-layout`**, and **`clock`** *(enabled by default)*:

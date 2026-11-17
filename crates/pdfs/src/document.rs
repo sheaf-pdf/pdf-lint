@@ -381,7 +381,6 @@ impl<'p> Document<'p> {
     /// ```
     /// # #[cfg(all(feature = "embed", feature = "text-layout"))]
     /// # {
-    /// use pdfs::annots::{BuiltAnnot, QuadPoints, RedactMark};
     /// use pdfs::prelude::*;
     ///
     /// # let program = pdf_fixtures::font::sample(1000).build();
