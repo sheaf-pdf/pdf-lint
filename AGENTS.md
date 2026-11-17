@@ -4,7 +4,7 @@ This document gives developers and coding agents a fast mental model of the work
 
 ## 1. Which Crate Should You Touch?
 
-- **Building an application or high-level workflow?** Start in **[`pdfs`](crates/pdfs)**. It wraps the entire library family behind ergonomic `Pdf`, `Page`, and `Document` types and re-exports every underlying crate (`pdfs::pdf_structure`, `pdfs::pdf_objects`, etc.).
+- **Building an application or high-level workflow?** Start in **[`pdfs`](crates/pdfs)**. It wraps the entire library family behind ergonomic `Pdf`, `Page`, and `Document` types and re-exports every underlying crate under its unprefixed name (`pdfs::gfx`, `pdfs::annots`, `pdfs::structure`, `pdfs::objects`, etc.); the `pdf_*` paths (`pdfs::pdf_gfx`, `pdfs::pdf_structure`, etc.) remain and name the same crates.
 - **Working on PDF validation / CLI reporting?** Look at **[`pdf-lint`](crates/pdf-lint)** (rule orchestration, baseline/incremental diffing, CLI/JSON output) and **[`pdf-arlington`](crates/pdf-arlington)** (TSV grammar loader and predicate evaluator).
 - **Working on a specific PDF subsystem?** Crates are layered strictly bottom-up with no circular dependencies:
 

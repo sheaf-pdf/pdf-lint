@@ -2,7 +2,7 @@
 
 Read, inspect, edit, and write PDF files through a single Rust dependency.
 
-`pdfs` combines a modular family of PDF crates behind an ergonomic, viewer-compatible API: open files lazily from disk or memory, inspect pages and metadata, extract text and fonts, draw new pages in Standard 14 or embedded TrueType fonts, encrypt with AES-256, linearize for fast web viewing, or append incremental updates. Every underlying crate in the family is also re-exported at the root (`pdfs::pdf_structure`, `pdfs::pdf_objects`, etc.) at matching versions when you need low-level control.
+`pdfs` combines a modular family of PDF crates behind an ergonomic, viewer-compatible API: open files lazily from disk or memory, inspect pages and metadata, extract text and fonts, draw new pages in Standard 14 or embedded TrueType fonts, encrypt with AES-256, linearize for fast web viewing, or append incremental updates. Every underlying crate in the family is also re-exported at the root (`pdfs::structure`, `pdfs::objects`, `pdfs::gfx`, `pdfs::annots`, etc.) at matching versions when you need low-level control; the longer `pdfs::pdf_structure`, `pdfs::pdf_objects` and the rest remain and name the same crates.
 
 ## Quickstart: Write and Read Page Text
 
@@ -157,20 +157,20 @@ assert_eq!(texts, ["First", "Second"]);
 
 ## Architecture & Re-exported Crates
 
-Every high-level method on `Pdf`, `Page`, and `Document` is also available as a standalone function in `pdfs::file`, `pdfs::page`, and `pdfs::build` over lower-level traits. When you need finer control, drop down to the re-exported crates directly through `pdfs`:
+Every high-level method on `Pdf`, `Page`, and `Document` is also available as a standalone function in `pdfs::file`, `pdfs::page`, and `pdfs::build` over lower-level traits. When you need finer control, drop down to the re-exported crates directly through `pdfs`, each under its short name (`pdfs::gfx`) and its crate name (`pdfs::pdf_gfx`) alike:
 
-- **[pdf-tokenizer](https://crates.io/crates/pdf-tokenizer)** — Zero-copy, `no_std` PDF lexer (`Rules::Iso` and `Rules::Pdfium`).
-- **[pdf-objects](https://crates.io/crates/pdf-objects)** — Owned PDF objects with byte spans, object parser/writer, text string codecs, and `Resolve` / `Streams` traits.
-- **[pdf-filters](https://crates.io/crates/pdf-filters)** — Standard stream filter decoders and Flate encoder (`miniz_oxide` and `zlib-rs`).
-- **[pdf-crypt](https://crates.io/crates/pdf-crypt)** — Standard security handler (RC4, AES-128, AES-256), password preparation, and permission flags.
-- **[pdf-structure](https://crates.io/crates/pdf-structure)** — Cross-reference tables/streams, object streams, lazy `Reading`, in-memory `Document`, and full/incremental writers (`Pdf::reading`, `Document::structure`).
-- **[pdf-color](https://crates.io/crates/pdf-color)** — Color space parsing and component counting.
-- **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
-- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — Dates, name/number trees, page trees, destinations, actions, outlines, page labels, embedded/associated files, optional content groups, viewer preferences, `/Info` dictionaries, and XMP metadata/conformance packets.
-- **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, text extraction, and TrueType font subsetting and embedding.
-- **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
-- **[pdf-annots](https://crates.io/crates/pdf-annots)** — Page annotations (`Page::annots`), typed subtype inspection, `/AP` placement and synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`Document::flatten_page`).
-- **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — Linearized PDF layout engine, hint tables, and validator.
+- **[pdf-tokenizer](https://crates.io/crates/pdf-tokenizer)** — `pdfs::tokenizer`. Zero-copy, `no_std` PDF lexer (`Rules::Iso` and `Rules::Pdfium`).
+- **[pdf-objects](https://crates.io/crates/pdf-objects)** — `pdfs::objects`. Owned PDF objects with byte spans, object parser/writer, text string codecs, and `Resolve` / `Streams` traits.
+- **[pdf-filters](https://crates.io/crates/pdf-filters)** — `pdfs::filters`. Standard stream filter decoders and Flate encoder (`miniz_oxide` and `zlib-rs`).
+- **[pdf-crypt](https://crates.io/crates/pdf-crypt)** — `pdfs::crypt`. Standard security handler (RC4, AES-128, AES-256), password preparation, and permission flags.
+- **[pdf-structure](https://crates.io/crates/pdf-structure)** — `pdfs::structure`. Cross-reference tables/streams, object streams, lazy `Reading`, in-memory `Document`, and full/incremental writers (`Pdf::reading`, `Document::structure`).
+- **[pdf-color](https://crates.io/crates/pdf-color)** — `pdfs::color`. Color space parsing and component counting.
+- **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — `pdfs::content_streams`. Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
+- **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — `pdfs::semantics`. Dates, name/number trees, page trees, destinations, actions, outlines, page labels, embedded/associated files, optional content groups, viewer preferences, `/Info` dictionaries, and XMP metadata/conformance packets.
+- **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — `pdfs::fonts`. Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, text extraction, and TrueType font subsetting and embedding.
+- **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — `pdfs::gfx`. 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
+- **[pdf-annots](https://crates.io/crates/pdf-annots)** — `pdfs::annots`. Page annotations (`Page::annots`), typed subtype inspection, `/AP` placement and synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`Document::flatten_page`).
+- **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — `pdfs::linearize`. Linearized PDF layout engine, hint tables, and validator.
 
 ## Key Guarantees
 
