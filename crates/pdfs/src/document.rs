@@ -371,6 +371,45 @@ impl<'p> Document<'p> {
     /// ([`build::add_annot`]). A redaction's `/RO` overlay is also bound as
     /// `/AP /R`.
     ///
+    /// An annotation whose text is drawn in a font embedded in this document
+    /// (pdf-annots' `BuiltAnnot::free_text_with_font` and
+    /// `BuiltAnnot::redact_with_font`, with the `embed` and `text-layout`
+    /// features) is added the same way: its streams name the font by the
+    /// number reserved for it, which a save writes with the glyphs they
+    /// draw.
+    ///
+    /// ```
+    /// # #[cfg(all(feature = "embed", feature = "text-layout"))]
+    /// # {
+    /// use pdfs::annots::{BuiltAnnot, QuadPoints, RedactMark};
+    /// use pdfs::prelude::*;
+    ///
+    /// # let program = pdf_fixtures::font::sample(1000).build();
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// let page = doc.page_ids().unwrap()[0].unwrap();
+    /// // A TrueType program's bytes, embedded: the label's font.
+    /// let font = doc.embed_font(program).unwrap();
+    /// let regions = [QuadPoints::from_rect(Rect::new(72.0, 700.0, 272.0, 720.0))];
+    /// let mark = RedactMark::new()
+    ///     .with_quads(&regions)
+    ///     .with_overlay_text("\u{4E2D}\u{6587}");
+    /// let rect = mark.bounds().unwrap();
+    /// // An error here names a character the font has no glyph for.
+    /// let redaction = BuiltAnnot::redact_with_font(rect, &mark, font.res(), &font).unwrap();
+    /// doc.add_annot(page, redaction).unwrap();
+    /// let file = doc.to_bytes().unwrap();
+    ///
+    /// let pdf = pdfs::from_bytes(file).unwrap();
+    /// let pages = pdf.pages().unwrap();
+    /// let annots = pages.get(0).unwrap().annots().unwrap();
+    /// let TypedAnnot::Redact(read) = annots[0].typed() else {
+    ///     panic!("a redaction");
+    /// };
+    /// assert_eq!(read.overlay_text.as_deref(), Some("\u{4E2D}\u{6587}"));
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`build::add_annot`] fails, or if flushing pending added pages fails.

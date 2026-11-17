@@ -1,6 +1,7 @@
 //! Deterministic `/AP /N` appearance Form XObject synthesis over
 //! [`pdf_gfx::Canvas`] (ISO 32000-2 §12.5.5).
 
+use std::convert::Infallible;
 use std::fmt;
 
 use pdf_content_streams::{
@@ -8,6 +9,8 @@ use pdf_content_streams::{
 };
 use pdf_fonts::{Encoding, Std14};
 use pdf_gfx::{Canvas, Point, Quad, Rect};
+#[cfg(feature = "text-layout")]
+use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_objects::{Dict, Object, Stream, dict};
 
 use crate::annot::Annot;
@@ -737,7 +740,17 @@ pub fn synth_text_note(
 /// Synthesizes `/AP /N` for `/FreeText` box annotations: the background, the
 /// border inside the box in any of the five border styles
 /// (`pdf_gfx::Canvas::box_border`, the background its bevel's hint), and the
-/// text, padded to clear the border.
+/// text in Helvetica, padded to clear the border.
+///
+/// The text is drawn at `/DA`'s `Tf` size where that is above 0, and at 12
+/// with no `/DA`, no `Tf`, or a size below 0. A size of exactly 0 asks for
+/// the text sized to its box (ISO 32000-2, 12.7.4.3): under the
+/// `text-layout` feature it is, between 4 and 12; without the feature it is
+/// drawn at 12. Of `/DA`'s other operators the color alone is applied.
+///
+/// A character Helvetica's encoding hasn't is replaced without `text-layout`,
+/// and with it the text is left out. To draw text in another font, see
+/// `synth_free_text_with_font` (under `text-layout`).
 #[must_use]
 pub fn synth_free_text(
     rect: Rect,
@@ -746,18 +759,66 @@ pub fn synth_free_text(
     quadding: Quadding,
     style: &PaintStyle,
 ) -> Option<SynthesizedAp> {
+    never(free_text_ap(
+        rect,
+        contents,
+        da,
+        quadding,
+        style,
+        draw_helvetica,
+    ))
+}
+
+/// Synthesizes `/AP /N` for a `/FreeText` box annotation as
+/// [`synth_free_text`] does, its text drawn in `font`, which the stream names
+/// by `font_res` in its `/Resources /Font`: any [`LayoutFont`], a font
+/// embedded in the document among them, so the text isn't held to
+/// Helvetica's characters.
+///
+/// `/DA` gives the size and the color as it does there; the font it names
+/// isn't looked at, and isn't rewritten to `font`: a viewer that draws the
+/// appearance stream shows the text as laid out here, and one that makes its
+/// own from `/DA` looks its font up where it would for any other annotation.
+///
+/// # Errors
+///
+/// [`UnencodableChar`] for the first character of `contents` that `font`
+/// can't draw: no appearance is made.
+#[cfg(feature = "text-layout")]
+pub fn synth_free_text_with_font<F: LayoutFont + ?Sized>(
+    rect: Rect,
+    contents: &str,
+    da: Option<&DefaultAppearance>,
+    quadding: Quadding,
+    style: &PaintStyle,
+    font_res: Res,
+    font: &F,
+) -> Result<Option<SynthesizedAp>, UnencodableChar> {
+    free_text_ap(rect, contents, da, quadding, style, |cv, text| {
+        draw_box_text(cv, text, font_res, font)
+    })
+}
+
+/// A `/FreeText`'s `/AP /N`, its text drawn by `text`, whose error ends it
+/// with nothing made.
+fn free_text_ap<E>(
+    rect: Rect,
+    contents: &str,
+    da: Option<&DefaultAppearance>,
+    quadding: Quadding,
+    style: &PaintStyle,
+    text: impl FnOnce(&mut Canvas, &BoxText<'_>) -> Result<(), E>,
+) -> Result<Option<SynthesizedAp>, E> {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return None;
+        return Ok(None);
     }
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
     let mut canvas = Canvas::new();
 
     let text_color = da.and_then(|d| d.color).unwrap_or(Color::Gray(0.0));
-    let font_size = da
-        .and_then(|d| d.font_size)
-        .filter(|&s| s > 0.0)
-        .unwrap_or(12.0);
+    let size = free_text_size(da);
 
+    let mut drawn = Ok(());
     canvas.with_state(|cv| {
         apply_opacity(
             cv,
@@ -780,10 +841,53 @@ pub fn synth_free_text(
         let Some(inner) = bbox.inset(pad, pad) else {
             return;
         };
-        draw_box_text(cv, inner, contents, font_size, quadding, text_color);
+        drawn = text(
+            cv,
+            &BoxText {
+                rect: inner,
+                text: contents,
+                size,
+                quadding,
+                color: text_color,
+            },
+        );
     });
+    drawn?;
 
-    Some(SynthesizedAp::from_canvas(bbox, canvas))
+    Ok(Some(SynthesizedAp::from_canvas(bbox, canvas)))
+}
+
+/// The size a `/FreeText`'s text is drawn at, `None` to size it to its box:
+/// `/DA`'s `Tf` size where it's above 0, the box's where it's exactly 0 (as
+/// `DefaultAppearance::text_box_style` maps it), and 12 for anything else.
+#[cfg(feature = "text-layout")]
+fn free_text_size(da: Option<&DefaultAppearance>) -> Option<f32> {
+    match da {
+        Some(d) if d.font_size == Some(0.0) => d.text_box_style().size,
+        _ => Some(fixed_text_size(da)),
+    }
+}
+
+/// The size a `/FreeText`'s text is drawn at: `/DA`'s `Tf` size where it's
+/// above 0, else 12 (nothing here sizes text to its box).
+#[cfg(not(feature = "text-layout"))]
+fn free_text_size(da: Option<&DefaultAppearance>) -> Option<f32> {
+    Some(fixed_text_size(da))
+}
+
+/// `/DA`'s `Tf` size where it's above 0, else 12.
+fn fixed_text_size(da: Option<&DefaultAppearance>) -> f32 {
+    da.and_then(|d| d.font_size)
+        .filter(|&s| s > 0.0)
+        .unwrap_or(12.0)
+}
+
+/// What can't fail, taken out of its `Result`.
+fn never<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
 }
 
 /// What a `/Redact` mark's appearances are drawn from (ISO 32000-2,
@@ -958,9 +1062,42 @@ fn quad_as_rect(quad: &Quad) -> Option<Rect> {
 /// The overlay holds the text once for each quadrilateral (more under
 /// `repeat`): its size grows with the two together. Returns `None` where
 /// `rect` has no width or no height.
+///
+/// The text is drawn in Helvetica, and left out where it holds a character
+/// Helvetica's encoding hasn't (replaced, without the `text-layout` feature).
+/// To draw it in another font, see `synth_redact_with_font` (under
+/// `text-layout`).
 #[must_use]
 pub fn synth_redact(rect: Rect, mark: &RedactMark<'_>) -> Option<(SynthesizedAp, SynthesizedAp)> {
-    Some((redact_mark_ap(rect, mark)?, redact_overlay_ap(rect, mark)?))
+    let overlay = never(redact_overlay_ap(rect, mark, draw_helvetica));
+    redact_mark_ap(rect, mark).zip(overlay)
+}
+
+/// Synthesizes a `/Redact` annotation's `/AP /N` and `/RO` as [`synth_redact`]
+/// does, the overlay text drawn in `font`, which the overlay names by
+/// `font_res` in its `/Resources /Font`: any [`LayoutFont`], a font embedded
+/// in the document among them, so a label isn't held to Helvetica's
+/// characters.
+///
+/// The mark's `/DA` gives the text's size and color as it does there; the
+/// font it names isn't looked at.
+///
+/// # Errors
+///
+/// [`UnencodableChar`] for the first character of the overlay text that
+/// `font` can't draw (the space between repeats under
+/// [`RedactMark::repeat`] among them): neither stream is made.
+#[cfg(feature = "text-layout")]
+pub fn synth_redact_with_font<F: LayoutFont + ?Sized>(
+    rect: Rect,
+    mark: &RedactMark<'_>,
+    font_res: Res,
+    font: &F,
+) -> Result<Option<(SynthesizedAp, SynthesizedAp)>, UnencodableChar> {
+    let overlay = redact_overlay_ap(rect, mark, |cv, text| {
+        draw_box_text(cv, text, font_res.clone(), font)
+    })?;
+    Ok(redact_mark_ap(rect, mark).zip(overlay))
 }
 
 /// `/AP /N` of a `/Redact`: a crisp outline and a faint translucent wash over
@@ -1011,15 +1148,21 @@ fn redact_mark_ap(rect: Rect, mark: &RedactMark<'_>) -> Option<SynthesizedAp> {
 }
 
 /// `/RO` of a `/Redact`: the opaque interior fill of each region, then the
-/// `/OverlayText` in each.
-fn redact_overlay_ap(rect: Rect, mark: &RedactMark<'_>) -> Option<SynthesizedAp> {
+/// `/OverlayText` in each, drawn by `text`, whose error ends it with nothing
+/// made.
+fn redact_overlay_ap<E>(
+    rect: Rect,
+    mark: &RedactMark<'_>,
+    mut text: impl FnMut(&mut Canvas, &BoxText<'_>) -> Result<(), E>,
+) -> Result<Option<SynthesizedAp>, E> {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return None;
+        return Ok(None);
     }
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
     let whole = mark.local_quads(rect).next().is_none();
 
     let mut ro_cv = Canvas::new();
+    let mut drawn = Ok(());
     ro_cv.with_state(|cv| {
         let fill = mark
             .interior_color
@@ -1039,20 +1182,31 @@ fn redact_overlay_ap(rect: Rect, mark: &RedactMark<'_>) -> Option<SynthesizedAp>
         }
 
         if let Some(txt) = mark.overlay_text.filter(|t| !t.is_empty()) {
-            if whole {
-                draw_overlay_text(cv, bbox, txt, mark);
-            }
-            for quad in mark.local_quads(rect) {
-                draw_overlay_text(cv, quad.bounds(), txt, mark);
+            let regions = whole
+                .then_some(bbox)
+                .into_iter()
+                .chain(mark.local_quads(rect).map(|quad| quad.bounds()));
+            for region in regions {
+                drawn = draw_overlay_text(cv, region, txt, mark, &mut text);
+                if drawn.is_err() {
+                    return;
+                }
             }
         }
     });
-    Some(SynthesizedAp::from_canvas(bbox, ro_cv))
+    drawn?;
+    Ok(Some(SynthesizedAp::from_canvas(bbox, ro_cv)))
 }
 
-/// Draws a redaction's overlay text in `region`, repeated across it under
-/// `/Repeat`.
-fn draw_overlay_text(cv: &mut Canvas, region: Rect, txt: &str, mark: &RedactMark<'_>) {
+/// Draws a redaction's overlay text in `region` by `text`, repeated across
+/// it under `/Repeat`.
+fn draw_overlay_text<E>(
+    cv: &mut Canvas,
+    region: Rect,
+    txt: &str,
+    mark: &RedactMark<'_>,
+    text: &mut impl FnMut(&mut Canvas, &BoxText<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     let text_color = mark.da.and_then(|d| d.color).unwrap_or(Color::Gray(1.0));
     let font_size = mark
         .da
@@ -1065,65 +1219,95 @@ fn draw_overlay_text(cv: &mut Canvas, region: Rect, txt: &str, mark: &RedactMark
     } else {
         txt.to_string()
     };
-    if let Some(inner) = region.inset(2.0, 1.0) {
-        draw_box_text(cv, inner, &shown, font_size, mark.quadding, text_color);
-    }
+    let Some(inner) = region.inset(2.0, 1.0) else {
+        return Ok(());
+    };
+    text(
+        cv,
+        &BoxText {
+            rect: inner,
+            text: &shown,
+            size: Some(font_size),
+            quadding: mark.quadding,
+            color: text_color,
+        },
+    )
 }
 
-#[cfg(feature = "text-layout")]
-fn draw_box_text(
-    cv: &mut Canvas,
-    box_rect: Rect,
-    text: &str,
-    font_size: f32,
+/// Text to draw in a box: a `/FreeText`'s contents or a redaction's label.
+struct BoxText<'a> {
+    /// The box, in the form's space.
+    rect: Rect,
+    text: &'a str,
+    /// The size, `None` to fit the text to the box (taken only where
+    /// `text-layout` can: 12 otherwise).
+    size: Option<f32>,
     quadding: Quadding,
     color: Color,
-) {
+}
+
+/// Draws `text` in Helvetica, the font of every appearance made with no font
+/// given. Under `text-layout` a character its encoding hasn't leaves the text
+/// out, silently.
+fn draw_helvetica(cv: &mut Canvas, text: &BoxText<'_>) -> Result<(), Infallible> {
+    #[cfg(feature = "text-layout")]
+    if let Ok(font_res) = Res::dict(Std14::Helvetica.dict()) {
+        let _ = draw_box_text(cv, text, font_res, &Std14::Helvetica);
+    }
+    #[cfg(not(feature = "text-layout"))]
+    draw_box_text(cv, text);
+    Ok(())
+}
+
+/// Lays `text` out in its box in `font`, wrapped at words and cut at the
+/// box, and draws it under the name `font_res` gets.
+///
+/// For a character `font` can't draw the text's color alone has been set,
+/// and no text drawn.
+#[cfg(feature = "text-layout")]
+fn draw_box_text<F: LayoutFont + ?Sized>(
+    cv: &mut Canvas,
+    text: &BoxText<'_>,
+    font_res: Res,
+    font: &F,
+) -> Result<(), UnencodableChar> {
     use pdf_gfx::{TextAlign, TextBoxStyle, WrapMode};
 
-    if text.is_empty() {
-        return;
+    if text.text.is_empty() {
+        return Ok(());
     }
-    let Ok(font_res) = Res::dict(Std14::Helvetica.dict()) else {
-        return;
-    };
-    let align = match quadding {
+    let align = match text.quadding {
         Quadding::Left => TextAlign::Left,
         Quadding::Center => TextAlign::Center,
         Quadding::Right => TextAlign::Right,
     };
     let style = TextBoxStyle {
-        size: Some(font_size),
+        size: text.size,
         align,
         wrap: WrapMode::Word,
         clip: true,
         ..TextBoxStyle::default()
     };
-    cv.fill_color(color);
-    let _ = cv.text_box(font_res, &Std14::Helvetica, text, box_rect, &style);
+    cv.fill_color(text.color);
+    cv.text_box(font_res, font, text.text, text.rect, &style)?;
+    Ok(())
 }
 
 #[cfg(not(feature = "text-layout"))]
-fn draw_box_text(
-    cv: &mut Canvas,
-    box_rect: Rect,
-    text: &str,
-    font_size: f32,
-    quadding: Quadding,
-    color: Color,
-) {
-    if text.is_empty() {
+fn draw_box_text(cv: &mut Canvas, text: &BoxText<'_>) {
+    if text.text.is_empty() {
         return;
     }
     let Ok(font_res) = Res::dict(Std14::Helvetica.dict()) else {
         return;
     };
+    let (box_rect, font_size, quadding) = (text.rect, text.size.unwrap_or(12.0), text.quadding);
     cv.with_state(|c| {
         c.clip_rect(box_rect);
-        c.fill_color(color);
+        c.fill_color(text.color);
         let line_h = font_size * 1.2;
         let mut y = box_rect.y1 - font_size;
-        for line in text.lines() {
+        for line in text.text.lines() {
             if y < box_rect.y0 - font_size {
                 break;
             }

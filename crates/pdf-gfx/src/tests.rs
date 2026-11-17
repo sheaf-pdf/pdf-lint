@@ -3146,6 +3146,36 @@ fn box_border_fuzz_body_holds_over_extreme_numbers() {
             fuzz::check(&bytes_of(&numbers));
         }
     }
+    // A fuzzer's find: a box as tall as `f32` goes and a width equal to its
+    // height, whose underline's stroke a reader can't bound.
+    let found = [
+        0x3530_2030_u32,
+        0x2030_3520,
+        0x7f72_2030,
+        0x7f7f_7f7f,
+        0x7f7f_7f7f,
+    ];
+    let mut numbers = base;
+    for (number, bits) in numbers.iter_mut().zip(found) {
+        *number = f32::from_bits(bits);
+    }
+    fuzz::check(&bytes_of(&numbers));
+    // Boxes and widths near `f32`'s largest together, where a stroke's
+    // extent overflows though every number written is finite.
+    let large = [1e37_f32, 3e37, 1e38, 3e38, f32::MAX];
+    for hi in large {
+        for lo in [-hi, -hi / 2.0, 0.0, hi / 2.0] {
+            for width in large.iter().flat_map(|w| [*w, w / 16.0]) {
+                for (x0, y0, x1, y1) in
+                    [(lo, lo, hi, hi), (lo, 0.0, hi, 50.0), (0.0, lo, 100.0, hi)]
+                {
+                    let mut numbers = base;
+                    numbers[..5].copy_from_slice(&[x0, y0, x1, y1, width]);
+                    fuzz::check(&bytes_of(&numbers));
+                }
+            }
+        }
+    }
     let mut x = 0x2545_f491_u32;
     for _ in 0..4096 {
         let mut data = Vec::with_capacity(40);

@@ -323,7 +323,12 @@ impl Canvas {
     /// Everything is drawn inside one `q`..`Q` scope with its colors set
     /// there, so the caller's graphics state is as it was. Nothing is drawn
     /// where the border's width isn't finite and above `0.0`, or `rect` isn't
-    /// finite. With `w` the width:
+    /// finite, or `rect` grown by `5.0 * w` on every side isn't: numbers so
+    /// near `f32`'s largest that a stroke's extent (as far as a miter at the
+    /// default limit of `10` reaches) overflows, which
+    /// [`interpret`](crate::interpret) refuses as
+    /// [`Error::NotFinite`](crate::Error::NotFinite). What is written, read
+    /// alone, interprets without a fault. With `w` the width:
     ///
     /// - [`BoxBorderStyle::Solid`]: the rectangle inset by `w / 2.0`, stroked
     ///   at `w` (what [`Canvas::border_rect`] draws). Nothing where `rect` is
@@ -356,6 +361,14 @@ impl Canvas {
             return;
         }
         let half = w / 2.0;
+        // A reader bounds a stroke by its path's points and, past them, half
+        // the width times the miter limit (`10` unless set): no further than
+        // this from the box, for every style. Past `f32`'s range the stream
+        // would be one its own interpreter can't read back.
+        let reach = half * 10.0;
+        if !rect.expand(reach).is_finite() {
+            return;
+        }
         match border.style {
             BoxBorderStyle::Solid | BoxBorderStyle::Dashed => {
                 let Some(frame) = rect.inset(half, half) else {

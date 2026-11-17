@@ -20,7 +20,7 @@ use crate::{
     SynthesizedAp, TabOrder, TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot,
     WidgetAnnot, fuzz, page_annots, page_annots_with, page_tabs, placement_matrix, plan_flatten,
     plan_flatten_filtered, push_page_annot, resolve_dest, resolve_threads, stream_placement_matrix,
-    synth_annot, synth_redact,
+    synth_annot, synth_free_text, synth_redact,
 };
 
 #[derive(Default)]
@@ -2144,4 +2144,396 @@ fn a_built_redaction_is_written_with_its_overlay_and_reads_back() {
     let built = BuiltAnnot::redact_mark(MARK_RECT, &RedactMark::new().with_default_appearance(&da));
     assert!(built.dict.get(b"DA").is_some());
     assert_eq!(built.dict.get(b"OverlayText"), None);
+}
+
+/// A font of four Greek letters and, where `space` is set, the space: each a
+/// two-byte code that a content stream shows as two ASCII letters, 500 wide.
+#[cfg(feature = "text-layout")]
+struct Greek {
+    space: bool,
+}
+
+#[cfg(feature = "text-layout")]
+impl Greek {
+    fn code(&self, ch: char) -> Option<[u8; 2]> {
+        match ch {
+            '\u{3B1}' => Some(*b"Ga"),
+            '\u{3B2}' => Some(*b"Gb"),
+            '\u{3B3}' => Some(*b"Gc"),
+            '\u{3B4}' => Some(*b"Gd"),
+            ' ' if self.space => Some(*b"Sp"),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "text-layout")]
+impl pdf_gfx::LayoutFont for Greek {
+    fn font_metrics(&self) -> pdf_fonts::FontMetrics {
+        pdf_fonts::FontMetrics::new(800.0, -200.0, None)
+    }
+
+    fn char_advance(&self, ch: char) -> Option<f32> {
+        self.code(ch).map(|_| 500.0)
+    }
+
+    fn encode_char(&self, ch: char, out: &mut Vec<u8>) -> bool {
+        match self.code(ch) {
+            Some(code) => {
+                out.extend(code);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Whether `ap`'s `q` and `Q` balance.
+#[cfg(feature = "text-layout")]
+fn balanced(ap: &SynthesizedAp) -> bool {
+    let words = || ap.content.split(u8::is_ascii_whitespace);
+    words().filter(|w| w == b"q").count() == words().filter(|w| w == b"Q").count()
+}
+
+/// What `ap`'s `/Resources /Font` names its fonts as; empty where it has
+/// none.
+#[cfg(feature = "text-layout")]
+fn font_resources(ap: &SynthesizedAp) -> Vec<Object> {
+    let fonts = ap.resources.get(b"Font").and_then(Object::as_dict);
+    fonts.map_or(Vec::new(), |fonts| {
+        fonts.iter().map(|(_, font)| font.clone()).collect()
+    })
+}
+
+#[cfg(feature = "text-layout")]
+#[test]
+fn free_text_and_overlay_text_are_drawn_in_the_font_given() {
+    use pdf_content_streams::Res;
+    use pdf_fonts::Std14;
+    use pdf_gfx::{LayoutFont, UnencodableChar};
+
+    use crate::{synth_free_text_with_font, synth_redact_with_font};
+
+    const TEXT: &str = "\u{3B1}\u{3B2} \u{3B3}\u{3B4}";
+    let rect = Rect::new(100.0, 500.0, 300.0, 560.0);
+    let da = DefaultAppearance::new(b"Helv".to_vec(), 10.0, Some(Color::Gray(0.0)));
+    let style = bordered(1.0, BorderStyle::Solid);
+    let greek = Greek { space: true };
+    let font_id = ObjectId::new(9, 0);
+    let res = || Res::written(font_id);
+
+    // A FreeText: the font's codes shown under the one font resource, the
+    // reference given, with no Helvetica; the rest of the stream as the
+    // default draws it.
+    let ap =
+        synth_free_text_with_font(rect, TEXT, Some(&da), Quadding::Left, &style, res(), &greek)
+            .unwrap()
+            .unwrap();
+    let name = only_resource(&ap, "Font");
+    assert_eq!(font_resources(&ap), [Object::from(font_id)]);
+    let text = content_text(&ap);
+    assert!(
+        text.ends_with(&format!(
+            "0 g\nq\n3 3 194 54 re\nW\nn\nBT\n/{name} 10 Tf\n1 0 0 1 3 49 Tm\n\
+             (GaGbSpGcGd) Tj\nET\nQ\nQ\n"
+        )),
+        "{text}"
+    );
+    let plain = synth_free_text(rect, "", Some(&da), Quadding::Left, &style).unwrap();
+    let before_text = content_text(&plain);
+    let before_text = before_text.strip_suffix("Q\n").unwrap();
+    assert!(text.starts_with(before_text), "{text}");
+    assert!(balanced(&ap));
+
+    // Helvetica passed as the font is what no font draws.
+    let helvetica = || Res::dict(Std14::Helvetica.dict()).unwrap();
+    let latin = "Latin text, wrapped\nand broken";
+    assert_eq!(
+        synth_free_text_with_font(
+            rect,
+            latin,
+            Some(&da),
+            Quadding::Center,
+            &style,
+            helvetica(),
+            &Std14::Helvetica
+        ),
+        Ok(synth_free_text(
+            rect,
+            latin,
+            Some(&da),
+            Quadding::Center,
+            &style
+        ))
+    );
+    // And a font behind a trait object is taken.
+    let dynamic: &dyn LayoutFont = &greek;
+    assert_eq!(
+        synth_free_text_with_font(
+            rect,
+            TEXT,
+            Some(&da),
+            Quadding::Left,
+            &style,
+            res(),
+            dynamic
+        ),
+        Ok(Some(ap.clone()))
+    );
+
+    // The builder: the same appearance, the dictionary free_text's (its
+    // /DA as given, not renamed to the font).
+    let built =
+        BuiltAnnot::free_text_with_font(rect, TEXT, &da, Quadding::Left, &style, res(), &greek)
+            .unwrap();
+    assert_eq!(built.normal_ap.as_ref(), Some(&ap));
+    assert_eq!(built.redact_overlay, None);
+    let default = BuiltAnnot::free_text(rect, TEXT, &da, Quadding::Left, &style);
+    assert_eq!(built.dict, default.dict);
+    assert_eq!(
+        built.dict.get(b"DA").and_then(Object::as_bytes),
+        Some(&b"/Helv 10 Tf 0 g"[..])
+    );
+    // The default drops text Helvetica can't draw, with no font named.
+    let dropped = default.normal_ap.unwrap();
+    assert_eq!(font_resources(&dropped), []);
+    assert_eq!(content_text(&dropped), format!("{before_text}0 g\nQ\n"));
+
+    // A redaction over two regions: the overlay shows the label in each
+    // under the one font, repeated; the mark is the default's.
+    let mark = RedactMark::new()
+        .with_quads(&MARK_QUADS)
+        .with_interior_color(AnnotColor::Gray(0.0))
+        .with_overlay_text("\u{3B1}\u{3B2}")
+        .with_repeat(true)
+        .with_default_appearance(&da);
+    let (mark_ap, ro) = synth_redact_with_font(MARK_RECT, &mark, res(), &greek)
+        .unwrap()
+        .unwrap();
+    let (default_ap, default_ro) = synth_redact(MARK_RECT, &mark).unwrap();
+    assert_eq!(mark_ap, default_ap);
+    assert_eq!(font_resources(&mark_ap), []);
+    let name = only_resource(&ro, "Font");
+    assert_eq!(font_resources(&ro), [Object::from(font_id)]);
+    let text = content_text(&ro);
+    // Four repeats across the first region's box, three across the second's.
+    assert!(
+        text.ends_with(&format!(
+            "0 g\nq\n2 21 96 18 re\nW\nn\nBT\n/{name} 10 Tf\n1 0 0 1 2 31 Tm\n\
+             (GaGbSpGaGbSpGaGbSpGaGb) Tj\nET\nQ\n\
+             0 g\nq\n107 3 81 22 re\nW\nn\nBT\n/{name} 10 Tf\n1 0 0 1 107 17 Tm\n\
+             (GaGbSpGaGbSpGaGb) Tj\nET\nQ\nQ\n"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("Helvetica"));
+    assert!(!content_text(&default_ro).contains("Tj"), "dropped");
+    // Its fills are the default's: the text alone differs.
+    let fills = "q\n0 g\n0 20 100 20 re\nf\n";
+    assert!(text.starts_with(fills) && content_text(&default_ro).starts_with(fills));
+    assert!(balanced(&ro));
+
+    let built = BuiltAnnot::redact_with_font(MARK_RECT, &mark, res(), &greek).unwrap();
+    assert_eq!(built.normal_ap.as_ref(), Some(&mark_ap));
+    assert_eq!(built.redact_overlay.as_ref(), Some(&ro));
+    assert_eq!(built.dict, BuiltAnnot::redact_mark(MARK_RECT, &mark).dict);
+    // With no /DA given the dictionary gets the default one, unrenamed.
+    let bare = RedactMark::new().with_overlay_text("\u{3B1}");
+    let built = BuiltAnnot::redact_with_font(MARK_RECT, &bare, res(), &greek).unwrap();
+    assert_eq!(
+        built.dict.get(b"DA").and_then(Object::as_bytes),
+        Some(&b"/Helv 0 Tf 1 g"[..])
+    );
+    assert!(content_text(built.redact_overlay.as_ref().unwrap()).contains("(Ga) Tj"));
+
+    // A character the font can't draw: an error naming it, nothing built.
+    let refused = UnencodableChar {
+        at: 4,
+        character: 'x',
+    };
+    let bad = "\u{3B1}\u{3B2}x\u{3B3}";
+    assert_eq!(
+        synth_free_text_with_font(rect, bad, Some(&da), Quadding::Left, &style, res(), &greek),
+        Err(refused)
+    );
+    assert_eq!(
+        BuiltAnnot::free_text_with_font(rect, bad, &da, Quadding::Left, &style, res(), &greek)
+            .map(|built| built.dict),
+        Err(refused)
+    );
+    let bad_mark = mark.with_overlay_text(bad).with_repeat(false);
+    assert_eq!(
+        synth_redact_with_font(MARK_RECT, &bad_mark, res(), &greek),
+        Err(refused)
+    );
+    assert_eq!(
+        BuiltAnnot::redact_with_font(MARK_RECT, &bad_mark, res(), &greek).map(|built| built.dict),
+        Err(refused)
+    );
+    // With no quad too, and in the second region as in the first.
+    assert_eq!(
+        synth_redact_with_font(MARK_RECT, &bad_mark.with_quads(&[]), res(), &greek),
+        Err(refused)
+    );
+    // An error in one region isn't lost to a later one that draws nothing
+    // (too low for any text).
+    let low = [
+        MARK_QUADS[0],
+        QuadPoints::from_rect(Rect::new(100.0, 500.0, 300.0, 501.0)),
+    ];
+    assert_eq!(
+        synth_redact_with_font(MARK_RECT, &bad_mark.with_quads(&low), res(), &greek),
+        Err(refused)
+    );
+    // The space between repeats is the font's to draw as well.
+    let spaceless = Greek { space: false };
+    assert_eq!(
+        synth_redact_with_font(MARK_RECT, &mark, res(), &spaceless),
+        Err(UnencodableChar {
+            at: 4,
+            character: ' '
+        })
+    );
+    assert!(synth_redact_with_font(MARK_RECT, &mark.with_repeat(false), res(), &spaceless).is_ok());
+
+    // Nothing to draw is no error whatever the font, and names no font: no
+    // text, no box, a box the padding leaves nothing of.
+    let none = Greek { space: false };
+    let empty =
+        synth_free_text_with_font(rect, "", Some(&da), Quadding::Left, &style, res(), &none)
+            .unwrap()
+            .unwrap();
+    assert_eq!(empty, plain);
+    let no_box = Rect::new(0.0, 0.0, 0.0, 10.0);
+    assert_eq!(
+        synth_free_text_with_font(no_box, "x", None, Quadding::Left, &style, res(), &none),
+        Ok(None)
+    );
+    assert_eq!(
+        synth_redact_with_font(no_box, &bad_mark, res(), &none),
+        Ok(None)
+    );
+    let tiny = Rect::new(0.0, 0.0, 4.0, 4.0);
+    let squeezed =
+        synth_free_text_with_font(tiny, "x", None, Quadding::Left, &style, res(), &none).unwrap();
+    assert_eq!(font_resources(&squeezed.unwrap()), []);
+    let unlabelled = RedactMark::new().with_overlay_text("");
+    let (_, ro) = synth_redact_with_font(MARK_RECT, &unlabelled, res(), &none)
+        .unwrap()
+        .unwrap();
+    assert_eq!(font_resources(&ro), []);
+}
+
+/// The size a FreeText's first line is drawn at.
+fn tf_size(ap: &SynthesizedAp) -> f32 {
+    let text = content_text(ap);
+    let line = text.lines().find(|line| line.ends_with(" Tf")).unwrap();
+    line.split(' ').nth(1).unwrap().parse().unwrap()
+}
+
+#[test]
+fn free_text_is_sized_to_its_box_only_for_a_size_of_zero() {
+    let rect = Rect::new(0.0, 0.0, 120.0, 40.0);
+    let style = PaintStyle::new(None, None);
+    let long = "Enough words to fill a small box several times over, so that they fit \
+                only at a size well below twelve.";
+    let draw = |text: &str, da: Option<&DefaultAppearance>| {
+        synth_free_text(rect, text, da, Quadding::Left, &style).unwrap()
+    };
+    let sized = |size: f32| DefaultAppearance::new(b"Helv".to_vec(), size, None);
+    let twelve = draw(long, Some(&sized(12.0)));
+    assert_eq!(tf_size(&twelve), 12.0);
+
+    // No /DA, a /DA with no Tf, and a size below 0 or not a number: 12.
+    assert_eq!(draw(long, None), twelve);
+    assert_eq!(draw(long, Some(&DefaultAppearance::default())), twelve);
+    assert_eq!(draw(long, Some(&sized(-5.0))), twelve);
+    assert_eq!(draw(long, Some(&sized(f32::NAN))), twelve);
+    // A size above 0 as given.
+    assert_eq!(tf_size(&draw(long, Some(&sized(7.5)))), 7.5);
+    assert_eq!(tf_size(&draw(long, Some(&sized(30.0)))), 30.0);
+
+    // Exactly 0: sized to the box where the layout can, between 4 and 12.
+    let auto = draw(long, Some(&sized(0.0)));
+    let short = draw("Short", Some(&sized(0.0)));
+    if cfg!(feature = "text-layout") {
+        let size = tf_size(&auto);
+        assert!((4.0..10.0).contains(&size), "{size}");
+        // All of it is drawn: as many glyphs as a size that small draws.
+        let small = draw(long, Some(&sized(size)));
+        assert_eq!(read_back(&auto).1, read_back(&small).1);
+        assert!(read_back(&auto).1 > read_back(&twelve).1 || read_back(&twelve).1 == 0);
+        let size = tf_size(&short);
+        assert!((11.9..=12.0).contains(&size), "{size}");
+        assert_eq!(tf_size(&draw(long, Some(&sized(-0.0)))), tf_size(&auto));
+    } else {
+        assert_eq!(auto, twelve);
+        assert_eq!(tf_size(&short), 12.0);
+    }
+    // The builder draws what the synthesizer does.
+    let built = BuiltAnnot::free_text(rect, long, &sized(0.0), Quadding::Left, &style);
+    assert_eq!(built.normal_ap, Some(auto.clone()));
+
+    // In a font given, the same rule.
+    #[cfg(feature = "text-layout")]
+    {
+        use pdf_content_streams::Res;
+
+        let greek = Greek { space: true };
+        let text = "\u{3B1}\u{3B2}\u{3B3} ".repeat(30);
+        let draw = |da: Option<&DefaultAppearance>| {
+            let res = Res::written(ObjectId::new(9, 0));
+            crate::synth_free_text_with_font(rect, &text, da, Quadding::Left, &style, res, &greek)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(tf_size(&draw(None)), 12.0);
+        assert_eq!(tf_size(&draw(Some(&sized(-1.0)))), 12.0);
+        assert_eq!(tf_size(&draw(Some(&sized(9.0)))), 9.0);
+        assert!((4.0..11.0).contains(&tf_size(&draw(Some(&sized(0.0))))));
+    }
+
+    // A redaction's label keeps its own default for 0: its region's height.
+    let mark = RedactMark::new().with_overlay_text("LABEL");
+    let (_, by_default) = synth_redact(MARK_RECT, &mark).unwrap();
+    let zero = DefaultAppearance::new(b"Helv".to_vec(), 0.0, Some(Color::Gray(1.0)));
+    let (_, by_zero) = synth_redact(MARK_RECT, &mark.with_default_appearance(&zero)).unwrap();
+    assert_eq!(by_zero, by_default);
+    assert_eq!(tf_size(&by_default), 14.0);
+}
+
+#[test]
+fn a_default_appearances_other_operators_are_not_applied_to_the_text() {
+    let rect = Rect::new(0.0, 0.0, 200.0, 60.0);
+    let style = PaintStyle::new(None, None);
+    let plain = DefaultAppearance::parse(b"/Helv 10 Tf 0 g", &Limits::DEFAULT.content).unwrap();
+    // Invisible text (3 Tr) and the rest: read, kept, and the text still
+    // filled where it was.
+    let all = DefaultAppearance::parse(
+        b"/Helv 10 Tf 0 g 3 Tr 2 Tc 3 Tw 50 Tz 40 TL 5 Ts",
+        &Limits::DEFAULT.content,
+    )
+    .unwrap();
+    assert_eq!(
+        all.text_mode,
+        Some(pdf_content_streams::TextMode::Invisible)
+    );
+    let draw = |da: &DefaultAppearance| {
+        synth_free_text(rect, "Still shown", Some(da), Quadding::Left, &style).unwrap()
+    };
+    let shown = draw(&all);
+    assert_eq!(shown, draw(&plain));
+    let text = content_text(&shown);
+    assert!(text.contains("(Still shown) Tj"), "{text}");
+    for operator in [" Tr", " Tc", " Tw", " Tz", " TL", " Ts"] {
+        assert!(!text.contains(operator), "{operator}");
+    }
+    assert_eq!(read_back(&shown), (0, 11));
+
+    let mark = RedactMark::new().with_overlay_text("LABEL");
+    let (_, ro) = synth_redact(MARK_RECT, &mark.with_default_appearance(&all)).unwrap();
+    assert_eq!(
+        Some(ro),
+        synth_redact(MARK_RECT, &mark.with_default_appearance(&plain)).map(|(_, ro)| ro)
+    );
 }

@@ -42,6 +42,11 @@
 //!     [`BuiltAnnot::redact_mark`], [`BuiltAnnot::redact_quads`]): the mark and its `/RO` overlay
 //!     drawn over each `/QuadPoints` quadrilateral, the overlay also bound as `/AP /R`, with
 //!     [`AnnotMut`] setters for `/RO`, `/OverlayText`, and `/Repeat`.
+//!   - Draws FreeText and redaction overlay text in Helvetica by default, or in any
+//!     `pdf_gfx::LayoutFont` given (`text-layout` feature: `synth_free_text_with_font`,
+//!     `synth_redact_with_font`, `BuiltAnnot::free_text_with_font`,
+//!     `BuiltAnnot::redact_with_font`), such as a font embedded in the document for text beyond
+//!     Helvetica's characters; a character the font can't draw is an error, with nothing built.
 //!   - Flattening keeps `/Redact` marks on the page, undrawn, unless
 //!     [`FlattenOpts::with_redactions`] asks for them: it never removes the content under a
 //!     mark, so a mark painted onto the page would only look like a redaction.
@@ -200,3 +205,5 @@ pub use synth::{
     RedactMark, SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly,
     synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
+#[cfg(feature = "text-layout")]
+pub use synth::{synth_free_text_with_font, synth_redact_with_font};

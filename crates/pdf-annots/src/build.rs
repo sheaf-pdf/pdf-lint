@@ -4,6 +4,10 @@
 use std::fmt;
 
 use pdf_content_streams::Color;
+#[cfg(feature = "text-layout")]
+use pdf_content_streams::Res;
+#[cfg(feature = "text-layout")]
+use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_gfx::{Point, Rect};
 use pdf_objects::{Dict, Object, ObjectId, dict};
 use pdf_semantics::action::Action;
@@ -21,6 +25,8 @@ use crate::synth::{
     RedactMark, SynthesizedAp, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact,
     synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
+#[cfg(feature = "text-layout")]
+use crate::synth::{synth_free_text_with_font, synth_redact_with_font};
 
 /// Zero-I/O mutable wrapper around an annotation [`Dict`] (standalone
 /// annotation or merged Field+Widget dictionary).
@@ -585,7 +591,8 @@ impl BuiltAnnot {
         }
     }
 
-    /// Builds a `/FreeText` annotation with synthesized `/AP /N`.
+    /// Builds a `/FreeText` annotation with synthesized `/AP /N`, its text in
+    /// Helvetica ([`synth_free_text`]).
     #[must_use]
     pub fn free_text(
         rect: Rect,
@@ -593,6 +600,50 @@ impl BuiltAnnot {
         da: &DefaultAppearance,
         quadding: Quadding,
         style: &PaintStyle,
+    ) -> Self {
+        let normal_ap = synth_free_text(rect, contents, Some(da), quadding, style);
+        Self::free_text_over(rect, contents, da, quadding, style, normal_ap)
+    }
+
+    /// Builds a `/FreeText` annotation as [`Self::free_text`] does, the text
+    /// of its `/AP /N` drawn in `font` under the resource `font_res`
+    /// ([`synth_free_text_with_font`]): a font embedded in the document, say,
+    /// for text beyond Helvetica's characters.
+    ///
+    /// `/DA` is written as given: its font name isn't changed to `font`,
+    /// and nothing is added to the document's `/AcroForm /DR`. A viewer
+    /// that draws `/AP /N` shows the text as laid out here; one that makes
+    /// an appearance of its own from `/DA` resolves that name itself.
+    ///
+    /// # Errors
+    ///
+    /// [`UnencodableChar`] for the first character of `contents` that `font`
+    /// can't draw: nothing is built.
+    #[cfg(feature = "text-layout")]
+    pub fn free_text_with_font<F: LayoutFont + ?Sized>(
+        rect: Rect,
+        contents: &str,
+        da: &DefaultAppearance,
+        quadding: Quadding,
+        style: &PaintStyle,
+        font_res: Res,
+        font: &F,
+    ) -> Result<Self, UnencodableChar> {
+        let normal_ap =
+            synth_free_text_with_font(rect, contents, Some(da), quadding, style, font_res, font)?;
+        Ok(Self::free_text_over(
+            rect, contents, da, quadding, style, normal_ap,
+        ))
+    }
+
+    /// A `/FreeText` annotation's dictionary, with `normal_ap` its `/AP /N`.
+    fn free_text_over(
+        rect: Rect,
+        contents: &str,
+        da: &DefaultAppearance,
+        quadding: Quadding,
+        style: &PaintStyle,
+        normal_ap: Option<SynthesizedAp>,
     ) -> Self {
         let mut d = base_annot_dict(&AnnotSubtype::FreeText, rect, AnnotFlags::PRINT);
         {
@@ -606,7 +657,6 @@ impl BuiltAnnot {
                 m.set_color(bg);
             }
         }
-        let normal_ap = synth_free_text(rect, contents, Some(da), quadding, style);
         Self {
             dict: d,
             normal_ap,
@@ -656,6 +706,45 @@ impl BuiltAnnot {
     /// table asks for a `/DA` there.
     #[must_use]
     pub fn redact_mark(rect: Rect, mark: &RedactMark<'_>) -> Self {
+        Self::redact_over(rect, mark, synth_redact(rect, mark))
+    }
+
+    /// Builds a `/Redact` annotation as [`Self::redact_mark`] does, the
+    /// overlay text of its `/RO` drawn in `font` under the resource
+    /// `font_res` ([`synth_redact_with_font`]): a font embedded in the
+    /// document, say, for a label beyond Helvetica's characters. For a
+    /// `/Rect` taken from the mark's quadrilaterals, pass
+    /// [`RedactMark::bounds`].
+    ///
+    /// The dictionary is [`Self::redact_mark`]'s: a `/DA` is written as
+    /// given, or `/Helv 0 Tf 1 g` beside overlay text with none given, its
+    /// font name never changed to `font`, and nothing is added to the
+    /// document's `/AcroForm /DR`. A viewer that applies the mark with its
+    /// `/RO` leaves the text as laid out here; one that draws the label
+    /// itself from `/OverlayText` and `/DA` resolves that name itself.
+    ///
+    /// # Errors
+    ///
+    /// [`UnencodableChar`] for the first character of the overlay text that
+    /// `font` can't draw: nothing is built.
+    #[cfg(feature = "text-layout")]
+    pub fn redact_with_font<F: LayoutFont + ?Sized>(
+        rect: Rect,
+        mark: &RedactMark<'_>,
+        font_res: Res,
+        font: &F,
+    ) -> Result<Self, UnencodableChar> {
+        let forms = synth_redact_with_font(rect, mark, font_res, font)?;
+        Ok(Self::redact_over(rect, mark, forms))
+    }
+
+    /// A `/Redact` annotation's dictionary, with `forms` its `/AP /N` and
+    /// `/RO`.
+    fn redact_over(
+        rect: Rect,
+        mark: &RedactMark<'_>,
+        forms: Option<(SynthesizedAp, SynthesizedAp)>,
+    ) -> Self {
         let mut d = base_annot_dict(&AnnotSubtype::Redact, rect, AnnotFlags::PRINT);
         {
             let mut m = AnnotMut::new(&mut d);
@@ -687,7 +776,7 @@ impl BuiltAnnot {
             }
             m.set_repeat(mark.repeat);
         }
-        let (normal_ap, redact_overlay) = match synth_redact(rect, mark) {
+        let (normal_ap, redact_overlay) = match forms {
             Some((ap, ro)) => (Some(ap), Some(ro)),
             None => (None, None),
         };
