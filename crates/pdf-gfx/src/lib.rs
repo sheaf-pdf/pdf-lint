@@ -29,6 +29,12 @@
 //!   Builds new content streams with scoped `q`/`Q` state, inset borders,
 //!   rounded rectangles, ellipses, placed images/Form XObjects, and
 //!   `TJ`-kerned text over [`ContentWriter`](pdf_content_streams::ContentWriter).
+//! - **Default appearance strings ([`DefaultAppearance`]):**
+//!   Parses a `/DA` string (ISO 32000-2, §12.7.4.3) under
+//!   [`pdf_content_streams::Limits`] into its font resource name and size
+//!   (`Tf`, with `0` kept as auto-size), device color, and text-state scalars
+//!   (`Tc`, `Tw`, `Tz`, `TL`, `Tr`, `Ts`), and writes it back deterministically,
+//!   so annotations and form fields share one reader and writer.
 //! - **Positioned text page, search & multiline layout (`text-layout` feature):**
 //!   `TextPage` assembles placed glyphs into reading-order lines with synthetic
 //!   spaces and line breaks, faux-bold deduplication, `/ActualText` replacement,
@@ -122,6 +128,7 @@ pub use pdf_semantics;
 
 mod canvas;
 mod clip;
+mod da;
 mod encode;
 mod error;
 mod fault;
@@ -147,6 +154,7 @@ mod xobject;
 
 pub use canvas::{Canvas, TextPiece};
 pub use clip::{Clip, ClipPart, ClipParts};
+pub use da::DefaultAppearance;
 pub use encode::{EncodedPage, encode, encode_with};
 pub use error::{Error, Unwritable};
 pub use fault::Fault;

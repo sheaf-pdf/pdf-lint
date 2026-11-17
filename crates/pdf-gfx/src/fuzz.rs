@@ -9,6 +9,9 @@
 //! 4. Re-encode round-trip invariance: whenever `encode` succeeds, re-interpreting
 //!    the encoded page and Form XObject streams reproduces the exact same
 //!    non-`Op` geometry, text, clip, form, image, shading, and mark events.
+//! 5. `/DA` round-trip invariance: whenever `DefaultAppearance::parse` reads the
+//!    page content, what `to_bytes` writes parses again and writes the same
+//!    bytes again.
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
@@ -22,6 +25,7 @@ use pdf_objects::{
 };
 use pdf_semantics::pages::{self, Inheritable};
 
+use crate::da::DefaultAppearance;
 use crate::encode::{EncodedPage, encode, encode_with};
 use crate::geom::{Matrix, PageGeom, Rect};
 use crate::interp::{Event, Forms, Kind, Opts, Wants, interpret, interpret_with};
@@ -40,6 +44,7 @@ pub const SEEDS: &[&[u8]] = &[
     b"BI /W 1 /$\x00\"\x00\x00\x00\x00\x80\x00\x00x EI",
     b"BI /SMask /None/W 1 / W* BI /W 1 /W n /Fm1 C\x01\x00\x00\x00\x00\x00\x00\"] I /CS /] ID x E\x01\x00\x00\x00\x00\x00\x00\x05KC 8 /CS /] ID x D x EIH;1 /BPKC 8 /CS /] ID x EI",
     b"BI /F /Fl ID x EI\n\n",
+    b"/Helv 0 Tf 0.2 0.4 0.6 rg 0.5 G 0 0 0 1 k 1.5 Tc -2 Tw 90 Tz 14 TL 2 Tr 3 Ts",
     b"1 Tw 2 Tc /Fm1 Do 5 Tw 6 Tc /Fm1 Do\xff<< /XObject << /Fm1 1 0 R >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>\xff<< /Subtype /Form /BBox [0 0 80 80] >>\nstream\nBT /F1 10 Tf 1e39 0 (Hi) \" ET",
 ];
 
@@ -50,6 +55,8 @@ pub fn check(data: &[u8]) {
     let mut parts = data.split(|&b| b == 0xFF);
     let page_bytes = parts.next().unwrap_or_default();
     let res_bytes = parts.next().unwrap_or_default();
+
+    check_default_appearance(page_bytes);
 
     let mut parse_limits = pdf_objects::Limits::DEFAULT;
     parse_limits.nesting = 16;
@@ -219,6 +226,36 @@ pub fn check(data: &[u8]) {
                 }
             }
         }
+    }
+}
+
+/// Parses `da` as a `/DA` string and, where it parses, holds the round trip:
+/// what `to_bytes` writes parses again, and writes the same bytes again.
+fn check_default_appearance(da: &[u8]) {
+    // The default content limits both times: what's written holds no more
+    // operands, nesting, or images than what was read, so no cap that took
+    // `da` refuses it.
+    let limits = pdf_content_streams::Limits::DEFAULT;
+    let Some(parsed) = DefaultAppearance::parse(da, &limits) else {
+        return;
+    };
+    let _ = format!("{parsed:?}");
+    let _ = parsed.size();
+    #[cfg(feature = "text-layout")]
+    let _ = parsed.text_box_style();
+
+    let written = parsed.to_bytes();
+    let again =
+        DefaultAppearance::parse(&written, &limits).expect("a written /DA must parse again");
+    // A content parser keeps the first 255 bytes of a word, so a font name
+    // whose written form (its `/` and `#XX` escapes among it) is longer reads
+    // back cut short. The bytes are held equal only where the name fits.
+    let name_word = written
+        .iter()
+        .position(|&b| b == b' ')
+        .unwrap_or(written.len());
+    if parsed.font_name.is_none() || name_word <= 255 {
+        assert_eq!(again.to_bytes(), written);
     }
 }
 

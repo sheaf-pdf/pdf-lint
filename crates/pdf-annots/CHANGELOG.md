@@ -8,7 +8,8 @@ First release. Until `0.1.0` stabilizes, alpha releases may include breaking API
 
 - `Annot`, `page_annots`, `page_annots_with`, `page_tabs`, `TabOrder`, and `MarkupInfo`: zero-I/O page `/Annots` traversal and `&Dict` wrapper under `Rules::Iso` and `Rules::Pdfium` (as of chromium/8152).
 - `AnnotSubtype` and `TypedAnnot`: typed views for `Text`, `Link`, `FreeText`, `Highlight`/`Underline`/`Squiggly`/`StrikeOut` (`TextMarkupAnnot`, `QuadPoints`), `Line`, `Square`/`Circle` (`ShapeAnnot`), `Polygon`/`PolyLine` (`PolyAnnot`), `Ink`, `Stamp`, `Caret`, `Popup`, `FileAttachment`, `Redact`, and `Widget`.
-- `AnnotFlags`, `AnnotColor`, `Border`, `BorderStyle`, `AppearanceChars`, `DefaultAppearance`, `LineEnding`, and `Quadding`: common visual, border, appearance-characteristic (`/MK`), and `/DA` default-appearance parsing and serialization.
+- `AnnotFlags`, `AnnotColor`, `Border`, `BorderStyle`, `AppearanceChars`, `LineEnding`, and `Quadding`: common visual, border, and appearance-characteristic (`/MK`) parsing and serialization.
+- `DefaultAppearance`: `/DA` default-appearance parsing and serialization, re-exported from `pdf-gfx` (one type under both names): its color is a `pdf-content-streams` `Color` (`AnnotColor::to_content_color` converts one), it keeps the text-state scalars `Tc`, `Tw`, `Tz`, `TL`, `Tr`, and `Ts`, and `parse` takes `pdf-content-streams`' `Limits` (`Limits::content` here).
 - `Appearances`, `AppearanceEntry`, `AppearanceMode`, `placement_matrix`, and `stream_placement_matrix`: `/AP` + `/AS` resolution and ISO 32000-2 §12.5.5 Form XObject placement matrices.
 - Re-exports `Dest`, `ExplicitDest`, `PageTarget`, `DestFit`, `DestNameKind`, `DestTable`, `ResolvedDest`, `resolve_dest`, `Action`, `NamedAction`, `AdditionalActions`, and `OpenAction` from `pdf-semantics`.
 - `AnnotThread`, `ReplyKind`, `MarkedState`, `ReviewState`, and `resolve_threads`: `/IRT` reply/group threading and effective state aggregation.

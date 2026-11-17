@@ -13,10 +13,11 @@ use pdf_semantics::pages;
 
 use crate::{
     ActiveColorSpace, BlendState, Canvas, Cap, Clip, ClipPart, ColorValues, DashPattern,
-    EncodedPage, Error, Fault, FormUse, Forms, ImageDrawn, ImageOf, Kind, Limits, Mark, MarkProps,
-    Marks, Matrix, Opts, PageGeom, PathDrawn, Point, Quad, Rect, Refused, RenderingIntent,
-    Rotation, Seg, ShadingDrawn, SoftMask, SoftMaskKind, State, Summary, TextPiece, TextState,
-    Unwritable, UseId, Wants, encode, encode_with, fuzz, interpret, interpret_with,
+    DefaultAppearance, EncodedPage, Error, Fault, FormUse, Forms, ImageDrawn, ImageOf, Kind,
+    Limits, Mark, MarkProps, Marks, Matrix, Opts, PageGeom, PathDrawn, Point, Quad, Rect, Refused,
+    RenderingIntent, Rotation, Seg, ShadingDrawn, SoftMask, SoftMaskKind, State, Summary,
+    TextPiece, TextState, Unwritable, UseId, Wants, encode, encode_with, fuzz, interpret,
+    interpret_with,
 };
 
 #[derive(Default)]
@@ -2275,4 +2276,341 @@ fn encode_preserves_inherited_spacing_on_reused_form_with_nonfinite_quote_op() {
     }
     let after = collect_origins(&store, &Concat::new(&[&encoded.content]));
     assert_eq!(before, after);
+}
+
+fn parse_da(da: &[u8]) -> DefaultAppearance {
+    DefaultAppearance::parse(da, &pdf_content_streams::Limits::DEFAULT).expect("the /DA parses")
+}
+
+#[test]
+fn default_appearance_reads_and_writes_font_color_and_each_scalar() {
+    let da = parse_da(b"/Helv 12 Tf 0 g");
+    assert_eq!(da.font_name.as_deref(), Some(&b"Helv"[..]));
+    assert_eq!(da.font_size, Some(12.0));
+    assert_eq!(da.color, Some(Color::Gray(0.0)));
+    assert_eq!(
+        (da.char_space, da.word_space, da.horizontal_scale),
+        (None, None, None)
+    );
+    assert_eq!((da.leading, da.text_mode, da.rise), (None, None, None));
+    assert_eq!(
+        da,
+        DefaultAppearance::new("Helv", 12.0, Some(Color::Gray(0.0)))
+    );
+    assert_eq!(da.to_bytes(), b"/Helv 12 Tf 0 g");
+
+    // Each text-state scalar by itself: read into its own field, and written back.
+    let none = DefaultAppearance::default();
+    for (src, want) in [
+        (
+            &b"1.5 Tc"[..],
+            DefaultAppearance {
+                char_space: Some(1.5),
+                ..none.clone()
+            },
+        ),
+        (
+            b"-2 Tw",
+            DefaultAppearance {
+                word_space: Some(-2.0),
+                ..none.clone()
+            },
+        ),
+        (
+            b"90 Tz",
+            DefaultAppearance {
+                horizontal_scale: Some(90.0),
+                ..none.clone()
+            },
+        ),
+        (
+            b"14 TL",
+            DefaultAppearance {
+                leading: Some(14.0),
+                ..none.clone()
+            },
+        ),
+        (
+            b"3 Tr",
+            DefaultAppearance {
+                text_mode: Some(TextMode::Invisible),
+                ..none.clone()
+            },
+        ),
+        (
+            b"-0.25 Ts",
+            DefaultAppearance {
+                rise: Some(-0.25),
+                ..none.clone()
+            },
+        ),
+    ] {
+        let da = parse_da(src);
+        assert_eq!(da, want, "{}", String::from_utf8_lossy(src));
+        assert_eq!(da.to_bytes(), src);
+    }
+
+    // All of them, written in the one canonical order whatever order they were read in.
+    let da = parse_da(b"3 Ts 2 Tr 14 TL 90 Tz -2 Tw 1.5 Tc 0.2 0.4 0.6 rg /F#201 9 Tf");
+    assert_eq!(da.font_name.as_deref(), Some(&b"F 1"[..]));
+    assert_eq!(da.color, Some(Color::Rgb([0.2, 0.4, 0.6])));
+    assert_eq!(da.text_mode, Some(TextMode::FillStroke));
+    assert_eq!(
+        da.to_bytes(),
+        b"/F#201 9 Tf 0.2 0.4 0.6 rg 1.5 Tc -2 Tw 90 Tz 14 TL 2 Tr 3 Ts"
+    );
+
+    // The default is empty, and writes nothing; a color alone has no leading space.
+    assert_eq!(none.to_bytes(), b"");
+    assert_eq!(parse_da(b""), none);
+    assert_eq!(parse_da(b"0 0 1 0 k").to_bytes(), b"0 0 1 0 k");
+}
+
+#[test]
+fn default_appearance_ignores_bad_operands_and_keeps_the_last_of_each() {
+    // `Tr` outside 0..=7 sets no mode, and leaves an earlier one standing.
+    assert_eq!(parse_da(b"8 Tr").text_mode, None);
+    assert_eq!(parse_da(b"-1 Tr").text_mode, None);
+    assert_eq!(parse_da(b"1 Tr 9 Tr").text_mode, Some(TextMode::Stroke));
+    assert_eq!(parse_da(b"7 Tr").text_mode, Some(TextMode::Clip));
+    // A real is cut to its whole part, as the interpreter reads `Tr`.
+    assert_eq!(parse_da(b"2.9 Tr").text_mode, Some(TextMode::FillStroke));
+
+    // A real past `f32`'s range reads as infinite: the operator is ignored.
+    let huge = format!("1{}.", "0".repeat(45));
+    for op in ["Tc", "Tw", "Tz", "TL", "Tr", "Ts"] {
+        let da = parse_da(format!("{huge} {op}").as_bytes());
+        assert_eq!(da, DefaultAppearance::default(), "{op}");
+    }
+    let da = parse_da(format!("4 Tc {huge} Tc /Helv {huge} Tf {huge} g 0 {huge} 0 rg").as_bytes());
+    assert_eq!(da.char_space, Some(4.0));
+    assert_eq!(da.font_name.as_deref(), Some(&b"Helv"[..]));
+    assert_eq!(da.font_size, None);
+    assert_eq!(da.color, None);
+    // Written, a font without a size gets 0.
+    assert_eq!(da.to_bytes(), b"/Helv 0 Tf 4 Tc");
+
+    // An operator without the operands it needs is passed over, as is any other operator.
+    let da = parse_da(b"Tc Tw 1 0 rg 0 0 1 k BT (x) Tj ET 5 w");
+    assert_eq!(da, DefaultAppearance::default());
+    // No `Tf` still parses: the caller decides whether that's a fault.
+    assert_eq!(parse_da(b"0.5 g").font_name, None);
+
+    // The last color wins, stroking and nonstroking operators alike, clamped to 0..=1.
+    assert_eq!(
+        parse_da(b"0 g 1 0 0 rg").color,
+        Some(Color::Rgb([1.0, 0.0, 0.0]))
+    );
+    assert_eq!(parse_da(b"1 0 0 rg 0.25 G").color, Some(Color::Gray(0.25)));
+    assert_eq!(
+        parse_da(b"0.5 g 0.1 0.2 0.3 RG").color,
+        Some(Color::Rgb([0.1, 0.2, 0.3]))
+    );
+    assert_eq!(
+        parse_da(b"0 g 0 0.5 1 0.25 K").color,
+        Some(Color::Cmyk([0.0, 0.5, 1.0, 0.25]))
+    );
+    assert_eq!(
+        parse_da(b"2 -1 0.5 rg").color,
+        Some(Color::Rgb([1.0, 0.0, 0.5]))
+    );
+    // The last `Tf` and the last scalar win too.
+    let da = parse_da(b"/A 8 Tf 1 Tc /B 10 Tf 2 Tc");
+    assert_eq!(da.font_name.as_deref(), Some(&b"B"[..]));
+    assert_eq!((da.font_size, da.char_space), (Some(10.0), Some(2.0)));
+}
+
+#[test]
+fn default_appearance_size_is_none_for_auto_sizing() {
+    let da = parse_da(b"/Helv 0 Tf");
+    assert_eq!(da.font_size, Some(0.0));
+    assert_eq!(da.size(), None);
+    assert_eq!(da.to_bytes(), b"/Helv 0 Tf");
+
+    assert_eq!(parse_da(b"/Helv 9.5 Tf").size(), Some(9.5));
+    assert_eq!(parse_da(b"/Helv -3 Tf").size(), None);
+    assert_eq!(parse_da(b"/Helv -3 Tf").font_size, Some(-3.0));
+    assert_eq!(parse_da(b"0 g").size(), None);
+    assert_eq!(DefaultAppearance::new("F", f32::NAN, None).size(), None);
+    assert_eq!(
+        DefaultAppearance::new("F", f32::INFINITY, None).size(),
+        None
+    );
+}
+
+#[cfg(feature = "text-layout")]
+#[test]
+fn default_appearance_text_box_style_maps_the_size_alone() {
+    use crate::TextBoxStyle;
+
+    let fixed = parse_da(b"/Helv 9 Tf 3 Tr 20 TL 2 Tc").text_box_style();
+    assert_eq!(
+        fixed,
+        TextBoxStyle {
+            size: Some(9.0),
+            ..TextBoxStyle::default()
+        }
+    );
+    // `3 Tr` and `TL` are kept for writing back, never applied to the style.
+    assert_eq!(fixed.mode, TextMode::Fill);
+    assert_eq!(fixed.line_height, None);
+
+    for auto in [&b"/Helv 0 Tf"[..], b"/Helv -1 Tf", b"0 g", b""] {
+        assert_eq!(
+            parse_da(auto).text_box_style(),
+            TextBoxStyle {
+                size: None,
+                ..TextBoxStyle::default()
+            }
+        );
+    }
+}
+
+#[test]
+fn default_appearance_round_trips_what_it_writes() {
+    fn name_word(written: &[u8]) -> usize {
+        written
+            .iter()
+            .position(|&b| b == b' ')
+            .unwrap_or(written.len())
+    }
+
+    // What `to_bytes` writes parses again and writes the same bytes again.
+    let again = |src: &[u8]| {
+        let written = parse_da(src).to_bytes();
+        assert_eq!(parse_da(&written).to_bytes(), written);
+        written
+    };
+    assert_eq!(again(b"/Helv 12 Tf 0 g"), b"/Helv 12 Tf 0 g");
+    // Numbers are rounded to four places once, then stay.
+    assert_eq!(
+        again(b"/F 10.123456 Tf 0.33333333 g 1234.56789 Tc"),
+        b"/F 10.1235 Tf 0.3333 g 1234.5679 Tc"
+    );
+    // A whole number past 32 bits keeps its point, so it reads back as a real.
+    assert_eq!(again(b"/F 12345678901. Tf"), b"/F 12345678848. Tf");
+    assert_eq!(again(b"-0.00001 Ts"), b"0 Ts");
+    // A name's delimiters, spaces, and `#` are escaped, and read back as they were.
+    let escaped = again(b"/A#20B#23#28#ff 7 Tf");
+    assert_eq!(escaped, b"/A#20B#23#28#FF 7 Tf");
+    assert_eq!(
+        parse_da(&escaped).font_name.as_deref(),
+        Some(&b"A B#(\xff"[..])
+    );
+    // An empty name is a name.
+    assert_eq!(again(b"/ 7 Tf"), b"/ 7 Tf");
+
+    // A name holding a NUL can't be written: `/Helv` stands in, with nothing
+    // half-written before it.
+    let nul = parse_da(b"/A#00B 7 Tf 1 g");
+    assert_eq!(nul.font_name.as_deref(), Some(&b"A\0B"[..]));
+    assert_eq!(nul.to_bytes(), b"/Helv 7 Tf 1 g");
+    assert_eq!(again(b"/A#00B 7 Tf 1 g"), b"/Helv 7 Tf 1 g");
+
+    // A content parser keeps a word's first 255 bytes, so a name whose
+    // written form is longer reads back cut short: the one case outside the
+    // round trip, which `to_bytes` documents and the fuzz body leaves out.
+    let long = DefaultAppearance::new(vec![b' '; 100], 7.0, None);
+    let written = long.to_bytes();
+    assert_eq!(name_word(&written), 301);
+    let cut = parse_da(&written);
+    let mut kept = vec![b' '; 84];
+    kept.extend_from_slice(b"#2"); // the escape the cut fell in
+    assert_eq!(cut.font_name, Some(kept));
+    assert_eq!(cut.font_size, Some(7.0));
+    // A name that fits, at the edge, holds.
+    let fits = DefaultAppearance::new(vec![b'a'; 254], 7.0, None);
+    assert_eq!(name_word(&fits.to_bytes()), 255);
+    assert_eq!(parse_da(&fits.to_bytes()), fits);
+
+    // Pseudo-random fragments of /DA operators, numbers, and names: the fuzz
+    // body's invariant, held here over a fixed sample.
+    let tokens = [
+        &b"/Helv "[..],
+        b"/F#201 ",
+        b"/A#00 ",
+        b"0 ",
+        b"12 ",
+        b"-3.14159 ",
+        b"0.00004 ",
+        b"99999.99995 ",
+        b"4294967296 ",
+        b"3000000000.5 ",
+        b"--5 ",
+        b"1.2.3 ",
+        b"(s) ",
+        b"[1 2] ",
+        b"Tf ",
+        b"g ",
+        b"G ",
+        b"rg ",
+        b"RG ",
+        b"k ",
+        b"K ",
+        b"Tc ",
+        b"Tw ",
+        b"Tz ",
+        b"TL ",
+        b"Tr ",
+        b"Ts ",
+        b"BT ",
+    ];
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut parsed = 0;
+    for _ in 0..512 {
+        let mut buf = Vec::new();
+        for _ in 0..12 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            buf.extend_from_slice(tokens[(state >> 32) as usize % tokens.len()]);
+        }
+        if DefaultAppearance::parse(&buf, &pdf_content_streams::Limits::DEFAULT).is_some() {
+            parsed += 1;
+            again(&buf);
+        }
+        fuzz::check(&buf);
+    }
+    assert!(parsed > 400, "{parsed} of 512 fragments parsed");
+}
+
+#[test]
+fn default_appearance_debug_reports_the_names_length_not_the_name() {
+    let da = parse_da(b"/SECRET_FONT 12 Tf 0 0 1 rg 2 Tc 1 Tw 90 Tz 14 TL 1 Tr 3 Ts");
+    let dbg = format!("{da:?}");
+    assert!(!dbg.contains("SECRET"), "{dbg}");
+    assert!(!dbg.contains("83, 69, 67"), "{dbg}"); // nor as a list of bytes
+    assert_eq!(
+        dbg,
+        "DefaultAppearance { font_name_len: Some(11), font_size: Some(12.0), \
+         color: Some(Rgb([0.0, 0.0, 1.0])), char_space: Some(2.0), word_space: Some(1.0), \
+         horizontal_scale: Some(90.0), leading: Some(14.0), text_mode: Some(Stroke), \
+         rise: Some(3.0) }"
+    );
+    let pretty = format!("{da:#?}");
+    assert!(!pretty.contains("SECRET"), "{pretty}");
+    assert!(
+        format!("{:?}", DefaultAppearance::default()).contains("font_name_len: None"),
+        "an absent name has no length"
+    );
+}
+
+#[test]
+fn default_appearance_parse_is_refused_past_a_content_cap() {
+    let src = b"/Helv 12 Tf 0.1 0.2 0.3 rg";
+    assert!(DefaultAppearance::parse(src, &pdf_content_streams::Limits::DEFAULT).is_some());
+
+    // `rg` has three operands: a cap of two refuses the string whole.
+    let mut limits = pdf_content_streams::Limits::DEFAULT;
+    limits.operands = 2;
+    assert_eq!(DefaultAppearance::parse(src, &limits), None);
+    // Under the same cap, what stays within it parses.
+    assert!(DefaultAppearance::parse(b"/Helv 12 Tf 0 g", &limits).is_some());
+
+    // What can't be lexed is refused too.
+    assert_eq!(
+        DefaultAppearance::parse(
+            b"/Helv 12 Tf (unclosed",
+            &pdf_content_streams::Limits::DEFAULT
+        ),
+        None
+    );
 }

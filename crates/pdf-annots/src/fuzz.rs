@@ -104,7 +104,7 @@ pub fn check(data: &[u8]) {
         ..Limits::DEFAULT
     };
 
-    let _ = DefaultAppearance::parse(page_bytes, &limits).map(|da| da.to_bytes());
+    let _ = DefaultAppearance::parse(page_bytes, &limits.content).map(|da| da.to_bytes());
 
     for rules in [Rules::Iso, Rules::Pdfium] {
         let plain = page_annots(&map, &page_dict, None, rules, &limits);

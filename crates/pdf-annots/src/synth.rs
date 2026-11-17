@@ -711,10 +711,7 @@ pub fn synth_free_text(
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
     let mut canvas = Canvas::new();
 
-    let text_color = da
-        .and_then(|d| d.color)
-        .and_then(AnnotColor::to_content_color)
-        .unwrap_or(Color::Gray(0.0));
+    let text_color = da.and_then(|d| d.color).unwrap_or(Color::Gray(0.0));
     let font_size = da
         .and_then(|d| d.font_size)
         .filter(|&s| s > 0.0)
@@ -791,10 +788,7 @@ pub fn synth_redact(
         cv.fill_rect(bbox);
 
         if let Some(txt) = overlay_text.filter(|t| !t.is_empty()) {
-            let text_color = da
-                .and_then(|d| d.color)
-                .and_then(AnnotColor::to_content_color)
-                .unwrap_or(Color::Gray(1.0));
+            let text_color = da.and_then(|d| d.color).unwrap_or(Color::Gray(1.0));
             let font_size = da
                 .and_then(|d| d.font_size)
                 .filter(|&s| s > 0.0)

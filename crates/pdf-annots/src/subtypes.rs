@@ -979,7 +979,7 @@ fn read_da<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     let Some(da_bytes) = reader.byte_string_entry(dict, within, "DA")? else {
         return Ok(None);
     };
-    match DefaultAppearance::parse(da_bytes, reader.limits) {
+    match DefaultAppearance::parse(da_bytes, &reader.limits.content) {
         Some(da) => {
             if da.font_name.is_none() {
                 reader.say(within, None, Fault::InvalidDefaultAppearance);

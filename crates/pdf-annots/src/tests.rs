@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use pdf_content_streams::Color;
 use pdf_gfx::{Matrix, Point, Rect};
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, Form, Object, ObjectId, Str, Stream, Value, Why, dict};
@@ -355,8 +356,8 @@ fn subtypes_borders_da_and_encrypted_string_locked_error() {
     let da = ft_view.da.as_ref().unwrap();
     assert_eq!(da.font_name.as_deref(), Some(&b"Helv"[..]));
     assert_eq!(da.font_size, Some(14.0));
-    assert_eq!(da.color, Some(AnnotColor::Rgb([0.25, 0.5, 0.75])));
-    let reparsed = DefaultAppearance::parse(&da.to_bytes(), &Limits::DEFAULT).unwrap();
+    assert_eq!(da.color, Some(Color::Rgb([0.25, 0.5, 0.75])));
+    let reparsed = DefaultAppearance::parse(&da.to_bytes(), &Limits::DEFAULT.content).unwrap();
     assert_eq!(reparsed, *da);
     assert_eq!(ft_view.quadding, Quadding::Right);
     assert_eq!(ft_view.intent, FreeTextIntent::Callout);
@@ -716,11 +717,7 @@ fn builders_appearance_synthesis_and_page_flattening_roundtrip() {
     };
 
     let border = Border::default();
-    let da = DefaultAppearance {
-        font_name: Some(b"Helv".to_vec()),
-        font_size: Some(11.0),
-        color: Some(AnnotColor::Rgb([0.1, 0.2, 0.8])),
-    };
+    let da = DefaultAppearance::new(b"Helv".to_vec(), 11.0, Some(Color::Rgb([0.1, 0.2, 0.8])));
 
     let built_items = [
         BuiltAnnot::link_dest(
@@ -957,4 +954,21 @@ fn builders_appearance_synthesis_and_page_flattening_roundtrip() {
         events > 10,
         "expected rendered path/text events, got {events}"
     );
+}
+
+#[test]
+fn default_appearance_is_pdf_gfxs_type() {
+    use std::any::TypeId;
+
+    assert_eq!(
+        TypeId::of::<crate::DefaultAppearance>(),
+        TypeId::of::<pdf_gfx::DefaultAppearance>()
+    );
+    // One value passes for both names, with no conversion.
+    let da: pdf_gfx::DefaultAppearance =
+        crate::DefaultAppearance::new("Helv", 12.0, AnnotColor::Gray(0.0).to_content_color());
+    let same: &crate::DefaultAppearance = &da;
+    assert_eq!(same.to_bytes(), b"/Helv 12 Tf 0 g");
+    // A transparent annotation color is no `/DA` color.
+    assert_eq!(AnnotColor::Transparent.to_content_color(), None);
 }

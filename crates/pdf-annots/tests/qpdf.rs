@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use pdf_annots::pdf_content_streams::Color;
 use pdf_annots::pdf_gfx::{Point, Rect};
 use pdf_annots::pdf_objects::{Dict, Object, Stream, Version, dict};
 use pdf_annots::pdf_semantics::pages::{FANOUT, write};
@@ -69,11 +70,7 @@ fn qpdf_accepts_synthesized_annotations_and_flattened_pages() {
         "Resources" => dict! {},
     };
 
-    let da = DefaultAppearance::new(
-        b"Helv".to_vec(),
-        12.0,
-        Some(AnnotColor::Rgb([0.0, 0.2, 0.6])),
-    );
+    let da = DefaultAppearance::new(b"Helv".to_vec(), 12.0, Some(Color::Rgb([0.0, 0.2, 0.6])));
     for built in [
         BuiltAnnot::link_dest(Rect::new(50.0, 700.0, 150.0, 720.0), &Dest::fit(p2)),
         BuiltAnnot::text_markup(

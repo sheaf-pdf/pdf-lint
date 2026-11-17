@@ -14,7 +14,8 @@
 //!     or [`Rules::Pdfium`](pdf_objects::pdf_tokenizer::Rules::Pdfium), decoding `/Subtype`
 //!     ([`AnnotSubtype`]), `/Rect`, [`AnnotFlags`], [`AnnotColor`] (`/C`, `/IC`), [`Border`]
 //!     (`/BS`, legacy `/Border`, `/BE`), [`AppearanceChars`] (`/MK`), [`DefaultAppearance`]
-//!     (`/DA`), and [`MarkupInfo`] (`/T`, `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
+//!     (`/DA`, `pdf-gfx`'s shared parser and serializer, re-exported), and [`MarkupInfo`] (`/T`,
+//!     `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
 //!   - [`Annot::from_dict`] and [`Annot::from_dict_with`] inspect any `&Dict` directly (including
 //!     merged Field+Widget dictionaries).
 //! - **Typed subtype payloads ([`TypedAnnot`]):**

@@ -7,7 +7,7 @@ PDF annotations, appearance placement, destinations, and actions (ISO 32000-2, Â
 ## Core Concepts
 
 - **Page `/Annots` & `&Dict` inspection (`Annot`, `page_annots`, `page_annots_with`, `page_tabs`):**
-  - Walks page `/Annots` arrays under `Rules::Iso` or `Rules::Pdfium` as of chromium/8152, decoding `/Subtype` (`AnnotSubtype`), `/Rect`, `AnnotFlags`, `AnnotColor` (`/C`, `/IC`), `Border` (`/BS`, legacy `/Border`, `/BE`), `AppearanceChars` (`/MK`), `DefaultAppearance` (`/DA`), and `MarkupInfo` (`/T`, `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
+  - Walks page `/Annots` arrays under `Rules::Iso` or `Rules::Pdfium` as of chromium/8152, decoding `/Subtype` (`AnnotSubtype`), `/Rect`, `AnnotFlags`, `AnnotColor` (`/C`, `/IC`), `Border` (`/BS`, legacy `/Border`, `/BE`), `AppearanceChars` (`/MK`), `DefaultAppearance` (`/DA`, `pdf-gfx`'s shared parser and serializer, re-exported), and `MarkupInfo` (`/T`, `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
   - `Annot::from_dict` and `Annot::from_dict_with` inspect any `&Dict` directly, including merged Field+Widget dictionaries.
 - **Typed subtype payloads (`TypedAnnot`):**
   - Structured views for `Text` (`TextAnnot`), `Link` (`LinkAnnot`), `FreeText` (`FreeTextAnnot`), text markups (`TextMarkupAnnot`, `QuadPoints`), `Line` (`LineAnnot`), `Square`/`Circle` (`ShapeAnnot`), `Polygon`/`PolyLine` (`PolyAnnot`), `Ink` (`InkAnnot`), `Stamp` (`StampAnnot`), `Caret` (`CaretAnnot`), `Popup` (`PopupAnnot`), `FileAttachment` (`FileAttachmentAnnot`), `Redact` (`RedactAnnot`), and `Widget` (`WidgetAnnot`).
