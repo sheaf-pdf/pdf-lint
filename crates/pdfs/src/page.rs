@@ -384,6 +384,11 @@ where
 /// Plans flattening of `page`'s annotations according to `opts`
 /// ([`pdf_annots::plan_flatten`]).
 ///
+/// `/Redact` marks stay on the page, undrawn, unless `opts` sets
+/// [`include_redactions`](pdf_annots::FlattenOpts::include_redactions):
+/// flattening never removes the content under a mark, so drawing one would
+/// only make the page look redacted.
+///
 /// # Errors
 ///
 /// [`Error::Annots`] if `/Annots` or an appearance Form XObject fails to read.

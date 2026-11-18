@@ -7,7 +7,7 @@ PDF annotations, appearance placement, destinations, and actions (ISO 32000-2, Â
 ## Core Concepts
 
 - **Page `/Annots` & `&Dict` inspection (`Annot`, `page_annots`, `page_annots_with`, `page_tabs`):**
-  - Walks page `/Annots` arrays under `Rules::Iso` or `Rules::Pdfium` as of chromium/8152, decoding `/Subtype` (`AnnotSubtype`), `/Rect`, `AnnotFlags`, `AnnotColor` (`/C`, `/IC`), `Border` (`/BS`, legacy `/Border`, `/BE`), `AppearanceChars` (`/MK`), `DefaultAppearance` (`/DA`), and `MarkupInfo` (`/T`, `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
+  - Walks page `/Annots` arrays under `Rules::Iso` or `Rules::Pdfium` as of chromium/8152, decoding `/Subtype` (`AnnotSubtype`), `/Rect`, `AnnotFlags`, `AnnotColor` (`/C`, `/IC`), `Border` (`/BS`, legacy `/Border`, `/BE`), `AppearanceChars` (`/MK`), `DefaultAppearance` (`/DA`, `pdf-gfx`'s shared parser and serializer, re-exported), and `MarkupInfo` (`/T`, `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
   - `Annot::from_dict` and `Annot::from_dict_with` inspect any `&Dict` directly, including merged Field+Widget dictionaries.
 - **Typed subtype payloads (`TypedAnnot`):**
   - Structured views for `Text` (`TextAnnot`), `Link` (`LinkAnnot`), `FreeText` (`FreeTextAnnot`), text markups (`TextMarkupAnnot`, `QuadPoints`), `Line` (`LineAnnot`), `Square`/`Circle` (`ShapeAnnot`), `Polygon`/`PolyLine` (`PolyAnnot`), `Ink` (`InkAnnot`), `Stamp` (`StampAnnot`), `Caret` (`CaretAnnot`), `Popup` (`PopupAnnot`), `FileAttachment` (`FileAttachmentAnnot`), `Redact` (`RedactAnnot`), and `Widget` (`WidgetAnnot`).
@@ -16,7 +16,10 @@ PDF annotations, appearance placement, destinations, and actions (ISO 32000-2, Â
 - **Destinations, actions & reply threads (`Dest`, `DestTable`, `Action`, `resolve_threads`):**
   - Re-exports `pdf_semantics::dest` and `pdf_semantics::action` for explicit/named destinations across Catalog `/Names/Dests` and `/Dests` and bounded `/A`, `/Next`, `/AA`, and `/OpenAction` chains, and resolves `/IRT` reply/group hierarchies with effective `MarkedState` and `ReviewState` tracking.
 - **Appearance synthesis, builders & zero-I/O flattening (`SynthesizedAp`, `BuiltAnnot`, `AnnotMut`, `plan_flatten`):**
-  - Deterministically synthesizes `/AP /N` (and `/Redact` `/RO`) Form XObjects over `pdf_gfx::Canvas`, constructs or mutates annotation dictionaries without file I/O, and plans graphics-state-isolated page flattening with collision-free `/Resources/XObject` names.
+  - Deterministically synthesizes `/AP /N` (and `/Redact` `/RO`) Form XObjects over `pdf_gfx::Canvas` (FreeText and plain `/Square` borders in all five `/BS` styles: solid, dashed, beveled, inset, underline), constructs or mutates annotation dictionaries without file I/O, and plans graphics-state-isolated page flattening with collision-free `/Resources/XObject` names.
+  - Authors `/Redact` marks whole (`RedactMark`, `synth_redact`, `BuiltAnnot::redact_mark`, `BuiltAnnot::redact_quads`): the mark and its `/RO` overlay drawn over each `/QuadPoints` quadrilateral, the overlay also bound as `/AP /R`, with `AnnotMut` setters for `/RO`, `/OverlayText`, and `/Repeat`.
+  - Draws FreeText and redaction overlay text in Helvetica by default, or in any `pdf_gfx::LayoutFont` given (`text-layout` feature: `synth_free_text_with_font`, `synth_redact_with_font`, `BuiltAnnot::free_text_with_font`, `BuiltAnnot::redact_with_font`), such as a font embedded in the document for text beyond Helvetica's characters; a character the font can't draw is an error, with nothing built.
+  - Flattening keeps `/Redact` marks on the page, undrawn, unless `FlattenOpts::with_redactions(true)` asks for them: it never removes the content under a mark, so a mark painted onto the page would only look like a redaction.
 
 ## Quickstart
 
@@ -114,7 +117,7 @@ assert_eq!(annots[1].markup().unwrap().author.as_deref(), Some("Reviewer"));
 ## Cargo Features
 
 - **`programs`** *(default)*: Forwards `pdf-gfx/programs` and `pdf-fonts/programs`.
-- **`text-layout`** *(default)*: Forwards `pdf-gfx/text-layout` for multiline appearance layout.
+- **`text-layout`** *(default)*: Forwards `pdf-gfx/text-layout` for multiline appearance layout: FreeText and redaction overlay text wrapped at words, a FreeText whose `/DA` says `0 Tf` sized to its box, and the `*_with_font` synthesizers and builders that draw that text in a `LayoutFont`.
 - **`predefined-cmaps`** *(optional)*: Forwards `pdf-gfx/predefined-cmaps` and `pdf-fonts/predefined-cmaps`.
 - **`tracing`** *(optional)*: Emits numeric [tracing](https://crates.io/crates/tracing) spans around page annotation walks and destination table construction.
 

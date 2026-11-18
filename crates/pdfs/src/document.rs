@@ -368,7 +368,46 @@ impl<'p> Document<'p> {
 
     /// Writes `built` (and any synthesized `/AP /N` / `/RO` streams, deflated)
     /// into the document and appends it to `page_id`'s `/Annots` array
-    /// ([`build::add_annot`]).
+    /// ([`build::add_annot`]). A redaction's `/RO` overlay is also bound as
+    /// `/AP /R`.
+    ///
+    /// An annotation whose text is drawn in a font embedded in this document
+    /// (pdf-annots' `BuiltAnnot::free_text_with_font` and
+    /// `BuiltAnnot::redact_with_font`, with the `embed` and `text-layout`
+    /// features) is added the same way: its streams name the font by the
+    /// number reserved for it, which a save writes with the glyphs they
+    /// draw.
+    ///
+    /// ```
+    /// # #[cfg(all(feature = "embed", feature = "text-layout"))]
+    /// # {
+    /// use pdfs::prelude::*;
+    ///
+    /// # let program = pdf_fixtures::font::sample(1000).build();
+    /// let mut doc = Document::new();
+    /// doc.add_page(Rect::LETTER);
+    /// let page = doc.page_ids().unwrap()[0].unwrap();
+    /// // A TrueType program's bytes, embedded: the label's font.
+    /// let font = doc.embed_font(program).unwrap();
+    /// let regions = [QuadPoints::from_rect(Rect::new(72.0, 700.0, 272.0, 720.0))];
+    /// let mark = RedactMark::new()
+    ///     .with_quads(&regions)
+    ///     .with_overlay_text("\u{4E2D}\u{6587}");
+    /// let rect = mark.bounds().unwrap();
+    /// // An error here names a character the font has no glyph for.
+    /// let redaction = BuiltAnnot::redact_with_font(rect, &mark, font.res(), &font).unwrap();
+    /// doc.add_annot(page, redaction).unwrap();
+    /// let file = doc.to_bytes().unwrap();
+    ///
+    /// let pdf = pdfs::from_bytes(file).unwrap();
+    /// let pages = pdf.pages().unwrap();
+    /// let annots = pages.get(0).unwrap().annots().unwrap();
+    /// let TypedAnnot::Redact(read) = annots[0].typed() else {
+    ///     panic!("a redaction");
+    /// };
+    /// assert_eq!(read.overlay_text.as_deref(), Some("\u{4E2D}\u{6587}"));
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -386,6 +425,11 @@ impl<'p> Document<'p> {
 
     /// Flattens eligible annotations on `page_id` into its page content stream
     /// according to `opts` ([`build::flatten_page`]).
+    ///
+    /// `/Redact` marks stay on the page, undrawn, unless `opts` sets
+    /// [`include_redactions`](pdf_annots::FlattenOpts::include_redactions):
+    /// flattening never removes the content under a mark, so drawing one would
+    /// only make the page look redacted.
     ///
     /// # Errors
     ///

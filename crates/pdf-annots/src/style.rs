@@ -3,14 +3,22 @@
 
 use std::fmt;
 
-use pdf_content_streams::{Color, Operator, ResCx, operations, write_number};
+use pdf_content_streams::Color;
+use pdf_gfx::{BoxBorder, BoxBorderStyle};
 use pdf_objects::fault::Sink;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, serialize};
+use pdf_objects::{Dict, Object, ObjectId, Resolve};
 
 use crate::error::Error;
 use crate::fault::Fault;
-use crate::limits::Limits;
 use crate::resolve::Reader;
+
+/// Parsed `/DA` (Default Appearance) string used by `/FreeText`, `/Redact`, and
+/// variable-text `/Widget` annotations (ISO 32000-2 §12.7.4.3): `pdf-gfx`'s
+/// type, re-exported so annotations and other variable text share one parser
+/// and serializer. Its color is a `pdf-content-streams` [`Color`]
+/// ([`AnnotColor::to_content_color`] converts one).
+#[doc(inline)]
+pub use pdf_gfx::DefaultAppearance;
 
 /// Device color array used in `/C`, `/IC`, `/MK/BC`, and `/MK/BG`
 /// (ISO 32000-2 §12.5.2 Table 166).
@@ -192,6 +200,19 @@ impl BorderStyle {
     }
 }
 
+impl From<BorderStyle> for BoxBorderStyle {
+    /// The drawing style of a `/BS /S` border style.
+    fn from(style: BorderStyle) -> Self {
+        match style {
+            BorderStyle::Solid => Self::Solid,
+            BorderStyle::Dashed => Self::Dashed,
+            BorderStyle::Beveled => Self::Beveled,
+            BorderStyle::Inset => Self::Inset,
+            BorderStyle::Underline => Self::Underline,
+        }
+    }
+}
+
 /// Effective border specification resolved from `/BS` or legacy `/Border`
 /// (ISO 32000-2 §12.5.4).
 #[derive(Debug, Clone, PartialEq)]
@@ -202,7 +223,10 @@ pub struct Border {
     /// Border style (`Solid` by default, or `Dashed` when a 4-element `/Border`
     /// supplies a dash array).
     pub style: BorderStyle,
-    /// Dash array when `style == BorderStyle::Dashed` (`[3.0]` by default).
+    /// Dash array when `style == BorderStyle::Dashed`. A reader fills in
+    /// `[3.0]` where the file gives none, and a dashed border built by hand
+    /// with an empty array is drawn with `[3.0]` too (ISO 32000-2 §12.5.4
+    /// Table 168).
     pub dash: Vec<f32>,
     /// Horizontal corner radius from legacy `/Border` (`0.0` when `/BS` is
     /// used).
@@ -224,6 +248,17 @@ impl Default for Border {
             vertical_radius: 0.0,
             cloudy_intensity: None,
         }
+    }
+}
+
+impl Border {
+    /// This border's width, style, and dash array as a [`BoxBorder`], for
+    /// `pdf_gfx::Canvas::box_border` to draw around a rectangle (an
+    /// annotation's box, a widget's). The corner radii and the cloudy effect
+    /// aren't a rectangle's and are left out.
+    #[must_use]
+    pub fn to_box_border(&self) -> BoxBorder<'_> {
+        BoxBorder::new(self.width, self.style.into()).with_dash(&self.dash)
     }
 }
 
@@ -581,153 +616,4 @@ pub(crate) fn read_mk<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         down_caption,
         text_position,
     }))
-}
-
-/// Parsed `/DA` (Default Appearance) string used by `/FreeText`, `/Redact`, and
-/// variable-text `/Widget` annotations (ISO 32000-2 §12.7.4.3).
-///
-/// Its `Debug` implementation reports `font_name`'s byte length rather than the
-/// raw resource name.
-#[derive(Clone, PartialEq)]
-#[non_exhaustive]
-pub struct DefaultAppearance {
-    /// Font resource name selected by `Tf` (decoded without leading `/`, e.g.
-    /// `b"Helv"`), if `Tf` was present.
-    pub font_name: Option<Vec<u8>>,
-    /// Font size selected by `Tf` (`0.0` indicates auto-sizing).
-    pub font_size: Option<f32>,
-    /// Text color set by `g`/`G`, `rg`/`RG`, or `k`/`K` in `/DA`.
-    pub color: Option<AnnotColor>,
-}
-
-impl fmt::Debug for DefaultAppearance {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DefaultAppearance")
-            .field("font_name_len", &self.font_name.as_ref().map(Vec::len))
-            .field("font_size", &self.font_size)
-            .field("color", &self.color)
-            .finish()
-    }
-}
-
-impl DefaultAppearance {
-    /// Constructs a [`DefaultAppearance`] from font resource name, size, and
-    /// optional color.
-    #[must_use]
-    pub fn new(font_name: impl Into<Vec<u8>>, font_size: f32, color: Option<AnnotColor>) -> Self {
-        Self {
-            font_name: Some(font_name.into()),
-            font_size: Some(font_size),
-            color,
-        }
-    }
-
-    /// Parses a `/DA` content fragment under `limits.content`.
-    ///
-    /// Returns `None` if lexing fails (`Fault::InvalidDefaultAppearance` may be
-    /// diagnosed by callers when `font_name` is `None`).
-    #[must_use]
-    pub fn parse(da: &[u8], limits: &Limits) -> Option<Self> {
-        let mut font_name = None;
-        let mut font_size = None;
-        let mut color = None;
-        for step in operations(da, &ResCx::none(), &limits.content) {
-            let step = step.ok()?;
-            match step.operator() {
-                Operator::Font => {
-                    if let Some(name) = step.arg(1).and_then(|o| o.name()) {
-                        font_name = Some(name.into_owned());
-                    }
-                    if let Some(sz) = step.arg(0).map(|o| o.number()).filter(|v| v.is_finite()) {
-                        font_size = Some(sz);
-                    }
-                }
-                Operator::FillGray | Operator::StrokeGray => {
-                    if let Some(g) = step.arg(0).map(|o| o.number()).filter(|v| v.is_finite()) {
-                        color = Some(AnnotColor::Gray(g.clamp(0.0, 1.0)));
-                    }
-                }
-                Operator::FillRgb | Operator::StrokeRgb => {
-                    if let (Some(r), Some(g), Some(b)) = (
-                        step.arg(2).map(|o| o.number()).filter(|v| v.is_finite()),
-                        step.arg(1).map(|o| o.number()).filter(|v| v.is_finite()),
-                        step.arg(0).map(|o| o.number()).filter(|v| v.is_finite()),
-                    ) {
-                        color = Some(AnnotColor::Rgb([
-                            r.clamp(0.0, 1.0),
-                            g.clamp(0.0, 1.0),
-                            b.clamp(0.0, 1.0),
-                        ]));
-                    }
-                }
-                Operator::FillCmyk | Operator::StrokeCmyk => {
-                    if let (Some(c), Some(m), Some(y), Some(k)) = (
-                        step.arg(3).map(|o| o.number()).filter(|v| v.is_finite()),
-                        step.arg(2).map(|o| o.number()).filter(|v| v.is_finite()),
-                        step.arg(1).map(|o| o.number()).filter(|v| v.is_finite()),
-                        step.arg(0).map(|o| o.number()).filter(|v| v.is_finite()),
-                    ) {
-                        color = Some(AnnotColor::Cmyk([
-                            c.clamp(0.0, 1.0),
-                            m.clamp(0.0, 1.0),
-                            y.clamp(0.0, 1.0),
-                            k.clamp(0.0, 1.0),
-                        ]));
-                    }
-                }
-                _ => {}
-            }
-        }
-        Some(Self {
-            font_name,
-            font_size,
-            color,
-        })
-    }
-
-    /// Serializes this default appearance into a canonical `/DA` byte string
-    /// (e.g. `b"/Helv 12 Tf 0 g"`).
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        if let Some(name) = &self.font_name {
-            if serialize::name(&mut out, name).is_err() {
-                out.extend_from_slice(b"/Helv");
-            }
-            out.push(b' ');
-            write_number(&mut out, self.font_size.unwrap_or(0.0));
-            out.extend_from_slice(b" Tf");
-        }
-        if let Some(c) = self.color {
-            if !out.is_empty() {
-                out.push(b' ');
-            }
-            match c {
-                AnnotColor::Transparent => {}
-                AnnotColor::Gray(g) => {
-                    write_number(&mut out, g);
-                    out.extend_from_slice(b" g");
-                }
-                AnnotColor::Rgb([r, g, b]) => {
-                    write_number(&mut out, r);
-                    out.push(b' ');
-                    write_number(&mut out, g);
-                    out.push(b' ');
-                    write_number(&mut out, b);
-                    out.extend_from_slice(b" rg");
-                }
-                AnnotColor::Cmyk([c, m, y, k]) => {
-                    write_number(&mut out, c);
-                    out.push(b' ');
-                    write_number(&mut out, m);
-                    out.push(b' ');
-                    write_number(&mut out, y);
-                    out.push(b' ');
-                    write_number(&mut out, k);
-                    out.extend_from_slice(b" k");
-                }
-            }
-        }
-        out
-    }
 }

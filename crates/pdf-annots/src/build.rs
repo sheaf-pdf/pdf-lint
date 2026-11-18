@@ -3,6 +3,10 @@
 
 use std::fmt;
 
+#[cfg(feature = "text-layout")]
+use pdf_content_streams::Res;
+#[cfg(feature = "text-layout")]
+use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_gfx::{Point, Rect};
 use pdf_objects::{Dict, Object, ObjectId, dict};
 use pdf_semantics::action::Action;
@@ -17,9 +21,11 @@ use crate::style::{
 };
 use crate::subtypes::{AnnotSubtype, PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind};
 use crate::synth::{
-    SynthesizedAp, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact, synth_shape,
-    synth_stamp, synth_text_markup, synth_text_note,
+    RedactMark, SynthesizedAp, overlay_text_color, synth_free_text, synth_ink, synth_line,
+    synth_poly, synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
+#[cfg(feature = "text-layout")]
+use crate::synth::{synth_free_text_with_font, synth_redact_with_font};
 
 /// Zero-I/O mutable wrapper around an annotation [`Dict`] (standalone
 /// annotation or merged Field+Widget dictionary).
@@ -193,12 +199,83 @@ impl<'a> AnnotMut<'a> {
         self
     }
 
-    /// Binds `/AP << /N form_id >>` on this annotation.
+    /// Binds `/AP << /N form_id >>` on this annotation, keeping the other
+    /// entries of an `/AP` that is a direct dictionary.
+    ///
+    /// An `/AP` that is anything else, an indirect reference among them, is
+    /// replaced by a new dictionary of `/N` alone: nothing here can follow
+    /// a reference, so a caller who means to keep the dictionary it names
+    /// changes that object itself.
     pub fn set_normal_appearance(&mut self, form_id: ObjectId) -> &mut Self {
         if let Some(ap) = self.dict.get_mut(b"AP").and_then(Object::as_dict_mut) {
             ap.set("N", form_id);
         } else {
             self.dict.set("AP", dict! { "N" => form_id });
+        }
+        self
+    }
+
+    /// Binds `/AP << /R form_id >>`, the rollover appearance shown while the
+    /// pointer is over the annotation (ISO 32000-2 §12.5.5 Table 170),
+    /// keeping the other entries of an `/AP` that is a direct dictionary.
+    ///
+    /// With no `/AP` a new one of `/R` alone is made. An `/AP` that is
+    /// there and isn't a direct dictionary (an indirect reference, as files
+    /// often have it) is left as it is and nothing is bound: replacing it
+    /// would drop the `/N` it names, and nothing here can follow the
+    /// reference. [`Self::has_direct_appearance`] tells the two apart
+    /// beforehand; for an indirect `/AP`, set `/R` in the object it names.
+    pub fn set_rollover_appearance(&mut self, form_id: ObjectId) -> &mut Self {
+        match self.dict.get_mut(b"AP") {
+            None => {
+                self.dict.set("AP", dict! { "R" => form_id });
+            }
+            Some(ap) => {
+                // Asked first, so that an `/AP` left alone keeps its span.
+                if ap.as_dict().is_some()
+                    && let Some(ap) = ap.as_dict_mut()
+                {
+                    ap.set("R", form_id);
+                }
+            }
+        }
+        self
+    }
+
+    /// Whether `/AP` is a direct dictionary, one whose entries
+    /// [`Self::set_normal_appearance`] and [`Self::set_rollover_appearance`]
+    /// keep. `false` with no `/AP`, and for one that is an indirect
+    /// reference or not a dictionary.
+    #[must_use]
+    pub fn has_direct_appearance(&self) -> bool {
+        self.dict
+            .get(b"AP")
+            .is_some_and(|ap| ap.as_dict().is_some())
+    }
+
+    /// Sets `/RO`, the Form XObject that applying a `/Redact` mark leaves
+    /// over its regions (ISO 32000-2 §12.5.6.23 Table 195).
+    pub fn set_redact_overlay(&mut self, form_id: ObjectId) -> &mut Self {
+        self.dict.set("RO", form_id);
+        self
+    }
+
+    /// Sets `/OverlayText`, the label that applying a `/Redact` mark draws
+    /// over its regions. The table asks for a `/DA` beside it
+    /// ([`Self::set_default_appearance`]).
+    pub fn set_overlay_text(&mut self, text: &str) -> &mut Self {
+        self.dict.set("OverlayText", Object::text(text));
+        self
+    }
+
+    /// Sets `/Repeat`, whether a `/Redact` mark's overlay text repeats across
+    /// each region: `true` is written, and the key removed for `false`, its
+    /// default.
+    pub fn set_repeat(&mut self, repeat: bool) -> &mut Self {
+        if repeat {
+            self.dict.set("Repeat", true);
+        } else {
+            self.dict.remove(b"Repeat");
         }
         self
     }
@@ -266,14 +343,23 @@ impl BuiltAnnot {
     /// Allocates any synthesized `/AP /N` and `/RO` streams via `alloc`, wires
     /// their indirect `ObjectId`s into `self.dict`, and allocates and returns
     /// the annotation's own `ObjectId`.
+    ///
+    /// A redaction's overlay is also bound as `/AP /R` beside `/N`, so a
+    /// viewer shows what applying the mark leaves while the pointer is over
+    /// it.
     pub fn write_into(mut self, mut alloc: impl FnMut(Object) -> ObjectId) -> ObjectId {
-        if let Some(ro) = self.redact_overlay {
+        let ro_id = self.redact_overlay.map(|ro| {
             let ro_id = alloc(Object::from(ro.to_stream()));
-            self.dict.set("RO", ro_id);
-        }
+            AnnotMut::new(&mut self.dict).set_redact_overlay(ro_id);
+            ro_id
+        });
         if let Some(ap) = self.normal_ap {
             let ap_id = alloc(Object::from(ap.to_stream()));
-            AnnotMut::new(&mut self.dict).set_normal_appearance(ap_id);
+            let mut m = AnnotMut::new(&mut self.dict);
+            m.set_normal_appearance(ap_id);
+            if let Some(ro_id) = ro_id {
+                m.set_rollover_appearance(ro_id);
+            }
         }
         alloc(Object::from(self.dict))
     }
@@ -536,7 +622,8 @@ impl BuiltAnnot {
         }
     }
 
-    /// Builds a `/FreeText` annotation with synthesized `/AP /N`.
+    /// Builds a `/FreeText` annotation with synthesized `/AP /N`, its text in
+    /// Helvetica ([`synth_free_text`]).
     #[must_use]
     pub fn free_text(
         rect: Rect,
@@ -544,6 +631,51 @@ impl BuiltAnnot {
         da: &DefaultAppearance,
         quadding: Quadding,
         style: &PaintStyle,
+    ) -> Self {
+        let normal_ap = synth_free_text(rect, contents, Some(da), quadding, style);
+        Self::free_text_over(rect, contents, da, quadding, style, normal_ap)
+    }
+
+    /// Builds a `/FreeText` annotation as [`Self::free_text`] does, the text
+    /// of its `/AP /N` drawn in `font` under the resource `font_res`
+    /// ([`synth_free_text_with_font`]): a font embedded in the document, say,
+    /// for text beyond Helvetica's characters.
+    ///
+    /// `/DA` is written as given: its font name isn't changed to `font`,
+    /// and nothing is added to the document's `/AcroForm /DR`. A viewer
+    /// that draws `/AP /N` shows the text as laid out here; one that makes
+    /// an appearance of its own from `/DA` resolves that name itself.
+    ///
+    /// # Errors
+    ///
+    /// [`UnencodableChar`] for the first character of `contents` that `font`
+    /// can't draw: nothing is built. The error holds that one character of
+    /// the text, as [`synth_free_text_with_font`] says.
+    #[cfg(feature = "text-layout")]
+    pub fn free_text_with_font<F: LayoutFont + ?Sized>(
+        rect: Rect,
+        contents: &str,
+        da: &DefaultAppearance,
+        quadding: Quadding,
+        style: &PaintStyle,
+        font_res: Res,
+        font: &F,
+    ) -> Result<Self, UnencodableChar> {
+        let normal_ap =
+            synth_free_text_with_font(rect, contents, Some(da), quadding, style, font_res, font)?;
+        Ok(Self::free_text_over(
+            rect, contents, da, quadding, style, normal_ap,
+        ))
+    }
+
+    /// A `/FreeText` annotation's dictionary, with `normal_ap` its `/AP /N`.
+    fn free_text_over(
+        rect: Rect,
+        contents: &str,
+        da: &DefaultAppearance,
+        quadding: Quadding,
+        style: &PaintStyle,
+        normal_ap: Option<SynthesizedAp>,
     ) -> Self {
         let mut d = base_annot_dict(&AnnotSubtype::FreeText, rect, AnnotFlags::PRINT);
         {
@@ -557,7 +689,6 @@ impl BuiltAnnot {
                 m.set_color(bg);
             }
         }
-        let normal_ap = synth_free_text(rect, contents, Some(da), quadding, style);
         Self {
             dict: d,
             normal_ap,
@@ -566,7 +697,11 @@ impl BuiltAnnot {
     }
 
     /// Builds a standard `/Redact` annotation with synthesized `/AP /N` and
-    /// `/RO` overlay Form XObject.
+    /// `/RO` overlay Form XObject, both drawn over `quads` where there are
+    /// any ([`synth_redact`]).
+    ///
+    /// [`Self::redact_mark`] over a [`RedactMark`] of these values and no
+    /// outline color.
     #[must_use]
     pub fn redact(
         rect: Rect,
@@ -577,32 +712,111 @@ impl BuiltAnnot {
         da: Option<&DefaultAppearance>,
         quadding: Quadding,
     ) -> Self {
+        Self::redact_mark(
+            rect,
+            &RedactMark {
+                quads,
+                interior_color: Some(interior_color),
+                overlay_text,
+                repeat,
+                da,
+                quadding,
+                ..RedactMark::new()
+            },
+        )
+    }
+
+    /// Builds a `/Redact` annotation over `rect` from `mark`, with
+    /// synthesized `/AP /N` and `/RO` overlay Form XObject ([`synth_redact`]).
+    ///
+    /// The dictionary gets `/C` and `/IC` where the mark has those colors
+    /// (`/IC` as three `DeviceRGB` numbers whatever the color's space, as ISO
+    /// 32000-2, 12.5.6.23, Table 195 has it; none for a transparent one),
+    /// `/QuadPoints` where it has quadrilaterals, `/Q`, `/OverlayText`,
+    /// `/Repeat`, and `/DA`: the mark's, or beside overlay text with none
+    /// given, the one the overlay was drawn with (`/Helv 0 Tf 1 g`, white
+    /// over the interior color, or `/Helv 0 Tf 0 g` with no interior color),
+    /// as the table asks for a `/DA` there.
+    ///
+    /// With no interior color, or a transparent one, there is no `/IC` and
+    /// the `/RO` fills nothing, so the two say the same: the regions are
+    /// left transparent. `/QuadPoints` are written as given, though the
+    /// appearances draw only what of them lies inside `rect`.
+    #[must_use]
+    pub fn redact_mark(rect: Rect, mark: &RedactMark<'_>) -> Self {
+        Self::redact_over(rect, mark, synth_redact(rect, mark))
+    }
+
+    /// Builds a `/Redact` annotation as [`Self::redact_mark`] does, the
+    /// overlay text of its `/RO` drawn in `font` under the resource
+    /// `font_res` ([`synth_redact_with_font`]): a font embedded in the
+    /// document, say, for a label beyond Helvetica's characters. For a
+    /// `/Rect` taken from the mark's quadrilaterals, pass
+    /// [`RedactMark::bounds`].
+    ///
+    /// The dictionary is [`Self::redact_mark`]'s: a `/DA` is written as
+    /// given, or `/Helv 0 Tf 1 g` (`0 g` with no interior color) beside
+    /// overlay text with none given, its
+    /// font name never changed to `font`, and nothing is added to the
+    /// document's `/AcroForm /DR`. A viewer that applies the mark with its
+    /// `/RO` leaves the text as laid out here; one that draws the label
+    /// itself from `/OverlayText` and `/DA` resolves that name itself.
+    ///
+    /// # Errors
+    ///
+    /// [`UnencodableChar`] for the first character of the overlay text that
+    /// `font` can't draw: nothing is built. Its offset and what it holds of
+    /// the text are as [`synth_redact_with_font`] says.
+    #[cfg(feature = "text-layout")]
+    pub fn redact_with_font<F: LayoutFont + ?Sized>(
+        rect: Rect,
+        mark: &RedactMark<'_>,
+        font_res: Res,
+        font: &F,
+    ) -> Result<Self, UnencodableChar> {
+        let forms = synth_redact_with_font(rect, mark, font_res, font)?;
+        Ok(Self::redact_over(rect, mark, forms))
+    }
+
+    /// A `/Redact` annotation's dictionary, with `forms` its `/AP /N` and
+    /// `/RO`.
+    fn redact_over(
+        rect: Rect,
+        mark: &RedactMark<'_>,
+        forms: Option<(SynthesizedAp, SynthesizedAp)>,
+    ) -> Self {
         let mut d = base_annot_dict(&AnnotSubtype::Redact, rect, AnnotFlags::PRINT);
         {
             let mut m = AnnotMut::new(&mut d);
-            m.set_interior_color(interior_color).set_quadding(quadding);
-            if !quads.is_empty() {
-                m.set_quad_points(quads);
+            if let Some(c) = mark.stroke_color {
+                m.set_color(c);
             }
-            if let Some(da_val) = da {
-                m.set_default_appearance(da_val);
+            if let Some(rgb) = mark.interior_color.and_then(device_rgb) {
+                m.set_interior_color(AnnotColor::Rgb(rgb));
             }
+            m.set_quadding(mark.quadding);
+            if !mark.quads.is_empty() {
+                m.set_quad_points(mark.quads);
+            }
+            match (mark.da, mark.overlay_text) {
+                (Some(da), _) => {
+                    m.set_default_appearance(da);
+                }
+                (None, Some(_)) => {
+                    m.set_default_appearance(&DefaultAppearance::new(
+                        b"Helv".to_vec(),
+                        0.0,
+                        Some(overlay_text_color(mark)),
+                    ));
+                }
+                (None, None) => {}
+            }
+            if let Some(txt) = mark.overlay_text {
+                m.set_overlay_text(txt);
+            }
+            m.set_repeat(mark.repeat);
         }
-        if let Some(txt) = overlay_text {
-            d.set("OverlayText", Object::text(txt));
-        }
-        if repeat {
-            d.set("Repeat", true);
-        }
-        let (normal_ap, redact_overlay) = match synth_redact(
-            rect,
-            None,
-            Some(interior_color),
-            overlay_text,
-            repeat,
-            da,
-            quadding,
-        ) {
+        let (normal_ap, redact_overlay) = match forms {
             Some((ap, ro)) => (Some(ap), Some(ro)),
             None => (None, None),
         };
@@ -610,6 +824,32 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay,
+        }
+    }
+
+    /// Builds a `/Redact` annotation from `mark` whose `/Rect` is the
+    /// smallest rectangle that holds the mark's quadrilaterals
+    /// ([`RedactMark::bounds`]), as [`Self::redact_mark`] builds it.
+    ///
+    /// Returns `None` where the mark has no usable quadrilateral, or they
+    /// span no width or no height.
+    #[must_use]
+    pub fn redact_quads(mark: &RedactMark<'_>) -> Option<Self> {
+        let rect = mark.bounds()?;
+        (rect.width() > 0.0 && rect.height() > 0.0).then(|| Self::redact_mark(rect, mark))
+    }
+}
+
+/// `color` as `DeviceRGB` components: gray three times, CMYK by the device
+/// formula (ISO 32000-2 §10.4.2.4); `None` for a transparent color.
+fn device_rgb(color: AnnotColor) -> Option<[f32; 3]> {
+    match color {
+        AnnotColor::Transparent => None,
+        AnnotColor::Gray(g) => Some([g, g, g]),
+        AnnotColor::Rgb(rgb) => Some(rgb),
+        AnnotColor::Cmyk([c, m, y, k]) => {
+            let ink = |v: f32| 1.0 - (v.clamp(0.0, 1.0) + k.clamp(0.0, 1.0)).min(1.0);
+            Some([ink(c), ink(m), ink(y)])
         }
     }
 }

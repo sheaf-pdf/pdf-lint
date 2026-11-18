@@ -2,8 +2,10 @@
 //!
 //! `pdfs` provides a high-level, viewer-compatible API on top of a modular
 //! family of PDF crates, and re-exports every crate in the family at matching
-//! versions ([`pdf_structure`], [`pdf_objects`], [`pdf_fonts`], etc.) so you
-//! can drop down to lower-level APIs whenever needed.
+//! versions ([`structure`], [`objects`], [`fonts`], [`gfx`], [`annots`], etc.)
+//! so you can drop down to lower-level APIs whenever needed. Each is there
+//! under its own crate name too ([`pdf_structure`], [`pdf_objects`], etc.),
+//! and both paths name the same items.
 //!
 //! # Overview
 //!
@@ -45,6 +47,27 @@
 //! `_with` report recoverable spec departures to a
 //! [`fault::Sink`](pdf_objects::fault::Sink), while plain methods skip fault
 //! collection at zero cost.
+//!
+//! # Crates
+//!
+//! Every crate of the family is re-exported at the root under two names, its
+//! own and the one without `pdf_`; both name the same crate, so an item
+//! reached through either path is the same item.
+//!
+//! | Short name | Crate | What it holds |
+//! |---|---|---|
+//! | [`tokenizer`] | [`pdf_tokenizer`] | The lossless, zero-copy `no_std` lexer, under ISO 32000-2's rules and PDFium's. |
+//! | [`objects`] | [`pdf_objects`] | Object values with byte spans, the object parser and writer, text string codecs. |
+//! | [`filters`] | [`pdf_filters`] | The standard stream filter decoders and the Flate encoder. |
+//! | [`crypt`] | [`pdf_crypt`] | The standard security handler: decrypting and password-encrypting files. |
+//! | [`structure`] | [`pdf_structure`] | File structure: lazy positional reading, in-memory documents, full and incremental writers. |
+//! | [`color`] | [`pdf_color`] | Color space parsing, component counting, and resource lookup. |
+//! | [`content_streams`] | [`pdf_content_streams`] | Content stream lexing, typed operators, graphics-state checks, splicing, and writing. |
+//! | [`semantics`] | [`pdf_semantics`] | Dates, name and number trees, page trees, destinations, actions, `/Info`, and XMP claims. |
+//! | [`fonts`] | [`pdf_fonts`] | Font dictionaries, encodings, CMaps, font programs, Standard 14 metrics, text extraction, TrueType embedding. |
+//! | [`gfx`] | [`pdf_gfx`] | 2D geometry, the graphics and text state interpreter, the content re-encoder, the canvas, `/DA` strings. |
+//! | [`annots`] | [`pdf_annots`] | Annotations, appearance synthesis, builders, reply threads, and page flattening. |
+//! | [`linearize`] | [`pdf_linearize`] | The linearized ("Fast Web View") layout engine, hint tables, and validator. |
 //!
 //! # Features
 //!
@@ -124,42 +147,128 @@ pub mod prelude;
 
 /// Lossless, zero-copy `no_std` PDF lexer supporting ISO 32000-2 and PDFium rules.
 pub use pdf_tokenizer;
+/// [`pdf_tokenizer`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_tokenizer as tokenizer;
 
 /// Owned PDF object values with byte spans, object parser/writer, and text string codecs.
 pub use pdf_objects;
+/// [`pdf_objects`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_objects as objects;
 
 /// Standard PDF stream filter decoders and Flate encoder (`miniz_oxide` and `zlib-rs`).
 pub use pdf_filters;
+/// [`pdf_filters`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_filters as filters;
 
 /// Standard PDF security handler for decrypting and password-encrypting files.
 pub use pdf_crypt;
+/// [`pdf_crypt`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_crypt as crypt;
 
 /// PDF file structure: lazy positional reading, in-memory documents, and full/incremental writers.
 pub use pdf_structure;
+/// [`pdf_structure`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_structure as structure;
 
 /// PDF color space parsing, component counting, and resource lookup.
 pub use pdf_color;
+/// [`pdf_color`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_color as color;
 
 /// PDF content stream lexing, typed operators, graphics-state checks, splicing, and writing.
 pub use pdf_content_streams;
+/// [`pdf_content_streams`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_content_streams as content_streams;
 
 /// Common PDF structures: dates, name/number trees, page trees, destinations, actions, `/Info`, and XMP claims.
 pub use pdf_semantics;
+/// [`pdf_semantics`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_semantics as semantics;
 
 /// PDF font dictionaries, encodings, CMaps, embedded font programs, Standard 14 metrics, text extraction, and TrueType font embedding.
 pub use pdf_fonts;
+/// [`pdf_fonts`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_fonts as fonts;
 
 /// PDF 2D geometry, bounded graphics and text state interpreter, content re-encoder, and vector/text canvas.
 pub use pdf_gfx;
+/// [`pdf_gfx`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_gfx as gfx;
 
 /// PDF annotations, appearance synthesis, builders, reply threads, and zero-I/O page flattening.
 pub use pdf_annots;
+/// [`pdf_annots`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_annots as annots;
 
 /// Linearized ("Fast Web View") PDF layout engine, hint tables, and validator.
 pub use pdf_linearize;
+/// [`pdf_linearize`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_linearize as linearize;
 
 #[cfg(test)]
 mod tests {
+    /// Each crate of the family is at the root under two names, its own and
+    /// the one without `pdf_`, and an item named through either is the same
+    /// item: a value of one path's type is taken where the other's is asked.
+    #[test]
+    fn each_crate_is_under_its_short_name_and_its_own() {
+        fn same<T>(_: fn(T) -> T, _: fn(T) -> T) {}
+        fn id<T>(value: T) -> T {
+            value
+        }
+        same(
+            id::<crate::tokenizer::Rules>,
+            id::<crate::pdf_tokenizer::Rules>,
+        );
+        same(
+            id::<crate::objects::ObjectId>,
+            id::<crate::pdf_objects::ObjectId>,
+        );
+        same(
+            id::<crate::filters::Backend>,
+            id::<crate::pdf_filters::Backend>,
+        );
+        same(
+            id::<crate::crypt::Permissions>,
+            id::<crate::pdf_crypt::Permissions>,
+        );
+        same(
+            id::<crate::structure::Document>,
+            id::<crate::pdf_structure::Document>,
+        );
+        same(id::<crate::color::Limits>, id::<crate::pdf_color::Limits>);
+        same(
+            id::<crate::content_streams::ContentWriter>,
+            id::<crate::pdf_content_streams::ContentWriter>,
+        );
+        same(
+            id::<crate::semantics::date::Date>,
+            id::<crate::pdf_semantics::date::Date>,
+        );
+        same(id::<crate::fonts::Std14>, id::<crate::pdf_fonts::Std14>);
+        same(id::<crate::gfx::Canvas>, id::<crate::pdf_gfx::Canvas>);
+        same(
+            id::<crate::annots::BuiltAnnot>,
+            id::<crate::pdf_annots::BuiltAnnot>,
+        );
+        same(
+            id::<crate::linearize::Limits>,
+            id::<crate::pdf_linearize::Limits>,
+        );
+    }
+
     /// The README is shown on crates.io and docs.rs, where a path beside the
     /// crate reaches nothing: its licence links are the repository's URLs, the
     /// manifest's `repository` and the file, and every link it has is a URL.
@@ -384,6 +493,71 @@ mod tests {
         })
         .unwrap();
         assert_eq!(paths, 1);
+    }
+
+    #[test]
+    fn a_redaction_is_added_with_its_overlay_as_its_rollover_appearance() {
+        use crate::pdf_annots::{AppearanceMode, RedactMark};
+        use crate::prelude::*;
+
+        let mut doc = Document::new();
+        doc.add_page(Rect::LETTER);
+        let page_id = doc.page_ids().unwrap()[0].unwrap();
+        let quads = [
+            QuadPoints::from_rect(Rect::new(72.0, 700.0, 200.0, 716.0)),
+            QuadPoints([210.0, 682.0, 290.0, 686.0, 285.0, 706.0, 205.0, 701.0]),
+        ];
+        let mark = RedactMark::new()
+            .with_quads(&quads)
+            .with_interior_color(Color::Gray(0.0).into())
+            .with_overlay_text("REDACTED");
+        let built = BuiltAnnot::redact_quads(&mark).unwrap();
+        let (mark_form, overlay_form) = (
+            built.normal_ap.clone().unwrap(),
+            built.redact_overlay.clone().unwrap(),
+        );
+        doc.add_annot(page_id, built).unwrap();
+
+        let bytes = doc.to_bytes().unwrap();
+        let pdf = crate::from_bytes(&bytes[..]).unwrap();
+        let pages = pdf.pages().unwrap();
+        let page = pages.get(0).unwrap();
+        let annots = page.annots().unwrap();
+        assert_eq!(annots.len(), 1);
+        assert_eq!(annots[0].rect(), Rect::new(72.0, 682.0, 290.0, 716.0));
+        let TypedAnnot::Redact(rd) = annots[0].typed() else {
+            panic!("expected Redact");
+        };
+        assert_eq!(rd.quad_points, quads);
+        // /AP holds /N and /R, and /R is the /RO overlay.
+        let overlay = rd.overlay_form.expect("/RO");
+        let aps = annots[0].appearances().expect("/AP");
+        let normal = aps
+            .stream(AppearanceMode::Normal, false, false)
+            .expect("/AP /N");
+        assert_eq!(
+            aps.stream(AppearanceMode::Rollover, false, false),
+            Some(overlay)
+        );
+        assert_ne!(normal, overlay);
+        // Each stream is the one that was built.
+        let reading = pdf.reading();
+        let decoded = |id| {
+            crate::pdf_objects::Streams::decoded(&reading, id, usize::MAX)
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(decoded(normal), mark_form.content);
+        assert_eq!(decoded(overlay), overlay_form.content);
+
+        // Flattening leaves the mark on the page, undrawn, unless asked.
+        let mut edited = pdf.edit().unwrap();
+        let plan = edited.flatten_page(page_id, FlattenOpts::DEFAULT).unwrap();
+        assert_eq!((plan.drawn_count, plan.removed_count), (0, 0));
+        let plan = edited
+            .flatten_page(page_id, FlattenOpts::DEFAULT.with_redactions(true))
+            .unwrap();
+        assert_eq!((plan.drawn_count, plan.removed_count), (1, 1));
     }
 
     #[test]

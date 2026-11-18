@@ -14,7 +14,8 @@
 //!     or [`Rules::Pdfium`](pdf_objects::pdf_tokenizer::Rules::Pdfium), decoding `/Subtype`
 //!     ([`AnnotSubtype`]), `/Rect`, [`AnnotFlags`], [`AnnotColor`] (`/C`, `/IC`), [`Border`]
 //!     (`/BS`, legacy `/Border`, `/BE`), [`AppearanceChars`] (`/MK`), [`DefaultAppearance`]
-//!     (`/DA`), and [`MarkupInfo`] (`/T`, `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
+//!     (`/DA`, `pdf-gfx`'s shared parser and serializer, re-exported), and [`MarkupInfo`] (`/T`,
+//!     `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
 //!   - [`Annot::from_dict`] and [`Annot::from_dict_with`] inspect any `&Dict` directly (including
 //!     merged Field+Widget dictionaries).
 //! - **Typed subtype payloads ([`TypedAnnot`]):**
@@ -33,9 +34,22 @@
 //!     `/IRT` reply/group hierarchies with effective [`MarkedState`] and [`ReviewState`] tracking.
 //! - **Appearance synthesis, builders & zero-I/O flattening ([`SynthesizedAp`], [`BuiltAnnot`], [`AnnotMut`], [`plan_flatten`]):**
 //!   - Deterministically synthesizes `/AP /N` (and `/Redact` `/RO`) Form XObjects over
-//!     [`pdf_gfx::Canvas`], constructs or mutates annotation dictionaries without file I/O, and
-//!     plans graphics-state-isolated page flattening with collision-free `/Resources/XObject`
-//!     names.
+//!     [`pdf_gfx::Canvas`] (FreeText and plain `/Square` borders in all five `/BS` styles: solid,
+//!     dashed, beveled, inset, underline), constructs or mutates annotation dictionaries without
+//!     file I/O, and plans graphics-state-isolated page flattening with collision-free
+//!     `/Resources/XObject` names.
+//!   - Authors `/Redact` marks whole ([`RedactMark`], [`synth_redact`],
+//!     [`BuiltAnnot::redact_mark`], [`BuiltAnnot::redact_quads`]): the mark and its `/RO` overlay
+//!     drawn over each `/QuadPoints` quadrilateral, the overlay also bound as `/AP /R`, with
+//!     [`AnnotMut`] setters for `/RO`, `/OverlayText`, and `/Repeat`.
+//!   - Draws FreeText and redaction overlay text in Helvetica by default, or in any
+//!     `pdf_gfx::LayoutFont` given (`text-layout` feature: `synth_free_text_with_font`,
+//!     `synth_redact_with_font`, `BuiltAnnot::free_text_with_font`,
+//!     `BuiltAnnot::redact_with_font`), such as a font embedded in the document for text beyond
+//!     Helvetica's characters; a character the font can't draw is an error, with nothing built.
+//!   - Flattening keeps `/Redact` marks on the page, undrawn, unless
+//!     [`FlattenOpts::with_redactions`] asks for them: it never removes the content under a
+//!     mark, so a mark painted onto the page would only look like a redaction.
 //!
 //! # Quickstart
 //!
@@ -177,9 +191,10 @@ pub use pdf_semantics::dest::{
 };
 pub use replies::{AnnotThread, MarkedState, ReplyKind, ReviewState, resolve_threads};
 pub use resolve::QuadPoints;
+#[doc(inline)]
+pub use style::DefaultAppearance;
 pub use style::{
-    AnnotColor, AppearanceChars, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle,
-    Quadding,
+    AnnotColor, AppearanceChars, Border, BorderStyle, LineEnding, PaintStyle, Quadding,
 };
 pub use subtypes::{
     AnnotSubtype, AttachmentIcon, CaretAnnot, CaretSymbol, FileAttachmentAnnot, FreeTextAnnot,
@@ -188,6 +203,8 @@ pub use subtypes::{
     TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
 };
 pub use synth::{
-    SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact,
-    synth_shape, synth_stamp, synth_text_markup, synth_text_note,
+    RedactMark, SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly,
+    synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
+#[cfg(feature = "text-layout")]
+pub use synth::{synth_free_text_with_font, synth_redact_with_font};

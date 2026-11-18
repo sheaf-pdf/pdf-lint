@@ -859,6 +859,11 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// Plans flattening of eligible annotations on this page according to
     /// `opts` ([`page::plan_flatten`](fn@page::plan_flatten)).
     ///
+    /// `/Redact` marks stay on the page, undrawn, unless `opts` sets
+    /// [`include_redactions`](pdf_annots::FlattenOpts::include_redactions):
+    /// flattening never removes the content under a mark, so drawing one would
+    /// only make the page look redacted.
+    ///
     /// # Errors
     ///
     /// As [`page::plan_flatten`](fn@page::plan_flatten) fails.

@@ -1,13 +1,16 @@
 //! Deterministic `/AP /N` appearance Form XObject synthesis over
 //! [`pdf_gfx::Canvas`] (ISO 32000-2 §12.5.5).
 
+use std::convert::Infallible;
 use std::fmt;
 
 use pdf_content_streams::{
     Blend, Color, GState, LineCap, LineJoin, Paint, Res, ResBody, Reserved, ResourceNeeds,
 };
 use pdf_fonts::{Encoding, Std14};
-use pdf_gfx::{Canvas, Point, Rect};
+use pdf_gfx::{Canvas, Point, Quad, Rect};
+#[cfg(feature = "text-layout")]
+use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_objects::{Dict, Object, Stream, dict};
 
 use crate::annot::Annot;
@@ -122,10 +125,16 @@ fn apply_opacity(canvas: &mut Canvas, stroke_alpha: f32, fill_alpha: f32, multip
     canvas.gstate(gs);
 }
 
+/// Sets the line width and, for a dashed border, the dash array of a stroked
+/// path: `[3]` where the border has none (ISO 32000-2 §12.5.4 Table 168).
 fn apply_border_stroke(canvas: &mut Canvas, border: &Border) {
     canvas.line_width(border.width.max(0.0));
-    if border.style == BorderStyle::Dashed && !border.dash.is_empty() {
-        canvas.dash(&border.dash, 0.0);
+    if border.style == BorderStyle::Dashed {
+        if border.dash.is_empty() {
+            canvas.dash(&[3.0], 0.0);
+        } else {
+            canvas.dash(&border.dash, 0.0);
+        }
     }
 }
 
@@ -213,6 +222,18 @@ pub fn synth_text_markup(
 }
 
 /// Synthesizes `/AP /N` for `/Square` or `/Circle` annotations.
+///
+/// A plain `/Square` (no corner radius, no cloudy effect) fills its box, less
+/// `rect_diff`, and draws its border inside it in any of the five border
+/// styles (`pdf_gfx::Canvas::box_border`). A `/Circle`, and a `/Square` with
+/// corner radii or a cloudy effect, is one path stroked along the border's
+/// center line, solid or dashed: the beveled, inset, and underline styles are
+/// a rectangle's, and come out solid there.
+///
+/// A solid or dashed border over an interior color is one path, filled and
+/// stroked together, for the square as for the circle: under an opacity
+/// below 1 the border then shows its own color, not that color over the
+/// interior's (ISO 32000-2 §11.7.4.4).
 #[must_use]
 pub fn synth_shape(
     kind: ShapeKind,
@@ -225,12 +246,63 @@ pub fn synth_shape(
     }
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
     let [dl, db, dr, dt] = rect_diff.unwrap_or([0.0; 4]);
-    let half_w = if style.border.width > 0.0
-        && style
-            .stroke
-            .and_then(AnnotColor::to_content_color)
-            .is_some()
-    {
+    let sc = style
+        .stroke
+        .and_then(AnnotColor::to_content_color)
+        .filter(|_| style.border.width > 0.0);
+    let fc = style.fill.and_then(AnnotColor::to_content_color);
+    let mut canvas = Canvas::new();
+
+    let radius = style
+        .border
+        .horizontal_radius
+        .min(style.border.vertical_radius);
+    let plain_square = kind == ShapeKind::Square
+        && radius.max(0.0) == 0.0
+        && style.border.cloudy_intensity.is_none();
+    if plain_square {
+        let outer = Rect::new(
+            dl.min(bbox.x1),
+            db.min(bbox.y1),
+            (bbox.x1 - dr).max(0.0),
+            (bbox.y1 - dt).max(0.0),
+        );
+        if outer.width() <= 0.0 || outer.height() <= 0.0 || (fc.is_none() && sc.is_none()) {
+            return Some(SynthesizedAp::from_canvas(bbox, canvas));
+        }
+        canvas.with_state(|cv| {
+            apply_opacity(
+                cv,
+                style.opacity,
+                style.fill_opacity.unwrap_or(style.opacity),
+                false,
+            );
+            // One path for a frame over an interior, so that the two don't
+            // blend under an opacity; the other styles are more than a frame
+            // and are drawn over the filled box.
+            let half = style.border.width / 2.0;
+            let framed = matches!(style.border.style, BorderStyle::Solid | BorderStyle::Dashed);
+            if let (Some(fill), Some(stroke), true, Some(frame)) =
+                (fc, sc, framed, outer.inset(half, half))
+            {
+                cv.stroke_color(stroke);
+                apply_border_stroke(cv, &style.border);
+                cv.fill_color(fill);
+                cv.paint_rect(frame, Paint::FillStroke);
+                return;
+            }
+            if let Some(c) = fc {
+                cv.fill_color(c);
+                cv.fill_rect(outer);
+            }
+            if let Some(c) = sc {
+                cv.box_border(outer, &style.border.to_box_border(), c, fc);
+            }
+        });
+        return Some(SynthesizedAp::from_canvas(bbox, canvas));
+    }
+
+    let half_w = if sc.is_some() {
         style.border.width / 2.0
     } else {
         0.0
@@ -241,16 +313,10 @@ pub fn synth_shape(
         (bbox.x1 - dr - half_w).max(0.0),
         (bbox.y1 - dt - half_w).max(0.0),
     );
-    let mut canvas = Canvas::new();
     if inner.width() <= 0.0 || inner.height() <= 0.0 {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
     }
 
-    let sc = style
-        .stroke
-        .and_then(AnnotColor::to_content_color)
-        .filter(|_| style.border.width > 0.0);
-    let fc = style.fill.and_then(AnnotColor::to_content_color);
     let paint = match (fc, sc) {
         (Some(_), Some(_)) => Paint::FillStroke,
         (Some(_), None) => Paint::Fill,
@@ -273,13 +339,7 @@ pub fn synth_shape(
             cv.fill_color(c);
         }
         match kind {
-            ShapeKind::Square => {
-                let rad = style
-                    .border
-                    .horizontal_radius
-                    .min(style.border.vertical_radius);
-                cv.rounded_rect(inner, rad, paint);
-            }
+            ShapeKind::Square => cv.rounded_rect(inner, radius, paint),
             ShapeKind::Circle => cv.ellipse(inner, paint),
         }
     });
@@ -696,7 +756,22 @@ pub fn synth_text_note(
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
-/// Synthesizes `/AP /N` for `/FreeText` box annotations.
+/// Synthesizes `/AP /N` for `/FreeText` box annotations: the background, the
+/// border inside the box in any of the five border styles
+/// (`pdf_gfx::Canvas::box_border`, the background its bevel's hint), and the
+/// text in Helvetica, padded to clear the border.
+///
+/// The text is drawn at `/DA`'s `Tf` size where that is above 0, and at 12
+/// with no `/DA`, no `Tf`, or a size below 0. A size of exactly 0 asks for
+/// the text sized to its box (ISO 32000-2 §12.7.4.3): under the
+/// `text-layout` feature it is, between 4 and 12 (12 where the text fits at
+/// it), as `DefaultAppearance::text_box_style` maps a `/DA`; without the
+/// feature it is drawn at 12. Of `/DA`'s other operators the color alone is
+/// applied.
+///
+/// A character Helvetica's encoding hasn't is replaced without `text-layout`,
+/// and with it the text is left out. To draw text in another font, see
+/// `synth_free_text_with_font` (under `text-layout`).
 #[must_use]
 pub fn synth_free_text(
     rect: Rect,
@@ -705,21 +780,68 @@ pub fn synth_free_text(
     quadding: Quadding,
     style: &PaintStyle,
 ) -> Option<SynthesizedAp> {
+    never(free_text_ap(
+        rect,
+        contents,
+        da,
+        quadding,
+        style,
+        draw_helvetica,
+    ))
+}
+
+/// Synthesizes `/AP /N` for a `/FreeText` box annotation as
+/// [`synth_free_text`] does, its text drawn in `font`, which the stream names
+/// by `font_res` in its `/Resources /Font`: any [`LayoutFont`], a font
+/// embedded in the document among them, so the text isn't held to
+/// Helvetica's characters.
+///
+/// `/DA` gives the size and the color as it does there; the font it names
+/// isn't looked at, and isn't rewritten to `font`: a viewer that draws the
+/// appearance stream shows the text as laid out here, and one that makes its
+/// own from `/DA` looks its font up where it would for any other annotation.
+///
+/// # Errors
+///
+/// [`UnencodableChar`] for the first character of `contents` that `font`
+/// can't draw: no appearance is made. The error holds that one character of
+/// the annotation's text and shows it in its `Debug` and `Display`, so
+/// whether to log it is the caller's choice.
+#[cfg(feature = "text-layout")]
+pub fn synth_free_text_with_font<F: LayoutFont + ?Sized>(
+    rect: Rect,
+    contents: &str,
+    da: Option<&DefaultAppearance>,
+    quadding: Quadding,
+    style: &PaintStyle,
+    font_res: Res,
+    font: &F,
+) -> Result<Option<SynthesizedAp>, UnencodableChar> {
+    free_text_ap(rect, contents, da, quadding, style, |cv, text| {
+        draw_box_text(cv, text, font_res, font)
+    })
+}
+
+/// A `/FreeText`'s `/AP /N`, its text drawn by `text`, whose error ends it
+/// with nothing made.
+fn free_text_ap<E>(
+    rect: Rect,
+    contents: &str,
+    da: Option<&DefaultAppearance>,
+    quadding: Quadding,
+    style: &PaintStyle,
+    text: impl FnOnce(&mut Canvas, &BoxText<'_>) -> Result<(), E>,
+) -> Result<Option<SynthesizedAp>, E> {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return None;
+        return Ok(None);
     }
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
     let mut canvas = Canvas::new();
 
-    let text_color = da
-        .and_then(|d| d.color)
-        .and_then(AnnotColor::to_content_color)
-        .unwrap_or(Color::Gray(0.0));
-    let font_size = da
-        .and_then(|d| d.font_size)
-        .filter(|&s| s > 0.0)
-        .unwrap_or(12.0);
+    let text_color = da.and_then(|d| d.color).unwrap_or(Color::Gray(0.0));
+    let size = free_text_size(da);
 
+    let mut drawn = Ok(());
     canvas.with_state(|cv| {
         apply_opacity(
             cv,
@@ -727,46 +849,304 @@ pub fn synth_free_text(
             style.fill_opacity.unwrap_or(style.opacity),
             false,
         );
-        if let Some(bg) = style.fill.and_then(AnnotColor::to_content_color) {
+        let background = style.fill.and_then(AnnotColor::to_content_color);
+        if let Some(bg) = background {
             cv.fill_color(bg);
             cv.fill_rect(bbox);
         }
-        if style.border.width > 0.0
-            && let Some(bc) = style.stroke.and_then(AnnotColor::to_content_color)
-        {
-            cv.stroke_color(bc);
-            cv.border_rect(bbox, style.border.width);
+        let border = style.border.to_box_border();
+        if let Some(bc) = style.stroke.and_then(AnnotColor::to_content_color) {
+            cv.box_border(bbox, &border, bc, background);
         }
-        let pad = (style.border.width + 2.0).max(2.0);
+        // The text clears the border (a bevel's band too), whether or not a
+        // stroke color draws it.
+        let pad = (border.inset() + 2.0).max(2.0);
         let Some(inner) = bbox.inset(pad, pad) else {
             return;
         };
-        draw_box_text(cv, inner, contents, font_size, quadding, text_color);
+        drawn = text(
+            cv,
+            &BoxText {
+                rect: inner,
+                text: contents,
+                size,
+                quadding,
+                color: text_color,
+            },
+        );
     });
+    drawn?;
 
-    Some(SynthesizedAp::from_canvas(bbox, canvas))
+    Ok(Some(SynthesizedAp::from_canvas(bbox, canvas)))
 }
 
-/// Synthesizes `/AP /N` (pre-apply redaction mark) and `/RO` (post-apply
-/// overlay Form XObject) for a `/Redact` annotation.
+/// The size a `/FreeText`'s text is drawn at, `None` to size it to its box,
+/// as `DefaultAppearance::text_box_style` maps it: `/DA`'s `Tf` size where
+/// it's above 0, the box's where it's exactly 0, and 12 for anything else
+/// (no `/DA` among them).
+#[cfg(feature = "text-layout")]
+fn free_text_size(da: Option<&DefaultAppearance>) -> Option<f32> {
+    da.map_or(Some(12.0), |d| d.text_box_style().size)
+}
+
+/// The size a `/FreeText`'s text is drawn at: `/DA`'s `Tf` size where it's
+/// above 0, else 12 (nothing here sizes text to its box).
+#[cfg(not(feature = "text-layout"))]
+fn free_text_size(da: Option<&DefaultAppearance>) -> Option<f32> {
+    Some(da.and_then(DefaultAppearance::size).unwrap_or(12.0))
+}
+
+/// What can't fail, taken out of its `Result`.
+fn never<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
+/// What a `/Redact` mark's appearances are drawn from (ISO 32000-2
+/// §12.5.6.23): the regions to redact and how the mark and its overlay look.
+///
+/// It borrows what it holds and is `Copy`, so a mark read from a file is
+/// drawn without cloning its quadrilaterals or its text. Built with
+/// [`RedactMark::new`] and the `with_*` methods.
+///
+/// Its `Debug` implementation reports the quadrilaterals' count and the
+/// overlay text's length, never the text.
+#[derive(Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct RedactMark<'a> {
+    /// `/QuadPoints`: the regions to redact, in the page's default user
+    /// space. Empty: the whole `/Rect`. A region is drawn only as far as it
+    /// lies inside `/Rect`: the part outside is cut, and one wholly outside
+    /// isn't drawn.
+    pub quads: &'a [QuadPoints],
+    /// `/C`: the color of the mark's outline and wash before it's applied (a
+    /// red where `None`).
+    pub stroke_color: Option<AnnotColor>,
+    /// `/IC`: the color that fills each region once the mark is applied.
+    /// `None`, or a transparent color: the regions are left unfilled
+    /// (ISO 32000-2 §12.5.6.23 Table 195).
+    pub interior_color: Option<AnnotColor>,
+    /// `/OverlayText`: the label drawn over each region once the mark is
+    /// applied.
+    pub overlay_text: Option<&'a str>,
+    /// `/Repeat`: whether the overlay text repeats across each region.
+    pub repeat: bool,
+    /// `/DA`: the overlay text's color and size. With no color given the
+    /// text is white over an interior color, and black where the regions
+    /// are left unfilled.
+    pub da: Option<&'a DefaultAppearance>,
+    /// `/Q`: the overlay text's justification.
+    pub quadding: Quadding,
+}
+
+impl fmt::Debug for RedactMark<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedactMark")
+            .field("quads", &self.quads.len())
+            .field("stroke_color", &self.stroke_color)
+            .field("interior_color", &self.interior_color)
+            .field("overlay_text_len", &self.overlay_text.map(str::len))
+            .field("repeat", &self.repeat)
+            .field("da", &self.da)
+            .field("quadding", &self.quadding)
+            .finish()
+    }
+}
+
+impl Default for RedactMark<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> RedactMark<'a> {
+    /// A mark over its whole `/Rect`: no quadrilaterals, colors, or text.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            quads: &[],
+            stroke_color: None,
+            interior_color: None,
+            overlay_text: None,
+            repeat: false,
+            da: None,
+            quadding: Quadding::Left,
+        }
+    }
+
+    /// Sets the regions to redact.
+    #[must_use]
+    pub const fn with_quads(mut self, quads: &'a [QuadPoints]) -> Self {
+        self.quads = quads;
+        self
+    }
+
+    /// Sets the color of the mark's outline and wash.
+    #[must_use]
+    pub const fn with_stroke_color(mut self, color: AnnotColor) -> Self {
+        self.stroke_color = Some(color);
+        self
+    }
+
+    /// Sets the color that fills each region once the mark is applied.
+    #[must_use]
+    pub const fn with_interior_color(mut self, color: AnnotColor) -> Self {
+        self.interior_color = Some(color);
+        self
+    }
+
+    /// Sets the label drawn over each region once the mark is applied.
+    #[must_use]
+    pub const fn with_overlay_text(mut self, text: &'a str) -> Self {
+        self.overlay_text = Some(text);
+        self
+    }
+
+    /// Sets whether the overlay text repeats across each region.
+    #[must_use]
+    pub const fn with_repeat(mut self, repeat: bool) -> Self {
+        self.repeat = repeat;
+        self
+    }
+
+    /// Sets the overlay text's color and size.
+    #[must_use]
+    pub const fn with_default_appearance(mut self, da: &'a DefaultAppearance) -> Self {
+        self.da = Some(da);
+        self
+    }
+
+    /// Sets the overlay text's justification.
+    #[must_use]
+    pub const fn with_quadding(mut self, quadding: Quadding) -> Self {
+        self.quadding = quadding;
+        self
+    }
+
+    /// The smallest rectangle that holds every quadrilateral, one with a
+    /// number that isn't finite left out; `None` where none is left.
+    #[must_use]
+    pub fn bounds(&self) -> Option<Rect> {
+        self.quads
+            .iter()
+            .filter(|q| q.0.iter().all(|v| v.is_finite()))
+            .map(|q| q.bounds())
+            .reduce(Rect::union)
+    }
+
+    /// The quadrilaterals that can be drawn, each in perimeter order and
+    /// moved into the form space of an annotation whose `/Rect` is `rect`:
+    /// one that isn't finite there is left out, and so is one whose bounds
+    /// don't reach inside the form's `/BBox`, where nothing of it would show.
+    fn local_quads(&self, rect: Rect) -> impl Iterator<Item = Quad> + '_ {
+        let (width, height) = (rect.width(), rect.height());
+        self.quads
+            .iter()
+            .map(move |q| {
+                Quad(
+                    q.to_quad()
+                        .0
+                        .map(|p| Point::new(p.x - rect.x0, p.y - rect.y0)),
+                )
+            })
+            .filter(move |quad| {
+                let b = quad.bounds();
+                quad.is_finite() && b.x0 < width && b.x1 > 0.0 && b.y0 < height && b.y1 > 0.0
+            })
+    }
+}
+
+/// The rectangle `quad` is, where its sides run along the axes.
+fn quad_as_rect(quad: &Quad) -> Option<Rect> {
+    let [a, b, c, d] = quad.0;
+    let level = |p: Point, q: Point| p.y == q.y;
+    let upright = |p: Point, q: Point| p.x == q.x;
+    let along = (level(a, b) && upright(b, c) && level(c, d) && upright(d, a))
+        || (upright(a, b) && level(b, c) && upright(c, d) && level(d, a));
+    along.then(|| quad.bounds())
+}
+
+/// Synthesizes `/AP /N` (the mark before it's applied) and `/RO` (the overlay
+/// Form XObject that applying it leaves) for a `/Redact` annotation whose
+/// `/Rect` is `rect`.
+///
+/// With no quadrilateral in `mark` (or none whose numbers are all finite and
+/// that reaches inside `rect`), both cover the whole box. Otherwise each
+/// quadrilateral that reaches inside `rect`, moved into the form's space, is
+/// drawn alone, and cut at the box where it runs past it (the form's `/BBox`
+/// is the box):
+///
+/// - `/AP /N`: a translucent wash over the quadrilateral and its outline, at
+///   a width of `1.0`: inside the quadrilateral where it's a rectangle along
+///   the axes (as `pdf_gfx::Canvas::border_rect` draws it, so an edge on the
+///   form's `/BBox` isn't cut in half), along its edges otherwise.
+/// - `/RO`: the interior color over the quadrilateral, then the overlay text
+///   laid out, unrotated, in the quadrilateral's bounding box, repeated there
+///   under [`RedactMark::repeat`]. A mark with no interior color, or a
+///   transparent one, fills nothing, as its dictionary then has no `/IC`
+///   (ISO 32000-2 §12.5.6.23 Table 195: the region is left transparent);
+///   its text, with no color from `/DA`, is then black, not white.
+///
+/// The overlay holds the text once for each quadrilateral (more under
+/// `repeat`): its size grows with the two together. Returns `None` where
+/// `rect` has no width or no height.
+///
+/// The text is drawn in Helvetica, and left out where it holds a character
+/// Helvetica's encoding hasn't (replaced, without the `text-layout` feature).
+/// To draw it in another font, see `synth_redact_with_font` (under
+/// `text-layout`).
 #[must_use]
-pub fn synth_redact(
+pub fn synth_redact(rect: Rect, mark: &RedactMark<'_>) -> Option<(SynthesizedAp, SynthesizedAp)> {
+    let overlay = never(redact_overlay_ap(rect, mark, draw_helvetica));
+    redact_mark_ap(rect, mark).zip(overlay)
+}
+
+/// Synthesizes a `/Redact` annotation's `/AP /N` and `/RO` as [`synth_redact`]
+/// does, the overlay text drawn in `font`, which the overlay names by
+/// `font_res` in its `/Resources /Font`: any [`LayoutFont`], a font embedded
+/// in the document among them, so a label isn't held to Helvetica's
+/// characters.
+///
+/// The mark's `/DA` gives the text's size and color as it does there; the
+/// font it names isn't looked at.
+///
+/// # Errors
+///
+/// [`UnencodableChar`] for the first character of the overlay text that
+/// `font` can't draw: neither stream is made. Under [`RedactMark::repeat`]
+/// the text laid out is the label's copies joined by single spaces, and the
+/// error's offset counts into that: an offset below the label's length is a
+/// character of the label, and one equal to it is the joining space, which
+/// `font` must draw too. The error holds that one character of the text and
+/// shows it in its `Debug` and `Display`, so whether to log it is the
+/// caller's choice.
+#[cfg(feature = "text-layout")]
+pub fn synth_redact_with_font<F: LayoutFont + ?Sized>(
     rect: Rect,
-    stroke_color: Option<AnnotColor>,
-    interior_color: Option<AnnotColor>,
-    overlay_text: Option<&str>,
-    repeat: bool,
-    da: Option<&DefaultAppearance>,
-    quadding: Quadding,
-) -> Option<(SynthesizedAp, SynthesizedAp)> {
+    mark: &RedactMark<'_>,
+    font_res: Res,
+    font: &F,
+) -> Result<Option<(SynthesizedAp, SynthesizedAp)>, UnencodableChar> {
+    let overlay = redact_overlay_ap(rect, mark, |cv, text| {
+        draw_box_text(cv, text, font_res.clone(), font)
+    })?;
+    Ok(redact_mark_ap(rect, mark).zip(overlay))
+}
+
+/// `/AP /N` of a `/Redact`: a crisp outline and a faint translucent wash over
+/// each region.
+fn redact_mark_ap(rect: Rect, mark: &RedactMark<'_>) -> Option<SynthesizedAp> {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return None;
     }
     let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let whole = mark.local_quads(rect).next().is_none();
 
-    // 1. Pre-apply `/AP /N`: crisp redaction outline + faint translucent wash.
     let mut mark_cv = Canvas::new();
-    let outline = stroke_color
+    let outline = mark
+        .stroke_color
         .and_then(AnnotColor::to_content_color)
         .unwrap_or(Color::Rgb([0.85, 0.1, 0.1]));
     mark_cv.with_state(|cv| {
@@ -774,103 +1154,208 @@ pub fn synth_redact(
         gs.fill_alpha = Some(0.15);
         cv.gstate(gs);
         cv.fill_color(outline);
-        cv.fill_rect(bbox);
-    });
-    mark_cv.with_state(|cv| {
-        cv.stroke_color(outline);
-        cv.border_rect(bbox, 1.0);
-    });
-
-    // 2. Post-apply `/RO`: opaque interior fill + optional `/OverlayText`.
-    let mut ro_cv = Canvas::new();
-    ro_cv.with_state(|cv| {
-        let fill = interior_color
-            .and_then(AnnotColor::to_content_color)
-            .unwrap_or(Color::Gray(0.0));
-        cv.fill_color(fill);
-        cv.fill_rect(bbox);
-
-        if let Some(txt) = overlay_text.filter(|t| !t.is_empty()) {
-            let text_color = da
-                .and_then(|d| d.color)
-                .and_then(AnnotColor::to_content_color)
-                .unwrap_or(Color::Gray(1.0));
-            let font_size = da
-                .and_then(|d| d.font_size)
-                .filter(|&s| s > 0.0)
-                .unwrap_or_else(|| (bbox.height() * 0.55).clamp(6.0, 14.0));
-            let shown = if repeat {
-                let reps = ((bbox.width() / (font_size * 3.0)).ceil() as usize).clamp(2, 32);
-                vec![txt; reps].join(" ")
-            } else {
-                txt.to_string()
-            };
-            if let Some(inner) = bbox.inset(2.0, 1.0) {
-                draw_box_text(cv, inner, &shown, font_size, quadding, text_color);
+        if whole {
+            cv.fill_rect(bbox);
+        }
+        for quad in mark.local_quads(rect) {
+            match quad_as_rect(&quad) {
+                Some(r) => cv.fill_rect(r),
+                None => cv.polyline(&quad.0, true, Paint::Fill),
             }
         }
     });
-
-    Some((
-        SynthesizedAp::from_canvas(bbox, mark_cv),
-        SynthesizedAp::from_canvas(bbox, ro_cv),
-    ))
+    mark_cv.with_state(|cv| {
+        cv.stroke_color(outline);
+        if whole {
+            cv.border_rect(bbox, 1.0);
+        }
+        for quad in mark.local_quads(rect) {
+            match quad_as_rect(&quad) {
+                Some(r) => cv.border_rect(r, 1.0),
+                None => cv.with_state(|c| {
+                    c.line_width(1.0);
+                    c.polyline(&quad.0, true, Paint::Stroke);
+                }),
+            }
+        }
+    });
+    Some(SynthesizedAp::from_canvas(bbox, mark_cv))
 }
 
-#[cfg(feature = "text-layout")]
-fn draw_box_text(
+/// `/RO` of a `/Redact`: the opaque interior fill of each region, then the
+/// `/OverlayText` in each, drawn by `text`, whose error ends it with nothing
+/// made.
+fn redact_overlay_ap<E>(
+    rect: Rect,
+    mark: &RedactMark<'_>,
+    mut text: impl FnMut(&mut Canvas, &BoxText<'_>) -> Result<(), E>,
+) -> Result<Option<SynthesizedAp>, E> {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Ok(None);
+    }
+    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let whole = mark.local_quads(rect).next().is_none();
+
+    let mut ro_cv = Canvas::new();
+    let mut drawn = Ok(());
+    ro_cv.with_state(|cv| {
+        // No `/IC`, or a transparent one: the regions are left as they are.
+        let fill = mark.interior_color.and_then(AnnotColor::to_content_color);
+        if let Some(fill) = fill {
+            cv.fill_color(fill);
+            if whole {
+                cv.fill_rect(bbox);
+            }
+            // Every fill before any text: the text sets its own fill color,
+            // and no region's fill then covers another's label.
+            for quad in mark.local_quads(rect) {
+                match quad_as_rect(&quad) {
+                    Some(r) => cv.fill_rect(r),
+                    None => cv.polyline(&quad.0, true, Paint::Fill),
+                }
+            }
+        }
+
+        if let Some(txt) = mark.overlay_text.filter(|t| !t.is_empty()) {
+            let regions = whole
+                .then_some(bbox)
+                .into_iter()
+                .chain(mark.local_quads(rect).map(|quad| quad.bounds()));
+            for region in regions {
+                drawn = draw_overlay_text(cv, region, txt, mark, &mut text);
+                if drawn.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    drawn?;
+    Ok(Some(SynthesizedAp::from_canvas(bbox, ro_cv)))
+}
+
+/// Draws a redaction's overlay text in `region` by `text`, repeated across
+/// it under `/Repeat`.
+fn draw_overlay_text<E>(
     cv: &mut Canvas,
-    box_rect: Rect,
-    text: &str,
-    font_size: f32,
+    region: Rect,
+    txt: &str,
+    mark: &RedactMark<'_>,
+    text: &mut impl FnMut(&mut Canvas, &BoxText<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    let text_color = mark
+        .da
+        .and_then(|d| d.color)
+        .unwrap_or(overlay_text_color(mark));
+    let font_size = mark
+        .da
+        .and_then(|d| d.font_size)
+        .filter(|&s| s > 0.0)
+        .unwrap_or_else(|| (region.height() * 0.55).clamp(6.0, 14.0));
+    let shown = if mark.repeat {
+        let reps = ((region.width() / (font_size * 3.0)).ceil() as usize).clamp(2, 32);
+        vec![txt; reps].join(" ")
+    } else {
+        txt.to_string()
+    };
+    let Some(inner) = region.inset(2.0, 1.0) else {
+        return Ok(());
+    };
+    text(
+        cv,
+        &BoxText {
+            rect: inner,
+            text: &shown,
+            size: Some(font_size),
+            quadding: mark.quadding,
+            color: text_color,
+        },
+    )
+}
+
+/// The color a redaction's overlay text takes where its `/DA` gives none:
+/// white over an interior color, black where the regions are left unfilled.
+pub(crate) fn overlay_text_color(mark: &RedactMark<'_>) -> Color {
+    let filled = mark
+        .interior_color
+        .and_then(AnnotColor::to_content_color)
+        .is_some();
+    Color::Gray(if filled { 1.0 } else { 0.0 })
+}
+
+/// Text to draw in a box: a `/FreeText`'s contents or a redaction's label.
+struct BoxText<'a> {
+    /// The box, in the form's space.
+    rect: Rect,
+    text: &'a str,
+    /// The size, `None` to fit the text to the box (taken only where
+    /// `text-layout` can: 12 otherwise).
+    size: Option<f32>,
     quadding: Quadding,
     color: Color,
-) {
+}
+
+/// Draws `text` in Helvetica, the font of every appearance made with no font
+/// given. Under `text-layout` a character its encoding hasn't leaves the text
+/// out, silently.
+fn draw_helvetica(cv: &mut Canvas, text: &BoxText<'_>) -> Result<(), Infallible> {
+    #[cfg(feature = "text-layout")]
+    if let Ok(font_res) = Res::dict(Std14::Helvetica.dict()) {
+        let _ = draw_box_text(cv, text, font_res, &Std14::Helvetica);
+    }
+    #[cfg(not(feature = "text-layout"))]
+    draw_box_text(cv, text);
+    Ok(())
+}
+
+/// Lays `text` out in its box in `font`, wrapped at words and cut at the
+/// box, and draws it under the name `font_res` gets.
+///
+/// For a character `font` can't draw the text's color alone has been set,
+/// and no text drawn.
+#[cfg(feature = "text-layout")]
+fn draw_box_text<F: LayoutFont + ?Sized>(
+    cv: &mut Canvas,
+    text: &BoxText<'_>,
+    font_res: Res,
+    font: &F,
+) -> Result<(), UnencodableChar> {
     use pdf_gfx::{TextAlign, TextBoxStyle, WrapMode};
 
-    if text.is_empty() {
-        return;
+    if text.text.is_empty() {
+        return Ok(());
     }
-    let Ok(font_res) = Res::dict(Std14::Helvetica.dict()) else {
-        return;
-    };
-    let align = match quadding {
+    let align = match text.quadding {
         Quadding::Left => TextAlign::Left,
         Quadding::Center => TextAlign::Center,
         Quadding::Right => TextAlign::Right,
     };
     let style = TextBoxStyle {
-        size: Some(font_size),
+        size: text.size,
         align,
         wrap: WrapMode::Word,
         clip: true,
         ..TextBoxStyle::default()
     };
-    cv.fill_color(color);
-    let _ = cv.text_box(font_res, &Std14::Helvetica, text, box_rect, &style);
+    cv.fill_color(text.color);
+    cv.text_box(font_res, font, text.text, text.rect, &style)?;
+    Ok(())
 }
 
 #[cfg(not(feature = "text-layout"))]
-fn draw_box_text(
-    cv: &mut Canvas,
-    box_rect: Rect,
-    text: &str,
-    font_size: f32,
-    quadding: Quadding,
-    color: Color,
-) {
-    if text.is_empty() {
+fn draw_box_text(cv: &mut Canvas, text: &BoxText<'_>) {
+    if text.text.is_empty() {
         return;
     }
     let Ok(font_res) = Res::dict(Std14::Helvetica.dict()) else {
         return;
     };
+    let (box_rect, font_size, quadding) = (text.rect, text.size.unwrap_or(12.0), text.quadding);
     cv.with_state(|c| {
         c.clip_rect(box_rect);
-        c.fill_color(color);
+        c.fill_color(text.color);
         let line_h = font_size * 1.2;
         let mut y = box_rect.y1 - font_size;
-        for line in text.lines() {
+        for line in text.text.lines() {
             if y < box_rect.y0 - font_size {
                 break;
             }
@@ -983,16 +1468,16 @@ pub fn synth_annot(annot: &Annot<'_>) -> Option<SynthesizedAp> {
             annot.color().unwrap_or(AnnotColor::Rgb([0.75, 0.1, 0.1])),
             opacity,
         ),
-        TypedAnnot::Redact(rd) => synth_redact(
+        // The mark alone: its overlay isn't an appearance of the annotation.
+        TypedAnnot::Redact(rd) => redact_mark_ap(
             rect,
-            annot.color(),
-            rd.interior_color,
-            rd.overlay_text.as_deref(),
-            rd.repeat,
-            rd.da.as_ref(),
-            rd.quadding,
-        )
-        .map(|(ap, _)| ap),
+            &RedactMark {
+                quads: &rd.quad_points,
+                stroke_color: annot.color(),
+                interior_color: rd.interior_color,
+                ..RedactMark::new()
+            },
+        ),
         _ => None,
     }
 }

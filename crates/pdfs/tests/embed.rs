@@ -504,3 +504,200 @@ fn no_debug_holds_what_is_drawn() {
     let refused = font.codes("MARKER\u{1F600}").unwrap_err();
     assert!(!refused.to_string().contains("MARKER"));
 }
+
+/// The text the Form XObject `id` of `pdf` shows, read through its own
+/// `/Resources`, and the fonts those name.
+#[cfg(feature = "text-layout")]
+fn form_text(pdf: &Pdf<&[u8]>, id: ObjectId) -> (String, Vec<ObjectId>) {
+    use std::ops::ControlFlow;
+
+    use pdfs::content_streams::Concat;
+    use pdfs::gfx::{Kind, Limits, Opts, interpret};
+
+    let reading = pdf.reading();
+    let form = reading.resolve(id).unwrap().as_stream().unwrap();
+    assert_eq!(
+        form.dict.get("Subtype").unwrap().as_name(),
+        Some(&b"Form"[..])
+    );
+    let resources = form.dict.get("Resources");
+    let fonts = resources
+        .and_then(|resources| resources.as_dict()?.get("Font")?.as_dict())
+        .map_or(Vec::new(), |fonts| {
+            let number = |(_, font): (_, &Object)| font.as_reference().unwrap();
+            fonts.iter().map(number).collect()
+        });
+    let content = pdf.stream(id).unwrap();
+    let slices = [&content[..]];
+    let mut text = String::new();
+    let summary = interpret(
+        reading,
+        &Concat::new(&slices),
+        resources,
+        &Limits::DEFAULT,
+        &pdfs::fonts::Fonts::default(),
+        Opts::default(),
+        |event| {
+            if let Kind::Text(show) = &event.kind {
+                for glyph in show.glyphs() {
+                    text.push_str(&glyph.text().expect("the font's /ToUnicode has it"));
+                }
+            }
+            ControlFlow::Continue(())
+        },
+    );
+    assert!(!summary.unwrap().stopped);
+    (text, fonts)
+}
+
+/// A `/FreeText` and a `/Redact` over two regions, their text Chinese and
+/// Hebrew, built in a font embedded in the document and added to a page
+/// drawn in it too: saved and reopened, each appearance stream shows the
+/// text given under the one font, written once with every glyph drawn; the
+/// redaction's overlay is its rollover appearance too; and a character the
+/// program has no glyph for builds nothing.
+#[cfg(feature = "text-layout")]
+#[test]
+fn annotations_text_in_an_embedded_font_reads_back() {
+    use pdfs::annots::{
+        AnnotColor, AppearanceMode, BuiltAnnot, DefaultAppearance, PaintStyle, QuadPoints,
+        Quadding, RedactMark, TypedAnnot,
+    };
+    use pdfs::content_streams::Color;
+    use pdfs::gfx::UnencodableChar;
+
+    const PAGE: &str = "Ag";
+    const NOTE: &str = "\u{4E2D}\u{6587} \u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+    const LABEL: &str = "\u{4E16}\u{754C} \u{5E9}\u{5DC}";
+
+    let mut doc = Document::new();
+    let font = doc.embed_font(program(1000)).unwrap();
+    on_glyphs_of_their_own(font.program(), &[PAGE, NOTE, LABEL]);
+    add(&mut doc, drawn_at(&font, &[PAGE]));
+    let page_id = doc.page_ids().unwrap()[0].unwrap();
+
+    let da = DefaultAppearance::new("Helv", 12.0, Some(Color::Gray(0.0)));
+    let style = PaintStyle::new(
+        Some(AnnotColor::Gray(0.0)),
+        Some(AnnotColor::Rgb([1.0, 1.0, 0.8])),
+    );
+    let note_rect = Rect::new(72.0, 500.0, 372.0, 560.0);
+    let note = BuiltAnnot::free_text_with_font(
+        note_rect,
+        NOTE,
+        &da,
+        Quadding::Left,
+        &style,
+        font.res(),
+        &font,
+    )
+    .unwrap();
+    // Over the page's own text, and a region below it.
+    let quads = [
+        QuadPoints::from_rect(Rect::new(72.0, 696.0, 272.0, 724.0)),
+        QuadPoints::from_rect(Rect::new(72.0, 656.0, 272.0, 684.0)),
+    ];
+    let mark = RedactMark::new()
+        .with_quads(&quads)
+        .with_interior_color(AnnotColor::Gray(0.0))
+        .with_overlay_text(LABEL);
+    let rect = mark.bounds().unwrap();
+    let redaction = BuiltAnnot::redact_with_font(rect, &mark, font.res(), &font).unwrap();
+
+    // A character the program has no glyph for: named, and nothing built.
+    let refused = UnencodableChar {
+        at: NOTE.len(),
+        character: '\u{1F600}',
+    };
+    let bad = format!("{NOTE}\u{1F600}");
+    let built = BuiltAnnot::free_text_with_font(
+        note_rect,
+        &bad,
+        &da,
+        Quadding::Left,
+        &style,
+        font.res(),
+        &font,
+    );
+    assert_eq!(built.map(|built| built.dict), Err(refused));
+    let bad_mark = mark.with_overlay_text(&bad);
+    let built = BuiltAnnot::redact_with_font(rect, &bad_mark, font.res(), &font);
+    assert_eq!(built.map(|built| built.dict), Err(refused));
+
+    doc.add_annot(page_id, note).unwrap();
+    doc.add_annot(page_id, redaction).unwrap();
+    let file = doc.to_bytes().unwrap();
+
+    let pdf = pdfs::from_bytes(&file[..]).unwrap();
+    let pages = pdf.pages().unwrap();
+    let page = pages.get(0).unwrap();
+    assert_eq!(page.text().unwrap().text(), PAGE);
+    let annots = page.annots().unwrap();
+    assert_eq!(annots.len(), 2);
+    let normal = |annot: &pdfs::annots::Annot<'_>| {
+        let appearances = annot.appearances().expect("/AP");
+        appearances
+            .stream(AppearanceMode::Normal, false, false)
+            .expect("/AP /N")
+    };
+    let embedded = number(&font);
+
+    // The FreeText: its contents, and its appearance's text in the font.
+    assert!(matches!(annots[0].typed(), TypedAnnot::FreeText(_)));
+    assert_eq!(annots[0].rect(), note_rect);
+    assert_eq!(annots[0].contents(), Some(NOTE));
+    assert_eq!(
+        form_text(&pdf, normal(&annots[0])),
+        (NOTE.to_owned(), vec![embedded])
+    );
+
+    // The redaction: its mark draws no text; its overlay the label in each
+    // region, in the font; and /AP /R is the overlay.
+    let TypedAnnot::Redact(read) = annots[1].typed() else {
+        panic!("a redaction");
+    };
+    assert_eq!(annots[1].rect(), rect);
+    assert_eq!(read.quad_points, quads);
+    assert_eq!(read.overlay_text.as_deref(), Some(LABEL));
+    assert_eq!(
+        form_text(&pdf, normal(&annots[1])),
+        (String::new(), Vec::new())
+    );
+    let overlay = read.overlay_form.expect("/RO");
+    assert_ne!(overlay, normal(&annots[1]));
+    let appearances = annots[1].appearances().unwrap();
+    assert_eq!(
+        appearances.stream(AppearanceMode::Rollover, false, false),
+        Some(overlay)
+    );
+    assert_eq!(
+        form_text(&pdf, overlay),
+        ([LABEL, LABEL].concat(), vec![embedded])
+    );
+
+    // One font in the file, the page's and the two forms', its program cut
+    // to `.notdef` and the glyphs the three drew.
+    let reading = pdf.reading();
+    let type0s = reading.ids().filter(|&id| {
+        let dict = reading.resolve(id).and_then(Object::as_dict);
+        dict.is_some_and(|dict| {
+            dict.get("Type").and_then(Object::as_name) == Some(&b"Font"[..])
+                && dict.get("Subtype").and_then(Object::as_name) == Some(&b"Type0"[..])
+        })
+    });
+    assert_eq!(type0s.collect::<Vec<_>>(), [embedded]);
+    let programs = reading.ids().filter(|&id| {
+        let dict = reading.resolve(id).and_then(Object::as_dict);
+        dict.is_some_and(|dict| dict.get("FontFile2").is_some())
+    });
+    assert_eq!(programs.count(), 1);
+    let walked = Walked::of(&file);
+    assert_eq!(walked.numbers[0], embedded);
+    let drawn: std::collections::BTreeSet<_> = [PAGE, NOTE, LABEL]
+        .iter()
+        .flat_map(|text| text.chars())
+        .map(|c| font.program().glyph(c).unwrap())
+        .collect();
+    assert_eq!(usize::from(walked.program.glyph_count()), 1 + drawn.len());
+    widths_are_the_programs(&page_font(&pdf, 0), font.program(), &[PAGE, NOTE, LABEL]);
+}
