@@ -151,7 +151,9 @@ jobs:
   # candidate's published, as a pre-release, its commit and tag made here
   # first, once every archive is built.
   release:
-    name: ${{ needs.version.outputs.rc != '' && 'Publish the release candidate' || 'Draft the release' }}
+    # A fixed name: GitHub shows a skipped job's name unevaluated, and
+    # this one is skipped on every run by hand without `rc`.
+    name: The release
     needs: [version, archive]
     if: github.event_name == 'push' || needs.version.outputs.rc != ''
     runs-on: ubuntu-24.04
