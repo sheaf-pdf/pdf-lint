@@ -5,13 +5,37 @@ name: Release
 # nothing here): an archive for each platform, each holding pdf-lint and
 # the notices of what it embeds, each checked to run as it's unpacked
 # (release/smoke.sh); then a draft GitHub release with them,
-# to look over and publish by hand. Run by hand, it builds and checks the
-# archives without drafting a release.
+# to look over and publish by hand.
+#
+# Run by hand on main with `rc`, a number, it publishes a release candidate
+# of main as it stands: the crate's version with -rc.<n>
+# (pdf-lint-v0.2.0-rc.1), given to the build (release/prerelease.sh), then
+# committed on top of the commit built, in a commit no branch holds, which
+# the tag names, so that the tag builds what it says and main keeps its
+# version; then published as a pre-release, which the releases' `latest`
+# never leads to, so setup-pdf-lint installs it only where its `version`
+# names it. Run by hand without `rc`, on any branch, it builds and checks
+# the archives, publishing nothing.
+#
+# A release candidate goes to no registry, by three things each enough
+# alone: the tag is pushed with the run's own token, which starts no
+# workflow; publish.yml leaves out a release candidate's tag, and its
+# pdf-lint job refuses one; and no job here has `id-token: write`, which a
+# crates.io token is exchanged for, or the `release` environment
+# publish.yml's jobs do. Keep it so.
 
 on:
   push:
     tags: ["pdf-lint-v*"]
   workflow_dispatch:
+    inputs:
+      rc:
+        description: >-
+          Publish main as release candidate <n> of pdf-lint's version: 1
+          publishes pdf-lint-v0.2.0-rc.1 where the crate is 0.2.0. Empty:
+          build and check the archives, publishing nothing.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -20,8 +44,47 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # What's built, said once for every job: the crate's version, checked
+  # against the tag pushed; or a release candidate's, checked to be of main
+  # and of a number not tagged yet, before any archive is built.
+  version:
+    name: The version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      rc: ${{ steps.version.outputs.rc }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The version, and its tag
+        id: version
+        env:
+          RC: ${{ inputs.rc }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-lint/Cargo.toml | head -n 1)
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if [ "$GITHUB_REF_NAME" != "pdf-lint-v$version" ]; then
+              echo "The tag is $GITHUB_REF_NAME, and pdf-lint's version $version" >&2
+              exit 1
+            fi
+          elif [ -n "$RC" ]; then
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "A release candidate is of main, not of $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+            version=$(release/prerelease.sh "$RC")
+            if [ -n "$(git ls-remote --tags origin "refs/tags/pdf-lint-v$version")" ]; then
+              echo "pdf-lint-v$version is tagged already: give the next number" >&2
+              exit 1
+            fi
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "rc=$RC" >>"$GITHUB_OUTPUT"
+
   archive:
     name: Archive for ${{ matrix.platform }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -55,14 +118,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Check the tag is the crate's version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-lint/Cargo.toml | head -n 1)
-          if [ "$GITHUB_REF_NAME" != "pdf-lint-v$version" ]; then
-            echo "The tag is $GITHUB_REF_NAME, and pdf-lint's version $version" >&2
-            exit 1
-          fi
+      - name: Give pdf-lint the release candidate's version
+        if: needs.version.outputs.rc != ''
+        env:
+          RC: ${{ needs.version.outputs.rc }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: test "$(release/prerelease.sh "$RC")" = "$VERSION"
       - name: Install Rosetta
         if: matrix.platform == 'macos-x86_64'
         run: sudo softwareupdate --install-rosetta --agree-to-license
@@ -86,29 +147,64 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
 
+  # A tag's release drafted, to look over and publish by hand; a release
+  # candidate's published, as a pre-release, its commit and tag made here
+  # first, once every archive is built.
   release:
-    name: Draft the release
-    needs: archive
-    if: startsWith(github.ref, 'refs/tags/')
+    name: ${{ needs.version.outputs.rc != '' && 'Publish the release candidate' || 'Draft the release' }}
+    needs: [version, archive]
+    if: github.event_name == 'push' || needs.version.outputs.rc != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RC: ${{ needs.version.outputs.rc }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
+      # Its credentials kept, to push the tag: this job builds nothing.
+      - uses: actions/checkout@v7
+        if: needs.version.outputs.rc != ''
+        with:
+          persist-credentials: true
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - name: Draft a release with the archives
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # The version given to the commit built, as the archives' builds gave
+      # it, committed, and that commit tagged, as pdf-lint-v0.1.0 is, with
+      # its name and version. A push doesn't move a tag that's there
+      # already, so a number is never taken twice, even by two runs at once.
+      - name: Commit and tag the release candidate
+        if: needs.version.outputs.rc != ''
         run: |
-          cat > notes.md <<'EOF'
+          test "$(release/prerelease.sh "$RC")" = "$VERSION"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -q -m "pdf-lint $VERSION" \
+            -m "A release candidate: main at $GITHUB_SHA, with the version given to it here alone. No branch holds this commit: its tag does." \
+            -- crates/pdf-lint/Cargo.toml Cargo.lock
+          git tag -a "pdf-lint-v$VERSION" -m "pdf-lint $VERSION"
+          git push origin "refs/tags/pdf-lint-v$VERSION"
+      - name: The release, with the archives
+        run: |
+          if [ -n "$RC" ]; then
+            cat > notes.md <<EOF
+          A release candidate of pdf-lint ${VERSION%-rc.*}: main at $GITHUB_SHA, with its version, \`$VERSION\`, given in a commit of its own, which the tag names. setup-pdf-lint installs it where its \`version\` is \`$VERSION\`: \`latest\` never takes a pre-release.
+
+          EOF
+            set -- --prerelease --latest=false
+          else
+            : > notes.md
+            set -- --draft
+          fi
+          cat >> notes.md <<'EOF'
           Each archive holds `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it: unpack it anywhere. The Linux binaries are static. Beside each archive, its SHA-256.
 
           What's compiled in, each crate and its licence, the Rust standard library and, on Linux, musl, has its notices in `THIRD-PARTY-NOTICES.txt`, `RUST-NOTICES.html` and `MUSL-COPYRIGHT`. The font metrics compiled in, Adobe's Core 14 AFMs, go with the file Adobe distributes them with, `ADOBE-AFM-NOTICE.html`.
 
           The Arlington PDF Model it checks against is embedded: its NOTICE.txt is `ARLINGTON-NOTICE.txt`, and what the embedded copy corrects and adds, where the model contradicts ISO 32000-2 or lacks what a reference defines, is `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. `pdf-lint --version` says the model's commit and hash.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "pdf-lint ${GITHUB_REF_NAME#pdf-lint-v}" --notes-file notes.md
+          gh release create "pdf-lint-v$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag "$@" \
+            --title "pdf-lint $VERSION" --notes-file notes.md
