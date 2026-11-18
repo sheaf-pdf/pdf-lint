@@ -15,10 +15,16 @@ name: Publish
 # manifest's version and the CHANGELOG's dated entry for it, and the package
 # is checked as CI checks it on every push. pdf-lint's tag starts
 # release.yml's archives too.
+#
+# A release candidate of pdf-lint's, pdf-lint-v0.2.0-rc.1, release.yml's
+# alone, is never published: its tag starts nothing here (the `!` pattern
+# after "pdf-lint-v*" leaves it out), and the pdf-lint job refuses one
+# however it's started. Its tag's commit has its version, so the check of
+# the tag against the manifest wouldn't stop it.
 
 on:
   push:
-    tags: ["pdf-tokenizer-v*", "pdf-objects-v*", "pdf-filters-v*", "pdf-crypt-v*", "pdf-color-v*", "pdf-structure-v*", "pdf-content-streams-v*", "pdf-semantics-v*", "pdf-fonts-v*", "pdf-gfx-v*", "pdf-annots-v*", "pdf-linearize-v*", "pdfs-v*", "pdf-arlington-v*", "pdf-lint-v*"]
+    tags: ["pdf-tokenizer-v*", "pdf-objects-v*", "pdf-filters-v*", "pdf-crypt-v*", "pdf-color-v*", "pdf-structure-v*", "pdf-content-streams-v*", "pdf-semantics-v*", "pdf-fonts-v*", "pdf-gfx-v*", "pdf-annots-v*", "pdf-linearize-v*", "pdfs-v*", "pdf-arlington-v*", "pdf-lint-v*", "!pdf-lint-v*-rc.*"]
 
 permissions:
   contents: read
@@ -702,7 +708,9 @@ jobs:
 
   pdf-lint:
     name: Publish pdf-lint
-    if: startsWith(github.ref, 'refs/tags/pdf-lint-v')
+    # Never a release candidate's tag, which the trigger leaves out too:
+    # release.yml's alone.
+    if: startsWith(github.ref, 'refs/tags/pdf-lint-v') && !contains(github.ref_name, '-rc.')
     runs-on: ubuntu-latest
     # As pdf-objects' job: the environment pdf-tokenizer's job names, and a
     # version perhaps published by hand, as 0.1.0 was, which the look at
