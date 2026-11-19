@@ -1,11 +1,11 @@
 name: Fuzz
 
 # Each fuzz target under libFuzzer, through `just fuzz` as it runs locally.
-# On pull requests and pushes to main, the 21 target/feature runs are grouped
+# On pull requests and pushes to main, the 22 target/feature runs are grouped
 # into 5 buckets (two minutes a target, from the corpus the scheduled runs
 # keep) so shared dependencies build with AddressSanitizer once per bucket
-# rather than 21 times. Twice a week (and on manual `workflow_dispatch`), the
-# full 21-way matrix runs in parallel (half an hour a target on schedule, the
+# rather than 22 times. Twice a week (and on manual `workflow_dispatch`), the
+# full 22-way matrix runs in parallel (half an hour a target on schedule, the
 # corpus minimized and kept in the cache for the next run). `content` runs
 # twice, the second time built with `simd`, and `fonts`, `gfx` and `annots`
 # twice, the second time built with `predefined-cmaps`, each from the same
@@ -48,13 +48,13 @@ jobs:
             t5: ""
             runs: tokenize filters crypt objects
           - group: structure
-            label: structure, write, semantics, linearize
+            label: structure, write, semantics, linearize, forms
             t1: structure
             t2: write
             t3: semantics
             t4: linearize
-            t5: ""
-            runs: structure write semantics linearize
+            t5: forms
+            runs: structure write semantics linearize forms
           - group: fonts
             label: content, color, fonts, embed
             t1: content
@@ -154,7 +154,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, linearize, pdfs, arlington, check]
+        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, forms, linearize, pdfs, arlington, check]
         # The features fuzz/ is built with: none, for each target. A run
         # given features of its own is a combination of its own, as it sets
         # this key, so it doesn't change the target's run without them.

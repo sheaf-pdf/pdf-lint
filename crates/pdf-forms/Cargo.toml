@@ -1,0 +1,67 @@
+[package]
+name = "pdf-forms"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-forms"
+description = "PDF interactive forms: the field tree, inherited field values, and widgets"
+keywords = ["pdf", "forms", "acroform", "fields", "iso-32000"]
+categories = ["parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-annots.workspace = true
+pdf-content-streams.workspace = true
+pdf-fonts.workspace = true
+pdf-gfx.workspace = true
+pdf-objects.workspace = true
+pdf-semantics.workspace = true
+thiserror = "2"
+# Optional numeric spans for the field tree walk; without proc macros
+# (`default-features = false`) and with `std` for span guards.
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = ["programs", "text-layout"]
+# Forwards `pdf-annots/programs` (and so `pdf-gfx/programs` and
+# `pdf-fonts/programs`) for embedded font program metrics.
+programs = ["pdf-annots/programs", "pdf-gfx/programs", "pdf-fonts/programs"]
+# Forwards `pdf-annots/text-layout` and `pdf-gfx/text-layout` for text laid out
+# in a widget's rectangle.
+text-layout = ["pdf-annots/text-layout", "pdf-gfx/text-layout"]
+# Forwards `predefined-cmaps` to `pdf-annots`, `pdf-gfx`, and `pdf-fonts`.
+predefined-cmaps = [
+    "pdf-annots/predefined-cmaps",
+    "pdf-gfx/predefined-cmaps",
+    "pdf-fonts/predefined-cmaps",
+]
+# Emits `debug`-level `tracing` spans with numeric counts (never file
+# plaintext, field names, or field values).
+tracing = [
+    "dep:tracing",
+    "pdf-annots/tracing",
+    "pdf-content-streams/tracing",
+    "pdf-fonts/tracing",
+    "pdf-gfx/tracing",
+    "pdf-semantics/tracing",
+]
+
+[package.metadata.docs.rs]
+features = ["predefined-cmaps", "tracing"]
+
+[lib]
+bench = false
+
+[dev-dependencies]
+# Path-only dev-dependencies omitted from the published package manifest so
+# `pdf-forms` packages cleanly over its zero-I/O library dependencies alone.
+pdf-fixtures = { path = "../pdf-fixtures" }
+pdf-structure = { path = "../pdf-structure" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

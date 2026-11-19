@@ -4,7 +4,7 @@
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
 # pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts,
-# pdf-gfx, pdf-annots, pdf-linearize, pdfs, pdf-arlington and pdf-lint
+# pdf-gfx, pdf-annots, pdf-forms, pdf-linearize, pdfs, pdf-arlington and pdf-lint
 # support, from their Cargo.toml. pdf-lint's is its library's, and the
 # binary's as `cargo install` builds it; its release archives are built with
 # stable Rust.
@@ -19,6 +19,7 @@ color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' 
 fonts_msrv := `grep -m1 '^rust-version' crates/pdf-fonts/Cargo.toml | cut -d'"' -f2`
 gfx_msrv := `grep -m1 '^rust-version' crates/pdf-gfx/Cargo.toml | cut -d'"' -f2`
 annots_msrv := `grep -m1 '^rust-version' crates/pdf-annots/Cargo.toml | cut -d'"' -f2`
+forms_msrv := `grep -m1 '^rust-version' crates/pdf-forms/Cargo.toml | cut -d'"' -f2`
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
 pdfs_msrv := `grep -m1 '^rust-version' crates/pdfs/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
@@ -90,6 +91,10 @@ clippy:
     cargo clippy --locked -p pdf-annots --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-annots --no-default-features --features programs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-annots --no-default-features --features text-layout --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-forms --features predefined-cmaps,tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-forms --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-forms --no-default-features --features programs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-forms --no-default-features --features text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
@@ -154,6 +159,12 @@ test:
     cargo test --locked -p pdf-annots --no-default-features --doc
     cargo nextest run --locked -p pdf-annots --no-default-features --features programs
     cargo nextest run --locked -p pdf-annots --no-default-features --features text-layout
+    cargo nextest run --locked -p pdf-forms --features predefined-cmaps,tracing
+    cargo test --locked -p pdf-forms --features predefined-cmaps,tracing --doc
+    cargo nextest run --locked -p pdf-forms --no-default-features
+    cargo test --locked -p pdf-forms --no-default-features --doc
+    cargo nextest run --locked -p pdf-forms --no-default-features --features programs
+    cargo nextest run --locked -p pdf-forms --no-default-features --features text-layout
     cargo nextest run --locked -p pdf-structure --features tracing
     cargo test --locked -p pdf-structure --features tracing --doc
     cargo nextest run --locked -p pdfs
@@ -305,6 +316,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features --features embed
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-annots --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features embed
@@ -522,6 +534,12 @@ gfx-package: (_package "pdf-gfx" "pdf-objects" "pdf-color" "pdf-content-streams"
 # what's checked.
 annots-package: (_package "pdf-annots" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-filters")
 
+# Package pdf-forms as a publish would, pdf-objects, pdf-color,
+# pdf-content-streams, pdf-semantics, pdf-fonts, pdf-gfx, pdf-annots and
+# pdf-filters beside it while the versions it and they name aren't published;
+# `_package` says what's checked.
+forms-package: (_package "pdf-forms" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-filters")
+
 # Package pdf-linearize as a publish would, pdf-objects, pdf-crypt,
 # pdf-structure, pdf-semantics and pdf-filters beside it while the versions it
 # and they name aren't published; `_package` says what's checked.
@@ -529,9 +547,9 @@ linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-crypt" "pdf-stru
 
 # Package pdfs as a publish would, pdf-objects, pdf-crypt, pdf-color,
 # pdf-filters, pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts,
-# pdf-gfx, pdf-annots and pdf-linearize beside it while the versions it names
+# pdf-gfx, pdf-annots, pdf-forms and pdf-linearize beside it while the versions it names
 # aren't published; `_package` says what's checked.
-pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-linearize")
+pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-forms" "pdf-linearize")
 
 # Package pdf-arlington as a publish would, the model it embeds with its
 # licence and notice beside its sources, and pdf-objects and pdf-color
@@ -550,7 +568,7 @@ arlington-package: (_package "pdf-arlington" "pdf-objects" "pdf-color")
 lint-package: (_package "pdf-lint" "pdf-objects" "pdf-filters" "pdf-crypt" "pdf-color" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize" "pdf-arlington")
 
 # Package every published crate as a publish would; `_package` says what's checked.
-package: tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package linearize-package pdfs-package arlington-package lint-package
+package: tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package forms-package linearize-package pdfs-package arlington-package lint-package
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
@@ -713,6 +731,22 @@ annots-cmaps-msrv:
     cargo +{{ annots_msrv }} nextest run --locked -p pdf-annots --features predefined-cmaps
     cargo +{{ annots_msrv }} test --locked -p pdf-annots --features predefined-cmaps --doc
 
+# Test pdf-forms on its oldest supported Rust, as it's published, with no
+# feature, and with its spans (`tracing`), which must be installed.
+forms-msrv:
+    cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms
+    cargo +{{ forms_msrv }} test --locked -p pdf-forms --doc
+    cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms --no-default-features
+    cargo +{{ forms_msrv }} test --locked -p pdf-forms --no-default-features --doc
+    cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms --features tracing
+    cargo +{{ forms_msrv }} test --locked -p pdf-forms --features tracing --doc
+
+# Test pdf-forms with `predefined-cmaps` on that feature's oldest Rust, which
+# must be installed.
+forms-cmaps-msrv:
+    cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms --features predefined-cmaps
+    cargo +{{ forms_msrv }} test --locked -p pdf-forms --features predefined-cmaps --doc
+
 # Test pdf-linearize on its oldest supported Rust, which must be installed,
 # with its adapter and without, and with its spans (`tracing`); and the lopdf
 # adapter's crate, never published, on the same Rust, which its manifest names.
@@ -752,7 +786,7 @@ lint-msrv:
     cargo +{{ lint_msrv }} test --locked -p pdf-lint --no-default-features --doc
 
 # Test every crate on its oldest supported Rust.
-msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
+msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv forms-msrv forms-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
@@ -855,6 +889,11 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/annots
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" annots fuzz/corpus/annots fuzz/seeds/annots -- -dict=fuzz/annots.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    forms)
+        PDF_FORMS_FUZZ_SEEDS="$PWD/fuzz/seeds/forms" cargo test --locked -q -p pdf-forms --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/forms
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" forms fuzz/corpus/forms fuzz/seeds/forms -- -dict=fuzz/forms.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     linearize)
         PDF_LINEARIZE_FUZZ_SEEDS="$PWD/fuzz/seeds/linearize" cargo test --locked -q -p pdf-linearize --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/linearize
@@ -876,7 +915,7 @@ fuzz target="tokenize" seconds="60" features="":
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, linearize, pdfs, arlington or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, forms, linearize, pdfs, arlington or check" >&2
         exit 2
         ;;
     esac

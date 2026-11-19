@@ -4,7 +4,7 @@ This document gives developers and coding agents a fast mental model of the work
 
 ## 1. Which Crate Should You Touch?
 
-- **Building an application or high-level workflow?** Start in **[`pdfs`](crates/pdfs)**. It wraps the entire library family behind ergonomic `Pdf`, `Page`, and `Document` types and re-exports every underlying crate under its unprefixed name (`pdfs::gfx`, `pdfs::annots`, `pdfs::structure`, `pdfs::objects`, etc.); the `pdf_*` paths (`pdfs::pdf_gfx`, `pdfs::pdf_structure`, etc.) remain and name the same crates.
+- **Building an application or high-level workflow?** Start in **[`pdfs`](crates/pdfs)**. It wraps the entire library family behind ergonomic `Pdf`, `Page`, and `Document` types and re-exports every underlying crate under its unprefixed name (`pdfs::gfx`, `pdfs::annots`, `pdfs::forms`, `pdfs::structure`, `pdfs::objects`, etc.); the `pdf_*` paths (`pdfs::pdf_gfx`, `pdfs::pdf_structure`, etc.) remain and name the same crates.
 - **Working on PDF validation / CLI reporting?** Look at **[`pdf-lint`](crates/pdf-lint)** (rule orchestration, baseline/incremental diffing, CLI/JSON output) and **[`pdf-arlington`](crates/pdf-arlington)** (TSV grammar loader and predicate evaluator).
 - **Working on a specific PDF subsystem?** Crates are layered strictly bottom-up with no circular dependencies:
 
@@ -14,6 +14,10 @@ This document gives developers and coding agents a fast mental model of the work
                     └──────┬───────┘      └──────┬───────┘
                            │                     │
         ┌──────────────────┼─────────┬───────────┼──────────────────┐
+        │                  ▼         │           │                  │
+        │          ┌───────────────┐ │           │                  │
+        │          │   pdf-forms   │ │           │                  │
+        │          └───────┬───────┘ │           │                  │
         │                  ▼         │           │                  │
         │          ┌───────────────┐ │           │                  │
         │          │  pdf-annots   │ │           │                  │
@@ -51,7 +55,7 @@ This document gives developers and coding agents a fast mental model of the work
 ## 2. Core Cross-Crate Concepts
 
 ### Zero-I/O Domain Crates (`Resolve` and `Streams`)
-Only `pdf-structure` (and `pdfs` on top of it) reads or writes files. Domain crates—`pdf-color`, `pdf-semantics`, `pdf-content-streams`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, and `pdf-arlington`—operate over two traits defined in [`pdf-objects`](crates/pdf-objects):
+Only `pdf-structure` (and `pdfs` on top of it) reads or writes files. Domain crates—`pdf-color`, `pdf-semantics`, `pdf-content-streams`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, `pdf-forms`, and `pdf-arlington`—operate over two traits defined in [`pdf-objects`](crates/pdf-objects):
 - **`Resolve`**: Resolves an indirect `ObjectId` to `Option<&Object>` (or `try_resolve` -> `Result<Option<&Object>, Unreadable>` to distinguish missing objects from locked, capped, damaged, or I/O-failed reads). Implemented for `&pdf_structure::Reading`, `&pdf_structure::Document`, `&pdf_structure::WithReading`, and any `Fn(ObjectId) -> Option<&Object>` closure.
 - **`Streams`**: Extends `Resolve` with `decoded(id, limit)` to return decrypted, filter-decoded stream bytes up to `limit`. Use `pdf_objects::WithStreams` to pair a closure resolver with a stream-decoding function in tests or custom callers.
 
@@ -93,9 +97,9 @@ Run development checks via [`just`](justfile):
 Several automated tests enforce strict consistency across code and documentation:
 
 1. **Feature-matrix compilation & rustdoc (`just clippy`, `just test`, `just doc`):**
-   Crates are tested and documented with `--no-default-features` (e.g., `pdf-semantics` without `clock`, `pdf-linearize` without `family`, `pdf-fonts` without `programs` and with `embed` alone, `pdf-gfx` and `pdf-annots` without `programs`/`text-layout`, `pdfs` without `programs`/`text-layout`/`clock`/`embed` and with `embed` alone, `pdf-filters` with only `zlib-rs`). Avoid unguarded `[`intra_doc_links`]` or doctests that reference feature-gated items when those features are off.
+   Crates are tested and documented with `--no-default-features` (e.g., `pdf-semantics` without `clock`, `pdf-linearize` without `family`, `pdf-fonts` without `programs` and with `embed` alone, `pdf-gfx`, `pdf-annots`, and `pdf-forms` without `programs`/`text-layout`, `pdfs` without `programs`/`text-layout`/`clock`/`embed` and with `embed` alone, `pdf-filters` with only `zlib-rs`). Avoid unguarded `[`intra_doc_links`]` or doctests that reference feature-gated items when those features are off.
 2. **README doctests & `lib.rs` first-example parity:**
-   Each library crate compiles its `README.md` via `#[cfg(doctest)] #[doc = include_str!("../README.md")]`. In `pdfs`, `pdf-annots`, `pdf-gfx`, `pdf-fonts`, `pdf-crypt`, `pdf-linearize`, `pdf-semantics`, and `pdf-content-streams`, a unit test asserts that the **first** ` ```rust ` block in `README.md` matches the **first** ` ``` ` block in `src/lib.rs` (`//!`) line-for-line.
+   Each library crate compiles its `README.md` via `#[cfg(doctest)] #[doc = include_str!("../README.md")]`. In `pdfs`, `pdf-forms`, `pdf-annots`, `pdf-gfx`, `pdf-fonts`, `pdf-crypt`, `pdf-linearize`, `pdf-semantics`, and `pdf-content-streams`, a unit test asserts that the **first** ` ```rust ` block in `README.md` matches the **first** ` ``` ` block in `src/lib.rs` (`//!`) line-for-line.
 3. **README URLs & license links:**
    Published crates test that `README.md` contains exact GitHub `https://` links to `LICENSE-APACHE` and `LICENSE-MIT` (`LICENSE-APACHE` alone in `pdf-arlington` and `pdf-lint`, which are Apache-2.0 alone; and in `pdf-fonts`, exact links to `` [`FTL.TXT`](...) `` and `` [`assets/afm/MustRead.html`](...) ``), contains no `](../` relative paths, and in several crates uses `https://` for every Markdown link.
 4. **`pdf-lint` CLI `--help` sync:**

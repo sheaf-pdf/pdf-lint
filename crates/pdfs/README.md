@@ -170,6 +170,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — `pdfs::fonts`. Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, text extraction, and TrueType font subsetting and embedding.
 - **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — `pdfs::gfx`. 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
 - **[pdf-annots](https://crates.io/crates/pdf-annots)** — `pdfs::annots`. Page annotations (`Page::annots`), typed subtype inspection, `/AP` placement and synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`Document::flatten_page`).
+- **[pdf-forms](https://crates.io/crates/pdf-forms)** — `pdfs::forms`. Interactive forms: the `/AcroForm` field tree with inherited types, flags, values, and default appearances, and each field's widgets.
 - **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — `pdfs::linearize`. Linearized PDF layout engine, hint tables, and validator.
 
 ## Key Guarantees
