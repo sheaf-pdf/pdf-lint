@@ -1,0 +1,21 @@
+# PDFium's answer for each case, as chromium/8152 gives it (oracle/pdfium.py record)
+forms-inherit	idx 0 type 6 flags 4096 name top.kid value from%20top ; idx 1 type 6 flags 4096 name top value from%20top
+forms-own-over-inherited	idx 0 type 4 flags 131072 name top.choice ; idx 1 type 6 flags 0 name top.text value own
+forms-three-deep	idx 0 none
+forms-button-kinds	idx 0 type 2 flags 0 name check ; idx 1 type 3 flags 32768 name radio ; idx 2 type 1 flags 65536 name push ; idx 3 type 3 flags 98304 name both
+forms-choice-kinds	idx 0 type 5 flags 0 name list ; idx 1 type 4 flags 131072 name combo ; idx 2 type 4 flags 393216 name edit
+forms-signature	idx 0 type 7 flags 0 name sig
+forms-type-missing-or-unknown	idx 0 none ; idx 1 type 0 flags 0 name unknown
+forms-nameless-middle	idx 0 none
+forms-name-with-a-period	idx 0 type 6 flags 0 name a.b.c value %
+forms-name-and-value-in-utf16	idx 0 type 6 flags 0 name %C5%81 value %C3%96l
+forms-nameless-at-the-top	idx 0 none
+forms-kids-loop	idx 0 none
+forms-field-listed-twice	idx 0 type 6 flags 0 name twice value v
+forms-direct-field	idx 0 none
+forms-fields-by-reference	idx 0 type 6 flags 0 name f value by%20reference
+forms-real-flags	idx 0 type 6 flags 4096 name real value v
+forms-value-not-a-string	idx 0 type 6 flags 0 name name value % ; idx 1 type 6 flags 0 name number value %
+forms-widget-outside-the-tree	idx 0 type 6 flags 0 name inside value v ; idx 1 type 6 flags 0 name outside value o
+forms-not-a-widget	idx 0 none ; idx 1 type 6 flags 0 name f value v
+forms-no-form	idx 0 type 6 flags 0 name lone value v

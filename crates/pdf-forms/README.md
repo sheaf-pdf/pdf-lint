@@ -19,6 +19,13 @@ PDF interactive forms (ISO 32000-2, §12.7): the field tree with what each field
   - The walk ends within `Limits` whatever the file says: a field reached twice (a cycle through `/Kids`) is left out, a tree deeper than `Limits::depth` is cut there, and more fields and widgets than `Limits::fields` is an error.
   - Recoverable departures go to a `pdf_objects::fault::Sink` as `Fault`s; `&mut ()` collects none and reads the same form. `Debug` output of every type prints numbers and counts, never a field's name or value.
 
+## Where it reads more, or less, than PDFium
+
+Under `Rules::Pdfium` text strings, names, and numbers are read as PDFium reads them as of chromium/8152, and a button with both the push button and the radio flags is a radio button. The tree itself is read as ISO 32000-2 gives it, which differs from PDFium in two ways, each held by a recorded case:
+
+- **More fields.** A field's type is inherited from any ancestor (PDFium makes a terminal field only where `/FT` is its own or its parent's), a terminal field with no type or no name is still read, with a `Fault`, and a field is found by walking down from `/Fields` whether or not its widget's `/Parent` leads back up.
+- **No widgets from pages.** PDFium adds a page's widget that has a `/FT` to the form though `/Fields` doesn't reach it, and makes a form of such widgets where the catalog has no `/AcroForm`. `Form::read` reads the tree `/Fields` gives.
+
 ## Quickstart
 
 Read a form whose text field inherits its type and default appearance from its parent:

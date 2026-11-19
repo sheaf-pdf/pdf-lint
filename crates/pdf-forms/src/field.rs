@@ -12,6 +12,23 @@ use crate::error::Error;
 use crate::fault::Fault;
 use crate::limits::Limits;
 
+/// What a field of `field_type` with `flags` is, under `rules`.
+pub(crate) fn kind_of(field_type: FieldType, flags: FieldFlags, rules: Rules) -> FieldKind {
+    let (push, radio) = (
+        flags.contains(FieldFlags::PUSHBUTTON),
+        flags.contains(FieldFlags::RADIO),
+    );
+    match field_type {
+        FieldType::Button if radio && (rules == Rules::Pdfium || !push) => FieldKind::Radio,
+        FieldType::Button if push => FieldKind::PushButton,
+        FieldType::Button => FieldKind::CheckBox,
+        FieldType::Text => FieldKind::Text,
+        FieldType::Choice if flags.contains(FieldFlags::COMBO) => FieldKind::Combo,
+        FieldType::Choice => FieldKind::List,
+        FieldType::Signature => FieldKind::Signature,
+    }
+}
+
 /// A field's type, its `/FT`, the field's own or inherited (ISO 32000-2
 /// §12.7.4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -205,6 +222,7 @@ pub struct Field<'o> {
     pub(crate) widgets: Vec<Widget<'o>>,
     pub(crate) name: Option<String>,
     pub(crate) field_type: Option<FieldType>,
+    pub(crate) kind: Option<FieldKind>,
     pub(crate) flags: FieldFlags,
     pub(crate) value: Option<Arc<FieldValue<'o>>>,
     pub(crate) default_value: Option<Arc<FieldValue<'o>>>,
@@ -272,20 +290,13 @@ impl<'o> Field<'o> {
         self.flags
     }
 
-    /// What the field is, from its type and flags. The push button flag wins
-    /// over the radio flag, which means something only when it is clear.
+    /// What the field is, from its type and flags. A button with both the
+    /// push button and the radio flags is a push button under ISO 32000-2's
+    /// rules, where the radio flag means something only when the push button
+    /// flag is clear, and a radio button under PDFium's as of chromium/8152.
     #[must_use]
-    pub fn kind(&self) -> Option<FieldKind> {
-        let flags = self.flags;
-        Some(match self.field_type? {
-            FieldType::Button if flags.contains(FieldFlags::PUSHBUTTON) => FieldKind::PushButton,
-            FieldType::Button if flags.contains(FieldFlags::RADIO) => FieldKind::Radio,
-            FieldType::Button => FieldKind::CheckBox,
-            FieldType::Text => FieldKind::Text,
-            FieldType::Choice if flags.contains(FieldFlags::COMBO) => FieldKind::Combo,
-            FieldType::Choice => FieldKind::List,
-            FieldType::Signature => FieldKind::Signature,
-        })
+    pub const fn kind(&self) -> Option<FieldKind> {
+        self.kind
     }
 
     /// The field's value (`/V`).

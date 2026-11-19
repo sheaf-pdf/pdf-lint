@@ -11,7 +11,7 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Value, text};
 
 use crate::error::Error;
 use crate::fault::Fault;
-use crate::field::{Field, FieldFlags, FieldType, FieldValue, Widget};
+use crate::field::{Field, FieldFlags, FieldType, FieldValue, Widget, kind_of};
 use crate::limits::{Cap, Limits};
 use crate::phases::phase;
 use crate::read::{DictAt, Reader, locked_string};
@@ -439,6 +439,7 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         widgets: Vec::new(),
         name,
         field_type,
+        kind: field_type.map(|ft| kind_of(ft, flags.unwrap_or_default(), reader.rules)),
         flags: flags.unwrap_or_default(),
         value: value.clone(),
         default_value: default_value.clone(),

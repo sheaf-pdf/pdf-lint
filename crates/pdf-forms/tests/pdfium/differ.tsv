@@ -1,0 +1,12 @@
+# Intentional differences from PDFium (chromium/8152): where PDFium reads fewer
+# fields than ISO 32000-2's inheritance gives, and the widgets it adopts from
+# pages.
+# name	why
+forms-three-deep	PDFium makes a terminal field only where /FT is the field's own or its parent's; a type handed down two levels or more is read here, as ISO 32000-2 has it inherited
+forms-type-missing-or-unknown	PDFium leaves out a terminal field with no /FT; it is read here with no type, for the caller to see and a fault to say
+forms-nameless-middle	the type comes down two levels, as in forms-three-deep; the field with no /T adds nothing to the name
+forms-nameless-at-the-top	PDFium finds a widget's field by its name and finds none for an empty name; the field is read here with an empty name and a fault
+forms-kids-loop	PDFium follows the loop to its depth limit and then finds no /FT one level up; here a field reached twice is left out and the type is inherited
+forms-direct-field	PDFium finds a widget's field through the widget's /Parent, which a kid of a direct field can't have; here the walk down from /Fields finds it
+forms-widget-outside-the-tree	PDFium adds a page's widget that has a /FT to the form though /Fields doesn't reach it; this reads the tree /Fields gives and sees no pages
+forms-no-form	PDFium makes a form of a page's widgets where the catalog has no /AcroForm; here no /AcroForm is no form

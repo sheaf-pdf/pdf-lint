@@ -257,6 +257,14 @@ class Pdfium:
             ("FPDFPage_CloseAnnot", None, [P]),
             ("FPDFAnnot_GetSubtype", I, [P]),
             ("FPDFAnnot_GetFlags", I, [P]),
+            ("FPDFDOC_InitFormFillEnvironment", P, [P, P]),
+            ("FPDFDOC_ExitFormFillEnvironment", None, [P]),
+            ("FORM_OnAfterLoadPage", None, [P, P]),
+            ("FORM_OnBeforeClosePage", None, [P, P]),
+            ("FPDFAnnot_GetFormFieldType", I, [P, P]),
+            ("FPDFAnnot_GetFormFieldFlags", I, [P, P]),
+            ("FPDFAnnot_GetFormFieldName", U, [P, P, P, U]),
+            ("FPDFAnnot_GetFormFieldValue", U, [P, P, P, U]),
             ("FPDFAnnot_GetRect", I, [P, ctypes.POINTER(FSRect)]),
             ("FPDFAnnot_GetBorder", I, [P, pf, pf, pf]),
             ("FPDFAnnot_GetStringValue", U, [P, ctypes.c_char_p, P, U]),
@@ -667,6 +675,57 @@ class Pdfium:
         lib.FPDF_ClosePage(page)
         lib.FPDF_CloseDocument(doc)
         return parts
+
+    def forms(self, data):
+        """Page 0's widgets as PDFium's form-fill environment reads their
+        fields (fpdf_formfill.h, fpdf_annot.h): each one's field type, its
+        flags, its fully qualified name, and a text field's value."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        # FPDF_FORMFILLINFO at version 2, every callback null: reading fields
+        # calls none of them.
+        info = ctypes.create_string_buffer(1024)
+        ctypes.cast(info, ctypes.POINTER(ctypes.c_int))[0] = 2
+        form = lib.FPDFDOC_InitFormFillEnvironment(doc, info)
+        page = lib.FPDF_LoadPage(doc, 0)
+        if not page or not form:
+            if form:
+                lib.FPDFDOC_ExitFormFillEnvironment(form)
+            lib.FPDF_CloseDocument(doc)
+            return None
+        lib.FORM_OnAfterLoadPage(page, form)
+
+        def text(get, a):
+            size = get(form, a, None, 0)
+            if size <= 2:
+                return b""
+            sbuf = ctypes.create_string_buffer(size)
+            get(form, a, sbuf, size)
+            return sbuf.raw[:size - 2].decode("utf-16le", "replace").encode("utf-8")
+
+        out = []
+        for i in range(lib.FPDFPage_GetAnnotCount(page)):
+            a = lib.FPDFPage_GetAnnot(page, i)
+            if not a:
+                continue
+            kind = lib.FPDFAnnot_GetFormFieldType(form, a)
+            if kind < 0:
+                out.append("idx %d none" % i)
+            else:
+                words = ["idx", str(i), "type", str(kind),
+                         "flags", str(lib.FPDFAnnot_GetFormFieldFlags(form, a) & 0xFFFFFFFF),
+                         "name", esc(text(lib.FPDFAnnot_GetFormFieldName, a))]
+                if kind == 6:
+                    words += ["value", esc(text(lib.FPDFAnnot_GetFormFieldValue, a))]
+                out.append(" ".join(words))
+            lib.FPDFPage_CloseAnnot(a)
+        lib.FORM_OnBeforeClosePage(page, form)
+        lib.FPDF_ClosePage(page)
+        lib.FPDFDOC_ExitFormFillEnvironment(form)
+        lib.FPDF_CloseDocument(doc)
+        return out
 
     def annots(self, data):
         """Page 0's annotations, links, destinations, and actions as PDFium
@@ -1140,6 +1199,8 @@ def answer(pdfium, kind, files):
         return content_answer(pdfium.gfx_text(files["pdf"], files.get("queries")))
     if kind == "annots":
         return content_answer(pdfium.annots(files["pdf"]))
+    if kind == "forms":
+        return content_answer(pdfium.forms(files["pdf"]))
     if kind in ("annots-flatten-display", "annots-flatten-print"):
         return content_answer(pdfium.annots_flatten(files["pdf"], kind == "annots-flatten-print"))
     if kind == "outlines":

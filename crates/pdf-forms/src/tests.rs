@@ -338,11 +338,6 @@ fn kinds_follow_the_type_and_flags() {
         ("Btn", FieldFlags::default(), FieldKind::CheckBox),
         ("Btn", FieldFlags::RADIO, FieldKind::Radio),
         ("Btn", FieldFlags::PUSHBUTTON, FieldKind::PushButton),
-        (
-            "Btn",
-            FieldFlags::PUSHBUTTON | FieldFlags::RADIO,
-            FieldKind::PushButton,
-        ),
         ("Tx", FieldFlags::COMB, FieldKind::Text),
         ("Ch", FieldFlags::default(), FieldKind::List),
         ("Ch", FieldFlags::COMBO | FieldFlags::EDIT, FieldKind::Combo),
@@ -363,6 +358,22 @@ fn kinds_follow_the_type_and_flags() {
         assert_eq!(field.field_type().unwrap().name(), ft);
     }
     assert_eq!(FieldType::from_name(b"Other"), None);
+
+    // Both button flags: ISO 32000-2 reads a push button, PDFium a radio.
+    let both = store.put(dict! {
+        "T" => Object::text("both"),
+        "FT" => Object::name("Btn"),
+        "Ff" => i64::from((FieldFlags::PUSHBUTTON | FieldFlags::RADIO).bits()),
+    });
+    let catalog = catalog_of(refs(&[both]));
+    assert_eq!(
+        read(&store, &catalog).fields()[0].kind(),
+        Some(FieldKind::Radio)
+    );
+    let iso = Form::read(&store.objects, &catalog, Rules::Iso, &Limits::DEFAULT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(iso.fields()[0].kind(), Some(FieldKind::PushButton));
 }
 
 #[test]

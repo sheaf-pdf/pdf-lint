@@ -1,0 +1,21 @@
+# name	kind	files
+forms-inherit	forms	forms-inherit.pdf
+forms-own-over-inherited	forms	forms-own-over-inherited.pdf
+forms-three-deep	forms	forms-three-deep.pdf
+forms-button-kinds	forms	forms-button-kinds.pdf
+forms-choice-kinds	forms	forms-choice-kinds.pdf
+forms-signature	forms	forms-signature.pdf
+forms-type-missing-or-unknown	forms	forms-type-missing-or-unknown.pdf
+forms-nameless-middle	forms	forms-nameless-middle.pdf
+forms-name-with-a-period	forms	forms-name-with-a-period.pdf
+forms-name-and-value-in-utf16	forms	forms-name-and-value-in-utf16.pdf
+forms-nameless-at-the-top	forms	forms-nameless-at-the-top.pdf
+forms-kids-loop	forms	forms-kids-loop.pdf
+forms-field-listed-twice	forms	forms-field-listed-twice.pdf
+forms-direct-field	forms	forms-direct-field.pdf
+forms-fields-by-reference	forms	forms-fields-by-reference.pdf
+forms-real-flags	forms	forms-real-flags.pdf
+forms-value-not-a-string	forms	forms-value-not-a-string.pdf
+forms-widget-outside-the-tree	forms	forms-widget-outside-the-tree.pdf
+forms-not-a-widget	forms	forms-not-a-widget.pdf
+forms-no-form	forms	forms-no-form.pdf

@@ -11,6 +11,7 @@ Several crates emulate PDFium's forgiving behavior when reading real-world PDFsâ
 - `pdf-fonts` (`Font`, `shown`)
 - `pdf-gfx` (`PageGeom`, `interpret`, `encode`, `TextPage`)
 - `pdf-annots` (`page_annots`, `TypedAnnot`, `plan_flatten`)
+- `pdf-forms` (`Form::read`: field types, flags, names, and values)
 - `pdf-linearize` (checked against PDFium's `FPDFAvail_*` incremental-loading API)
 
 To keep behavior reproducible without linking PDFium into any crate, each crate stores small synthetic test cases alongside recorded answers from a pinned PDFium build in `crates/<crate>/tests/pdfium/`.
@@ -67,6 +68,7 @@ Each crate's `tests/pdfium/` directory (excluded from published crates.io packag
 - **`fonts`, `fonts-heights`, `fonts-boxes`:** Complete `.pdf` showing a test string at 1000 pt -> `FPDFText_GetUnicode`, character origins, loose boxes, and outline boxes.
 - **`gfx-geom`, `gfx`, `gfx-text`:** Complete `.pdf` -> page view dimensions, quarter-turn rotation, and `FPDF_PageToDevice` probes (`gfx-geom`); flattened page and Form XObject leaf objects in PageSpace (paths with stroke styles/dashes, placed image quads, shadings, text render modes, top-level clip paths, nested marked-content stacks) plus non-generated `FPDFText_GetCharOrigin` positions (`gfx`); and `CPDF_TextPage` reading-order characters, generated spaces/newlines, soft-wrapped hyphens, `FPDFText_CountRects` merged selection count, and `FPDFText_FindStart` search matches (`gfx-text`).
 - **`annots`, `annots-flatten-display`, `annots-flatten-print`:** Complete `.pdf` -> page 0 annotation slots (`FPDFAnnot_*`), legacy borders, decoded text strings, `QuadPoints`, line/polygon/ink geometry, link destinations (`FPDFLink_GetDest`), and actions (`FPDFAction_*`) (`annots`); and `FPDFPage_Flatten` (`FLAT_NORMALDISPLAY` vs. `FLAT_PRINT`) status, remaining `/Annots` count, and flattened PageSpace path segments (`annots-flatten-*`).
+- **`forms`:** Complete `.pdf` -> page 0's widgets under a form-fill environment (`FPDFDOC_InitFormFillEnvironment`): each one's field type (`FPDFAnnot_GetFormFieldType`), flags, fully qualified name, and a text field's value, or `none` where PDFium finds no field for the annotation.
 
 ## Bumping the PDFium Pin
 
