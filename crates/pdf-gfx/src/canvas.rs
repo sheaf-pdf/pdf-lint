@@ -141,6 +141,21 @@ fn darkened(color: Color) -> Color {
     }
 }
 
+/// Whether a border of width `w` can be drawn in `rect`: `w` finite and above
+/// `0.0`, `rect` finite, and `rect` grown by `5.0 * w` finite too.
+fn border_drawable(rect: Rect, w: f32) -> bool {
+    if !(w > 0.0 && w.is_finite() && rect.is_finite()) {
+        return false;
+    }
+    let half = w / 2.0;
+    // A reader bounds a stroke by its path's points and, past them, half
+    // the width times the miter limit (`10` unless set): no further than
+    // this from the box, for every style. Past `f32`'s range the stream
+    // would be one its own interpreter can't read back.
+    let reach = half * 10.0;
+    rect.expand(reach).is_finite()
+}
+
 /// High-level content-stream builder wrapping [`ContentWriter`].
 ///
 /// Coordinates are expressed in the active user space (PageSpace at the start
@@ -350,7 +365,8 @@ impl Canvas {
     ///   (a middle gray without a hint); Inset fills the first a middle gray
     ///   and the second a light gray. Nothing where `rect` is narrower or
     ///   shorter than `2.0 * w`; the frame alone where it's narrower or shorter
-    ///   than `4.0 * w`. [`BoxBorder::inset`] says how far the whole reaches.
+    ///   than `4.0 * w`. [`BoxBorder::inset`] says how far the whole reaches,
+    ///   and [`Canvas::box_bands`] draws the bands alone.
     ///
     /// `fill_hint` is the color behind the border (a widget's background, a
     /// box's interior), used only by `Beveled`.
@@ -362,18 +378,10 @@ impl Canvas {
         fill_hint: Option<Color>,
     ) {
         let w = border.width;
-        if !(w > 0.0 && w.is_finite() && rect.is_finite()) {
+        if !border_drawable(rect, w) {
             return;
         }
         let half = w / 2.0;
-        // A reader bounds a stroke by its path's points and, past them, half
-        // the width times the miter limit (`10` unless set): no further than
-        // this from the box, for every style. Past `f32`'s range the stream
-        // would be one its own interpreter can't read back.
-        let reach = half * 10.0;
-        if !rect.expand(reach).is_finite() {
-            return;
-        }
         match border.style {
             BoxBorderStyle::Solid | BoxBorderStyle::Dashed => {
                 let Some(frame) = rect.inset(half, half) else {
@@ -421,14 +429,6 @@ impl Canvas {
                     return;
                 };
                 let inner = rect.inset(2.0 * w, 2.0 * w);
-                let (top_left, bottom_right) = if border.style == BoxBorderStyle::Beveled {
-                    (
-                        Color::Gray(1.0),
-                        fill_hint.map_or(Color::Gray(0.5), darkened),
-                    )
-                } else {
-                    (Color::Gray(0.5), Color::Gray(0.75))
-                };
                 self.with_state(|c| {
                     c.stroke_color(stroke);
                     c.line_width(w);
@@ -437,35 +437,77 @@ impl Canvas {
                     let Some(inner) = inner else {
                         return;
                     };
-                    c.fill_color(top_left);
-                    c.polyline(
-                        &[
-                            Point::new(outer.x0, outer.y0),
-                            Point::new(outer.x0, outer.y1),
-                            Point::new(outer.x1, outer.y1),
-                            Point::new(inner.x1, inner.y1),
-                            Point::new(inner.x0, inner.y1),
-                            Point::new(inner.x0, inner.y0),
-                        ],
-                        true,
-                        Paint::Fill,
-                    );
-                    c.fill_color(bottom_right);
-                    c.polyline(
-                        &[
-                            Point::new(outer.x0, outer.y0),
-                            Point::new(outer.x1, outer.y0),
-                            Point::new(outer.x1, outer.y1),
-                            Point::new(inner.x1, inner.y1),
-                            Point::new(inner.x1, inner.y0),
-                            Point::new(inner.x0, inner.y0),
-                        ],
-                        true,
-                        Paint::Fill,
-                    );
+                    c.bands(outer, inner, border.style, fill_hint);
                 });
             }
         }
+    }
+
+    /// Draws the two bands of a [`BoxBorderStyle::Beveled`] or
+    /// [`BoxBorderStyle::Inset`] `border` inside `rect` without its frame, in
+    /// a `q`..`Q` scope of their own: what [`Canvas::box_border`] fills
+    /// inside the frame it strokes, the same operators with the same
+    /// numbers, for a caller that shades a box's edge where no color is
+    /// given to stroke its frame. `fill_hint` is as there.
+    ///
+    /// Nothing is drawn for the other styles, nor where
+    /// [`Canvas::box_border`] would draw no bands: a width or box it can't
+    /// use, or a box narrower or shorter than four times the width. The
+    /// fill color is set inside the scope, so the caller's graphics state is
+    /// as it was.
+    pub fn box_bands(&mut self, rect: Rect, border: &BoxBorder<'_>, fill_hint: Option<Color>) {
+        let w = border.width;
+        let banded = matches!(
+            border.style,
+            BoxBorderStyle::Beveled | BoxBorderStyle::Inset
+        );
+        if !(banded && border_drawable(rect, w)) {
+            return;
+        }
+        let (Some(outer), Some(inner)) = (rect.inset(w, w), rect.inset(2.0 * w, 2.0 * w)) else {
+            return;
+        };
+        self.with_state(|c| c.bands(outer, inner, border.style, fill_hint));
+    }
+
+    /// Fills a bevel's two mitered bands between `outer` and `inner`, with no
+    /// scope of their own: the top and left one, then the bottom and right
+    /// one, in `style`'s shades ([`Canvas::box_border`]).
+    fn bands(&mut self, outer: Rect, inner: Rect, style: BoxBorderStyle, fill_hint: Option<Color>) {
+        let (top_left, bottom_right) = if style == BoxBorderStyle::Beveled {
+            (
+                Color::Gray(1.0),
+                fill_hint.map_or(Color::Gray(0.5), darkened),
+            )
+        } else {
+            (Color::Gray(0.5), Color::Gray(0.75))
+        };
+        self.fill_color(top_left);
+        self.polyline(
+            &[
+                Point::new(outer.x0, outer.y0),
+                Point::new(outer.x0, outer.y1),
+                Point::new(outer.x1, outer.y1),
+                Point::new(inner.x1, inner.y1),
+                Point::new(inner.x0, inner.y1),
+                Point::new(inner.x0, inner.y0),
+            ],
+            true,
+            Paint::Fill,
+        );
+        self.fill_color(bottom_right);
+        self.polyline(
+            &[
+                Point::new(outer.x0, outer.y0),
+                Point::new(outer.x1, outer.y0),
+                Point::new(outer.x1, outer.y1),
+                Point::new(inner.x1, inner.y1),
+                Point::new(inner.x1, inner.y0),
+                Point::new(inner.x0, inner.y0),
+            ],
+            true,
+            Paint::Fill,
+        );
     }
 
     /// Strokes a single line segment from `from` to `to` (`m l S`).

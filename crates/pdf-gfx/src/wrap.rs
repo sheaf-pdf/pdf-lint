@@ -262,7 +262,8 @@ pub struct TextBoxStyle {
     /// Maximum font size chosen when `size` is auto-sized (`12.0` by default).
     pub max_auto_size: f32,
     /// Explicit baseline-to-baseline line step in points (`None` uses
-    /// `(ascent - descent) / 1000 * font_size * leading_factor`).
+    /// `(ascent - descent) / 1000 * font_size * leading_factor`, the heights
+    /// as [`font_heights_as_given`](Self::font_heights_as_given) says).
     pub line_height: Option<f32>,
     /// Multiplier applied to `(ascent - descent)` when `line_height` is `None`
     /// (`1.2` by default).
@@ -284,6 +285,32 @@ pub struct TextBoxStyle {
     pub clip: bool,
     /// Text rendering mode (`TextMode::Fill` by default).
     pub mode: TextMode,
+    /// Whether a wrapped line keeps the spaces it's broken at (`false` by
+    /// default).
+    ///
+    /// Off, the spaces a line ends with are trimmed from it, and a wrapped
+    /// line's first spaces are passed over. On, no space is dropped: under
+    /// [`WrapMode::Word`] a line that would pass the box's width at its next
+    /// character, a space among them, is broken before the last word that
+    /// begins on it after its first character (a character that's neither a
+    /// space nor a hyphen, after a space or a hyphen), so the spaces before
+    /// that word end the line, in its `codes`, its `text_range`, and the
+    /// `width` it's aligned by, and the next line begins at the word. With no
+    /// such word it's broken before that next character, which begins the
+    /// next line even where it's a space. A paragraph's last line keeps the
+    /// spaces it ends with too. Justified text is spread by the spaces
+    /// between its words, not by those that end its line.
+    pub line_end_spaces: bool,
+    /// Whether the font's ascent and descent are taken as its
+    /// [`LayoutFont::font_metrics`] gives them (`false` by default).
+    ///
+    /// Off, layout takes the ascent as at least `0.70` em, the descent as at
+    /// most `-0.15` em, and the difference between them as at least `0.85`
+    /// em, so a font that gives small heights, or none, still has room. On,
+    /// they're taken as given wherever they're finite and the ascent is
+    /// above the descent (per em, as layout divides them by `1000`); where
+    /// they aren't, the same floors apply, so no line has a step of `0`.
+    pub font_heights_as_given: bool,
 }
 
 impl Default for TextBoxStyle {
@@ -301,6 +328,8 @@ impl Default for TextBoxStyle {
             comb: None,
             clip: true,
             mode: TextMode::Fill,
+            line_end_spaces: false,
+            font_heights_as_given: false,
         }
     }
 }
@@ -457,10 +486,8 @@ pub fn layout_text<F: LayoutFont + ?Sized>(
     }
     paragraphs.push((para_start..text.len(), cur_glyphs));
 
-    let metrics = font.font_metrics();
-    let ascent_em = (metrics.ascent / 1000.0).max(0.70);
-    let descent_em = (metrics.descent / 1000.0).min(-0.15);
-    let height_em = (ascent_em - descent_em).max(0.85);
+    let (ascent_em, descent_em, height_em) =
+        line_heights(font.font_metrics(), style.font_heights_as_given);
 
     if let Some(comb_n) = style.comb.filter(|&n| n > 0) {
         return Ok(layout_comb(
@@ -490,6 +517,24 @@ pub fn layout_text<F: LayoutFont + ?Sized>(
         descent_em,
         height_em,
     ))
+}
+
+/// The ascent, the descent, and the height between them, per em, that layout
+/// measures lines by: `metrics`' own where `as_given` and they give a height
+/// (both finite, the ascent above the descent), else floored to at least
+/// `0.70`, at most `-0.15`, and at least `0.85`
+/// ([`TextBoxStyle::font_heights_as_given`]).
+fn line_heights(metrics: FontMetrics, as_given: bool) -> (f32, f32, f32) {
+    let ascent = metrics.ascent / 1000.0;
+    let descent = metrics.descent / 1000.0;
+    // Distinct finite numbers differ by more than nothing, so the height
+    // is above 0.
+    if as_given && ascent.is_finite() && descent.is_finite() && ascent > descent {
+        return (ascent, descent, ascent - descent);
+    }
+    let ascent_em = ascent.max(0.70);
+    let descent_em = descent.min(-0.15);
+    (ascent_em, descent_em, (ascent_em - descent_em).max(0.85))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -635,12 +680,16 @@ struct WrappedSlice<'a> {
     is_para_last: bool,
 }
 
+/// `glyphs`, a paragraph's, cut into lines no wider than `max_width` by
+/// `wrap`, the spaces kept where `keep_spaces`
+/// ([`TextBoxStyle::line_end_spaces`]).
 fn wrap_paragraph<'a>(
     para_range: &Range<usize>,
     glyphs: &'a [EncodedGlyph],
     max_width: f32,
     font_size: f32,
     wrap: WrapMode,
+    keep_spaces: bool,
 ) -> Vec<WrappedSlice<'a>> {
     if glyphs.is_empty() {
         return vec![WrappedSlice {
@@ -665,7 +714,7 @@ fn wrap_paragraph<'a>(
     while start < n {
         // Skip leading spaces on wrapped continuation lines (not on index 0 of
         // the paragraph so intentional leading indentation is preserved).
-        if start > 0 {
+        if start > 0 && !keep_spaces {
             while start < n && glyphs[start].ch == ' ' {
                 start += 1;
             }
@@ -680,15 +729,20 @@ fn wrap_paragraph<'a>(
 
         while end < n {
             let gw = glyphs[end].units * scale;
+            // Keeping spaces, a line breaks before a word, which a character
+            // that would pass the width may itself begin.
+            if keep_spaces && wrap == WrapMode::Word && end > start && begins_word(glyphs, end) {
+                last_break = Some(end);
+            }
             if end > start && width + gw > max_width + 1e-4 {
                 // If this glyph is a space, break right here and consume trailing spaces.
-                if glyphs[end].ch == ' ' {
+                if !keep_spaces && glyphs[end].ch == ' ' {
                     last_break = Some(end);
                 }
                 break;
             }
             width += gw;
-            if wrap == WrapMode::Word {
+            if wrap == WrapMode::Word && !keep_spaces {
                 if glyphs[end].ch == ' ' {
                     last_break = Some(end);
                 } else if glyphs[end].ch == '-' && end + 1 < n {
@@ -699,7 +753,12 @@ fn wrap_paragraph<'a>(
         }
 
         if end == n {
-            let trimmed = trim_trailing_spaces(&glyphs[start..end]);
+            let kept = &glyphs[start..end];
+            let trimmed = if keep_spaces {
+                kept
+            } else {
+                trim_trailing_spaces(kept)
+            };
             let range =
                 slice_byte_range(trimmed, glyphs[start].byte_start..glyphs[end - 1].byte_end);
             out.push(WrappedSlice {
@@ -719,7 +778,11 @@ fn wrap_paragraph<'a>(
         };
 
         let raw_slice = &glyphs[start..split_at];
-        let trimmed = trim_trailing_spaces(raw_slice);
+        let trimmed = if keep_spaces {
+            raw_slice
+        } else {
+            trim_trailing_spaces(raw_slice)
+        };
         let fallback_start = raw_slice[0].byte_start;
         let fallback_end = raw_slice.last().unwrap().byte_end;
         let range = slice_byte_range(trimmed, fallback_start..fallback_end);
@@ -735,6 +798,22 @@ fn wrap_paragraph<'a>(
         last.is_para_last = true;
     }
     out
+}
+
+/// Whether a word begins at `glyphs[i]`, for a line that keeps its spaces: a
+/// character that's neither a space nor a hyphen, after a space or a hyphen.
+fn begins_word(glyphs: &[EncodedGlyph], i: usize) -> bool {
+    let not_a_break = |ch: char| ch != ' ' && ch != '-';
+    i > 0 && not_a_break(glyphs[i].ch) && !not_a_break(glyphs[i - 1].ch)
+}
+
+/// How many of `glyphs` are spaces that `Tw` widens: a space drawn as the
+/// single byte 32 (ISO 32000-2, 9.3.3).
+fn word_spaces(glyphs: &[EncodedGlyph]) -> usize {
+    glyphs
+        .iter()
+        .filter(|g| g.ch == ' ' && g.codes_len == 1 && g.codes[0] == b' ')
+        .count()
 }
 
 fn trim_trailing_spaces(slice: &[EncodedGlyph]) -> &[EncodedGlyph] {
@@ -771,7 +850,12 @@ fn build_lines_at_size(
     let mut wrapped: Vec<WrappedSlice<'_>> = Vec::new();
     for (p_range, p_glyphs) in paragraphs {
         wrapped.extend(wrap_paragraph(
-            p_range, p_glyphs, max_w, font_size, style.wrap,
+            p_range,
+            p_glyphs,
+            max_w,
+            font_size,
+            style.wrap,
+            style.line_end_spaces,
         ));
     }
 
@@ -811,16 +895,26 @@ fn build_lines_at_size(
         if raw_w > max_w + 1e-3 {
             overflowed = true;
         }
-        let spaces = ws
-            .glyphs
-            .iter()
-            .filter(|g| g.ch == ' ' && g.codes_len == 1 && g.codes[0] == b' ')
-            .count();
+        let spaces = word_spaces(ws.glyphs);
 
         let (x, word_space, final_w) = match style.align {
             TextAlign::Left => (inner.x0, 0.0, raw_w),
             TextAlign::Center => (inner.x0 + 0.5 * (max_w - raw_w), 0.0, raw_w),
             TextAlign::Right => (inner.x1 - raw_w, 0.0, raw_w),
+            // The spaces a line ends with show nothing: the line's words are
+            // spread to the box's edge by the spaces between them, and the
+            // `Tw` that widens those widens the ones at its end too.
+            TextAlign::Justify if style.line_end_spaces && !ws.is_para_last => {
+                let words = trim_trailing_spaces(ws.glyphs);
+                let words_w: f32 = words.iter().map(|g| g.units * scale).sum();
+                let between = word_spaces(words);
+                if between > 0 && max_w > words_w {
+                    let extra = (max_w - words_w) / (between as f32);
+                    (inner.x0, extra, raw_w + extra * (spaces as f32))
+                } else {
+                    (inner.x0, 0.0, raw_w)
+                }
+            }
             TextAlign::Justify if !ws.is_para_last && spaces > 0 && max_w > raw_w => {
                 let extra = (max_w - raw_w) / (spaces as f32);
                 (inner.x0, extra, max_w)

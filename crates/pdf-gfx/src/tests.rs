@@ -3303,3 +3303,651 @@ fn box_border_fuzz_body_holds_over_extreme_numbers() {
         fuzz::check(&data);
     }
 }
+
+/// A font for layout's numbers: every ASCII character 500 units wide but the
+/// space, 250, and the heights it's given.
+#[cfg(feature = "text-layout")]
+struct Even {
+    ascent: f32,
+    descent: f32,
+}
+
+#[cfg(feature = "text-layout")]
+impl crate::LayoutFont for Even {
+    fn font_metrics(&self) -> pdf_fonts::FontMetrics {
+        pdf_fonts::FontMetrics::new(self.ascent, self.descent, None)
+    }
+
+    fn char_advance(&self, ch: char) -> Option<f32> {
+        ch.is_ascii()
+            .then_some(if ch == ' ' { 250.0 } else { 500.0 })
+    }
+
+    fn encode_char(&self, ch: char, out: &mut Vec<u8>) -> bool {
+        if !ch.is_ascii() {
+            return false;
+        }
+        out.push(ch as u8);
+        true
+    }
+}
+
+/// `text` laid out at size 10 in [`Even`] (a character 5 wide, a space 2.5)
+/// in a box `width` wide, `align`ed, keeping its spaces or not: each line's
+/// text, `x` and width, its codes held equal to its text.
+#[cfg(feature = "text-layout")]
+fn even_lines(
+    text: &str,
+    width: f32,
+    align: crate::TextAlign,
+    keep: bool,
+) -> Vec<(String, f32, f32)> {
+    let style = crate::TextBoxStyle {
+        size: Some(10.0),
+        align,
+        line_end_spaces: keep,
+        ..crate::TextBoxStyle::default()
+    };
+    let font = Even {
+        ascent: 800.0,
+        descent: -200.0,
+    };
+    let laid = crate::layout_text(&font, text, Rect::new(0.0, 0.0, width, 100.0), &style).unwrap();
+    assert!(!laid.overflowed, "{text:?} in {width}");
+    laid.lines
+        .iter()
+        .map(|line| {
+            let shown = &text[line.text_range.clone()];
+            assert_eq!(line.codes, shown.as_bytes(), "{text:?}");
+            (shown.to_string(), line.origin.x, line.width)
+        })
+        .collect()
+}
+
+#[cfg(feature = "text-layout")]
+#[test]
+fn line_end_spaces_keeps_the_spaces_a_line_breaks_at() {
+    use crate::TextAlign::{Center, Justify, Left, Right};
+
+    let lines = |text, width, keep| even_lines(text, width, Left, keep);
+    let want = |of: &[(&str, f32)]| -> Vec<(String, f32, f32)> {
+        of.iter().map(|&(s, w)| (s.to_string(), 0.0, w)).collect()
+    };
+
+    // Broken before a word: off, the spaces are trimmed from the line and
+    // passed over at the next; on, they end the line, in its codes, its range
+    // and its width.
+    let text = "ab cd  ef";
+    assert_eq!(
+        lines(text, 30.0, false),
+        want(&[("ab cd", 22.5), ("ef", 10.0)])
+    );
+    assert_eq!(
+        lines(text, 30.0, true),
+        want(&[("ab cd  ", 27.5), ("ef", 10.0)])
+    );
+    // The width the line is aligned by is the one with its spaces.
+    for (align, off, on) in [(Right, 7.5, 2.5), (Center, 3.75, 1.25)] {
+        assert_eq!(even_lines(text, 30.0, align, false)[0].1, off, "{align:?}");
+        assert_eq!(even_lines(text, 30.0, align, true)[0].1, on, "{align:?}");
+    }
+
+    // A space that would pass the width: off, the line breaks at it and keeps
+    // its last word; on, before that word, which begins the next line.
+    let text = "ab cd ef";
+    assert_eq!(
+        lines(text, 22.5, false),
+        want(&[("ab cd", 22.5), ("ef", 10.0)])
+    );
+    assert_eq!(
+        lines(text, 22.5, true),
+        want(&[("ab ", 12.5), ("cd ef", 22.5)])
+    );
+    // With no word begun on the line after its first character, before the
+    // space, which begins the next line.
+    let text = "abcd ef";
+    assert_eq!(
+        lines(text, 20.0, false),
+        want(&[("abcd", 20.0), ("ef", 10.0)])
+    );
+    assert_eq!(
+        lines(text, 20.0, true),
+        want(&[("abcd", 20.0), (" ef", 12.5)])
+    );
+
+    // A word begins after a hyphen too.
+    let text = "ab-cd ef";
+    assert_eq!(
+        lines(text, 25.0, false),
+        want(&[("ab-cd", 25.0), ("ef", 10.0)])
+    );
+    assert_eq!(
+        lines(text, 25.0, true),
+        want(&[("ab-", 15.0), ("cd ef", 22.5)])
+    );
+    // But not at a space or a hyphen after one.
+    let text = "a--b c";
+    assert_eq!(
+        lines(text, 22.5, true),
+        want(&[("a--b ", 22.5), ("c", 5.0)])
+    );
+    assert_eq!(
+        lines("a- b c", 15.0, true),
+        want(&[("a- ", 12.5), ("b c", 12.5)])
+    );
+
+    // A paragraph's last line keeps its spaces too; a paragraph's first ones
+    // are kept either way.
+    assert_eq!(lines("ab  ", 100.0, false), want(&[("ab", 10.0)]));
+    assert_eq!(lines("ab  ", 100.0, true), want(&[("ab  ", 15.0)]));
+    assert_eq!(
+        lines("ab  \ncd", 100.0, false),
+        want(&[("ab", 10.0), ("cd", 10.0)])
+    );
+    assert_eq!(
+        lines("ab  \ncd", 100.0, true),
+        want(&[("ab  ", 15.0), ("cd", 10.0)])
+    );
+    for keep in [false, true] {
+        assert_eq!(lines("  ab", 100.0, keep), want(&[("  ab", 15.0)]));
+    }
+
+    // Justified, the words are spread to the edge by the spaces between them:
+    // the `Tw` is the same, and the width, the spaces at the end widened too,
+    // is the whole line's.
+    let style = |keep| crate::TextBoxStyle {
+        size: Some(10.0),
+        align: Justify,
+        line_end_spaces: keep,
+        ..crate::TextBoxStyle::default()
+    };
+    let font = Even {
+        ascent: 800.0,
+        descent: -200.0,
+    };
+    let rect = Rect::new(0.0, 0.0, 30.0, 100.0);
+    let off = crate::layout_text(&font, "ab cd  ef", rect, &style(false)).unwrap();
+    let on = crate::layout_text(&font, "ab cd  ef", rect, &style(true)).unwrap();
+    assert_eq!((off.lines[0].word_space, off.lines[0].width), (7.5, 30.0));
+    assert_eq!((on.lines[0].word_space, on.lines[0].width), (7.5, 50.0));
+    assert_eq!((on.lines[1].word_space, on.lines[1].width), (0.0, 10.0));
+    // Drawn, the kept spaces are in the `Tj`.
+    let mut canvas = Canvas::new();
+    canvas.draw_layout(Res::dict(Std14::Helvetica.dict()).unwrap(), &on);
+    let (bytes, _) = canvas.finish(&Reserved::default());
+    let drawn = String::from_utf8(bytes).unwrap();
+    assert!(
+        drawn.contains("7.5 Tw\n1 0 0 1 0 92 Tm\n(ab cd  ) Tj\n"),
+        "{drawn}"
+    );
+}
+
+#[cfg(feature = "text-layout")]
+#[test]
+fn font_heights_as_given_drops_the_floors() {
+    use crate::{TextBoxStyle, VerticalAlign, layout_text};
+
+    let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+    let style = |given, vertical_align| TextBoxStyle {
+        size: Some(10.0),
+        vertical_align,
+        font_heights_as_given: given,
+        ..TextBoxStyle::default()
+    };
+    // Heights under the floors: 0.5 and -0.1 em, 0.6 between them.
+    let short = Even {
+        ascent: 500.0,
+        descent: -100.0,
+    };
+    let baselines = |font: &Even, text, given, valign| {
+        let laid = layout_text(font, text, rect, &style(given, valign)).unwrap();
+        let ys: Vec<f32> = laid.lines.iter().map(|l| l.origin.y).collect();
+        (ys, laid.line_height)
+    };
+    // Off: an ascent of 0.70, a descent of -0.15, a step of 0.85 times 1.2.
+    let (ys, step) = baselines(&short, "ab\ncd", false, VerticalAlign::Top);
+    assert_approx(ys[0], 43.0);
+    assert_approx(ys[1], 32.8);
+    assert_approx(step, 10.2);
+    // On: the font's own, 0.5 and -0.1, a step of 0.6 times 1.2.
+    let (ys, step) = baselines(&short, "ab\ncd", true, VerticalAlign::Top);
+    assert_approx(ys[0], 45.0);
+    assert_approx(ys[1], 37.8);
+    assert_approx(step, 7.2);
+    // A single line about the middle: `25 - (ascent + descent) / 2`.
+    assert_approx(
+        baselines(&short, "ab", false, VerticalAlign::Middle).0[0],
+        22.25,
+    );
+    assert_approx(
+        baselines(&short, "ab", true, VerticalAlign::Middle).0[0],
+        23.0,
+    );
+    // With no leading the step is the height itself.
+    let unled = TextBoxStyle {
+        leading_factor: 1.0,
+        ..style(true, VerticalAlign::Top)
+    };
+    assert_approx(
+        layout_text(&short, "ab", rect, &unled).unwrap().line_height,
+        6.0,
+    );
+    // Comb cells stand on the same baseline.
+    let comb = TextBoxStyle {
+        comb: Some(5),
+        ..style(true, VerticalAlign::Middle)
+    };
+    let laid = layout_text(&short, "ab", rect, &comb).unwrap();
+    assert_approx(laid.lines[0].cells[0].0.y, 23.0);
+
+    // Heights that give none: the floors all the same, so no step is 0. A
+    // descent above the ascent (a flipped Type 3 font), heights not finite,
+    // or an ascent above the descent by less than `f32` holds once divided
+    // by 1000.
+    for (ascent, descent) in [
+        (0.0, 0.0),
+        (-100.0, 500.0),
+        (f32::NAN, -200.0),
+        (800.0, f32::NEG_INFINITY),
+        (f32::INFINITY, -200.0),
+        (f32::from_bits(1), 0.0),
+    ] {
+        let font = Even { ascent, descent };
+        for valign in [VerticalAlign::Top, VerticalAlign::Middle] {
+            let on = layout_text(&font, "ab\ncd", rect, &style(true, valign)).unwrap();
+            let off = layout_text(&font, "ab\ncd", rect, &style(false, valign)).unwrap();
+            // As text, since an infinite height lays lines out where the
+            // floors leave it, at infinite or NaN places, either way.
+            assert_eq!(format!("{on:?}"), format!("{off:?}"), "{ascent} {descent}");
+            assert!(on.line_height > 0.0);
+        }
+    }
+
+    // Helvetica's heights are within the floors: the same either way.
+    // Courier's ascent (629) isn't: on, it stands higher by 0.071 em.
+    for valign in [VerticalAlign::Top, VerticalAlign::Middle] {
+        let text = "Hello\nworld";
+        let on = layout_text(&Std14::Helvetica, text, rect, &style(true, valign)).unwrap();
+        let off = layout_text(&Std14::Helvetica, text, rect, &style(false, valign)).unwrap();
+        assert_eq!(on, off);
+    }
+    let on = layout_text(
+        &Std14::Courier,
+        "Hi",
+        rect,
+        &style(true, VerticalAlign::Top),
+    )
+    .unwrap();
+    let off = layout_text(
+        &Std14::Courier,
+        "Hi",
+        rect,
+        &style(false, VerticalAlign::Top),
+    )
+    .unwrap();
+    assert_approx(on.lines[0].origin.y, 50.0 - 6.29);
+    assert_approx(off.lines[0].origin.y, 50.0 - 7.0);
+}
+
+/// What `Canvas::box_bands` writes for one border, as text.
+fn box_bands_text(rect: Rect, border: &BoxBorder<'_>, fill_hint: Option<Color>) -> String {
+    let mut canvas = Canvas::new();
+    canvas.box_bands(rect, border, fill_hint);
+    let (bytes, needs) = canvas.finish(&Reserved::default());
+    assert!(needs.0.is_empty(), "bands need no resource");
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn box_bands_draw_box_borders_bands_alone() {
+    let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
+    let blue = Color::Rgb([0.0, 0.0, 1.0]);
+    // What `box_border` writes in the bands' place, in a scope of their own.
+    assert_eq!(
+        box_bands_text(rect, &BoxBorder::new(2.0, BoxBorderStyle::Beveled), None),
+        "q\n1 g\n12 22 m\n12 68 l\n108 68 l\n106 66 l\n14 66 l\n14 24 l\nh\nf\n\
+         0.5 g\n12 22 m\n108 22 l\n108 68 l\n106 66 l\n106 24 l\n14 24 l\nh\nf\nQ\n"
+    );
+    // For every shade, `box_border` is its frame's scope and stroke, then
+    // the same bands.
+    let frame = "q\n0 0 1 RG\n2 w\n[] 0 d\n11 21 98 48 re\nS\n";
+    for style in [BoxBorderStyle::Beveled, BoxBorderStyle::Inset] {
+        for hint in [
+            None,
+            Some(Color::Gray(0.8)),
+            Some(Color::Rgb([1.0, 0.5, 0.2])),
+            Some(Color::Cmyk([0.2, 0.4, 0.0, 0.2])),
+        ] {
+            // The dash array is a dashed border's alone, here as there.
+            let border = BoxBorder::new(2.0, style).with_dash(&[1.0]);
+            let bands = box_bands_text(rect, &border, hint);
+            let whole = box_border_text(rect, &border, blue, hint);
+            assert_eq!(
+                whole,
+                format!("{frame}{}", bands.strip_prefix("q\n").unwrap()),
+                "{style:?} {hint:?}"
+            );
+        }
+    }
+
+    // Nothing for the styles without bands, at any width.
+    for style in [
+        BoxBorderStyle::Solid,
+        BoxBorderStyle::Dashed,
+        BoxBorderStyle::Underline,
+    ] {
+        for width in [0.5, 2.0, 6.0] {
+            let border = BoxBorder::new(width, style).with_dash(&[2.0]);
+            assert_eq!(box_bands_text(rect, &border, Some(Color::Gray(0.5))), "");
+        }
+    }
+    for style in [BoxBorderStyle::Beveled, BoxBorderStyle::Inset] {
+        // Nothing where `box_border` would draw no bands: a width or box it
+        // can't use, or a box under four widths (no empty scope either).
+        for width in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                box_bands_text(rect, &BoxBorder::new(width, style), None),
+                ""
+            );
+        }
+        let border = BoxBorder::new(2.0, style);
+        for bad in [
+            Rect {
+                x0: f32::NAN,
+                ..rect
+            },
+            Rect {
+                y1: f32::INFINITY,
+                ..rect
+            },
+            Rect::new(0.0, 0.0, 7.9, 30.0),
+            Rect::new(0.0, 0.0, 30.0, 7.9),
+            Rect::new(0.0, 0.0, 3.0, 3.0),
+        ] {
+            assert_eq!(
+                box_bands_text(bad, &border, None),
+                "",
+                "{style:?} in {bad:?}"
+            );
+        }
+        let huge = BoxBorder::new(f32::MAX / 4.0, style);
+        assert_eq!(
+            box_bands_text(Rect::new(0.0, 0.0, f32::MAX, f32::MAX), &huge, None),
+            ""
+        );
+        // A box of exactly four widths holds bands that meet in the middle.
+        let met = box_bands_text(Rect::new(0.0, 0.0, 8.0, 8.0), &border, None);
+        assert!(
+            met.contains("2 2 m\n2 6 l\n6 6 l\n4 4 l\n4 4 l\n4 4 l\nh\nf\n"),
+            "{met}"
+        );
+
+        // Read back: two fills a width inside the box, and the caller's
+        // fill color as it was after them.
+        let mut canvas = Canvas::new();
+        canvas.box_bands(rect, &border, Some(Color::Gray(0.8)));
+        canvas.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0));
+        let (bytes, _) = canvas.finish(&Reserved::default());
+        let mut paths = painted_paths(&bytes);
+        let after = paths.pop().expect("the caller's own path");
+        assert_eq!(after.state.fill_color.as_slice(), &[0.0]);
+        assert_eq!(paths.len(), 2);
+        let band = Rect::new(12.0, 22.0, 108.0, 68.0);
+        for path in &paths {
+            assert_eq!(path.paint, Paint::Fill);
+            assert!(band.expand(1e-3).contains_rect(path.covers), "{style:?}");
+        }
+    }
+}
+
+/// `da` parsed with a sink, held to what `parse` gives: the value, and the
+/// faults told, each at a place with no object and no span.
+fn da_faults_under(
+    da: &[u8],
+    limits: &pdf_content_streams::Limits,
+) -> (Option<DefaultAppearance>, Vec<Fault>) {
+    let mut faults = Vec::new();
+    let parsed = DefaultAppearance::parse_with(da, limits, &mut faults);
+    assert_eq!(parsed, DefaultAppearance::parse(da, limits));
+    assert_eq!(parsed, DefaultAppearance::parse_with(da, limits, &mut ()));
+    let faults = faults
+        .into_iter()
+        .map(|(place, fault)| {
+            assert_eq!(place, pdf_objects::fault::Place::new(None, None));
+            fault
+        })
+        .collect();
+    (parsed, faults)
+}
+
+fn da_faults(da: &[u8]) -> (Option<DefaultAppearance>, Vec<Fault>) {
+    da_faults_under(da, &pdf_content_streams::Limits::DEFAULT)
+}
+
+#[test]
+fn default_appearance_parse_with_tells_each_fault_at_its_offset() {
+    use pdf_content_streams::{ErrorKind, Operator};
+
+    let operand = |at, operator| Fault::DefaultAppearanceOperand { at, operator };
+    let faults = |da: &[u8]| da_faults(da).1;
+
+    // Nothing to tell.
+    assert_eq!(faults(b"/Helv 12 Tf 0 g"), []);
+    assert_eq!(
+        faults(b"/Helv 0 Tf 0 0 1 rg 2 Tc 1 Tw 90 Tz 14 TL 1 Tr 3 Ts 0 0 0 1 K 0.5 G"),
+        []
+    );
+    // Operands before those an operator takes are passed over, as PDFium
+    // passes them over, and other operators too.
+    assert_eq!(faults(b"/A 1 /Helv 12 Tf 1 2 0.5 g BT (x) Tj ET 5 w"), []);
+
+    // `Tf` read in part: its name kept where its size isn't finite, its size
+    // kept where its name is missing or not a name.
+    let huge = format!("1{}.", "0".repeat(45));
+    let src = format!("/Helv {huge} Tf");
+    let (da, told) = da_faults(src.as_bytes());
+    assert_eq!(told, [operand(src.len() - 2, Operator::Font)]);
+    let da = da.unwrap();
+    assert_eq!(
+        (da.font_name.as_deref(), da.font_size),
+        (Some(&b"Helv"[..]), None)
+    );
+    // Taken from the last, as PDFium takes them, a lone name is the size,
+    // and reads as 0: no font is named.
+    let (da, told) = da_faults(b"/Helv Tf");
+    assert_eq!(
+        told,
+        [operand(6, Operator::Font), Fault::DefaultAppearanceNoFont]
+    );
+    let da = da.unwrap();
+    assert_eq!((da.font_name, da.font_size), (None, Some(0.0)));
+    let (da, told) = da_faults(b"12 12 Tf");
+    assert_eq!(
+        told,
+        [operand(6, Operator::Font), Fault::DefaultAppearanceNoFont]
+    );
+    assert_eq!(da.unwrap().font_size, Some(12.0));
+    assert_eq!(
+        faults(b"12 Tf"),
+        [operand(3, Operator::Font), Fault::DefaultAppearanceNoFont]
+    );
+    // A later `Tf` without a name keeps the earlier one's.
+    assert_eq!(faults(b"/A 8 Tf 9 Tf"), [operand(10, Operator::Font)]);
+
+    // A color short of components, or with one not finite, is ignored.
+    assert_eq!(
+        faults(b"/Helv 9 Tf 0 0 rg"),
+        [operand(15, Operator::FillRgb)]
+    );
+    assert_eq!(
+        faults(b"/F 1 Tf 1 0 K"),
+        [operand(12, Operator::StrokeCmyk)]
+    );
+    assert_eq!(faults(b"/F 1 Tf G"), [operand(8, Operator::StrokeGray)]);
+    let src = format!("/F 1 Tf 0 {huge} 0 RG");
+    assert_eq!(
+        faults(src.as_bytes()),
+        [operand(src.len() - 2, Operator::StrokeRgb)]
+    );
+    // So is each text-state operator with no operand.
+    assert_eq!(
+        faults(b"/F 1 Tf Tc Tw Tz TL Ts Tr"),
+        [
+            operand(8, Operator::CharSpace),
+            operand(11, Operator::WordSpace),
+            operand(14, Operator::Scale),
+            operand(17, Operator::Leading),
+            operand(20, Operator::Rise),
+            operand(23, Operator::RenderMode),
+        ]
+    );
+    let src = format!("/F 1 Tf {huge} Tr");
+    assert_eq!(
+        faults(src.as_bytes()),
+        [operand(src.len() - 2, Operator::RenderMode)]
+    );
+
+    // A mode outside 0..=7; a real cut to its whole part is none.
+    let (da, told) = da_faults(b"/F 1 Tf 8 Tr -1 Tr 2.9 Tr");
+    assert_eq!(
+        told,
+        [
+            Fault::DefaultAppearanceTextMode { at: 10 },
+            Fault::DefaultAppearanceTextMode { at: 16 },
+        ]
+    );
+    assert_eq!(da.unwrap().text_mode, Some(TextMode::FillStroke));
+
+    // Unreadable: the error, at its offset, last, and no appearance. What was
+    // told before it stays told.
+    let unreadable =
+        |at, kind| Fault::DefaultAppearanceUnreadable(pdf_content_streams::Error { at, kind });
+    assert_eq!(
+        da_faults(b"/Helv 12 Tf (unclosed"),
+        (None, vec![unreadable(12, ErrorKind::String)])
+    );
+    assert_eq!(
+        da_faults(b"Tc /Helv 12 Tf <0"),
+        (
+            None,
+            vec![
+                operand(0, Operator::CharSpace),
+                unreadable(15, ErrorKind::HexString)
+            ]
+        )
+    );
+    // A cap passed is told by its kind, at the first operand past it.
+    let mut limits = pdf_content_streams::Limits::DEFAULT;
+    limits.operands = 2;
+    assert_eq!(
+        da_faults_under(b"/Helv 12 Tf 0.1 0.2 0.3 rg", &limits),
+        (None, vec![unreadable(20, ErrorKind::Operands)])
+    );
+
+    // No `Tf` names a font: told last, with no offset.
+    for nameless in [&b""[..], b"0.5 g", b"BT (x) Tj ET 5 w", b"/Helv 12"] {
+        assert_eq!(
+            faults(nameless),
+            [Fault::DefaultAppearanceNoFont],
+            "{nameless:?}"
+        );
+    }
+    // In the order read.
+    assert_eq!(
+        faults(b"Tc /Helv 12 Tf 9 Tr"),
+        [
+            operand(0, Operator::CharSpace),
+            Fault::DefaultAppearanceTextMode { at: 17 }
+        ]
+    );
+}
+
+/// Counts what it's told; `wants` as it's made, and fails if it's told
+/// anything while it wants nothing.
+struct Counted {
+    wants: bool,
+    told: usize,
+}
+
+impl pdf_objects::fault::Sink<Fault> for Counted {
+    fn fault(&mut self, _: pdf_objects::fault::Place, fault: Fault) {
+        assert!(self.wants, "told {fault:?}, though it wants none");
+        self.told += 1;
+    }
+
+    fn wants(&self) -> bool {
+        self.wants
+    }
+}
+
+#[test]
+fn default_appearance_parse_with_gives_what_parse_gives_whatever_the_sink() {
+    let huge = format!("1{}.", "0".repeat(45));
+    let sources: Vec<Vec<u8>> = [
+        &b"/Helv 12 Tf 0 g"[..],
+        b"/Helv Tf",
+        b"12 12 Tf",
+        b"/F 1 Tf Tc Tw Tz TL Ts Tr 8 Tr 0 0 rg",
+        b"Tc /Helv 12 Tf <0",
+        b"/Helv 12 Tf (unclosed",
+        b"",
+        b"/SECRET_FONT 12 Tf 0 0 1 rg 2 Tc 1 Tw 90 Tz 14 TL 1 Tr 3 Ts",
+    ]
+    .iter()
+    .map(|s| s.to_vec())
+    .chain([format!("{huge} Tc /F {huge} Tf {huge} g 9 Tr").into_bytes()])
+    .collect();
+    for src in &sources {
+        let limits = pdf_content_streams::Limits::DEFAULT;
+        let (parsed, told) = da_faults(src);
+        // A sink that wants nothing is told nothing, and the value is the
+        // same; one that wants faults is told each, through `dyn` too.
+        let mut quiet = Counted {
+            wants: false,
+            told: 0,
+        };
+        assert_eq!(
+            DefaultAppearance::parse_with(src, &limits, &mut quiet),
+            parsed
+        );
+        assert_eq!(quiet.told, 0);
+        let mut counted = Counted {
+            wants: true,
+            told: 0,
+        };
+        let sink: &mut dyn pdf_objects::fault::Sink<Fault> = &mut counted;
+        assert_eq!(DefaultAppearance::parse_with(src, &limits, sink), parsed);
+        assert_eq!(counted.told, told.len());
+        // The faults name no font and quote no operand.
+        for fault in &told {
+            let dbg = format!("{fault:?}");
+            assert!(!dbg.contains("SECRET") && !dbg.contains("Helv"), "{dbg}");
+        }
+    }
+
+    // Each fault's `Debug`: offsets, the operator, the error's kind.
+    use pdf_content_streams::{ErrorKind, Operator};
+    for (fault, dbg) in [
+        (
+            Fault::DefaultAppearanceUnreadable(pdf_content_streams::Error {
+                at: 12,
+                kind: ErrorKind::String,
+            }),
+            "DefaultAppearanceUnreadable(Error { at: 12, kind: String })",
+        ),
+        (
+            Fault::DefaultAppearanceOperand {
+                at: 3,
+                operator: Operator::Font,
+            },
+            "DefaultAppearanceOperand { at: 3, operator: Font }",
+        ),
+        (
+            Fault::DefaultAppearanceTextMode { at: 10 },
+            "DefaultAppearanceTextMode { at: 10 }",
+        ),
+        (Fault::DefaultAppearanceNoFont, "DefaultAppearanceNoFont"),
+    ] {
+        assert_eq!(format!("{fault:?}"), dbg);
+    }
+}
