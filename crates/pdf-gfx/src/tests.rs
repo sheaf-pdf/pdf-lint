@@ -2447,6 +2447,97 @@ fn default_appearance_size_is_none_for_auto_sizing() {
     );
 }
 
+/// Symbol lays out the Greek letters and the composed angle brackets at the
+/// codes of the signs that draw them, at those glyphs' widths; every other
+/// character of every standard 14 font is laid out as its encoding's code for
+/// it, and one the encoding hasn't is refused with nothing written.
+#[cfg(feature = "text-layout")]
+#[test]
+fn symbol_lays_out_greek_letters_and_composed_angle_brackets() {
+    use crate::pdf_fonts::Encoding;
+    use crate::{LayoutFont, TextBoxStyle, layout_text};
+
+    // What text has, the character Symbol's encoding has for it, its code.
+    const GIVEN: [(char, char, u8); 5] = [
+        ('\u{0394}', '\u{2206}', b'D'),
+        ('\u{03A9}', '\u{2126}', b'W'),
+        ('\u{03BC}', '\u{00B5}', b'm'),
+        ('\u{3008}', '\u{2329}', 0xE1),
+        ('\u{3009}', '\u{232A}', 0xF1),
+    ];
+    for (given, sign, code) in GIVEN {
+        assert_eq!(
+            Encoding::Symbol.code(sign),
+            Some(code),
+            "U+{:04X}",
+            sign as u32
+        );
+        assert_eq!(Encoding::Symbol.code(given), None, "U+{:04X}", given as u32);
+        for ch in [given, sign] {
+            let mut out = vec![0xAA];
+            assert!(
+                Std14::Symbol.encode_char(ch, &mut out),
+                "U+{:04X}",
+                ch as u32
+            );
+            assert_eq!(out, [0xAA, code], "U+{:04X}", ch as u32);
+            let glyph = Encoding::Symbol.glyph(code).unwrap();
+            let width = Std14::Symbol.glyph_width(glyph);
+            assert!(width.is_some_and(|w| w > 0.0), "{glyph}");
+            assert_eq!(Std14::Symbol.char_advance(ch), width, "U+{:04X}", ch as u32);
+        }
+    }
+
+    // Everything else, in every font: the encoding's code and its glyph's
+    // width, or refused, `out` untouched.
+    for font in Std14::ALL {
+        let enc = match font {
+            Std14::Symbol => Encoding::Symbol,
+            Std14::ZapfDingbats => Encoding::ZapfDingbats,
+            _ => Encoding::WinAnsi,
+        };
+        let symbol = font == Std14::Symbol;
+        let mut out = Vec::new();
+        // The Basic Multilingual Plane, which holds every character an
+        // encoding has, and some past it.
+        for ch in ('\0'..='\u{FFFF}').chain(['\u{1D11E}', '\u{E0041}', char::MAX]) {
+            if symbol && GIVEN.iter().any(|&(given, ..)| given == ch) {
+                continue;
+            }
+            out.clear();
+            let code = enc.code(ch);
+            assert_eq!(
+                font.encode_char(ch, &mut out),
+                code.is_some(),
+                "{font:?} {ch:?}"
+            );
+            assert_eq!(out, Vec::from_iter(code), "{font:?} {ch:?}");
+            let width = code.and_then(|c| font.glyph_width(enc.glyph(c)?));
+            assert_eq!(font.char_advance(ch), width, "{font:?} {ch:?}");
+        }
+    }
+    // The letters are Symbol's alone: Helvetica has the micro sign, no mu.
+    assert_eq!(Std14::Helvetica.char_advance('\u{03BC}'), None);
+    assert!(Std14::Helvetica.char_advance('\u{00B5}').is_some());
+
+    // Laid out, composed text is the same codes as the signs.
+    let rect = Rect::from_xywh(0.0, 0.0, 400.0, 40.0);
+    let style = TextBoxStyle {
+        size: Some(10.0),
+        ..TextBoxStyle::default()
+    };
+    let letters = "\u{3008}\u{0394}\u{03A9}\u{03BC}\u{3009}";
+    let signs = "\u{2329}\u{2206}\u{2126}\u{00B5}\u{232A}";
+    let laid = layout_text(&Std14::Symbol, letters, rect, &style).unwrap();
+    assert_eq!(laid.lines.len(), 1);
+    assert_eq!(laid.lines[0].codes, [0xE1, b'D', b'W', b'm', 0xF1]);
+    let as_signs = layout_text(&Std14::Symbol, signs, rect, &style).unwrap();
+    assert_eq!(laid.lines[0].codes, as_signs.lines[0].codes);
+    assert_eq!(laid.lines[0].width, as_signs.lines[0].width);
+    let refused = layout_text(&Std14::Helvetica, letters, rect, &style).unwrap_err();
+    assert_eq!((refused.at, refused.character), (0, '\u{3008}'));
+}
+
 #[cfg(feature = "text-layout")]
 #[test]
 fn default_appearance_text_box_style_maps_the_size_alone() {
