@@ -32,7 +32,8 @@ pub struct FieldFont {
     font: Font,
     res: Option<Res>,
     fallback: bool,
-    /// The heights lines are measured by, in glyph units.
+    /// The heights lines are measured by, in glyph units, and the box comb
+    /// text at an automatic size is fitted to, none for a standard font.
     metrics: FontMetrics,
 }
 
@@ -123,7 +124,13 @@ impl FieldFont {
         }
         .and_then(Object::as_name)
         .and_then(Std14::named);
-        let metrics = measured(&font, face);
+        let mut metrics = measured(&font, face);
+        if face.is_some()
+            && matches!(font.kind(), FontKind::Type1 | FontKind::MMType1)
+            && !embeds_program(dict, objects)
+        {
+            metrics.bbox = None;
+        }
         Ok(FieldFont {
             font,
             res,
@@ -149,7 +156,8 @@ impl FieldFont {
             &mut (),
         )
         .expect("a font by name alone has no stream to decompress");
-        let metrics = measured(&read, Some(font));
+        let mut metrics = measured(&read, Some(font));
+        metrics.bbox = None;
         FieldFont {
             font: read,
             res: Res::dict(dict).ok(),
@@ -191,6 +199,12 @@ impl FieldFont {
     /// descriptor with a box gives both as 0, PDFium measures its face's `A`
     /// and `g`, for which the face's ascent and descent stand in); any other
     /// font its own (`pdf_fonts::Font::metrics`).
+    ///
+    /// Its box is the font's own, but a standard 14 Type 1 font that embeds
+    /// no program has none: the face it's drawn in is the viewer's, and
+    /// PDFium sizes comb text in it by its table of sizes, where it fits comb
+    /// text in any other font to a cell by the font's box
+    /// (`fpdfsdk/pwl/cpwl_edit.cpp`, `GetCharArrayAutoFontSize`).
     #[must_use]
     pub fn layout(&self) -> FieldLayoutFont<'_> {
         FieldLayoutFont {
@@ -341,6 +355,24 @@ fn fallback(name: &[u8]) -> Std14 {
     let bold = has(b"bold");
     let slanted = has(b"italic") || has(b"oblique");
     faces[usize::from(bold) + 2 * usize::from(slanted)]
+}
+
+/// Whether the font `dict`'s descriptor holds a program (`/FontFile`,
+/// `/FontFile2`, or `/FontFile3`), the descriptor followed once if it's a
+/// reference.
+fn embeds_program<'o, R: Resolve<'o>>(dict: &'o Dict, objects: R) -> bool {
+    let descriptor = match dict.get("FontDescriptor") {
+        Some(raw) => match raw.as_reference() {
+            Some(id) => objects.resolve(id),
+            None => Some(raw),
+        },
+        None => None,
+    };
+    descriptor.and_then(Object::as_dict).is_some_and(|d| {
+        ["FontFile", "FontFile2", "FontFile3"]
+            .iter()
+            .any(|key| d.get(key.as_bytes()).is_some())
+    })
 }
 
 /// Whether a value of `dict`, at any depth, is an indirect reference.

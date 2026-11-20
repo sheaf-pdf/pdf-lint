@@ -19,7 +19,9 @@
 //! - `Debug` output prints numbers and counts, never a field's name or value.
 //! - With `text-layout` (a default feature), the `appearance` module makes the
 //!   appearances a field without one would show, held to those PDFium makes:
-//!   its `FieldFont` is the font a field's text is drawn in.
+//!   `appearance::text` makes a text field's from plain data, in the font
+//!   `FieldFont` reads, and `appearance::for_widget` makes a `Widget`'s from
+//!   what this crate reads.
 //!
 //! # Example
 //!

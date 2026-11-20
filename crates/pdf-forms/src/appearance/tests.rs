@@ -1,18 +1,25 @@
-//! Unit, cap, and hygiene tests for the field's font.
+//! Unit, cap, and hygiene tests for the field's font and the appearances
+//! made in it.
 
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use pdf_content_streams::Res;
-use pdf_fonts::{Font, Std14};
-use pdf_gfx::LayoutFont;
+use pdf_content_streams::{Color, Res};
+use pdf_fonts::{Font, GlyphBox, Std14};
+use pdf_gfx::{BoxBorder, DefaultAppearance, LayoutFont, UnencodableChar};
 use pdf_objects::fault::Place;
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{
-    Data, Dict, Object, ObjectId, Resolve, Streams, Unreadable, Value, Why, WithStreams, dict,
+    Data, Dict, Object, ObjectId, Resolve, Stream, Streams, Unreadable, Value, Why, WithStreams,
+    dict,
 };
 
-use super::{FieldFont, FieldLayoutFont};
-use crate::{Cap, Error, Fault, Form, Limits};
+use super::{
+    Appearance, FieldFont, FieldLayoutFont, TextField, Unmade, WidgetLook, for_widget, text,
+    widget_text,
+};
+use crate::{Cap, Error, Fault, FieldFlags, Form, Limits};
 
 type Objects = BTreeMap<ObjectId, Object>;
 
@@ -475,7 +482,8 @@ fn standard_fonts_take_the_heights_pdfium_draws_them_with() {
             (ascent, descent),
             "{face:?}"
         );
-        assert_eq!(metrics.bbox, face.metrics().bbox);
+        // No box: the face is the viewer's.
+        assert_eq!(metrics.bbox, None);
         // The font as read keeps Adobe's metrics; only the layout's differ.
         assert_eq!(standard.font().metrics(), face.metrics());
 
@@ -787,4 +795,861 @@ fn field_fonts_are_send_and_sync() {
     check::<FieldFont>();
     check::<FieldLayoutFont<'static>>();
     check::<Font>();
+}
+
+/// A box of `width` by `height` with no border.
+fn bare(width: f32, height: f32) -> WidgetLook<'static> {
+    let mut look = WidgetLook::new(width, height);
+    look.border = BoxBorder::solid(0.0);
+    look
+}
+
+fn helvetica() -> FieldFont {
+    FieldFont::standard(Std14::Helvetica)
+}
+
+/// `field` made in Helvetica in a 100 by 20 box with no border, at 10
+/// points in black.
+fn made(field: &TextField<'_>) -> Result<Appearance, Unmade> {
+    let font = helvetica();
+    text(
+        field,
+        &bare(100.0, 20.0),
+        &DefaultAppearance::new("Helv", 10.0, Some(Color::Gray(0.0))),
+        font.res().unwrap(),
+        &font.layout(),
+        &Limits::DEFAULT,
+    )
+}
+
+/// The strings an appearance's content shows, each `(...)` as written.
+fn strings(content: &[u8]) -> Vec<&[u8]> {
+    let mut found = Vec::new();
+    let mut rest = content;
+    while let Some(open) = rest.iter().position(|&b| b == b'(') {
+        let close = open + rest[open..].iter().position(|&b| b == b')').unwrap();
+        found.push(&rest[open + 1..close]);
+        rest = &rest[close + 1..];
+    }
+    found
+}
+
+/// A character the font has no code for is refused at its byte offset in
+/// the text the caller gave, whatever was dropped before the layout saw
+/// it: a single line's line breaks, a comb field's characters past its
+/// cells. A multiline field keeps its line breaks.
+#[test]
+fn unencodable_is_told_at_its_offset_in_the_callers_text() {
+    let refused = |field: &TextField<'_>| match made(field) {
+        Err(Unmade::Unencodable(c)) => Some((c.at, c.character)),
+        Ok(_) => None,
+        Err(other) => panic!("{other:?}"),
+    };
+    let line = "ab\r\ncd\n中";
+    assert_eq!(
+        refused(&TextField::new(line)),
+        Some((line.find('中').unwrap(), '中'))
+    );
+    let mut multiline = TextField::new("\n\r中");
+    multiline.flags = FieldFlags::MULTILINE;
+    assert_eq!(refused(&multiline), Some((2, '中')));
+
+    let mut comb = TextField::new("1\r\n中");
+    comb.flags = FieldFlags::COMB;
+    comb.max_len = Some(5);
+    assert_eq!(refused(&comb), Some((3, '中')));
+    // Past the cells: cut before it's drawn, so not refused.
+    comb.text = "12\r\n34567中";
+    let ap = made(&comb).unwrap();
+    assert!(ap.overflowed);
+    assert!(strings(&ap.content).iter().all(|s| s.len() == 1));
+    assert_eq!(strings(&ap.content).len(), 5);
+    comb.text = "12345";
+    assert!(!made(&comb).unwrap().overflowed);
+
+    // The error says the same in each form.
+    let err = made(&TextField::new("a€中")).unwrap_err();
+    assert_eq!(
+        err,
+        Unmade::Unencodable(UnencodableChar {
+            at: 4,
+            character: '中'
+        })
+    );
+    assert_eq!(
+        err.to_string(),
+        "the font has no code for '中', at byte 4 of the text"
+    );
+}
+
+/// A password field draws `*` for each character, so its value reaches
+/// neither the font, the content, an error, nor any `Debug`.
+#[test]
+fn a_passwords_value_reaches_nothing() {
+    let value = "hunter2中\u{1F600}";
+    let mut field = TextField::new(value);
+    field.flags = FieldFlags::PASSWORD;
+    // The font has no code for two of its characters, and isn't asked.
+    let ap = made(&field).unwrap();
+    let shown = strings(&ap.content);
+    assert_eq!(shown, [&b"*********"[..]]);
+    assert!(!ap.content.windows(4).any(|w| w == b"hunt"));
+    for hidden in [
+        format!("{ap:?}"),
+        format!("{field:?}"),
+        format!("{:?}", made(&field)),
+    ] {
+        assert!(!hidden.contains("hunter"), "{hidden}");
+    }
+
+    // In a font with no `*`, `*` is refused, at the text's start, whatever
+    // came before it.
+    let dingbats = FieldFont::standard(Std14::ZapfDingbats);
+    let mut after_a_break = field;
+    after_a_break.text = "\r\nhunter2";
+    let err = text(
+        &after_a_break,
+        &bare(100.0, 20.0),
+        &DefaultAppearance::new("ZaDb", 10.0, None),
+        dingbats.res().unwrap(),
+        &dingbats.layout(),
+        &Limits::DEFAULT,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        Unmade::Unencodable(UnencodableChar {
+            at: 0,
+            character: '*'
+        })
+    );
+    assert!(!format!("{err:?} {err}").contains("hunter"));
+
+    // A multiline password keeps its lines, each character starred.
+    field.flags = FieldFlags::PASSWORD | FieldFlags::MULTILINE;
+    field.text = "ab\ncd";
+    let ap = made(&field).unwrap();
+    assert_eq!(strings(&ap.content), [&b"**"[..], &b"**"[..]]);
+
+    // Read through the convenience, a password field's value isn't in what's
+    // read either.
+    let mut objects = Objects::new();
+    objects.insert(
+        id(1),
+        Object::from(dict! {
+            "T" => Object::text("pin"),
+            "FT" => Object::name("Tx"),
+            "Ff" => 8192,
+            "V" => Object::text(value),
+            "DA" => Object::text("/Helv 0 Tf 0 g"),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(20)],
+        }),
+    );
+    let catalog = dict! { "AcroForm" => dict! { "Fields" => vec![Object::from(id(1))] } };
+    let form = Form::read(&objects, &catalog, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
+        .unwrap();
+    let field = &form.fields()[0];
+    let read = widget_text(
+        field,
+        &field.widgets()[0],
+        reading(&objects),
+        Rules::Pdfium,
+        None,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    let made = for_widget(
+        &form,
+        field,
+        &field.widgets()[0],
+        reading(&objects),
+        Rules::Pdfium,
+        None,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    assert_eq!(strings(&made.appearance.content), [&b"*********"[..]]);
+    let shown = format!("{read:?} {made:?}");
+    assert!(!shown.contains("hunter"), "{shown}");
+}
+
+/// Colors are written with the digits they're given: the navy forms use,
+/// `0 0 0.502 rg`, and gray and CMYK, for the text, the background, and the
+/// border.
+#[test]
+fn colors_are_written_with_their_digits() {
+    let font = helvetica();
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.background = Some(Color::Cmyk([0.1, 0.2, 0.3, 0.4]));
+    look.border_color = Some(Color::Gray(0.25));
+    let ap = text(
+        &TextField::new("Hello"),
+        &look,
+        &DefaultAppearance::new("Helv", 10.0, Some(Color::Rgb([0.0, 0.0, 0.502]))),
+        font.res().unwrap(),
+        &font.layout(),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    let content = String::from_utf8_lossy(&ap.content);
+    for written in ["0 0 0.502 rg", "0.1 0.2 0.3 0.4 k", "0.25 G"] {
+        assert!(content.contains(written), "{written} in {content}");
+    }
+    // No color in `/DA`: black.
+    let ap = text(
+        &TextField::new("Hello"),
+        &bare(100.0, 20.0),
+        &DefaultAppearance::new("Helv", 10.0, None),
+        font.res().unwrap(),
+        &font.layout(),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    let content = String::from_utf8_lossy(&ap.content);
+    assert!(content.contains("n\n0 g\nBT"), "{content}");
+}
+
+/// An empty text writes `/Tx BMC EMC` with nothing between, and needs no
+/// font.
+#[test]
+fn an_empty_text_is_an_empty_tx() {
+    let ap = made(&TextField::new("")).unwrap();
+    let content = String::from_utf8_lossy(&ap.content);
+    assert!(content.ends_with("/Tx BMC\nEMC\n"), "{content}");
+    assert!(ap.needs.0.is_empty());
+    assert_eq!(ap.font_size, 10.0);
+    // A single line of line breaks alone shows nothing too.
+    let ap = made(&TextField::new("\r\n")).unwrap();
+    assert!(String::from_utf8_lossy(&ap.content).ends_with("/Tx BMC\nEMC\n"));
+}
+
+/// A box with no width or no height, or one that isn't finite, is no box;
+/// a number of the look or of the default appearance that isn't finite,
+/// or a size at which the text's place isn't, is refused; text past
+/// `Limits::text` is a cap.
+#[test]
+fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
+    let font = helvetica();
+    let make = |look: &WidgetLook<'_>, da: &DefaultAppearance, limits: &Limits| {
+        let mut field = TextField::new("Hello");
+        field.quadding = pdf_annots::Quadding::Right;
+        text(
+            &field,
+            look,
+            da,
+            font.res().unwrap(),
+            &font.layout(),
+            limits,
+        )
+    };
+    let da = DefaultAppearance::new("Helv", 10.0, None);
+    for (w, h) in [
+        (0.0, 20.0),
+        (100.0, 0.0),
+        (-100.0, 20.0),
+        (f32::NAN, 20.0),
+        (100.0, f32::INFINITY),
+    ] {
+        assert_eq!(
+            make(&WidgetLook::new(w, h), &da, &Limits::DEFAULT),
+            Err(Unmade::NoBox),
+            "{w} {h}"
+        );
+    }
+
+    let mut looks = Vec::new();
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.border.width = f32::NAN;
+    looks.push(look);
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.background = Some(Color::Gray(f32::NAN));
+    looks.push(look);
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.border_color = Some(Color::Rgb([0.0, f32::INFINITY, 0.0]));
+    looks.push(look);
+    for look in &looks {
+        assert_eq!(
+            make(look, &da, &Limits::DEFAULT),
+            Err(Unmade::NotFinite),
+            "{look:?}"
+        );
+    }
+    let look = WidgetLook::new(100.0, 20.0);
+    let mut nan_size = da.clone();
+    nan_size.font_size = Some(f32::NAN);
+    let mut nan_color = da.clone();
+    nan_color.color = Some(Color::Cmyk([0.0, 0.0, f32::NAN, 1.0]));
+    // So large the line's width and its place aren't finite.
+    let huge = DefaultAppearance::new("Helv", 3.0e38, None);
+    for da in [nan_size, nan_color, huge] {
+        assert_eq!(
+            make(&look, &da, &Limits::DEFAULT),
+            Err(Unmade::NotFinite),
+            "{da:?}"
+        );
+    }
+
+    let mut limits = Limits::DEFAULT;
+    limits.text = 4;
+    assert_eq!(make(&look, &da, &limits), Err(Unmade::Limit(Cap::Text)));
+    limits.text = 5;
+    assert!(make(&look, &da, &limits).is_ok());
+
+    for (unmade, said) in [
+        (Unmade::NoBox, "the widget's box has no width or no height"),
+        (
+            Unmade::NotFinite,
+            "a number of the widget's look or of its default appearance isn't finite",
+        ),
+        (
+            Unmade::Limit(Cap::Text),
+            "exceeded cap on bytes of an appearance's text",
+        ),
+        (Unmade::NotText, "the field isn't a text field"),
+        (
+            Unmade::FontNotBindable,
+            "the field's font can't be named by the appearance's resources",
+        ),
+    ] {
+        assert_eq!(unmade.to_string(), said);
+        assert!(std::error::Error::source(&unmade).is_none());
+    }
+    let unreadable = Unmade::from(Error::Unreadable(Unreadable::new(
+        id(3),
+        Why::Locked,
+        "locked",
+    )));
+    assert!(std::error::Error::source(&unreadable).is_none());
+    assert_eq!(
+        Unmade::from(Error::Limit(Cap::FontBytes)),
+        Unmade::Limit(Cap::FontBytes)
+    );
+}
+
+/// A standard 14 Type 1 font that embeds no program has no box of its own,
+/// so comb text in it takes its size from PDFium's table; any other font
+/// keeps its box.
+#[test]
+fn a_standard_font_has_no_box_unless_it_embeds_a_program() {
+    assert_eq!(helvetica().layout().font_metrics().bbox, None);
+    let found = |fonts: &Dict, objects: &Objects| {
+        FieldFont::find(
+            Some((fonts, None)),
+            b"F",
+            reading(objects),
+            &Limits::DEFAULT,
+            &mut (),
+        )
+        .unwrap()
+        .layout()
+        .font_metrics()
+        .bbox
+    };
+    let mut objects = Objects::new();
+    let fonts = dict! { "F" => Object::from(Std14::Courier.dict()) };
+    assert_eq!(found(&fonts, &objects), None);
+
+    // Named as a standard font but embedding a program (here one that can't
+    // be read): its descriptor's box.
+    objects.insert(
+        id(2),
+        Object::from(Stream::new(Dict::new(), b"not a program".to_vec())),
+    );
+    let descriptor = dict! {
+        "Type" => Object::name("FontDescriptor"),
+        "FontBBox" => vec![Object::from(0), Object::from(-100), Object::from(500), Object::from(900)],
+        "Ascent" => 900,
+        "Descent" => -100,
+        "FontFile" => id(2),
+    };
+    let mut font = std_font("Helvetica", Object::name("WinAnsiEncoding"));
+    font.push("FontDescriptor", descriptor);
+    let fonts = dict! { "F" => Object::from(font) };
+    assert_eq!(
+        found(&fonts, &objects),
+        Some(GlyphBox::new(0.0, -100.0, 500.0, 900.0))
+    );
+
+    // A TrueType font named Arial isn't a standard font to PDFium.
+    let mut arial = std_font("Arial", Object::name("WinAnsiEncoding"));
+    arial.set("Subtype", Object::name("TrueType"));
+    let fonts = dict! { "F" => Object::from(arial) };
+    assert!(found(&fonts, &objects).is_some());
+
+    // A font that isn't standard: its descriptor's box.
+    let (described, descriptor) = described(800, -200, id(4));
+    objects.insert(id(4), Object::from(descriptor));
+    let fonts = dict! { "F" => Object::from(described) };
+    assert_eq!(
+        found(&fonts, &objects),
+        Some(GlyphBox::new(0.0, -200.0, 1000.0, 800.0))
+    );
+}
+
+/// A form of text fields, each its own widget with `entries` and a box of
+/// 100 by 20, whose default resources hold `/F1`, object 1.
+fn text_fields(entries: Vec<Dict>, f1: Dict) -> (Objects, Dict) {
+    let mut objects = Objects::new();
+    objects.insert(id(1), Object::from(f1));
+    let mut fields = Vec::new();
+    for (i, mut field) in entries.into_iter().enumerate() {
+        let n = 10 + u32::try_from(i).unwrap();
+        field.set("T", Object::text(&format!("f{i}")));
+        field.set("Subtype", Object::name("Widget"));
+        field.set(
+            "Rect",
+            vec![
+                Object::from(0),
+                Object::from(0),
+                Object::from(100),
+                Object::from(20),
+            ],
+        );
+        if field.get("FT").is_none() {
+            field.set("FT", Object::name("Tx"));
+        }
+        objects.insert(id(n), Object::from(field));
+        fields.push(Object::from(id(n)));
+    }
+    let catalog = dict! {
+        "AcroForm" => dict! {
+            "Fields" => fields,
+            "DR" => dict! { "Font" => dict! { "F1" => id(1) } },
+        },
+    };
+    (objects, catalog)
+}
+
+/// The convenience reads the widget's own `/DA` else the field's, parses it
+/// once and tells its departures once, in the object it was read from; a
+/// text stream's value is its text, any other value none, told; a field
+/// that isn't a text field is refused.
+#[test]
+fn the_convenience_reads_its_widget_and_tells_once() {
+    let f1 = std_font("Courier", Object::name("WinAnsiEncoding"));
+    let mut objects = Objects::new();
+    objects.insert(id(1), Object::from(f1));
+    objects.insert(
+        id(2),
+        Object::from(Stream::new(Dict::new(), b"streamed".to_vec())),
+    );
+    objects.insert(
+        id(3),
+        Object::from(Stream::new(Dict::new(), vec![b'x'; 64])),
+    );
+    // A parent with two widgets, one with a `/DA` and `/Q` of its own that
+    // passes over an operand; a field with no `/DA` anywhere; one whose
+    // `/DA` has no `Tf`; values a stream, one past the cap, a name; a button.
+    let rect = || {
+        vec![
+            Object::from(0),
+            Object::from(0),
+            Object::from(100),
+            Object::from(20),
+        ]
+    };
+    objects.insert(
+        id(10),
+        Object::from(dict! {
+            "T" => Object::text("parent"),
+            "FT" => Object::name("Tx"),
+            "V" => Object::text("Hello"),
+            "DA" => Object::text("/F1 10 Tf 0 g"),
+            "Kids" => vec![Object::from(id(11)), Object::from(id(12))],
+        }),
+    );
+    objects.insert(
+        id(11),
+        Object::from(
+            dict! { "Parent" => id(10), "Subtype" => Object::name("Widget"), "Rect" => rect() },
+        ),
+    );
+    objects.insert(
+        id(12),
+        Object::from(dict! {
+            "Parent" => id(10),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => rect(),
+            "DA" => Object::text("/F1 12 Tf 9 Tr 1 0 0 rg"),
+            "Q" => 2,
+        }),
+    );
+    let widget = |n: u32, entries: Dict| {
+        let mut field = entries;
+        field.set("T", Object::text(&format!("f{n}")));
+        field.set("Subtype", Object::name("Widget"));
+        field.set("Rect", rect());
+        field
+    };
+    objects.insert(
+        id(13),
+        Object::from(widget(
+            13,
+            dict! { "FT" => Object::name("Tx"), "V" => Object::text("x") },
+        )),
+    );
+    objects.insert(
+        id(14),
+        Object::from(widget(14, dict! { "FT" => Object::name("Tx"), "V" => Object::text("x"), "DA" => Object::text("0 0 1 rg") })),
+    );
+    objects.insert(
+        id(15),
+        Object::from(widget(
+            15,
+            dict! { "FT" => Object::name("Tx"), "V" => id(2), "DA" => Object::text("/F1 0 Tf") },
+        )),
+    );
+    objects.insert(
+        id(16),
+        Object::from(widget(
+            16,
+            dict! { "FT" => Object::name("Tx"), "V" => id(3), "DA" => Object::text("/F1 0 Tf") },
+        )),
+    );
+    objects.insert(
+        id(17),
+        Object::from(widget(17, dict! { "FT" => Object::name("Tx"), "V" => Object::name("Off"), "DA" => Object::text("/F1 0 Tf") })),
+    );
+    objects.insert(
+        id(18),
+        Object::from(widget(18, dict! { "FT" => Object::name("Btn") })),
+    );
+    let fields: Vec<Object> = (10..=18)
+        .filter(|n| ![11, 12].contains(n))
+        .map(|n| Object::from(id(n)))
+        .collect();
+    let catalog = dict! {
+        "AcroForm" => dict! {
+            "Fields" => fields,
+            "DR" => dict! { "Font" => dict! { "F1" => id(1) } },
+        },
+    };
+    let form = Form::read(&objects, &catalog, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
+        .unwrap();
+    let mut limits = Limits::DEFAULT;
+    limits.text = 32;
+    let read = |at: usize, widget: usize, told: &mut Vec<(Place, Fault)>| {
+        let field = &form.fields()[at];
+        widget_text(
+            field,
+            &field.widgets()[widget],
+            reading(&objects),
+            Rules::Pdfium,
+            None,
+            &limits,
+            told,
+        )
+    };
+
+    // The parent's own widget takes the parent's `/DA` and `/Q`.
+    let mut told = Vec::new();
+    let plain = read(0, 0, &mut told).unwrap();
+    assert!(told.is_empty(), "{told:?}");
+    assert_eq!(plain.font_name(), Some(&b"F1"[..]));
+    assert_eq!(plain.default_appearance().font_size, Some(10.0));
+    assert_eq!(plain.field().quadding, pdf_annots::Quadding::Left);
+    assert_eq!(plain.field().text, "Hello");
+    // The other its own, its departure told once, in the widget's object.
+    let own = read(0, 1, &mut told).unwrap();
+    assert_eq!(own.default_appearance().font_size, Some(12.0));
+    assert_eq!(
+        own.default_appearance().color,
+        Some(Color::Rgb([1.0, 0.0, 0.0]))
+    );
+    assert_eq!(own.field().quadding, pdf_annots::Quadding::Right);
+    assert_eq!(
+        told,
+        [(
+            Place::new(Some(id(12)), None),
+            Fault::DefaultAppearance(pdf_gfx::Fault::DefaultAppearanceTextMode { at: 12 })
+        )]
+    );
+
+    // No `/DA`, or one with no `Tf`: Helvetica, told once, at the field.
+    for (at, color) in [(1, None), (2, Some(Color::Rgb([0.0, 0.0, 1.0])))] {
+        let mut told = Vec::new();
+        let read = read(at, 0, &mut told).unwrap();
+        assert_eq!(read.font_name(), None);
+        assert_eq!(read.default_appearance().color, color);
+        let id = form.fields()[at].id();
+        assert_eq!(
+            told,
+            [(Place::new(id, None), Fault::MissingDefaultAppearance)]
+        );
+        let mut told = Vec::new();
+        let field = &form.fields()[at];
+        let made = for_widget(
+            &form,
+            field,
+            &field.widgets()[0],
+            reading(&objects),
+            Rules::Pdfium,
+            None,
+            &limits,
+            &mut told,
+        )
+        .unwrap();
+        assert!(made.font.is_fallback());
+        assert_eq!(made.font.res(), helvetica().res());
+        assert_eq!(made.appearance.font_size, 14.0);
+        assert_eq!(
+            told,
+            [(Place::new(id, None), Fault::MissingDefaultAppearance)]
+        );
+    }
+
+    // A text stream's value; one past `Limits::text`; a name.
+    let mut told = Vec::new();
+    assert_eq!(read(3, 0, &mut told).unwrap().field().text, "streamed");
+    assert!(told.is_empty());
+    assert_eq!(read(4, 0, &mut told).unwrap_err(), Unmade::Limit(Cap::Text));
+    let named = read(5, 0, &mut told).unwrap();
+    assert_eq!(named.field().text, "");
+    assert_eq!(
+        told,
+        [(
+            Place::new(Some(id(17)), None),
+            Fault::WrongType { key: "V" }
+        )]
+    );
+    // A button.
+    assert_eq!(read(6, 0, &mut Vec::new()).unwrap_err(), Unmade::NotText);
+
+    // What's read is what `text` makes from it.
+    let font = form
+        .field_font(reading(&objects), b"F1", &limits, &mut ())
+        .unwrap();
+    let field = &form.fields()[0];
+    let by_hand = text(
+        &own.field(),
+        &own.look(),
+        own.default_appearance(),
+        font.res().unwrap(),
+        &font.layout(),
+        &limits,
+    )
+    .unwrap();
+    let made = for_widget(
+        &form,
+        field,
+        &field.widgets()[1],
+        reading(&objects),
+        Rules::Pdfium,
+        None,
+        &limits,
+        &mut (),
+    )
+    .unwrap();
+    assert_eq!(made.appearance, by_hand);
+    assert_eq!(
+        own.make(font.res().unwrap(), &font.layout(), &limits)
+            .unwrap(),
+        by_hand
+    );
+    // Shown otherwise than the value.
+    let shown = widget_text(
+        field,
+        &field.widgets()[0],
+        reading(&objects),
+        Rules::Pdfium,
+        Some("$1.00"),
+        &limits,
+        &mut (),
+    )
+    .unwrap();
+    assert!(matches!(shown.field().text, "$1.00"));
+
+    // A direct font of the default resources that holds a reference can't
+    // be named by the appearance: nothing is made.
+    let mut objects = Objects::new();
+    objects.insert(
+        id(2),
+        Object::from(dict! { "Type" => Object::name("FontDescriptor") }),
+    );
+    let mut direct = std_font("Courier", Object::name("WinAnsiEncoding"));
+    direct.set("FontDescriptor", id(2));
+    objects.insert(
+        id(10),
+        Object::from(dict! {
+            "T" => Object::text("f"),
+            "FT" => Object::name("Tx"),
+            "V" => Object::text("x"),
+            "DA" => Object::text("/Direct 0 Tf"),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => rect(),
+        }),
+    );
+    let catalog = dict! {
+        "AcroForm" => dict! {
+            "Fields" => vec![Object::from(id(10))],
+            "DR" => dict! { "Font" => dict! { "Direct" => Object::from(direct) } },
+        },
+    };
+    let form = Form::read(&objects, &catalog, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
+        .unwrap();
+    let field = &form.fields()[0];
+    let unmade = for_widget(
+        &form,
+        field,
+        &field.widgets()[0],
+        reading(&objects),
+        Rules::Pdfium,
+        None,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap_err();
+    assert_eq!(unmade, Unmade::FontNotBindable);
+}
+
+/// `Debug` of what's made, what it's made from, and what's read prints
+/// lengths and numbers, never the text.
+#[test]
+fn debug_prints_no_text() {
+    let field = TextField::new("SECRET value");
+    let ap = made(&field).unwrap();
+    let mut objects = Objects::new();
+    objects.insert(
+        id(1),
+        Object::from(dict! {
+            "T" => Object::text("f"),
+            "FT" => Object::name("Tx"),
+            "V" => Object::text("SECRET value"),
+            "DA" => Object::text("/SECRETFONT 0 Tf"),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(20)],
+        }),
+    );
+    let catalog = dict! { "AcroForm" => dict! { "Fields" => vec![Object::from(id(1))] } };
+    let form = Form::read(&objects, &catalog, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
+        .unwrap();
+    let form_field = &form.fields()[0];
+    let widget = &form_field.widgets()[0];
+    let read = widget_text(
+        form_field,
+        widget,
+        reading(&objects),
+        Rules::Pdfium,
+        None,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    let made = for_widget(
+        &form,
+        form_field,
+        widget,
+        reading(&objects),
+        Rules::Pdfium,
+        None,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    let shown = format!("{field:?} {ap:?} {read:?} {made:?} {:?}", read.look());
+    assert!(!shown.contains("SECRET"), "{shown}");
+    assert!(shown.contains("text_len: 12"), "{shown}");
+    assert!(
+        shown.contains(&format!("content_len: {}", ap.content.len())),
+        "{shown}"
+    );
+}
+
+/// Objects whose font, object 1, is counted each time it's resolved.
+#[derive(Clone, Copy)]
+struct Counting<'a> {
+    objects: &'a Objects,
+    reads: &'a Cell<usize>,
+}
+
+impl<'a> Resolve<'a> for Counting<'a> {
+    fn resolve(&self, at: ObjectId) -> Option<&'a Object> {
+        if at == id(1) {
+            self.reads.set(self.reads.get() + 1);
+        }
+        self.objects.get(&at)
+    }
+}
+
+impl Streams for Counting<'_> {
+    fn decoded(&self, at: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        reading(self.objects)
+            .decoded(at, limit)
+            .map(|d| Cow::Owned(d.into_owned()))
+    }
+}
+
+/// A thousand widgets read with `widget_text` and made with `make` in one
+/// `FieldFont`, read once, where `for_widget` reads the font for each.
+#[test]
+fn a_thousand_widgets_read_their_font_once() {
+    let fields = (0..1000)
+        .map(|i| dict! { "V" => Object::text(&format!("{i}")), "DA" => Object::text("/F1 0 Tf 0 g") })
+        .collect();
+    let (objects, catalog) = text_fields(
+        fields,
+        std_font("Times-Roman", Object::name("WinAnsiEncoding")),
+    );
+    let reads = Cell::new(0);
+    let counting = Counting {
+        objects: &objects,
+        reads: &reads,
+    };
+    let form = Form::read(counting, &catalog, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reads.get(), 0);
+    let font = form
+        .field_font(counting, b"F1", &Limits::DEFAULT, &mut ())
+        .unwrap();
+    let layout = font.layout();
+    let res = font.res().unwrap();
+    let mut made = 0;
+    for field in form.terminals().map(|(_, field)| field) {
+        let read = widget_text(
+            field,
+            &field.widgets()[0],
+            counting,
+            Rules::Pdfium,
+            None,
+            &Limits::DEFAULT,
+            &mut (),
+        )
+        .unwrap();
+        assert_eq!(read.font_name(), Some(&b"F1"[..]));
+        let ap = read.make(res.clone(), &layout, &Limits::DEFAULT).unwrap();
+        assert_eq!(ap.needs.0.len(), 1);
+        made += 1;
+    }
+    assert_eq!((made, reads.get()), (1000, 1));
+
+    let field = &form.fields()[0];
+    for_widget(
+        &form,
+        field,
+        &field.widgets()[0],
+        counting,
+        Rules::Pdfium,
+        None,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    assert_eq!(reads.get(), 2);
+}
+
+#[test]
+fn appearances_are_send_and_sync() {
+    fn check<T: Send + Sync>() {}
+    check::<Appearance>();
+    check::<Unmade>();
+    check::<super::Made>();
+    check::<super::WidgetText<'static>>();
 }

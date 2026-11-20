@@ -342,7 +342,7 @@ def tx(rest=b"", value=b"Hello", da=b"/Helv 0 Tf 0 g", rect=BOX):
     None), `rest` its other entries."""
     entries = b"/FT /Tx"
     if value is not None:
-        entries += b" /V " + (value if value[:1] in b"<[/" or value.endswith(b" R") else lit(value))
+        entries += b" /V " + (value if value[:1] and value[:1] in b"<[/" or value.endswith(b" R") else lit(value))
     if da is not None:
         entries += b" /DA (" + da + b")"
     if rest:
@@ -495,6 +495,10 @@ def ap_cases():
     ap("ap-comb-password", [tx(b"/Ff 16785408 /MaxLen 5", value=b"123", da=b"/Helv 12 Tf 0 g")])
     ap("ap-comb-no-maxlen", [tx(COMB, value=b"123", da=b"/Helv 12 Tf 0 g")])
     ap("ap-comb-described-auto", [tx(COMB + b" /MaxLen 5", value=b"123", da=b"/Desc 0 Tf 0 g")])
+    # Cells narrower than the box is tall, where the font's box and PDFium's
+    # sizes give different sizes.
+    ap("ap-comb-described-auto-cells", [tx(COMB + b" /MaxLen 10 " + bs(b"0"), value=b"123", da=b"/Desc 0 Tf 0 g",
+                                           rect=b"[10 10 110 40]")])
 
     # Multiline: wrapped in each alignment; line ends; an empty line; a word
     # longer than the line; hyphens; leading and doubled spaces; auto; past
