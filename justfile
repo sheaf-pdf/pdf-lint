@@ -809,7 +809,11 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # `embed`, pdf-fonts' embedding of a TrueType program, whole or one table of a
 # fixture program, the font it writes read back;
 # `gfx`, pdf-gfx's geometry, interpreter, text layout and content re-encoder on
-# any parts and in a file; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
+# any parts and in a file; `annots`, pdf-annots' reading of a page's
+# annotations, destinations and reply threads from any objects, a redaction
+# mark made from what was read, flattening, and text drawn in a font given; `forms`, pdf-forms' field tree read from any objects and in a
+# file, and its text fields' appearances made, from plain data and for each
+# widget read; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
 # through the facade, and written in the clear and encrypted, read locked and
 # unlocked; `arlington`, pdf-arlington's loader on any tables and its
@@ -817,7 +821,7 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
-# `color`, `fonts`, `embed`, `gfx`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make,
+# `color`, `fonts`, `embed`, `gfx`, `annots`, `forms`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make,
 # `embed`'s by pdf-fonts with its `embed` feature, without which it has none. The
 # nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
 # to build the targets with: `simd`, the content streams' dependencies'

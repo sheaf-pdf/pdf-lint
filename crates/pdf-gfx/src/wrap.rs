@@ -945,7 +945,7 @@ fn is_ideograph(ch: char) -> bool {
 }
 
 /// How many of `glyphs` are spaces that `Tw` widens: a space drawn as the
-/// single byte 32 (ISO 32000-2, 9.3.3).
+/// single byte 32 (ISO 32000-2, §9.3.3).
 fn word_spaces(glyphs: &[EncodedGlyph]) -> usize {
     glyphs
         .iter()
