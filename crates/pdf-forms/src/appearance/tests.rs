@@ -1029,14 +1029,14 @@ fn an_empty_text_is_an_empty_tx() {
 
 /// A box with no width or no height, or one that isn't finite, is no box;
 /// a number of the look or of the default appearance that isn't finite,
-/// or a size at which the text's place isn't, is refused; text past
-/// `Limits::text` is a cap.
+/// or a size or box at which the text's place isn't, or reaches past
+/// `1e35`, is refused; text past `Limits::text` is a cap.
 #[test]
 fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
     let font = helvetica();
-    let make = |look: &WidgetLook<'_>, da: &DefaultAppearance, limits: &Limits| {
+    let aligned = |quadding, look: &WidgetLook<'_>, da: &DefaultAppearance, limits: &Limits| {
         let mut field = TextField::new("Hello");
-        field.quadding = pdf_annots::Quadding::Right;
+        field.quadding = quadding;
         text(
             &field,
             look,
@@ -1045,6 +1045,9 @@ fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
             &font.layout(),
             limits,
         )
+    };
+    let make = |look: &WidgetLook<'_>, da: &DefaultAppearance, limits: &Limits| {
+        aligned(pdf_annots::Quadding::Right, look, da, limits)
     };
     let da = DefaultAppearance::new("Helv", 10.0, None);
     for (w, h) in [
@@ -1071,6 +1074,14 @@ fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
     let mut look = WidgetLook::new(100.0, 20.0);
     look.border_color = Some(Color::Rgb([0.0, f32::INFINITY, 0.0]));
     looks.push(look);
+    // Borders so much wider than the box that the box inside them is past
+    // finite: twice the largest `f32`, and a beveled border's twice its width.
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.border = BoxBorder::solid(f32::MAX);
+    looks.push(look);
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.border = BoxBorder::new(2.0e38, BoxBorderStyle::Beveled);
+    looks.push(look);
     for look in &looks {
         assert_eq!(
             make(look, &da, &Limits::DEFAULT),
@@ -1078,20 +1089,34 @@ fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
             "{look:?}"
         );
     }
+    // One whose box inside it is huge but finite is made, its text centered
+    // near the box's origin; right-aligned, `1e38` out, the text reaches too
+    // far to be placed.
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.border = BoxBorder::solid(1.0e38);
+    let centered = aligned(pdf_annots::Quadding::Center, &look, &da, &Limits::DEFAULT);
+    assert!(centered.is_ok());
+    assert_eq!(make(&look, &da, &Limits::DEFAULT), Err(Unmade::NotFinite));
     let look = WidgetLook::new(100.0, 20.0);
     let mut nan_size = da.clone();
     nan_size.font_size = Some(f32::NAN);
     let mut nan_color = da.clone();
     nan_color.color = Some(Color::Cmyk([0.0, 0.0, f32::NAN, 1.0]));
-    // So large the line's width and its place aren't finite.
+    // So large the line's width and its place aren't finite; and so large
+    // that, every number written finite, its five characters reach past
+    // `1e35`, as a size of the default appearance may be.
     let huge = DefaultAppearance::new("Helv", 3.0e38, None);
-    for da in [nan_size, nan_color, huge] {
+    let far = DefaultAppearance::new("Helv", 1.0e36, None);
+    for da in [nan_size, nan_color, huge, far] {
         assert_eq!(
             make(&look, &da, &Limits::DEFAULT),
             Err(Unmade::NotFinite),
             "{da:?}"
         );
     }
+    // One huge but within it is made.
+    let near = DefaultAppearance::new("Helv", 1.0e33, None);
+    assert!(make(&look, &near, &Limits::DEFAULT).is_ok());
 
     let mut limits = Limits::DEFAULT;
     limits.text = 4;
@@ -1103,7 +1128,8 @@ fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
         (Unmade::NoBox, "the widget's box has no width or no height"),
         (
             Unmade::NotFinite,
-            "a number of the widget's look or of its default appearance isn't finite",
+            "a number of the widget's look or of its default appearance isn't finite, \
+             or sets the text too far out to be placed",
         ),
         (
             Unmade::Limit(Cap::Text),

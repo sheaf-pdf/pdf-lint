@@ -29,5 +29,7 @@ mod widget;
 
 pub use font::{FieldFont, FieldLayoutFont};
 pub use frame::{Appearance, Unmade, WidgetLook};
+#[cfg(any(test, fuzzing))]
+pub(crate) use text::REACH;
 pub use text::{TextField, text};
 pub use widget::{Made, WidgetText, for_widget, widget_text};

@@ -117,8 +117,13 @@ pub enum Unmade {
     #[error("the widget's box has no width or no height")]
     NoBox,
     /// A number of the widget's look or of its default appearance's size or
-    /// color isn't finite, or the text laid out at that size isn't.
-    #[error("a number of the widget's look or of its default appearance isn't finite")]
+    /// color isn't finite, or the box inside a border so much wider than it
+    /// isn't, or the text laid out at that size isn't, or it reaches so far
+    /// from the box's origin that a reader working in `f32` may not place it.
+    #[error(
+        "a number of the widget's look or of its default appearance isn't finite, \
+         or sets the text too far out to be placed"
+    )]
     NotFinite,
     /// One of [`Limits`](crate::Limits)'s caps was exceeded.
     #[error("exceeded cap on {0}")]
@@ -211,14 +216,20 @@ pub(crate) fn placed(look: &WidgetLook<'_>) -> Result<(Rect, Matrix), Unmade> {
 /// ([`BoxBorder::inset`]), turned the right way round where the border is
 /// wider than half the box, as PDFium sets text in a box smaller than its
 /// border (`fpdfsdk/cpdfsdk_widget.cpp`, `GetClientRect`).
-pub(crate) fn client(look: &WidgetLook<'_>, bbox: Rect) -> Rect {
+/// [`Unmade::NotFinite`] where a border so much wider than its box leaves
+/// it a width or height past finite, which no content could write.
+pub(crate) fn client(look: &WidgetLook<'_>, bbox: Rect) -> Result<Rect, Unmade> {
     let inset = look.border.inset();
-    Rect::new(
+    let client = Rect::new(
         bbox.x0 + inset,
         bbox.y0 + inset,
         bbox.x1 - inset,
         bbox.y1 - inset,
-    )
+    );
+    match client.width().is_finite() && client.height().is_finite() {
+        true => Ok(client),
+        false => Err(Unmade::NotFinite),
+    }
 }
 
 /// Draws what's under the content, in the order PDFium draws it

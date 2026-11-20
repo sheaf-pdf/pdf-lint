@@ -7,7 +7,7 @@ use std::fmt;
 use pdf_annots::Quadding;
 use pdf_content_streams::{Color, Res, Reserved};
 use pdf_gfx::{
-    Canvas, DefaultAppearance, LaidOutText, LayoutFont, Rect, TextAlign, TextBoxStyle,
+    Canvas, DefaultAppearance, LaidOutText, LayoutFont, Point, Rect, TextAlign, TextBoxStyle,
     UnencodableChar, VerticalAlign, WrapMode, layout_text,
 };
 
@@ -143,8 +143,11 @@ const MULTILINE_SIZES: usize = AUTO_SIZES.len() / 4;
 /// [`Limits::text`] bytes, or a comb field has more cells than that;
 /// [`Unmade::NoBox`] for a box with no width or no
 /// height; [`Unmade::NotFinite`] where a number of `look`, `da`'s size or
-/// color, or the text laid out isn't finite; [`Unmade::Unencodable`] for a
-/// character `font` has no code for.
+/// color, the text box, or the text laid out isn't finite, or a string of
+/// the text laid out reaches past `1e35` from the box's origin (its place,
+/// and one more than the bytes of its codes, each its size wide), further
+/// than a reader working in `f32` may place it; [`Unmade::Unencodable`] for
+/// a character `font` has no code for.
 pub fn text<F: LayoutFont + ?Sized>(
     field: &TextField<'_>,
     look: &WidgetLook<'_>,
@@ -160,7 +163,7 @@ pub fn text<F: LayoutFont + ?Sized>(
     if da.font_size.is_some_and(|s| !s.is_finite()) || !frame::finite_color(da.color) {
         return Err(Unmade::NotFinite);
     }
-    let client = frame::client(look, bbox);
+    let client = frame::client(look, bbox)?;
     let shown = Shown::of(field);
     if shown
         .cells
@@ -315,15 +318,36 @@ fn lay_out<F: LayoutFont + ?Sized>(
     style.size = Some(size);
     let laid =
         layout_text(font, &shown.text, client, &style).map_err(|err| shown.unencodable(err))?;
-    let placed = laid
-        .lines
-        .iter()
-        .flat_map(|line| std::iter::once(line.origin).chain(line.cells.iter().map(|c| c.0)))
-        .all(|p| p.is_finite());
-    if !(laid.font_size.is_finite() && placed) {
+    if !placeable(&laid) {
         return Err(Unmade::NotFinite);
     }
     Ok(Some(laid))
+}
+
+/// How far from the box's origin a string of the text may reach: the place
+/// it's shown at (`x` and `y` from `0`, each as far as it is), and one more
+/// than the bytes of its codes, each its size and word spacing wide,
+/// together: a glyph's code is a byte or more, so each glyph is counted.
+/// No widget's text comes near it; past it, a reader working in `f32` may not
+/// place the string. `pdf-gfx`'s interpreter refuses one that reaches past
+/// `3e37`, counting each glyph its font's extent wide, and a standard 14
+/// font's widths times a size pass `f32::MAX` from about `3e35`.
+pub(crate) const REACH: f64 = 1e35;
+
+/// Whether `laid` can be placed: its size and the place of every line and
+/// comb cell finite, and every string shown within [`REACH`].
+fn placeable(laid: &LaidOutText) -> bool {
+    let size = f64::from(laid.font_size.abs());
+    let within = |at: Point, codes: &[u8], word_space: f32| {
+        let wide = (codes.len() as f64 + 1.0) * (size + f64::from(word_space.abs()));
+        at.is_finite()
+            && (codes.is_empty() || f64::from(at.x.abs()) + f64::from(at.y.abs()) + wide <= REACH)
+    };
+    laid.font_size.is_finite()
+        && laid.lines.iter().all(|line| {
+            within(line.origin, &line.codes, line.word_space)
+                && (line.cells.iter()).all(|(at, codes)| within(*at, codes, 0.0))
+        })
 }
 
 /// The size an automatic size (`0 Tf`) comes to for `shown` in `client`.

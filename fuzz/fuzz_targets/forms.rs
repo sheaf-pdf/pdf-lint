@@ -1,6 +1,10 @@
 //! The field tree read from arbitrary bytes (`pdf_forms::fuzz::check`),
 //! checking fault-sink invariance, the tree's shape, its caps, and `Debug`
-//! hygiene; and read from a PDF file's catalog (`pdf_forms::fuzz::over`).
+//! hygiene, and making the appearance of each of its text fields' widgets;
+//! the same bytes cut into a text field's text, flags, box, border, colors,
+//! rotation, and `/DA`, its appearance made in each standard 14 font
+//! (`pdf_forms::fuzz::check_appearance`, which `check` calls); and the form
+//! read from a PDF file's catalog (`pdf_forms::fuzz::over`).
 
 #![no_main]
 
