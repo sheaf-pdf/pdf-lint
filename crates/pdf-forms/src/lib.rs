@@ -20,7 +20,7 @@
 //! - With `text-layout` (a default feature), the `appearance` module makes the
 //!   appearances a field without one would show, held to those PDFium makes:
 //!   `appearance::text` makes a text field's from plain data, in the font
-//!   `FieldFont` reads, and `appearance::for_widget` makes a `Widget`'s from
+//!   `FieldFont` reads, and `appearance::text_for_widget` makes a `Widget`'s from
 //!   what this crate reads.
 //!
 //! # Example
@@ -97,7 +97,8 @@
 //! assert_eq!(agree.default_appearance(), Some(&b"/Helv 0 Tf 0 g"[..]));
 //! ```
 
-#[cfg(doctest)]
+// The README's second example makes an appearance, which `text-layout` adds.
+#[cfg(all(doctest, feature = "text-layout"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 

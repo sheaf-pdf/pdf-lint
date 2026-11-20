@@ -216,6 +216,20 @@ def cases():
         },
     )
 
+    # A kid's value that reaches nothing: a reference to no object, a null,
+    # and a reference to a null, each under a parent with a value.
+    for name, value, more in (
+        ("forms-value-dangling", b"99 0 R", {}),
+        ("forms-value-null", b"null", {}),
+        ("forms-value-null-by-reference", b"60 0 R", {60: b"null"}),
+    ):
+        objs = {
+            5: b"<< /T (p) /FT /Tx /V (parent) /Kids [6 0 R] >>",
+            6: b"<< /T (k) /Parent 5 0 R /V " + value + b" " + WIDGET + b" " + rect(0) + b" >>",
+        }
+        objs.update(more)
+        add(name, b"[5 0 R]", b"[6 0 R]", objs)
+
     # Annotations that aren't a tree's widgets.
     add(
         "forms-widget-outside-the-tree",
@@ -575,3 +589,12 @@ def ap_cases():
     ap("ap-value-kinds", [tx(value=b"50 0 R", da=b"/Helv 10 Tf 0 g"), tx(value=b"/Name", da=b"/Helv 10 Tf 0 g"),
                           tx(value=b"[(a) (b)]", da=b"/Helv 10 Tf 0 g"), tx(value=b"51 0 R", da=b"/Helv 10 Tf 0 g")],
        objs={50: stream(b"", b"from a stream"), 51: b"(by reference)"})
+
+    # What /DA says oddly: a stroking color beside the text's or alone; a
+    # size too small to write; a font and a color written twice.
+    ap("ap-da-stroking-color", [tx(da=da) for da in (b"/Helv 8 Tf 1 0 0 rg 0 0 1 RG", b"0 0 1 RG /Helv 8 Tf",
+                                                     b"/Helv 8 Tf 0 g 1 G", b"/Helv 8 Tf 0 1 1 0 K 0 0 0 1 k")],
+       fonts=[b"Helv"])
+    ap("ap-da-size-near-zero", [tx(da=b"/Helv %s Tf 0 g" % size) for size in (b"0.00001", b"0.00009", b"0.0004")])
+    ap("ap-da-written-twice", [tx(da=da) for da in (b"/Helv 8 Tf /Helv 20 Tf 0 g", b"/Helv 8 Tf 0 g 1 0 0 rg",
+                                                    b"/Helv 8 Tf 0 0 1 rg 1 0 0 rg")])

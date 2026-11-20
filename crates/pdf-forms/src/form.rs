@@ -159,10 +159,44 @@ impl<'o> Form<'o> {
         Some(parts.join("."))
     }
 
-    /// The index of the first field whose fully qualified name is `name`.
+    /// The index of the first field whose fully qualified name
+    /// ([`full_name`](Self::full_name)) is `name`.
+    ///
+    /// It looks at each field in turn, matching `name` against the field's
+    /// partial names from its own up, and builds no name: a caller with many
+    /// names to find in a large form keeps a map of its own from
+    /// [`full_name`](Self::full_name).
     #[must_use]
     pub fn find(&self, name: &str) -> Option<usize> {
-        (0..self.fields.len()).find(|&i| self.full_name(i).as_deref() == Some(name))
+        (0..self.fields.len()).find(|&i| self.is_named(i, name))
+    }
+
+    /// Whether the fully qualified name of the field at `index` is `name`:
+    /// `name` is eaten from its end, a partial name and the period before it
+    /// at a time, a field with no partial name eating nothing.
+    fn is_named(&self, index: usize, name: &str) -> bool {
+        let mut rest = name;
+        // Whether a partial name has been eaten, so the next is followed by
+        // a period.
+        let mut joined = false;
+        let mut at = Some(index);
+        while let Some(field) = at.and_then(|i| self.fields.get(i)) {
+            if let Some(part) = field.partial_name() {
+                if joined {
+                    match rest.strip_suffix('.') {
+                        Some(before) => rest = before,
+                        None => return false,
+                    }
+                }
+                match rest.strip_suffix(part) {
+                    Some(before) => rest = before,
+                    None => return false,
+                }
+                joined = true;
+            }
+            at = field.parent;
+        }
+        rest.is_empty()
     }
 
     /// The bytes of the form's default appearance string (`/DA`), which a field
@@ -254,7 +288,7 @@ impl<'o> Form<'o> {
     /// # Errors
     ///
     /// As [`FieldFont::find`]: [`Error::Limit`] past
-    /// [`Limits::font_bytes`], [`Error::Unreadable`] on locked, I/O, or
+    /// [`Limits::font_budget`], [`Error::Unreadable`] on locked, I/O, or
     /// reader-cap failures.
     #[cfg(feature = "text-layout")]
     pub fn field_font<R, S>(
@@ -268,7 +302,7 @@ impl<'o> Form<'o> {
         R: Resolve<'o> + pdf_objects::Streams + Copy,
         S: Sink<Fault> + ?Sized,
     {
-        FieldFont::find(self.fonts, name, objects, limits, sink)
+        FieldFont::find(objects, self.fonts, name, limits, sink)
     }
 }
 
@@ -439,14 +473,8 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         .int_entry(dict, at, "Ff")?
         .map(|n| FieldFlags::from_bits(n as u32))
         .or(inherited.flags);
-    let value = match dict.get("V") {
-        Some(raw) => field_value(reader, raw, at, "V")?.map(Arc::new),
-        None => inherited.value.clone(),
-    };
-    let default_value = match dict.get("DV") {
-        Some(raw) => field_value(reader, raw, at, "DV")?.map(Arc::new),
-        None => inherited.default_value.clone(),
-    };
+    let value = own_value(reader, dict, at, "V", &inherited.value)?;
+    let default_value = own_value(reader, dict, at, "DV", &inherited.default_value)?;
     let da = reader.bytes_entry(dict, at, "DA")?.or(inherited.da);
     let quadding = reader
         .int_entry(dict, at, "Q")?
@@ -524,17 +552,37 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     Ok(Node::Field(index))
 }
 
-/// Types a `/V` or `/DV`: `None` for `null` and for a value of no kind a field
-/// holds.
+/// A field's `/V` or `/DV`: its own where the entry reaches a value, typed;
+/// `inherited` where it has none or the entry reaches nothing (`null`, a
+/// reference to no object or to `null`, a damaged object, a chain too long),
+/// as an entry that is null is one that's absent (ISO 32000-2, §7.3.9) and
+/// as every other inherited entry is read; none for a value of no kind a
+/// field holds, which is the field's own, wrong, and told.
+fn own_value<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &mut Reader<'_, R, S>,
+    dict: &'o Dict,
+    within: Option<ObjectId>,
+    key: &'static str,
+    inherited: &Option<Arc<FieldValue<'o>>>,
+) -> Result<Option<Arc<FieldValue<'o>>>, Error> {
+    let Some(raw) = dict.get(key) else {
+        return Ok(inherited.clone());
+    };
+    let Some((object, id)) = reader.reached(raw, within)? else {
+        return Ok(inherited.clone());
+    };
+    Ok(field_value(reader, raw, object, id, key)?.map(Arc::new))
+}
+
+/// Types a `/V` or `/DV` that `raw` reaches as `object`, read within `id`:
+/// `None` for a value of no kind a field holds.
 fn field_value<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     reader: &mut Reader<'_, R, S>,
     raw: &'o Object,
-    within: Option<ObjectId>,
+    object: &'o Object,
+    id: Option<ObjectId>,
     key: &'static str,
 ) -> Result<Option<FieldValue<'o>>, Error> {
-    let Some((object, id)) = reader.reached(raw, within)? else {
-        return Ok(None);
-    };
     Ok(Some(match object.value() {
         Value::String(Str::Bytes(bytes), _) => {
             FieldValue::Text(text::decode_str(bytes, reader.rules))

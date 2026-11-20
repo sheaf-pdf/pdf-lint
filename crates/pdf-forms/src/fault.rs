@@ -118,10 +118,26 @@ impl fmt::Display for Fault {
             Self::ParentMismatch => f.write_str("a field's /Parent doesn't name its parent"),
             Self::MissingName => f.write_str("a top-level field has no partial name"),
             Self::Annot(inner) => write!(f, "{inner}"),
-            // `pdf_gfx::Fault` has no `Display`; its `Debug` holds no name.
-            Self::DefaultAppearance(inner) => {
-                write!(f, "a default appearance string departs: {inner:?}")
-            }
+            // `pdf_gfx::Fault` has no `Display`: its `/DA` departures are
+            // worded here.
+            Self::DefaultAppearance(inner) => match inner {
+                pdf_gfx::Fault::DefaultAppearanceUnreadable(error) => {
+                    write!(f, "a default appearance string can't be read: {error}")
+                }
+                pdf_gfx::Fault::DefaultAppearanceOperand { at, operator } => write!(
+                    f,
+                    "a default appearance string's {} at byte {at} lacks an operand it needs",
+                    operator.name().unwrap_or("operator")
+                ),
+                pdf_gfx::Fault::DefaultAppearanceTextMode { at } => write!(
+                    f,
+                    "a default appearance string's Tr at byte {at} gives no text rendering mode"
+                ),
+                pdf_gfx::Fault::DefaultAppearanceNoFont => {
+                    f.write_str("a default appearance string names no font")
+                }
+                _ => f.write_str("a default appearance string departs from its form"),
+            },
             Self::MissingDefaultAppearance => {
                 f.write_str("a text field has no default appearance with a font")
             }

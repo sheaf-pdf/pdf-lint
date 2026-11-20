@@ -725,7 +725,7 @@ fn standard_faces_heights_are_the_recorded_ones() {
     assert_eq!(held.len(), Std14::ALL.len(), "a case for each face");
 }
 
-/// The appearance `pdf_forms::appearance::for_widget` makes for each widget
+/// The appearance `pdf_forms::appearance::text_for_widget` makes for each widget
 /// of a `forms-ap` case, interpreted with `pdf_gfx::interpret` and recorded
 /// in the five parts PDFium's answers are read into, and held to them part
 /// by part.
@@ -986,7 +986,7 @@ mod made_here {
             &mut (),
         )
         .map_err(|e| e.to_string())?;
-        let made = appearance::for_widget(
+        let made = appearance::text_for_widget(
             form,
             field,
             widget,
@@ -1213,7 +1213,7 @@ mod made_here {
     }
 
     /// A dash array as the pattern it draws: one with an odd number of
-    /// lengths repeats them, so `[3]` is `[3 3]` (ISO 32000-2, 8.4.3.6).
+    /// lengths repeats them, so `[3]` is `[3 3]` (ISO 32000-2, §8.4.3.6).
     fn pattern(dash: &[f32]) -> Vec<f32> {
         match dash.len() % 2 {
             1 => dash.iter().chain(dash).copied().collect(),
@@ -1366,7 +1366,7 @@ mod made_here {
         parts
     }
 
-    /// Each `forms-ap` case's appearances, made by `for_widget` from the
+    /// Each `forms-ap` case's appearances, made by `text_for_widget` from the
     /// case's file read with pdf-structure, agree with PDFium's recorded
     /// ones in every part, or in every part but those `differ.tsv` lists
     /// for it, which must still differ: the size, every text origin within

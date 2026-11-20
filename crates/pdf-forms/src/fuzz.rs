@@ -17,11 +17,14 @@
 //!    each widget of the form's text fields, `appearance::widget_text`, the
 //!    font its `/DA` names in the form's default resources
 //!    (`Form::field_font`, each of those fonts read alike whatever the
-//!    sink), `WidgetText::make`, and `appearance::for_widget`, each under
+//!    sink), `WidgetText::make`, and `appearance::text_for_widget`, each under
 //!    `&mut ()` and a `Vec` sink. Each appearance is made the same twice and
-//!    whatever the sink, and `for_widget` makes what the three make and
+//!    whatever the sink, and `text_for_widget` makes what the three make and
 //!    tells what they tell. What's made holds what `text` promises: a cap
-//!    passed, no box, or a number that isn't finite is refused as it says;
+//!    passed (the text's bytes, a comb field's cells), no box, or a number
+//!    that isn't finite is refused as it says, as is a size or a box that
+//!    sets a string past the reach `text` keeps to (`1e35` from the box's
+//!    origin), and every string of made content is within that reach;
 //!    a character the font lacks is told at its offset in the text, and for
 //!    a password only as `*` at `0`; an appearance is of finite numbers, its
 //!    box placed on the widget's rectangle by its matrix, with at most one
@@ -186,7 +189,8 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
     limits.depth = 4;
     limits.items = 8;
     limits.text = 1 << 10;
-    limits.font_bytes = 1 << 16;
+    limits.comb_cells = 1 << 6;
+    limits.font_budget = 1 << 16;
 
     for rules in [Rules::Iso, Rules::Pdfium] {
         let quiet = Form::read(objects, catalog, rules, &limits);
@@ -393,6 +397,7 @@ impl<'a> Cut<'a> {
     fn limits(&self) -> Limits {
         let mut limits = Limits::DEFAULT;
         limits.text = self.cap;
+        limits.comb_cells = self.cap;
         limits
     }
 }
@@ -447,7 +452,7 @@ fn holds<F: pdf_gfx::LayoutFont + ?Sized>(
     let cells = field
         .max_len
         .filter(|&n| n > 0 && field.flags.contains(FieldFlags::COMB));
-    let past = cells.is_some_and(|n| usize::try_from(n).map_or(true, |n| n > limits.text));
+    let past = cells.is_some_and(|n| usize::try_from(n).map_or(true, |n| n > limits.comb_cells));
     let made = match made {
         Ok(made) => made,
         Err(Unmade::Unencodable(told)) => {
@@ -467,7 +472,11 @@ fn holds<F: pdf_gfx::LayoutFont + ?Sized>(
         }
         Err(err) => {
             assert!(
-                *err != Unmade::Limit(Cap::Text) || past,
+                match err {
+                    Unmade::Limit(Cap::CombCells) => past,
+                    Unmade::Limit(_) => false,
+                    _ => true,
+                },
                 "refused for a cap not passed"
             );
             assert!(
@@ -736,7 +745,7 @@ fn widget_appearances<'o, R: Resolve<'o> + Streams + Copy>(
     limits: &Limits,
 ) {
     use crate::FieldKind;
-    use crate::appearance::{Unmade, for_widget, widget_text};
+    use crate::appearance::{Unmade, text_for_widget, widget_text};
 
     for name in form.font_names() {
         let quiet = form.field_font(objects, name, limits, &mut ());
@@ -763,8 +772,8 @@ fn widget_appearances<'o, R: Resolve<'o> + Streams + Copy>(
 
             let mut faults: Vec<(Place, Fault)> = Vec::new();
             let made = [
-                for_widget(form, field, widget, objects, rules, None, limits, &mut ()),
-                for_widget(
+                text_for_widget(form, field, widget, objects, rules, None, limits, &mut ()),
+                text_for_widget(
                     form,
                     field,
                     widget,
@@ -777,7 +786,7 @@ fn widget_appearances<'o, R: Resolve<'o> + Streams + Copy>(
             ];
             assert!(
                 faults == told,
-                "for_widget tells what reading the widget and its font tell"
+                "text_for_widget tells what reading the widget and its font tell"
             );
             if let Ok(read) = &read {
                 let shown = format!("{read:?} {faults:?} {made:?}");
@@ -787,7 +796,7 @@ fn widget_appearances<'o, R: Resolve<'o> + Streams + Copy>(
                 match (made, &expected) {
                     (Ok(made), Ok(appearance)) => assert!(made.appearance == *appearance),
                     (Err(err), Err(expected)) => assert!(err == *expected),
-                    _ => panic!("for_widget makes what widget_text, field_font and make make"),
+                    _ => panic!("text_for_widget makes what widget_text, field_font and make make"),
                 }
             }
         }
@@ -1097,7 +1106,11 @@ mod tests {
         assert!(!strings(&password.content).contains("secret"));
         let inset = made[3][0].as_ref().unwrap();
         assert!(strings(&inset.content).contains("(x) Tj"));
-        assert!(made[4].iter().all(|m| *m == Err(Unmade::Limit(Cap::Text))));
+        assert!(
+            made[4]
+                .iter()
+                .all(|m| matches!(m, Err(Unmade::Limit(Cap::Text | Cap::CombCells))))
+        );
         for unencodable in latin(&made[5]) {
             let Err(Unmade::Unencodable(told)) = unencodable else {
                 panic!("the snowman is drawn")
@@ -1108,13 +1121,13 @@ mod tests {
     }
 
     /// The text fields of the seeds' forms, each widget made by
-    /// `for_widget`: whether it's made, in a fallback font, or why not.
+    /// `text_for_widget`: whether it's made, in a fallback font, or why not.
     #[cfg(feature = "text-layout")]
     #[test]
     fn the_form_seeds_reach_their_widgets_appearances() {
         use pdf_objects::pdf_tokenizer::Rules;
 
-        use crate::appearance::{Unmade, for_widget};
+        use crate::appearance::{Unmade, text_for_widget};
         use crate::{FieldKind, Form, Limits};
 
         let made = |seed: &[u8]| {
@@ -1129,7 +1142,7 @@ mod tests {
                 assert_eq!(field.kind(), Some(FieldKind::Text));
                 for widget in field.widgets() {
                     let mut faults = Vec::new();
-                    let widget = for_widget(
+                    let widget = text_for_widget(
                         &form,
                         field,
                         widget,
@@ -1316,8 +1329,8 @@ mod tests {
             super::check(found);
         }
 
-        // A comb field of more cells than `Limits::text` is refused, as is a
-        // text longer than it.
+        // A comb field of more cells than `Limits::comb_cells` is refused,
+        // as is a text longer than `Limits::text`.
         let font = &super::faces()[0];
         for input in &inputs[inputs.len() - 24..] {
             let bytes = input.bytes();
@@ -1332,7 +1345,10 @@ mod tests {
                 &limits,
             );
             let past = input.max_len.is_some_and(|n| n > 16) || input.text.len() > 16;
-            assert_eq!(made == Err(Unmade::Limit(Cap::Text)), past);
+            assert_eq!(
+                matches!(made, Err(Unmade::Limit(Cap::Text | Cap::CombCells))),
+                past
+            );
         }
     }
 }

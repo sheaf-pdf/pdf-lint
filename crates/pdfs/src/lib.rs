@@ -352,8 +352,15 @@ mod tests {
         shared::<pdf_annots::FlattenPlan>();
         shared::<pdf_annots::Limits>();
         shared::<pdf_annots::Error>();
+        shared::<pdf_forms::Form<'static>>();
+        shared::<pdf_forms::Field<'static>>();
+        shared::<pdf_forms::Limits>();
+        shared::<pdf_forms::Error>();
         #[cfg(feature = "text-layout")]
         {
+            shared::<pdf_forms::appearance::FieldFont>();
+            shared::<pdf_forms::appearance::Appearance>();
+            shared::<pdf_forms::appearance::Unmade>();
             shared::<pdf_gfx::TextPage>();
             shared::<pdf_gfx::TextMatch>();
             shared::<pdf_gfx::LaidOutText>();

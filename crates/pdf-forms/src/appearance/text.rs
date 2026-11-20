@@ -70,14 +70,18 @@ const AUTO_SIZES: [f32; 25] = [
     60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 144.0,
 ];
 
+/// The size below which PDFium takes a size for none and chooses one
+/// (`core/fxcrt/fx_system.h`, `FXSYS_IsFloatZero`).
+const NO_SIZE: f32 = 0.0001;
+
 /// How many of [`AUTO_SIZES`] a multiline field chooses from: the first
 /// quarter, 12 points at most.
 const MULTILINE_SIZES: usize = AUTO_SIZES.len() / 4;
 
 /// Makes the appearance of a text field's widget: `field`'s text in `font`,
 /// named by `font_res`, in the box `look` gives, at the size and in the
-/// color of `da`, the field's default appearance (ISO 32000-2, 12.7.4.3 and
-/// 12.7.5.3), as PDFium as of chromium/8152 makes it for the same field.
+/// color of `da`, the field's default appearance (ISO 32000-2, §12.7.4.3 and
+/// §12.7.5.3), as PDFium as of chromium/8152 makes it for the same field.
 ///
 /// The box is `[0 0 width height]`, its sides swapped where the widget's
 /// rotation is a quarter turn or three; the matrix turns it back onto the
@@ -106,8 +110,9 @@ const MULTILINE_SIZES: usize = AUTO_SIZES.len() / 4;
 /// How the text is laid out, the box less the border's reach being the
 /// text box:
 ///
-/// - **Size:** `da`'s where it gives one above `0`. Otherwise (`0 Tf`, no
-///   `Tf`, or a size below `0`) the largest of PDFium's sizes (4 to 144
+/// - **Size:** `da`'s where it gives one of `0.0001` or more. Otherwise
+///   (`0 Tf`, no `Tf`, or a size below `0.0001`, which PDFium takes for
+///   none and a content stream would write as `0`) the largest of PDFium's sizes (4 to 144
 ///   points, 4 to 12 for a multiline field) at which the text fits the text
 ///   box, found by PDFium's search, or 4 where none does. Comb text in a
 ///   font with a box of its own ([`FieldFont::layout`](super::FieldFont::layout))
@@ -137,17 +142,56 @@ const MULTILINE_SIZES: usize = AUTO_SIZES.len() / 4;
 /// The font's resource name in the content is the writer's, by what the
 /// font is ([`Appearance::needs`]), not `da`'s.
 ///
+/// A color's components are written within `0.0..=1.0`: one of `look`'s or
+/// `da`'s outside it is drawn as the nearer end, as a default appearance
+/// string's are read.
+///
+/// ```
+/// use pdf_forms::appearance::{FieldFont, TextField, WidgetLook, text};
+/// use pdf_forms::pdf_annots::pdf_content_streams::Color;
+/// use pdf_forms::pdf_annots::pdf_gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
+/// use pdf_forms::pdf_fonts::Std14;
+/// use pdf_forms::{Limits, Quadding};
+///
+/// // What's shown and how: the text, right-justified.
+/// let mut field = TextField::new("Hello");
+/// field.quadding = Quadding::Right;
+/// // The widget: 100 by 20, a black dashed border of width 1 on white.
+/// let mut look = WidgetLook::new(100.0, 20.0);
+/// look.background = Some(Color::Gray(1.0));
+/// look.border_color = Some(Color::Gray(0.0));
+/// look.border = BoxBorder::new(1.0, BoxBorderStyle::Dashed).with_dash(&[3.0, 2.0]);
+/// // The field's default appearance, and the font it names.
+/// let da = DefaultAppearance::parse(b"/Helv 12 Tf 0 0 1 rg", &Limits::DEFAULT.annots.content).unwrap();
+/// let font = FieldFont::standard(Std14::Helvetica);
+///
+/// let made = text(&field, &look, &da, font.res().unwrap(), &font.layout(), &Limits::DEFAULT).unwrap();
+/// assert_eq!(made.font_size, 12.0);
+/// assert!(!made.overflowed);
+/// // The font is the content's one resource, under the name the content uses.
+/// let need = &made.needs.0[0];
+/// assert_eq!(need.res, font.res().unwrap());
+/// let content = String::from_utf8(made.content).unwrap();
+/// assert!(content.starts_with("q\n1 g\n0 0 100 20 re\nf\nQ\n"));
+/// assert!(content.contains("/Tx BMC\nq\n1 1 98 18 re\nW\nn\n0 0 1 rg\nBT\n"));
+/// assert!(content.contains(&format!("/{} 12 Tf\n", String::from_utf8_lossy(&need.name))));
+/// assert!(content.ends_with("(Hello) Tj\nET\nQ\nEMC\n"));
+/// ```
+///
 /// # Errors
 ///
 /// [`Unmade::Limit`] with [`Cap::Text`] where the text is longer than
-/// [`Limits::text`] bytes, or a comb field has more cells than that;
-/// [`Unmade::NoBox`] for a box with no width or no
+/// [`Limits::text`] bytes, or with [`Cap::CombCells`] where a comb field has
+/// more cells than [`Limits::comb_cells`]; [`Unmade::NoBox`] for a box with no width or no
 /// height; [`Unmade::NotFinite`] where a number of `look`, `da`'s size or
 /// color, the text box, or the text laid out isn't finite, or a string of
 /// the text laid out reaches past `1e35` from the box's origin (its place,
 /// and one more than the bytes of its codes, each its size wide), further
 /// than a reader working in `f32` may place it; [`Unmade::Unencodable`] for
-/// a character `font` has no code for.
+/// a character `font` has no code for. Never [`Unmade::NotText`],
+/// [`Unmade::FontNotBindable`], or [`Unmade::Unreadable`], which are the
+/// read layer's ([`widget_text`](super::widget_text),
+/// [`text_for_widget`](super::text_for_widget)).
 pub fn text<F: LayoutFont + ?Sized>(
     field: &TextField<'_>,
     look: &WidgetLook<'_>,
@@ -163,13 +207,14 @@ pub fn text<F: LayoutFont + ?Sized>(
     if da.font_size.is_some_and(|s| !s.is_finite()) || !frame::finite_color(da.color) {
         return Err(Unmade::NotFinite);
     }
+    let look = &frame::in_range(look);
     let client = frame::client(look, bbox)?;
     let shown = Shown::of(field);
     if shown
         .cells
-        .is_some_and(|n| usize::try_from(n).map_or(true, |n| n > limits.text))
+        .is_some_and(|n| usize::try_from(n).map_or(true, |n| n > limits.comb_cells))
     {
-        return Err(Unmade::Limit(Cap::Text));
+        return Err(Unmade::Limit(Cap::CombCells));
     }
     let laid = lay_out(field, &shown, client, da, font)?;
 
@@ -182,7 +227,7 @@ pub fn text<F: LayoutFont + ?Sized>(
         Some(laid) if !shown.text.is_empty() => canvas.with_tagged("Tx", |c| {
             c.with_state(|c| {
                 c.clip_rect(client);
-                c.fill_color(da.color.unwrap_or(Color::Gray(0.0)));
+                c.fill_color(da.color.map_or(Color::Gray(0.0), frame::clamped));
                 c.draw_layout(font_res, laid);
             });
         }),
@@ -311,7 +356,7 @@ fn lay_out<F: LayoutFont + ?Sized>(
         }
     }
 
-    let size = match da.size() {
+    let size = match da.size().filter(|size| *size >= NO_SIZE) {
         Some(size) => size,
         None => auto_size(field, shown, client, &style, &advances, font),
     };

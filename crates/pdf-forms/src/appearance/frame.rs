@@ -5,13 +5,14 @@ use std::fmt;
 
 use pdf_content_streams::{Color, LineCap, Paint, ResourceNeeds};
 use pdf_gfx::{BoxBorder, BoxBorderStyle, Canvas, Matrix, Point, Rect, UnencodableChar};
+use pdf_objects::Unreadable;
 
 use crate::error::Error;
 use crate::limits::Cap;
 
 /// A widget's box and what's drawn around its content, as plain data: the
 /// box's size, its background and border colors and its rotation (`/MK`,
-/// ISO 32000-2, 12.5.6.19), and its border (12.5.4).
+/// ISO 32000-2, §12.5.6.19), and its border (§12.5.4).
 ///
 /// It may gain fields: build it with [`new`](Self::new) and set them.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -22,7 +23,8 @@ pub struct WidgetLook<'a> {
     /// The box's height: its `/Rect`'s.
     pub height: f32,
     /// The color the box is filled with under everything else (`/MK /BG`);
-    /// none for no fill.
+    /// none for no fill. A component outside `0.0..=1.0` is drawn as the
+    /// nearer end, in this color and the border's.
     pub background: Option<Color>,
     /// The color the border is drawn in (`/MK /BC`); none for no border but
     /// the two shaded bands of a beveled or inset one, which have colors of
@@ -104,6 +106,13 @@ impl fmt::Debug for Appearance {
 
 /// Why an appearance couldn't be made. Nothing is drawn: no `?` stands in
 /// for a character, and no box is guessed.
+///
+/// The maker of plain data ([`text`](super::text)) gives the first four;
+/// [`NotText`](Self::NotText), [`FontNotBindable`](Self::FontNotBindable),
+/// and [`Unreadable`](Self::Unreadable) come only from reading a widget for
+/// it ([`widget_text`](super::widget_text),
+/// [`text_for_widget`](super::text_for_widget)). An [`Error`] of the read
+/// layer converts into it, a cap to [`Limit`](Self::Limit).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unmade {
@@ -138,16 +147,17 @@ pub enum Unmade {
     #[error("the field's font can't be named by the appearance's resources")]
     FontNotBindable,
     /// Reading the widget, its value, or its font failed for a caller-level
-    /// reason (locked encryption, a reader cap, a detached handle, or I/O).
+    /// reason (locked encryption, a reader cap, a detached handle, or I/O),
+    /// as [`Error::Unreadable`] has it.
     #[error("{0}")]
-    Unreadable(Error),
+    Unreadable(Unreadable),
 }
 
 impl From<Error> for Unmade {
     fn from(err: Error) -> Self {
         match err {
             Error::Limit(cap) => Self::Limit(cap),
-            err @ Error::Unreadable(_) => Self::Unreadable(err),
+            Error::Unreadable(unreadable) => Self::Unreadable(unreadable),
         }
     }
 }
@@ -162,10 +172,29 @@ pub(crate) fn finite_color(color: Option<Color>) -> bool {
     }
 }
 
+/// `color` with each component within `0.0..=1.0`, the nearer end for one
+/// outside it, as a default appearance string's color is read.
+pub(crate) fn clamped(color: Color) -> Color {
+    match color {
+        Color::Gray(g) => Color::Gray(g.clamp(0.0, 1.0)),
+        Color::Rgb(c) => Color::Rgb(c.map(|v| v.clamp(0.0, 1.0))),
+        Color::Cmyk(c) => Color::Cmyk(c.map(|v| v.clamp(0.0, 1.0))),
+    }
+}
+
+/// `look` with its colors' components within `0.0..=1.0` ([`clamped`]).
+pub(crate) fn in_range<'a>(look: &WidgetLook<'a>) -> WidgetLook<'a> {
+    WidgetLook {
+        background: look.background.map(clamped),
+        border_color: look.border_color.map(clamped),
+        ..*look
+    }
+}
+
 /// The quarter turns counterclockwise a widget's rotation (`/MK /R`) comes
 /// to: `90`, `180`, or `270` degrees, or any of those and a whole turn
 /// either way, is one, two, or three; any other number is none. A negative
-/// rotation is clockwise, so `-90` is three, as ISO 32000-2, 12.5.6.19 has
+/// rotation is clockwise, so `-90` is three, as ISO 32000-2, §12.5.6.19 has
 /// it (PDFium reads it as one).
 pub(crate) const fn quarter_turns(rotation: i32) -> u8 {
     match rotation.rem_euclid(360) {
@@ -272,7 +301,7 @@ fn strokable(rect: Rect, w: f32) -> bool {
 
 /// The dash array a dashed border is drawn with: its own, or `[3]` where
 /// that's empty, holds a negative or non-finite number, or is all zeros
-/// (ISO 32000-2, 12.5.4 and 8.4.3.6), as `Canvas::box_border` takes it.
+/// (ISO 32000-2, §12.5.4 and §8.4.3.6), as `Canvas::box_border` takes it.
 fn dash<'a>(border: &BoxBorder<'a>) -> &'a [f32] {
     let usable = border.dash.iter().all(|d| d.is_finite() && *d >= 0.0)
         && border.dash.iter().any(|d| *d > 0.0);

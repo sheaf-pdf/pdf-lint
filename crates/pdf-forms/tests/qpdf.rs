@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use pdf_fixtures::qpdf::Qpdf;
-use pdf_forms::appearance::{Appearance, for_widget, widget_text};
+use pdf_forms::appearance::{Appearance, text_for_widget, widget_text};
 use pdf_forms::pdf_content_streams::{Concat, ResBody, ResId};
 use pdf_forms::pdf_fonts::{Fonts, Std14};
 use pdf_forms::pdf_gfx::{self, Rect, TextPage, TextPageOpts};
@@ -192,7 +192,7 @@ fn document() -> (Vec<u8>, Vec<Placed>) {
                     false => read.field().text.to_string(),
                 };
                 let mut faults = Vec::new();
-                let made = for_widget(
+                let made = text_for_widget(
                     &form,
                     field,
                     widget,
@@ -205,10 +205,10 @@ fn document() -> (Vec<u8>, Vec<Placed>) {
                 .unwrap();
                 // Only the font the resources lack is told.
                 assert_eq!(faults.is_empty(), !made.font.is_fallback());
-                let added = made
-                    .font
-                    .is_fallback()
-                    .then(|| read.font_name().unwrap_or(b"Helv").to_vec());
+                let added = match made.font.is_fallback() {
+                    true => Some(made.font_name.expect("every /DA here names its font")),
+                    false => None,
+                };
                 let rect = widget.annot(&doc, Rules::Iso, &limits).unwrap().rect();
                 let rotation = read.look().rotation;
                 let id = widget.id().unwrap();
@@ -278,7 +278,7 @@ fn document() -> (Vec<u8>, Vec<Placed>) {
 
 /// Each widget's appearance, read back from the file written, drawn on its
 /// rectangle as a viewer draws it (its box turned by its matrix and moved
-/// to the rectangle's corner, ISO 32000-2, 12.5.5): the text it shows is
+/// to the rectangle's corner, ISO 32000-2, §12.5.5): the text it shows is
 /// read there, each character inside the rectangle.
 #[test]
 fn made_appearances_read_back_as_their_text_on_their_widgets() {

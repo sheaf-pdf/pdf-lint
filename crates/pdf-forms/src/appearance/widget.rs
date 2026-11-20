@@ -15,7 +15,6 @@ use pdf_objects::{ObjectId, Resolve, Streams, Why, text};
 use super::font::FieldFont;
 use super::frame::{Appearance, Unmade, WidgetLook};
 use super::text::TextField;
-use crate::error::Error;
 use crate::fault::Fault;
 use crate::field::{Field, FieldFlags, FieldKind, FieldValue, Widget};
 use crate::form::Form;
@@ -140,7 +139,7 @@ impl fmt::Debug for WidgetText<'_> {
 ///   [`Fault::MissingDefaultAppearance`] is told.
 /// - **The quadding** is the widget's own `/Q`, else the field's.
 /// - **The value:** a text string as it is; a text stream's data (ISO
-///   32000-2, 12.7.5.3) decoded within [`Limits::text`] and read as a text
+///   32000-2, §12.7.5.3) decoded within [`Limits::text`] and read as a text
 ///   string under `rules`; any other value is no text, told as
 ///   [`Fault::WrongType`] for `V` (a damaged stream as
 ///   [`Fault::DamagedObject`]).
@@ -240,17 +239,39 @@ where
     })
 }
 
-/// A widget's appearance made from what the read layer gives
-/// ([`for_widget`]), with the font it's drawn in, which the caller adds to
-/// the default resources where it's a fallback
-/// ([`FieldFont::is_fallback`]).
-#[derive(Debug)]
+/// A text widget's appearance made from what the read layer gives
+/// ([`text_for_widget`]), with the font it's drawn in and the name the
+/// default appearance string gives it.
+///
+/// Where the font is a fallback ([`FieldFont::is_fallback`]), the caller
+/// adds it to the default resources (`/DR /Font`) under
+/// [`font_name`](Self::font_name), so a viewer that makes the appearance
+/// anew finds it. With no name, no default appearance string names a font
+/// at all ([`Fault::MissingDefaultAppearance`]): an entry in the default
+/// resources repairs nothing by itself, and the caller writes the field a
+/// `/DA` naming the entry it adds as well.
+///
+/// `Debug` prints the name's length, never the name.
 #[non_exhaustive]
-pub struct Made {
+pub struct MadeText {
     /// The appearance.
     pub appearance: Appearance,
     /// The font it's drawn in.
     pub font: FieldFont,
+    /// The font resource name the default appearance string gives (`Tf`),
+    /// which the font is, or is to be, in the default resources under;
+    /// `None` where it gives none, and the text is drawn in Helvetica.
+    pub font_name: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for MadeText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MadeText")
+            .field("appearance", &self.appearance)
+            .field("font", &self.font)
+            .field("font_name_len", &self.font_name.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// Makes the appearance of `widget` of `field`, a text field of `form`:
@@ -262,13 +283,16 @@ pub struct Made {
 /// It reads the font for each widget: a caller making many widgets calls
 /// [`widget_text`] for each and keeps a [`FieldFont`] for each font name.
 ///
+/// Text fields alone are made, as the name says: a button's or a choice
+/// field's widget is [`Unmade::NotText`].
+///
 /// # Errors
 ///
 /// As [`widget_text`], [`Form::field_font`], and [`WidgetText::make`];
 /// [`Unmade::FontNotBindable`] for a font the appearance's resources can't
 /// name ([`FieldFont::res`]).
 #[allow(clippy::too_many_arguments)]
-pub fn for_widget<'o, R, S>(
+pub fn text_for_widget<'o, R, S>(
     form: &Form<'o>,
     field: &Field<'o>,
     widget: &Widget<'o>,
@@ -277,7 +301,7 @@ pub fn for_widget<'o, R, S>(
     display: Option<&str>,
     limits: &Limits,
     sink: &mut S,
-) -> Result<Made, Unmade>
+) -> Result<MadeText, Unmade>
 where
     R: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
@@ -289,7 +313,11 @@ where
     };
     let res = font.res().ok_or(Unmade::FontNotBindable)?;
     let appearance = read.make(res, &font.layout(), limits)?;
-    Ok(Made { appearance, font })
+    Ok(MadeText {
+        appearance,
+        font,
+        font_name: read.da.font_name,
+    })
 }
 
 /// The text a text field's value gives: a text string's, or a text stream's
@@ -314,7 +342,7 @@ where
                 return Err(Unmade::Limit(Cap::Text));
             }
             Err(unreadable) if unreadable.why == Why::Damaged => Fault::DamagedObject(*id),
-            Err(unreadable) => return Err(Unmade::Unreadable(Error::Unreadable(unreadable))),
+            Err(unreadable) => return Err(Unmade::Unreadable(unreadable)),
         },
         Some(_) => Fault::WrongType { key: "V" },
     };

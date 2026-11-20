@@ -16,7 +16,7 @@ use pdf_objects::{
 };
 
 use super::{
-    Appearance, FieldFont, FieldLayoutFont, TextField, Unmade, WidgetLook, for_widget, text,
+    Appearance, FieldFont, FieldLayoutFont, TextField, Unmade, WidgetLook, text, text_for_widget,
     widget_text,
 };
 use crate::{Cap, Error, Fault, FieldFlags, Form, Limits};
@@ -108,7 +108,7 @@ fn find_told(
     limits: &Limits,
 ) -> (Result<FieldFont, Error>, Vec<(Place, Fault)>) {
     let mut told = Vec::new();
-    let found = FieldFont::find(fonts, name, reading(objects), limits, &mut told);
+    let found = FieldFont::find(reading(objects), fonts, name, limits, &mut told);
     (found, told)
 }
 
@@ -384,9 +384,9 @@ fn res_names_what_can_be_written() {
     };
     let find = |name: &[u8]| {
         FieldFont::find(
+            reading(&objects),
             Some((&fonts, None)),
             name,
-            reading(&objects),
             &Limits::DEFAULT,
             &mut (),
         )
@@ -407,10 +407,10 @@ fn res_names_what_can_be_written() {
     );
 }
 
-/// What a font's streams decompress to is held to `Limits::font_bytes`; a
+/// What a font's streams decompress to is held to `Limits::font_budget`; a
 /// stream that can't be read for the caller's reason is that error.
 #[test]
-fn a_font_past_font_bytes_is_a_cap() {
+fn a_font_past_font_budget_is_a_cap() {
     let cmap =
         b"1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <41> <0042> endbfchar"
             .to_vec();
@@ -425,14 +425,14 @@ fn a_font_past_font_bytes_is_a_cap() {
     let fonts = dict! { "F" => id(1) };
 
     let mut limits = Limits::DEFAULT;
-    limits.font_bytes = cmap.len() - 1;
+    limits.font_budget = cmap.len() - 1;
     let (found, _) = find_told(Some((&fonts, None)), b"F", &objects, &limits);
-    assert_eq!(found.unwrap_err(), Error::Limit(Cap::FontBytes));
+    assert_eq!(found.unwrap_err(), Error::Limit(Cap::FontBudget));
     assert_eq!(
-        Error::Limit(Cap::FontBytes).to_string(),
+        Error::Limit(Cap::FontBudget).to_string(),
         "exceeded cap on bytes a field's font decompresses to"
     );
-    limits.font_bytes = cmap.len();
+    limits.font_budget = cmap.len();
     let (found, _) = find_told(Some((&fonts, None)), b"F", &objects, &limits);
     let font = found.unwrap();
     assert_eq!(font.font().cost(), cmap.len());
@@ -443,9 +443,9 @@ fn a_font_past_font_bytes_is_a_cap() {
         Err::<Vec<u8>, _>(Unreadable::new(id, Why::Locked, "locked"))
     });
     let err = FieldFont::find(
+        locked,
         Some((&fonts, None)),
         b"F",
-        locked,
         &Limits::DEFAULT,
         &mut (),
     )
@@ -490,9 +490,9 @@ fn standard_fonts_take_the_heights_pdfium_draws_them_with() {
         // The same font in the default resources.
         let fonts = dict! { "F" => Object::from(face.dict()) };
         let found = FieldFont::find(
+            reading(&Objects::new()),
             Some((&fonts, None)),
             b"F",
-            reading(&Objects::new()),
             &Limits::DEFAULT,
             &mut (),
         )
@@ -526,9 +526,9 @@ fn standard_fonts_take_the_heights_pdfium_draws_them_with() {
         font.push("FontDescriptor", desc);
         let fonts = dict! { "F" => Object::from(font) };
         let found = FieldFont::find(
+            reading(&Objects::new()),
             Some((&fonts, None)),
             b"F",
-            reading(&Objects::new()),
             &Limits::DEFAULT,
             &mut (),
         )
@@ -544,9 +544,9 @@ fn standard_fonts_take_the_heights_pdfium_draws_them_with() {
     font.set("BaseFont", id(1));
     let fonts = dict! { "F" => Object::from(font) };
     let found = FieldFont::find(
+        reading(&objects),
         Some((&fonts, None)),
         b"F",
-        reading(&objects),
         &Limits::DEFAULT,
         &mut (),
     )
@@ -575,9 +575,9 @@ fn standard_fonts_take_the_heights_pdfium_draws_them_with() {
     };
     let fonts = dict! { "F" => Object::from(type3) };
     let found = FieldFont::find(
+        reading(&Objects::new()),
         Some((&fonts, None)),
         b"F",
-        reading(&Objects::new()),
         &Limits::DEFAULT,
         &mut (),
     )
@@ -589,9 +589,9 @@ fn standard_fonts_take_the_heights_pdfium_draws_them_with() {
     // A font that isn't standard keeps what pdf-fonts reads.
     let fonts = dict! { "F" => Object::from(std_font("Foo", Object::name("WinAnsiEncoding"))) };
     let found = FieldFont::find(
+        reading(&Objects::new()),
         Some((&fonts, None)),
         b"F",
-        reading(&Objects::new()),
         &Limits::DEFAULT,
         &mut (),
     )
@@ -668,17 +668,17 @@ fn the_same_font_whatever_the_sink() {
     let text = "Hello é € — “ ” 中";
     for name in [&b"Bare"[..], b"Desc", b"Std", b"HeBo"] {
         let quiet = FieldFont::find(
+            reading(&objects),
             Some((&fonts, Some(id(9)))),
             name,
-            reading(&objects),
             &Limits::DEFAULT,
             &mut (),
         )
         .unwrap();
         let unwanted = FieldFont::find(
+            reading(&objects),
             Some((&fonts, Some(id(9)))),
             name,
-            reading(&objects),
             &Limits::DEFAULT,
             &mut Unwanted,
         )
@@ -759,9 +759,34 @@ fn debug_prints_no_name() {
         said(Fault::from(pdf_gfx::Fault::DefaultAppearanceNoFont)),
         (
             "DefaultAppearance(DefaultAppearanceNoFont)".into(),
-            "a default appearance string departs: DefaultAppearanceNoFont".into()
+            "a default appearance string names no font".into()
         )
     );
+    // A `/DA` departure is a sentence, with no Rust syntax in it.
+    let mut told = Vec::new();
+    let limits = pdf_content_streams::Limits::DEFAULT;
+    let _ = DefaultAppearance::parse_with(b"Tc 9 Tr 0 g", &limits, &mut told);
+    let _ = DefaultAppearance::parse_with(b"(open", &limits, &mut told);
+    let said: Vec<String> = told
+        .into_iter()
+        .map(|(_, fault)| Fault::from(fault).to_string())
+        .collect();
+    assert_eq!(
+        said[..3],
+        [
+            "a default appearance string's Tc at byte 0 lacks an operand it needs",
+            "a default appearance string's Tr at byte 5 gives no text rendering mode",
+            "a default appearance string names no font",
+        ]
+    );
+    assert_eq!(said.len(), 4);
+    assert!(
+        said[3].starts_with("a default appearance string can't be read: "),
+        "{}",
+        said[3]
+    );
+    assert!(said.iter().all(|s| !s.contains(['{', '}'])), "{said:?}");
+    let said = |fault: Fault| (format!("{fault:?}"), fault.to_string());
     assert_eq!(
         said(Fault::MissingDefaultAppearance),
         (
@@ -785,8 +810,32 @@ fn debug_prints_no_name() {
     );
     assert_eq!(
         Error::Limit(Cap::Text).to_string(),
-        "exceeded cap on bytes of an appearance's text, or a comb field's cells"
+        "exceeded cap on bytes of an appearance's text"
     );
+    assert_eq!(
+        Error::Limit(Cap::CombCells).to_string(),
+        "exceeded cap on cells of a comb field"
+    );
+}
+
+/// The README's second example is this module's, which its doctest runs.
+#[test]
+fn the_readmes_appearance_example_is_the_modules() {
+    let readme = include_str!("../../README.md");
+    let block = |text: &'static str, fence: &str, nth: usize| {
+        let mut blocks = text.split(fence).skip(1);
+        let (code, _) = blocks.nth(nth).unwrap().split_once("\n```").unwrap();
+        code.to_string()
+    };
+    let module: String = include_str!("mod.rs")
+        .lines()
+        .take_while(|l| l.starts_with("//!"))
+        .map(|l| l.strip_prefix("//! ").unwrap_or(&l[3..]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Leaked to give the helper one lifetime for both texts.
+    let module: &'static str = module.leak();
+    assert_eq!(block(readme, "```rust\n", 1), block(module, "```\n", 0));
 }
 
 #[test]
@@ -961,7 +1010,7 @@ fn a_passwords_value_reaches_nothing() {
         &mut (),
     )
     .unwrap();
-    let made = for_widget(
+    let made = text_for_widget(
         &form,
         field,
         &field.widgets()[0],
@@ -1011,6 +1060,89 @@ fn colors_are_written_with_their_digits() {
     .unwrap();
     let content = String::from_utf8_lossy(&ap.content);
     assert!(content.contains("n\n0 g\nBT"), "{content}");
+
+    // A component outside 0..=1 is written as the nearer end, in the
+    // background, the border, the dividers, and the text.
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.background = Some(Color::Rgb([2.0, -1.0, 0.5]));
+    look.border_color = Some(Color::Cmyk([-0.5, 0.25, 7.0, 1.0]));
+    let mut comb = TextField::new("12");
+    comb.flags = FieldFlags::COMB;
+    comb.max_len = Some(2);
+    let ap = text(
+        &comb,
+        &look,
+        &DefaultAppearance::new("Helv", 10.0, Some(Color::Gray(-3.0))),
+        font.res().unwrap(),
+        &font.layout(),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    let content = String::from_utf8_lossy(&ap.content);
+    assert!(
+        content.starts_with("q\n1 0 0.5 rg\n0 0 100 20 re\nf\nQ\n"),
+        "{content}"
+    );
+    assert_eq!(content.matches("0 0.25 1 1 K").count(), 2, "{content}");
+    assert!(content.contains("n\n0 g\nBT"), "{content}");
+    for outside in ["2 -1", "-0.5", "7 1 K", "-3 g"] {
+        assert!(!content.contains(outside), "{outside} in {content}");
+    }
+}
+
+/// Text is filled, so it's drawn in `/DA`'s nonstroking color alone: a
+/// stroking color beside it, after it, or alone never colors it.
+#[test]
+fn a_stroking_color_in_da_never_colors_the_text() {
+    let font = helvetica();
+    let color = |da: &[u8]| {
+        let da = DefaultAppearance::parse(da, &Limits::DEFAULT.annots.content).unwrap();
+        let ap = text(
+            &TextField::new("Hello"),
+            &bare(100.0, 20.0),
+            &da,
+            font.res().unwrap(),
+            &font.layout(),
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let content = String::from_utf8(ap.content).unwrap();
+        let (before, _) = content.split_once("\nBT\n").unwrap();
+        before.rsplit('\n').next().unwrap().to_string()
+    };
+    assert_eq!(color(b"/Helv 8 Tf 1 0 0 rg 0 0 1 RG"), "1 0 0 rg");
+    assert_eq!(color(b"0 0 1 RG /Helv 8 Tf"), "0 g");
+    assert_eq!(color(b"/Helv 8 Tf 0 g 1 G"), "0 g");
+    assert_eq!(color(b"/Helv 8 Tf 0 1 1 0 K 0 0 0 1 k"), "0 0 0 1 k");
+}
+
+/// A size below `0.0001`, which a content stream would write as `0`, is no
+/// size, as PDFium takes it: the text is sized to its box, and the size
+/// told is the size written.
+#[test]
+fn a_size_too_small_to_write_is_automatic() {
+    let font = helvetica();
+    let sized = |size: f32| {
+        let ap = text(
+            &TextField::new("Hello"),
+            &bare(100.0, 20.0),
+            &DefaultAppearance::new("Helv", size, None),
+            font.res().unwrap(),
+            &font.layout(),
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let content = String::from_utf8(ap.content).unwrap();
+        let tf = content.lines().find(|line| line.ends_with(" Tf")).unwrap();
+        let written: f32 = tf.split(' ').nth(1).unwrap().parse().unwrap();
+        assert_eq!(written, ap.font_size, "{size}: {tf}");
+        ap.font_size
+    };
+    for none in [0.0, 1.0e-30, 0.000_01, 0.000_09, -4.0] {
+        assert_eq!(sized(none), 14.0, "{none}");
+    }
+    assert_eq!(sized(0.0001), 0.0001);
+    assert_eq!(sized(0.0004), 0.0004);
 }
 
 /// An empty text writes `/Tx BMC EMC` with nothing between, and needs no
@@ -1133,7 +1265,7 @@ fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
         ),
         (
             Unmade::Limit(Cap::Text),
-            "exceeded cap on bytes of an appearance's text, or a comb field's cells",
+            "exceeded cap on bytes of an appearance's text",
         ),
         (Unmade::NotText, "the field isn't a text field"),
         (
@@ -1144,15 +1276,15 @@ fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
         assert_eq!(unmade.to_string(), said);
         assert!(std::error::Error::source(&unmade).is_none());
     }
-    let unreadable = Unmade::from(Error::Unreadable(Unreadable::new(
-        id(3),
-        Why::Locked,
-        "locked",
-    )));
+    // A read failure is held as it is, and a cap has the one spelling.
+    let locked = Unreadable::new(id(3), Why::Locked, "locked");
+    let unreadable = Unmade::from(Error::Unreadable(locked.clone()));
+    assert_eq!(unreadable, Unmade::Unreadable(locked.clone()));
+    assert_eq!(unreadable.to_string(), locked.to_string());
     assert!(std::error::Error::source(&unreadable).is_none());
     assert_eq!(
-        Unmade::from(Error::Limit(Cap::FontBytes)),
-        Unmade::Limit(Cap::FontBytes)
+        Unmade::from(Error::Limit(Cap::FontBudget)),
+        Unmade::Limit(Cap::FontBudget)
     );
 }
 
@@ -1164,9 +1296,9 @@ fn a_standard_font_has_no_box_unless_it_embeds_a_program() {
     assert_eq!(helvetica().layout().font_metrics().bbox, None);
     let found = |fonts: &Dict, objects: &Objects| {
         FieldFont::find(
+            reading(objects),
             Some((fonts, None)),
             b"F",
-            reading(objects),
             &Limits::DEFAULT,
             &mut (),
         )
@@ -1409,7 +1541,7 @@ fn the_convenience_reads_its_widget_and_tells_once() {
         );
         let mut told = Vec::new();
         let field = &form.fields()[at];
-        let made = for_widget(
+        let made = text_for_widget(
             &form,
             field,
             &field.widgets()[0],
@@ -1422,6 +1554,8 @@ fn the_convenience_reads_its_widget_and_tells_once() {
         .unwrap();
         assert!(made.font.is_fallback());
         assert_eq!(made.font.res(), helvetica().res());
+        // No name to add the fallback under: the caller writes a `/DA` too.
+        assert_eq!(made.font_name, None);
         assert_eq!(made.appearance.font_size, 14.0);
         assert_eq!(
             told,
@@ -1460,7 +1594,7 @@ fn the_convenience_reads_its_widget_and_tells_once() {
         &limits,
     )
     .unwrap();
-    let made = for_widget(
+    let made = text_for_widget(
         &form,
         field,
         &field.widgets()[1],
@@ -1472,6 +1606,8 @@ fn the_convenience_reads_its_widget_and_tells_once() {
     )
     .unwrap();
     assert_eq!(made.appearance, by_hand);
+    assert_eq!(made.font_name.as_deref(), own.font_name());
+    assert!(made.font_name.is_some());
     assert_eq!(
         own.make(font.res().unwrap(), &font.layout(), &limits)
             .unwrap(),
@@ -1520,7 +1656,7 @@ fn the_convenience_reads_its_widget_and_tells_once() {
         .unwrap()
         .unwrap();
     let field = &form.fields()[0];
-    let unmade = for_widget(
+    let unmade = text_for_widget(
         &form,
         field,
         &field.widgets()[0],
@@ -1568,7 +1704,7 @@ fn debug_prints_no_text() {
         &mut (),
     )
     .unwrap();
-    let made = for_widget(
+    let made = text_for_widget(
         &form,
         form_field,
         widget,
@@ -1613,7 +1749,7 @@ impl Streams for Counting<'_> {
 }
 
 /// A thousand widgets read with `widget_text` and made with `make` in one
-/// `FieldFont`, read once, where `for_widget` reads the font for each.
+/// `FieldFont`, read once, where `text_for_widget` reads the font for each.
 #[test]
 fn a_thousand_widgets_read_their_font_once() {
     let fields = (0..1000)
@@ -1657,7 +1793,7 @@ fn a_thousand_widgets_read_their_font_once() {
     assert_eq!((made, reads.get()), (1000, 1));
 
     let field = &form.fields()[0];
-    for_widget(
+    text_for_widget(
         &form,
         field,
         &field.widgets()[0],
@@ -1676,7 +1812,7 @@ fn appearances_are_send_and_sync() {
     fn check<T: Send + Sync>() {}
     check::<Appearance>();
     check::<Unmade>();
-    check::<super::Made>();
+    check::<super::MadeText>();
     check::<super::WidgetText<'static>>();
 }
 
@@ -1797,8 +1933,9 @@ fn each_border_style_is_drawn_as_pdfium_draws_it() {
 /// cells divided, at the cells' edges across the box less the border, with
 /// or without text: solid lines with square caps, or dashed ones under the
 /// border's dash array. No other border draws them, nor one with no color,
-/// nor a field of one cell. A field with more cells than `Limits::text`
-/// is past that cap.
+/// nor a field of one cell. A field with more cells than
+/// `Limits::comb_cells` is past that cap, whatever its text, so an empty
+/// field's dividers are bounded.
 #[test]
 fn a_comb_fields_cells_are_divided_by_solid_and_dashed_borders() {
     use BoxBorderStyle::{Beveled, Dashed, Inset, Solid, Underline};
@@ -1850,10 +1987,10 @@ fn a_comb_fields_cells_are_divided_by_solid_and_dashed_borders() {
     unset.max_len = None;
     assert_eq!(count(&drawn(&unset, &bordered(Solid, &[], true))), 0);
 
-    // More cells than `Limits::text`: the cap.
+    // More cells than `Limits::comb_cells`: the cap.
     let font = helvetica();
     let mut limits = Limits::DEFAULT;
-    limits.text = 4;
+    limits.comb_cells = 4;
     let make = |field: &TextField<'_>| {
         text(
             field,
@@ -1864,11 +2001,32 @@ fn a_comb_fields_cells_are_divided_by_solid_and_dashed_borders() {
             &limits,
         )
     };
-    assert_eq!(make(&comb), Err(Unmade::Limit(Cap::Text)));
+    assert_eq!(make(&comb), Err(Unmade::Limit(Cap::CombCells)));
     comb.max_len = Some(4);
     assert!(make(&comb).is_ok());
     comb.max_len = Some(u32::MAX);
-    assert_eq!(make(&comb), Err(Unmade::Limit(Cap::Text)));
+    assert_eq!(make(&comb), Err(Unmade::Limit(Cap::CombCells)));
+
+    // Under the defaults an empty comb field of very many cells is
+    // refused, and one at the cap makes dividers of a bounded size.
+    let limits = Limits::DEFAULT;
+    let make = |cells: u32| {
+        let mut empty = TextField::new("");
+        empty.flags = FieldFlags::COMB;
+        empty.max_len = Some(cells);
+        text(
+            &empty,
+            &bordered(Solid, &[], true),
+            &DefaultAppearance::new("Helv", 10.0, None),
+            font.res().unwrap(),
+            &font.layout(),
+            &limits,
+        )
+    };
+    assert_eq!(make(262_144), Err(Unmade::Limit(Cap::CombCells)));
+    assert_eq!(make(1_025), Err(Unmade::Limit(Cap::CombCells)));
+    let most = make(1_024).unwrap();
+    assert!(most.content.len() < 64 << 10, "{}", most.content.len());
 }
 
 /// `/MK /R` turns the box: at a quarter turn or three its width and height

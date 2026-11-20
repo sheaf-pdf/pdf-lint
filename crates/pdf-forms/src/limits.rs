@@ -24,17 +24,22 @@ pub struct Limits {
     pub items: usize,
     /// Caps forwarded to `pdf-annots` when a widget is read as an annotation.
     pub annots: pdf_annots::Limits,
-    /// Maximum bytes of display text an appearance is made of, and cells a
-    /// comb field's appearance divides its box into, `text-layout`
-    /// (`262_144` by default); past either, [`Cap::Text`].
+    /// Maximum bytes of display text an appearance is made of,
+    /// `text-layout` (`262_144` by default); past it, [`Cap::Text`].
     pub text: usize,
+    /// Maximum cells a comb field's appearance divides its box into
+    /// (`/MaxLen`), `text-layout` (`1_024` by default); past it,
+    /// [`Cap::CombCells`]. A divider may be drawn for each cell whatever
+    /// the text, so the cells bound what an empty comb field's appearance
+    /// holds.
+    pub comb_cells: usize,
     /// Caps forwarded to `pdf-fonts` when a field's font is read from the
     /// default resources (`FieldFont::find`, `text-layout`).
     pub fonts: pdf_fonts::Limits,
     /// Maximum bytes one such font's streams decompress to: its `/ToUnicode`,
     /// an embedded CMap's chain, and with `programs` its program (`128 MiB` by
-    /// default); past it, [`Cap::FontBytes`].
-    pub font_bytes: usize,
+    /// default); past it, [`Cap::FontBudget`].
+    pub font_budget: usize,
 }
 
 impl Limits {
@@ -46,8 +51,9 @@ impl Limits {
         items: 16_384,
         annots: pdf_annots::Limits::DEFAULT,
         text: 262_144,
+        comb_cells: 1_024,
         fonts: pdf_fonts::Limits::DEFAULT,
-        font_bytes: 128 << 20,
+        font_budget: 128 << 20,
     };
 }
 
@@ -67,11 +73,12 @@ pub enum Cap {
     Items,
     /// A cap of `pdf-annots` was exceeded while a widget was read.
     Annots(pdf_annots::Cap),
-    /// The display text of an appearance, or a comb field's cells,
-    /// exceeded [`Limits::text`].
+    /// The display text of an appearance exceeded [`Limits::text`].
     Text,
-    /// A field's font's streams decompressed past [`Limits::font_bytes`].
-    FontBytes,
+    /// A comb field's cells exceeded [`Limits::comb_cells`].
+    CombCells,
+    /// A field's font's streams decompressed past [`Limits::font_budget`].
+    FontBudget,
 }
 
 impl std::fmt::Display for Cap {
@@ -80,8 +87,9 @@ impl std::fmt::Display for Cap {
             Cap::Fields => f.write_str("fields and widgets in a form"),
             Cap::Items => f.write_str("items in a field's value"),
             Cap::Annots(cap) => write!(f, "{cap}"),
-            Cap::Text => f.write_str("bytes of an appearance's text, or a comb field's cells"),
-            Cap::FontBytes => f.write_str("bytes a field's font decompresses to"),
+            Cap::Text => f.write_str("bytes of an appearance's text"),
+            Cap::CombCells => f.write_str("cells of a comb field"),
+            Cap::FontBudget => f.write_str("bytes a field's font decompresses to"),
         }
     }
 }

@@ -47,7 +47,7 @@ impl FieldFont {
     ///
     /// A font found is read with `pdf_fonts::Font::read` under
     /// [`Limits::fonts`], its streams decompressed within
-    /// [`Limits::font_bytes`], and its departures told to `sink` as
+    /// [`Limits::font_budget`], and its departures told to `sink` as
     /// [`Fault::Font`]; what's read is the same whatever the sink. Its codes
     /// are its encoding's (WinAnsiEncoding, MacRomanEncoding, a built-in
     /// encoding with `/Differences`, each by glyph name), its widths its
@@ -65,13 +65,13 @@ impl FieldFont {
     ///
     /// # Errors
     ///
-    /// [`Error::Limit`] with [`Cap::FontBytes`] where the font's streams
-    /// decompress past [`Limits::font_bytes`]; [`Error::Unreadable`] on
+    /// [`Error::Limit`] with [`Cap::FontBudget`] where the font's streams
+    /// decompress past [`Limits::font_budget`]; [`Error::Unreadable`] on
     /// locked, I/O, or reader-cap failures.
     pub fn find<'o, R, S>(
+        objects: R,
         fonts: Option<(&'o Dict, Option<ObjectId>)>,
         name: &[u8],
-        objects: R,
         limits: &Limits,
         sink: &mut S,
     ) -> Result<FieldFont, Error>
@@ -100,7 +100,7 @@ impl FieldFont {
             return Ok(FieldFont::standard(fallback(name)));
         };
 
-        let mut budget = limits.font_bytes;
+        let mut budget = limits.font_budget;
         let mut lifted = Lift {
             sink,
             within: own.or(within),
@@ -179,7 +179,11 @@ impl FieldFont {
     }
 
     /// Whether the default resources lack the font, so the caller adds it to
-    /// them ([`Fault::FontNotInResources`]).
+    /// them ([`Fault::FontNotInResources`]) under the name the default
+    /// appearance string gives. A font made by [`standard`](Self::standard)
+    /// is one whatever it's made for: where it stands in for a default
+    /// appearance string that names no font, the caller writes the field a
+    /// `/DA` naming the entry it adds too.
     #[must_use]
     pub const fn is_fallback(&self) -> bool {
         self.fallback
@@ -393,11 +397,11 @@ fn holds_reference(dict: &Dict) -> bool {
 /// What reading a field's font failed by, as this crate's error.
 fn font_error(err: pdf_fonts::Error) -> Error {
     match err {
-        pdf_fonts::Error::TooLarge => Error::Limit(Cap::FontBytes),
+        pdf_fonts::Error::TooLarge => Error::Limit(Cap::FontBudget),
         pdf_fonts::Error::Unreadable(unreadable) => Error::Unreadable(unreadable),
         // `pdf_fonts::Error` is non-exhaustive: a kind added later is a cap
         // or a read failure this crate can't name yet.
-        _ => Error::Limit(Cap::FontBytes),
+        _ => Error::Limit(Cap::FontBudget),
     }
 }
 

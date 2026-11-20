@@ -16,6 +16,9 @@ forms-direct-field	idx 0 none
 forms-fields-by-reference	idx 0 type 6 flags 0 name f value by%20reference
 forms-real-flags	idx 0 type 6 flags 4096 name real value v
 forms-value-not-a-string	idx 0 type 6 flags 0 name name value % ; idx 1 type 6 flags 0 name number value %
+forms-value-dangling	idx 0 type 6 flags 0 name p.k value parent
+forms-value-null	idx 0 type 6 flags 0 name p.k value %
+forms-value-null-by-reference	idx 0 type 6 flags 0 name p.k value %
 forms-widget-outside-the-tree	idx 0 type 6 flags 0 name inside value v ; idx 1 type 6 flags 0 name outside value o
 forms-not-a-widget	idx 0 none ; idx 1 type 6 flags 0 name f value v
 forms-no-form	idx 0 type 6 flags 0 name lone value v
@@ -134,3 +137,6 @@ ap-kids-own-da-and-q	idx 0 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip no
 ap-inherited-one-level	idx 0 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 12 at 46.6640015 5.67399979 codes 1 font Helv size 12 at 66.2639999 5.67399979 codes 2 font Helv size 12 at 85.8639984 5.67399979 codes 3
 ap-inherited-two-levels	idx 0 none ; idx 1 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 12 at 74.987999 5.67399979 codes near
 ap-value-kinds	idx 0 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 10 at 1 6.39500046 codes from%20a%20stream ; idx 1 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none tx none ; idx 2 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 10 at 1 6.39500046 codes a ; idx 3 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 10 at 1 6.39500046 codes by%20reference
+ap-da-stroking-color	idx 0 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color rg 1 0 0 font Helv size 8 at 1 7.11600018 codes Hello ; idx 1 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 8 at 1 7.11600018 codes Hello ; idx 2 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 8 at 1 7.11600018 codes Hello ; idx 3 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color k 0 0 0 1 font Helv size 8 at 1 7.11600018 codes Hello
+ap-da-size-near-zero	idx 0 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 14 at 1 4.95300007 codes Hello ; idx 1 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 14 at 1 4.95300007 codes Hello ; idx 2 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 0.00039999999 at 1 9.99985504 codes Hello
+ap-da-written-twice	idx 0 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 8 at 1 7.11600018 codes Hello ; idx 1 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color g 0 font Helv size 8 at 1 7.11600018 codes Hello ; idx 2 bbox 0 0 100 20 matrix 1 0 0 1 0 0 paint none clip none color rg 0 0 1 font Helv size 8 at 1 7.11600018 codes Hello

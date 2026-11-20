@@ -22,9 +22,9 @@ PDF interactive forms (ISO 32000-2, §12.7): the field tree with what each field
 - **A text field's appearance (`appearance::text`, with `text-layout`):**
   - `appearance::text` makes the appearance a text widget with no `/AP` shows, as PDFium as of chromium/8152 makes it, from plain data: a `TextField` (the text, flags, `/MaxLen`, `/Q`), a `WidgetLook` (the box, `/MK`'s background, border color and rotation, the border), a parsed `/DA`, and a font. It gives an `Appearance` (`/BBox`, `/Matrix`, the content uncompressed, and the font it needs, named by what it is), or why none could be made (`Unmade`: a character the font has no code for, at its offset in the text; no box; a number that isn't finite, or a size or box that sets the text too far out to be placed; a cap), never a `?` drawn.
   - The background and border, then `/Tx BMC`, the clip, the color, and the text: a single line set at the box's middle by the font's heights; wrapped lines from the top, words found as PDFium finds them; comb cells from `/MaxLen` in each quadding, divided by a solid or dashed border's color; a password as `*`; an automatic size (`0 Tf`) from PDFium's sizes by its search. The five border styles as PDFium draws them (a beveled or inset border's bands with no border color too, a dashed one from its bottom left corner round); `/MK /R` at each quarter turn, through the box and the matrix.
-  - `appearance::widget_text` reads a `Widget` of a text field into that data (the widget's own `/DA` and `/Q`, else the field's; a text stream's value), and `WidgetText::make` draws it in a font the caller keeps; `appearance::for_widget` reads the font too, for one widget.
+  - `appearance::widget_text` reads a `Widget` of a text field into that data (the widget's own `/DA` and `/Q`, else the field's; a text stream's value), and `WidgetText::make` draws it in a font the caller keeps; `appearance::text_for_widget` reads the font too, for one widget.
 - **Bounded, and quiet about content (`Limits`, `Fault`, `Error`):**
-  - The walk ends within `Limits` whatever the file says: a field reached twice (a cycle through `/Kids`) is left out, a tree deeper than `Limits::depth` is cut there, and more fields and widgets than `Limits::fields` is an error. A field's font is read under `Limits::fonts`, its streams within `Limits::font_bytes`; an appearance's text, and a comb field's cells, are within `Limits::text`.
+  - The walk ends within `Limits` whatever the file says: a field reached twice (a cycle through `/Kids`) is left out, a tree deeper than `Limits::depth` is cut there, and more fields and widgets than `Limits::fields` is an error. A field's font is read under `Limits::fonts`, its streams within `Limits::font_budget`; an appearance's text is within `Limits::text`, and a comb field's cells within `Limits::comb_cells`, so an empty field's dividers are bounded too.
   - Recoverable departures go to a `pdf_objects::fault::Sink` as `Fault`s; `&mut ()` collects none and reads the same form. `Debug` output of every type prints numbers and counts, never a field's name or value.
 
 ## Where it reads more, or less, than PDFium
@@ -42,7 +42,9 @@ A text field's appearance is laid out as PDFium lays it out as of chromium/8152:
 - **The border is read as ISO 32000-2 gives it:** from the border style dictionary over `/Border`, at the width `/W` gives, a fraction kept, and a dashed border and a comb field's dividers with the dash array given. PDFium reads `/Border` first, cuts the width to an integer, and dashes every dashed border `[3 3]`. A solid border wider than half its box covers it, where PDFium's ring leaves a hole.
 - **A negative `/MK /R` turns clockwise,** as `/R` is counterclockwise (`-90` is three quarter turns); PDFium reads the rotation's size alone (`-90` as `90`).
 - **A beveled border's dark band over a CMYK background is darker than it** (cyan, magenta and yellow halved, black moved halfway to full); PDFium halves every component, which draws the band lighter.
-- **A text field's value is a text string or a text stream** (ISO 32000-2, 12.7.5.3); an array is no text, where PDFium draws its first element. A field whose type comes from its grandparent gets its appearance, as the tree above has it inherited.
+- **A text field's value is a text string or a text stream** (ISO 32000-2, §12.7.5.3); an array is no text, where PDFium draws its first element. A field whose type comes from its grandparent gets its appearance, as the tree above has it inherited.
+- **Of two `Tf`, or two nonstroking colors, in a `/DA` the last is used,** as a content stream's graphics state has it; PDFium takes the first `Tf`, and the first `g`, else the first `rg`, else the first `k`. A stroking color (`G`, `RG`, `K`) never colors the text, here or in PDFium.
+- **A `/V` that is null, or refers to a null object, is an absent one,** and the parent's value is inherited, as for a reference to no object; PDFium inherits only for that last.
 
 ## Quickstart
 
@@ -118,6 +120,72 @@ let agree = &form.fields()[form.find("agree").unwrap()];
 assert_eq!(agree.kind(), Some(FieldKind::CheckBox));
 assert_eq!(agree.value(), Some(&FieldValue::State(b"Yes")));
 assert_eq!(agree.default_appearance(), Some(&b"/Helv 0 Tf 0 g"[..]));
+```
+
+Make the appearance of a text field's widget that has none, and bind what it names (`text-layout`):
+
+```rust
+use std::collections::BTreeMap;
+
+use pdf_forms::appearance::text_for_widget;
+use pdf_forms::pdf_content_streams::ResBody;
+use pdf_forms::pdf_fonts::Std14;
+use pdf_forms::pdf_gfx::Matrix;
+use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
+use pdf_forms::pdf_objects::{Object, ObjectId, Unreadable, Why, WithStreams, dict};
+use pdf_forms::{Form, Limits};
+
+let (name, helv) = (ObjectId::new(2, 0), ObjectId::new(3, 0));
+let mut objects = BTreeMap::new();
+// A text field that is its own widget, with a value and no `/AP`.
+objects.insert(
+    name,
+    Object::from(dict! {
+        "T" => Object::text("name"),
+        "FT" => Object::name("Tx"),
+        "V" => Object::text("Ada"),
+        "DA" => Object::text("/Helv 12 Tf 0 g"),
+        "Subtype" => Object::name("Widget"),
+        "Rect" => vec![Object::from(72), Object::from(700), Object::from(172), Object::from(720)],
+    }),
+);
+objects.insert(helv, Object::from(Std14::Helvetica.dict()));
+let catalog = dict! {
+    "AcroForm" => dict! {
+        "Fields" => vec![Object::from(name)],
+        "DR" => dict! { "Font" => dict! { "Helv" => helv } },
+    },
+};
+// A font's streams are read through the same source; these objects have none.
+let source = WithStreams::new(&objects, |id: ObjectId, _| -> Result<Vec<u8>, Unreadable> {
+    Err(Unreadable::new(id, Why::Damaged, "no streams".to_string()))
+});
+
+let limits = Limits::DEFAULT;
+let form = Form::read(&source, &catalog, Rules::Iso, &limits).unwrap().unwrap();
+let field = &form.fields()[form.find("name").unwrap()];
+let widget = &field.widgets()[0];
+let made = text_for_widget(&form, field, widget, &source, Rules::Iso, None, &limits, &mut ()).unwrap();
+
+// The form XObject to write as the widget's `/AP /N`: its `/BBox`, its
+// `/Matrix`, its content, and in its `/Resources` each resource the content
+// names, here the default resources' own font, by its object number.
+let appearance = &made.appearance;
+assert_eq!((appearance.bbox.width(), appearance.bbox.height()), (100.0, 20.0));
+assert_eq!(appearance.matrix, Matrix::IDENTITY);
+let mut fonts = dict! {};
+for need in &appearance.needs.0 {
+    match need.res.body() {
+        ResBody::Written(id) => fonts.set(need.name.clone(), *id),
+        // A fallback font's dictionary, which the caller writes as an object.
+        other => panic!("not an object of the file: {other:?}"),
+    }
+}
+assert_eq!(fonts.len(), 1);
+assert!(appearance.content.ends_with(b"(Ada) Tj\nET\nQ\nEMC\n"));
+// The font was found in `/DR` under the name `/DA` gives, so `/DR` is whole.
+assert!(!made.font.is_fallback());
+assert_eq!(made.font_name.as_deref(), Some(&b"Helv"[..]));
 ```
 
 ## Features

@@ -231,6 +231,112 @@ fn a_field_inherits_what_it_doesnt_hold() {
     assert_eq!(form.terminals().map(|(i, _)| i).collect::<Vec<_>>(), [2, 3]);
 }
 
+/// A `/V` or `/DV` that reaches nothing (null, a reference to no object or
+/// to null) is an absent one, and the parent's is inherited, as every other
+/// inherited entry is read; a value of the wrong type is the field's own,
+/// and no value.
+#[test]
+fn a_value_that_reaches_nothing_is_inherited() {
+    let mut store = Store::default();
+    let top = store.reserve();
+    let null = store.put(Object::from(Value::Null));
+    let dangling = ObjectId::new(9_999, 0);
+    let mut kids = Vec::new();
+    for (name, value) in [
+        ("dangling", Object::from(dangling)),
+        ("null", Object::from(Value::Null)),
+        ("by-reference", Object::from(null)),
+        ("wrong", Object::from(4)),
+        ("own", Object::text("mine")),
+    ] {
+        kids.push(store.put(dict! {
+            "T" => Object::text(name),
+            "Parent" => top,
+            "V" => value.clone(),
+            "DV" => value,
+            "Rect" => rect(),
+        }));
+    }
+    store.set(
+        top,
+        dict! {
+            "T" => Object::text("top"),
+            "FT" => Object::name("Tx"),
+            "V" => Object::text("from top"),
+            "DV" => Object::text("default"),
+            "Kids" => refs(&kids),
+        },
+    );
+    let catalog = catalog_of(refs(&[top]));
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let form = Form::read(&store.objects, &catalog, rules, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let values = |name: &str| {
+            let field = &form.fields()[form.find(name).unwrap()];
+            (field.value().cloned(), field.default_value().cloned())
+        };
+        let text = |s: &str| Some(FieldValue::Text(s.into()));
+        for inherits in ["top.dangling", "top.null", "top.by-reference"] {
+            assert_eq!(
+                values(inherits),
+                (text("from top"), text("default")),
+                "{inherits}"
+            );
+        }
+        assert_eq!(values("top.wrong"), (None, None));
+        assert_eq!(values("top.own"), (text("mine"), text("mine")));
+    }
+}
+
+/// `find` gives the first field whose full name is the one asked for,
+/// through names that hold periods, are empty, or are missing.
+#[test]
+fn find_is_the_first_field_of_that_full_name() {
+    let mut store = Store::default();
+    let top = store.reserve();
+    let mid = store.reserve();
+    let nameless = store.reserve();
+    let leaf = |store: &mut Store, name: &str, parent| {
+        store.put(dict! { "T" => Object::text(name), "Parent" => parent, "FT" => Object::name("Tx"), "Rect" => rect() })
+    };
+    let a = leaf(&mut store, "b.c", top);
+    let b = leaf(&mut store, "c", mid);
+    let c = leaf(&mut store, "", top);
+    let d = leaf(&mut store, "x", nameless);
+    let e = leaf(&mut store, "b", top);
+    store.set(
+        top,
+        dict! { "T" => Object::text("a"), "Kids" => refs(&[a, mid, c, nameless, e]) },
+    );
+    store.set(
+        mid,
+        dict! { "T" => Object::text("b"), "Parent" => top, "Kids" => refs(&[b]) },
+    );
+    store.set(nameless, dict! { "Parent" => top, "Kids" => refs(&[d]) });
+    let lone = store
+        .put(dict! { "T" => Object::text("a.b"), "FT" => Object::name("Tx"), "Rect" => rect() });
+    let catalog = catalog_of(refs(&[top, lone]));
+    let form = read(&store, &catalog);
+
+    let names: Vec<String> = (0..form.fields().len())
+        .map(|i| form.full_name(i).unwrap())
+        .collect();
+    assert!(names.len() >= 9, "{names:?}");
+    let asked = [
+        "", "a", "a.", "a.b", "a.b.c", "a.x", "a..x", ".a", "b", "b.c", "c", "x", "a.b.c.d", "aa",
+        "a.bb", "a.b.", ".",
+    ];
+    for name in names.iter().map(String::as_str).chain(asked) {
+        let by_scan = names.iter().position(|full| full == name);
+        assert_eq!(form.find(name), by_scan, "{name:?} among {names:?}");
+    }
+    // Two fields share `a.b.c` and two `a.b`; the first of each is found.
+    assert_eq!(names.iter().filter(|n| *n == "a.b.c").count(), 2);
+    assert_eq!(names.iter().filter(|n| *n == "a.b").count(), 3);
+    assert_eq!(form.find("nowhere"), None);
+}
+
 #[test]
 fn the_forms_da_and_q_stand_behind_a_fields() {
     let mut store = Store::default();
