@@ -2398,20 +2398,27 @@ fn default_appearance_ignores_bad_operands_and_keeps_the_last_of_each() {
     // No `Tf` still parses: the caller decides whether that's a fault.
     assert_eq!(parse_da(b"0.5 g").font_name, None);
 
-    // The last color wins, stroking and nonstroking operators alike, clamped to 0..=1.
+    // The last color of each kind wins, clamped to 0..=1: the nonstroking one is the text's,
+    // and a stroking one never is, whichever comes last.
     assert_eq!(
         parse_da(b"0 g 1 0 0 rg").color,
         Some(Color::Rgb([1.0, 0.0, 0.0]))
     );
-    assert_eq!(parse_da(b"1 0 0 rg 0.25 G").color, Some(Color::Gray(0.25)));
-    assert_eq!(
-        parse_da(b"0.5 g 0.1 0.2 0.3 RG").color,
-        Some(Color::Rgb([0.1, 0.2, 0.3]))
-    );
-    assert_eq!(
-        parse_da(b"0 g 0 0.5 1 0.25 K").color,
-        Some(Color::Cmyk([0.0, 0.5, 1.0, 0.25]))
-    );
+    let both = parse_da(b"1 0 0 rg 0.25 G");
+    assert_eq!(both.color, Some(Color::Rgb([1.0, 0.0, 0.0])));
+    assert_eq!(both.stroke_color, Some(Color::Gray(0.25)));
+    let both = parse_da(b"0.1 0.2 0.3 RG 0.5 g 1 G 0 0.5 1 0.25 K");
+    assert_eq!(both.color, Some(Color::Gray(0.5)));
+    assert_eq!(both.stroke_color, Some(Color::Cmyk([0.0, 0.5, 1.0, 0.25])));
+    // Written back in the one order: the text's color, then the stroking one.
+    assert_eq!(both.to_bytes(), b"0.5 g 0 0.5 1 0.25 K");
+    let stroke = parse_da(b"/Helv 8 Tf 2 -1 0.5 RG");
+    assert_eq!(stroke.color, None);
+    assert_eq!(stroke.stroke_color, Some(Color::Rgb([1.0, 0.0, 0.5])));
+    assert_eq!(stroke.to_bytes(), b"/Helv 8 Tf 1 0 0.5 RG");
+    assert_eq!(parse_da(&stroke.to_bytes()), stroke);
+    // A stroking operator without its operands is passed over like any other.
+    assert_eq!(parse_da(b"G 1 RG 0 0 1 K"), DefaultAppearance::default());
     assert_eq!(
         parse_da(b"2 -1 0.5 rg").color,
         Some(Color::Rgb([1.0, 0.0, 0.5]))
@@ -2644,7 +2651,7 @@ fn default_appearance_debug_reports_the_names_length_not_the_name() {
     assert_eq!(
         dbg,
         "DefaultAppearance { font_name_len: Some(11), font_size: Some(12.0), \
-         color: Some(Rgb([0.0, 0.0, 1.0])), char_space: Some(2.0), word_space: Some(1.0), \
+         color: Some(Rgb([0.0, 0.0, 1.0])), stroke_color: None, char_space: Some(2.0), word_space: Some(1.0), \
          horizontal_scale: Some(90.0), leading: Some(14.0), text_mode: Some(Stroke), \
          rise: Some(3.0) }"
     );
