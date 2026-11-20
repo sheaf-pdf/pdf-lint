@@ -57,20 +57,65 @@ fn std14_encoding(font: Std14) -> Encoding {
     }
 }
 
+/// The character Symbol's encoding has a code for where text has `ch`
+/// ([`Encoding::code`]), or `ch`. Five of its glyphs are written in text as
+/// characters the encoding's codes don't read back as:
+///
+/// - `Delta`, `Omega` and `mu` are Greek letters, as the alphabet around them
+///   is, but their codes' text is the signs ∆ (U+2206), Ω (U+2126) and
+///   µ (U+00B5), as the Adobe Glyph List reads those names. A keyboard gives
+///   the letters Δ (U+0394), Ω (U+03A9) and μ (U+03BC), and composed text has
+///   no U+2126 at all: its canonical composition is U+03A9.
+/// - `angleleft` and `angleright` read as U+2329 and U+232A, whose canonical
+///   compositions are U+3008 and U+3009, so composed text has those alone.
+///
+/// Text composed before it's laid out (as a combining accent needs:
+/// [`Encoding::code`]) would otherwise lose the omega sign and the angle
+/// brackets it had before composing.
+fn symbol_character(ch: char) -> char {
+    match ch {
+        '\u{0394}' => '\u{2206}',
+        '\u{03A9}' => '\u{2126}',
+        '\u{03BC}' => '\u{00B5}',
+        '\u{3008}' => '\u{2329}',
+        '\u{3009}' => '\u{232A}',
+        ch => ch,
+    }
+}
+
+/// The code that draws `ch` in a standard 14 font, in the encoding its
+/// dictionary names ([`Std14::dict`]), with that encoding.
+fn std14_code(font: Std14, ch: char) -> Option<(Encoding, u8)> {
+    let enc = std14_encoding(font);
+    let ch = match enc {
+        Encoding::Symbol => symbol_character(ch),
+        _ => ch,
+    };
+    Some((enc, enc.code(ch)?))
+}
+
+/// A standard 14 font lays text out in the encoding its dictionary names
+/// ([`Std14::dict`]): WinAnsiEncoding for the twelve Latin fonts, their own for
+/// Symbol and ZapfDingbats, each character the code [`Encoding::code`] gives it.
+/// Symbol also takes the Greek letters Δ (U+0394), Ω (U+03A9) and μ (U+03BC)
+/// and the angle brackets U+3008 and U+3009, at the codes of the signs ∆
+/// (U+2206), Ω (U+2126) and µ (U+00B5) and of U+2329 and U+232A, which draw
+/// them: so the letters a keyboard gives are drawn, and text composed (NFC)
+/// keeps its omega sign and angle brackets. Those five codes read back as the
+/// signs, not as the characters given.
 impl LayoutFont for Std14 {
     fn font_metrics(&self) -> FontMetrics {
         self.metrics()
     }
 
     fn char_advance(&self, ch: char) -> Option<f32> {
-        let enc = std14_encoding(*self);
-        let code = enc.code(ch)?;
+        let (enc, code) = std14_code(*self, ch)?;
         let glyph = enc.glyph(code)?;
         self.glyph_width(glyph)
     }
 
     fn encode_char(&self, ch: char, out: &mut Vec<u8>) -> bool {
-        let Some(code) = std14_encoding(*self).code(ch) else {
+        let Some((_, code)) = std14_code(*self, ch) else {
             return false;
         };
         out.push(code);
