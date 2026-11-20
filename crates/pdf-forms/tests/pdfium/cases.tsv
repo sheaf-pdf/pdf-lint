@@ -70,6 +70,7 @@ ap-border-underline	forms-ap	ap-border-underline.pdf
 ap-border-dash-array	forms-ap	ap-border-dash-array.pdf
 ap-border-array	forms-ap	ap-border-array.pdf
 ap-border-odd	forms-ap	ap-border-odd.pdf
+ap-border-beveled-colors	forms-ap	ap-border-beveled-colors.pdf
 ap-color-da-gray	forms-ap	ap-color-da-gray.pdf
 ap-color-da-rgb	forms-ap	ap-color-da-rgb.pdf
 ap-color-da-cmyk	forms-ap	ap-color-da-cmyk.pdf
@@ -91,6 +92,7 @@ ap-comb-border-dashed	forms-ap	ap-comb-border-dashed.pdf
 ap-comb-border-beveled	forms-ap	ap-comb-border-beveled.pdf
 ap-comb-border-inset	forms-ap	ap-comb-border-inset.pdf
 ap-comb-border-underline	forms-ap	ap-comb-border-underline.pdf
+ap-comb-border-dash-array	forms-ap	ap-comb-border-dash-array.pdf
 ap-comb-multiline	forms-ap	ap-comb-multiline.pdf
 ap-comb-password	forms-ap	ap-comb-password.pdf
 ap-comb-no-maxlen	forms-ap	ap-comb-no-maxlen.pdf

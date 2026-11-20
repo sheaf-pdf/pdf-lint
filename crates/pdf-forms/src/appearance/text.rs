@@ -7,7 +7,7 @@ use std::fmt;
 use pdf_annots::Quadding;
 use pdf_content_streams::{Color, Res, Reserved};
 use pdf_gfx::{
-    Canvas, DefaultAppearance, LaidOutText, LayoutFont, Matrix, Rect, TextAlign, TextBoxStyle,
+    Canvas, DefaultAppearance, LaidOutText, LayoutFont, Rect, TextAlign, TextBoxStyle,
     UnencodableChar, VerticalAlign, WrapMode, layout_text,
 };
 
@@ -79,12 +79,26 @@ const MULTILINE_SIZES: usize = AUTO_SIZES.len() / 4;
 /// color of `da`, the field's default appearance (ISO 32000-2, 12.7.4.3 and
 /// 12.7.5.3), as PDFium as of chromium/8152 makes it for the same field.
 ///
-/// What's drawn, in the box `[0 0 width height]`:
+/// The box is `[0 0 width height]`, its sides swapped where the widget's
+/// rotation is a quarter turn or three; the matrix turns it back onto the
+/// widget's rectangle (`[0 1 -1 0 width 0]`, `[-1 0 0 -1 width height]`,
+/// `[0 -1 1 0 0 height]` at one, two, and three quarter turns
+/// counterclockwise, a negative rotation clockwise; a rotation that isn't a
+/// multiple of 90 is none). What's drawn in it, in PDFium's order:
 ///
-/// 1. The background, where `look` has one, then the border in its color
-///    (`pdf_gfx::Canvas::box_border`), or with no color only a beveled or
-///    inset border's shaded bands.
-/// 2. `/Tx BMC`, then in a `q`..`Q` the box less the border's reach as a
+/// 1. The background, where `look` has one.
+/// 2. A beveled or inset border's two shaded bands, with a border color or
+///    without one: white and the background at half its brightness (a
+///    middle gray with none) for beveled, a middle and a light gray for
+///    inset.
+/// 3. The border, where it has a color: a solid frame for a solid, beveled,
+///    or inset border (`pdf_gfx::Canvas::box_border`), an underline's line,
+///    or for a dashed border one open path from its bottom left corner round
+///    under its own dash array (`[3]` where it has none it can use).
+/// 4. A comb field's dividers where its border is solid or dashed and has a
+///    color: a line between each two cells, in the border's color, width,
+///    and dashes, with or without text.
+/// 5. `/Tx BMC`, then in a `q`..`Q` the box less the border's reach as a
 ///    clip (`re W n`), the text color (`da`'s, black where it gives none),
 ///    and the text in `BT`..`ET`, then `EMC`. With no text, `/Tx BMC EMC`
 ///    with nothing between.
@@ -103,8 +117,10 @@ const MULTILINE_SIZES: usize = AUTO_SIZES.len() / 4;
 ///   given (`pdf_gfx::TextBoxStyle::font_heights_as_given`).
 /// - **Multiline** ([`FieldFlags::MULTILINE`]): `\r`, `\n`, and `\r\n` end
 ///   a line, a line is wrapped before the word that would pass the text
-///   box, keeping the spaces it's wrapped at, and lines are set from the
-///   top a line height apart, the font's ascent less its descent.
+///   box, keeping the spaces it's wrapped at, words found as PDFium finds
+///   them (`pdf_gfx::TextBoxStyle::line_end_spaces`: `half-baked` is one
+///   word), and lines are set from the top a line height apart, the font's
+///   ascent less its descent.
 /// - **Comb** ([`FieldFlags::COMB`] and a maximum length above `0`, as
 ///   PDFium draws it whatever the other flags): the text box is that many
 ///   equal cells, each of the text's first characters centered in one,
@@ -124,7 +140,8 @@ const MULTILINE_SIZES: usize = AUTO_SIZES.len() / 4;
 /// # Errors
 ///
 /// [`Unmade::Limit`] with [`Cap::Text`] where the text is longer than
-/// [`Limits::text`] bytes; [`Unmade::NoBox`] for a box with no width or no
+/// [`Limits::text`] bytes, or a comb field has more cells than that;
+/// [`Unmade::NoBox`] for a box with no width or no
 /// height; [`Unmade::NotFinite`] where a number of `look`, `da`'s size or
 /// color, or the text laid out isn't finite; [`Unmade::Unencodable`] for a
 /// character `font` has no code for.
@@ -139,16 +156,25 @@ pub fn text<F: LayoutFont + ?Sized>(
     if field.text.len() > limits.text {
         return Err(Unmade::Limit(Cap::Text));
     }
-    let bbox = frame::bbox(look)?;
+    let (bbox, matrix) = frame::placed(look)?;
     if da.font_size.is_some_and(|s| !s.is_finite()) || !frame::finite_color(da.color) {
         return Err(Unmade::NotFinite);
     }
     let client = frame::client(look, bbox);
     let shown = Shown::of(field);
+    if shown
+        .cells
+        .is_some_and(|n| usize::try_from(n).map_or(true, |n| n > limits.text))
+    {
+        return Err(Unmade::Limit(Cap::Text));
+    }
     let laid = lay_out(field, &shown, client, da, font)?;
 
     let mut canvas = Canvas::new();
     frame::frame(&mut canvas, look, bbox);
+    if let Some(cells) = shown.cells {
+        frame::dividers(&mut canvas, look, client, cells);
+    }
     match &laid {
         Some(laid) if !shown.text.is_empty() => canvas.with_tagged("Tx", |c| {
             c.with_state(|c| {
@@ -162,7 +188,7 @@ pub fn text<F: LayoutFont + ?Sized>(
     let (content, needs) = canvas.finish(&Reserved::default());
     Ok(Appearance {
         bbox,
-        matrix: Matrix::IDENTITY,
+        matrix,
         content,
         needs,
         font_size: laid.as_ref().map_or(0.0, |laid| laid.font_size),

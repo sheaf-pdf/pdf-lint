@@ -736,7 +736,7 @@ mod made_here {
     use std::ops::ControlFlow;
 
     use pdf_forms::appearance;
-    use pdf_forms::pdf_annots::{Annot, BorderStyle};
+    use pdf_forms::pdf_annots::{Annot, BorderStyle, TypedAnnot};
     use pdf_forms::pdf_content_streams::{Concat, LineCap, LineJoin, Paint as Painting, ResBody};
     use pdf_forms::pdf_fonts::Fonts;
     use pdf_forms::pdf_gfx::{
@@ -764,33 +764,6 @@ mod made_here {
     /// sequence, the one made here is empty.
     const RULES: [&str; 2] = ["clip", "tx"];
 
-    /// The cases whose rules the maker doesn't hold yet (multiline layout,
-    /// the border styles but solid, a comb field's dividers, rotation):
-    /// each must still differ from PDFium, so one that comes to agree is
-    /// taken off the list rather than passing unnoticed.
-    const PENDING: &[&str] = &[
-        "ap-multiline-hyphens",
-        "ap-border-dashed",
-        "ap-border-beveled",
-        "ap-border-inset",
-        "ap-border-dash-array",
-        "ap-border-array",
-        "ap-border-odd",
-        "ap-multiline-inset-centre",
-        "ap-comb-border-solid",
-        "ap-comb-border-dashed",
-        "ap-comb-border-beveled",
-        "ap-comb-border-inset",
-        "ap-rotate-90",
-        "ap-rotate-180",
-        "ap-rotate-270",
-        "ap-rotate-90-tall",
-        "ap-rotate-180-tall",
-        "ap-rotate-270-tall",
-        "ap-rotate-90-multiline",
-        "ap-rotate-odd",
-    ];
-
     /// The name a font PDFium adds to the appearance's resources is given
     /// here, and one this crate falls back to where the default resources
     /// lack the font: neither is the default resources'.
@@ -812,7 +785,9 @@ mod made_here {
         client: Option<[f32; 4]>,
     }
 
-    /// The box less `annot`'s border's reach on every side, as `[x y w h]`.
+    /// The box less `annot`'s border's reach on every side, as `[x y w h]`:
+    /// its rectangle's, turned by a quarter turn or three by `/MK /R`, as
+    /// PDFium turns it (`abs(R % 360)`: either swaps the sides).
     fn client_box(annot: &Annot<'_>) -> [f32; 4] {
         let border = annot.border();
         let width = border.width;
@@ -821,7 +796,15 @@ mod made_here {
             BorderStyle::Beveled | BorderStyle::Inset => 2.0 * width,
             _ => width,
         };
+        let rotation = match annot.typed() {
+            TypedAnnot::Widget(widget) => widget.appearance_chars.as_ref().map(|mk| mk.rotation),
+            _ => None,
+        };
         let (w, h) = (annot.rect().width(), annot.rect().height());
+        let (w, h) = match rotation.unwrap_or(0).unsigned_abs() % 360 {
+            90 | 270 => (h, w),
+            _ => (w, h),
+        };
         let (x0, x1) = (reach.min(w - reach), reach.max(w - reach));
         let (y0, y1) = (reach.min(h - reach), reach.max(h - reach));
         [x0, y0, x1 - x0, y1 - y0]
@@ -1194,9 +1177,61 @@ mod made_here {
             })
     }
 
+    /// A filled path's corners, where it's one polygon: a move and lines,
+    /// closed or not (a fill closes it), its last corner dropped where it's
+    /// back at the first.
+    fn polygon(segments: &[Segment]) -> Option<Vec<[f32; 2]>> {
+        let (Segment::Move(first), rest) = segments.split_first()? else {
+            return None;
+        };
+        let rest = match rest.split_last() {
+            Some((Segment::Close, before)) => before,
+            _ => rest,
+        };
+        let mut corners = vec![*first];
+        for segment in rest {
+            let Segment::Line(p) = segment else {
+                return None;
+            };
+            corners.push(*p);
+        }
+        if corners.len() > 1 && near(corners[0], corners[corners.len() - 1], PATH) {
+            corners.pop();
+        }
+        Some(corners)
+    }
+
+    /// Whether two polygons have the same corners in the same ring, from
+    /// any of them and either way round: the same region filled.
+    fn same_polygon(a: &[[f32; 2]], b: &[[f32; 2]]) -> bool {
+        let n = a.len();
+        n == b.len()
+            && (0..n).any(|from| {
+                (0..n).all(|i| near(a[i], b[(from + i) % n], PATH))
+                    || (0..n).all(|i| near(a[i], b[(from + n - i) % n], PATH))
+            })
+    }
+
+    /// A dash array as the pattern it draws: one with an odd number of
+    /// lengths repeats them, so `[3]` is `[3 3]` (ISO 32000-2, 8.4.3.6).
+    fn pattern(dash: &[f32]) -> Vec<f32> {
+        match dash.len() % 2 {
+            1 => dash.iter().chain(dash).copied().collect(),
+            _ => dash.to_vec(),
+        }
+    }
+
     fn same_paint(pdfium: &[Painted], ours: &[Painted]) -> bool {
         pdfium.len() == ours.len()
             && pdfium.iter().zip(ours).all(|(a, b)| {
+                let fill = matches!(
+                    (&a.paint, &b.paint),
+                    (Paint::Fill, Paint::Fill) | (Paint::EvenOddFill, Paint::EvenOddFill)
+                );
+                let region = match (polygon(&a.segments), polygon(&b.segments)) {
+                    (Some(pa), Some(pb)) if fill => same_polygon(&pa, &pb),
+                    _ => same_segments(&a.segments, &b.segments),
+                };
                 let paint = match (&a.paint, &b.paint) {
                     (Paint::Fill, Paint::Fill) | (Paint::EvenOddFill, Paint::EvenOddFill) => true,
                     (
@@ -1215,16 +1250,17 @@ mod made_here {
                             phase: p,
                         },
                     ) => {
+                        let (dash, d) = (pattern(dash), pattern(d));
                         (width - w).abs() <= PATH
                             && cap == c
                             && join == j
                             && dash.len() == d.len()
-                            && dash.iter().zip(d).all(|(a, b)| (a - b).abs() <= PATH)
+                            && dash.iter().zip(&d).all(|(a, b)| (a - b).abs() <= PATH)
                             && (phase - p).abs() <= PATH
                     }
                     _ => false,
                 };
-                paint && same_color(&a.color, &b.color) && same_segments(&a.segments, &b.segments)
+                paint && same_color(&a.color, &b.color) && region
             })
     }
 
@@ -1335,11 +1371,12 @@ mod made_here {
     /// ones in every part, or in every part but those `differ.tsv` lists
     /// for it, which must still differ: the size, every text origin within
     /// 0.05 pt, every string byte for byte, the box and the matrix, the
-    /// clip, and each path painted under the text (a solid border as the
-    /// region it covers) within 0.01 pt in its color. Where PDFium writes
-    /// no clip the clip here is the box less the border's reach, and where
-    /// it writes no `/Tx` the `/Tx` here is empty, each held on every such
-    /// case. The cases on [`PENDING`] must still differ somewhere.
+    /// clip, and each path painted under the text, in order, as the region
+    /// it covers (a solid border's ring, each band's six corners from any
+    /// of them, a line's ends, width, and dashes) within 0.01 pt in its
+    /// color. Where PDFium writes no clip the clip here is the box less the
+    /// border's reach, and where it writes no `/Tx` the `/Tx` here is
+    /// empty, each held on every such case.
     #[test]
     fn made_appearances_agree_with_pdfiums() {
         let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
@@ -1380,13 +1417,6 @@ mod made_here {
             }
         }
         assert_eq!(rules.len(), RULES.len(), "a differ.tsv line for each rule");
-        for name in PENDING {
-            assert!(
-                cases.iter().any(|c| c == name),
-                "{name} isn't a forms-ap case"
-            );
-            assert!(!listed.contains_key(*name), "{name} is pending and listed");
-        }
 
         let mut held = Held::default();
         let mut wrong = Vec::new();
@@ -1409,14 +1439,6 @@ mod made_here {
                     ));
                 }
                 found.extend(here.into_iter().map(|part| (index, part)));
-            }
-            if PENDING.contains(&name.as_str()) {
-                if found.is_empty() {
-                    wrong.push(format!(
-                        "{name} agrees with PDFium now: take it off PENDING"
-                    ));
-                }
-                continue;
             }
             let expected = listed.remove(name).unwrap_or_default();
             let covers = |(part, at): &(String, Option<usize>),

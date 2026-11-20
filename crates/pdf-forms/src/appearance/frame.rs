@@ -3,8 +3,8 @@
 
 use std::fmt;
 
-use pdf_content_streams::{Color, ResourceNeeds};
-use pdf_gfx::{BoxBorder, Canvas, Matrix, Rect, UnencodableChar};
+use pdf_content_streams::{Color, LineCap, Paint, ResourceNeeds};
+use pdf_gfx::{BoxBorder, BoxBorderStyle, Canvas, Matrix, Point, Rect, UnencodableChar};
 
 use crate::error::Error;
 use crate::limits::Cap;
@@ -28,7 +28,9 @@ pub struct WidgetLook<'a> {
     /// the two shaded bands of a beveled or inset one, which have colors of
     /// their own.
     pub border_color: Option<Color>,
-    /// The widget's rotation (`/MK /R`), in degrees counterclockwise.
+    /// The widget's rotation (`/MK /R`), in degrees counterclockwise: a
+    /// multiple of 90 turns the appearance's box, a negative one clockwise;
+    /// any other number is none.
     pub rotation: i32,
     /// The border: its width, style, and dash array. Whether or not it's
     /// drawn, the text is set inside it, by its width, or twice its width
@@ -64,9 +66,12 @@ impl WidgetLook<'static> {
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Appearance {
-    /// The form XObject's `/BBox`: the box at the origin.
+    /// The form XObject's `/BBox`: the box at the origin, its width and
+    /// height swapped where the widget's rotation is a quarter turn or
+    /// three.
     pub bbox: Rect,
-    /// The form XObject's `/Matrix`.
+    /// The form XObject's `/Matrix`: the turn that places the box on the
+    /// widget's rectangle, or the identity.
     pub matrix: Matrix,
     /// The content stream, uncompressed.
     pub content: Vec<u8>,
@@ -152,12 +157,31 @@ pub(crate) fn finite_color(color: Option<Color>) -> bool {
     }
 }
 
-/// The box `look` gives, at the origin: [`Unmade::NoBox`] where it has no
+/// The quarter turns counterclockwise a widget's rotation (`/MK /R`) comes
+/// to: `90`, `180`, or `270` degrees, or any of those and a whole turn
+/// either way, is one, two, or three; any other number is none. A negative
+/// rotation is clockwise, so `-90` is three, as ISO 32000-2, 12.5.6.19 has
+/// it (PDFium reads it as one).
+pub(crate) const fn quarter_turns(rotation: i32) -> u8 {
+    match rotation.rem_euclid(360) {
+        90 => 1,
+        180 => 2,
+        270 => 3,
+        _ => 0,
+    }
+}
+
+/// The appearance's box and matrix for `look`: the box at the origin,
+/// turned by the widget's rotation, so its width and height swap at a
+/// quarter turn and three, and the matrix that turns it back onto the
+/// widget's rectangle (as PDFium places it, `fpdfsdk/cpdfsdk_widget.cpp`,
+/// `GetRotatedRect` and `GetMatrix`). [`Unmade::NoBox`] where the box has no
 /// width or no height, or isn't finite, and [`Unmade::NotFinite`] where its
 /// border's width or a color isn't.
-pub(crate) fn bbox(look: &WidgetLook<'_>) -> Result<Rect, Unmade> {
+pub(crate) fn placed(look: &WidgetLook<'_>) -> Result<(Rect, Matrix), Unmade> {
     let sized = |v: f32| v.is_finite() && v > 0.0;
-    if !(sized(look.width) && sized(look.height)) {
+    let (w, h) = (look.width, look.height);
+    if !(sized(w) && sized(h)) {
         return Err(Unmade::NoBox);
     }
     if !(look.border.width.is_finite()
@@ -166,7 +190,21 @@ pub(crate) fn bbox(look: &WidgetLook<'_>) -> Result<Rect, Unmade> {
     {
         return Err(Unmade::NotFinite);
     }
-    Ok(Rect::new(0.0, 0.0, look.width, look.height))
+    Ok(match quarter_turns(look.rotation) {
+        1 => (
+            Rect::new(0.0, 0.0, h, w),
+            Matrix::new(0.0, 1.0, -1.0, 0.0, w, 0.0),
+        ),
+        2 => (
+            Rect::new(0.0, 0.0, w, h),
+            Matrix::new(-1.0, 0.0, 0.0, -1.0, w, h),
+        ),
+        3 => (
+            Rect::new(0.0, 0.0, h, w),
+            Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, h),
+        ),
+        _ => (Rect::new(0.0, 0.0, w, h), Matrix::IDENTITY),
+    })
 }
 
 /// The box text is set in: `bbox` less the border's reach on every side
@@ -183,11 +221,17 @@ pub(crate) fn client(look: &WidgetLook<'_>, bbox: Rect) -> Rect {
     )
 }
 
-/// Draws what's under the content: the box filled in the background, then
-/// the border in its color (`Canvas::box_border`), or with no color only a
-/// beveled or inset border's bands (`Canvas::box_bands`), as PDFium draws
-/// them with no `/BC` (`fpdfsdk/cpdfsdk_appstream.cpp`,
-/// `GetBorderAppStream`).
+/// Draws what's under the content, in the order PDFium draws it
+/// (`fpdfsdk/cpdfsdk_appstream.cpp`, `GetBorderAppStream`):
+///
+/// 1. The box filled in the background.
+/// 2. A beveled or inset border's two bands (`Canvas::box_bands`), with a
+///    border color or without one; a beveled border's dark band is the
+///    background at half its brightness, or with none, white's (a middle
+///    gray in RGB).
+/// 3. The border in its color, where it has one: a solid frame for a solid,
+///    beveled, or inset border (`Canvas::box_border`); a dashed one as
+///    [`dashed`] draws it; an underline's line.
 pub(crate) fn frame(canvas: &mut Canvas, look: &WidgetLook<'_>, bbox: Rect) {
     if let Some(background) = look.background {
         canvas.with_state(|c| {
@@ -195,8 +239,96 @@ pub(crate) fn frame(canvas: &mut Canvas, look: &WidgetLook<'_>, bbox: Rect) {
             c.fill_rect(bbox);
         });
     }
-    match look.border_color {
-        Some(color) => canvas.box_border(bbox, &look.border, color, look.background),
-        None => canvas.box_bands(bbox, &look.border, look.background),
+    let behind = look.background.unwrap_or(Color::Rgb([1.0; 3]));
+    canvas.box_bands(bbox, &look.border, Some(behind));
+    let Some(color) = look.border_color else {
+        return;
+    };
+    let border = &look.border;
+    match border.style {
+        BoxBorderStyle::Dashed => dashed(canvas, bbox, border, color),
+        BoxBorderStyle::Underline => canvas.box_border(bbox, border, color, None),
+        _ => canvas.box_border(bbox, &BoxBorder::solid(border.width), color, None),
     }
+}
+
+/// Whether a line of width `w` can be stroked about `rect`: `w` finite and
+/// above `0`, and `rect` grown by as far as a stroke's miter reaches at the
+/// default limit finite, as `Canvas::box_border` keeps its borders.
+fn strokable(rect: Rect, w: f32) -> bool {
+    w > 0.0 && w.is_finite() && rect.expand(w / 2.0 * 10.0).is_finite()
+}
+
+/// The dash array a dashed border is drawn with: its own, or `[3]` where
+/// that's empty, holds a negative or non-finite number, or is all zeros
+/// (ISO 32000-2, 12.5.4 and 8.4.3.6), as `Canvas::box_border` takes it.
+fn dash<'a>(border: &BoxBorder<'a>) -> &'a [f32] {
+    let usable = border.dash.iter().all(|d| d.is_finite() && *d >= 0.0)
+        && border.dash.iter().any(|d| *d > 0.0);
+    if usable { border.dash } else { &[3.0] }
+}
+
+/// A dashed border as PDFium draws it, so its dashes fall where PDFium's do:
+/// one open path half its width inside `rect`, from the bottom left corner
+/// up, along the top, down, and back along the bottom to where it began,
+/// stroked under its own dash array from phase `0`. Nothing where `rect` is
+/// narrower or shorter than the width.
+fn dashed(canvas: &mut Canvas, rect: Rect, border: &BoxBorder<'_>, color: Color) {
+    let w = border.width;
+    if !strokable(rect, w) {
+        return;
+    }
+    let Some(r) = rect.inset(w / 2.0, w / 2.0) else {
+        return;
+    };
+    canvas.with_state(|c| {
+        c.stroke_color(color);
+        c.line_width(w);
+        c.dash(dash(border), 0.0);
+        c.polyline(
+            &[
+                Point::new(r.x0, r.y0),
+                Point::new(r.x0, r.y1),
+                Point::new(r.x1, r.y1),
+                Point::new(r.x1, r.y0),
+                Point::new(r.x0, r.y0),
+            ],
+            false,
+            Paint::Stroke,
+        );
+    });
+}
+
+/// A comb field's dividers, as PDFium draws them where its border is solid
+/// or dashed and has a color (`fpdfsdk/cpdfsdk_appstream.cpp`,
+/// `SetAsTextField`): between each two of `cells` equal cells across
+/// `client`, the box less the border, a line from its bottom to its top in
+/// the border's color and width; a solid border's with projecting square
+/// caps, a dashed one's under its dash array. Nothing for the other styles.
+pub(crate) fn dividers(canvas: &mut Canvas, look: &WidgetLook<'_>, client: Rect, cells: u32) {
+    let border = &look.border;
+    let dashed = match border.style {
+        BoxBorderStyle::Solid => false,
+        BoxBorderStyle::Dashed => true,
+        _ => return,
+    };
+    let Some(color) = look.border_color else {
+        return;
+    };
+    if cells < 2 || !strokable(client, border.width) {
+        return;
+    }
+    let step = client.width() / cells as f32;
+    canvas.with_state(|c| {
+        c.line_width(border.width);
+        c.stroke_color(color);
+        match dashed {
+            true => c.dash(dash(border), 0.0),
+            false => c.line_cap(LineCap::Square),
+        }
+        for i in 1..cells {
+            let x = client.x0 + step * i as f32;
+            c.line(Point::new(x, client.y0), Point::new(x, client.y1));
+        }
+    });
 }

@@ -3415,7 +3415,8 @@ fn line_end_spaces_keeps_the_spaces_a_line_breaks_at() {
         want(&[("abcd", 20.0), (" ef", 12.5)])
     );
 
-    // A word begins after a hyphen too.
+    // A hyphen joins the characters about it: on, no word begins after one,
+    // so a line with no other word breaks before its next character.
     let text = "ab-cd ef";
     assert_eq!(
         lines(text, 25.0, false),
@@ -3423,9 +3424,9 @@ fn line_end_spaces_keeps_the_spaces_a_line_breaks_at() {
     );
     assert_eq!(
         lines(text, 25.0, true),
-        want(&[("ab-", 15.0), ("cd ef", 22.5)])
+        want(&[("ab-cd", 25.0), (" ef", 12.5)])
     );
-    // But not at a space or a hyphen after one.
+    // Nor at a space or a hyphen after one.
     let text = "a--b c";
     assert_eq!(
         lines(text, 22.5, true),
@@ -3434,6 +3435,35 @@ fn line_end_spaces_keeps_the_spaces_a_line_breaks_at() {
     assert_eq!(
         lines("a- b c", 15.0, true),
         want(&[("a- ", 12.5), ("b c", 12.5)])
+    );
+    // A hyphenated word that fits a line moves to the next whole; one longer
+    // than a line breaks before the character that passes it, hyphen or not.
+    assert_eq!(
+        lines("ab cd-ef", 30.0, true),
+        want(&[("ab ", 12.5), ("cd-ef", 25.0)])
+    );
+    assert_eq!(
+        lines("abc-def", 17.5, true),
+        want(&[("abc", 15.0), ("-de", 15.0), ("f", 5.0)])
+    );
+    // Punctuation that doesn't join ends a word; an opening bracket and a
+    // currency sign begin one, and inside a bracket just opened nothing
+    // does.
+    assert_eq!(
+        lines("ab!cd", 20.0, true),
+        want(&[("ab!", 15.0), ("cd", 10.0)])
+    );
+    assert_eq!(
+        lines("ab(cd", 20.0, true),
+        want(&[("ab", 10.0), ("(cd", 15.0)])
+    );
+    assert_eq!(
+        lines("a( bc", 17.5, true),
+        want(&[("a", 5.0), ("( bc", 17.5)])
+    );
+    assert_eq!(
+        lines("ab$12", 20.0, true),
+        want(&[("ab", 10.0), ("$12", 15.0)])
     );
 
     // A paragraph's last line keeps its spaces too; a paragraph's first ones
@@ -3480,6 +3510,67 @@ fn line_end_spaces_keeps_the_spaces_a_line_breaks_at() {
         drawn.contains("7.5 Tw\n1 0 0 1 0 92 Tm\n(ab cd  ) Tj\n"),
         "{drawn}"
     );
+}
+
+/// Where a line that keeps its spaces may break between two characters, by
+/// the classes PDFium's line breaking reads them in.
+#[cfg(feature = "text-layout")]
+#[test]
+fn line_end_spaces_divides_words_by_their_characters_classes() {
+    use crate::wrap::divides;
+
+    // Two letters or digits, Latin's past ASCII among them, never.
+    for (a, b) in [
+        ('a', 'b'),
+        ('1', 'x'),
+        ('x', '2'),
+        ('é', 'ß'),
+        ('Ａ', 'ｚ'),
+        ('ẞ', 'a'),
+    ] {
+        assert!(!divides(a, b), "{a:?} {b:?}");
+    }
+    // Before a space or punctuation never; after one, at a character that
+    // isn't, always.
+    for b in [
+        ' ', '\u{3000}', '!', ')', ',', '-', '.', ':', '?', ']', '}', '\u{2019}', '\u{3002}',
+    ] {
+        assert!(!divides('a', b), "{b:?}");
+    }
+    for a in [
+        ' ', '\u{3000}', '!', '"', ')', ':', ';', '?', ']', '}', '\u{201D}', '\u{FF01}',
+    ] {
+        assert!(divides(a, 'b'), "{a:?}");
+    }
+    // Punctuation that joins: neither after it nor before it.
+    for a in ['\'', ',', '-', '.', '/', '\u{6}'] {
+        assert!(!divides(a, 'b'), "{a:?}");
+        assert!(!divides(a, '中'), "{a:?}");
+    }
+    assert!(!divides('a', '\u{6}'));
+    // A currency sign or the numero sign: before one, not after it.
+    for sign in ['$', '€', '£', '¥', '\u{20BF}', '№', '\u{FF04}'] {
+        assert!(divides('a', sign), "{sign:?}");
+        assert!(!divides(sign, '1'), "{sign:?}");
+        assert!(!divides(sign, '中'), "{sign:?}");
+    }
+    // Ideographs and syllables each a word, before and after.
+    for cjk in ['中', 'あ', 'カ', '한', '\u{20000}', '\u{FF76}', '\u{3021}'] {
+        assert!(divides('a', cjk), "{cjk:?}");
+        assert!(divides(cjk, 'a'), "{cjk:?}");
+        assert!(divides(cjk, '中'), "{cjk:?}");
+    }
+    // Other characters stay with what's beside them.
+    for (a, b) in [
+        ('a', '#'),
+        ('#', 'a'),
+        ('a', '+'),
+        ('*', '1'),
+        ('a', 'α'),
+        ('α', 'β'),
+    ] {
+        assert!(!divides(a, b), "{a:?} {b:?}");
+    }
 }
 
 #[cfg(feature = "text-layout")]

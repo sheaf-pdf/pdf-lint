@@ -24,8 +24,9 @@ pub struct Limits {
     pub items: usize,
     /// Caps forwarded to `pdf-annots` when a widget is read as an annotation.
     pub annots: pdf_annots::Limits,
-    /// Maximum bytes of display text an appearance is made of, `text-layout`
-    /// (`262_144` by default); past it, [`Cap::Text`].
+    /// Maximum bytes of display text an appearance is made of, and cells a
+    /// comb field's appearance divides its box into, `text-layout`
+    /// (`262_144` by default); past either, [`Cap::Text`].
     pub text: usize,
     /// Caps forwarded to `pdf-fonts` when a field's font is read from the
     /// default resources (`FieldFont::find`, `text-layout`).
@@ -66,7 +67,8 @@ pub enum Cap {
     Items,
     /// A cap of `pdf-annots` was exceeded while a widget was read.
     Annots(pdf_annots::Cap),
-    /// The display text of an appearance exceeded [`Limits::text`].
+    /// The display text of an appearance, or a comb field's cells,
+    /// exceeded [`Limits::text`].
     Text,
     /// A field's font's streams decompressed past [`Limits::font_bytes`].
     FontBytes,
@@ -78,7 +80,7 @@ impl std::fmt::Display for Cap {
             Cap::Fields => f.write_str("fields and widgets in a form"),
             Cap::Items => f.write_str("items in a field's value"),
             Cap::Annots(cap) => write!(f, "{cap}"),
-            Cap::Text => f.write_str("bytes of an appearance's text"),
+            Cap::Text => f.write_str("bytes of an appearance's text, or a comb field's cells"),
             Cap::FontBytes => f.write_str("bytes a field's font decompresses to"),
         }
     }

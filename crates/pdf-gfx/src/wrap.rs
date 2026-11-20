@@ -289,17 +289,27 @@ pub struct TextBoxStyle {
     /// default).
     ///
     /// Off, the spaces a line ends with are trimmed from it, and a wrapped
-    /// line's first spaces are passed over. On, no space is dropped: under
-    /// [`WrapMode::Word`] a line that would pass the box's width at its next
-    /// character, a space among them, is broken before the last word that
-    /// begins on it after its first character (a character that's neither a
-    /// space nor a hyphen, after a space or a hyphen), so the spaces before
-    /// that word end the line, in its `codes`, its `text_range`, and the
-    /// `width` it's aligned by, and the next line begins at the word. With no
-    /// such word it's broken before that next character, which begins the
-    /// next line even where it's a space. A paragraph's last line keeps the
-    /// spaces it ends with too. Justified text is spread by the spaces
-    /// between its words, not by those that end its line.
+    /// line's first spaces are passed over. On, no space is dropped, and
+    /// words are found as PDFium's line breaking finds them as of
+    /// chromium/8152: under [`WrapMode::Word`] a line that would pass the
+    /// box's width at its next character, a space among them, is broken
+    /// before the last word that begins on it after its first character, so
+    /// the spaces before that word end the line, in its `codes`, its
+    /// `text_range`, and the `width` it's aligned by, and the next line
+    /// begins at the word. With no such word it's broken before that next
+    /// character, which begins the next line even where it's a space. A
+    /// paragraph's last line keeps the spaces it ends with too. Justified
+    /// text is spread by the spaces between its words, not by those that end
+    /// its line.
+    ///
+    /// A word begins at a character that isn't a space or punctuation after
+    /// a space or punctuation, but not after punctuation that joins what's
+    /// about it (an apostrophe, comma, hyphen, full stop or solidus: `e.g.`
+    /// and `half-baked` are each one word); at an opening bracket; at a
+    /// currency sign, but not after one; and at an ideograph or after one;
+    /// never between two letters or digits, and not inside a bracket just
+    /// opened (the spaces after it, and the first character after those,
+    /// carry on its word).
     pub line_end_spaces: bool,
     /// Whether the font's ascent and descent are taken as its
     /// [`LayoutFont::font_metrics`] gives them (`false` by default).
@@ -800,11 +810,138 @@ fn wrap_paragraph<'a>(
     out
 }
 
-/// Whether a word begins at `glyphs[i]`, for a line that keeps its spaces: a
-/// character that's neither a space nor a hyphen, after a space or a hyphen.
+/// Whether a word begins at `glyphs[i]`, for a line that keeps its spaces,
+/// as PDFium's line breaking finds one as of chromium/8152
+/// (`core/fpdfdoc/cpvt_section.cpp`, `SplitLines` and `NeedDivision`): at an
+/// opening bracket, or where the character before it and it divide
+/// ([`divides`]); but not inside a bracket just opened, where the spaces
+/// after it and the first character after those carry on its word.
 fn begins_word(glyphs: &[EncodedGlyph], i: usize) -> bool {
-    let not_a_break = |ch: char| ch != ' ' && ch != '-';
-    i > 0 && not_a_break(glyphs[i].ch) && !not_a_break(glyphs[i - 1].ch)
+    let Some(prev) = i.checked_sub(1).map(|p| glyphs[p].ch) else {
+        return false;
+    };
+    let ch = glyphs[i].ch;
+    if !(opens(ch) || divides(prev, ch)) {
+        return false;
+    }
+    // A space is never a word's start, so only a word's first character
+    // looks back, and only over the spaces just before it.
+    let opened = glyphs[..i]
+        .iter()
+        .rev()
+        .map(|g| g.ch)
+        .find(|&c| !is_space(c))
+        .is_some_and(opens);
+    !opened
+}
+
+/// Whether a line may break between `prev` and `ch`, `ch` beginning a word:
+/// never between two letters or digits, before a space or punctuation, or
+/// next to punctuation that joins what's about it (an apostrophe, comma,
+/// hyphen, full stop or solidus); always after a space or other
+/// punctuation; never after a currency sign; always before one or an
+/// ideograph, and after an ideograph.
+pub(crate) fn divides(prev: char, ch: char) -> bool {
+    // Two letters or digits never divide: every rule below that does needs
+    // a space, punctuation, a currency sign, or an ideograph.
+    if is_space(ch) || is_punctuation(ch) || joins(prev) || joins(ch) {
+        return false;
+    }
+    if is_space(prev) || is_punctuation(prev) {
+        return true;
+    }
+    if is_prefix(prev) {
+        return false;
+    }
+    is_prefix(ch) || is_ideograph(ch) || is_ideograph(prev)
+}
+
+/// A space, for line breaking: U+0020 and the ideographic space.
+fn is_space(ch: char) -> bool {
+    matches!(ch, ' ' | '\u{3000}')
+}
+
+/// Punctuation, for line breaking: a line may break after it, and before
+/// it never.
+fn is_punctuation(ch: char) -> bool {
+    matches!(ch,
+        '\u{1}'..='\u{4}'
+        | '!' | '"' | '\'' | '(' | ')' | ',' | '-' | '.' | '/' | ':' | ';' | '?'
+        | '[' | ']' | '{' | '}'
+        | '\u{82}' | '\u{84}' | '\u{85}' | '\u{91}'..='\u{94}' | '\u{96}' | '\u{B4}' | '\u{B8}'
+        | '\u{2010}'..='\u{2013}'
+        | '\u{2018}'..='\u{201F}'
+        | '\u{2032}'..='\u{2037}'
+        | '\u{203C}'..='\u{203E}'
+        | '\u{2044}'
+        | '\u{3001}'..='\u{3003}'
+        | '\u{3005}'
+        | '\u{3009}'..='\u{3011}'
+        | '\u{3014}'..='\u{301B}'
+        | '\u{301D}'..='\u{301F}'
+        | '\u{FE50}'..='\u{FE5E}'
+        | '\u{FE63}'
+        | '\u{FF01}' | '\u{FF02}' | '\u{FF07}'..='\u{FF09}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF0F}'
+        | '\u{FF1A}' | '\u{FF1B}' | '\u{FF1F}' | '\u{FF3B}' | '\u{FF3D}' | '\u{FF40}'
+        | '\u{FF5B}'..='\u{FF5D}'
+        | '\u{FF61}'..='\u{FF65}'
+        | '\u{FF9E}' | '\u{FF9F}')
+}
+
+/// Punctuation that joins the characters about it, so no line breaks next
+/// to it: the apostrophe, comma, hyphen, full stop and solidus (and
+/// U+0006).
+fn joins(ch: char) -> bool {
+    matches!(ch, '\u{6}' | '\'' | ',' | '-' | '.' | '/')
+}
+
+/// An opening bracket, which begins a word wherever it isn't inside one
+/// just opened.
+fn opens(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{1}'
+            | '\u{3}'
+            | '('
+            | '['
+            | '{'
+            | '\u{300A}'
+            | '\u{300C}'
+            | '\u{300E}'
+            | '\u{3010}'
+            | '\u{3014}'
+            | '\u{3016}'
+            | '\u{3018}'
+            | '\u{301A}'
+            | '\u{FF08}'
+            | '\u{FF3B}'
+            | '\u{FF5B}'
+            | '\u{FF62}'
+    )
+}
+
+/// A sign written before a number (a currency sign, or the numero sign),
+/// which no line breaks after.
+fn is_prefix(ch: char) -> bool {
+    matches!(ch,
+        '$' | '\u{80}' | '\u{A2}'..='\u{A5}' | '\u{20A0}'..='\u{20CF}' | '\u{2116}' | '\u{FE69}'
+        | '\u{FF04}' | '\u{FFE0}' | '\u{FFE1}' | '\u{FFE5}' | '\u{FFE6}')
+}
+
+/// An ideograph or syllable of Chinese, Japanese or Korean, each a word of
+/// its own for line breaking.
+fn is_ideograph(ch: char) -> bool {
+    matches!(ch,
+        '\u{1100}'..='\u{11FF}'
+        | '\u{2E80}'..='\u{2FFF}'
+        | '\u{3005}' | '\u{3006}' | '\u{3021}'..='\u{3029}' | '\u{3031}'..='\u{3035}'
+        | '\u{3040}'..='\u{9FBF}'
+        | '\u{AC00}'..='\u{D7AF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FE30}'..='\u{FE4F}'
+        | '\u{FF66}'..='\u{FF9D}'
+        | '\u{20000}'..='\u{2A6DF}'
+        | '\u{2F800}'..='\u{2FA1F}')
 }
 
 /// How many of `glyphs` are spaces that `Tw` widens: a space drawn as the

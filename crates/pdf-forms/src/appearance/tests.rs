@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use pdf_content_streams::{Color, Res};
 use pdf_fonts::{Font, GlyphBox, Std14};
-use pdf_gfx::{BoxBorder, DefaultAppearance, LayoutFont, UnencodableChar};
+use pdf_gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance, LayoutFont, Matrix, UnencodableChar};
 use pdf_objects::fault::Place;
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{
@@ -785,7 +785,7 @@ fn debug_prints_no_name() {
     );
     assert_eq!(
         Error::Limit(Cap::Text).to_string(),
-        "exceeded cap on bytes of an appearance's text"
+        "exceeded cap on bytes of an appearance's text, or a comb field's cells"
     );
 }
 
@@ -1107,7 +1107,7 @@ fn unmade_for_no_box_numbers_not_finite_and_the_text_cap() {
         ),
         (
             Unmade::Limit(Cap::Text),
-            "exceeded cap on bytes of an appearance's text",
+            "exceeded cap on bytes of an appearance's text, or a comb field's cells",
         ),
         (Unmade::NotText, "the field isn't a text field"),
         (
@@ -1652,4 +1652,265 @@ fn appearances_are_send_and_sync() {
     check::<Unmade>();
     check::<super::Made>();
     check::<super::WidgetText<'static>>();
+}
+
+/// `field` made in Helvetica at 10 points in black in `look`: its content.
+fn drawn(field: &TextField<'_>, look: &WidgetLook<'_>) -> String {
+    let font = helvetica();
+    let ap = text(
+        field,
+        look,
+        &DefaultAppearance::new("Helv", 10.0, None),
+        font.res().unwrap(),
+        &font.layout(),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    String::from_utf8(ap.content).unwrap()
+}
+
+/// A 100 by 20 box with a border 2 wide in `style` under `dash`, blue where
+/// `colored`.
+fn bordered(style: BoxBorderStyle, dash: &[f32], colored: bool) -> WidgetLook<'_> {
+    let mut look = WidgetLook::new(100.0, 20.0);
+    look.border = BoxBorder::new(2.0, style).with_dash(dash);
+    look.border_color = colored.then_some(Color::Rgb([0.0, 0.0, 1.0]));
+    look
+}
+
+/// What's drawn before the text: the content up to `/Tx BMC`.
+fn under_the_text(content: &str) -> &str {
+    &content[..content.find("/Tx BMC").unwrap()]
+}
+
+/// Each border style is drawn where PDFium draws it, in its order: a beveled
+/// or inset border's bands first, with a border color or without one, then
+/// the frame in that color; a dashed border as one open path from its
+/// bottom left corner up, under its own dash array or `[3]`; an underline's
+/// line half its width up; nothing for a width of `0`.
+#[test]
+fn each_border_style_is_drawn_as_pdfium_draws_it() {
+    use BoxBorderStyle::{Beveled, Dashed, Inset, Solid, Underline};
+    let hello = TextField::new("Hello");
+    let border = |style, dash: &[f32], colored| {
+        under_the_text(&drawn(&hello, &bordered(style, dash, colored))).to_string()
+    };
+
+    // Dashed: one open path, half the width inside the box, from the bottom
+    // left corner up and round, under the dash array as given.
+    let dashed = border(Dashed, &[3.0, 2.0], true);
+    assert_eq!(
+        dashed,
+        "q\n0 0 1 RG\n2 w\n[3 2] 0 d\n1 1 m\n1 19 l\n99 19 l\n99 1 l\n1 1 l\nS\nQ\n"
+    );
+    // An array that can't be used, `[3]`.
+    for unusable in [&[][..], &[0.0, 0.0], &[-1.0, 2.0], &[3.0, f32::INFINITY]] {
+        assert!(
+            border(Dashed, unusable, true).contains("[3] 0 d\n1 1 m\n"),
+            "{unusable:?}"
+        );
+    }
+
+    // Beveled: the light band, the dark one (white halved with no
+    // background), then the frame.
+    let beveled = border(Beveled, &[], true);
+    assert_eq!(
+        beveled,
+        "q\n1 g\n2 2 m\n2 18 l\n98 18 l\n96 16 l\n4 16 l\n4 4 l\nh\nf\n\
+         0.5 0.5 0.5 rg\n2 2 m\n98 2 l\n98 18 l\n96 16 l\n96 4 l\n4 4 l\nh\nf\nQ\n\
+         q\n0 0 1 RG\n2 w\n[] 0 d\n1 1 98 18 re\nS\nQ\n"
+    );
+    // Over a background, the dark band is it halved.
+    let mut look = bordered(Beveled, &[], true);
+    look.background = Some(Color::Gray(0.8));
+    let over = under_the_text(&drawn(&hello, &look)).to_string();
+    assert!(
+        over.starts_with("q\n0.8 g\n0 0 100 20 re\nf\nQ\nq\n1 g\n"),
+        "{over}"
+    );
+    assert!(over.contains("f\n0.4 g\n2 2 m\n"), "{over}");
+    // Inset: a middle gray band and a light one, then the frame.
+    let inset = border(Inset, &[], true);
+    assert!(inset.starts_with("q\n0.5 g\n2 2 m\n"), "{inset}");
+    assert!(inset.contains("f\n0.75 g\n2 2 m\n"), "{inset}");
+    assert!(inset.ends_with("Q\nq\n0 0 1 RG\n2 w\n[] 0 d\n1 1 98 18 re\nS\nQ\n"));
+    // With no border color, the bands alone.
+    for (style, banded) in [(Beveled, &beveled), (Inset, &inset)] {
+        let bands = border(style, &[], false);
+        assert!(banded.starts_with(&bands), "{style:?}: {bands}");
+        assert!(
+            !bands.contains("RG") && bands.ends_with("f\nQ\n"),
+            "{bands}"
+        );
+    }
+
+    // Solid: the frame; underline: the line along the bottom.
+    assert_eq!(
+        border(Solid, &[], true),
+        "q\n0 0 1 RG\n2 w\n[] 0 d\n1 1 98 18 re\nS\nQ\n"
+    );
+    assert_eq!(
+        border(Underline, &[], true),
+        "q\n0 0 1 RG\n2 w\n[] 0 d\n0 1 m\n100 1 l\nS\nQ\n"
+    );
+
+    // No color, or no width: nothing for the other styles, nothing at all.
+    for style in [Solid, Dashed, Underline] {
+        assert_eq!(border(style, &[3.0], false), "", "{style:?}");
+    }
+    for style in [Solid, Dashed, Beveled, Inset, Underline] {
+        for colored in [false, true] {
+            let mut look = bordered(style, &[3.0], colored);
+            look.border.width = 0.0;
+            assert_eq!(under_the_text(&drawn(&hello, &look)), "", "{style:?}");
+        }
+    }
+}
+
+/// A comb field whose border is solid or dashed and has a color has its
+/// cells divided, at the cells' edges across the box less the border, with
+/// or without text: solid lines with square caps, or dashed ones under the
+/// border's dash array. No other border draws them, nor one with no color,
+/// nor a field of one cell. A field with more cells than `Limits::text`
+/// is past that cap.
+#[test]
+fn a_comb_fields_cells_are_divided_by_solid_and_dashed_borders() {
+    use BoxBorderStyle::{Beveled, Dashed, Inset, Solid, Underline};
+    let mut comb = TextField::new("123");
+    comb.flags = FieldFlags::COMB;
+    comb.max_len = Some(5);
+    let lines = "21.2 2 m\n21.2 18 l\nS\n40.4 2 m\n40.4 18 l\nS\n\
+                 59.6 2 m\n59.6 18 l\nS\n78.8 2 m\n78.8 18 l\nS\nQ\n";
+
+    let solid = drawn(&comb, &bordered(Solid, &[], true));
+    let frame = "q\n0 0 1 RG\n2 w\n[] 0 d\n1 1 98 18 re\nS\nQ\n";
+    assert_eq!(
+        under_the_text(&solid),
+        format!("{frame}q\n2 w\n0 0 1 RG\n2 J\n{lines}")
+    );
+    let dashed = drawn(&comb, &bordered(Dashed, &[3.0, 2.0], true));
+    assert!(
+        under_the_text(&dashed).ends_with(&format!("q\n2 w\n0 0 1 RG\n[3 2] 0 d\n{lines}")),
+        "{dashed}"
+    );
+    // With no text, the cells are divided all the same.
+    let mut empty = comb;
+    empty.text = "";
+    let divided = drawn(&empty, &bordered(Solid, &[], true));
+    assert!(
+        divided.ends_with(&format!("2 J\n{lines}/Tx BMC\nEMC\n")),
+        "{divided}"
+    );
+
+    // Not for the other styles, a border with no color, one cell, or no
+    // comb.
+    let count = |content: &str| under_the_text(content).matches(" m\n").count();
+    for style in [Beveled, Inset, Underline] {
+        let content = drawn(&comb, &bordered(style, &[], true));
+        let alone = drawn(&TextField::new("123"), &bordered(style, &[], true));
+        assert_eq!(
+            under_the_text(&content),
+            under_the_text(&alone),
+            "{style:?}"
+        );
+    }
+    for style in [Solid, Dashed] {
+        assert_eq!(count(&drawn(&comb, &bordered(style, &[3.0], false))), 0);
+    }
+    let mut one = comb;
+    one.max_len = Some(1);
+    assert_eq!(count(&drawn(&one, &bordered(Solid, &[], true))), 0);
+    let mut unset = comb;
+    unset.max_len = None;
+    assert_eq!(count(&drawn(&unset, &bordered(Solid, &[], true))), 0);
+
+    // More cells than `Limits::text`: the cap.
+    let font = helvetica();
+    let mut limits = Limits::DEFAULT;
+    limits.text = 4;
+    let make = |field: &TextField<'_>| {
+        text(
+            field,
+            &bordered(Solid, &[], true),
+            &DefaultAppearance::new("Helv", 10.0, None),
+            font.res().unwrap(),
+            &font.layout(),
+            &limits,
+        )
+    };
+    assert_eq!(make(&comb), Err(Unmade::Limit(Cap::Text)));
+    comb.max_len = Some(4);
+    assert!(make(&comb).is_ok());
+    comb.max_len = Some(u32::MAX);
+    assert_eq!(make(&comb), Err(Unmade::Limit(Cap::Text)));
+}
+
+/// `/MK /R` turns the box: at a quarter turn or three its width and height
+/// swap, the text is laid out and the border drawn in the turned box, and
+/// the matrix turns it back onto the widget's rectangle. A negative turn is
+/// clockwise; a number that isn't a multiple of 90 is no turn.
+#[test]
+fn rotation_turns_the_box_and_its_matrix_places_it() {
+    let quarter = [
+        Matrix::IDENTITY,
+        Matrix::new(0.0, 1.0, -1.0, 0.0, 100.0, 0.0),
+        Matrix::new(-1.0, 0.0, 0.0, -1.0, 100.0, 20.0),
+        Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, 20.0),
+    ];
+    let font = helvetica();
+    for (rotation, turns) in [
+        (0, 0),
+        (90, 1),
+        (180, 2),
+        (270, 3),
+        (360, 0),
+        (450, 1),
+        (-90, 3),
+        (-180, 2),
+        (-270, 1),
+        (-360, 0),
+        (45, 0),
+        (-45, 0),
+        (89, 0),
+        (i32::MAX, 0),
+        (i32::MIN, 0),
+    ] {
+        let mut look = WidgetLook::new(100.0, 20.0);
+        look.rotation = rotation;
+        look.border_color = Some(Color::Gray(0.0));
+        let ap = text(
+            &TextField::new("Hello"),
+            &look,
+            &DefaultAppearance::new("Helv", 10.0, None),
+            font.res().unwrap(),
+            &font.layout(),
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let turned = turns % 2 == 1;
+        let (w, h) = if turned { (20.0, 100.0) } else { (100.0, 20.0) };
+        assert_eq!(ap.bbox, pdf_gfx::Rect::new(0.0, 0.0, w, h), "{rotation}");
+        assert_eq!(ap.matrix, quarter[turns], "{rotation}");
+        // The matrix places the box on the widget's rectangle.
+        let corners = ap.bbox.corners().map(|p| ap.matrix.apply(p));
+        let placed = corners.iter().fold(
+            pdf_gfx::Rect::new(corners[0].x, corners[0].y, corners[0].x, corners[0].y),
+            |r, p| r.union(pdf_gfx::Rect::new(p.x, p.y, p.x, p.y)),
+        );
+        assert_eq!(
+            placed,
+            pdf_gfx::Rect::new(0.0, 0.0, 100.0, 20.0),
+            "{rotation}"
+        );
+        // The frame and the clip are the turned box's.
+        let content = String::from_utf8(ap.content).unwrap();
+        let (frame, clip) = match turned {
+            true => ("0.5 0.5 19 99 re\nS", "1 1 18 98 re\nW"),
+            false => ("0.5 0.5 99 19 re\nS", "1 1 98 18 re\nW"),
+        };
+        assert!(
+            content.contains(frame) && content.contains(clip),
+            "{rotation}: {content}"
+        );
+    }
 }

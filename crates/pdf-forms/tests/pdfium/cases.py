@@ -469,6 +469,9 @@ def ap_cases():
                            tx(b"/Border [0 0 1] " + bs(b"3", b"B") + b" /MK << /BC [0] >>")])
     ap("ap-border-odd", [tx(b"/BS << /W 1.5 >> /MK << /BC [0] >>"), tx(bs(b"2", b"X") + b" /MK << /BC [0] >>"),
                          tx(b"/BS << /S /D >> /MK << /BC [0] >>")])
+    # A beveled border's dark band: the background halved, in CMYK and RGB.
+    ap("ap-border-beveled-colors", [tx(bs(b"2", b"B") + b" /MK << /BC [0] /BG [0.1 0.2 0.3 0.4] >>"),
+                                    tx(bs(b"2", b"B") + b" /MK << /BC [0] /BG [0.2 0.4 0.6] >>")])
 
     # Colors: /DA's in each space and none; /MK's.
     for name, color in (("gray", b"0.5 g"), ("rgb", b"1 0 0 rg"), ("cmyk", b"0.1 0.2 0.3 0.4 k"), ("none", b""),
@@ -491,6 +494,9 @@ def ap_cases():
                         (b"U", "underline")):
         ap("ap-comb-border-" + word, [tx(COMB + b" /MaxLen 5 " + bs(w, style) + b" /MK << /BC [0 0 1] >>",
                                          value=b"123", da=b"/Helv 12 Tf 0 g") for w in (b"1", b"2")])
+    # A comb field's dividers under a dashed border's own dash array.
+    ap("ap-comb-border-dash-array", [tx(COMB + b" /MaxLen 3 " + bs(b"1", b"D", b" /D [2 1]") + b" /MK << /BC [0] >>",
+                                        value=b"12", da=b"/Helv 10 Tf 0 g")])
     ap("ap-comb-multiline", [tx(b"/Ff 16781312 /MaxLen 5", value=b"123", da=b"/Helv 12 Tf 0 g")])
     ap("ap-comb-password", [tx(b"/Ff 16785408 /MaxLen 5", value=b"123", da=b"/Helv 12 Tf 0 g")])
     ap("ap-comb-no-maxlen", [tx(COMB, value=b"123", da=b"/Helv 12 Tf 0 g")])
