@@ -1,0 +1,1480 @@
+//! Holds `pdf-forms`'s `Rules::Pdfium` reading of the field tree to PDFium's
+//! answers recorded at `chromium/8152` in `tests/pdfium/chromium-8152.txt`:
+//! for each widget of a page, its field's type, flags, fully qualified name,
+//! and a text field's value (the `forms` cases). The `forms-ap` cases record
+//! the appearance PDFium makes for a text field that has none; their answers
+//! are read here into what each widget's appearance paints, clips and shows,
+//! and the heights of the faces PDFium draws the standard 14 in are held to
+//! them.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
+use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
+use pdf_forms::pdf_objects::{Object, Resolve};
+use pdf_forms::pdf_semantics::pages;
+use pdf_forms::{Field, FieldKind, FieldValue, Form, Limits};
+use pdf_structure::read::Recovery;
+use pdf_structure::{Reading, read};
+
+fn set() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pdfium")
+}
+
+fn read_tsv<const N: usize>(name: &str) -> Vec<[String; N]> {
+    fs::read_to_string(set().join(name))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let cols: Vec<String> = l.splitn(N, '\t').map(str::to_owned).collect();
+            cols.try_into().unwrap()
+        })
+        .collect()
+}
+
+/// Bytes as one word, as `oracle/pdfium.py`'s `esc` writes them: printable
+/// ASCII as it is but `%`, any other byte `%XX`, none `%` alone, and past 64
+/// bytes (its `LONG`) `#`, the length, `:` and the bytes' FNV-1a 64 hash.
+fn esc(data: &[u8]) -> String {
+    if data.is_empty() {
+        return "%".to_string();
+    }
+    if data.len() > 64 {
+        let hash = data.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        return format!("#{}:{hash:016x}", data.len());
+    }
+    let mut out = String::with_capacity(data.len());
+    for &b in data {
+        if (0x21..=0x7E).contains(&b) && b != b'%' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// PDFium's `FPDF_FORMFIELD_*` number for a field.
+fn type_number(field: &Field<'_>) -> u32 {
+    match field.kind() {
+        None => 0,
+        Some(FieldKind::PushButton) => 1,
+        Some(FieldKind::CheckBox) => 2,
+        Some(FieldKind::Radio) => 3,
+        Some(FieldKind::Combo) => 4,
+        Some(FieldKind::List) => 5,
+        Some(FieldKind::Text) => 6,
+        Some(FieldKind::Signature) => 7,
+        Some(_) => unreachable!("a kind PDFium has no number for"),
+    }
+}
+
+fn forms_answer(bytes: &[u8]) -> String {
+    let mut opts = read::Options::DEFAULT;
+    opts.recovery = Recovery::Pdfium;
+    let Ok(reading) = Reading::open(bytes, &opts) else {
+        return "no-page".to_string();
+    };
+    let objects = &reading;
+    let trailer = reading.trailer().dict();
+    let Ok(Some(catalog)) = pdf_forms::pdf_semantics::catalog(objects, trailer) else {
+        return "no-page".to_string();
+    };
+    let Ok(table) = pages::pages(
+        objects,
+        catalog,
+        Rules::Pdfium,
+        &pdf_forms::pdf_semantics::Limits::DEFAULT,
+        &mut (),
+    ) else {
+        return "no-page".to_string();
+    };
+    let Some(page) = table.iter().next().and_then(|page| page.dict) else {
+        return "no-page".to_string();
+    };
+    let form = Form::read(objects, catalog, Rules::Pdfium, &Limits::DEFAULT).unwrap();
+
+    let follow = |object: &Object| match object.as_reference() {
+        Some(id) => objects.resolve(id).cloned(),
+        None => Some(object.clone()),
+    };
+    let annots = page.get("Annots").and_then(follow);
+    let annots = annots.as_ref().and_then(Object::as_array).unwrap_or(&[]);
+
+    let mut out = Vec::new();
+    for (index, entry) in annots.iter().enumerate() {
+        if follow(entry).is_none_or(|annot| annot.as_dict().is_none()) {
+            continue;
+        }
+        // The field whose widget this annotation is, by its object number.
+        let found = form.as_ref().and_then(|form| {
+            let id = entry.as_reference()?;
+            form.fields()
+                .iter()
+                .enumerate()
+                .find(|(_, field)| field.widgets().iter().any(|widget| widget.id() == Some(id)))
+        });
+        let Some((at, field)) = found else {
+            out.push(format!("idx {index} none"));
+            continue;
+        };
+        let name = form.as_ref().unwrap().full_name(at).unwrap();
+        let mut words = format!(
+            "idx {index} type {} flags {} name {}",
+            type_number(field),
+            field.flags().bits(),
+            esc(name.as_bytes())
+        );
+        if field.kind() == Some(FieldKind::Text) {
+            let value = match field.value() {
+                Some(FieldValue::Text(text)) => text.as_str(),
+                _ => "",
+            };
+            words.push_str(&format!(" value {}", esc(value.as_bytes())));
+        }
+        out.push(words);
+    }
+    if out.is_empty() {
+        "none".to_string()
+    } else {
+        out.join(" ; ")
+    }
+}
+
+/// `differ.tsv`'s lines, each cut at its tabs: a `forms` case's name and
+/// why; a `forms-ap` case's name, the part of its record that differs, and
+/// why, or the kind's name for a difference that is a rule.
+fn differ_lines() -> Vec<Vec<String>> {
+    fs::read_to_string(set().join("differ.tsv"))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.split('\t').map(str::to_owned).collect())
+        .collect()
+}
+
+#[test]
+fn pdfium_recorded_cases_agree() {
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let cases = read_tsv::<3>("cases.tsv");
+    assert!(!cases.is_empty(), "cases.tsv must not be empty");
+    let lines = differ_lines();
+    for line in &lines {
+        assert!(
+            line[0] == "forms-ap" || recorded.contains_key(&line[0]),
+            "differ.tsv names unknown case {}",
+            line[0]
+        );
+    }
+    let differs: HashMap<String, String> = lines
+        .into_iter()
+        .filter(|line| {
+            cases
+                .iter()
+                .any(|[name, kind, _]| *name == line[0] && kind == "forms")
+        })
+        .map(|line| {
+            assert_eq!(line.len(), 2, "a forms case's differ.tsv line: {line:?}");
+            (line[0].clone(), line[1].clone())
+        })
+        .collect();
+
+    let mut wrong = Vec::new();
+    for [name, kind, _files] in &cases {
+        assert!(
+            kind == "forms" || kind == "forms-ap",
+            "{name}: unexpected case kind {kind}"
+        );
+        if kind != "forms" {
+            continue;
+        }
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let ours = forms_answer(&bytes);
+        let pdfium = recorded
+            .get(name)
+            .unwrap_or_else(|| panic!("{name}: no recorded answer"));
+        let matches = ours.split_whitespace().eq(pdfium.split_whitespace());
+        if differs.contains_key(name) {
+            if matches {
+                wrong.push(format!(
+                    "{name} is listed in differ.tsv but now matches PDFium: {ours}"
+                ));
+            }
+        } else if !matches {
+            wrong.push(format!("{name}:\n  pdfium: {pdfium}\n  ours:   {ours}"));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "{} case(s) disagreed with chromium/8152:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// A color as a `forms-ap` record gives it: the operator that set it (`g`,
+/// `rg`, `k`, or `G`, `RG`, `K` for a stroke) and its components.
+#[derive(Debug, Clone, PartialEq)]
+struct Color {
+    op: String,
+    components: Vec<f32>,
+}
+
+/// How a path of a made appearance is painted.
+#[derive(Debug, Clone, PartialEq)]
+enum Paint {
+    Fill,
+    EvenOddFill,
+    /// Its line width, cap, join, dash array and phase.
+    Stroke {
+        width: f32,
+        cap: u8,
+        join: u8,
+        dash: Vec<f32>,
+        phase: f32,
+    },
+}
+
+/// A path's segment: `re` with its four numbers, `m`, `l`, `c`, `h`.
+#[derive(Debug, Clone, PartialEq)]
+enum Segment {
+    Rect([f32; 4]),
+    Move([f32; 2]),
+    Line([f32; 2]),
+    Curve([f32; 6]),
+    Close,
+}
+
+/// A path painted before the appearance's `/Tx` sequence.
+#[derive(Debug, Clone, PartialEq)]
+struct Painted {
+    paint: Paint,
+    color: Color,
+    segments: Vec<Segment>,
+}
+
+/// A `Tj` in the `/Tx` sequence: its font's resource name (`%` where no `Tf`
+/// came first), size, origin, and codes as `esc` writes them.
+#[derive(Debug, Clone, PartialEq)]
+struct Shown {
+    font: String,
+    size: f32,
+    at: [f32; 2],
+    codes: String,
+}
+
+/// What the `/Tx` sequence holds: its clip rectangle (none where it has none),
+/// and the color of its text with each string shown (none where it shows none).
+#[derive(Debug, Clone, PartialEq)]
+struct Tx {
+    clip: Option<[f32; 4]>,
+    text: Option<(Color, Vec<Shown>)>,
+}
+
+/// A made appearance, in the record's five parts.
+#[derive(Debug, Clone, PartialEq)]
+struct Made {
+    bbox: [f32; 4],
+    matrix: [f32; 6],
+    paint: Vec<Painted>,
+    /// None where the appearance has no `/Tx` sequence (`tx none`).
+    tx: Option<Tx>,
+}
+
+/// A record's words, read in the order `oracle/pdfium.py`'s `ap_record` and
+/// `forms_ap` write them; a word out of place panics, naming the record.
+struct Words<'a> {
+    words: std::iter::Peekable<std::str::SplitWhitespace<'a>>,
+    record: &'a str,
+}
+
+impl<'a> Words<'a> {
+    fn new(record: &'a str) -> Self {
+        Self {
+            words: record.split_whitespace().peekable(),
+            record,
+        }
+    }
+
+    fn word(&mut self) -> &'a str {
+        self.words
+            .next()
+            .unwrap_or_else(|| panic!("a record ends early: {}", self.record))
+    }
+
+    fn expect(&mut self, keyword: &str) {
+        let word = self.word();
+        assert_eq!(word, keyword, "in {}", self.record);
+    }
+
+    fn eat(&mut self, keyword: &str) -> bool {
+        let found = self.words.peek() == Some(&keyword);
+        if found {
+            self.words.next();
+        }
+        found
+    }
+
+    fn peek(&mut self) -> Option<&'a str> {
+        self.words.peek().copied()
+    }
+
+    fn num(&mut self) -> f32 {
+        let word = self.word();
+        word.parse()
+            .unwrap_or_else(|_| panic!("{word} isn't a number in {}", self.record))
+    }
+
+    fn nums<const N: usize>(&mut self) -> [f32; N] {
+        std::array::from_fn(|_| self.num())
+    }
+
+    fn color(&mut self) -> Color {
+        let op = self.word().to_string();
+        let count = match op.as_str() {
+            "g" | "G" => 1,
+            "rg" | "RG" => 3,
+            "k" | "K" => 4,
+            _ => panic!("{op} isn't a color operator in {}", self.record),
+        };
+        let components = (0..count).map(|_| self.num()).collect();
+        Color { op, components }
+    }
+
+    fn painted(&mut self, paint: &str) -> Painted {
+        let color = self.color();
+        let paint = match paint {
+            "fill" => Paint::Fill,
+            "eofill" => Paint::EvenOddFill,
+            _ => {
+                self.expect("w");
+                let width = self.num();
+                self.expect("cap");
+                let cap = self.word().parse().unwrap();
+                self.expect("join");
+                let join = self.word().parse().unwrap();
+                self.expect("dash");
+                let mut dash = Vec::new();
+                if !self.eat("none") {
+                    while self.peek() != Some("phase") {
+                        dash.push(self.num());
+                    }
+                }
+                self.expect("phase");
+                Paint::Stroke {
+                    width,
+                    cap,
+                    join,
+                    dash,
+                    phase: self.num(),
+                }
+            }
+        };
+        let mut segments = Vec::new();
+        loop {
+            let segment = match self.peek() {
+                Some("re") => Segment::Rect(self.after_word()),
+                Some("m") => Segment::Move(self.after_word()),
+                Some("l") => Segment::Line(self.after_word()),
+                Some("c") => Segment::Curve(self.after_word()),
+                Some("h") => {
+                    self.word();
+                    Segment::Close
+                }
+                _ => break,
+            };
+            segments.push(segment);
+        }
+        Painted {
+            paint,
+            color,
+            segments,
+        }
+    }
+
+    fn after_word<const N: usize>(&mut self) -> [f32; N] {
+        self.word();
+        self.nums()
+    }
+
+    fn tx(&mut self) -> Option<Tx> {
+        if self.eat("tx") {
+            self.expect("none");
+            return None;
+        }
+        self.expect("clip");
+        let clip = if self.eat("none") {
+            None
+        } else {
+            Some(self.nums())
+        };
+        if self.eat("text") {
+            self.expect("none");
+            return Some(Tx { clip, text: None });
+        }
+        self.expect("color");
+        let color = self.color();
+        let mut shown = Vec::new();
+        while self.eat("font") {
+            let font = self.word().to_string();
+            self.expect("size");
+            let size = self.num();
+            self.expect("at");
+            let at = self.nums();
+            self.expect("codes");
+            let codes = self.word().to_string();
+            shown.push(Shown {
+                font,
+                size,
+                at,
+                codes,
+            });
+        }
+        assert!(
+            !shown.is_empty(),
+            "text with nothing shown: {}",
+            self.record
+        );
+        Some(Tx {
+            clip,
+            text: Some((color, shown)),
+        })
+    }
+}
+
+/// A `forms-ap` answer: for each annotation of the page in order, the
+/// appearance PDFium made for it, or none.
+fn made_appearances(answer: &str) -> Vec<Option<Made>> {
+    answer
+        .split(" ; ")
+        .enumerate()
+        .map(|(index, record)| {
+            let mut words = Words::new(record);
+            words.expect("idx");
+            assert_eq!(words.word(), index.to_string(), "in {record}");
+            if words.eat("none") {
+                assert!(words.peek().is_none(), "in {record}");
+                return None;
+            }
+            words.expect("bbox");
+            let bbox = words.nums();
+            words.expect("matrix");
+            let matrix = words.nums();
+            words.expect("paint");
+            let mut paint = Vec::new();
+            if !words.eat("none") {
+                while let Some(kind @ ("fill" | "eofill" | "stroke")) = words.peek() {
+                    words.word();
+                    paint.push(words.painted(kind));
+                }
+            }
+            let tx = words.tx();
+            assert!(
+                words.peek().is_none(),
+                "words past the record's end: {record}"
+            );
+            Some(Made {
+                bbox,
+                matrix,
+                paint,
+                tx,
+            })
+        })
+        .collect()
+}
+
+/// Each `forms-ap` case's answer reads as a record for every widget of its
+/// file, and in each made appearance what the recorder holds holds: the box
+/// at the origin, a quarter turn or none as its matrix, colors with their
+/// components, every path with a segment, a stroke's style in range, text
+/// at a size with codes. Each case has one appearance at least, with its
+/// box, its matrix and its `/Tx` part.
+#[test]
+fn forms_ap_answers_read() {
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let cases = read_tsv::<3>("cases.tsv");
+    let mut read = 0;
+    for [name, kind, _files] in cases.iter().filter(|[_, kind, _]| kind == "forms-ap") {
+        assert!(name.starts_with("ap-"), "{name}: a {kind} case's name");
+        let answer = recorded
+            .get(name)
+            .unwrap_or_else(|| panic!("{name}: no recorded answer"));
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let widgets = bytes
+            .windows(16)
+            .filter(|w| w == b"/Subtype /Widget")
+            .count();
+        let made = made_appearances(answer);
+        assert_eq!(made.len(), widgets, "{name}: a record for each widget");
+        assert!(made.iter().any(Option::is_some), "{name}: nothing made");
+        for appearance in made.iter().flatten() {
+            let [x0, y0, x1, y1] = appearance.bbox;
+            assert!(x0 == 0.0 && y0 == 0.0 && x1 >= 0.0 && y1 >= 0.0, "{name}");
+            let [a, b, c, d, e, f] = appearance.matrix;
+            let turns = [
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, -1.0, 0.0],
+                [-1.0, 0.0, 0.0, -1.0],
+                [0.0, -1.0, 1.0, 0.0],
+            ];
+            assert!(turns.contains(&[a, b, c, d]), "{name}: matrix");
+            assert!(
+                [e, f].iter().all(|v| [0.0, x1, y1].contains(v)),
+                "{name}: matrix"
+            );
+            for painted in &appearance.paint {
+                let stroke = matches!(painted.paint, Paint::Stroke { .. });
+                assert_eq!(
+                    painted.color.op.chars().all(char::is_uppercase),
+                    stroke,
+                    "{name}"
+                );
+                assert!(!painted.segments.is_empty(), "{name}");
+                if let Paint::Stroke {
+                    width,
+                    cap,
+                    join,
+                    ref dash,
+                    phase,
+                } = painted.paint
+                {
+                    assert!(
+                        width >= 0.0 && cap <= 2 && join <= 2 && phase >= 0.0,
+                        "{name}"
+                    );
+                    assert!(dash.iter().all(|v| *v >= 0.0), "{name}");
+                }
+                let corners = painted.segments.iter().map(|segment| match *segment {
+                    Segment::Rect([x, y, w, h]) => {
+                        x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()
+                    }
+                    Segment::Move(p) | Segment::Line(p) => p.iter().all(|v| v.is_finite()),
+                    Segment::Curve(p) => p.iter().all(|v| v.is_finite()),
+                    Segment::Close => true,
+                });
+                assert!(corners.into_iter().all(|ok| ok), "{name}");
+            }
+            let Some(tx) = &appearance.tx else { continue };
+            if let Some(clip) = tx.clip {
+                assert!(clip.iter().all(|v| v.is_finite()), "{name}: clip");
+            }
+            if let Some((color, shown)) = &tx.text {
+                assert!(color.op.chars().all(char::is_lowercase), "{name}");
+                assert!(
+                    color.components.iter().all(|v| (0.0..=1.0).contains(v)),
+                    "{name}"
+                );
+                for run in shown {
+                    assert!(
+                        run.size >= 0.0 && run.at.iter().all(|v| v.is_finite()),
+                        "{name}"
+                    );
+                    assert!(
+                        !run.font.is_empty() && run.codes != "%",
+                        "{name}: {}",
+                        run.codes
+                    );
+                }
+            }
+        }
+        read += 1;
+    }
+    assert!(read > 0, "no forms-ap case");
+}
+
+/// The reader takes each part as the recorder writes it, and nothing else.
+#[test]
+fn forms_ap_records_are_read_by_part() {
+    let made = made_appearances(
+        "idx 0 bbox 0 0 100 20 matrix 0 1 -1 0 20 0 paint fill rg 1 1 0 re 0 0 100 20 stroke RG 0 0 1 \
+         w 2 cap 0 join 0 dash 3 3 phase 0 m 1 1 l 1 19 h clip 1 1 98 18 color k 0 0 0 1 font Helv \
+         size 12 at 2 5.5 codes Hi font % size 0 at 0 0 codes %2A ; idx 1 none ; idx 2 bbox 0 0 4 4 \
+         matrix 1 0 0 1 0 0 paint none tx none",
+    );
+    assert_eq!(made.len(), 3);
+    let first = made[0].as_ref().unwrap();
+    assert_eq!(first.matrix, [0.0, 1.0, -1.0, 0.0, 20.0, 0.0]);
+    assert_eq!(first.paint.len(), 2);
+    assert_eq!(
+        first.paint[0].segments,
+        [Segment::Rect([0.0, 0.0, 100.0, 20.0])]
+    );
+    assert_eq!(
+        first.paint[1].paint,
+        Paint::Stroke {
+            width: 2.0,
+            cap: 0,
+            join: 0,
+            dash: vec![3.0, 3.0],
+            phase: 0.0
+        }
+    );
+    assert_eq!(
+        first.paint[1].segments,
+        [
+            Segment::Move([1.0, 1.0]),
+            Segment::Line([1.0, 19.0]),
+            Segment::Close
+        ]
+    );
+    let tx = first.tx.as_ref().unwrap();
+    assert_eq!(tx.clip, Some([1.0, 1.0, 98.0, 18.0]));
+    let (color, shown) = tx.text.as_ref().unwrap();
+    assert_eq!(color.components, [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(shown[1].font, "%");
+    assert!(made[1].is_none());
+    assert_eq!(made[2].as_ref().unwrap().tx, None);
+    for wrong in [
+        "idx 0 bbox 0 0 1 1 matrix 1 0 0 1 0 0 paint none",
+        "idx 0 bbox 0 0 1 1 matrix 1 0 0 1 0 0 paint none tx none extra",
+        "idx 1 none",
+        "idx 0 bbox 0 0 1 1 matrix 1 0 0 1 0 0 paint fill q 1 re 0 0 1 1 tx none",
+        "idx 0 bbox 0 0 1 1 matrix 1 0 0 1 0 0 paint none clip none color g 0",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| made_appearances(wrong)).is_err(),
+            "read: {wrong}"
+        );
+    }
+}
+
+/// `esc` writes a long string as the oracle does, by its length and hash.
+#[test]
+fn esc_writes_long_strings_by_their_hash() {
+    assert_eq!(esc(b""), "%");
+    assert_eq!(esc(b"a b%"), "a%20b%25");
+    assert_eq!(esc(&[b'a'; 64]), "a".repeat(64));
+    // FNV-1a 64 of 65 bytes of `a`, as `oracle/pdfium.py`'s `fnv` gives it.
+    assert_eq!(esc(&[b'a'; 65]), "#65:8087e9a889f8a14c");
+}
+
+/// Each standard 14 face's heights, as a field's `/DR` font gives them to its
+/// layout, are the ones PDFium's appearances at 100 points show (the
+/// `ap-face-*` cases: boxes 400 by 300 with no border). A single line's
+/// baseline is the box's middle less half their sum, a multiline field's
+/// first its top less the ascent.
+#[cfg(feature = "text-layout")]
+#[test]
+fn standard_faces_heights_are_the_recorded_ones() {
+    use pdf_forms::pdf_fonts::Std14;
+    use pdf_forms::pdf_gfx::{DefaultAppearance, LayoutFont};
+
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let mut held = Vec::new();
+    for [name, _, _] in read_tsv::<3>("cases.tsv")
+        .iter()
+        .filter(|[name, _, _]| name.starts_with("ap-face-"))
+    {
+        let face = Std14::ALL
+            .into_iter()
+            .find(|face| *name == format!("ap-face-{}", face.name().to_ascii_lowercase()))
+            .unwrap_or_else(|| panic!("{name}: no standard face of that name"));
+        let made = made_appearances(&recorded[name]);
+        let baseline = |widget: usize| {
+            let tx = made[widget].as_ref().and_then(|made| made.tx.as_ref());
+            let (_, shown) = tx.and_then(|tx| tx.text.as_ref()).unwrap();
+            assert_eq!((shown.len(), shown[0].size), (1, 100.0), "{name}");
+            shown[0].at[1]
+        };
+        let ascent = (300.0 - baseline(1)) * 10.0;
+        let sum = (150.0 - baseline(0)) * 20.0;
+
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let mut opts = read::Options::DEFAULT;
+        opts.recovery = Recovery::Pdfium;
+        let reading = Reading::open(&bytes, &opts).unwrap();
+        let catalog = pdf_forms::pdf_semantics::catalog(&reading, reading.trailer().dict())
+            .unwrap()
+            .unwrap();
+        let form = Form::read(&reading, catalog, Rules::Pdfium, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let da = form.fields()[0].default_appearance().unwrap();
+        let da = DefaultAppearance::parse(da, &pdf_forms::pdf_content_streams::Limits::DEFAULT);
+        let font_name = da.and_then(|da| da.font_name).unwrap();
+        let mut told: Vec<(pdf_forms::pdf_objects::fault::Place, pdf_forms::Fault)> = Vec::new();
+        let font = form
+            .field_font(&reading, &font_name, &Limits::DEFAULT, &mut told)
+            .unwrap();
+        assert!(!font.is_fallback() && told.is_empty(), "{name}: {told:?}");
+        let metrics = font.layout().font_metrics();
+        assert!(
+            (metrics.ascent - ascent).abs() < 0.5
+                && (metrics.ascent + metrics.descent - sum).abs() < 0.5,
+            "{name}: ours {} and {}, PDFium's {ascent} and {}",
+            metrics.ascent,
+            metrics.descent,
+            sum - ascent
+        );
+        held.push(face);
+    }
+    assert_eq!(held.len(), Std14::ALL.len(), "a case for each face");
+}
+
+/// The appearance `pdf_forms::appearance::text_for_widget` makes for each widget
+/// of a `forms-ap` case, interpreted with `pdf_gfx::interpret` and recorded
+/// in the five parts PDFium's answers are read into, and held to them part
+/// by part.
+#[cfg(all(feature = "text-layout", feature = "programs"))]
+mod made_here {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::fs;
+    use std::ops::ControlFlow;
+
+    use pdf_forms::appearance;
+    use pdf_forms::pdf_annots::{Annot, BorderStyle, TypedAnnot};
+    use pdf_forms::pdf_content_streams::{Concat, LineCap, LineJoin, Paint as Painting, ResBody};
+    use pdf_forms::pdf_fonts::Fonts;
+    use pdf_forms::pdf_gfx::{
+        self, ActiveColorSpace, ColorValues, Kind, Opts, PathDrawn, Seg, State,
+    };
+    use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
+    use pdf_forms::pdf_objects::{Dict, Object, Resolve};
+    use pdf_forms::pdf_semantics::pages;
+    use pdf_forms::{Field, Form, Limits, Widget};
+    use pdf_structure::read::Recovery;
+    use pdf_structure::{Reading, read};
+
+    use super::{
+        Color, Made, Paint, Painted, Segment, Shown, Tx, differ_lines, esc, made_appearances,
+        read_tsv, set,
+    };
+
+    /// A record's parts a `differ.tsv` line may name: `made`, an appearance
+    /// made on one side and not the other, then the five.
+    const PARTS: [&str; 6] = ["made", "bbox", "matrix", "paint", "clip", "text"];
+
+    /// The two differences that are rules, each a line under the kind's
+    /// name: where PDFium writes no clip, the appearance made here clips to
+    /// the box less the border's reach; where PDFium writes no `/Tx`
+    /// sequence, the one made here is empty.
+    const RULES: [&str; 2] = ["clip", "tx"];
+
+    /// The name a font PDFium adds to the appearance's resources is given
+    /// here, and one this crate falls back to where the default resources
+    /// lack the font: neither is the default resources'.
+    const ADDED: &str = "(added)";
+
+    /// Places: a text's origin and a clip, in points.
+    const PLACE: f32 = 0.05;
+    /// A path's points and a stroke's numbers.
+    const PATH: f32 = 0.01;
+    /// A color's components, a size, a box, and a matrix.
+    const EXACT: f32 = 0.001;
+
+    /// One annotation of a case's page, as made here.
+    struct Annotation {
+        /// What's made, or why nothing is.
+        made: Result<Made, String>,
+        /// The box less the border's reach, `[x y w h]`, turned the right
+        /// way round.
+        client: Option<[f32; 4]>,
+    }
+
+    /// The box less `annot`'s border's reach on every side, as `[x y w h]`:
+    /// its rectangle's, turned by a quarter turn or three by `/MK /R`, as
+    /// PDFium turns it (`abs(R % 360)`: either swaps the sides).
+    fn client_box(annot: &Annot<'_>) -> [f32; 4] {
+        let border = annot.border();
+        let width = border.width;
+        let reach = match border.style {
+            _ if !(width > 0.0 && width.is_finite()) => 0.0,
+            BorderStyle::Beveled | BorderStyle::Inset => 2.0 * width,
+            _ => width,
+        };
+        let rotation = match annot.typed() {
+            TypedAnnot::Widget(widget) => widget.appearance_chars.as_ref().map(|mk| mk.rotation),
+            _ => None,
+        };
+        let (w, h) = (annot.rect().width(), annot.rect().height());
+        let (w, h) = match rotation.unwrap_or(0).unsigned_abs() % 360 {
+            90 | 270 => (h, w),
+            _ => (w, h),
+        };
+        let (x0, x1) = (reach.min(w - reach), reach.max(w - reach));
+        let (y0, y1) = (reach.min(h - reach), reach.max(h - reach));
+        [x0, y0, x1 - x0, y1 - y0]
+    }
+
+    /// A color as the record gives it, from the color space and components
+    /// the state holds.
+    fn color(space: &ActiveColorSpace, values: &ColorValues, stroke: bool) -> Color {
+        let op = match space {
+            ActiveColorSpace::DeviceGray => "g",
+            ActiveColorSpace::DeviceRgb => "rg",
+            ActiveColorSpace::DeviceCmyk => "k",
+            other => panic!("a color space the maker doesn't write: {other:?}"),
+        };
+        Color {
+            op: if stroke { op.to_uppercase() } else { op.into() },
+            components: values.as_slice().to_vec(),
+        }
+    }
+
+    fn painted(state: &State, path: &PathDrawn<'_>) -> Painted {
+        let paint = match path.paint {
+            Painting::Fill => Paint::Fill,
+            Painting::FillEvenOdd => Paint::EvenOddFill,
+            Painting::Stroke | Painting::CloseStroke => Paint::Stroke {
+                width: state.line_width,
+                cap: match state.line_cap {
+                    LineCap::Butt => 0,
+                    LineCap::Round => 1,
+                    LineCap::Square => 2,
+                },
+                join: match state.line_join {
+                    LineJoin::Miter => 0,
+                    LineJoin::Round => 1,
+                    LineJoin::Bevel => 2,
+                },
+                dash: state.dash.array.to_vec(),
+                phase: state.dash.phase,
+            },
+            other => panic!("a paint the maker doesn't write: {other:?}"),
+        };
+        let stroke = matches!(paint, Paint::Stroke { .. });
+        let color = match stroke {
+            true => color(&state.stroke_color_space, &state.stroke_color, true),
+            false => color(&state.fill_color_space, &state.fill_color, false),
+        };
+        Painted {
+            paint,
+            color,
+            segments: segments(path),
+        }
+    }
+
+    fn segments(path: &PathDrawn<'_>) -> Vec<Segment> {
+        path.segments
+            .iter()
+            .map(|seg| match *seg {
+                Seg::Move(p) => Segment::Move([p.x, p.y]),
+                Seg::Line(p) => Segment::Line([p.x, p.y]),
+                Seg::Curve(a, b, p) => Segment::Curve([a.x, a.y, b.x, b.y, p.x, p.y]),
+                Seg::Close => Segment::Close,
+            })
+            .collect()
+    }
+
+    /// `segments`' corners, where they're one closed rectangle with sides
+    /// along the axes, as `re` places it: `[x0 y0 x1 y1]`.
+    fn rectangle(segments: &[Segment]) -> Option<[f32; 4]> {
+        let [
+            Segment::Move(a),
+            Segment::Line(b),
+            Segment::Line(c),
+            Segment::Line(d),
+            Segment::Line(e),
+            Segment::Close,
+        ] = segments
+        else {
+            return None;
+        };
+        let aligned = (a[1] == b[1] && b[0] == c[0] && c[1] == d[1] && d[0] == a[0])
+            || (a[0] == b[0] && b[1] == c[1] && c[0] == d[0] && d[1] == a[1]);
+        let aligned = aligned && a == e;
+        aligned.then(|| {
+            [
+                a[0].min(c[0]),
+                a[1].min(c[1]),
+                a[0].max(c[0]),
+                a[1].max(c[1]),
+            ]
+        })
+    }
+
+    /// `re`'s path, as the interpreter places it: a move to `(x, y)`, four
+    /// lines round to it, and a close.
+    fn rect_path([x, y, w, h]: [f32; 4]) -> Vec<Segment> {
+        vec![
+            Segment::Move([x, y]),
+            Segment::Line([x + w, y]),
+            Segment::Line([x + w, y + h]),
+            Segment::Line([x, y + h]),
+            Segment::Line([x, y]),
+            Segment::Close,
+        ]
+    }
+
+    /// PDFium's paths with each `re` as the path it places.
+    fn placed(paint: &[Painted]) -> Vec<Painted> {
+        paint
+            .iter()
+            .map(|p| Painted {
+                segments: p
+                    .segments
+                    .iter()
+                    .flat_map(|s| match *s {
+                        Segment::Rect(r) => rect_path(r),
+                        ref other => vec![other.clone()],
+                    })
+                    .collect(),
+                ..p.clone()
+            })
+            .collect()
+    }
+
+    /// The paths made here with a solid stroke round a rectangle as the
+    /// region it covers, which PDFium fills: the ring between the
+    /// rectangle grown and shrunk by half the width, even-odd, or where the
+    /// width passes the rectangle's, the grown rectangle whole.
+    fn regions(paint: Vec<Painted>) -> Vec<Painted> {
+        paint
+            .into_iter()
+            .map(|p| {
+                let Paint::Stroke {
+                    width, ref dash, ..
+                } = p.paint
+                else {
+                    return p;
+                };
+                let Some([x0, y0, x1, y1]) = rectangle(&p.segments).filter(|_| dash.is_empty())
+                else {
+                    return p;
+                };
+                let half = width / 2.0;
+                let (w, h) = (x1 - x0, y1 - y0);
+                let mut segments = rect_path([x0 - half, y0 - half, w + width, h + width]);
+                let fill = if w >= width && h >= width {
+                    segments.extend(rect_path([x0 + half, y0 + half, w - width, h - width]));
+                    Paint::EvenOddFill
+                } else {
+                    Paint::Fill
+                };
+                Painted {
+                    paint: fill,
+                    color: Color {
+                        op: p.color.op.to_lowercase(),
+                        components: p.color.components,
+                    },
+                    segments,
+                }
+            })
+            .collect()
+    }
+
+    /// What's made for `widget` of `field`, interpreted and recorded; its
+    /// font named by its `/DA` name, or [`ADDED`] for a fallback.
+    fn record<'o>(
+        form: &Form<'o>,
+        field: &Field<'o>,
+        widget: &Widget<'o>,
+        objects: &'o Reading<&[u8]>,
+    ) -> Result<Made, String> {
+        let limits = Limits::DEFAULT;
+        let read = appearance::widget_text(
+            field,
+            widget,
+            objects,
+            Rules::Pdfium,
+            None,
+            &limits,
+            &mut (),
+        )
+        .map_err(|e| e.to_string())?;
+        let made = appearance::text_for_widget(
+            form,
+            field,
+            widget,
+            objects,
+            Rules::Pdfium,
+            None,
+            &limits,
+            &mut (),
+        )
+        .map_err(|e| e.to_string())?;
+        let font = match made.font.is_fallback() {
+            true => ADDED.to_string(),
+            false => String::from_utf8_lossy(read.font_name().unwrap()).into_owned(),
+        };
+        let ap = &made.appearance;
+
+        // The test's binder: each resource the content needs under its
+        // name, an object written already by reference.
+        let mut fonts = Dict::new();
+        for need in &ap.needs.0 {
+            let bound = match need.res.body() {
+                ResBody::Written(id) => Object::from(*id),
+                ResBody::Objects(objects) => objects[0].clone(),
+                other => panic!("a resource the maker doesn't name: {other:?}"),
+            };
+            fonts.set(need.name.clone(), bound);
+        }
+        let mut resources = Dict::new();
+        resources.set("Font", fonts);
+        let resources = Object::from(resources);
+        let font_need = ap.needs.0.first().map(|need| need.name.clone());
+
+        let (mut paint, mut tx, mut inside, mut stray) = (Vec::new(), None::<Tx>, false, false);
+        let mut tf: Option<Vec<u8>> = None;
+        let content = Concat::new(&[&ap.content]);
+        pdf_gfx::interpret(
+            objects,
+            &content,
+            Some(&resources),
+            &pdf_gfx::Limits::DEFAULT,
+            &Fonts::default(),
+            Opts::default(),
+            |event| {
+                match event.kind {
+                    Kind::Op if event.at.name() == b"Tf" => {
+                        tf = event
+                            .at
+                            .operand(1)
+                            .and_then(|o| o.name())
+                            .map(|n| n.into_owned());
+                    }
+                    Kind::MarkedBegin(mark) if mark.tag == b"Tx" => {
+                        inside = true;
+                        tx = Some(Tx {
+                            clip: None,
+                            text: None,
+                        });
+                    }
+                    Kind::MarkedEnd(mark) if mark.tag == b"Tx" => inside = false,
+                    Kind::Path(path) if path.clip.is_some() && inside => {
+                        let clip = rectangle(&segments(&path))
+                            .map(|[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0]);
+                        stray |= clip.is_none();
+                        if let Some(tx) = tx.as_mut() {
+                            tx.clip = clip;
+                        }
+                    }
+                    Kind::Path(path) if !inside => paint.push(painted(event.state, &path)),
+                    Kind::Text(show) if inside => {
+                        let named = tf.is_some() && tf == font_need;
+                        let shown = Shown {
+                            font: if named { font.clone() } else { "?".into() },
+                            size: show.size,
+                            at: [show.start.e, show.start.f],
+                            codes: esc(show.string),
+                        };
+                        let fill = color(
+                            &event.state.fill_color_space,
+                            &event.state.fill_color,
+                            false,
+                        );
+                        if let Some(tx) = tx.as_mut() {
+                            tx.text.get_or_insert((fill, Vec::new())).1.push(shown);
+                        }
+                    }
+                    Kind::Path(_) | Kind::Text(_) => stray = true,
+                    _ => {}
+                }
+                ControlFlow::Continue(())
+            },
+        )
+        .map_err(|e| format!("our content doesn't interpret: {e}"))?;
+        if stray {
+            return Err("our content paints inside /Tx, or clips outside it".into());
+        }
+        Ok(Made {
+            bbox: [ap.bbox.x0, ap.bbox.y0, ap.bbox.x1, ap.bbox.y1],
+            matrix: ap.matrix.to_array(),
+            paint,
+            tx,
+        })
+    }
+
+    /// Each annotation of `name`'s page as made here, and the names of the
+    /// default resources' fonts.
+    fn made_for(name: &str) -> (Vec<Annotation>, HashSet<String>) {
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let mut opts = read::Options::DEFAULT;
+        opts.recovery = Recovery::Pdfium;
+        let reading = Reading::open(&bytes[..], &opts).unwrap();
+        let objects = &reading;
+        let catalog = pdf_forms::pdf_semantics::catalog(objects, reading.trailer().dict())
+            .unwrap()
+            .unwrap();
+        let table = pages::pages(
+            objects,
+            catalog,
+            Rules::Pdfium,
+            &pdf_forms::pdf_semantics::Limits::DEFAULT,
+            &mut (),
+        )
+        .unwrap();
+        let page = table.iter().next().and_then(|page| page.dict).unwrap();
+        let form = Form::read(objects, catalog, Rules::Pdfium, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let fonts = form
+            .font_names()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect();
+        let annots = page
+            .get("Annots")
+            .and_then(|object| match object.as_reference() {
+                Some(id) => objects.resolve(id),
+                None => Some(object),
+            });
+        let mut made = Vec::new();
+        for entry in annots.and_then(Object::as_array).unwrap_or(&[]) {
+            let id = entry.as_reference();
+            let found = form.fields().iter().find_map(|field| {
+                let widget = field
+                    .widgets()
+                    .iter()
+                    .find(|w| w.id().is_some() && w.id() == id)?;
+                Some((field, *widget))
+            });
+            made.push(match found {
+                None => Annotation {
+                    made: Err("no field's widget".into()),
+                    client: None,
+                },
+                Some((field, widget)) => {
+                    let annot = widget
+                        .annot(objects, Rules::Pdfium, &Limits::DEFAULT)
+                        .unwrap();
+                    Annotation {
+                        made: record(&form, field, &widget, objects),
+                        client: Some(client_box(&annot)),
+                    }
+                }
+            });
+        }
+        (made, fonts)
+    }
+
+    fn near<const N: usize>(a: [f32; N], b: [f32; N], within: f32) -> bool {
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() <= within)
+    }
+
+    fn same_color(a: &Color, b: &Color) -> bool {
+        a.op == b.op
+            && a.components.len() == b.components.len()
+            && a.components
+                .iter()
+                .zip(&b.components)
+                .all(|(a, b)| (a - b).abs() <= EXACT)
+    }
+
+    fn same_segments(a: &[Segment], b: &[Segment]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|pair| match pair {
+                (Segment::Move(a), Segment::Move(b)) | (Segment::Line(a), Segment::Line(b)) => {
+                    near(*a, *b, PATH)
+                }
+                (Segment::Curve(a), Segment::Curve(b)) => near(*a, *b, PATH),
+                (Segment::Close, Segment::Close) => true,
+                _ => false,
+            })
+    }
+
+    /// A filled path's corners, where it's one polygon: a move and lines,
+    /// closed or not (a fill closes it), its last corner dropped where it's
+    /// back at the first.
+    fn polygon(segments: &[Segment]) -> Option<Vec<[f32; 2]>> {
+        let (Segment::Move(first), rest) = segments.split_first()? else {
+            return None;
+        };
+        let rest = match rest.split_last() {
+            Some((Segment::Close, before)) => before,
+            _ => rest,
+        };
+        let mut corners = vec![*first];
+        for segment in rest {
+            let Segment::Line(p) = segment else {
+                return None;
+            };
+            corners.push(*p);
+        }
+        if corners.len() > 1 && near(corners[0], corners[corners.len() - 1], PATH) {
+            corners.pop();
+        }
+        Some(corners)
+    }
+
+    /// Whether two polygons have the same corners in the same ring, from
+    /// any of them and either way round: the same region filled.
+    fn same_polygon(a: &[[f32; 2]], b: &[[f32; 2]]) -> bool {
+        let n = a.len();
+        n == b.len()
+            && (0..n).any(|from| {
+                (0..n).all(|i| near(a[i], b[(from + i) % n], PATH))
+                    || (0..n).all(|i| near(a[i], b[(from + n - i) % n], PATH))
+            })
+    }
+
+    /// A dash array as the pattern it draws: one with an odd number of
+    /// lengths repeats them, so `[3]` is `[3 3]` (ISO 32000-2, §8.4.3.6).
+    fn pattern(dash: &[f32]) -> Vec<f32> {
+        match dash.len() % 2 {
+            1 => dash.iter().chain(dash).copied().collect(),
+            _ => dash.to_vec(),
+        }
+    }
+
+    fn same_paint(pdfium: &[Painted], ours: &[Painted]) -> bool {
+        pdfium.len() == ours.len()
+            && pdfium.iter().zip(ours).all(|(a, b)| {
+                let fill = matches!(
+                    (&a.paint, &b.paint),
+                    (Paint::Fill, Paint::Fill) | (Paint::EvenOddFill, Paint::EvenOddFill)
+                );
+                let region = match (polygon(&a.segments), polygon(&b.segments)) {
+                    (Some(pa), Some(pb)) if fill => same_polygon(&pa, &pb),
+                    _ => same_segments(&a.segments, &b.segments),
+                };
+                let paint = match (&a.paint, &b.paint) {
+                    (Paint::Fill, Paint::Fill) | (Paint::EvenOddFill, Paint::EvenOddFill) => true,
+                    (
+                        Paint::Stroke {
+                            width,
+                            cap,
+                            join,
+                            dash,
+                            phase,
+                        },
+                        Paint::Stroke {
+                            width: w,
+                            cap: c,
+                            join: j,
+                            dash: d,
+                            phase: p,
+                        },
+                    ) => {
+                        let (dash, d) = (pattern(dash), pattern(d));
+                        (width - w).abs() <= PATH
+                            && cap == c
+                            && join == j
+                            && dash.len() == d.len()
+                            && dash.iter().zip(&d).all(|(a, b)| (a - b).abs() <= PATH)
+                            && (phase - p).abs() <= PATH
+                    }
+                    _ => false,
+                };
+                paint && same_color(&a.color, &b.color) && region
+            })
+    }
+
+    fn same_text(
+        pdfium: &Option<(Color, Vec<Shown>)>,
+        ours: &Option<(Color, Vec<Shown>)>,
+        fonts: &HashSet<String>,
+    ) -> bool {
+        match (pdfium, ours) {
+            (None, None) => true,
+            (Some((pc, ps)), Some((oc, os))) => {
+                same_color(pc, oc)
+                    && ps.len() == os.len()
+                    && ps.iter().zip(os).all(|(p, o)| {
+                        let font = if fonts.contains(&p.font) {
+                            p.font.as_str()
+                        } else {
+                            ADDED
+                        };
+                        font == o.font
+                            && (p.size - o.size).abs() <= EXACT
+                            && near(p.at, o.at, PLACE)
+                            && p.codes == o.codes
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// How often each rule applied, and held.
+    #[derive(Default)]
+    struct Held {
+        clip: usize,
+        tx: usize,
+    }
+
+    /// The parts in which what's made here for one annotation differs from
+    /// PDFium's record of it.
+    fn differing(
+        pdfium: &Option<Made>,
+        ours: &Annotation,
+        fonts: &HashSet<String>,
+        held: &mut Held,
+    ) -> BTreeSet<&'static str> {
+        let mut parts = BTreeSet::new();
+        let (pdfium, made) = match (pdfium, &ours.made) {
+            (None, Err(_)) => return parts,
+            (Some(pdfium), Ok(made)) => (pdfium, made),
+            _ => {
+                parts.insert("made");
+                return parts;
+            }
+        };
+        if !near(pdfium.bbox, made.bbox, EXACT) {
+            parts.insert("bbox");
+        }
+        if !near(pdfium.matrix, made.matrix, EXACT) {
+            parts.insert("matrix");
+        }
+        if !same_paint(&placed(&pdfium.paint), &regions(made.paint.clone())) {
+            parts.insert("paint");
+        }
+        match (&pdfium.tx, &made.tx) {
+            // No `/Tx` in PDFium's: an empty one here.
+            (
+                None,
+                Some(Tx {
+                    clip: None,
+                    text: None,
+                }),
+            ) => held.tx += 1,
+            (None, Some(Tx { clip, text })) => {
+                if clip.is_some() {
+                    parts.insert("clip");
+                }
+                if text.is_some() {
+                    parts.insert("text");
+                }
+            }
+            (_, None) => {
+                parts.insert("clip");
+                parts.insert("text");
+            }
+            (Some(p), Some(o)) => {
+                let clip = match (p.clip, o.clip) {
+                    // No clip in PDFium's: the box less the border's reach.
+                    (None, Some(o)) => {
+                        let held_here = ours.client.is_some_and(|client| near(client, o, PLACE));
+                        held.clip += usize::from(held_here);
+                        held_here
+                    }
+                    (Some(p), Some(o)) => near(p, o, PLACE),
+                    (_, None) => false,
+                };
+                if !clip {
+                    parts.insert("clip");
+                }
+                if !same_text(&p.text, &o.text, fonts) {
+                    parts.insert("text");
+                }
+            }
+        }
+        parts
+    }
+
+    /// Each `forms-ap` case's appearances, made by `text_for_widget` from the
+    /// case's file read with pdf-structure, agree with PDFium's recorded
+    /// ones in every part, or in every part but those `differ.tsv` lists
+    /// for it, which must still differ: the size, every text origin within
+    /// 0.05 pt, every string byte for byte, the box and the matrix, the
+    /// clip, and each path painted under the text, in order, as the region
+    /// it covers (a solid border's ring, each band's six corners from any
+    /// of them, a line's ends, width, and dashes) within 0.01 pt in its
+    /// color. Where PDFium writes no clip the clip here is the box less the
+    /// border's reach, and where it writes no `/Tx` the `/Tx` here is
+    /// empty, each held on every such case.
+    #[test]
+    fn made_appearances_agree_with_pdfiums() {
+        let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+            .into_iter()
+            .map(|[k, v]| (k, v))
+            .collect();
+        let cases: Vec<String> = read_tsv::<3>("cases.tsv")
+            .into_iter()
+            .filter(|[_, kind, _]| kind == "forms-ap")
+            .map(|[name, _, _]| name)
+            .collect();
+
+        // Each case's listed parts, each for one annotation (`part@N`) or any.
+        let mut listed: HashMap<String, BTreeSet<(String, Option<usize>)>> = HashMap::new();
+        let mut rules = BTreeSet::new();
+        for line in differ_lines() {
+            if line[0] == "forms-ap" {
+                assert_eq!(line.len(), 3, "{line:?}");
+                assert!(RULES.contains(&line[1].as_str()), "{line:?}");
+                assert!(
+                    rules.insert(line[1].clone()),
+                    "a rule listed twice: {line:?}"
+                );
+            } else if cases.contains(&line[0]) {
+                assert_eq!(line.len(), 3, "a forms-ap case's differ.tsv line: {line:?}");
+                let (part, at) = match line[1].split_once('@') {
+                    Some((part, at)) => (part, Some(at.parse().unwrap())),
+                    None => (line[1].as_str(), None),
+                };
+                assert!(PARTS.contains(&part), "{line:?}");
+                assert!(
+                    listed
+                        .entry(line[0].clone())
+                        .or_default()
+                        .insert((part.to_owned(), at)),
+                    "a part listed twice: {line:?}"
+                );
+            }
+        }
+        assert_eq!(rules.len(), RULES.len(), "a differ.tsv line for each rule");
+
+        let mut held = Held::default();
+        let mut wrong = Vec::new();
+        for name in &cases {
+            let pdfium = made_appearances(&recorded[name]);
+            let (ours, fonts) = made_for(name);
+            assert_eq!(
+                pdfium.len(),
+                ours.len(),
+                "{name}: a record for each annotation"
+            );
+            let mut found = BTreeSet::new();
+            let mut said = Vec::new();
+            for (index, (pdfium, ours)) in pdfium.iter().zip(&ours).enumerate() {
+                let here = differing(pdfium, ours, &fonts, &mut held);
+                if !here.is_empty() {
+                    said.push(format!(
+                        "  idx {index}: {here:?}\n    pdfium: {pdfium:?}\n    ours:   {:?}",
+                        ours.made
+                    ));
+                }
+                found.extend(here.into_iter().map(|part| (index, part)));
+            }
+            let expected = listed.remove(name).unwrap_or_default();
+            let covers = |(part, at): &(String, Option<usize>),
+                          (index, differs): &(usize, &str)| {
+                part == differs && at.is_none_or(|at| at == *index)
+            };
+            let unlisted: Vec<_> = found
+                .iter()
+                .filter(|f| !expected.iter().any(|e| covers(e, f)))
+                .collect();
+            let agreeing: Vec<_> = expected
+                .iter()
+                .filter(|e| !found.iter().any(|f| covers(e, f)))
+                .collect();
+            if !unlisted.is_empty() || !agreeing.is_empty() {
+                wrong.push(format!(
+                    "{name}: differs unlisted in {unlisted:?}; listed but agrees: {agreeing:?}\n{}",
+                    said.join("\n")
+                ));
+            }
+        }
+        assert!(
+            listed.is_empty(),
+            "differ.tsv lists cases that aren't forms-ap cases: {listed:?}"
+        );
+        if held.clip == 0 {
+            wrong.push("the clip rule held on no case".into());
+        }
+        if held.tx == 0 {
+            wrong.push("the /Tx rule held on no case".into());
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} forms-ap case(s) disagreed with chromium/8152:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+}

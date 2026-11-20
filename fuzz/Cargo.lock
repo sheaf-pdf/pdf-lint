@@ -451,6 +451,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-forms"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "pdf-annots",
+ "pdf-content-streams",
+ "pdf-fonts",
+ "pdf-gfx",
+ "pdf-objects",
+ "pdf-semantics",
+ "thiserror",
+]
+
+[[package]]
 name = "pdf-gfx"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -544,6 +557,7 @@ dependencies = [
  "pdf-crypt",
  "pdf-filters",
  "pdf-fonts",
+ "pdf-forms",
  "pdf-gfx",
  "pdf-linearize",
  "pdf-lint",
@@ -564,6 +578,7 @@ dependencies = [
  "pdf-crypt",
  "pdf-filters",
  "pdf-fonts",
+ "pdf-forms",
  "pdf-gfx",
  "pdf-linearize",
  "pdf-objects",

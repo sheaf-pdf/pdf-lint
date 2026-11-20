@@ -1,0 +1,46 @@
+# Intentional differences from PDFium (chromium/8152): where PDFium reads fewer
+# fields than ISO 32000-2's inheritance gives, and the widgets it adopts from
+# pages; and where an appearance made for a text field differs from the one
+# PDFium makes.
+# A forms case: name	why
+# A forms-ap case: name	part	why, the part of its record that differs
+# (made, bbox, matrix, paint, clip, or text), in every annotation of the case
+# or, written part@N, in annotation N alone; every other part agrees. A line
+# under the kind's name is a rule held on every case it applies to.
+forms-three-deep	PDFium makes a terminal field only where /FT is the field's own or its parent's; a type handed down two levels or more is read here, as ISO 32000-2 has it inherited
+forms-type-missing-or-unknown	PDFium leaves out a terminal field with no /FT; it is read here with no type, for the caller to see and a fault to say
+forms-nameless-middle	the type comes down two levels, as in forms-three-deep; the field with no /T adds nothing to the name
+forms-nameless-at-the-top	PDFium finds a widget's field by its name and finds none for an empty name; the field is read here with an empty name and a fault
+forms-kids-loop	PDFium follows the loop to its depth limit and then finds no /FT one level up; here a field reached twice is left out and the type is inherited
+forms-direct-field	PDFium finds a widget's field through the widget's /Parent, which a kid of a direct field can't have; here the walk down from /Fields finds it
+forms-widget-outside-the-tree	PDFium adds a page's widget that has a /FT to the form though /Fields doesn't reach it; this reads the tree /Fields gives and sees no pages
+forms-no-form	PDFium makes a form of a page's widgets where the catalog has no /AcroForm; here no /AcroForm is no form
+forms-ap	clip	the text is always clipped to the box less the border's reach, as Acrobat writes it; PDFium writes the clip only where the text passes that box: wherever PDFium writes none, the clip here is that box
+forms-ap	tx	an empty text is an empty marked-content sequence, /Tx BMC EMC, as Acrobat writes it; PDFium writes none: wherever PDFium writes none, the sequence here is empty
+ap-auto-empty-box	made	a box with no height can show nothing, so no appearance is made for it (Unmade::NoBox); PDFium writes a string with no font set before it
+ap-face-symbol	made	Latin letters have no code in Symbol's own encoding, which holds Greek letters at those codes, so the value is refused as it is (Unmade::Unencodable); PDFium writes the letters' bytes as codes, which draw Greek letters
+ap-face-zapfdingbats	made	digits have no code in ZapfDingbats' own encoding, which holds dingbats at those codes, so the value is refused as it is (Unmade::Unencodable); PDFium writes the digits' bytes as codes, which draw dingbats
+ap-font-missing-times	text	a /DA font the default resources lack falls back to the standard 14 family its name gives (TiRo: Times-Roman), whose widths and heights are nearer; PDFium draws every such font in Helvetica
+ap-font-missing-courier	text	a /DA font the default resources lack falls back to the standard 14 family its name gives (Cour: Courier), whose widths and heights are nearer; PDFium draws every such font in Helvetica
+ap-font-missing-bold	text	a /DA font the default resources lack keeps the face its name gives (HelveticaLTStd-Bold: Helvetica-Bold), whose widths and heights are nearer; PDFium draws every such font in Helvetica
+ap-comb-no-maxlen	text	the Comb flag with no /MaxLen makes no cells (ISO 32000-2, §12.7.5.3), and the line is one string; PDFium writes each character as a string of its own at the place it has in the line: the same glyphs at the same places
+ap-max-len	text@0	/MaxLen cuts only a comb field's text, as the maker draws the display text it's given (a value formatted for display may be longer than the value /MaxLen limits); PDFium cuts every text field's text at /MaxLen
+ap-box-under-its-border	paint	a solid border wider than half its box covers the box, as its stroke does; PDFium fills an even-odd ring whose inner rectangle, turned inside out, leaves a hole
+ap-inherited-two-levels	made@0	the field's type is inherited from its grandparent, as ISO 32000-2 has it inherited, and its widget is made; PDFium makes a terminal field only where /FT is the field's own or its parent's, as in forms-three-deep
+ap-value-kinds	clip@2	a text field's /V that is an array is no text (ISO 32000-2, §12.7.5.3: a text string or a text stream), so its /Tx is empty; PDFium draws the array's first element
+ap-value-kinds	text@2	a text field's /V that is an array is no text (ISO 32000-2, §12.7.5.3: a text string or a text stream), so nothing is drawn; PDFium draws the array's first element
+ap-border-dash-array	paint	a dashed border is drawn with the dash array its border style dictionary gives (/D [3 2]), as ISO 32000-2, §12.5.4 has it; PDFium draws every dashed border with [3 3]
+ap-border-array	paint@1	a dashed border is drawn with the dash array /Border gives ([3 2]), as ISO 32000-2, §12.5.2 has it; PDFium draws every dashed border with [3 3]
+ap-border-array	paint@2	a widget with a border style dictionary takes its border from it alone (beveled at /W 3), as ISO 32000-2, §12.5.2 has it (Border is then ignored); PDFium takes the width from /Border first (1)
+ap-border-array	text@2	the text is set inside the border the border style dictionary gives (beveled at /W 3, a reach of 6), as ISO 32000-2, §12.5.2 has it; PDFium takes the width from /Border first (1, a reach of 2)
+ap-border-odd	paint@0	a border's width is the number /W gives (1.5), as ISO 32000-2, §12.5.4 has it; PDFium draws a border at a whole width, the number cut to an integer (1)
+ap-border-odd	text@0	the text is set inside the border's width as /W gives it (1.5); PDFium cuts the width to an integer (1)
+ap-rotate-odd	matrix@1	a negative rotation (/R -90) turns the widget clockwise, three quarter turns counterclockwise, as ISO 32000-2, §12.5.6.19 has /R counterclockwise; PDFium reads the rotation's size alone (abs(R % 360)), so -90 turns it one quarter counterclockwise
+ap-rotate-odd	matrix@3	a negative rotation (/R -270) turns the widget clockwise, one quarter turn counterclockwise, as ISO 32000-2, §12.5.6.19 has /R counterclockwise; PDFium reads the rotation's size alone (abs(R % 360)), so -270 turns it three quarters counterclockwise
+ap-border-beveled-colors	paint@0	a beveled border's dark band over a CMYK background is that color at half its brightness (cyan, magenta and yellow halved, black moved halfway to full: 0.05 0.1 0.15 0.7 k), darker than the background as the band's shade is; PDFium halves every component (0.05 0.1 0.15 0.2 k), which takes ink away and draws the band lighter than the background
+ap-comb-border-dash-array	paint	a dashed border and a comb field's dividers are drawn with the dash array the border style dictionary gives (/D [2 1]), as ISO 32000-2, §12.5.4 has it; PDFium draws both with [3 3]
+forms-value-null	a /V that is null is an absent one (ISO 32000-2, §7.3.9), so the parent's value is inherited, as for the reference to no object in forms-value-dangling; PDFium takes the null for the field's own value and reads none
+forms-value-null-by-reference	a /V that refers to a null object is an absent one, as in forms-value-null, and the parent's value is inherited; PDFium reads no value
+ap-da-written-twice	text@0	of two Tf in a /DA the last is the font and size, as a content stream's graphics state has it; PDFium takes the first (8, not 20)
+ap-da-written-twice	text@1	of two nonstroking colors in a /DA the last is the text's (1 0 0 rg), as a content stream's graphics state has it; PDFium takes the first g where there is one, else the first rg, else the first k (0 g)
+ap-da-written-twice	text@2	of two rg in a /DA the last is the text's color (1 0 0 rg), as a content stream's graphics state has it; PDFium takes the first (0 0 1 rg)

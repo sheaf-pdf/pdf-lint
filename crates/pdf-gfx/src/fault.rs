@@ -3,10 +3,13 @@
 
 use std::fmt;
 
+use pdf_content_streams::Operator;
 use pdf_objects::ObjectId;
 
 /// A recoverable ISO 32000-2 departure observed while interpreting a content
-/// stream with [`interpret_with`](crate::interpret_with).
+/// stream with [`interpret_with`](crate::interpret_with), or reading a default
+/// appearance string with
+/// [`DefaultAppearance::parse_with`](crate::DefaultAppearance::parse_with).
 ///
 /// Its `Debug` implementation reports resource names by byte length rather than
 /// raw file bytes.
@@ -51,6 +54,28 @@ pub enum Fault {
         /// Object ID of the damaged object.
         id: ObjectId,
     },
+    /// A `/DA` string failed to lex or passed a `pdf-content-streams` cap
+    /// (ISO 32000-2, §12.7.4.3): the error, its offset into the string and
+    /// its kind, which tells a cap passed from bytes that don't lex.
+    /// [`DefaultAppearance::parse_with`](crate::DefaultAppearance::parse_with)
+    /// returns `None`.
+    DefaultAppearanceUnreadable(pdf_content_streams::Error),
+    /// A `/DA` operator ignored, or `Tf` read in part, for an operand it
+    /// needs that's missing or not finite, or a `Tf` font that isn't a name.
+    DefaultAppearanceOperand {
+        /// Byte offset of the operator in the string.
+        at: usize,
+        /// The operator.
+        operator: Operator,
+    },
+    /// A `/DA` `Tr` ignored for a mode outside `0..=7` (ISO 32000-2, §9.3.6).
+    DefaultAppearanceTextMode {
+        /// Byte offset of the `Tr` in the string.
+        at: usize,
+    },
+    /// A `/DA` string in which no `Tf` names a font: ISO 32000-2, §12.7.4.3,
+    /// asks for one at least.
+    DefaultAppearanceNoFont,
 }
 
 impl fmt::Debug for Fault {
@@ -70,6 +95,20 @@ impl fmt::Debug for Fault {
                 .field("name_len", &name.len())
                 .finish(),
             Fault::Damaged { id } => f.debug_struct("Damaged").field("id", id).finish(),
+            Fault::DefaultAppearanceUnreadable(error) => f
+                .debug_tuple("DefaultAppearanceUnreadable")
+                .field(error)
+                .finish(),
+            Fault::DefaultAppearanceOperand { at, operator } => f
+                .debug_struct("DefaultAppearanceOperand")
+                .field("at", at)
+                .field("operator", operator)
+                .finish(),
+            Fault::DefaultAppearanceTextMode { at } => f
+                .debug_struct("DefaultAppearanceTextMode")
+                .field("at", at)
+                .finish(),
+            Fault::DefaultAppearanceNoFont => f.write_str("DefaultAppearanceNoFont"),
         }
     }
 }

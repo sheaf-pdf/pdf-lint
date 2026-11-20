@@ -18,6 +18,7 @@ import re
 import struct
 import sys
 import tempfile
+import zlib
 
 sys.dont_write_bytecode = True
 
@@ -134,6 +135,334 @@ def contents_pdf(contents, objects):
         out += b"%010d 00000 n \n" % o
     out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
     return bytes(out)
+
+
+class Ref(tuple):
+    """An indirect reference read by `pdf_value`: (number, generation)."""
+
+
+class Name(bytes):
+    """A name read by `pdf_value` or `content_tokens`, without its `/`."""
+
+
+class Op(bytes):
+    """An operator read by `content_tokens`."""
+
+
+WHITE = b"\0\t\n\f\r "
+DELIMS = b"()<>[]{}/%"
+STRING_ESCAPES = {ord("n"): b"\n", ord("r"): b"\r", ord("t"): b"\t", ord("b"): b"\b", ord("f"): b"\f",
+                  ord("("): b"(", ord(")"): b")", ord("\\"): b"\\"}
+
+
+def _skip(data, i):
+    while i < len(data):
+        if data[i] in WHITE:
+            i += 1
+        elif data[i] == 0x25:
+            while i < len(data) and data[i] not in b"\r\n":
+                i += 1
+        else:
+            break
+    return i
+
+
+def _literal(data, i):
+    """The literal string opening at `data[i]`, and where it ends."""
+    out, depth = bytearray(), 1
+    i += 1
+    while True:
+        if i >= len(data):
+            raise SystemExit("forms-ap: a string doesn't end")
+        b = data[i]
+        if b == 0x5C:
+            i += 1
+            c = data[i]
+            if c in STRING_ESCAPES:
+                out += STRING_ESCAPES[c]
+                i += 1
+            elif 0x30 <= c <= 0x37:
+                j = i
+                while j < min(i + 3, len(data)) and 0x30 <= data[j] <= 0x37:
+                    j += 1
+                out.append(int(data[i:j], 8) & 0xFF)
+                i = j
+            elif c in b"\r\n":
+                i += 2 if data[i:i + 2] == b"\r\n" else 1
+            else:
+                out.append(c)
+                i += 1
+            continue
+        if b == 0x28:
+            depth += 1
+        elif b == 0x29:
+            depth -= 1
+            if depth == 0:
+                return bytes(out), i + 1
+        out.append(b)
+        i += 1
+
+
+def _word(data, i):
+    j = i
+    while j < len(data) and data[j] not in WHITE and data[j] not in DELIMS:
+        j += 1
+    return data[i:j], j
+
+
+def _number(word):
+    try:
+        return float(word)
+    except ValueError:
+        return None
+
+
+def pdf_value(data, i):
+    """The object at `data[i]` as PDFium saves one (a dictionary, an array, a
+    name, a number, a string, a reference, a keyword), and where it ends.
+    Anything else stops the recording."""
+    i = _skip(data, i)
+    b = data[i:i + 2]
+    if b == b"<<":
+        out, i = {}, i + 2
+        while True:
+            i = _skip(data, i)
+            if data[i:i + 2] == b">>":
+                return out, i + 2
+            key, i = pdf_value(data, i)
+            if not isinstance(key, Name):
+                raise SystemExit("forms-ap: a dictionary's key isn't a name")
+            out[bytes(key)], i = pdf_value(data, i)
+    if b[:1] == b"[":
+        out, i = [], i + 1
+        while True:
+            i = _skip(data, i)
+            if data[i:i + 1] == b"]":
+                return out, i + 1
+            value, i = pdf_value(data, i)
+            out.append(value)
+    if b[:1] == b"/":
+        word, i = _word(data, i + 1)
+        return Name(word), i
+    if b[:1] == b"(":
+        return _literal(data, i)
+    if b[:1] == b"<":
+        j = data.index(b">", i)
+        return bytes.fromhex(re.sub(rb"\s", b"", data[i + 1:j]).decode("ascii")), j + 1
+    word, j = _word(data, i)
+    if word in (b"true", b"false", b"null"):
+        return word.decode("ascii"), j
+    n = _number(word)
+    if n is None:
+        raise SystemExit("forms-ap: %r isn't an object" % word)
+    # `n g R`, a reference, or a number alone.
+    m = re.match(rb"\s*(\d+)\s+R(?=[\s/<>\[\]()%]|$)", data[j:j + 24])
+    if m and word.isdigit():
+        return Ref((int(word), int(m.group(1)))), j + m.end()
+    return n, j
+
+
+def saved_objects(data):
+    """Each object of a file PDFium saved, by its number: its value, and its
+    stream's bytes (decoded where it says /FlateDecode) or None. The file is
+    held to the form PDFium writes it in: no object streams, each object at a
+    line's start."""
+    out = {}
+    for m in re.finditer(rb"(?m)^(\d+) 0 obj\s*", data):
+        value, i = pdf_value(data, m.end())
+        stream = None
+        s = re.match(rb"\s*stream\r?\n", data[i:i + 16])
+        if s:
+            if not isinstance(value, dict) or not isinstance(value.get(b"Length"), float):
+                raise SystemExit("forms-ap: a saved stream's /Length isn't a direct number")
+            start = i + s.end()
+            stream = data[start:start + int(value[b"Length"])]
+            filters = value.get(b"Filter")
+            if filters == Name(b"FlateDecode"):
+                stream = zlib.decompress(stream)
+            elif filters is not None:
+                raise SystemExit("forms-ap: a saved stream's filter isn't /FlateDecode alone")
+        out[int(m.group(1))] = (value, stream)
+    return out
+
+
+def content_tokens(data):
+    """A content stream's operands and operators in order: numbers as floats,
+    names, strings as bytes, arrays as lists, operators as `Op`."""
+    out, i = [], 0
+    stack = []
+    while True:
+        i = _skip(data, i)
+        if i >= len(data):
+            break
+        b = data[i:i + 1]
+        if b == b"[":
+            stack.append(out)
+            out = []
+            i += 1
+            continue
+        if b == b"]":
+            if not stack:
+                raise SystemExit("forms-ap: `]` with no `[`")
+            inner, out = out, stack.pop()
+            out.append(inner)
+            i += 1
+            continue
+        if b in (b"/", b"(", b"<"):
+            value, i = pdf_value(data, i)
+            out.append(value)
+            continue
+        word, i = _word(data, i)
+        if not word:
+            raise SystemExit("forms-ap: %r in a content stream" % data[i:i + 1])
+        n = _number(word)
+        out.append(n if n is not None else Op(word))
+    if stack:
+        raise SystemExit("forms-ap: `[` with no `]`")
+    return out
+
+
+COLOR_OPS = {b"g": 1, b"rg": 3, b"k": 4, b"G": 1, b"RG": 3, b"K": 4}
+SEGMENT_OPS = {b"re": 4, b"m": 2, b"l": 2, b"c": 6, b"h": 0}
+PAINT_OPS = {b"f": "fill", b"F": "fill", b"f*": "eofill", b"S": "stroke"}
+
+
+def ap_record(content):
+    """A made appearance's content as the record's words from `paint` on:
+    each path painted before `/Tx BMC`, in order, with its color (and a
+    stroke's width, cap, join and dash) and its segments; then `tx none`
+    where there is no `/Tx BMC`, or the clip in it and its text, each `Tj` by
+    its font, size, origin (the `Td`s summed in f32) and codes. An operator
+    PDFium doesn't write in a text field's appearance stops the recording."""
+    def fail(why):
+        raise SystemExit("forms-ap: %s in %r" % (why, content[:200]))
+
+    state = {"fill": (b"g", [0.0]), "stroke": (b"G", [0.0]), "w": 1.0, "dash": ([], 0.0), "cap": 0, "join": 0}
+    saved, path, operands = [], [], []
+    paint, runs, colors = [], [], set()
+    clip, tx, in_tx, in_bt, pending_clip = None, False, False, False, False
+    font, size, x, y = None, None, 0.0, 0.0
+
+    def nums(count):
+        if len(operands) != count or not all(isinstance(v, float) for v in operands):
+            fail("%d numbers wanted" % count)
+        return [f32(v) for v in operands]
+
+    for token in content_tokens(content):
+        if not isinstance(token, Op):
+            operands.append(token)
+            continue
+        op = bytes(token)
+        if op == b"q":
+            nums(0)
+            saved.append(dict(state))
+        elif op == b"Q":
+            nums(0)
+            if not saved:
+                fail("`Q` with no `q`")
+            state = saved.pop()
+        elif op in COLOR_OPS:
+            state["fill" if op.islower() else "stroke"] = (op, nums(COLOR_OPS[op]))
+        elif op == b"w":
+            state["w"] = nums(1)[0]
+        elif op == b"J":
+            state["cap"] = int(nums(1)[0])
+        elif op == b"j":
+            state["join"] = int(nums(1)[0])
+        elif op == b"d":
+            if len(operands) != 2 or not isinstance(operands[0], list) or not isinstance(operands[1], float):
+                fail("`d` wants an array and a number")
+            state["dash"] = ([f32(v) for v in operands[0]], f32(operands[1]))
+        elif op in SEGMENT_OPS:
+            if in_bt:
+                fail("a path in a text object")
+            path.append((op, nums(SEGMENT_OPS[op])))
+        elif op in PAINT_OPS:
+            nums(0)
+            if tx or not path or pending_clip:
+                fail("a path painted in /Tx, a clip painted, or no path")
+            kind = PAINT_OPS[op]
+            color = state["stroke" if kind == "stroke" else "fill"]
+            words = [kind, color[0].decode("ascii")] + [num(v) for v in color[1]]
+            if kind == "stroke":
+                dash, phase = state["dash"]
+                words += ["w", num(state["w"]), "cap", str(state["cap"]), "join", str(state["join"]), "dash"]
+                words += ([num(v) for v in dash] or ["none"]) + ["phase", num(phase)]
+            for seg, args in path:
+                words += [seg.decode("ascii")] + [num(v) for v in args]
+            paint.append(" ".join(words))
+            path = []
+        elif op == b"W":
+            nums(0)
+            pending_clip = True
+        elif op == b"n":
+            nums(0)
+            if pending_clip:
+                if not in_tx or clip is not None or len(path) != 1 or path[0][0] != b"re":
+                    fail("a clip other than one rectangle in /Tx")
+                clip = path[0][1]
+            path, pending_clip = [], False
+        elif op == b"BMC":
+            if operands != [Name(b"Tx")] or tx:
+                fail("a marked sequence other than one /Tx")
+            operands = []
+            tx = in_tx = True
+        elif op == b"EMC":
+            nums(0)
+            if not in_tx:
+                fail("`EMC` with no `BMC`")
+            in_tx = False
+        elif op == b"BT":
+            nums(0)
+            if in_bt or not in_tx:
+                fail("`BT` outside /Tx, or within a text object")
+            in_bt, x, y = True, 0.0, 0.0
+        elif op == b"ET":
+            nums(0)
+            in_bt = False
+        elif op == b"Td":
+            if not in_bt:
+                fail("`Td` outside a text object")
+            dx, dy = nums(2)
+            x, y = f32(x + dx), f32(y + dy)
+        elif op == b"Tf":
+            if len(operands) != 2 or not isinstance(operands[0], Name) or not isinstance(operands[1], float):
+                fail("`Tf` wants a name and a number")
+            font, size = bytes(operands[0]), f32(operands[1])
+        elif op == b"Tj":
+            if not in_bt or len(operands) != 1 or not isinstance(operands[0], bytes) \
+                    or isinstance(operands[0], Name):
+                fail("`Tj` outside a text object, or with no string")
+            colors.add((state["fill"][0], tuple(state["fill"][1])))
+            # A `Tj` before any `Tf`, which PDFium writes for a box with no
+            # room, is shown in no font: `%`, the empty word, at size 0.
+            runs.append("font %s size %s at %s %s codes %s" % (esc(font or b""), num(size or 0.0), num(x),
+                                                              num(y), esc(operands[0])))
+        else:
+            fail("operator %r" % op)
+        if op not in (b"BMC",):
+            operands = []
+    if operands or saved or in_tx or in_bt or path:
+        fail("an unfinished stream")
+    words = ["paint"] + (paint or ["none"])
+    if not tx:
+        return " ".join(words + ["tx", "none"])
+    words += ["clip"] + ([num(v) for v in clip] if clip else ["none"])
+    if not runs:
+        return " ".join(words + ["text", "none"])
+    if len(colors) != 1:
+        fail("text in more than one color")
+    op, comps = colors.pop()
+    return " ".join(words + ["color", op.decode("ascii")] + [num(v) for v in comps] + runs)
+
+
+class FileWrite(ctypes.Structure):
+    pass
+
+
+FileWrite._fields_ = [("version", ctypes.c_int),
+                      ("WriteBlock", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(FileWrite),
+                                                      ctypes.c_void_p, ctypes.c_ulong))]
 
 
 class M(ctypes.Structure):
@@ -257,6 +586,16 @@ class Pdfium:
             ("FPDFPage_CloseAnnot", None, [P]),
             ("FPDFAnnot_GetSubtype", I, [P]),
             ("FPDFAnnot_GetFlags", I, [P]),
+            ("FPDFDOC_InitFormFillEnvironment", P, [P, P]),
+            ("FPDFDOC_ExitFormFillEnvironment", None, [P]),
+            ("FORM_OnAfterLoadPage", None, [P, P]),
+            ("FORM_OnBeforeClosePage", None, [P, P]),
+            ("FPDFAnnot_GetFormFieldType", I, [P, P]),
+            ("FPDFAnnot_GetFormFieldFlags", I, [P, P]),
+            ("FPDFAnnot_GetFormFieldName", U, [P, P, P, U]),
+            ("FPDFAnnot_GetFormFieldValue", U, [P, P, P, U]),
+            ("FPDFAnnot_GetAP", U, [P, I, P, U]),
+            ("FPDF_SaveAsCopy", I, [P, ctypes.POINTER(FileWrite), U]),
             ("FPDFAnnot_GetRect", I, [P, ctypes.POINTER(FSRect)]),
             ("FPDFAnnot_GetBorder", I, [P, pf, pf, pf]),
             ("FPDFAnnot_GetStringValue", U, [P, ctypes.c_char_p, P, U]),
@@ -667,6 +1006,131 @@ class Pdfium:
         lib.FPDF_ClosePage(page)
         lib.FPDF_CloseDocument(doc)
         return parts
+
+    def forms(self, data):
+        """Page 0's widgets as PDFium's form-fill environment reads their
+        fields (fpdf_formfill.h, fpdf_annot.h): each one's field type, its
+        flags, its fully qualified name, and a text field's value."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        # FPDF_FORMFILLINFO at version 2, every callback null: reading fields
+        # calls none of them.
+        info = ctypes.create_string_buffer(1024)
+        ctypes.cast(info, ctypes.POINTER(ctypes.c_int))[0] = 2
+        form = lib.FPDFDOC_InitFormFillEnvironment(doc, info)
+        page = lib.FPDF_LoadPage(doc, 0)
+        if not page or not form:
+            if form:
+                lib.FPDFDOC_ExitFormFillEnvironment(form)
+            lib.FPDF_CloseDocument(doc)
+            return None
+        lib.FORM_OnAfterLoadPage(page, form)
+
+        def text(get, a):
+            size = get(form, a, None, 0)
+            if size <= 2:
+                return b""
+            sbuf = ctypes.create_string_buffer(size)
+            get(form, a, sbuf, size)
+            return sbuf.raw[:size - 2].decode("utf-16le", "replace").encode("utf-8")
+
+        out = []
+        for i in range(lib.FPDFPage_GetAnnotCount(page)):
+            a = lib.FPDFPage_GetAnnot(page, i)
+            if not a:
+                continue
+            kind = lib.FPDFAnnot_GetFormFieldType(form, a)
+            if kind < 0:
+                out.append("idx %d none" % i)
+            else:
+                words = ["idx", str(i), "type", str(kind),
+                         "flags", str(lib.FPDFAnnot_GetFormFieldFlags(form, a) & 0xFFFFFFFF),
+                         "name", esc(text(lib.FPDFAnnot_GetFormFieldName, a))]
+                if kind == 6:
+                    words += ["value", esc(text(lib.FPDFAnnot_GetFormFieldValue, a))]
+                out.append(" ".join(words))
+            lib.FPDFPage_CloseAnnot(a)
+        lib.FORM_OnBeforeClosePage(page, form)
+        lib.FPDF_ClosePage(page)
+        lib.FPDFDOC_ExitFormFillEnvironment(form)
+        lib.FPDF_CloseDocument(doc)
+        return out
+
+    def forms_ap(self, data):
+        """The normal appearance PDFium makes for each of page 0's widgets
+        that has none, under the form-fill environment `forms` sets up
+        (fpdf_formfill.h): each widget's `/AP /N` as the file PDFium saves
+        after (FPDF_SaveAsCopy, fpdf_save.h) has it, its `/BBox`, its
+        `/Matrix` and its content read by `ap_record`; `idx N none` where
+        PDFium made none. The content FPDFAnnot_GetAP gives is held to the
+        saved stream's where both are ASCII, so a widget is never read with
+        another's appearance."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        info = ctypes.create_string_buffer(1024)
+        ctypes.cast(info, ctypes.POINTER(ctypes.c_int))[0] = 2
+        form = lib.FPDFDOC_InitFormFillEnvironment(doc, info)
+        page = lib.FPDF_LoadPage(doc, 0)
+        if not page or not form:
+            if form:
+                lib.FPDFDOC_ExitFormFillEnvironment(form)
+            lib.FPDF_CloseDocument(doc)
+            return None
+        lib.FORM_OnAfterLoadPage(page, form)
+        given = []
+        for i in range(lib.FPDFPage_GetAnnotCount(page)):
+            a = lib.FPDFPage_GetAnnot(page, i)
+            given.append(self._u16(lib.FPDFAnnot_GetAP, a, 0) if a else None)
+            if a:
+                lib.FPDFPage_CloseAnnot(a)
+        chunks = []
+
+        def write(_, block, size):
+            chunks.append(ctypes.string_at(block, size))
+            return 1
+
+        writer = FileWrite(1, FileWrite._fields_[1][1](write))
+        saved = lib.FPDF_SaveAsCopy(doc, ctypes.byref(writer), 0)
+        lib.FORM_OnBeforeClosePage(page, form)
+        lib.FPDF_ClosePage(page)
+        lib.FPDFDOC_ExitFormFillEnvironment(form)
+        lib.FPDF_CloseDocument(doc)
+        if not saved:
+            raise SystemExit("forms-ap: PDFium didn't save the file")
+        objects = saved_objects(b"".join(chunks))
+
+        def get(value):
+            while isinstance(value, Ref):
+                value = objects.get(value[0], (None, None))[0]
+            return value
+
+        pages = [v for v, _ in objects.values() if isinstance(v, dict) and v.get(b"Type") == Name(b"Page")]
+        if len(pages) != 1:
+            raise SystemExit("forms-ap: a case's file has %d pages, not one" % len(pages))
+        annots = get(pages[0].get(b"Annots")) or []
+        if len(annots) != len(given):
+            raise SystemExit("forms-ap: %d annotations saved, %d read" % (len(annots), len(given)))
+        out = []
+        for i, entry in enumerate(annots):
+            ap = get((get(entry) or {}).get(b"AP"))
+            n = ap.get(b"N") if isinstance(ap, dict) else None
+            if not isinstance(n, Ref) or not isinstance(objects.get(n[0], (None, None))[1], bytes):
+                out.append("idx %d none" % i)
+                continue
+            dictionary, content = objects[n[0]]
+            if given[i] is not None and max(content, default=0) < 0x80 and given[i] != content:
+                raise SystemExit("forms-ap: annotation %d's saved appearance isn't the one PDFium gave" % i)
+            bbox, matrix = get(dictionary.get(b"BBox")), get(dictionary.get(b"Matrix"))
+            if not (isinstance(bbox, list) and len(bbox) == 4 and isinstance(matrix, list) and len(matrix) == 6
+                    and all(isinstance(v, float) for v in bbox + matrix)):
+                raise SystemExit("forms-ap: annotation %d's /BBox or /Matrix isn't as PDFium writes them" % i)
+            out.append(" ".join(["idx", str(i), "bbox"] + [num(f32(v)) for v in bbox] + ["matrix"]
+                                + [num(f32(v)) for v in matrix]) + " " + ap_record(content))
+        return out
 
     def annots(self, data):
         """Page 0's annotations, links, destinations, and actions as PDFium
@@ -1140,6 +1604,10 @@ def answer(pdfium, kind, files):
         return content_answer(pdfium.gfx_text(files["pdf"], files.get("queries")))
     if kind == "annots":
         return content_answer(pdfium.annots(files["pdf"]))
+    if kind == "forms":
+        return content_answer(pdfium.forms(files["pdf"]))
+    if kind == "forms-ap":
+        return content_answer(pdfium.forms_ap(files["pdf"]))
     if kind in ("annots-flatten-display", "annots-flatten-print"):
         return content_answer(pdfium.annots_flatten(files["pdf"], kind == "annots-flatten-print"))
     if kind == "outlines":
@@ -1155,6 +1623,14 @@ def answer(pdfium, kind, files):
         ans = pdfium.viewer(files["pdf"])
         return "no-document" if ans is None else ans
     raise SystemExit("unknown kind %r" % kind)
+
+
+def named_answer(pdfium, folder, name, kind, files):
+    """`answer`, with a recording that stops naming the case it stopped at."""
+    try:
+        return answer(pdfium, kind, files)
+    except SystemExit as stop:
+        raise SystemExit("%s: %s: %s" % (folder, name, stop.code)) from None
 
 
 def load_generator(folder):
@@ -1328,7 +1804,7 @@ def main(argv):
     failed = 0
     for folder in rest[1:]:
         cases = read_cases(folder)
-        answers = [(name, answer(pdfium, kind, files)) for name, kind, files in cases]
+        answers = [(name, named_answer(pdfium, folder, name, kind, files)) for name, kind, files in cases]
         if command == "run":
             print("# %s" % folder)
             for name, text in answers:

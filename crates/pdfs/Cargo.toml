@@ -35,6 +35,9 @@ pdf-fonts.workspace = true
 pdf-gfx.workspace = true
 # PDF annotations, appearance synthesis, and page flattening.
 pdf-annots.workspace = true
+# Interactive forms: the field tree, inherited values, widgets, and the
+# appearances text fields' widgets without one show.
+pdf-forms.workspace = true
 # A pdf-structure document linearized and a file's linearization checked
 # (`family`), and pdf-filters' zlib-rs through it.
 pdf-linearize = { workspace = true, features = ["family", "zlib-rs"] }
@@ -47,11 +50,11 @@ tracing = { version = "0.1.41", default-features = false, features = ["std"], op
 default = ["programs", "text-layout", "clock", "embed"]
 # pdf-fonts' `programs`: a font's program read, for its glyphs' boxes and
 # its heights, and the text of what its encoding leaves to it.
-programs = ["pdf-fonts/programs", "pdf-gfx/programs", "pdf-annots/programs"]
+programs = ["pdf-fonts/programs", "pdf-gfx/programs", "pdf-annots/programs", "pdf-forms/programs"]
 # pdf-gfx's `text-layout`: `Page::text_page` / `Page::search` spatial reading
 # order, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas`
 # text boxes.
-text-layout = ["pdf-gfx/text-layout", "pdf-annots/text-layout"]
+text-layout = ["pdf-gfx/text-layout", "pdf-annots/text-layout", "pdf-forms/text-layout"]
 # pdf-semantics' `clock`: `Date::now` and `Date::from_unix`.
 clock = ["pdf-semantics/clock"]
 # pdf-fonts' `embed`: a TrueType program embedded in a document, cut to the
@@ -64,7 +67,12 @@ embed = ["pdf-fonts/embed"]
 image-ends = ["pdf-content-streams/image-ends"]
 # pdf-fonts' `predefined-cmaps`: Adobe's predefined CMaps, from hayro-cmap's
 # bundle.
-predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps", "pdf-annots/predefined-cmaps"]
+predefined-cmaps = [
+    "pdf-fonts/predefined-cmaps",
+    "pdf-gfx/predefined-cmaps",
+    "pdf-annots/predefined-cmaps",
+    "pdf-forms/predefined-cmaps",
+]
 # pdf-content-streams' `simd`: its dependencies' SIMD, chosen as it runs by
 # what the CPU has.
 simd = ["pdf-content-streams/simd"]
@@ -78,6 +86,7 @@ tracing = [
     "pdf-fonts/tracing",
     "pdf-gfx/tracing",
     "pdf-annots/tracing",
+    "pdf-forms/tracing",
     "pdf-linearize/tracing",
 ]
 # pdf-structure's and pdf-linearize's test writer: a new file's encryption

@@ -6,14 +6,17 @@ use std::fmt;
 use pdf_content_streams::{
     Color, Limits, Operation, Operator, ResCx, TextMode, operations, write_number,
 };
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::serialize;
+
+use crate::fault::Fault;
 
 /// Parsed `/DA` (Default Appearance) string used by `/FreeText`, `/Redact`, and
 /// variable-text `/Widget` annotations and by interactive form fields
 /// (ISO 32000-2 §12.7.4.3).
 ///
 /// A `/DA` is a fragment of content: a `Tf` naming a font resource and its
-/// size, an optional color operator, and optional text-state operators. Each
+/// size, optional color operators, and optional text-state operators. Each
 /// field is `None` where its operator was absent; where an operator is written
 /// more than once, the last one wins.
 ///
@@ -45,9 +48,13 @@ pub struct DefaultAppearance {
     /// takes a name and a size together, so a size set by hand with no
     /// `font_name` isn't written by [`to_bytes`](Self::to_bytes).
     pub font_size: Option<f32>,
-    /// Text color set by `g`/`G`, `rg`/`RG`, or `k`/`K` in `/DA`, its
-    /// components clamped to `0.0..=1.0`.
+    /// Text color: the nonstroking color set by `g`, `rg`, or `k` in `/DA`,
+    /// which text is filled with, its components clamped to `0.0..=1.0`.
     pub color: Option<Color>,
+    /// The stroking color set by `G`, `RG`, or `K` in `/DA`, its components
+    /// clamped to `0.0..=1.0`. Filled text isn't drawn in it: it's kept for
+    /// writing back, and for a caller that strokes.
+    pub stroke_color: Option<Color>,
     /// Character spacing set by `Tc`, in unscaled text space units.
     pub char_space: Option<f32>,
     /// Word spacing set by `Tw`, in unscaled text space units.
@@ -68,6 +75,7 @@ impl fmt::Debug for DefaultAppearance {
             .field("font_name_len", &self.font_name.as_ref().map(Vec::len))
             .field("font_size", &self.font_size)
             .field("color", &self.color)
+            .field("stroke_color", &self.stroke_color)
             .field("char_space", &self.char_space)
             .field("word_space", &self.word_space)
             .field("horizontal_scale", &self.horizontal_scale)
@@ -88,6 +96,32 @@ fn component(step: &Operation<'_>, i: usize) -> Option<f32> {
     finite(step, i).map(|v| v.clamp(0.0, 1.0))
 }
 
+/// Sets `field` to a text-state operator's operand where it's there and
+/// finite, else leaves it as it was; whether it was.
+fn scalar(field: &mut Option<f32>, step: &Operation<'_>) -> bool {
+    let value = finite(step, 0);
+    if value.is_some() {
+        *field = value;
+    }
+    value.is_some()
+}
+
+/// Sets the color `operator` sets, nonstroking or stroking, to `color` where
+/// its operands gave one, else leaves it as it was; whether they did.
+fn set_color(out: &mut DefaultAppearance, operator: Operator, color: Option<Color>) -> bool {
+    let stroking = matches!(
+        operator,
+        Operator::StrokeGray | Operator::StrokeRgb | Operator::StrokeCmyk
+    );
+    if let Some(color) = color {
+        match stroking {
+            true => out.stroke_color = Some(color),
+            false => out.color = Some(color),
+        }
+    }
+    color.is_some()
+}
+
 impl DefaultAppearance {
     /// Constructs a [`DefaultAppearance`] from font resource name, size, and
     /// optional color, with no text-state scalar set.
@@ -103,66 +137,149 @@ impl DefaultAppearance {
 
     /// Parses a `/DA` content fragment under `limits`.
     ///
-    /// Reads `Tf`, the device color operators (`g`/`G`, `rg`/`RG`, `k`/`K`,
-    /// stroking and nonstroking alike), and the text-state operators `Tc`,
+    /// Reads `Tf`, the device color operators (nonstroking `g`, `rg`, `k`
+    /// into [`color`](Self::color), stroking `G`, `RG`, `K` into
+    /// [`stroke_color`](Self::stroke_color)), and the text-state operators `Tc`,
     /// `Tw`, `Tz`, `TL`, `Tr`, and `Ts`; every other operator is passed over.
     /// An operator is ignored where an operand it needs is missing or not
     /// finite, and `Tr` where its operand is outside `0..=7`.
     ///
     /// Returns `None` if lexing fails or a cap of `limits` is passed. A `/DA`
     /// without `Tf` parses with `font_name` `None`, which callers may diagnose.
+    /// [`parse_with`](Self::parse_with) reads the same and says what it
+    /// passed over.
     #[must_use]
     pub fn parse(da: &[u8], limits: &Limits) -> Option<Self> {
+        Self::parse_with(da, limits, &mut ())
+    }
+
+    /// Parses a `/DA` content fragment under `limits` as
+    /// [`parse`](Self::parse) does, the same value whatever `sink` is, and
+    /// tells `sink` what departs from ISO 32000-2, §12.7.4.3, each at its
+    /// byte offset into `da` where it has one:
+    ///
+    /// - [`Fault::DefaultAppearanceUnreadable`]: `da` failed to lex or passed
+    ///   a cap of `limits`, and `None` is returned;
+    /// - [`Fault::DefaultAppearanceOperand`]: an operator ignored, or a `Tf`
+    ///   read in part (its name or its size), for an operand it needs that's
+    ///   missing or not finite, or a font that isn't a name;
+    /// - [`Fault::DefaultAppearanceTextMode`]: a `Tr` ignored for a mode
+    ///   outside `0..=7`;
+    /// - [`Fault::DefaultAppearanceNoFont`]: no `Tf` names a font.
+    ///
+    /// Each is told at a [`Place`] with no object and no span: a `/DA` is a
+    /// string, and where it was read from is the caller's to say. With a
+    /// sink whose [`wants`](Sink::wants) is `false`, `&mut ()` among them,
+    /// nothing is gathered for it.
+    ///
+    /// ```
+    /// use pdf_gfx::pdf_content_streams::{Limits, Operator};
+    /// use pdf_gfx::{DefaultAppearance, Fault};
+    ///
+    /// let mut faults = Vec::new();
+    /// let da = DefaultAppearance::parse_with(b"Tc 9 Tr 0 g", &Limits::DEFAULT, &mut faults);
+    /// assert_eq!(da, DefaultAppearance::parse(b"Tc 9 Tr 0 g", &Limits::DEFAULT));
+    /// let faults: Vec<Fault> = faults.into_iter().map(|(_, fault)| fault).collect();
+    /// assert_eq!(
+    ///     faults,
+    ///     [
+    ///         Fault::DefaultAppearanceOperand { at: 0, operator: Operator::CharSpace },
+    ///         Fault::DefaultAppearanceTextMode { at: 5 },
+    ///         Fault::DefaultAppearanceNoFont,
+    ///     ]
+    /// );
+    /// ```
+    #[must_use]
+    pub fn parse_with<S: Sink<Fault> + ?Sized>(
+        da: &[u8],
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Option<Self> {
+        let mut tell = |fault: Fault| {
+            if sink.wants() {
+                sink.fault(Place::new(None, None), fault);
+            }
+        };
         let mut out = Self::default();
         for step in operations(da, &ResCx::none(), limits) {
-            let step = step.ok()?;
-            match step.operator() {
+            let step = match step {
+                Ok(step) => step,
+                Err(error) => {
+                    tell(Fault::DefaultAppearanceUnreadable(error));
+                    return None;
+                }
+            };
+            let operator = step.operator();
+            // Whether every operand the operator needs was there to read.
+            let read = match operator {
                 Operator::Font => {
-                    if let Some(name) = step.arg(1).and_then(|o| o.name()) {
+                    let name = step.arg(1).and_then(|o| o.name());
+                    let size = finite(&step, 0);
+                    let whole = name.is_some() && size.is_some();
+                    if let Some(name) = name {
                         out.font_name = Some(name.into_owned());
                     }
-                    if let Some(sz) = finite(&step, 0) {
+                    if let Some(sz) = size {
                         out.font_size = Some(sz);
                     }
+                    whole
                 }
                 Operator::FillGray | Operator::StrokeGray => {
-                    if let Some(g) = component(&step, 0) {
-                        out.color = Some(Color::Gray(g));
-                    }
+                    let gray = component(&step, 0).map(Color::Gray);
+                    set_color(&mut out, operator, gray)
                 }
                 Operator::FillRgb | Operator::StrokeRgb => {
-                    if let (Some(r), Some(g), Some(b)) = (
+                    let rgb = match (
                         component(&step, 2),
                         component(&step, 1),
                         component(&step, 0),
                     ) {
-                        out.color = Some(Color::Rgb([r, g, b]));
-                    }
+                        (Some(r), Some(g), Some(b)) => Some(Color::Rgb([r, g, b])),
+                        _ => None,
+                    };
+                    set_color(&mut out, operator, rgb)
                 }
                 Operator::FillCmyk | Operator::StrokeCmyk => {
-                    if let (Some(c), Some(m), Some(y), Some(k)) = (
+                    let cmyk = match (
                         component(&step, 3),
                         component(&step, 2),
                         component(&step, 1),
                         component(&step, 0),
                     ) {
-                        out.color = Some(Color::Cmyk([c, m, y, k]));
-                    }
+                        (Some(c), Some(m), Some(y), Some(k)) => Some(Color::Cmyk([c, m, y, k])),
+                        _ => None,
+                    };
+                    set_color(&mut out, operator, cmyk)
                 }
-                Operator::CharSpace => out.char_space = finite(&step, 0).or(out.char_space),
-                Operator::WordSpace => out.word_space = finite(&step, 0).or(out.word_space),
-                Operator::Scale => {
-                    out.horizontal_scale = finite(&step, 0).or(out.horizontal_scale);
-                }
-                Operator::Leading => out.leading = finite(&step, 0).or(out.leading),
-                Operator::RenderMode => {
+                Operator::CharSpace => scalar(&mut out.char_space, &step),
+                Operator::WordSpace => scalar(&mut out.word_space, &step),
+                Operator::Scale => scalar(&mut out.horizontal_scale, &step),
+                Operator::Leading => scalar(&mut out.leading, &step),
+                Operator::RenderMode => match finite(&step, 0) {
                     // Cut to its whole part, as the interpreter reads `Tr`.
-                    let mode = finite(&step, 0).and_then(|n| TextMode::of(n as i32));
-                    out.text_mode = mode.or(out.text_mode);
-                }
-                Operator::Rise => out.rise = finite(&step, 0).or(out.rise),
-                _ => {}
+                    Some(n) => {
+                        match TextMode::of(n as i32) {
+                            Some(mode) => out.text_mode = Some(mode),
+                            None => tell(Fault::DefaultAppearanceTextMode {
+                                at: step.at().start,
+                            }),
+                        }
+                        true
+                    }
+                    None => false,
+                },
+                Operator::Rise => scalar(&mut out.rise, &step),
+                _ => true,
+            };
+            if !read {
+                tell(Fault::DefaultAppearanceOperand {
+                    at: step.at().start,
+                    operator,
+                });
             }
+        }
+        if out.font_name.is_none() {
+            tell(Fault::DefaultAppearanceNoFont);
         }
         Some(out)
     }
@@ -174,7 +291,8 @@ impl DefaultAppearance {
     /// `Tf` (where a font name is set; `/Helv` where the name holds a NUL byte
     /// and so can't be written, and size `0` where none is set), the color
     /// (`g`, `rg`, or `k`, its components clamped to `0.0..=1.0` as
-    /// [`parse`](Self::parse) reads them), then `Tc`, `Tw`, `Tz`, `TL`, `Tr`,
+    /// [`parse`](Self::parse) reads them), the stroking color (`G`, `RG`, or
+    /// `K`, the same), then `Tc`, `Tw`, `Tz`, `TL`, `Tr`,
     /// and `Ts`, each only where set, separated by single spaces. Numbers are
     /// written as content numbers, a value that isn't finite as `0`. A size
     /// with no font name is left out, as `Tf` needs both.
@@ -208,12 +326,17 @@ impl DefaultAppearance {
             write_number(&mut out, self.font_size.unwrap_or(0.0));
             out.extend_from_slice(b" Tf");
         }
-        if let Some(color) = self.color {
+        let operators: [(Option<Color>, [&[u8]; 3]); 2] = [
+            (self.color, [b"g", b"rg", b"k"]),
+            (self.stroke_color, [b"G", b"RG", b"K"]),
+        ];
+        for (color, [gray, rgb, cmyk]) in operators {
+            let Some(color) = color else { continue };
             sep(&mut out);
             let (components, operator): (&[f32], &[u8]) = match &color {
-                Color::Gray(g) => (std::slice::from_ref(g), b"g"),
-                Color::Rgb(rgb) => (rgb, b"rg"),
-                Color::Cmyk(cmyk) => (cmyk, b"k"),
+                Color::Gray(g) => (std::slice::from_ref(g), gray),
+                Color::Rgb(c) => (c, rgb),
+                Color::Cmyk(c) => (c, cmyk),
             };
             for &c in components {
                 write_number(&mut out, c.clamp(0.0, 1.0));

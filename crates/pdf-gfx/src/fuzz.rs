@@ -11,17 +11,31 @@
 //!    non-`Op` geometry, text, clip, form, image, shading, and mark events.
 //! 5. `/DA` round-trip invariance: whenever `DefaultAppearance::parse` reads the
 //!    page content, what `to_bytes` writes parses again and writes the same
-//!    bytes again.
+//!    bytes again. `DefaultAppearance::parse_with` gives what `parse` gives
+//!    whatever its sink, tells a sink that wants none nothing, and tells a
+//!    `Vec` what it read past: an unreadable string's error last where it
+//!    gives `None`, a missing font last where it gives one without, every
+//!    offset within the string.
 //! 6. Box borders: `Canvas::box_border` over a box, width, dash array, and
 //!    colors taken from the input's raw bytes draws nothing for a width or box
 //!    it can't use, and otherwise one balanced `q`..`Q` scope that interprets
-//!    without an error or a fault into at most three painted paths.
+//!    without an error or a fault into at most three painted paths;
+//!    `Canvas::box_bands` draws the same bands, in a scope of their own, and
+//!    nothing for a style without them.
+//! 7. Layout flags (`text-layout`): `layout_text` over the input's first bytes
+//!    with `TextBoxStyle::line_end_spaces` and `font_heights_as_given` each on
+//!    and off gives the same error or none, lines over the text in order with
+//!    a code for each character, none wider than its box but one of a single
+//!    character; with `line_end_spaces`, every character but a line break on
+//!    a line; with `font_heights_as_given`, Helvetica, whose heights the
+//!    floors don't move, laid out as without it.
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
 use pdf_content_streams::{Color, Concat, Join, Reserved};
 use pdf_fonts::Fonts;
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{
@@ -32,6 +46,7 @@ use pdf_semantics::pages::{self, Inheritable};
 use crate::canvas::{BoxBorder, BoxBorderStyle, Canvas};
 use crate::da::DefaultAppearance;
 use crate::encode::{EncodedPage, encode, encode_with};
+use crate::fault::Fault;
 use crate::geom::{Matrix, PageGeom, Rect};
 use crate::interp::{Event, Forms, Kind, Opts, Wants, interpret, interpret_with};
 use crate::limits::Limits;
@@ -53,6 +68,10 @@ pub const SEEDS: &[&[u8]] = &[
     // A box border's numbers, as `check_box_border` reads them: the box
     // 0 0 100 50, a width of 2, the dash array [3 1], a hint of 0.5 0.25 1.
     b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc8\x42\x00\x00\x48\x42\x00\x00\x00\x40\x00\x00\x40\x40\x00\x00\x80\x3f\x00\x00\x00\x3f\x00\x00\x80\x3e\x00\x00\x80\x3f",
+    // A `/DA` with each fault `parse_with` tells but the unreadable one, and
+    // text whose spaces the layout flags keep or drop.
+    b"Tc /Helv Tf 9 Tr 0 0 rg 1000000000000000000000000000000000000000000. Ts",
+    b"  ab cd  ef-gh  \n\tij -  kl\r\nmn",
     b"1 Tw 2 Tc /Fm1 Do 5 Tw 6 Tc /Fm1 Do\xff<< /XObject << /Fm1 1 0 R >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>\xff<< /Subtype /Form /BBox [0 0 80 80] >>\nstream\nBT /F1 10 Tf 1e39 0 (Hi) \" ET",
 ];
 
@@ -238,16 +257,67 @@ pub fn check(data: &[u8]) {
     }
 }
 
-/// Parses `da` as a `/DA` string and, where it parses, holds the round trip:
-/// what `to_bytes` writes parses again, and writes the same bytes again.
+/// A sink that wants no fault, and fails if it's told one.
+struct Unwanted;
+
+impl Sink<Fault> for Unwanted {
+    fn fault(&mut self, _: Place, fault: Fault) {
+        panic!("told {fault:?}, though it wants none");
+    }
+
+    fn wants(&self) -> bool {
+        false
+    }
+}
+
+/// Parses `da` as a `/DA` string, with and without a sink, and, where it
+/// parses, holds the round trip: what `to_bytes` writes parses again, and
+/// writes the same bytes again.
 fn check_default_appearance(da: &[u8]) {
     // The default content limits both times: what's written holds no more
     // operands, nesting, or images than what was read, so no cap that took
     // `da` refuses it.
     let limits = pdf_content_streams::Limits::DEFAULT;
-    let Some(parsed) = DefaultAppearance::parse(da, &limits) else {
+    let parsed = DefaultAppearance::parse(da, &limits);
+    let mut faults = Vec::new();
+    assert_eq!(
+        DefaultAppearance::parse_with(da, &limits, &mut faults),
+        parsed
+    );
+    assert_eq!(
+        DefaultAppearance::parse_with(da, &limits, &mut Unwanted),
+        parsed
+    );
+    for (i, (place, fault)) in faults.iter().enumerate() {
+        let _ = format!("{fault:?}");
+        assert_eq!(*place, Place::new(None, None));
+        let last = i + 1 == faults.len();
+        match fault {
+            Fault::DefaultAppearanceUnreadable(error) => {
+                assert!(last && parsed.is_none() && error.at <= da.len());
+            }
+            Fault::DefaultAppearanceOperand { at, .. }
+            | Fault::DefaultAppearanceTextMode { at } => {
+                assert!(*at < da.len());
+            }
+            Fault::DefaultAppearanceNoFont => {
+                assert!(last && parsed.as_ref().is_some_and(|p| p.font_name.is_none()));
+            }
+            _ => panic!("{fault:?} is no /DA fault"),
+        }
+    }
+    let told_last = |want: fn(&Fault) -> bool| faults.last().is_some_and(|(_, f)| want(f));
+    let Some(parsed) = parsed else {
+        assert!(told_last(|f| matches!(
+            f,
+            Fault::DefaultAppearanceUnreadable(_)
+        )));
         return;
     };
+    assert_eq!(
+        parsed.font_name.is_none(),
+        told_last(|f| matches!(f, Fault::DefaultAppearanceNoFont))
+    );
     let _ = format!("{parsed:?}");
     let _ = parsed.size();
     #[cfg(feature = "text-layout")]
@@ -311,6 +381,24 @@ fn check_box_border(data: &[u8]) {
         canvas.box_border(rect, &border, Color::Gray(0.0), Some(hint));
         let (bytes, needs) = canvas.finish(&Reserved::default());
         assert!(needs.0.is_empty());
+
+        // The bands alone: what follows the frame in the border's scope, in
+        // a scope of their own.
+        let mut bands = Canvas::new();
+        bands.box_bands(rect, &border, Some(hint));
+        let (bands, needs) = bands.finish(&Reserved::default());
+        assert!(needs.0.is_empty());
+        if bands.is_empty() {
+            assert!(!bytes.windows(3).any(|w| w == b"\nf\n"), "bands not drawn");
+        } else {
+            let filled = bands
+                .strip_prefix(b"q\n")
+                .and_then(|b| b.strip_suffix(b"Q\n"))
+                .expect("the bands are in a scope of their own");
+            assert!(bytes.ends_with(&[filled, b"Q\n"].concat()));
+            assert!(bytes.len() > bands.len());
+        }
+
         if bytes.is_empty() {
             continue;
         }
@@ -412,6 +500,85 @@ fn fuzz_text_layout<'a, S>(
             Rect::new(0.0, 0.0, 120.0, 60.0),
             &style,
         );
+        check_layout_flags(sample);
+    }
+}
+
+/// Lays `text` out with each of `TextBoxStyle`'s two flags on and off, in
+/// Helvetica, whose heights the floors don't move, and Courier, whose ascent
+/// they do, and holds what the flags promise.
+#[cfg(feature = "text-layout")]
+fn check_layout_flags(text: &str) {
+    use pdf_fonts::Std14;
+
+    use crate::wrap::{LaidOutText, TextAlign, TextBoxStyle, WrapMode, layout_text};
+
+    let rect = Rect::new(0.0, 0.0, 120.0, 60.0);
+    let unbroken: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+    let holds = |laid: &LaidOutText, style: &TextBoxStyle| {
+        assert!(laid.font_size.is_finite() && laid.font_size > 0.0);
+        assert!(laid.line_height.is_finite() && laid.line_height > 0.0);
+        let mut after = 0;
+        for line in &laid.lines {
+            let shown = text
+                .get(line.text_range.clone())
+                .expect("a line's range is the text's");
+            assert!(line.text_range.start >= after, "lines in order");
+            after = line.text_range.end;
+            assert!(!shown.contains(['\r', '\n']));
+            assert_eq!(
+                line.codes.len(),
+                shown.chars().count(),
+                "a code a character"
+            );
+            if style.align != TextAlign::Justify && shown.chars().nth(1).is_some() {
+                assert!(
+                    line.width <= laid.bounds.width() + 1e-3,
+                    "a line fits its box"
+                );
+            }
+        }
+        if style.line_end_spaces {
+            let kept: String = laid
+                .lines
+                .iter()
+                .map(|l| &text[l.text_range.clone()])
+                .collect();
+            assert_eq!(kept, unbroken, "every character on a line");
+        }
+    };
+    for font in [Std14::Helvetica, Std14::Courier] {
+        for (wrap, align, size) in [
+            (WrapMode::Word, TextAlign::Left, None),
+            (WrapMode::Word, TextAlign::Justify, Some(9.0)),
+            (WrapMode::Char, TextAlign::Right, Some(11.0)),
+        ] {
+            let mut laid = Vec::new();
+            for keep in [false, true] {
+                for given in [false, true] {
+                    let style = TextBoxStyle {
+                        size,
+                        align,
+                        wrap,
+                        line_end_spaces: keep,
+                        font_heights_as_given: given,
+                        ..TextBoxStyle::default()
+                    };
+                    let result = layout_text(&font, text, rect, &style);
+                    if let Ok(out) = &result {
+                        holds(out, &style);
+                    }
+                    laid.push(result);
+                }
+            }
+            // The flags move no character's code: the same error, or none.
+            let errors: Vec<_> = laid.iter().map(|r| r.as_ref().err()).collect();
+            assert!(errors.iter().all(|e| *e == errors[0]));
+            if font == Std14::Helvetica {
+                assert_eq!(laid[0], laid[1]);
+                assert_eq!(laid[2], laid[3]);
+            }
+        }
     }
 }
 

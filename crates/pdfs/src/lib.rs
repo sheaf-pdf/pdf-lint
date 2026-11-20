@@ -2,7 +2,7 @@
 //!
 //! `pdfs` provides a high-level, viewer-compatible API on top of a modular
 //! family of PDF crates, and re-exports every crate in the family at matching
-//! versions ([`structure`], [`objects`], [`fonts`], [`gfx`], [`annots`], etc.)
+//! versions ([`structure`], [`objects`], [`fonts`], [`gfx`], [`annots`], [`forms`], etc.)
 //! so you can drop down to lower-level APIs whenever needed. Each is there
 //! under its own crate name too ([`pdf_structure`], [`pdf_objects`], etc.),
 //! and both paths name the same items.
@@ -67,6 +67,7 @@
 //! | [`fonts`] | [`pdf_fonts`] | Font dictionaries, encodings, CMaps, font programs, Standard 14 metrics, text extraction, TrueType embedding. |
 //! | [`gfx`] | [`pdf_gfx`] | 2D geometry, the graphics and text state interpreter, the content re-encoder, the canvas, `/DA` strings. |
 //! | [`annots`] | [`pdf_annots`] | Annotations, appearance synthesis, builders, reply threads, and page flattening. |
+//! | [`forms`] | [`pdf_forms`] | Interactive forms: the field tree, inherited field values, widgets, and text fields' appearances. |
 //! | [`linearize`] | [`pdf_linearize`] | The linearized ("Fast Web View") layout engine, hint tables, and validator. |
 //!
 //! # Features
@@ -211,6 +212,13 @@ pub use pdf_annots;
 /// the same items.
 pub use pdf_annots as annots;
 
+/// PDF interactive forms: the field tree, inherited field values, widgets, and
+/// text fields' appearances.
+pub use pdf_forms;
+/// [`pdf_forms`] under its shorter name: the same crate, so either path names
+/// the same items.
+pub use pdf_forms as forms;
+
 /// Linearized ("Fast Web View") PDF layout engine, hint tables, and validator.
 pub use pdf_linearize;
 /// [`pdf_linearize`] under its shorter name: the same crate, so either path names
@@ -263,6 +271,7 @@ mod tests {
             id::<crate::annots::BuiltAnnot>,
             id::<crate::pdf_annots::BuiltAnnot>,
         );
+        same(id::<crate::forms::Limits>, id::<crate::pdf_forms::Limits>);
         same(
             id::<crate::linearize::Limits>,
             id::<crate::pdf_linearize::Limits>,
@@ -343,8 +352,15 @@ mod tests {
         shared::<pdf_annots::FlattenPlan>();
         shared::<pdf_annots::Limits>();
         shared::<pdf_annots::Error>();
+        shared::<pdf_forms::Form<'static>>();
+        shared::<pdf_forms::Field<'static>>();
+        shared::<pdf_forms::Limits>();
+        shared::<pdf_forms::Error>();
         #[cfg(feature = "text-layout")]
         {
+            shared::<pdf_forms::appearance::FieldFont>();
+            shared::<pdf_forms::appearance::Appearance>();
+            shared::<pdf_forms::appearance::Unmade>();
             shared::<pdf_gfx::TextPage>();
             shared::<pdf_gfx::TextMatch>();
             shared::<pdf_gfx::LaidOutText>();

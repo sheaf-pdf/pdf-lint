@@ -156,6 +156,8 @@ jobs:
         run: just gfx-msrv gfx-cmaps-msrv
       - name: pdf-annots
         run: just annots-msrv annots-cmaps-msrv
+      - name: pdf-forms
+        run: just forms-msrv forms-cmaps-msrv
       - name: pdf-linearize
         run: just linearize-msrv
       - name: pdfs
@@ -200,6 +202,8 @@ jobs:
         run: just gfx-package
       - name: pdf-annots
         run: just annots-package
+      - name: pdf-forms
+        run: just forms-package
       - name: pdf-linearize
         run: just linearize-package
       - name: pdfs

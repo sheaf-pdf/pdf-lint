@@ -1,0 +1,38 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [8 0 R] >>
+endobj
+5 0 obj
+<< /T (a) /FT /Tx /Ff 8192 /Kids [6 0 R] >>
+endobj
+6 0 obj
+<< /T (b) /Parent 5 0 R /V (deep) /Kids [7 0 R] >>
+endobj
+7 0 obj
+<< /T (c) /Parent 6 0 R /Kids [8 0 R] >>
+endobj
+8 0 obj
+<< /Parent 7 0 R /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 10 110 30] >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000090 00000 n 
+0000000147 00000 n 
+0000000000 65535 f 
+0000000234 00000 n 
+0000000293 00000 n 
+0000000359 00000 n 
+0000000415 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+510
+%%EOF
