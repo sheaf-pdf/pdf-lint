@@ -3,7 +3,9 @@
 //! for each widget of a page, its field's type, flags, fully qualified name,
 //! and a text field's value (the `forms` cases). The `forms-ap` cases record
 //! the appearance PDFium makes for a text field that has none; their answers
-//! are read here into what each widget's appearance paints, clips and shows.
+//! are read here into what each widget's appearance paints, clips and shows,
+//! and the heights of the faces PDFium draws the standard 14 in are held to
+//! them.
 
 use std::collections::HashMap;
 use std::fs;
@@ -635,4 +637,70 @@ fn esc_writes_long_strings_by_their_hash() {
     assert_eq!(esc(&[b'a'; 64]), "a".repeat(64));
     // FNV-1a 64 of 65 bytes of `a`, as `oracle/pdfium.py`'s `fnv` gives it.
     assert_eq!(esc(&[b'a'; 65]), "#65:8087e9a889f8a14c");
+}
+
+/// Each standard 14 face's heights, as a field's `/DR` font gives them to its
+/// layout, are the ones PDFium's appearances at 100 points show (the
+/// `ap-face-*` cases: boxes 400 by 300 with no border). A single line's
+/// baseline is the box's middle less half their sum, a multiline field's
+/// first its top less the ascent.
+#[cfg(feature = "text-layout")]
+#[test]
+fn standard_faces_heights_are_the_recorded_ones() {
+    use pdf_forms::pdf_fonts::Std14;
+    use pdf_forms::pdf_gfx::{DefaultAppearance, LayoutFont};
+
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let mut held = Vec::new();
+    for [name, _, _] in read_tsv::<3>("cases.tsv")
+        .iter()
+        .filter(|[name, _, _]| name.starts_with("ap-face-"))
+    {
+        let face = Std14::ALL
+            .into_iter()
+            .find(|face| *name == format!("ap-face-{}", face.name().to_ascii_lowercase()))
+            .unwrap_or_else(|| panic!("{name}: no standard face of that name"));
+        let made = made_appearances(&recorded[name]);
+        let baseline = |widget: usize| {
+            let tx = made[widget].as_ref().and_then(|made| made.tx.as_ref());
+            let (_, shown) = tx.and_then(|tx| tx.text.as_ref()).unwrap();
+            assert_eq!((shown.len(), shown[0].size), (1, 100.0), "{name}");
+            shown[0].at[1]
+        };
+        let ascent = (300.0 - baseline(1)) * 10.0;
+        let sum = (150.0 - baseline(0)) * 20.0;
+
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let mut opts = read::Options::DEFAULT;
+        opts.recovery = Recovery::Pdfium;
+        let reading = Reading::open(&bytes, &opts).unwrap();
+        let catalog = pdf_forms::pdf_semantics::catalog(&reading, reading.trailer().dict())
+            .unwrap()
+            .unwrap();
+        let form = Form::read(&reading, catalog, Rules::Pdfium, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let da = form.fields()[0].default_appearance().unwrap();
+        let da = DefaultAppearance::parse(da, &pdf_forms::pdf_content_streams::Limits::DEFAULT);
+        let font_name = da.and_then(|da| da.font_name).unwrap();
+        let mut told: Vec<(pdf_forms::pdf_objects::fault::Place, pdf_forms::Fault)> = Vec::new();
+        let font = form
+            .field_font(&reading, &font_name, &Limits::DEFAULT, &mut told)
+            .unwrap();
+        assert!(!font.is_fallback() && told.is_empty(), "{name}: {told:?}");
+        let metrics = font.layout().font_metrics();
+        assert!(
+            (metrics.ascent - ascent).abs() < 0.5
+                && (metrics.ascent + metrics.descent - sum).abs() < 0.5,
+            "{name}: ours {} and {}, PDFium's {ascent} and {}",
+            metrics.ascent,
+            metrics.descent,
+            sum - ascent
+        );
+        held.push(face);
+    }
+    assert_eq!(held.len(), Std14::ALL.len(), "a case for each face");
 }

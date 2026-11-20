@@ -9,6 +9,8 @@ use pdf_objects::fault::Sink;
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Value, text};
 
+#[cfg(feature = "text-layout")]
+use crate::appearance::FieldFont;
 use crate::error::Error;
 use crate::fault::Fault;
 use crate::field::{Field, FieldFlags, FieldType, FieldValue, Widget, kind_of};
@@ -242,6 +244,31 @@ impl<'o> Form<'o> {
         };
         let own = raw.as_reference().is_some().then_some(id).flatten();
         Ok(object.as_dict().map(|dict| (dict, own)))
+    }
+
+    /// The font a `/DA` string's font name `name` draws a field's text in: the
+    /// default resources' font of that name, read, or the standard 14 font the
+    /// name falls back to where they have none ([`FieldFont::find`] over the
+    /// form's `/DR /Font`), departures told to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`FieldFont::find`]: [`Error::Limit`] past
+    /// [`Limits::font_bytes`], [`Error::Unreadable`] on locked, I/O, or
+    /// reader-cap failures.
+    #[cfg(feature = "text-layout")]
+    pub fn field_font<R, S>(
+        &self,
+        objects: R,
+        name: &[u8],
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Result<FieldFont, Error>
+    where
+        R: Resolve<'o> + pdf_objects::Streams + Copy,
+        S: Sink<Fault> + ?Sized,
+    {
+        FieldFont::find(self.fonts, name, objects, limits, sink)
     }
 }
 

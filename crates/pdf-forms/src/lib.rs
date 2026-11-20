@@ -17,6 +17,9 @@
 //!   departures go to a [`pdf_objects::fault::Sink`] as [`Fault`]s; `&mut ()`
 //!   collects none and reads the same form.
 //! - `Debug` output prints numbers and counts, never a field's name or value.
+//! - With `text-layout` (a default feature), the `appearance` module makes the
+//!   appearances a field without one would show, held to those PDFium makes:
+//!   its `FieldFont` is the font a field's text is drawn in.
 //!
 //! # Example
 //!
@@ -103,6 +106,8 @@ pub use pdf_gfx;
 pub use pdf_objects;
 pub use pdf_semantics;
 
+#[cfg(feature = "text-layout")]
+pub mod appearance;
 mod error;
 mod fault;
 mod field;

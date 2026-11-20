@@ -15,8 +15,12 @@ PDF interactive forms (ISO 32000-2, §12.7): the field tree with what each field
   - A value is typed as it is written: a text string, a name (a button's state), an array of text strings (a list box's selection), a dictionary (a signature), or a stream.
 - **Widgets (`Widget`):**
   - A kid with no partial name and no kids of its own is a widget of its parent; a terminal field with a `/Subtype /Widget` or a `/Rect` is its own widget (`Widget::is_merged`). `Widget::annot` reads either as a `pdf_annots::Annot`: its rectangle, flags, border, `/MK`, and appearances.
+- **A field's font (`appearance::FieldFont`, with `text-layout`):**
+  - `FieldFont::find` (or `Form::field_font`, over the form's own `/DR /Font`) reads the default resources' font a `/DA` string names with `pdf-fonts`: its codes by its encoding (WinAnsiEncoding, MacRomanEncoding, a built-in encoding with `/Differences`), its widths by `/Widths` or, for the standard 14, Adobe's metrics. A name the resources lack falls back to a standard 14 font by that name (`Arial` and `Helv` to Helvetica, `TiRo` to Times-Roman, `HelveticaLTStd-Bold` to Helvetica-Bold), read from the dictionary it will be written as, and is told as `Fault::FontNotInResources`.
+  - `FieldFont::layout` gives `pdf-gfx`'s text layout its codes, widths, and heights: for a standard 14 font with no program and no heights of its own, those of the face PDFium as of chromium/8152 draws it in, as PDFium measures a field's lines. `FieldFont::res` is the resource an appearance names it by: the font's object, or its dictionary where that holds no reference.
+  - A font is read once and shared across widgets and threads.
 - **Bounded, and quiet about content (`Limits`, `Fault`, `Error`):**
-  - The walk ends within `Limits` whatever the file says: a field reached twice (a cycle through `/Kids`) is left out, a tree deeper than `Limits::depth` is cut there, and more fields and widgets than `Limits::fields` is an error.
+  - The walk ends within `Limits` whatever the file says: a field reached twice (a cycle through `/Kids`) is left out, a tree deeper than `Limits::depth` is cut there, and more fields and widgets than `Limits::fields` is an error. A field's font is read under `Limits::fonts`, its streams within `Limits::font_bytes`.
   - Recoverable departures go to a `pdf_objects::fault::Sink` as `Fault`s; `&mut ()` collects none and reads the same form. `Debug` output of every type prints numbers and counts, never a field's name or value.
 
 ## Where it reads more, or less, than PDFium
@@ -105,7 +109,7 @@ assert_eq!(agree.default_appearance(), Some(&b"/Helv 0 Tf 0 g"[..]));
 ## Features
 
 - `programs` (default): forwards `programs` to `pdf-annots`, `pdf-gfx`, and `pdf-fonts`, for embedded font program metrics.
-- `text-layout` (default): forwards `text-layout` to `pdf-annots` and `pdf-gfx`.
+- `text-layout` (default): forwards `text-layout` to `pdf-annots` and `pdf-gfx`, and adds the `appearance` module.
 - `predefined-cmaps`: forwards `predefined-cmaps` to `pdf-annots`, `pdf-gfx`, and `pdf-fonts`.
 - `tracing`: `debug`-level spans with numeric counts only.
 

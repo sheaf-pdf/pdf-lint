@@ -1,10 +1,12 @@
-//! Resource caps for the bounded field tree walk.
+//! Resource caps for the bounded field tree walk, and for reading a field's
+//! font and making its appearance.
 
 /// Per-call resource caps enforced while reading an interactive form.
 ///
 /// The walk over `/Fields` and each field's `/Kids`, the indirect references it
 /// follows, and the items of a choice field's value all end within these
-/// bounds, whatever the file says.
+/// bounds, whatever the file says; so do reading a field's font from the
+/// default resources and making an appearance (`text-layout`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -22,6 +24,16 @@ pub struct Limits {
     pub items: usize,
     /// Caps forwarded to `pdf-annots` when a widget is read as an annotation.
     pub annots: pdf_annots::Limits,
+    /// Maximum bytes of display text an appearance is made of, `text-layout`
+    /// (`262_144` by default); past it, [`Cap::Text`].
+    pub text: usize,
+    /// Caps forwarded to `pdf-fonts` when a field's font is read from the
+    /// default resources (`FieldFont::find`, `text-layout`).
+    pub fonts: pdf_fonts::Limits,
+    /// Maximum bytes one such font's streams decompress to: its `/ToUnicode`,
+    /// an embedded CMap's chain, and with `programs` its program (`128 MiB` by
+    /// default); past it, [`Cap::FontBytes`].
+    pub font_bytes: usize,
 }
 
 impl Limits {
@@ -32,6 +44,9 @@ impl Limits {
         depth: 64,
         items: 16_384,
         annots: pdf_annots::Limits::DEFAULT,
+        text: 262_144,
+        fonts: pdf_fonts::Limits::DEFAULT,
+        font_bytes: 128 << 20,
     };
 }
 
@@ -51,6 +66,10 @@ pub enum Cap {
     Items,
     /// A cap of `pdf-annots` was exceeded while a widget was read.
     Annots(pdf_annots::Cap),
+    /// The display text of an appearance exceeded [`Limits::text`].
+    Text,
+    /// A field's font's streams decompressed past [`Limits::font_bytes`].
+    FontBytes,
 }
 
 impl std::fmt::Display for Cap {
@@ -59,6 +78,8 @@ impl std::fmt::Display for Cap {
             Cap::Fields => f.write_str("fields and widgets in a form"),
             Cap::Items => f.write_str("items in a field's value"),
             Cap::Annots(cap) => write!(f, "{cap}"),
+            Cap::Text => f.write_str("bytes of an appearance's text"),
+            Cap::FontBytes => f.write_str("bytes a field's font decompresses to"),
         }
     }
 }
