@@ -1067,6 +1067,64 @@ fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
     assert_eq!(Some(&record), reading.record(ObjectId::new(3, 0)));
 }
 
+/// Read alone, an object is the one a read unkept gives, or fails as that
+/// read fails, and it keeps what that read keeps and no more: none of the
+/// object, not even its record, but the object stream it's in, decoded,
+/// with the objects that stream and its filters are. One kept already is
+/// given as it's kept. In memory and by position, at offsets, in object
+/// streams, encrypted, and with a `/Length` by reference.
+#[test]
+fn an_object_read_alone_is_the_one_read_unkept_and_keeps_no_more() {
+    fn alone<S: ByteSource>(reading: &Reading<S>, id: ObjectId) -> Result<Object, String> {
+        reading.object_unrecorded(id).map_err(|e| e.to_string())
+    }
+    fn kept<S: ByteSource>(reading: &Reading<S>) -> Vec<ObjectId> {
+        reading
+            .ids()
+            .filter(|&id| reading.record(id).is_some())
+            .collect()
+    }
+    for (name, file, passwords) in files() {
+        let (read_alone, read_unkept) = (
+            open(&file, &passwords, &Options::DEFAULT),
+            open(&file, &passwords, &Options::DEFAULT),
+        );
+        let ids: Vec<ObjectId> = read_alone.ids().collect();
+        assert!(!ids.is_empty(), "{name}");
+        for &id in &ids {
+            let unkept = (read_unkept.object_unkept(id))
+                .map(|(object, _)| object)
+                .map_err(|e| e.to_string());
+            assert_eq!(alone(&read_alone, id), unkept, "{name}: {id:?}");
+        }
+        assert_eq!(kept(&read_alone), kept(&read_unkept), "{name}");
+        assert_eq!(read_alone.faults(), read_unkept.faults(), "{name}");
+        let missing = ObjectId::new(u32::MAX, 0);
+        assert!(matches!(
+            read_alone.object_unrecorded(missing),
+            Err(Error::Unread(Unread::Missing { id })) if id == missing
+        ));
+        for first in [1, 64] {
+            let source = crate::fuzz::Counted::new(&file, first);
+            let by = crate::fuzz::open(source, &passwords, &Options::DEFAULT, true).unwrap();
+            for &id in &ids {
+                assert_eq!(
+                    alone(&by, id),
+                    alone(&read_alone, id),
+                    "{name}, {first}: {id:?}"
+                );
+            }
+            assert_eq!(kept(&by), kept(&read_alone), "{name}, {first}");
+        }
+        // Kept, each is given as it's kept.
+        for &id in &ids {
+            if let Ok(kept) = read_alone.get(id) {
+                assert_eq!(alone(&read_alone, id).as_ref(), Ok(kept), "{name}: {id:?}");
+            }
+        }
+    }
+}
+
 /// An object's record says whether `endobj` follows it, its extent
 /// running past it when it does, and to its value's end when it doesn't;
 /// a stream's, how its data was chosen.
