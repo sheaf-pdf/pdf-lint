@@ -1880,6 +1880,92 @@ fn fuzz_harness_corpus_smoke_and_prng_invariants() {
     }
 }
 
+/// A font whose codes are bytes is laid out without its codes split
+/// (`text::bytes_end`) to the bit where its codes are laid out one at a time
+/// (`text::laid_end`): with any widths, at any size, spaced or not, `Tc` and
+/// `Tw` 0 of either sign, which the first leaves out, from where an
+/// operator's text starts or on from a string before it.
+#[test]
+fn byte_codes_end_where_laid_out() {
+    /// A deterministic generator of the cases.
+    struct Cases(u64);
+    impl Cases {
+        fn next(&mut self) -> u32 {
+            self.0 = (self.0)
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 32) as u32
+        }
+        fn within(&mut self, lo: f32, hi: f32) -> f32 {
+            let unit = f64::from(self.next()) / 4_294_967_296.0;
+            lo + (hi - lo) * unit as f32
+        }
+        fn spacing(&mut self) -> f32 {
+            match self.next() % 3 {
+                0 => 0.0,
+                1 => -0.0,
+                _ => self.within(-50.0, 50.0),
+            }
+        }
+    }
+    let mut cases = Cases(0x2545_F491_4F6C_DD1D);
+    let store = Store::default();
+    for case in 0..512 {
+        let widths: Vec<Object> = (0..256)
+            .map(|_| Object::from(i64::from(cases.next() % 5_000) - 2_000))
+            .collect();
+        let font = dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("ABCDEF+Some"),
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        };
+        let mut budget = 1 << 20;
+        let font = pdf_fonts::Font::read(
+            store.as_streams(),
+            &font,
+            &pdf_fonts::Limits::DEFAULT,
+            &mut budget,
+            &mut (),
+        )
+        .unwrap();
+        let byte_widths = font.byte_widths().expect("a simple font's codes are bytes");
+        assert!((0..256u32).all(|c| byte_widths[c as usize].to_bits() == font.width(c).to_bits()));
+        let size = match cases.next() % 4 {
+            0 => 0.0,
+            1 => -0.0,
+            2 => 3e38,
+            _ => cases.within(-100.0, 100.0),
+        };
+        let text = TextState {
+            size,
+            word_space: cases.spacing(),
+            char_space: cases.spacing(),
+            ..TextState::default()
+        };
+        let from = match cases.next() % 2 {
+            0 => 0.0,
+            _ => cases.within(-1_000.0, 1_000.0),
+        };
+        let len = cases.next() as usize % 64;
+        let s: Vec<u8> = (0..len)
+            .map(|_| match cases.next() % 4 {
+                0 => b' ',
+                _ => (cases.next() % 256) as u8,
+            })
+            .collect();
+        let fast = crate::text::bytes_end(byte_widths, &text, &s, from);
+        let (laid, glyphs) = crate::text::laid_end(&font, &text, &s, from);
+        assert!(
+            fast.to_bits() == laid.to_bits() || fast.is_nan() && laid.is_nan(),
+            "case {case}: {fast} {laid}"
+        );
+        assert_eq!(glyphs, s.len());
+    }
+}
+
 #[cfg(feature = "programs")]
 fn build_wide_truetype_a() -> Vec<u8> {
     fn be(values: &[i16]) -> Vec<u8> {
