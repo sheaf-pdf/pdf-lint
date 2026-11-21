@@ -19,7 +19,7 @@ use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Span, Value};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams};
 
-use crate::clip::{self, ClipPart};
+use crate::clip;
 use crate::error::Error;
 use crate::fault::Fault;
 use crate::geom::Rect;
@@ -578,7 +578,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         }
         if inline.is_none() && op.builds_path() {
             local.path.build(op, &step);
-            if clip_segments(&local.state.clip) + local.path.len() > self.lim.segments {
+            if local.state.clip.segments() + local.path.len() > self.lim.segments {
                 return Err(past(Cap::Segments));
             }
             return Ok(());
@@ -922,13 +922,15 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         self.check_reader()
     }
 
+    /// `Tj`, `'` or `"`: the bytes of their string operand, or of a name, as
+    /// PDFium's `Handle_ShowText` takes them (`GetString`).
     fn show(
         &mut self,
         local: &mut Local,
         at: &At<'_>,
         operand: Option<Operand<'_>>,
     ) -> Result<(), Stop> {
-        let Some(string) = string_only(operand, &self.lim.content) else {
+        let Some(string) = string_or_name(operand, &self.lim.content) else {
             return Ok(());
         };
         if string.is_empty() {
@@ -1082,7 +1084,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         }
         if let Some(rule) = ended.clip {
             local.state.clip = local.state.clip.with_path(ended.segs, rule, ended.points);
-            if clip_segments(&local.state.clip) > self.lim.segments {
+            if local.state.clip.segments() > self.lim.segments {
                 return Err(past(Cap::Segments));
             }
         }
@@ -1202,7 +1204,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
             .emit(at, state, marks, Kind::FormBegin(shown))
             .and_then(|()| {
                 let begun = state.form(shown.matrix, shown.bbox);
-                if clip_segments(&begun.clip) > self.lim.segments {
+                if begun.clip.segments() > self.lim.segments {
                     return Err(past(Cap::Segments));
                 }
                 self.stream(&inner, begun, marks.clone())
@@ -1476,15 +1478,6 @@ fn end_text(local: &mut Local) {
     }
 }
 
-fn clip_segments(clip: &crate::clip::Clip) -> usize {
-    clip.parts()
-        .map(|part| match part {
-            ClipPart::Path { segments, .. } => segments.len(),
-            ClipPart::Text { .. } => 0,
-        })
-        .sum()
-}
-
 /// Decodes a `/Name` or string operand (`CPDF_StreamContentParser::GetString`).
 fn string_or_name(operand: Option<Operand<'_>>, lim: &ContentLimits) -> Option<Vec<u8>> {
     let op = operand?;
@@ -1494,7 +1487,8 @@ fn string_or_name(operand: Option<Operand<'_>>, lim: &ContentLimits) -> Option<V
     string_only(Some(op), lim)
 }
 
-/// Decodes a literal or hex string operand (`Tj`, `'`, `"`, `TJ` string item).
+/// Decodes a literal or hex string operand: a `TJ` array's element, which
+/// PDFium shows only where it's a string (`Handle_ShowText_Positioning`).
 fn string_only(operand: Option<Operand<'_>>, lim: &ContentLimits) -> Option<Vec<u8>> {
     let op = operand.filter(Operand::is_string)?;
     let obj = op.object(lim)?;

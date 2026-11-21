@@ -193,6 +193,11 @@ def text_cases():
         resources=font_res,
     )
     add_gfx(
+        "text-show-name-operands",
+        b"BT /F0 10 Tf 14 TL 10 160 Td /AB Tj /CD ' 1 2 /EF \" [(G) /HI (J)] TJ /K#4CM Tj ET",
+        resources=font_res,
+    )
+    add_gfx(
         "text-missing-font-uses-stock-helvetica",
         b"BT /Missing 10 Tf 10 50 Td (Hello) Tj ET",
         resources=b"<< >>",

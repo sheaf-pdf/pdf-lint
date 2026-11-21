@@ -29,6 +29,7 @@ text-line-moves-and-quotes	text size 10 mode 0 ; text size 10 mode 0 ; text size
 text-matrix-scale-spacing-rise	text size 10 mode 0 ; text size 10 mode 0 ; char 0041 15 84 ; char 0020 25.5 84 ; char 0042 40.5 84 ; char 0043 51 84
 text-tj-empty-string-quirk	text size 10 mode 0 ; text size 10 mode 0 ; char 0041 10 100 ; char 0042 11 100 ; char 0043 17 100
 text-tj-kerning-and-empty-ops	text size 10 mode 0 ; char 0041 9 100 ; char 0042 14.5 100 ; char 0043 21 100
+text-show-name-operands	text size 10 mode 0 ; text size 10 mode 0 ; text size 10 mode 0 ; text size 10 mode 0 ; text size 10 mode 0 ; char 0041 10 160 ; char 0042 16 160 ; char 0043 10 146 ; char 0044 16 146 ; char 0045 10 132 ; char 0046 18 132 ; char 0047 26 132 ; char 004a 34 132 ; char 004b 42 132 ; char 004c 50 132 ; char 004d 58 132
 text-missing-font-uses-stock-helvetica	text size 10 mode 0 ; char 0048 10 50 ; char 0065 17.2199993 50 ; char 006c 22.7799988 50 ; char 006c 25 50 ; char 006f 27.2199993 50
 text-extgstate-font-and-unloaded-tf	text size 14 mode 0 ; text size 12 mode 0 ; text size 9 mode 0 ; char 0041 10 140 ; char 0042 19.3380013 140 ; char 0043 10 120 ; char 0044 17.2000008 120 ; char 0045 10 100 ; char 0046 15.3999996 100
 text-vertical-identity-v	text size 10 mode 0 ; char 0041 55 171.199997 ; char 0042 55 161.199997

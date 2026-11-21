@@ -662,6 +662,47 @@ fn text_layout_tj_empty_string_quirk_and_vertical_writing() {
     assert_approx(vert_ys[1].2, 190.0);
 }
 
+/// `Tj`, `'` and `"` show a name's bytes, its `#` escapes decoded, as they
+/// show a string's, as PDFium's `GetString` takes them; a `TJ` array's name
+/// is no string, and moves nothing.
+#[test]
+fn a_name_shown_by_tj_and_the_quotes_is_its_bytes() {
+    let store = Store::default();
+    let resources = helvetica_resources();
+    let fonts = Fonts::default();
+    let content = Concat::new(&[
+        br#"BT /F1 10 Tf 14 TL 10 100 Td /AB Tj /CD ' 1 2 /EF " [(G) /HI (J)] TJ /K#4CM Tj 7 Tj ET"#,
+    ]);
+    let mut shown: Vec<(Vec<u8>, f32)> = Vec::new();
+    interpret(
+        store.as_streams(),
+        &content,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        Opts::default(),
+        |ev| {
+            if let Kind::Text(show) = ev.kind {
+                let x = show.glyphs().next().map_or(f32::NAN, |g| g.origin.x);
+                shown.push((show.string.to_vec(), x));
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    let strings: Vec<&[u8]> = shown.iter().map(|(s, _)| s.as_slice()).collect();
+    assert_eq!(
+        strings,
+        [&b"AB"[..], b"CD", b"EF", b"G", b"J", b"KLM"],
+        "{shown:?}"
+    );
+    // `'` and `"` each begin a line at 10; `J` follows `G` with no adjustment.
+    assert_approx(shown[1].1, 10.0);
+    assert_approx(shown[2].1, 10.0);
+    let g_width = 10.0 * 0.778;
+    assert_approx(shown[4].1 - shown[3].1, g_width + 2.0);
+}
+
 #[cfg(feature = "programs")]
 #[test]
 fn embedded_truetype_outline_expands_glyph_quad() {
@@ -890,6 +931,107 @@ fn clip_auto_merge_text_clips_and_deep_drop_safety() {
     }
     drop(deep_clip);
     drop(deep_marks);
+}
+
+/// A clip's path segments are counted as it's built, each part's once, so
+/// that holding [`Limits::segments`] at every path operator never walks the
+/// clip: the count is what its parts hold, through a merge, a text part and
+/// the clip saved before them; 100,000 clips, each wider than the last so
+/// that none merges, are interpreted as quickly as one; and the cap still
+/// counts the clip's segments with those of the path being built.
+#[test]
+fn a_clip_s_segments_are_counted_as_it_is_built() {
+    let walked = |clip: &Clip| -> usize {
+        clip.parts()
+            .map(|part| match part {
+                ClipPart::Path { segments, .. } => segments.len(),
+                ClipPart::Text { .. } => 0,
+            })
+            .sum()
+    };
+    let square = |r: f32| {
+        [
+            Seg::Move(Point::new(0.0, 0.0)),
+            Seg::Line(Point::new(r, 0.0)),
+            Seg::Line(Point::new(r, r)),
+            Seg::Line(Point::new(0.0, r)),
+            Seg::Close,
+        ]
+    };
+    let unclipped = Clip::default();
+    let outer = unclipped.with_path(
+        &square(100.0),
+        FillRule::NonZero,
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+    );
+    // Within the outer square, the inner one takes its place.
+    let inner = outer.with_path(
+        &square(50.0),
+        FillRule::NonZero,
+        Rect::new(0.0, 0.0, 50.0, 50.0),
+    );
+    // A triangle past the inner square cuts it.
+    let triangle = [
+        Seg::Move(Point::new(0.0, 0.0)),
+        Seg::Line(Point::new(60.0, 0.0)),
+        Seg::Line(Point::new(30.0, 60.0)),
+        Seg::Close,
+    ];
+    let cut = inner.with_path(
+        &triangle,
+        FillRule::EvenOdd,
+        Rect::new(0.0, 0.0, 60.0, 60.0),
+    );
+    let glyph = Quad::from_rect(Rect::new(1.0, 1.0, 5.0, 5.0));
+    let text = cut.with_text(vec![glyph], 1);
+    for (clip, parts, segments) in [
+        (&unclipped, 0, 0),
+        (&outer, 1, 5),
+        (&inner, 1, 5),
+        (&cut, 2, 9),
+        (&text, 3, 9),
+    ] {
+        assert_eq!(clip.parts().count(), parts);
+        assert_eq!(clip.segments(), segments);
+        assert_eq!(clip.segments(), walked(clip));
+    }
+
+    let store = Store::default();
+    let fonts = Fonts::default();
+    let clips = |n: usize| -> Vec<u8> {
+        (1..=n)
+            .flat_map(|i| format!("0 0 {i} {i} re W n ").into_bytes())
+            .collect()
+    };
+    let run = |content: &[u8], limits: &Limits| {
+        let mut ops = 0;
+        let read = interpret(
+            store.as_streams(),
+            &Concat::new(&[content]),
+            None,
+            limits,
+            &fonts,
+            Opts::default(),
+            |ev| {
+                ops += usize::from(matches!(ev.kind, Kind::Op));
+                ControlFlow::Continue(())
+            },
+        );
+        (read, ops)
+    };
+    let (read, _) = run(&clips(100_000), &Limits::DEFAULT);
+    assert_eq!(read.unwrap().operators, 300_000);
+    // 1,000 clips of 6 segments (`re` is `m`, four `l` and `h`), then a
+    // rectangle more being built, which passes 6,005 at its `re`.
+    let content = clips(1_001);
+    let at = |segments: usize| Limits {
+        segments,
+        ..Limits::DEFAULT
+    };
+    let (read, ops) = run(&content, &at(6_005));
+    assert_eq!(read.unwrap_err(), Error::Limit(Cap::Segments));
+    assert_eq!(ops, 3_001);
+    assert!(run(&content, &at(6_006)).0.is_ok());
 }
 
 #[test]
@@ -1735,6 +1877,92 @@ fn fuzz_harness_corpus_smoke_and_prng_invariants() {
             b"\xff<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >> >>",
         );
         fuzz::check(&buf);
+    }
+}
+
+/// A font whose codes are bytes is laid out without its codes split
+/// (`text::bytes_end`) to the bit where its codes are laid out one at a time
+/// (`text::laid_end`): with any widths, at any size, spaced or not, `Tc` and
+/// `Tw` 0 of either sign, which the first leaves out, from where an
+/// operator's text starts or on from a string before it.
+#[test]
+fn byte_codes_end_where_laid_out() {
+    /// A deterministic generator of the cases.
+    struct Cases(u64);
+    impl Cases {
+        fn next(&mut self) -> u32 {
+            self.0 = (self.0)
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 32) as u32
+        }
+        fn within(&mut self, lo: f32, hi: f32) -> f32 {
+            let unit = f64::from(self.next()) / 4_294_967_296.0;
+            lo + (hi - lo) * unit as f32
+        }
+        fn spacing(&mut self) -> f32 {
+            match self.next() % 3 {
+                0 => 0.0,
+                1 => -0.0,
+                _ => self.within(-50.0, 50.0),
+            }
+        }
+    }
+    let mut cases = Cases(0x2545_F491_4F6C_DD1D);
+    let store = Store::default();
+    for case in 0..512 {
+        let widths: Vec<Object> = (0..256)
+            .map(|_| Object::from(i64::from(cases.next() % 5_000) - 2_000))
+            .collect();
+        let font = dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("TrueType"),
+            "BaseFont" => Object::name("ABCDEF+Some"),
+            "FirstChar" => 0,
+            "LastChar" => 255,
+            "Widths" => widths,
+        };
+        let mut budget = 1 << 20;
+        let font = pdf_fonts::Font::read(
+            store.as_streams(),
+            &font,
+            &pdf_fonts::Limits::DEFAULT,
+            &mut budget,
+            &mut (),
+        )
+        .unwrap();
+        let byte_widths = font.byte_widths().expect("a simple font's codes are bytes");
+        assert!((0..256u32).all(|c| byte_widths[c as usize].to_bits() == font.width(c).to_bits()));
+        let size = match cases.next() % 4 {
+            0 => 0.0,
+            1 => -0.0,
+            2 => 3e38,
+            _ => cases.within(-100.0, 100.0),
+        };
+        let text = TextState {
+            size,
+            word_space: cases.spacing(),
+            char_space: cases.spacing(),
+            ..TextState::default()
+        };
+        let from = match cases.next() % 2 {
+            0 => 0.0,
+            _ => cases.within(-1_000.0, 1_000.0),
+        };
+        let len = cases.next() as usize % 64;
+        let s: Vec<u8> = (0..len)
+            .map(|_| match cases.next() % 4 {
+                0 => b' ',
+                _ => (cases.next() % 256) as u8,
+            })
+            .collect();
+        let fast = crate::text::bytes_end(byte_widths, &text, &s, from);
+        let (laid, glyphs) = crate::text::laid_end(&font, &text, &s, from);
+        assert!(
+            fast.to_bits() == laid.to_bits() || fast.is_nan() && laid.is_nan(),
+            "case {case}: {fast} {laid}"
+        );
+        assert_eq!(glyphs, s.len());
     }
 }
 
