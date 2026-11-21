@@ -833,6 +833,36 @@ impl<S: ByteSource> Reading<S> {
         object.map_err(Error::Unread)
     }
 
+    /// Object `id`, as [`Reading::object_unkept`] reads it, alone: not
+    /// kept, and without where it was read from, so its bytes aren't
+    /// hashed for a record no one is given. A stream's data is among them,
+    /// so a caller that reads a stream's dictionary and not its data, or
+    /// takes its data otherwise ([`Reading::data`]), doesn't read through
+    /// it. One kept already is given as it's kept.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reading::object_unkept`] fails.
+    pub fn object_unrecorded(&self, id: ObjectId) -> Result<Object, Error> {
+        let Some(i) = self.reader.listed(id) else {
+            return Err(Error::Unread(Unread::Missing { id }));
+        };
+        let cx = self.reader.unrecorded();
+        let object = match (self.reader.slots[i].get(), self.source.whole()) {
+            (Some(read), _) => read.object.clone(),
+            (None, Some(file)) => {
+                let Ok(read) = self.reader.read_by(InMemory(file), cx, i);
+                read.object
+            }
+            (None, None) => {
+                (self.reader.read_by(self.by_position(), cx, i))
+                    .map_err(Error::Io)?
+                    .object
+            }
+        };
+        object.map(|(object, _)| object).map_err(Error::Unread)
+    }
+
     /// Where object `id` was read from, once a read of it is kept, and it
     /// read; none before.
     #[must_use]
