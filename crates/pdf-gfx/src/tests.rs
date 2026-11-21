@@ -933,6 +933,107 @@ fn clip_auto_merge_text_clips_and_deep_drop_safety() {
     drop(deep_marks);
 }
 
+/// A clip's path segments are counted as it's built, each part's once, so
+/// that holding [`Limits::segments`] at every path operator never walks the
+/// clip: the count is what its parts hold, through a merge, a text part and
+/// the clip saved before them; 100,000 clips, each wider than the last so
+/// that none merges, are interpreted as quickly as one; and the cap still
+/// counts the clip's segments with those of the path being built.
+#[test]
+fn a_clip_s_segments_are_counted_as_it_is_built() {
+    let walked = |clip: &Clip| -> usize {
+        clip.parts()
+            .map(|part| match part {
+                ClipPart::Path { segments, .. } => segments.len(),
+                ClipPart::Text { .. } => 0,
+            })
+            .sum()
+    };
+    let square = |r: f32| {
+        [
+            Seg::Move(Point::new(0.0, 0.0)),
+            Seg::Line(Point::new(r, 0.0)),
+            Seg::Line(Point::new(r, r)),
+            Seg::Line(Point::new(0.0, r)),
+            Seg::Close,
+        ]
+    };
+    let unclipped = Clip::default();
+    let outer = unclipped.with_path(
+        &square(100.0),
+        FillRule::NonZero,
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+    );
+    // Within the outer square, the inner one takes its place.
+    let inner = outer.with_path(
+        &square(50.0),
+        FillRule::NonZero,
+        Rect::new(0.0, 0.0, 50.0, 50.0),
+    );
+    // A triangle past the inner square cuts it.
+    let triangle = [
+        Seg::Move(Point::new(0.0, 0.0)),
+        Seg::Line(Point::new(60.0, 0.0)),
+        Seg::Line(Point::new(30.0, 60.0)),
+        Seg::Close,
+    ];
+    let cut = inner.with_path(
+        &triangle,
+        FillRule::EvenOdd,
+        Rect::new(0.0, 0.0, 60.0, 60.0),
+    );
+    let glyph = Quad::from_rect(Rect::new(1.0, 1.0, 5.0, 5.0));
+    let text = cut.with_text(vec![glyph], 1);
+    for (clip, parts, segments) in [
+        (&unclipped, 0, 0),
+        (&outer, 1, 5),
+        (&inner, 1, 5),
+        (&cut, 2, 9),
+        (&text, 3, 9),
+    ] {
+        assert_eq!(clip.parts().count(), parts);
+        assert_eq!(clip.segments(), segments);
+        assert_eq!(clip.segments(), walked(clip));
+    }
+
+    let store = Store::default();
+    let fonts = Fonts::default();
+    let clips = |n: usize| -> Vec<u8> {
+        (1..=n)
+            .flat_map(|i| format!("0 0 {i} {i} re W n ").into_bytes())
+            .collect()
+    };
+    let run = |content: &[u8], limits: &Limits| {
+        let mut ops = 0;
+        let read = interpret(
+            store.as_streams(),
+            &Concat::new(&[content]),
+            None,
+            limits,
+            &fonts,
+            Opts::default(),
+            |ev| {
+                ops += usize::from(matches!(ev.kind, Kind::Op));
+                ControlFlow::Continue(())
+            },
+        );
+        (read, ops)
+    };
+    let (read, _) = run(&clips(100_000), &Limits::DEFAULT);
+    assert_eq!(read.unwrap().operators, 300_000);
+    // 1,000 clips of 6 segments (`re` is `m`, four `l` and `h`), then a
+    // rectangle more being built, which passes 6,005 at its `re`.
+    let content = clips(1_001);
+    let at = |segments: usize| Limits {
+        segments,
+        ..Limits::DEFAULT
+    };
+    let (read, ops) = run(&content, &at(6_005));
+    assert_eq!(read.unwrap_err(), Error::Limit(Cap::Segments));
+    assert_eq!(ops, 3_001);
+    assert!(run(&content, &at(6_006)).0.is_ok());
+}
+
 #[test]
 fn forms_resource_fallback_cycles_images_shadings_and_marks() {
     let mut store = Store::default();
