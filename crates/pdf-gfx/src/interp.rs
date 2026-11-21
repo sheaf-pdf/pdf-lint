@@ -922,13 +922,15 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         self.check_reader()
     }
 
+    /// `Tj`, `'` or `"`: the bytes of their string operand, or of a name, as
+    /// PDFium's `Handle_ShowText` takes them (`GetString`).
     fn show(
         &mut self,
         local: &mut Local,
         at: &At<'_>,
         operand: Option<Operand<'_>>,
     ) -> Result<(), Stop> {
-        let Some(string) = string_only(operand, &self.lim.content) else {
+        let Some(string) = string_or_name(operand, &self.lim.content) else {
             return Ok(());
         };
         if string.is_empty() {
@@ -1494,7 +1496,8 @@ fn string_or_name(operand: Option<Operand<'_>>, lim: &ContentLimits) -> Option<V
     string_only(Some(op), lim)
 }
 
-/// Decodes a literal or hex string operand (`Tj`, `'`, `"`, `TJ` string item).
+/// Decodes a literal or hex string operand: a `TJ` array's element, which
+/// PDFium shows only where it's a string (`Handle_ShowText_Positioning`).
 fn string_only(operand: Option<Operand<'_>>, lim: &ContentLimits) -> Option<Vec<u8>> {
     let op = operand.filter(Operand::is_string)?;
     let obj = op.object(lim)?;

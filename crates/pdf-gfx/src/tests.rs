@@ -662,6 +662,47 @@ fn text_layout_tj_empty_string_quirk_and_vertical_writing() {
     assert_approx(vert_ys[1].2, 190.0);
 }
 
+/// `Tj`, `'` and `"` show a name's bytes, its `#` escapes decoded, as they
+/// show a string's, as PDFium's `GetString` takes them; a `TJ` array's name
+/// is no string, and moves nothing.
+#[test]
+fn a_name_shown_by_tj_and_the_quotes_is_its_bytes() {
+    let store = Store::default();
+    let resources = helvetica_resources();
+    let fonts = Fonts::default();
+    let content = Concat::new(&[
+        br#"BT /F1 10 Tf 14 TL 10 100 Td /AB Tj /CD ' 1 2 /EF " [(G) /HI (J)] TJ /K#4CM Tj 7 Tj ET"#,
+    ]);
+    let mut shown: Vec<(Vec<u8>, f32)> = Vec::new();
+    interpret(
+        store.as_streams(),
+        &content,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        Opts::default(),
+        |ev| {
+            if let Kind::Text(show) = ev.kind {
+                let x = show.glyphs().next().map_or(f32::NAN, |g| g.origin.x);
+                shown.push((show.string.to_vec(), x));
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    let strings: Vec<&[u8]> = shown.iter().map(|(s, _)| s.as_slice()).collect();
+    assert_eq!(
+        strings,
+        [&b"AB"[..], b"CD", b"EF", b"G", b"J", b"KLM"],
+        "{shown:?}"
+    );
+    // `'` and `"` each begin a line at 10; `J` follows `G` with no adjustment.
+    assert_approx(shown[1].1, 10.0);
+    assert_approx(shown[2].1, 10.0);
+    let g_width = 10.0 * 0.778;
+    assert_approx(shown[4].1 - shown[3].1, g_width + 2.0);
+}
+
 #[cfg(feature = "programs")]
 #[test]
 fn embedded_truetype_outline_expands_glyph_quad() {
