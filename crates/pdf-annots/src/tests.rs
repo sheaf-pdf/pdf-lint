@@ -512,6 +512,66 @@ fn subtypes_borders_da_and_encrypted_string_locked_error() {
     assert!(matches!(err, Error::Unreadable(u) if u.why == Why::Locked));
 }
 
+/// An annotation's appearances are read alone: what the whole annotation
+/// gives for the same dictionary, and still there when its action chain is
+/// past the cap that refuses the annotation whole.
+#[test]
+fn appearances_are_read_alone_past_a_cap_on_the_rest() {
+    let mut store = Store::default();
+    let form = |store: &mut Store| {
+        store.put_stream(
+            dict! {
+                "Subtype" => Object::name("Form"),
+                "BBox" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+            },
+            b"0 0 10 10 re f".to_vec(),
+        )
+    };
+    let (off, yes) = (form(&mut store), form(&mut store));
+    let ap = store.put(dict! { "N" => dict! { "Off" => off, "Yes" => yes } });
+    let widget = |action: Option<ObjectId>| {
+        let mut d = dict! {
+            "Subtype" => Object::name("Widget"),
+            "Rect" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+            "AS" => Object::name("Yes"),
+            "AP" => ap,
+        };
+        if let Some(action) = action {
+            d.set("A", action);
+        }
+        d
+    };
+    let limits = Limits::DEFAULT;
+
+    let plain = widget(None);
+    let whole = Annot::from_dict(&store.objects, &plain, None, Rules::Pdfium, &limits).unwrap();
+    let alone = Appearances::read(&store.objects, &plain, None, Rules::Pdfium, &limits)
+        .unwrap()
+        .expect("an /AP");
+    assert_eq!(Some(&alone), whole.appearances());
+    assert_eq!(alone.stream(AppearanceMode::Normal, true, false), Some(yes));
+
+    // A chain of actions one past the cap, each the next's `/Next`.
+    let mut next = None;
+    for _ in 0..=limits.semantics.action_chain {
+        let mut action = dict! { "S" => Object::name("Named"), "N" => Object::name("NextPage") };
+        if let Some(next) = next {
+            action.set("Next", next);
+        }
+        next = Some(store.put(action));
+    }
+    let chained = widget(next);
+    let err = Annot::from_dict(&store.objects, &chained, None, Rules::Pdfium, &limits).unwrap_err();
+    assert_eq!(err, Error::Limit(Cap::ActionChain));
+    let read = Appearances::read(&store.objects, &chained, None, Rules::Pdfium, &limits).unwrap();
+    assert_eq!(read, Some(alone));
+
+    // Neither `/AP` nor `/AS`: none.
+    let bare = dict! { "Subtype" => Object::name("Square") };
+    let read = Appearances::read(&store.objects, &bare, None, Rules::Pdfium, &limits).unwrap();
+    assert_eq!(read, None);
+}
+
 #[test]
 fn appearance_states_and_section_12_5_5_placement_matrix() {
     let mut store = Store::default();
