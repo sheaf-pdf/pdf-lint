@@ -14,6 +14,7 @@ use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_objects::{Dict, Object, Stream, dict};
 
 use crate::annot::Annot;
+use crate::geometry::{caret_outline, upright_frame};
 use crate::resolve::QuadPoints;
 use crate::style::{
     AnnotColor, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle, Quadding,
@@ -761,6 +762,39 @@ pub fn synth_ink(
         }
     });
 
+    Some(SynthesizedAp::from_canvas(bbox, canvas))
+}
+
+/// Synthesizes `/AP /N` for a `/Caret` (ISO 32000-2 §12.5.6.11): its
+/// triangle ([`caret_outline`] through `frame`, given in the page's default
+/// user space) filled in `color`, in the form's own space or in place
+/// ([`ApRect`]). The paragraph symbol a caret's `/Sy /P` asks for isn't
+/// drawn.
+///
+/// Returns `None` where `/Rect` has no area; with no color to draw in (a
+/// transparent `color`) the appearance is empty.
+#[must_use]
+pub fn synth_caret(
+    rect: impl Into<ApRect>,
+    frame: Matrix,
+    color: AnnotColor,
+    opacity: f32,
+) -> Option<SynthesizedAp> {
+    let at = rect.into();
+    if !at.has_area() {
+        return None;
+    }
+    let bbox = at.bbox();
+    let mut canvas = Canvas::new();
+    let Some(c) = color.to_content_color() else {
+        return Some(SynthesizedAp::from_canvas(bbox, canvas));
+    };
+    let points = caret_outline(frame).map(|p| at.local(p));
+    canvas.with_state(|cv| {
+        apply_opacity(cv, opacity, opacity, false);
+        cv.fill_color(c);
+        cv.polyline(&points, true, Paint::Fill);
+    });
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
@@ -1585,6 +1619,13 @@ pub fn synth_annot(annot: &Annot<'_>) -> Option<SynthesizedAp> {
             annot.color().unwrap_or(AnnotColor::Rgb([0.75, 0.1, 0.1])),
             opacity,
         ),
+        // Its triangle in the box `/RD` leaves, upright on the page.
+        TypedAnnot::Caret(ct) => synth_caret(
+            rect,
+            upright_frame(inset_by(rect, ct.rect_diff)),
+            annot.color().unwrap_or(AnnotColor::Gray(0.0)),
+            opacity,
+        ),
         // The mark alone: its overlay isn't an appearance of the annotation.
         TypedAnnot::Redact(rd) => redact_mark_ap(
             rect,
@@ -1597,6 +1638,17 @@ pub fn synth_annot(annot: &Annot<'_>) -> Option<SynthesizedAp> {
         ),
         _ => None,
     }
+}
+
+/// `rect` less `rect_diff` (`/RD`), each side kept inside `rect`.
+fn inset_by(rect: Rect, rect_diff: Option<[f32; 4]>) -> Rect {
+    let [dl, db, dr, dt] = rect_diff.unwrap_or([0.0; 4]);
+    Rect::new(
+        (rect.x0 + dl.max(0.0)).min(rect.x1),
+        (rect.y0 + db.max(0.0)).min(rect.y1),
+        (rect.x1 - dr.max(0.0)).max(rect.x0),
+        (rect.y1 - dt.max(0.0)).max(rect.y0),
+    )
 }
 
 fn std14_code_width(font: Std14, code: u8) -> f32 {

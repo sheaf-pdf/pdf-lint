@@ -3225,3 +3225,151 @@ fn an_appearance_drawn_in_place_is_the_one_drawn_in_its_own_space_moved() {
         assert!(drawings(space).iter().all(|(_, ap)| ap.is_none()));
     }
 }
+
+/// The frame of the box `[x0 y0 x1 y1]` turned with a page whose `/Rotate`
+/// is `degrees`, so that what's drawn through it reads upright on the
+/// page as shown: the unit square's top left where the box's reads.
+fn turned_frame(r: Rect, degrees: u16) -> Matrix {
+    let (w, h) = (r.width(), r.height());
+    match degrees {
+        // The square's x up the page, its y to the right of it.
+        90 => Matrix {
+            a: 0.0,
+            b: h,
+            c: w,
+            d: 0.0,
+            e: r.x0,
+            f: r.y0,
+        },
+        180 => Matrix {
+            a: -w,
+            b: 0.0,
+            c: 0.0,
+            d: h,
+            e: r.x1,
+            f: r.y0,
+        },
+        270 => Matrix {
+            a: 0.0,
+            b: -h,
+            c: -w,
+            d: 0.0,
+            e: r.x1,
+            f: r.y1,
+        },
+        _ => Matrix {
+            a: w,
+            b: 0.0,
+            c: 0.0,
+            d: -h,
+            e: r.x0,
+            f: r.y1,
+        },
+    }
+}
+
+#[test]
+fn a_caret_is_its_triangle_through_its_frame_and_is_drawn_so() {
+    use crate::{ApRect, caret_outline, synth_caret};
+
+    // Upright: its base along the bottom, its tip at the top's middle.
+    let b = Rect::new(10.0, 20.0, 22.0, 32.0);
+    let upright = caret_outline(turned_frame(b, 0));
+    assert_eq!(
+        upright,
+        [
+            Point::new(10.0, 20.0),
+            Point::new(16.0, 32.0),
+            Point::new(22.0, 20.0)
+        ]
+    );
+    // On a turned page it reads upright as the page is shown: its tip on
+    // the side the page's top is, the base on the other.
+    assert_eq!(
+        caret_outline(turned_frame(b, 90)),
+        [
+            Point::new(22.0, 20.0),
+            Point::new(10.0, 26.0),
+            Point::new(22.0, 32.0)
+        ]
+    );
+    assert_eq!(
+        caret_outline(turned_frame(b, 180)),
+        [
+            Point::new(22.0, 32.0),
+            Point::new(16.0, 20.0),
+            Point::new(10.0, 32.0)
+        ]
+    );
+    assert_eq!(
+        caret_outline(turned_frame(b, 270)),
+        [
+            Point::new(10.0, 32.0),
+            Point::new(22.0, 26.0),
+            Point::new(10.0, 20.0)
+        ]
+    );
+    // Each point is the frame applied to its own place in the square, to
+    // the bit, whatever the frame: a viewer that paints the caret by the
+    // same frame paints these numbers.
+    let odd = Matrix {
+        a: 7.3,
+        b: 0.0,
+        c: 0.0,
+        d: 4.1,
+        e: 100.3,
+        f: 200.7,
+    };
+    let unit = [(0.0, 1.0), (0.5, 0.0), (1.0, 1.0)].map(|(x, y)| odd.apply(Point::new(x, y)));
+    let got = caret_outline(odd);
+    for (g, u) in got.iter().zip(&unit) {
+        assert_eq!(
+            (g.x.to_bits(), g.y.to_bits()),
+            (u.x.to_bits(), u.y.to_bits())
+        );
+    }
+
+    // Drawn: the triangle filled, in the form's space or in place.
+    let rect = Rect::new(8.0, 18.0, 24.0, 34.0);
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    let frame = turned_frame(b, 0);
+    let own = synth_caret(rect, frame, red, 1.0).unwrap();
+    assert_eq!(
+        content_text(&own),
+        "q\n1 0 0 rg\n2 2 m\n8 14 l\n14 2 l\nh\nf\nQ\n"
+    );
+    assert_eq!(own.bbox, Rect::new(0.0, 0.0, 16.0, 16.0));
+    let placed = synth_caret(ApRect::InPlace(rect), frame, red, 1.0).unwrap();
+    assert_eq!(
+        content_text(&placed),
+        "q\n1 0 0 rg\n10 20 m\n16 32 l\n22 20 l\nh\nf\nQ\n"
+    );
+    assert_eq!((placed.bbox, placed.matrix), (rect, Matrix::IDENTITY));
+    assert!(placed.needs.0.is_empty());
+    for ap in [&own, &placed] {
+        assert_eq!(read_back(ap), (1, 0));
+    }
+    // Translucent: under an ExtGState of its alpha.
+    let faint = synth_caret(ApRect::InPlace(rect), frame, red, 0.5).unwrap();
+    assert_eq!(faint.needs.0.len(), 1);
+    assert!(content_text(&faint).contains(" gs\n1 0 0 rg\n10 20 m\n"));
+    // Nothing to draw in, or nowhere.
+    let clear = synth_caret(rect, frame, AnnotColor::Transparent, 1.0).unwrap();
+    assert!(clear.content.is_empty());
+    let flat = Rect::new(8.0, 18.0, 24.0, 18.0);
+    assert!(synth_caret(flat, frame, red, 1.0).is_none());
+
+    // As read from a file: in the box `/RD` leaves, upright on the page.
+    let mut store = Store::default();
+    let id = store.put(dict! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("Caret"),
+        "Rect" => vec![Object::from(8), Object::from(18), Object::from(24), Object::from(34)],
+        "RD" => vec![Object::from(2), Object::from(2), Object::from(2), Object::from(2)],
+        "C" => vec![Object::from(1), Object::from(0), Object::from(0)],
+        "Sy" => Object::name("None"),
+    });
+    let page = dict! { "Annots" => vec![Object::from(id)] };
+    let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
+    assert_eq!(synth_annot(&annots[0]), Some(own));
+}
