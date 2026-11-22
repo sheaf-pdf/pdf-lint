@@ -121,3 +121,100 @@ pub fn attachment_icon_strokes(icon: &AttachmentIcon, frame: Matrix) -> Vec<Vec<
         })
         .collect()
 }
+
+/// The most scallops a cloud is drawn with: past that (a step too short
+/// for its outline) none is, and its outline is drawn plain.
+pub(crate) const MOST_SCALLOPS: usize = 1 << 16;
+
+/// How long a cloudy border's scallops are along its outline, in points,
+/// for a border `width` wide at `intensity` (`/BE /I`, ISO 32000-2 §12.5.4
+/// Table 167, from 0 to 2): at an intensity of 1, 9 points and three times
+/// the width, at most 30; at another, that times the intensity, so that an
+/// intensity of 0 makes none.
+#[must_use]
+pub fn cloud_step(width: f32, intensity: f32) -> f32 {
+    (9.0 + width * 3.0).min(30.0) * intensity
+}
+
+/// A cloudy border (`/BE /S /C`) around the closed outline `outline`: each
+/// side cut into scallops about `step` long, each a cubic curve `[from,
+/// control, control, to]` bulging outward, away from the outline's inside
+/// whichever way round it runs, in the same space as `outline` and in its
+/// order. A side shorter than 0.01 has none.
+///
+/// None for an outline of fewer than three points, a `step` that isn't a
+/// number above 0, or one that would cut the outline into more than 65,536
+/// scallops.
+#[must_use]
+pub fn cloud_outline(outline: &[Point], step: f32) -> Vec<[Point; 4]> {
+    let n = outline.len();
+    if n < 3 || !(step > 0.0 && step.is_finite()) {
+        return Vec::new();
+    }
+    let sides = || {
+        (0..n).filter_map(|i| {
+            let (a, b) = (outline[i], outline[(i + 1) % n]);
+            let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+            if len < 0.01 {
+                return None;
+            }
+            Some((a, b, len, (len / step).round().max(1.0)))
+        })
+    };
+    if sides().map(|(.., k)| f64::from(k)).sum::<f64>() > MOST_SCALLOPS as f64 {
+        return Vec::new();
+    }
+    // Which side is out: the outline's turning, from its signed area.
+    let area: f32 = (0..n)
+        .map(|i| {
+            let (a, b) = (outline[i], outline[(i + 1) % n]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    let out = if area > 0.0 { 1.0 } else { -1.0 };
+    let mut curves = Vec::new();
+    for (a, b, len, k) in sides() {
+        let k = k as usize;
+        for j in 0..k {
+            let t0 = j as f32 / k as f32;
+            let t1 = (j + 1) as f32 / k as f32;
+            let p = Point::new(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0);
+            let q = Point::new(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1);
+            let seg = len / k as f32;
+            let (nx, ny) = (out * (q.y - p.y) / seg, out * -(q.x - p.x) / seg);
+            let h = seg * 0.55;
+            curves.push([
+                p,
+                Point::new(p.x + nx * h, p.y + ny * h),
+                Point::new(q.x + nx * h, q.y + ny * h),
+                q,
+            ]);
+        }
+    }
+    curves
+}
+
+/// The outline a cloudy square's scallops run along: `r`'s corners, from
+/// its top left round the way the page's text reads.
+pub(crate) fn box_outline(r: Rect) -> [Point; 4] {
+    [
+        Point::new(r.x0, r.y1),
+        Point::new(r.x1, r.y1),
+        Point::new(r.x1, r.y0),
+        Point::new(r.x0, r.y0),
+    ]
+}
+
+/// The outline a cloudy circle's scallops run along: the ellipse inscribed
+/// in `r` in 32 steps, from its rightmost point round the way a square's
+/// runs.
+pub(crate) fn ellipse_outline(r: Rect) -> Vec<Point> {
+    let (rx, ry) = (r.width() / 2.0, r.height() / 2.0);
+    let (cx, cy) = (r.x0 + rx, r.y0 + ry);
+    (0..32)
+        .map(|i| {
+            let t = i as f32 / 32.0 * std::f32::consts::TAU;
+            Point::new(cx + rx * t.cos(), cy - ry * t.sin())
+        })
+        .collect()
+}

@@ -1495,12 +1495,17 @@ fn free_text_text_clears_its_border_and_stays_put_for_a_solid_one() {
 
 #[test]
 fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
+    use crate::{cloud_outline, cloud_step};
+
     let rect = Rect::new(100.0, 200.0, 200.0, 250.0);
-    let shape = |kind, style: &PaintStyle| {
-        let ap = crate::synth_shape(kind, rect, style, None).unwrap();
+    let drawn = |kind, style: &PaintStyle, rd| {
+        let ap = crate::synth_shape(kind, rect, style, rd).unwrap();
         assert_eq!(read_back(&ap), (1, 0));
         content_text(&ap)
     };
+    let shape = |kind, style: &PaintStyle| drawn(kind, style, None);
+    // A cloud's scallops reach out past its line: `/RD` leaves them room.
+    let cloud_rd = Some([10.0; 4]);
     let rounded = |style| {
         let mut paint = bordered(2.0, style);
         paint.border.horizontal_radius = 5.0;
@@ -1527,8 +1532,23 @@ fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
         "{round}"
     );
     assert!(round.ends_with("h\nB\nQ\n"));
-    let cloud = shape(ShapeKind::Square, &cloudy(BorderStyle::Solid));
-    assert_eq!(cloud, "q\n1 0 0 RG\n2 w\n0.8 g\n1 1 98 48 re\nB\nQ\n");
+    // A cloudy one's line cut into scallops, from its top left: a curve
+    // each, one path.
+    let cloud = drawn(ShapeKind::Square, &cloudy(BorderStyle::Solid), cloud_rd);
+    let outline = [
+        Point::new(11.0, 39.0),
+        Point::new(89.0, 39.0),
+        Point::new(89.0, 11.0),
+        Point::new(11.0, 11.0),
+    ];
+    let scallops = cloud_outline(&outline, cloud_step(2.0, 1.0)).len();
+    assert_eq!(scallops, 14);
+    assert!(
+        cloud.starts_with("q\n1 0 0 RG\n2 w\n0.8 g\n11 39 m\n"),
+        "{cloud}"
+    );
+    assert_eq!(cloud.matches(" c\n").count(), scallops, "{cloud}");
+    assert!(cloud.ends_with(" 11 39 c\nh\nB\nQ\n"), "{cloud}");
 
     // The bevels and the underline are a plain rectangle's: here they come
     // out solid.
@@ -1547,7 +1567,11 @@ fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
             round,
             "{style:?}"
         );
-        assert_eq!(shape(ShapeKind::Square, &cloudy(style)), cloud, "{style:?}");
+        assert_eq!(
+            drawn(ShapeKind::Square, &cloudy(style), cloud_rd),
+            cloud,
+            "{style:?}"
+        );
     }
     // A dashed one is the same path under its dash array.
     let dash = "q\n1 0 0 RG\n2 w\n[3] 0 d\n0.8 g\n";
@@ -1561,7 +1585,7 @@ fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
         round.replacen(solid, dash, 1)
     );
     assert_eq!(
-        shape(ShapeKind::Square, &cloudy(BorderStyle::Dashed)),
+        drawn(ShapeKind::Square, &cloudy(BorderStyle::Dashed), cloud_rd),
         cloud.replacen(solid, dash, 1)
     );
 }
@@ -3471,4 +3495,165 @@ fn an_attachment_s_icon_is_its_strokes_through_its_frame_and_is_drawn_so() {
         synth_annot(&annots[0]),
         synth_file_attachment(b, &graph, frame, red, 1.0)
     );
+}
+
+#[test]
+fn clouds_bulge_outward_whichever_way_round() {
+    use crate::{ApRect, cloud_outline, cloud_step, synth_cloud, synth_poly, synth_shape};
+
+    // A scallop's length: 9 and three times the width, at most 30, times
+    // the intensity.
+    assert_eq!(cloud_step(1.5, 1.0), 13.5);
+    assert_eq!(cloud_step(10.0, 1.0), 30.0);
+    assert_eq!(cloud_step(1.0, 2.0), 24.0);
+    assert_eq!(cloud_step(1.0, 0.0), 0.0);
+
+    let square = [
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        Point::new(200.0, 200.0),
+        Point::new(100.0, 200.0),
+    ];
+    let reversed: Vec<Point> = square.iter().rev().copied().collect();
+    for pts in [square.to_vec(), reversed] {
+        let curves = cloud_outline(&pts, 20.0);
+        assert_eq!(curves.len(), 20);
+        for (i, [from, c1, c2, to]) in curves.iter().enumerate() {
+            // Every control point is outside the square, and each scallop
+            // starts where the one before it ends.
+            for c in [c1, c2] {
+                let inside = c.x > 100.0 && c.x < 200.0 && c.y > 100.0 && c.y < 200.0;
+                assert!(!inside, "{c:?}");
+            }
+            let next = curves[(i + 1) % curves.len()][0];
+            assert_eq!(*to, next, "{i}");
+            assert!(pts.contains(from) || i % 5 != 0);
+        }
+    }
+    // None for an outline that isn't one, or a step that cuts nothing or
+    // too much; a side under 0.01 has none.
+    assert!(cloud_outline(&square[..2], 20.0).is_empty());
+    for step in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert!(cloud_outline(&square, step).is_empty(), "{step}");
+    }
+    let huge = square.map(|p| Point::new(p.x * 1e6, p.y * 1e6));
+    assert!(cloud_outline(&huge, 1.0).is_empty());
+    let mut repeated = square.to_vec();
+    repeated.insert(1, square[0]);
+    assert_eq!(cloud_outline(&repeated, 20.0), cloud_outline(&square, 20.0));
+
+    // Drawn round an outline of the caller's: one path of the scallops,
+    // filled and stroked, in place or in the form's space alike.
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    let mut style = PaintStyle::new(Some(red), Some(AnnotColor::Gray(0.8))).with_border(Border {
+        width: 1.5,
+        cloudy_intensity: Some(1.0),
+        ..Border::default()
+    });
+    let rect = Rect::new(80.0, 80.0, 220.0, 220.0);
+    let placed = synth_cloud(ApRect::InPlace(rect), &square, &style).unwrap();
+    let curves = cloud_outline(&square, cloud_step(1.5, 1.0));
+    let text = content_text(&placed);
+    assert!(
+        text.starts_with("q\n1 0 0 RG\n1.5 w\n0.8 g\n100 100 m\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches(" c\n").count(), curves.len());
+    assert!(text.ends_with("h\nB\nQ\n"), "{text}");
+    assert_eq!(read_back(&placed), (1, 0));
+    let own = synth_cloud(rect, &square, &style).unwrap();
+    assert_eq!(operators(&own), operators(&placed));
+    assert_eq!(painted_points(&own).len(), painted_points(&placed).len());
+    // A dashed one under its dashes; with no line, filled alone; with
+    // nothing to paint, empty; an outline that makes no scallops, as it is.
+    style.border.style = BorderStyle::Dashed;
+    style.border.dash = vec![4.0, 3.0];
+    let dashed = content_text(&synth_cloud(rect, &square, &style).unwrap());
+    assert!(
+        dashed.starts_with("q\n1 0 0 RG\n1.5 w\n[4 3] 0 d\n0.8 g\n"),
+        "{dashed}"
+    );
+    style.border.width = 0.0;
+    let filled = content_text(&synth_cloud(rect, &square, &style).unwrap());
+    assert!(
+        filled.starts_with("q\n0.8 g\n") && filled.ends_with("h\nf\nQ\n"),
+        "{filled}"
+    );
+    style.fill = None;
+    assert!(
+        synth_cloud(rect, &square, &style)
+            .unwrap()
+            .content
+            .is_empty()
+    );
+    style.border.width = 1.5;
+    style.border.cloudy_intensity = Some(0.0);
+    let plain = content_text(&synth_cloud(rect, &square, &style).unwrap());
+    assert!(
+        plain.ends_with("20 20 m\n120 20 l\n120 120 l\n20 120 l\nh\nS\nQ\n"),
+        "{plain}"
+    );
+    let flat = Rect::new(80.0, 80.0, 220.0, 80.0);
+    assert!(synth_cloud(flat, &square, &style).is_none());
+
+    // A cloudy circle: scallops round its 32 sides; a cloudy polygon round
+    // its vertices; a polyline has none; an intensity of 0 is no cloud.
+    let cloudy = |intensity| {
+        PaintStyle::new(Some(red), None).with_border(Border {
+            width: 1.0,
+            cloudy_intensity: Some(intensity),
+            ..Border::default()
+        })
+    };
+    let rd = Some([10.0; 4]);
+    let circle = synth_shape(ShapeKind::Circle, rect, &cloudy(1.0), rd).unwrap();
+    assert_eq!(content_text(&circle).matches(" c\n").count(), 32);
+    assert_eq!(read_back(&circle), (1, 0));
+    let polygon = synth_poly(
+        PolyKind::Polygon,
+        rect,
+        &square,
+        (LineEnding::None, LineEnding::None),
+        &cloudy(1.0),
+    )
+    .unwrap();
+    assert_eq!(
+        content_text(&polygon).matches(" c\n").count(),
+        cloud_outline(&square, cloud_step(1.0, 1.0)).len()
+    );
+    let polyline = synth_poly(
+        PolyKind::PolyLine,
+        rect,
+        &square,
+        (LineEnding::None, LineEnding::None),
+        &cloudy(1.0),
+    )
+    .unwrap();
+    assert!(!content_text(&polyline).contains(" c\n"));
+    let none = synth_shape(ShapeKind::Square, rect, &cloudy(0.0), rd).unwrap();
+    let mut plain_style = cloudy(0.0);
+    plain_style.border.cloudy_intensity = None;
+    assert_eq!(
+        none,
+        synth_shape(ShapeKind::Square, rect, &plain_style, rd).unwrap()
+    );
+
+    // As read from a file: a `/Square` with `/BE /S /C` is drawn cloudy.
+    let mut store = Store::default();
+    let id = store.put(dict! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("Square"),
+        "Rect" => vec![Object::from(80), Object::from(80), Object::from(220), Object::from(220)],
+        "RD" => vec![Object::from(10), Object::from(10), Object::from(10), Object::from(10)],
+        "C" => vec![Object::from(1), Object::from(0), Object::from(0)],
+        "BE" => dict! { "S" => Object::name("C"), "I" => 1 },
+    });
+    let page = dict! { "Annots" => vec![Object::from(id)] };
+    let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
+    let read = synth_annot(&annots[0]).unwrap();
+    assert_eq!(
+        read,
+        synth_shape(ShapeKind::Square, rect, &cloudy(1.0), rd).unwrap()
+    );
+    assert!(content_text(&read).matches(" c\n").count() > 4);
 }

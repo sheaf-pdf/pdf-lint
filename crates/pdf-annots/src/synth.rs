@@ -8,13 +8,16 @@ use pdf_content_streams::{
     Blend, Color, GState, LineCap, LineJoin, Paint, Res, ResBody, Reserved, ResourceNeeds,
 };
 use pdf_fonts::{Encoding, Std14};
-use pdf_gfx::{Canvas, Matrix, Point, Quad, Rect};
+use pdf_gfx::{Canvas, Matrix, Point, Quad, Rect, Seg};
 #[cfg(feature = "text-layout")]
 use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_objects::{Dict, Object, Stream, dict};
 
 use crate::annot::Annot;
-use crate::geometry::{attachment_icon_strokes, caret_outline, upright_frame};
+use crate::geometry::{
+    attachment_icon_strokes, box_outline, caret_outline, cloud_outline, cloud_step,
+    ellipse_outline, upright_frame,
+};
 use crate::resolve::QuadPoints;
 use crate::style::{
     AnnotColor, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle, Quadding,
@@ -346,6 +349,13 @@ pub fn synth_text_markup(
 /// center line, solid or dashed: the beveled, inset, and underline styles are
 /// a rectangle's, and come out solid there.
 ///
+/// A cloudy border (`/BE /S /C`, an intensity above 0) is that line cut into
+/// scallops bulging outward ([`cloud_outline`], each about [`cloud_step`]
+/// long): a square's from its top left corner, a circle's 32 sides from its
+/// rightmost point, each round the way the page's text reads. The scallops
+/// reach out past the line by about half their length: `rect_diff` leaves
+/// them room (ISO 32000-2 §12.5.4), as `/Rect` clips them.
+///
 /// A solid or dashed border over an interior color is one path, filled and
 /// stroked together, for the square as for the circle: under an opacity
 /// below 1 the border then shows its own color, not that color over the
@@ -377,9 +387,8 @@ pub fn synth_shape(
         .border
         .horizontal_radius
         .min(style.border.vertical_radius);
-    let plain_square = kind == ShapeKind::Square
-        && radius.max(0.0) == 0.0
-        && style.border.cloudy_intensity.is_none();
+    let cloud = cloudy(&style.border);
+    let plain_square = kind == ShapeKind::Square && radius.max(0.0) == 0.0 && cloud.is_none();
     if plain_square {
         let outer = Rect::new(
             (bbox.x0 + dl).min(bbox.x1),
@@ -443,6 +452,13 @@ pub fn synth_shape(
         (None, Some(_)) => Paint::Stroke,
         (None, None) => return Some(SynthesizedAp::from_canvas(bbox, canvas)),
     };
+    let curves = cloud.map_or_else(Vec::new, |intensity| {
+        let outline = match kind {
+            ShapeKind::Square => box_outline(inner).to_vec(),
+            ShapeKind::Circle => ellipse_outline(inner),
+        };
+        cloud_outline(&outline, cloud_step(style.border.width, intensity))
+    });
 
     canvas.with_state(|cv| {
         apply_opacity(
@@ -459,6 +475,7 @@ pub fn synth_shape(
             cv.fill_color(c);
         }
         match kind {
+            _ if !curves.is_empty() => draw_cloud(cv, &curves, paint),
             ShapeKind::Square => cv.rounded_rect(inner, radius, paint),
             ShapeKind::Circle => cv.ellipse(inner, paint),
         }
@@ -633,7 +650,10 @@ fn draw_line_ending(
 }
 
 /// Synthesizes `/AP /N` for `/Polygon` or `/PolyLine` annotations, in the
-/// form's own space or in place ([`ApRect`]).
+/// form's own space or in place ([`ApRect`]). A polygon's cloudy border
+/// (`/BE /S /C`, an intensity above 0) is its outline cut into scallops
+/// bulging outward ([`cloud_outline`], each about [`cloud_step`] long), from
+/// its first vertex in its own order; a polyline has none.
 #[must_use]
 pub fn synth_poly(
     kind: PolyKind,
@@ -665,6 +685,12 @@ pub fn synth_poly(
         (None, Some(_)) => Paint::Stroke,
         (None, None) => return Some(SynthesizedAp::from_canvas(bbox, canvas)),
     };
+    let curves = match cloudy(&style.border) {
+        Some(intensity) if closed => {
+            cloud_outline(&local, cloud_step(style.border.width, intensity))
+        }
+        _ => Vec::new(),
+    };
 
     canvas.with_state(|cv| {
         apply_opacity(
@@ -680,7 +706,11 @@ pub fn synth_poly(
         if let Some(c) = fc {
             cv.fill_color(c);
         }
-        cv.polyline(&local, closed, paint);
+        if curves.is_empty() {
+            cv.polyline(&local, closed, paint);
+        } else {
+            draw_cloud(cv, &curves, paint);
+        }
 
         if kind == PolyKind::PolyLine
             && sc.is_some()
@@ -724,6 +754,88 @@ pub fn synth_poly(
         }
     });
 
+    Some(SynthesizedAp::from_canvas(bbox, canvas))
+}
+
+/// A cloudy border's intensity (`/BE /I`), where it has one that draws
+/// scallops: a number above 0.
+fn cloudy(border: &Border) -> Option<f32> {
+    border
+        .cloudy_intensity
+        .filter(|i| *i > 0.0 && i.is_finite())
+}
+
+/// Draws `curves`, a cloud's scallops, as one closed path painted `paint`.
+fn draw_cloud(cv: &mut Canvas, curves: &[[Point; 4]], paint: Paint) {
+    let Some(first) = curves.first() else {
+        return;
+    };
+    let mut segments = Vec::with_capacity(curves.len() + 2);
+    segments.push(Seg::Move(first[0]));
+    segments.extend(curves.iter().map(|&[_, c1, c2, to]| Seg::Curve(c1, c2, to)));
+    segments.push(Seg::Close);
+    cv.draw_segments(&segments, paint);
+}
+
+/// Synthesizes `/AP /N` for a cloudy border (`/BE /S /C`) around an
+/// outline of the caller's (a polygon's vertices, a box's corners, an
+/// ellipse's points, in the page's default user space): its scallops
+/// ([`cloud_outline`]) filled with `style.fill` and stroked with
+/// `style.stroke` at the border's width (no stroke at a width of 0), dashed
+/// where the border is, in the form's own space or in place ([`ApRect`]).
+/// The scallops are [`cloud_step`] long at the border's width and its
+/// `cloudy_intensity`, or 1 where it has none. Where the outline makes none
+/// (fewer than three points, an intensity of 0) it's drawn as it is,
+/// closed.
+///
+/// Returns `None` where `/Rect` has no area; with nothing to paint the
+/// appearance is empty.
+#[must_use]
+pub fn synth_cloud(
+    rect: impl Into<ApRect>,
+    outline: &[Point],
+    style: &PaintStyle,
+) -> Option<SynthesizedAp> {
+    let at = rect.into();
+    if !at.has_area() {
+        return None;
+    }
+    let bbox = at.bbox();
+    let mut canvas = Canvas::new();
+    let sc = style
+        .stroke
+        .and_then(AnnotColor::to_content_color)
+        .filter(|_| style.border.width > 0.0);
+    let fc = style.fill.and_then(AnnotColor::to_content_color);
+    let paint = match (fc, sc) {
+        (Some(_), Some(_)) => Paint::FillStroke,
+        (Some(_), None) => Paint::Fill,
+        (None, Some(_)) => Paint::Stroke,
+        (None, None) => return Some(SynthesizedAp::from_canvas(bbox, canvas)),
+    };
+    let local: Vec<Point> = outline.iter().map(|&p| at.local(p)).collect();
+    let intensity = style.border.cloudy_intensity.unwrap_or(1.0);
+    let curves = cloud_outline(&local, cloud_step(style.border.width, intensity));
+    canvas.with_state(|cv| {
+        apply_opacity(
+            cv,
+            style.opacity,
+            style.fill_opacity.unwrap_or(style.opacity),
+            false,
+        );
+        if let Some(c) = sc {
+            cv.stroke_color(c);
+            apply_border_stroke(cv, &style.border);
+        }
+        if let Some(c) = fc {
+            cv.fill_color(c);
+        }
+        if curves.is_empty() {
+            cv.polyline(&local, true, paint);
+        } else {
+            draw_cloud(cv, &curves, paint);
+        }
+    });
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
