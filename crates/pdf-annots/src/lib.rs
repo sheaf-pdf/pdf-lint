@@ -198,9 +198,9 @@ pub use style::{
 };
 pub use subtypes::{
     AnnotSubtype, AttachmentIcon, CaretAnnot, CaretSymbol, FileAttachmentAnnot, FreeTextAnnot,
-    FreeTextIntent, HighlightMode, InkAnnot, LineAnnot, LinkAnnot, PolyAnnot, PolyKind, PopupAnnot,
-    RedactAnnot, ShapeAnnot, ShapeKind, StampAnnot, StampName, TextAnnot, TextIcon,
-    TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
+    FreeTextIntent, HighlightMode, InkAnnot, LineAnnot, LineIntent, LinkAnnot, PolyAnnot,
+    PolyIntent, PolyKind, PopupAnnot, RedactAnnot, ShapeAnnot, ShapeKind, StampAnnot, StampName,
+    TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
 };
 pub use synth::{
     RedactMark, SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly,

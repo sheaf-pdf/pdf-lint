@@ -14,13 +14,13 @@ use crate::{
     BorderStyle, BuiltAnnot, Cap, CaretAnnot, CaretSymbol, DefaultAppearance, Dest, DestFit,
     DestNameKind, DestTable, Error, ExplicitDest, Fault, FileAttachmentAnnot, FlattenOpts,
     FlattenPlan, FlattenTarget, FreeTextAnnot, FreeTextIntent, HighlightMode, InkAnnot, Limits,
-    LineAnnot, LineEnding, LinkAnnot, MarkedState, MarkupInfo, NamedAction, OpenAction, PageTarget,
-    PaintStyle, PolyAnnot, PolyKind, PopupAnnot, QuadPoints, Quadding, RedactAnnot, RedactMark,
-    ReplyKind, ResolvedDest, ReviewState, ShapeAnnot, ShapeKind, StampAnnot, StampName,
-    SynthesizedAp, TabOrder, TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot,
-    WidgetAnnot, fuzz, page_annots, page_annots_with, page_tabs, placement_matrix, plan_flatten,
-    plan_flatten_filtered, push_page_annot, resolve_dest, resolve_threads, stream_placement_matrix,
-    synth_annot, synth_free_text, synth_redact,
+    LineAnnot, LineEnding, LineIntent, LinkAnnot, MarkedState, MarkupInfo, NamedAction, OpenAction,
+    PageTarget, PaintStyle, PolyAnnot, PolyIntent, PolyKind, PopupAnnot, QuadPoints, Quadding,
+    RedactAnnot, RedactMark, ReplyKind, ResolvedDest, ReviewState, ShapeAnnot, ShapeKind,
+    StampAnnot, StampName, SynthesizedAp, TabOrder, TextAnnot, TextIcon, TextMarkupAnnot,
+    TextMarkupKind, TypedAnnot, WidgetAnnot, fuzz, page_annots, page_annots_with, page_tabs,
+    placement_matrix, plan_flatten, plan_flatten_filtered, push_page_annot, resolve_dest,
+    resolve_threads, stream_placement_matrix, synth_annot, synth_free_text, synth_redact,
 };
 
 #[derive(Default)]
@@ -80,10 +80,12 @@ fn public_types_are_send_and_sync() {
     check::<FreeTextAnnot>();
     check::<TextMarkupKind>();
     check::<TextMarkupAnnot>();
+    check::<LineIntent>();
     check::<LineAnnot>();
     check::<ShapeKind>();
     check::<ShapeAnnot>();
     check::<PolyKind>();
+    check::<PolyIntent>();
     check::<PolyAnnot>();
     check::<InkAnnot>();
     check::<StampName>();
@@ -290,6 +292,114 @@ fn fuzz_seeds_pass_all_invariants() {
     }
 }
 
+/// A line's and a polygon's or polyline's `/IT` is read by name, reached
+/// through a reference too, a name no table has kept as written, and an
+/// absent one is none.
+#[test]
+fn a_line_s_and_a_poly_s_intent_is_read() {
+    let mut store = Store::default();
+    let it = store.put(Object::name("PolyLineDimension"));
+    let rect = || {
+        vec![
+            Object::from(0),
+            Object::from(0),
+            Object::from(100),
+            Object::from(100),
+        ]
+    };
+    let l = || {
+        vec![
+            Object::from(10),
+            Object::from(20),
+            Object::from(80),
+            Object::from(90),
+        ]
+    };
+    let v = || {
+        vec![
+            Object::from(10),
+            Object::from(10),
+            Object::from(50),
+            Object::from(90),
+            Object::from(90),
+            Object::from(10),
+        ]
+    };
+    let line = |intent: Option<Object>| {
+        let mut d = dict! { "Subtype" => Object::name("Line"), "Rect" => rect(), "L" => l() };
+        if let Some(intent) = intent {
+            d.set("IT", intent);
+        }
+        d
+    };
+    let poly = |subtype: &str, intent: Option<Object>| {
+        let mut d =
+            dict! { "Subtype" => Object::name(subtype), "Rect" => rect(), "Vertices" => v() };
+        if let Some(intent) = intent {
+            d.set("IT", intent);
+        }
+        d
+    };
+    let lines = [
+        (
+            line(Some(Object::name("LineArrow"))),
+            Some(LineIntent::Arrow),
+        ),
+        (
+            line(Some(Object::name("LineDimension"))),
+            Some(LineIntent::Dimension),
+        ),
+        (
+            line(Some(Object::name("LineCallout"))),
+            Some(LineIntent::Other(Box::from(&b"LineCallout"[..]))),
+        ),
+        (line(None), None),
+    ];
+    for (dict, want) in &lines {
+        let annot =
+            Annot::from_dict(&store.objects, dict, None, Rules::Pdfium, &Limits::DEFAULT).unwrap();
+        let TypedAnnot::Line(view) = annot.typed() else {
+            panic!("expected Line");
+        };
+        assert_eq!(view.intent, *want);
+        if let Some(intent) = &view.intent {
+            assert_eq!(LineIntent::from_name(intent.as_bytes()), *intent);
+        }
+    }
+    let polys = [
+        (
+            poly("Polygon", Some(Object::name("PolygonCloud"))),
+            Some(PolyIntent::Cloud),
+        ),
+        (
+            poly("Polygon", Some(Object::name("PolygonDimension"))),
+            Some(PolyIntent::PolygonDimension),
+        ),
+        (
+            poly("PolyLine", Some(Object::from(it))),
+            Some(PolyIntent::LineDimension),
+        ),
+        (poly("PolyLine", None), None),
+    ];
+    for (dict, want) in &polys {
+        let annot =
+            Annot::from_dict(&store.objects, dict, None, Rules::Pdfium, &Limits::DEFAULT).unwrap();
+        let TypedAnnot::Poly(view) = annot.typed() else {
+            panic!("expected Poly");
+        };
+        assert_eq!(view.intent, *want);
+        assert_eq!(view.vertices.len(), 3);
+        if let Some(intent) = &view.intent {
+            assert_eq!(PolyIntent::from_name(intent.as_bytes()), *intent);
+        }
+    }
+    // An intent name no table has is told by its length alone.
+    let other = format!("{:?}", LineIntent::Other(Box::from(&b"Secret"[..])));
+    assert!(!other.contains("Secret"), "{other}");
+    let other = format!("{:?}", PolyIntent::Other(Box::from(&b"Secret"[..])));
+    assert!(!other.contains("Secret"), "{other}");
+}
+
 #[test]
 fn subtypes_borders_da_and_encrypted_string_locked_error() {
     let mut store = Store::default();
@@ -377,6 +487,7 @@ fn subtypes_borders_da_and_encrypted_string_locked_error() {
     );
     assert!(line_view.caption);
     assert_eq!(annots[1].legacy_border(), Some([2.0, 4.0, 1.5]));
+    assert_eq!(line_view.intent, None);
 
     // Encrypted string without password must fail with `Why::Locked`.
     let mut locked_dict = dict! {
