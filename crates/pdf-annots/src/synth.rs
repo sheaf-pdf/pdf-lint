@@ -8,36 +8,130 @@ use pdf_content_streams::{
     Blend, Color, GState, LineCap, LineJoin, Paint, Res, ResBody, Reserved, ResourceNeeds,
 };
 use pdf_fonts::{Encoding, Std14};
-use pdf_gfx::{Canvas, Point, Quad, Rect};
+use pdf_gfx::{Canvas, Matrix, Point, Quad, Rect, Seg};
 #[cfg(feature = "text-layout")]
 use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_objects::{Dict, Object, Stream, dict};
 
 use crate::annot::Annot;
+use crate::geometry::{
+    attachment_icon_strokes, box_outline, caret_outline, cloud_outline, cloud_step,
+    ellipse_outline, upright_frame,
+};
 use crate::resolve::QuadPoints;
 use crate::style::{
     AnnotColor, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle, Quadding,
 };
-use crate::subtypes::{PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind, TypedAnnot};
+use crate::subtypes::{
+    AttachmentIcon, PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind, TypedAnnot,
+};
+
+/// An annotation's `/Rect`, and where an appearance drawn for it is drawn:
+/// what the `synth_*` functions that draw geometry given in the page's
+/// default user space take. A [`Rect`] alone is drawn in the form's own
+/// space ([`ApRect::Form`]).
+///
+/// Either way the form's `/Matrix` is the identity, and a viewer places it
+/// on `/Rect` (ISO 32000-2 §12.5.5): the two draw the same shape in the same
+/// place. They part in `f32`: a form drawn in its own space has each
+/// coordinate given less the corner of `/Rect`, so a renderer, moving it
+/// back, lands its edges a hair from where the same shape drawn on the page
+/// lands them, and its coverage can round the two apart by a level of
+/// antialiasing. A writer whose appearances must match a drawing of the mark
+/// in the page's space to the pixel (a viewer's own drawing of it, or the
+/// page's content), or that keeps each appearance where its annotation is,
+/// as many writers do, draws them in place ([`ApRect::InPlace`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum ApRect {
+    /// Drawn in the form's own space: its `/BBox` is `[0 0 w h]`, the
+    /// annotation's `/Rect` moved to the origin, and the geometry given is
+    /// moved with it, so the annotation can move without its stream being
+    /// written again.
+    Form(Rect),
+    /// Drawn in place: the form's `/BBox` is the annotation's `/Rect`, and
+    /// the geometry is drawn where it was given, in the page's default user
+    /// space.
+    InPlace(Rect),
+}
+
+impl ApRect {
+    /// The annotation's `/Rect`.
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        match self {
+            Self::Form(rect) | Self::InPlace(rect) => rect,
+        }
+    }
+
+    /// The form's `/BBox`: `[0 0 w h]` in the form's own space, the `/Rect`
+    /// itself in place.
+    #[must_use]
+    pub fn bbox(self) -> Rect {
+        match self {
+            Self::Form(rect) => Rect::new(0.0, 0.0, rect.width(), rect.height()),
+            Self::InPlace(rect) => rect,
+        }
+    }
+
+    /// Whether the `/Rect` has an area to draw in.
+    fn has_area(self) -> bool {
+        let rect = self.rect();
+        rect.width() > 0.0 && rect.height() > 0.0
+    }
+
+    /// Where `p`, a point in the page's default user space, is drawn: less
+    /// the `/Rect`'s corner in the form's own space, as it is in place.
+    fn local(self, p: Point) -> Point {
+        match self {
+            Self::Form(rect) => Point::new(p.x - rect.x0, p.y - rect.y0),
+            Self::InPlace(_) => p,
+        }
+    }
+}
+
+impl From<Rect> for ApRect {
+    fn from(rect: Rect) -> Self {
+        Self::Form(rect)
+    }
+}
 
 /// Self-contained synthesized Form XObject stream ready to be stored as an
 /// annotation's `/AP /N` (or `/RO` redaction overlay) stream.
 ///
-/// Coordinates inside `content` use local `[0, 0, width, height]` Form space
-/// (`bbox = Rect::new(0.0, 0.0, rect.width(), rect.height())`) so relocating an
-/// annotation's `/Rect` without resizing requires no stream rewrite.
+/// The `synth_*` functions draw in local `[0, 0, width, height]` Form space
+/// (`bbox = Rect::new(0.0, 0.0, rect.width(), rect.height())`, `matrix` the
+/// identity) so relocating an annotation's `/Rect` without resizing requires
+/// no stream rewrite; those that take an [`ApRect`] draw in place on request,
+/// `bbox` the `/Rect` itself. An appearance the caller drew
+/// ([`SynthesizedAp::drawn`]) has the box and matrix it was given.
 ///
-/// Its `Debug` implementation reports byte lengths rather than raw stream
-/// content.
+/// What the content draws with is held twice: by what each resource is
+/// ([`needs`](Self::needs)), for a writer that binds resources itself (one
+/// font object for every appearance in a file, say), and bound in a finished
+/// [`resources`](Self::resources) dictionary, for one that stores the stream
+/// as it is ([`to_stream`](Self::to_stream)).
+///
+/// Its `Debug` implementation reports byte lengths and counts rather than raw
+/// stream content.
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct SynthesizedAp {
-    /// Form `/BBox` (`[0, 0, width, height]`).
+    /// Form `/BBox` (`[0, 0, width, height]` for a synthesized appearance).
     pub bbox: Rect,
+    /// Form `/Matrix`: the identity for a synthesized appearance.
+    pub matrix: Matrix,
     /// Uncompressed Form content-stream bytes.
     pub content: Vec<u8>,
-    /// Form `/Resources` dictionary containing any generated `/ExtGState` or
-    /// `/Font` entries.
+    /// What `content` draws with, each under the name it gives it, by what
+    /// it is: the resources [`resources`](Self::resources) binds.
+    pub needs: ResourceNeeds,
+    /// Form `/Resources` dictionary binding [`needs`](Self::needs): each
+    /// resource by its first object (a generated `/ExtGState` or `/Font`), or
+    /// by its number where the caller had already written it
+    /// ([`ResBody::Written`]). A resource of more objects than one (a font
+    /// with its program, say) is bound by its first alone, so a writer of one
+    /// binds `needs` itself.
     pub resources: Dict,
 }
 
@@ -45,7 +139,9 @@ impl fmt::Debug for SynthesizedAp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SynthesizedAp")
             .field("bbox", &self.bbox)
+            .field("matrix", &self.matrix)
             .field("content_len", &self.content.len())
+            .field("needs", &self.needs.0.len())
             .field("resource_categories", &self.resources.len())
             .finish()
     }
@@ -53,17 +149,35 @@ impl fmt::Debug for SynthesizedAp {
 
 impl SynthesizedAp {
     fn from_canvas(bbox: Rect, canvas: Canvas) -> Self {
+        Self::drawn(bbox, Matrix::IDENTITY, canvas)
+    }
+
+    /// An appearance the caller drew on `canvas`, for a Form XObject whose
+    /// `/BBox` is `bbox` and whose `/Matrix` is `matrix`: one no `synth_*`
+    /// function draws (a custom stamp, say), held as a synthesized one is, so
+    /// that a writer stores every appearance one way.
+    ///
+    /// `canvas` is finished with no names reserved, as the `synth_*`
+    /// functions finish theirs, and [`resources`](Self::resources) is made
+    /// from its needs as theirs is: a resource the caller had already written
+    /// ([`ResBody::Written`]) is bound there by its number in the file being
+    /// written.
+    #[must_use]
+    pub fn drawn(bbox: Rect, matrix: Matrix, canvas: Canvas) -> Self {
         let (content, needs) = canvas.finish(&Reserved::default());
         let resources = build_resources_dict(&needs);
         Self {
             bbox,
+            matrix,
             content,
+            needs,
             resources,
         }
     }
 
     /// Converts this appearance into an uncompressed [`Stream`] with
-    /// `/Type /XObject`, `/Subtype /Form`, `/BBox`, and `/Resources`.
+    /// `/Type /XObject`, `/Subtype /Form`, `/BBox`, `/Matrix` where it isn't
+    /// the identity, and `/Resources` where it binds any.
     #[must_use]
     pub fn to_stream(&self) -> Stream {
         let mut d = dict! {
@@ -76,6 +190,9 @@ impl SynthesizedAp {
                 Object::from(f64::from(self.bbox.y1)),
             ],
         };
+        if self.matrix != Matrix::IDENTITY {
+            d.set("Matrix", self.matrix.to_pdf_array());
+        }
         if !self.resources.is_empty() {
             d.set("Resources", self.resources.clone());
         }
@@ -139,25 +256,27 @@ fn apply_border_stroke(canvas: &mut Canvas, border: &Border) {
 }
 
 /// Synthesizes `/AP /N` for `Highlight`, `Underline`, `Squiggly`, or
-/// `StrikeOut` annotations from `quads`.
+/// `StrikeOut` annotations from `quads`, in the form's own space or in
+/// place ([`ApRect`]).
 #[must_use]
 pub fn synth_text_markup(
     kind: TextMarkupKind,
-    rect: Rect,
+    rect: impl Into<ApRect>,
     quads: &[QuadPoints],
     color: AnnotColor,
     opacity: f32,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
     let Some(c) = color.to_content_color() else {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
     };
 
-    let shift = |p: Point| Point::new(p.x - rect.x0, p.y - rect.y0);
+    let shift = |p: Point| at.local(p);
 
     canvas.with_state(|cv| {
         let is_hl = kind == TextMarkupKind::Highlight;
@@ -230,21 +349,32 @@ pub fn synth_text_markup(
 /// center line, solid or dashed: the beveled, inset, and underline styles are
 /// a rectangle's, and come out solid there.
 ///
+/// A cloudy border (`/BE /S /C`, an intensity above 0) is that line cut into
+/// scallops bulging outward ([`cloud_outline`], each about [`cloud_step`]
+/// long): a square's from its top left corner, a circle's 32 sides from its
+/// rightmost point, each round the way the page's text reads. The scallops
+/// reach out past the line by about half their length: `rect_diff` leaves
+/// them room (ISO 32000-2 §12.5.4), as `/Rect` clips them.
+///
 /// A solid or dashed border over an interior color is one path, filled and
 /// stroked together, for the square as for the circle: under an opacity
 /// below 1 the border then shows its own color, not that color over the
 /// interior's (ISO 32000-2 §11.7.4.4).
+///
+/// `rect_diff` (`/RD`) is in from each side of `/Rect`, in the form's own
+/// space or in place ([`ApRect`]) alike.
 #[must_use]
 pub fn synth_shape(
     kind: ShapeKind,
-    rect: Rect,
+    rect: impl Into<ApRect>,
     style: &PaintStyle,
     rect_diff: Option<[f32; 4]>,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let [dl, db, dr, dt] = rect_diff.unwrap_or([0.0; 4]);
     let sc = style
         .stroke
@@ -257,15 +387,14 @@ pub fn synth_shape(
         .border
         .horizontal_radius
         .min(style.border.vertical_radius);
-    let plain_square = kind == ShapeKind::Square
-        && radius.max(0.0) == 0.0
-        && style.border.cloudy_intensity.is_none();
+    let cloud = cloudy(&style.border);
+    let plain_square = kind == ShapeKind::Square && radius.max(0.0) == 0.0 && cloud.is_none();
     if plain_square {
         let outer = Rect::new(
-            dl.min(bbox.x1),
-            db.min(bbox.y1),
-            (bbox.x1 - dr).max(0.0),
-            (bbox.y1 - dt).max(0.0),
+            (bbox.x0 + dl).min(bbox.x1),
+            (bbox.y0 + db).min(bbox.y1),
+            (bbox.x1 - dr).max(bbox.x0),
+            (bbox.y1 - dt).max(bbox.y0),
         );
         if outer.width() <= 0.0 || outer.height() <= 0.0 || (fc.is_none() && sc.is_none()) {
             return Some(SynthesizedAp::from_canvas(bbox, canvas));
@@ -308,10 +437,10 @@ pub fn synth_shape(
         0.0
     };
     let inner = Rect::new(
-        (dl + half_w).min(bbox.x1),
-        (db + half_w).min(bbox.y1),
-        (bbox.x1 - dr - half_w).max(0.0),
-        (bbox.y1 - dt - half_w).max(0.0),
+        (bbox.x0 + dl + half_w).min(bbox.x1),
+        (bbox.y0 + db + half_w).min(bbox.y1),
+        (bbox.x1 - dr - half_w).max(bbox.x0),
+        (bbox.y1 - dt - half_w).max(bbox.y0),
     );
     if inner.width() <= 0.0 || inner.height() <= 0.0 {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
@@ -323,6 +452,13 @@ pub fn synth_shape(
         (None, Some(_)) => Paint::Stroke,
         (None, None) => return Some(SynthesizedAp::from_canvas(bbox, canvas)),
     };
+    let curves = cloud.map_or_else(Vec::new, |intensity| {
+        let outline = match kind {
+            ShapeKind::Square => box_outline(inner).to_vec(),
+            ShapeKind::Circle => ellipse_outline(inner),
+        };
+        cloud_outline(&outline, cloud_step(style.border.width, intensity))
+    });
 
     canvas.with_state(|cv| {
         apply_opacity(
@@ -339,6 +475,7 @@ pub fn synth_shape(
             cv.fill_color(c);
         }
         match kind {
+            _ if !curves.is_empty() => draw_cloud(cv, &curves, paint),
             ShapeKind::Square => cv.rounded_rect(inner, radius, paint),
             ShapeKind::Circle => cv.ellipse(inner, paint),
         }
@@ -348,25 +485,27 @@ pub fn synth_shape(
 }
 
 /// Synthesizes `/AP /N` for `/Line` annotations, including start/end
-/// [`LineEnding`] arrowheads or markers.
+/// [`LineEnding`] arrowheads or markers, in the form's own space or in place
+/// ([`ApRect`]).
 #[must_use]
 pub fn synth_line(
-    rect: Rect,
+    rect: impl Into<ApRect>,
     start: Point,
     end: Point,
     endings: (LineEnding, LineEnding),
     style: &PaintStyle,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
     let Some(sc) = style.stroke.and_then(AnnotColor::to_content_color) else {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
     };
-    let p0 = Point::new(start.x - rect.x0, start.y - rect.y0);
-    let p1 = Point::new(end.x - rect.x0, end.y - rect.y0);
+    let p0 = at.local(start);
+    let p1 = at.local(end);
     let w = style.border.width.max(0.5);
 
     canvas.with_state(|cv| {
@@ -510,24 +649,26 @@ fn draw_line_ending(
     }
 }
 
-/// Synthesizes `/AP /N` for `/Polygon` or `/PolyLine` annotations.
+/// Synthesizes `/AP /N` for `/Polygon` or `/PolyLine` annotations, in the
+/// form's own space or in place ([`ApRect`]). A polygon's cloudy border
+/// (`/BE /S /C`, an intensity above 0) is its outline cut into scallops
+/// bulging outward ([`cloud_outline`], each about [`cloud_step`] long), from
+/// its first vertex in its own order; a polyline has none.
 #[must_use]
 pub fn synth_poly(
     kind: PolyKind,
-    rect: Rect,
+    rect: impl Into<ApRect>,
     vertices: &[Point],
     endings: (LineEnding, LineEnding),
     style: &PaintStyle,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 || vertices.len() < 2 {
+    let at = rect.into();
+    if !at.has_area() || vertices.len() < 2 {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
-    let local: Vec<Point> = vertices
-        .iter()
-        .map(|p| Point::new(p.x - rect.x0, p.y - rect.y0))
-        .collect();
+    let local: Vec<Point> = vertices.iter().map(|&p| at.local(p)).collect();
     let closed = kind == PolyKind::Polygon;
     let sc = style
         .stroke
@@ -544,6 +685,12 @@ pub fn synth_poly(
         (None, Some(_)) => Paint::Stroke,
         (None, None) => return Some(SynthesizedAp::from_canvas(bbox, canvas)),
     };
+    let curves = match cloudy(&style.border) {
+        Some(intensity) if closed => {
+            cloud_outline(&local, cloud_step(style.border.width, intensity))
+        }
+        _ => Vec::new(),
+    };
 
     canvas.with_state(|cv| {
         apply_opacity(
@@ -559,7 +706,11 @@ pub fn synth_poly(
         if let Some(c) = fc {
             cv.fill_color(c);
         }
-        cv.polyline(&local, closed, paint);
+        if curves.is_empty() {
+            cv.polyline(&local, closed, paint);
+        } else {
+            draw_cloud(cv, &curves, paint);
+        }
 
         if kind == PolyKind::PolyLine
             && sc.is_some()
@@ -606,19 +757,103 @@ pub fn synth_poly(
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
-/// Synthesizes `/AP /N` for `/Ink` freehand annotations.
+/// A cloudy border's intensity (`/BE /I`), where it has one that draws
+/// scallops: a number above 0.
+fn cloudy(border: &Border) -> Option<f32> {
+    border
+        .cloudy_intensity
+        .filter(|i| *i > 0.0 && i.is_finite())
+}
+
+/// Draws `curves`, a cloud's scallops, as one closed path painted `paint`.
+fn draw_cloud(cv: &mut Canvas, curves: &[[Point; 4]], paint: Paint) {
+    let Some(first) = curves.first() else {
+        return;
+    };
+    let mut segments = Vec::with_capacity(curves.len() + 2);
+    segments.push(Seg::Move(first[0]));
+    segments.extend(curves.iter().map(|&[_, c1, c2, to]| Seg::Curve(c1, c2, to)));
+    segments.push(Seg::Close);
+    cv.draw_segments(&segments, paint);
+}
+
+/// Synthesizes `/AP /N` for a cloudy border (`/BE /S /C`) around an
+/// outline of the caller's (a polygon's vertices, a box's corners, an
+/// ellipse's points, in the page's default user space): its scallops
+/// ([`cloud_outline`]) filled with `style.fill` and stroked with
+/// `style.stroke` at the border's width (no stroke at a width of 0), dashed
+/// where the border is, in the form's own space or in place ([`ApRect`]).
+/// The scallops are [`cloud_step`] long at the border's width and its
+/// `cloudy_intensity`, or 1 where it has none. Where the outline makes none
+/// (fewer than three points, an intensity of 0) it's drawn as it is,
+/// closed.
+///
+/// Returns `None` where `/Rect` has no area; with nothing to paint the
+/// appearance is empty.
+#[must_use]
+pub fn synth_cloud(
+    rect: impl Into<ApRect>,
+    outline: &[Point],
+    style: &PaintStyle,
+) -> Option<SynthesizedAp> {
+    let at = rect.into();
+    if !at.has_area() {
+        return None;
+    }
+    let bbox = at.bbox();
+    let mut canvas = Canvas::new();
+    let sc = style
+        .stroke
+        .and_then(AnnotColor::to_content_color)
+        .filter(|_| style.border.width > 0.0);
+    let fc = style.fill.and_then(AnnotColor::to_content_color);
+    let paint = match (fc, sc) {
+        (Some(_), Some(_)) => Paint::FillStroke,
+        (Some(_), None) => Paint::Fill,
+        (None, Some(_)) => Paint::Stroke,
+        (None, None) => return Some(SynthesizedAp::from_canvas(bbox, canvas)),
+    };
+    let local: Vec<Point> = outline.iter().map(|&p| at.local(p)).collect();
+    let intensity = style.border.cloudy_intensity.unwrap_or(1.0);
+    let curves = cloud_outline(&local, cloud_step(style.border.width, intensity));
+    canvas.with_state(|cv| {
+        apply_opacity(
+            cv,
+            style.opacity,
+            style.fill_opacity.unwrap_or(style.opacity),
+            false,
+        );
+        if let Some(c) = sc {
+            cv.stroke_color(c);
+            apply_border_stroke(cv, &style.border);
+        }
+        if let Some(c) = fc {
+            cv.fill_color(c);
+        }
+        if curves.is_empty() {
+            cv.polyline(&local, true, paint);
+        } else {
+            draw_cloud(cv, &curves, paint);
+        }
+    });
+    Some(SynthesizedAp::from_canvas(bbox, canvas))
+}
+
+/// Synthesizes `/AP /N` for `/Ink` freehand annotations, in the form's own
+/// space or in place ([`ApRect`]).
 #[must_use]
 pub fn synth_ink(
-    rect: Rect,
+    rect: impl Into<ApRect>,
     strokes: &[Vec<Point>],
     color: AnnotColor,
     border: &Border,
     opacity: f32,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
     let Some(c) = color.to_content_color() else {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
@@ -631,10 +866,7 @@ pub fn synth_ink(
         cv.line_cap(LineCap::Round);
         cv.line_join(LineJoin::Round);
         for stroke in strokes {
-            let pts: Vec<Point> = stroke
-                .iter()
-                .map(|p| Point::new(p.x - rect.x0, p.y - rect.y0))
-                .collect();
+            let pts: Vec<Point> = stroke.iter().map(|&p| at.local(p)).collect();
             if pts.len() == 1 {
                 cv.fill_color(c);
                 cv.circle(pts[0], (border.width * 0.5).max(0.5), Paint::Fill);
@@ -644,6 +876,81 @@ pub fn synth_ink(
         }
     });
 
+    Some(SynthesizedAp::from_canvas(bbox, canvas))
+}
+
+/// Synthesizes `/AP /N` for a `/Caret` (ISO 32000-2 §12.5.6.11): its
+/// triangle ([`caret_outline`] through `frame`, given in the page's default
+/// user space) filled in `color`, in the form's own space or in place
+/// ([`ApRect`]). The paragraph symbol a caret's `/Sy /P` asks for isn't
+/// drawn.
+///
+/// Returns `None` where `/Rect` has no area; with no color to draw in (a
+/// transparent `color`) the appearance is empty.
+#[must_use]
+pub fn synth_caret(
+    rect: impl Into<ApRect>,
+    frame: Matrix,
+    color: AnnotColor,
+    opacity: f32,
+) -> Option<SynthesizedAp> {
+    let at = rect.into();
+    if !at.has_area() {
+        return None;
+    }
+    let bbox = at.bbox();
+    let mut canvas = Canvas::new();
+    let Some(c) = color.to_content_color() else {
+        return Some(SynthesizedAp::from_canvas(bbox, canvas));
+    };
+    let points = caret_outline(frame).map(|p| at.local(p));
+    canvas.with_state(|cv| {
+        apply_opacity(cv, opacity, opacity, false);
+        cv.fill_color(c);
+        cv.polyline(&points, true, Paint::Fill);
+    });
+    Some(SynthesizedAp::from_canvas(bbox, canvas))
+}
+
+/// The width of the pen a file attachment's icon is drawn with.
+const ICON_PEN: f32 = 1.5;
+
+/// Synthesizes `/AP /N` for a `/FileAttachment` (ISO 32000-2 §12.5.6.15):
+/// its icon's strokes ([`attachment_icon_strokes`] through `frame`, given in
+/// the page's default user space), each drawn in `color` with a pen 1.5
+/// wide, round at its ends and joins, in the form's own space or in place
+/// ([`ApRect`]).
+///
+/// Returns `None` where `/Rect` has no area; with no color to draw in (a
+/// transparent `color`) the appearance is empty.
+#[must_use]
+pub fn synth_file_attachment(
+    rect: impl Into<ApRect>,
+    icon: &AttachmentIcon,
+    frame: Matrix,
+    color: AnnotColor,
+    opacity: f32,
+) -> Option<SynthesizedAp> {
+    let at = rect.into();
+    if !at.has_area() {
+        return None;
+    }
+    let bbox = at.bbox();
+    let mut canvas = Canvas::new();
+    let Some(c) = color.to_content_color() else {
+        return Some(SynthesizedAp::from_canvas(bbox, canvas));
+    };
+    canvas.with_state(|cv| {
+        apply_opacity(cv, opacity, opacity, false);
+        cv.stroke_color(c);
+        cv.line_width(ICON_PEN);
+        cv.line_cap(LineCap::Round);
+        cv.line_join(LineJoin::Round);
+        for stroke in attachment_icon_strokes(icon, frame) {
+            let local: Vec<Point> = stroke.into_iter().map(|p| at.local(p)).collect();
+            cv.polyline(&local, false, Paint::Stroke);
+        }
+    });
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
@@ -1468,6 +1775,21 @@ pub fn synth_annot(annot: &Annot<'_>) -> Option<SynthesizedAp> {
             annot.color().unwrap_or(AnnotColor::Rgb([0.75, 0.1, 0.1])),
             opacity,
         ),
+        // Its triangle in the box `/RD` leaves, upright on the page.
+        TypedAnnot::Caret(ct) => synth_caret(
+            rect,
+            upright_frame(inset_by(rect, ct.rect_diff)),
+            annot.color().unwrap_or(AnnotColor::Gray(0.0)),
+            opacity,
+        ),
+        // Its icon over its whole `/Rect`, upright on the page.
+        TypedAnnot::FileAttachment(fa) => synth_file_attachment(
+            rect,
+            &fa.icon,
+            upright_frame(rect),
+            annot.color().unwrap_or(AnnotColor::Gray(0.0)),
+            opacity,
+        ),
         // The mark alone: its overlay isn't an appearance of the annotation.
         TypedAnnot::Redact(rd) => redact_mark_ap(
             rect,
@@ -1480,6 +1802,17 @@ pub fn synth_annot(annot: &Annot<'_>) -> Option<SynthesizedAp> {
         ),
         _ => None,
     }
+}
+
+/// `rect` less `rect_diff` (`/RD`), each side kept inside `rect`.
+fn inset_by(rect: Rect, rect_diff: Option<[f32; 4]>) -> Rect {
+    let [dl, db, dr, dt] = rect_diff.unwrap_or([0.0; 4]);
+    Rect::new(
+        (rect.x0 + dl.max(0.0)).min(rect.x1),
+        (rect.y0 + db.max(0.0)).min(rect.y1),
+        (rect.x1 - dr.max(0.0)).max(rect.x0),
+        (rect.y1 - dt.max(0.0)).max(rect.y0),
+    )
 }
 
 fn std14_code_width(font: Std14, code: u8) -> f32 {

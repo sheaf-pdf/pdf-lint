@@ -14,13 +14,13 @@ use crate::{
     BorderStyle, BuiltAnnot, Cap, CaretAnnot, CaretSymbol, DefaultAppearance, Dest, DestFit,
     DestNameKind, DestTable, Error, ExplicitDest, Fault, FileAttachmentAnnot, FlattenOpts,
     FlattenPlan, FlattenTarget, FreeTextAnnot, FreeTextIntent, HighlightMode, InkAnnot, Limits,
-    LineAnnot, LineEnding, LinkAnnot, MarkedState, MarkupInfo, NamedAction, OpenAction, PageTarget,
-    PaintStyle, PolyAnnot, PolyKind, PopupAnnot, QuadPoints, Quadding, RedactAnnot, RedactMark,
-    ReplyKind, ResolvedDest, ReviewState, ShapeAnnot, ShapeKind, StampAnnot, StampName,
-    SynthesizedAp, TabOrder, TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot,
-    WidgetAnnot, fuzz, page_annots, page_annots_with, page_tabs, placement_matrix, plan_flatten,
-    plan_flatten_filtered, push_page_annot, resolve_dest, resolve_threads, stream_placement_matrix,
-    synth_annot, synth_free_text, synth_redact,
+    LineAnnot, LineEnding, LineIntent, LinkAnnot, MarkedState, MarkupInfo, NamedAction, OpenAction,
+    PageTarget, PaintStyle, PolyAnnot, PolyIntent, PolyKind, PopupAnnot, QuadPoints, Quadding,
+    RedactAnnot, RedactMark, ReplyKind, ResolvedDest, ReviewState, ShapeAnnot, ShapeKind,
+    StampAnnot, StampName, SynthesizedAp, TabOrder, TextAnnot, TextIcon, TextMarkupAnnot,
+    TextMarkupKind, TypedAnnot, WidgetAnnot, fuzz, page_annots, page_annots_with, page_tabs,
+    placement_matrix, plan_flatten, plan_flatten_filtered, push_page_annot, resolve_dest,
+    resolve_threads, stream_placement_matrix, synth_annot, synth_free_text, synth_redact,
 };
 
 #[derive(Default)]
@@ -80,10 +80,12 @@ fn public_types_are_send_and_sync() {
     check::<FreeTextAnnot>();
     check::<TextMarkupKind>();
     check::<TextMarkupAnnot>();
+    check::<LineIntent>();
     check::<LineAnnot>();
     check::<ShapeKind>();
     check::<ShapeAnnot>();
     check::<PolyKind>();
+    check::<PolyIntent>();
     check::<PolyAnnot>();
     check::<InkAnnot>();
     check::<StampName>();
@@ -290,6 +292,114 @@ fn fuzz_seeds_pass_all_invariants() {
     }
 }
 
+/// A line's and a polygon's or polyline's `/IT` is read by name, reached
+/// through a reference too, a name no table has kept as written, and an
+/// absent one is none.
+#[test]
+fn a_line_s_and_a_poly_s_intent_is_read() {
+    let mut store = Store::default();
+    let it = store.put(Object::name("PolyLineDimension"));
+    let rect = || {
+        vec![
+            Object::from(0),
+            Object::from(0),
+            Object::from(100),
+            Object::from(100),
+        ]
+    };
+    let l = || {
+        vec![
+            Object::from(10),
+            Object::from(20),
+            Object::from(80),
+            Object::from(90),
+        ]
+    };
+    let v = || {
+        vec![
+            Object::from(10),
+            Object::from(10),
+            Object::from(50),
+            Object::from(90),
+            Object::from(90),
+            Object::from(10),
+        ]
+    };
+    let line = |intent: Option<Object>| {
+        let mut d = dict! { "Subtype" => Object::name("Line"), "Rect" => rect(), "L" => l() };
+        if let Some(intent) = intent {
+            d.set("IT", intent);
+        }
+        d
+    };
+    let poly = |subtype: &str, intent: Option<Object>| {
+        let mut d =
+            dict! { "Subtype" => Object::name(subtype), "Rect" => rect(), "Vertices" => v() };
+        if let Some(intent) = intent {
+            d.set("IT", intent);
+        }
+        d
+    };
+    let lines = [
+        (
+            line(Some(Object::name("LineArrow"))),
+            Some(LineIntent::Arrow),
+        ),
+        (
+            line(Some(Object::name("LineDimension"))),
+            Some(LineIntent::Dimension),
+        ),
+        (
+            line(Some(Object::name("LineCallout"))),
+            Some(LineIntent::Other(Box::from(&b"LineCallout"[..]))),
+        ),
+        (line(None), None),
+    ];
+    for (dict, want) in &lines {
+        let annot =
+            Annot::from_dict(&store.objects, dict, None, Rules::Pdfium, &Limits::DEFAULT).unwrap();
+        let TypedAnnot::Line(view) = annot.typed() else {
+            panic!("expected Line");
+        };
+        assert_eq!(view.intent, *want);
+        if let Some(intent) = &view.intent {
+            assert_eq!(LineIntent::from_name(intent.as_bytes()), *intent);
+        }
+    }
+    let polys = [
+        (
+            poly("Polygon", Some(Object::name("PolygonCloud"))),
+            Some(PolyIntent::Cloud),
+        ),
+        (
+            poly("Polygon", Some(Object::name("PolygonDimension"))),
+            Some(PolyIntent::PolygonDimension),
+        ),
+        (
+            poly("PolyLine", Some(Object::from(it))),
+            Some(PolyIntent::LineDimension),
+        ),
+        (poly("PolyLine", None), None),
+    ];
+    for (dict, want) in &polys {
+        let annot =
+            Annot::from_dict(&store.objects, dict, None, Rules::Pdfium, &Limits::DEFAULT).unwrap();
+        let TypedAnnot::Poly(view) = annot.typed() else {
+            panic!("expected Poly");
+        };
+        assert_eq!(view.intent, *want);
+        assert_eq!(view.vertices.len(), 3);
+        if let Some(intent) = &view.intent {
+            assert_eq!(PolyIntent::from_name(intent.as_bytes()), *intent);
+        }
+    }
+    // An intent name no table has is told by its length alone.
+    let other = format!("{:?}", LineIntent::Other(Box::from(&b"Secret"[..])));
+    assert!(!other.contains("Secret"), "{other}");
+    let other = format!("{:?}", PolyIntent::Other(Box::from(&b"Secret"[..])));
+    assert!(!other.contains("Secret"), "{other}");
+}
+
 #[test]
 fn subtypes_borders_da_and_encrypted_string_locked_error() {
     let mut store = Store::default();
@@ -377,6 +487,7 @@ fn subtypes_borders_da_and_encrypted_string_locked_error() {
     );
     assert!(line_view.caption);
     assert_eq!(annots[1].legacy_border(), Some([2.0, 4.0, 1.5]));
+    assert_eq!(line_view.intent, None);
 
     // Encrypted string without password must fail with `Why::Locked`.
     let mut locked_dict = dict! {
@@ -399,6 +510,66 @@ fn subtypes_borders_da_and_encrypted_string_locked_error() {
     )
     .unwrap_err();
     assert!(matches!(err, Error::Unreadable(u) if u.why == Why::Locked));
+}
+
+/// An annotation's appearances are read alone: what the whole annotation
+/// gives for the same dictionary, and still there when its action chain is
+/// past the cap that refuses the annotation whole.
+#[test]
+fn appearances_are_read_alone_past_a_cap_on_the_rest() {
+    let mut store = Store::default();
+    let form = |store: &mut Store| {
+        store.put_stream(
+            dict! {
+                "Subtype" => Object::name("Form"),
+                "BBox" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+            },
+            b"0 0 10 10 re f".to_vec(),
+        )
+    };
+    let (off, yes) = (form(&mut store), form(&mut store));
+    let ap = store.put(dict! { "N" => dict! { "Off" => off, "Yes" => yes } });
+    let widget = |action: Option<ObjectId>| {
+        let mut d = dict! {
+            "Subtype" => Object::name("Widget"),
+            "Rect" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+            "AS" => Object::name("Yes"),
+            "AP" => ap,
+        };
+        if let Some(action) = action {
+            d.set("A", action);
+        }
+        d
+    };
+    let limits = Limits::DEFAULT;
+
+    let plain = widget(None);
+    let whole = Annot::from_dict(&store.objects, &plain, None, Rules::Pdfium, &limits).unwrap();
+    let alone = Appearances::read(&store.objects, &plain, None, Rules::Pdfium, &limits)
+        .unwrap()
+        .expect("an /AP");
+    assert_eq!(Some(&alone), whole.appearances());
+    assert_eq!(alone.stream(AppearanceMode::Normal, true, false), Some(yes));
+
+    // A chain of actions one past the cap, each the next's `/Next`.
+    let mut next = None;
+    for _ in 0..=limits.semantics.action_chain {
+        let mut action = dict! { "S" => Object::name("Named"), "N" => Object::name("NextPage") };
+        if let Some(next) = next {
+            action.set("Next", next);
+        }
+        next = Some(store.put(action));
+    }
+    let chained = widget(next);
+    let err = Annot::from_dict(&store.objects, &chained, None, Rules::Pdfium, &limits).unwrap_err();
+    assert_eq!(err, Error::Limit(Cap::ActionChain));
+    let read = Appearances::read(&store.objects, &chained, None, Rules::Pdfium, &limits).unwrap();
+    assert_eq!(read, Some(alone));
+
+    // Neither `/AP` nor `/AS`: none.
+    let bare = dict! { "Subtype" => Object::name("Square") };
+    let read = Appearances::read(&store.objects, &bare, None, Rules::Pdfium, &limits).unwrap();
+    assert_eq!(read, None);
 }
 
 #[test]
@@ -1384,12 +1555,17 @@ fn free_text_text_clears_its_border_and_stays_put_for_a_solid_one() {
 
 #[test]
 fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
+    use crate::{cloud_outline, cloud_step};
+
     let rect = Rect::new(100.0, 200.0, 200.0, 250.0);
-    let shape = |kind, style: &PaintStyle| {
-        let ap = crate::synth_shape(kind, rect, style, None).unwrap();
+    let drawn = |kind, style: &PaintStyle, rd| {
+        let ap = crate::synth_shape(kind, rect, style, rd).unwrap();
         assert_eq!(read_back(&ap), (1, 0));
         content_text(&ap)
     };
+    let shape = |kind, style: &PaintStyle| drawn(kind, style, None);
+    // A cloud's scallops reach out past its line: `/RD` leaves them room.
+    let cloud_rd = Some([10.0; 4]);
     let rounded = |style| {
         let mut paint = bordered(2.0, style);
         paint.border.horizontal_radius = 5.0;
@@ -1416,8 +1592,23 @@ fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
         "{round}"
     );
     assert!(round.ends_with("h\nB\nQ\n"));
-    let cloud = shape(ShapeKind::Square, &cloudy(BorderStyle::Solid));
-    assert_eq!(cloud, "q\n1 0 0 RG\n2 w\n0.8 g\n1 1 98 48 re\nB\nQ\n");
+    // A cloudy one's line cut into scallops, from its top left: a curve
+    // each, one path.
+    let cloud = drawn(ShapeKind::Square, &cloudy(BorderStyle::Solid), cloud_rd);
+    let outline = [
+        Point::new(11.0, 39.0),
+        Point::new(89.0, 39.0),
+        Point::new(89.0, 11.0),
+        Point::new(11.0, 11.0),
+    ];
+    let scallops = cloud_outline(&outline, cloud_step(2.0, 1.0)).len();
+    assert_eq!(scallops, 14);
+    assert!(
+        cloud.starts_with("q\n1 0 0 RG\n2 w\n0.8 g\n11 39 m\n"),
+        "{cloud}"
+    );
+    assert_eq!(cloud.matches(" c\n").count(), scallops, "{cloud}");
+    assert!(cloud.ends_with(" 11 39 c\nh\nB\nQ\n"), "{cloud}");
 
     // The bevels and the underline are a plain rectangle's: here they come
     // out solid.
@@ -1436,7 +1627,11 @@ fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
             round,
             "{style:?}"
         );
-        assert_eq!(shape(ShapeKind::Square, &cloudy(style)), cloud, "{style:?}");
+        assert_eq!(
+            drawn(ShapeKind::Square, &cloudy(style), cloud_rd),
+            cloud,
+            "{style:?}"
+        );
     }
     // A dashed one is the same path under its dash array.
     let dash = "q\n1 0 0 RG\n2 w\n[3] 0 d\n0.8 g\n";
@@ -1450,7 +1645,7 @@ fn rounded_and_cloudy_squares_and_circles_keep_their_one_stroked_path() {
         round.replacen(solid, dash, 1)
     );
     assert_eq!(
-        shape(ShapeKind::Square, &cloudy(BorderStyle::Dashed)),
+        drawn(ShapeKind::Square, &cloudy(BorderStyle::Dashed), cloud_rd),
         cloud.replacen(solid, dash, 1)
     );
 }
@@ -2833,4 +3028,692 @@ fn a_default_appearances_other_operators_are_not_applied_to_the_text() {
         Some(ro),
         synth_redact(MARK_RECT, &mark.with_default_appearance(&plain)).map(|(_, ro)| ro)
     );
+}
+
+/// What `ap.resources` binds `need` to: its category's entry by its name.
+fn bound<'a>(ap: &'a SynthesizedAp, need: &pdf_content_streams::Need) -> &'a Object {
+    let category = ap.resources.get(need.kind.key()).and_then(Object::as_dict);
+    category.and_then(|c| c.get(&need.name)).unwrap()
+}
+
+#[test]
+fn an_appearance_the_caller_drew_is_held_as_a_synthesized_one_is() {
+    use pdf_content_streams::{GState, Res, ResBody, Reserved};
+
+    // A form the caller has written already, by its number, under an
+    // opacity, an ExtGState made of its dictionary.
+    let written = ObjectId::new(12, 0);
+    let draw = || {
+        let mut canvas = pdf_gfx::Canvas::new();
+        let mut state = GState::default();
+        state.fill_alpha = Some(0.5);
+        canvas.gstate(state);
+        canvas.draw_xobject(Res::written(written), Matrix::translate(2.0, 3.0));
+        canvas
+    };
+    let bbox = Rect::new(0.0, 0.0, 40.0, 20.0);
+    // A quarter turn that lands the box on `[0 0 20 40]`.
+    let matrix = Matrix::new(0.0, 1.0, -1.0, 0.0, 20.0, 0.0);
+    let ap = SynthesizedAp::drawn(bbox, matrix, draw());
+    let (content, needs) = draw().finish(&Reserved::default());
+    assert_eq!((ap.bbox, ap.matrix), (bbox, matrix));
+    assert_eq!((&ap.content, &ap.needs), (&content, &needs));
+    assert_eq!(needs.0.len(), 2, "the form and the opacity");
+    for need in &needs.0 {
+        match need.res.body() {
+            ResBody::Written(id) => assert_eq!(bound(&ap, need), &Object::from(*id)),
+            ResBody::Objects(objects) => assert_eq!(bound(&ap, need), &objects[0]),
+            other => panic!("{other:?}"),
+        }
+    }
+    let stream = ap.to_stream();
+    assert_eq!(
+        stream.dict.get(b"Matrix"),
+        Some(&Object::from(matrix.to_pdf_array()))
+    );
+    assert_eq!(
+        stream.dict.get(b"Resources"),
+        Some(&Object::from(ap.resources.clone()))
+    );
+    assert_eq!(
+        stream.data.bytes(),
+        Some(&content[..]),
+        "the content as drawn"
+    );
+
+    // Drawn at the identity, as every synthesized appearance is, its form
+    // has no /Matrix.
+    let upright = SynthesizedAp::drawn(bbox, Matrix::IDENTITY, draw());
+    assert_eq!(upright.to_stream().dict.get(b"Matrix"), None);
+    let dbg = format!("{ap:?}");
+    assert!(dbg.contains("needs: 2"), "{dbg}");
+    assert!(!dbg.contains(" Do"), "no content in {dbg}");
+}
+
+#[test]
+fn a_synthesized_appearance_is_at_the_identity_and_binds_what_it_needs() {
+    let style = PaintStyle::new(Some(AnnotColor::Rgb([1.0, 0.0, 0.0])), None).with_opacity(0.5);
+    let shape = crate::synth_shape(ShapeKind::Square, MARK_RECT, &style, None).unwrap();
+    let text = synth_free_text(MARK_RECT, "Shown", None, Quadding::Left, &style).unwrap();
+    for ap in [&shape, &text] {
+        assert_eq!(ap.matrix, Matrix::IDENTITY);
+        assert_eq!(ap.to_stream().dict.get(b"Matrix"), None);
+        assert!(!ap.needs.0.is_empty());
+        let mut categories = std::collections::BTreeSet::new();
+        for need in &ap.needs.0 {
+            let pdf_content_streams::ResBody::Objects(objects) = need.res.body() else {
+                panic!("a synthesized appearance's resource is its objects");
+            };
+            assert_eq!(bound(ap, need), &objects[0]);
+            categories.insert(need.kind.key());
+        }
+        let bound_names: usize = (ap.resources.iter())
+            .map(|(_, c)| c.as_dict().map_or(0, Dict::len))
+            .sum();
+        assert_eq!(bound_names, ap.needs.0.len(), "nothing bound but its needs");
+        assert_eq!(categories.len(), ap.resources.len());
+    }
+}
+
+/// Every point of every path `ap` paints, in the page's default user space
+/// (the form's `/Matrix` and a placement aside), in order.
+fn painted_points(ap: &SynthesizedAp) -> Vec<Point> {
+    use std::ops::ControlFlow;
+
+    use pdf_content_streams::Paint;
+    use pdf_gfx::{Kind, Seg};
+
+    let objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let streams = pdf_objects::WithStreams::new(&objects, |id: ObjectId, _limit: usize| {
+        Err(pdf_objects::Unreadable::new(id, Why::Damaged, "missing"))
+    });
+    let resources = Object::from(ap.resources.clone());
+    let slices = [&ap.content[..]];
+    let mut faults = Vec::new();
+    let mut points = Vec::new();
+    pdf_gfx::interpret_with(
+        streams,
+        &pdf_content_streams::Concat::new(&slices),
+        Some(&resources),
+        &pdf_gfx::Limits::DEFAULT,
+        &pdf_fonts::Fonts::default(),
+        pdf_gfx::Opts::default(),
+        &mut faults,
+        |ev| {
+            if let Kind::Path(path) = &ev.kind
+                && !matches!(path.paint, Paint::None)
+            {
+                points.extend(path.segments.iter().flat_map(Seg::points));
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(faults.is_empty());
+    points
+}
+
+/// `ap`'s content with every number taken out: what it draws, by its
+/// operators.
+fn operators(ap: &SynthesizedAp) -> Vec<String> {
+    String::from_utf8(ap.content.clone())
+        .unwrap()
+        .split_ascii_whitespace()
+        .filter(|w| w.parse::<f32>().is_err())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn an_appearance_drawn_in_place_is_the_one_drawn_in_its_own_space_moved() {
+    use crate::ApRect;
+
+    let quad = |x0: f32, y0: f32, x1: f32, y1: f32| QuadPoints([x0, y1, x1, y1, x0, y0, x1, y0]);
+    let style = |fill: bool, dashed: bool| {
+        let mut style = bordered(1.5, BorderStyle::Solid);
+        if !fill {
+            style.fill = None;
+        }
+        if dashed {
+            style.border.style = BorderStyle::Dashed;
+            style.border.dash = vec![4.0, 3.0];
+        }
+        style
+    };
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    // Each kind drawn for `rect`, from geometry given in the page's space.
+    let drawings = |rect: ApRect| -> Vec<(&'static str, Option<SynthesizedAp>)> {
+        let r = rect.rect();
+        let (x, y) = (r.x0, r.y0);
+        let quads = [
+            quad(x + 2.0, y + 3.0, x + 50.0, y + 15.0),
+            quad(x + 2.0, y + 18.0, x + 30.0, y + 30.0),
+        ];
+        let path = [
+            Point::new(x + 3.0, y + 4.0),
+            Point::new(x + 40.25, y + 30.5),
+            Point::new(x + 70.0, y + 9.0),
+        ];
+        let rd = Some([2.5, 3.0, 2.0, 4.0]);
+        let ink = Border {
+            width: 2.0,
+            ..Border::default()
+        };
+        vec![
+            (
+                "highlight",
+                crate::synth_text_markup(TextMarkupKind::Highlight, rect, &quads, red, 0.5),
+            ),
+            (
+                "underline",
+                crate::synth_text_markup(TextMarkupKind::Underline, rect, &quads, red, 1.0),
+            ),
+            (
+                "squiggly",
+                crate::synth_text_markup(TextMarkupKind::Squiggly, rect, &quads, red, 1.0),
+            ),
+            (
+                "square",
+                crate::synth_shape(ShapeKind::Square, rect, &style(true, false), rd),
+            ),
+            (
+                "square dashed",
+                crate::synth_shape(ShapeKind::Square, rect, &style(false, true), rd),
+            ),
+            (
+                "circle",
+                crate::synth_shape(ShapeKind::Circle, rect, &style(true, false), rd),
+            ),
+            (
+                "line",
+                crate::synth_line(
+                    rect,
+                    path[0],
+                    path[2],
+                    (LineEnding::ClosedArrow, LineEnding::Circle),
+                    &style(true, false),
+                ),
+            ),
+            (
+                "polygon",
+                crate::synth_poly(
+                    PolyKind::Polygon,
+                    rect,
+                    &path,
+                    (LineEnding::None, LineEnding::None),
+                    &style(true, true),
+                ),
+            ),
+            (
+                "polyline",
+                crate::synth_poly(
+                    PolyKind::PolyLine,
+                    rect,
+                    &path,
+                    (LineEnding::OpenArrow, LineEnding::Square),
+                    &style(false, false),
+                ),
+            ),
+            (
+                "ink",
+                crate::synth_ink(rect, &[path.to_vec(), vec![path[1]]], red, &ink, 0.75),
+            ),
+        ]
+    };
+
+    let rect = Rect::new(100.25, 200.5, 180.75, 240.125);
+    let own = drawings(ApRect::from(rect));
+    let placed = drawings(ApRect::InPlace(rect));
+    assert_eq!(ApRect::from(rect), ApRect::Form(rect));
+    for ((what, own), (_, placed)) in own.iter().zip(&placed) {
+        let (own, placed) = (own.as_ref().unwrap(), placed.as_ref().unwrap());
+        assert_eq!(
+            own.bbox,
+            Rect::new(0.0, 0.0, rect.width(), rect.height()),
+            "{what}"
+        );
+        assert_eq!(placed.bbox, rect, "{what}");
+        assert_eq!(
+            (own.matrix, placed.matrix),
+            (Matrix::IDENTITY, Matrix::IDENTITY)
+        );
+        assert_eq!(own.needs, placed.needs, "{what}");
+        assert_eq!(own.resources, placed.resources, "{what}");
+        // The same operators, the same paths: in place each point is the
+        // one drawn in the form's own space, moved to the `/Rect`'s corner.
+        assert_eq!(operators(own), operators(placed), "{what}");
+        let (moved, there) = (painted_points(own), painted_points(placed));
+        assert!(!there.is_empty(), "{what}");
+        assert_eq!(moved.len(), there.len(), "{what}");
+        for (m, t) in moved.iter().zip(&there) {
+            let m = Point::new(m.x + rect.x0, m.y + rect.y0);
+            assert!(
+                (m.x - t.x).abs() < 1e-3 && (m.y - t.y).abs() < 1e-3,
+                "{what}: {m:?} moved, {t:?} in place"
+            );
+        }
+        // Drawn where it is, every path inside the `/Rect`.
+        read_back(placed);
+    }
+    // At the origin the two are one.
+    let at_origin = Rect::new(0.0, 0.0, 80.5, 39.625);
+    for ((what, own), (_, placed)) in drawings(ApRect::Form(at_origin))
+        .iter()
+        .zip(&drawings(ApRect::InPlace(at_origin)))
+    {
+        assert_eq!(own, placed, "{what}");
+    }
+    // A `/Rect` with no area draws nothing either way.
+    let flat = Rect::new(10.0, 10.0, 90.0, 10.0);
+    for space in [ApRect::Form(flat), ApRect::InPlace(flat)] {
+        assert!(drawings(space).iter().all(|(_, ap)| ap.is_none()));
+    }
+}
+
+/// The frame of the box `[x0 y0 x1 y1]` turned with a page whose `/Rotate`
+/// is `degrees`, so that what's drawn through it reads upright on the
+/// page as shown: the unit square's top left where the box's reads.
+fn turned_frame(r: Rect, degrees: u16) -> Matrix {
+    let (w, h) = (r.width(), r.height());
+    match degrees {
+        // The square's x up the page, its y to the right of it.
+        90 => Matrix {
+            a: 0.0,
+            b: h,
+            c: w,
+            d: 0.0,
+            e: r.x0,
+            f: r.y0,
+        },
+        180 => Matrix {
+            a: -w,
+            b: 0.0,
+            c: 0.0,
+            d: h,
+            e: r.x1,
+            f: r.y0,
+        },
+        270 => Matrix {
+            a: 0.0,
+            b: -h,
+            c: -w,
+            d: 0.0,
+            e: r.x1,
+            f: r.y1,
+        },
+        _ => Matrix {
+            a: w,
+            b: 0.0,
+            c: 0.0,
+            d: -h,
+            e: r.x0,
+            f: r.y1,
+        },
+    }
+}
+
+#[test]
+fn a_caret_is_its_triangle_through_its_frame_and_is_drawn_so() {
+    use crate::{ApRect, caret_outline, synth_caret};
+
+    // Upright: its base along the bottom, its tip at the top's middle.
+    let b = Rect::new(10.0, 20.0, 22.0, 32.0);
+    let upright = caret_outline(turned_frame(b, 0));
+    assert_eq!(
+        upright,
+        [
+            Point::new(10.0, 20.0),
+            Point::new(16.0, 32.0),
+            Point::new(22.0, 20.0)
+        ]
+    );
+    // On a turned page it reads upright as the page is shown: its tip on
+    // the side the page's top is, the base on the other.
+    assert_eq!(
+        caret_outline(turned_frame(b, 90)),
+        [
+            Point::new(22.0, 20.0),
+            Point::new(10.0, 26.0),
+            Point::new(22.0, 32.0)
+        ]
+    );
+    assert_eq!(
+        caret_outline(turned_frame(b, 180)),
+        [
+            Point::new(22.0, 32.0),
+            Point::new(16.0, 20.0),
+            Point::new(10.0, 32.0)
+        ]
+    );
+    assert_eq!(
+        caret_outline(turned_frame(b, 270)),
+        [
+            Point::new(10.0, 32.0),
+            Point::new(22.0, 26.0),
+            Point::new(10.0, 20.0)
+        ]
+    );
+    // Each point is the frame applied to its own place in the square, to
+    // the bit, whatever the frame: a viewer that paints the caret by the
+    // same frame paints these numbers.
+    let odd = Matrix {
+        a: 7.3,
+        b: 0.0,
+        c: 0.0,
+        d: 4.1,
+        e: 100.3,
+        f: 200.7,
+    };
+    let unit = [(0.0, 1.0), (0.5, 0.0), (1.0, 1.0)].map(|(x, y)| odd.apply(Point::new(x, y)));
+    let got = caret_outline(odd);
+    for (g, u) in got.iter().zip(&unit) {
+        assert_eq!(
+            (g.x.to_bits(), g.y.to_bits()),
+            (u.x.to_bits(), u.y.to_bits())
+        );
+    }
+
+    // Drawn: the triangle filled, in the form's space or in place.
+    let rect = Rect::new(8.0, 18.0, 24.0, 34.0);
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    let frame = turned_frame(b, 0);
+    let own = synth_caret(rect, frame, red, 1.0).unwrap();
+    assert_eq!(
+        content_text(&own),
+        "q\n1 0 0 rg\n2 2 m\n8 14 l\n14 2 l\nh\nf\nQ\n"
+    );
+    assert_eq!(own.bbox, Rect::new(0.0, 0.0, 16.0, 16.0));
+    let placed = synth_caret(ApRect::InPlace(rect), frame, red, 1.0).unwrap();
+    assert_eq!(
+        content_text(&placed),
+        "q\n1 0 0 rg\n10 20 m\n16 32 l\n22 20 l\nh\nf\nQ\n"
+    );
+    assert_eq!((placed.bbox, placed.matrix), (rect, Matrix::IDENTITY));
+    assert!(placed.needs.0.is_empty());
+    for ap in [&own, &placed] {
+        assert_eq!(read_back(ap), (1, 0));
+    }
+    // Translucent: under an ExtGState of its alpha.
+    let faint = synth_caret(ApRect::InPlace(rect), frame, red, 0.5).unwrap();
+    assert_eq!(faint.needs.0.len(), 1);
+    assert!(content_text(&faint).contains(" gs\n1 0 0 rg\n10 20 m\n"));
+    // Nothing to draw in, or nowhere.
+    let clear = synth_caret(rect, frame, AnnotColor::Transparent, 1.0).unwrap();
+    assert!(clear.content.is_empty());
+    let flat = Rect::new(8.0, 18.0, 24.0, 18.0);
+    assert!(synth_caret(flat, frame, red, 1.0).is_none());
+
+    // As read from a file: in the box `/RD` leaves, upright on the page.
+    let mut store = Store::default();
+    let id = store.put(dict! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("Caret"),
+        "Rect" => vec![Object::from(8), Object::from(18), Object::from(24), Object::from(34)],
+        "RD" => vec![Object::from(2), Object::from(2), Object::from(2), Object::from(2)],
+        "C" => vec![Object::from(1), Object::from(0), Object::from(0)],
+        "Sy" => Object::name("None"),
+    });
+    let page = dict! { "Annots" => vec![Object::from(id)] };
+    let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
+    assert_eq!(synth_annot(&annots[0]), Some(own));
+}
+
+#[test]
+fn an_attachment_s_icon_is_its_strokes_through_its_frame_and_is_drawn_so() {
+    use crate::{ApRect, attachment_icon_strokes, synth_file_attachment};
+
+    let icons = [
+        AttachmentIcon::PushPin,
+        AttachmentIcon::Paperclip,
+        AttachmentIcon::Graph,
+        AttachmentIcon::Tag,
+    ];
+    let b = Rect::new(100.0, 200.0, 120.0, 220.0);
+    let frame = turned_frame(b, 0);
+    // A pushpin's head and pin, a paperclip's wire, a graph's axes and
+    // three bars, a tag's outline and hole: each inside its box, a line
+    // of two points or more.
+    for (icon, strokes) in icons.iter().zip([2, 1, 4, 2]) {
+        let drawn = attachment_icon_strokes(icon, frame);
+        assert_eq!(drawn.len(), strokes, "{icon:?}");
+        for p in drawn.iter().flatten() {
+            assert!(
+                p.x > b.x0 && p.x < b.x1 && p.y > b.y0 && p.y < b.y1,
+                "{icon:?}: {p:?}"
+            );
+        }
+        assert!(drawn.iter().all(|s| s.len() >= 2), "{icon:?}");
+    }
+    // Upright, a pin's point is at the bottom of its box; on a page turned
+    // a quarter, toward the right of it, the page's bottom as shown.
+    let pin = |frame| attachment_icon_strokes(&AttachmentIcon::PushPin, frame)[1].clone();
+    assert_eq!(
+        pin(frame),
+        [Point::new(110.0, 208.8), Point::new(110.0, 201.2)]
+    );
+    let quarter = pin(turned_frame(b, 90));
+    assert!((quarter[1].x - 118.8).abs() < 1e-4 && (quarter[1].y - 210.0).abs() < 1e-4);
+    // A name the standard doesn't have is the default, the pushpin.
+    assert_eq!(
+        attachment_icon_strokes(&AttachmentIcon::Other(Box::from(&b"Star"[..])), frame),
+        attachment_icon_strokes(&AttachmentIcon::PushPin, frame)
+    );
+    // Each point is the frame applied to its own place in the square, to
+    // the bit.
+    let odd = Matrix {
+        a: 7.3,
+        b: 0.0,
+        c: 0.0,
+        d: 4.1,
+        e: 100.3,
+        f: 200.7,
+    };
+    let clip = attachment_icon_strokes(&AttachmentIcon::Paperclip, odd);
+    let first = odd.apply(Point::new(0.36, 0.72));
+    assert_eq!(
+        (clip[0][0].x.to_bits(), clip[0][0].y.to_bits()),
+        (first.x.to_bits(), first.y.to_bits())
+    );
+
+    // Drawn: each stroke in the pen, round at its ends and joins.
+    let rect = Rect::new(97.5, 197.5, 122.5, 222.5);
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    let graph = AttachmentIcon::Graph;
+    let placed = synth_file_attachment(ApRect::InPlace(rect), &graph, frame, red, 1.0).unwrap();
+    assert_eq!(
+        content_text(&placed),
+        "q\n1 0 0 RG\n1.5 w\n1 J\n1 j\n102.8 218 m\n102.8 202.8 l\n118 202.8 l\nS\n\
+         106.4 202.8 m\n106.4 208.4 l\nS\n110.4 202.8 m\n110.4 212.8 l\nS\n\
+         114.4 202.8 m\n114.4 216.4 l\nS\nQ\n"
+    );
+    assert_eq!((placed.bbox, placed.matrix), (rect, Matrix::IDENTITY));
+    let own = synth_file_attachment(rect, &graph, frame, red, 1.0).unwrap();
+    assert_eq!(own.bbox, Rect::new(0.0, 0.0, 25.0, 25.0));
+    assert!(content_text(&own).contains("\n5.3 20.5 m\n5.3 5.3 l\n20.5 5.3 l\nS\n"));
+    for ap in [&own, &placed] {
+        assert_eq!(read_back(ap), (4, 0));
+    }
+    let faint = synth_file_attachment(rect, &graph, frame, red, 0.25).unwrap();
+    assert_eq!(faint.needs.0.len(), 1);
+    let clear = synth_file_attachment(rect, &graph, frame, AnnotColor::Transparent, 1.0).unwrap();
+    assert!(clear.content.is_empty());
+    let flat = Rect::new(97.5, 197.5, 97.5, 222.5);
+    assert!(synth_file_attachment(flat, &graph, frame, red, 1.0).is_none());
+
+    // As read from a file: its icon over its whole `/Rect`, upright.
+    let mut store = Store::default();
+    let id = store.put(dict! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("FileAttachment"),
+        "Rect" => vec![Object::from(100), Object::from(200), Object::from(120), Object::from(220)],
+        "Name" => Object::name("Graph"),
+        "C" => vec![Object::from(1), Object::from(0), Object::from(0)],
+    });
+    let page = dict! { "Annots" => vec![Object::from(id)] };
+    let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
+    assert_eq!(
+        synth_annot(&annots[0]),
+        synth_file_attachment(b, &graph, frame, red, 1.0)
+    );
+}
+
+#[test]
+fn clouds_bulge_outward_whichever_way_round() {
+    use crate::{ApRect, cloud_outline, cloud_step, synth_cloud, synth_poly, synth_shape};
+
+    // A scallop's length: 9 and three times the width, at most 30, times
+    // the intensity.
+    assert_eq!(cloud_step(1.5, 1.0), 13.5);
+    assert_eq!(cloud_step(10.0, 1.0), 30.0);
+    assert_eq!(cloud_step(1.0, 2.0), 24.0);
+    assert_eq!(cloud_step(1.0, 0.0), 0.0);
+
+    let square = [
+        Point::new(100.0, 100.0),
+        Point::new(200.0, 100.0),
+        Point::new(200.0, 200.0),
+        Point::new(100.0, 200.0),
+    ];
+    let reversed: Vec<Point> = square.iter().rev().copied().collect();
+    for pts in [square.to_vec(), reversed] {
+        let curves = cloud_outline(&pts, 20.0);
+        assert_eq!(curves.len(), 20);
+        for (i, [from, c1, c2, to]) in curves.iter().enumerate() {
+            // Every control point is outside the square, and each scallop
+            // starts where the one before it ends.
+            for c in [c1, c2] {
+                let inside = c.x > 100.0 && c.x < 200.0 && c.y > 100.0 && c.y < 200.0;
+                assert!(!inside, "{c:?}");
+            }
+            let next = curves[(i + 1) % curves.len()][0];
+            assert_eq!(*to, next, "{i}");
+            assert!(pts.contains(from) || i % 5 != 0);
+        }
+    }
+    // None for an outline that isn't one, or a step that cuts nothing or
+    // too much; a side under 0.01 has none.
+    assert!(cloud_outline(&square[..2], 20.0).is_empty());
+    for step in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert!(cloud_outline(&square, step).is_empty(), "{step}");
+    }
+    let huge = square.map(|p| Point::new(p.x * 1e6, p.y * 1e6));
+    assert!(cloud_outline(&huge, 1.0).is_empty());
+    let mut repeated = square.to_vec();
+    repeated.insert(1, square[0]);
+    assert_eq!(cloud_outline(&repeated, 20.0), cloud_outline(&square, 20.0));
+
+    // Drawn round an outline of the caller's: one path of the scallops,
+    // filled and stroked, in place or in the form's space alike.
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    let mut style = PaintStyle::new(Some(red), Some(AnnotColor::Gray(0.8))).with_border(Border {
+        width: 1.5,
+        cloudy_intensity: Some(1.0),
+        ..Border::default()
+    });
+    let rect = Rect::new(80.0, 80.0, 220.0, 220.0);
+    let placed = synth_cloud(ApRect::InPlace(rect), &square, &style).unwrap();
+    let curves = cloud_outline(&square, cloud_step(1.5, 1.0));
+    let text = content_text(&placed);
+    assert!(
+        text.starts_with("q\n1 0 0 RG\n1.5 w\n0.8 g\n100 100 m\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches(" c\n").count(), curves.len());
+    assert!(text.ends_with("h\nB\nQ\n"), "{text}");
+    assert_eq!(read_back(&placed), (1, 0));
+    let own = synth_cloud(rect, &square, &style).unwrap();
+    assert_eq!(operators(&own), operators(&placed));
+    assert_eq!(painted_points(&own).len(), painted_points(&placed).len());
+    // A dashed one under its dashes; with no line, filled alone; with
+    // nothing to paint, empty; an outline that makes no scallops, as it is.
+    style.border.style = BorderStyle::Dashed;
+    style.border.dash = vec![4.0, 3.0];
+    let dashed = content_text(&synth_cloud(rect, &square, &style).unwrap());
+    assert!(
+        dashed.starts_with("q\n1 0 0 RG\n1.5 w\n[4 3] 0 d\n0.8 g\n"),
+        "{dashed}"
+    );
+    style.border.width = 0.0;
+    let filled = content_text(&synth_cloud(rect, &square, &style).unwrap());
+    assert!(
+        filled.starts_with("q\n0.8 g\n") && filled.ends_with("h\nf\nQ\n"),
+        "{filled}"
+    );
+    style.fill = None;
+    assert!(
+        synth_cloud(rect, &square, &style)
+            .unwrap()
+            .content
+            .is_empty()
+    );
+    style.border.width = 1.5;
+    style.border.cloudy_intensity = Some(0.0);
+    let plain = content_text(&synth_cloud(rect, &square, &style).unwrap());
+    assert!(
+        plain.ends_with("20 20 m\n120 20 l\n120 120 l\n20 120 l\nh\nS\nQ\n"),
+        "{plain}"
+    );
+    let flat = Rect::new(80.0, 80.0, 220.0, 80.0);
+    assert!(synth_cloud(flat, &square, &style).is_none());
+
+    // A cloudy circle: scallops round its 32 sides; a cloudy polygon round
+    // its vertices; a polyline has none; an intensity of 0 is no cloud.
+    let cloudy = |intensity| {
+        PaintStyle::new(Some(red), None).with_border(Border {
+            width: 1.0,
+            cloudy_intensity: Some(intensity),
+            ..Border::default()
+        })
+    };
+    let rd = Some([10.0; 4]);
+    let circle = synth_shape(ShapeKind::Circle, rect, &cloudy(1.0), rd).unwrap();
+    assert_eq!(content_text(&circle).matches(" c\n").count(), 32);
+    assert_eq!(read_back(&circle), (1, 0));
+    let polygon = synth_poly(
+        PolyKind::Polygon,
+        rect,
+        &square,
+        (LineEnding::None, LineEnding::None),
+        &cloudy(1.0),
+    )
+    .unwrap();
+    assert_eq!(
+        content_text(&polygon).matches(" c\n").count(),
+        cloud_outline(&square, cloud_step(1.0, 1.0)).len()
+    );
+    let polyline = synth_poly(
+        PolyKind::PolyLine,
+        rect,
+        &square,
+        (LineEnding::None, LineEnding::None),
+        &cloudy(1.0),
+    )
+    .unwrap();
+    assert!(!content_text(&polyline).contains(" c\n"));
+    let none = synth_shape(ShapeKind::Square, rect, &cloudy(0.0), rd).unwrap();
+    let mut plain_style = cloudy(0.0);
+    plain_style.border.cloudy_intensity = None;
+    assert_eq!(
+        none,
+        synth_shape(ShapeKind::Square, rect, &plain_style, rd).unwrap()
+    );
+
+    // As read from a file: a `/Square` with `/BE /S /C` is drawn cloudy.
+    let mut store = Store::default();
+    let id = store.put(dict! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("Square"),
+        "Rect" => vec![Object::from(80), Object::from(80), Object::from(220), Object::from(220)],
+        "RD" => vec![Object::from(10), Object::from(10), Object::from(10), Object::from(10)],
+        "C" => vec![Object::from(1), Object::from(0), Object::from(0)],
+        "BE" => dict! { "S" => Object::name("C"), "I" => 1 },
+    });
+    let page = dict! { "Annots" => vec![Object::from(id)] };
+    let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
+    let read = synth_annot(&annots[0]).unwrap();
+    assert_eq!(
+        read,
+        synth_shape(ShapeKind::Square, rect, &cloudy(1.0), rd).unwrap()
+    );
+    assert!(content_text(&read).matches(" c\n").count() > 4);
 }

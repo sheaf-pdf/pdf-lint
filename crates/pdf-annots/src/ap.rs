@@ -5,10 +5,12 @@ use std::fmt;
 
 use pdf_gfx::{Matrix, Point, Rect};
 use pdf_objects::fault::Sink;
+use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, ObjectId, Resolve, Value};
 
 use crate::error::Error;
 use crate::fault::Fault;
+use crate::limits::Limits;
 use crate::resolve::Reader;
 
 /// Which slot of `/AP` is selected (ISO 32000-2 §12.5.5 Table 170).
@@ -120,6 +122,53 @@ impl fmt::Debug for Appearances {
 }
 
 impl Appearances {
+    /// Reads `/AP` and `/AS` of the annotation dictionary `dict` (object `id`,
+    /// `None` if direct) and nothing else of it, without collecting non-fatal
+    /// [`Fault`]s: what [`Annot::appearances`](crate::Annot::appearances)
+    /// gives for the same dictionary, for a caller that draws or flattens an
+    /// annotation and needs no more of it. The annotation's actions,
+    /// destination, and `/DA` aren't read, so a cap on one of those
+    /// ([`Cap`](crate::Cap)) can't cost the caller an appearance that is
+    /// there.
+    ///
+    /// `Ok(None)` when the dictionary has neither `/AP` nor `/AS`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unreadable`] on locked/I/O/reader-cap failures.
+    pub fn read<'o, R: Resolve<'o>>(
+        objects: R,
+        dict: &'o Dict,
+        id: Option<ObjectId>,
+        rules: Rules,
+        limits: &Limits,
+    ) -> Result<Option<Self>, Error> {
+        Self::read_with(objects, dict, id, rules, limits, &mut ())
+    }
+
+    /// As [`Self::read`], reporting recoverable ISO 32000-2 departures in
+    /// `/AP` and `/AS` to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`Self::read`].
+    pub fn read_with<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+        objects: R,
+        dict: &'o Dict,
+        id: Option<ObjectId>,
+        rules: Rules,
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Result<Option<Self>, Error> {
+        let mut reader = Reader {
+            objects,
+            rules,
+            limits,
+            sink,
+        };
+        read_appearances(&mut reader, dict, id)
+    }
+
     /// Returns the [`AppearanceEntry`] for `mode` (without falling back across
     /// modes).
     #[must_use]

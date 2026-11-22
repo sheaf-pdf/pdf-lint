@@ -38,6 +38,12 @@
 //!     dashed, beveled, inset, underline), constructs or mutates annotation dictionaries without
 //!     file I/O, and plans graphics-state-isolated page flattening with collision-free
 //!     `/Resources/XObject` names.
+//!   - Draws a `/Caret`'s triangle, a `/FileAttachment`'s icon, and cloudy borders as scallops
+//!     ([`synth_caret`], [`synth_file_attachment`], [`synth_cloud`], and [`synth_shape`] and
+//!     [`synth_poly`] under `/BE /S /C`), their shapes public ([`caret_outline`],
+//!     [`attachment_icon_strokes`], [`cloud_outline`], [`cloud_step`]) so a viewer that paints a
+//!     mark itself paints the same numbers; and draws in place on request ([`ApRect`]), the
+//!     form's `/BBox` the annotation's `/Rect`.
 //!   - Authors `/Redact` marks whole ([`RedactMark`], [`synth_redact`],
 //!     [`BuiltAnnot::redact_mark`], [`BuiltAnnot::redact_quads`]): the mark and its `/RO` overlay
 //!     drawn over each `/QuadPoints` quadrilateral, the overlay also bound as `/AP /R`, with
@@ -165,6 +171,7 @@ mod flatten;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+mod geometry;
 mod limits;
 mod phases;
 mod replies;
@@ -184,6 +191,7 @@ pub use error::Error;
 pub use fault::Fault;
 pub use flags::AnnotFlags;
 pub use flatten::{FlattenOpts, FlattenPlan, FlattenTarget, plan_flatten, plan_flatten_filtered};
+pub use geometry::{attachment_icon_strokes, caret_outline, cloud_outline, cloud_step};
 pub use limits::{Cap, Limits};
 pub use pdf_semantics::action::{Action, AdditionalActions, NamedAction, OpenAction};
 pub use pdf_semantics::dest::{
@@ -198,13 +206,14 @@ pub use style::{
 };
 pub use subtypes::{
     AnnotSubtype, AttachmentIcon, CaretAnnot, CaretSymbol, FileAttachmentAnnot, FreeTextAnnot,
-    FreeTextIntent, HighlightMode, InkAnnot, LineAnnot, LinkAnnot, PolyAnnot, PolyKind, PopupAnnot,
-    RedactAnnot, ShapeAnnot, ShapeKind, StampAnnot, StampName, TextAnnot, TextIcon,
-    TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
+    FreeTextIntent, HighlightMode, InkAnnot, LineAnnot, LineIntent, LinkAnnot, PolyAnnot,
+    PolyIntent, PolyKind, PopupAnnot, RedactAnnot, ShapeAnnot, ShapeKind, StampAnnot, StampName,
+    TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
 };
 pub use synth::{
-    RedactMark, SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly,
-    synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
+    ApRect, RedactMark, SynthesizedAp, synth_annot, synth_caret, synth_cloud,
+    synth_file_attachment, synth_free_text, synth_ink, synth_line, synth_poly, synth_redact,
+    synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
 #[cfg(feature = "text-layout")]
 pub use synth::{synth_free_text_with_font, synth_redact_with_font};

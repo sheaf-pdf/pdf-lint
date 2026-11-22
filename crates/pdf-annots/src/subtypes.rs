@@ -515,12 +515,62 @@ pub struct TextMarkupAnnot {
     pub quad_points: Vec<QuadPoints>,
 }
 
+/// Intent of a `/Line` annotation (`/IT`, ISO 32000-2 §12.5.6.7 Table 178).
+///
+/// Its `Debug` implementation reports byte lengths for unrecognized
+/// [`Self::Other`] names rather than raw file bytes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum LineIntent {
+    /// `/LineArrow`: the line is an arrow pointing at something.
+    Arrow,
+    /// `/LineDimension`: the line is a dimension, a measurement between its
+    /// endpoints (with `/Measure`, ISO 32000-2 §12.9).
+    Dimension,
+    /// Unrecognized intent name.
+    Other(Box<[u8]>),
+}
+
+impl fmt::Debug for LineIntent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Arrow => f.write_str("Arrow"),
+            Self::Dimension => f.write_str("Dimension"),
+            Self::Other(b) => f.debug_struct("Other").field("name_len", &b.len()).finish(),
+        }
+    }
+}
+
+impl LineIntent {
+    /// Parses a `/Line` `/IT` name.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> Self {
+        match name {
+            b"LineArrow" => Self::Arrow,
+            b"LineDimension" => Self::Dimension,
+            other => Self::Other(Box::from(other)),
+        }
+    }
+
+    /// Raw `/IT` name bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Arrow => b"LineArrow",
+            Self::Dimension => b"LineDimension",
+            Self::Other(b) => b,
+        }
+    }
+}
+
 /// Straight-line annotation details (`/Subtype /Line`, ISO 32000-2 §12.5.6.7).
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct LineAnnot {
     /// Start and end points `((x1, y1), (x2, y2))` from `/L`, if valid.
     pub endpoints: Option<(Point, Point)>,
+    /// `/IT` intent, if present: an arrow or a dimension.
+    pub intent: Option<LineIntent>,
     /// `/LE` start and end line-ending styles (`(None, None)` by default).
     pub endings: (LineEnding, LineEnding),
     /// `/IC` interior color used to fill closed line endings.
@@ -570,12 +620,69 @@ pub enum PolyKind {
     PolyLine,
 }
 
+/// Intent of a `/Polygon` or `/PolyLine` annotation (`/IT`, ISO 32000-2
+/// §12.5.6.9 Table 181).
+///
+/// Its `Debug` implementation reports byte lengths for unrecognized
+/// [`Self::Other`] names rather than raw file bytes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PolyIntent {
+    /// `/PolygonCloud`: a cloud drawn around something.
+    Cloud,
+    /// `/PolyLineDimension`: a dimension, the length along the polyline
+    /// (with `/Measure`, ISO 32000-2 §12.9).
+    LineDimension,
+    /// `/PolygonDimension`: a dimension, the area the polygon encloses (with
+    /// `/Measure`).
+    PolygonDimension,
+    /// Unrecognized intent name.
+    Other(Box<[u8]>),
+}
+
+impl fmt::Debug for PolyIntent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cloud => f.write_str("Cloud"),
+            Self::LineDimension => f.write_str("LineDimension"),
+            Self::PolygonDimension => f.write_str("PolygonDimension"),
+            Self::Other(b) => f.debug_struct("Other").field("name_len", &b.len()).finish(),
+        }
+    }
+}
+
+impl PolyIntent {
+    /// Parses a `/Polygon` or `/PolyLine` `/IT` name.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> Self {
+        match name {
+            b"PolygonCloud" => Self::Cloud,
+            b"PolyLineDimension" => Self::LineDimension,
+            b"PolygonDimension" => Self::PolygonDimension,
+            other => Self::Other(Box::from(other)),
+        }
+    }
+
+    /// Raw `/IT` name bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Cloud => b"PolygonCloud",
+            Self::LineDimension => b"PolyLineDimension",
+            Self::PolygonDimension => b"PolygonDimension",
+            Self::Other(b) => b,
+        }
+    }
+}
+
 /// Polygon or PolyLine annotation details (ISO 32000-2 §12.5.6.9).
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct PolyAnnot {
     /// Closed polygon vs. open polyline.
     pub kind: PolyKind,
+    /// `/IT` intent, if present: a cloud or a dimension.
+    pub intent: Option<PolyIntent>,
     /// `/Vertices` points in PageSpace.
     pub vertices: Vec<Point>,
     /// `/LE` start and end line endings (meaningful for `PolyLine`).
@@ -1103,6 +1210,9 @@ pub(crate) fn read_typed<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                 reader.say(within, None, Fault::InvalidPoints { key: "L" });
                 None
             };
+            let intent = reader
+                .name_entry(dict, within, "IT")?
+                .map(LineIntent::from_name);
             let endings = read_line_endings(reader, dict, within)?;
             let interior_color = read_color(reader, dict, within, "IC")?;
             let leader_length = reader.float_entry(dict, within, "LL")?.unwrap_or(0.0);
@@ -1111,6 +1221,7 @@ pub(crate) fn read_typed<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
             let caption = reader.bool_entry(dict, within, "Cap")?.unwrap_or(false);
             Ok(TypedAnnot::Line(LineAnnot {
                 endpoints,
+                intent,
                 endings,
                 interior_color,
                 leader_length,
@@ -1146,10 +1257,14 @@ pub(crate) fn read_typed<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                     .unwrap_or_default(),
                 None => Vec::new(),
             };
+            let intent = reader
+                .name_entry(dict, within, "IT")?
+                .map(PolyIntent::from_name);
             let endings = read_line_endings(reader, dict, within)?;
             let interior_color = read_color(reader, dict, within, "IC")?;
             Ok(TypedAnnot::Poly(PolyAnnot {
                 kind,
+                intent,
                 vertices,
                 endings,
                 interior_color,
