@@ -8,7 +8,7 @@ use pdf_content_streams::{
     Blend, Color, GState, LineCap, LineJoin, Paint, Res, ResBody, Reserved, ResourceNeeds,
 };
 use pdf_fonts::{Encoding, Std14};
-use pdf_gfx::{Canvas, Point, Quad, Rect};
+use pdf_gfx::{Canvas, Matrix, Point, Quad, Rect};
 #[cfg(feature = "text-layout")]
 use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_objects::{Dict, Object, Stream, dict};
@@ -23,21 +23,38 @@ use crate::subtypes::{PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind, 
 /// Self-contained synthesized Form XObject stream ready to be stored as an
 /// annotation's `/AP /N` (or `/RO` redaction overlay) stream.
 ///
-/// Coordinates inside `content` use local `[0, 0, width, height]` Form space
-/// (`bbox = Rect::new(0.0, 0.0, rect.width(), rect.height())`) so relocating an
-/// annotation's `/Rect` without resizing requires no stream rewrite.
+/// The `synth_*` functions draw in local `[0, 0, width, height]` Form space
+/// (`bbox = Rect::new(0.0, 0.0, rect.width(), rect.height())`, `matrix` the
+/// identity) so relocating an annotation's `/Rect` without resizing requires
+/// no stream rewrite. An appearance the caller drew ([`SynthesizedAp::drawn`])
+/// has the box and matrix it was given.
 ///
-/// Its `Debug` implementation reports byte lengths rather than raw stream
-/// content.
+/// What the content draws with is held twice: by what each resource is
+/// ([`needs`](Self::needs)), for a writer that binds resources itself (one
+/// font object for every appearance in a file, say), and bound in a finished
+/// [`resources`](Self::resources) dictionary, for one that stores the stream
+/// as it is ([`to_stream`](Self::to_stream)).
+///
+/// Its `Debug` implementation reports byte lengths and counts rather than raw
+/// stream content.
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct SynthesizedAp {
-    /// Form `/BBox` (`[0, 0, width, height]`).
+    /// Form `/BBox` (`[0, 0, width, height]` for a synthesized appearance).
     pub bbox: Rect,
+    /// Form `/Matrix`: the identity for a synthesized appearance.
+    pub matrix: Matrix,
     /// Uncompressed Form content-stream bytes.
     pub content: Vec<u8>,
-    /// Form `/Resources` dictionary containing any generated `/ExtGState` or
-    /// `/Font` entries.
+    /// What `content` draws with, each under the name it gives it, by what
+    /// it is: the resources [`resources`](Self::resources) binds.
+    pub needs: ResourceNeeds,
+    /// Form `/Resources` dictionary binding [`needs`](Self::needs): each
+    /// resource by its first object (a generated `/ExtGState` or `/Font`), or
+    /// by its number where the caller had already written it
+    /// ([`ResBody::Written`]). A resource of more objects than one (a font
+    /// with its program, say) is bound by its first alone, so a writer of one
+    /// binds `needs` itself.
     pub resources: Dict,
 }
 
@@ -45,7 +62,9 @@ impl fmt::Debug for SynthesizedAp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SynthesizedAp")
             .field("bbox", &self.bbox)
+            .field("matrix", &self.matrix)
             .field("content_len", &self.content.len())
+            .field("needs", &self.needs.0.len())
             .field("resource_categories", &self.resources.len())
             .finish()
     }
@@ -53,17 +72,35 @@ impl fmt::Debug for SynthesizedAp {
 
 impl SynthesizedAp {
     fn from_canvas(bbox: Rect, canvas: Canvas) -> Self {
+        Self::drawn(bbox, Matrix::IDENTITY, canvas)
+    }
+
+    /// An appearance the caller drew on `canvas`, for a Form XObject whose
+    /// `/BBox` is `bbox` and whose `/Matrix` is `matrix`: one no `synth_*`
+    /// function draws (a custom stamp, say), held as a synthesized one is, so
+    /// that a writer stores every appearance one way.
+    ///
+    /// `canvas` is finished with no names reserved, as the `synth_*`
+    /// functions finish theirs, and [`resources`](Self::resources) is made
+    /// from its needs as theirs is: a resource the caller had already written
+    /// ([`ResBody::Written`]) is bound there by its number in the file being
+    /// written.
+    #[must_use]
+    pub fn drawn(bbox: Rect, matrix: Matrix, canvas: Canvas) -> Self {
         let (content, needs) = canvas.finish(&Reserved::default());
         let resources = build_resources_dict(&needs);
         Self {
             bbox,
+            matrix,
             content,
+            needs,
             resources,
         }
     }
 
     /// Converts this appearance into an uncompressed [`Stream`] with
-    /// `/Type /XObject`, `/Subtype /Form`, `/BBox`, and `/Resources`.
+    /// `/Type /XObject`, `/Subtype /Form`, `/BBox`, `/Matrix` where it isn't
+    /// the identity, and `/Resources` where it binds any.
     #[must_use]
     pub fn to_stream(&self) -> Stream {
         let mut d = dict! {
@@ -76,6 +113,9 @@ impl SynthesizedAp {
                 Object::from(f64::from(self.bbox.y1)),
             ],
         };
+        if self.matrix != Matrix::IDENTITY {
+            d.set("Matrix", self.matrix.to_pdf_array());
+        }
         if !self.resources.is_empty() {
             d.set("Resources", self.resources.clone());
         }

@@ -2834,3 +2834,88 @@ fn a_default_appearances_other_operators_are_not_applied_to_the_text() {
         synth_redact(MARK_RECT, &mark.with_default_appearance(&plain)).map(|(_, ro)| ro)
     );
 }
+
+/// What `ap.resources` binds `need` to: its category's entry by its name.
+fn bound<'a>(ap: &'a SynthesizedAp, need: &pdf_content_streams::Need) -> &'a Object {
+    let category = ap.resources.get(need.kind.key()).and_then(Object::as_dict);
+    category.and_then(|c| c.get(&need.name)).unwrap()
+}
+
+#[test]
+fn an_appearance_the_caller_drew_is_held_as_a_synthesized_one_is() {
+    use pdf_content_streams::{GState, Res, ResBody, Reserved};
+
+    // A form the caller has written already, by its number, under an
+    // opacity, an ExtGState made of its dictionary.
+    let written = ObjectId::new(12, 0);
+    let draw = || {
+        let mut canvas = pdf_gfx::Canvas::new();
+        let mut state = GState::default();
+        state.fill_alpha = Some(0.5);
+        canvas.gstate(state);
+        canvas.draw_xobject(Res::written(written), Matrix::translate(2.0, 3.0));
+        canvas
+    };
+    let bbox = Rect::new(0.0, 0.0, 40.0, 20.0);
+    // A quarter turn that lands the box on `[0 0 20 40]`.
+    let matrix = Matrix::new(0.0, 1.0, -1.0, 0.0, 20.0, 0.0);
+    let ap = SynthesizedAp::drawn(bbox, matrix, draw());
+    let (content, needs) = draw().finish(&Reserved::default());
+    assert_eq!((ap.bbox, ap.matrix), (bbox, matrix));
+    assert_eq!((&ap.content, &ap.needs), (&content, &needs));
+    assert_eq!(needs.0.len(), 2, "the form and the opacity");
+    for need in &needs.0 {
+        match need.res.body() {
+            ResBody::Written(id) => assert_eq!(bound(&ap, need), &Object::from(*id)),
+            ResBody::Objects(objects) => assert_eq!(bound(&ap, need), &objects[0]),
+            other => panic!("{other:?}"),
+        }
+    }
+    let stream = ap.to_stream();
+    assert_eq!(
+        stream.dict.get(b"Matrix"),
+        Some(&Object::from(matrix.to_pdf_array()))
+    );
+    assert_eq!(
+        stream.dict.get(b"Resources"),
+        Some(&Object::from(ap.resources.clone()))
+    );
+    assert_eq!(
+        stream.data.bytes(),
+        Some(&content[..]),
+        "the content as drawn"
+    );
+
+    // Drawn at the identity, as every synthesized appearance is, its form
+    // has no /Matrix.
+    let upright = SynthesizedAp::drawn(bbox, Matrix::IDENTITY, draw());
+    assert_eq!(upright.to_stream().dict.get(b"Matrix"), None);
+    let dbg = format!("{ap:?}");
+    assert!(dbg.contains("needs: 2"), "{dbg}");
+    assert!(!dbg.contains(" Do"), "no content in {dbg}");
+}
+
+#[test]
+fn a_synthesized_appearance_is_at_the_identity_and_binds_what_it_needs() {
+    let style = PaintStyle::new(Some(AnnotColor::Rgb([1.0, 0.0, 0.0])), None).with_opacity(0.5);
+    let shape = crate::synth_shape(ShapeKind::Square, MARK_RECT, &style, None).unwrap();
+    let text = synth_free_text(MARK_RECT, "Shown", None, Quadding::Left, &style).unwrap();
+    for ap in [&shape, &text] {
+        assert_eq!(ap.matrix, Matrix::IDENTITY);
+        assert_eq!(ap.to_stream().dict.get(b"Matrix"), None);
+        assert!(!ap.needs.0.is_empty());
+        let mut categories = std::collections::BTreeSet::new();
+        for need in &ap.needs.0 {
+            let pdf_content_streams::ResBody::Objects(objects) = need.res.body() else {
+                panic!("a synthesized appearance's resource is its objects");
+            };
+            assert_eq!(bound(ap, need), &objects[0]);
+            categories.insert(need.kind.key());
+        }
+        let bound_names: usize = (ap.resources.iter())
+            .map(|(_, c)| c.as_dict().map_or(0, Dict::len))
+            .sum();
+        assert_eq!(bound_names, ap.needs.0.len(), "nothing bound but its needs");
+        assert_eq!(categories.len(), ap.resources.len());
+    }
+}
