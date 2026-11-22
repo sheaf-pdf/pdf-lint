@@ -34,6 +34,10 @@ struct Node {
     /// Cumulative text-clip count across this node and its ancestors, counted
     /// the way PDFium's `m_TextList` counts (`objects + 1` per `ET` sentinel).
     texts: usize,
+    /// Cumulative path segment count across this node and its ancestors, what
+    /// [`Limits::segments`](crate::Limits::segments) holds the clip to, kept
+    /// here so that holding it never walks the list.
+    segments: usize,
     outer: Clip,
 }
 
@@ -105,6 +109,12 @@ impl Clip {
         }
     }
 
+    /// The path segments of every [`ClipPart::Path`] active, counted as the
+    /// clip was built.
+    pub(crate) fn segments(&self) -> usize {
+        self.0.as_ref().map_or(0, |node| node.segments)
+    }
+
     /// Conservative axis-aligned bounding box of everything left visible by the
     /// clip (`CPDF_ClipPath::GetClipBox`), or `None` when unclipped.
     ///
@@ -161,11 +171,16 @@ impl Clip {
         let bounds = outer.map_or(part.bounds(), |node| {
             node.bounds.intersect_or_empty(part.bounds())
         });
+        let segments = match &part {
+            ClipPart::Path { segments, .. } => segments.len(),
+            ClipPart::Text { .. } => 0,
+        };
         Clip(Some(Arc::new(Node {
             part,
             bounds,
             rect,
             texts: outer.map_or(0, |node| node.texts) + texts,
+            segments: outer.map_or(0, |node| node.segments) + segments,
             outer: self.clone(),
         })))
     }

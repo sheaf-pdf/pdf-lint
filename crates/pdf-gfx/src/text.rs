@@ -366,7 +366,7 @@ pub(crate) fn advance(font: &Font, text: &TextState, s: &[u8], from: f32) -> (f3
     }
 }
 
-fn laid_end(font: &Font, text: &TextState, s: &[u8], from: f32) -> (f32, usize) {
+pub(crate) fn laid_end(font: &Font, text: &TextState, s: &[u8], from: f32) -> (f32, usize) {
     let vertical = font.is_vertical();
     let mut at = from;
     let mut glyphs = 0;
@@ -377,7 +377,7 @@ fn laid_end(font: &Font, text: &TextState, s: &[u8], from: f32) -> (f32, usize) 
     (at, glyphs)
 }
 
-fn bytes_end(widths: &[f32; 256], text: &TextState, s: &[u8], from: f32) -> f32 {
+pub(crate) fn bytes_end(widths: &[f32; 256], text: &TextState, s: &[u8], from: f32) -> f32 {
     let mut at = from;
     if text.word_space == 0.0 && text.char_space == 0.0 {
         for &b in s {
