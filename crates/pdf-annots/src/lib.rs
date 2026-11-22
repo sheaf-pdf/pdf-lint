@@ -185,7 +185,7 @@ pub use error::Error;
 pub use fault::Fault;
 pub use flags::AnnotFlags;
 pub use flatten::{FlattenOpts, FlattenPlan, FlattenTarget, plan_flatten, plan_flatten_filtered};
-pub use geometry::caret_outline;
+pub use geometry::{attachment_icon_strokes, caret_outline};
 pub use limits::{Cap, Limits};
 pub use pdf_semantics::action::{Action, AdditionalActions, NamedAction, OpenAction};
 pub use pdf_semantics::dest::{
@@ -205,9 +205,9 @@ pub use subtypes::{
     TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
 };
 pub use synth::{
-    ApRect, RedactMark, SynthesizedAp, synth_annot, synth_caret, synth_free_text, synth_ink,
-    synth_line, synth_poly, synth_redact, synth_shape, synth_stamp, synth_text_markup,
-    synth_text_note,
+    ApRect, RedactMark, SynthesizedAp, synth_annot, synth_caret, synth_file_attachment,
+    synth_free_text, synth_ink, synth_line, synth_poly, synth_redact, synth_shape, synth_stamp,
+    synth_text_markup, synth_text_note,
 };
 #[cfg(feature = "text-layout")]
 pub use synth::{synth_free_text_with_font, synth_redact_with_font};

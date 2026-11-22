@@ -14,12 +14,14 @@ use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_objects::{Dict, Object, Stream, dict};
 
 use crate::annot::Annot;
-use crate::geometry::{caret_outline, upright_frame};
+use crate::geometry::{attachment_icon_strokes, caret_outline, upright_frame};
 use crate::resolve::QuadPoints;
 use crate::style::{
     AnnotColor, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle, Quadding,
 };
-use crate::subtypes::{PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind, TypedAnnot};
+use crate::subtypes::{
+    AttachmentIcon, PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind, TypedAnnot,
+};
 
 /// An annotation's `/Rect`, and where an appearance drawn for it is drawn:
 /// what the `synth_*` functions that draw geometry given in the page's
@@ -794,6 +796,48 @@ pub fn synth_caret(
         apply_opacity(cv, opacity, opacity, false);
         cv.fill_color(c);
         cv.polyline(&points, true, Paint::Fill);
+    });
+    Some(SynthesizedAp::from_canvas(bbox, canvas))
+}
+
+/// The width of the pen a file attachment's icon is drawn with.
+const ICON_PEN: f32 = 1.5;
+
+/// Synthesizes `/AP /N` for a `/FileAttachment` (ISO 32000-2 §12.5.6.15):
+/// its icon's strokes ([`attachment_icon_strokes`] through `frame`, given in
+/// the page's default user space), each drawn in `color` with a pen 1.5
+/// wide, round at its ends and joins, in the form's own space or in place
+/// ([`ApRect`]).
+///
+/// Returns `None` where `/Rect` has no area; with no color to draw in (a
+/// transparent `color`) the appearance is empty.
+#[must_use]
+pub fn synth_file_attachment(
+    rect: impl Into<ApRect>,
+    icon: &AttachmentIcon,
+    frame: Matrix,
+    color: AnnotColor,
+    opacity: f32,
+) -> Option<SynthesizedAp> {
+    let at = rect.into();
+    if !at.has_area() {
+        return None;
+    }
+    let bbox = at.bbox();
+    let mut canvas = Canvas::new();
+    let Some(c) = color.to_content_color() else {
+        return Some(SynthesizedAp::from_canvas(bbox, canvas));
+    };
+    canvas.with_state(|cv| {
+        apply_opacity(cv, opacity, opacity, false);
+        cv.stroke_color(c);
+        cv.line_width(ICON_PEN);
+        cv.line_cap(LineCap::Round);
+        cv.line_join(LineJoin::Round);
+        for stroke in attachment_icon_strokes(icon, frame) {
+            let local: Vec<Point> = stroke.into_iter().map(|p| at.local(p)).collect();
+            cv.polyline(&local, false, Paint::Stroke);
+        }
     });
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
@@ -1623,6 +1667,14 @@ pub fn synth_annot(annot: &Annot<'_>) -> Option<SynthesizedAp> {
         TypedAnnot::Caret(ct) => synth_caret(
             rect,
             upright_frame(inset_by(rect, ct.rect_diff)),
+            annot.color().unwrap_or(AnnotColor::Gray(0.0)),
+            opacity,
+        ),
+        // Its icon over its whole `/Rect`, upright on the page.
+        TypedAnnot::FileAttachment(fa) => synth_file_attachment(
+            rect,
+            &fa.icon,
+            upright_frame(rect),
             annot.color().unwrap_or(AnnotColor::Gray(0.0)),
             opacity,
         ),

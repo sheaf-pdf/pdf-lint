@@ -3373,3 +3373,102 @@ fn a_caret_is_its_triangle_through_its_frame_and_is_drawn_so() {
     let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
     assert_eq!(synth_annot(&annots[0]), Some(own));
 }
+
+#[test]
+fn an_attachment_s_icon_is_its_strokes_through_its_frame_and_is_drawn_so() {
+    use crate::{ApRect, attachment_icon_strokes, synth_file_attachment};
+
+    let icons = [
+        AttachmentIcon::PushPin,
+        AttachmentIcon::Paperclip,
+        AttachmentIcon::Graph,
+        AttachmentIcon::Tag,
+    ];
+    let b = Rect::new(100.0, 200.0, 120.0, 220.0);
+    let frame = turned_frame(b, 0);
+    // A pushpin's head and pin, a paperclip's wire, a graph's axes and
+    // three bars, a tag's outline and hole: each inside its box, a line
+    // of two points or more.
+    for (icon, strokes) in icons.iter().zip([2, 1, 4, 2]) {
+        let drawn = attachment_icon_strokes(icon, frame);
+        assert_eq!(drawn.len(), strokes, "{icon:?}");
+        for p in drawn.iter().flatten() {
+            assert!(
+                p.x > b.x0 && p.x < b.x1 && p.y > b.y0 && p.y < b.y1,
+                "{icon:?}: {p:?}"
+            );
+        }
+        assert!(drawn.iter().all(|s| s.len() >= 2), "{icon:?}");
+    }
+    // Upright, a pin's point is at the bottom of its box; on a page turned
+    // a quarter, toward the right of it, the page's bottom as shown.
+    let pin = |frame| attachment_icon_strokes(&AttachmentIcon::PushPin, frame)[1].clone();
+    assert_eq!(
+        pin(frame),
+        [Point::new(110.0, 208.8), Point::new(110.0, 201.2)]
+    );
+    let quarter = pin(turned_frame(b, 90));
+    assert!((quarter[1].x - 118.8).abs() < 1e-4 && (quarter[1].y - 210.0).abs() < 1e-4);
+    // A name the standard doesn't have is the default, the pushpin.
+    assert_eq!(
+        attachment_icon_strokes(&AttachmentIcon::Other(Box::from(&b"Star"[..])), frame),
+        attachment_icon_strokes(&AttachmentIcon::PushPin, frame)
+    );
+    // Each point is the frame applied to its own place in the square, to
+    // the bit.
+    let odd = Matrix {
+        a: 7.3,
+        b: 0.0,
+        c: 0.0,
+        d: 4.1,
+        e: 100.3,
+        f: 200.7,
+    };
+    let clip = attachment_icon_strokes(&AttachmentIcon::Paperclip, odd);
+    let first = odd.apply(Point::new(0.36, 0.72));
+    assert_eq!(
+        (clip[0][0].x.to_bits(), clip[0][0].y.to_bits()),
+        (first.x.to_bits(), first.y.to_bits())
+    );
+
+    // Drawn: each stroke in the pen, round at its ends and joins.
+    let rect = Rect::new(97.5, 197.5, 122.5, 222.5);
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    let graph = AttachmentIcon::Graph;
+    let placed = synth_file_attachment(ApRect::InPlace(rect), &graph, frame, red, 1.0).unwrap();
+    assert_eq!(
+        content_text(&placed),
+        "q\n1 0 0 RG\n1.5 w\n1 J\n1 j\n102.8 218 m\n102.8 202.8 l\n118 202.8 l\nS\n\
+         106.4 202.8 m\n106.4 208.4 l\nS\n110.4 202.8 m\n110.4 212.8 l\nS\n\
+         114.4 202.8 m\n114.4 216.4 l\nS\nQ\n"
+    );
+    assert_eq!((placed.bbox, placed.matrix), (rect, Matrix::IDENTITY));
+    let own = synth_file_attachment(rect, &graph, frame, red, 1.0).unwrap();
+    assert_eq!(own.bbox, Rect::new(0.0, 0.0, 25.0, 25.0));
+    assert!(content_text(&own).contains("\n5.3 20.5 m\n5.3 5.3 l\n20.5 5.3 l\nS\n"));
+    for ap in [&own, &placed] {
+        assert_eq!(read_back(ap), (4, 0));
+    }
+    let faint = synth_file_attachment(rect, &graph, frame, red, 0.25).unwrap();
+    assert_eq!(faint.needs.0.len(), 1);
+    let clear = synth_file_attachment(rect, &graph, frame, AnnotColor::Transparent, 1.0).unwrap();
+    assert!(clear.content.is_empty());
+    let flat = Rect::new(97.5, 197.5, 97.5, 222.5);
+    assert!(synth_file_attachment(flat, &graph, frame, red, 1.0).is_none());
+
+    // As read from a file: its icon over its whole `/Rect`, upright.
+    let mut store = Store::default();
+    let id = store.put(dict! {
+        "Type" => Object::name("Annot"),
+        "Subtype" => Object::name("FileAttachment"),
+        "Rect" => vec![Object::from(100), Object::from(200), Object::from(120), Object::from(220)],
+        "Name" => Object::name("Graph"),
+        "C" => vec![Object::from(1), Object::from(0), Object::from(0)],
+    });
+    let page = dict! { "Annots" => vec![Object::from(id)] };
+    let annots = page_annots(&store.objects, &page, None, Rules::Iso, &Limits::DEFAULT).unwrap();
+    assert_eq!(
+        synth_annot(&annots[0]),
+        synth_file_attachment(b, &graph, frame, red, 1.0)
+    );
+}
