@@ -1341,16 +1341,19 @@ struct Container {
 /// One read's sink: the faults it told, in order, where they're wanted
 /// (`wants`, [`Options::faults`]), and none told where they aren't;
 /// whether it's reading a stream's indirect `/Length`, which reads no
-/// other; and whether a stream's `/Length` may be read from an object
+/// other; whether a stream's `/Length` may be read from an object
 /// stream (`members`), which a read as the open's doesn't
-/// ([`Cx::opening`]). A check made only to say a fault is made only where
-/// it [`wants`](Sink::wants) them; what the reading needs is read either
-/// way, and only the telling left out.
+/// ([`Cx::opening`]); and whether the record of what it reads is given to
+/// anyone (`records`), which only a read that gives the object alone
+/// ([`Reading::object_unrecorded`]) says it isn't. A check made only to
+/// say a fault is made only where it [`wants`](Sink::wants) them; what
+/// the reading needs is read either way, and only the telling left out.
 struct Cx {
     faults: Vec<(Place, Fault)>,
     wants: bool,
     resolving: bool,
     members: bool,
+    records: bool,
 }
 
 impl Cx {
@@ -1361,6 +1364,17 @@ impl Cx {
             wants,
             resolving: false,
             members: true,
+            records: true,
+        }
+    }
+
+    /// [`Cx::new`]'s, for a read whose record no one is given: what it
+    /// reads isn't hashed ([`Record::hash_of`]), a stream's data among
+    /// its bytes, which its record alone would need.
+    fn unrecorded(wants: bool) -> Cx {
+        Cx {
+            records: false,
+            ..Cx::new(wants)
         }
     }
 
@@ -1407,6 +1421,17 @@ impl Sink<Fault> for Cx {
 
     fn wants(&self) -> bool {
         self.wants
+    }
+}
+
+/// The hash a record that `cx` makes holds of `bytes`, the object's
+/// ([`Record::hash_of`]); 0 where `cx` gives its record to no one
+/// ([`Cx::unrecorded`]), so that an object read alone doesn't hash bytes
+/// nothing else of the read reads, a stream's data.
+fn hash(cx: &Cx, bytes: Option<&[u8]>) -> u64 {
+    match cx.records {
+        true => Record::hash_of(bytes.unwrap_or_default()),
+        false => 0,
     }
 }
 
@@ -1821,6 +1846,11 @@ impl Reader {
         Cx::new(self.wants)
     }
 
+    /// A read's sink whose record no one is given ([`Cx::unrecorded`]).
+    fn unrecorded(&self) -> Cx {
+        Cx::unrecorded(self.wants)
+    }
+
     /// An empty slot for each entry, and a lock for each object stream the
     /// entries put objects in: nothing read yet.
     fn empty_slots(&mut self) {
@@ -1959,13 +1989,18 @@ impl Reader {
     /// Entry `i`'s object, read, and not kept: at its offset, or from its
     /// object stream's decoded data, which is.
     fn read<'f, F: Bytes<'f>>(&self, file: F, i: usize) -> Result<Read, F::Error> {
+        self.read_by(file, self.cx(), i)
+    }
+
+    /// [`Reader::read`], by `cx`.
+    fn read_by<'f, F: Bytes<'f>>(&self, file: F, cx: Cx, i: usize) -> Result<Read, F::Error> {
         let (n, (generation, entry)) = self.entries[i];
         Ok(match entry {
             XrefEntry::InUse { offset, .. } => {
-                self.read_at(file, ObjectId::new(n, generation), offset)?
+                self.read_at(file, cx, ObjectId::new(n, generation), offset)?
             }
             XrefEntry::Compressed { stream, index } => {
-                self.read_in(file, ObjectId::new(n, 0), stream, index)?
+                self.read_in(file, cx, ObjectId::new(n, 0), stream, index)?
             }
             XrefEntry::Free => Read {
                 object: Err(Unread::Missing {
@@ -1977,15 +2012,15 @@ impl Reader {
         })
     }
 
-    /// Object `id`, read at `offset`, and in an encrypted file it opened, its
-    /// strings decrypted.
+    /// Object `id`, read at `offset` by `cx`, and in an encrypted file it
+    /// opened, its strings decrypted.
     fn read_at<'f, F: Bytes<'f>>(
         &self,
         file: F,
+        mut cx: Cx,
         id: ObjectId,
         offset: usize,
     ) -> Result<Read, F::Error> {
-        let mut cx = self.cx();
         let mut object =
             self.indirect(file, &mut cx, offset, Some(id))?
                 .map(|(_, mut o, mut record)| {
@@ -2014,17 +2049,17 @@ impl Reader {
         })
     }
 
-    /// Object `id`, the `index`th of object stream `stream`, read from the
-    /// stream's decoded data, which is decoded the first time an object in
-    /// it is read.
+    /// Object `id`, the `index`th of object stream `stream`, read by `cx`
+    /// from the stream's decoded data, which is decoded the first time an
+    /// object in it is read.
     fn read_in<'f, F: Bytes<'f>>(
         &self,
         file: F,
+        mut cx: Cx,
         id: ObjectId,
         stream: u32,
         index: u32,
     ) -> Result<Read, F::Error> {
-        let mut cx = self.cx();
         let object = match self.container(file, stream)? {
             None => Err(Unread::ContainerMissing { stream }),
             Some(container) => match &container.header {
@@ -4419,7 +4454,7 @@ impl Reader {
             at,
             endobj: false,
             data: None,
-            hash: Record::hash_of(bytes.unwrap_or_default()),
+            hash: hash(cx, bytes),
         };
         Ok((object, record))
     }
@@ -4568,7 +4603,7 @@ impl Reader {
             at: span(start, end),
             endobj: has_endobj,
             data,
-            hash: Record::hash_of(bytes.unwrap_or_default()),
+            hash: hash(cx, bytes),
         };
         Ok(Ok((id, object, record)))
     }
