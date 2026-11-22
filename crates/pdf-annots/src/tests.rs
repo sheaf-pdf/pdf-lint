@@ -3030,3 +3030,198 @@ fn a_synthesized_appearance_is_at_the_identity_and_binds_what_it_needs() {
         assert_eq!(categories.len(), ap.resources.len());
     }
 }
+
+/// Every point of every path `ap` paints, in the page's default user space
+/// (the form's `/Matrix` and a placement aside), in order.
+fn painted_points(ap: &SynthesizedAp) -> Vec<Point> {
+    use std::ops::ControlFlow;
+
+    use pdf_content_streams::Paint;
+    use pdf_gfx::{Kind, Seg};
+
+    let objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let streams = pdf_objects::WithStreams::new(&objects, |id: ObjectId, _limit: usize| {
+        Err(pdf_objects::Unreadable::new(id, Why::Damaged, "missing"))
+    });
+    let resources = Object::from(ap.resources.clone());
+    let slices = [&ap.content[..]];
+    let mut faults = Vec::new();
+    let mut points = Vec::new();
+    pdf_gfx::interpret_with(
+        streams,
+        &pdf_content_streams::Concat::new(&slices),
+        Some(&resources),
+        &pdf_gfx::Limits::DEFAULT,
+        &pdf_fonts::Fonts::default(),
+        pdf_gfx::Opts::default(),
+        &mut faults,
+        |ev| {
+            if let Kind::Path(path) = &ev.kind
+                && !matches!(path.paint, Paint::None)
+            {
+                points.extend(path.segments.iter().flat_map(Seg::points));
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(faults.is_empty());
+    points
+}
+
+/// `ap`'s content with every number taken out: what it draws, by its
+/// operators.
+fn operators(ap: &SynthesizedAp) -> Vec<String> {
+    String::from_utf8(ap.content.clone())
+        .unwrap()
+        .split_ascii_whitespace()
+        .filter(|w| w.parse::<f32>().is_err())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn an_appearance_drawn_in_place_is_the_one_drawn_in_its_own_space_moved() {
+    use crate::ApRect;
+
+    let quad = |x0: f32, y0: f32, x1: f32, y1: f32| QuadPoints([x0, y1, x1, y1, x0, y0, x1, y0]);
+    let style = |fill: bool, dashed: bool| {
+        let mut style = bordered(1.5, BorderStyle::Solid);
+        if !fill {
+            style.fill = None;
+        }
+        if dashed {
+            style.border.style = BorderStyle::Dashed;
+            style.border.dash = vec![4.0, 3.0];
+        }
+        style
+    };
+    let red = AnnotColor::Rgb([1.0, 0.0, 0.0]);
+    // Each kind drawn for `rect`, from geometry given in the page's space.
+    let drawings = |rect: ApRect| -> Vec<(&'static str, Option<SynthesizedAp>)> {
+        let r = rect.rect();
+        let (x, y) = (r.x0, r.y0);
+        let quads = [
+            quad(x + 2.0, y + 3.0, x + 50.0, y + 15.0),
+            quad(x + 2.0, y + 18.0, x + 30.0, y + 30.0),
+        ];
+        let path = [
+            Point::new(x + 3.0, y + 4.0),
+            Point::new(x + 40.25, y + 30.5),
+            Point::new(x + 70.0, y + 9.0),
+        ];
+        let rd = Some([2.5, 3.0, 2.0, 4.0]);
+        let ink = Border {
+            width: 2.0,
+            ..Border::default()
+        };
+        vec![
+            (
+                "highlight",
+                crate::synth_text_markup(TextMarkupKind::Highlight, rect, &quads, red, 0.5),
+            ),
+            (
+                "underline",
+                crate::synth_text_markup(TextMarkupKind::Underline, rect, &quads, red, 1.0),
+            ),
+            (
+                "squiggly",
+                crate::synth_text_markup(TextMarkupKind::Squiggly, rect, &quads, red, 1.0),
+            ),
+            (
+                "square",
+                crate::synth_shape(ShapeKind::Square, rect, &style(true, false), rd),
+            ),
+            (
+                "square dashed",
+                crate::synth_shape(ShapeKind::Square, rect, &style(false, true), rd),
+            ),
+            (
+                "circle",
+                crate::synth_shape(ShapeKind::Circle, rect, &style(true, false), rd),
+            ),
+            (
+                "line",
+                crate::synth_line(
+                    rect,
+                    path[0],
+                    path[2],
+                    (LineEnding::ClosedArrow, LineEnding::Circle),
+                    &style(true, false),
+                ),
+            ),
+            (
+                "polygon",
+                crate::synth_poly(
+                    PolyKind::Polygon,
+                    rect,
+                    &path,
+                    (LineEnding::None, LineEnding::None),
+                    &style(true, true),
+                ),
+            ),
+            (
+                "polyline",
+                crate::synth_poly(
+                    PolyKind::PolyLine,
+                    rect,
+                    &path,
+                    (LineEnding::OpenArrow, LineEnding::Square),
+                    &style(false, false),
+                ),
+            ),
+            (
+                "ink",
+                crate::synth_ink(rect, &[path.to_vec(), vec![path[1]]], red, &ink, 0.75),
+            ),
+        ]
+    };
+
+    let rect = Rect::new(100.25, 200.5, 180.75, 240.125);
+    let own = drawings(ApRect::from(rect));
+    let placed = drawings(ApRect::InPlace(rect));
+    assert_eq!(ApRect::from(rect), ApRect::Form(rect));
+    for ((what, own), (_, placed)) in own.iter().zip(&placed) {
+        let (own, placed) = (own.as_ref().unwrap(), placed.as_ref().unwrap());
+        assert_eq!(
+            own.bbox,
+            Rect::new(0.0, 0.0, rect.width(), rect.height()),
+            "{what}"
+        );
+        assert_eq!(placed.bbox, rect, "{what}");
+        assert_eq!(
+            (own.matrix, placed.matrix),
+            (Matrix::IDENTITY, Matrix::IDENTITY)
+        );
+        assert_eq!(own.needs, placed.needs, "{what}");
+        assert_eq!(own.resources, placed.resources, "{what}");
+        // The same operators, the same paths: in place each point is the
+        // one drawn in the form's own space, moved to the `/Rect`'s corner.
+        assert_eq!(operators(own), operators(placed), "{what}");
+        let (moved, there) = (painted_points(own), painted_points(placed));
+        assert!(!there.is_empty(), "{what}");
+        assert_eq!(moved.len(), there.len(), "{what}");
+        for (m, t) in moved.iter().zip(&there) {
+            let m = Point::new(m.x + rect.x0, m.y + rect.y0);
+            assert!(
+                (m.x - t.x).abs() < 1e-3 && (m.y - t.y).abs() < 1e-3,
+                "{what}: {m:?} moved, {t:?} in place"
+            );
+        }
+        // Drawn where it is, every path inside the `/Rect`.
+        read_back(placed);
+    }
+    // At the origin the two are one.
+    let at_origin = Rect::new(0.0, 0.0, 80.5, 39.625);
+    for ((what, own), (_, placed)) in drawings(ApRect::Form(at_origin))
+        .iter()
+        .zip(&drawings(ApRect::InPlace(at_origin)))
+    {
+        assert_eq!(own, placed, "{what}");
+    }
+    // A `/Rect` with no area draws nothing either way.
+    let flat = Rect::new(10.0, 10.0, 90.0, 10.0);
+    for space in [ApRect::Form(flat), ApRect::InPlace(flat)] {
+        assert!(drawings(space).iter().all(|(_, ap)| ap.is_none()));
+    }
+}

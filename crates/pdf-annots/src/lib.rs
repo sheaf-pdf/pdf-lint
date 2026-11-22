@@ -203,8 +203,8 @@ pub use subtypes::{
     TextAnnot, TextIcon, TextMarkupAnnot, TextMarkupKind, TypedAnnot, WidgetAnnot,
 };
 pub use synth::{
-    RedactMark, SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line, synth_poly,
-    synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
+    ApRect, RedactMark, SynthesizedAp, synth_annot, synth_free_text, synth_ink, synth_line,
+    synth_poly, synth_redact, synth_shape, synth_stamp, synth_text_markup, synth_text_note,
 };
 #[cfg(feature = "text-layout")]
 pub use synth::{synth_free_text_with_font, synth_redact_with_font};

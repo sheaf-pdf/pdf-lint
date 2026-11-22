@@ -20,14 +20,85 @@ use crate::style::{
 };
 use crate::subtypes::{PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind, TypedAnnot};
 
+/// An annotation's `/Rect`, and where an appearance drawn for it is drawn:
+/// what the `synth_*` functions that draw geometry given in the page's
+/// default user space take. A [`Rect`] alone is drawn in the form's own
+/// space ([`ApRect::Form`]).
+///
+/// Either way the form's `/Matrix` is the identity, and a viewer places it
+/// on `/Rect` (ISO 32000-2 §12.5.5): the two draw the same shape in the same
+/// place. They part in `f32`: a form drawn in its own space has each
+/// coordinate given less the corner of `/Rect`, so a renderer, moving it
+/// back, lands its edges a hair from where the same shape drawn on the page
+/// lands them, and its coverage can round the two apart by a level of
+/// antialiasing. A writer whose appearances must match a drawing of the mark
+/// in the page's space to the pixel (a viewer's own drawing of it, or the
+/// page's content), or that keeps each appearance where its annotation is,
+/// as many writers do, draws them in place ([`ApRect::InPlace`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum ApRect {
+    /// Drawn in the form's own space: its `/BBox` is `[0 0 w h]`, the
+    /// annotation's `/Rect` moved to the origin, and the geometry given is
+    /// moved with it, so the annotation can move without its stream being
+    /// written again.
+    Form(Rect),
+    /// Drawn in place: the form's `/BBox` is the annotation's `/Rect`, and
+    /// the geometry is drawn where it was given, in the page's default user
+    /// space.
+    InPlace(Rect),
+}
+
+impl ApRect {
+    /// The annotation's `/Rect`.
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        match self {
+            Self::Form(rect) | Self::InPlace(rect) => rect,
+        }
+    }
+
+    /// The form's `/BBox`: `[0 0 w h]` in the form's own space, the `/Rect`
+    /// itself in place.
+    #[must_use]
+    pub fn bbox(self) -> Rect {
+        match self {
+            Self::Form(rect) => Rect::new(0.0, 0.0, rect.width(), rect.height()),
+            Self::InPlace(rect) => rect,
+        }
+    }
+
+    /// Whether the `/Rect` has an area to draw in.
+    fn has_area(self) -> bool {
+        let rect = self.rect();
+        rect.width() > 0.0 && rect.height() > 0.0
+    }
+
+    /// Where `p`, a point in the page's default user space, is drawn: less
+    /// the `/Rect`'s corner in the form's own space, as it is in place.
+    fn local(self, p: Point) -> Point {
+        match self {
+            Self::Form(rect) => Point::new(p.x - rect.x0, p.y - rect.y0),
+            Self::InPlace(_) => p,
+        }
+    }
+}
+
+impl From<Rect> for ApRect {
+    fn from(rect: Rect) -> Self {
+        Self::Form(rect)
+    }
+}
+
 /// Self-contained synthesized Form XObject stream ready to be stored as an
 /// annotation's `/AP /N` (or `/RO` redaction overlay) stream.
 ///
 /// The `synth_*` functions draw in local `[0, 0, width, height]` Form space
 /// (`bbox = Rect::new(0.0, 0.0, rect.width(), rect.height())`, `matrix` the
 /// identity) so relocating an annotation's `/Rect` without resizing requires
-/// no stream rewrite. An appearance the caller drew ([`SynthesizedAp::drawn`])
-/// has the box and matrix it was given.
+/// no stream rewrite; those that take an [`ApRect`] draw in place on request,
+/// `bbox` the `/Rect` itself. An appearance the caller drew
+/// ([`SynthesizedAp::drawn`]) has the box and matrix it was given.
 ///
 /// What the content draws with is held twice: by what each resource is
 /// ([`needs`](Self::needs)), for a writer that binds resources itself (one
@@ -179,25 +250,27 @@ fn apply_border_stroke(canvas: &mut Canvas, border: &Border) {
 }
 
 /// Synthesizes `/AP /N` for `Highlight`, `Underline`, `Squiggly`, or
-/// `StrikeOut` annotations from `quads`.
+/// `StrikeOut` annotations from `quads`, in the form's own space or in
+/// place ([`ApRect`]).
 #[must_use]
 pub fn synth_text_markup(
     kind: TextMarkupKind,
-    rect: Rect,
+    rect: impl Into<ApRect>,
     quads: &[QuadPoints],
     color: AnnotColor,
     opacity: f32,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
     let Some(c) = color.to_content_color() else {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
     };
 
-    let shift = |p: Point| Point::new(p.x - rect.x0, p.y - rect.y0);
+    let shift = |p: Point| at.local(p);
 
     canvas.with_state(|cv| {
         let is_hl = kind == TextMarkupKind::Highlight;
@@ -274,17 +347,21 @@ pub fn synth_text_markup(
 /// stroked together, for the square as for the circle: under an opacity
 /// below 1 the border then shows its own color, not that color over the
 /// interior's (ISO 32000-2 §11.7.4.4).
+///
+/// `rect_diff` (`/RD`) is in from each side of `/Rect`, in the form's own
+/// space or in place ([`ApRect`]) alike.
 #[must_use]
 pub fn synth_shape(
     kind: ShapeKind,
-    rect: Rect,
+    rect: impl Into<ApRect>,
     style: &PaintStyle,
     rect_diff: Option<[f32; 4]>,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let [dl, db, dr, dt] = rect_diff.unwrap_or([0.0; 4]);
     let sc = style
         .stroke
@@ -302,10 +379,10 @@ pub fn synth_shape(
         && style.border.cloudy_intensity.is_none();
     if plain_square {
         let outer = Rect::new(
-            dl.min(bbox.x1),
-            db.min(bbox.y1),
-            (bbox.x1 - dr).max(0.0),
-            (bbox.y1 - dt).max(0.0),
+            (bbox.x0 + dl).min(bbox.x1),
+            (bbox.y0 + db).min(bbox.y1),
+            (bbox.x1 - dr).max(bbox.x0),
+            (bbox.y1 - dt).max(bbox.y0),
         );
         if outer.width() <= 0.0 || outer.height() <= 0.0 || (fc.is_none() && sc.is_none()) {
             return Some(SynthesizedAp::from_canvas(bbox, canvas));
@@ -348,10 +425,10 @@ pub fn synth_shape(
         0.0
     };
     let inner = Rect::new(
-        (dl + half_w).min(bbox.x1),
-        (db + half_w).min(bbox.y1),
-        (bbox.x1 - dr - half_w).max(0.0),
-        (bbox.y1 - dt - half_w).max(0.0),
+        (bbox.x0 + dl + half_w).min(bbox.x1),
+        (bbox.y0 + db + half_w).min(bbox.y1),
+        (bbox.x1 - dr - half_w).max(bbox.x0),
+        (bbox.y1 - dt - half_w).max(bbox.y0),
     );
     if inner.width() <= 0.0 || inner.height() <= 0.0 {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
@@ -388,25 +465,27 @@ pub fn synth_shape(
 }
 
 /// Synthesizes `/AP /N` for `/Line` annotations, including start/end
-/// [`LineEnding`] arrowheads or markers.
+/// [`LineEnding`] arrowheads or markers, in the form's own space or in place
+/// ([`ApRect`]).
 #[must_use]
 pub fn synth_line(
-    rect: Rect,
+    rect: impl Into<ApRect>,
     start: Point,
     end: Point,
     endings: (LineEnding, LineEnding),
     style: &PaintStyle,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
     let Some(sc) = style.stroke.and_then(AnnotColor::to_content_color) else {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
     };
-    let p0 = Point::new(start.x - rect.x0, start.y - rect.y0);
-    let p1 = Point::new(end.x - rect.x0, end.y - rect.y0);
+    let p0 = at.local(start);
+    let p1 = at.local(end);
     let w = style.border.width.max(0.5);
 
     canvas.with_state(|cv| {
@@ -550,24 +629,23 @@ fn draw_line_ending(
     }
 }
 
-/// Synthesizes `/AP /N` for `/Polygon` or `/PolyLine` annotations.
+/// Synthesizes `/AP /N` for `/Polygon` or `/PolyLine` annotations, in the
+/// form's own space or in place ([`ApRect`]).
 #[must_use]
 pub fn synth_poly(
     kind: PolyKind,
-    rect: Rect,
+    rect: impl Into<ApRect>,
     vertices: &[Point],
     endings: (LineEnding, LineEnding),
     style: &PaintStyle,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 || vertices.len() < 2 {
+    let at = rect.into();
+    if !at.has_area() || vertices.len() < 2 {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
-    let local: Vec<Point> = vertices
-        .iter()
-        .map(|p| Point::new(p.x - rect.x0, p.y - rect.y0))
-        .collect();
+    let local: Vec<Point> = vertices.iter().map(|&p| at.local(p)).collect();
     let closed = kind == PolyKind::Polygon;
     let sc = style
         .stroke
@@ -646,19 +724,21 @@ pub fn synth_poly(
     Some(SynthesizedAp::from_canvas(bbox, canvas))
 }
 
-/// Synthesizes `/AP /N` for `/Ink` freehand annotations.
+/// Synthesizes `/AP /N` for `/Ink` freehand annotations, in the form's own
+/// space or in place ([`ApRect`]).
 #[must_use]
 pub fn synth_ink(
-    rect: Rect,
+    rect: impl Into<ApRect>,
     strokes: &[Vec<Point>],
     color: AnnotColor,
     border: &Border,
     opacity: f32,
 ) -> Option<SynthesizedAp> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    let at = rect.into();
+    if !at.has_area() {
         return None;
     }
-    let bbox = Rect::new(0.0, 0.0, rect.width(), rect.height());
+    let bbox = at.bbox();
     let mut canvas = Canvas::new();
     let Some(c) = color.to_content_color() else {
         return Some(SynthesizedAp::from_canvas(bbox, canvas));
@@ -671,10 +751,7 @@ pub fn synth_ink(
         cv.line_cap(LineCap::Round);
         cv.line_join(LineJoin::Round);
         for stroke in strokes {
-            let pts: Vec<Point> = stroke
-                .iter()
-                .map(|p| Point::new(p.x - rect.x0, p.y - rect.y0))
-                .collect();
+            let pts: Vec<Point> = stroke.iter().map(|&p| at.local(p)).collect();
             if pts.len() == 1 {
                 cv.fill_color(c);
                 cv.circle(pts[0], (border.width * 0.5).max(0.5), Paint::Fill);
