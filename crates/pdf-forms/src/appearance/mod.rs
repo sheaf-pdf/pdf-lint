@@ -9,6 +9,17 @@
 //!   [`WidgetLook`] (the widget's box, colors, rotation, and border), its
 //!   parsed default appearance string, and a font. It gives an
 //!   [`Appearance`], or why one couldn't be made ([`Unmade`]).
+//! - [`check_box`] and [`radio_button`] make a check box's and a radio
+//!   button's from plain data (a [`ToggleButton`], a [`WidgetLook`], the
+//!   parsed default appearance, and the resource ZapfDingbats is drawn
+//!   under): the normal and the down appearance of its on state and of
+//!   `Off` ([`ToggleAppearances`]), its mark the ZapfDingbats glyph its
+//!   caption names ([`Mark`]), and no `Off` where it would paint nothing;
+//!   [`push_button`] makes a push button's normal, rollover, and down
+//!   appearances ([`PushAppearances`]) from a [`PushButton`] in a font.
+//!   [`widget_toggle`] and [`widget_push`] read a widget of a
+//!   [`Form`](crate::Form)'s buttons into that data, and
+//!   [`toggle_for_widget`] and [`push_for_widget`] make one widget's.
 //! - [`FieldFont`] is the font a field's text is drawn in: the default
 //!   resources' font (`/DR /Font`) its default appearance string names, read
 //!   with `pdf-fonts`, or a standard 14 font chosen by that name where the
@@ -91,15 +102,28 @@
 //! assert_eq!(made.font_name.as_deref(), Some(&b"Helv"[..]));
 //! ```
 
+mod button;
 mod font;
 mod frame;
+mod line;
+mod read;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_buttons;
 mod text;
 mod widget;
 
+pub use button::{
+    Mark, PushAppearances, PushButton, ToggleAppearances, ToggleButton, check_box, push_button,
+    radio_button,
+};
 pub use font::{FieldFont, FieldLayoutFont};
 pub use frame::{Appearance, Unmade, WidgetLook};
+pub use read::{
+    MadePush, MadeToggle, WidgetPush, WidgetToggle, push_for_widget, toggle_for_widget,
+    widget_push, widget_toggle,
+};
 #[cfg(any(test, fuzzing))]
 pub(crate) use text::REACH;
 #[cfg(feature = "embed")]

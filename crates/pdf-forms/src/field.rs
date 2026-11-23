@@ -807,7 +807,7 @@ pub struct WidgetStates {
 }
 
 impl WidgetStates {
-    fn of(appearances: Option<Appearances>, rules: Rules) -> Self {
+    pub(crate) fn of(appearances: Option<Appearances>, rules: Rules) -> Self {
         let Some(appearances) = appearances else {
             return Self::default();
         };

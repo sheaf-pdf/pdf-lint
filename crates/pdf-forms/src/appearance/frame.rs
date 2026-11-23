@@ -4,7 +4,7 @@
 use std::fmt;
 
 use pdf_content_streams::{Color, LineCap, Paint, ResourceNeeds};
-use pdf_gfx::{BoxBorder, BoxBorderStyle, Canvas, Matrix, Point, Rect, UnencodableChar};
+use pdf_gfx::{BoxBorder, BoxBorderStyle, Canvas, Matrix, Point, Rect, Seg, UnencodableChar};
 use pdf_objects::Unreadable;
 
 use crate::error::Error;
@@ -156,6 +156,20 @@ pub enum Unmade {
     /// as [`Error::Unreadable`] has it.
     #[error("{0}")]
     Unreadable(Unreadable),
+    /// The field isn't the kind of button a button's reader makes: a check
+    /// box or a radio button for [`widget_toggle`](super::widget_toggle)
+    /// and [`toggle_for_widget`](super::toggle_for_widget), a push button
+    /// for [`widget_push`](super::widget_push) and
+    /// [`push_for_widget`](super::push_for_widget).
+    #[error("the field isn't a button of the kind asked for")]
+    NotButton,
+    /// The push button shows an icon (`/MK /I`), which isn't drawn, and its
+    /// caption isn't shown alone (`/MK /TP` other than `0`): made without
+    /// its icon, it would show nothing, or a caption where the icon's place
+    /// was to be. From [`widget_push`](super::widget_push) and
+    /// [`push_for_widget`](super::push_for_widget).
+    #[error("the push button shows an icon, which isn't drawn")]
+    Icon,
 }
 
 impl From<Error> for Unmade {
@@ -286,6 +300,12 @@ pub(crate) fn frame(canvas: &mut Canvas, look: &WidgetLook<'_>, bbox: Rect) {
     }
     let behind = look.background.unwrap_or(Color::Rgb([1.0; 3]));
     canvas.box_bands(bbox, &look.border, Some(behind));
+    edge(canvas, look, bbox);
+}
+
+/// A frame's third part: the border in its color, where it has one, as
+/// [`frame`] draws it.
+fn edge(canvas: &mut Canvas, look: &WidgetLook<'_>, bbox: Rect) {
     let Some(color) = look.border_color else {
         return;
     };
@@ -376,4 +396,193 @@ pub(crate) fn dividers(canvas: &mut Canvas, look: &WidgetLook<'_>, client: Rect,
             c.line(Point::new(x, client.y0), Point::new(x, client.y1));
         }
     });
+}
+
+/// The background a button's down appearance (`/AP /D`) is filled with, as
+/// PDFium as of chromium/8152 fills it (`fpdfsdk/cpdfsdk_appstream.cpp`,
+/// `SetAsPushButton`, `SetAsCheckBox`): `background`, its components in
+/// `0.0..=1.0`, each less `0.25` in its own color space and none below `0`;
+/// or, where there is none, PDFium's transparent background less `0.25`,
+/// `0.75 0.75 0.75 rg`.
+pub(crate) fn pressed(background: Option<Color>) -> Color {
+    let less = |v: f32| (v - 0.25).max(0.0);
+    match background {
+        None => Color::Rgb([0.75; 3]),
+        Some(Color::Gray(g)) => Color::Gray(less(g)),
+        Some(Color::Rgb(c)) => Color::Rgb(c.map(less)),
+        Some(Color::Cmyk(c)) => Color::Cmyk(c.map(less)),
+    }
+}
+
+/// `color` at half its brightness, as `Canvas::box_bands` shades a beveled
+/// border's dark band: a gray level or RGB components halved, CMYK's cyan,
+/// magenta, and yellow halved and its black moved halfway to full.
+fn half_bright(color: Color) -> Color {
+    match color {
+        Color::Gray(g) => Color::Gray(g / 2.0),
+        Color::Rgb(c) => Color::Rgb(c.map(|v| v / 2.0)),
+        Color::Cmyk([c, m, y, k]) => Color::Cmyk([c / 2.0, m / 2.0, y / 2.0, (k + 1.0) / 2.0]),
+    }
+}
+
+/// Draws what's under a button's down appearance (`/AP /D`), as PDFium as
+/// of chromium/8152 draws it: [`frame`]'s three parts, the box filled in the
+/// background less `0.25` ([`pressed`]), a beveled border's two bands with
+/// their shades exchanged (the background at half its brightness above and
+/// to the left, white below and to the right) and an inset border's black
+/// and white (`Canvas::box_bands_in`), and the border as `frame` draws it.
+pub(crate) fn down_frame(canvas: &mut Canvas, look: &WidgetLook<'_>, bbox: Rect) {
+    canvas.with_state(|c| {
+        c.fill_color(pressed(look.background));
+        c.fill_rect(bbox);
+    });
+    let behind = look.background.unwrap_or(Color::Rgb([1.0; 3]));
+    let (top_left, bottom_right) = match look.border.style {
+        BoxBorderStyle::Beveled => (half_bright(behind), Color::Gray(1.0)),
+        _ => (Color::Gray(0.0), Color::Gray(1.0)),
+    };
+    canvas.box_bands_in(bbox, &look.border, top_left, bottom_right);
+    edge(canvas, look, bbox);
+}
+
+/// The control points' share of a quarter circle's radius that draws it as
+/// one cubic Bézier curve: 4/3 (√2 − 1).
+const BEZIER: f32 = 0.552_284_8;
+
+/// A circle in `rect`'s box (an ellipse where it isn't square) as four
+/// Bézier curves, from the middle of its left side up and round, as PDFium
+/// as of chromium/8152 writes one (`fpdfsdk/cpdfsdk_appstream.cpp`,
+/// `GetAP_Circle`), so the curves can be held to its own.
+pub(crate) fn circle(rect: Rect) -> [Seg; 5] {
+    let (rx, ry) = (rect.width() / 2.0, rect.height() / 2.0);
+    let (cx, cy) = (rect.x0 + rx, rect.y0 + ry);
+    let (kx, ky) = (rx * BEZIER, ry * BEZIER);
+    let p = Point::new;
+    [
+        Seg::Move(p(rect.x0, cy)),
+        Seg::Curve(p(rect.x0, cy + ky), p(cx - kx, rect.y1), p(cx, rect.y1)),
+        Seg::Curve(p(cx + kx, rect.y1), p(rect.x1, cy + ky), p(rect.x1, cy)),
+        Seg::Curve(p(rect.x1, cy - ky), p(cx + kx, rect.y0), p(cx, rect.y0)),
+        Seg::Curve(p(cx - kx, rect.y0), p(rect.x0, cy - ky), p(rect.x0, cy)),
+    ]
+}
+
+/// Half of the circle in `rect`'s box, from the end of a diameter turned
+/// `turn` radians counterclockwise from the horizontal round to the other
+/// end, as two Bézier curves: at a quarter turn's half (π/4) the upper left
+/// half, at five times that the lower right. The points are placed where
+/// PDFium as of chromium/8152 places its own under the turn it writes
+/// (`GetAP_HalfCircle`).
+fn half_circle(rect: Rect, turn: f32) -> [Seg; 3] {
+    let (rx, ry) = (rect.width() / 2.0, rect.height() / 2.0);
+    let (cx, cy) = (rect.x0 + rx, rect.y0 + ry);
+    let (sin, cos) = turn.sin_cos();
+    let at = |x: f32, y: f32| Point::new(x * cos - y * sin + cx, x * sin + y * cos + cy);
+    let (kx, ky) = (rx * BEZIER, ry * BEZIER);
+    [
+        Seg::Move(at(-rx, 0.0)),
+        Seg::Curve(at(-rx, ky), at(-kx, ry), at(0.0, ry)),
+        Seg::Curve(at(kx, ry), at(rx, ky), at(rx, 0.0)),
+    ]
+}
+
+/// Draws a radio button's round frame, under the content of a button whose
+/// mark is a circle, as PDFium as of chromium/8152 draws it
+/// (`fpdfsdk/cpdfsdk_appstream.cpp`, `SetAsRadioButton` and
+/// `GetCircleBorderAppStream`), in the box's centre square less `1` on each
+/// side, `down` for the down appearance (`/AP /D`):
+///
+/// 1. The circle filled in the background, where there is one; for the
+///    down appearance, in the background less `0.25` ([`pressed`]), but
+///    for a beveled border in the background itself.
+/// 2. A solid, dashed, or underline border, where it has a color: the
+///    circle half the width inside, stroked at the width, a dashed one
+///    under its dash array.
+/// 3. A beveled or inset border, its width doubled as for a square frame:
+///    the circle stroked at half that in the border's color, where it has
+///    one; then two half circles three quarters of that half inside,
+///    stroked at it, the upper left one in white and the lower right in the
+///    background less `0.25` for beveled, a middle and a light gray for
+///    inset; for the down appearance, the background less `0.25` and white
+///    for beveled, black and white for inset.
+///
+/// Nothing of the border is drawn where its width isn't finite and above
+/// `0`, or a stroke of it about the box couldn't be bounded.
+pub(crate) fn round_frame(canvas: &mut Canvas, look: &WidgetLook<'_>, bbox: Rect, down: bool) {
+    let side = bbox.width().min(bbox.height());
+    let (cx, cy) = ((bbox.x0 + bbox.x1) / 2.0, (bbox.y0 + bbox.y1) / 2.0);
+    let half = side / 2.0 - 1.0;
+    let centre = Rect::new(cx - half, cy - half, cx + half, cy + half);
+    let border = &look.border;
+    let beveled = border.style == BoxBorderStyle::Beveled;
+    let fill = match (down, beveled) {
+        (false, _) | (true, true) => look.background,
+        (true, false) => Some(pressed(look.background)),
+    };
+    if let Some(fill) = fill {
+        canvas.with_state(|c| {
+            c.fill_color(fill);
+            c.draw_segments(&circle(centre), Paint::Fill);
+        });
+    }
+    let width = border.inset();
+    if !strokable(centre, width) {
+        return;
+    }
+    let stroke = |canvas: &mut Canvas, color: Color, w: f32, dashes: &[f32], path: &[Seg]| {
+        canvas.with_state(|c| {
+            c.line_width(w);
+            if !dashes.is_empty() {
+                c.dash(dashes, 0.0);
+            }
+            c.stroke_color(color);
+            c.draw_segments(path, Paint::Stroke);
+        });
+    };
+    match border.style {
+        BoxBorderStyle::Beveled | BoxBorderStyle::Inset => {
+            let w = width / 2.0;
+            if let Some(color) = look.border_color {
+                stroke(canvas, color, w, &[], &circle(centre));
+            }
+            let (top_left, bottom_right) = match (beveled, down) {
+                (true, false) => (Color::Gray(1.0), pressed(look.background)),
+                (true, true) => (pressed(look.background), Color::Gray(1.0)),
+                (false, false) => (Color::Gray(0.5), Color::Gray(0.75)),
+                (false, true) => (Color::Gray(0.0), Color::Gray(1.0)),
+            };
+            let reach = w * 0.75;
+            let inside = Rect::new(
+                centre.x0 + reach,
+                centre.y0 + reach,
+                centre.x1 - reach,
+                centre.y1 - reach,
+            );
+            let quarter = std::f32::consts::FRAC_PI_4;
+            stroke(canvas, top_left, w, &[], &half_circle(inside, quarter));
+            stroke(
+                canvas,
+                bottom_right,
+                w,
+                &[],
+                &half_circle(inside, 5.0 * quarter),
+            );
+        }
+        _ => {
+            let Some(color) = look.border_color else {
+                return;
+            };
+            let dashes = match border.style {
+                BoxBorderStyle::Dashed => dash(border),
+                _ => &[],
+            };
+            let inside = Rect::new(
+                centre.x0 + width / 2.0,
+                centre.y0 + width / 2.0,
+                centre.x1 - width / 2.0,
+                centre.y1 - width / 2.0,
+            );
+            stroke(canvas, color, width, dashes, &circle(inside));
+        }
+    }
 }

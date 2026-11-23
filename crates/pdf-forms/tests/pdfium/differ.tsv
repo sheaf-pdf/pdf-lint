@@ -10,6 +10,9 @@
 # A forms-press case: name	part	why, the part of its record that differs
 # after the presses (as, a widget's /AS, in every widget or, written as@N,
 # in widget N alone; or v, a field's /V); every other part agrees.
+# A forms-ap-all case of buttons (btn-, push-): name	part	why, the part that
+# differs (made, states, as, bbox, matrix, paint, mark, clip, or text), in
+# every annotation or, written part@N, in annotation N alone.
 forms-three-deep	PDFium makes a terminal field only where /FT is the field's own or its parent's; a type handed down two levels or more is read here, as ISO 32000-2 has it inherited
 forms-type-missing-or-unknown	PDFium leaves out a terminal field with no /FT; it is read here with no type, for the caller to see and a fault to say
 forms-nameless-middle	the type comes down two levels, as in forms-three-deep; the field with no /T adds nothing to the name
@@ -53,3 +56,18 @@ press-radio-on-toggles	as@0	a radio button pressed while on turns off where the 
 press-radio-on-toggles	v	the field's value is Off once no radio button is on, as their /AS are; PDFium keeps the radio button on and /V /1
 press-opt-check-off	v	the field's value is Off once no check box is on, as it is with no /Opt, /V and /AS being the same (ISO 32000-2, §12.7.5.2.3); PDFium leaves /V as it was (/0) where a check box of a field with /Opt is turned off
 press-opt-own-names	v	the field's value is the name of the on state of the check box turned on (/y), which its /AS is, as ISO 32000-2, §12.7.5.2.3 has /V and /AS the same; PDFium writes the widget's index (/1) where the field has /Opt, whatever its on state's name
+forms-ap-all	as	a check box's or radio button's /AS is a name, as ISO 32000-2, Table 166 has it, /Off where the widget has none; PDFium sets the string (Off)
+forms-ap-all	mark	a check box's or radio button's mark is the ZapfDingbats glyph its caption names, as ISO 32000-2's example of a check box draws it and its /DA names the font, held to PDFium's own shape by where each reaches: the centres within 0.04 of the centre square's side on each axis, the widths and heights within 0.04 (a cross's width within 0.16, its glyph narrower than PDFium's square cross); PDFium fills or strokes a path of its own
+forms-ap-all	off	a check box's or radio button's Off appearance that would paint nothing (no background, no border drawn) isn't made, so its normal appearance has no Off, which ISO 32000-2, §12.7.5.2.3 makes optional; PDFium writes an empty stream
+btn-marks-check	mark@21	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default check for any caption but the six it knows
+btn-marks-check	mark@22	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default check for any caption but the six it knows
+btn-marks-check	mark@23	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default check for any caption but the six it knows
+btn-marks-radio	mark@21	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default circle for any caption but the six it knows
+btn-marks-radio	paint@21	the caption 6 names a glyph of ZapfDingbats (a22), not the circle, so the frame is square; PDFium draws its default circle in a round frame for any caption but the six it knows
+btn-marks-radio	mark@22	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default circle for any caption but the six it knows
+btn-marks-radio	paint@22	the caption 6 names a glyph of ZapfDingbats (a22), not the circle, so the frame is square; PDFium draws its default circle in a round frame for any caption but the six it knows
+btn-marks-radio	mark@23	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default circle for any caption but the six it knows
+btn-marks-radio	paint@23	the caption 6 names a glyph of ZapfDingbats (a22), not the circle, so the frame is square; PDFium draws its default circle in a round frame for any caption but the six it knows
+btn-da	mark@3	the mark is drawn at the size /DA gives (8), as a glyph of a font named at a size; PDFium fills its shape to the box whatever the size
+btn-da	mark@8	the mark is drawn at the size /DA gives (8), as a glyph of a font named at a size; PDFium fills its shape to the box whatever the size
+btn-opt-own-name	states@0	a widget whose normal appearance names its on state (/mine) keeps that name, so its appearance is found by it and /AS can name it; PDFium names the state it makes by the widget's index in /Opt (/0), leaving /mine beside it

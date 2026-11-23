@@ -478,6 +478,8 @@ def button_choice_cases():
        objs={50: b"<< /T (group) /FT /Btn " + RADIO + b" /V /1 /Kids [5 0 R 6 0 R 7 0 R] >>", 51: on, 52: off})
     as_kind("forms-press", press=b"1")
     press_cases()
+    toggle_cases()
+    push_cases()
 
 
 def press(name, ff, kids, value=b"", opt=b"", presses=b"0"):
@@ -534,6 +536,161 @@ def press_cases():
     press("press-opt-radio", radio, first_on, b"/V /0 ", opt, presses=b"1")
     press("press-opt-radio-unison", radio | unison, by_index, opt=opt, presses=b"0")
     press("press-opt-own-names", 0, [(b"Off", b"x"), (b"Off", b"y")], opt=b"/Opt [(a) (b)] ", presses=b"1")
+
+
+def at(i, w=12, h=12, cols=8):
+    """The `/Rect` of the `i`th widget of a grid, `w` by `h`, 60 apart."""
+    x, y = 10 + 60 * (i % cols), 10 + 60 * (i // cols)
+    return b"[%d %d %s %s]" % (x, y, b"%g" % (x + w), b"%g" % (y + h))
+
+
+def toggle(ff, rest, i, w=12, h=12):
+    """A check box's or radio button's merged widget: /Ff `ff`, `rest` its
+    other entries, the `i`th of a grid."""
+    return widget_of(b"/FT /Btn /Ff %d " % ff + rest, at(i, w, h))
+
+
+def toggle_cases():
+    check, radio = 0, 49152
+    # Each mark a caption names, and none (the default) and 6 (a glyph
+    # PDFium has no shape for), in a check box and a radio button, at three
+    # boxes, a black border of 1 on white.
+    captions = [None, b"4", b"8", b"H", b"l", b"n", b"u", b"6"]
+    boxes = [(12, 12), (20, 20), (14, 20)]
+    for word, ff in (("check", check), ("radio", radio)):
+        widgets = []
+        for caption in captions:
+            for w, h in boxes:
+                ca = b"/CA (" + caption + b") " if caption else b""
+                widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << " + ca + b"/BC [0] /BG [1] >>",
+                                      len(widgets), w, h))
+        ap("btn-marks-" + word, widgets)
+        as_kind("forms-ap-all")
+    # Each border style, with a background and without: none (a width of 0),
+    # solid, beveled, inset, dashed, underline; with a check mark, with the
+    # default mark (a radio button's round frame), and with none but the
+    # frame drawn (no border color).
+    styles = [(None, None), (b"S", b"1"), (b"B", b"2"), (b"I", b"1"), (b"D", b"1"), (b"U", b"1"), (b"B", b"1")]
+    for word, ff, captions in (("check", check, [b"4", None]), ("radio", radio, [None, b"4"])):
+        widgets = []
+        for caption in captions:
+            for style, width in styles:
+                for bg in (b"", b"/BG [0.9] "):
+                    ca = b"/CA (" + caption + b") " if caption else b""
+                    bc = b"/BC [0] " if style else b""
+                    bs = b" /BS << /W %s /S /%s >>" % (width, style) if style else b" /BS << /W 0 >>"
+                    widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << " + ca + bc + bg + b">>" + bs,
+                                          len(widgets), 16, 16))
+        # Beveled and inset with no border color: the bands alone.
+        for style in (b"B", b"I"):
+            widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << /BG [0.5] >> /BS << /W 1 /S /%s >>" % style,
+                                  len(widgets), 16, 16))
+        ap("btn-borders-" + word, widgets)
+        as_kind("forms-ap-all")
+    # Turned: a check, a circle and a cross, a quarter, a half and three
+    # quarters, in a box 14 by 20.
+    widgets = []
+    for ff, caption in ((check, b"4"), (radio, b"l"), (check, b"8")):
+        for r in (b"90", b"180", b"270"):
+            widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << /CA (" + caption + b") /R " + r
+                                  + b" /BC [0] /BG [1] >>", len(widgets), 14, 20))
+    ap("btn-rotate", widgets)
+    as_kind("forms-ap-all")
+    # /DA's colors (gray, RGB, CMYK, none), and its size: 8 (the mark drawn
+    # at it), 0, and no /DA at all; a background in RGB and CMYK, whose down
+    # appearance is each component less 0.25.
+    widgets = []
+    for ff in (check, radio):
+        for da, mk in ((b"/DA (/ZaDb 0 Tf 0.5 g)", b"/BG [1 0 0]"), (b"/DA (/ZaDb 0 Tf 0 0 1 rg)", b"/BG [0.1 0.2 0.3 0.4]"),
+                       (b"/DA (/ZaDb 0 Tf 0 0 0 1 k)", b""), (b"/DA (/ZaDb 8 Tf 0 g)", b""), (b"", b"")):
+            widgets.append(toggle(ff, da + b" /MK << /CA (n) /BC [0] " + mk + b" >>", len(widgets), 20, 20))
+    ap("btn-da", widgets)
+    as_kind("forms-ap-all")
+    # The on state's name a widget has, under /NeedAppearances, which makes
+    # PDFium make every widget's appearances anew: /1, /Yes, /On, /spouse,
+    # /Choice1, none of them with an Off of its own, the first on; with no
+    # colors, so nothing is drawn when they're off.
+    on = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 12 12] ", b"0 g 2 2 8 8 re f")
+    widgets = []
+    for i, name in enumerate((b"1", b"Yes", b"On", b"spouse", b"Choice1")):
+        state = name if i == 0 else b"Off"
+        widgets.append(toggle(check if i % 2 == 0 else radio, b"/DA (/ZaDb 0 Tf 0 g) /AS /" + state
+                              + b" /AP << /N << /" + name + b" 50 0 R >> >>", i))
+    ap("btn-states", widgets, form=b"/NeedAppearances true", objs={50: on})
+    as_kind("forms-ap-all")
+    # /Opt: check boxes and radio buttons of a field each, its kids with no
+    # /AP, named by their indexes; and under /NeedAppearances a check box
+    # field whose first kid has a name of its own, which PDFium names by its
+    # index all the same.
+    for word, ff in (("check", check), ("radio", radio)):
+        kids = [b"<< /Parent 50 0 R /MK << /CA (4) /BC [0] >> " + WIDGET + b" /Rect " + at(i) + b" >>"
+                for i in range(3)]
+        field = (b"<< /T (g) /FT /Btn /Ff %d /DA (/ZaDb 0 Tf 0 g) /Opt [(apple) (pear) (apple)]"
+                 b" /Kids [5 0 R 6 0 R 7 0 R] >>" % ff)
+        ap("btn-opt-" + word, kids, fields=b"50 0 R", objs={50: field})
+        as_kind("forms-ap-all")
+    kids = [b"<< /Parent 50 0 R /AS /Off /AP << /N << /mine 51 0 R >> >> /MK << /BC [0] >> " + WIDGET
+            + b" /Rect " + at(0) + b" >>",
+            b"<< /Parent 50 0 R /MK << /BC [0] >> " + WIDGET + b" /Rect " + at(1) + b" >>"]
+    field = b"<< /T (g) /FT /Btn /DA (/ZaDb 0 Tf 0 g) /Opt [(apple) (pear)] /Kids [5 0 R 6 0 R] >>"
+    ap("btn-opt-own-name", kids, fields=b"50 0 R", objs={50: field, 51: on}, form=b"/NeedAppearances true")
+    as_kind("forms-ap-all")
+    # The default resources' ZapfDingbats with an encoding of its own, whose
+    # code for a check mark draws a circle, and a /DA naming Helvetica: the
+    # mark drawn in ZapfDingbats as it's written by name all the same.
+    objects = {
+        5: b"<< /T (f0) " + toggle(check, b"/DA (/ZaEnc 0 Tf 0 g) /MK << /CA (4) /BC [0] >>", 0) + b" >>",
+        6: b"<< /T (f1) " + toggle(radio, b"/DA (/Helv 0 Tf 0 g) /MK << /BC [0] >>", 1) + b" >>",
+        60: std(b"ZapfDingbats", b" /Encoding << /Differences [52 /a71] >>"),
+        100: FONTS[b"Helv"][1],
+    }
+    acroform = b"<< /Fields [5 0 R 6 0 R] /DR << /Font << /ZaEnc 60 0 R /Helv 100 0 R >> >> >>"
+    ROWS.append(("btn-fonts", "forms-ap-all", {"pdf": build_doc(acroform, b"[5 0 R 6 0 R]", objects)}))
+
+
+def push(rest, i, w=50, h=20):
+    """A push button's merged widget, `rest` its other entries, the `i`th of
+    a grid of four a row."""
+    return widget_of(b"/FT /Btn /Ff 65536 " + rest, at(i, w, h, cols=4))
+
+
+def push_cases():
+    # /DA's sizes: automatic, 9, 12 in red, none at all (12 in a font PDFium
+    # adds), a color alone (automatic, the same font), Times; a caption wider
+    # than its box at 10 and automatic; no caption; the icon alone with no
+    # icon; turned a quarter.
+    widgets = []
+    for da in (b"/DA (/Helv 0 Tf 0 g)", b"/DA (/Helv 9 Tf 0 g)", b"/DA (/Helv 12 Tf 1 0 0 rg)", b"",
+               b"/DA (0 0 1 rg)", b"/DA (/TiRo 10 Tf 0 g)"):
+        widgets.append(push(da + b" /MK << /CA (Push me) /BC [0] /BG [0.75] >> /BS << /W 1 /S /B >>",
+                            len(widgets)))
+    for size in (b"10", b"0"):
+        widgets.append(push(b"/DA (/Helv " + size + b" Tf 0 g) /MK << /CA (A caption much wider than its box)"
+                            b" /BC [0] >>", len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /BC [0] /BG [1 1 0] >>", len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /CA (Hidden) /TP 1 /BC [0] >>", len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /CA (Turned) /R 90 /BC [0] >>", len(widgets), 20, 50))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /CA (Tall) >>", len(widgets), 50, 60))
+    ap("push-sizes", widgets)
+    as_kind("forms-ap-all")
+    # Highlighting: none, invert, outline, push and toggle; push with its
+    # rollover and down captions and without; each border style; a
+    # background in gray, RGB, CMYK and none, whose down appearance is each
+    # component less 0.25.
+    widgets = []
+    for h in (b"N", b"I", b"O", b"P", b"T"):
+        widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /" + h + b" /MK << /CA (Go) /BC [0] /BG [0.75] >>",
+                            len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Go) /RC (Over) /AC (Down) /BC [0] >>",
+                        len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Go) /RC () /BC [0] >>", len(widgets)))
+    for style, bg in ((b"B", b"[0.75]"), (b"I", b"[1 0 0]"), (b"S", b"[0.1 0.2 0.3 0.4]"), (b"D", None),
+                      (b"U", b"[0.5]"), (b"B", None)):
+        mk = b"/BG " + bg + b" " if bg else b""
+        widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Press) /BC [0 0 1] " + mk
+                            + b">> /BS << /W 1 /S /" + style + b" >>", len(widgets)))
+    ap("push-states", widgets)
+    as_kind("forms-ap-all")
 
 
 def ap_cases():

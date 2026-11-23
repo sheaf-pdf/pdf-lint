@@ -25,7 +25,24 @@
 //!    button with NoToggleToOff left as it was; an index past the widgets
 //!    changing nothing. The value is the first on widget's on state, `Off`
 //!    with none, each `/AS` its widget's on state or `Off`, and no `Debug`
-//!    shows a state's name, an export value, or an option.
+//!    shows a state's name, an export value, or an option. With
+//!    `text-layout`, their appearances: `appearance::check_box`,
+//!    `radio_button` and `push_button` over a caption, a box, a border,
+//!    colors, a rotation, and a `/DA` cut from the input as
+//!    `check_appearance` cuts them (`check_buttons`), the push button in each
+//!    standard 14 font; and for each widget of the form's buttons,
+//!    `appearance::widget_toggle` or `widget_push`, alike under `&mut ()`
+//!    and a `Vec` sink, and `toggle_for_widget` or `push_for_widget`, which
+//!    make what `make` makes in their font and tell what reading the widget
+//!    and its font tells; any other field's refused (`Unmade::NotButton`).
+//!    Each is made the same twice; a caption past `Limits::text` and no box
+//!    are refused as they say, a character a font lacks told at its offset
+//!    in a caption; a toggle's `Off` is its on state's frame without the
+//!    mark, none where that paints nothing, and its on state has at most
+//!    the font it's given as its resource; each content's `q`/`Q` and
+//!    `BT`/`ET` balanced, no `/Tx`, its numbers finite, and in a standard 14
+//!    font it interprets with no error and no fault; and no `Debug` shows a
+//!    caption.
 //! 6. Appearances (`text-layout`): `appearance::text` over a text, flags,
 //!    `/MaxLen`, `/Q`, a box, a border, colors, a rotation, and a `/DA` cut
 //!    from the input (`check_appearance`), in each standard 14 font; and for
@@ -154,6 +171,8 @@ pub fn check(data: &[u8]) {
     let parsed = Parsed::of(data);
     read(parsed.objects(), &parsed.catalog);
     check_group(data);
+    #[cfg(feature = "text-layout")]
+    check_buttons(data);
 }
 
 /// A catalog and objects 1, 2, … split on `0xFF` and parsed, the first 24
@@ -285,6 +304,8 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
         }
         let _ = (form.has_xfa(), form.quadding(), form.sig_flags());
         buttons_and_choices(objects, &form, rules, &limits);
+        #[cfg(feature = "text-layout")]
+        widget_buttons(objects, &form, rules, &limits);
 
         #[cfg(feature = "text-layout")]
         widget_appearances(objects, &form, rules, &limits);
@@ -1394,6 +1415,350 @@ fn holds_press(group: &crate::group::Group<'_>, before: &[bool], index: usize, a
     }
     assert_eq!(group.export_value(count), None);
     assert_eq!(group.on_state(count), None);
+}
+
+/// Makes a check box's, a radio button's, and a push button's appearances
+/// from what `data` is cut into, as [`check_appearance`] cuts it (`Cut`):
+/// the text the caption, the rollover and down captions its halves, the
+/// push button in each standard 14 font; each made twice the same, and
+/// holding what the makers promise ([`toggle_holds`], [`push_holds`]).
+#[cfg(feature = "text-layout")]
+pub fn check_buttons(data: &[u8]) {
+    use pdf_fonts::Std14;
+
+    use crate::appearance::{
+        FieldFont, PushButton, ToggleButton, check_box, push_button, radio_button,
+    };
+
+    let cut = Cut::of(data);
+    let (look, limits) = (cut.look(), cut.limits());
+    let caption: &str = &cut.text;
+    let half = (0..=caption.len() / 2)
+        .rev()
+        .find(|&at| caption.is_char_boundary(at))
+        .unwrap_or(0);
+    let mut toggle = ToggleButton::new();
+    toggle.caption = Some(caption);
+    let zapf = FieldFont::standard(Std14::ZapfDingbats);
+    let res = zapf
+        .res()
+        .expect("a standard 14 font is named by its dictionary");
+    for make in [check_box, radio_button] {
+        let made = make(&toggle, &look, &cut.da, res.clone(), &limits);
+        assert_eq!(made, make(&toggle, &look, &cut.da, res.clone(), &limits));
+        toggle_holds(&look, caption, &limits, &res, &made);
+    }
+
+    let mut push = PushButton::new(caption);
+    push.rollover_caption = Some(&caption[..half]);
+    push.down_caption = Some(&caption[half..]);
+    push.pressed_states = data.first().is_some_and(|b| b & 1 != 0);
+    for font in faces() {
+        let layout = font.layout();
+        let res = font
+            .res()
+            .expect("a standard 14 font is named by its dictionary");
+        let made = push_button(&push, &look, &cut.da, res.clone(), &layout, &limits);
+        assert_eq!(
+            made,
+            push_button(&push, &look, &cut.da, res.clone(), &layout, &limits)
+        );
+        push_holds(&push, &look, &limits, &res, &made);
+    }
+}
+
+/// Holds what `appearance::check_box` and `radio_button` promise of
+/// `made`, made with `caption` in `look` under `limits` in the font `res`.
+#[cfg(feature = "text-layout")]
+fn toggle_holds(
+    look: &crate::appearance::WidgetLook<'_>,
+    caption: &str,
+    limits: &Limits,
+    res: &pdf_content_streams::Res,
+    made: &Result<crate::appearance::ToggleAppearances, crate::appearance::Unmade>,
+) {
+    let made = match made {
+        Ok(made) => made,
+        Err(err) => {
+            refused_as_said(look, caption.len() > limits.text, err);
+            assert!(
+                !shows(&format!("{err:?} {err}"), caption),
+                "an error shows a caption"
+            );
+            return;
+        }
+    };
+    assert!(caption.len() <= limits.text, "a caption past its cap");
+    assert!(boxed(look), "made in no box");
+    for (on, off) in [(&made.on, &made.off), (&made.down_on, &made.down_off)] {
+        button_content_holds(&on.content);
+        assert!(on.needs.0.len() <= 1, "one resource at most");
+        assert!(
+            on.needs.0.iter().all(|need| need.res == *res),
+            "the font given"
+        );
+        match off {
+            Some(off) => {
+                assert!(
+                    on.content.starts_with(&off.content),
+                    "Off the on state's frame"
+                );
+                assert!(!off.content.is_empty() && off.needs.0.is_empty());
+                assert_eq!((off.bbox, off.matrix), (on.bbox, on.matrix));
+                button_content_holds(&off.content);
+            }
+            // Nothing before the mark's scope.
+            None => assert!(on.content.is_empty() || on.content.starts_with(b"q\n")),
+        }
+        assert!(on.font_size.is_finite() && on.font_size >= 0.0);
+        interprets_alone(on);
+        if let Some(off) = off {
+            interprets_alone(off);
+        }
+    }
+    assert!(
+        !shows(&format!("{made:?}"), caption),
+        "an appearance shows a caption"
+    );
+}
+
+/// Holds what `appearance::push_button` promises of `made`, made of
+/// `button` in `look` under `limits` in the font `res`.
+#[cfg(feature = "text-layout")]
+fn push_holds(
+    button: &crate::appearance::PushButton<'_>,
+    look: &crate::appearance::WidgetLook<'_>,
+    limits: &Limits,
+    res: &pdf_content_streams::Res,
+    made: &Result<crate::appearance::PushAppearances, crate::appearance::Unmade>,
+) {
+    use crate::appearance::Unmade;
+
+    let captions = [
+        Some(button.caption),
+        button.rollover_caption,
+        button.down_caption,
+    ];
+    let past = captions.iter().flatten().any(|c| c.len() > limits.text);
+    let made = match made {
+        Ok(made) => made,
+        Err(Unmade::Unencodable(told)) => {
+            assert!(
+                captions.iter().flatten().any(|c| c
+                    .get(told.at..)
+                    .is_some_and(|c| c.starts_with(told.character))),
+                "a character told at its offset in a caption"
+            );
+            return;
+        }
+        Err(err) => {
+            refused_as_said(look, past, err);
+            assert!(
+                !shows(&format!("{err:?} {err}"), button.caption),
+                "an error shows a caption"
+            );
+            return;
+        }
+    };
+    assert!(!past, "a caption past its cap");
+    assert!(boxed(look), "made in no box");
+    assert_eq!(made.rollover.is_some(), button.pressed_states);
+    assert_eq!(made.down.is_some(), button.pressed_states);
+    for made in [
+        Some(&made.normal),
+        made.rollover.as_ref(),
+        made.down.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        button_content_holds(&made.content);
+        assert!(made.needs.0.len() <= 1, "one resource at most");
+        assert!(
+            made.needs.0.iter().all(|need| need.res == *res),
+            "the font given"
+        );
+        assert!(made.font_size.is_finite() && made.font_size >= 0.0);
+        interprets_alone(made);
+    }
+    assert!(
+        !shows(&format!("{made:?}"), button.caption),
+        "an appearance shows a caption"
+    );
+}
+
+/// Holds a button maker's refusal `err` of `look` to what it says: no box
+/// exactly where the box has no width or no height, a caption past its cap
+/// only where one is (`past`), a number not finite only where the box is.
+#[cfg(feature = "text-layout")]
+fn refused_as_said(
+    look: &crate::appearance::WidgetLook<'_>,
+    past: bool,
+    err: &crate::appearance::Unmade,
+) {
+    use crate::Cap;
+    use crate::appearance::Unmade;
+
+    match err {
+        Unmade::Limit(Cap::Text) => assert!(past, "refused for a cap not passed"),
+        Unmade::NoBox => assert!(!past && !boxed(look), "no box for a box"),
+        Unmade::NotFinite => assert!(!past && boxed(look), "not finite for no box"),
+        other => panic!("a maker of plain data refused with {other:?}"),
+    }
+}
+
+/// Whether `look`'s box has a width and a height.
+#[cfg(feature = "text-layout")]
+fn boxed(look: &crate::appearance::WidgetLook<'_>) -> bool {
+    let sized = |v: f32| v.is_finite() && v > 0.0;
+    sized(look.width) && sized(look.height)
+}
+
+/// Holds what a button's appearance's content promises, read as
+/// operations: `q`/`Q` and `BT`/`ET` balanced, no marked sequence, and
+/// every number finite.
+#[cfg(feature = "text-layout")]
+fn button_content_holds(content: &[u8]) {
+    use pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
+
+    let limits = ContentLimits::DEFAULT;
+    let (mut states, mut texts) = (0isize, 0isize);
+    for operation in operations(content, &ResCx::none(), &limits) {
+        let operation = operation.expect("a made appearance's content reads");
+        for operand in operation.operands() {
+            if operand.is_number() {
+                assert!(operand.number().is_finite(), "a number written not finite");
+            }
+            for element in operand.elements().filter(|e| e.is_number()) {
+                assert!(element.number().is_finite(), "a number written not finite");
+            }
+        }
+        match operation.name() {
+            b"q" => states += 1,
+            b"Q" => states -= 1,
+            b"BT" => texts += 1,
+            b"ET" => texts -= 1,
+            b"BMC" | b"BDC" | b"EMC" => panic!("a button's appearance in a marked sequence"),
+            _ => {}
+        }
+        assert!(states >= 0 && texts >= 0, "closed before it's opened");
+    }
+    assert_eq!((states, texts), (0, 0), "q/Q and BT/ET balanced");
+}
+
+/// `made`, whose font is a standard 14 font's dictionary, interpreted over
+/// no objects: with no error and no fault.
+#[cfg(feature = "text-layout")]
+fn interprets_alone(made: &crate::appearance::Appearance) {
+    let store: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let nothing = WithStreams::new(&store, |id: ObjectId, _: usize| {
+        Err(Unreadable::new(id, Why::Damaged, "no stream"))
+    });
+    let resources = resources(made);
+    if let Err(why) = interprets(nothing, made, &resources) {
+        panic!("a button's appearance in a standard 14 font interprets with {why}");
+    }
+}
+
+/// Reads each button widget of `form` for its appearances, alike whatever
+/// the sink, makes them in their font, and holds the conveniences to what
+/// they're made of, as the module's docs list.
+#[cfg(feature = "text-layout")]
+fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
+    objects: R,
+    form: &Form<'o>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    use pdf_fonts::Std14;
+
+    use crate::FieldKind;
+    use crate::appearance::{
+        FieldFont, Unmade, push_for_widget, toggle_for_widget, widget_push, widget_toggle,
+    };
+
+    for field in form.fields() {
+        let kind = field.kind();
+        let toggle = matches!(kind, Some(FieldKind::CheckBox | FieldKind::Radio));
+        let push = kind == Some(FieldKind::PushButton);
+        for widget in field.widgets() {
+            let quiet = widget_toggle(field, widget, objects, rules, limits, &mut ());
+            let mut told: Vec<(Place, Fault)> = Vec::new();
+            let read = widget_toggle(field, widget, objects, rules, limits, &mut told);
+            assert_eq!(
+                format!("{quiet:?}"),
+                format!("{read:?}"),
+                "a sink changed a toggle"
+            );
+            if !toggle {
+                assert!(matches!(read, Err(Unmade::NotButton)));
+            }
+            if let Ok(read) = &read {
+                let caption = read.button().caption.unwrap_or_default();
+                assert!(!shows(&format!("{read:?}"), caption), "a caption shown");
+                let mut faults = Vec::new();
+                let made =
+                    toggle_for_widget(form, field, widget, objects, rules, limits, &mut faults);
+                let made_quiet =
+                    toggle_for_widget(form, field, widget, objects, rules, limits, &mut ());
+                assert_eq!(format!("{made:?}"), format!("{made_quiet:?}"));
+                assert!(faults.starts_with(&told), "the reader's faults first");
+                if let Ok(made) = made {
+                    assert_eq!(made.on_state, read.on_state());
+                    let res = made.font.res().expect("a toggle's font is named");
+                    assert_eq!(read.make(res, limits).as_ref(), Ok(&made.appearances));
+                    let standard = FieldFont::standard(Std14::ZapfDingbats);
+                    if made.font.is_fallback() {
+                        assert_eq!(made.font.res(), standard.res());
+                    }
+                }
+            }
+
+            let quiet = widget_push(field, widget, objects, rules, limits, &mut ());
+            let mut told: Vec<(Place, Fault)> = Vec::new();
+            let read = widget_push(field, widget, objects, rules, limits, &mut told);
+            assert_eq!(
+                format!("{quiet:?}"),
+                format!("{read:?}"),
+                "a sink changed a push button"
+            );
+            if !push {
+                assert!(matches!(read, Err(Unmade::NotButton)));
+            }
+            let Ok(read) = &read else { continue };
+            let button = read.button();
+            assert!(
+                !shows(&format!("{read:?}"), button.caption),
+                "a caption shown"
+            );
+            let mut faults = Vec::new();
+            let made = push_for_widget(form, field, widget, objects, rules, limits, &mut faults);
+            assert_eq!(
+                format!("{made:?}"),
+                format!(
+                    "{:?}",
+                    push_for_widget(form, field, widget, objects, rules, limits, &mut ())
+                )
+            );
+            let font = match read.font_name() {
+                Some(name) => form.field_font(objects, name, limits, &mut told),
+                None => Ok(FieldFont::standard(Std14::Helvetica)),
+            };
+            assert!(faults == told, "push_for_widget tells what reading tells");
+            let expected = match font {
+                Ok(font) => match font.res() {
+                    Some(res) => read.make(res, &font.layout(), limits),
+                    None => Err(Unmade::FontNotBindable),
+                },
+                Err(err) => Err(err.into()),
+            };
+            match (made, expected) {
+                (Ok(made), Ok(expected)) => assert!(made.appearances == expected),
+                (Err(err), Err(expected)) => assert!(err == expected),
+                _ => panic!("push_for_widget makes what widget_push, field_font and make make"),
+            }
+        }
+    }
 }
 
 /// The objects and catalog a seed is parsed into, for the crate's tests.

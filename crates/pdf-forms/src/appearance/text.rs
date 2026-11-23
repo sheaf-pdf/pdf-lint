@@ -73,14 +73,14 @@ impl fmt::Debug for TextField<'_> {
 
 /// The sizes PDFium chooses an automatic size from, in points
 /// (`core/fpdfdoc/cpvt_variabletext.cpp`, `kFontSizeSteps`).
-const AUTO_SIZES: [f32; 25] = [
+pub(super) const AUTO_SIZES: [f32; 25] = [
     4.0, 6.0, 8.0, 9.0, 10.0, 12.0, 14.0, 18.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0,
     60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 144.0,
 ];
 
 /// The size below which PDFium takes a size for none and chooses one
 /// (`core/fxcrt/fx_system.h`, `FXSYS_IsFloatZero`).
-const NO_SIZE: f32 = 0.0001;
+pub(super) const NO_SIZE: f32 = 0.0001;
 
 /// How many of [`AUTO_SIZES`] a multiline field chooses from: the first
 /// quarter, 12 points at most.
@@ -896,6 +896,6 @@ fn advances<F: FontSet + ?Sized>(
 
 /// Whether `a` is bigger than `b` by more than `0.0001`, as PDFium compares
 /// them (`core/fxcrt/fx_system.h`, `FXSYS_IsFloatBigger`).
-fn is_bigger(a: f32, b: f32) -> bool {
+pub(super) fn is_bigger(a: f32, b: f32) -> bool {
     a > b && a - b >= 0.0001
 }
