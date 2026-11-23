@@ -627,6 +627,24 @@ def ap_cases():
        objs={50 + f: b"<< /T (f%d) /FT /Tx " % f + COMB + (b" /MaxLen 6" if f == 2 else b"")
              + b" /V (123456789) /DA (/Helv 12 Tf 0 g) /Kids [%d 0 R %d 0 R] >>" % (5 + 2 * f, 6 + 2 * f)
              for f in range(4)})
+    # A /MaxLen held by null, the field's own, through a reference (60, a
+    # null object) or its parent's (56), is found as PDFium keeps a null in a
+    # dictionary, and the widgets' 4 isn't read: no cells. A reference to no
+    # object (61) is no entry, and the widgets' 4 makes the cells. A first
+    # widget's null, or its reference to no object, is that widget's entry
+    # and no number: no cells. The value is one character, which a comb
+    # field with no /MaxLen draws as PDFium does (ap-comb-no-maxlen's
+    # difference is in a line of more).
+    own = [b" /MaxLen null", b" /MaxLen 60 0 R", b" /Parent 56 0 R", b" /MaxLen 61 0 R", b"", b""]
+    first = [b" /MaxLen 4"] * 4 + [b" /MaxLen null", b" /MaxLen 61 0 R"]
+    objs = {50 + f: b"<< /T (f%d) /FT /Tx " % f + COMB + own[f]
+            + b" /V (1) /DA (/Helv 12 Tf 0 g) /Kids [%d 0 R %d 0 R] >>" % (5 + 2 * f, 6 + 2 * f)
+            for f in range(6)}
+    objs.update({56: b"<< /T (p) /MaxLen null /Kids [52 0 R] >>", 60: b"null"})
+    ap("ap-max-len-held-by-null",
+       [b"<< /Parent %d 0 R " % (50 + i // 2) + WIDGET + b" /Rect [10 %d 210 %d]" % (10 + 30 * i, 30 + 30 * i)
+        + (first[i // 2] if i % 2 == 0 else b" /MaxLen 4") + b" >>" for i in range(12)],
+       fonts=[b"Helv"], fields=b"50 0 R 51 0 R 56 0 R 53 0 R 54 0 R 55 0 R", objs=objs)
     ap("ap-value-kinds", [tx(value=b"50 0 R", da=b"/Helv 10 Tf 0 g"), tx(value=b"/Name", da=b"/Helv 10 Tf 0 g"),
                           tx(value=b"[(a) (b)]", da=b"/Helv 10 Tf 0 g"), tx(value=b"51 0 R", da=b"/Helv 10 Tf 0 g")],
        objs={50: stream(b"", b"from a stream"), 51: b"(by reference)"})

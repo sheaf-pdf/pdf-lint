@@ -328,8 +328,9 @@ struct Inherited<'o> {
     da: Option<&'o [u8]>,
     quadding: Option<Quadding>,
     max_len: Option<u32>,
-    /// Whether a `/MaxLen` was reached on the way down, a number or not: a
-    /// field below one takes none of its widgets' under PDFium's rules.
+    /// Whether a `/MaxLen` was held on the way down, a number or not, `null`
+    /// included: a field below one takes none of its widgets' under PDFium's
+    /// rules.
     max_len_held: bool,
 }
 
@@ -581,7 +582,9 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     // ancestor's takes the first of its widgets' own, as PDFium as of
     // chromium/8152 reads a field's (`core/fpdfdoc/cpdf_formfield.cpp`,
     // `GetMaxLen`): the first widget whose dictionary has the key, whatever
-    // it holds, and none where that's no number of 0 or more. ISO 32000-2
+    // it holds, and none where that's no number of 0 or more. An entry that
+    // holds `null` is one, as PDFium's dictionaries keep it, so the widgets
+    // aren't read below it; one that reaches no object isn't. ISO 32000-2
     // gives the entry to fields alone (§12.7.5.3).
     if reader.rules == Rules::Pdfium && !max_len_held {
         let first = (walk.fields[index].widgets.iter())

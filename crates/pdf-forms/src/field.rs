@@ -335,7 +335,9 @@ impl<'o> Field<'o> {
     /// of its widgets' own, as PDFium as of chromium/8152 reads it: the first
     /// widget, in `/Kids` order, whose dictionary has the entry, whatever it
     /// holds, so a `0` there, or no number, gives no limit though a later
-    /// widget has one.
+    /// widget has one. A `/MaxLen` the field or an ancestor holds keeps the
+    /// widgets unread though it's no number or `null`, as PDFium finds it;
+    /// one that's a reference to no object is none.
     #[must_use]
     pub const fn max_len(&self) -> Option<u32> {
         self.max_len

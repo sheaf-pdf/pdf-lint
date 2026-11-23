@@ -625,12 +625,15 @@ fn a_real_for_an_integer_is_taken_only_under_pdfiums_rules() {
 
 /// Under PDFium's rules a field with no `/MaxLen` of its own or an
 /// ancestor's takes the first of its widgets' own: the first widget whose
-/// dictionary has the entry, whatever it holds. Under ISO 32000-2's the entry
+/// dictionary has the entry, whatever it holds. An entry the field or an
+/// ancestor holds keeps the widgets unread, `null` included, as PDFium finds
+/// it; a reference to no object is none. Under ISO 32000-2's rules the entry
 /// is a field's alone, and a widget's is never read.
 #[test]
 fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
     let mut store = Store::default();
     let missing = store.reserve();
+    let null = store.put(Object::from(Value::Null));
     // A field of widget kids, each with the `/MaxLen` given or none, under
     // `parent`, holding `own` itself.
     let field = |store: &mut Store,
@@ -675,6 +678,14 @@ fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
         ("dangling", None, vec![Some(Object::from(missing)), n(4)]),
         ("own-text", Some(Object::text("x")), vec![n(4)]),
         ("none", None, vec![None, None]),
+        ("own-null", Some(Object::from(Value::Null)), vec![n(4)]),
+        ("own-to-null", Some(Object::from(null)), vec![n(4)]),
+        ("own-dangling", Some(Object::from(missing)), vec![n(4)]),
+        (
+            "first-null",
+            None,
+            vec![Some(Object::from(Value::Null)), n(4)],
+        ),
     ] {
         let (id, mut dict, kids) = field(&mut store, name, own, None, widgets);
         dict.push("Kids", refs(&kids));
@@ -683,14 +694,18 @@ fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
         fields.push(name);
     }
     // A field's own merged widget, and fields under a parent that has a
-    // `/MaxLen` and under one that has none.
+    // `/MaxLen`, under one that has none, and under one whose is `null`.
     roots.push(store.put(dict! {
         "T" => Object::text("merged"),
         "FT" => Object::name("Tx"),
         "Subtype" => Object::name("Widget"),
         "Rect" => rect(),
     }));
-    for (name, own) in [("held", n(5)), ("bare", None)] {
+    for (name, own) in [
+        ("held", n(5)),
+        ("bare", None),
+        ("held-null", Some(Object::from(Value::Null))),
+    ] {
         let (parent, mut dict, _) = field(&mut store, name, own, None, Vec::new());
         let (kid, mut kid_dict, kids) = field(&mut store, "kid", None, Some(parent), vec![n(4)]);
         kid_dict.push("Kids", refs(&kids));
@@ -706,11 +721,19 @@ fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
         let form = Form::read_with(&store.objects, &catalog, rules, &Limits::DEFAULT, &mut sink)
             .unwrap()
             .unwrap();
-        let max_lens: Vec<_> = ["merged", "held", "held.kid", "bare", "bare.kid"]
-            .iter()
-            .chain(&fields)
-            .map(|name| (*name, form.fields()[form.find(name).unwrap()].max_len()))
-            .collect();
+        let max_lens: Vec<_> = [
+            "merged",
+            "held",
+            "held.kid",
+            "bare",
+            "bare.kid",
+            "held-null",
+            "held-null.kid",
+        ]
+        .iter()
+        .chain(&fields)
+        .map(|name| (*name, form.fields()[form.find(name).unwrap()].max_len()))
+        .collect();
         let faults: Vec<_> = sink.into_iter().map(|(_, fault)| fault).collect();
         // The same form read without a sink.
         let quiet = Form::read(&store.objects, &catalog, rules, &Limits::DEFAULT)
@@ -733,6 +756,8 @@ fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
             ("held.kid", Some(5)),
             ("bare", None),
             ("bare.kid", Some(4)),
+            ("held-null", None),
+            ("held-null.kid", None),
             ("second", Some(4)),
             ("first", Some(7)),
             ("own", Some(6)),
@@ -743,6 +768,10 @@ fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
             ("dangling", None),
             ("own-text", None),
             ("none", None),
+            ("own-null", None),
+            ("own-to-null", None),
+            ("own-dangling", Some(4)),
+            ("first-null", None),
         ]
     );
     // The widgets' entries read are told as any field's are: the real, the
