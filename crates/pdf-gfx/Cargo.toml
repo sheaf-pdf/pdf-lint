@@ -37,6 +37,11 @@ text-layout = ["dep:unicode-bidi"]
 # Forwards `pdf-fonts/predefined-cmaps` so Type 0 fonts using Adobe's
 # predefined CJK CMaps resolve character codes and CIDs from the bundle.
 predefined-cmaps = ["pdf-fonts/predefined-cmaps"]
+# Forwards `pdf-fonts/embed` (which brings in `subsetter`); with `text-layout`,
+# a TrueType program embedded in a document is a `LayoutFont`, and
+# `ProgramFont` records the glyphs it encodes. It doesn't turn `text-layout`
+# on, so a dependent that embeds without laying text out builds without it.
+embed = ["pdf-fonts/embed"]
 # Emits `debug`-level `tracing` spans with numeric counts and byte lengths
 # (never file plaintext or stream bytes).
 tracing = [
@@ -47,7 +52,7 @@ tracing = [
 ]
 
 [package.metadata.docs.rs]
-features = ["predefined-cmaps", "tracing"]
+features = ["predefined-cmaps", "tracing", "embed"]
 
 [lib]
 bench = false

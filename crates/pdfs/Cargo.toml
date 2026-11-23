@@ -59,8 +59,9 @@ text-layout = ["pdf-gfx/text-layout", "pdf-annots/text-layout", "pdf-forms/text-
 clock = ["pdf-semantics/clock"]
 # pdf-fonts' `embed`: a TrueType program embedded in a document, cut to the
 # glyphs its pages draw, so that they draw Unicode text in it
-# (`Document::embed_font`).
-embed = ["pdf-fonts/embed"]
+# (`Document::embed_font`); and pdf-gfx's, whose `ProgramFont` lays text out
+# in it with `text-layout`. Neither turns `text-layout` on.
+embed = ["pdf-fonts/embed", "pdf-gfx/embed"]
 # pdf-content-streams' `image-ends`: an inline image's DCT and CCITTFax
 # data ended by decoding it, as PDFium's decoders end it, for a reading
 # that asks for that.

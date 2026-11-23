@@ -4368,3 +4368,169 @@ fn default_appearance_parse_with_gives_what_parse_gives_whatever_the_sink() {
         assert_eq!(format!("{fault:?}"), dbg);
     }
 }
+
+/// A TrueType program embedded in a document, laid out in as itself and through
+/// `ProgramFont`, which records the glyphs it encodes.
+#[cfg(all(feature = "embed", feature = "text-layout"))]
+mod program {
+    use std::sync::{Arc, Mutex};
+
+    use pdf_fixtures::font;
+    use pdf_fonts::embed::{Glyphs, Program};
+
+    use crate::{LayoutFont, ProgramFont, Rect, TextBoxStyle, UnencodableChar, layout_text};
+
+    fn program() -> Program {
+        let mut fixture = font::sample(1000);
+        fixture.names = vec![(4, "MARKER Full".into()), (6, "MARKER-PostScript".into())];
+        Program::open(fixture.build(), 0).unwrap()
+    }
+
+    fn style() -> TextBoxStyle {
+        TextBoxStyle {
+            size: Some(10.0),
+            ..TextBoxStyle::default()
+        }
+    }
+
+    const BOX: Rect = Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 300.0,
+        y1: 40.0,
+    };
+
+    /// Its metrics, each character's advance its glyph's width and its code its
+    /// glyph's number, two bytes, high first; a character its `cmap` doesn't map
+    /// has neither, and nothing is written for it.
+    #[test]
+    fn a_program_is_laid_out_in_as_its_glyphs() {
+        let program = program();
+        assert_eq!(program.font_metrics(), program.metrics());
+        let a = program.glyph('A').unwrap();
+        assert_eq!(program.char_advance('A'), Some(program.width(a)));
+        assert_eq!(program.char_advance('\u{4E2D}'), Some(1000.0));
+        let mut out = vec![7];
+        assert!(program.encode_char('\u{1D11E}', &mut out));
+        assert_eq!(out, [7, 0x01, 0x40]);
+        assert_eq!(program.char_advance('z'), None);
+        assert!(!program.encode_char('z', &mut out));
+        assert!(!program.encode_char('\n', &mut out));
+        assert_eq!(out, [7, 0x01, 0x40]);
+
+        // A layout in it is the program's codes, through `&dyn LayoutFont` too.
+        let text = "Ag H\u{C4}\u{4E2D}";
+        let laid = layout_text(&program, text, BOX, &style()).unwrap();
+        let codes = program.codes(text).unwrap();
+        assert_eq!(laid.lines.len(), 1);
+        assert_eq!(laid.lines[0].codes, codes);
+        let dynamic: &dyn LayoutFont = &program;
+        let again = layout_text(dynamic, text, BOX, &style()).unwrap();
+        assert_eq!(again.lines[0].codes, codes);
+        let refused = layout_text(&program, "Az", BOX, &style()).unwrap_err();
+        assert_eq!(
+            refused,
+            UnencodableChar {
+                at: 1,
+                character: 'z'
+            }
+        );
+    }
+
+    /// `ProgramFont` lays text out as its program does, and records each glyph it
+    /// encodes once, with the character it was drawn for: a layout refused
+    /// part-way has recorded the glyphs before the refusal, and glyphs recorded by
+    /// two fonts sharing one set are one set.
+    #[test]
+    fn a_program_font_records_each_glyph_it_encodes() {
+        let program = program();
+        let glyphs = Mutex::new(Glyphs::new());
+        let font = ProgramFont::new(&program, &glyphs);
+        assert!(std::ptr::eq(font.program(), &program));
+        assert_eq!(font.font_metrics(), program.metrics());
+        assert_eq!(font.char_advance('g'), program.char_advance('g'));
+        assert_eq!(font.char_advance('z'), None);
+        assert!(glyphs.lock().unwrap().is_empty());
+
+        let text = "AgA gH";
+        let laid = layout_text(&font, text, BOX, &style()).unwrap();
+        let plain = layout_text(&program, text, BOX, &style()).unwrap();
+        assert_eq!(laid.lines[0].codes, plain.lines[0].codes);
+        assert_eq!(laid.lines[0].origin, plain.lines[0].origin);
+        let mut expected = Glyphs::new();
+        expected.add(&program, "Ag H").unwrap();
+        assert_eq!(
+            glyphs.lock().unwrap().iter().collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>()
+        );
+
+        let refused = layout_text(&font, "\u{4E2D}z\u{6587}", BOX, &style()).unwrap_err();
+        assert_eq!(refused.character, 'z');
+        let recorded = glyphs.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 5);
+        assert!(recorded.iter().any(|(_, text)| text == "\u{4E2D}"));
+        assert!(!recorded.iter().any(|(_, text)| text == "\u{6587}"));
+
+        // Two threads, one set.
+        let program = Arc::new(program);
+        let shared = Arc::new(Mutex::new(Glyphs::new()));
+        std::thread::scope(|scope| {
+            for text in ["\u{5E9}\u{5DC}", "\u{633}\u{644}"] {
+                let (program, shared) = (&program, &shared);
+                scope.spawn(move || {
+                    let font = ProgramFont::new(program, shared);
+                    layout_text(&font, text, BOX, &style()).unwrap();
+                });
+            }
+        });
+        assert_eq!(shared.lock().unwrap().len(), 4);
+    }
+
+    /// A lock a thread panicked holding is taken as it is: what's recorded is
+    /// whole at every step, and recording goes on.
+    #[test]
+    fn a_poisoned_lock_is_taken_as_it_is() {
+        let program = program();
+        let glyphs = Mutex::new(Glyphs::new());
+        glyphs.lock().unwrap().add(&program, "A").unwrap();
+        let poisoned = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _held = glyphs.lock().unwrap();
+                    panic!("poisons the lock");
+                })
+                .join()
+        });
+        assert!(poisoned.is_err() && glyphs.is_poisoned());
+        let font = ProgramFont::new(&program, &glyphs);
+        let laid = layout_text(&font, "gH", BOX, &style()).unwrap();
+        assert_eq!(laid.lines[0].codes, program.codes("gH").unwrap());
+        let recorded = glyphs.lock().unwrap_or_else(|p| p.into_inner()).len();
+        assert_eq!(recorded, 3);
+        assert!(format!("{font:?}").contains("glyphs: Some(3)"));
+    }
+
+    /// `Debug` gives the program's counts and how many glyphs are recorded, never
+    /// a name of the program or a text drawn, and doesn't wait for a lock the
+    /// caller holds. The font is `Send` and `Sync`, for threads drawing pages.
+    #[test]
+    fn a_program_font_prints_counts_alone() {
+        let program = program();
+        let glyphs = Mutex::new(Glyphs::new());
+        let font = ProgramFont::new(&program, &glyphs);
+        layout_text(&font, "MARKER", BOX, &style()).unwrap_err();
+        glyphs.lock().unwrap().insert(9, "MARKER");
+        let printed = format!("{font:?}");
+        assert!(!printed.contains("MARKER"), "{printed}");
+        assert!(
+            printed.contains("glyphs: 321") && printed.contains("glyphs: Some(1)"),
+            "{printed}"
+        );
+        let held = glyphs.lock().unwrap();
+        assert!(format!("{font:?}").contains("glyphs: None"));
+        drop(held);
+
+        fn shared<T: Send + Sync>() {}
+        shared::<ProgramFont<'static>>();
+    }
+}

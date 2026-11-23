@@ -64,7 +64,9 @@ fmt:
 # every workspace build; then pdf-fonts with Adobe's predefined CMaps and its
 # spans (`tracing`), which nothing else turns on, and what embeds a font
 # (`embed`), which pdfs turns on, with no feature at all, and with `embed`
-# alone, without the reading's programs; then pdf-structure with its spans (`tracing`), which nothing else
+# alone, without the reading's programs; then pdf-gfx with what lays text out
+# in a font embedded (`embed`), alone and with `text-layout`, without the
+# reading's programs; then pdf-structure with its spans (`tracing`), which nothing else
 # turns on; then pdfs as a user gets it, with no feature at all, with what
 # embeds a font (`embed`) alone, and with every feature it forwards, which
 # nothing else turns on all at once.
@@ -87,6 +89,8 @@ clippy:
     cargo clippy --locked -p pdf-gfx --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --features programs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-gfx --no-default-features --features text-layout --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-gfx --no-default-features --features embed --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-gfx --no-default-features --features embed,text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-annots --features predefined-cmaps,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-annots --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-annots --no-default-features --features programs --all-targets -- -D warnings
@@ -118,7 +122,9 @@ test-unit *args="--workspace":
 # engine, without its adapter, and with its spans, which only its tests
 # read; then pdf-fonts' with Adobe's predefined CMaps and its spans, which
 # only its tests read, and what embeds a font, with no feature at all, and
-# with `embed` alone, without the reading's programs; then pdf-structure's
+# with `embed` alone, without the reading's programs; then pdf-gfx's with what
+# lays text out in a font embedded, alone and with `text-layout`, without the
+# reading's programs; then pdf-structure's
 # with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
 # with what embeds a font alone, and with every feature it forwards but its
@@ -153,6 +159,9 @@ test:
     cargo test --locked -p pdf-gfx --no-default-features --doc
     cargo nextest run --locked -p pdf-gfx --no-default-features --features programs
     cargo nextest run --locked -p pdf-gfx --no-default-features --features text-layout
+    cargo nextest run --locked -p pdf-gfx --no-default-features --features embed
+    cargo nextest run --locked -p pdf-gfx --no-default-features --features embed,text-layout
+    cargo test --locked -p pdf-gfx --no-default-features --features embed,text-layout --doc
     cargo nextest run --locked -p pdf-annots --features predefined-cmaps,tracing
     cargo test --locked -p pdf-annots --features predefined-cmaps,tracing --doc
     cargo nextest run --locked -p pdf-annots --no-default-features
@@ -305,7 +314,9 @@ fuzzing:
 # which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
 # pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
-# and with what embeds a font alone, then pdfs as it's published, with no
+# and with what embeds a font alone, then pdf-gfx with no feature, and with
+# what lays text out in a font embedded, alone and with `text-layout`, then
+# pdfs as it's published, with no
 # feature, and with what embeds a font alone, which a link to what only a
 # feature has would fail.
 doc:
@@ -317,6 +328,8 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features --features embed
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features --features embed
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features --features embed,text-layout
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-annots --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
@@ -702,7 +715,9 @@ fonts-cmaps-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features predefined-cmaps --doc
 
 # Test pdf-gfx on its oldest supported Rust, as it's published, with no
-# feature, and with its spans (`tracing`), which must be installed.
+# feature, with its spans (`tracing`), and with what lays text out in a font
+# embedded (`embed`), subsetter among it, with `text-layout` and alone, which
+# must be installed.
 gfx-msrv:
     cargo +{{ gfx_msrv }} nextest run --locked -p pdf-gfx
     cargo +{{ gfx_msrv }} test --locked -p pdf-gfx --doc
@@ -710,6 +725,9 @@ gfx-msrv:
     cargo +{{ gfx_msrv }} test --locked -p pdf-gfx --no-default-features --doc
     cargo +{{ gfx_msrv }} nextest run --locked -p pdf-gfx --features tracing
     cargo +{{ gfx_msrv }} test --locked -p pdf-gfx --features tracing --doc
+    cargo +{{ gfx_msrv }} nextest run --locked -p pdf-gfx --features embed
+    cargo +{{ gfx_msrv }} test --locked -p pdf-gfx --features embed --doc
+    cargo +{{ gfx_msrv }} nextest run --locked -p pdf-gfx --no-default-features --features embed
 
 # Test pdf-gfx with `predefined-cmaps` on that feature's oldest Rust, which
 # must be installed.

@@ -44,7 +44,9 @@
 //!   `unicode-bidi` visual-to-logical reordering, soft-hyphen detection,
 //!   selection quads, hit-testing, and search; `layout_text` and
 //!   `Canvas::text_box` wrap, align, justify, auto-size, and comb-place UTF-8
-//!   text over `Std14`, `Font`, or `FontEncoder`.
+//!   text over `Std14`, `Font`, `FontEncoder`, or, with `embed`, an embedded
+//!   TrueType program (`pdf_fonts::embed::Program`, or `ProgramFont`, which
+//!   records the glyphs it encodes).
 //!
 //! # Cargo Features
 //!
@@ -56,6 +58,10 @@
 //!   `layout_text` / `Canvas::text_box` drawing.
 //! - **`predefined-cmaps`** *(optional)*: Forwards `pdf-fonts/predefined-cmaps`
 //!   for bundled Adobe CJK CMaps and UCS-2 collections.
+//! - **`embed`** *(optional)*: Forwards `pdf-fonts/embed`; with `text-layout`,
+//!   a TrueType program embedded in a document (`pdf_fonts::embed::Program`)
+//!   is a `LayoutFont`, and `ProgramFont` lays text out in one, recording each
+//!   glyph it encodes for the font written of them.
 //! - **`tracing`** *(optional)*: Emits numeric `tracing` spans (byte lengths
 //!   only; never file plaintext or names).
 //!
@@ -146,6 +152,8 @@ mod limits;
 mod marked;
 mod path;
 mod phases;
+#[cfg(all(feature = "embed", feature = "text-layout"))]
+mod program;
 mod reader;
 mod state;
 #[cfg(test)]
@@ -168,6 +176,8 @@ pub use layout::{PageChar, SearchOpts, TextLine, TextMatch, TextPage, TextPageOp
 pub use limits::{Cap, Limits};
 pub use marked::{Mark, MarkProps, Marks, MarksIter};
 pub use path::{PathDrawn, Seg};
+#[cfg(all(feature = "embed", feature = "text-layout"))]
+pub use program::ProgramFont;
 pub use state::{
     ActiveColorSpace, BlendState, ColorValues, DashPattern, RenderingIntent, SoftMask,
     SoftMaskKind, State, TextState,

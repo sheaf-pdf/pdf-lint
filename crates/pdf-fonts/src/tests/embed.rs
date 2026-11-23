@@ -957,6 +957,47 @@ fn glyphs_keep_the_smallest_text() {
     assert_eq!(glyphs.texts.get(&3).map(String::as_str), Some("f"));
 }
 
+/// Glyphs gathered apart join to the same whichever is joined into which, and in
+/// whatever order: a glyph both keep keeps the smaller text. Read back, they come in
+/// the order of their numbers, each with its text.
+#[test]
+fn glyphs_merge_to_the_same_in_any_order() {
+    let program = sample();
+    let mut first = Glyphs::new();
+    first.add(&program, "Ag").unwrap();
+    first.insert(9, "fi");
+    let mut second = Glyphs::new();
+    second.add(&program, "HA").unwrap();
+    second.insert(9, "f");
+    second.insert(300, "\u{4E2D}");
+    let mut third = Glyphs::new();
+    third.insert(2, "a");
+
+    let mut one = first.clone();
+    one.merge(&second);
+    one.merge(&third);
+    let mut other = third.clone();
+    other.merge(&second);
+    other.merge(&first);
+    let read: Vec<(u16, &str)> = one.iter().collect();
+    assert_eq!(read, other.iter().collect::<Vec<_>>());
+    assert_eq!(
+        read,
+        [(2, "A"), (3, "g"), (4, "H"), (9, "f"), (300, "\u{4E2D}")]
+    );
+    assert_eq!(one.len(), 5);
+
+    // Nothing joined, nothing changed; joined with itself, the same.
+    let mut same = first.clone();
+    same.merge(&Glyphs::new());
+    same.merge(&first);
+    assert_eq!(
+        same.iter().collect::<Vec<_>>(),
+        first.iter().collect::<Vec<_>>()
+    );
+    assert!(Glyphs::new().iter().next().is_none());
+}
+
 /// `Debug` says how much, never a name of the program, a byte of it or a text drawn.
 #[test]
 fn debug_holds_no_name_or_text() {
