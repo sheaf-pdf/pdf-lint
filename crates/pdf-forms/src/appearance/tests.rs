@@ -1920,6 +1920,11 @@ fn appearances_are_send_and_sync() {
     check::<Unmade>();
     check::<super::MadeText>();
     check::<super::WidgetText<'static>>();
+    #[cfg(feature = "embed")]
+    {
+        check::<super::Fallback<'static>>();
+        check::<super::MadeWithFallback>();
+    }
 }
 
 /// `field` made in Helvetica at 10 points in black in `look`: its content.
@@ -2419,8 +2424,9 @@ mod fallback {
         glyphs.iter().map(|(g, t)| (g, t.to_owned())).collect()
     }
 
-    /// The value the caller checks draws in Helvetica and the program, a run
-    /// each where the font changes, each run where the advances before it end,
+    /// A name WinAnsiEncoding has all but two characters of (`Ł` and `ễ`),
+    /// which the program has, draws in Helvetica and the program, a run each
+    /// where the font changes, each run where the advances before it end,
     /// and the program's glyphs it draws are returned, with their text: one
     /// font written of them draws it.
     #[test]

@@ -452,6 +452,86 @@ fn a_character_the_program_has_no_glyph_for_is_refused() {
     }
 }
 
+/// A text field's value made by pdf-forms with the document's font as the
+/// fallback: `text_with_fallback` lays out in the program, which records
+/// nothing, and returns the glyphs, which `EmbeddedFont::record` takes, so
+/// the font saved has them and text drawn by their codes reads back;
+/// `appearance::text` in a `WithFallback` of the font records them as it
+/// draws, the same content. Glyphs past the program's are refused, none
+/// recorded.
+#[cfg(feature = "text-layout")]
+#[test]
+fn an_appearances_fallback_glyphs_are_recorded_in_the_documents_font() {
+    use pdfs::forms::appearance::{
+        Fallback, FieldFont, TextField, WidgetLook, text, text_with_fallback,
+    };
+    use pdfs::gfx::WithFallback;
+
+    let latin = || pdf_fixtures::font::latin(1000).build();
+    let limits = pdfs::forms::Limits::DEFAULT;
+    let field = TextField::new("\u{141}ukasz Nguy\u{1EC5}n");
+    let look = WidgetLook::new(200.0, 20.0);
+    let da = DefaultAppearance::parse(b"/Helv 12 Tf 0 g", &limits.annots.content).unwrap();
+    let helvetica = FieldFont::standard(Std14::Helvetica);
+    let res = || helvetica.res().unwrap();
+
+    let mut doc = Document::new();
+    let font = doc.embed_font(latin()).unwrap();
+    let fallback = Fallback::new(font.res(), font.program());
+    let made = text_with_fallback(
+        &field,
+        &look,
+        &da,
+        res(),
+        &helvetica.layout(),
+        &fallback,
+        &limits,
+    );
+    let made = made.unwrap();
+    assert_eq!(made.glyphs.len(), 2);
+    assert!(format!("{font:?}").contains("glyphs: 0"), "{font:?}");
+    // The two characters Helvetica lacks, by the program's codes, which
+    // record nothing either.
+    let lacked = "\u{141}\u{1EC5}";
+    let codes = font.program().codes(lacked).unwrap();
+    let mut canvas = Canvas::new();
+    canvas.text_at(font.res(), 12.0, Point::new(72.0, 700.0), &codes);
+    add(&mut doc, canvas);
+    font.record(&made.glyphs).unwrap();
+    assert!(format!("{font:?}").contains("glyphs: 2"), "{font:?}");
+    let file = doc.to_bytes().unwrap();
+    assert_eq!(texts(&file), [lacked]);
+    let recorded = widths(&file, &font);
+    assert!(!recorded.is_empty());
+
+    // Drawn in a set of Helvetica and the font itself: the same content,
+    // the glyphs recorded as they're drawn.
+    let mut doc = Document::new();
+    let font = doc.embed_font(latin()).unwrap();
+    let field_font = helvetica.layout();
+    let set = WithFallback::new(&field_font, &font, font.res());
+    let drawn = text(&field, &look, &da, res(), &set, &limits).unwrap();
+    assert_eq!(drawn, made.appearance);
+    assert!(format!("{font:?}").contains("glyphs: 2"), "{font:?}");
+    add(&mut doc, Canvas::new());
+    assert_eq!(widths(&doc.to_bytes().unwrap(), &font), recorded);
+
+    // A glyph past the program's is refused with nothing recorded, and the
+    // font is still written.
+    let mut glyphs = made.glyphs.clone();
+    glyphs.insert(u16::MAX, "x");
+    let mut doc = Document::new();
+    let font = doc.embed_font(latin()).unwrap();
+    let count = font.program().glyph_count();
+    assert!(matches!(
+        font.record(&glyphs),
+        Err(embed::Error::Glyph { glyph: u16::MAX, count: c }) if c == count
+    ));
+    assert!(format!("{font:?}").contains("glyphs: 0"), "{font:?}");
+    add(&mut doc, Canvas::new());
+    doc.to_bytes().unwrap();
+}
+
 /// Pages drawn on threads of their own draw in one font, which records
 /// every glyph each draws.
 #[test]

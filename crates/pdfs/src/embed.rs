@@ -83,9 +83,39 @@ impl EmbeddedFont {
 
     /// The program it embeds: its metrics, each glyph's advance, and what its
     /// licence allows ([`Program::embedding`]).
+    ///
+    /// The program itself records nothing: codes made through it
+    /// ([`Program::codes`]), or text laid out in it, draw glyphs the font is
+    /// written without, unless they're given to [`record`](Self::record).
     #[must_use]
     pub fn program(&self) -> &Program {
         &self.program
+    }
+
+    /// Records `glyphs`, drawn in its program by something that didn't
+    /// record them here, so that the font written at the next save has
+    /// them: each joined to those recorded as [`Glyphs::merge`] joins them,
+    /// in any order. pdf-forms' `appearance::text_with_fallback`, given
+    /// [`res`](Self::res) and [`program`](Self::program) as its fallback,
+    /// returns the glyphs an appearance draws (`MadeWithFallback::glyphs`),
+    /// which are recorded this way; codes of a caller's own making by glyph
+    /// number are too ([`Glyphs::insert`]).
+    ///
+    /// A glyph is a number in this font's program: one of another program's
+    /// records whatever glyph has its number here.
+    ///
+    /// # Errors
+    ///
+    /// [`embed::Error::Glyph`] for the first of `glyphs` at or past the
+    /// program's count, as [`embed::write`] refuses it; then none of
+    /// `glyphs` is recorded, so the font is still written at the next save.
+    pub fn record(&self, glyphs: &Glyphs) -> Result<(), embed::Error> {
+        let count = self.program.glyph_count();
+        if let Some((glyph, _)) = glyphs.iter().find(|&(glyph, _)| glyph >= count) {
+            return Err(embed::Error::Glyph { glyph, count });
+        }
+        self.recorded().merge(glyphs);
+        Ok(())
     }
 
     /// The glyphs drawn in it, to record more: its lock, taken as it is where
@@ -123,6 +153,12 @@ impl fmt::Debug for EmbeddedFont {
 /// spacing (`Tw`) applies to a single-byte code 32 alone (ISO 32000-2,
 /// 9.3.3), which none of its two-byte codes is: so its lines aren't spread to
 /// the box, and nothing else of the layout changes.
+///
+/// It's a font to fall back to as well: after another in a
+/// [`WithFallback`](pdf_gfx::WithFallback) (`WithFallback::new(&first,
+/// &font, font.res())`), it draws what the first can't and records the
+/// glyphs it draws, in [`Canvas::text_box_in`](pdf_gfx::Canvas::text_box_in)
+/// and in pdf-forms' `appearance::text`, which take such a set.
 #[cfg(feature = "text-layout")]
 impl pdf_gfx::LayoutFont for EmbeddedFont {
     fn font_metrics(&self) -> pdf_fonts::FontMetrics {

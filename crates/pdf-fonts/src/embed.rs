@@ -354,7 +354,7 @@ pub enum Level {
 /// the smaller of their texts, as `str` orders them, whichever was drawn first. So
 /// glyphs gathered apart join to the same whatever order they're joined in
 /// ([`Glyphs::merge`]).
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Glyphs {
     pub(crate) texts: BTreeMap<u16, String>,
 }

@@ -267,7 +267,7 @@ impl fmt::Debug for Fallback<'_> {
 ///
 /// `Debug` prints lengths and counts, never the content or a glyph.
 #[cfg(feature = "embed")]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct MadeWithFallback {
     /// The appearance.
@@ -276,7 +276,10 @@ pub struct MadeWithFallback {
     /// character it's drawn for: none where the field's font draws all of
     /// the text. The caller joins every appearance's (`Glyphs::merge`) and
     /// writes one font of them, which every appearance's codes draw in, as
-    /// a code is its glyph's number in the whole program.
+    /// a code is its glyph's number in the whole program. Nothing else
+    /// keeps them: a font written without them draws nothing for the
+    /// content's codes in it. (Where the fallback is a font a pdfs document
+    /// embeds, they're given to its `EmbeddedFont::record`.)
     pub glyphs: Glyphs,
 }
 
@@ -306,7 +309,14 @@ impl fmt::Debug for MadeWithFallback {
 /// give the same appearance and glyphs, whatever else the caller draws: it
 /// joins every appearance's glyphs (`pdf_fonts::embed::Glyphs::merge`, in
 /// any order) and writes one font of them (`pdf_fonts::embed::write`, or a
-/// subset of its own behind a `/CIDToGIDMap` stream).
+/// subset of its own behind a `/CIDToGIDMap` stream). The program is laid
+/// out in as it is, recording nothing anywhere else: the glyphs returned
+/// are the only record of what the font must have.
+///
+/// A fallback that records the glyphs it draws itself (pdf-gfx's
+/// `ProgramFont`, or a font a pdfs document embeds) is drawn in by [`text`]
+/// instead, after `font` in a `pdf_gfx::WithFallback`: the content is the
+/// same, and nothing is returned beside it.
 ///
 /// Heights, the automatic size, and comb cells are the layout's by the
 /// fonts drawn in (`pdf_gfx::layout_text`): a line's ascent and descent are
