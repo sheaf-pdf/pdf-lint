@@ -186,7 +186,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **`programs`** *(default)* — Parse embedded font programs via `skrifa` for glyph bounding boxes, heights, and fallback character mappings.
 - **`text-layout`** *(default)* — Enable `Page::text_page`, `Page::search`, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas::text_box` layout via `pdf-gfx/text-layout`.
 - **`clock`** *(default)* — Enable `Date::now` and `Date::from_unix` in `pdf-semantics`.
-- **`embed`** *(default)* — Enable `Document::embed_font` and `EmbeddedFont`: embed a TrueType program, subset to the glyphs drawn, to draw Unicode text in, via `pdf-fonts/embed` (which brings in `subsetter`) and `pdf-gfx/embed` (its `ProgramFont`, which `EmbeddedFont` lays text out through).
+- **`embed`** *(default)* — Enable `Document::embed_font` and `EmbeddedFont`: embed a TrueType program, subset to the glyphs drawn, to draw Unicode text in, via `pdf-fonts/embed` (which brings in `subsetter`), `pdf-gfx/embed` (its `ProgramFont`, which `EmbeddedFont` lays text out through), and `pdf-forms/embed` (`appearance::text_with_fallback`, a text field's value drawn in a fallback program, with `text-layout`).
 - **`image-ends`** — Find inline DCT (JPEG) and CCITTFax image boundaries by decoding image data, matching PDFium.
 - **`predefined-cmaps`** — Bundle Adobe predefined CJK CMaps (via `hayro-cmap`) for CJK fonts without `/ToUnicode`.
 - **`simd`** — Enable runtime SIMD dispatch in `pdf-content-streams` dependencies.

@@ -21,7 +21,9 @@
 //!   appearances a field without one would show, held to those PDFium makes:
 //!   `appearance::text` makes a text field's from plain data, in the font
 //!   `FieldFont` reads, and `appearance::text_for_widget` makes a `Widget`'s from
-//!   what this crate reads.
+//!   what this crate reads. With `embed` too, `appearance::text_with_fallback`
+//!   draws what the field's font can't in a TrueType program the caller gives,
+//!   and returns the glyphs it drew, for the caller to embed.
 //!
 //! # Example
 //!

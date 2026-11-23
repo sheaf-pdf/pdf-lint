@@ -230,7 +230,9 @@ pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 pdf-fonts = { path = "../crates/pdf-fonts", features = ["embed"] }
 pdf-gfx = { path = "../crates/pdf-gfx" }
 pdf-annots = { path = "../crates/pdf-annots" }
-pdf-forms = { path = "../crates/pdf-forms" }
+# With `embed`, so `forms` draws a value in its field's font and a fallback
+# whose program is the input's, as a caller embeds one.
+pdf-forms = { path = "../crates/pdf-forms", features = ["embed"] }
 # With the test writer, so the linearize target's new encryptions are drawn
 # from the input and every write's IVs derived: an input writes the same
 # bytes each run, and a saved one reruns as it ran. `check` reads as the

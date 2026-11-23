@@ -140,3 +140,14 @@ ap-value-kinds	forms-ap	ap-value-kinds.pdf
 ap-da-stroking-color	forms-ap	ap-da-stroking-color.pdf
 ap-da-size-near-zero	forms-ap	ap-da-size-near-zero.pdf
 ap-da-written-twice	forms-ap	ap-da-written-twice.pdf
+ap-font-truetype-past-its-box	forms-ap	ap-font-truetype-past-its-box.pdf
+ap-nfd-helvetica	forms-ap	ap-nfd-helvetica.pdf
+ap-comb-cluster	forms-ap	ap-comb-cluster.pdf
+ap-embedded-comb	forms-ap	ap-embedded-comb.pdf
+ap-embedded-line	forms-ap	ap-embedded-line.pdf
+ap-embedded-multiline	forms-ap	ap-embedded-multiline.pdf
+back-comb	fonts	back-comb.pdf
+back-mixed	fonts	back-mixed.pdf
+back-multiline	fonts	back-multiline.pdf
+back-nfd	fonts	back-nfd.pdf
+back-winansi	fonts	back-winansi.pdf

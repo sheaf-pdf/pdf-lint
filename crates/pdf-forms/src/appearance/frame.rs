@@ -107,19 +107,22 @@ impl fmt::Debug for Appearance {
 /// Why an appearance couldn't be made. Nothing is drawn: no `?` stands in
 /// for a character, and no box is guessed.
 ///
-/// The maker of plain data ([`text`](super::text)) gives the first four;
-/// [`NotText`](Self::NotText), [`FontNotBindable`](Self::FontNotBindable),
-/// and [`Unreadable`](Self::Unreadable) come only from reading a widget for
-/// it ([`widget_text`](super::widget_text),
+/// The maker of plain data ([`text`](super::text)) gives the first four,
+/// and [`FontNotBindable`](Self::FontNotBindable) for a font of a set it's
+/// given with no resource; [`NotText`](Self::NotText),
+/// [`FontNotBindable`](Self::FontNotBindable) for a field's font, and
+/// [`Unreadable`](Self::Unreadable) come from reading a widget for it
+/// ([`widget_text`](super::widget_text),
 /// [`text_for_widget`](super::text_for_widget)). An [`Error`] of the read
 /// layer converts into it, a cap to [`Limit`](Self::Limit).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unmade {
-    /// The font has no code for a character of the text: the character and
-    /// its byte offset in the text the caller gave. A password field's
-    /// characters are drawn as `*`, so it's never one of them, only `*` at
-    /// offset `0` where the font has none for that.
+    /// No font has the whole of a grapheme cluster of the text, as given or
+    /// composed: the first of its characters as the caller gave it that the
+    /// first font can't draw, and its byte offset in the text the caller
+    /// gave. A password field's characters are drawn as `*`, so it's never
+    /// one of them, only `*` at offset `0` where no font has that.
     #[error("the font has no code for {:?}, at byte {} of the text", .0.character, .0.at)]
     Unencodable(UnencodableChar),
     /// The widget's box has no width or no height, or isn't finite.
@@ -143,7 +146,9 @@ pub enum Unmade {
     /// The field's font is a direct dictionary of the default resources
     /// that holds a reference, which an appearance's resources can't name as
     /// it is: a caller that writes it as an object of its own makes the
-    /// appearance with that object's resource.
+    /// appearance with that object's resource. Or a font of a set past the
+    /// first, which some of the text is drawn in, has no resource
+    /// (`pdf_gfx::FontSet::face_resource`).
     #[error("the field's font can't be named by the appearance's resources")]
     FontNotBindable,
     /// Reading the widget, its value, or its font failed for a caller-level

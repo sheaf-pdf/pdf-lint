@@ -66,7 +66,9 @@ fmt:
 # (`embed`), which pdfs turns on, with no feature at all, and with `embed`
 # alone, without the reading's programs; then pdf-gfx with what lays text out
 # in a font embedded (`embed`), alone and with `text-layout`, without the
-# reading's programs; then pdf-structure with its spans (`tracing`), which nothing else
+# reading's programs, and pdf-forms with what draws a value in a fallback
+# font (`embed`), alone and with `text-layout`, without them; then
+# pdf-structure with its spans (`tracing`), which nothing else
 # turns on; then pdfs as a user gets it, with no feature at all, with what
 # embeds a font (`embed`) alone, and with every feature it forwards, which
 # nothing else turns on all at once.
@@ -99,6 +101,8 @@ clippy:
     cargo clippy --locked -p pdf-forms --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-forms --no-default-features --features programs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-forms --no-default-features --features text-layout --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-forms --no-default-features --features embed --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-forms --no-default-features --features embed,text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
@@ -124,7 +128,8 @@ test-unit *args="--workspace":
 # only its tests read, and what embeds a font, with no feature at all, and
 # with `embed` alone, without the reading's programs; then pdf-gfx's with what
 # lays text out in a font embedded, alone and with `text-layout`, without the
-# reading's programs; then pdf-structure's
+# reading's programs, and pdf-forms' with what draws a value in a fallback
+# font, alone and with `text-layout`, without them; then pdf-structure's
 # with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
 # with what embeds a font alone, and with every feature it forwards but its
@@ -174,6 +179,9 @@ test:
     cargo test --locked -p pdf-forms --no-default-features --doc
     cargo nextest run --locked -p pdf-forms --no-default-features --features programs
     cargo nextest run --locked -p pdf-forms --no-default-features --features text-layout
+    cargo nextest run --locked -p pdf-forms --no-default-features --features embed
+    cargo nextest run --locked -p pdf-forms --no-default-features --features embed,text-layout
+    cargo test --locked -p pdf-forms --no-default-features --features embed,text-layout --doc
     cargo nextest run --locked -p pdf-structure --features tracing
     cargo test --locked -p pdf-structure --features tracing --doc
     cargo nextest run --locked -p pdfs
@@ -213,7 +221,8 @@ _qpdf:
 # then the page trees pdf-semantics writes, then the fonts pdf-fonts embeds
 # (with `embed`, which a `-p` build has only where it's named, and what qpdf
 # says of each printed), then the annotations pdf-annots writes and the
-# appearances pdf-forms makes, then the checker's in pdf-lint,
+# appearances pdf-forms makes (with `embed`, so those in a fallback font
+# too), then the checker's in pdf-lint,
 # then what pdf-linearize lays out, and its lopdf adapter, which `just test`
 # leaves out as ignored, against the pinned qpdf (the corpus tests aside).
 test-qpdf: _qpdf
@@ -222,7 +231,7 @@ test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-semantics --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fonts --features embed --lib tests::written::qpdf_checks_the_written_cases_clean -- --ignored --exact --nocapture
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-annots --test qpdf -- --ignored
-    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-forms --test qpdf -- --ignored
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-forms --features embed --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize-lopdf --test qpdf -- --ignored
@@ -316,7 +325,8 @@ fuzzing:
 # pdf-linearize's engine, without its adapter, then pdf-fonts with no feature,
 # and with what embeds a font alone, then pdf-gfx with no feature, and with
 # what lays text out in a font embedded, alone and with `text-layout`, then
-# pdfs as it's published, with no
+# pdf-forms with no feature, and with what draws a value in a fallback font,
+# alone and with `text-layout`, then pdfs as it's published, with no
 # feature, and with what embeds a font alone, which a link to what only a
 # feature has would fail.
 doc:
@@ -332,6 +342,8 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-gfx --no-deps --no-default-features --features embed,text-layout
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-annots --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features --features embed
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features --features embed,text-layout
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features embed
@@ -752,7 +764,9 @@ annots-cmaps-msrv:
     cargo +{{ annots_msrv }} test --locked -p pdf-annots --features predefined-cmaps --doc
 
 # Test pdf-forms on its oldest supported Rust, as it's published, with no
-# feature, and with its spans (`tracing`), which must be installed.
+# feature, with its spans (`tracing`), and with what draws a value in a
+# fallback font (`embed`), subsetter among it, with `text-layout` and alone,
+# which must be installed.
 forms-msrv:
     cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms
     cargo +{{ forms_msrv }} test --locked -p pdf-forms --doc
@@ -760,6 +774,9 @@ forms-msrv:
     cargo +{{ forms_msrv }} test --locked -p pdf-forms --no-default-features --doc
     cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms --features tracing
     cargo +{{ forms_msrv }} test --locked -p pdf-forms --features tracing --doc
+    cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms --features embed
+    cargo +{{ forms_msrv }} test --locked -p pdf-forms --features embed --doc
+    cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms --no-default-features --features embed
 
 # Test pdf-forms with `predefined-cmaps` on that feature's oldest Rust, which
 # must be installed.
@@ -840,10 +857,12 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
 # `color`, `fonts`, `embed`, `gfx`, `annots`, `forms`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make,
-# `embed`'s by pdf-fonts with its `embed` feature, without which it has none. The
-# nightly is `fuzz_toolchain`. A third argument names features of fuzz/'s
-# to build the targets with: `simd`, the content streams' dependencies'
-# SIMD, which `content` reaches (`just fuzz content 300 simd`); and
+# `embed`'s by pdf-fonts with its `embed` feature, without which it has none,
+# and `forms`'s by pdf-forms with its `embed` feature, without which none
+# carries a fallback's program. The nightly is `fuzz_toolchain`. A third
+# argument names features of fuzz/'s to build the targets with: `simd`, the
+# content streams' dependencies' SIMD, which `content` reaches (`just fuzz
+# content 300 simd`); and
 # `predefined-cmaps`, Adobe's predefined CMaps from pdf-fonts' bundle,
 # which `fonts` and `gfx` reach (`just fuzz gfx 300 predefined-cmaps`), and which
 # pdf-lint's binary, as `check` builds it, is without.
@@ -914,7 +933,7 @@ fuzz target="tokenize" seconds="60" features="":
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" annots fuzz/corpus/annots fuzz/seeds/annots -- -dict=fuzz/annots.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     forms)
-        PDF_FORMS_FUZZ_SEEDS="$PWD/fuzz/seeds/forms" cargo test --locked -q -p pdf-forms --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        PDF_FORMS_FUZZ_SEEDS="$PWD/fuzz/seeds/forms" cargo test --locked -q -p pdf-forms --features embed --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/forms
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" forms fuzz/corpus/forms fuzz/seeds/forms -- -dict=fuzz/forms.dict -max_total_time={{ seconds }} -timeout=10
         ;;

@@ -461,6 +461,8 @@ dependencies = [
  "pdf-objects",
  "pdf-semantics",
  "thiserror",
+ "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]

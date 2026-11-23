@@ -34,6 +34,18 @@
 //!    of the standard 14 the caller writes, interprets with no error and no
 //!    fault; no `Debug` of what's read or made, or of an error or a fault,
 //!    shows the text.
+//! 6. A fallback (`text-layout` and `embed`): where the input carries a
+//!    TrueType program after its text that `pdf_fonts::embed::Program::open`
+//!    opens, `appearance::text_with_fallback` draws the same text in each
+//!    standard 14 font and the program (`check_fallback`), made the same
+//!    twice: refused only where the font alone refuses it too, a character
+//!    of the text told at its offset (for a password only `*` at `0`); made,
+//!    its resources the font and the fallback, the fallback named exactly
+//!    where glyphs of it are returned, each glyph the program's for a
+//!    character of the text, as given or a cluster of it composed (for a
+//!    password `*` alone), its content holding what `text`'s holds, and for
+//!    text already composed that the font alone draws, `text`'s appearance
+//!    byte for byte and no glyph.
 //!
 //! `over` checks the same of the form a parsed PDF file's catalog names.
 
@@ -50,7 +62,9 @@ use crate::{Fault, Form, Limits};
 
 /// Built-in seed inputs: a catalog, then objects 1, 2, … split on `0xFF`, an
 /// object holding `\nstream\n` a stream of the bytes after it. The last are
-/// [`check_appearance`]'s first: its choices, numbers, `/DA` and text.
+/// [`check_appearance`]'s first: its choices, numbers, `/DA` and text. The
+/// seeds that carry a fallback's program after their text are written by a
+/// test, which builds the program (`the_seeds_are_written`).
 pub const SEEDS: &[&[u8]] = &[
     b"",
     b"<< /AcroForm << /Fields [1 0 R 3 0 R] /DA (/Helv 0 Tf 0 g) /Q 1 /DR << /Font << /Helv 4 0 R >> >> >> >>\xff<< /T (address) /FT /Tx /Ff 4096 /Kids [2 0 R] >>\xff<< /T (city) /Parent 1 0 R /V (Trenton) /MaxLen 20 /Subtype /Widget /Rect [72 700 200 716] /MK << /BC [0] >> >>\xff<< /T (agree) /FT /Btn /V /Yes /Kids [5 0 R 6 0 R] >>\xff<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\xff<< /Parent 3 0 R /Subtype /Widget /Rect [72 680 82 690] /AS /Yes >>\xff<< /Parent 3 0 R /Subtype /Widget /Rect [92 680 102 690] /AS /Off >>",
@@ -274,6 +288,157 @@ pub fn check_appearance(data: &[u8]) {
             }
         }
     }
+    #[cfg(feature = "embed")]
+    check_fallback(&cut);
+}
+
+/// Where `cut` carries a TrueType program that opens, makes its text's
+/// appearance with `appearance::text_with_fallback` in each standard 14 font
+/// and the program, each twice the same, and holds what it promises beside
+/// what `appearance::text` makes in the font alone.
+#[cfg(all(feature = "text-layout", feature = "embed"))]
+fn check_fallback(cut: &Cut<'_>) {
+    use pdf_content_streams::Res;
+    use pdf_fonts::embed::Program;
+    use pdf_gfx::LayoutFont;
+    use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use crate::FieldFlags;
+    use crate::appearance::{Fallback, Unmade, text, text_with_fallback};
+
+    let Some(bytes) = cut.program else {
+        return;
+    };
+    let Ok(program) = Program::open(bytes.to_vec(), 0) else {
+        return;
+    };
+    let (field, look, limits) = (cut.field(), cut.look(), cut.limits());
+    let res = Res::written(ObjectId::new(7, 0));
+    let fallback = Fallback::new(res.clone(), &program);
+    let given = field.text;
+    let password = field.flags.contains(FieldFlags::PASSWORD);
+    let composed = is_nfc_quick(given.chars()) == IsNormalized::Yes;
+    // Each character the text may be drawn as: as given, or a cluster of it
+    // composed, a `\t` drawn as a space.
+    let drawable = |ch: char| {
+        given.contains(ch)
+            || (ch == ' ' && given.contains('\t'))
+            || given.graphemes(true).any(|c| c.nfc().any(|n| n == ch))
+    };
+    for font in faces() {
+        let layout = font.layout();
+        let font_res = font
+            .res()
+            .expect("a standard 14 font is named by its dictionary");
+        let make = || {
+            text_with_fallback(
+                &field,
+                &look,
+                &cut.da,
+                font_res.clone(),
+                &layout,
+                &fallback,
+                &limits,
+            )
+        };
+        let made = make();
+        let again = make();
+        let glyphs = |made: &Result<crate::appearance::MadeWithFallback, Unmade>| match made {
+            Ok(m) => Ok((
+                m.appearance.clone(),
+                m.glyphs
+                    .iter()
+                    .map(|(g, t)| (g, t.to_owned()))
+                    .collect::<Vec<_>>(),
+            )),
+            Err(err) => Err(err.clone()),
+        };
+        assert_eq!(
+            glyphs(&made),
+            glyphs(&again),
+            "the same appearance made twice"
+        );
+        let alone = text(&field, &look, &cut.da, font_res.clone(), &layout, &limits);
+        let made = match made {
+            Ok(made) => made,
+            Err(Unmade::Unencodable(told)) => {
+                match password {
+                    true => assert_eq!(
+                        (told.at, told.character),
+                        (0, '*'),
+                        "a password's characters reach no error"
+                    ),
+                    false => assert!(
+                        given
+                            .get(told.at..)
+                            .is_some_and(|t| t.starts_with(told.character)),
+                        "a character told at its offset in the text given"
+                    ),
+                }
+                assert!(
+                    alone.is_err(),
+                    "refused with a fallback, where the font alone draws it"
+                );
+                continue;
+            }
+            Err(err) => {
+                assert!(
+                    !shows(&format!("{err:?} {err}"), given),
+                    "an error shows the text"
+                );
+                continue;
+            }
+        };
+        let needs = &made.appearance.needs.0;
+        assert!(
+            needs.len() <= 2
+                && needs
+                    .iter()
+                    .all(|need| need.res == font_res || need.res == res),
+            "the resources the font and the fallback"
+        );
+        assert_eq!(
+            needs.iter().any(|need| need.res == res),
+            !made.glyphs.is_empty(),
+            "the fallback named exactly where glyphs of it are drawn"
+        );
+        for (glyph, drawn) in made.glyphs.iter() {
+            let mut chars = drawn.chars();
+            let ch = chars.next().expect("a glyph's text");
+            assert!(chars.next().is_none(), "a glyph a character");
+            assert_eq!(
+                program.glyph(ch),
+                Some(glyph),
+                "a glyph the program's for its character"
+            );
+            match password {
+                true => assert_eq!(ch, '*', "a password's glyph the star's alone"),
+                false => assert!(drawable(ch), "a glyph for a character of the text"),
+            }
+        }
+        let star = password.then(|| {
+            let mut code = Vec::new();
+            match layout.encode_char('*', &mut code) {
+                true => code,
+                false => program.codes("*").unwrap_or_default(),
+            }
+        });
+        content_holds(&made.appearance.content, star.as_deref());
+        assert!(
+            !shows(&format!("{made:?}"), given),
+            "an appearance shows the text"
+        );
+        if let Ok(alone) = alone
+            && (composed || password)
+        {
+            assert_eq!(
+                made.appearance, alone,
+                "text the font draws whole drawn as in it alone"
+            );
+            assert!(made.glyphs.is_empty(), "no glyph of the fallback drawn");
+        }
+    }
 }
 
 /// What [`check_appearance`] makes an appearance of, cut from its input,
@@ -295,7 +460,8 @@ pub fn check_appearance(data: &[u8]) {
 ///   four background components and four border color components (as many
 ///   of each as the color space takes), and a size.
 /// - after them, a `/DA` string up to the first `0xFF`, and the text after
-///   it, read as UTF-8 with what isn't replaced.
+///   it up to the next `0xFF`, read as UTF-8 with what isn't replaced, and
+///   after that a TrueType program, the fallback's ([`check_fallback`]).
 #[cfg(feature = "text-layout")]
 struct Cut<'a> {
     flags: crate::FieldFlags,
@@ -312,6 +478,9 @@ struct Cut<'a> {
     cap: usize,
     da: pdf_gfx::DefaultAppearance,
     text: std::borrow::Cow<'a, str>,
+    /// The fallback's program, where the input carries one.
+    #[cfg_attr(not(feature = "embed"), allow(dead_code))]
+    program: Option<&'a [u8]>,
 }
 
 #[cfg(feature = "text-layout")]
@@ -348,6 +517,10 @@ impl<'a> Cut<'a> {
             Some(at) => (&rest[..at], &rest[at + 1..]),
             None => (rest, &[][..]),
         };
+        let (text, program) = match text.iter().position(|&b| b == 0xFF) {
+            Some(at) => (&text[..at], Some(&text[at + 1..])),
+            None => (text, None),
+        };
         let mut da =
             DefaultAppearance::parse(da, &pdf_content_streams::Limits::DEFAULT).unwrap_or_default();
         if colors & 0x10 != 0 {
@@ -374,6 +547,7 @@ impl<'a> Cut<'a> {
             cap: 1 << (byte(14) % 11),
             da,
             text: String::from_utf8_lossy(text),
+            program,
         }
     }
 
@@ -911,7 +1085,8 @@ mod tests {
     use super::SEEDS;
 
     /// `PDF_FORMS_FUZZ_SEEDS` names a folder: writes the seed inputs there for
-    /// `just fuzz forms` to begin from.
+    /// `just fuzz forms` to begin from, with `embed` those that carry a
+    /// fallback's program too ([`fallback_seeds`]).
     #[test]
     #[ignore = "needs PDF_FORMS_FUZZ_SEEDS, a folder to write the seeds to"]
     fn the_seeds_are_written() {
@@ -922,6 +1097,100 @@ mod tests {
         for (i, seed) in SEEDS.iter().enumerate() {
             std::fs::write(dir.join(format!("seed-{i}")), seed).unwrap();
         }
+        #[cfg(all(feature = "text-layout", feature = "embed"))]
+        for (i, seed) in fallback_seeds().iter().enumerate() {
+            std::fs::write(dir.join(format!("seed-fallback-{i}")), seed).unwrap();
+        }
+    }
+
+    /// The seeds that carry a fallback's program, pdf-fixtures' Latin one,
+    /// after their text: the value it draws with Helvetica, "Łukasz Nguyễn
+    /// Ölçer"; the same decomposed, in comb cells; on lines at an automatic
+    /// size; a password; a CJK ideograph and an emoji, refused; and a letter
+    /// with an accent no font has composed, a comb cell.
+    #[cfg(all(feature = "text-layout", feature = "embed"))]
+    fn fallback_seeds() -> Vec<Vec<u8>> {
+        use unicode_normalization::UnicodeNormalization;
+
+        const VALUE: &str = "\u{141}ukasz Nguy\u{1ec5}n \u{d6}l\u{e7}er";
+        let nfd: &'static str = VALUE.nfd().collect::<String>().leak();
+        let program = pdf_fixtures::font::latin(1000).build();
+        let inputs = [
+            Input::new(b"/Helv 12 Tf 0 g", VALUE).with(0, &[200.0]),
+            Input {
+                flags: COMB,
+                max_len: Some(24),
+                ..Input::new(b"/Helv 0 Tf 0 g", nfd)
+            }
+            .with(0, &[300.0]),
+            Input {
+                flags: 1 << 12,
+                ..Input::new(
+                    b"/Helv 0 Tf 0 g",
+                    "\u{141}ukasz Nguy\u{1ec5}n\n\u{d6}l\u{e7}er",
+                )
+            }
+            .with(1, &[50.0]),
+            Input {
+                flags: 1 << 13,
+                ..Input::new(b"/Helv 12 Tf 0 g", "\u{141}ukasz\u{4e2d}")
+            },
+            Input::new(b"/Helv 12 Tf 0 g", "\u{d6}l\u{e7}er \u{4e2d}\u{1f600}"),
+            Input {
+                flags: COMB,
+                max_len: Some(3),
+                ..Input::new(b"/Helv 12 Tf 0 g", "q\u{301}ab")
+            },
+        ];
+        inputs
+            .iter()
+            .map(|input| {
+                let mut seed = input.bytes();
+                seed.push(0xFF);
+                seed.extend(&program);
+                seed
+            })
+            .collect()
+    }
+
+    /// The seeds with a fallback's program reach it, and hold what
+    /// `check_fallback` holds, each cut short and with a byte flipped too:
+    /// the caller's value is drawn in Helvetica and the program, its two
+    /// characters Helvetica lacks the program's.
+    #[cfg(all(feature = "text-layout", feature = "embed"))]
+    #[test]
+    fn the_fallback_seeds_reach_the_fallback() {
+        use pdf_fonts::embed::Program;
+
+        use crate::appearance::{Fallback, text_with_fallback};
+
+        let seeds = fallback_seeds();
+        for seed in &seeds {
+            super::check(seed);
+            for cut in (0..seed.len()).step_by(97) {
+                super::check(&seed[..cut]);
+                let mut flipped = seed.clone();
+                flipped[cut] ^= 0x20;
+                super::check(&flipped);
+            }
+        }
+        let cut = super::Cut::of(&seeds[0]);
+        let program = Program::open(cut.program.unwrap().to_vec(), 0).unwrap();
+        let res = pdf_content_streams::Res::written(pdf_objects::ObjectId::new(7, 0));
+        let fallback = Fallback::new(res, &program);
+        let helvetica = &super::faces()[0];
+        let made = text_with_fallback(
+            &cut.field(),
+            &cut.look(),
+            &cut.da,
+            helvetica.res().unwrap(),
+            &helvetica.layout(),
+            &fallback,
+            &cut.limits(),
+        )
+        .unwrap();
+        assert_eq!(made.glyphs.len(), 2);
+        assert_eq!(made.appearance.needs.0.len(), 2);
     }
 
     /// What `Cut::of` cuts an input into, written as it reads it.

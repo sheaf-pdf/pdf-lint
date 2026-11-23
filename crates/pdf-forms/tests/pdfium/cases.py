@@ -5,7 +5,12 @@ Written using Python's standard library alone; `oracle/pdfium.py cases --write`
 materializes `cases/*.pdf` and `cases.tsv`, and `oracle/pdfium.py record`
 records `chromium-8152.txt`. The embedded TrueType cases read pdf-fonts' own
 program, `../../../pdf-fonts/tests/pdfium/programs/truetype` from here (which
-pdf-fonts' `the_programs_are_the_builders` holds to its builder)."""
+pdf-fonts' `the_programs_are_the_builders` holds to its builder). `written()`
+reads the files the crate's tests write into written/, of fonts pdf-fonts
+embeds: `the_written_cases_are_written` writes them, and
+`the_written_cases_are_the_maker` holds them to what makes them; `ap-*` are
+`forms-ap` cases, and `back-*` appearances made in Helvetica and a fallback
+program, drawn on their page, which PDFium's text page reads back (`fonts`)."""
 
 import os
 import re
@@ -256,6 +261,7 @@ def cases():
     ))
 
     ap_cases()
+    written()
     return list(ROWS)
 
 
@@ -300,6 +306,17 @@ def truetype(ascent, descent):
     return number
 
 
+def described_truetype(ascent, descent, box):
+    """A TrueType font that isn't embedded, its descriptor's heights as given
+    and its box `box`, which they may pass."""
+    def number(base):
+        return (b"<< /Type /Font /Subtype /TrueType /BaseFont /Foo /FirstChar 32 /LastChar 126 /Widths ["
+                + b" ".join([b"500"] * 95) + b"] /Encoding /WinAnsiEncoding /FontDescriptor %d 0 R >>" % (base + 1),
+                {base + 1: b"<< /Type /FontDescriptor /FontName /Foo /Flags 32 /FontBBox " + box
+                           + b" /ItalicAngle 0 /Ascent %d /Descent %d /CapHeight 700 /StemV 80 >>" % (ascent, descent)})
+    return number
+
+
 def described(ascent, descent):
     """A font that isn't one of the standard 14 and isn't embedded: its
     /Widths and its descriptor's heights are all PDFium measures it by."""
@@ -338,6 +355,7 @@ FONTS = {
     b"DeLo": (119, described(600, -150)),
     b"TT": (122, truetype(800, -200)),
     b"TTZero": (126, truetype(0, 0)),
+    b"TTBox": (130, described_truetype(1079, -250, b"[-431 -250 1483 1050]")),
 }
 
 
@@ -598,3 +616,29 @@ def ap_cases():
     ap("ap-da-size-near-zero", [tx(da=b"/Helv %s Tf 0 g" % size) for size in (b"0.00001", b"0.00009", b"0.0004")])
     ap("ap-da-written-twice", [tx(da=da) for da in (b"/Helv 8 Tf /Helv 20 Tf 0 g", b"/Helv 8 Tf 0 g 1 0 0 rg",
                                                     b"/Helv 8 Tf 0 0 1 rg 1 0 0 rg")])
+
+    # A descriptor's heights as given past its /FontBBox, which PDFium sets
+    # a field's lines by: a TrueType font not embedded, whose ascent is above
+    # its box's top.
+    ap("ap-font-truetype-past-its-box", [tx(value=b"Sample 123", da=b"/TTBox 12 Tf 0 g"),
+                                         tx(MULTILINE, value=b"Sample 123 and more", da=b"/TTBox 10 Tf 0 g",
+                                            rect=b"[10 40 110 90]"),
+                                         tx(value=b"Sample", da=b"/TTBox 0 Tf 0 g", rect=b"[10 100 110 130]")])
+    # Text given decomposed, a letter and a combining accent, which the font
+    # has composed and not apart.
+    ap("ap-nfd-helvetica", [tx(value=utf16("Cafe\u0301"), da=b"/Helv 12 Tf 0 g"),
+                            tx(MULTILINE, value=utf16("Cafe\u0301 au lait"), da=b"/Helv 12 Tf 0 g",
+                               rect=b"[10 40 110 90]")])
+
+
+def written():
+    # Each file the crate's tests write into written/: a `forms-ap` case of
+    # a TrueType program embedded as a Type 0 font in /DR (`ap-*`), or an
+    # appearance made in Helvetica and a fallback program, drawn on the page,
+    # read back by PDFium's text page (`back-*`).
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "written")
+    for name in sorted(os.listdir(folder)):
+        if name.endswith(".pdf"):
+            kind = "forms-ap" if name.startswith("ap-") else "fonts"
+            with open(os.path.join(folder, name), "rb") as f:
+                ROWS.append((name[:-len(".pdf")], kind, {"pdf": f.read()}))
