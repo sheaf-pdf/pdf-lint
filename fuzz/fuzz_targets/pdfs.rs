@@ -5,7 +5,9 @@
 //! linearization's verdict, holding and judged whole only where it's
 //! linearized; every answer the same with faults kept as with none looked
 //! for, and under small caps the same promises; its file edited, a page
-//! added, and saved whole, written or refused. And where it isn't
+//! added and a `/FreeText` whose font the form is to hold, and saved whole,
+//! written or refused, the font in the form's fonts under the name its `/DA`
+//! gives wherever it's added, every other font kept. And where it isn't
 //! encrypted, its document written in the clear and under a new encryption,
 //! its key drawn from the input and its IVs derived: read with no password,
 //! each page's content refused as locked or read as in the clear; unlocked by

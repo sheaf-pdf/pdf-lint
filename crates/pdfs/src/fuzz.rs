@@ -9,8 +9,8 @@ use std::ops::{ControlFlow, Range};
 
 use pdf_crypt::Password;
 use pdf_linearize::check::Verdict;
-use pdf_objects::Why;
 use pdf_objects::version::Version;
+use pdf_objects::{Dict, Object, ObjectId, Why};
 use pdf_semantics::info::Info;
 use pdf_semantics::xmp::Claims;
 use pdf_structure::Encryption;
@@ -29,7 +29,7 @@ use pdf_content_streams::ContentWriter;
 #[cfg(feature = "embed")]
 use pdf_fonts::embed;
 #[cfg(feature = "embed")]
-use pdf_objects::{Dict, Object, Resolve, Streams};
+use pdf_objects::{Resolve, Streams};
 #[cfg(feature = "embed")]
 use pdf_semantics::pages::Inheritable;
 
@@ -98,6 +98,9 @@ pub struct Reached {
     pub strings: usize,
     /// Inputs edited, a page added, and saved whole.
     pub edited: usize,
+    /// Inputs edited whose form was given a `/FreeText`'s font, under the
+    /// name its `/DA` gives.
+    pub registered: usize,
 }
 
 /// `pdf`'s answers, each page's content held within `limits`' cap on it and
@@ -295,8 +298,12 @@ fn small() -> Limits {
 /// verdict, which holds and is judged whole only where it's
 /// linearized. With faults kept, every answer the same as with none looked
 /// for, which finds none; and under small caps, the same promises. Its file
-/// edited, a page added to its page tree's root, and saved whole: written or
-/// refused, and what's written opens.
+/// edited, a page added to its page tree's root and a `/FreeText` to a page
+/// whose font the form's default resources are to hold, and saved whole:
+/// the annotation added or refused, and where it's added, the font in the
+/// form's fonts under the name its `/DA` gives, every other font kept,
+/// wherever and however the file holds the form; written or refused, and
+/// what's written opens.
 ///
 /// Then, where it isn't encrypted, its document written whole in the clear
 /// and under a new encryption by a password: read with no password, each
@@ -339,19 +346,75 @@ pub fn read(data: &[u8]) -> Reached {
     reached
 }
 
-/// The arm of [`read`] that edits `pdf`'s file, adds a page to it and saves it
-/// whole, its pages counted onto its page tree's: written or refused, never a
-/// panic, and what's written opens.
+/// The arm of [`read`] that edits `pdf`'s file, adds a page to it and a
+/// `/FreeText` to its first page whose font, a Courier, is to be the form's
+/// (`BuiltAnnot::da_font`) under the name `Helv`, and saves it whole, its
+/// pages counted onto its page tree's: the annotation added or refused, and
+/// where it's added, its font in the form's fonts under the name its `/DA`
+/// gives, every other font kept; written or refused, never a panic, and
+/// what's written opens.
 fn edited<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) {
     let Ok(mut doc) = pdf.edit() else {
         return;
     };
     doc.add_page(PdfBox::LETTER);
+    let first = doc
+        .page_ids()
+        .ok()
+        .and_then(|ids| ids.into_iter().flatten().next());
+    if let Some(page) = first {
+        let da = pdf_annots::DefaultAppearance::new("Helv", 12.0, None);
+        let rect = pdf_gfx::Rect::new(72.0, 72.0, 272.0, 112.0);
+        let style = pdf_annots::PaintStyle::default();
+        let quadding = pdf_annots::Quadding::Left;
+        let mut built = pdf_annots::BuiltAnnot::free_text(rect, "fuzz", &da, quadding, &style);
+        // Courier, so a `Helv` the file holds already is told from it.
+        built.da_font = Some(crate::standard_font(pdf_fonts::Std14::Courier));
+        let before = form_fonts(doc.structure()).cloned().unwrap_or_default();
+        if let Ok(annot) = doc.add_annot(page, built) {
+            registered(doc.structure(), annot, &before);
+            reached.registered += 1;
+        }
+    }
     if let Ok(file) = doc.to_bytes() {
         let saved = Options::DEFAULT.from_bytes(&file[..]);
         let saved = saved.expect("bytes in memory open");
         let _ = saved.pages();
         reached.edited += 1;
+    }
+}
+
+/// The font dictionary of the default resources of the form `doc`'s catalog
+/// holds (`/AcroForm /DR /Font`), each followed as a reader follows it.
+fn form_fonts(doc: &pdf_structure::Document) -> Option<&Dict> {
+    fn entry<'d>(doc: &'d pdf_structure::Document, dict: &'d Dict, key: &[u8]) -> Option<&'d Dict> {
+        doc.dereference(dict.get(key)?)?.1.as_dict()
+    }
+    let form = entry(doc, doc.catalog()?, b"AcroForm")?;
+    entry(doc, entry(doc, form, b"DR")?, b"Font")
+}
+
+/// The annotation `annot` of `doc`, added with a Courier for its form, whose
+/// fonts were `before`: its `/DA` names a font, which the form the catalog
+/// holds has in its fonts under that name, a Courier, every entry of
+/// `before` but a `null` kept as it was.
+fn registered(doc: &pdf_structure::Document, annot: ObjectId, before: &Dict) {
+    let dict = doc.get_dict(annot).expect("the annotation added");
+    let da = dict.get(b"DA").and_then(Object::as_bytes).expect("a /DA");
+    let da = pdf_annots::DefaultAppearance::parse(da, &pdf_content_streams::Limits::DEFAULT);
+    let name = da
+        .and_then(|da| da.font_name)
+        .expect("a /DA that names a font");
+    let fonts = form_fonts(doc).expect("the form's fonts");
+    let font = fonts.get(&name).and_then(Object::as_reference);
+    let font = doc.get_dict(font.expect("the font under the /DA's name"));
+    let base = font
+        .and_then(|font| font.get(b"BaseFont"))
+        .and_then(Object::as_name);
+    assert_eq!(base, Some(&b"Courier"[..]), "the font registered");
+    for (key, value) in before.iter().filter(|(_, value)| !value.is_null()) {
+        let kept = fonts.get(key).is_some_and(|now| now.eq_value(value));
+        assert!(kept, "another font's entry kept");
     }
 }
 
@@ -855,6 +918,19 @@ mod tests {
         doc
     }
 
+    /// One page, as [`one_page`], and a form whose default resources and
+    /// their fonts are each held by reference, its `Helv` a Helvetica and
+    /// its `Helv1` null.
+    fn with_a_form() -> Document {
+        let mut doc = one_page();
+        doc.catalog_mut().unwrap().set("AcroForm", r(5));
+        doc.insert(5, dict! { "Fields" => Vec::<Object>::new(), "DR" => r(6) });
+        doc.insert(6, dict! { "Font" => r(7) });
+        doc.insert(7, dict! { "Helv" => r(8), "Helv1" => Object::null() });
+        doc.insert(8, pdf_fonts::Std14::Helvetica.dict());
+        doc
+    }
+
     /// Three pages under a root that gives them a color space: one drawing an
     /// inline image in it, one whose `/Contents` holds a stream, a reference
     /// to nothing and a dictionary, one with none; a title and two dates, one
@@ -1007,10 +1083,11 @@ mod tests {
 
     /// Files of what the facade reads apart: a page, pages with their
     /// `/Contents` of each shape, what a file says and claims, packed in
-    /// object streams, linearized, and encrypted; and with `embed`, a page
+    /// object streams, linearized, and encrypted; with `embed`, a page
     /// drawn in a font over a TrueType program as it is, and one the facade
     /// wrote, drawn in a program it embedded, and a page drawn in one whose
-    /// content doesn't read.
+    /// content doesn't read; and last, a page and a form whose fonts are
+    /// held by reference.
     fn seeds() -> Vec<Vec<u8>> {
         let one = written(&one_page(), XrefKind::Table, false, None);
         let three = written(&three_pages(), XrefKind::Table, false, None);
@@ -1029,7 +1106,9 @@ mod tests {
         let unread = written(&embedded_unread(), XrefKind::Table, false, None);
         #[cfg(feature = "embed")]
         let seeds = [seeds, vec![whole, embedded_subset(), unread]].concat();
-        seeds
+        // Last, so each seed before keeps its place.
+        let form = written(&with_a_form(), XrefKind::Table, false, None);
+        [seeds, vec![form]].concat()
     }
 
     /// A mutation of `seed`, from `random`, as a fuzzer might make it.
@@ -1106,9 +1185,10 @@ mod tests {
             all.unlocked += reached.unlocked;
             all.strings += reached.strings;
             all.edited += reached.edited;
+            all.registered += reached.registered;
         }
         assert!(all.pages >= 10 && all.contents >= 8, "{all:?}");
-        assert!(all.edited >= 4, "{all:?}");
+        assert!(all.edited >= 4 && all.registered >= 4, "{all:?}");
         assert!(all.strings >= 6, "{all:?}");
         assert!(all.locked >= 4 && all.unlocked >= 4, "{all:?}");
     }

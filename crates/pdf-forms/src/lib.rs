@@ -25,6 +25,9 @@
 //!   what this crate reads. With `embed` too, `appearance::text_with_fallback`
 //!   draws what the field's font can't in a TrueType program the caller gives,
 //!   and returns the glyphs it drew, for the caller to embed.
+//! - [`default_resources::font_name`] gives the name a writer puts a font under
+//!   in the form's default resources, where no other font holds it, for a
+//!   default appearance string to name it by.
 //!
 //! # Example
 //!
@@ -114,6 +117,7 @@ pub use pdf_semantics;
 
 #[cfg(feature = "text-layout")]
 pub mod appearance;
+pub mod default_resources;
 mod error;
 mod fault;
 mod field;

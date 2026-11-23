@@ -222,9 +222,10 @@ _qpdf:
 # (with `embed`, which a `-p` build has only where it's named, and what qpdf
 # says of each printed), then the annotations pdf-annots writes and the
 # appearances pdf-forms makes (with `embed`, so those in a fallback font
-# too), then the checker's in pdf-lint,
-# then what pdf-linearize lays out, and its lopdf adapter, which `just test`
-# leaves out as ignored, against the pinned qpdf (the corpus tests aside).
+# too), then the forms pdfs makes or extends with an annotation's font, then
+# the checker's in pdf-lint, then what pdf-linearize lays out, and its lopdf
+# adapter, which `just test` leaves out as ignored, against the pinned qpdf
+# (the corpus tests aside).
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fixtures -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
@@ -232,6 +233,7 @@ test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-fonts --features embed --lib tests::written::qpdf_checks_the_written_cases_clean -- --ignored --exact --nocapture
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-annots --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-forms --features embed --test qpdf -- --ignored
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdfs --test annots -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize-lopdf --test qpdf -- --ignored

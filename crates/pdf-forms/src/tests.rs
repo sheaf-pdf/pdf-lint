@@ -911,6 +911,74 @@ fn default_resources_fonts_are_found_by_name() {
     assert!(font(b"Absent").is_none());
 }
 
+/// The name a font is put under in the default resources' fonts: the one
+/// wanted where it's free, `null` or the font's own, else the first number
+/// after it that is, never another font's; a key written twice taken by its
+/// last value, as a lookup reads it; and found within a number past every
+/// key the dictionary has.
+#[test]
+fn a_fonts_name_in_the_default_resources_is_no_other_fonts() {
+    use std::borrow::Cow;
+
+    use crate::default_resources::font_name;
+
+    let font = ObjectId::new(12, 0);
+    let other = Object::reference(7);
+    let named = |fonts: &Dict, wanted: &[u8]| font_name(Some(fonts), wanted, font).into_owned();
+
+    // Free, or the font's own: as wanted, borrowed.
+    let fonts = dict! { "Helv" => other.clone(), "Mine" => font, "Gone" => Object::null() };
+    for wanted in [&b"F1"[..], b"Mine", b"Gone"] {
+        assert!(matches!(
+            font_name(Some(&fonts), wanted, font),
+            Cow::Borrowed(name) if name == wanted
+        ));
+    }
+    assert_eq!(font_name(None, b"Helv", font), &b"Helv"[..]);
+    assert_eq!(font_name(Some(&Dict::new()), b"Helv", font), &b"Helv"[..]);
+
+    // Another font's: the first number after it that's free, null, or the
+    // font's own.
+    assert_eq!(named(&fonts, b"Helv"), b"Helv1");
+    let mut fonts = dict! {
+        "Helv" => other.clone(),
+        "Helv1" => other.clone(),
+        "Helv2" => Object::null(),
+        "Helv3" => font,
+    };
+    assert_eq!(named(&fonts, b"Helv"), b"Helv2");
+    fonts.set("Helv2", other.clone());
+    assert_eq!(named(&fonts, b"Helv"), b"Helv3");
+    // A font held directly, the font's number at another generation,
+    // anything else: another's.
+    let fonts = dict! {
+        "Helv" => dict! { "Type" => Object::name("Font") },
+        "Helv1" => ObjectId::new(12, 1),
+        "Helv2" => 4,
+    };
+    assert_eq!(named(&fonts, b"Helv"), b"Helv3");
+    // A key written twice is its last value's.
+    let mut twice = dict! { "Helv" => other.clone() };
+    twice.push("Helv1", font);
+    twice.push("Helv1", other.clone());
+    assert_eq!(named(&twice, b"Helv"), b"Helv2");
+    let mut twice = dict! { "Helv" => other.clone() };
+    twice.push("Helv1", other.clone());
+    twice.push("Helv1", font);
+    assert_eq!(named(&twice, b"Helv"), b"Helv1");
+    // An empty name, numbered as any other.
+    let fonts = dict! { "" => other.clone() };
+    assert_eq!(named(&fonts, b""), b"1");
+
+    // Every number up to the dictionary's length taken: the next.
+    let mut full = dict! { "F" => other.clone() };
+    for n in 1..1000 {
+        full.set(format!("F{n}").into_bytes(), other.clone());
+    }
+    assert_eq!(full.len(), 1000);
+    assert_eq!(named(&full, b"F"), b"F1000");
+}
+
 #[test]
 fn debug_never_prints_a_name_or_a_value() {
     let mut store = Store::default();
