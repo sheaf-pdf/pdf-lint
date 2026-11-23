@@ -42,7 +42,23 @@
 //!    the font it's given as its resource; each content's `q`/`Q` and
 //!    `BT`/`ET` balanced, no `/Tx`, its numbers finite, and in a standard 14
 //!    font it interprets with no error and no fault; and no `Debug` shows a
-//!    caption.
+//!    caption. And a choice field's: `appearance::combo_box` and `list_box`
+//!    over the same cut (`check_choices`), the text the combo box's, its
+//!    lines the list box's labels, the flags which are selected, `/MaxLen`
+//!    its top, in a standard 14 font the input's length picks; and for each
+//!    widget of the form's choice fields, `appearance::widget_choice`,
+//!    alike under `&mut ()` and a `Vec` sink, and `choice_for_widget`,
+//!    which makes what `make` makes in its font and tells what reading the
+//!    widget and its font tells; any other field's refused
+//!    (`Unmade::NotChoice`). Each is made the same twice; a text past
+//!    `Limits::text`, a list's lines from its top past `Limits::items` or
+//!    their bytes past `Limits::text`, and no box are refused as they say,
+//!    a character a font lacks told at its offset in the text or in its
+//!    option's label; each content's `q`/`Q`, one `/Tx BMC`/`EMC`, and
+//!    `BT`/`ET` balanced, its numbers finite, and in a standard 14 font it
+//!    interprets with no error and no fault; a list's lines no more than
+//!    its box less its border holds, from its top; and no `Debug` shows a
+//!    text or a label.
 //! 6. Appearances (`text-layout`): `appearance::text` over a text, flags,
 //!    `/MaxLen`, `/Q`, a box, a border, colors, a rotation, and a `/DA` cut
 //!    from the input (`check_appearance`), in each standard 14 font; and for
@@ -173,6 +189,8 @@ pub fn check(data: &[u8]) {
     check_group(data);
     #[cfg(feature = "text-layout")]
     check_buttons(data);
+    #[cfg(feature = "text-layout")]
+    check_choices(data);
 }
 
 /// A catalog and objects 1, 2, … split on `0xFF` and parsed, the first 24
@@ -306,6 +324,8 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
         buttons_and_choices(objects, &form, rules, &limits);
         #[cfg(feature = "text-layout")]
         widget_buttons(objects, &form, rules, &limits);
+        #[cfg(feature = "text-layout")]
+        widget_choices(objects, &form, rules, &limits);
 
         #[cfg(feature = "text-layout")]
         widget_appearances(objects, &form, rules, &limits);
@@ -1761,6 +1781,230 @@ fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
     }
 }
 
+/// Makes a combo box's and a list box's appearances from what `data` is
+/// cut into, as [`check_appearance`] cuts it (`Cut`): the text the combo
+/// box's, shown with a drop button where the flags' first bit is clear;
+/// its lines the list box's labels, those the flags' bits name selected
+/// (with one past them and one twice), from the maximum length's line;
+/// `Limits::items` the cut's cap, as `Limits::text` is; in the standard 14
+/// font the input's length picks; each made twice the same, and holding
+/// what the makers promise ([`choice_holds`]).
+#[cfg(feature = "text-layout")]
+pub fn check_choices(data: &[u8]) {
+    use crate::appearance::{ComboBox, ListBox, combo_box, list_box};
+
+    let cut = Cut::of(data);
+    let look = cut.look();
+    let mut limits = cut.limits();
+    limits.items = cut.cap;
+    let font = &faces()[data.len() % faces().len()];
+    let layout = font.layout();
+    let res = font
+        .res()
+        .expect("a standard 14 font is named by its dictionary");
+    let flags = cut.flags.bits();
+
+    let mut combo = ComboBox::new(&cut.text);
+    combo.drop_button = flags & 1 == 0;
+    let made = combo_box(&combo, &look, &cut.da, res.clone(), &layout, &limits);
+    assert_eq!(
+        made,
+        combo_box(&combo, &look, &cut.da, res.clone(), &layout, &limits)
+    );
+    choice_holds(&look, &[combo.text], 0, &limits, &layout, &res, true, &made);
+
+    let labels: Vec<&str> = cut.text.split('\n').collect();
+    let mut selected: Vec<usize> = (0..32).filter(|i| flags >> i & 1 != 0).collect();
+    selected.extend(selected.first().copied());
+    selected.push(labels.len());
+    let mut list = ListBox::new(&labels);
+    list.selected = &selected;
+    list.top = cut
+        .max_len
+        .map_or(0, |n| usize::try_from(n).unwrap_or(0) % (labels.len() + 2));
+    let made = list_box(&list, &look, &cut.da, res.clone(), &layout, &limits);
+    assert_eq!(
+        made,
+        list_box(&list, &look, &cut.da, res.clone(), &layout, &limits)
+    );
+    choice_holds(
+        &look, &labels, list.top, &limits, &layout, &res, false, &made,
+    );
+}
+
+/// Holds what `appearance::combo_box` (`combo`, whose text is `texts`' one)
+/// and `list_box` (whose labels are `texts`, from `top`) promise of `made`,
+/// made in `look` under `limits` in `font`, named by `res`.
+#[cfg(feature = "text-layout")]
+#[allow(clippy::too_many_arguments)]
+fn choice_holds<F: pdf_gfx::LayoutFont + ?Sized>(
+    look: &crate::appearance::WidgetLook<'_>,
+    texts: &[&str],
+    top: usize,
+    limits: &Limits,
+    font: &F,
+    res: &pdf_content_streams::Res,
+    combo: bool,
+    made: &Result<crate::appearance::Appearance, crate::appearance::Unmade>,
+) {
+    use crate::Cap;
+    use crate::appearance::Unmade;
+
+    let shown = texts.get(top..).unwrap_or_default();
+    let many = !combo && shown.len() > limits.items;
+    let bytes: usize = shown.iter().map(|t| t.len()).sum();
+    let long = !many && bytes > limits.text;
+    let made = match made {
+        Ok(made) => made,
+        Err(err) => {
+            match err {
+                Unmade::Limit(Cap::Items) => assert!(many, "refused for a cap not passed"),
+                Unmade::Limit(Cap::Text) => assert!(long, "refused for a cap not passed"),
+                Unmade::NoBox => assert!(!many && !long && !boxed(look), "no box for a box"),
+                Unmade::NotFinite => assert!(!many && !long && boxed(look), "not finite, no box"),
+                Unmade::Unencodable(told) => assert!(
+                    combo && texts[0][told.at..].starts_with(told.character),
+                    "a character told at its offset in the text"
+                ),
+                Unmade::UnencodableOption { option, character } => assert!(
+                    !combo
+                        && *option >= top
+                        && texts.get(*option).is_some_and(|label| label
+                            .get(character.at..)
+                            .is_some_and(|l| l.starts_with(character.character))),
+                    "a character told at its offset in its option's label"
+                ),
+                other => panic!("a maker of plain data refused with {other:?}"),
+            }
+            for text in texts {
+                assert!(
+                    !shows(&format!("{err:?} {err}"), text),
+                    "an error shows a text"
+                );
+            }
+            return;
+        }
+    };
+    assert!(!many && !long, "made past a cap");
+    assert!(boxed(look), "made in no box");
+    content_holds(&made.content, None);
+    assert!(made.needs.0.len() <= 1, "one resource at most");
+    assert!(
+        made.needs.0.iter().all(|need| need.res == *res),
+        "the font given"
+    );
+    assert!(made.font_size.is_finite() && made.font_size >= 0.0);
+    interprets_alone(made);
+    for text in texts {
+        assert!(
+            !shows(&format!("{made:?}"), text),
+            "an appearance shows a text"
+        );
+    }
+    if combo {
+        return;
+    }
+    // From its top, and no more lines than the box less the border holds:
+    // each written line's top is above that box's bottom, a line height
+    // apart. That box is turned the right way round where the border is
+    // wider than half the box, and taller than the box where the border is
+    // wider than the box; and each step down is rounded at the top's
+    // magnitude, which far from the origin can lose a step whole.
+    let lines = made.content.windows(3).filter(|w| w == b"BT\n").count();
+    assert!(lines <= shown.len(), "a line past the labels");
+    let metrics = font.font_metrics();
+    let height = (metrics.ascent - metrics.descent) * made.font_size / 1000.0;
+    if lines > 1 && height.is_finite() && height > 0.0 {
+        let (bbox, inset) = (made.bbox, look.border.inset());
+        let client = pdf_gfx::Rect::new(
+            bbox.x0 + inset,
+            bbox.y0 + inset,
+            bbox.x1 - inset,
+            bbox.y1 - inset,
+        );
+        let reach = f64::from(height) * (lines as f64 - 1.0);
+        let rounding = f64::from(client.y1.abs()) * 1e-4;
+        let bound = f64::from(client.height()) * (1.0 + 1e-4) + rounding + 1e-3;
+        assert!(
+            reach <= bound,
+            "lines written below the box less its border"
+        );
+    }
+}
+
+/// Reads each choice widget of `form` for its appearance, alike whatever
+/// the sink, makes it in its font, and holds the convenience to what it's
+/// made of, as the module's docs list.
+#[cfg(feature = "text-layout")]
+fn widget_choices<'o, R: Resolve<'o> + Streams + Copy>(
+    objects: R,
+    form: &Form<'o>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    use pdf_fonts::Std14;
+
+    use crate::FieldKind;
+    use crate::appearance::{FieldFont, Unmade, choice_for_widget, widget_choice};
+
+    for field in form.fields() {
+        let choice = matches!(field.kind(), Some(FieldKind::Combo | FieldKind::List));
+        for widget in field.widgets() {
+            let quiet = widget_choice(field, widget, objects, rules, limits, &mut ());
+            let mut told: Vec<(Place, Fault)> = Vec::new();
+            let read = widget_choice(field, widget, objects, rules, limits, &mut told);
+            assert_eq!(
+                format!("{quiet:?}"),
+                format!("{read:?}"),
+                "a sink changed a choice"
+            );
+            if !choice {
+                assert!(matches!(read, Err(Unmade::NotChoice)));
+            }
+            let Ok(read) = &read else { continue };
+            assert_eq!(read.is_combo(), field.kind() == Some(FieldKind::Combo));
+            let debug = format!("{read:?}");
+            if let Some(combo) = read.combo() {
+                assert!(!shows(&debug, combo.text), "a text shown");
+            }
+            for label in read.labels() {
+                assert!(!shows(&debug, label), "a label shown");
+            }
+            assert!(
+                read.selected().windows(2).all(|w| w[0] < w[1])
+                    && read.selected().iter().all(|&i| i < read.labels().len()),
+                "a selection sorted, each once, of an option"
+            );
+            let mut faults = Vec::new();
+            let made = choice_for_widget(form, field, widget, objects, rules, limits, &mut faults);
+            assert_eq!(
+                format!("{made:?}"),
+                format!(
+                    "{:?}",
+                    choice_for_widget(form, field, widget, objects, rules, limits, &mut ())
+                )
+            );
+            let font = match read.font_name() {
+                Some(name) => form.field_font(objects, name, limits, &mut told),
+                None => Ok(FieldFont::standard(Std14::Helvetica)),
+            };
+            assert!(faults == told, "choice_for_widget tells what reading tells");
+            let expected = match font {
+                Ok(font) => match font.res() {
+                    Some(res) => read.make(res, &font.layout(), limits),
+                    None => Err(Unmade::FontNotBindable),
+                },
+                Err(err) => Err(err.into()),
+            };
+            match (made, expected) {
+                (Ok(made), Ok(expected)) => assert!(made.appearance == expected),
+                (Err(err), Err(expected)) => assert!(err == expected),
+                _ => panic!("choice_for_widget makes what widget_choice, field_font and make make"),
+            }
+        }
+    }
+}
+
 /// The objects and catalog a seed is parsed into, for the crate's tests.
 #[cfg(test)]
 pub(crate) fn parsed(data: &[u8]) -> (BTreeMap<ObjectId, Object>, Dict) {
@@ -2148,7 +2392,7 @@ mod tests {
     /// up to past finite, comb and not; `/DA` sizes and boxes so large the
     /// text reaches past what can be placed, and two inputs the target
     /// stopped on there; and comb fields with more cells than a small
-    /// `Limits::text`.
+    /// `Limits::text`. `check_choices` is driven by the same inputs.
     #[cfg(feature = "text-layout")]
     #[test]
     fn appearances_hold_at_every_edge() {
@@ -2285,7 +2529,46 @@ mod tests {
         }
         for input in &inputs {
             super::check_appearance(&input.bytes());
+            super::check_choices(&input.bytes());
         }
+        // A list box from its second line, two of them selected: in a box
+        // that holds three of its five, and in one that holds them all
+        // far from its origin; and under a cap of two items, refused.
+        for (cap, height) in [(10, 30.0), (10, 1e30), (1, 30.0)] {
+            let list = Input {
+                flags: 0b1010,
+                max_len: Some(1),
+                cap,
+                ..Input::new(b"/Helv 10 Tf 0 g", "one\ntwo\nthree\nfour\nfive\nsix")
+            };
+            super::check_choices(&list.with(1, &[height]).bytes());
+        }
+        // List boxes of twelve lines whose solid border is wider than half
+        // their height, so the box less the border is turned the right way
+        // round, the lines set from its top as a text field's are: 20 high
+        // with a border 11 wide (that box 2 high, one line) and 40 wide (60
+        // high, taller than the box), barely high at all with one 13,265
+        // wide, and with one so wide (`1e30`) that each line's step down is
+        // lost to rounding at that box's top, every label written there;
+        // and one whose border leaves 16 points of it `1e8` from its
+        // origin, where a line's step is lost the same way.
+        for (height, width, da) in [
+            (20.0, 11.0, &b"/Helv 10 Tf 0 g"[..]),
+            (20.0, 40.0, &b"/Helv 10 Tf 0 g"[..]),
+            (1.517_883e-16, 13_265.286, &b"/Helv 10 Tf 0 g"[..]),
+            (20.0, 1e30, &b"/Helv 10 Tf 0 g"[..]),
+            (2e8 + 16.0, 1e8, &b"/Helv 2.5 Tf 0 g"[..]),
+        ] {
+            let list = Input {
+                flags: 0b1010,
+                ..Input::new(da, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl")
+            };
+            super::check_choices(&list.with(1, &[height, width]).bytes());
+        }
+        // An input the target stopped on: a list box `1.5e-16` high with a
+        // solid border 13,265 wide, its two lines set at the top of the box
+        // less the border, 26,530 high.
+        super::check(b"\x000\x00\x00\x00\x00\x00\x00\xa6\xff\xff\x14\xff\x03\n\x00\x00\xc8B\x00\x00/%%EOFChHB\x00\x00\x00@\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xcd\xcc\xcc=\xcd\xccL>\x9a\x99\x99>\xcd\xcc\xcc>\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00/TiRo 04 Tf 0 0 0 1 k\xffpass word\r\ns#cret#");
         // Two inputs the target stopped on: each cut into a password at a
         // `/DA` size of `5.2439346e36`, whose stars, every number written
         // finite, the interpreter refused to place.

@@ -1,7 +1,8 @@
 //! One line of text in a box, as PDFium as of chromium/8152 sets a push
-//! button's caption (`fpdfsdk/cpdfsdk_appstream.cpp`,
-//! `GetPushButtonAppStream`, over `fpdfsdk/pwl/cpwl_edit_impl.cpp`): its
-//! size, its layout, and whether it can be placed.
+//! button's caption, a combo box's text, and each line of a list box
+//! (`fpdfsdk/cpdfsdk_appstream.cpp`, `GetPushButtonAppStream`,
+//! `SetAsComboBox`, `SetAsListBox`, over `fpdfsdk/pwl/cpwl_edit_impl.cpp`):
+//! its size, its layout, and whether it can be placed.
 
 use pdf_gfx::{
     LaidOutText, LayoutFont, Rect, TextAlign, TextBoxStyle, UnencodableChar, VerticalAlign,
@@ -96,16 +97,7 @@ pub(super) fn one_line<F: LayoutFont + ?Sized>(
 /// even that is bigger). A text field's single line is sized the same way
 /// (`appearance::text`).
 fn auto_size<F: LayoutFont + ?Sized>(advances: &[f32], box_: Rect, font: &F) -> f32 {
-    let metrics = font.font_metrics();
-    // The heights the layout sets a line by: the font's as given, or its
-    // floors where they give no height.
-    let (ascent, descent) = {
-        let (a, d) = (metrics.ascent / 1000.0, metrics.descent / 1000.0);
-        match a.is_finite() && d.is_finite() && a > d {
-            true => (metrics.ascent, metrics.descent),
-            false => (a.max(0.70) * 1000.0, d.min(-0.15) * 1000.0),
-        }
-    };
+    let (ascent, descent) = heights(font);
     let bigger = |size: f32| {
         let wide = advances.iter().fold(0.0, |w, a| w + a * size * 0.001);
         let tall = ascent * size * 0.001 - descent * size * 0.001;
@@ -125,6 +117,26 @@ fn auto_size<F: LayoutFont + ?Sized>(advances: &[f32], box_: Rect, font: &F) -> 
         0 => AUTO_SIZES[0],
         n => AUTO_SIZES[n - 1],
     }
+}
+
+/// The heights the layout sets a line of `font` by, per 1000 em: its ascent
+/// and descent as given, or their floors where they give no height
+/// (`pdf_gfx::TextBoxStyle::font_heights_as_given`).
+fn heights<F: LayoutFont + ?Sized>(font: &F) -> (f32, f32) {
+    let metrics = font.font_metrics();
+    let (a, d) = (metrics.ascent / 1000.0, metrics.descent / 1000.0);
+    match a.is_finite() && d.is_finite() && a > d {
+        true => (metrics.ascent, metrics.descent),
+        false => (a.max(0.70) * 1000.0, d.min(-0.15) * 1000.0),
+    }
+}
+
+/// The height of a line of `font` at `size`: its ascent less its descent,
+/// as the layout sets lines by them ([`heights`]), as PDFium as of
+/// chromium/8152 steps a list box's lines down (`SetAsListBox`).
+pub(super) fn line_height<F: LayoutFont + ?Sized>(font: &F, size: f32) -> f32 {
+    let (ascent, descent) = heights(font);
+    ascent * size * 0.001 - descent * size * 0.001
 }
 
 /// Whether `laid` can be placed: its size and every line's origin finite,

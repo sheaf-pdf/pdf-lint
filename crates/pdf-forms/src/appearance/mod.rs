@@ -20,6 +20,13 @@
 //!   [`widget_toggle`] and [`widget_push`] read a widget of a
 //!   [`Form`](crate::Form)'s buttons into that data, and
 //!   [`toggle_for_widget`] and [`push_for_widget`] make one widget's.
+//! - [`combo_box`] and [`list_box`] make a combo box's and a list box's
+//!   from plain data: a [`ComboBox`] (the text it shows, and whether its
+//!   drop button is drawn) or a [`ListBox`] (its options' labels, those
+//!   selected, and the one at its top), a [`WidgetLook`], the parsed default
+//!   appearance, and a font; [`widget_choice`] reads a widget of a
+//!   [`Form`](crate::Form)'s choice fields into that data, and
+//!   [`choice_for_widget`] makes one widget's.
 //! - [`FieldFont`] is the font a field's text is drawn in: the default
 //!   resources' font (`/DR /Font`) its default appearance string names, read
 //!   with `pdf-fonts`, or a standard 14 font chosen by that name where the
@@ -103,6 +110,7 @@
 //! ```
 
 mod button;
+mod choice;
 mod font;
 mod frame;
 mod line;
@@ -111,6 +119,8 @@ mod read;
 mod tests;
 #[cfg(test)]
 mod tests_buttons;
+#[cfg(test)]
+mod tests_choices;
 mod text;
 mod widget;
 
@@ -118,11 +128,12 @@ pub use button::{
     Mark, PushAppearances, PushButton, ToggleAppearances, ToggleButton, check_box, push_button,
     radio_button,
 };
+pub use choice::{ComboBox, ListBox, combo_box, list_box};
 pub use font::{FieldFont, FieldLayoutFont};
 pub use frame::{Appearance, Unmade, WidgetLook};
 pub use read::{
-    MadePush, MadeToggle, WidgetPush, WidgetToggle, push_for_widget, toggle_for_widget,
-    widget_push, widget_toggle,
+    MadePush, MadeToggle, WidgetChoice, WidgetPush, WidgetToggle, choice_for_widget,
+    push_for_widget, toggle_for_widget, widget_choice, widget_push, widget_toggle,
 };
 #[cfg(any(test, fuzzing))]
 pub(crate) use text::REACH;

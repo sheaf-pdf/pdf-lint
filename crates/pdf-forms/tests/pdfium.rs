@@ -744,25 +744,19 @@ const RULE_KINDS: &[&str] = &["forms-ap", "forms-ap-all", "forms-press"];
 
 /// The cases of a kind that holds more than one maker's that a test
 /// compares to what the crate makes, by kind and the start of their names:
-/// `buttons_here`'s.
-const COMPARED: &[(&str, &str)] = &[("forms-ap-all", "btn-"), ("forms-ap-all", "push-")];
+/// `buttons_here`'s and `choices_here`'s.
+const COMPARED: &[(&str, &str)] = &[
+    ("forms-ap-all", "btn-"),
+    ("forms-ap-all", "push-"),
+    ("forms-ap-all", "combo-"),
+    ("forms-ap-all", "list-"),
+];
 
 /// The cases nothing here compares a maker or a rule to yet, by kind and
 /// the start of their names, each with why. Their answers are read part by
 /// part below, and `just test-pdfium` holds them to PDFium; a line leaves
 /// this list with the test that compares its cases.
-const NOT_YET_COMPARED: &[(&str, &str, &str)] = &[
-    (
-        "forms-ap-all",
-        "combo-",
-        "the crate makes no combo box's appearance yet",
-    ),
-    (
-        "forms-ap-all",
-        "list-",
-        "the crate makes no list box's appearance yet",
-    ),
-];
+const NOT_YET_COMPARED: &[(&str, &str, &str)] = &[];
 
 /// What a `forms-ap-all` record gives of an appearance's content, in the
 /// order the content has it: a path painted, a clip set and where it ends,
@@ -1537,7 +1531,11 @@ mod buttons_here {
     /// bounds, and each string shown with its color, its font (`font` where
     /// the content names the one resource it needs), its size, origin and
     /// codes.
-    fn items(objects: &Reading<&[u8]>, made: &Made, font: &str) -> Result<Vec<Item>, String> {
+    pub(super) fn items(
+        objects: &Reading<&[u8]>,
+        made: &Made,
+        font: &str,
+    ) -> Result<Vec<Item>, String> {
         let mut fonts = Dict::new();
         for need in &made.needs.0 {
             let bound = match need.res.body() {
@@ -1606,7 +1604,11 @@ mod buttons_here {
     }
 
     /// `made` as the oracle records a stream.
-    fn drawn(objects: &Reading<&[u8]>, made: &Made, font: &str) -> Result<Drawn, String> {
+    pub(super) fn drawn(
+        objects: &Reading<&[u8]>,
+        made: &Made,
+        font: &str,
+    ) -> Result<Drawn, String> {
         Ok(Drawn {
             bbox: [made.bbox.x0, made.bbox.y0, made.bbox.x1, made.bbox.y1],
             matrix: made.matrix.to_array(),
@@ -2208,6 +2210,427 @@ mod buttons_here {
         assert!(
             wrong.is_empty(),
             "{} button case(s) disagreed with chromium/8152:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+}
+
+/// The appearances `pdf_forms::appearance::choice_for_widget` makes for each
+/// widget of a `forms-ap-all` case's combo boxes and list boxes (`combo-`
+/// and `list-` cases), interpreted with `pdf_gfx::interpret` and recorded
+/// item by item as the oracle records PDFium's (`buttons_here::drawn`), and
+/// held to them part by part, under the features `made_here` needs, whose
+/// comparisons of a path and a color it takes.
+#[cfg(all(feature = "text-layout", feature = "programs"))]
+mod choices_here {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::fs;
+
+    use pdf_forms::appearance;
+    use pdf_forms::pdf_gfx::LayoutFont;
+    use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
+    use pdf_forms::pdf_objects::{Object, Resolve};
+    use pdf_forms::pdf_semantics::pages;
+    use pdf_forms::{FieldKind, Form, Limits};
+    use pdf_structure::read::Recovery;
+    use pdf_structure::{Reading, read};
+
+    use super::buttons_here::drawn;
+    use super::made_here::{
+        ADDED, EXACT, PLACE, client_box, near, placed, rectangle, regions, same_color, same_paint,
+    };
+    use super::{Drawn, Item, Painted, Segment, WidgetRecord, differ_lines, read_tsv, set};
+
+    /// A record's parts a `differ.tsv` line for a choice case may name:
+    /// `made`, made on one side and not the other; the appearance's `bbox`
+    /// and `matrix`; `paint`, the frame and a combo box's drop button;
+    /// `clip`, the `/Tx` sequence's clip; and `text`, what it shows, each
+    /// string and a list box's highlights in order.
+    const PARTS: [&str; 6] = ["made", "bbox", "matrix", "paint", "clip", "text"];
+
+    /// The differences that are rules, each a line under `forms-ap-all`:
+    /// where PDFium writes no clip, a combo box's clips to its text box;
+    /// where PDFium writes no `/Tx` sequence, the one made here is empty;
+    /// and a list box's lines PDFium writes below the box aren't written.
+    const RULES: [&str; 3] = ["clip", "tx", "below"];
+
+    /// The width PDFium gives a combo box's drop button.
+    const DROP_BUTTON: f32 = 13.0;
+
+    /// One annotation of a case's page, as made here.
+    struct Annotation {
+        /// What's made, or why nothing is.
+        made: Result<Drawn, String>,
+        /// The box text is set in, `[x0 y0 x1 y1]`: the box less the
+        /// border's reach, and a combo box's drop button.
+        text_box: [f32; 4],
+        /// The bottom of the box less the border's reach.
+        bottom: f32,
+        /// The font's ascent at the size made, in points.
+        ascent: f32,
+    }
+
+    /// Each annotation of `name`'s page as made here, and the names of the
+    /// default resources' fonts.
+    fn made_for(name: &str) -> (Vec<Option<Annotation>>, HashSet<String>) {
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let mut opts = read::Options::DEFAULT;
+        opts.recovery = Recovery::Pdfium;
+        let reading = Reading::open(&bytes[..], &opts).unwrap();
+        let objects = &reading;
+        let catalog = pdf_forms::pdf_semantics::catalog(objects, reading.trailer().dict())
+            .unwrap()
+            .unwrap();
+        let table = pages::pages(
+            objects,
+            catalog,
+            Rules::Pdfium,
+            &pdf_forms::pdf_semantics::Limits::DEFAULT,
+            &mut (),
+        )
+        .unwrap();
+        let page = table.iter().next().and_then(|page| page.dict).unwrap();
+        let form = Form::read(objects, catalog, Rules::Pdfium, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let fonts = form
+            .font_names()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect();
+        let annots = page
+            .get("Annots")
+            .and_then(|object| match object.as_reference() {
+                Some(id) => objects.resolve(id),
+                None => Some(object),
+            });
+        let limits = Limits::DEFAULT;
+        let mut made = Vec::new();
+        for entry in annots.and_then(Object::as_array).unwrap_or(&[]) {
+            let id = entry.as_reference();
+            let found = form.fields().iter().find_map(|field| {
+                let widget = field
+                    .widgets()
+                    .iter()
+                    .find(|w| w.id().is_some() && w.id() == id)?;
+                Some((field, *widget))
+            });
+            let Some((field, widget)) = found else {
+                made.push(None);
+                continue;
+            };
+            let annot = widget.annot(objects, Rules::Pdfium, &limits).unwrap();
+            let [x, y, w, h] = client_box(&annot);
+            let text_box = match field.kind() {
+                Some(FieldKind::Combo) => {
+                    let left = x + w - DROP_BUTTON;
+                    [x.min(left), y, x.max(left), y + h]
+                }
+                _ => [x, y, x + w, y + h],
+            };
+            let mut annotation = Annotation {
+                made: Err(String::new()),
+                text_box,
+                bottom: y,
+                ascent: 0.0,
+            };
+            let made_here = appearance::choice_for_widget(
+                &form,
+                field,
+                &widget,
+                objects,
+                Rules::Pdfium,
+                &limits,
+                &mut (),
+            );
+            annotation.made = made_here.map_err(|e| e.to_string()).and_then(|made| {
+                let font = match (made.font.is_fallback(), &made.font_name) {
+                    (false, Some(name)) => String::from_utf8_lossy(name).into_owned(),
+                    _ => ADDED.to_string(),
+                };
+                let ascent = made.font.layout().font_metrics().ascent;
+                annotation.ascent = ascent * made.appearance.font_size / 1000.0;
+                drawn(objects, &made.appearance, &font)
+            });
+            made.push(Some(annotation));
+        }
+        (made, fonts)
+    }
+
+    /// `items` cut at the `/Tx` sequence: the paths painted before and after
+    /// it, in order, and what's between its bounds, none where it has none.
+    fn cut(items: &[Item]) -> (Vec<Painted>, Option<Vec<Item>>) {
+        let (mut paint, mut tx, mut inside) = (Vec::new(), None::<Vec<Item>>, false);
+        for item in items {
+            match item {
+                Item::TxBegin => {
+                    inside = true;
+                    tx = Some(Vec::new());
+                }
+                Item::TxEnd => inside = false,
+                Item::Painted(painted) if !inside => paint.push(painted.clone()),
+                other if inside => tx.as_mut().unwrap().push(other.clone()),
+                other => panic!("{other:?} outside /Tx"),
+            }
+        }
+        (paint, tx)
+    }
+
+    /// A `/Tx` sequence's clip, `[x0 y0 x1 y1]`, and what it shows: each
+    /// path painted (a list box's highlight) and string shown, in order.
+    fn shown(tx: &[Item]) -> (Option<[f32; 4]>, Vec<Item>) {
+        let mut clip = None;
+        let mut shown = Vec::new();
+        for item in tx {
+            match item {
+                Item::Clip(segments) => {
+                    clip = match segments.as_slice() {
+                        [Segment::Rect([x, y, w, h])] => Some([*x, *y, x + w, y + h]),
+                        other => rectangle(other),
+                    };
+                }
+                Item::EndClip => {}
+                other => shown.push(other.clone()),
+            }
+        }
+        (clip, shown)
+    }
+
+    /// Whether two items shown are the same: a highlight's rectangle within
+    /// 0.05 pt in the same color, or a string at its origin within 0.05 pt
+    /// in the same color, font, size, and codes.
+    fn same_item(pdfium: &Item, ours: &Item, fonts: &HashSet<String>) -> bool {
+        match (pdfium, ours) {
+            (Item::Painted(p), Item::Painted(o)) => {
+                let p = placed(std::slice::from_ref(p));
+                let (p, o) = (&p[0], o);
+                let (Some(pr), Some(or)) = (rectangle(&p.segments), rectangle(&o.segments)) else {
+                    return false;
+                };
+                p.paint == o.paint && same_color(&p.color, &o.color) && near(pr, or, PLACE)
+            }
+            (
+                Item::Text {
+                    color: pc,
+                    shown: p,
+                },
+                Item::Text {
+                    color: oc,
+                    shown: o,
+                },
+            ) => {
+                let font = match fonts.contains(&p.font) {
+                    true => p.font.as_str(),
+                    false => ADDED,
+                };
+                same_color(pc, oc)
+                    && font == o.font
+                    && (p.size - o.size).abs() <= EXACT
+                    && near(p.at, o.at, PLACE)
+                    && p.codes == o.codes
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `item`, one PDFium shows past the lines written here, is
+    /// wholly below the box less the border's reach: a highlight's top, or
+    /// a string's top (its baseline and the font's ascent), at or below
+    /// its bottom.
+    fn below(item: &Item, ours: &Annotation) -> bool {
+        match item {
+            Item::Painted(p) => rectangle(&placed(std::slice::from_ref(p))[0].segments)
+                .is_some_and(|[_, _, _, top]| top <= ours.bottom + PLACE),
+            Item::Text { shown, .. } => shown.at[1] + ours.ascent <= ours.bottom + PLACE,
+            _ => false,
+        }
+    }
+
+    /// How often each rule applied, and held.
+    #[derive(Default)]
+    struct Held {
+        clip: usize,
+        tx: usize,
+        below: usize,
+    }
+
+    /// The parts in which what's made here for one annotation differs from
+    /// PDFium's record of it.
+    fn differing(
+        pdfium: &WidgetRecord,
+        ours: &Option<Annotation>,
+        fonts: &HashSet<String>,
+        held: &mut Held,
+    ) -> BTreeSet<&'static str> {
+        let mut parts = BTreeSet::new();
+        let theirs = (pdfium.appearances.iter().flatten())
+            .find(|a| a.slot == "N" && a.state.is_none())
+            .and_then(|a| a.drawn.as_ref());
+        let (Some(pdfium), Some(Ok(made))) = (theirs, ours.as_ref().map(|a| &a.made)) else {
+            if theirs.is_some() || ours.as_ref().is_some_and(|a| a.made.is_ok()) {
+                parts.insert("made");
+            }
+            return parts;
+        };
+        let ours = ours.as_ref().unwrap();
+        if !near(pdfium.bbox, made.bbox, EXACT) {
+            parts.insert("bbox");
+        }
+        if !near(pdfium.matrix, made.matrix, EXACT) {
+            parts.insert("matrix");
+        }
+        let (pdfium_paint, pdfium_tx) = cut(&pdfium.items);
+        let (ours_paint, ours_tx) = cut(&made.items);
+        if !same_paint(&placed(&pdfium_paint), &regions(ours_paint)) {
+            parts.insert("paint");
+        }
+        match (pdfium_tx, ours_tx) {
+            // No `/Tx` in PDFium's: an empty one here.
+            (None, Some(tx)) if tx.is_empty() => held.tx += 1,
+            (None, None) => {}
+            (None, Some(_)) | (Some(_), None) => {
+                parts.insert("clip");
+                parts.insert("text");
+            }
+            (Some(p), Some(o)) => {
+                let ((p_clip, p_shown), (o_clip, o_shown)) = (shown(&p), shown(&o));
+                let clip = match (p_clip, o_clip) {
+                    // No clip in PDFium's: the text box.
+                    (None, Some(o)) => {
+                        let held_here = near(o, ours.text_box, PLACE);
+                        held.clip += usize::from(held_here);
+                        held_here
+                    }
+                    (Some(p), Some(o)) => near(p, o, PLACE),
+                    (_, None) => false,
+                };
+                if !clip {
+                    parts.insert("clip");
+                }
+                let same = o_shown.len() <= p_shown.len()
+                    && (p_shown.iter().zip(&o_shown)).all(|(p, o)| same_item(p, o, fonts));
+                let rest = &p_shown[o_shown.len().min(p_shown.len())..];
+                if !same || !rest.iter().all(|item| below(item, ours)) {
+                    parts.insert("text");
+                } else if !rest.is_empty() {
+                    held.below += 1;
+                }
+            }
+        }
+        parts
+    }
+
+    /// Each `combo-` and `list-` case's appearances, made by
+    /// `choice_for_widget` from the case's file read with pdf-structure,
+    /// agree with PDFium's recorded ones in every part, or in every part
+    /// but those `differ.tsv` lists for it, which must still differ: the box
+    /// and the matrix; each path of the frame and a combo box's drop button,
+    /// in order, as the region it covers within 0.01 pt in its color; the
+    /// clip within 0.05 pt; and what the `/Tx` sequence shows, in order, each
+    /// string at its origin within 0.05 pt in its color, size, font, and
+    /// codes, and each list box highlight's rectangle within 0.05 pt in its
+    /// color. Where PDFium writes no clip, a combo box's here is its text
+    /// box; where PDFium writes no `/Tx`, the one here is empty; and where
+    /// PDFium writes a list box's lines past those written here, each is
+    /// wholly below the box less the border's reach: each rule held on
+    /// every such case, and on one at least.
+    #[test]
+    fn made_choices_agree_with_pdfiums() {
+        let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+            .into_iter()
+            .map(|[k, v]| (k, v))
+            .collect();
+        let cases: Vec<String> = read_tsv::<3>("cases.tsv")
+            .into_iter()
+            .filter(|[name, kind, _]| {
+                kind == "forms-ap-all" && (name.starts_with("combo-") || name.starts_with("list-"))
+            })
+            .map(|[name, _, _]| name)
+            .collect();
+
+        let mut listed: HashMap<String, BTreeSet<(String, Option<usize>)>> = HashMap::new();
+        let mut rules = BTreeSet::new();
+        for line in differ_lines() {
+            if line[0] == "forms-ap-all" {
+                assert_eq!(line.len(), 3, "{line:?}");
+                if RULES.contains(&line[1].as_str()) {
+                    assert!(
+                        rules.insert(line[1].clone()),
+                        "a rule listed twice: {line:?}"
+                    );
+                }
+            } else if cases.contains(&line[0]) {
+                assert_eq!(line.len(), 3, "a choice case's differ.tsv line: {line:?}");
+                let (part, at) = match line[1].split_once('@') {
+                    Some((part, at)) => (part, Some(at.parse().unwrap())),
+                    None => (line[1].as_str(), None),
+                };
+                assert!(PARTS.contains(&part), "{line:?}");
+                assert!(
+                    listed
+                        .entry(line[0].clone())
+                        .or_default()
+                        .insert((part.to_owned(), at)),
+                    "a part listed twice: {line:?}"
+                );
+            }
+        }
+        assert_eq!(rules.len(), RULES.len(), "a differ.tsv line for each rule");
+
+        let mut held = Held::default();
+        let mut wrong = Vec::new();
+        for name in &cases {
+            let pdfium = super::widget_records(&recorded[name]);
+            let (ours, fonts) = made_for(name);
+            assert_eq!(
+                pdfium.len(),
+                ours.len(),
+                "{name}: a record for each annotation"
+            );
+            let mut found = BTreeSet::new();
+            let mut said = Vec::new();
+            for (index, (pdfium, ours)) in pdfium.iter().zip(&ours).enumerate() {
+                let here = differing(pdfium, ours, &fonts, &mut held);
+                if !here.is_empty() {
+                    let made = ours.as_ref().map(|a| &a.made);
+                    said.push(format!(
+                        "  idx {index}: {here:?}\n    pdfium: {pdfium:?}\n    ours:   {made:?}"
+                    ));
+                }
+                found.extend(here.into_iter().map(|part| (index, part)));
+            }
+            let expected = listed.remove(name).unwrap_or_default();
+            let covers = |(part, at): &(String, Option<usize>),
+                          (index, differs): &(usize, &str)| {
+                part == differs && at.is_none_or(|at| at == *index)
+            };
+            let unlisted: Vec<_> = found
+                .iter()
+                .filter(|f| !expected.iter().any(|e| covers(e, f)))
+                .collect();
+            let agreeing: Vec<_> = expected
+                .iter()
+                .filter(|e| !found.iter().any(|f| covers(e, f)))
+                .collect();
+            if !unlisted.is_empty() || !agreeing.is_empty() {
+                wrong.push(format!(
+                    "{name}: differs unlisted in {unlisted:?}; listed but agrees: {agreeing:?}\n{}",
+                    said.join("\n")
+                ));
+            }
+        }
+        assert!(
+            listed.is_empty(),
+            "differ.tsv lists cases that aren't choice cases: {listed:?}"
+        );
+        for (rule, count) in [("clip", held.clip), ("tx", held.tx), ("below", held.below)] {
+            if count == 0 {
+                wrong.push(format!("the {rule} rule held on no case"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} choice case(s) disagreed with chromium/8152:\n{}",
             wrong.len(),
             wrong.join("\n")
         );

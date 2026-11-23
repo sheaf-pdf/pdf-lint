@@ -1,0 +1,169 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R] /DR << /Font << /Helv 100 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R] >>
+endobj
+5 0 obj
+<< /T (f0) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V (e2) /MK << /BC [0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 10 110 30] >>
+endobj
+6 0 obj
+<< /T (f1) /FT /Ch /Ff 393216 /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V (typed) /MK << /BC [0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 10 230 30] >>
+endobj
+7 0 obj
+<< /T (f2) /FT /Ch /Ff 131072 /DA (/Helv 0 Tf 0 g) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V (e2) /MK << /BC [0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 10 350 30] >>
+endobj
+8 0 obj
+<< /T (f3) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V (e2) /I [0] /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 10 470 30] >>
+endobj
+9 0 obj
+<< /T (f4) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V (e1) /I [0] /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 100 110 120] >>
+endobj
+10 0 obj
+<< /T (f5) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /V (b) /Q 1 /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 100 230 120] >>
+endobj
+11 0 obj
+<< /T (f6) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /V (b) /Q 2 /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 100 350 120] >>
+endobj
+12 0 obj
+<< /T (f7) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /V (b) /MK << /BC [0] /BG [0.9] >> /BS << /W 1 /S /B >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 100 470 120] >>
+endobj
+13 0 obj
+<< /T (f8) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /V (b) /MK << /BC [1 0 0] >> /BS << /W 2 /S /I >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 190 110 210] >>
+endobj
+14 0 obj
+<< /T (f9) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /V (b) /MK << /BC [0] >> /BS << /W 1 /S /D >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 190 230 210] >>
+endobj
+15 0 obj
+<< /T (f10) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /V (b) /MK << /BC [0] >> /BS << /W 1 /S /U >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 190 350 210] >>
+endobj
+16 0 obj
+<< /T (f11) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /MK << /BC [0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 190 470 210] >>
+endobj
+17 0 obj
+<< /T (f12) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 0 1 rg) /Opt [(A long label that passes the box)] /V (A long label that passes the box) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 280 110 300] >>
+endobj
+18 0 obj
+<< /T (f13) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V (outside) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 280 230 300] >>
+endobj
+19 0 obj
+<< /T (f14) /FT /Ch /Ff 131072 /DA (0 0 1 rg) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V (e3) /MK << /BG [1 1 0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 280 350 300] >>
+endobj
+20 0 obj
+<< /T (f15) /FT /Ch /Ff 131072 /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]] /V [(e2) (e1)] /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 280 470 300] >>
+endobj
+100 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 101
+0000000000 65535 f 
+0000000009 00000 n 
+0000000227 00000 n 
+0000000284 00000 n 
+0000000000 65535 f 
+0000000472 00000 n 
+0000000688 00000 n 
+0000000908 00000 n 
+0000001124 00000 n 
+0000001330 00000 n 
+0000001537 00000 n 
+0000001698 00000 n 
+0000001859 00000 n 
+0000002064 00000 n 
+0000002262 00000 n 
+0000002457 00000 n 
+0000002653 00000 n 
+0000002821 00000 n 
+0000003040 00000 n 
+0000003248 00000 n 
+0000003466 00000 n 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000003676 00000 n 
+trailer
+<< /Size 101 /Root 1 0 R >>
+startxref
+3775
+%%EOF

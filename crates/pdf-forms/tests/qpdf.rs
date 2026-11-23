@@ -13,7 +13,8 @@ use std::path::Path;
 
 use pdf_fixtures::qpdf::Qpdf;
 use pdf_forms::appearance::{
-    Appearance, push_for_widget, text_for_widget, toggle_for_widget, widget_text,
+    Appearance, choice_for_widget, push_for_widget, text_for_widget, toggle_for_widget,
+    widget_choice, widget_text,
 };
 use pdf_forms::pdf_annots::{
     AnnotColor, AnnotMut, AppearanceChars, AppearanceEntry, AppearanceMode, Appearances,
@@ -729,6 +730,249 @@ fn qpdf_checks_made_buttons_clean() {
     let folder = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(folder).unwrap();
     let path = folder.join("forms-qpdf-buttons.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    let qpdf = Qpdf::new(&path);
+    if let Err(why) = qpdf.version() {
+        panic!("this test needs qpdf ({why}): install it, or name it in PDF_LINT_QPDF");
+    }
+    let ran = qpdf
+        .exec(&["--check".to_string(), path.display().to_string()])
+        .expect("qpdf runs");
+    let said =
+        String::from_utf8_lossy(&ran.stdout).to_string() + &String::from_utf8_lossy(&ran.stderr);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(ran.code, Some(0), "{said}");
+    assert!(!said.contains("WARNING"), "{said}");
+}
+
+/// A document of choice fields whose appearances are made by
+/// `choice_for_widget` and bound as their normal appearances, as a caller
+/// saving them binds them: a combo box showing its selected option's label;
+/// an editable one turned a quarter, showing a value outside its options;
+/// and a list box of six options from its second, two selected, the last
+/// below its box and so not written. Written, and each widget made in it
+/// with the text it shows.
+fn choice_document() -> (Vec<u8>, Vec<Placed>) {
+    let mut doc = Document::new(Version::new(1, 7), dict! {});
+    let (page, pages) = (doc.new_id(), doc.new_id());
+    let helvetica = doc.add(Std14::Helvetica.dict());
+    let fields = [
+        (
+            "size",
+            [72.0, 700.0, 222.0, 720.0],
+            0,
+            dict! {
+                "Ff" => 1 << 17,
+                "Opt" => vec![
+                    Object::from(vec![Object::text("s"), Object::text("Small")]),
+                    Object::from(vec![Object::text("m"), Object::text("Medium")]),
+                ],
+                "V" => Object::text("m"),
+                "BS" => dict! { "W" => 1, "S" => Object::name("B") },
+                "MK" => dict! { "BC" => numbers(&[0.0]), "BG" => numbers(&[0.9]) },
+            },
+        ),
+        (
+            "colour",
+            [72.0, 560.0, 92.0, 680.0],
+            90,
+            dict! {
+                "Ff" => (1 << 17) | (1 << 18),
+                "Opt" => vec![Object::text("red"), Object::text("green")],
+                "V" => Object::text("teal"),
+                "MK" => dict! { "BC" => numbers(&[0.0, 0.0, 1.0]) },
+            },
+        ),
+        (
+            "days",
+            [300.0, 650.0, 380.0, 698.0],
+            0,
+            dict! {
+                "Ff" => 1 << 21,
+                "DA" => Object::text("/Helv 10 Tf 0 g"),
+                "Opt" => ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+                    .map(Object::text)
+                    .to_vec(),
+                "V" => vec![Object::text("Tue"), Object::text("Thu")],
+                "TI" => 1,
+                "MK" => dict! { "BC" => numbers(&[0.0]) },
+            },
+        ),
+    ];
+    let mut widgets = Vec::new();
+    for (name, rect, rotation, more) in fields {
+        let mut entries = dict! {
+            "Type" => Object::name("Annot"),
+            "Subtype" => Object::name("Widget"),
+            "FT" => Object::name("Ch"),
+            "T" => Object::text(name),
+            "Rect" => numbers(&rect),
+            "F" => 4,
+            "P" => page,
+        };
+        for (key, value) in more.iter() {
+            entries.set(key.to_vec(), value.clone());
+        }
+        if let Some(mk) = entries.get_mut(b"MK").and_then(Object::as_dict_mut) {
+            mk.set("R", rotation);
+        }
+        widgets.push(doc.add(entries));
+    }
+    let refs = || {
+        Object::from(
+            widgets
+                .iter()
+                .map(|&id| Object::from(id))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let form = doc.add(dict! {
+        "Fields" => refs(),
+        "DA" => Object::text("/Helv 0 Tf 0 g"),
+        "DR" => dict! { "Font" => dict! { "Helv" => helvetica } },
+    });
+    doc.set(
+        page,
+        dict! {
+            "Type" => Object::name("Page"),
+            "Parent" => pages,
+            "MediaBox" => numbers(&[0.0, 0.0, 612.0, 792.0]),
+            "Resources" => dict! {},
+            "Annots" => refs(),
+        },
+    );
+    doc.set(
+        pages,
+        dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1 },
+    );
+    let catalog = doc.add(dict! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+        "AcroForm" => form,
+    });
+    doc.trailer_mut().dict_mut().set("Root", catalog);
+
+    // Each widget made, with the text it shows: a combo box's, or the
+    // labels of a list box's lines written.
+    let limits = Limits::DEFAULT;
+    let mut made = Vec::new();
+    {
+        let catalog = doc.get_dict(catalog).unwrap();
+        let form = Form::read(&doc, catalog, Rules::Iso, &limits)
+            .unwrap()
+            .unwrap();
+        for field in form.fields() {
+            for widget in field.widgets() {
+                let read =
+                    widget_choice(field, widget, &doc, Rules::Iso, &limits, &mut ()).unwrap();
+                let shown = match read.combo() {
+                    Some(combo) => combo.text.to_string(),
+                    None => read.labels()[read.top()..read.top() + 4].join(" "),
+                };
+                let mut faults = Vec::new();
+                let choice =
+                    choice_for_widget(&form, field, widget, &doc, Rules::Iso, &limits, &mut faults)
+                        .unwrap();
+                assert!(faults.is_empty() && !choice.font.is_fallback());
+                let rect = widget.annot(&doc, Rules::Iso, &limits).unwrap().rect();
+                let place = Placed {
+                    id: widget.id().unwrap(),
+                    rect,
+                    shown,
+                    rotation: read.look().rotation,
+                };
+                made.push((choice.appearance, place));
+            }
+        }
+    }
+
+    let mut written: HashMap<ResId, ObjectId> = HashMap::new();
+    let mut placed = Vec::new();
+    for (appearance, place) in made {
+        let normal = form_xobject(&mut doc, &appearance, &mut written);
+        AnnotMut::new(doc.get_dict_mut(place.id).unwrap()).set_normal_appearance(normal);
+        placed.push(place);
+    }
+
+    let mut bytes = Vec::new();
+    pdf_structure::write::document(
+        &mut bytes,
+        &doc,
+        None,
+        None,
+        &pdf_structure::write::Options::DEFAULT,
+    )
+    .unwrap();
+    (bytes, placed)
+}
+
+/// Each choice widget's appearance, read back from the file written, drawn
+/// on its rectangle as a viewer draws it: the text it shows is read there,
+/// each character inside the rectangle, a list box's lines from its top
+/// down and none below its box.
+#[test]
+fn made_choices_read_back_as_their_text_on_their_widgets() {
+    let (bytes, placed) = choice_document();
+    let reading = Reading::open(&bytes[..], &read::Options::DEFAULT).unwrap();
+    for place in &placed {
+        let widget = (&reading)
+            .resolve(place.id)
+            .and_then(Object::as_dict)
+            .unwrap();
+        let ap = widget
+            .get(b"AP")
+            .and_then(Object::as_dict)
+            .and_then(|ap| ap.get(b"N"))
+            .and_then(Object::as_reference)
+            .expect("each widget has its appearance");
+        let content = format!("q 1 0 0 1 {} {} cm /Ap Do Q", place.rect.x0, place.rect.y0);
+        let resources = Object::from(dict! { "XObject" => dict! { "Ap" => ap } });
+        let page = TextPage::extract(
+            &reading,
+            &Concat::new(&[content.as_bytes()]),
+            Some(&resources),
+            &pdf_gfx::Limits::DEFAULT,
+            &Fonts::default(),
+            TextPageOpts::default(),
+        )
+        .unwrap();
+        let drawn: Vec<_> = page.chars().iter().filter(|c| !c.generated).collect();
+        for ch in &drawn {
+            let at = ch.origin;
+            let inside = place.rect.x0 - 0.01 <= at.x
+                && at.x <= place.rect.x1 + 0.01
+                && place.rect.y0 - 0.01 <= at.y
+                && at.y <= place.rect.y1 + 0.01;
+            assert!(inside, "{:?} at {at:?} outside {:?}", ch.ch, place.rect);
+        }
+        let mut read: Vec<char> = drawn
+            .iter()
+            .map(|c| c.ch)
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let mut shown: Vec<char> = place.shown.chars().filter(|c| !c.is_whitespace()).collect();
+        if place.rotation == 0 {
+            assert_eq!(
+                page.text().split_whitespace().collect::<Vec<_>>(),
+                place.shown.split_whitespace().collect::<Vec<_>>()
+            );
+        }
+        read.sort_unstable();
+        shown.sort_unstable();
+        assert_eq!(read, shown, "the characters a choice shows");
+    }
+    let shown: Vec<&str> = placed.iter().map(|p| p.shown.as_str()).collect();
+    assert_eq!(shown, ["Medium", "teal", "Tue Wed Thu Fri"]);
+    assert_eq!(placed[1].rotation, 90);
+}
+
+#[test]
+#[ignore = "needs qpdf: `just test-qpdf`"]
+fn qpdf_checks_made_choices_clean() {
+    let (bytes, _) = choice_document();
+    let folder = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(folder).unwrap();
+    let path = folder.join("forms-qpdf-choices.pdf");
     std::fs::write(&path, &bytes).unwrap();
     let qpdf = Qpdf::new(&path);
     if let Err(why) = qpdf.version() {

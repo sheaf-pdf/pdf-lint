@@ -480,6 +480,7 @@ def button_choice_cases():
     press_cases()
     toggle_cases()
     push_cases()
+    choice_cases()
 
 
 def press(name, ff, kids, value=b"", opt=b"", presses=b"0"):
@@ -690,6 +691,87 @@ def push_cases():
         widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Press) /BC [0 0 1] " + mk
                             + b">> /BS << /W 1 /S /" + style + b" >>", len(widgets)))
     ap("push-states", widgets)
+    as_kind("forms-ap-all")
+
+
+def place(i, w, h, cols=4):
+    """The `/Rect` of the `i`th choice widget of a grid, `w` by `h`, its
+    cells 120 by 90."""
+    x, y = 10 + 120 * (i % cols), 10 + 90 * (i // cols)
+    return b"[%d %d %s %s]" % (x, y, b"%g" % (x + w), b"%g" % (y + h))
+
+
+def choice_cases():
+    edit, multiple = 262144, 2097152
+    # Combo boxes, 100 by 20 unless said: a value among pairs, its label
+    # shown; an editable one's value outside them; an automatic size; /I
+    # against /V and with it; /Q 1 and 2, which PDFium doesn't apply; each
+    # border style; no value; a label wider than its text box; a value
+    # outside the options of one that isn't editable; a /DA with no font;
+    # a value that is an array, its first item's option shown.
+    pairs = b"/Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]]"
+    ab = b"/Opt [(a) (b)] /V (b)"
+    combos = [
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (e2) /MK << /BC [0] >>"),
+        (edit, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (typed) /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 0 Tf 0 g) " + pairs + b" /V (e2) /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (e2) /I [0]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (e1) /I [0]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /Q 1"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /Q 2"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [0] /BG [0.9] >> /BS << /W 1 /S /B >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [1 0 0] >> /BS << /W 2 /S /I >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [0] >> /BS << /W 1 /S /D >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [0] >> /BS << /W 1 /S /U >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 0 1 rg) /Opt [(A long label that passes the box)]"
+            b" /V (A long label that passes the box)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (outside)"),
+        (0, b"/DA (0 0 1 rg) " + pairs + b" /V (e3) /MK << /BG [1 1 0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V [(e2) (e1)]"),
+    ]
+    ap("combo-values", [widget_of(b"/FT /Ch /Ff %d " % (131072 | ff) + rest, place(i, 100, 20))
+                        for i, (ff, rest) in enumerate(combos)])
+    as_kind("forms-ap-all")
+    # Combo boxes narrower than their drop button, which then lies over
+    # the text box's left edge, the text box turned the right way round; too
+    # low for the triangle, and for the button's bands; turned a quarter, a
+    # half, and three quarters, over gray, RGB and CMYK backgrounds, beveled
+    # and inset.
+    boxes = [(12, 20, b""), (10, 20, b""), (40, 7, b""), (40, 5, b""), (5, 5, b""),
+             (20, 100, b"/MK << /R 90 /BC [0] /BG [0.75] >>"),
+             (100, 20, b"/MK << /R 180 /BC [0 0 1] /BG [1 0.9 0.9] >> /BS << /W 1 /S /B >>"),
+             (20, 100, b"/MK << /R 270 /BC [0] /BG [0.1 0.2 0.3 0.4] >> /BS << /W 1 /S /I >>")]
+    ap("combo-boxes", [widget_of(b"/FT /Ch /Ff 131072 /DA (/Helv 8 Tf 0 g) /Opt [(a) (Turned)] /V (%s) " % (
+        b"Turned" if more else b"a") + more, place(i, w, h)) for i, (w, h, more) in enumerate(boxes)])
+    as_kind("forms-ap-all")
+    # List boxes, 80 by 40 unless said, alpha to echo: one selected, its
+    # last lines below the box; two, by /I and /V and by /V alone; /I
+    # against /V; /TI 2 and 0, the selected line partly below; at size 0,
+    # which is 12; at 9 in blue, /Q 2; pairs; no options; beveled over gray;
+    # /Q 1; thirty options; a label wider than the box; an empty label; and
+    # turned a quarter.
+    abc = b"/Opt [(alpha) (bravo) (charlie) (delta) (echo)]"
+    lists = [
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo)"),
+        (multiple, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V [(alpha) (charlie)] /I [0 2]"),
+        (multiple, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V [(alpha) (charlie)]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (charlie) /I [1]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo) /TI 2"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (delta) /TI 0"),
+        (0, b"/DA (/Helv 0 Tf 0 g) " + abc + b" /V (bravo)"),
+        (0, b"/DA (/Helv 9 Tf 0 0 1 rg) " + abc + b" /V (bravo) /Q 2"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [[(x1) (Ex one)] [(x2) (Ex two)]] /V (x2)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [] /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo) /MK << /BC [0] /BG [0.9] >> /BS << /W 1 /S /B >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo) /Q 1 /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [" + b" ".join(b"(item %d)" % n for n in range(30)) + b"] /V (item 1)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [(A label much wider than its box) (b)] /V (b)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [(alpha) () (charlie)] /V (charlie)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (charlie) /MK << /R 90 /BC [0] >>"),
+    ]
+    ap("list-values", [widget_of(b"/FT /Ch /Ff %d " % ff + rest, place(i, 40 if i == 15 else 80, 80 if i == 15 else 40))
+                       for i, (ff, rest) in enumerate(lists)])
     as_kind("forms-ap-all")
 
 

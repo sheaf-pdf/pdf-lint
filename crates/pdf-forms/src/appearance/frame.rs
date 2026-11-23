@@ -87,7 +87,8 @@ pub struct Appearance {
     pub font_size: f32,
     /// Whether the text didn't fit: it passes the box inside the border at
     /// the size drawn, or a comb field's text has more characters than it
-    /// has cells.
+    /// has cells. For a list box, a line passes the box, below it or
+    /// across.
     pub overflowed: bool,
 }
 
@@ -170,6 +171,26 @@ pub enum Unmade {
     /// [`push_for_widget`](super::push_for_widget).
     #[error("the push button shows an icon, which isn't drawn")]
     Icon,
+    /// The field isn't a choice field: a combo box or a list box, for
+    /// [`widget_choice`](super::widget_choice) and
+    /// [`choice_for_widget`](super::choice_for_widget).
+    #[error("the field isn't a choice field")]
+    NotChoice,
+    /// The font has no code for a character of a list box's option: the
+    /// option's index among the labels the caller gave, and the character
+    /// and its byte offset in that label. From
+    /// [`list_box`](super::list_box) and the read layer's makers of a list
+    /// box.
+    #[error(
+        "the font has no code for {:?}, at byte {} of option {}",
+        .character.character, .character.at, .option
+    )]
+    UnencodableOption {
+        /// The option's index among the labels.
+        option: usize,
+        /// The character, and its byte offset in the option's label.
+        character: UnencodableChar,
+    },
 }
 
 impl From<Error> for Unmade {

@@ -1,0 +1,169 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R] /DR << /Font << /Helv 100 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R] >>
+endobj
+5 0 obj
+<< /T (f0) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (bravo) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 10 90 50] >>
+endobj
+6 0 obj
+<< /T (f1) /FT /Ch /Ff 2097152 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V [(alpha) (charlie)] /I [0 2] /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 10 210 50] >>
+endobj
+7 0 obj
+<< /T (f2) /FT /Ch /Ff 2097152 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V [(alpha) (charlie)] /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 10 330 50] >>
+endobj
+8 0 obj
+<< /T (f3) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (charlie) /I [1] /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 10 450 50] >>
+endobj
+9 0 obj
+<< /T (f4) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (bravo) /TI 2 /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 100 90 140] >>
+endobj
+10 0 obj
+<< /T (f5) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (delta) /TI 0 /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 100 210 140] >>
+endobj
+11 0 obj
+<< /T (f6) /FT /Ch /Ff 0 /DA (/Helv 0 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (bravo) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 100 330 140] >>
+endobj
+12 0 obj
+<< /T (f7) /FT /Ch /Ff 0 /DA (/Helv 9 Tf 0 0 1 rg) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (bravo) /Q 2 /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 100 450 140] >>
+endobj
+13 0 obj
+<< /T (f8) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [[(x1) (Ex one)] [(x2) (Ex two)]] /V (x2) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 190 90 230] >>
+endobj
+14 0 obj
+<< /T (f9) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [] /MK << /BC [0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 190 210 230] >>
+endobj
+15 0 obj
+<< /T (f10) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (bravo) /MK << /BC [0] /BG [0.9] >> /BS << /W 1 /S /B >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 190 330 230] >>
+endobj
+16 0 obj
+<< /T (f11) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (bravo) /Q 1 /MK << /BC [0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 190 450 230] >>
+endobj
+17 0 obj
+<< /T (f12) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(item 0) (item 1) (item 2) (item 3) (item 4) (item 5) (item 6) (item 7) (item 8) (item 9) (item 10) (item 11) (item 12) (item 13) (item 14) (item 15) (item 16) (item 17) (item 18) (item 19) (item 20) (item 21) (item 22) (item 23) (item 24) (item 25) (item 26) (item 27) (item 28) (item 29)] /V (item 1) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 280 90 320] >>
+endobj
+18 0 obj
+<< /T (f13) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(A label much wider than its box) (b)] /V (b) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [130 280 210 320] >>
+endobj
+19 0 obj
+<< /T (f14) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) () (charlie)] /V (charlie) /Type /Annot /Subtype /Widget /P 3 0 R /Rect [250 280 330 320] >>
+endobj
+20 0 obj
+<< /T (f15) /FT /Ch /Ff 0 /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta) (echo)] /V (charlie) /MK << /R 90 /BC [0] >> /Type /Annot /Subtype /Widget /P 3 0 R /Rect [370 280 410 360] >>
+endobj
+100 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 101
+0000000000 65535 f 
+0000000009 00000 n 
+0000000227 00000 n 
+0000000284 00000 n 
+0000000000 65535 f 
+0000000472 00000 n 
+0000000655 00000 n 
+0000000867 00000 n 
+0000001070 00000 n 
+0000001264 00000 n 
+0000001455 00000 n 
+0000001649 00000 n 
+0000001836 00000 n 
+0000002033 00000 n 
+0000002207 00000 n 
+0000002362 00000 n 
+0000002600 00000 n 
+0000002812 00000 n 
+0000003249 00000 n 
+0000003431 00000 n 
+0000003602 00000 n 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000003817 00000 n 
+trailer
+<< /Size 101 /Root 1 0 R >>
+startxref
+3916
+%%EOF

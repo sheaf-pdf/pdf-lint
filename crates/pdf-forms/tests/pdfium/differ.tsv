@@ -13,6 +13,9 @@
 # A forms-ap-all case of buttons (btn-, push-): name	part	why, the part that
 # differs (made, states, as, bbox, matrix, paint, mark, clip, or text), in
 # every annotation or, written part@N, in annotation N alone.
+# A forms-ap-all case of choices (combo-, list-): name	part	why, the part
+# that differs (made, bbox, matrix, paint, clip, or text), in every
+# annotation or, written part@N, in annotation N alone.
 forms-three-deep	PDFium makes a terminal field only where /FT is the field's own or its parent's; a type handed down two levels or more is read here, as ISO 32000-2 has it inherited
 forms-type-missing-or-unknown	PDFium leaves out a terminal field with no /FT; it is read here with no type, for the caller to see and a fault to say
 forms-nameless-middle	the type comes down two levels, as in forms-three-deep; the field with no /T adds nothing to the name
@@ -71,3 +74,8 @@ btn-marks-radio	paint@23	the caption 6 names a glyph of ZapfDingbats (a22), not 
 btn-da	mark@3	the mark is drawn at the size /DA gives (8), as a glyph of a font named at a size; PDFium fills its shape to the box whatever the size
 btn-da	mark@8	the mark is drawn at the size /DA gives (8), as a glyph of a font named at a size; PDFium fills its shape to the box whatever the size
 btn-opt-own-name	states@0	a widget whose normal appearance names its on state (/mine) keeps that name, so its appearance is found by it and /AS can name it; PDFium names the state it makes by the widget's index in /Opt (/0), leaving /mine beside it
+forms-ap-all	clip	a combo box's text is always clipped to its text box, the box less the border's reach and the drop button, as a text field's is (forms-ap's clip rule); PDFium writes the clip only where the text passes that box: wherever PDFium writes none, the clip here is that box
+forms-ap-all	tx	a combo box with no text, or a list box with no option, has an empty marked-content sequence, /Tx BMC EMC, as an empty text field's (forms-ap's tx rule); PDFium writes none: wherever PDFium writes none, the sequence here is empty
+forms-ap-all	below	a list box's lines whose top is at or below the box less the border's reach aren't written, nor any after them, so what's written is bounded by the box; PDFium writes every option to the last, clipped away: wherever PDFium writes more lines, each is wholly below that box
+combo-boxes	paint@3	a drop button 3 points high has no bands, as a beveled border's aren't drawn in a box under four times its width (pdf_gfx::Canvas::box_bands_in): the ring and the fill alone; PDFium fills two bands whose inner corners cross
+combo-boxes	paint@4	a drop button 3 points high has no bands, as a beveled border's aren't drawn in a box under four times its width (pdf_gfx::Canvas::box_bands_in): the ring and the fill alone; PDFium fills two bands whose inner corners cross
