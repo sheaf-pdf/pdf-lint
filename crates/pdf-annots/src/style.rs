@@ -6,10 +6,12 @@ use std::fmt;
 use pdf_content_streams::Color;
 use pdf_gfx::{BoxBorder, BoxBorderStyle};
 use pdf_objects::fault::Sink;
+use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, Object, ObjectId, Resolve};
 
 use crate::error::Error;
 use crate::fault::Fault;
+use crate::limits::Limits;
 use crate::resolve::Reader;
 
 /// Parsed `/DA` (Default Appearance) string used by `/FreeText`, `/Redact`, and
@@ -259,6 +261,61 @@ impl Border {
     #[must_use]
     pub fn to_box_border(&self) -> BoxBorder<'_> {
         BoxBorder::new(self.width, self.style.into()).with_dash(&self.dash)
+    }
+
+    /// Reads the border of the annotation dictionary `dict` (object `id`,
+    /// `None` if direct) and nothing else of it, without collecting
+    /// non-fatal [`Fault`]s: `/BS`, else the legacy `/Border`, with `/BE`,
+    /// what [`Annot::border`](crate::Annot::border) gives for the same
+    /// dictionary. It's for a caller that reads a widget or another
+    /// annotation itself and draws its border by the same rules: the
+    /// annotation's actions, destination, `/DA`, and the rest aren't read,
+    /// so a cap on one of those ([`Cap`](crate::Cap)) can't cost the caller
+    /// a border that is there. Only [`Limits::hops`] applies, to the
+    /// references followed.
+    ///
+    /// With neither `/BS` nor `/Border`, a solid border 1 point wide
+    /// ([`Border::default`], ISO 32000-2 §12.5.4).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unreadable`] on locked/I/O/reader-cap failures.
+    pub fn read<'o, R: Resolve<'o>>(
+        objects: R,
+        dict: &'o Dict,
+        id: Option<ObjectId>,
+        rules: Rules,
+        limits: &Limits,
+    ) -> Result<Self, Error> {
+        Self::read_with(objects, dict, id, rules, limits, &mut ())
+    }
+
+    /// As [`Self::read`], reporting recoverable ISO 32000-2 departures in
+    /// `/BS`, `/Border`, and `/BE` to `sink`: those that
+    /// [`Annot::from_dict_with`](crate::Annot::from_dict_with) tells while it
+    /// reads the border. `/Border` isn't read where `/BS` is there, since it's
+    /// then ignored (ISO 32000-2 §12.5.2 Table 166). `Annot` also reads
+    /// `/Border` for [`Annot::legacy_border`](crate::Annot::legacy_border),
+    /// whatever `/BS` says, and tells its faults for that too.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`Self::read`].
+    pub fn read_with<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+        objects: R,
+        dict: &'o Dict,
+        id: Option<ObjectId>,
+        rules: Rules,
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Result<Self, Error> {
+        let mut reader = Reader {
+            objects,
+            rules,
+            limits,
+            sink,
+        };
+        read_border(&mut reader, dict, id)
     }
 }
 

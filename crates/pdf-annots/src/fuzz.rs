@@ -12,7 +12,10 @@
 //! 5. Flattening with redaction marks drawn never keeps back what was drawn
 //!    or removed without them: it draws and removes at least as many
 //!    annotations, and keeps no more.
-//! 6. Under `text-layout`, a `/FreeText`'s text and a `/Redact`'s overlay
+//! 6. `Border::read` of an annotation's dictionary gives the border
+//!    `Annot::from_dict` read, with a sink and without, and tells what
+//!    `Annot::from_dict_with` tells while it reads the border.
+//! 7. Under `text-layout`, a `/FreeText`'s text and a `/Redact`'s overlay
 //!    text drawn in a font given (the `*_with_font` synthesizers and
 //!    builders) never panic; in Helvetica they give what the defaults give
 //!    wherever the font can draw the text, a builder builds exactly where its
@@ -24,17 +27,17 @@ use std::collections::BTreeMap;
 
 use pdf_objects::parse::Parser;
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Stream, Value};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Stream, Value, dict};
 use pdf_semantics::dest::DestTable;
 use pdf_semantics::pages;
 
-use crate::annot::{page_annots, page_annots_with, page_tabs};
+use crate::annot::{Annot, page_annots, page_annots_with, page_tabs};
 use crate::ap::{AppearanceMode, stream_placement_matrix};
 use crate::build::BuiltAnnot;
 use crate::flatten::{FlattenOpts, FlattenTarget, plan_flatten};
 use crate::limits::Limits;
 use crate::replies::resolve_threads;
-use crate::style::DefaultAppearance;
+use crate::style::{Border, DefaultAppearance};
 use crate::subtypes::TypedAnnot;
 use crate::synth::{RedactMark, synth_annot, synth_redact};
 #[cfg(feature = "text-layout")]
@@ -189,6 +192,7 @@ pub fn check(data: &[u8]) {
                         ft.quadding,
                     );
                 }
+                border_read_alone(&map, a, rules, &limits);
             }
             for target in [FlattenTarget::Display, FlattenTarget::Print] {
                 if let Ok(plan) = plan_flatten(
@@ -416,6 +420,46 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) {
             }
         }
     }
+}
+
+/// `Border::read` of `annot`'s dictionary gives the border `Annot::from_dict`
+/// read for it, with a sink and without, and tells what
+/// `Annot::from_dict_with` tells while it reads the border: `Annot` tells, in
+/// its order of reading, what's told of the dictionary's other entries, then
+/// of `/Border` alone (for `Annot::legacy_border`, whatever `/BS` says), then
+/// what `Border::read_with` tells.
+fn border_read_alone(
+    map: &BTreeMap<ObjectId, Object>,
+    annot: &Annot<'_>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    let (dict, id) = (annot.dict(), annot.id());
+    let read = Border::read(map, dict, id, rules, limits);
+    assert_eq!(read.as_ref(), Ok(annot.border()));
+    let mut told = Vec::new();
+    assert_eq!(
+        Border::read_with(map, dict, id, rules, limits, &mut told),
+        read
+    );
+
+    let mut whole = Vec::new();
+    assert!(Annot::from_dict_with(map, dict, id, rules, limits, &mut whole).is_ok());
+    let mut others = dict.clone();
+    for key in ["BS", "Border", "BE"] {
+        others.remove(key);
+    }
+    let mut rest = Vec::new();
+    assert!(Annot::from_dict_with(map, &others, id, rules, limits, &mut rest).is_ok());
+    let mut of_border = Vec::new();
+    if let Some(legacy) = dict.get(b"Border") {
+        let legacy = dict! { "Border" => legacy.clone() };
+        assert!(Border::read_with(map, &legacy, id, rules, limits, &mut of_border).is_ok());
+    }
+    of_border.extend(told);
+    assert!(
+        (0..=rest.len()).any(|at| whole == [&rest[..at], &of_border[..], &rest[at..]].concat())
+    );
 }
 
 fn split_once_bytes<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<(&'a [u8], &'a [u8])> {

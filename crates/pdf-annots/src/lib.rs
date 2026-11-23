@@ -18,6 +18,10 @@
 //!     `/Subj`, `/CA`, `/CreationDate`, `/IRT`, `/Popup`).
 //!   - [`Annot::from_dict`] and [`Annot::from_dict_with`] inspect any `&Dict` directly (including
 //!     merged Field+Widget dictionaries).
+//!   - [`Border::read`] reads an annotation's border (`/BS`, legacy `/Border`, `/BE`) and nothing
+//!     else of it, what [`Annot::border`] gives for the same dictionary, so a caller that reads a
+//!     widget itself draws its border by the same rules and a cap on the rest of the annotation
+//!     can't cost it the border.
 //! - **Typed subtype payloads ([`TypedAnnot`]):**
 //!   - Structured views for `Text` ([`TextAnnot`]), `Link` ([`LinkAnnot`]), `FreeText`
 //!     ([`FreeTextAnnot`]), text markups ([`TextMarkupAnnot`], [`QuadPoints`]), `Line`
@@ -181,6 +185,8 @@ mod subtypes;
 mod synth;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_border;
 
 pub use annot::{Annot, MarkupInfo, TabOrder, page_annots, page_annots_with, page_tabs};
 pub use ap::{
