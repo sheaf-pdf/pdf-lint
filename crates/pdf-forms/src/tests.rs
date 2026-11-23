@@ -794,6 +794,69 @@ fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
     assert_eq!(faults, [Fault::WrongType { key: "MaxLen" }]);
 }
 
+/// A field that is its own widget has one dictionary and one `/MaxLen`: an
+/// entry that reaches no object is told once under either rules, not again
+/// as the widget's.
+#[test]
+fn a_merged_widgets_max_len_is_read_once() {
+    /// A store one of whose objects is damaged.
+    struct Damaged<'o>(&'o BTreeMap<ObjectId, Object>, ObjectId);
+    impl<'o> pdf_objects::Resolve<'o> for Damaged<'o> {
+        fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+            self.0.get(&id)
+        }
+        fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, pdf_objects::Unreadable> {
+            if id == self.1 {
+                return Err(pdf_objects::Unreadable::new(id, Why::Damaged, "damaged"));
+            }
+            Ok(self.0.get(&id))
+        }
+    }
+
+    let mut store = Store::default();
+    let looping = store.reserve();
+    store.set(looping, Object::from(looping));
+    let damaged = store.reserve();
+    let missing = store.reserve();
+    let merged = |store: &mut Store, name: &str, max_len: ObjectId| {
+        store.put(dict! {
+            "T" => Object::text(name),
+            "FT" => Object::name("Tx"),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => rect(),
+            "MaxLen" => max_len,
+        })
+    };
+    let roots = [
+        merged(&mut store, "looping", looping),
+        merged(&mut store, "damaged", damaged),
+        merged(&mut store, "missing", missing),
+    ];
+    let catalog = catalog_of(refs(&roots));
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let mut sink: Vec<(Place, Fault)> = Vec::new();
+        let form = Form::read_with(
+            Damaged(&store.objects, damaged),
+            &catalog,
+            rules,
+            &Limits::DEFAULT,
+            &mut sink,
+        )
+        .unwrap()
+        .unwrap();
+        for field in form.fields() {
+            assert_eq!(field.max_len(), None, "{rules:?}");
+            assert_eq!(field.widgets().len(), 1, "{rules:?}");
+        }
+        let faults: Vec<_> = sink.into_iter().map(|(_, fault)| fault).collect();
+        assert_eq!(
+            faults,
+            [Fault::ReferenceLoop, Fault::DamagedObject(damaged)],
+            "{rules:?}"
+        );
+    }
+}
+
 #[test]
 fn the_caps_hold() {
     let mut store = Store::default();

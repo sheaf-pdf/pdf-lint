@@ -585,10 +585,12 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     // it holds, and none where that's no number of 0 or more. An entry that
     // holds `null` is one, as PDFium's dictionaries keep it, so the widgets
     // aren't read below it; one that reaches no object isn't. ISO 32000-2
-    // gives the entry to fields alone (§12.7.5.3).
+    // gives the entry to fields alone (§12.7.5.3). A field that is its own
+    // widget has one dictionary, whose entry was read above: it isn't read
+    // again, which would tell what is wrong with it a second time.
     if reader.rules == Rules::Pdfium && !max_len_held {
         let first = (walk.fields[index].widgets.iter())
-            .find(|widget| widget.dict.get("MaxLen").is_some())
+            .find(|widget| !widget.merged && widget.dict.get("MaxLen").is_some())
             .map(|widget| (widget.dict, widget.id.or(at)));
         if let Some((widget, within)) = first {
             walk.fields[index].max_len = reader
