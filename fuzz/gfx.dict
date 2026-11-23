@@ -1,6 +1,8 @@
 # Tokens for libFuzzer's -dict with the gfx target: 0xFF part delimiters,
 # stream separators, graphics/path/clip/text/color/marked-content operators,
-# ExtGState keys, Form/Image/Shading XObject dictionaries, and font dicts.
+# ExtGState keys, Form/Image/Shading XObject dictionaries, and font dicts;
+# and, for text laid out in Helvetica with Symbol after it, characters of
+# each, a combining mark, and a joiner.
 "\xff"
 "\x0astream\x0a"
 "<<"
@@ -97,3 +99,10 @@
 "/SMask /None"
 "/MCID 0"
 "/ActualText (Hi)"
+"\xce\xb1"
+"\xce\xa9"
+"\xe2\x88\x80"
+"\xc3\xa9"
+"\xe2\x80\x94"
+"\xcc\x81"
+"\xe2\x80\x8d"

@@ -46,7 +46,11 @@
 //!   `Canvas::text_box` wrap, align, justify, auto-size, and comb-place UTF-8
 //!   text over `Std14`, `Font`, `FontEncoder`, or, with `embed`, an embedded
 //!   TrueType program (`pdf_fonts::embed::Program`, or `ProgramFont`, which
-//!   records the glyphs it encodes).
+//!   records the glyphs it encodes); in one font or a `FontSet` of several
+//!   (`WithFallback`), each character, or grapheme cluster through
+//!   `unicode-segmentation`, drawn in the first face that has all of it
+//!   (`face_for`), and each line's runs in each face drawn under its own
+//!   resource (`Canvas::draw_layout_in`).
 //!
 //! # Cargo Features
 //!
@@ -55,7 +59,8 @@
 //!   boxes.
 //! - **`text-layout`** *(default)*: Enables `TextPage` reading-order assembly,
 //!   `unicode-bidi` reordering, selection quads, search, and multiline/box
-//!   `layout_text` / `Canvas::text_box` drawing.
+//!   `layout_text` / `Canvas::text_box` drawing, in one font or several, a
+//!   character or a `unicode-segmentation` grapheme cluster at a time.
 //! - **`predefined-cmaps`** *(optional)*: Forwards `pdf-fonts/predefined-cmaps`
 //!   for bundled Adobe CJK CMaps and UCS-2 collections.
 //! - **`embed`** *(optional)*: Forwards `pdf-fonts/embed`; with `text-layout`,
@@ -185,8 +190,8 @@ pub use state::{
 pub use text::{Glyph, Glyphs, TextShow};
 #[cfg(feature = "text-layout")]
 pub use wrap::{
-    FontEncoder, LaidOutLine, LaidOutText, LayoutFont, TextAlign, TextBoxStyle, UnencodableChar,
-    VerticalAlign, WrapMode, layout_text,
+    FontEncoder, FontSet, LaidOutLine, LaidOutRun, LaidOutText, LayoutFont, TextAlign,
+    TextBoxStyle, UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for, layout_text,
 };
 pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, UseId};
 

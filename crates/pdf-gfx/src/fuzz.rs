@@ -29,6 +29,17 @@
 //!    character; with `line_end_spaces`, every character but a line break on
 //!    a line; with `font_heights_as_given`, Helvetica, whose heights the
 //!    floors don't move, laid out as without it.
+//! 8. Fallback (`text-layout`): `layout_text` over the same text in Helvetica
+//!    with Symbol after it (`WithFallback`), a character and a grapheme
+//!    cluster at a time, in lines and in comb cells: laid out by clusters
+//!    only where it is by characters; each line's runs its codes in order,
+//!    a face each, the next face another, each run's units drawn in the face
+//!    `face_for` gives them, each cell in its unit's; text whose every unit,
+//!    drawn or past a comb's cells, is Helvetica's laid out as Helvetica
+//!    alone lays it out, and other text refused by Helvetica alone at the
+//!    first unit it lacks; text of one character a cluster the same either
+//!    way; and what `Canvas::draw_layout_in` draws interprets to a glyph a
+//!    code, each face under its resource.
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
@@ -72,6 +83,13 @@ pub const SEEDS: &[&[u8]] = &[
     // text whose spaces the layout flags keep or drop.
     b"Tc /Helv Tf 9 Tr 0 0 rg 1000000000000000000000000000000000000000000. Ts",
     b"  ab cd  ef-gh  \n\tij -  kl\r\nmn",
+    // Text Helvetica and Symbol draw between them, and a base and a mark
+    // neither draws as one cluster.
+    b"Gr\xc3\xbc\xc3\x9fe \xce\xb1\xce\xb2\xce\xb3 \xce\xa9 x\xe2\x88\x80y\n\xce\x94 \xe2\x80\x94 caf\xc3\xa9",
+    b"caf\xc3\xa9 e\xcc\x81 \xce\xb1",
+    // Eight letters Helvetica draws in eight comb cells, and past them a
+    // letter only Symbol draws.
+    b"abcdefgh\xce\xb1",
     b"1 Tw 2 Tc /Fm1 Do 5 Tw 6 Tc /Fm1 Do\xff<< /XObject << /Fm1 1 0 R >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>\xff<< /Subtype /Form /BBox [0 0 80 80] >>\nstream\nBT /F1 10 Tf 1e39 0 (Hi) \" ET",
 ];
 
@@ -501,6 +519,149 @@ fn fuzz_text_layout<'a, S>(
             &style,
         );
         check_layout_flags(sample);
+        check_fallback(sample);
+    }
+}
+
+/// Lays `text` out in Helvetica with Symbol after it, a character and a
+/// grapheme cluster at a time, in lines and in comb cells, and holds what
+/// the runs promise; draws each layout and interprets it.
+#[cfg(feature = "text-layout")]
+fn check_fallback(text: &str) {
+    use pdf_content_streams::Res;
+    use pdf_fonts::Std14;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use crate::wrap::{
+        FontSet, LaidOutText, TextBoxStyle, UnencodableChar, WithFallback, face_for, layout_text,
+    };
+
+    let helvetica = Res::dict(Std14::Helvetica.dict()).expect("a dictionary of names");
+    let symbol = Res::dict(Std14::Symbol.dict()).expect("a dictionary of names");
+    let set = WithFallback::new(&Std14::Helvetica, &Std14::Symbol, symbol.clone());
+    assert_eq!(set.faces(), 2);
+    let rect = Rect::new(0.0, 0.0, 120.0, 60.0);
+    // Each paragraph's units, at their offsets in the text.
+    let units = |clusters: bool| -> Vec<Vec<(usize, &str)>> {
+        let mut start = 0;
+        let mut paragraphs = Vec::new();
+        for para in text.split_inclusive(['\r', '\n']) {
+            let body = para.trim_end_matches(['\r', '\n']);
+            let at = start;
+            paragraphs.push(match clusters {
+                true => body
+                    .grapheme_indices(true)
+                    .map(|(i, u)| (at + i, u))
+                    .collect(),
+                false => (body.char_indices())
+                    .map(|(i, c)| (at + i, &body[i..i + c.len_utf8()]))
+                    .collect(),
+            });
+            start += para.len();
+        }
+        paragraphs
+    };
+    let one_char_clusters = (units(true).iter().flatten()).all(|(_, u)| u.chars().nth(1).is_none());
+
+    for comb in [None, Some(8)] {
+        let mut laid: Vec<Option<LaidOutText>> = Vec::new();
+        for clusters in [false, true] {
+            let style = TextBoxStyle {
+                size: Some(9.0),
+                comb,
+                clusters,
+                ..TextBoxStyle::default()
+            };
+            let all = units(clusters);
+            let faces: Option<Vec<usize>> = (all.iter().flatten())
+                .map(|(_, unit)| face_for(&set, unit).ok())
+                .collect();
+            let result = layout_text(&set, text, rect, &style);
+            // Refused exactly where a unit has no face.
+            assert_eq!(result.is_ok(), faces.is_some(), "{clusters}");
+            let Ok(out) = result else {
+                laid.push(None);
+                continue;
+            };
+            let faces = faces.unwrap_or_default();
+            for line in &out.lines {
+                assert_eq!(line.cell_faces.len(), line.cells.len());
+                assert!((line.ascent >= 0.0 && line.descent <= 0.0) || !line.ascent.is_finite());
+                if !line.cells.is_empty() {
+                    // Each cell in its unit's face, the units in order.
+                    assert_eq!(&line.cell_faces[..], &faces[..line.cells.len()]);
+                    continue;
+                }
+                let mut end = 0;
+                let mut last_face = None;
+                for run in &line.runs {
+                    assert_eq!(run.codes.start, end, "runs in order");
+                    assert!(run.codes.end > run.codes.start && run.face < 2);
+                    assert_ne!(Some(run.face), last_face, "a face a run");
+                    assert!(run.x.is_finite());
+                    end = run.codes.end;
+                    last_face = Some(run.face);
+                    let drawn = (all.iter().flatten())
+                        .filter(|(at, _)| run.text.contains(at))
+                        .map(|(_, unit)| face_for(&set, unit));
+                    assert!(drawn.into_iter().all(|f| f == Ok(run.face)));
+                }
+                assert_eq!(end, line.codes.len(), "the runs are the codes");
+            }
+            // Helvetica alone: where it has every unit, those past a comb's
+            // cells among them, its own layout; else refused at the first
+            // unit it lacks, as `face_for` refuses it there.
+            let alone = layout_text(&Std14::Helvetica, text, rect, &style);
+            let other = (all.iter().flatten()).zip(&faces).find(|(_, f)| **f != 0);
+            match other {
+                None => assert_eq!(Ok(&out), alone.as_ref()),
+                Some(((at, unit), _)) => {
+                    let lacks = face_for(&Std14::Helvetica, unit).expect_err("Helvetica lacks it");
+                    let at = at + lacks.at;
+                    let character = lacks.character;
+                    assert_eq!(alone, Err(UnencodableChar { at, character }));
+                }
+            }
+
+            // Drawn, each face under its resource: a glyph a code.
+            let mut canvas = Canvas::new();
+            canvas.draw_layout_in(&[helvetica.clone(), symbol.clone()], &out);
+            let (bytes, needs) = canvas.finish(&Reserved::default());
+            let mut fonts = Dict::new();
+            for need in &needs.0 {
+                let font = match need.res == helvetica {
+                    true => Std14::Helvetica,
+                    false => Std14::Symbol,
+                };
+                fonts.set(need.name.clone(), font.dict());
+            }
+            let resources = Object::from(pdf_objects::dict! { "Font" => fonts });
+            let objects = BTreeMap::<ObjectId, Object>::new();
+            let streams = WithStreams::new(&objects, |id, _| {
+                Err(Unreadable::new(id, Why::Damaged, "no streams"))
+            });
+            let codes: usize = (out.lines.iter())
+                .map(|l| l.codes.len() + l.cells.iter().map(|(_, c)| c.len()).sum::<usize>())
+                .sum();
+            let summary = interpret(
+                streams,
+                &Concat::new(&[&bytes]),
+                Some(&resources),
+                &Limits::DEFAULT,
+                &Fonts::default(),
+                Opts::default(),
+                |_| ControlFlow::Continue(()),
+            )
+            .expect("a layout drawn interprets");
+            assert_eq!(summary.glyphs, codes);
+            laid.push(Some(out));
+        }
+        // By clusters only where by characters; the same where every
+        // cluster is a character.
+        assert!(laid[1].is_none() || laid[0].is_some());
+        if one_char_clusters {
+            assert_eq!(laid[0], laid[1]);
+        }
     }
 }
 

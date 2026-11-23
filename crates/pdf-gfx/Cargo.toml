@@ -22,6 +22,10 @@ thiserror = "2"
 # Optional Unicode Bidirectional Algorithm support for visual-to-logical RTL
 # reordering in `TextPage` (`text-layout` feature).
 unicode-bidi = { version = "0.3.17", optional = true }
+# Optional extended grapheme clusters (Unicode Standard Annex #29), so that
+# layout can keep a character and its marks together (`text-layout` feature:
+# `TextBoxStyle::clusters`).
+unicode-segmentation = { version = "1.13.3", optional = true }
 # Optional numeric spans for page interpretation and content re-encoding;
 # without proc macros (`default-features = false`) and with `std` for span guards.
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
@@ -32,8 +36,9 @@ default = ["programs", "text-layout"]
 # programs for glyph outline boxes and metrics.
 programs = ["pdf-fonts/programs"]
 # Enables `TextPage` reading-order assembly, synthetic spaces/lines, BiDi
-# reordering, selection quads, text search, and multiline `Canvas` layout.
-text-layout = ["dep:unicode-bidi"]
+# reordering, selection quads, text search, and multiline `Canvas` layout,
+# in one font or several, a character or a grapheme cluster at a time.
+text-layout = ["dep:unicode-bidi", "dep:unicode-segmentation"]
 # Forwards `pdf-fonts/predefined-cmaps` so Type 0 fonts using Adobe's
 # predefined CJK CMaps resolve character codes and CIDs from the bundle.
 predefined-cmaps = ["pdf-fonts/predefined-cmaps"]

@@ -720,15 +720,53 @@ impl Canvas {
     /// [`layout_text`](crate::layout_text) in `font` as position-independent
     /// `Tm` + `Tj` (and `Tw` when justified) operations inside a single
     /// `BT`..`ET` text object.
+    ///
+    /// It's [`draw_layout_in`](Self::draw_layout_in) with `font` alone, for
+    /// a layout in one font; a layout in several is drawn by that, given a
+    /// resource for each face.
     #[cfg(feature = "text-layout")]
     pub fn draw_layout(&mut self, font: Res, layout: &crate::wrap::LaidOutText) {
-        let has_content = layout
-            .lines
-            .iter()
-            .any(|l| !l.codes.is_empty() || !l.cells.is_empty());
-        if !has_content {
+        self.draw_layout_in(std::slice::from_ref(&font), layout);
+    }
+
+    /// Emits a [`LaidOutText`](crate::LaidOutText) laid out in a
+    /// [`FontSet`](crate::FontSet), each face under its resource in `fonts`
+    /// (the first face under `fonts[0]`), as
+    /// [`draw_layout`](Self::draw_layout) does in one font: inside a single
+    /// `BT`..`ET` text object, a `Tf` first and again wherever the face
+    /// changes, and a `Tm` and a `Tj` for each comb cell and each run of a
+    /// line ([`LaidOutLine::runs`](crate::LaidOutLine::runs)), placed where
+    /// the layout puts it.
+    ///
+    /// A resource is named only where a run or a cell is drawn in it, so a
+    /// layout whose text is the first face's names the first face alone, as
+    /// [`draw_layout`](Self::draw_layout) writes it, byte for byte. A face
+    /// past `fonts` is the caller's mistake: what's drawn in it is left out,
+    /// under a debug assertion.
+    #[cfg(feature = "text-layout")]
+    pub fn draw_layout_in(&mut self, fonts: &[Res], layout: &crate::wrap::LaidOutText) {
+        self.draw_faces(layout, |face| fonts.get(face).cloned());
+    }
+
+    /// Draws `layout`, each face under the resource `font_of` gives it.
+    #[cfg(feature = "text-layout")]
+    fn draw_faces(
+        &mut self,
+        layout: &crate::wrap::LaidOutText,
+        font_of: impl Fn(usize) -> Option<Res>,
+    ) {
+        let font_of = |face: usize| {
+            let font = font_of(face);
+            debug_assert!(font.is_some(), "no resource for face {face} of a layout");
+            font
+        };
+        // Written where a line has codes or cells, as one font's layout is.
+        let first = (layout.lines.iter())
+            .flat_map(strings)
+            .find_map(|(face, _, _)| Some((face, font_of(face)?)));
+        let Some((mut face_now, font)) = first else {
             return;
-        }
+        };
         self.writer.begin_text();
         self.writer.font(font, layout.font_size);
         if layout.mode != TextMode::Fill {
@@ -741,25 +779,27 @@ impl Canvas {
                     self.set_word_space(0.0);
                     active_tw = 0.0;
                 }
-                for (pt, cell_codes) in &line.cells {
-                    if !cell_codes.is_empty() {
-                        self.writer
-                            .text_matrix(Matrix::translate(pt.x, pt.y).to_array());
-                        self.writer.show(cell_codes);
-                    }
-                }
+            } else if line.codes.is_empty() {
                 continue;
-            }
-            if line.codes.is_empty() {
-                continue;
-            }
-            if (line.word_space - active_tw).abs() > 1e-6 {
+            } else if (line.word_space - active_tw).abs() > 1e-6 {
                 self.set_word_space(line.word_space);
                 active_tw = line.word_space;
             }
-            self.writer
-                .text_matrix(Matrix::translate(line.origin.x, line.origin.y).to_array());
-            self.writer.show(&line.codes);
+            for (face, at, codes) in strings(line) {
+                if codes.is_empty() {
+                    continue;
+                }
+                if face != face_now {
+                    let Some(font) = font_of(face) else {
+                        continue;
+                    };
+                    self.writer.font(font, layout.font_size);
+                    face_now = face;
+                }
+                self.writer
+                    .text_matrix(Matrix::translate(at.x, at.y).to_array());
+                self.writer.show(codes);
+            }
         }
         if active_tw != 0.0 {
             self.set_word_space(0.0);
@@ -771,12 +811,20 @@ impl Canvas {
     /// and draws it onto `self` (clipping to `rect` inside `q`..`Q` when
     /// `style.clip` is `true`).
     ///
+    /// `font` is one font or a [`FontSet`](crate::FontSet) of several: its
+    /// first face is drawn under `font_res`, and every other under the
+    /// resource the set gives it ([`FontSet::face_resource`](crate::FontSet::face_resource),
+    /// as a [`WithFallback`](crate::WithFallback) does), as
+    /// [`draw_layout_in`](Self::draw_layout_in) draws them. A face with no
+    /// resource is the caller's mistake: what's drawn in it is left out,
+    /// under a debug assertion.
+    ///
     /// # Errors
     ///
     /// Returns [`UnencodableChar`](crate::UnencodableChar) without modifying
     /// `self` if any character in `text` cannot be encoded by `font`.
     #[cfg(feature = "text-layout")]
-    pub fn text_box<F: crate::wrap::LayoutFont + ?Sized>(
+    pub fn text_box<F: crate::wrap::FontSet + ?Sized>(
         &mut self,
         font_res: Res,
         font: &F,
@@ -786,14 +834,41 @@ impl Canvas {
     ) -> Result<crate::wrap::LaidOutText, crate::wrap::UnencodableChar> {
         let laid = crate::wrap::layout_text(font, text, rect, style)?;
         let norm = Rect::new(rect.x0, rect.y0, rect.x1, rect.y1);
+        let font_of = |face: usize| match face {
+            0 => Some(font_res.clone()),
+            face => font.face_resource(face),
+        };
         if style.clip {
             self.with_state(|c| {
                 c.clip_rect(norm);
-                c.draw_layout(font_res, &laid);
+                c.draw_faces(&laid, font_of);
             });
         } else {
-            self.draw_layout(font_res, &laid);
+            self.draw_faces(&laid, font_of);
         }
         Ok(laid)
     }
+}
+
+/// Each string `line` draws, in order: its face, where it's shown, and its
+/// codes; a comb line's cells, or every other line's runs.
+#[cfg(feature = "text-layout")]
+fn strings(line: &crate::wrap::LaidOutLine) -> impl Iterator<Item = (usize, Point, &[u8])> {
+    let cells = line.cells.iter().enumerate().map(|(i, (at, codes))| {
+        let face = line.cell_faces.get(i).copied().unwrap_or(0);
+        (face, *at, codes.as_slice())
+    });
+    let runs = (line.runs.iter())
+        .take_while(|_| line.cells.is_empty())
+        .filter_map(|run| {
+            let codes = line.codes.get(run.codes.clone())?;
+            // The first run, at the line's origin, is placed there as it is.
+            let x = if run.x == 0.0 {
+                line.origin.x
+            } else {
+                line.origin.x + run.x
+            };
+            Some((run.face, Point::new(x, line.origin.y), codes))
+        });
+    cells.chain(runs)
 }
