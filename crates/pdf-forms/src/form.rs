@@ -343,6 +343,35 @@ struct Walk<'o> {
     count: usize,
 }
 
+/// The default resources (`/DR`) of the form `dict`, object `id`, and their
+/// font dictionary (`/Font`), each with its own number when it is indirect.
+fn default_resources<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &mut Reader<'_, R, S>,
+    dict: &'o Dict,
+    id: Option<ObjectId>,
+) -> Result<(Option<DictAt<'o>>, Option<DictAt<'o>>), Error> {
+    let resources = reader.dict_entry(dict, id, "DR")?;
+    let fonts = match resources {
+        Some((dr, dr_id)) => reader.dict_entry(dr, dr_id.or(id), "Font")?,
+        None => None,
+    };
+    Ok((resources, fonts))
+}
+
+/// The font dictionary of the default resources of the form `catalog` names
+/// (`/AcroForm /DR /Font`), as [`Form`] holds it, nothing else of the form
+/// read.
+#[cfg(feature = "text-layout")]
+pub(crate) fn catalog_fonts<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &mut Reader<'_, R, S>,
+    catalog: &'o Dict,
+) -> Result<Option<DictAt<'o>>, Error> {
+    match reader.dict_entry(catalog, None, "AcroForm")? {
+        Some((dict, id)) => Ok(default_resources(reader, dict, id)?.1),
+        None => Ok(None),
+    }
+}
+
 fn read_form<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     reader: &mut Reader<'_, R, S>,
     dict: &'o Dict,
@@ -356,11 +385,7 @@ fn read_form<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     let sig_flags = reader
         .int_entry(dict, id, "SigFlags")?
         .map_or(0, |n| n as u32);
-    let resources = reader.dict_entry(dict, id, "DR")?;
-    let fonts = match resources {
-        Some((dr, dr_id)) => reader.dict_entry(dr, dr_id.or(id), "Font")?,
-        None => None,
-    };
+    let (resources, fonts) = default_resources(reader, dict, id)?;
 
     let mut walk = Walk {
         fields: Vec::new(),

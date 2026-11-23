@@ -31,6 +31,9 @@ use crate::read::Reader;
 pub struct FieldFont {
     font: Font,
     res: Option<Res>,
+    /// The font's dictionary, kept where no resource can name it (`res` is
+    /// `None`).
+    direct: Option<Dict>,
     fallback: bool,
     /// The heights lines are measured by, in glyph units, and the box comb
     /// text at an automatic size is fitted to, none for a standard font.
@@ -115,6 +118,7 @@ impl FieldFont {
             None if holds_reference(dict) => None,
             None => Res::dict(dict.clone()).ok(),
         };
+        let direct = res.is_none().then(|| dict.clone());
         let face = match dict.get("BaseFont") {
             Some(raw) => match raw.as_reference() {
                 Some(id) => objects.resolve(id),
@@ -134,9 +138,42 @@ impl FieldFont {
         Ok(FieldFont {
             font,
             res,
+            direct,
             fallback: false,
             metrics,
         })
+    }
+
+    /// The font `name` names in the default resources of the form `catalog`
+    /// names (`/AcroForm /DR /Font`), as [`find`](Self::find) gives it, with
+    /// nothing else of the form read: for a caller that reads the field tree
+    /// itself, or draws one widget. Where the catalog has no form, or the form
+    /// no default resources or no fonts in them, the font is the fallback for
+    /// the name. A wrong type on the way is told to `sink` as
+    /// [`Form::read_with`](crate::Form::read_with) tells it.
+    ///
+    /// # Errors
+    ///
+    /// As [`find`](Self::find).
+    pub fn find_in_catalog<'o, R, S>(
+        objects: R,
+        catalog: &'o Dict,
+        name: &[u8],
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Result<FieldFont, Error>
+    where
+        R: Resolve<'o> + Streams + Copy,
+        S: Sink<Fault> + ?Sized,
+    {
+        let mut reader = Reader {
+            objects,
+            rules: Rules::Pdfium,
+            limits,
+            sink: &mut *sink,
+        };
+        let fonts = crate::form::catalog_fonts(&mut reader, catalog)?;
+        Self::find(objects, fonts, name, limits, sink)
     }
 
     /// The standard 14 font `font`, as a field whose `/DA` font the default
@@ -161,6 +198,7 @@ impl FieldFont {
         FieldFont {
             font: read,
             res: Res::dict(dict).ok(),
+            direct: None,
             fallback: true,
             metrics,
         }
@@ -171,11 +209,23 @@ impl FieldFont {
     /// held directly that holds no reference at any depth, and for a fallback.
     /// `None` for a direct font dictionary that holds a reference (to its
     /// descriptor, say), which a copy of the dictionary would name wrongly: a
-    /// caller that writes the font as an object of its own names it by
+    /// caller that writes the font as an object of its own
+    /// ([`direct`](Self::direct) is what it writes) names it by
     /// `Res::written`.
     #[must_use]
     pub fn res(&self) -> Option<Res> {
         self.res.clone()
+    }
+
+    /// The font's dictionary as the default resources hold it, exactly where
+    /// no resource names it ([`res`](Self::res) is `None`): a direct
+    /// dictionary that holds a reference, whose references are the file's. A
+    /// caller writes it as an object of its own, each reference in it as it
+    /// writes the file's objects, and names the font by that object. `None`
+    /// for every font `res` names.
+    #[must_use]
+    pub const fn direct(&self) -> Option<&Dict> {
+        self.direct.as_ref()
     }
 
     /// Whether the default resources lack the font, so the caller adds it to
