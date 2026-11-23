@@ -396,6 +396,17 @@ fn res_names_what_can_be_written() {
     assert_eq!(find(b"Direct").res(), Some(Res::dict(direct).unwrap()));
     assert_eq!(find(b"DirectRef").res(), None);
     assert_eq!(find(b"Deep").res(), None);
+    // What no resource names is lent as the resources hold it, for the caller
+    // to write; what a resource names isn't.
+    assert_eq!(
+        find(b"DirectRef").direct(),
+        fonts.get("DirectRef").unwrap().as_dict()
+    );
+    assert_eq!(find(b"Deep").direct(), fonts.get("Deep").unwrap().as_dict());
+    for named in [&b"Ind"[..], b"Direct", b"Missing"] {
+        assert_eq!(find(named).direct(), None);
+    }
+    assert_eq!(FieldFont::standard(Std14::Symbol).direct(), None);
     assert!(!find(b"DirectRef").is_fallback());
     assert_eq!(
         find(b"Missing").res(),
@@ -405,6 +416,101 @@ fn res_names_what_can_be_written() {
         FieldFont::standard(Std14::Symbol).res(),
         Some(Res::dict(Std14::Symbol.dict()).unwrap())
     );
+}
+
+/// A font found from the catalog is the one the form, read whole, finds: the
+/// same default resources' fonts, with the font dictionary's own number where
+/// it is indirect, whether the form, its resources, and their fonts are held
+/// directly or by reference; the fallback where the catalog has no form, or
+/// the form no fonts, and a wrong type on the way told.
+#[test]
+fn find_in_catalog_is_the_forms_font_without_its_tree() {
+    let (described, descriptor) = described(800, -200, id(2));
+    let helv = std_font("Helvetica", differences());
+    let mut objects = Objects::new();
+    objects.insert(id(1), Object::from(helv));
+    objects.insert(id(2), Object::from(descriptor));
+    let fonts = dict! { "Ind" => id(1), "DirectRef" => described };
+    objects.insert(id(3), Object::from(fonts.clone()));
+    objects.insert(id(4), Object::from(dict! { "Font" => id(3) }));
+    objects.insert(
+        id(5),
+        // A field tree that can't be read whole is never reached.
+        Object::from(dict! { "DR" => id(4), "Fields" => id(5) }),
+    );
+    objects.insert(id(6), Object::from(id(3)));
+    let catalogs = [
+        dict! { "AcroForm" => dict! { "DR" => dict! { "Font" => fonts.clone() } } },
+        dict! { "AcroForm" => id(5) },
+        dict! { "AcroForm" => dict! { "DR" => dict! { "Font" => id(6) } } },
+    ];
+    for catalog in &catalogs {
+        let form = Form::read(&objects, catalog, Rules::Pdfium, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        for name in [&b"Ind"[..], b"DirectRef", b"Missing"] {
+            let (mut told, mut form_told) = (Vec::new(), Vec::new());
+            let found = FieldFont::find_in_catalog(
+                reading(&objects),
+                catalog,
+                name,
+                &Limits::DEFAULT,
+                &mut told,
+            )
+            .unwrap();
+            let forms = form
+                .field_font(reading(&objects), name, &Limits::DEFAULT, &mut form_told)
+                .unwrap();
+            assert_eq!(format!("{found:?}"), format!("{forms:?}"));
+            assert_eq!((found.res(), found.direct()), (forms.res(), forms.direct()));
+            assert_eq!(told, form_told);
+            assert_eq!(found.is_fallback(), name == b"Missing");
+        }
+    }
+
+    // No form, no resources, no fonts, or one of them of another type: the
+    // fallback, and the wrong type told once.
+    let none = [
+        (dict! {}, None),
+        (dict! { "AcroForm" => dict! {} }, None),
+        (dict! { "AcroForm" => dict! { "DR" => dict! {} } }, None),
+        (dict! { "AcroForm" => 1 }, Some("AcroForm")),
+        (dict! { "AcroForm" => dict! { "DR" => 1 } }, Some("DR")),
+        (
+            dict! { "AcroForm" => dict! { "DR" => dict! { "Font" => 1 } } },
+            Some("Font"),
+        ),
+        (dict! { "AcroForm" => id(9) }, None),
+    ];
+    for (catalog, wrong) in &none {
+        let mut told: Vec<(Place, Fault)> = Vec::new();
+        let found = FieldFont::find_in_catalog(
+            reading(&objects),
+            catalog,
+            b"Helv",
+            &Limits::DEFAULT,
+            &mut told,
+        )
+        .unwrap();
+        assert!(found.is_fallback());
+        let wrongs: Vec<&str> = (told.iter())
+            .filter_map(|(_, fault)| match fault {
+                Fault::WrongType { key } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wrongs, wrong.iter().copied().collect::<Vec<_>>());
+        assert!(matches!(told.last(), Some((_, Fault::FontNotInResources))));
+        let quiet = FieldFont::find_in_catalog(
+            reading(&objects),
+            catalog,
+            b"Helv",
+            &Limits::DEFAULT,
+            &mut (),
+        )
+        .unwrap();
+        assert_eq!(format!("{quiet:?}"), format!("{found:?}"));
+    }
 }
 
 /// What a font's streams decompress to is held to `Limits::font_budget`; a
