@@ -1,5 +1,7 @@
-"""pdf-forms's PDFium oracle cases: `forms`, how PDFium reads the field tree,
-and `forms-ap`, the appearance PDFium makes for a text field that has none.
+"""pdf-forms's PDFium oracle cases: `forms`, how PDFium reads the field tree;
+`forms-ap`, the appearance PDFium makes for a text field that has none; and
+`forms-ap-all` and `forms-press`, every appearance PDFium makes for a button
+or a choice field that has none, and its widgets' states after a press.
 
 Written using Python's standard library alone; `oracle/pdfium.py cases --write`
 materializes `cases/*.pdf` and `cases.tsv`, and `oracle/pdfium.py record`
@@ -262,6 +264,7 @@ def cases():
 
     ap_cases()
     written()
+    button_choice_cases()
     return list(ROWS)
 
 
@@ -420,6 +423,60 @@ LONG = b"Hello this is a very long line of text for a small box"
 PARAGRAPH = (b"one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
              b" seventeen")
 MULTILINE, PASSWORD, DO_NOT_SCROLL, COMB = b"/Ff 4096", b"/Ff 8192", b"/Ff 8388608", b"/Ff 16777216"
+
+
+# `forms-ap-all`: a button or a choice field with no /AP, every appearance
+# PDFium makes for it; `forms-press`: the same with its widgets' states and
+# its value after a press, the pressed widget's index in the case's `.press`
+# file. Each is laid out as `ap` lays out a `forms-ap` case.
+RADIO, PUSH, COMBO = b"/Ff 49152", b"/Ff 65536", b"/Ff 131072"
+
+
+def widget_of(entries, rect=b"[10 10 24 24]"):
+    """A field's merged widget: `entries` its own, at `rect`."""
+    return entries + b" " + WIDGET + b" /Rect " + rect
+
+
+def as_kind(kind, **more):
+    """The case `ap` added last, made a case of `kind`, with the files
+    `more` gives beside its own."""
+    name, _, files = ROWS.pop()
+    files.update(more)
+    ROWS.append((name, kind, files))
+
+
+def button_choice_cases():
+    # A check box and a radio button, each its mark named by /MK /CA in
+    # ZapfDingbats (a check, a circle), a border and a background.
+    ap("btn-check", [widget_of(b"/FT /Btn /DA (/ZaDb 0 Tf 0 g) /MK << /CA (4) /BC [0] /BG [1] >>")])
+    as_kind("forms-ap-all")
+    ap("btn-radio", [widget_of(b"/FT /Btn " + RADIO + b" /DA (/ZaDb 0 Tf 0 g) /MK << /CA (l) /BC [0] /BG [1] >>")])
+    as_kind("forms-ap-all")
+    # A push button whose highlighting is a push: its rollover and down
+    # appearances beside its normal one, the down one with a caption of its
+    # own.
+    ap("push-caption", [widget_of(b"/FT /Btn " + PUSH + b" /H /P /DA (/Helv 10 Tf 0 g) /MK << /CA (Push) /AC (Down)"
+                                  b" /BC [0] /BG [0.75] >> " + bs(b"1", b"B"), b"[10 10 70 30]")])
+    as_kind("forms-ap-all")
+    # A combo box showing the label of the option its value is; a list box
+    # with its value's option highlighted, more options than it shows.
+    ap("combo-label", [widget_of(b"/FT /Ch " + COMBO + b" /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)]"
+                                 b" [(e2) (Label two)]] /V (e2) /MK << /BC [0] >>", BOX)])
+    as_kind("forms-ap-all")
+    ap("list-select", [widget_of(b"/FT /Ch /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta)]"
+                                 b" /V (bravo) /MK << /BC [0] >>", b"[10 10 90 50]")])
+    as_kind("forms-ap-all")
+    # A radio group of three widgets, each its own state, the first on;
+    # the second pressed.
+    on = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"0 g 5 5 10 10 re f")
+    off = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"")
+    ap("press-radio",
+       [b"<< /Parent 50 0 R /AS /%s /AP << /N << /%d 51 0 R /Off 52 0 R >> >> /MK << /BC [0] >> "
+        % (b"1" if i == 0 else b"Off", i + 1) + WIDGET + b" /Rect [%d 10 %d 30] >>" % (10 + 30 * i, 30 + 30 * i)
+        for i in range(3)],
+       fonts=[], fields=b"50 0 R",
+       objs={50: b"<< /T (group) /FT /Btn " + RADIO + b" /V /1 /Kids [5 0 R 6 0 R 7 0 R] >>", 51: on, 52: off})
+    as_kind("forms-press", press=b"1")
 
 
 def ap_cases():

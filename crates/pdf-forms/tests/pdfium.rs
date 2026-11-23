@@ -6,6 +6,12 @@
 //! are read here into what each widget's appearance paints, clips and shows,
 //! and the heights of the faces PDFium draws the standard 14 in are held to
 //! them.
+//!
+//! The `forms-ap-all` cases record every appearance PDFium makes for a
+//! button or a choice field that has none, each state's and each slot's, and
+//! the `forms-press` cases a button group's states and value after a press;
+//! their answers are read here part by part, and `NOT_YET_COMPARED` names
+//! those nothing compares a maker or a rule to yet.
 
 use std::collections::HashMap;
 use std::fs;
@@ -168,7 +174,7 @@ fn pdfium_recorded_cases_agree() {
     let lines = differ_lines();
     for line in &lines {
         assert!(
-            line[0] == "forms-ap" || recorded.contains_key(&line[0]),
+            RULE_KINDS.contains(&line[0].as_str()) || recorded.contains_key(&line[0]),
             "differ.tsv names unknown case {}",
             line[0]
         );
@@ -189,7 +195,9 @@ fn pdfium_recorded_cases_agree() {
     let mut wrong = Vec::new();
     for [name, kind, _files] in &cases {
         assert!(
-            kind == "forms" || kind == "forms-ap" || (kind == "fonts" && name.starts_with("back-")),
+            kind == "forms"
+                || RULE_KINDS.contains(&kind.as_str())
+                || (kind == "fonts" && name.starts_with("back-")),
             "{name}: unexpected case kind {kind}"
         );
         if kind != "forms" {
@@ -723,6 +731,516 @@ fn standard_faces_heights_are_the_recorded_ones() {
         held.push(face);
     }
     assert_eq!(held.len(), Std14::ALL.len(), "a case for each face");
+}
+
+/// The kinds of case besides `forms`: `forms-ap`, a text field's appearance;
+/// `forms-ap-all`, every appearance of a button or a choice field;
+/// `forms-press`, a button group's states after a press. A `differ.tsv` line
+/// under one's name is a rule held on every case of it that it applies to.
+const RULE_KINDS: &[&str] = &["forms-ap", "forms-ap-all", "forms-press"];
+
+/// The cases nothing here compares a maker or a rule to yet, by kind and
+/// the start of their names, each with why. Their answers are read part by
+/// part below, and `just test-pdfium` holds them to PDFium; a line leaves
+/// this list with the test that compares its cases.
+const NOT_YET_COMPARED: &[(&str, &str, &str)] = &[
+    (
+        "forms-ap-all",
+        "btn-",
+        "the crate makes no check box's or radio button's appearances yet",
+    ),
+    (
+        "forms-ap-all",
+        "push-",
+        "the crate makes no push button's appearances yet",
+    ),
+    (
+        "forms-ap-all",
+        "combo-",
+        "the crate makes no combo box's appearance yet",
+    ),
+    (
+        "forms-ap-all",
+        "list-",
+        "the crate makes no list box's appearance yet",
+    ),
+    (
+        "forms-press",
+        "press-",
+        "the crate has no rules for a button group's states yet",
+    ),
+];
+
+/// What a `forms-ap-all` record gives of an appearance's content, in the
+/// order the content has it: a path painted, a clip set and where it ends,
+/// where the `/Tx` sequence begins and ends, and each string shown with its
+/// own color.
+#[derive(Debug, Clone, PartialEq)]
+enum Item {
+    Painted(Painted),
+    Clip(Vec<Segment>),
+    EndClip,
+    TxBegin,
+    TxEnd,
+    Text { color: Color, shown: Shown },
+}
+
+/// An appearance stream: its box, its matrix and its items.
+#[derive(Debug, Clone, PartialEq)]
+struct Drawn {
+    bbox: [f32; 4],
+    matrix: [f32; 6],
+    items: Vec<Item>,
+}
+
+/// One appearance of a widget: its slot in `/AP` (`N`, `D` or `R`), its
+/// state's name as `esc` writes it where the slot is a state dictionary,
+/// and the stream, none where the entry is no stream.
+#[derive(Debug, Clone, PartialEq)]
+struct Appearance {
+    slot: String,
+    state: Option<String>,
+    drawn: Option<Drawn>,
+}
+
+/// A widget's `forms-ap-all` record: its `/AS` as the oracle writes a value
+/// (`/` and a name, `(` a string `)`, `none`, `other`), and its appearances,
+/// none where it has no `/AP`.
+#[derive(Debug, Clone, PartialEq)]
+struct WidgetRecord {
+    state: String,
+    appearances: Option<Vec<Appearance>>,
+}
+
+impl Words<'_> {
+    fn segments(&mut self) -> Vec<Segment> {
+        let mut segments = Vec::new();
+        loop {
+            let segment = match self.peek() {
+                Some("re") => Segment::Rect(self.after_word()),
+                Some("m") => Segment::Move(self.after_word()),
+                Some("l") => Segment::Line(self.after_word()),
+                Some("c") => Segment::Curve(self.after_word()),
+                Some("h") => {
+                    self.word();
+                    Segment::Close
+                }
+                _ => return segments,
+            };
+            segments.push(segment);
+        }
+    }
+
+    /// The items of a stream, up to the record's next appearance or its end.
+    fn items(&mut self) -> Vec<Item> {
+        let mut items = Vec::new();
+        if self.eat("none") {
+            return items;
+        }
+        while let Some(word) = self.peek().filter(|word| *word != "ap") {
+            self.word();
+            let item = match word {
+                "fill" | "eofill" | "stroke" => Item::Painted(self.painted(word)),
+                "clip" => Item::Clip(self.segments()),
+                "]clip" => Item::EndClip,
+                "tx[" => Item::TxBegin,
+                "]tx" => Item::TxEnd,
+                "text" => {
+                    let color = self.color();
+                    self.expect("font");
+                    let font = self.word().to_string();
+                    self.expect("size");
+                    let size = self.num();
+                    self.expect("at");
+                    let at = self.nums();
+                    self.expect("codes");
+                    let codes = self.word().to_string();
+                    Item::Text {
+                        color,
+                        shown: Shown {
+                            font,
+                            size,
+                            at,
+                            codes,
+                        },
+                    }
+                }
+                _ => panic!("{word} isn't an item in {}", self.record),
+            };
+            items.push(item);
+        }
+        assert!(!items.is_empty(), "items with none: {}", self.record);
+        items
+    }
+}
+
+/// A `forms-ap-all` answer: for each annotation of the page in order, its
+/// `/AS` and every appearance PDFium left it with.
+fn widget_records(answer: &str) -> Vec<WidgetRecord> {
+    answer
+        .split(" ; ")
+        .enumerate()
+        .map(|(index, record)| {
+            let mut words = Words::new(record);
+            words.expect("idx");
+            assert_eq!(words.word(), index.to_string(), "in {record}");
+            words.expect("as");
+            let state = words.word().to_string();
+            words.expect("ap");
+            if words.eat("none") {
+                assert!(words.peek().is_none(), "in {record}");
+                return WidgetRecord {
+                    state,
+                    appearances: None,
+                };
+            }
+            let mut appearances = Vec::new();
+            loop {
+                let key = words.word();
+                let (slot, state) = match key.split_once('/') {
+                    Some((slot, state)) => (slot, Some(state.to_string())),
+                    None => (key, None),
+                };
+                assert!(["N", "D", "R"].contains(&slot), "{key} in {record}");
+                let drawn = if words.eat("none") {
+                    None
+                } else {
+                    words.expect("bbox");
+                    let bbox = words.nums();
+                    words.expect("matrix");
+                    let matrix = words.nums();
+                    words.expect("items");
+                    let items = words.items();
+                    Some(Drawn {
+                        bbox,
+                        matrix,
+                        items,
+                    })
+                };
+                appearances.push(Appearance {
+                    slot: slot.to_string(),
+                    state,
+                    drawn,
+                });
+                if !words.eat("ap") {
+                    break;
+                }
+            }
+            assert!(
+                words.peek().is_none(),
+                "words past the record's end: {record}"
+            );
+            WidgetRecord {
+                state,
+                appearances: Some(appearances),
+            }
+        })
+        .collect()
+}
+
+/// A `forms-press` answer: each widget's `/AS`, then each field's full name
+/// and `/V`, as the oracle writes a value.
+fn pressed_records(answer: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let (mut states, mut fields) = (Vec::new(), Vec::new());
+    for record in answer.split(" ; ") {
+        let mut words = Words::new(record);
+        if words.eat("idx") {
+            assert!(fields.is_empty(), "a widget after the fields: {answer}");
+            assert_eq!(words.word(), states.len().to_string(), "in {record}");
+            words.expect("as");
+            states.push(words.word().to_string());
+        } else {
+            words.expect("field");
+            let name = words.word().to_string();
+            words.expect("v");
+            fields.push((name, words.word().to_string()));
+        }
+        assert!(
+            words.peek().is_none(),
+            "words past the record's end: {record}"
+        );
+    }
+    (states, fields)
+}
+
+/// A value as the oracle writes `/AS` and `/V`: a name, a string, none or
+/// another kind of value.
+fn is_value_word(word: &str) -> bool {
+    word == "none"
+        || word == "other"
+        || word.len() > 1 && word.starts_with('/')
+        || word.len() > 2 && word.starts_with('(') && word.ends_with(')')
+}
+
+/// Each `forms-ap-all` case's answer reads as a record for every widget of
+/// its file, a value for its `/AS` and every appearance with a stream: the
+/// box at the origin, a quarter turn or none as its matrix, colors with
+/// their components, every path with a segment, a stroke's style in range,
+/// each clip ended and the `/Tx` sequence closed, text at a size with codes.
+/// A button's normal appearance is a state dictionary with an on state and
+/// `Off`; a push button's and a choice's is a stream.
+#[test]
+fn forms_ap_all_answers_read() {
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let cases = read_tsv::<3>("cases.tsv");
+    let mut read = 0;
+    for [name, kind, _files] in cases.iter().filter(|[_, kind, _]| kind == "forms-ap-all") {
+        let toggle = name.starts_with("btn-");
+        assert!(
+            ["btn-", "push-", "combo-", "list-"]
+                .iter()
+                .any(|start| name.starts_with(start)),
+            "{name}: a {kind} case's name"
+        );
+        let answer = recorded
+            .get(name)
+            .unwrap_or_else(|| panic!("{name}: no recorded answer"));
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let widgets = bytes
+            .windows(16)
+            .filter(|w| w == b"/Subtype /Widget")
+            .count();
+        let records = widget_records(answer);
+        assert_eq!(records.len(), widgets, "{name}: a record for each widget");
+        for record in &records {
+            assert!(is_value_word(&record.state), "{name}: {}", record.state);
+            let appearances = record
+                .appearances
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: nothing made"));
+            let normal: Vec<_> = appearances.iter().filter(|a| a.slot == "N").collect();
+            if toggle {
+                assert!(
+                    normal.iter().all(|a| a.state.is_some())
+                        && normal.iter().any(|a| a.state.as_deref() == Some("Off"))
+                        && normal.iter().any(|a| a.state.as_deref() != Some("Off")),
+                    "{name}: a button's normal appearances"
+                );
+            } else {
+                assert!(
+                    normal.len() == 1 && normal[0].state.is_none(),
+                    "{name}: one normal appearance"
+                );
+            }
+            for drawn in appearances.iter().filter_map(|a| a.drawn.as_ref()) {
+                let [x0, y0, x1, y1] = drawn.bbox;
+                assert!(x0 == 0.0 && y0 == 0.0 && x1 >= 0.0 && y1 >= 0.0, "{name}");
+                let [a, b, c, d, _, _] = drawn.matrix;
+                assert!(
+                    [a, b, c, d].iter().all(|v| [0.0, 1.0, -1.0].contains(v)),
+                    "{name}: matrix"
+                );
+                let (mut clips, mut tx) = (0, 0);
+                for item in &drawn.items {
+                    match item {
+                        Item::Painted(painted) => {
+                            let stroke = matches!(painted.paint, Paint::Stroke { .. });
+                            assert_eq!(
+                                painted.color.op.chars().all(char::is_uppercase),
+                                stroke,
+                                "{name}"
+                            );
+                            assert!(!painted.segments.is_empty(), "{name}");
+                            if let Paint::Stroke {
+                                width, cap, join, ..
+                            } = painted.paint
+                            {
+                                assert!(width >= 0.0 && cap <= 2 && join <= 2, "{name}");
+                            }
+                        }
+                        Item::Clip(segments) => {
+                            assert!(!segments.is_empty(), "{name}: a clip of nothing");
+                            clips += 1;
+                        }
+                        Item::EndClip => {
+                            assert!(clips > 0, "{name}: a clip ended unset");
+                            clips -= 1;
+                        }
+                        Item::TxBegin => {
+                            assert_eq!(tx, 0, "{name}: /Tx within /Tx");
+                            tx += 1;
+                        }
+                        Item::TxEnd => {
+                            assert_eq!(tx, 1, "{name}: /Tx ended unbegun");
+                            tx -= 1;
+                        }
+                        Item::Text { color, shown } => {
+                            assert!(color.op.chars().all(char::is_lowercase), "{name}");
+                            assert!(
+                                shown.size >= 0.0 && shown.codes != "%" && !shown.font.is_empty(),
+                                "{name}"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(tx, 0, "{name}: /Tx left open");
+            }
+        }
+        read += 1;
+    }
+    assert!(read > 0, "no forms-ap-all case");
+}
+
+/// Each `forms-press` case's answer reads as each widget's `/AS` and each
+/// field's `/V`, and the widget its `.press` file names is one of the page's.
+#[test]
+fn forms_press_answers_read() {
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let cases = read_tsv::<3>("cases.tsv");
+    let mut read = 0;
+    for [name, kind, files] in cases.iter().filter(|[_, kind, _]| kind == "forms-press") {
+        assert!(name.starts_with("press-"), "{name}: a {kind} case's name");
+        assert_eq!(
+            *files,
+            format!("{name}.pdf,{name}.press"),
+            "{name}: its files"
+        );
+        let (states, fields) = pressed_records(&recorded[name]);
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let widgets = bytes
+            .windows(16)
+            .filter(|w| w == b"/Subtype /Widget")
+            .count();
+        assert_eq!(states.len(), widgets, "{name}: a state for each widget");
+        assert!(!fields.is_empty(), "{name}: no field");
+        assert!(
+            states
+                .iter()
+                .chain(fields.iter().map(|(_, v)| v))
+                .all(|v| is_value_word(v)),
+            "{name}"
+        );
+        let presses =
+            fs::read_to_string(set().join("cases").join(format!("{name}.press"))).unwrap();
+        let presses: Vec<usize> = presses
+            .split_whitespace()
+            .map(|p| p.parse().unwrap())
+            .collect();
+        assert!(
+            !presses.is_empty() && presses.iter().all(|p| *p < widgets),
+            "{name}: its presses"
+        );
+        read += 1;
+    }
+    assert!(read > 0, "no forms-press case");
+}
+
+/// Every case is of a kind a test compares to what the crate does, or is
+/// listed in `NOT_YET_COMPARED` by its kind and the start of its name; and
+/// each line there has a case.
+#[test]
+fn every_case_is_compared_or_listed() {
+    let cases = read_tsv::<3>("cases.tsv");
+    let mut listed = vec![0; NOT_YET_COMPARED.len()];
+    for [name, kind, _] in &cases {
+        if kind == "forms" || kind == "forms-ap" {
+            continue;
+        }
+        let line = NOT_YET_COMPARED
+            .iter()
+            .position(|(k, start, _)| k == kind && name.starts_with(start))
+            .unwrap_or_else(|| panic!("{name}: a {kind} case nothing compares or lists"));
+        listed[line] += 1;
+    }
+    for ((kind, start, why), count) in NOT_YET_COMPARED.iter().zip(listed) {
+        assert!(
+            !why.is_empty() && count > 0,
+            "no {kind} case named {start}*"
+        );
+    }
+}
+
+/// The readers take each part as the recorder writes it, and nothing else.
+#[test]
+fn forms_ap_all_and_press_records_are_read_by_part() {
+    let records = widget_records(
+        "idx 0 as (Off) ap N/Off bbox 0 0 12 12 matrix 1 0 0 1 0 0 items none ap N/Yes bbox 0 0 12 12 \
+         matrix 0 1 -1 0 12 0 items fill g 0 m 1 1 c 1 2 3 4 5 6 h stroke RG 1 0 0 w 2 cap 0 join 0 \
+         dash none phase 0 m 0 0 l 1 1 ap D/Off none ; idx 1 as none ap none ; idx 2 as /On ap N \
+         bbox 0 0 50 20 matrix 1 0 0 1 0 0 items tx[ clip re 1 1 48 18 text g 1 font Helv size 10 at \
+         1 6.5 codes Hi ]clip ]tx eofill k 0 0 0 1 re 0 0 50 20 re 1 1 48 18",
+    );
+    assert_eq!(records.len(), 3);
+    let first = records[0].appearances.as_ref().unwrap();
+    assert_eq!(records[0].state, "(Off)");
+    assert_eq!(first.len(), 3);
+    assert_eq!(
+        (first[0].slot.as_str(), first[0].state.as_deref()),
+        ("N", Some("Off"))
+    );
+    assert_eq!(first[0].drawn.as_ref().unwrap().items, []);
+    let on = first[1].drawn.as_ref().unwrap();
+    assert_eq!(on.matrix, [0.0, 1.0, -1.0, 0.0, 12.0, 0.0]);
+    assert_eq!(on.items.len(), 2);
+    let Item::Painted(stroke) = &on.items[1] else {
+        panic!("{:?}", on.items[1])
+    };
+    assert_eq!(
+        stroke.segments,
+        [Segment::Move([0.0, 0.0]), Segment::Line([1.0, 1.0])]
+    );
+    assert_eq!(first[2].drawn, None);
+    assert_eq!(records[1].appearances, None);
+    let third = records[2].appearances.as_ref().unwrap();
+    assert_eq!(
+        (third[0].slot.as_str(), third[0].state.as_deref()),
+        ("N", None)
+    );
+    let items = &third[0].drawn.as_ref().unwrap().items;
+    assert_eq!(items[0], Item::TxBegin);
+    assert_eq!(
+        items[1],
+        Item::Clip(vec![Segment::Rect([1.0, 1.0, 48.0, 18.0])])
+    );
+    let Item::Text { color, shown } = &items[2] else {
+        panic!("{:?}", items[2])
+    };
+    assert_eq!(
+        (color.components.as_slice(), shown.at),
+        ([1.0].as_slice(), [1.0, 6.5])
+    );
+    assert_eq!(&items[3..5], [Item::EndClip, Item::TxEnd]);
+    for wrong in [
+        "idx 0 as (Off) ap N bbox 0 0 1 1 matrix 1 0 0 1 0 0",
+        "idx 0 as (Off) ap N bbox 0 0 1 1 matrix 1 0 0 1 0 0 items",
+        "idx 0 as (Off) ap N bbox 0 0 1 1 matrix 1 0 0 1 0 0 items none extra",
+        "idx 0 as (Off) ap X bbox 0 0 1 1 matrix 1 0 0 1 0 0 items none",
+        "idx 0 as (Off) ap N bbox 0 0 1 1 matrix 1 0 0 1 0 0 items q",
+        "idx 0 as (Off)",
+        "idx 1 as none ap none",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| widget_records(wrong)).is_err(),
+            "read: {wrong}"
+        );
+    }
+
+    let (states, fields) = pressed_records("idx 0 as /Off ; idx 1 as /2 ; field g.kid v /2");
+    assert_eq!(states, ["/Off", "/2"]);
+    assert_eq!(fields, [("g.kid".to_string(), "/2".to_string())]);
+    for wrong in [
+        "idx 1 as /Off",
+        "field g v /2 ; idx 0 as /Off",
+        "idx 0 as /Off extra",
+        "field g /2",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| pressed_records(wrong)).is_err(),
+            "read: {wrong}"
+        );
+    }
+    assert!(
+        ["/Off", "(Off)", "none", "other"]
+            .iter()
+            .all(|w| is_value_word(w))
+    );
+    assert!(!["/", "()", "Off", "%"].iter().any(|w| is_value_word(w)));
 }
 
 /// The appearance `pdf_forms::appearance::text_for_widget` makes for each widget
