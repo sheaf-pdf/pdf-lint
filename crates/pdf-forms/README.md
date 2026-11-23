@@ -10,7 +10,7 @@ PDF interactive forms (ISO 32000-2, §12.7): the field tree with what each field
   - `Form::read` takes a catalog and gives its `/AcroForm` with the field tree read; `Form::from_dict` starts from the `/AcroForm` dictionary. The form's `/DA`, `/Q`, `/NeedAppearances`, `/SigFlags`, and whether it holds `/XFA` are read, and its default resources' fonts (`/DR /Font`) are looked up by the name a `/DA` string gives (`Form::font`, `Form::font_names`).
   - Fields are one list, each before its kids (`Form::fields`), with the top of the tree in `Form::roots` and the terminal fields in `Form::terminals`. `Form::full_name` joins partial names with periods, and `Form::find` looks a field up by that name.
 - **Fields (`Field`, `FieldType`, `FieldKind`, `FieldFlags`, `FieldValue`):**
-  - A field's type (`/FT`), flags (`/Ff`), value (`/V`), default value (`/DV`), default appearance (`/DA`), quadding (`/Q`), and maximum length (`/MaxLen`) are the effective ones: its own, else its nearest ancestor's, and for `/DA` and `/Q` the form's after that. `Field::dict` has what the field itself holds.
+  - A field's type (`/FT`), flags (`/Ff`), value (`/V`), default value (`/DV`), default appearance (`/DA`), quadding (`/Q`), and maximum length (`/MaxLen`) are the effective ones: its own, else its nearest ancestor's, and for `/DA` and `/Q` the form's after that; under `Rules::Pdfium`, a `/MaxLen` neither gives is the first of the field's widgets' to hold one, as PDFium reads it. `Field::dict` has what the field itself holds.
   - `Field::kind` tells a push button, check box, radio button set, text field, combo box, list box, and signature field apart by the type and flags.
   - A value is typed as it is written: a text string, a name (a button's state), an array of text strings (a list box's selection), a dictionary (a signature), or a stream.
 - **Widgets (`Widget`):**
@@ -33,7 +33,7 @@ PDF interactive forms (ISO 32000-2, §12.7): the field tree with what each field
 
 ## Where it reads more, or less, than PDFium
 
-Under `Rules::Pdfium` text strings, names, and numbers are read as PDFium reads them as of chromium/8152, and a button with both the push button and the radio flags is a radio button. The tree itself is read as ISO 32000-2 gives it, which differs from PDFium in two ways, each held by a recorded case:
+Under `Rules::Pdfium` text strings, names, and numbers are read as PDFium reads them as of chromium/8152, a button with both the push button and the radio flags is a radio button, and a field with no `/MaxLen` of its own or an ancestor's takes the first of its widgets' own (the first widget whose dictionary has the entry), where ISO 32000-2 gives the entry to fields alone. The tree itself is read as ISO 32000-2 gives it, which differs from PDFium in two ways, each held by a recorded case:
 
 - **More fields.** A field's type is inherited from any ancestor (PDFium makes a terminal field only where `/FT` is its own or its parent's), a terminal field with no type or no name is still read, with a `Fault`, and a field is found by walking down from `/Fields` whether or not its widget's `/Parent` leads back up.
 - **No widgets from pages.** PDFium adds a page's widget that has a `/FT` to the form though `/Fields` doesn't reach it, and makes a form of such widgets where the catalog has no `/AcroForm`. `Form::read` reads the tree `/Fields` gives.

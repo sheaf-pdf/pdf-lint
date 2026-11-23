@@ -189,16 +189,29 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'_, R, S> {
         within: Option<ObjectId>,
         key: &'static str,
     ) -> Result<Option<i64>, Error> {
+        Ok(self.held_int_entry(dict, within, key)?.flatten())
+    }
+
+    /// An integer entry as [`int_entry`](Self::int_entry) reads it, told
+    /// apart from one that reaches nothing: `None` where the entry reaches
+    /// nothing (it's absent, null, or a reference to no object), `Some(None)`
+    /// where it reaches an object that gives no integer.
+    pub(crate) fn held_int_entry(
+        &mut self,
+        dict: &'o Dict,
+        within: Option<ObjectId>,
+        key: &'static str,
+    ) -> Result<Option<Option<i64>>, Error> {
         let Some((obj, id)) = self.entry(dict, within, key)? else {
             return Ok(None);
         };
         if let Some(n) = obj.as_integer() {
-            return Ok(Some(n));
+            return Ok(Some(Some(n)));
         }
         self.say(id, obj.at(), Fault::WrongType { key });
         match obj.as_number() {
-            Some(v) if self.rules == Rules::Pdfium && v.is_finite() => Ok(Some(v as i64)),
-            _ => Ok(None),
+            Some(v) if self.rules == Rules::Pdfium && v.is_finite() => Ok(Some(Some(v as i64))),
+            _ => Ok(Some(None)),
         }
     }
 }

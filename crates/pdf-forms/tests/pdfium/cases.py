@@ -604,6 +604,18 @@ def ap_cases():
        fonts=[b"Helv"], fields=b"50 0 R",
        objs={50: b"<< /T (top) /FT /Tx /MaxLen 5 /DA (/Helv 12 Tf 0 g) /Q 2 /Kids [51 0 R 6 0 R] >>",
              51: b"<< /T (mid) /Parent 50 0 R /Kids [5 0 R] >>"})
+    # A comb field with no /MaxLen of its own takes its first widget's that
+    # has one, for each of its widgets (PDFium's GetMaxLen): the second's
+    # where the first has none, the first's before the second's, the
+    # field's own before either, a real cut to an integer.
+    kids = [(b"", b" /MaxLen 4"), (b" /MaxLen 7", b" /MaxLen 4"), (b"", b" /MaxLen 4"), (b" /MaxLen 3.7", b"")]
+    ap("ap-max-len-from-a-widget",
+       [b"<< /Parent %d 0 R " % (50 + i // 2) + WIDGET + b" /Rect [10 %d 210 %d]" % (10 + 30 * i, 30 + 30 * i)
+        + kids[i // 2][i % 2] + b" >>" for i in range(8)],
+       fonts=[b"Helv"], fields=b"50 0 R 51 0 R 52 0 R 53 0 R",
+       objs={50 + f: b"<< /T (f%d) /FT /Tx " % f + COMB + (b" /MaxLen 6" if f == 2 else b"")
+             + b" /V (123456789) /DA (/Helv 12 Tf 0 g) /Kids [%d 0 R %d 0 R] >>" % (5 + 2 * f, 6 + 2 * f)
+             for f in range(4)})
     ap("ap-value-kinds", [tx(value=b"50 0 R", da=b"/Helv 10 Tf 0 g"), tx(value=b"/Name", da=b"/Helv 10 Tf 0 g"),
                           tx(value=b"[(a) (b)]", da=b"/Helv 10 Tf 0 g"), tx(value=b"51 0 R", da=b"/Helv 10 Tf 0 g")],
        objs={50: stream(b"", b"from a stream"), 51: b"(by reference)"})

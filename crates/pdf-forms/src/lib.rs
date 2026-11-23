@@ -9,7 +9,8 @@
 //! - A [`Field`]'s type, flags, value, default value, default appearance,
 //!   quadding, and maximum length are the effective ones: its own, else its
 //!   nearest ancestor's, and for the default appearance and quadding the
-//!   form's after that.
+//!   form's after that; under PDFium's rules, a maximum length neither gives
+//!   is the first of the field's widgets' to hold one ([`Field::max_len`]).
 //! - A [`Widget`] is a kid with no partial name and no kids of its own, or the
 //!   field's own dictionary; [`Widget::annot`] reads it as a
 //!   [`pdf_annots::Annot`].
