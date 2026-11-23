@@ -457,7 +457,8 @@ pub fn add_embedded_file(
 /// as a `/DA` font is found there (ISO 32000-2, 12.7.4.3); where that name is
 /// another font's, under the first free one pdf-forms'
 /// [`font_name`](pdf_forms::default_resources::font_name) gives, and `/DA`
-/// is written again to name it, nothing else of it changed. The font's
+/// is written again to name it: the name its last `Tf` reads alone
+/// replaced, every other byte of the string as it was. The font's
 /// object is the number a resource already written names
 /// ([`Res::written`]), as an embedded font's is; a resource of objects is
 /// written first, as [`resource`] writes one, here for each annotation. The
@@ -589,10 +590,47 @@ fn register(
         }
     }
     if name != wanted {
-        da.font_name = Some(name);
-        pdf_annots::AnnotMut::new(dict).set_default_appearance(&da);
+        let written = (dict.get(b"DA").and_then(Object::as_bytes))
+            .and_then(|written| renamed(written, &name));
+        match written {
+            Some(written) => dict.set("DA", Object::bytes(written)),
+            // What was read of it, written anew: for a name that can't be
+            // written alone (one with a NUL byte), as a string that gave a
+            // font's name has a `Tf` to rename.
+            None => {
+                da.font_name = Some(name);
+                pdf_annots::AnnotMut::new(dict).set_default_appearance(&da);
+            }
+        }
     }
     Ok(())
+}
+
+/// The default appearance string `da` with the font it names made `name`:
+/// the name operand of its last `Tf` that has one, which is the font read
+/// from it, replaced, and every other byte as it was, the operators a
+/// reader of default appearances doesn't model and the numbers as written
+/// among them. `None` where `da` doesn't read as content, no `Tf` names a
+/// font, or `name` can't be written as a name.
+fn renamed(da: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+    use pdf_content_streams::{Operator, ResCx, operations};
+
+    let limits = pdf_content_streams::Limits::DEFAULT;
+    let mut at = None;
+    for step in operations(da, &ResCx::none(), &limits) {
+        let step = step.ok()?;
+        if step.operator() == Operator::Font
+            && let Some(font) = step.arg(1).filter(|font| font.name().is_some())
+        {
+            at = Some(font.range());
+        }
+    }
+    let at = at?;
+    let mut out = Vec::with_capacity(da.len() + name.len());
+    out.extend_from_slice(da.get(..at.start)?);
+    pdf_objects::serialize::name(&mut out, name).ok()?;
+    out.extend_from_slice(da.get(at.end..)?);
+    Some(out)
 }
 
 /// The dictionary `value` is, a copy, and the object it's in where a chain

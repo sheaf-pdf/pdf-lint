@@ -4,11 +4,12 @@
 //! or the first free one after it, which `/DA` then names; on a file with no
 //! form, with a form whose resources are held directly, by reference, the
 //! form itself by reference, and all three by reference; read back by
-//! pdf-forms by that name; a font given
-//! as a resource of objects written once, its references among them made its
-//! own objects'; nothing registered for a `/DA` that names no font, and
-//! nothing changed for a document with no catalog. `qpdf --check` finds each
-//! saved file clean when run via `just test-qpdf`.
+//! pdf-forms by that name; a font given as a resource of objects written
+//! once, its references among them made its own objects'; a `/DA` of the
+//! caller's own kept byte for byte but the font's name; nothing registered
+//! for a `/DA` that names no font, and nothing changed for a document with
+//! no catalog. `qpdf --check` finds each saved file clean when run via
+//! `just test-qpdf`.
 
 #![cfg(feature = "text-layout")]
 
@@ -221,6 +222,67 @@ fn edited(held: Held) -> (Vec<u8>, ObjectId) {
         doc.add_annot(page, note.unwrap()).unwrap();
     }
     (doc.to_bytes().unwrap(), number)
+}
+
+/// A `/DA` of the caller's own, put in a built annotation's dictionary,
+/// whose font name is another font's in the form: the name alone is
+/// replaced, where the last `Tf` has it, and every other byte kept, the
+/// operators a default appearance isn't read for, the numbers as written,
+/// an earlier `Tf` and a comment among them.
+#[test]
+fn a_das_font_is_renamed_where_it_is() {
+    let file = file(Held::Direct);
+    let pdf = pdfs::from_bytes(&file[..]).unwrap();
+    let mut doc = pdf.edit().unwrap();
+    let page = doc.page_ids().unwrap()[0].unwrap();
+    let times = DefaultAppearance::new("Helv", 10.0, Some(Color::Gray(0.0)));
+    for (i, da) in [
+        &b"0.5 0.5 0.5 RG 0.25 w 2 Tr /Helv 9.123456 Tf 0 g % mine"[..],
+        b"/Helv 12 Tf 0 g",
+        b"/F#31 8 Tf /Helv  7 Tf\n/Helv 1 Tz",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rect = Rect::new(
+            72.0,
+            400.0 - 50.0 * i as f32,
+            372.0,
+            440.0 - 50.0 * i as f32,
+        );
+        let mut note = BuiltAnnot::free_text_with_font(
+            rect,
+            "In Times",
+            &times,
+            Quadding::Left,
+            &PaintStyle::default(),
+            standard_font(Std14::TimesRoman),
+            &Std14::TimesRoman,
+        )
+        .unwrap();
+        note.dict.set("DA", Object::bytes(da.to_vec()));
+        doc.add_annot(page, note).unwrap();
+    }
+    let saved = doc.to_bytes().unwrap();
+    let pdf = pdfs::from_bytes(&saved[..]).unwrap();
+    assert_eq!(
+        das(&pdf),
+        [
+            &b"0.5 0.5 0.5 RG 0.25 w 2 Tr /Helv1 9.123456 Tf 0 g % mine"[..],
+            b"/Helv1 12 Tf 0 g",
+            b"/F#31 8 Tf /Helv1  7 Tf\n/Helv 1 Tz",
+        ]
+    );
+    // Times is the form's under the name each names, Helvetica as it was.
+    let (_, _, fonts) = form(&pdf);
+    let base = |name: &str| {
+        let font = fonts.get(name).and_then(Object::as_reference).unwrap();
+        let font = pdf.reading().resolve(font).unwrap().as_dict().unwrap();
+        font.get("BaseFont").and_then(Object::as_name).unwrap()
+    };
+    assert_eq!(base("Helv1"), b"Times-Roman");
+    assert_eq!(base("Helv"), b"Helvetica");
+    assert_eq!(fonts.len(), 2);
 }
 
 /// A font embedded in a document and given to the two builders is put in
