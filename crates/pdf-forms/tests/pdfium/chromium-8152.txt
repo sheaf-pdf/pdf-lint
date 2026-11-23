@@ -160,3 +160,20 @@ push-caption	idx 0 as none ap N bbox 0 0 60 20 matrix 1 0 0 1 0 0 items fill g 0
 combo-label	idx 0 as none ap N bbox 0 0 100 20 matrix 1 0 0 1 0 0 items eofill g 0 re 0 0 100 20 re 1 1 98 18 tx[ text g 0 font Helv size 10 at 1 6.39500046 codes Label%20two ]tx fill rg 0.862744987 0.862744987 0.862744987 re 86 1 13 18 fill g 1 m 87 2 l 87 18 l 98 18 l 97 17 l 88 17 l 88 3 fill g 0.5 m 98 18 l 98 2 l 87 2 l 88 3 l 97 3 l 97 17 eofill g 0 re 86 1 13 18 re 87 2 11 16 fill g 0 m 89.5 11.5 l 95.5 11.5 l 92.5 8.5 l 89.5 11.5
 list-select	idx 0 as none ap N bbox 0 0 80 40 matrix 1 0 0 1 0 0 items eofill g 0 re 0 0 80 40 re 1 1 78 38 tx[ clip re 1 1 78 38 text g 0 font Helv size 10 at 1 29.5499992 codes alpha fill rg 0 0.200000003 0.44313699 re 1 15.6199989 78 11.6900005 text g 1 font Helv size 10 at 1 17.8599987 codes bravo text g 0 font Helv size 10 at 1 6.16999817 codes charlie text g 0 font Helv size 10 at 1 -5.52000237 codes delta ]clip ]tx
 press-radio	idx 0 as /Off ; idx 1 as /2 ; idx 2 as /Off ; field group v /2
+press-radio-on	idx 0 as /1 ; idx 1 as /Off ; idx 2 as /Off ; field group v /1
+press-radio-on-toggles	idx 0 as /1 ; idx 1 as /Off ; idx 2 as /Off ; field group v /1
+press-radio-off-toggles	idx 0 as /Off ; idx 1 as /2 ; idx 2 as /Off ; field group v /2
+press-radio-unison	idx 0 as /1 ; idx 1 as /Off ; idx 2 as /1 ; field group v /1
+press-radio-not-unison	idx 0 as /Off ; idx 1 as /Off ; idx 2 as /1 ; field group v /1
+press-named-states	idx 0 as /Off ; idx 1 as /spouse ; idx 2 as /Off ; field group v /spouse
+press-check-together	idx 0 as /Yes ; idx 1 as /Yes ; field group v /Yes
+press-check-together-off	idx 0 as /Off ; idx 1 as /Off ; field group v /Off
+press-check-distinct	idx 0 as /Off ; idx 1 as /b ; idx 2 as /Off ; field group v /b
+press-check-distinct-off	idx 0 as /Off ; idx 1 as /Off ; field group v /Off
+press-check-twice	idx 0 as /Off ; field group v /Off
+press-no-ap	idx 0 as /Yes ; idx 1 as /Yes ; field group v /Yes
+press-opt-check	idx 0 as /0 ; idx 1 as /Off ; idx 2 as /Off ; field group v /0
+press-opt-check-off	idx 0 as /Off ; idx 1 as /Off ; idx 2 as /Off ; field group v /0
+press-opt-radio	idx 0 as /Off ; idx 1 as /1 ; idx 2 as /Off ; field group v /1
+press-opt-radio-unison	idx 0 as /0 ; idx 1 as /Off ; idx 2 as /Off ; field group v /0
+press-opt-own-names	idx 0 as /Off ; idx 1 as /y ; field group v /1

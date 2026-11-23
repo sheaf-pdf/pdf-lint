@@ -7,6 +7,9 @@
 # (made, bbox, matrix, paint, clip, or text), in every annotation of the case
 # or, written part@N, in annotation N alone; every other part agrees. A line
 # under the kind's name is a rule held on every case it applies to.
+# A forms-press case: name	part	why, the part of its record that differs
+# after the presses (as, a widget's /AS, in every widget or, written as@N,
+# in widget N alone; or v, a field's /V); every other part agrees.
 forms-three-deep	PDFium makes a terminal field only where /FT is the field's own or its parent's; a type handed down two levels or more is read here, as ISO 32000-2 has it inherited
 forms-type-missing-or-unknown	PDFium leaves out a terminal field with no /FT; it is read here with no type, for the caller to see and a fault to say
 forms-nameless-middle	the type comes down two levels, as in forms-three-deep; the field with no /T adds nothing to the name
@@ -46,3 +49,7 @@ ap-da-written-twice	text@1	of two nonstroking colors in a /DA the last is the te
 ap-da-written-twice	text@2	of two rg in a /DA the last is the text's color (1 0 0 rg), as a content stream's graphics state has it; PDFium takes the first (0 0 1 rg)
 ap-nfd-helvetica	text	text given decomposed, a letter and a combining accent that the font has composed and not apart (e and U+0301), is drawn composed (Unicode Normalization Form C: é), as a font with no mark positioning draws it right; PDFium draws the letter and leaves the accent out, no font it has knowing it
 ap-comb-cluster	text	a comb field's cell holds a grapheme cluster (Unicode Standard Annex #29), a letter and its combining accent together, drawn composed where the font has it so (é in each font, four cells of six); PDFium gives each character a cell of its own, an accent's left empty where the font has no code for it (Helvetica), so the value takes all six
+press-radio-on-toggles	as@0	a radio button pressed while on turns off where the field hasn't NoToggleToOff, as ISO 32000-2, §12.7.5.2.4 has it, leaving none on; PDFium keeps it on, the flag set or not, reading the flag nowhere
+press-radio-on-toggles	v	the field's value is Off once no radio button is on, as their /AS are; PDFium keeps the radio button on and /V /1
+press-opt-check-off	v	the field's value is Off once no check box is on, as it is with no /Opt, /V and /AS being the same (ISO 32000-2, §12.7.5.2.3); PDFium leaves /V as it was (/0) where a check box of a field with /Opt is turned off
+press-opt-own-names	v	the field's value is the name of the on state of the check box turned on (/y), which its /AS is, as ISO 32000-2, §12.7.5.2.3 has /V and /AS the same; PDFium writes the widget's index (/1) where the field has /Opt, whatever its on state's name

@@ -11,7 +11,22 @@
 //!    `Limits::fields`.
 //! 4. `Debug` formatting never panics on a `Form`, `Field`, `Widget`, or
 //!    `Fault`.
-//! 5. Appearances (`text-layout`): `appearance::text` over a text, flags,
+//! 5. Buttons and choices: for each field, `Field::options`, `selected`,
+//!    `selection`, and `top_index`, and for each widget `Widget::states`,
+//!    each alike under `&mut ()` and a `Vec` sink, within `Limits::items`
+//!    or refused for it, a selection sorted, each once, and of an option;
+//!    for each check box and radio button field, `Field::group` alike
+//!    whatever the sink, and each of its widgets pressed from the states its
+//!    `/AS` gives; and a `group::Group` cut from the input (`check_group`),
+//!    its widgets pressed in turn. Each press answers a state for each
+//!    widget and holds the group's rules: an off widget turned on with those
+//!    of its on state and export value in unison and alone out of it, every
+//!    other off; an on one off with those in unison with it, or a radio
+//!    button with NoToggleToOff left as it was; an index past the widgets
+//!    changing nothing. The value is the first on widget's on state, `Off`
+//!    with none, each `/AS` its widget's on state or `Off`, and no `Debug`
+//!    shows a state's name, an export value, or an option.
+//! 6. Appearances (`text-layout`): `appearance::text` over a text, flags,
 //!    `/MaxLen`, `/Q`, a box, a border, colors, a rotation, and a `/DA` cut
 //!    from the input (`check_appearance`), in each standard 14 font; and for
 //!    each widget of the form's text fields, `appearance::widget_text`, the
@@ -81,6 +96,28 @@ pub const SEEDS: &[&[u8]] = &[
     // and a field whose font is a direct dictionary that holds a reference,
     // which no appearance's resources can name.
     b"<< /AcroForm << /Fields [1 0 R 2 0 R] /DR << /Font << /D << /Type /Font /Subtype /Type1 /BaseFont /Foo /FontDescriptor 3 0 R >> >> >> >> >>\xff<< /T (plain) /FT /Tx /V (no /DA) /Subtype /Widget /Rect [10 10 110 40] /MK << /R 270 /BG [0.5] /BC [1 0 0] >> /BS << /W 3 /S /I >> >>\xff<< /T (unbound) /FT /Tx /V (ab) /DA (/D 10 Tf) /Subtype /Widget /Rect [0 0 50 20] >>\xff<< /Type /FontDescriptor /FontName /Foo /Flags 32 /Ascent 700 /Descent -300 >>",
+    // Buttons: radio buttons in unison, one on and one with no `Off`; radio
+    // buttons with NoToggleToOff, of the names `On` and `spouse`; check boxes
+    // with `/Opt`, one named by its index, one by a name of its own, one with
+    // no appearance; and a push button with captions.
+    b"<< /AcroForm << /Fields [1 0 R 4 0 R 7 0 R 10 0 R] /DR << /Font << /ZaDb 13 0 R >> >> >> >>\xff<< /T (unison) /FT /Btn /Ff 33587200 /V /1 /Kids [2 0 R 3 0 R 14 0 R] >>\xff<< /Parent 1 0 R /Subtype /Widget /Rect [0 0 20 20] /AS /1 /AP << /N << /1 11 0 R /Off 12 0 R >> /D << /1 11 0 R /Off 12 0 R >> >> /MK << /CA (l) >> >>\xff<< /Parent 1 0 R /Subtype /Widget /Rect [30 0 50 20] /AS /Off /AP << /N << /2 11 0 R /Off 12 0 R >> >> /MK << /CA (8) >> >>\xff<< /T (radios) /FT /Btn /Ff 49152 /Kids [5 0 R 6 0 R] >>\xff<< /Parent 4 0 R /Subtype /Widget /Rect [0 30 20 50] /AS /On /AP << /N << /On 11 0 R /Off 12 0 R >> >> >>\xff<< /Parent 4 0 R /Subtype /Widget /Rect [30 30 50 50] /AS /Off /AP << /N << /spouse 11 0 R >> >> >>\xff<< /T (fruit) /FT /Btn /Opt [(apple) (pear) (apple)] /V /0 /Kids [8 0 R 9 0 R 15 0 R] >>\xff<< /Parent 7 0 R /Subtype /Widget /Rect [0 60 20 80] /AS /0 /AP << /N << /0 11 0 R /Off 12 0 R >> >> /MK << /CA (4) >> >>\xff<< /Parent 7 0 R /Subtype /Widget /Rect [30 60 50 80] /AS /Off /AP << /N << /a 11 0 R /Off 12 0 R >> >> >>\xff<< /T (push) /FT /Btn /Ff 65536 /H /P /Subtype /Widget /Rect [0 90 60 110] /DA (/Helv 0 Tf 0 g) /MK << /CA (Go) /RC (Over) /AC (Down) /TP 0 >> >>\xff<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] >>\nstream\n0 g 5 5 10 10 re f\xff<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] >>\nstream\n\xff<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>\xff<< /Parent 1 0 R /Subtype /Widget /Rect [60 0 80 20] /AS /Off /AP << /N << /1 11 0 R >> >> >>\xff<< /Parent 7 0 R /Subtype /Widget /Rect [60 60 80 80] /AS /Off >>",
+    // Choices: an editable combo box of pairs and a wrong item, its `/I`
+    // against its `/V`; and two list boxes that inherit `/Opt` and `/TI`,
+    // one of multiple selection whose `/I` agrees with its `/V`, one whose
+    // `/I` is a number.
+    b"<< /AcroForm << /Fields [1 0 R 2 0 R] /DA (/Helv 0 Tf 0 g) >> >>\xff<< /T (combo) /FT /Ch /Ff 393216 /Opt [[(e1) (Label one)] [(e2) (Label two)] 7] /V (e2) /I [0] /TI 1 /Subtype /Widget /Rect [0 0 100 20] >>\xff<< /T (lists) /FT /Ch /Opt 5 0 R /TI 2 /Kids [3 0 R 4 0 R] >>\xff<< /T (multi) /Parent 2 0 R /Ff 2097152 /V [(alpha) (charlie)] /I [0 2] /Subtype /Widget /Rect [0 30 80 70] >>\xff<< /T (single) /Parent 2 0 R /V (bravo) /I 1 /TI -1 /Subtype /Widget /Rect [0 80 80 120] >>\xff[(alpha) (bravo) (charlie) [(d) (delta)] /wrong]",
+    // `check_group`'s, each as it's cut. Radio buttons in unison with
+    // NoToggleToOff, `/1`, `/2`, `/1`, the first on, each pressed and one
+    // past them.
+    b"\x07\x03\x01\x03\x03\x04\x03\x00\x01\x02\x04",
+    // Check boxes of `/Opt [(apple) (pear) (apple)]` with no appearances,
+    // one state given for three.
+    b"\x00\x03\x00\x01\x08\x10\x08\x00\x02\x00\x01",
+    // Check boxes of four on states, all on, the second pressed twice.
+    b"\x00\x04\x0f\x04\x01\x02\x05\x06\x01\x01\x03\x00",
+    // Radio buttons in unison of one on state, `/1`, and the export values
+    // `apple`, `pear`, `apple`: the first and the third go together.
+    b"\x05\x03\x00\x03\x0b\x13\x0b\x00\x01\x02",
     // `check_appearance`'s, each as it's cut, which a test holds. A single
     // line at an automatic size in a box 100 by 20, its border solid, 1 wide,
     // in black: `/Helv 0 Tf 0 g`, `Hello #1`.
@@ -116,6 +153,7 @@ pub fn check(data: &[u8]) {
 
     let parsed = Parsed::of(data);
     read(parsed.objects(), &parsed.catalog);
+    check_group(data);
 }
 
 /// A catalog and objects 1, 2, … split on `0xFF` and parsed, the first 24
@@ -246,6 +284,7 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
             let _ = form.font(objects, name, &limits);
         }
         let _ = (form.has_xfa(), form.quadding(), form.sig_flags());
+        buttons_and_choices(objects, &form, rules, &limits);
 
         #[cfg(feature = "text-layout")]
         widget_appearances(objects, &form, rules, &limits);
@@ -871,7 +910,6 @@ fn interprets<'a, R: Resolve<'a> + Streams + Copy>(
 /// does (one other than a letter, a digit, a space, and the punctuation of
 /// numbers, lists, and structs), so a text of `0` or `bbox` isn't taken for
 /// one shown.
-#[cfg(feature = "text-layout")]
 fn shows(debug: &str, text: &str) -> bool {
     let escaped: String = text.escape_debug().collect();
     let telling = escaped
@@ -1079,6 +1117,297 @@ fn same_font(
         _ => panic!("a sink changed whether a font was read"),
     }
 }
+
+/// Reads each field's options, selected indexes, selection, and top index,
+/// and each widget's states, alike whatever the sink, and presses every
+/// widget of each check box and radio button field, as the module's docs
+/// list.
+fn buttons_and_choices<'o, R: Resolve<'o> + Copy>(
+    objects: R,
+    form: &Form<'o>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    use crate::FieldKind;
+
+    for field in form.fields() {
+        let quiet = field.options(objects, rules, limits);
+        let mut faults: Vec<(Place, Fault)> = Vec::new();
+        let told = field.options_with(objects, rules, limits, &mut faults);
+        assert_eq!(quiet, told, "a sink changed a field's options");
+        if let Ok(options) = &told {
+            assert!(options.len() <= limits.items, "options past the cap");
+            for option in options {
+                let shown = format!("{option:?} {told:?}");
+                assert!(!shows(&shown, &option.export), "an option shown");
+                assert!(!shows(&shown, option.label()), "an option's label shown");
+            }
+        }
+
+        let quiet = field.selected(objects, rules, limits);
+        let told_selected = field.selected_with(objects, rules, limits, &mut faults);
+        assert_eq!(quiet, told_selected, "a sink changed a field's /I");
+        if let Ok(selected) = &told_selected {
+            assert!(selected.len() <= limits.items, "/I past the cap");
+        }
+
+        let quiet = field.selection(objects, rules, limits);
+        let selection = field.selection_with(objects, rules, limits, &mut faults);
+        assert_eq!(quiet, selection, "a sink changed a field's selection");
+        match (&selection, &told, &told_selected) {
+            (Ok(selection), Ok(options), Ok(_)) => {
+                assert!(
+                    selection.windows(2).all(|w| w[0] < w[1]),
+                    "a selection unsorted or repeated"
+                );
+                assert!(
+                    selection.iter().all(|&i| i < options.len()),
+                    "a selection of no option"
+                );
+            }
+            (Ok(_), _, _) => panic!("a selection made of options or /I unread"),
+            (Err(_), _, _) => assert!(told.is_err() || told_selected.is_err()),
+        }
+        let _ = (field.top_index(), format!("{faults:?}"));
+
+        for widget in field.widgets() {
+            let quiet = widget.states(objects, rules, limits);
+            let mut faults: Vec<(Place, Fault)> = Vec::new();
+            let told = widget.states_with(objects, rules, limits, &mut faults);
+            assert_eq!(quiet, told, "a sink changed a widget's states");
+            if let Ok(states) = &told {
+                assert!(
+                    states
+                        .on_state
+                        .as_deref()
+                        .is_none_or(|n| !n.is_empty() && n != b"Off"),
+                    "an on state of no name, or Off"
+                );
+                let shown = format!("{states:?}");
+                for name in [&states.on_state, &states.state].into_iter().flatten() {
+                    assert!(
+                        !shows(&shown, &String::from_utf8_lossy(name)),
+                        "a state shown"
+                    );
+                }
+            }
+        }
+
+        let quiet = field.group(objects, rules, limits);
+        let mut faults: Vec<(Place, Fault)> = Vec::new();
+        let told = field.group_with(objects, rules, limits, &mut faults);
+        let (quiet, told) = match (quiet, told) {
+            (Ok(quiet), Ok(told)) => (quiet, told),
+            (Err(quiet), Err(told)) => {
+                assert_eq!(quiet, told);
+                continue;
+            }
+            _ => panic!("a sink changed whether a group was read"),
+        };
+        assert_eq!(format!("{quiet:?}"), format!("{told:?}"));
+        assert_eq!(quiet.states(), told.states());
+        let group = told.group();
+        let toggle = matches!(field.kind(), Some(FieldKind::CheckBox | FieldKind::Radio));
+        let widgets = if toggle { field.widgets().len() } else { 0 };
+        assert_eq!(
+            group.widgets.len(),
+            widgets,
+            "a group of the field's widgets"
+        );
+        assert_eq!(told.states().len(), widgets, "a state for each widget");
+        for index in 0..=widgets {
+            let after = group.press(told.states(), index);
+            holds_press(&group, told.states(), index, &after);
+        }
+        for widget in group.widgets {
+            let shown = format!("{group:?} {widget:?} {told:?}");
+            for text in [
+                widget.export.as_deref(),
+                widget
+                    .on_state
+                    .as_deref()
+                    .map(|n| std::str::from_utf8(n).unwrap_or_default()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(!shows(&shown, text), "a group's name or export value shown");
+            }
+        }
+    }
+}
+
+/// The names [`check_group`] gives a widget's on state, by three bits.
+const GROUP_NAMES: [Option<&[u8]>; 8] = [
+    None,
+    Some(b"Yes"),
+    Some(b"On"),
+    Some(b"1"),
+    Some(b"2"),
+    Some(b"spouse"),
+    Some(b"Choice1"),
+    Some(b"Off"),
+];
+
+/// The export values [`check_group`] gives a widget, by three bits.
+const GROUP_EXPORTS: [Option<&str>; 8] = [
+    None,
+    Some("apple"),
+    Some("pear"),
+    Some(""),
+    Some("Yes"),
+    Some("spouse"),
+    Some("1"),
+    Some("caf\u{e9}"),
+];
+
+/// Cuts `data` into a check box or radio button group and presses its
+/// widgets in turn, each press holding the group's rules ([`holds_press`]),
+/// each byte missing `0`:
+///
+/// - byte 0: bit 0, radio buttons (else check boxes); bit 1, NoToggleToOff;
+///   bit 2, RadiosInUnison.
+/// - byte 1: the widgets, modulo 9; byte 2, their states before, a bit
+///   each; byte 3: how many of those states are given, modulo 10, so fewer
+///   or more than the widgets.
+/// - a byte for each widget: bits 0 to 2 its on state's name, bits 3 to 5
+///   its export value ([`GROUP_NAMES`], [`GROUP_EXPORTS`]).
+/// - after them, up to 16 presses, each a widget's index modulo two more
+///   than the widgets, so past them too.
+pub fn check_group(data: &[u8]) {
+    use std::borrow::Cow;
+
+    use crate::group::{Group, GroupKind, GroupWidget};
+
+    let byte = |at: usize| data.get(at).copied().unwrap_or(0);
+    let flags = byte(0);
+    let count = usize::from(byte(1) % 9);
+    let widgets: Vec<GroupWidget<'_>> = (0..count)
+        .map(|i| {
+            let choice = byte(4 + i);
+            let mut widget = GroupWidget::new(GROUP_NAMES[usize::from(choice & 7)]);
+            widget.export = GROUP_EXPORTS[usize::from(choice >> 3 & 7)].map(Cow::Borrowed);
+            widget
+        })
+        .collect();
+    let kind = match flags & 1 {
+        0 => GroupKind::CheckBox,
+        _ => GroupKind::Radio,
+    };
+    let mut group = Group::new(kind, &widgets);
+    group.no_toggle_to_off = flags & 2 != 0;
+    group.in_unison = flags & 4 != 0;
+    let given = usize::from(byte(3) % 10);
+    let mut states: Vec<bool> = (0..given).map(|i| byte(2) >> (i % 8) & 1 != 0).collect();
+    let presses = data.get(4 + count..).unwrap_or_default();
+    for &press in presses.iter().take(16) {
+        let index = usize::from(press) % (count + 2);
+        let after = group.press(&states, index);
+        assert_eq!(after, group.press(&states, index), "a press made twice");
+        holds_press(&group, &states, index, &after);
+        states = after;
+    }
+    let shown = format!("{group:?} {widgets:?}");
+    for word in ["spouse", "Choice1", "apple", "pear", "caf"] {
+        assert!(
+            !shown.contains(word),
+            "a group's name or export value shown"
+        );
+    }
+}
+
+/// Holds what the group's rules give of widget `index` pressed from
+/// `before` (`after`), and of the value, the export value, and the states'
+/// names after.
+fn holds_press(group: &crate::group::Group<'_>, before: &[bool], index: usize, after: &[bool]) {
+    use crate::group::GroupKind;
+
+    let count = group.widgets.len();
+    assert_eq!(after.len(), count, "a state for each widget");
+    let was: Vec<bool> = (0..count)
+        .map(|i| before.get(i).copied().unwrap_or(false))
+        .collect();
+    let together = |a: usize, b: usize| {
+        group.on_state(a) == group.on_state(b) && group.export_value(a) == group.export_value(b)
+    };
+    let unison = group.is_in_unison();
+    if index >= count {
+        assert_eq!(after, was, "a press past the widgets changed one");
+    } else if !was[index] {
+        for (i, &on) in after.iter().enumerate() {
+            assert_eq!(
+                on,
+                i == index || (unison && together(i, index)),
+                "a press turning on"
+            );
+        }
+        if !unison {
+            assert_eq!(
+                after.iter().filter(|&&on| on).count(),
+                1,
+                "out of unison, one on"
+            );
+        }
+    } else if group.kind == GroupKind::Radio && group.no_toggle_to_off {
+        assert_eq!(after, was, "NoToggleToOff, and a radio button turned off");
+    } else {
+        for (i, (&on, &was)) in after.iter().zip(&was).enumerate() {
+            let goes = i == index || (unison && together(i, index));
+            assert_eq!(on, was && !goes, "a press turning off");
+        }
+    }
+
+    let first = after.iter().position(|&on| on);
+    let value = group.value(after);
+    match first {
+        Some(first) => {
+            assert_eq!(Some(value.clone()), group.on_state(first));
+            assert_eq!(group.export(after), group.export_value(first));
+        }
+        None => {
+            assert_eq!(&*value, b"Off");
+            assert_eq!(group.export(after), None);
+        }
+    }
+    assert!(group.states_for(b"Off").iter().all(|&on| !on));
+    let named = group.states_for(&value);
+    assert_eq!(named.len(), count);
+    for (i, &on) in after.iter().enumerate() {
+        let name = group.state_name(i, on);
+        match on {
+            true => assert_eq!(Some(name), group.on_state(i)),
+            false => assert_eq!(&*name, b"Off"),
+        }
+        if named[i] {
+            assert_eq!(
+                group.on_state(i).as_deref(),
+                Some(&*value),
+                "states_for by another name"
+            );
+        }
+        let export = group.export_value(i).expect("a widget's export value");
+        let pressed = group
+            .states_for_export(&export)
+            .expect("a widget's own export value");
+        let found = (0..count).position(|j| group.export_value(j).as_deref() == Some(&*export));
+        assert_eq!(found.map(|j| pressed[j]), Some(true), "states_for_export");
+    }
+    assert_eq!(group.export_value(count), None);
+    assert_eq!(group.on_state(count), None);
+}
+
+/// The objects and catalog a seed is parsed into, for the crate's tests.
+#[cfg(test)]
+pub(crate) fn parsed(data: &[u8]) -> (BTreeMap<ObjectId, Object>, Dict) {
+    let parsed = Parsed::of(data);
+    (parsed.objects, parsed.catalog)
+}
+
+/// The seeds of forms of buttons and of choices, and `check_group`'s.
+#[cfg(test)]
+pub(crate) const BUTTON_SEEDS: &[&[u8]] = &[SEEDS[6], SEEDS[7]];
+#[cfg(test)]
+pub(crate) const GROUP_SEEDS: &[&[u8]] = &[SEEDS[8], SEEDS[9], SEEDS[10], SEEDS[11]];
 
 #[cfg(test)]
 mod tests {

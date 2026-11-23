@@ -11,14 +11,17 @@
 //! button or a choice field that has none, each state's and each slot's, and
 //! the `forms-press` cases a button group's states and value after a press;
 //! their answers are read here part by part, and `NOT_YET_COMPARED` names
-//! those nothing compares a maker or a rule to yet.
+//! those nothing compares a maker or a rule to yet. The presses are made
+//! here by `pdf_forms::group`'s rules over what the read layer reads of the
+//! group, and held to PDFium's states and values.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
+use pdf_forms::group::FieldGroup;
 use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
-use pdf_forms::pdf_objects::{Object, Resolve};
+use pdf_forms::pdf_objects::{Object, Resolve, Str, Value};
 use pdf_forms::pdf_semantics::pages;
 use pdf_forms::{Field, FieldKind, FieldValue, Form, Limits};
 use pdf_structure::read::Recovery;
@@ -764,11 +767,6 @@ const NOT_YET_COMPARED: &[(&str, &str, &str)] = &[
         "list-",
         "the crate makes no list box's appearance yet",
     ),
-    (
-        "forms-press",
-        "press-",
-        "the crate has no rules for a button group's states yet",
-    ),
 ];
 
 /// What a `forms-ap-all` record gives of an appearance's content, in the
@@ -1139,7 +1137,7 @@ fn every_case_is_compared_or_listed() {
     let cases = read_tsv::<3>("cases.tsv");
     let mut listed = vec![0; NOT_YET_COMPARED.len()];
     for [name, kind, _] in &cases {
-        if kind == "forms" || kind == "forms-ap" {
+        if kind == "forms" || kind == "forms-ap" || kind == "forms-press" {
             continue;
         }
         let line = NOT_YET_COMPARED
@@ -1241,6 +1239,216 @@ fn forms_ap_all_and_press_records_are_read_by_part() {
             .all(|w| is_value_word(w))
     );
     assert!(!["/", "()", "Off", "%"].iter().any(|w| is_value_word(w)));
+}
+
+/// The parts of a `forms-press` record a `differ.tsv` line may name: a
+/// widget's `/AS` (`as`, or `as@N` for widget N alone), and a field's `/V`
+/// (`v`).
+const PRESS_PARTS: [&str; 2] = ["as", "v"];
+
+/// A value as the oracle writes `/AS` and `/V` (`is_value_word`), `objects`
+/// resolving a reference: a name as `/` and its bytes as `esc` writes them,
+/// a string in parentheses, `none`, or `other`.
+fn value_word<'o>(objects: impl Resolve<'o>, object: Option<&'o Object>) -> String {
+    let object = match object.map(|o| (o, o.as_reference())) {
+        Some((_, Some(id))) => objects.resolve(id),
+        Some((object, None)) => Some(object),
+        None => None,
+    };
+    match object {
+        None => "none".into(),
+        Some(object) => match (object.as_name(), object.value()) {
+            (Some(name), _) => format!("/{}", esc(name)),
+            (_, Value::String(Str::Bytes(bytes), _)) => format!("({})", esc(bytes)),
+            _ => "other".into(),
+        },
+    }
+}
+
+/// The presses of the `forms-press` case `name` made here: each widget of
+/// its page's `/AS` and each field's full name and `/V` after them, as the
+/// oracle writes them. A pressed field's group is read once
+/// (`Field::group`), its widgets' states from their `/AS`, and pressed in
+/// turn (`Group::press`); then, as `pdf_forms::group` has a caller save
+/// them, its `/V` is the group's value and each of its widgets' `/AS` the
+/// group's name for that widget's state. Every other `/AS` and `/V` is the
+/// file's.
+fn pressed_here(name: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let cases = set().join("cases");
+    let bytes = fs::read(cases.join(format!("{name}.pdf"))).unwrap();
+    let presses: Vec<usize> = fs::read_to_string(cases.join(format!("{name}.press")))
+        .unwrap()
+        .split_whitespace()
+        .map(|p| p.parse().unwrap())
+        .collect();
+    let mut opts = read::Options::DEFAULT;
+    opts.recovery = Recovery::Pdfium;
+    let reading = Reading::open(&bytes[..], &opts).unwrap();
+    let objects = &reading;
+    let catalog = pdf_forms::pdf_semantics::catalog(objects, reading.trailer().dict())
+        .unwrap()
+        .unwrap();
+    let table = pages::pages(
+        objects,
+        catalog,
+        Rules::Pdfium,
+        &pdf_forms::pdf_semantics::Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    let page = table.iter().next().and_then(|page| page.dict).unwrap();
+    let annots = page
+        .get("Annots")
+        .and_then(|object| match object.as_reference() {
+            Some(id) => objects.resolve(id),
+            None => Some(object),
+        })
+        .and_then(Object::as_array)
+        .unwrap();
+    let form = Form::read(objects, catalog, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
+        .unwrap();
+    // The field and the index among its widgets of a page's annotation.
+    let widget_of = |entry: &Object| {
+        let id = entry.as_reference()?;
+        form.fields().iter().enumerate().find_map(|(index, field)| {
+            let at = field.widgets().iter().position(|w| w.id() == Some(id))?;
+            Some((index, at))
+        })
+    };
+
+    let mut groups: HashMap<usize, (FieldGroup, Vec<bool>)> = HashMap::new();
+    for press in presses {
+        let (field, at) = widget_of(&annots[press]).unwrap();
+        let (group, states) = groups.entry(field).or_insert_with(|| {
+            let group = form.fields()[field]
+                .group(objects, Rules::Pdfium, &Limits::DEFAULT)
+                .unwrap();
+            let states = group.states().to_vec();
+            (group, states)
+        });
+        *states = group.group().press(states, at);
+    }
+
+    let mut states = Vec::new();
+    for entry in annots {
+        let annot = match entry.as_reference() {
+            Some(id) => objects.resolve(id),
+            None => Some(entry),
+        };
+        let mut word = value_word(
+            objects,
+            annot.and_then(Object::as_dict).and_then(|d| d.get("AS")),
+        );
+        if let Some((field, at)) = widget_of(entry)
+            && let Some((group, after)) = groups.get(&field)
+        {
+            word = format!("/{}", esc(&group.group().state_name(at, after[at])));
+        }
+        states.push(word);
+    }
+    let mut fields = Vec::new();
+    for (index, field) in form.fields().iter().enumerate() {
+        if field.partial_name().is_none() {
+            continue;
+        }
+        let word = match groups.get(&index) {
+            Some((group, after)) => format!("/{}", esc(&group.group().value(after))),
+            None => value_word(objects, field.dict().get("V")),
+        };
+        fields.push((esc(form.full_name(index).unwrap().as_bytes()), word));
+    }
+    (states, fields)
+}
+
+/// Each `forms-press` case's presses, made here by `pdf_forms::group`'s
+/// rules over the case's file read with pdf-structure ([`pressed_here`]),
+/// leave each widget's `/AS` and each field's `/V` as PDFium's record has
+/// them, word for word, but for the parts `differ.tsv` lists for the case,
+/// which must still differ.
+#[test]
+fn presses_agree_with_pdfiums() {
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let cases: Vec<String> = read_tsv::<3>("cases.tsv")
+        .into_iter()
+        .filter(|[_, kind, _]| kind == "forms-press")
+        .map(|[name, _, _]| name)
+        .collect();
+
+    // Each case's listed parts, each for one widget (`as@N`) or any.
+    let mut listed: HashMap<String, BTreeSet<(String, Option<usize>)>> = HashMap::new();
+    for line in differ_lines() {
+        assert_ne!(line[0], "forms-press", "a rule for every press: {line:?}");
+        if !cases.contains(&line[0]) {
+            continue;
+        }
+        assert_eq!(
+            line.len(),
+            3,
+            "a forms-press case's differ.tsv line: {line:?}"
+        );
+        let (part, at) = match line[1].split_once('@') {
+            Some((part, at)) => (part, Some(at.parse().unwrap())),
+            None => (line[1].as_str(), None),
+        };
+        assert!(PRESS_PARTS.contains(&part), "{line:?}");
+        assert!(part == "as" || at.is_none(), "{line:?}");
+        assert!(
+            listed
+                .entry(line[0].clone())
+                .or_default()
+                .insert((part.to_owned(), at)),
+            "a part listed twice: {line:?}"
+        );
+    }
+
+    let mut wrong = Vec::new();
+    for name in &cases {
+        let (states, fields) = pressed_records(&recorded[name]);
+        let (our_states, our_fields) = pressed_here(name);
+        assert_eq!(
+            states.len(),
+            our_states.len(),
+            "{name}: a state for each widget"
+        );
+        let mut found = BTreeSet::new();
+        for (index, (pdfium, ours)) in states.iter().zip(&our_states).enumerate() {
+            if pdfium != ours {
+                found.insert(("as", Some(index)));
+            }
+        }
+        if fields != our_fields {
+            found.insert(("v", None));
+        }
+        let expected = listed.remove(name).unwrap_or_default();
+        let covers = |(part, at): &(String, Option<usize>),
+                      (differs, index): &(&str, Option<usize>)| {
+            part == differs && at.is_none_or(|at| Some(at) == *index)
+        };
+        let unlisted: Vec<_> = found
+            .iter()
+            .filter(|f| !expected.iter().any(|e| covers(e, f)))
+            .collect();
+        let agreeing: Vec<_> = expected
+            .iter()
+            .filter(|e| !found.iter().any(|f| covers(e, f)))
+            .collect();
+        if !unlisted.is_empty() || !agreeing.is_empty() {
+            wrong.push(format!(
+                "{name}: differs in {unlisted:?}, listed but agrees in {agreeing:?}\n  pdfium: \
+                 {states:?} {fields:?}\n  ours:   {our_states:?} {our_fields:?}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} press case(s) disagreed with chromium/8152:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
 }
 
 /// The appearance `pdf_forms::appearance::text_for_widget` makes for each widget

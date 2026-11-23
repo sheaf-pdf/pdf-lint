@@ -12,6 +12,8 @@ use crate::limits::Limits;
 pub(crate) type ArrayAt<'o> = (&'o [Object], Option<ObjectId>);
 /// A dictionary reached through an entry, with its own number when indirect.
 pub(crate) type DictAt<'o> = (&'o Dict, Option<ObjectId>);
+/// An object reached through an entry, with the object it was read within.
+pub(crate) type EntryAt<'o> = (&'o Object, Option<ObjectId>);
 
 pub(crate) struct Reader<'s, R, S: ?Sized> {
     pub(crate) objects: R,

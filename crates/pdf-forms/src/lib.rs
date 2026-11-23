@@ -14,6 +14,14 @@
 //! - A [`Widget`] is a kid with no partial name and no kids of its own, or the
 //!   field's own dictionary; [`Widget::annot`] reads it as a
 //!   [`pdf_annots::Annot`].
+//! - A choice field's options, top index, and selection, and a button
+//!   field's export values ([`Field::options`], [`Field::top_index`],
+//!   [`Field::selected`], [`Field::selection`]), are found with the field and
+//!   decoded when they're asked for, and [`Widget::states`] reads a widget's
+//!   on state and `/AS`. [`group`] holds a check box or radio button field's
+//!   rules as pure functions of plain data: which widgets a press or a value
+//!   turns on, and what each widget's `/AS` and the field's `/V` become
+//!   ([`Field::group`] reads one).
 //! - The walk ends within [`Limits`] whatever the file says. Recoverable
 //!   departures go to a [`pdf_objects::fault::Sink`] as [`Fault`]s; `&mut ()`
 //!   collects none and reads the same form.
@@ -125,15 +133,23 @@ mod form;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+pub mod group;
 mod limits;
 mod phases;
 mod read;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_buttons;
+#[cfg(test)]
+mod tests_group;
 
 pub use error::Error;
 pub use fault::Fault;
-pub use field::{Field, FieldFlags, FieldKind, FieldType, FieldValue, Widget};
+pub use field::{
+    Field, FieldFlags, FieldKind, FieldOption, FieldType, FieldValue, Widget, WidgetStates,
+    selection,
+};
 pub use form::Form;
 pub use limits::{Cap, Limits};
 pub use pdf_annots::Quadding;

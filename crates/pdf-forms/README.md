@@ -196,6 +196,67 @@ assert!(!made.font.is_fallback());
 assert_eq!(made.font_name.as_deref(), Some(&b"Helv"[..]));
 ```
 
+## Buttons and choices
+
+- **What the read layer gives of them.** `Field::options` decodes `/Opt`: a choice field's options (`FieldOption`, an export value and the label shown for it) or a button field's export values, one for each widget. `Field::top_index` is `/TI`, `Field::selected` is `/I`, and `Field::selection` the options the field's value selects, as `selection` finds them over plain data: `/I` where it agrees with `/V`, else the options whose export values `/V` gives, as PDFium as of chromium/8152 finds them. `/Opt`, `/TI`, and `/I` are each the field's own or the nearest ancestor's under either rules, found with the field and decoded only when they're asked for, within `Limits::items`, and an `/Opt` or `/I` that can't be read fails the call that asks for it, not `Form::read`. `Widget::states` reads a widget's on state, its `/AS`, and whether it has an `Off` appearance from `/AP` and `/AS` alone.
+- **A group's rules (`group`).** `Group` and `GroupWidget` hold a check box or radio button field's widgets as plain data, filled by a caller from a model of its own or read by `Field::group`. `Group::press`, `Group::states_for`, and `Group::states_for_export` say which widgets are on after a press, for a state's name, or for an export value; `Group::value` and `Group::state_name` what the field's `/V` and each widget's `/AS` become; `on_state_name` names the state a made appearance goes under. They follow PDFium as of chromium/8152 where ISO 32000-2 says less: a check box field's widgets are always in unison, and in unison a widget goes with those of its on state and export value. Where PDFium departs from ISO 32000-2, the standard's rules are kept, each held by a recorded case:
+  - **A radio button pressed while on turns off** where the field hasn't NoToggleToOff (ISO 32000-2, §12.7.5.2.4); PDFium never turns a radio button off by a press, reading the flag nowhere.
+  - **The value is the name of the on widget's state, `Off` with none,** as `/V` and `/AS` are the same (ISO 32000-2, §12.7.5.2.3); with `/Opt`, PDFium writes the pressed widget's index whatever its state's name, and leaves `/V` as it was when a widget is turned off.
+
+Press a radio button and set what its group's widgets and field become:
+
+```rust
+use std::collections::BTreeMap;
+
+use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
+use pdf_forms::pdf_objects::{Object, ObjectId, Stream, dict};
+use pdf_forms::{Form, Limits};
+
+let (answer, on) = (ObjectId::new(2, 0), ObjectId::new(3, 0));
+let (yes, no) = (ObjectId::new(4, 0), ObjectId::new(5, 0));
+let mut objects = BTreeMap::new();
+objects.insert(on, Object::from(Stream::new(dict! { "Subtype" => Object::name("Form") }, Vec::new())));
+// A radio button field of two widgets, the first on.
+objects.insert(
+    answer,
+    Object::from(dict! {
+        "T" => Object::text("answer"),
+        "FT" => Object::name("Btn"),
+        "Ff" => 1 << 15,
+        "V" => Object::name("yes"),
+        "Kids" => vec![Object::from(yes), Object::from(no)],
+    }),
+);
+for (id, name, state) in [(yes, "yes", "yes"), (no, "no", "Off")] {
+    objects.insert(
+        id,
+        Object::from(dict! {
+            "Parent" => answer,
+            "Subtype" => Object::name("Widget"),
+            "Rect" => vec![Object::from(72), Object::from(700), Object::from(84), Object::from(712)],
+            "AS" => Object::name(state),
+            "AP" => dict! { "N" => dict! { name => on } },
+        }),
+    );
+}
+let catalog = dict! { "AcroForm" => dict! { "Fields" => vec![Object::from(answer)] } };
+
+let limits = Limits::DEFAULT;
+let form = Form::read(&objects, &catalog, Rules::Iso, &limits).unwrap().unwrap();
+let field = &form.fields()[form.find("answer").unwrap()];
+let read = field.group(&objects, Rules::Iso, &limits).unwrap();
+assert_eq!(read.states(), [true, false]);
+
+// The second pressed: the first's `/AS` becomes `Off`, the second's and the
+// field's `/V` its on state.
+let group = read.group();
+let states = group.press(read.states(), 1);
+assert_eq!(states, [false, true]);
+assert_eq!(&*group.state_name(0, states[0]), b"Off");
+assert_eq!(&*group.state_name(1, states[1]), b"no");
+assert_eq!(&*group.value(&states), b"no");
+```
+
 ## Features
 
 - `programs` (default): forwards `programs` to `pdf-annots`, `pdf-gfx`, and `pdf-fonts`, for embedded font program metrics.

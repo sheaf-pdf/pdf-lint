@@ -5,8 +5,9 @@
 ///
 /// The walk over `/Fields` and each field's `/Kids`, the indirect references it
 /// follows, and the items of a choice field's value all end within these
-/// bounds, whatever the file says; so do reading a field's font from the
-/// default resources and making an appearance (`text-layout`).
+/// bounds, whatever the file says; so do decoding a field's options and
+/// selected indexes, reading a field's font from the default resources, and
+/// making an appearance (`text-layout`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -19,7 +20,9 @@ pub struct Limits {
     /// Maximum depth of the field tree; deeper fields are left out with
     /// [`Fault::TooDeep`](crate::Fault::TooDeep) (`64` by default).
     pub depth: usize,
-    /// Maximum items read from one field's array value or default value
+    /// Maximum items read from one field's array value or default value, and
+    /// decoded from its options (`/Opt`, [`Field::options`](crate::Field::options))
+    /// or selected indexes (`/I`, [`Field::selected`](crate::Field::selected))
     /// (`16_384` by default).
     pub items: usize,
     /// Caps forwarded to `pdf-annots` when a widget is read as an annotation.
@@ -69,7 +72,8 @@ impl Default for Limits {
 pub enum Cap {
     /// Fields and widgets in the form exceeded [`Limits::fields`].
     Fields,
-    /// Items in a field's array value exceeded [`Limits::items`].
+    /// Items in a field's array value, its options, or its selected indexes
+    /// exceeded [`Limits::items`].
     Items,
     /// A cap of `pdf-annots` was exceeded while a widget was read.
     Annots(pdf_annots::Cap),
@@ -85,7 +89,7 @@ impl std::fmt::Display for Cap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Cap::Fields => f.write_str("fields and widgets in a form"),
-            Cap::Items => f.write_str("items in a field's value"),
+            Cap::Items => f.write_str("items in a field's value, options, or selection"),
             Cap::Annots(cap) => write!(f, "{cap}"),
             Cap::Text => f.write_str("bytes of an appearance's text"),
             Cap::CombCells => f.write_str("cells of a comb field"),

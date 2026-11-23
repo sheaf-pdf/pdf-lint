@@ -13,10 +13,10 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Value, text};
 use crate::appearance::FieldFont;
 use crate::error::Error;
 use crate::fault::Fault;
-use crate::field::{Field, FieldFlags, FieldType, FieldValue, Widget, kind_of};
+use crate::field::{Field, FieldFlags, FieldType, FieldValue, Found, Widget, kind_of};
 use crate::limits::{Cap, Limits};
 use crate::phases::phase;
-use crate::read::{DictAt, Reader, locked_string};
+use crate::read::{DictAt, EntryAt, Reader, locked_string};
 
 /// A document's interactive form (`/AcroForm`, ISO 32000-2 §12.7.3) with its
 /// field tree read.
@@ -325,6 +325,11 @@ struct Inherited<'o> {
     flags: Option<FieldFlags>,
     value: Option<Arc<FieldValue<'o>>>,
     default_value: Option<Arc<FieldValue<'o>>>,
+    /// `/Opt` and `/I` as a field hands them down ([`Found::entry`]),
+    /// undecoded, and `/TI`.
+    options: Option<EntryAt<'o>>,
+    selected: Option<EntryAt<'o>>,
+    top_index: Option<u32>,
     da: Option<&'o [u8]>,
     quadding: Option<Quadding>,
     max_len: Option<u32>,
@@ -504,6 +509,15 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         .or(inherited.flags);
     let value = own_value(reader, dict, at, "V", &inherited.value)?;
     let default_value = own_value(reader, dict, at, "DV", &inherited.default_value)?;
+    // A choice field's options and selected indices, or a button field's
+    // export values, found here and decoded when they're asked for
+    // (`Field::options`, `Field::selected`); and the top index, a number.
+    let options = own_entry(reader, dict, at, "Opt", inherited.options);
+    let selected = own_entry(reader, dict, at, "I", inherited.selected);
+    let top_index = reader
+        .int_entry(dict, at, "TI")?
+        .map(|n| u32::try_from(n).unwrap_or(0))
+        .or(inherited.top_index);
     let da = reader.bytes_entry(dict, at, "DA")?.or(inherited.da);
     let quadding = reader
         .int_entry(dict, at, "Q")?
@@ -532,6 +546,9 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         da,
         quadding,
         max_len,
+        options,
+        selected,
+        top_index,
     });
 
     match kids {
@@ -541,6 +558,9 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                 flags,
                 value,
                 default_value,
+                options: options.entry,
+                selected: selected.entry,
+                top_index,
                 da,
                 quadding,
                 max_len,
@@ -671,4 +691,53 @@ fn field_value<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
             return Ok(None);
         }
     }))
+}
+
+/// A field's `/Opt` or `/I`, kept undecoded ([`Found`]): the object its own
+/// entry reaches, with the object it was read within; `inherited` where it
+/// has none or the entry reaches nothing, as [`own_value`] reads `/V`. ISO
+/// 32000-2 marks a button field's `/Opt` inheritable (Table 230) and says
+/// nothing of the kind for a choice field's `/Opt` and `/I` (Table 234);
+/// both are read inherited, under either rules, as PDFium as of
+/// chromium/8152 reads them.
+///
+/// The entry is followed telling nothing and failing for nothing, so a form
+/// reads as it would without it: an entry that reaches no object is kept
+/// to be followed again when it's asked for, which tells a damaged object
+/// or a loop, and one that can't be read is kept, and handed down, to fail
+/// then.
+fn own_entry<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &Reader<'_, R, S>,
+    dict: &'o Dict,
+    within: Option<ObjectId>,
+    key: &'static str,
+    inherited: Option<EntryAt<'o>>,
+) -> Found<'o> {
+    let Some(raw) = dict.get(key) else {
+        return Found {
+            own: None,
+            entry: inherited,
+        };
+    };
+    let objects: &dyn Resolve<'o> = &reader.objects;
+    let mut quiet = Reader {
+        objects,
+        rules: reader.rules,
+        limits: reader.limits,
+        sink: &mut (),
+    };
+    match quiet.reached(raw, within) {
+        Ok(Some(reached)) => Found {
+            own: None,
+            entry: Some(reached),
+        },
+        Ok(None) => Found {
+            own: Some((raw, within)),
+            entry: inherited,
+        },
+        Err(_) => Found {
+            own: None,
+            entry: Some((raw, within)),
+        },
+    }
 }

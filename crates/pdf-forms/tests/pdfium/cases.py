@@ -477,6 +477,63 @@ def button_choice_cases():
        fonts=[], fields=b"50 0 R",
        objs={50: b"<< /T (group) /FT /Btn " + RADIO + b" /V /1 /Kids [5 0 R 6 0 R 7 0 R] >>", 51: on, 52: off})
     as_kind("forms-press", press=b"1")
+    press_cases()
+
+
+def press(name, ff, kids, value=b"", opt=b"", presses=b"0"):
+    """A `forms-press` case laid out as `press-radio`: a button field of /Ff
+    `ff`, object 50, with `value` and `opt` its own entries, and a widget for
+    each of `kids`, its /AS and the name of its normal appearance's on state
+    (None for no /AP), from the left; `presses` the widgets pressed in
+    turn."""
+    on = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"0 g 5 5 10 10 re f")
+    off = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"")
+    widgets = []
+    for i, (state, own) in enumerate(kids):
+        states = b" /AP << /N << /" + own + b" 51 0 R /Off 52 0 R >> >>" if own else b""
+        widgets.append(b"<< /Parent 50 0 R /AS /" + state + states + b" /MK << /BC [0] >> " + WIDGET
+                       + b" /Rect [%d 10 %d 30] >>" % (10 + 30 * i, 30 + 30 * i))
+    refs = b" ".join(b"%d 0 R" % (5 + i) for i in range(len(kids)))
+    field = b"<< /T (group) /FT /Btn /Ff %d " % ff + value + opt + b"/Kids [" + refs + b"] >>"
+    ap(name, widgets, fonts=[], fields=b"50 0 R", objs={50: field, 51: on, 52: off})
+    as_kind("forms-press", press=presses)
+
+
+def press_cases():
+    radio, no_toggle, unison = 32768, 16384, 33554432
+    # A radio button pressed while on, with NoToggleToOff and without; and
+    # one pressed while off, without.
+    three = [(b"1", b"1"), (b"Off", b"2"), (b"Off", b"3")]
+    press("press-radio-on", radio | no_toggle, three, b"/V /1 ", presses=b"0")
+    press("press-radio-on-toggles", radio, three, b"/V /1 ", presses=b"0")
+    press("press-radio-off-toggles", radio, three, b"/V /1 ", presses=b"1")
+    # Radio buttons of one on state, in unison and not.
+    same = [(b"Off", b"1"), (b"Off", b"2"), (b"Off", b"1")]
+    press("press-radio-unison", radio | unison, same, presses=b"2")
+    press("press-radio-not-unison", radio, same, presses=b"2")
+    # Radio buttons of on states named On, spouse and Choice1, two pressed.
+    named = [(b"On", b"On"), (b"Off", b"spouse"), (b"Off", b"Choice1")]
+    press("press-named-states", radio, named, b"/V /On ", presses=b"2 1")
+    # Check boxes of one on state go together, on and off; check boxes of
+    # distinct on states act as radio buttons, and may all be off; one
+    # pressed twice; two with no /AP, whose states PDFium makes as Yes.
+    press("press-check-together", 0, [(b"Off", b"Yes"), (b"Off", b"Yes")], presses=b"0")
+    press("press-check-together-off", 0, [(b"Yes", b"Yes"), (b"Yes", b"Yes")], b"/V /Yes ", presses=b"1")
+    press("press-check-distinct", 0, [(b"a", b"a"), (b"Off", b"b"), (b"Off", b"c")], b"/V /a ", presses=b"1")
+    press("press-check-distinct-off", 0, [(b"a", b"a"), (b"Off", b"b")], b"/V /a ", presses=b"0")
+    press("press-check-twice", 0, [(b"Off", b"Yes")], presses=b"0 0")
+    press("press-no-ap", 0, [(b"Off", None), (b"Off", None)], presses=b"0")
+    # /Opt's export values: check boxes of two widgets of one export value,
+    # told apart by their indexes, one turned on and one off; radio buttons,
+    # in unison and not; check boxes whose states have names of their own.
+    opt = b"/Opt [(apple) (pear) (apple)] "
+    by_index = [(b"Off", b"0"), (b"Off", b"1"), (b"Off", b"2")]
+    first_on = [(b"0", b"0"), (b"Off", b"1"), (b"Off", b"2")]
+    press("press-opt-check", 0, by_index, opt=opt, presses=b"0")
+    press("press-opt-check-off", 0, first_on, b"/V /0 ", opt, presses=b"0")
+    press("press-opt-radio", radio, first_on, b"/V /0 ", opt, presses=b"1")
+    press("press-opt-radio-unison", radio | unison, by_index, opt=opt, presses=b"0")
+    press("press-opt-own-names", 0, [(b"Off", b"x"), (b"Off", b"y")], opt=b"/Opt [(a) (b)] ", presses=b"1")
 
 
 def ap_cases():
