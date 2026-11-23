@@ -849,8 +849,9 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # any parts and in a file; `annots`, pdf-annots' reading of a page's
 # annotations, destinations and reply threads from any objects, a redaction
 # mark made from what was read, flattening, and text drawn in a font given; `forms`, pdf-forms' field tree read from any objects and in a
-# file, and its text fields' appearances made, from plain data and for each
-# widget read; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
+# file, and its text fields' appearances made, from plain data, in a font and
+# a TrueType program the input carries as a fallback, and for each widget
+# read; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
 # through the facade, and written in the clear and encrypted, read locked and
 # unlocked; `arlington`, pdf-arlington's loader on any tables and its

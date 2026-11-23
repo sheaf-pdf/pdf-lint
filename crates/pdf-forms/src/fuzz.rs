@@ -1155,8 +1155,8 @@ mod tests {
 
     /// The seeds with a fallback's program reach it, and hold what
     /// `check_fallback` holds, each cut short and with a byte flipped too:
-    /// the caller's value is drawn in Helvetica and the program, its two
-    /// characters Helvetica lacks the program's.
+    /// a name WinAnsiEncoding has all but two characters of is drawn in
+    /// Helvetica and the program, the two Helvetica lacks the program's.
     #[cfg(all(feature = "text-layout", feature = "embed"))]
     #[test]
     fn the_fallback_seeds_reach_the_fallback() {

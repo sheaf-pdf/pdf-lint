@@ -152,7 +152,9 @@
 # catalog, `/Info`, claims, pages, each page's content joined within its cap
 # and its operations walked, its fonts and its text, which fails only as its
 # content does, and its linearization's verdict, holding only where it's
-# linearized; its file edited, a page added, and saved, written or refused;
+# linearized; its file edited, a page added and a `/FreeText` whose font the
+# form is to hold, and saved, written or refused, the font in the form's fonts
+# under the name its `/DA` gives wherever it's added;
 # and its document written in the clear and under a new
 # encryption, its key drawn from the input, read locked, each page's content
 # refused as locked, and unlocked by its password, read as in the clear; and

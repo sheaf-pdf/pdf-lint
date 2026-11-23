@@ -1505,7 +1505,8 @@ mod written {
 
     use super::{read_tsv, set};
 
-    /// The value the caller checks.
+    /// A name WinAnsiEncoding has all but two characters of (`Ł` and `ễ`),
+    /// which the program has.
     const VALUE: &str = "\u{141}ukasz Nguy\u{1ec5}n \u{d6}l\u{e7}er";
 
     const COMB: i64 = 1 << 24;
