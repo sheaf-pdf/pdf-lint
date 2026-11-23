@@ -15,7 +15,15 @@
 //! 6. `Border::read` of an annotation's dictionary gives the border
 //!    `Annot::from_dict` read, with a sink and without, and tells what
 //!    `Annot::from_dict_with` tells while it reads the border.
-//! 7. Under `text-layout`, a `/FreeText`'s text and a `/Redact`'s overlay
+//! 7. The `AnnotMut` setters of `/MK`, `/AP /D`, and state dictionaries,
+//!    each on a copy of an annotation's dictionary, write what they're given
+//!    and keep what they say they keep, as `Appearances::read` and
+//!    `Annot::from_dict` read the copy back: a slot holds the states given,
+//!    in their order, or the one state set beside the others; the other slots
+//!    and `/AS` are as they were; an `/AP` that isn't a direct dictionary is
+//!    left as it is for `/R` and `/D`; a widget's `/MK` reads back as set,
+//!    and a direct `/MK`'s other entries are kept.
+//! 8. Under `text-layout`, a `/FreeText`'s text and a `/Redact`'s overlay
 //!    text drawn in a font given (the `*_with_font` synthesizers and
 //!    builders) never panic; in Helvetica they give what the defaults give
 //!    wherever the font can draw the text, a builder builds exactly where its
@@ -27,17 +35,17 @@ use std::collections::BTreeMap;
 
 use pdf_objects::parse::Parser;
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Stream, Value, dict};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Stream, Value, dict};
 use pdf_semantics::dest::DestTable;
 use pdf_semantics::pages;
 
 use crate::annot::{Annot, page_annots, page_annots_with, page_tabs};
-use crate::ap::{AppearanceMode, stream_placement_matrix};
-use crate::build::BuiltAnnot;
+use crate::ap::{AppearanceEntry, AppearanceMode, Appearances, stream_placement_matrix};
+use crate::build::{AnnotMut, BuiltAnnot};
 use crate::flatten::{FlattenOpts, FlattenTarget, plan_flatten};
 use crate::limits::Limits;
 use crate::replies::resolve_threads;
-use crate::style::{Border, DefaultAppearance};
+use crate::style::{AnnotColor, AppearanceChars, Border, DefaultAppearance};
 use crate::subtypes::TypedAnnot;
 use crate::synth::{RedactMark, synth_annot, synth_redact};
 #[cfg(feature = "text-layout")]
@@ -47,8 +55,9 @@ use crate::{
 };
 
 /// Built-in seed inputs exercising links, destinations, action chains, text
-/// markup, geometric annotations, ink, redaction, replies/review states, and
-/// appearance dictionaries.
+/// markup, geometric annotations, ink, redaction, replies/review states,
+/// appearance dictionaries, and widgets' appearance characteristics and
+/// state dictionaries, direct and by reference.
 pub const SEEDS: &[&[u8]] = &[
     b"",
     b"<< /Annots [1 0 R 2 0 R] /Tabs /S >>\xff<< /Type /Catalog /Pages 3 0 R /Names << /Dests << /Names [(sec1) [4 0 R /XYZ 0 700 null]] >> >> >>\xff<< /Subtype /Link /Rect [10 20 100 40] /Dest (sec1) /Border [0 0 1] /F 4 >>\xff<< /Subtype /Highlight /Rect [10 50 120 70] /QuadPoints [10 70 120 70 10 50 120 50] /C [1 1 0] /T (Alice) /Contents (Check this) >>\xff<< /Type /Pages /Kids [4 0 R] /Count 1 >>\xff<< /Type /Page /Parent 3 0 R /MediaBox [0 0 612 792] >>",
@@ -56,6 +65,7 @@ pub const SEEDS: &[&[u8]] = &[
     b"<< /Annots [1 0 R 2 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Ink /Rect [0 0 100 100] /InkList [[10 10 20 30 40 25]] /BS << /W 2 /S /D /D [4 2] >> >>\xff<< /Subtype /Redact /Rect [10 10 80 30] /IC [0 0 0] /OverlayText (REDACTED) /DA (/Helv 10 Tf 1 g) /AP << /N 3 0 R >> >>\xff<< /Subtype /Form /BBox [0 0 70 20] >>\nstream\n0 g 0 0 70 20 re f",
     b"<< /Annots [1 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Redact /Rect [100 500 300 540] /C [0 0 1] /IC [0.5] /QuadPoints [100 540 200 540 100 520 200 520 210 502 290 506 285 526 205 521] /OverlayText (b\\(5\\)) /Repeat true /DA (/Helv 6 Tf 1 g) /Q 1 >>",
     b"<< /Annots [1 0 R 2 0 R 3 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Redact /Rect [10 10 80 30] /Popup 2 0 R /OverlayText (\\251 x) /Repeat true /RO 4 0 R /AP << /N 4 0 R >> >>\xff<< /Subtype /Popup /Rect [90 10 190 60] /Parent 1 0 R /Open true >>\xff<< /Subtype /FreeText /Rect [50 50 200 100] /DA (/Helv 0 Tf 0 g) /Contents (Caf\\351 \\(1\\)) /Q 2 >>\xff<< /Subtype /Form /BBox [0 0 70 20] >>\nstream\n0 g 0 0 70 20 re f",
+    b"<< /Annots [1 0 R 2 0 R 3 0 R] >>\xff<< /Type /Catalog >>\xff<< /Subtype /Widget /Rect [10 10 30 30] /FT /Btn /MK << /R 90 /BC [1 0 0] /BG [0.9] /CA (4) /AC (8) /I 4 0 R /IF << /SW /A >> >> /AS /Yes /AP << /N << /Yes 4 0 R /Off 5 0 R >> /D << /Yes 4 0 R >> >> /BS << /W 2 /S /B >> >>\xff<< /Subtype /Widget /Rect [40 10 60 30] /MK 6 0 R /AP 7 0 R /AS /Off /Border [0 0 1 [2 1]] >>\xff<< /Subtype /Widget /Rect [70 10 90 30] /AP << /N 4 0 R /D 5 0 R >> /BE << /S /C /I 1 >> >>\xff<< /Subtype /Form /BBox [0 0 20 20] >>\nstream\n0 g 0 0 20 20 re f\xff<< /Subtype /Form /BBox [0 0 20 20] >>\nstream\n1 g 0 0 20 20 re f\xff<< /CA (l) /I 4 0 R >>\xff<< /N << /On 4 0 R /Off 5 0 R >> /R 4 0 R >>",
 ];
 
 /// Runs annotation, destination, action, and reply-thread checks over an
@@ -193,6 +203,7 @@ pub fn check(data: &[u8]) {
                     );
                 }
                 border_read_alone(&map, a, rules, &limits);
+                setters_read_back(&map, a, rules, &limits);
             }
             for target in [FlattenTarget::Display, FlattenTarget::Print] {
                 if let Ok(plan) = plan_flatten(
@@ -460,6 +471,235 @@ fn border_read_alone(
     assert!(
         (0..=rest.len()).any(|at| whole == [&rest[..at], &of_border[..], &rest[at..]].concat())
     );
+}
+
+/// The keys of `/MK` that `AnnotMut::set_appearance_chars` writes.
+const MK_KEYS: [&[u8]; 7] = [b"R", b"BC", b"BG", b"CA", b"RC", b"AC", b"TP"];
+
+/// Each `AnnotMut` setter of `/MK`, `/AP /D`, and a state dictionary, on a
+/// copy of `annot`'s dictionary, writes what it's given and keeps what it
+/// says it keeps, as `Appearances::read` and `Annot::from_dict` read the copy
+/// back.
+fn setters_read_back(
+    map: &BTreeMap<ObjectId, Object>,
+    annot: &Annot<'_>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    // Two forms of the fuzzer's own, at numbers no input chunk has. An input
+    // may still refer to them, so what was there is read with them too.
+    let forms = [ObjectId::new(1 << 20, 0), ObjectId::new((1 << 20) + 1, 0)];
+    let mut objects = map.clone();
+    for (byte, id) in b"01".iter().zip(forms) {
+        let bbox = vec![
+            Object::from(0),
+            Object::from(0),
+            Object::from(1),
+            Object::from(1),
+        ];
+        let form = dict! { "Subtype" => Object::name("Form"), "BBox" => bbox };
+        objects.insert(id, Object::from(Stream::new(form, vec![*byte])));
+    }
+    let (dict, id) = (annot.dict(), annot.id());
+    let objects = &objects;
+    let appearances =
+        |dict: &Dict| Appearances::read(objects, dict, id, rules, limits).expect("no object fails");
+    let whole = Annot::from_dict(objects, dict, id, rules, limits).is_ok();
+    // `Annot::from_dict` reads the copy where it reads the dictionary, the
+    // copy's appearances those `Appearances::read` reads.
+    let read_back = |copy: &Dict, ap: &Option<Appearances>| {
+        if whole {
+            let read = Annot::from_dict(objects, copy, id, rules, limits);
+            assert_eq!(read.expect("the copy is read").appearances(), ap.as_ref());
+        }
+    };
+
+    let before = appearances(dict);
+    let direct = AnnotMut::new(&mut dict.clone()).has_direct_appearance();
+    let had_ap = dict.get(b"AP").is_some();
+    // The states set: the annotation's own normal states' names but `Off`, a
+    // few, or `Yes` where it has none, each given a form, and the first given
+    // again with the other form. No `Off` is given, so none may be written.
+    let own: Vec<&[u8]> = match before.as_ref().and_then(|ap| ap.normal.as_ref()) {
+        Some(AppearanceEntry::States(states)) => states
+            .iter()
+            .map(|(name, _)| &**name)
+            .filter(|&name| name != b"Off")
+            .take(4)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let names = if own.is_empty() {
+        vec![&b"Yes"[..]]
+    } else {
+        own
+    };
+    let mut given: Vec<(&[u8], ObjectId)> = names
+        .iter()
+        .zip(forms.iter().cycle())
+        .map(|(&n, &f)| (n, f))
+        .collect();
+    given.push((names[0], forms[1]));
+    let mut once: Vec<(Box<[u8]>, ObjectId)> = Vec::new();
+    for &(name, form) in &given {
+        match once.iter_mut().find(|(n, _)| &**n == name) {
+            Some(state) => state.1 = form,
+            None => once.push((Box::from(name), form)),
+        }
+    }
+    let one = names[names.len() - 1];
+
+    // What a setter binding `mode` leaves of the slots it doesn't bind: as
+    // they were in a direct `/AP`, none in one it made or replaced; and `/AS`
+    // as it was. Where it binds nothing, all as it was.
+    let others_held = |mode: AppearanceMode, bound: bool, after: &Option<Appearances>| {
+        if !bound {
+            assert_eq!(after, &before);
+            return;
+        }
+        let after = after.as_ref().expect("an /AP was bound");
+        for other in [
+            AppearanceMode::Normal,
+            AppearanceMode::Rollover,
+            AppearanceMode::Down,
+        ] {
+            if other != mode {
+                let was = before.as_ref().and_then(|ap| ap.entry(other));
+                assert_eq!(after.entry(other), if direct { was } else { None });
+            }
+        }
+        assert_eq!(after.state, before.as_ref().and_then(|ap| ap.state.clone()));
+    };
+
+    for mode in [
+        AppearanceMode::Normal,
+        AppearanceMode::Rollover,
+        AppearanceMode::Down,
+    ] {
+        let bound = direct || !had_ap || mode == AppearanceMode::Normal;
+
+        let mut copy = dict.clone();
+        AnnotMut::new(&mut copy).set_appearance_states(mode, &given);
+        let after = appearances(&copy);
+        others_held(mode, bound, &after);
+        if bound {
+            let slot = after.as_ref().and_then(|ap| ap.entry(mode));
+            assert_eq!(slot, Some(&AppearanceEntry::States(once.clone())));
+        }
+        read_back(&copy, &after);
+
+        let mut copy = dict.clone();
+        AnnotMut::new(&mut copy).set_state_appearance(mode, one, forms[0]);
+        let after = appearances(&copy);
+        others_held(mode, bound, &after);
+        if bound {
+            let Some(AppearanceEntry::States(states)) =
+                after.as_ref().and_then(|ap| ap.entry(mode))
+            else {
+                panic!("a state dictionary is bound");
+            };
+            let slot_direct = direct
+                && dict
+                    .get(b"AP")
+                    .and_then(Object::as_dict)
+                    .and_then(|ap| ap.get(mode.key()))
+                    .is_some_and(|slot| matches!(slot.value(), Value::Dict(_)));
+            let set: Vec<_> = states.iter().filter(|(n, _)| &**n == one).collect();
+            assert_eq!(set, [&(Box::from(one), forms[0])]);
+            let kept: Vec<_> = states.iter().filter(|(n, _)| &**n != one).collect();
+            match before.as_ref().and_then(|ap| ap.entry(mode)) {
+                Some(AppearanceEntry::States(was)) if slot_direct => {
+                    let was: Vec<_> = was.iter().filter(|(n, _)| &**n != one).collect();
+                    assert_eq!(kept, was);
+                }
+                _ => assert!(kept.is_empty()),
+            }
+        }
+        read_back(&copy, &after);
+    }
+
+    let mut copy = dict.clone();
+    AnnotMut::new(&mut copy).set_down_appearance(forms[1]);
+    let after = appearances(&copy);
+    let bound = direct || !had_ap;
+    others_held(AppearanceMode::Down, bound, &after);
+    if bound {
+        let down = after.as_ref().and_then(|ap| ap.down.as_ref());
+        assert_eq!(down, Some(&AppearanceEntry::Single(forms[1])));
+    }
+    read_back(&copy, &after);
+
+    // `/MK`: the widget's own as it was read, where it has one, and one cut
+    // from what was read of the annotation.
+    let own = match annot.typed() {
+        TypedAnnot::Widget(widget) => widget.appearance_chars.clone(),
+        _ => None,
+    };
+    let cut = AppearanceChars {
+        rotation: 90,
+        border_color: annot.color(),
+        background_color: Some(AnnotColor::Transparent),
+        normal_caption: annot.contents().map(String::from),
+        rollover_caption: annot.name().map(String::from),
+        down_caption: None,
+        text_position: Some(7),
+    };
+    let mk_others = |dict: &Dict| -> Option<Vec<(Vec<u8>, Object)>> {
+        let mk = dict.get(b"MK")?;
+        let Value::Dict(mk) = mk.value() else {
+            return None;
+        };
+        let others = mk.entries().iter().filter(|e| !MK_KEYS.contains(&e.key()));
+        Some(
+            others
+                .map(|e| (e.key().to_vec(), e.value().clone()))
+                .collect(),
+        )
+    };
+    for chars in own.iter().chain([&cut]) {
+        let mut copy = dict.clone();
+        let _ = format!("{:?}", AnnotMut::new(&mut copy).set_appearance_chars(chars));
+        let mk = copy.get(b"MK").and_then(Object::as_dict).expect("a /MK");
+        let had: [bool; 7] = [
+            chars.rotation != 0,
+            chars.border_color.is_some(),
+            chars.background_color.is_some(),
+            chars.normal_caption.is_some(),
+            chars.rollover_caption.is_some(),
+            chars.down_caption.is_some(),
+            chars.text_position.is_some(),
+        ];
+        for (key, had) in MK_KEYS.iter().zip(had) {
+            assert_eq!(mk.has(key), had);
+        }
+        assert_eq!(
+            mk_others(&copy).unwrap_or_default(),
+            mk_others(dict).unwrap_or_default()
+        );
+        if whole && let TypedAnnot::Widget(_) = annot.typed() {
+            let read =
+                Annot::from_dict(objects, &copy, id, rules, limits).expect("the copy is read");
+            let TypedAnnot::Widget(widget) = read.typed() else {
+                panic!("a widget is read as one");
+            };
+            let as_written = |text: &Option<String>| {
+                text.as_deref()
+                    .map(|text| match Object::text(text).into_value() {
+                        Value::String(Str::Bytes(bytes), _) => {
+                            pdf_objects::text::decode_str(&bytes, rules)
+                        }
+                        _ => String::new(),
+                    })
+            };
+            let expected = AppearanceChars {
+                normal_caption: as_written(&chars.normal_caption),
+                rollover_caption: as_written(&chars.rollover_caption),
+                down_caption: as_written(&chars.down_caption),
+                ..chars.clone()
+            };
+            assert_eq!(widget.appearance_chars.as_ref(), Some(&expected));
+        }
+    }
 }
 
 fn split_once_bytes<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<(&'a [u8], &'a [u8])> {

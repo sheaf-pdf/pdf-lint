@@ -7,16 +7,18 @@ use pdf_content_streams::Res;
 #[cfg(feature = "text-layout")]
 use pdf_gfx::{LayoutFont, UnencodableChar};
 use pdf_gfx::{Point, Rect};
-use pdf_objects::{Dict, Object, ObjectId, dict};
+use pdf_objects::{Dict, Object, ObjectId, Value, dict};
 use pdf_semantics::action::Action;
 use pdf_semantics::date::Date;
 use pdf_semantics::dest::Dest;
 
+use crate::ap::AppearanceMode;
 use crate::flags::AnnotFlags;
 use crate::replies::ReplyKind;
 use crate::resolve::QuadPoints;
 use crate::style::{
-    AnnotColor, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle, Quadding,
+    AnnotColor, AppearanceChars, Border, BorderStyle, DefaultAppearance, LineEnding, PaintStyle,
+    Quadding,
 };
 use crate::subtypes::{AnnotSubtype, PolyKind, ShapeKind, StampName, TextIcon, TextMarkupKind};
 use crate::synth::{
@@ -241,15 +243,168 @@ impl<'a> AnnotMut<'a> {
         self
     }
 
+    /// Binds `/AP << /D form_id >>`, the down appearance shown while the
+    /// mouse button is pressed within the annotation (ISO 32000-2 §12.5.5
+    /// Table 170), keeping the other entries of an `/AP` that is a direct
+    /// dictionary.
+    ///
+    /// With no `/AP` a new one of `/D` alone is made. An `/AP` that is
+    /// there and isn't a direct dictionary is left as it is and nothing is
+    /// bound, as [`Self::set_rollover_appearance`] leaves it: replacing it
+    /// would drop the `/N` it names. [`Self::has_direct_appearance`] tells
+    /// the two apart beforehand.
+    pub fn set_down_appearance(&mut self, form_id: ObjectId) -> &mut Self {
+        if let Some(ap) = self.appearance_dict(AppearanceMode::Down) {
+            ap.set("D", form_id);
+        }
+        self
+    }
+
+    /// Binds the `mode` slot of `/AP` (`/N`, `/R`, or `/D`) to a state
+    /// dictionary of exactly `states`, each a state's name and its Form
+    /// XObject, in the order given (ISO 32000-2 §12.5.5): a check box's or
+    /// a radio button's appearances under its on state's name and `Off`,
+    /// say. What the slot held is replaced. A state not given isn't
+    /// written, so an `/Off` the caller leaves out stays absent; a name
+    /// given twice is written once, where it's first given, with the last
+    /// form given for it.
+    ///
+    /// `/AP` is kept where it's a direct dictionary, its other slots with
+    /// it, and made where there is none. Any other `/AP`, an indirect
+    /// reference among them, is replaced by a new dictionary of this slot
+    /// alone for `/N`, as [`Self::set_normal_appearance`] replaces it, and
+    /// left as it is for `/R` and `/D`, nothing bound, as
+    /// [`Self::set_rollover_appearance`] leaves it;
+    /// [`Self::has_direct_appearance`] tells which beforehand. `/AS`, the
+    /// state shown, is [`Self::set_appearance_state`]'s.
+    pub fn set_appearance_states(
+        &mut self,
+        mode: AppearanceMode,
+        states: &[(&[u8], ObjectId)],
+    ) -> &mut Self {
+        if let Some(ap) = self.appearance_dict(mode) {
+            let mut slot = Dict::with_capacity(states.len());
+            for &(state, form_id) in states {
+                slot.set(state, form_id);
+            }
+            ap.set(mode.key(), slot);
+        }
+        self
+    }
+
+    /// Binds the state `state` of the `mode` slot of `/AP` (`/N`, `/R`, or
+    /// `/D`) to `form_id`, keeping the slot's other states where it's a
+    /// direct state dictionary: the state is set where the dictionary has
+    /// it, and added at its end where it hasn't.
+    ///
+    /// A slot that is anything else becomes a dictionary of this state
+    /// alone: a single Form XObject, which states don't sit beside, or an
+    /// indirect reference, which may name a state dictionary that nothing
+    /// here can follow; to keep that dictionary's states, set the state in
+    /// the object it names. `/AP` itself is kept, made, replaced, or left
+    /// as [`Self::set_appearance_states`] says.
+    pub fn set_state_appearance(
+        &mut self,
+        mode: AppearanceMode,
+        state: &[u8],
+        form_id: ObjectId,
+    ) -> &mut Self {
+        if let Some(ap) = self.appearance_dict(mode) {
+            let key = mode.key();
+            // Asked first: a slot that is a stream has a dictionary too.
+            if ap
+                .get(key)
+                .is_some_and(|slot| matches!(slot.value(), Value::Dict(_)))
+                && let Some(slot) = ap.get_mut(key).and_then(Object::as_dict_mut)
+            {
+                slot.set(state, form_id);
+            } else {
+                let mut slot = Dict::new();
+                slot.set(state, form_id);
+                ap.set(key, slot);
+            }
+        }
+        self
+    }
+
     /// Whether `/AP` is a direct dictionary, one whose entries
     /// [`Self::set_normal_appearance`] and [`Self::set_rollover_appearance`]
     /// keep. `false` with no `/AP`, and for one that is an indirect
     /// reference or not a dictionary.
+    ///
+    /// [`Self::set_down_appearance`], [`Self::set_appearance_states`], and
+    /// [`Self::set_state_appearance`] go by it too: where it's `true` they
+    /// keep `/AP`'s other entries, and where it's `false` and there is an
+    /// `/AP`, one that binds `/N` replaces it and one that binds `/R` or `/D`
+    /// leaves it as it is.
     #[must_use]
     pub fn has_direct_appearance(&self) -> bool {
         self.dict
             .get(b"AP")
             .is_some_and(|ap| ap.as_dict().is_some())
+    }
+
+    /// `/AP`, to bind a `mode` slot in: a direct dictionary as it is, and
+    /// one made where there is none. Any other `/AP` is replaced by a new
+    /// dictionary for `/N`, and left as it is (`None`) for `/R` and `/D`,
+    /// untouched, so it keeps its span.
+    fn appearance_dict(&mut self, mode: AppearanceMode) -> Option<&mut Dict> {
+        if !self.has_direct_appearance() {
+            if mode != AppearanceMode::Normal && self.dict.get(b"AP").is_some() {
+                return None;
+            }
+            self.dict.set("AP", Dict::new());
+        }
+        self.dict.get_mut(b"AP").and_then(Object::as_dict_mut)
+    }
+
+    /// Sets `/MK`, a widget's appearance characteristics (ISO 32000-2
+    /// §12.5.6.19 Table 192), to `chars`: `/R`, `/BC`, `/BG`, `/CA`, `/RC`,
+    /// `/AC`, and `/TP`, each written as `chars` has it and removed where it
+    /// hasn't (`/R` where it's 0, its default), keeping the other entries
+    /// of a `/MK` that is a direct dictionary: an icon (`/I`, `/RI`, `/IX`)
+    /// and its fit (`/IF`) among them.
+    ///
+    /// A `/MK` that is anything else, an indirect reference among them, is
+    /// replaced by a new dictionary of what `chars` has: nothing here can
+    /// follow a reference, so a caller who means to keep the dictionary it
+    /// names changes that object itself.
+    pub fn set_appearance_chars(&mut self, chars: &AppearanceChars) -> &mut Self {
+        if !self
+            .dict
+            .get(b"MK")
+            .is_some_and(|mk| matches!(mk.value(), Value::Dict(_)))
+        {
+            self.dict.set("MK", Dict::new());
+        }
+        let Some(mk) = self.dict.get_mut(b"MK").and_then(Object::as_dict_mut) else {
+            return self;
+        };
+        let caption = |text: &Option<String>| text.as_deref().map(Object::text);
+        let entries = [
+            (
+                "R",
+                (chars.rotation != 0).then(|| Object::from(i64::from(chars.rotation))),
+            ),
+            ("BC", chars.border_color.map(AnnotColor::to_object)),
+            ("BG", chars.background_color.map(AnnotColor::to_object)),
+            ("CA", caption(&chars.normal_caption)),
+            ("RC", caption(&chars.rollover_caption)),
+            ("AC", caption(&chars.down_caption)),
+            (
+                "TP",
+                chars.text_position.map(|tp| Object::from(i64::from(tp))),
+            ),
+        ];
+        for (key, value) in entries {
+            match value {
+                Some(value) => mk.set(key, value),
+                None => {
+                    mk.remove(key);
+                }
+            }
+        }
+        self
     }
 
     /// Sets `/RO`, the Form XObject that applying a `/Redact` mark leaves

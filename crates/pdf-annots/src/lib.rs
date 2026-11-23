@@ -48,6 +48,11 @@
 //!     [`attachment_icon_strokes`], [`cloud_outline`], [`cloud_step`]) so a viewer that paints a
 //!     mark itself paints the same numbers; and draws in place on request ([`ApRect`]), the
 //!     form's `/BBox` the annotation's `/Rect`.
+//!   - Binds a widget's appearances whole ([`AnnotMut::set_appearance_chars`] for `/MK`,
+//!     [`AnnotMut::set_down_appearance`], [`AnnotMut::set_appearance_states`],
+//!     [`AnnotMut::set_state_appearance`]): a check box's or a radio button's normal and down
+//!     appearances under its on state's name and `Off`, a state not given left unwritten so an
+//!     absent `/Off` stays absent, and `/MK`'s captions and colors set beside its icon.
 //!   - Authors `/Redact` marks whole ([`RedactMark`], [`synth_redact`],
 //!     [`BuiltAnnot::redact_mark`], [`BuiltAnnot::redact_quads`]): the mark and its `/RO` overlay
 //!     drawn over each `/QuadPoints` quadrilateral, the overlay also bound as `/AP /R`, with
@@ -187,6 +192,8 @@ mod synth;
 mod tests;
 #[cfg(test)]
 mod tests_border;
+#[cfg(test)]
+mod tests_setters;
 
 pub use annot::{Annot, MarkupInfo, TabOrder, page_annots, page_annots_with, page_tabs};
 pub use ap::{

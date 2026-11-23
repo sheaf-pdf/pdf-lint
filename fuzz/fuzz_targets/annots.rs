@@ -1,7 +1,8 @@
 //! Annotation, destination, action, reply-thread, appearance synthesis, and
 //! flattening checks on arbitrary bytes (`pdf_annots::fuzz::check`), checking
-//! fault-sink invariance and `Debug` hygiene; and read as a PDF file
-//! (`pdf_annots::fuzz::over`) over its first pages.
+//! fault-sink invariance and `Debug` hygiene, a border read alone against the
+//! annotation's, and what the appearance setters write read back; and read as
+//! a PDF file (`pdf_annots::fuzz::over`) over its first pages.
 
 #![no_main]
 
