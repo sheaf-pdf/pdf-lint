@@ -625,7 +625,8 @@ fn check_fallback(text: &str) {
 
             // Drawn, each face under its resource: a glyph a code.
             let mut canvas = Canvas::new();
-            canvas.draw_layout_in(&[helvetica.clone(), symbol.clone()], &out);
+            let drawn = canvas.draw_layout_in(&[helvetica.clone(), symbol.clone()], &out);
+            assert!(drawn, "a layout drawn as made, a resource a face");
             let (bytes, needs) = canvas.finish(&Reserved::default());
             let mut fonts = Dict::new();
             for need in &needs.0 {

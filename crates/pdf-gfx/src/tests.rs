@@ -133,6 +133,9 @@ fn public_types_are_send_and_sync() {
         check::<crate::UnencodableChar>();
         check::<crate::LaidOutLine>();
         check::<crate::LaidOutText>();
+        check::<crate::LaidOutRun>();
+        check::<crate::TextBoxError>();
+        check::<crate::WithFallback<'static, pdf_fonts::Std14, pdf_fonts::Std14>>();
     }
 }
 
@@ -4595,8 +4598,8 @@ mod fallback {
 
     use super::assert_approx;
     use crate::{
-        Canvas, FontSet, LaidOutText, LayoutFont, Rect, TextAlign, TextBoxStyle, UnencodableChar,
-        VerticalAlign, WithFallback, WrapMode, face_for, layout_text,
+        Canvas, FontSet, LaidOutText, LayoutFont, Rect, TextAlign, TextBoxError, TextBoxStyle,
+        UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for, layout_text,
     };
 
     /// A font of the characters it's given, each `advance` wide, its code the
@@ -4870,7 +4873,7 @@ mod fallback {
         assert_approx(line.width, after_beta + summed(" cd", Std14::Helvetica));
 
         let (content, named) =
-            drawn(|c| c.draw_layout_in(&[helvetica.clone(), symbol.clone()], &laid));
+            drawn(|c| assert!(c.draw_layout_in(&[helvetica.clone(), symbol.clone()], &laid)));
         assert_eq!(
             content,
             "BT\n/F0 10 Tf\n1 0 0 1 0 89.9 Tm\n(ab ) Tj\n/F1 10 Tf\n1 0 0 1 13.9 89.9 Tm\n\
@@ -5074,19 +5077,24 @@ mod fallback {
                 let alone = layout_text(&Std14::Helvetica, text, rect, style).unwrap();
                 assert_eq!(layout_text(&set, text, rect, style).unwrap(), alone);
                 assert_eq!(layout_text(one, text, rect, style).unwrap(), alone);
-                let (want, names) = drawn(|c| c.draw_layout(helvetica.clone(), &alone));
+                let (want, names) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &alone)));
                 let fonts = [helvetica.clone(), symbol.clone()];
                 assert_eq!(
-                    drawn(|c| c.draw_layout_in(&fonts, &alone)),
+                    drawn(|c| assert!(c.draw_layout_in(&fonts, &alone))),
                     (want.clone(), names)
                 );
                 let boxed = |font: &dyn FontSet| {
                     drawn(|c| {
-                        c.text_box(helvetica.clone(), font, text, rect, style)
+                        c.text_box_in(helvetica.clone(), font, text, rect, style)
                             .unwrap();
                     })
                 };
-                assert_eq!(boxed(&set), boxed(&Std14::Helvetica));
+                let alone = drawn(|c| {
+                    c.text_box(helvetica.clone(), &Std14::Helvetica, text, rect, style)
+                        .unwrap();
+                });
+                assert_eq!(boxed(&set), alone);
+                assert_eq!(boxed(&Std14::Helvetica), alone);
                 assert!(!boxed(&set).1.contains(&symbol));
             }
         }
@@ -5103,7 +5111,7 @@ mod fallback {
         assert!(!TextBoxStyle::default().clusters);
     }
 
-    /// Sets nest: three fonts, each drawn by `text_box` under its own
+    /// Sets nest: three fonts, each drawn by `text_box_in` under its own
     /// resource, the same whichever way they're nested.
     #[test]
     fn sets_nest() {
@@ -5127,7 +5135,7 @@ mod fallback {
         let boxed = |set: &dyn FontSet| {
             drawn(|canvas| {
                 canvas
-                    .text_box(a.clone(), set, text, BOX, &style())
+                    .text_box_in(a.clone(), set, text, BOX, &style())
                     .unwrap();
             })
         };
@@ -5140,8 +5148,144 @@ mod fallback {
         assert!(content.ends_with("(\u{FFFD}) Tj\nET\nQ\n"), "{content}");
     }
 
-    /// `layout_text` and `text_box` take a `&dyn LayoutFont`, and a
-    /// `&dyn FontSet`, as they take the font itself.
+    /// Two faces, the second with no resource: a caller's own set that
+    /// leaves [`FontSet::face_resource`] at its default.
+    struct Unnamed;
+
+    impl FontSet for Unnamed {
+        fn faces(&self) -> usize {
+            2
+        }
+
+        fn face_metrics(&self, face: usize) -> FontMetrics {
+            [Std14::Helvetica, Std14::Symbol][face.min(1)].metrics()
+        }
+
+        fn face_advance(&self, face: usize, ch: char) -> Option<f32> {
+            [Std14::Helvetica, Std14::Symbol]
+                .get(face)?
+                .char_advance(ch)
+        }
+
+        fn face_encode(&self, face: usize, ch: char, out: &mut Vec<u8>) -> bool {
+            ([Std14::Helvetica, Std14::Symbol].get(face)).is_some_and(|f| f.encode_char(ch, out))
+        }
+    }
+
+    /// A face some of the text is drawn in that has no resource: `text_box_in`
+    /// refuses it with the face, and `draw_layout` and `draw_layout_in` say
+    /// they drew nothing, each leaving the canvas as it was, never a part of
+    /// the text drawn or a panic. Text the faces with a resource draw whole
+    /// is drawn.
+    #[test]
+    fn a_face_with_no_resource_draws_nothing() {
+        let helvetica = res(Std14::Helvetica);
+        let clipped = TextBoxStyle {
+            clip: true,
+            ..style()
+        };
+        for style in [style(), clipped] {
+            let (content, named) = drawn(|c| {
+                assert_eq!(
+                    c.text_box_in(helvetica.clone(), &Unnamed, "a\u{3C0}b", BOX, &style),
+                    Err(TextBoxError::NoResource { face: 1 })
+                );
+                assert_eq!(
+                    c.text_box_in(helvetica.clone(), &Unnamed, "a\u{4E2D}", BOX, &style),
+                    Err(TextBoxError::Unencodable(UnencodableChar {
+                        at: 1,
+                        character: '\u{4E2D}'
+                    }))
+                );
+            });
+            assert_eq!((content.as_str(), named.len()), ("", 0));
+            // The first face's text is drawn as the font alone draws it.
+            let boxed = drawn(|c| {
+                (c.text_box_in(helvetica.clone(), &Unnamed, "ab", BOX, &style)).unwrap();
+            });
+            let alone = drawn(|c| {
+                (c.text_box(helvetica.clone(), &Std14::Helvetica, "ab", BOX, &style)).unwrap();
+            });
+            assert_eq!(boxed, alone);
+            assert!(boxed.0.contains("(ab) Tj"));
+        }
+        assert_eq!(
+            TextBoxError::NoResource { face: 1 }.to_string(),
+            "face 1 of the fonts has no resource to draw text under"
+        );
+        let err = UnencodableChar {
+            at: 1,
+            character: 'x',
+        };
+        assert_eq!(TextBoxError::from(err).to_string(), err.to_string());
+
+        // A layout in two faces, drawn with one resource, in a line and in
+        // comb cells; with both it's drawn.
+        let symbol = res(Std14::Symbol);
+        let fonts = WithFallback::new(&Std14::Helvetica, &Std14::Symbol, symbol.clone());
+        let comb = TextBoxStyle {
+            comb: Some(4),
+            ..style()
+        };
+        for style in [style(), comb] {
+            let laid = layout_text(&fonts, "a\u{3C0}b", BOX, &style).unwrap();
+            let (content, named) = drawn(|c| {
+                assert!(!c.draw_layout(helvetica.clone(), &laid));
+                assert!(!c.draw_layout_in(std::slice::from_ref(&helvetica), &laid));
+                assert!(!c.draw_layout_in(&[], &laid));
+            });
+            assert_eq!((content.as_str(), named.len()), ("", 0));
+            let (content, named) =
+                drawn(|c| assert!(c.draw_layout_in(&[helvetica.clone(), symbol.clone()], &laid)));
+            assert_eq!(named.len(), 2);
+            assert_eq!(content.matches(" Tj\n").count(), 3);
+        }
+        // Nothing to draw is drawn, with no font at all.
+        let empty = layout_text(&fonts, "", BOX, &style()).unwrap();
+        assert_eq!(drawn(|c| assert!(c.draw_layout_in(&[], &empty))).0, "");
+    }
+
+    /// A line all in one face is drawn as its codes whole, as they are when
+    /// it's drawn; a line in several by its runs, and one whose run names
+    /// bytes its codes don't have keeps the layout undrawn.
+    #[test]
+    fn a_line_is_drawn_as_its_codes_or_its_runs() {
+        let helvetica = res(Std14::Helvetica);
+        let symbol = res(Std14::Symbol);
+        let mut laid = layout_text(&Std14::Helvetica, "ab", BOX, &style()).unwrap();
+        laid.lines[0].codes = b"abcd".to_vec();
+        let (content, _) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &laid)));
+        assert!(content.contains("(abcd) Tj"), "{content}");
+        laid.lines[0].codes = b"a".to_vec();
+        let (content, _) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &laid)));
+        assert!(content.contains("(a) Tj"), "{content}");
+        laid.lines[0].runs.clear();
+        let (content, _) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &laid)));
+        assert!(content.contains("(a) Tj"), "{content}");
+
+        // A line all in a set's second face is its codes whole too.
+        let fonts = WithFallback::new(&Std14::Helvetica, &Std14::Symbol, symbol.clone());
+        let both = [helvetica.clone(), symbol.clone()];
+        let mut laid = layout_text(&fonts, "\u{3C0}", BOX, &style()).unwrap();
+        assert_eq!(laid.lines[0].runs.len(), 1);
+        laid.lines[0].codes.push(b'p');
+        let (content, named) = drawn(|c| assert!(c.draw_layout_in(&both, &laid)));
+        assert!(content.contains("(pp) Tj"), "{content}");
+        assert_eq!(named.as_slice(), std::slice::from_ref(&symbol));
+
+        // In two faces: the runs' bytes, and none where a run has none.
+        let mut laid = layout_text(&fonts, "a\u{3C0}b", BOX, &style()).unwrap();
+        laid.lines[0].codes.extend_from_slice(b"cd");
+        let (content, _) = drawn(|c| assert!(c.draw_layout_in(&both, &laid)));
+        assert!(content.contains("(b) Tj") && !content.contains("cd"));
+        laid.lines[0].codes.truncate(2);
+        let (content, named) = drawn(|c| assert!(!c.draw_layout_in(&both, &laid)));
+        assert_eq!((content.as_str(), named.len()), ("", 0));
+    }
+
+    /// `layout_text` and `text_box` take a `&dyn LayoutFont`, and
+    /// `layout_text` and `text_box_in` a `&dyn FontSet`, as they take the
+    /// font itself.
     #[test]
     fn layout_text_and_text_box_take_a_dyn_layout_font() {
         let font: &dyn LayoutFont = &Std14::Helvetica;
@@ -5159,7 +5303,10 @@ mod fallback {
         assert_eq!(boxed, laid);
         let set: &dyn FontSet = &font;
         assert_eq!(layout_text(set, text, BOX, &style()).unwrap(), laid);
-        assert!(canvas.text_box(helvetica, set, text, BOX, &style()).is_ok());
+        assert_eq!(
+            canvas.text_box_in(helvetica, set, text, BOX, &style()),
+            Ok(laid)
+        );
     }
 
     /// With clusters, a line breaks between clusters alone, a word too long

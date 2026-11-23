@@ -50,7 +50,7 @@
 //!   (`WithFallback`), each character, or grapheme cluster through
 //!   `unicode-segmentation`, drawn in the first face that has all of it
 //!   (`face_for`), and each line's runs in each face drawn under its own
-//!   resource (`Canvas::draw_layout_in`).
+//!   resource (`Canvas::draw_layout_in`, `Canvas::text_box_in`).
 //!
 //! # Cargo Features
 //!
@@ -59,8 +59,9 @@
 //!   boxes.
 //! - **`text-layout`** *(default)*: Enables `TextPage` reading-order assembly,
 //!   `unicode-bidi` reordering, selection quads, search, and multiline/box
-//!   `layout_text` / `Canvas::text_box` drawing, in one font or several, a
-//!   character or a `unicode-segmentation` grapheme cluster at a time.
+//!   `layout_text` / `Canvas::text_box` / `Canvas::text_box_in` drawing, in
+//!   one font or several, a character or a `unicode-segmentation` grapheme
+//!   cluster at a time.
 //! - **`predefined-cmaps`** *(optional)*: Forwards `pdf-fonts/predefined-cmaps`
 //!   for bundled Adobe CJK CMaps and UCS-2 collections.
 //! - **`embed`** *(optional)*: Forwards `pdf-fonts/embed`; with `text-layout`,
@@ -191,7 +192,8 @@ pub use text::{Glyph, Glyphs, TextShow};
 #[cfg(feature = "text-layout")]
 pub use wrap::{
     FontEncoder, FontSet, LaidOutLine, LaidOutRun, LaidOutText, LayoutFont, TextAlign,
-    TextBoxStyle, UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for, layout_text,
+    TextBoxError, TextBoxStyle, UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for,
+    layout_text,
 };
 pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, UseId};
 

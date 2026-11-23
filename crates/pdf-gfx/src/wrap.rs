@@ -9,9 +9,10 @@
 //! and fixed-width comb cells (`comb: Some(n)`), a character or a grapheme
 //! cluster at a time ([`TextBoxStyle::clusters`]).
 //! [`Canvas::draw_layout`](crate::Canvas::draw_layout),
-//! [`Canvas::draw_layout_in`](crate::Canvas::draw_layout_in) and
-//! [`Canvas::text_box`](crate::Canvas::text_box) emit the resulting lines as
-//! position-independent `Tm` + `Tj` operations.
+//! [`Canvas::draw_layout_in`](crate::Canvas::draw_layout_in),
+//! [`Canvas::text_box`](crate::Canvas::text_box) and
+//! [`Canvas::text_box_in`](crate::Canvas::text_box_in) emit the resulting
+//! lines as position-independent `Tm` + `Tj` operations.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -264,9 +265,10 @@ impl LayoutFont for FontEncoder<'_> {
 /// [`TextBoxStyle::clusters`]) is drawn in the first face that has an advance
 /// and a code for every character of it ([`face_for`]), so a font that lacks
 /// a character falls back to the faces after it. Every [`LayoutFont`] is a
-/// set of one face, so [`layout_text`] and
-/// [`Canvas::text_box`](crate::Canvas::text_box) take one as they always
-/// have; [`WithFallback`] puts two sets one after the other, and nests.
+/// set of one face, so [`layout_text`] takes one as it always has, and
+/// [`Canvas::text_box_in`](crate::Canvas::text_box_in) draws in a set as
+/// [`Canvas::text_box`](crate::Canvas::text_box) does in one font;
+/// [`WithFallback`] puts two sets one after the other, and nests.
 ///
 /// Each method's `face` counts from `0` below [`faces`](Self::faces): asked
 /// of a face past them, a set gives no advance and no code, and metrics of
@@ -289,10 +291,13 @@ pub trait FontSet {
     fn face_encode(&self, face: usize, ch: char, out: &mut Vec<u8>) -> bool;
 
     /// The resource `face` is drawn under, where the set knows it (`None` by
-    /// default). [`Canvas::text_box`](crate::Canvas::text_box) draws the
-    /// first face under the resource it's given and every other under the
-    /// set's own answer, so text in several fonts needs no list of resources
-    /// beside the set.
+    /// default). [`Canvas::text_box_in`](crate::Canvas::text_box_in) draws
+    /// the first face under the resource it's given and every other under
+    /// the set's own answer, so text in several fonts needs no list of
+    /// resources beside the set; a face past the first that it would draw
+    /// in and that has none here it refuses
+    /// ([`TextBoxError::NoResource`]). A set of more than one face gives
+    /// each past the first its resource.
     fn face_resource(&self, face: usize) -> Option<Res> {
         let _ = face;
         None
@@ -574,6 +579,10 @@ pub enum WrapMode {
 }
 
 /// Layout parameters for [`layout_text`] and [`Canvas::text_box`](crate::Canvas::text_box).
+///
+/// Its fields are public and it's built from its default, the fields that
+/// matter named (`TextBoxStyle { size: None, ..TextBoxStyle::default() }`):
+/// a release may add a field, which a value built so takes at its default.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextBoxStyle {
     /// Fixed font size in points, or `None` (or `Some(0.0)`) to auto-size
@@ -702,6 +711,29 @@ pub struct UnencodableChar {
     pub character: char,
 }
 
+/// Why [`Canvas::text_box_in`](crate::Canvas::text_box_in) drew nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TextBoxError {
+    /// A unit of the text no face of the set draws whole, as
+    /// [`layout_text`] refuses it.
+    #[error("{0}")]
+    Unencodable(UnencodableChar),
+    /// A face past the first that some of the text is drawn in has no
+    /// resource of the set's ([`FontSet::face_resource`]).
+    #[error("face {face} of the fonts has no resource to draw text under")]
+    NoResource {
+        /// The face, counted from `0`.
+        face: usize,
+    },
+}
+
+impl From<UnencodableChar> for TextBoxError {
+    fn from(err: UnencodableChar) -> Self {
+        TextBoxError::Unencodable(err)
+    }
+}
+
 /// One positioned line (or comb cell row) produced by [`layout_text`].
 ///
 /// Its `Debug` implementation prints byte lengths and geometry rather than raw
@@ -717,14 +749,20 @@ pub struct LaidOutLine {
     /// spacing when active).
     pub width: f32,
     /// Encoded character-code bytes for `Tj` (empty when `cells` is used for
-    /// comb layout), in each face as [`runs`](Self::runs) says.
+    /// comb layout), in each face as [`runs`](Self::runs) says. A line all
+    /// in one face is drawn as these bytes whole; a line in several as the
+    /// bytes of them each run names
+    /// ([`Canvas::draw_layout_in`](crate::Canvas::draw_layout_in)).
     pub codes: Vec<u8>,
     /// Extra word spacing (`Tw`) in text-space points (`0.0` unless justified).
     pub word_space: f32,
     /// Individual `(origin, codes)` placements when laid out into `comb` cells.
     pub cells: Vec<(Point, Vec<u8>)>,
     /// The runs of `codes` drawn in one face each, in order: one for a line
-    /// in one face, none for an empty line or a comb line.
+    /// in one face, none for an empty line or a comb line. Where a line is
+    /// in several faces its runs are what's drawn, so a caller that changes
+    /// `codes` there changes them with it: a run that names bytes `codes`
+    /// hasn't keeps the whole layout undrawn.
     pub runs: Vec<LaidOutRun>,
     /// The face each of `cells` is drawn in, beside it.
     pub cell_faces: Vec<usize>,

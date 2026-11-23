@@ -84,6 +84,7 @@ impl LayoutFont for Program {
 /// assert_eq!(glyphs.lock().unwrap().len(), 2);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+#[derive(Clone, Copy)]
 pub struct ProgramFont<'a> {
     program: &'a Program,
     glyphs: &'a Mutex<Glyphs>,
