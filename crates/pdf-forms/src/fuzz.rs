@@ -1370,8 +1370,12 @@ mod tests {
         let comb = made[1][0].as_ref().unwrap();
         assert_eq!((comb.bbox.x1, comb.bbox.y1), (20.0, 100.0));
         assert_eq!(strings(&comb.content).matches("[3 1] 0 d").count(), 2);
+        // Seven of Courier's stars at 10 points fill the 42 points the box
+        // gives, and their sum in `f32` passes it, as PDFium sums it: six to
+        // a line.
         let password = made[2][0].as_ref().unwrap();
-        assert!(strings(&password.content).contains("(*******) Tj"));
+        assert!(strings(&password.content).contains("(******) Tj"));
+        assert!(!strings(&password.content).contains("(*******"));
         assert!(!strings(&password.content).contains("secret"));
         let inset = made[3][0].as_ref().unwrap();
         assert!(strings(&inset.content).contains("(x) Tj"));

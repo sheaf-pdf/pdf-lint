@@ -3838,6 +3838,57 @@ fn line_end_spaces_keeps_the_spaces_a_line_breaks_at() {
     );
 }
 
+/// A line its glyphs fill exactly: keeping its spaces, it breaks where
+/// PDFium's sum of the advances in `f32` passes the box's width; without
+/// them, it fits by the allowance, as it always has.
+#[cfg(feature = "text-layout")]
+#[test]
+fn line_end_spaces_breaks_a_line_its_glyphs_fill_where_pdfium_does() {
+    let lines = |text: &str, size: f32, keep: bool| -> Vec<String> {
+        let style = crate::TextBoxStyle {
+            size: Some(size),
+            line_end_spaces: keep,
+            ..crate::TextBoxStyle::default()
+        };
+        // Ten of Courier's advances of 600 across.
+        let rect = Rect::new(0.0, 0.0, 6.0 * size, 200.0);
+        let laid = crate::layout_text(&Std14::Courier, text, rect, &style).unwrap();
+        assert!(!laid.overflowed, "{text:?} at {size}");
+        (laid.lines.iter())
+            .map(|line| text[line.text_range.clone()].to_string())
+            .collect()
+    };
+    let a = |n: usize| "A".repeat(n);
+    // How many `A`s PDFium as of chromium/8152 sets on the first line at each
+    // size (pdf-forms' `forms-ap` case of them): where ten advances sum past
+    // the width in `f32` (`6.0000005` each at 10 points), nine.
+    for (size, first) in [
+        (4.0, 10),
+        (5.0, 9),
+        (6.0, 10),
+        (7.0, 9),
+        (8.0, 10),
+        (9.0, 9),
+        (10.0, 9),
+        (11.0, 10),
+        (12.0, 10),
+        (14.0, 9),
+    ] {
+        assert_eq!(
+            lines(&a(12), size, true),
+            [a(first), a(12 - first)],
+            "{size}"
+        );
+        assert_eq!(lines(&a(12), size, false), [a(10), a(2)], "{size}");
+        // Broken before a word, the line's words are where they were.
+        assert_eq!(
+            lines("AAAAA AAAA AAAA", size, true),
+            ["AAAAA ", "AAAA AAAA"],
+            "{size}"
+        );
+    }
+}
+
 /// Where a line that keeps its spaces may break between two characters, by
 /// the classes PDFium's line breaking reads them in.
 #[cfg(feature = "text-layout")]

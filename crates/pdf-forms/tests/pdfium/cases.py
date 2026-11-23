@@ -561,6 +561,17 @@ def ap_cases():
     ap("ap-multiline-inset-centre", [tx(MULTILINE + b" /Q 1 " + bs(b"2", b"I") + b" /MK << /BC [0] >>",
                                         value=b"The quick brown fox jumps over the lazy dog",
                                         da=b"/Helv 10 Tf 0 g", rect=b"[10 10 110 60]")])
+    # A line its glyphs fill exactly: ten of Courier's 600 across the text's
+    # box at each size, whose sum in f32 passes the box at some (10 points:
+    # nine fit) and not at others (12 points: ten); then words, broken before
+    # the one that passes it at every size; and a password's stars, seven
+    # across at 10 points, which six fill.
+    sizes = (4, 5, 6, 7, 8, 9, 10, 11, 12, 14)
+    ap("ap-multiline-full-line",
+       [tx(MULTILINE, value=value, da=b"/Cour %d Tf 0 g" % size,
+           rect=b"[%d %d %d %d]" % (x, 10 + 70 * i, x + 2 + 6 * size, 70 + 70 * i))
+        for x, value in ((10, b"AAAAAAAAAAAA"), (300, b"AAAAA AAAA AAAA")) for i, size in enumerate(sizes)]
+       + [tx(b"/Ff 12288", value=b"passwords", da=b"/Cour 10 Tf 0 g", rect=b"[150 10 194 70]")])
 
     # A single line: line ends in the value, past the box at a fixed size in
     # each alignment, DoNotScroll, a password, /MaxLen without comb, no

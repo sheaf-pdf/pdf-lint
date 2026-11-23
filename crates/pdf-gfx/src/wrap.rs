@@ -625,6 +625,15 @@ pub struct TextBoxStyle {
     /// text is spread by the spaces between its words, not by those that end
     /// its line.
     ///
+    /// On, a line's width is also found as PDFium finds it, each advance
+    /// times the size and then times `0.001`, summed in `f32`, and a line
+    /// passes the box's width where that sum is above it at all, so a line
+    /// whose glyphs fill the box exactly breaks where PDFium breaks it: in
+    /// Courier at 10 points, ten characters of 6 each sum past 60 and the
+    /// tenth begins the next line, where at 12 points ten of 7.2 sum to 72
+    /// and fit. Off, the advances are scaled by the size over `1000` and a
+    /// line passes the width by more than `0.0001`.
+    ///
     /// A word begins at a character that isn't a space or punctuation after
     /// a space or punctuation, but not after punctuation that joins what's
     /// about it (an apostrophe, comma, hyphen, full stop or solidus: `e.g.`
@@ -1261,6 +1270,20 @@ fn wrap_paragraph<'a>(
     }
 
     let scale = font_size / 1000.0;
+    // Keeping spaces, a line's width is summed and compared as PDFium's line
+    // breaking does it as of chromium/8152 (`core/fpdfdoc/cpvt_section.cpp`,
+    // `SplitLines`, over `cpvt_variabletext.cpp`'s `GetWordWidth`): each
+    // advance times the size, then times `0.001`, in `f32`, and the line full
+    // where the sum passes the width at all. Otherwise, by the scale, with an
+    // allowance of `1e-4` for its rounding.
+    let advance = |g: &EncodedGlyph| match keep_spaces {
+        true => g.units * font_size * 0.001,
+        false => g.units * scale,
+    };
+    let passes = |after: f32| match keep_spaces {
+        true => after > max_width,
+        false => after > max_width + 1e-4,
+    };
     let mut out = Vec::new();
     let mut start = 0usize;
     let n = glyphs.len();
@@ -1285,16 +1308,16 @@ fn wrap_paragraph<'a>(
         // line breaks inside.
         while end < n {
             let next = unit_end(glyphs, end);
-            let mut after = width + glyphs[end].units * scale;
+            let mut after = width + advance(&glyphs[end]);
             for g in &glyphs[end + 1..next] {
-                after += g.units * scale;
+                after += advance(g);
             }
             // Keeping spaces, a line breaks before a word, which a character
             // that would pass the width may itself begin.
             if keep_spaces && wrap == WrapMode::Word && end > start && begins_word(glyphs, end) {
                 last_break = Some(end);
             }
-            if end > start && after > max_width + 1e-4 {
+            if end > start && passes(after) {
                 // If this glyph is a space, break right here and consume trailing spaces.
                 if !keep_spaces && is_space_unit(glyphs, end) {
                     last_break = Some(end);
