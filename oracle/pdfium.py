@@ -816,8 +816,6 @@ class Pdfium:
             ("FORM_OnMouseMove", I, [P, P, I, ctypes.c_double, ctypes.c_double]),
             ("FORM_OnLButtonDown", I, [P, P, I, ctypes.c_double, ctypes.c_double]),
             ("FORM_OnLButtonUp", I, [P, P, I, ctypes.c_double, ctypes.c_double]),
-            ("FORM_SetFocusedAnnot", I, [P, P]),
-            ("FORM_OnChar", I, [P, P, I, I]),
             ("FORM_ForceToKillFocus", I, [P]),
             ("FPDFAnnot_GetFormFieldType", I, [P, P]),
             ("FPDFAnnot_GetFormFieldFlags", I, [P, P]),
@@ -1487,14 +1485,13 @@ class Pdfium:
             out.append(" ".join(words + (entries or ["ap", "none"])))
         return out
 
-    def forms_press(self, data, presses, how="pointer", callbacks=True):
+    def forms_press(self, data, presses):
         """Each of page 0's widgets' `/AS`, and each field's `/V`, in the file
         PDFium saves after the widgets `presses` gives (page 0's annotation
         indices, in order) are pressed under a form-fill environment whose
         first callbacks each do nothing (or answer page 0): by the pointer,
         `FORM_OnMouseMove`, `FORM_OnLButtonDown` and `FORM_OnLButtonUp` at the
-        widget's centre, or (`how` "keyboard") `FORM_SetFocusedAnnot` and
-        `FORM_OnChar` with a space. `idx N as` and the widget's `/AS`, then
+        widget's centre. `idx N as` and the widget's `/AS`, then
         `field`, each field's full name from `/Fields` down, `v` and its own
         `/V`, each as `value_word` writes it. A press PDFium doesn't take
         stops the recording."""
@@ -1513,13 +1510,12 @@ class Pdfium:
             "FFI_GetCurrentPage": lambda *_: page_of[0] if page_of else None,
             "FFI_GetRotation": lambda *_: 0,
         }
-        if callbacks:
-            for name, signature in FORM_CALLBACKS.items():
-                if signature is None or name == "Release":
-                    continue
-                res, args = signature
-                held[name] = ctypes.CFUNCTYPE(res, *args)(answers.get(name, nothing))
-                setattr(info, name, ctypes.cast(held[name], ctypes.c_void_p))
+        for name, signature in FORM_CALLBACKS.items():
+            if signature is None or name == "Release":
+                continue
+            res, args = signature
+            held[name] = ctypes.CFUNCTYPE(res, *args)(answers.get(name, nothing))
+            setattr(info, name, ctypes.cast(held[name], ctypes.c_void_p))
         taken = []
 
         def act(page, form):
@@ -1528,16 +1524,13 @@ class Pdfium:
                 a = lib.FPDFPage_GetAnnot(page, index)
                 if not a:
                     raise SystemExit("forms-press: no annotation %d to press" % index)
-                if how == "keyboard":
-                    taken.append(lib.FORM_SetFocusedAnnot(form, a) and lib.FORM_OnChar(form, page, 0x20, 0))
-                else:
-                    rect = FSRect()
-                    lib.FPDFAnnot_GetRect(a, ctypes.byref(rect))
-                    x, y = (rect.left + rect.right) / 2.0, (rect.top + rect.bottom) / 2.0
-                    lib.FORM_OnMouseMove(form, page, 0, x, y)
-                    down = lib.FORM_OnLButtonDown(form, page, 0, x, y)
-                    up = lib.FORM_OnLButtonUp(form, page, 0, x, y)
-                    taken.append(down and up)
+                rect = FSRect()
+                lib.FPDFAnnot_GetRect(a, ctypes.byref(rect))
+                x, y = (rect.left + rect.right) / 2.0, (rect.top + rect.bottom) / 2.0
+                lib.FORM_OnMouseMove(form, page, 0, x, y)
+                down = lib.FORM_OnLButtonDown(form, page, 0, x, y)
+                up = lib.FORM_OnLButtonUp(form, page, 0, x, y)
+                taken.append(down and up)
                 lib.FPDFPage_CloseAnnot(a)
             lib.FORM_ForceToKillFocus(form)
 

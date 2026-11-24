@@ -12,10 +12,10 @@
 //! the `forms-press` cases a button group's states and value after a press;
 //! their answers are read here part by part. Each button's and choice's is
 //! held to what `appearance`'s makers make for the same widget
-//! (`buttons_here`, `choices_here`), and `NOT_YET_COMPARED` would name a case
-//! of theirs nothing compares a maker or a rule to, with why. The presses are
-//! made here by `pdf_forms::group`'s rules over what the read layer reads of
-//! the group, and held to PDFium's states and values.
+//! (`buttons_here`, `choices_here`), and a case of theirs that nothing
+//! compares fails `every_case_is_compared`. The presses are made here by
+//! `pdf_forms::group`'s rules over what the read layer reads of the group,
+//! and held to PDFium's states and values.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -754,12 +754,6 @@ const COMPARED: &[(&str, &str)] = &[
     ("forms-ap-all", "list-"),
 ];
 
-/// The cases nothing here compares a maker or a rule to yet, by kind and
-/// the start of their names, each with why. Their answers are read part by
-/// part below, and `just test-pdfium` holds them to PDFium; a line leaves
-/// this list with the test that compares its cases.
-const NOT_YET_COMPARED: &[(&str, &str, &str)] = &[];
-
 /// What a `forms-ap-all` record gives of an appearance's content, in the
 /// order the content has it: a path painted, a clip set and where it ends,
 /// where the `/Tx` sequence begins and ends, and each string shown with its
@@ -1121,31 +1115,24 @@ fn forms_press_answers_read() {
 }
 
 /// Every case is of a kind a test compares to what the crate does, or of a
-/// kind and a start of its name in `COMPARED`, or is listed in
-/// `NOT_YET_COMPARED` by its kind and the start of its name; and each line
-/// there has a case.
+/// kind and a start of its name in `COMPARED`; and each line there has a
+/// case.
 #[test]
-fn every_case_is_compared_or_listed() {
+fn every_case_is_compared() {
     let cases = read_tsv::<3>("cases.tsv");
-    let mut listed = vec![0; NOT_YET_COMPARED.len()];
+    let mut compared = vec![0; COMPARED.len()];
     for [name, kind, _] in &cases {
         if kind == "forms" || kind == "forms-ap" || kind == "forms-press" {
             continue;
         }
-        if (COMPARED.iter()).any(|(k, start)| k == kind && name.starts_with(start)) {
-            continue;
-        }
-        let line = NOT_YET_COMPARED
+        let line = COMPARED
             .iter()
-            .position(|(k, start, _)| k == kind && name.starts_with(start))
-            .unwrap_or_else(|| panic!("{name}: a {kind} case nothing compares or lists"));
-        listed[line] += 1;
+            .position(|(k, start)| k == kind && name.starts_with(start))
+            .unwrap_or_else(|| panic!("{name}: a {kind} case nothing compares"));
+        compared[line] += 1;
     }
-    for ((kind, start, why), count) in NOT_YET_COMPARED.iter().zip(listed) {
-        assert!(
-            !why.is_empty() && count > 0,
-            "no {kind} case named {start}*"
-        );
+    for ((kind, start), count) in COMPARED.iter().zip(compared) {
+        assert!(count > 0, "no {kind} case named {start}*");
     }
 }
 
