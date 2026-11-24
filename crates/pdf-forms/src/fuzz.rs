@@ -87,7 +87,7 @@
 //!    of the standard 14 the caller writes, interprets with no error and no
 //!    fault; no `Debug` of what's read or made, or of an error or a fault,
 //!    shows the text.
-//! 6. A fallback (`text-layout` and `embed`): where the input carries a
+//! 7. A fallback (`text-layout` and `embed`): where the input carries a
 //!    TrueType program after its text that `pdf_fonts::embed::Program::open`
 //!    opens, `appearance::text_with_fallback` draws the same text in each
 //!    standard 14 font and the program (`check_fallback`), made the same
