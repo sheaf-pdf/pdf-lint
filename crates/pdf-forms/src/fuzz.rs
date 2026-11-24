@@ -1741,6 +1741,8 @@ fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
         let kind = field.kind();
         let toggle = matches!(kind, Some(FieldKind::CheckBox | FieldKind::Radio));
         let push = kind == Some(FieldKind::PushButton);
+        // Read once for the field: each widget's on state is held to it.
+        let group = field.group(objects, rules, limits);
         for widget in field.widgets() {
             let quiet = widget_toggle(field, widget, objects, rules, limits, &mut ());
             let mut told: Vec<(Place, Fault)> = Vec::new();
@@ -1761,7 +1763,7 @@ fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
                         .any(|(_, fault)| matches!(fault, Fault::WrongType { key: "Opt" })),
                     "a toggle told of /Opt"
                 );
-                if let Ok(Some(group)) = field.group(objects, rules, limits) {
+                if let Ok(Some(group)) = &group {
                     assert_eq!(
                         group.group().on_state(widget.index()).as_deref(),
                         Some(read.on_state()),
