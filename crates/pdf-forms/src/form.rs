@@ -1,6 +1,6 @@
 //! The interactive form dictionary and the walk over its field tree.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -348,6 +348,10 @@ enum Node<'o> {
 
 struct Walk<'o> {
     fields: Vec<Field<'o>>,
+    handed: Vec<Inherited<'o>>,
+    depths: Vec<usize>,
+    by_id: HashMap<ObjectId, usize>,
+    values: HashMap<(ObjectId, &'static str), Option<Arc<FieldValue<'o>>>>,
     seen: HashSet<ObjectId>,
     count: usize,
 }
@@ -398,6 +402,10 @@ fn read_form<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
 
     let mut walk = Walk {
         fields: Vec::new(),
+        handed: Vec::new(),
+        depths: Vec::new(),
+        by_id: HashMap::new(),
+        values: HashMap::new(),
         seen: HashSet::new(),
         count: 0,
     };
@@ -408,10 +416,18 @@ fn read_form<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
             quadding,
             ..Inherited::default()
         };
+        let mut deferred = Vec::new();
         for raw in entries {
-            if let Node::Field(index) = node(reader, &mut walk, raw, within, None, &inherited, 0)? {
+            if has_parent_dict(reader, raw, within)? {
+                deferred.push(raw);
+            } else if let Node::Field(index) = node(
+                reader, &mut walk, raw, within, None, &inherited, 0, false, false,
+            )? {
                 roots.push(index);
             }
+        }
+        if !deferred.is_empty() {
+            attach_deferred(reader, &mut walk, &mut roots, &deferred, within, &inherited)?;
         }
     }
     phase!(
@@ -435,8 +451,272 @@ fn read_form<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     })
 }
 
+/// Whether `raw` in `/Fields` resolves to a dictionary whose `/Parent` also
+/// resolves to a dictionary, so top-level roots in `/Fields` should walk first.
+fn has_parent_dict<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &Reader<'_, R, S>,
+    raw: &'o Object,
+    within: Option<ObjectId>,
+) -> Result<bool, Error> {
+    let objects: &dyn Resolve<'o> = &reader.objects;
+    let mut quiet = Reader {
+        objects,
+        rules: reader.rules,
+        limits: reader.limits,
+        sink: &mut (),
+    };
+    let Some((obj, reached_id)) = quiet.reached(raw, within)? else {
+        return Ok(false);
+    };
+    let Some(dict) = obj.as_dict() else {
+        return Ok(false);
+    };
+    let entry_within = raw.as_reference().and(reached_id).or(within);
+    Ok(quiet.dict_entry(dict, entry_within, "Parent")?.is_some())
+}
+
+/// Whether `raw` resolves to an unseen field kid dictionary (having `/T` or an
+/// array `/Kids`).
+fn is_field_kid<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &Reader<'_, R, S>,
+    seen: &HashSet<ObjectId>,
+    raw: &'o Object,
+    within: Option<ObjectId>,
+) -> Result<bool, Error> {
+    let objects: &dyn Resolve<'o> = &reader.objects;
+    let mut quiet = Reader {
+        objects,
+        rules: reader.rules,
+        limits: reader.limits,
+        sink: &mut (),
+    };
+    let Some((obj, reached_id)) = quiet.reached(raw, within)? else {
+        return Ok(false);
+    };
+    let id = raw.as_reference().and(reached_id);
+    if id.is_some_and(|oid| seen.contains(&oid)) {
+        return Ok(false);
+    }
+    let Some(dict) = obj.as_dict() else {
+        return Ok(false);
+    };
+    Ok(dict.get("T").is_some() || quiet.array_entry(dict, id.or(within), "Kids")?.is_some())
+}
+
+/// Pass 2 over `/Fields` entries whose `/Parent` resolves to a dictionary: skips
+/// entries already reached via Pass 1 `/Kids`, and otherwise climbs `/Parent`
+/// (up to `Limits::depth`, cycle-safe) so ancestors are loaded and inherited
+/// from before attaching unreferenced children or widgets.
+fn attach_deferred<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &mut Reader<'_, R, S>,
+    walk: &mut Walk<'o>,
+    roots: &mut Vec<usize>,
+    deferred: &[&'o Object],
+    within: Option<ObjectId>,
+    form_inherited: &Inherited<'o>,
+) -> Result<(), Error> {
+    // Pre-scan which parent `ObjectId`s have at least one field kid among
+    // `deferred`, so mixed nameless widgets + field kids under a `/Kids`-less
+    // parent become terminal fields regardless of their order in `/Fields`.
+    let mut mixed_parents = HashSet::new();
+    {
+        let objects: &dyn Resolve<'o> = &reader.objects;
+        let mut quiet = Reader {
+            objects,
+            rules: reader.rules,
+            limits: reader.limits,
+            sink: &mut (),
+        };
+        for &raw in deferred {
+            if let Some((obj, reached_id)) = quiet.reached(raw, within)?
+                && let Some(dict) = obj.as_dict()
+            {
+                let entry_within = raw.as_reference().and(reached_id).or(within);
+                if (dict.get("T").is_some()
+                    || quiet.array_entry(dict, entry_within, "Kids")?.is_some())
+                    && let Some(p_raw) = dict.get("Parent")
+                    && p_raw.as_reference().is_some()
+                    && let Some((p_obj, Some(p_id))) = quiet.reached(p_raw, entry_within)?
+                    && p_obj.as_dict().is_some()
+                {
+                    mixed_parents.insert(p_id);
+                }
+            }
+        }
+    }
+
+    for &raw in deferred {
+        let entry_info = {
+            let objects: &dyn Resolve<'o> = &reader.objects;
+            let mut quiet = Reader {
+                objects,
+                rules: reader.rules,
+                limits: reader.limits,
+                sink: &mut (),
+            };
+            quiet.reached(raw, within)?
+        };
+        let Some((entry_obj, reached_id)) = entry_info else {
+            continue;
+        };
+        let entry_id = raw.as_reference().and(reached_id);
+        if entry_id.is_some_and(|oid| walk.seen.contains(&oid)) {
+            continue;
+        }
+        let Some(entry_dict) = entry_obj.as_dict() else {
+            continue;
+        };
+
+        // Climb `/Parent` references up to `Limits::depth`.
+        let mut ancestors: Vec<(&'o Object, ObjectId, Option<ObjectId>)> = Vec::new();
+        let mut anchor: Option<(usize, ObjectId)> = None;
+        {
+            let objects: &dyn Resolve<'o> = &reader.objects;
+            let mut quiet = Reader {
+                objects,
+                rules: reader.rules,
+                limits: reader.limits,
+                sink: &mut (),
+            };
+            let mut climbed = HashSet::new();
+            if let Some(oid) = entry_id {
+                climbed.insert(oid);
+            }
+            let mut cur_dict = entry_dict;
+            let mut cur_within = entry_id.or(within);
+            while ancestors.len() + 1 < reader.limits.depth {
+                let Some(p_raw) = cur_dict.get("Parent") else {
+                    break;
+                };
+                if p_raw.as_reference().is_none() {
+                    break;
+                }
+                let Some((p_obj, Some(p_id))) = quiet.reached(p_raw, cur_within)? else {
+                    break;
+                };
+                let Some(p_dict) = p_obj.as_dict() else {
+                    break;
+                };
+                if let Some(&existing_idx) = walk.by_id.get(&p_id) {
+                    anchor = Some((existing_idx, p_id));
+                    break;
+                }
+                if walk.seen.contains(&p_id) || !climbed.insert(p_id) {
+                    break;
+                }
+                ancestors.push((p_raw, p_id, cur_within));
+                cur_dict = p_dict;
+                cur_within = Some(p_id);
+            }
+        }
+
+        let mut cur_parent = anchor.map(|(idx, pid)| (idx, Some(pid)));
+        for (p_raw, p_id, raw_within) in ancestors.into_iter().rev() {
+            if let Some(&idx) = walk.by_id.get(&p_id) {
+                cur_parent = Some((idx, Some(p_id)));
+                continue;
+            }
+            if walk.seen.contains(&p_id) {
+                cur_parent = None;
+                break;
+            }
+            let (inh, depth) = match cur_parent {
+                Some((p_idx, _)) => (walk.handed[p_idx].clone(), walk.depths[p_idx] + 1),
+                None => (form_inherited.clone(), 0),
+            };
+            match node(
+                reader, &mut *walk, p_raw, raw_within, cur_parent, &inh, depth, false, true,
+            )? {
+                Node::Field(idx) => {
+                    if let Some((p_idx, _)) = cur_parent {
+                        walk.fields[p_idx].kids.push(idx);
+                    } else {
+                        roots.push(idx);
+                    }
+                    cur_parent = Some((idx, Some(p_id)));
+                }
+                _ => {
+                    cur_parent = None;
+                    break;
+                }
+            }
+        }
+
+        if entry_id.is_some_and(|oid| walk.seen.contains(&oid)) {
+            if let Some((p_idx, p_id)) = cur_parent
+                && walk.fields[p_idx].is_terminal()
+                && walk.fields[p_idx].field_type.is_none()
+            {
+                reader.say(p_id, None, Fault::MissingFieldType);
+            }
+            continue;
+        }
+
+        match cur_parent {
+            Some((p_idx, p_id)) => {
+                let inh = walk.handed[p_idx].clone();
+                let depth = walk.depths[p_idx] + 1;
+                let as_field = !walk.fields[p_idx].kids.is_empty()
+                    || p_id.is_some_and(|pid| mixed_parents.contains(&pid));
+                match node(
+                    reader,
+                    &mut *walk,
+                    raw,
+                    within,
+                    Some((p_idx, p_id)),
+                    &inh,
+                    depth,
+                    as_field,
+                    false,
+                )? {
+                    Node::Field(kid) => walk.fields[p_idx].kids.push(kid),
+                    Node::Widget(mut widget) => {
+                        let was_unheld = reader.rules == Rules::Pdfium
+                            && !walk.handed[p_idx].max_len_held
+                            && walk.fields[p_idx].max_len.is_none()
+                            && !walk.fields[p_idx]
+                                .widgets
+                                .iter()
+                                .any(|w| !w.merged && w.dict.get("MaxLen").is_some());
+                        let w_dict = widget.dict;
+                        let w_at = widget.id.or(p_id);
+                        widget.index = walk.fields[p_idx].widgets.len();
+                        walk.fields[p_idx].widgets.push(widget);
+                        if was_unheld && w_dict.get("MaxLen").is_some() {
+                            walk.fields[p_idx].max_len = reader
+                                .int_entry(w_dict, w_at, "MaxLen")?
+                                .and_then(|n| u32::try_from(n).ok());
+                        }
+                    }
+                    Node::Skipped => {}
+                }
+                if walk.fields[p_idx].is_terminal() && walk.fields[p_idx].field_type.is_none() {
+                    reader.say(p_id, None, Fault::MissingFieldType);
+                }
+            }
+            None => {
+                if let Node::Field(idx) = node(
+                    reader,
+                    &mut *walk,
+                    raw,
+                    within,
+                    None,
+                    form_inherited,
+                    0,
+                    false,
+                    false,
+                )? {
+                    roots.push(idx);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reads one entry of `/Fields` or of a field's `/Kids`, and the tree under
 /// it. `parent` is the field whose `/Kids` holds the entry, with its number.
+#[expect(clippy::too_many_arguments)]
 fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     reader: &mut Reader<'_, R, S>,
     walk: &mut Walk<'o>,
@@ -445,6 +725,8 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     parent: Option<(usize, Option<ObjectId>)>,
     inherited: &Inherited<'o>,
     depth: usize,
+    as_field: bool,
+    pending_kid: bool,
 ) -> Result<Node<'o>, Error> {
     let Some((object, reached_id)) = reader.reached(raw, within)? else {
         return Ok(Node::Skipped);
@@ -478,8 +760,8 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
 
     let kids = reader.array_entry(dict, id.or(within), "Kids")?;
     // A kid with no name and no kids of its own is one of its parent's
-    // widgets, not a field.
-    if parent.is_some() && kids.is_none() && dict.get("T").is_none() {
+    // widgets, not a field, unless its sibling in `/Kids` is a field (`as_field`).
+    if !as_field && parent.is_some() && kids.is_none() && dict.get("T").is_none() {
         return Ok(Node::Widget(Widget {
             dict,
             id,
@@ -509,8 +791,15 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         .int_entry(dict, at, "Ff")?
         .map(|n| FieldFlags::from_bits(n as u32))
         .or(inherited.flags);
-    let value = own_value(reader, dict, at, "V", &inherited.value)?;
-    let default_value = own_value(reader, dict, at, "DV", &inherited.default_value)?;
+    let value = own_value(reader, &mut walk.values, dict, at, "V", &inherited.value)?;
+    let default_value = own_value(
+        reader,
+        &mut walk.values,
+        dict,
+        at,
+        "DV",
+        &inherited.default_value,
+    )?;
     // A choice field's options and selected indices, or a button field's
     // export values, found here and decoded when they're asked for
     // (`Field::options`, `Field::selected`); and the top index, a number.
@@ -533,6 +822,24 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         .or(inherited.max_len);
 
     let index = walk.fields.len();
+    if let Some(oid) = id {
+        walk.by_id.insert(oid, index);
+    }
+    let handed = Inherited {
+        field_type,
+        flags,
+        value: value.clone(),
+        default_value: default_value.clone(),
+        options: options.entry,
+        selected: selected.entry,
+        top_index,
+        da,
+        quadding,
+        max_len,
+        max_len_held,
+    };
+    walk.handed.push(handed.clone());
+    walk.depths.push(depth);
     walk.fields.push(Field {
         dict,
         id,
@@ -543,8 +850,8 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         field_type,
         kind: field_type.map(|ft| kind_of(ft, flags.unwrap_or_default(), reader.rules)),
         flags: flags.unwrap_or_default(),
-        value: value.clone(),
-        default_value: default_value.clone(),
+        value,
+        default_value,
         da,
         quadding,
         max_len,
@@ -555,19 +862,15 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
 
     match kids {
         Some((entries, kids_within)) => {
-            let handed = Inherited {
-                field_type,
-                flags,
-                value,
-                default_value,
-                options: options.entry,
-                selected: selected.entry,
-                top_index,
-                da,
-                quadding,
-                max_len,
-                max_len_held,
-            };
+            let mut mixed = false;
+            if depth + 1 < reader.limits.depth {
+                for raw in entries {
+                    if is_field_kid(reader, &walk.seen, raw, kids_within)? {
+                        mixed = true;
+                        break;
+                    }
+                }
+            }
             for raw in entries {
                 match node(
                     reader,
@@ -577,6 +880,8 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                     Some((index, id)),
                     &handed,
                     depth + 1,
+                    mixed,
+                    false,
                 )? {
                     Node::Field(kid) => walk.fields[index].kids.push(kid),
                     Node::Widget(mut widget) => {
@@ -591,9 +896,13 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
             if parent.is_none() && walk.fields[index].name.is_none() {
                 reader.say(at, None, Fault::MissingName);
             }
-            // A field that is its own widget: one dictionary holds both.
-            if dict.get("Subtype").and_then(Object::as_name) == Some(b"Widget")
-                || dict.get("Rect").is_some()
+            // A field that is its own widget: one dictionary holds both (or a
+            // nameless widget kid promoted to a terminal field alongside field
+            // siblings).
+            if !pending_kid
+                && (as_field
+                    || dict.get("Subtype").and_then(Object::as_name) == Some(b"Widget")
+                    || dict.get("Rect").is_some())
             {
                 walk.fields[index].widgets.push(Widget {
                     dict,
@@ -624,13 +933,15 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                 .and_then(|n| u32::try_from(n).ok());
         }
     }
-    if walk.fields[index].is_terminal() && field_type.is_none() {
+    if !pending_kid && walk.fields[index].is_terminal() && field_type.is_none() {
         reader.say(at, None, Fault::MissingFieldType);
     }
     Ok(Node::Field(index))
 }
 
-/// A field's `/V` or `/DV`: its own where the entry reaches a value, typed;
+/// A field's `/V` or `/DV`: its own where the entry reaches a value, typed
+/// (cached by `(ObjectId, key)` when indirect so shared array values across
+/// many fields decode and report faults once);
 /// `inherited` where it has none or the entry reaches nothing (`null`, a
 /// reference to no object or to `null`, a damaged object, a chain too long),
 /// as an entry that is null is one that's absent (ISO 32000-2, §7.3.9) and
@@ -638,6 +949,7 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
 /// field holds, which is the field's own, wrong, and told.
 fn own_value<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     reader: &mut Reader<'_, R, S>,
+    values: &mut HashMap<(ObjectId, &'static str), Option<Arc<FieldValue<'o>>>>,
     dict: &'o Dict,
     within: Option<ObjectId>,
     key: &'static str,
@@ -649,6 +961,14 @@ fn own_value<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     let Some((object, id)) = reader.reached(raw, within)? else {
         return Ok(inherited.clone());
     };
+    if let Some(oid) = raw.as_reference().and(id) {
+        if let Some(cached) = values.get(&(oid, key)) {
+            return Ok(cached.clone());
+        }
+        let decoded = field_value(reader, raw, object, id, key)?.map(Arc::new);
+        values.insert((oid, key), decoded.clone());
+        return Ok(decoded);
+    }
     Ok(field_value(reader, raw, object, id, key)?.map(Arc::new))
 }
 

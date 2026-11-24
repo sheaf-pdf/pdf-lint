@@ -302,7 +302,11 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
         };
         let fields = form.fields();
         assert_eq!(fields.len(), told.fields().len());
-        let widgets: usize = fields.iter().map(|field| field.widgets().len()).sum();
+        let widgets: usize = fields
+            .iter()
+            .flat_map(|field| field.widgets())
+            .filter(|widget| !widget.is_merged())
+            .count();
         assert!(fields.len() + widgets <= limits.fields);
         for (index, field) in fields.iter().enumerate() {
             assert_eq!(format!("{field:?}"), format!("{:?}", told.fields()[index]));

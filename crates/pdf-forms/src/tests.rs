@@ -880,12 +880,12 @@ fn the_caps_hold() {
     let mut limits = Limits::DEFAULT;
     limits.depth = 3;
     let (form, faults) = read_told(&store, &catalog, &limits);
-    assert_eq!(form.fields().len(), 3);
+    assert_eq!(form.fields().len(), 5);
     assert_eq!(faults, [Fault::TooDeep]);
 
     let mut limits = Limits::DEFAULT;
     limits.fields = 12;
-    assert_eq!(read(&store, &catalog).fields().len(), 6);
+    assert_eq!(read(&store, &catalog).fields().len(), 11);
     assert!(Form::read(&store.objects, &catalog, Rules::Pdfium, &limits).is_ok());
     limits.fields = 11;
     assert_eq!(
@@ -1069,6 +1069,171 @@ fn debug_never_prints_a_name_or_a_value() {
     );
     assert!(!shown.contains("SECRET"), "{shown}");
     assert!(shown.contains("Text(11 bytes)"));
+}
+
+#[test]
+fn fields_array_children_and_mixed_kids_inherit_and_keep_every_widget_terminal() {
+    // 1a: `/Fields` lists a widget kid before its root parent.
+    let mut store = Store::default();
+    let top = store.reserve();
+    let wid = store.put(dict! {
+        "Parent" => top,
+        "Subtype" => Object::name("Widget"),
+        "Rect" => rect(),
+    });
+    store.set(
+        top,
+        dict! {
+            "T" => Object::text("top"),
+            "FT" => Object::name("Tx"),
+            "V" => Object::text("hi"),
+            "Kids" => refs(&[wid]),
+        },
+    );
+    let cat = catalog_of(refs(&[wid, top]));
+    let form = read(&store, &cat);
+    assert_eq!(form.fields().len(), 1);
+    assert_eq!(form.full_name(0).as_deref(), Some("top"));
+    assert_eq!(form.fields()[0].kind(), Some(FieldKind::Text));
+    assert_eq!(
+        form.fields()[0].value(),
+        Some(&FieldValue::Text("hi".into()))
+    );
+    assert_eq!(form.fields()[0].widgets().len(), 1);
+
+    // 1b: `/Fields` lists only a leaf widget whose `/Parent` chain (`mid` -> `root`)
+    // is omitted from `/Fields` and lacks `/Kids`.
+    let mut store = Store::default();
+    let root = store.put(dict! {
+        "T" => Object::text("root"),
+        "FT" => Object::name("Tx"),
+        "Ff" => 4096,
+        "V" => Object::text("from-root"),
+    });
+    let mid = store.put(dict! {
+        "T" => Object::text("mid"),
+        "Parent" => root,
+    });
+    let leaf_wid = store.put(dict! {
+        "Parent" => mid,
+        "Subtype" => Object::name("Widget"),
+        "Rect" => rect(),
+    });
+    let cat = catalog_of(refs(&[leaf_wid]));
+    let form = read(&store, &cat);
+    let terms: Vec<_> = form.terminals().collect();
+    assert_eq!(terms.len(), 1);
+    let (idx, term) = terms[0];
+    assert_eq!(form.full_name(idx).as_deref(), Some("root.mid"));
+    assert_eq!(term.kind(), Some(FieldKind::Text));
+    assert_eq!(term.flags().bits(), 4096);
+    assert_eq!(term.value(), Some(&FieldValue::Text("from-root".into())));
+    assert_eq!(term.widgets().len(), 1);
+
+    // `/Parent` cycle (`a <-> b`) terminates cleanly without panicking.
+    let mut store = Store::default();
+    let a = store.reserve();
+    let b = store.reserve();
+    store.set(
+        a,
+        dict! { "T" => Object::text("a"), "FT" => Object::name("Tx"), "Parent" => b },
+    );
+    store.set(
+        b,
+        dict! { "T" => Object::text("b"), "FT" => Object::name("Tx"), "Parent" => a },
+    );
+    let cat = catalog_of(refs(&[a]));
+    let form = read(&store, &cat);
+    assert!(!form.fields().is_empty());
+
+    // 2: Mixed `/Kids` (named field kid alongside nameless widget kid, in both orders)
+    // keeps every widget on a terminal field.
+    for reversed in [false, true] {
+        let mut store = Store::default();
+        let parent = store.reserve();
+        let named = store.put(dict! {
+            "T" => Object::text("sub"),
+            "Parent" => parent,
+            "V" => Object::text("own"),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => rect(),
+        });
+        let nameless = store.put(dict! {
+            "Parent" => parent,
+            "Subtype" => Object::name("Widget"),
+            "Rect" => rect(),
+        });
+        let kids = if reversed {
+            refs(&[nameless, named])
+        } else {
+            refs(&[named, nameless])
+        };
+        store.set(
+            parent,
+            dict! {
+                "T" => Object::text("top"),
+                "FT" => Object::name("Tx"),
+                "V" => Object::text("inherited"),
+                "Kids" => kids,
+            },
+        );
+        let cat = catalog_of(refs(&[parent]));
+        let form = read(&store, &cat);
+        assert!(!form.fields()[0].is_terminal());
+        assert!(form.fields()[0].widgets().is_empty());
+        let mut got: Vec<_> = form
+            .terminals()
+            .map(|(i, f)| {
+                assert_eq!(f.widgets().len(), 1);
+                (
+                    form.full_name(i).unwrap(),
+                    f.kind(),
+                    match f.value() {
+                        Some(FieldValue::Text(s)) => s.clone(),
+                        other => panic!("unexpected value {other:?}"),
+                    },
+                )
+            })
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            vec![
+                ("top".into(), Some(FieldKind::Text), "inherited".into()),
+                ("top.sub".into(), Some(FieldKind::Text), "own".into()),
+            ]
+        );
+    }
+}
+
+#[test]
+fn shared_indirect_value_array_decodes_and_reports_faults_once() {
+    let mut store = Store::default();
+    let mut arr: Vec<Object> = (0..512)
+        .map(|i| Object::text(&format!("item-{i}")))
+        .collect();
+    arr.push(Object::from(42));
+    let shared_v = store.put(arr);
+    let fields: Vec<ObjectId> = (0..256)
+        .map(|i| {
+            store.put(dict! {
+                "T" => Object::text(&format!("f{i}")),
+                "FT" => Object::name("Ch"),
+                "V" => shared_v,
+            })
+        })
+        .collect();
+    let catalog = catalog_of(refs(&fields));
+    let (form, faults) = read_told(&store, &catalog, &Limits::DEFAULT);
+    assert_eq!(form.fields().len(), 256);
+    for f in form.fields() {
+        let Some(FieldValue::Items(items)) = f.value() else {
+            panic!("expected shared items");
+        };
+        assert_eq!(items.len(), 512);
+    }
+    // The one wrong-typed element in `shared_v` is reported once, not 256 times.
+    assert_eq!(faults, [Fault::WrongType { key: "V" }]);
 }
 
 #[test]
