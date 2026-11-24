@@ -1114,15 +1114,15 @@ fn forms_press_answers_read() {
     assert!(read > 0, "no forms-press case");
 }
 
-/// Every case is of a kind a test compares to what the crate does, or of a
-/// kind and a start of its name in `COMPARED`; and each line there has a
-/// case.
+/// Every case is of a kind a test compares to what the crate does (`fonts`,
+/// the read-back cases, `written::read_back_cases_agree`'s), or of a kind and
+/// a start of its name in `COMPARED`; and each line there has a case.
 #[test]
 fn every_case_is_compared() {
     let cases = read_tsv::<3>("cases.tsv");
     let mut compared = vec![0; COMPARED.len()];
     for [name, kind, _] in &cases {
-        if kind == "forms" || kind == "forms-ap" || kind == "forms-press" {
+        if kind == "forms" || kind == "forms-ap" || kind == "forms-press" || kind == "fonts" {
             continue;
         }
         let line = COMPARED
