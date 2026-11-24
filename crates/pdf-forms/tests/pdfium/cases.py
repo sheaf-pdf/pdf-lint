@@ -1,5 +1,7 @@
-"""pdf-forms's PDFium oracle cases: `forms`, how PDFium reads the field tree,
-and `forms-ap`, the appearance PDFium makes for a text field that has none.
+"""pdf-forms's PDFium oracle cases: `forms`, how PDFium reads the field tree;
+`forms-ap`, the appearance PDFium makes for a text field that has none; and
+`forms-ap-all` and `forms-press`, every appearance PDFium makes for a button
+or a choice field that has none, and its widgets' states after a press.
 
 Written using Python's standard library alone; `oracle/pdfium.py cases --write`
 materializes `cases/*.pdf` and `cases.tsv`, and `oracle/pdfium.py record`
@@ -262,6 +264,7 @@ def cases():
 
     ap_cases()
     written()
+    button_choice_cases()
     return list(ROWS)
 
 
@@ -420,6 +423,403 @@ LONG = b"Hello this is a very long line of text for a small box"
 PARAGRAPH = (b"one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
              b" seventeen")
 MULTILINE, PASSWORD, DO_NOT_SCROLL, COMB = b"/Ff 4096", b"/Ff 8192", b"/Ff 8388608", b"/Ff 16777216"
+
+
+# `forms-ap-all`: a button or a choice field with no /AP, every appearance
+# PDFium makes for it; `forms-press`: the same with its widgets' states and
+# its value after a press, the pressed widget's index in the case's `.press`
+# file. Each is laid out as `ap` lays out a `forms-ap` case.
+RADIO, PUSH, COMBO = b"/Ff 49152", b"/Ff 65536", b"/Ff 131072"
+
+
+def widget_of(entries, rect=b"[10 10 24 24]"):
+    """A field's merged widget: `entries` its own, at `rect`."""
+    return entries + b" " + WIDGET + b" /Rect " + rect
+
+
+def as_kind(kind, **more):
+    """The case `ap` added last, made a case of `kind`, with the files
+    `more` gives beside its own."""
+    name, _, files = ROWS.pop()
+    files.update(more)
+    ROWS.append((name, kind, files))
+
+
+def button_choice_cases():
+    # A check box and a radio button, each its mark named by /MK /CA in
+    # ZapfDingbats (a check, a circle), a border and a background.
+    ap("btn-check", [widget_of(b"/FT /Btn /DA (/ZaDb 0 Tf 0 g) /MK << /CA (4) /BC [0] /BG [1] >>")])
+    as_kind("forms-ap-all")
+    ap("btn-radio", [widget_of(b"/FT /Btn " + RADIO + b" /DA (/ZaDb 0 Tf 0 g) /MK << /CA (l) /BC [0] /BG [1] >>")])
+    as_kind("forms-ap-all")
+    # A push button whose highlighting is a push: its rollover and down
+    # appearances beside its normal one, the down one with a caption of its
+    # own.
+    ap("push-caption", [widget_of(b"/FT /Btn " + PUSH + b" /H /P /DA (/Helv 10 Tf 0 g) /MK << /CA (Push) /AC (Down)"
+                                  b" /BC [0] /BG [0.75] >> " + bs(b"1", b"B"), b"[10 10 70 30]")])
+    as_kind("forms-ap-all")
+    # A combo box showing the label of the option its value is; a list box
+    # with its value's option highlighted, more options than it shows.
+    ap("combo-label", [widget_of(b"/FT /Ch " + COMBO + b" /DA (/Helv 10 Tf 0 g) /Opt [[(e1) (Label one)]"
+                                 b" [(e2) (Label two)]] /V (e2) /MK << /BC [0] >>", BOX)])
+    as_kind("forms-ap-all")
+    ap("list-select", [widget_of(b"/FT /Ch /DA (/Helv 10 Tf 0 g) /Opt [(alpha) (bravo) (charlie) (delta)]"
+                                 b" /V (bravo) /MK << /BC [0] >>", b"[10 10 90 50]")])
+    as_kind("forms-ap-all")
+    # A radio group of three widgets, each its own state, the first on;
+    # the second pressed.
+    on = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"0 g 5 5 10 10 re f")
+    off = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"")
+    ap("press-radio",
+       [b"<< /Parent 50 0 R /AS /%s /AP << /N << /%d 51 0 R /Off 52 0 R >> >> /MK << /BC [0] >> "
+        % (b"1" if i == 0 else b"Off", i + 1) + WIDGET + b" /Rect [%d 10 %d 30] >>" % (10 + 30 * i, 30 + 30 * i)
+        for i in range(3)],
+       fonts=[], fields=b"50 0 R",
+       objs={50: b"<< /T (group) /FT /Btn " + RADIO + b" /V /1 /Kids [5 0 R 6 0 R 7 0 R] >>", 51: on, 52: off})
+    as_kind("forms-press", press=b"1")
+    press_cases()
+    toggle_cases()
+    push_cases()
+    choice_cases()
+
+
+def press(name, ff, kids, value=b"", opt=b"", presses=b"0"):
+    """A `forms-press` case laid out as `press-radio`: a button field of /Ff
+    `ff`, object 50, with `value` and `opt` its own entries, and a widget for
+    each of `kids`, its /AS and the name of its normal appearance's on state
+    (None for no /AP), from the left; `presses` the widgets pressed in
+    turn."""
+    on = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"0 g 5 5 10 10 re f")
+    off = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"")
+    widgets = []
+    for i, (state, own) in enumerate(kids):
+        states = b" /AP << /N << /" + own + b" 51 0 R /Off 52 0 R >> >>" if own else b""
+        widgets.append(b"<< /Parent 50 0 R /AS /" + state + states + b" /MK << /BC [0] >> " + WIDGET
+                       + b" /Rect [%d 10 %d 30] >>" % (10 + 30 * i, 30 + 30 * i))
+    refs = b" ".join(b"%d 0 R" % (5 + i) for i in range(len(kids)))
+    field = b"<< /T (group) /FT /Btn /Ff %d " % ff + value + opt + b"/Kids [" + refs + b"] >>"
+    ap(name, widgets, fonts=[], fields=b"50 0 R", objs={50: field, 51: on, 52: off})
+    as_kind("forms-press", press=presses)
+
+
+def press_cases():
+    radio, no_toggle, unison = 32768, 16384, 33554432
+    # A radio button pressed while on, with NoToggleToOff and without; and
+    # one pressed while off, without.
+    three = [(b"1", b"1"), (b"Off", b"2"), (b"Off", b"3")]
+    press("press-radio-on", radio | no_toggle, three, b"/V /1 ", presses=b"0")
+    press("press-radio-on-toggles", radio, three, b"/V /1 ", presses=b"0")
+    press("press-radio-off-toggles", radio, three, b"/V /1 ", presses=b"1")
+    # Radio buttons of one on state, in unison and not.
+    same = [(b"Off", b"1"), (b"Off", b"2"), (b"Off", b"1")]
+    press("press-radio-unison", radio | unison, same, presses=b"2")
+    press("press-radio-not-unison", radio, same, presses=b"2")
+    # Radio buttons of on states named On, spouse and Choice1, two pressed.
+    named = [(b"On", b"On"), (b"Off", b"spouse"), (b"Off", b"Choice1")]
+    press("press-named-states", radio, named, b"/V /On ", presses=b"2 1")
+    # Check boxes of one on state go together, on and off; check boxes of
+    # distinct on states act as radio buttons, and may all be off; one
+    # pressed twice; two with no /AP, whose states PDFium makes as Yes.
+    press("press-check-together", 0, [(b"Off", b"Yes"), (b"Off", b"Yes")], presses=b"0")
+    press("press-check-together-off", 0, [(b"Yes", b"Yes"), (b"Yes", b"Yes")], b"/V /Yes ", presses=b"1")
+    press("press-check-distinct", 0, [(b"a", b"a"), (b"Off", b"b"), (b"Off", b"c")], b"/V /a ", presses=b"1")
+    press("press-check-distinct-off", 0, [(b"a", b"a"), (b"Off", b"b")], b"/V /a ", presses=b"0")
+    press("press-check-twice", 0, [(b"Off", b"Yes")], presses=b"0 0")
+    press("press-no-ap", 0, [(b"Off", None), (b"Off", None)], presses=b"0")
+    # /Opt's export values: check boxes of two widgets of one export value,
+    # told apart by their indexes, one turned on and one off; radio buttons,
+    # in unison and not; check boxes whose states have names of their own.
+    opt = b"/Opt [(apple) (pear) (apple)] "
+    by_index = [(b"Off", b"0"), (b"Off", b"1"), (b"Off", b"2")]
+    first_on = [(b"0", b"0"), (b"Off", b"1"), (b"Off", b"2")]
+    press("press-opt-check", 0, by_index, opt=opt, presses=b"0")
+    press("press-opt-check-off", 0, first_on, b"/V /0 ", opt, presses=b"0")
+    press("press-opt-radio", radio, first_on, b"/V /0 ", opt, presses=b"1")
+    press("press-opt-radio-unison", radio | unison, by_index, opt=opt, presses=b"0")
+    press("press-opt-own-names", 0, [(b"Off", b"x"), (b"Off", b"y")], opt=b"/Opt [(a) (b)] ", presses=b"1")
+    # An /Opt shorter than its widgets: two check boxes of one on state, the
+    # second with no entry, which don't go together, either pressed; and an
+    # empty /Opt over two with no /AP, whose states PDFium makes by index.
+    short = [(b"Off", b"a"), (b"Off", b"a")]
+    press("press-opt-short", 0, short, opt=b"/Opt [(a)] ", presses=b"0")
+    press("press-opt-short-past", 0, short, opt=b"/Opt [(a)] ", presses=b"1")
+    press("press-opt-empty", 0, [(b"Off", None), (b"Off", None)], opt=b"/Opt [] ", presses=b"0")
+
+
+def at(i, w=12, h=12, cols=8):
+    """The `/Rect` of the `i`th widget of a grid, `w` by `h`, 60 apart."""
+    x, y = 10 + 60 * (i % cols), 10 + 60 * (i // cols)
+    return b"[%d %d %s %s]" % (x, y, b"%g" % (x + w), b"%g" % (y + h))
+
+
+def toggle(ff, rest, i, w=12, h=12):
+    """A check box's or radio button's merged widget: /Ff `ff`, `rest` its
+    other entries, the `i`th of a grid."""
+    return widget_of(b"/FT /Btn /Ff %d " % ff + rest, at(i, w, h))
+
+
+def toggle_cases():
+    check, radio = 0, 49152
+    # Each mark a caption names, and none (the default) and 6 (a glyph
+    # PDFium has no shape for), in a check box and a radio button, at three
+    # boxes, a black border of 1 on white.
+    captions = [None, b"4", b"8", b"H", b"l", b"n", b"u", b"6"]
+    boxes = [(12, 12), (20, 20), (14, 20)]
+    for word, ff in (("check", check), ("radio", radio)):
+        widgets = []
+        for caption in captions:
+            for w, h in boxes:
+                ca = b"/CA (" + caption + b") " if caption else b""
+                widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << " + ca + b"/BC [0] /BG [1] >>",
+                                      len(widgets), w, h))
+        ap("btn-marks-" + word, widgets)
+        as_kind("forms-ap-all")
+    # Each border style, with a background and without: none (a width of 0),
+    # solid, beveled, inset, dashed, underline; with a check mark, with the
+    # default mark (a radio button's round frame), and with none but the
+    # frame drawn (no border color).
+    styles = [(None, None), (b"S", b"1"), (b"B", b"2"), (b"I", b"1"), (b"D", b"1"), (b"U", b"1"), (b"B", b"1")]
+    for word, ff, captions in (("check", check, [b"4", None]), ("radio", radio, [None, b"4"])):
+        widgets = []
+        for caption in captions:
+            for style, width in styles:
+                for bg in (b"", b"/BG [0.9] "):
+                    ca = b"/CA (" + caption + b") " if caption else b""
+                    bc = b"/BC [0] " if style else b""
+                    bs = b" /BS << /W %s /S /%s >>" % (width, style) if style else b" /BS << /W 0 >>"
+                    widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << " + ca + bc + bg + b">>" + bs,
+                                          len(widgets), 16, 16))
+        # Beveled and inset with no border color: the bands alone.
+        for style in (b"B", b"I"):
+            widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << /BG [0.5] >> /BS << /W 1 /S /%s >>" % style,
+                                  len(widgets), 16, 16))
+        ap("btn-borders-" + word, widgets)
+        as_kind("forms-ap-all")
+    # Turned: a check, a circle and a cross, a quarter, a half and three
+    # quarters, in a box 14 by 20.
+    widgets = []
+    for ff, caption in ((check, b"4"), (radio, b"l"), (check, b"8")):
+        for r in (b"90", b"180", b"270"):
+            widgets.append(toggle(ff, b"/DA (/ZaDb 0 Tf 0 g) /MK << /CA (" + caption + b") /R " + r
+                                  + b" /BC [0] /BG [1] >>", len(widgets), 14, 20))
+    ap("btn-rotate", widgets)
+    as_kind("forms-ap-all")
+    # /DA's colors (gray, RGB, CMYK, none), and its size: 8 (the mark drawn
+    # at it), 0, and no /DA at all; a background in RGB and CMYK, whose down
+    # appearance is each component less 0.25.
+    widgets = []
+    for ff in (check, radio):
+        for da, mk in ((b"/DA (/ZaDb 0 Tf 0.5 g)", b"/BG [1 0 0]"), (b"/DA (/ZaDb 0 Tf 0 0 1 rg)", b"/BG [0.1 0.2 0.3 0.4]"),
+                       (b"/DA (/ZaDb 0 Tf 0 0 0 1 k)", b""), (b"/DA (/ZaDb 8 Tf 0 g)", b""), (b"", b"")):
+            widgets.append(toggle(ff, da + b" /MK << /CA (n) /BC [0] " + mk + b" >>", len(widgets), 20, 20))
+    ap("btn-da", widgets)
+    as_kind("forms-ap-all")
+    # The on state's name a widget has, under /NeedAppearances, which makes
+    # PDFium make every widget's appearances anew: /1, /Yes, /On, /spouse,
+    # /Choice1, none of them with an Off of its own, the first on; with no
+    # colors, so nothing is drawn when they're off.
+    on = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 12 12] ", b"0 g 2 2 8 8 re f")
+    widgets = []
+    for i, name in enumerate((b"1", b"Yes", b"On", b"spouse", b"Choice1")):
+        state = name if i == 0 else b"Off"
+        widgets.append(toggle(check if i % 2 == 0 else radio, b"/DA (/ZaDb 0 Tf 0 g) /AS /" + state
+                              + b" /AP << /N << /" + name + b" 50 0 R >> >>", i))
+    ap("btn-states", widgets, form=b"/NeedAppearances true", objs={50: on})
+    as_kind("forms-ap-all")
+    # /Opt: check boxes and radio buttons of a field each, its kids with no
+    # /AP, named by their indexes; and under /NeedAppearances a check box
+    # field whose first kid has a name of its own, which PDFium names by its
+    # index all the same.
+    for word, ff in (("check", check), ("radio", radio)):
+        kids = [b"<< /Parent 50 0 R /MK << /CA (4) /BC [0] >> " + WIDGET + b" /Rect " + at(i) + b" >>"
+                for i in range(3)]
+        field = (b"<< /T (g) /FT /Btn /Ff %d /DA (/ZaDb 0 Tf 0 g) /Opt [(apple) (pear) (apple)]"
+                 b" /Kids [5 0 R 6 0 R 7 0 R] >>" % ff)
+        ap("btn-opt-" + word, kids, fields=b"50 0 R", objs={50: field})
+        as_kind("forms-ap-all")
+    kids = [b"<< /Parent 50 0 R /AS /Off /AP << /N << /mine 51 0 R >> >> /MK << /BC [0] >> " + WIDGET
+            + b" /Rect " + at(0) + b" >>",
+            b"<< /Parent 50 0 R /MK << /BC [0] >> " + WIDGET + b" /Rect " + at(1) + b" >>"]
+    field = b"<< /T (g) /FT /Btn /DA (/ZaDb 0 Tf 0 g) /Opt [(apple) (pear)] /Kids [5 0 R 6 0 R] >>"
+    ap("btn-opt-own-name", kids, fields=b"50 0 R", objs={50: field, 51: on}, form=b"/NeedAppearances true")
+    as_kind("forms-ap-all")
+    # The default resources' ZapfDingbats with an encoding of its own, whose
+    # code for a check mark draws a circle, and a /DA naming Helvetica: the
+    # mark drawn in ZapfDingbats as it's written by name all the same.
+    objects = {
+        5: b"<< /T (f0) " + toggle(check, b"/DA (/ZaEnc 0 Tf 0 g) /MK << /CA (4) /BC [0] >>", 0) + b" >>",
+        6: b"<< /T (f1) " + toggle(radio, b"/DA (/Helv 0 Tf 0 g) /MK << /BC [0] >>", 1) + b" >>",
+        60: std(b"ZapfDingbats", b" /Encoding << /Differences [52 /a71] >>"),
+        100: FONTS[b"Helv"][1],
+    }
+    acroform = b"<< /Fields [5 0 R 6 0 R] /DR << /Font << /ZaEnc 60 0 R /Helv 100 0 R >> >> >>"
+    ROWS.append(("btn-fonts", "forms-ap-all", {"pdf": build_doc(acroform, b"[5 0 R 6 0 R]", objects)}))
+
+
+def push(rest, i, w=50, h=20):
+    """A push button's merged widget, `rest` its other entries, the `i`th of
+    a grid of four a row."""
+    return widget_of(b"/FT /Btn /Ff 65536 " + rest, at(i, w, h, cols=4))
+
+
+def push_cases():
+    # /DA's sizes: automatic, 9, 12 in red, none at all (12 in a font PDFium
+    # adds), a color alone (automatic, the same font), Times; a caption wider
+    # than its box at 10 and automatic; no caption; the icon alone with no
+    # icon; turned a quarter.
+    widgets = []
+    for da in (b"/DA (/Helv 0 Tf 0 g)", b"/DA (/Helv 9 Tf 0 g)", b"/DA (/Helv 12 Tf 1 0 0 rg)", b"",
+               b"/DA (0 0 1 rg)", b"/DA (/TiRo 10 Tf 0 g)"):
+        widgets.append(push(da + b" /MK << /CA (Push me) /BC [0] /BG [0.75] >> /BS << /W 1 /S /B >>",
+                            len(widgets)))
+    for size in (b"10", b"0"):
+        widgets.append(push(b"/DA (/Helv " + size + b" Tf 0 g) /MK << /CA (A caption much wider than its box)"
+                            b" /BC [0] >>", len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /BC [0] /BG [1 1 0] >>", len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /CA (Hidden) /TP 1 /BC [0] >>", len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /CA (Turned) /R 90 /BC [0] >>", len(widgets), 20, 50))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /MK << /CA (Tall) >>", len(widgets), 50, 60))
+    ap("push-sizes", widgets)
+    as_kind("forms-ap-all")
+    # Highlighting: none, invert, outline, push and toggle; push with its
+    # rollover and down captions and without; each border style; a
+    # background in gray, RGB, CMYK and none, whose down appearance is each
+    # component less 0.25.
+    widgets = []
+    for h in (b"N", b"I", b"O", b"P", b"T"):
+        widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /" + h + b" /MK << /CA (Go) /BC [0] /BG [0.75] >>",
+                            len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Go) /RC (Over) /AC (Down) /BC [0] >>",
+                        len(widgets)))
+    widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Go) /RC () /BC [0] >>", len(widgets)))
+    for style, bg in ((b"B", b"[0.75]"), (b"I", b"[1 0 0]"), (b"S", b"[0.1 0.2 0.3 0.4]"), (b"D", None),
+                      (b"U", b"[0.5]"), (b"B", None)):
+        mk = b"/BG " + bg + b" " if bg else b""
+        widgets.append(push(b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Press) /BC [0 0 1] " + mk
+                            + b">> /BS << /W 1 /S /" + style + b" >>", len(widgets)))
+    ap("push-states", widgets)
+    as_kind("forms-ap-all")
+    # A /DA whose size is below 0, beside one of 0: PDFium sets no font and
+    # a size of 0 for it.
+    ap("push-size-negative", [push(b"/DA (/Helv " + size + b" Tf 0 g) /MK << /CA (Neg) /BC [0] >>", i)
+                              for i, size in enumerate((b"-10", b"0"))])
+    as_kind("forms-ap-all")
+
+
+def place(i, w, h, cols=4):
+    """The `/Rect` of the `i`th choice widget of a grid, `w` by `h`, its
+    cells 120 by 90."""
+    x, y = 10 + 120 * (i % cols), 10 + 90 * (i // cols)
+    return b"[%d %d %s %s]" % (x, y, b"%g" % (x + w), b"%g" % (y + h))
+
+
+def choice_cases():
+    edit, multiple = 262144, 2097152
+    # Combo boxes, 100 by 20 unless said: a value among pairs, its label
+    # shown; an editable one's value outside them; an automatic size; /I
+    # against /V and with it; /Q 1 and 2, which PDFium doesn't apply; each
+    # border style; no value; a label wider than its text box; a value
+    # outside the options of one that isn't editable; a /DA with no font;
+    # a value that is an array, its first item's option shown.
+    pairs = b"/Opt [[(e1) (Label one)] [(e2) (Label two)] [(e3) (Three)]]"
+    ab = b"/Opt [(a) (b)] /V (b)"
+    combos = [
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (e2) /MK << /BC [0] >>"),
+        (edit, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (typed) /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 0 Tf 0 g) " + pairs + b" /V (e2) /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (e2) /I [0]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (e1) /I [0]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /Q 1"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /Q 2"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [0] /BG [0.9] >> /BS << /W 1 /S /B >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [1 0 0] >> /BS << /W 2 /S /I >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [0] >> /BS << /W 1 /S /D >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + ab + b" /MK << /BC [0] >> /BS << /W 1 /S /U >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [(a) (b)] /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 0 1 rg) /Opt [(A long label that passes the box)]"
+            b" /V (A long label that passes the box)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V (outside)"),
+        (0, b"/DA (0 0 1 rg) " + pairs + b" /V (e3) /MK << /BG [1 1 0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + pairs + b" /V [(e2) (e1)]"),
+    ]
+    ap("combo-values", [widget_of(b"/FT /Ch /Ff %d " % (131072 | ff) + rest, place(i, 100, 20))
+                        for i, (ff, rest) in enumerate(combos)])
+    as_kind("forms-ap-all")
+    # Combo boxes narrower than their drop button, which then lies over
+    # the text box's left edge, the text box turned the right way round; too
+    # low for the triangle, and for the button's bands; turned a quarter, a
+    # half, and three quarters, over gray, RGB and CMYK backgrounds, beveled
+    # and inset.
+    boxes = [(12, 20, b""), (10, 20, b""), (40, 7, b""), (40, 5, b""), (5, 5, b""),
+             (20, 100, b"/MK << /R 90 /BC [0] /BG [0.75] >>"),
+             (100, 20, b"/MK << /R 180 /BC [0 0 1] /BG [1 0.9 0.9] >> /BS << /W 1 /S /B >>"),
+             (20, 100, b"/MK << /R 270 /BC [0] /BG [0.1 0.2 0.3 0.4] >> /BS << /W 1 /S /I >>")]
+    ap("combo-boxes", [widget_of(b"/FT /Ch /Ff 131072 /DA (/Helv 8 Tf 0 g) /Opt [(a) (Turned)] /V (%s) " % (
+        b"Turned" if more else b"a") + more, place(i, w, h)) for i, (w, h, more) in enumerate(boxes)])
+    as_kind("forms-ap-all")
+    # List boxes, 80 by 40 unless said, alpha to echo: one selected, its
+    # last lines below the box; two, by /I and /V and by /V alone; /I
+    # against /V; /TI 2 and 0, the selected line partly below; at size 0,
+    # which is 12; at 9 in blue, /Q 2; pairs; no options; beveled over gray;
+    # /Q 1; thirty options; a label wider than the box; an empty label; and
+    # turned a quarter.
+    abc = b"/Opt [(alpha) (bravo) (charlie) (delta) (echo)]"
+    lists = [
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo)"),
+        (multiple, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V [(alpha) (charlie)] /I [0 2]"),
+        (multiple, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V [(alpha) (charlie)]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (charlie) /I [1]"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo) /TI 2"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (delta) /TI 0"),
+        (0, b"/DA (/Helv 0 Tf 0 g) " + abc + b" /V (bravo)"),
+        (0, b"/DA (/Helv 9 Tf 0 0 1 rg) " + abc + b" /V (bravo) /Q 2"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [[(x1) (Ex one)] [(x2) (Ex two)]] /V (x2)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [] /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo) /MK << /BC [0] /BG [0.9] >> /BS << /W 1 /S /B >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (bravo) /Q 1 /MK << /BC [0] >>"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [" + b" ".join(b"(item %d)" % n for n in range(30)) + b"] /V (item 1)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [(A label much wider than its box) (b)] /V (b)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) /Opt [(alpha) () (charlie)] /V (charlie)"),
+        (0, b"/DA (/Helv 10 Tf 0 g) " + abc + b" /V (charlie) /MK << /R 90 /BC [0] >>"),
+    ]
+    ap("list-values", [widget_of(b"/FT /Ch /Ff %d " % ff + rest, place(i, 40 if i == 15 else 80, 80 if i == 15 else 40))
+                       for i, (ff, rest) in enumerate(lists)])
+    as_kind("forms-ap-all")
+    # List boxes with no value, or none that is text: /I alone, one index
+    # and two; a number in /I's place; /I beside a /V that is a name, and
+    # one that is an empty array; a default value alone.
+    ten = b"/DA (/Helv 10 Tf 0 g) "
+    lists = [
+        (0, ten + abc + b" /I [1]"),
+        (multiple, ten + abc + b" /I [0 2]"),
+        (0, ten + abc + b" /I 1"),
+        (0, ten + abc + b" /V /bravo /I [1]"),
+        (multiple, ten + abc + b" /V [] /I [1]"),
+        (0, ten + abc + b" /DV (bravo)"),
+    ]
+    ap("list-no-value", [widget_of(b"/FT /Ch /Ff %d " % ff + rest, place(i, 80, 40))
+                         for i, (ff, rest) in enumerate(lists)])
+    as_kind("forms-ap-all")
+    # A top index below 0, and past the options; a /DA size below 0.
+    lists = [
+        ten + abc + b" /V (bravo) /TI -1",
+        ten + abc + b" /V (bravo) /TI 9",
+        b"/DA (/Helv -10 Tf 0 g) " + abc + b" /V (bravo)",
+    ]
+    ap("list-odd", [widget_of(b"/FT /Ch " + rest, place(i, 80, 40)) for i, rest in enumerate(lists)])
+    as_kind("forms-ap-all")
+    # Combo boxes with no value: a default value alone, which PDFium
+    # shows; /I alone, an array and a number; and one with a value whose /DA
+    # size is below 0.
+    combos = [
+        ten + pairs + b" /DV (e3)",
+        ten + pairs + b" /I [1]",
+        ten + pairs + b" /I 1",
+        b"/DA (/Helv -10 Tf 0 g) " + pairs + b" /V (e2)",
+    ]
+    ap("combo-no-value", [widget_of(b"/FT /Ch /Ff 131072 " + rest, place(i, 100, 20))
+                          for i, rest in enumerate(combos)])
+    as_kind("forms-ap-all")
 
 
 def ap_cases():

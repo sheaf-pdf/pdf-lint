@@ -141,6 +141,21 @@ fn darkened(color: Color) -> Color {
     }
 }
 
+/// The shades a border's two bands are filled with, the top and left one's
+/// and the bottom and right one's: for [`BoxBorderStyle::Beveled`], white
+/// and `fill_hint` at half its brightness (a middle gray without a hint);
+/// for every other style, [`BoxBorderStyle::Inset`]'s middle and light gray.
+pub(crate) fn shades(style: BoxBorderStyle, fill_hint: Option<Color>) -> (Color, Color) {
+    if style == BoxBorderStyle::Beveled {
+        (
+            Color::Gray(1.0),
+            fill_hint.map_or(Color::Gray(0.5), darkened),
+        )
+    } else {
+        (Color::Gray(0.5), Color::Gray(0.75))
+    }
+}
+
 /// Whether a border of width `w` can be drawn in `rect`: `w` finite and above
 /// `0.0`, `rect` finite, and `rect` grown by `5.0 * w` finite too.
 fn border_drawable(rect: Rect, w: f32) -> bool {
@@ -437,7 +452,8 @@ impl Canvas {
                     let Some(inner) = inner else {
                         return;
                     };
-                    c.bands(outer, inner, border.style, fill_hint);
+                    let (top_left, bottom_right) = shades(border.style, fill_hint);
+                    c.bands(outer, inner, top_left, bottom_right);
                 });
             }
         }
@@ -454,8 +470,32 @@ impl Canvas {
     /// [`Canvas::box_border`] would draw no bands: a width or box it can't
     /// use, or a box narrower or shorter than four times the width. The
     /// fill color is set inside the scope, so the caller's graphics state is
-    /// as it was.
+    /// as it was. It's [`Canvas::box_bands_in`] in the style's shades.
     pub fn box_bands(&mut self, rect: Rect, border: &BoxBorder<'_>, fill_hint: Option<Color>) {
+        let (top_left, bottom_right) = shades(border.style, fill_hint);
+        self.box_bands_in(rect, border, top_left, bottom_right);
+    }
+
+    /// Draws the two bands of a [`BoxBorderStyle::Beveled`] or
+    /// [`BoxBorderStyle::Inset`] `border` inside `rect` as
+    /// [`Canvas::box_bands`] draws them, in shades the caller gives: the top
+    /// and left band filled with `top_left`, the bottom and right one with
+    /// `bottom_right`. For a box whose bands take other shades than its
+    /// style's, such as a button's down appearance, whose two shades change
+    /// places. Given the shades `box_bands` chooses, it writes what
+    /// `box_bands` writes, byte for byte.
+    ///
+    /// Nothing is drawn where [`Canvas::box_bands`] draws nothing: another
+    /// style, a width or box it can't use, or a box narrower or shorter than
+    /// four times the width. The fill color is set inside a `q`..`Q` scope
+    /// of the bands' own, so the caller's graphics state is as it was.
+    pub fn box_bands_in(
+        &mut self,
+        rect: Rect,
+        border: &BoxBorder<'_>,
+        top_left: Color,
+        bottom_right: Color,
+    ) {
         let w = border.width;
         let banded = matches!(
             border.style,
@@ -467,21 +507,13 @@ impl Canvas {
         let (Some(outer), Some(inner)) = (rect.inset(w, w), rect.inset(2.0 * w, 2.0 * w)) else {
             return;
         };
-        self.with_state(|c| c.bands(outer, inner, border.style, fill_hint));
+        self.with_state(|c| c.bands(outer, inner, top_left, bottom_right));
     }
 
     /// Fills a bevel's two mitered bands between `outer` and `inner`, with no
-    /// scope of their own: the top and left one, then the bottom and right
-    /// one, in `style`'s shades ([`Canvas::box_border`]).
-    fn bands(&mut self, outer: Rect, inner: Rect, style: BoxBorderStyle, fill_hint: Option<Color>) {
-        let (top_left, bottom_right) = if style == BoxBorderStyle::Beveled {
-            (
-                Color::Gray(1.0),
-                fill_hint.map_or(Color::Gray(0.5), darkened),
-            )
-        } else {
-            (Color::Gray(0.5), Color::Gray(0.75))
-        };
+    /// scope of their own: the top and left one in `top_left`, then the
+    /// bottom and right one in `bottom_right`.
+    fn bands(&mut self, outer: Rect, inner: Rect, top_left: Color, bottom_right: Color) {
         self.fill_color(top_left);
         self.polyline(
             &[

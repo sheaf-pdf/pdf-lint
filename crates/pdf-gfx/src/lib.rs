@@ -164,6 +164,8 @@ mod reader;
 mod state;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bands;
 mod text;
 #[cfg(feature = "text-layout")]
 mod wrap;

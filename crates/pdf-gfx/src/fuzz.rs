@@ -21,7 +21,9 @@
 //!    it can't use, and otherwise one balanced `q`..`Q` scope that interprets
 //!    without an error or a fault into at most three painted paths;
 //!    `Canvas::box_bands` draws the same bands, in a scope of their own, and
-//!    nothing for a style without them.
+//!    nothing for a style without them; `Canvas::box_bands_in` in the shades
+//!    `box_bands` chooses writes what it writes, and in shades taken from
+//!    the input the same bands, drawn exactly where those are.
 //! 7. Layout flags (`text-layout`): `layout_text` over the input's first bytes
 //!    with `TextBoxStyle::line_end_spaces` and `font_heights_as_given` each on
 //!    and off gives the same error or none, lines over the text in order with
@@ -376,6 +378,10 @@ fn check_box_border(data: &[u8]) {
     let width = next();
     let dash = [next(), next()];
     let hint = Color::Rgb([next(), next(), next()]);
+    let shades = [
+        Color::Gray(next()),
+        Color::Cmyk([next(), next(), next(), next()]),
+    ];
     let usable = width > 0.0 && width.is_finite() && rect.is_finite();
 
     let store: BTreeMap<ObjectId, Object> = BTreeMap::new();
@@ -416,6 +422,7 @@ fn check_box_border(data: &[u8]) {
             assert!(bytes.ends_with(&[filled, b"Q\n"].concat()));
             assert!(bytes.len() > bands.len());
         }
+        check_bands_in(rect, &border, Some(hint), shades, &bands);
 
         if bytes.is_empty() {
             continue;
@@ -447,6 +454,55 @@ fn check_box_border(data: &[u8]) {
         assert!(faults.is_empty(), "a written border reads without a fault");
         assert!(paths <= 3);
     }
+}
+
+/// Holds `Canvas::box_bands_in` to `bands`, what `Canvas::box_bands` drew
+/// for `border` in `rect` with `hint`: in the shades `box_bands` chooses,
+/// the same bytes; in `shades`, cut from the input, nothing exactly where
+/// `bands` is nothing, and else the same paths in a scope of their own.
+fn check_bands_in(
+    rect: Rect,
+    border: &BoxBorder<'_>,
+    hint: Option<Color>,
+    shades: [Color; 2],
+    bands: &[u8],
+) {
+    let (top_left, bottom_right) = crate::canvas::shades(border.style, hint);
+    let mut own = Canvas::new();
+    own.box_bands_in(rect, border, top_left, bottom_right);
+    let (own, needs) = own.finish(&Reserved::default());
+    assert!(needs.0.is_empty());
+    assert_eq!(
+        own, bands,
+        "box_bands is box_bands_in in the style's shades"
+    );
+
+    let mut given = Canvas::new();
+    given.box_bands_in(rect, border, shades[0], shades[1]);
+    let (given, needs) = given.finish(&Reserved::default());
+    assert!(needs.0.is_empty());
+    assert_eq!(
+        given.is_empty(),
+        bands.is_empty(),
+        "bands drawn where box_bands draws them"
+    );
+    // Every line but the two that set a fill color the same.
+    let paths = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        bytes
+            .split(|&b| b == b'\n')
+            .filter(|line| {
+                ![&b" g"[..], b" rg", b" k"]
+                    .iter()
+                    .any(|op| line.ends_with(op))
+            })
+            .map(<[u8]>::to_vec)
+            .collect()
+    };
+    assert_eq!(
+        paths(&given),
+        paths(bands),
+        "the same bands in other shades"
+    );
 }
 
 fn split_once_bytes<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<(&'a [u8], &'a [u8])> {

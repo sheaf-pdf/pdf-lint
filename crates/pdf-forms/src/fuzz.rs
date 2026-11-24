@@ -11,7 +11,60 @@
 //!    `Limits::fields`.
 //! 4. `Debug` formatting never panics on a `Form`, `Field`, `Widget`, or
 //!    `Fault`.
-//! 5. Appearances (`text-layout`): `appearance::text` over a text, flags,
+//! 5. Buttons and choices: for each field, `Field::options`, `selected`,
+//!    `selection`, and `top_index`, and for each widget `Widget::states`,
+//!    each alike under `&mut ()` and a `Vec` sink, within `Limits::items`
+//!    or refused for it, a selection sorted, each once, and of an option,
+//!    `Field::option_count` the options' count, and each widget's index its
+//!    place; for each check box and radio button field, `Field::group` alike
+//!    whatever the sink (none for any other field), its `/Opt` the field's,
+//!    and each of its widgets pressed from the states its `/AS` gives; and a
+//!    `group::Group` cut from the input (`check_group`), with `/Opt` or
+//!    without, each widget's on state and export value as the rules name
+//!    them, its widgets pressed in turn. Each press answers a state for each
+//!    widget and holds the group's rules: an off widget turned on with those
+//!    of its on state and export value in unison and alone out of it, every
+//!    other off; an on one off with those in unison with it, or a radio
+//!    button with NoToggleToOff left as it was; an index past the widgets
+//!    changing nothing. The value is the first on widget's on state, `Off`
+//!    with none, each `/AS` its widget's on state or `Off`, and no `Debug`
+//!    shows a state's name, an export value, or an option. With
+//!    `text-layout`, their appearances: `appearance::check_box`,
+//!    `radio_button` and `push_button` over a caption, a box, a border,
+//!    colors, a rotation, and a `/DA` cut from the input as
+//!    `check_appearance` cuts them (`check_buttons`), the push button in each
+//!    standard 14 font; and for each widget of the form's buttons,
+//!    `appearance::widget_toggle` or `widget_push`, alike under `&mut ()`
+//!    and a `Vec` sink, a toggle's on state its group's and nothing of
+//!    `/Opt` told for it, and `toggle_for_widget` or `push_for_widget`, which
+//!    make what `make` makes in their font and tell what reading the widget
+//!    and its font tells; any other field's refused (`Unmade::NotButton`).
+//!    Each is made the same twice; a caption past `Limits::text` and no box
+//!    are refused as they say, a character a font lacks told at its offset
+//!    in a caption; a toggle's `Off` is its on state's frame without the
+//!    mark, none where that paints nothing, and its on state has at most
+//!    the font it's given as its resource; each content's `q`/`Q` and
+//!    `BT`/`ET` balanced, no `/Tx`, its numbers finite, and in a standard 14
+//!    font it interprets with no error and no fault; and no `Debug` shows a
+//!    caption. And a choice field's: `appearance::combo_box` and `list_box`
+//!    over the same cut (`check_choices`), the text the combo box's, its
+//!    lines the list box's labels, the flags which are selected, `/MaxLen`
+//!    its top, in a standard 14 font the input's length picks; and for each
+//!    of the form's choice fields, `appearance::field_choice`, and for each
+//!    of its widgets `widget_choice` over it, each alike under `&mut ()` and
+//!    a `Vec` sink, nothing selected where the field has no value, and
+//!    `choice_for_widget`, which makes what `make` makes in its font and
+//!    tells what reading the field, the widget and its font tells; any
+//!    other field's refused (`Unmade::NotChoice`). Each is made the same twice; a text past
+//!    `Limits::text`, a list's lines from its top past `Limits::items` or
+//!    their bytes past `Limits::text`, and no box are refused as they say,
+//!    a character a font lacks told at its offset in the text or in its
+//!    option's label; each content's `q`/`Q`, one `/Tx BMC`/`EMC`, and
+//!    `BT`/`ET` balanced, its numbers finite, and in a standard 14 font it
+//!    interprets with no error and no fault; a list's lines no more than
+//!    its box less its border holds, from its top; and no `Debug` shows a
+//!    text or a label.
+//! 6. Appearances (`text-layout`): `appearance::text` over a text, flags,
 //!    `/MaxLen`, `/Q`, a box, a border, colors, a rotation, and a `/DA` cut
 //!    from the input (`check_appearance`), in each standard 14 font; and for
 //!    each widget of the form's text fields, `appearance::widget_text`, the
@@ -32,9 +85,9 @@
 //!    and `BT`/`ET` are balanced, whose every number is finite, whose
 //!    strings for a password are the font's `*` alone, and which, in a font
 //!    of the standard 14 the caller writes, interprets with no error and no
-//!    fault; no `Debug` of what's read or made, or of an error or a fault,
-//!    shows the text.
-//! 6. A fallback (`text-layout` and `embed`): where the input carries a
+//!    fault; no `Debug` of what's read or made, or of another error or a
+//!    fault, shows the text.
+//! 7. A fallback (`text-layout` and `embed`): where the input carries a
 //!    TrueType program after its text that `pdf_fonts::embed::Program::open`
 //!    opens, `appearance::text_with_fallback` draws the same text in each
 //!    standard 14 font and the program (`check_fallback`), made the same
@@ -81,6 +134,28 @@ pub const SEEDS: &[&[u8]] = &[
     // and a field whose font is a direct dictionary that holds a reference,
     // which no appearance's resources can name.
     b"<< /AcroForm << /Fields [1 0 R 2 0 R] /DR << /Font << /D << /Type /Font /Subtype /Type1 /BaseFont /Foo /FontDescriptor 3 0 R >> >> >> >> >>\xff<< /T (plain) /FT /Tx /V (no /DA) /Subtype /Widget /Rect [10 10 110 40] /MK << /R 270 /BG [0.5] /BC [1 0 0] >> /BS << /W 3 /S /I >> >>\xff<< /T (unbound) /FT /Tx /V (ab) /DA (/D 10 Tf) /Subtype /Widget /Rect [0 0 50 20] >>\xff<< /Type /FontDescriptor /FontName /Foo /Flags 32 /Ascent 700 /Descent -300 >>",
+    // Buttons: radio buttons in unison, one on and one with no `Off`; radio
+    // buttons with NoToggleToOff, of the names `On` and `spouse`; check boxes
+    // with `/Opt`, one named by its index, one by a name of its own, one with
+    // no appearance; and a push button with captions.
+    b"<< /AcroForm << /Fields [1 0 R 4 0 R 7 0 R 10 0 R] /DR << /Font << /ZaDb 13 0 R >> >> >> >>\xff<< /T (unison) /FT /Btn /Ff 33587200 /V /1 /Kids [2 0 R 3 0 R 14 0 R] >>\xff<< /Parent 1 0 R /Subtype /Widget /Rect [0 0 20 20] /AS /1 /AP << /N << /1 11 0 R /Off 12 0 R >> /D << /1 11 0 R /Off 12 0 R >> >> /MK << /CA (l) >> >>\xff<< /Parent 1 0 R /Subtype /Widget /Rect [30 0 50 20] /AS /Off /AP << /N << /2 11 0 R /Off 12 0 R >> >> /MK << /CA (8) >> >>\xff<< /T (radios) /FT /Btn /Ff 49152 /Kids [5 0 R 6 0 R] >>\xff<< /Parent 4 0 R /Subtype /Widget /Rect [0 30 20 50] /AS /On /AP << /N << /On 11 0 R /Off 12 0 R >> >> >>\xff<< /Parent 4 0 R /Subtype /Widget /Rect [30 30 50 50] /AS /Off /AP << /N << /spouse 11 0 R >> >> >>\xff<< /T (fruit) /FT /Btn /Opt [(apple) (pear) (apple)] /V /0 /Kids [8 0 R 9 0 R 15 0 R] >>\xff<< /Parent 7 0 R /Subtype /Widget /Rect [0 60 20 80] /AS /0 /AP << /N << /0 11 0 R /Off 12 0 R >> >> /MK << /CA (4) >> >>\xff<< /Parent 7 0 R /Subtype /Widget /Rect [30 60 50 80] /AS /Off /AP << /N << /a 11 0 R /Off 12 0 R >> >> >>\xff<< /T (push) /FT /Btn /Ff 65536 /H /P /Subtype /Widget /Rect [0 90 60 110] /DA (/Helv 0 Tf 0 g) /MK << /CA (Go) /RC (Over) /AC (Down) /TP 0 >> >>\xff<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] >>\nstream\n0 g 5 5 10 10 re f\xff<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] >>\nstream\n\xff<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>\xff<< /Parent 1 0 R /Subtype /Widget /Rect [60 0 80 20] /AS /Off /AP << /N << /1 11 0 R >> >> >>\xff<< /Parent 7 0 R /Subtype /Widget /Rect [60 60 80 80] /AS /Off >>",
+    // Choices: an editable combo box of pairs and a wrong item, its `/I`
+    // against its `/V`; and two list boxes that inherit `/Opt` and `/TI`,
+    // one of multiple selection whose `/I` agrees with its `/V`, one whose
+    // `/I` is a number.
+    b"<< /AcroForm << /Fields [1 0 R 2 0 R] /DA (/Helv 0 Tf 0 g) >> >>\xff<< /T (combo) /FT /Ch /Ff 393216 /Opt [[(e1) (Label one)] [(e2) (Label two)] 7] /V (e2) /I [0] /TI 1 /Subtype /Widget /Rect [0 0 100 20] >>\xff<< /T (lists) /FT /Ch /Opt 5 0 R /TI 2 /Kids [3 0 R 4 0 R] >>\xff<< /T (multi) /Parent 2 0 R /Ff 2097152 /V [(alpha) (charlie)] /I [0 2] /Subtype /Widget /Rect [0 30 80 70] >>\xff<< /T (single) /Parent 2 0 R /V (bravo) /I 1 /TI -1 /Subtype /Widget /Rect [0 80 80 120] >>\xff[(alpha) (bravo) (charlie) [(d) (delta)] /wrong]",
+    // `check_group`'s, each as it's cut. Radio buttons in unison with
+    // NoToggleToOff, `/1`, `/2`, `/1`, the first on, each pressed and one
+    // past them.
+    b"\x07\x03\x01\x03\x03\x04\x03\x00\x01\x02\x04",
+    // Check boxes of `/Opt [(apple) (pear) (apple)]` with no appearances,
+    // one state given for three.
+    b"\x00\x03\x00\x01\x08\x10\x08\x00\x02\x00\x01",
+    // Check boxes of four on states, all on, the second pressed twice.
+    b"\x00\x04\x0f\x04\x01\x02\x05\x06\x01\x01\x03\x00",
+    // Radio buttons in unison of one on state, `/1`, and the export values
+    // `apple`, `pear`, `apple`: the first and the third go together.
+    b"\x05\x03\x00\x03\x0b\x13\x0b\x00\x01\x02",
     // `check_appearance`'s, each as it's cut, which a test holds. A single
     // line at an automatic size in a box 100 by 20, its border solid, 1 wide,
     // in black: `/Helv 0 Tf 0 g`, `Hello #1`.
@@ -116,6 +191,11 @@ pub fn check(data: &[u8]) {
 
     let parsed = Parsed::of(data);
     read(parsed.objects(), &parsed.catalog);
+    check_group(data);
+    #[cfg(feature = "text-layout")]
+    check_buttons(data);
+    #[cfg(feature = "text-layout")]
+    check_choices(data);
 }
 
 /// A catalog and objects 1, 2, … split on `0xFF` and parsed, the first 24
@@ -246,6 +326,11 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
             let _ = form.font(objects, name, &limits);
         }
         let _ = (form.has_xfa(), form.quadding(), form.sig_flags());
+        buttons_and_choices(objects, &form, rules, &limits);
+        #[cfg(feature = "text-layout")]
+        widget_buttons(objects, &form, rules, &limits);
+        #[cfg(feature = "text-layout")]
+        widget_choices(objects, &form, rules, &limits);
 
         #[cfg(feature = "text-layout")]
         widget_appearances(objects, &form, rules, &limits);
@@ -871,7 +956,6 @@ fn interprets<'a, R: Resolve<'a> + Streams + Copy>(
 /// does (one other than a letter, a digit, a space, and the punctuation of
 /// numbers, lists, and structs), so a text of `0` or `bbox` isn't taken for
 /// one shown.
-#[cfg(feature = "text-layout")]
 fn shows(debug: &str, text: &str) -> bool {
     let escaped: String = text.escape_debug().collect();
     let telling = escaped
@@ -963,7 +1047,12 @@ fn widget_appearances<'o, R: Resolve<'o> + Streams + Copy>(
                 "text_for_widget tells what reading the widget and its font tell"
             );
             if let Ok(read) = &read {
-                let shown = format!("{read:?} {faults:?} {made:?}");
+                let mut shown = format!("{read:?} {faults:?}");
+                for m in &made {
+                    if !matches!(m, Err(Unmade::Unencodable(_))) {
+                        shown.push_str(&format!(" {m:?}"));
+                    }
+                }
                 assert!(!shows(&shown, read.field().text), "a widget's text shown");
             }
             for made in made {
@@ -1079,6 +1168,983 @@ fn same_font(
         _ => panic!("a sink changed whether a font was read"),
     }
 }
+
+/// Reads each field's options, selected indexes, selection, and top index,
+/// and each widget's states, alike whatever the sink, and presses every
+/// widget of each check box and radio button field, as the module's docs
+/// list.
+fn buttons_and_choices<'o, R: Resolve<'o> + Copy>(
+    objects: R,
+    form: &Form<'o>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    use crate::FieldKind;
+
+    for field in form.fields() {
+        let quiet = field.options(objects, rules, limits);
+        let mut faults: Vec<(Place, Fault)> = Vec::new();
+        let told = field.options_with(objects, rules, limits, &mut faults);
+        assert_eq!(quiet, told, "a sink changed a field's options");
+        if let Ok(options) = &told {
+            assert!(options.len() <= limits.items, "options past the cap");
+            // An array's items each keep their place; anything else is none.
+            match field.option_count(objects, rules, limits) {
+                Ok(Some(count)) => assert_eq!(count, options.len(), "/Opt's count"),
+                Ok(None) => assert!(options.is_empty(), "options of no array"),
+                Err(_) => panic!("/Opt read, and its count refused"),
+            }
+            for option in options {
+                let shown = format!("{option:?} {told:?}");
+                assert!(!shows(&shown, &option.export), "an option shown");
+                assert!(!shows(&shown, option.label()), "an option's label shown");
+            }
+        }
+
+        let quiet = field.selected(objects, rules, limits);
+        let told_selected = field.selected_with(objects, rules, limits, &mut faults);
+        assert_eq!(quiet, told_selected, "a sink changed a field's /I");
+        if let Ok(selected) = &told_selected {
+            assert!(selected.len() <= limits.items, "/I past the cap");
+        }
+
+        let quiet = field.selection(objects, rules, limits);
+        let selection = field.selection_with(objects, rules, limits, &mut faults);
+        assert_eq!(quiet, selection, "a sink changed a field's selection");
+        match (&selection, &told, &told_selected) {
+            (Ok(selection), Ok(options), Ok(_)) => {
+                assert!(
+                    selection.windows(2).all(|w| w[0] < w[1]),
+                    "a selection unsorted or repeated"
+                );
+                assert!(
+                    selection.iter().all(|&i| i < options.len()),
+                    "a selection of no option"
+                );
+            }
+            (Ok(_), _, _) => panic!("a selection made of options or /I unread"),
+            (Err(_), _, _) => assert!(told.is_err() || told_selected.is_err()),
+        }
+        let _ = (field.top_index(), format!("{faults:?}"));
+
+        for (index, widget) in field.widgets().iter().enumerate() {
+            assert_eq!(widget.index(), index, "a widget's index is its place");
+            let quiet = widget.states(objects, rules, limits);
+            let mut faults: Vec<(Place, Fault)> = Vec::new();
+            let told = widget.states_with(objects, rules, limits, &mut faults);
+            assert_eq!(quiet, told, "a sink changed a widget's states");
+            if let Ok(states) = &told {
+                assert!(
+                    states
+                        .on_state
+                        .as_deref()
+                        .is_none_or(|n| !n.is_empty() && n != b"Off"),
+                    "an on state of no name, or Off"
+                );
+                let shown = format!("{states:?}");
+                for name in [&states.on_state, &states.state].into_iter().flatten() {
+                    assert!(
+                        !shows(&shown, &String::from_utf8_lossy(name)),
+                        "a state shown"
+                    );
+                }
+            }
+        }
+
+        let quiet = field.group(objects, rules, limits);
+        let mut faults: Vec<(Place, Fault)> = Vec::new();
+        let told = field.group_with(objects, rules, limits, &mut faults);
+        let (quiet, told) = match (quiet, told) {
+            (Ok(quiet), Ok(told)) => (quiet, told),
+            (Err(quiet), Err(told)) => {
+                assert_eq!(quiet, told);
+                continue;
+            }
+            _ => panic!("a sink changed whether a group was read"),
+        };
+        assert_eq!(format!("{quiet:?}"), format!("{told:?}"));
+        let toggle = matches!(field.kind(), Some(FieldKind::CheckBox | FieldKind::Radio));
+        assert_eq!(told.is_some(), toggle, "a group of a field of no toggles");
+        let (Some(quiet), Some(told)) = (quiet, told) else {
+            continue;
+        };
+        assert_eq!(quiet.states(), told.states());
+        let group = told.group();
+        let widgets = field.widgets().len();
+        assert_eq!(
+            group.widgets.len(),
+            widgets,
+            "a group of the field's widgets"
+        );
+        assert_eq!(
+            Ok(group.has_opt),
+            field
+                .option_count(objects, rules, limits)
+                .map(|n| n.is_some()),
+            "a group's /Opt is its field's"
+        );
+        assert_eq!(told.states().len(), widgets, "a state for each widget");
+        for index in 0..=widgets {
+            let after = group.press(told.states(), index);
+            holds_press(&group, told.states(), index, &after);
+        }
+        for widget in group.widgets {
+            let shown = format!("{group:?} {widget:?} {told:?}");
+            for text in [
+                widget.export.as_deref(),
+                widget
+                    .on_state
+                    .as_deref()
+                    .map(|n| std::str::from_utf8(n).unwrap_or_default()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(!shows(&shown, text), "a group's name or export value shown");
+            }
+        }
+    }
+}
+
+/// The names [`check_group`] gives a widget's on state, by three bits.
+const GROUP_NAMES: [Option<&[u8]>; 8] = [
+    None,
+    Some(b"Yes"),
+    Some(b"On"),
+    Some(b"1"),
+    Some(b"2"),
+    Some(b"spouse"),
+    Some(b"Choice1"),
+    Some(b"Off"),
+];
+
+/// The export values [`check_group`] gives a widget, by three bits.
+const GROUP_EXPORTS: [Option<&str>; 8] = [
+    None,
+    Some("apple"),
+    Some("pear"),
+    Some(""),
+    Some("Yes"),
+    Some("spouse"),
+    Some("1"),
+    Some("caf\u{e9}"),
+];
+
+/// Cuts `data` into a check box or radio button group and presses its
+/// widgets in turn, each press holding the group's rules ([`holds_press`]),
+/// each byte missing `0`:
+///
+/// - byte 0: bit 0, radio buttons (else check boxes); bit 1, NoToggleToOff;
+///   bit 2, RadiosInUnison; bit 3, a field with `/Opt`.
+/// - byte 1: the widgets, modulo 9; byte 2, their states before, a bit
+///   each; byte 3: how many of those states are given, modulo 10, so fewer
+///   or more than the widgets.
+/// - a byte for each widget: bits 0 to 2 its on state's name, bits 3 to 5
+///   its export value ([`GROUP_NAMES`], [`GROUP_EXPORTS`]).
+/// - after them, up to 16 presses, each a widget's index modulo two more
+///   than the widgets, so past them too.
+pub fn check_group(data: &[u8]) {
+    use std::borrow::Cow;
+
+    use crate::group::{Group, GroupKind, GroupWidget};
+
+    let byte = |at: usize| data.get(at).copied().unwrap_or(0);
+    let flags = byte(0);
+    let count = usize::from(byte(1) % 9);
+    let widgets: Vec<GroupWidget<'_>> = (0..count)
+        .map(|i| {
+            let choice = byte(4 + i);
+            let mut widget = GroupWidget::new(GROUP_NAMES[usize::from(choice & 7)]);
+            widget.export = GROUP_EXPORTS[usize::from(choice >> 3 & 7)].map(Cow::Borrowed);
+            widget
+        })
+        .collect();
+    let kind = match flags & 1 {
+        0 => GroupKind::CheckBox,
+        _ => GroupKind::Radio,
+    };
+    let mut group = Group::new(kind, &widgets);
+    group.no_toggle_to_off = flags & 2 != 0;
+    group.in_unison = flags & 4 != 0;
+    group.has_opt = flags & 8 != 0;
+    for index in 0..count {
+        // What `/Opt` gives a widget of no entry, or an empty one.
+        let under_opt = group.has_opt || widgets[index].export.is_some();
+        let export = group.export_value(index).expect("a widget's export value");
+        match widgets[index].export.as_deref() {
+            Some(own) if !own.is_empty() => assert_eq!(export, own),
+            _ if under_opt => assert_eq!(export, "Yes"),
+            _ => assert_eq!(
+                export.as_bytes(),
+                &*group.on_state(index).expect("a widget's on state")
+            ),
+        }
+        let own = GROUP_NAMES[usize::from(byte(4 + index) & 7)].filter(|name| *name != b"Off");
+        let expected = crate::group::on_state_name(own, under_opt, index);
+        assert_eq!(group.on_state(index), Some(expected), "a widget's on state");
+    }
+    let given = usize::from(byte(3) % 10);
+    let mut states: Vec<bool> = (0..given).map(|i| byte(2) >> (i % 8) & 1 != 0).collect();
+    let presses = data.get(4 + count..).unwrap_or_default();
+    for &press in presses.iter().take(16) {
+        let index = usize::from(press) % (count + 2);
+        let after = group.press(&states, index);
+        assert_eq!(after, group.press(&states, index), "a press made twice");
+        holds_press(&group, &states, index, &after);
+        states = after;
+    }
+    let shown = format!("{group:?} {widgets:?}");
+    for word in ["spouse", "Choice1", "apple", "pear", "caf"] {
+        assert!(
+            !shown.contains(word),
+            "a group's name or export value shown"
+        );
+    }
+}
+
+/// Holds what the group's rules give of widget `index` pressed from
+/// `before` (`after`), and of the value, the export value, and the states'
+/// names after.
+fn holds_press(group: &crate::group::Group<'_>, before: &[bool], index: usize, after: &[bool]) {
+    use crate::group::GroupKind;
+
+    let count = group.widgets.len();
+    assert_eq!(after.len(), count, "a state for each widget");
+    let was: Vec<bool> = (0..count)
+        .map(|i| before.get(i).copied().unwrap_or(false))
+        .collect();
+    let together = |a: usize, b: usize| {
+        group.on_state(a) == group.on_state(b) && group.export_value(a) == group.export_value(b)
+    };
+    let unison = group.is_in_unison();
+    if index >= count {
+        assert_eq!(after, was, "a press past the widgets changed one");
+    } else if !was[index] {
+        for (i, &on) in after.iter().enumerate() {
+            assert_eq!(
+                on,
+                i == index || (unison && together(i, index)),
+                "a press turning on"
+            );
+        }
+        if !unison {
+            assert_eq!(
+                after.iter().filter(|&&on| on).count(),
+                1,
+                "out of unison, one on"
+            );
+        }
+    } else if group.kind == GroupKind::Radio && group.no_toggle_to_off {
+        assert_eq!(after, was, "NoToggleToOff, and a radio button turned off");
+    } else {
+        for (i, (&on, &was)) in after.iter().zip(&was).enumerate() {
+            let goes = i == index || (unison && together(i, index));
+            assert_eq!(on, was && !goes, "a press turning off");
+        }
+    }
+
+    let first = after.iter().position(|&on| on);
+    let value = group.value(after);
+    match first {
+        Some(first) => {
+            assert_eq!(Some(value.clone()), group.on_state(first));
+            assert_eq!(group.export(after), group.export_value(first));
+        }
+        None => {
+            assert_eq!(&*value, b"Off");
+            assert_eq!(group.export(after), None);
+        }
+    }
+    assert!(group.states_for(b"Off").iter().all(|&on| !on));
+    let named = group.states_for(&value);
+    assert_eq!(named.len(), count);
+    for (i, &on) in after.iter().enumerate() {
+        let name = group.state_name(i, on);
+        match on {
+            true => assert_eq!(Some(name), group.on_state(i)),
+            false => assert_eq!(&*name, b"Off"),
+        }
+        if named[i] {
+            assert_eq!(
+                group.on_state(i).as_deref(),
+                Some(&*value),
+                "states_for by another name"
+            );
+        }
+        let export = group.export_value(i).expect("a widget's export value");
+        let pressed = group
+            .states_for_export(&export)
+            .expect("a widget's own export value");
+        let found = (0..count).position(|j| group.export_value(j).as_deref() == Some(&*export));
+        assert_eq!(found.map(|j| pressed[j]), Some(true), "states_for_export");
+    }
+    assert_eq!(group.export_value(count), None);
+    assert_eq!(group.on_state(count), None);
+}
+
+/// Makes a check box's, a radio button's, and a push button's appearances
+/// from what `data` is cut into, as [`check_appearance`] cuts it (`Cut`):
+/// the text the caption, the rollover and down captions its halves, the
+/// push button in each standard 14 font; each made twice the same, and
+/// holding what the makers promise ([`toggle_holds`], [`push_holds`]).
+#[cfg(feature = "text-layout")]
+pub fn check_buttons(data: &[u8]) {
+    use pdf_fonts::Std14;
+
+    use crate::appearance::{
+        FieldFont, PushButton, ToggleButton, check_box, push_button, radio_button,
+    };
+
+    let cut = Cut::of(data);
+    let (look, limits) = (cut.look(), cut.limits());
+    let caption: &str = &cut.text;
+    let half = (0..=caption.len() / 2)
+        .rev()
+        .find(|&at| caption.is_char_boundary(at))
+        .unwrap_or(0);
+    let mut toggle = ToggleButton::new();
+    toggle.caption = Some(caption);
+    let zapf = FieldFont::standard(Std14::ZapfDingbats);
+    let res = zapf
+        .res()
+        .expect("a standard 14 font is named by its dictionary");
+    for make in [check_box, radio_button] {
+        let made = make(&toggle, &look, &cut.da, res.clone(), &limits);
+        assert_eq!(made, make(&toggle, &look, &cut.da, res.clone(), &limits));
+        toggle_holds(&look, caption, &limits, &res, &made);
+    }
+
+    let mut push = PushButton::new(caption);
+    push.rollover_caption = Some(&caption[..half]);
+    push.down_caption = Some(&caption[half..]);
+    push.pressed_states = data.first().is_some_and(|b| b & 1 != 0);
+    for font in faces() {
+        let layout = font.layout();
+        let res = font
+            .res()
+            .expect("a standard 14 font is named by its dictionary");
+        let made = push_button(&push, &look, &cut.da, res.clone(), &layout, &limits);
+        assert_eq!(
+            made,
+            push_button(&push, &look, &cut.da, res.clone(), &layout, &limits)
+        );
+        push_holds(&push, &look, &limits, &res, &made);
+    }
+}
+
+/// Holds what `appearance::check_box` and `radio_button` promise of
+/// `made`, made with `caption` in `look` under `limits` in the font `res`.
+#[cfg(feature = "text-layout")]
+fn toggle_holds(
+    look: &crate::appearance::WidgetLook<'_>,
+    caption: &str,
+    limits: &Limits,
+    res: &pdf_content_streams::Res,
+    made: &Result<crate::appearance::ToggleAppearances, crate::appearance::Unmade>,
+) {
+    let made = match made {
+        Ok(made) => made,
+        Err(err) => {
+            refused_as_said(look, caption.len() > limits.text, err);
+            assert!(
+                !shows(&format!("{err:?} {err}"), caption),
+                "an error shows a caption"
+            );
+            return;
+        }
+    };
+    assert!(caption.len() <= limits.text, "a caption past its cap");
+    assert!(boxed(look), "made in no box");
+    for (on, off) in [(&made.on, &made.off), (&made.down_on, &made.down_off)] {
+        button_content_holds(&on.content);
+        assert!(on.needs.0.len() <= 1, "one resource at most");
+        assert!(
+            on.needs.0.iter().all(|need| need.res == *res),
+            "the font given"
+        );
+        match off {
+            Some(off) => {
+                assert!(
+                    on.content.starts_with(&off.content),
+                    "Off the on state's frame"
+                );
+                assert!(!off.content.is_empty() && off.needs.0.is_empty());
+                assert_eq!((off.bbox, off.matrix), (on.bbox, on.matrix));
+                button_content_holds(&off.content);
+            }
+            // Nothing before the mark's scope.
+            None => assert!(on.content.is_empty() || on.content.starts_with(b"q\n")),
+        }
+        assert!(on.font_size.is_finite() && on.font_size >= 0.0);
+        interprets_alone(on);
+        if let Some(off) = off {
+            interprets_alone(off);
+        }
+    }
+    assert!(
+        !shows(&format!("{made:?}"), caption),
+        "an appearance shows a caption"
+    );
+}
+
+/// Holds what `appearance::push_button` promises of `made`, made of
+/// `button` in `look` under `limits` in the font `res`.
+#[cfg(feature = "text-layout")]
+fn push_holds(
+    button: &crate::appearance::PushButton<'_>,
+    look: &crate::appearance::WidgetLook<'_>,
+    limits: &Limits,
+    res: &pdf_content_streams::Res,
+    made: &Result<crate::appearance::PushAppearances, crate::appearance::Unmade>,
+) {
+    use crate::appearance::Unmade;
+
+    let captions = [
+        Some(button.caption),
+        button.rollover_caption,
+        button.down_caption,
+    ];
+    let past = captions.iter().flatten().any(|c| c.len() > limits.text);
+    let made = match made {
+        Ok(made) => made,
+        Err(Unmade::Unencodable(told)) => {
+            assert!(
+                captions.iter().flatten().any(|c| c
+                    .get(told.at..)
+                    .is_some_and(|c| c.starts_with(told.character))),
+                "a character told at its offset in a caption"
+            );
+            return;
+        }
+        Err(err) => {
+            refused_as_said(look, past, err);
+            assert!(
+                !shows(&format!("{err:?} {err}"), button.caption),
+                "an error shows a caption"
+            );
+            return;
+        }
+    };
+    assert!(!past, "a caption past its cap");
+    assert!(boxed(look), "made in no box");
+    assert_eq!(made.rollover.is_some(), button.pressed_states);
+    assert_eq!(made.down.is_some(), button.pressed_states);
+    for made in [
+        Some(&made.normal),
+        made.rollover.as_ref(),
+        made.down.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        button_content_holds(&made.content);
+        assert!(made.needs.0.len() <= 1, "one resource at most");
+        assert!(
+            made.needs.0.iter().all(|need| need.res == *res),
+            "the font given"
+        );
+        assert!(made.font_size.is_finite() && made.font_size >= 0.0);
+        interprets_alone(made);
+    }
+    assert!(
+        !shows(&format!("{made:?}"), button.caption),
+        "an appearance shows a caption"
+    );
+}
+
+/// Holds a button maker's refusal `err` of `look` to what it says: no box
+/// exactly where the box has no width or no height, a caption past its cap
+/// only where one is (`past`), a number not finite only where the box is.
+#[cfg(feature = "text-layout")]
+fn refused_as_said(
+    look: &crate::appearance::WidgetLook<'_>,
+    past: bool,
+    err: &crate::appearance::Unmade,
+) {
+    use crate::Cap;
+    use crate::appearance::Unmade;
+
+    match err {
+        Unmade::Limit(Cap::Text) => assert!(past, "refused for a cap not passed"),
+        Unmade::NoBox => assert!(!past && !boxed(look), "no box for a box"),
+        Unmade::NotFinite => assert!(!past && boxed(look), "not finite for no box"),
+        other => panic!("a maker of plain data refused with {other:?}"),
+    }
+}
+
+/// Whether `look`'s box has a width and a height.
+#[cfg(feature = "text-layout")]
+fn boxed(look: &crate::appearance::WidgetLook<'_>) -> bool {
+    let sized = |v: f32| v.is_finite() && v > 0.0;
+    sized(look.width) && sized(look.height)
+}
+
+/// Holds what a button's appearance's content promises, read as
+/// operations: `q`/`Q` and `BT`/`ET` balanced, no marked sequence, and
+/// every number finite.
+#[cfg(feature = "text-layout")]
+fn button_content_holds(content: &[u8]) {
+    use pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
+
+    let limits = ContentLimits::DEFAULT;
+    let (mut states, mut texts) = (0isize, 0isize);
+    for operation in operations(content, &ResCx::none(), &limits) {
+        let operation = operation.expect("a made appearance's content reads");
+        for operand in operation.operands() {
+            if operand.is_number() {
+                assert!(operand.number().is_finite(), "a number written not finite");
+            }
+            for element in operand.elements().filter(|e| e.is_number()) {
+                assert!(element.number().is_finite(), "a number written not finite");
+            }
+        }
+        match operation.name() {
+            b"q" => states += 1,
+            b"Q" => states -= 1,
+            b"BT" => texts += 1,
+            b"ET" => texts -= 1,
+            b"BMC" | b"BDC" | b"EMC" => panic!("a button's appearance in a marked sequence"),
+            _ => {}
+        }
+        assert!(states >= 0 && texts >= 0, "closed before it's opened");
+    }
+    assert_eq!((states, texts), (0, 0), "q/Q and BT/ET balanced");
+}
+
+/// `made`, whose font is a standard 14 font's dictionary, interpreted over
+/// no objects: with no error and no fault.
+#[cfg(feature = "text-layout")]
+fn interprets_alone(made: &crate::appearance::Appearance) {
+    let store: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let nothing = WithStreams::new(&store, |id: ObjectId, _: usize| {
+        Err(Unreadable::new(id, Why::Damaged, "no stream"))
+    });
+    let resources = resources(made);
+    if let Err(why) = interprets(nothing, made, &resources) {
+        panic!("a button's appearance in a standard 14 font interprets with {why}");
+    }
+}
+
+/// Reads each button widget of `form` for its appearances, alike whatever
+/// the sink, makes them in their font, and holds the conveniences to what
+/// they're made of, as the module's docs list.
+#[cfg(feature = "text-layout")]
+fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
+    objects: R,
+    form: &Form<'o>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    use pdf_fonts::Std14;
+
+    use crate::FieldKind;
+    use crate::appearance::{
+        FieldFont, Unmade, push_for_widget, toggle_for_widget, widget_push, widget_toggle,
+    };
+
+    for field in form.fields() {
+        let kind = field.kind();
+        let toggle = matches!(kind, Some(FieldKind::CheckBox | FieldKind::Radio));
+        let push = kind == Some(FieldKind::PushButton);
+        // Read once for the field: each widget's on state is held to it.
+        let group = field.group(objects, rules, limits);
+        for widget in field.widgets() {
+            let quiet = widget_toggle(field, widget, objects, rules, limits, &mut ());
+            let mut told: Vec<(Place, Fault)> = Vec::new();
+            let read = widget_toggle(field, widget, objects, rules, limits, &mut told);
+            assert_eq!(
+                format!("{quiet:?}"),
+                format!("{read:?}"),
+                "a sink changed a toggle"
+            );
+            if !toggle {
+                assert!(matches!(read, Err(Unmade::NotButton)));
+            }
+            if let Ok(read) = &read {
+                // What's wrong in `/Opt` is the field's to tell, once.
+                assert!(
+                    !told
+                        .iter()
+                        .any(|(_, fault)| matches!(fault, Fault::WrongType { key: "Opt" })),
+                    "a toggle told of /Opt"
+                );
+                if let Ok(Some(group)) = &group {
+                    assert_eq!(
+                        group.group().on_state(widget.index()).as_deref(),
+                        Some(read.on_state()),
+                        "a toggle's on state is its group's"
+                    );
+                }
+                let caption = read.button().caption.unwrap_or_default();
+                assert!(!shows(&format!("{read:?}"), caption), "a caption shown");
+                let mut faults = Vec::new();
+                let made =
+                    toggle_for_widget(form, field, widget, objects, rules, limits, &mut faults);
+                let made_quiet =
+                    toggle_for_widget(form, field, widget, objects, rules, limits, &mut ());
+                assert_eq!(format!("{made:?}"), format!("{made_quiet:?}"));
+                assert!(faults.starts_with(&told), "the reader's faults first");
+                if let Ok(made) = made {
+                    assert_eq!(made.on_state, read.on_state());
+                    let res = made.font.res().expect("a toggle's font is named");
+                    assert_eq!(read.make(res, limits).as_ref(), Ok(&made.appearances));
+                    let standard = FieldFont::standard(Std14::ZapfDingbats);
+                    if made.font.is_fallback() {
+                        assert_eq!(made.font.res(), standard.res());
+                    }
+                }
+            }
+
+            let quiet = widget_push(field, widget, objects, rules, limits, &mut ());
+            let mut told: Vec<(Place, Fault)> = Vec::new();
+            let read = widget_push(field, widget, objects, rules, limits, &mut told);
+            assert_eq!(
+                format!("{quiet:?}"),
+                format!("{read:?}"),
+                "a sink changed a push button"
+            );
+            if !push {
+                assert!(matches!(read, Err(Unmade::NotButton)));
+            }
+            let Ok(read) = &read else { continue };
+            let mut faults = Vec::new();
+            let made = push_for_widget(form, field, widget, objects, rules, limits, &mut faults);
+            assert_eq!(
+                format!("{made:?}"),
+                format!(
+                    "{:?}",
+                    push_for_widget(form, field, widget, objects, rules, limits, &mut ())
+                )
+            );
+            let button = read.button();
+            let mut shown = format!("{read:?} {faults:?}");
+            if !matches!(&made, Err(Unmade::Unencodable(_))) {
+                shown.push_str(&format!(" {made:?}"));
+            }
+            for caption in [
+                Some(button.caption),
+                button.rollover_caption,
+                button.down_caption,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(!shows(&shown, caption), "a caption shown");
+            }
+            let font = match read.font_name() {
+                Some(name) => form.field_font(objects, name, limits, &mut told),
+                None => Ok(FieldFont::standard(Std14::Helvetica)),
+            };
+            assert!(faults == told, "push_for_widget tells what reading tells");
+            let expected = match font {
+                Ok(font) => match font.res() {
+                    Some(res) => read.make(res, &font.layout(), limits),
+                    None => Err(Unmade::FontNotBindable),
+                },
+                Err(err) => Err(err.into()),
+            };
+            match (made, expected) {
+                (Ok(made), Ok(expected)) => assert!(made.appearances == expected),
+                (Err(err), Err(expected)) => assert!(err == expected),
+                _ => panic!("push_for_widget makes what widget_push, field_font and make make"),
+            }
+        }
+    }
+}
+
+/// Makes a combo box's and a list box's appearances from what `data` is
+/// cut into, as [`check_appearance`] cuts it (`Cut`): the text the combo
+/// box's, shown with a drop button where the flags' first bit is clear;
+/// its lines the list box's labels, those the flags' bits name selected
+/// (with one past them and one twice), from the maximum length's line;
+/// `Limits::items` the cut's cap, as `Limits::text` is; in the standard 14
+/// font the input's length picks; each made twice the same, and holding
+/// what the makers promise ([`choice_holds`]).
+#[cfg(feature = "text-layout")]
+pub fn check_choices(data: &[u8]) {
+    use crate::appearance::{ComboBox, ListBox, combo_box, list_box};
+
+    let cut = Cut::of(data);
+    let look = cut.look();
+    let mut limits = cut.limits();
+    limits.items = cut.cap;
+    let font = &faces()[data.len() % faces().len()];
+    let layout = font.layout();
+    let res = font
+        .res()
+        .expect("a standard 14 font is named by its dictionary");
+    let flags = cut.flags.bits();
+
+    let mut combo = ComboBox::new(&cut.text);
+    combo.drop_button = flags & 1 == 0;
+    let made = combo_box(&combo, &look, &cut.da, res.clone(), &layout, &limits);
+    assert_eq!(
+        made,
+        combo_box(&combo, &look, &cut.da, res.clone(), &layout, &limits)
+    );
+    choice_holds(&look, &[combo.text], 0, &limits, &layout, &res, true, &made);
+
+    let labels: Vec<&str> = cut.text.split('\n').collect();
+    let mut selected: Vec<usize> = (0..32).filter(|i| flags >> i & 1 != 0).collect();
+    selected.extend(selected.first().copied());
+    selected.push(labels.len());
+    let mut list = ListBox::new(&labels);
+    list.selected = &selected;
+    list.top = cut
+        .max_len
+        .map_or(0, |n| usize::try_from(n).unwrap_or(0) % (labels.len() + 2));
+    let made = list_box(&list, &look, &cut.da, res.clone(), &layout, &limits);
+    assert_eq!(
+        made,
+        list_box(&list, &look, &cut.da, res.clone(), &layout, &limits)
+    );
+    choice_holds(
+        &look, &labels, list.top, &limits, &layout, &res, false, &made,
+    );
+}
+
+/// Holds what `appearance::combo_box` (`combo`, whose text is `texts`' one)
+/// and `list_box` (whose labels are `texts`, from `top`) promise of `made`,
+/// made in `look` under `limits` in `font`, named by `res`.
+#[cfg(feature = "text-layout")]
+#[allow(clippy::too_many_arguments)]
+fn choice_holds<F: pdf_gfx::LayoutFont + ?Sized>(
+    look: &crate::appearance::WidgetLook<'_>,
+    texts: &[&str],
+    top: usize,
+    limits: &Limits,
+    font: &F,
+    res: &pdf_content_streams::Res,
+    combo: bool,
+    made: &Result<crate::appearance::Appearance, crate::appearance::Unmade>,
+) {
+    use crate::Cap;
+    use crate::appearance::Unmade;
+
+    let shown = texts.get(top..).unwrap_or_default();
+    let many = !combo && shown.len() > limits.items;
+    let bytes: usize = shown.iter().map(|t| t.len()).sum();
+    let long = !many && bytes > limits.text;
+    let made = match made {
+        Ok(made) => made,
+        Err(Unmade::Unencodable(told)) => {
+            assert!(
+                combo
+                    && !many
+                    && !long
+                    && boxed(look)
+                    && texts
+                        .first()
+                        .and_then(|text| text.get(told.at..))
+                        .is_some_and(|text| text.starts_with(told.character)),
+                "a character told at its offset in the text"
+            );
+            return;
+        }
+        Err(Unmade::UnencodableOption { option, character }) => {
+            assert!(
+                !combo
+                    && !many
+                    && !long
+                    && boxed(look)
+                    && *option >= top
+                    && texts
+                        .get(*option)
+                        .and_then(|label| label.get(character.at..))
+                        .is_some_and(|label| label.starts_with(character.character)),
+                "a character told at its offset in its option's label"
+            );
+            return;
+        }
+        Err(err) => {
+            match err {
+                Unmade::Limit(Cap::Items) => assert!(many, "refused for a cap not passed"),
+                Unmade::Limit(Cap::Text) => assert!(long, "refused for a cap not passed"),
+                Unmade::NoBox => assert!(!many && !long && !boxed(look), "no box for a box"),
+                Unmade::NotFinite => assert!(!many && !long && boxed(look), "not finite, no box"),
+                other => panic!("a maker of plain data refused with {other:?}"),
+            }
+            for text in texts {
+                assert!(
+                    !shows(&format!("{err:?} {err}"), text),
+                    "an error shows a text"
+                );
+            }
+            return;
+        }
+    };
+    assert!(!many && !long, "made past a cap");
+    assert!(boxed(look), "made in no box");
+    content_holds(&made.content, None);
+    assert!(made.needs.0.len() <= 1, "one resource at most");
+    assert!(
+        made.needs.0.iter().all(|need| need.res == *res),
+        "the font given"
+    );
+    assert!(made.font_size.is_finite() && made.font_size >= 0.0);
+    interprets_alone(made);
+    for text in texts {
+        assert!(
+            !shows(&format!("{made:?}"), text),
+            "an appearance shows a text"
+        );
+    }
+    if combo {
+        return;
+    }
+    // From its top, and no more lines than the box less the border holds:
+    // each written line's top is above that box's bottom, a line height
+    // apart. That box is turned the right way round where the border is
+    // wider than half the box, and taller than the box where the border is
+    // wider than the box; and each step down is rounded at the top's
+    // magnitude, which far from the origin can lose a step whole.
+    let lines = made.content.windows(3).filter(|w| w == b"BT\n").count();
+    assert!(lines <= shown.len(), "a line past the labels");
+    let metrics = font.font_metrics();
+    let height = (metrics.ascent - metrics.descent) * made.font_size / 1000.0;
+    if lines > 1 && height.is_finite() && height > 0.0 {
+        let (bbox, inset) = (made.bbox, look.border.inset());
+        let client = pdf_gfx::Rect::new(
+            bbox.x0 + inset,
+            bbox.y0 + inset,
+            bbox.x1 - inset,
+            bbox.y1 - inset,
+        );
+        let reach = f64::from(height) * (lines as f64 - 1.0);
+        let rounding = f64::from(client.y1.abs()) * 1e-4;
+        let bound = f64::from(client.height()) * (1.0 + 1e-4) + rounding + 1e-3;
+        assert!(
+            reach <= bound,
+            "lines written below the box less its border"
+        );
+    }
+}
+
+/// Reads each choice widget of `form` for its appearance, alike whatever
+/// the sink, makes it in its font, and holds the convenience to what it's
+/// made of, as the module's docs list.
+#[cfg(feature = "text-layout")]
+fn widget_choices<'o, R: Resolve<'o> + Streams + Copy>(
+    objects: R,
+    form: &Form<'o>,
+    rules: Rules,
+    limits: &Limits,
+) {
+    use pdf_fonts::Std14;
+
+    use crate::FieldKind;
+    use crate::appearance::{FieldFont, Unmade, choice_for_widget, field_choice, widget_choice};
+
+    for field in form.fields() {
+        let choice = matches!(field.kind(), Some(FieldKind::Combo | FieldKind::List));
+        let quiet = field_choice(field, objects, rules, limits, &mut ());
+        let mut of_field: Vec<(Place, Fault)> = Vec::new();
+        let shows_what = field_choice(field, objects, rules, limits, &mut of_field);
+        assert_eq!(
+            format!("{quiet:?}"),
+            format!("{shows_what:?}"),
+            "a sink changed what a choice field shows"
+        );
+        if !choice {
+            assert!(matches!(shows_what, Err(Unmade::NotChoice)));
+        }
+        let Ok(shows_what) = &shows_what else {
+            continue;
+        };
+        assert_eq!(
+            shows_what.is_combo(),
+            field.kind() == Some(FieldKind::Combo)
+        );
+        assert_eq!(shows_what.is_combo(), shows_what.combo().is_some());
+        assert_eq!(shows_what.is_combo(), shows_what.list().is_none());
+        if let Some(list) = shows_what.list() {
+            assert!(
+                list.labels == shows_what.labels()
+                    && list.selected == shows_what.selected()
+                    && list.top == shows_what.top()
+            );
+            if field.value().is_none() {
+                assert!(list.selected.is_empty(), "no value, and an option selected");
+            }
+        }
+        let debug = format!("{shows_what:?}");
+        if let Some(combo) = shows_what.combo() {
+            assert!(!shows(&debug, combo.text), "a text shown");
+        }
+        for label in shows_what.labels() {
+            assert!(!shows(&debug, label), "a label shown");
+        }
+        assert!(
+            shows_what.selected().windows(2).all(|w| w[0] < w[1])
+                && (shows_what.selected().iter()).all(|&i| i < shows_what.labels().len()),
+            "a selection sorted, each once, of an option"
+        );
+        for widget in field.widgets() {
+            let quiet = widget_choice(field, widget, shows_what, objects, rules, limits, &mut ());
+            let mut told: Vec<(Place, Fault)> = of_field.clone();
+            let read = widget_choice(field, widget, shows_what, objects, rules, limits, &mut told);
+            assert_eq!(
+                format!("{quiet:?}"),
+                format!("{read:?}"),
+                "a sink changed a choice"
+            );
+            let Ok(read) = &read else { continue };
+            assert!(std::ptr::eq(read.choice(), shows_what));
+            let mut faults = Vec::new();
+            let made = choice_for_widget(form, field, widget, objects, rules, limits, &mut faults);
+            assert_eq!(
+                format!("{made:?}"),
+                format!(
+                    "{:?}",
+                    choice_for_widget(form, field, widget, objects, rules, limits, &mut ())
+                )
+            );
+            let mut debug = format!("{read:?} {faults:?}");
+            if !matches!(
+                &made,
+                Err(Unmade::Unencodable(_) | Unmade::UnencodableOption { .. })
+            ) {
+                debug.push_str(&format!(" {made:?}"));
+            }
+            if let Some(combo) = shows_what.combo() {
+                assert!(!shows(&debug, combo.text), "a text shown");
+            }
+            for label in shows_what.labels() {
+                assert!(!shows(&debug, label), "a label shown");
+            }
+            let font = match read.font_name() {
+                Some(name) => form.field_font(objects, name, limits, &mut told),
+                None => Ok(FieldFont::standard(Std14::Helvetica)),
+            };
+            assert!(faults == told, "choice_for_widget tells what reading tells");
+            let expected = match font {
+                Ok(font) => match font.res() {
+                    Some(res) => read.make(res, &font.layout(), limits),
+                    None => Err(Unmade::FontNotBindable),
+                },
+                Err(err) => Err(err.into()),
+            };
+            match (made, expected) {
+                (Ok(made), Ok(expected)) => assert!(made.appearance == expected),
+                (Err(err), Err(expected)) => assert!(err == expected),
+                _ => panic!("choice_for_widget makes what widget_choice, field_font and make make"),
+            }
+        }
+    }
+}
+
+/// The objects and catalog a seed is parsed into, for the crate's tests.
+#[cfg(test)]
+pub(crate) fn parsed(data: &[u8]) -> (BTreeMap<ObjectId, Object>, Dict) {
+    let parsed = Parsed::of(data);
+    (parsed.objects, parsed.catalog)
+}
+
+/// The seeds of forms of buttons and of choices, and `check_group`'s.
+#[cfg(test)]
+pub(crate) const BUTTON_SEEDS: &[&[u8]] = &[SEEDS[6], SEEDS[7]];
+#[cfg(test)]
+pub(crate) const GROUP_SEEDS: &[&[u8]] = &[SEEDS[8], SEEDS[9], SEEDS[10], SEEDS[11]];
 
 #[cfg(test)]
 mod tests {
@@ -1454,7 +2520,7 @@ mod tests {
     /// up to past finite, comb and not; `/DA` sizes and boxes so large the
     /// text reaches past what can be placed, and two inputs the target
     /// stopped on there; and comb fields with more cells than a small
-    /// `Limits::text`.
+    /// `Limits::text`. `check_choices` is driven by the same inputs.
     #[cfg(feature = "text-layout")]
     #[test]
     fn appearances_hold_at_every_edge() {
@@ -1591,7 +2657,46 @@ mod tests {
         }
         for input in &inputs {
             super::check_appearance(&input.bytes());
+            super::check_choices(&input.bytes());
         }
+        // A list box from its second line, two of them selected: in a box
+        // that holds three of its five, and in one that holds them all
+        // far from its origin; and under a cap of two items, refused.
+        for (cap, height) in [(10, 30.0), (10, 1e30), (1, 30.0)] {
+            let list = Input {
+                flags: 0b1010,
+                max_len: Some(1),
+                cap,
+                ..Input::new(b"/Helv 10 Tf 0 g", "one\ntwo\nthree\nfour\nfive\nsix")
+            };
+            super::check_choices(&list.with(1, &[height]).bytes());
+        }
+        // List boxes of twelve lines whose solid border is wider than half
+        // their height, so the box less the border is turned the right way
+        // round, the lines set from its top as a text field's are: 20 high
+        // with a border 11 wide (that box 2 high, one line) and 40 wide (60
+        // high, taller than the box), barely high at all with one 13,265
+        // wide, and with one so wide (`1e30`) that each line's step down is
+        // lost to rounding at that box's top, every label written there;
+        // and one whose border leaves 16 points of it `1e8` from its
+        // origin, where a line's step is lost the same way.
+        for (height, width, da) in [
+            (20.0, 11.0, &b"/Helv 10 Tf 0 g"[..]),
+            (20.0, 40.0, &b"/Helv 10 Tf 0 g"[..]),
+            (1.517_883e-16, 13_265.286, &b"/Helv 10 Tf 0 g"[..]),
+            (20.0, 1e30, &b"/Helv 10 Tf 0 g"[..]),
+            (2e8 + 16.0, 1e8, &b"/Helv 2.5 Tf 0 g"[..]),
+        ] {
+            let list = Input {
+                flags: 0b1010,
+                ..Input::new(da, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl")
+            };
+            super::check_choices(&list.with(1, &[height, width]).bytes());
+        }
+        // An input the target stopped on: a list box `1.5e-16` high with a
+        // solid border 13,265 wide, its two lines set at the top of the box
+        // less the border, 26,530 high.
+        super::check(b"\x000\x00\x00\x00\x00\x00\x00\xa6\xff\xff\x14\xff\x03\n\x00\x00\xc8B\x00\x00/%%EOFChHB\x00\x00\x00@\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xcd\xcc\xcc=\xcd\xccL>\x9a\x99\x99>\xcd\xcc\xcc>\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00/TiRo 04 Tf 0 0 0 1 k\xffpass word\r\ns#cret#");
         // Two inputs the target stopped on: each cut into a password at a
         // `/DA` size of `5.2439346e36`, whose stars, every number written
         // finite, the interpreter refused to place.
@@ -1601,6 +2706,19 @@ mod tests {
         ] {
             super::check(found);
         }
+        // A value, caption, or option label that is one character the font
+        // lacks: `Unmade::Unencodable` and `UnencodableOption` name that
+        // character, and nothing else does; including an input the target
+        // stopped on, cut into `\u{fffd}` between two `0xFF`s.
+        for text in ["\u{2603}", "\u{fffd}", "a\n\u{2603}"] {
+            super::check(&Input::new(b"/Helv 12 Tf 0 g", text).bytes());
+        }
+        super::check(
+            b"\x00\x00\x00\x01\x05\x00\x00\x00\x00\x00'\xb9\x8b\t\n\x00\x00\xc8B\x00\x00\xa0A\x00\x00\x80?\x00\x00@@\x00\x00/Helvetica\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xffCour 12 Tf 0 0 0.502\xff\x99\xff\xff\xff\xff\xff\xff\xff\xff\xff\xffour 1f 0 0 0.502 /FontBBox%%EOF",
+        );
+        super::check(
+            b"<< /AcroForm << /Fields [1 0 R 2 0 R 3 0 R 4 0 R 5 0 R] /DA (/Helv 10 Tf 0 g) >> >>\xff<< /T (t) /FT /Tx /V <FEFF2603> /Subtype /Widget /Rect [0 0 80 20] >>\xff<< /T (p) /FT /Tx /Ff 8192 /V (*) /DA (/ZaDb 10 Tf 0 g) /Subtype /Widget /Rect [0 0 80 20] >>\xff<< /T (b) /FT /Btn /Ff 65536 /Subtype /Widget /Rect [0 0 80 20] /MK << /CA <FEFF2603> >> >>\xff<< /T (c) /FT /Ch /Ff 131072 /V <FEFF2603> /Subtype /Widget /Rect [0 0 80 20] >>\xff<< /T (l) /FT /Ch /Opt [<FEFF2603>] /V <FEFF2603> /Subtype /Widget /Rect [0 0 80 40] >>",
+        );
 
         // A comb field of more cells than `Limits::comb_cells` is refused,
         // as is a text longer than `Limits::text`.

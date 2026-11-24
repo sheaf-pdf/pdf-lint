@@ -1,14 +1,35 @@
 //! Appearances made for fields that have none (`text-layout`).
 //!
-//! A text widget with a value and no appearance stream (`/AP`) shows nothing
-//! in a viewer that doesn't make one. This module makes it, as PDFium as of
-//! chromium/8152 makes it for the same field, from plain data.
+//! A text widget with a value, a button, or a choice field's widget with no
+//! appearance stream (`/AP`) shows nothing in a viewer that doesn't make one.
+//! This module makes it, as PDFium as of chromium/8152 makes it for the same
+//! field (a check box's or radio button's mark aside, which is drawn in
+//! ZapfDingbats), from plain data.
 //!
 //! - [`text`] makes a text field's appearance from plain data: a
 //!   [`TextField`] (its text, flags, maximum length, and quadding), a
 //!   [`WidgetLook`] (the widget's box, colors, rotation, and border), its
 //!   parsed default appearance string, and a font. It gives an
 //!   [`Appearance`], or why one couldn't be made ([`Unmade`]).
+//! - [`check_box`] and [`radio_button`] make a check box's and a radio
+//!   button's from plain data (a [`ToggleButton`], a [`WidgetLook`], the
+//!   parsed default appearance, and the resource ZapfDingbats is drawn
+//!   under): the normal and the down appearance of its on state and of
+//!   `Off` ([`ToggleAppearances`]), its mark the ZapfDingbats glyph its
+//!   caption names ([`Mark`]), and no `Off` where it would paint nothing;
+//!   [`push_button`] makes a push button's normal, rollover, and down
+//!   appearances ([`PushAppearances`]) from a [`PushButton`] in a font.
+//!   [`widget_toggle`] and [`widget_push`] read a widget of a
+//!   [`Form`](crate::Form)'s buttons into that data, and
+//!   [`toggle_for_widget`] and [`push_for_widget`] make one widget's.
+//! - [`combo_box`] and [`list_box`] make a combo box's and a list box's
+//!   from plain data: a [`ComboBox`] (the text it shows, and whether its
+//!   drop button is drawn) or a [`ListBox`] (its options' labels, those
+//!   selected, and the one at its top), a [`WidgetLook`], the parsed default
+//!   appearance, and a font; [`field_choice`] reads what a
+//!   [`Form`](crate::Form)'s choice field shows into that data, once for
+//!   all its widgets ([`FieldChoice`]), [`widget_choice`] reads a widget's
+//!   box beside it, and [`choice_for_widget`] makes one widget's.
 //! - [`FieldFont`] is the font a field's text is drawn in: the default
 //!   resources' font (`/DR /Font`) its default appearance string names, read
 //!   with `pdf-fonts`, or a standard 14 font chosen by that name where the
@@ -91,15 +112,32 @@
 //! assert_eq!(made.font_name.as_deref(), Some(&b"Helv"[..]));
 //! ```
 
+mod button;
+mod choice;
 mod font;
 mod frame;
+mod line;
+mod read;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_buttons;
+#[cfg(test)]
+mod tests_choices;
 mod text;
 mod widget;
 
+pub use button::{
+    Mark, PushAppearances, PushButton, ToggleAppearances, ToggleButton, check_box, push_button,
+    radio_button,
+};
+pub use choice::{ComboBox, ListBox, combo_box, list_box};
 pub use font::{FieldFont, FieldLayoutFont};
 pub use frame::{Appearance, Unmade, WidgetLook};
+pub use read::{
+    FieldChoice, MadePush, MadeToggle, WidgetChoice, WidgetPush, WidgetToggle, choice_for_widget,
+    field_choice, push_for_widget, toggle_for_widget, widget_choice, widget_push, widget_toggle,
+};
 #[cfg(any(test, fuzzing))]
 pub(crate) use text::REACH;
 #[cfg(feature = "embed")]

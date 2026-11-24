@@ -1,12 +1,22 @@
 # Intentional differences from PDFium (chromium/8152): where PDFium reads fewer
 # fields than ISO 32000-2's inheritance gives, and the widgets it adopts from
-# pages; and where an appearance made for a text field differs from the one
-# PDFium makes.
+# pages; where an appearance made for a text, button, or choice field differs
+# from the one PDFium makes; and where a button group's states and value after
+# a press differ from PDFium's.
 # A forms case: name	why
 # A forms-ap case: name	part	why, the part of its record that differs
 # (made, bbox, matrix, paint, clip, or text), in every annotation of the case
 # or, written part@N, in annotation N alone; every other part agrees. A line
 # under the kind's name is a rule held on every case it applies to.
+# A forms-press case: name	part	why, the part of its record that differs
+# after the presses (as, a widget's /AS, in every widget or, written as@N,
+# in widget N alone; or v, a field's /V); every other part agrees.
+# A forms-ap-all case of buttons (btn-, push-): name	part	why, the part that
+# differs (made, states, as, bbox, matrix, paint, mark, clip, or text), in
+# every annotation or, written part@N, in annotation N alone.
+# A forms-ap-all case of choices (combo-, list-): name	part	why, the part
+# that differs (made, bbox, matrix, paint, clip, or text), in every
+# annotation or, written part@N, in annotation N alone.
 forms-three-deep	PDFium makes a terminal field only where /FT is the field's own or its parent's; a type handed down two levels or more is read here, as ISO 32000-2 has it inherited
 forms-type-missing-or-unknown	PDFium leaves out a terminal field with no /FT; it is read here with no type, for the caller to see and a fault to say
 forms-nameless-middle	the type comes down two levels, as in forms-three-deep; the field with no /T adds nothing to the name
@@ -46,3 +56,38 @@ ap-da-written-twice	text@1	of two nonstroking colors in a /DA the last is the te
 ap-da-written-twice	text@2	of two rg in a /DA the last is the text's color (1 0 0 rg), as a content stream's graphics state has it; PDFium takes the first (0 0 1 rg)
 ap-nfd-helvetica	text	text given decomposed, a letter and a combining accent that the font has composed and not apart (e and U+0301), is drawn composed (Unicode Normalization Form C: é), as a font with no mark positioning draws it right; PDFium draws the letter and leaves the accent out, no font it has knowing it
 ap-comb-cluster	text	a comb field's cell holds a grapheme cluster (Unicode Standard Annex #29), a letter and its combining accent together, drawn composed where the font has it so (é in each font, four cells of six); PDFium gives each character a cell of its own, an accent's left empty where the font has no code for it (Helvetica), so the value takes all six
+press-radio-on-toggles	as@0	a radio button pressed while on turns off where the field hasn't NoToggleToOff, as ISO 32000-2, §12.7.5.2.4 has it, leaving none on; PDFium keeps it on, the flag set or not, reading the flag nowhere
+press-radio-on-toggles	v	the field's value is Off once no radio button is on, as their /AS are; PDFium keeps the radio button on and /V /1
+press-opt-check-off	v	the field's value is Off once no check box is on, as it is with no /Opt, /V and /AS being the same (ISO 32000-2, §12.7.5.2.3); PDFium leaves /V as it was (/0) where a check box of a field with /Opt is turned off
+press-opt-own-names	v	the field's value is the name of the on state of the check box turned on (/y), which its /AS is, as ISO 32000-2, §12.7.5.2.3 has /V and /AS the same; PDFium writes the widget's index (/1) where the field has /Opt, whatever its on state's name
+forms-ap-all	as	a check box's or radio button's /AS is a name, as ISO 32000-2, Table 166 has it, /Off where the widget has none; PDFium sets the string (Off)
+forms-ap-all	mark	a check box's or radio button's mark is the ZapfDingbats glyph its caption names, as ISO 32000-2's example of a check box draws it and its /DA names the font, held to PDFium's own shape by where each reaches: the centres within 0.04 of the centre square's side on each axis, the widths and heights within 0.04 (a cross's width within 0.16, its glyph narrower than PDFium's square cross); PDFium fills or strokes a path of its own
+forms-ap-all	off	a check box's or radio button's Off appearance that would paint nothing (no background, no border drawn) isn't made, so its normal appearance has no Off, which ISO 32000-2, §12.7.5.2.3 makes optional; PDFium writes an empty stream
+btn-marks-check	mark@21	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default check for any caption but the six it knows
+btn-marks-check	mark@22	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default check for any caption but the six it knows
+btn-marks-check	mark@23	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default check for any caption but the six it knows
+btn-marks-radio	mark@21	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default circle for any caption but the six it knows
+btn-marks-radio	paint@21	the caption 6 names a glyph of ZapfDingbats (a22), not the circle, so the frame is square; PDFium draws its default circle in a round frame for any caption but the six it knows
+btn-marks-radio	mark@22	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default circle for any caption but the six it knows
+btn-marks-radio	paint@22	the caption 6 names a glyph of ZapfDingbats (a22), not the circle, so the frame is square; PDFium draws its default circle in a round frame for any caption but the six it knows
+btn-marks-radio	mark@23	the caption 6 names a glyph of ZapfDingbats (a22), which is drawn; PDFium draws its default circle for any caption but the six it knows
+btn-marks-radio	paint@23	the caption 6 names a glyph of ZapfDingbats (a22), not the circle, so the frame is square; PDFium draws its default circle in a round frame for any caption but the six it knows
+btn-da	mark@3	the mark is drawn at the size /DA gives (8), as a glyph of a font named at a size; PDFium fills its shape to the box whatever the size
+btn-da	mark@8	the mark is drawn at the size /DA gives (8), as a glyph of a font named at a size; PDFium fills its shape to the box whatever the size
+btn-opt-own-name	states@0	a widget whose normal appearance names its on state (/mine) keeps that name, so its appearance is found by it and /AS can name it; PDFium names the state it makes by the widget's index in /Opt (/0), leaving /mine beside it
+forms-ap-all	clip	a combo box's text is always clipped to its text box, the box less the border's reach and the drop button, as a text field's is (forms-ap's clip rule); PDFium writes the clip only where the text passes that box: wherever PDFium writes none, the clip here is that box
+forms-ap-all	tx	a combo box with no text, or a list box with no option, has an empty marked-content sequence, /Tx BMC EMC, as an empty text field's (forms-ap's tx rule); PDFium writes none: wherever PDFium writes none, the sequence here is empty
+forms-ap-all	below	a list box's lines whose top is at or below the box less the border's reach aren't written, nor any after them, so what's written is bounded by the box; PDFium writes every option to the last, clipped away: wherever PDFium writes more lines, each is wholly below that box
+combo-boxes	paint@3	a drop button 3 points high has no bands, as a beveled border's aren't drawn in a box under four times its width (pdf_gfx::Canvas::box_bands_in): the ring and the fill alone; PDFium fills two bands whose inner corners cross
+combo-boxes	paint@4	a drop button 3 points high has no bands, as a beveled border's aren't drawn in a box under four times its width (pdf_gfx::Canvas::box_bands_in): the ring and the fill alone; PDFium fills two bands whose inner corners cross
+press-opt-short	v	the field's value is the name of the on state of the check box turned on (/a), which its /AS is, as ISO 32000-2, §12.7.5.2.3 has /V and /AS the same; PDFium writes the widget's index (/0) where the field has /Opt, whatever its on state's name, as in press-opt-own-names
+press-opt-short-past	v	the field's value is the name of the on state of the check box turned on (/a), which its /AS is, as ISO 32000-2, §12.7.5.2.3 has /V and /AS the same; PDFium writes the widget's index (/1) where the field has /Opt, whatever its on state's name, as in press-opt-own-names
+push-size-negative	text@0	a /DA size below 0 is no size, as 0 is none: the caption is sized to its box, as at 0 (annotation 1); PDFium sets no font and a size of 0 for it, which shows nothing
+list-no-value	text@2	a choice field with no /V has no value and selects nothing: /I only tells apart the options a value selects (ISO 32000-2, Table 234), and an /I array alone selects nothing in PDFium either (annotations 0 and 1); PDFium reads a number written in /I's place as the value and highlights the option at it
+list-odd	text@0	a top index below 0 is 0, the first option at the top of the box; PDFium takes the number as it is and writes a line for an option before the first, an empty one, so the first option is a line down
+list-odd	text@2	a /DA size below 0 is no size, as 0 is none: a list box's lines are then set at 12, as at 0 (list-values, annotation 6); PDFium sets no font and a size of 0 for it, which shows nothing
+combo-no-value	clip@0	the empty /Tx sequence has no clip, as a combo box with no text has none (forms-ap-all's tx rule); PDFium shows the /DV and clips nothing, as the text fits
+combo-no-value	text@0	a combo box with no /V shows no text: /DV is the value a reset gives the field (ISO 32000-2, Table 226), not one it has; PDFium shows a choice field's /DV where it has no /V, by its export value (e3), not its label
+combo-no-value	clip@2	the empty /Tx sequence has no clip, as a combo box with no text has none (forms-ap-all's tx rule); PDFium shows a text and clips nothing, as it fits
+combo-no-value	text@2	a choice field with no /V has no value and selects nothing: /I only tells apart the options a value selects (ISO 32000-2, Table 234), and an /I array alone selects nothing in PDFium either (annotations 0 and 1); PDFium reads a number written in /I's place as the value and shows the label of the option at it
+combo-no-value	text@3	a /DA size below 0 is no size, as 0 is none: the text is sized to its box, as at 0 (combo-values, annotation 2); PDFium sets no font and a size of 0 for it, which shows nothing

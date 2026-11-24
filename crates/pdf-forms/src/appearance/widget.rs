@@ -383,7 +383,7 @@ where
 
 /// Passes a widget's faults on but `pdf-annots`' for its `/DA`, which the
 /// default appearance string's own parse tells more finely.
-struct WithoutDa<'s, S: ?Sized>(&'s mut S);
+pub(super) struct WithoutDa<'s, S: ?Sized>(pub(super) &'s mut S);
 
 impl<S: Sink<Fault> + ?Sized> Sink<Fault> for WithoutDa<'_, S> {
     fn fault(&mut self, at: Place, fault: Fault) {
@@ -400,9 +400,9 @@ impl<S: Sink<Fault> + ?Sized> Sink<Fault> for WithoutDa<'_, S> {
 /// Passes a default appearance string's faults on as this crate's, placed
 /// in the object the string was read from; one with no font is said by
 /// [`Fault::MissingDefaultAppearance`] instead.
-struct DaFaults<'s, S: ?Sized> {
-    sink: &'s mut S,
-    at: Option<ObjectId>,
+pub(super) struct DaFaults<'s, S: ?Sized> {
+    pub(super) sink: &'s mut S,
+    pub(super) at: Option<ObjectId>,
 }
 
 impl<S: Sink<Fault> + ?Sized> Sink<pdf_gfx::Fault> for DaFaults<'_, S> {

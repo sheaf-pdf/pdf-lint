@@ -14,10 +14,27 @@
 //! - A [`Widget`] is a kid with no partial name and no kids of its own, or the
 //!   field's own dictionary; [`Widget::annot`] reads it as a
 //!   [`pdf_annots::Annot`].
+//! - A choice field's options and selection, and a button field's export
+//!   values ([`Field::options`], [`Field::selected`], [`Field::selection`]),
+//!   are found with the field and decoded when they're asked for
+//!   ([`Field::top_index`] is read with it), and [`Widget::states`] reads a
+//!   widget's on state and `/AS`. [`group`] holds a check box or radio button field's
+//!   rules as pure functions of plain data: which widgets a press or a value
+//!   turns on, and what each widget's `/AS` and the field's `/V` become
+//!   ([`Field::group`] reads one). With `text-layout`,
+//!   `appearance::check_box`, `radio_button`, and `push_button` make a
+//!   button's appearances, and `appearance::combo_box` and `list_box` a
+//!   choice field's, from plain data; `appearance::toggle_for_widget`,
+//!   `push_for_widget`, and `choice_for_widget` make a `Widget`'s from what
+//!   this crate reads.
 //! - The walk ends within [`Limits`] whatever the file says. Recoverable
 //!   departures go to a [`pdf_objects::fault::Sink`] as [`Fault`]s; `&mut ()`
 //!   collects none and reads the same form.
-//! - `Debug` output prints numbers and counts, never a field's name or value.
+//! - `Debug` output prints numbers and counts, never a field's name or value,
+//!   an option, a caption, or a state's name, but for the one character an
+//!   appearance couldn't be drawn for (`appearance::Unmade::Unencodable`,
+//!   `UnencodableOption`) and the one ZapfDingbats code a caption names for
+//!   a mark (`appearance::Mark::Other`).
 //! - With `text-layout` (a default feature), the `appearance` module makes the
 //!   appearances a field without one would show, held to those PDFium makes:
 //!   `appearance::text` makes a text field's from plain data, in the font
@@ -125,15 +142,23 @@ mod form;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+pub mod group;
 mod limits;
 mod phases;
 mod read;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_buttons;
+#[cfg(test)]
+mod tests_group;
 
 pub use error::Error;
 pub use fault::Fault;
-pub use field::{Field, FieldFlags, FieldKind, FieldType, FieldValue, Widget};
+pub use field::{
+    Field, FieldFlags, FieldKind, FieldOption, FieldType, FieldValue, Widget, WidgetStates,
+    selected_options,
+};
 pub use form::Form;
 pub use limits::{Cap, Limits};
 pub use pdf_annots::Quadding;
