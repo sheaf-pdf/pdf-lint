@@ -85,8 +85,8 @@
 //!    and `BT`/`ET` are balanced, whose every number is finite, whose
 //!    strings for a password are the font's `*` alone, and which, in a font
 //!    of the standard 14 the caller writes, interprets with no error and no
-//!    fault; no `Debug` of what's read or made, or of an error or a fault,
-//!    shows the text.
+//!    fault; no `Debug` of what's read or made, or of another error or a
+//!    fault, shows the text.
 //! 7. A fallback (`text-layout` and `embed`): where the input carries a
 //!    TrueType program after its text that `pdf_fonts::embed::Program::open`
 //!    opens, `appearance::text_with_fallback` draws the same text in each
@@ -1047,7 +1047,12 @@ fn widget_appearances<'o, R: Resolve<'o> + Streams + Copy>(
                 "text_for_widget tells what reading the widget and its font tell"
             );
             if let Ok(read) = &read {
-                let shown = format!("{read:?} {faults:?} {made:?}");
+                let mut shown = format!("{read:?} {faults:?}");
+                for m in &made {
+                    if !matches!(m, Err(Unmade::Unencodable(_))) {
+                        shown.push_str(&format!(" {m:?}"));
+                    }
+                }
                 assert!(!shows(&shown, read.field().text), "a widget's text shown");
             }
             for made in made {
@@ -1802,11 +1807,6 @@ fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
                 assert!(matches!(read, Err(Unmade::NotButton)));
             }
             let Ok(read) = &read else { continue };
-            let button = read.button();
-            assert!(
-                !shows(&format!("{read:?}"), button.caption),
-                "a caption shown"
-            );
             let mut faults = Vec::new();
             let made = push_for_widget(form, field, widget, objects, rules, limits, &mut faults);
             assert_eq!(
@@ -1816,6 +1816,21 @@ fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
                     push_for_widget(form, field, widget, objects, rules, limits, &mut ())
                 )
             );
+            let button = read.button();
+            let mut shown = format!("{read:?} {faults:?}");
+            if !matches!(&made, Err(Unmade::Unencodable(_))) {
+                shown.push_str(&format!(" {made:?}"));
+            }
+            for caption in [
+                Some(button.caption),
+                button.rollover_caption,
+                button.down_caption,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(!shows(&shown, caption), "a caption shown");
+            }
             let font = match read.font_name() {
                 Some(name) => form.field_font(objects, name, limits, &mut told),
                 None => Ok(FieldFont::standard(Std14::Helvetica)),
@@ -1912,24 +1927,41 @@ fn choice_holds<F: pdf_gfx::LayoutFont + ?Sized>(
     let long = !many && bytes > limits.text;
     let made = match made {
         Ok(made) => made,
+        Err(Unmade::Unencodable(told)) => {
+            assert!(
+                combo
+                    && !many
+                    && !long
+                    && boxed(look)
+                    && texts
+                        .first()
+                        .and_then(|text| text.get(told.at..))
+                        .is_some_and(|text| text.starts_with(told.character)),
+                "a character told at its offset in the text"
+            );
+            return;
+        }
+        Err(Unmade::UnencodableOption { option, character }) => {
+            assert!(
+                !combo
+                    && !many
+                    && !long
+                    && boxed(look)
+                    && *option >= top
+                    && texts
+                        .get(*option)
+                        .and_then(|label| label.get(character.at..))
+                        .is_some_and(|label| label.starts_with(character.character)),
+                "a character told at its offset in its option's label"
+            );
+            return;
+        }
         Err(err) => {
             match err {
                 Unmade::Limit(Cap::Items) => assert!(many, "refused for a cap not passed"),
                 Unmade::Limit(Cap::Text) => assert!(long, "refused for a cap not passed"),
                 Unmade::NoBox => assert!(!many && !long && !boxed(look), "no box for a box"),
                 Unmade::NotFinite => assert!(!many && !long && boxed(look), "not finite, no box"),
-                Unmade::Unencodable(told) => assert!(
-                    combo && texts[0][told.at..].starts_with(told.character),
-                    "a character told at its offset in the text"
-                ),
-                Unmade::UnencodableOption { option, character } => assert!(
-                    !combo
-                        && *option >= top
-                        && texts.get(*option).is_some_and(|label| label
-                            .get(character.at..)
-                            .is_some_and(|l| l.starts_with(character.character))),
-                    "a character told at its offset in its option's label"
-                ),
                 other => panic!("a maker of plain data refused with {other:?}"),
             }
             for text in texts {
@@ -2058,13 +2090,6 @@ fn widget_choices<'o, R: Resolve<'o> + Streams + Copy>(
             );
             let Ok(read) = &read else { continue };
             assert!(std::ptr::eq(read.choice(), shows_what));
-            let debug = format!("{read:?}");
-            if let Some(combo) = shows_what.combo() {
-                assert!(!shows(&debug, combo.text), "a text shown");
-            }
-            for label in shows_what.labels() {
-                assert!(!shows(&debug, label), "a label shown");
-            }
             let mut faults = Vec::new();
             let made = choice_for_widget(form, field, widget, objects, rules, limits, &mut faults);
             assert_eq!(
@@ -2074,6 +2099,19 @@ fn widget_choices<'o, R: Resolve<'o> + Streams + Copy>(
                     choice_for_widget(form, field, widget, objects, rules, limits, &mut ())
                 )
             );
+            let mut debug = format!("{read:?} {faults:?}");
+            if !matches!(
+                &made,
+                Err(Unmade::Unencodable(_) | Unmade::UnencodableOption { .. })
+            ) {
+                debug.push_str(&format!(" {made:?}"));
+            }
+            if let Some(combo) = shows_what.combo() {
+                assert!(!shows(&debug, combo.text), "a text shown");
+            }
+            for label in shows_what.labels() {
+                assert!(!shows(&debug, label), "a label shown");
+            }
             let font = match read.font_name() {
                 Some(name) => form.field_font(objects, name, limits, &mut told),
                 None => Ok(FieldFont::standard(Std14::Helvetica)),
@@ -2668,6 +2706,19 @@ mod tests {
         ] {
             super::check(found);
         }
+        // A value, caption, or option label that is one character the font
+        // lacks: `Unmade::Unencodable` and `UnencodableOption` name that
+        // character, and nothing else does; including an input the target
+        // stopped on, cut into `\u{fffd}` between two `0xFF`s.
+        for text in ["\u{2603}", "\u{fffd}", "a\n\u{2603}"] {
+            super::check(&Input::new(b"/Helv 12 Tf 0 g", text).bytes());
+        }
+        super::check(
+            b"\x00\x00\x00\x01\x05\x00\x00\x00\x00\x00'\xb9\x8b\t\n\x00\x00\xc8B\x00\x00\xa0A\x00\x00\x80?\x00\x00@@\x00\x00/Helvetica\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xffCour 12 Tf 0 0 0.502\xff\x99\xff\xff\xff\xff\xff\xff\xff\xff\xff\xffour 1f 0 0 0.502 /FontBBox%%EOF",
+        );
+        super::check(
+            b"<< /AcroForm << /Fields [1 0 R 2 0 R 3 0 R 4 0 R 5 0 R] /DA (/Helv 10 Tf 0 g) >> >>\xff<< /T (t) /FT /Tx /V <FEFF2603> /Subtype /Widget /Rect [0 0 80 20] >>\xff<< /T (p) /FT /Tx /Ff 8192 /V (*) /DA (/ZaDb 10 Tf 0 g) /Subtype /Widget /Rect [0 0 80 20] >>\xff<< /T (b) /FT /Btn /Ff 65536 /Subtype /Widget /Rect [0 0 80 20] /MK << /CA <FEFF2603> >> >>\xff<< /T (c) /FT /Ch /Ff 131072 /V <FEFF2603> /Subtype /Widget /Rect [0 0 80 20] >>\xff<< /T (l) /FT /Ch /Opt [<FEFF2603>] /V <FEFF2603> /Subtype /Widget /Rect [0 0 80 40] >>",
+        );
 
         // A comb field of more cells than `Limits::comb_cells` is refused,
         // as is a text longer than `Limits::text`.
