@@ -228,15 +228,9 @@ impl<'w> Copying<'w> {
         if !as_read(id, object, record, self.from.id())? {
             return Ok(false);
         }
-        // Read at an offset its sections give, `endobj` after it.
-        if record.origin != Origin::File || !record.endobj {
-            return Ok(false);
-        }
-        // A stream's /Length a number, its data as long.
-        if record
-            .data
-            .is_some_and(|d| !d.declared || d.indirect_length)
-        {
+        // Read at an offset its sections give, `endobj` after it, and a
+        // stream's `/Length` an inline number matching its data.
+        if !record.copies_at_offset() {
             return Ok(false);
         }
         // Encrypted, its bytes are right under the same key alone: at its

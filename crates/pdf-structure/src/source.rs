@@ -526,6 +526,22 @@ pub struct Record {
 static RECORD_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
 
 impl Record {
+    /// Whether this record satisfies the structural rules to be copied as raw
+    /// indirect-object bytes at a file offset
+    /// ([`write::Body::Read`](crate::write::Body::Read), rules 4–6): read from
+    /// an in-use cross-reference offset ([`Origin::File`]), terminated by
+    /// `endobj`, and for a stream having an inline `/Length` matching its data
+    /// extent.
+    #[must_use]
+    pub const fn copies_at_offset(&self) -> bool {
+        matches!(self.origin, Origin::File)
+            && self.endobj
+            && match self.data {
+                Some(d) => d.declared && !d.indirect_length,
+                None => true,
+            }
+    }
+
     /// What a record's hash is of `bytes`: std's keyed hash under the
     /// process's one key ([`RECORD_KEY`]), so that two readings in one
     /// process hash the same bytes alike.

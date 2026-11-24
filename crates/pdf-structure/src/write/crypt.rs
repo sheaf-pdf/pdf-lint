@@ -595,7 +595,8 @@ impl Encryptor {
     /// strings', its streams', a crypt filter's its dictionary has, or
     /// `/EFF`'s), so that what it encrypted is right at its own number
     /// alone, which a copy at another number isn't.
-    pub(super) fn per_object(&self) -> bool {
+    #[must_use]
+    pub const fn per_object(&self) -> bool {
         self.per_object
     }
 
@@ -679,7 +680,7 @@ impl Encryptor {
     /// back what's written.
     #[cfg(any(test, fuzzing))]
     pub(crate) fn writes_metadata_anew(&self) -> bool {
-        self.place == Place::New && !self.list.unencrypted_metadata
+        self.source.is_none() && !self.list.unencrypted_metadata
     }
 
     /// Past every number the file it was read from lists ([`Encryptor::of`]):
@@ -1219,8 +1220,8 @@ impl<'a> Encrypting<'a> {
             }
             false => None,
         };
-        let metadata_anew = match (encryptor.place, unencrypted) {
-            (Place::New, false) => found(),
+        let metadata_anew = match (encryptor.source.is_none(), unencrypted) {
+            (true, false) => found(),
             _ => None,
         };
         let ivs = (encryptor.ivs)();

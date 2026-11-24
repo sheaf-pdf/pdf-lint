@@ -1076,6 +1076,50 @@ pub enum Error {
 }
 
 impl Error {
+    /// Whether this error refused copying raw object or stream bytes from a
+    /// [`Reading`] (`Elsewhere`, `Changed`, `Gone`, `Uncontained`, `Placed`, or
+    /// `Data`), as opposed to an I/O, serialization, encryption, or layout
+    /// failure.
+    #[must_use]
+    pub const fn is_copy_refusal(&self) -> bool {
+        match self {
+            Error::Elsewhere(_)
+            | Error::Changed(_)
+            | Error::Gone { .. }
+            | Error::Uncontained { .. }
+            | Error::Placed(_)
+            | Error::Data { .. } => true,
+            Error::TooFar(_)
+            | Error::Packed(_)
+            | Error::BeforeHeader { .. }
+            | Error::Serialize(_)
+            | Error::Unencodable(_)
+            | Error::Encrypt { .. }
+            | Error::Locked
+            | Error::Unsupported(_)
+            | Error::Number(_)
+            | Error::Twice(_)
+            | Error::WrittenTwice(_)
+            | Error::EncryptAt(_)
+            | Error::PackedTable
+            | Error::PackedStream
+            | Error::NoNumber(_)
+            | Error::Unsound
+            | Error::Rootless
+            | Error::Earlier(_)
+            | Error::Unmatched
+            | Error::Free(_)
+            | Error::Catalog(_)
+            | Error::Group(_)
+            | Error::Stopped
+            | Error::Io { .. }
+            | Error::Unnumbered(_)
+            | Error::Renumbered
+            | Error::Moved(_)
+            | Error::WriteIo { .. } => false,
+        }
+    }
+
     /// [`Error::Io`], of `e`.
     fn io(e: &std::io::Error) -> Error {
         Error::Io {

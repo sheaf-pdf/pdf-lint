@@ -1134,7 +1134,11 @@ mod tests {
         match (a.value(), b.value()) {
             (Value::String(Str::Bytes(x), _), Value::String(Str::Bytes(y), _)) => {
                 let dy = text::decode(y);
-                if x == y || (dy.quirks.is_empty() && text::decode(x).text == dy.text) {
+                if x == y
+                    || (dy.quirks.is_empty()
+                        && (text::decode(x).text == dy.text
+                            || qpdf_pdf_doc(x).as_deref() == Some(dy.text.as_str())))
+                {
                     None
                 } else if x.starts_with(&[0xFF, 0xFE]) {
                     explained(
@@ -1165,6 +1169,49 @@ mod tests {
             (Value::Stream(x), Value::Stream(y)) => dicts(&x.dict, &y.dict),
             (x, y) => (x != y).then(differ).flatten(),
         }
+    }
+
+    /// Decodes `x` under qpdf's extended PDFDocEncoding table (`qpdf --json`
+    /// treats `0x08` backspace and `0x0C` form feed as `U+0008` and `U+000C`
+    /// alongside ISO 32000-2 Table D.2's defined PDFDocEncoding bytes).
+    fn qpdf_pdf_doc(x: &[u8]) -> Option<String> {
+        if x.starts_with(&[0xFE, 0xFF])
+            || x.starts_with(&[0xFF, 0xFE])
+            || x.starts_with(&[0xEF, 0xBB, 0xBF])
+        {
+            return None;
+        }
+        let mut out = String::with_capacity(x.len());
+        for &b in x {
+            match b {
+                0x08 => out.push('\x08'),
+                0x0C => out.push('\x0C'),
+                _ => {
+                    let d = text::decode(&[b]);
+                    if !d.quirks.is_empty() {
+                        return None;
+                    }
+                    out.push_str(&d.text);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn qpdf_pdf_doc_matches_backspace_and_form_feed_strings() {
+        let raw = b"C\n2y\x08E-\xc7bs_\x82*\xe8j$\x0c";
+        let qpdf_utf16 = Object::bytes(text::encode(&qpdf_pdf_doc(raw).unwrap()));
+        let ours = Object::bytes(raw.to_vec());
+        assert_eq!(
+            difference(&ours, &qpdf_utf16, "1 0 R/Out", &|_| false),
+            None
+        );
+
+        // Truly undefined PDFDocEncoding bytes (e.g. `0x00`, `0x7F`) still differ.
+        let undef = Object::bytes(b"a\x7fb".to_vec());
+        let bad_utf16 = Object::bytes(text::encode("a\x7fb"));
+        assert!(difference(&undef, &bad_utf16, "1 0 R/Out", &|_| false).is_some());
     }
 
     /// The differences between `a`, read from its bytes, and `b`, read
@@ -1252,7 +1299,7 @@ mod tests {
     fn what_qpdf_keeps_and_loses_reading_alone() {
         let dir = scratch("loses");
         let path = dir.path().join("odd.pdf");
-        let catalog = b"<< /Type /Catalog /Pages 2 0 R /Odd#20Name 1 /Bin#FFx 2 /Dup 1 /Dup 2 /Utf16 <FEFF00410042> /Real +.5 >>";
+        let catalog = b"<< /Type /Catalog /Pages 2 0 R /Odd#20Name 1 /Bin#FFx 2 /Dup 1 /Dup 2 /Utf16 <FEFF00410042> /BsFf <430A327908452DC762735F822AE86A240C> /Real +.5 >>";
         let pages = b"<< /Type /Pages /Kids [] /Count 0 >>";
         let file = fixture::assembled(
             "1.7",

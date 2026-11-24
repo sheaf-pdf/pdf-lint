@@ -114,6 +114,21 @@ impl<'w> Parts<'w> {
         self.to
     }
 
+    /// Whether [`Parts::body`] will copy `body` (given as `id`, written at
+    /// `at`) from the reading's raw bytes rather than serializing it anew, by
+    /// the pre-read copy rules ([`Body::Read`], rules 1–7).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Elsewhere`] if `body` carries a [`Record`](crate::Record)
+    /// from another reading or another object.
+    pub fn copies(&self, id: ObjectId, at: ObjectId, body: &Body<'_>) -> Result<bool, Error> {
+        match &self.copying {
+            Some(copying) => copying.copies(id, at, body, self.encrypting),
+            None => Ok(false),
+        }
+    }
+
     /// Object `id`, `body`, written on its own at the end of `out` at `at`, `n g
     /// obj` to `endobj` and a line's end: where it starts in `out`. Copied where
     /// it's copied, else written anew, a stream's data where it was written read
