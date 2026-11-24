@@ -266,6 +266,73 @@ fn one_state_is_set_beside_the_others() {
     assert_eq!(objects.get(&named_id), Some(&Object::from(named)));
 }
 
+/// An `/AP` that is a stream written in place (in memory only: a file's
+/// streams are indirect) is no direct dictionary, though a stream has a
+/// dictionary of its own: nothing is written into that one. The setters
+/// that bind `/N` replace the stream, and those that bind `/R` or `/D`
+/// leave it as it is.
+#[test]
+fn an_ap_that_is_a_direct_stream_is_never_written_into() {
+    let (_, f) = forms(&[1, 2]);
+    let stream = Object::from(Stream::new(dict! { "Length" => 0 }, Vec::new()));
+    let held = widget(dict! { "AP" => stream.clone() });
+    assert!(!AnnotMut::new(&mut held.clone()).has_direct_appearance());
+
+    type Set<'a> = &'a dyn Fn(&mut AnnotMut<'_>);
+    let left: [Set<'_>; 6] = [
+        &|m| {
+            m.set_rollover_appearance(f[0]);
+        },
+        &|m| {
+            m.set_down_appearance(f[0]);
+        },
+        &|m| {
+            m.set_appearance_states(AppearanceMode::Down, &[(b"Yes", f[0])]);
+        },
+        &|m| {
+            m.set_appearance_states(AppearanceMode::Rollover, &[(b"Yes", f[0])]);
+        },
+        &|m| {
+            m.set_state_appearance(AppearanceMode::Down, b"Yes", f[0]);
+        },
+        &|m| {
+            m.set_state_appearance(AppearanceMode::Rollover, b"Yes", f[0]);
+        },
+    ];
+    for set in left {
+        let mut dict = held.clone();
+        set(&mut AnnotMut::new(&mut dict));
+        assert_eq!(dict, held);
+    }
+
+    let replaced: [(Set<'_>, Object); 3] = [
+        (
+            &|m| {
+                m.set_normal_appearance(f[0]);
+            },
+            Object::from(dict! { "N" => f[0] }),
+        ),
+        (
+            &|m| {
+                m.set_appearance_states(AppearanceMode::Normal, &[(b"Yes", f[0])]);
+            },
+            Object::from(dict! { "N" => dict! { "Yes" => f[0] } }),
+        ),
+        (
+            &|m| {
+                m.set_state_appearance(AppearanceMode::Normal, b"Off", f[1]);
+            },
+            Object::from(dict! { "N" => dict! { "Off" => f[1] } }),
+        ),
+    ];
+    for (set, ap) in replaced {
+        let mut dict = held.clone();
+        set(&mut AnnotMut::new(&mut dict));
+        assert_eq!(dict.get(b"AP"), Some(&ap));
+        assert!(AnnotMut::new(&mut dict).has_direct_appearance());
+    }
+}
+
 /// An `/AP` that isn't a direct dictionary is replaced by the setters that
 /// bind `/N`, and left as it is, its span with it, by those that bind `/R`
 /// and `/D`, as `has_direct_appearance` says beforehand.

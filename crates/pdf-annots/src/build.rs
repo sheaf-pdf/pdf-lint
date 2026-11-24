@@ -208,10 +208,8 @@ impl<'a> AnnotMut<'a> {
     /// a reference, so a caller who means to keep the dictionary it names
     /// changes that object itself.
     pub fn set_normal_appearance(&mut self, form_id: ObjectId) -> &mut Self {
-        if let Some(ap) = self.dict.get_mut(b"AP").and_then(Object::as_dict_mut) {
+        if let Some(ap) = self.appearance_dict(AppearanceMode::Normal) {
             ap.set("N", form_id);
-        } else {
-            self.dict.set("AP", dict! { "N" => form_id });
         }
         self
     }
@@ -227,18 +225,8 @@ impl<'a> AnnotMut<'a> {
     /// reference. [`Self::has_direct_appearance`] tells the two apart
     /// beforehand; for an indirect `/AP`, set `/R` in the object it names.
     pub fn set_rollover_appearance(&mut self, form_id: ObjectId) -> &mut Self {
-        match self.dict.get_mut(b"AP") {
-            None => {
-                self.dict.set("AP", dict! { "R" => form_id });
-            }
-            Some(ap) => {
-                // Asked first, so that an `/AP` left alone keeps its span.
-                if ap.as_dict().is_some()
-                    && let Some(ap) = ap.as_dict_mut()
-                {
-                    ap.set("R", form_id);
-                }
-            }
+        if let Some(ap) = self.appearance_dict(AppearanceMode::Rollover) {
+            ap.set("R", form_id);
         }
         self
     }
@@ -330,7 +318,8 @@ impl<'a> AnnotMut<'a> {
     /// Whether `/AP` is a direct dictionary, one whose entries
     /// [`Self::set_normal_appearance`] and [`Self::set_rollover_appearance`]
     /// keep. `false` with no `/AP`, and for one that is an indirect
-    /// reference or not a dictionary.
+    /// reference or not a dictionary: a stream written in place of one
+    /// among them, whose own dictionary is no `/AP`'s.
     ///
     /// [`Self::set_down_appearance`], [`Self::set_appearance_states`], and
     /// [`Self::set_state_appearance`] go by it too: where it's `true` they
@@ -339,15 +328,17 @@ impl<'a> AnnotMut<'a> {
     /// leaves it as it is.
     #[must_use]
     pub fn has_direct_appearance(&self) -> bool {
+        // Not `as_dict`, which gives a stream's own dictionary too.
         self.dict
             .get(b"AP")
-            .is_some_and(|ap| ap.as_dict().is_some())
+            .is_some_and(|ap| matches!(ap.value(), Value::Dict(_)))
     }
 
     /// `/AP`, to bind a `mode` slot in: a direct dictionary as it is, and
     /// one made where there is none. Any other `/AP` is replaced by a new
     /// dictionary for `/N`, and left as it is (`None`) for `/R` and `/D`,
-    /// untouched, so it keeps its span.
+    /// untouched, so it keeps its span: asked before anything is borrowed
+    /// to change.
     fn appearance_dict(&mut self, mode: AppearanceMode) -> Option<&mut Dict> {
         if !self.has_direct_appearance() {
             if mode != AppearanceMode::Normal && self.dict.get(b"AP").is_some() {
