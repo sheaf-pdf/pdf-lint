@@ -1,3 +1,10 @@
+//! Documents of the appearances made for buttons' and choice fields'
+//! widgets, as for text fields' below, bound into them with `pdf-structure`
+//! and written: read back, a check box's and a radio button's states and a
+//! push button's appearances, bound by `pdf_annots::AnnotMut`, are where they
+//! were bound, and each combo or list box's text is where its appearance puts
+//! it; and `qpdf --check` finds each clean when run via `just test-qpdf`.
+//!
 //! A document of appearances made for its text fields' widgets, each turned
 //! by its rotation and one in a font its default resources lack, bound into
 //! it with `pdf-structure` and written: read back, each widget's text is

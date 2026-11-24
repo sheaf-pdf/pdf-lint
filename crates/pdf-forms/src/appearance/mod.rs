@@ -1,8 +1,10 @@
 //! Appearances made for fields that have none (`text-layout`).
 //!
-//! A text widget with a value and no appearance stream (`/AP`) shows nothing
-//! in a viewer that doesn't make one. This module makes it, as PDFium as of
-//! chromium/8152 makes it for the same field, from plain data.
+//! A text widget with a value, a button, or a choice field's widget with no
+//! appearance stream (`/AP`) shows nothing in a viewer that doesn't make one.
+//! This module makes it, as PDFium as of chromium/8152 makes it for the same
+//! field (a check box's or radio button's mark aside, which is drawn in
+//! ZapfDingbats), from plain data.
 //!
 //! - [`text`] makes a text field's appearance from plain data: a
 //!   [`TextField`] (its text, flags, maximum length, and quadding), a

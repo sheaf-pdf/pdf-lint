@@ -847,10 +847,14 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # fixture program, the font it writes read back;
 # `gfx`, pdf-gfx's geometry, interpreter, text layout and content re-encoder on
 # any parts and in a file; `annots`, pdf-annots' reading of a page's
-# annotations, destinations and reply threads from any objects, a redaction
+# annotations, destinations and reply threads from any objects, an
+# annotation's border read alone and what its appearance setters write read
+# back, a redaction
 # mark made from what was read, flattening, and text drawn in a font given; `forms`, pdf-forms' field tree read from any objects and in a
-# file, and its text fields' appearances made, from plain data, in a font and
-# a TrueType program the input carries as a fallback, and for each widget
+# file, its fields' options and selections read and its button groups
+# pressed, from plain data too, and its text fields', buttons' and choice
+# fields' appearances made, from plain data (a text field's in a font and a
+# TrueType program the input carries as a fallback) and for each widget
 # read; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
 # through the facade, and written in the clear and encrypted, read locked and

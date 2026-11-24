@@ -35,8 +35,9 @@ pdf-fonts.workspace = true
 pdf-gfx.workspace = true
 # PDF annotations, appearance synthesis, and page flattening.
 pdf-annots.workspace = true
-# Interactive forms: the field tree, inherited values, widgets, and the
-# appearances text fields' widgets without one show.
+# Interactive forms: the field tree, inherited values, widgets, button
+# groups' rules, and the appearances text, button, and choice fields' widgets
+# without one show.
 pdf-forms.workspace = true
 # A pdf-structure document linearized and a file's linearization checked
 # (`family`), and pdf-filters' zlib-rs through it.

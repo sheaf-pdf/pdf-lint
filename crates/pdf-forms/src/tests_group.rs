@@ -276,6 +276,10 @@ fn debug_prints_no_name_or_export_value() {
         assert!(!one.contains(word), "{one}");
     }
     assert!(one.contains("widgets: 2") && one.contains("on: 1"), "{one}");
+    // The kind is named, as it holds nothing of the field.
+    assert!(one.starts_with("Group { kind: Radio,"), "{one}");
+    assert!(one.contains("FieldGroup { kind: Radio,"), "{one}");
+    assert_eq!(format!("{:?}", GroupKind::CheckBox), "CheckBox");
     // Nor their bytes or lengths in any other form: a group of other names
     // and export values prints alike.
     let other = shown(&[Some(b"x"), None], &["a much longer export", "b"]);

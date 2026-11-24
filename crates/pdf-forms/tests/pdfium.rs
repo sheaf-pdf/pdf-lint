@@ -10,10 +10,12 @@
 //! The `forms-ap-all` cases record every appearance PDFium makes for a
 //! button or a choice field that has none, each state's and each slot's, and
 //! the `forms-press` cases a button group's states and value after a press;
-//! their answers are read here part by part, and `NOT_YET_COMPARED` names
-//! those nothing compares a maker or a rule to yet. The presses are made
-//! here by `pdf_forms::group`'s rules over what the read layer reads of the
-//! group, and held to PDFium's states and values.
+//! their answers are read here part by part. Each button's and choice's is
+//! held to what `appearance`'s makers make for the same widget
+//! (`buttons_here`, `choices_here`), and `NOT_YET_COMPARED` would name a case
+//! of theirs nothing compares a maker or a rule to, with why. The presses are
+//! made here by `pdf_forms::group`'s rules over what the read layer reads of
+//! the group, and held to PDFium's states and values.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;

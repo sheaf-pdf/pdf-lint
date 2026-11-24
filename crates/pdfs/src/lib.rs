@@ -67,7 +67,7 @@
 //! | [`fonts`] | [`pdf_fonts`] | Font dictionaries, encodings, CMaps, font programs, Standard 14 metrics, text extraction, TrueType embedding. |
 //! | [`gfx`] | [`pdf_gfx`] | 2D geometry, the graphics and text state interpreter, the content re-encoder, the canvas, `/DA` strings. |
 //! | [`annots`] | [`pdf_annots`] | Annotations, appearance synthesis, builders, reply threads, and page flattening. |
-//! | [`forms`] | [`pdf_forms`] | Interactive forms: the field tree, inherited field values, widgets, and text fields' appearances. |
+//! | [`forms`] | [`pdf_forms`] | Interactive forms: the field tree, inherited field values, widgets, button groups' rules, and text, button, and choice fields' appearances. |
 //! | [`linearize`] | [`pdf_linearize`] | The linearized ("Fast Web View") layout engine, hint tables, and validator. |
 //!
 //! # Features
@@ -215,8 +215,8 @@ pub use pdf_annots;
 /// the same items.
 pub use pdf_annots as annots;
 
-/// PDF interactive forms: the field tree, inherited field values, widgets, and
-/// text fields' appearances.
+/// PDF interactive forms: the field tree, inherited field values, widgets,
+/// button groups' rules, and text, button, and choice fields' appearances.
 pub use pdf_forms;
 /// [`pdf_forms`] under its shorter name: the same crate, so either path names
 /// the same items.

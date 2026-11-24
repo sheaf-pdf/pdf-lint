@@ -1,7 +1,8 @@
 # Intentional differences from PDFium (chromium/8152): where PDFium reads fewer
 # fields than ISO 32000-2's inheritance gives, and the widgets it adopts from
-# pages; and where an appearance made for a text field differs from the one
-# PDFium makes.
+# pages; where an appearance made for a text, button, or choice field differs
+# from the one PDFium makes; and where a button group's states and value after
+# a press differ from PDFium's.
 # A forms case: name	why
 # A forms-ap case: name	part	why, the part of its record that differs
 # (made, bbox, matrix, paint, clip, or text), in every annotation of the case

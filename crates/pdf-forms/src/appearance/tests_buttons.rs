@@ -905,6 +905,15 @@ fn debug_prints_no_caption_or_state() {
     push.down_caption = Some("Zq#7 three");
     let shown = format!("{toggle:?} {push:?}");
     assert!(!shown.contains("Zq#7"), "{shown}");
+    // A mark is the glyph its caption names, by its code where it's none of
+    // the six PDFium knows: the one character of the caption drawn, and
+    // nothing more of it.
+    let mark = Mark::from_caption(toggle.caption, Mark::Check);
+    assert_eq!(format!("{mark:?}"), format!("Other({})", b'Z'));
+    assert_eq!(
+        format!("{:?}", Mark::from_caption(Some("4 Zq#7"), Mark::Circle)),
+        "Check"
+    );
 
     let fields = vec![
         widget(dict! {

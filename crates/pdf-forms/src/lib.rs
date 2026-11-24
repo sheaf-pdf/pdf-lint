@@ -21,11 +21,17 @@
 //!   on state and `/AS`. [`group`] holds a check box or radio button field's
 //!   rules as pure functions of plain data: which widgets a press or a value
 //!   turns on, and what each widget's `/AS` and the field's `/V` become
-//!   ([`Field::group`] reads one).
+//!   ([`Field::group`] reads one). With `text-layout`,
+//!   `appearance::check_box`, `radio_button`, and `push_button` make a
+//!   button's appearances, and `appearance::combo_box` and `list_box` a
+//!   choice field's, from plain data; `appearance::toggle_for_widget`,
+//!   `push_for_widget`, and `choice_for_widget` make a `Widget`'s from what
+//!   this crate reads.
 //! - The walk ends within [`Limits`] whatever the file says. Recoverable
 //!   departures go to a [`pdf_objects::fault::Sink`] as [`Fault`]s; `&mut ()`
 //!   collects none and reads the same form.
-//! - `Debug` output prints numbers and counts, never a field's name or value.
+//! - `Debug` output prints numbers and counts, never a field's name or value,
+//!   an option, a caption, or a state's name.
 //! - With `text-layout` (a default feature), the `appearance` module makes the
 //!   appearances a field without one would show, held to those PDFium makes:
 //!   `appearance::text` makes a text field's from plain data, in the font
