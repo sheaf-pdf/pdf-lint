@@ -409,10 +409,10 @@ impl Glyphs {
     /// Each glyph it keeps and its text, in the order of their numbers in the
     /// program: for a caller that cuts the program itself and writes its own
     /// `/ToUnicode`.
-    pub fn iter(&self) -> impl Iterator<Item = (u16, &str)> {
-        self.texts
-            .iter()
-            .map(|(&glyph, text)| (glyph, text.as_str()))
+    pub fn iter(&self) -> GlyphsIter<'_> {
+        GlyphsIter {
+            inner: self.texts.iter(),
+        }
     }
 
     /// How many glyphs it keeps.
@@ -425,6 +425,67 @@ impl Glyphs {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.texts.is_empty()
+    }
+}
+
+impl<'a> IntoIterator for &'a Glyphs {
+    type Item = (u16, &'a str);
+    type IntoIter = GlyphsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// An iterator over a [`Glyphs`]'s `(glyph, text)` pairs in ascending glyph-ID
+/// order ([`Glyphs::iter`]).
+///
+/// Its `Debug` says how many pairs remain, never which or their text.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+#[derive(Clone)]
+pub struct GlyphsIter<'a> {
+    inner: std::collections::btree_map::Iter<'a, u16, String>,
+}
+
+impl<'a> Iterator for GlyphsIter<'a> {
+    type Item = (u16, &'a str);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|(&glyph, text)| (glyph, text.as_str()))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for GlyphsIter<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next_back()
+            .map(|(&glyph, text)| (glyph, text.as_str()))
+    }
+}
+
+impl ExactSizeIterator for GlyphsIter<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl std::iter::FusedIterator for GlyphsIter<'_> {}
+
+impl fmt::Debug for GlyphsIter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GlyphsIter")
+            .field("len", &self.inner.len())
+            .finish()
     }
 }
 

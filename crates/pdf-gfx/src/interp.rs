@@ -922,8 +922,9 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         self.check_reader()
     }
 
-    /// `Tj`, `'` or `"`: the bytes of their string operand, or of a name, as
-    /// PDFium's `Handle_ShowText` takes them (`GetString`).
+    /// `Tj`, `'` or `"`: the bytes of their string operand, of a name, or
+    /// `true` or `false` as written, as PDFium's `Handle_ShowText` takes them
+    /// (`GetString`).
     fn show(
         &mut self,
         local: &mut Local,
@@ -1478,11 +1479,15 @@ fn end_text(local: &mut Local) {
     }
 }
 
-/// Decodes a `/Name` or string operand (`CPDF_StreamContentParser::GetString`).
+/// Decodes a `/Name`, string, or boolean operand
+/// (`CPDF_StreamContentParser::GetString`).
 fn string_or_name(operand: Option<Operand<'_>>, lim: &ContentLimits) -> Option<Vec<u8>> {
     let op = operand?;
     if let Some(name) = op.name() {
         return Some(name.into_owned());
+    }
+    if matches!(op.bytes(), b"true" | b"false") {
+        return Some(op.bytes().to_vec());
     }
     string_only(Some(op), lim)
 }

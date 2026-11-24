@@ -979,12 +979,14 @@ fn glyphs_merge_to_the_same_in_any_order() {
     let mut other = third.clone();
     other.merge(&second);
     other.merge(&first);
-    let read: Vec<(u16, &str)> = one.iter().collect();
+    let read: Vec<(u16, &str)> = (&one).into_iter().collect();
     assert_eq!(read, other.iter().collect::<Vec<_>>());
     assert_eq!(
         read,
         [(2, "A"), (3, "g"), (4, "H"), (9, "f"), (300, "\u{4E2D}")]
     );
+    assert_eq!(one.iter().len(), 5);
+    assert_eq!(one.iter().next_back(), Some((300, "\u{4E2D}")));
     assert_eq!(one.len(), 5);
 
     // Nothing joined, nothing changed; joined with itself, the same.
@@ -1007,7 +1009,11 @@ fn debug_holds_no_name_or_text() {
     let mut glyphs = Glyphs::new();
     glyphs.add(&program, "AgH").unwrap();
     glyphs.insert(7, "MARKER");
-    let printed = format!("{program:?} {glyphs:?} {:?}", program.clone());
+    let printed = format!(
+        "{program:?} {glyphs:?} {:?} {:?}",
+        glyphs.iter(),
+        program.clone()
+    );
     assert!(!printed.contains("MARKER"), "{printed}");
     assert!(
         printed.contains("glyphs: 321") && printed.contains("len: 4"),
@@ -1023,6 +1029,7 @@ fn programs_and_glyphs_are_send_and_sync() {
     fn shared<T: Send + Sync>() {}
     shared::<Program>();
     shared::<Glyphs>();
+    shared::<crate::embed::GlyphsIter<'static>>();
     shared::<Error>();
     shared::<Arc<Program>>();
 }

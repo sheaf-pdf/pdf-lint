@@ -2772,6 +2772,212 @@ mod fallback {
         };
         assert_eq!(made("a\u{141}"), Err(Unmade::FontNotBindable));
         assert!(made("ab").is_ok());
+
+        let push = |caption| {
+            super::super::push_button(
+                &super::super::PushButton::new(caption),
+                &bare(100.0, 20.0),
+                &da(12.0),
+                font.res().unwrap(),
+                &set,
+                &Limits::DEFAULT,
+            )
+        };
+        assert_eq!(push("a\u{141}"), Err(Unmade::FontNotBindable));
+        assert!(push("ab").is_ok());
+
+        let combo = |value| {
+            super::super::combo_box(
+                &super::super::ComboBox::new(value),
+                &bare(100.0, 20.0),
+                &da(12.0),
+                font.res().unwrap(),
+                &set,
+                &Limits::DEFAULT,
+            )
+        };
+        assert_eq!(combo("a\u{141}"), Err(Unmade::FontNotBindable));
+        assert!(combo("ab").is_ok());
+
+        let list = |labels: &[&str]| {
+            super::super::list_box(
+                &super::super::ListBox::new(labels),
+                &bare(100.0, 40.0),
+                &da(12.0),
+                font.res().unwrap(),
+                &set,
+                &Limits::DEFAULT,
+            )
+        };
+        assert_eq!(list(&["ab", "a\u{141}"]), Err(Unmade::FontNotBindable));
+        assert!(list(&["ab", "cd"]).is_ok());
+    }
+
+    /// Push buttons, combo boxes, and list boxes take any `FontSet`, drawing
+    /// runs across the field's font and a recording `ProgramFont`, composing
+    /// NFD clusters as `text` does, recording only the glyphs drawn on visible
+    /// lines, and embedding nothing when the field's font draws the whole text.
+    #[test]
+    fn buttons_and_choices_draw_in_a_font_set_and_record_fallback_glyphs() {
+        use std::sync::Mutex;
+
+        use pdf_content_streams::Concat;
+        use pdf_fonts::Fonts;
+        use pdf_fonts::embed::Glyphs;
+        use pdf_gfx::{ProgramFont, TextPage, TextPageOpts, WithFallback};
+        use pdf_objects::{Object, WithStreams, dict};
+
+        use super::super::{ComboBox, ListBox, PushButton, combo_box, list_box, push_button};
+
+        let program = program();
+        let font = helvetica();
+        let layout = font.layout();
+        let helv_res = font.res().unwrap();
+        let fb_res = Res::written(id(20));
+
+        let expected = vec![
+            (program.glyph('\u{141}').unwrap(), "\u{141}".to_owned()),
+            (program.glyph('\u{1ec5}').unwrap(), "\u{1ec5}".to_owned()),
+        ];
+        let nfd: String = VALUE.nfd().collect();
+
+        // 1. Push button: normal and down captions in two fonts, NFD == NFC.
+        let rec = Mutex::new(Glyphs::new());
+        let prog_font = ProgramFont::new(&program, &rec);
+        let set = WithFallback::new(&layout, &prog_font, fb_res.clone());
+        let mut btn = PushButton::new(VALUE);
+        btn.pressed_states = true;
+        btn.down_caption = Some("Zo\u{eb}");
+        let made_nfc = push_button(
+            &btn,
+            &bare(260.0, 24.0),
+            &da(0.0),
+            helv_res.clone(),
+            &set,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let mut got = glyphs(&rec.into_inner().unwrap());
+        got.sort();
+        assert_eq!(got, expected);
+        assert_eq!(made_nfc.normal.needs.0.len(), 2);
+        // The down caption ("Zoë") is WinAnsi alone, so it names Helvetica only.
+        assert_eq!(made_nfc.down.as_ref().unwrap().needs.0.len(), 1);
+
+        let rec_nfd = Mutex::new(Glyphs::new());
+        let prog_nfd = ProgramFont::new(&program, &rec_nfd);
+        let set_nfd = WithFallback::new(&layout, &prog_nfd, fb_res.clone());
+        let mut btn_nfd = btn;
+        btn_nfd.caption = &nfd;
+        let made_nfd = push_button(
+            &btn_nfd,
+            &bare(260.0, 24.0),
+            &da(0.0),
+            helv_res.clone(),
+            &set_nfd,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        assert_eq!(made_nfc, made_nfd);
+
+        // 2. Combo box: mixed runs, NFD == NFC, and read-back through TextPage.
+        let rec = Mutex::new(Glyphs::new());
+        let prog_font = ProgramFont::new(&program, &rec);
+        let set = WithFallback::new(&layout, &prog_font, fb_res.clone());
+        let combo_nfc = combo_box(
+            &ComboBox::new(VALUE),
+            &bare(280.0, 24.0),
+            &da(12.0),
+            helv_res.clone(),
+            &set,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let combo_nfd = combo_box(
+            &ComboBox::new(&nfd),
+            &bare(280.0, 24.0),
+            &da(12.0),
+            helv_res.clone(),
+            &set,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        assert_eq!(combo_nfc, combo_nfd);
+
+        // 3. List box: visible options record fallback glyphs; clipped options
+        //    below the box neither draw nor fail on unencodable characters.
+        let rec = Mutex::new(Glyphs::new());
+        let prog_font = ProgramFont::new(&program, &rec);
+        let set = WithFallback::new(&layout, &prog_font, fb_res.clone());
+        let labels = ["Zo\u{eb}", VALUE, "\u{4e2d}"];
+        let mut lb = ListBox::new(&labels);
+        lb.selected = &[1];
+        let list_ap = list_box(
+            &lb,
+            &bare(280.0, 28.0),
+            &da(12.0),
+            helv_res.clone(),
+            &set,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let recorded = rec.into_inner().unwrap();
+        let mut got = glyphs(&recorded);
+        got.sort();
+        assert_eq!(got, expected);
+
+        // Write the embedded subset once and verify `combo_nfc` and `list_ap`
+        // extract back cleanly with `TextPage`.
+        let font_objs = embed::write(&program, &recorded, &embed::Options::default()).unwrap();
+        let mut objects = super::Objects::new();
+        let mut streams: std::collections::BTreeMap<pdf_objects::ObjectId, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        let ids: Vec<_> = (0..font_objs.len()).map(|i| id(20 + i as u32)).collect();
+        for (mut obj, &oid) in font_objs.into_iter().zip(&ids) {
+            obj.renumber(|to| ids.get(to.number as usize).copied());
+            if let Some(s) = obj.as_stream()
+                && let Some(b) = s.data.bytes()
+            {
+                streams.insert(oid, b.to_vec());
+            }
+            objects.insert(oid, obj);
+        }
+        let source = WithStreams::new(&objects, |oid, cap| match streams.get(&oid) {
+            Some(b) if b.len() <= cap => Ok(b.clone()),
+            _ => Err(pdf_objects::Unreadable::new(
+                oid,
+                pdf_objects::Why::Damaged,
+                "none",
+            )),
+        });
+        for (ap, want) in [
+            (&combo_nfc, VALUE),
+            (
+                &list_ap,
+                "Zo\u{eb}\n\u{141}ukasz Nguy\u{1ec5}n \u{d6}l\u{e7}er",
+            ),
+        ] {
+            let mut fonts = dict! {};
+            for need in &ap.needs.0 {
+                match need.res.body() {
+                    pdf_content_streams::ResBody::Written(oid) => {
+                        fonts.set(need.name.clone(), *oid)
+                    }
+                    _ => fonts.set(need.name.clone(), Std14::Helvetica.dict()),
+                }
+            }
+            let res_obj = Object::from(dict! { "Font" => fonts });
+            let page = TextPage::extract(
+                source,
+                &Concat::new(&[&ap.content]),
+                Some(&res_obj),
+                &pdf_gfx::Limits::DEFAULT,
+                &Fonts::default(),
+                TextPageOpts::default(),
+            )
+            .unwrap();
+            assert_eq!(page.text(), want);
+        }
     }
 
     /// The read layer's maker draws what `text_with_fallback` draws of the

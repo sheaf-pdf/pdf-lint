@@ -19,6 +19,11 @@ forms-value-not-a-string	forms	forms-value-not-a-string.pdf
 forms-value-dangling	forms	forms-value-dangling.pdf
 forms-value-null	forms	forms-value-null.pdf
 forms-value-null-by-reference	forms	forms-value-null-by-reference.pdf
+forms-inherit-past-null	forms	forms-inherit-past-null.pdf
+forms-chained-references	forms	forms-chained-references.pdf
+forms-fields-kid-before-root	forms	forms-fields-kid-before-root.pdf
+forms-fields-kid-without-root	forms	forms-fields-kid-without-root.pdf
+forms-mixed-kids	forms	forms-mixed-kids.pdf
 forms-widget-outside-the-tree	forms	forms-widget-outside-the-tree.pdf
 forms-not-a-widget	forms	forms-not-a-widget.pdf
 forms-no-form	forms	forms-no-form.pdf
@@ -180,6 +185,8 @@ press-opt-own-names	forms-press	press-opt-own-names.pdf,press-opt-own-names.pres
 press-opt-short	forms-press	press-opt-short.pdf,press-opt-short.press
 press-opt-short-past	forms-press	press-opt-short-past.pdf,press-opt-short-past.press
 press-opt-empty	forms-press	press-opt-empty.pdf,press-opt-empty.press
+press-opt-pairs	forms-press	press-opt-pairs.pdf,press-opt-pairs.press
+press-ap-single-stream	forms-press	press-ap-single-stream.pdf,press-ap-single-stream.press
 btn-marks-check	forms-ap-all	btn-marks-check.pdf
 btn-marks-radio	forms-ap-all	btn-marks-radio.pdf
 btn-borders-check	forms-ap-all	btn-borders-check.pdf
@@ -190,10 +197,13 @@ btn-states	forms-ap-all	btn-states.pdf
 btn-opt-check	forms-ap-all	btn-opt-check.pdf
 btn-opt-radio	forms-ap-all	btn-opt-radio.pdf
 btn-opt-own-name	forms-ap-all	btn-opt-own-name.pdf
+btn-opt-pairs	forms-ap-all	btn-opt-pairs.pdf
 btn-fonts	forms-ap-all	btn-fonts.pdf
 push-sizes	forms-ap-all	push-sizes.pdf
 push-states	forms-ap-all	push-states.pdf
 push-size-negative	forms-ap-all	push-size-negative.pdf
+push-beveled-cmyk	forms-ap-all	push-beveled-cmyk.pdf
+push-fit-bounds-no-icon	forms-ap-all	push-fit-bounds-no-icon.pdf
 combo-values	forms-ap-all	combo-values.pdf
 combo-boxes	forms-ap-all	combo-boxes.pdf
 list-values	forms-ap-all	list-values.pdf

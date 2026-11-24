@@ -131,6 +131,7 @@ fn public_types_are_send_and_sync() {
         check::<crate::WrapMode>();
         check::<crate::TextBoxStyle>();
         check::<crate::UnencodableChar>();
+        check::<crate::LaidOutCell>();
         check::<crate::LaidOutLine>();
         check::<crate::LaidOutText>();
         check::<crate::LaidOutRun>();
@@ -704,6 +705,72 @@ fn a_name_shown_by_tj_and_the_quotes_is_its_bytes() {
     assert_approx(shown[2].1, 10.0);
     let g_width = 10.0 * 0.778;
     assert_approx(shown[4].1 - shown[3].1, g_width + 2.0);
+}
+
+/// `Tj`, `'`, `"`, `Tf`, `Do`, and marked-content tags read `true` and `false`
+/// as their written bytes, as PDFium's `GetString` takes them (`pdf-fonts`'s
+/// `shown` agrees); a `TJ` array's boolean is no string, and moves nothing.
+#[test]
+fn booleans_are_strings_where_pdfiums_get_string_reads_them() {
+    let mut store = Store::default();
+    let form_id = store.put_stream(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(100)],
+        },
+        b"BT (ok) Tj ET".to_vec(),
+    );
+    let resources = Object::from(dict! {
+        "Font" => dict! {
+            "true" => Std14::Helvetica.dict(),
+        },
+        "XObject" => dict! {
+            "false" => form_id,
+        },
+    });
+    let fonts = Fonts::default();
+    let content = Concat::new(&[
+        br#"true BMC BT true 10 Tf 14 TL 10 100 Td true Tj false ' 1 2 true " [(A) true (B) false] TJ ET false Do EMC"#,
+    ]);
+    let mut shown: Vec<Vec<u8>> = Vec::new();
+    let mut tags: Vec<Vec<u8>> = Vec::new();
+    interpret(
+        store.as_streams(),
+        &content,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        Opts::default(),
+        |ev| {
+            match ev.kind {
+                Kind::Text(show) => shown.push(show.string.to_vec()),
+                Kind::MarkedBegin(mark) => tags.push(mark.tag.to_vec()),
+                _ => {}
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    let strings: Vec<&[u8]> = shown.iter().map(Vec::as_slice).collect();
+    assert_eq!(
+        strings,
+        [&b"true"[..], b"false", b"true", b"A", b"B", b"ok"],
+        "{shown:?}"
+    );
+    assert_eq!(tags, [b"true".to_vec()]);
+
+    let mut budget = 1 << 20;
+    let fonts_shown = pdf_fonts::shown(
+        store.as_streams(),
+        &fonts,
+        Some(&resources),
+        &content,
+        &pdf_content_streams::ResCx::none(),
+        &pdf_fonts::Limits::DEFAULT,
+        &mut budget,
+    );
+    assert_eq!(fonts_shown.text(), "truefalsetrueABok");
 }
 
 #[cfg(feature = "programs")]
@@ -2236,7 +2303,7 @@ fn canvas_text_box_wrapping_alignment_autosize_comb_and_custom_fonts() {
         .unwrap();
     assert!(!comb_laid.overflowed);
     assert_eq!(comb_laid.lines[0].cells.len(), 2);
-    assert!(comb_laid.lines[0].cells[0].0.x > 36.0 + 80.0);
+    assert!(comb_laid.lines[0].cells[0].origin.x > 36.0 + 80.0);
 
     // 4. Unencodable character returns Err without mutating the canvas.
     let (before_bytes, _) = canvas.named(&Reserved::default());
@@ -4009,7 +4076,7 @@ fn font_heights_as_given_drops_the_floors() {
         ..style(true, VerticalAlign::Middle)
     };
     let laid = layout_text(&short, "ab", rect, &comb).unwrap();
-    assert_approx(laid.lines[0].cells[0].0.y, 23.0);
+    assert_approx(laid.lines[0].cells[0].origin.y, 23.0);
 
     // Heights that give none: the floors all the same, so no step is 0. A
     // descent above the ascent (a flipped Type 3 font), heights not finite,
@@ -4782,21 +4849,26 @@ mod fallback {
         let laid = layout_text(&set, text, BOX, &comb(4, true)).unwrap();
         let line = &laid.lines[0];
         assert!(!laid.overflowed);
-        assert_eq!(line.cell_faces, [0, 1, 0]);
-        let codes: Vec<&[u8]> = line.cells.iter().map(|(_, c)| c.as_slice()).collect();
+        let faces: Vec<usize> = line.cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [0, 1, 0]);
+        let codes: Vec<&[u8]> = line.cells.iter().map(|c| c.codes.as_slice()).collect();
         assert_eq!(codes, [&[1][..], &[101, 102], &[2]]);
+        let ranges: Vec<_> = line.cells.iter().map(|c| c.text.clone()).collect();
+        assert_eq!(ranges, [0..1, 1..4, 4..5]);
+        assert!(!format!("{laid:?}").contains("101"));
         assert!(line.runs.is_empty() && line.codes.is_empty());
         // Each cell is 50 wide: the cluster is 8 wide, 400 units twice.
-        assert_approx(line.cells[0].0.x, 22.5);
-        assert_approx(line.cells[1].0.x, 50.0 + 21.0);
-        assert_approx(line.cells[2].0.x, 100.0 + 22.5);
+        assert_approx(line.cells[0].origin.x, 22.5);
+        assert_approx(line.cells[1].origin.x, 50.0 + 21.0);
+        assert_approx(line.cells[2].origin.x, 100.0 + 22.5);
         // The second face is drawn: its heights, 10 and -4, widen the line.
         assert_approx(line.ascent, 10.0);
         assert_approx(line.descent, -4.0);
 
         // A character at a time, the mark is a cell of its own.
         let laid = layout_text(&set, text, BOX, &comb(4, false)).unwrap();
-        assert_eq!(laid.lines[0].cell_faces, [0, 0, 1, 0]);
+        let faces: Vec<usize> = laid.lines[0].cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [0, 0, 1, 0]);
         // Three clusters past two cells: two drawn, and the text overflows;
         // in three they fit.
         let laid = layout_text(&set, text, BOX, &comb(2, true)).unwrap();
@@ -4815,7 +4887,8 @@ mod fallback {
         assert_approx(laid.lines[0].descent, -2.0);
         let set = WithFallback::new(&LATIN, &LAST, named(201));
         let laid = layout_text(&set, "z", BOX, &comb(4, true)).unwrap();
-        assert_eq!(laid.lines[0].cell_faces, [1]);
+        let faces: Vec<usize> = laid.lines[0].cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [1]);
         assert_approx(laid.lines[0].ascent, 8.0);
         assert_approx(laid.lines[0].descent, -3.0);
     }
@@ -4833,7 +4906,8 @@ mod fallback {
         let text = "abcd\u{E9}";
         let laid = layout_text(&set, text, BOX, &comb).unwrap();
         assert!(laid.overflowed);
-        assert_eq!(laid.lines[0].cell_faces, [0; 4]);
+        let faces: Vec<usize> = laid.lines[0].cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [0; 4]);
         // The `é` isn't drawn, so the line has the first face's heights alone.
         assert_approx(laid.lines[0].ascent, 8.0);
         assert_approx(laid.lines[0].descent, -2.0);

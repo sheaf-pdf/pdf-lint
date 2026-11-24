@@ -224,7 +224,9 @@ def cases():
     )
 
     # A kid's value that reaches nothing: a reference to no object, a null,
-    # and a reference to a null, each under a parent with a value.
+    # and a reference to a null, each under a parent with a value; and null
+    # `/FT` and `/Ff` entries (direct and indirect) under a parent that gives
+    # both.
     for name, value, more in (
         ("forms-value-dangling", b"99 0 R", {}),
         ("forms-value-null", b"null", {}),
@@ -236,6 +238,75 @@ def cases():
         }
         objs.update(more)
         add(name, b"[5 0 R]", b"[6 0 R]", objs)
+
+    add(
+        "forms-inherit-past-null",
+        b"[5 0 R]",
+        b"[6 0 R 7 0 R]",
+        {
+            5: b"<< /T (p) /FT /Tx /Ff 4096 /V (parent) /Kids [6 0 R 7 0 R] >>",
+            6: b"<< /T (direct) /Parent 5 0 R /FT null /Ff null " + WIDGET + b" " + rect(0) + b" >>",
+            7: b"<< /T (indirect) /Parent 5 0 R /FT 60 0 R /Ff 60 0 R " + WIDGET + b" " + rect(1) + b" >>",
+            60: b"null",
+        },
+    )
+    add(
+        "forms-chained-references",
+        b"[5 0 R]",
+        b"[8 0 R]",
+        {
+            5: b"<< /T 60 0 R /FT 63 0 R /Ff 66 0 R /V 69 0 R /Kids 72 0 R >>",
+            8: widget(5, 0),
+            60: b"61 0 R",
+            61: b"62 0 R",
+            62: b"(chained)",
+            63: b"64 0 R",
+            64: b"65 0 R",
+            65: b"/Tx",
+            66: b"67 0 R",
+            67: b"68 0 R",
+            68: b"4096",
+            69: b"70 0 R",
+            70: b"71 0 R",
+            71: b"(hop value)",
+            72: b"73 0 R",
+            73: b"[74 0 R]",
+            74: b"8 0 R",
+        },
+    )
+    # `/Fields` listing a kid with `/Parent` before its root or without its
+    # root in `/Fields`, and a parent mixing field kids and nameless widgets.
+    add(
+        "forms-fields-kid-before-root",
+        b"[6 0 R 5 0 R]",
+        b"[6 0 R]",
+        {
+            5: b"<< /T (top) /FT /Tx /V (hi) /Kids [6 0 R] >>",
+            6: widget(5, 0),
+        },
+    )
+    add(
+        "forms-fields-kid-without-root",
+        b"[6 0 R]",
+        b"[6 0 R]",
+        {
+            5: b"<< /T (top) /FT /Tx /V (hi) >>",
+            6: widget(5, 0),
+        },
+    )
+    add(
+        "forms-mixed-kids",
+        b"[5 0 R 8 0 R]",
+        b"[6 0 R 7 0 R 10 0 R 9 0 R]",
+        {
+            5: b"<< /T (top) /FT /Tx /V (hi) /Kids [6 0 R 7 0 R] >>",
+            6: b"<< /T (kid) /Parent 5 0 R /V (own) " + WIDGET + b" " + rect(0) + b" >>",
+            7: widget(5, 1),
+            8: b"<< /T (rev) /FT /Tx /V (lo) /Kids [10 0 R 9 0 R] >>",
+            9: b"<< /T (kid) /Parent 8 0 R /V (sub) " + WIDGET + b" " + rect(2) + b" >>",
+            10: widget(8, 3),
+        },
+    )
 
     # Annotations that aren't a tree's widgets.
     add(
@@ -544,6 +615,31 @@ def press_cases():
     press("press-opt-short", 0, short, opt=b"/Opt [(a)] ", presses=b"0")
     press("press-opt-short-past", 0, short, opt=b"/Opt [(a)] ", presses=b"1")
     press("press-opt-empty", 0, [(b"Off", None), (b"Off", None)], opt=b"/Opt [] ", presses=b"0")
+    # Two-string `[export label]` entries in `/Opt` on a unison button group
+    # of one on state, and a toggle whose `/AP /N` is a single stream rather
+    # than a state dictionary.
+    pairs_opt = b"/Opt [[(e1) (One)] [(e2) (Two)] [(e1) (Three)]] "
+    one_state = [(b"Off", b"1"), (b"Off", b"1"), (b"Off", b"1")]
+    press("press-opt-pairs", radio | unison, one_state, opt=pairs_opt, presses=b"0")
+    single_ap = stream(b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] ", b"0 g 5 5 10 10 re f")
+    ap(
+        "press-ap-single-stream",
+        [
+            b"<< /Parent 50 0 R /AS /Yes /AP << /N 51 0 R >> /MK << /BC [0] >> "
+            + WIDGET
+            + b" /Rect [10 10 30 30] >>",
+            b"<< /Parent 50 0 R /AS /Off /AP << /N 51 0 R >> /MK << /BC [0] >> "
+            + WIDGET
+            + b" /Rect [40 10 60 30] >>",
+        ],
+        fonts=[],
+        fields=b"50 0 R",
+        objs={
+            50: b"<< /T (group) /FT /Btn /V /Yes /Kids [5 0 R 6 0 R] >>",
+            51: single_ap,
+        },
+    )
+    as_kind("forms-press", press=b"1")
 
 
 def at(i, w=12, h=12, cols=8):
@@ -643,6 +739,13 @@ def toggle_cases():
     field = b"<< /T (g) /FT /Btn /DA (/ZaDb 0 Tf 0 g) /Opt [(apple) (pear)] /Kids [5 0 R 6 0 R] >>"
     ap("btn-opt-own-name", kids, fields=b"50 0 R", objs={50: field, 51: on}, form=b"/NeedAppearances true")
     as_kind("forms-ap-all")
+    # Two-string `/Opt` entries on a check box group.
+    kids = [b"<< /Parent 50 0 R /MK << /CA (4) /BC [0] >> " + WIDGET + b" /Rect " + at(i) + b" >>"
+            for i in range(3)]
+    field = (b"<< /T (g) /FT /Btn /DA (/ZaDb 0 Tf 0 g) /Opt [[(e1) (One)] [(e2) (Two)] [(e1) (Three)]]"
+             b" /Kids [5 0 R 6 0 R 7 0 R] >>")
+    ap("btn-opt-pairs", kids, fields=b"50 0 R", objs={50: field})
+    as_kind("forms-ap-all")
     # The default resources' ZapfDingbats with an encoding of its own, whose
     # code for a check mark draws a circle, and a /DA naming Helvetica: the
     # mark drawn in ZapfDingbats as it's written by name all the same.
@@ -703,6 +806,31 @@ def push_cases():
     # a size of 0 for it.
     ap("push-size-negative", [push(b"/DA (/Helv " + size + b" Tf 0 g) /MK << /CA (Neg) /BC [0] >>", i)
                               for i, size in enumerate((b"-10", b"0"))])
+    as_kind("forms-ap-all")
+    # Down beveled push button over a CMYK background, and `/MK /IF << /FB true >>`
+    # with no icon stream.
+    ap(
+        "push-beveled-cmyk",
+        [
+            push(
+                b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Press) /BC [0] /BG [0.1 0.2 0.3 0.4] >>"
+                b" /BS << /W 2 /S /B >>",
+                0,
+            )
+        ],
+    )
+    as_kind("forms-ap-all")
+    ap(
+        "push-fit-bounds-no-icon",
+        [
+            push(
+                b"/DA (/Helv 10 Tf 0 g) /H /P /MK << /CA (Fit) /TP %d /BC [0] /BG [0.8]"
+                b" /IF << /FB true >> >>" % tp,
+                i,
+            )
+            for i, tp in enumerate((0, 2, 6))
+        ],
+    )
     as_kind("forms-ap-all")
 
 

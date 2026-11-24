@@ -302,7 +302,11 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
         };
         let fields = form.fields();
         assert_eq!(fields.len(), told.fields().len());
-        let widgets: usize = fields.iter().map(|field| field.widgets().len()).sum();
+        let widgets: usize = fields
+            .iter()
+            .flat_map(|field| field.widgets())
+            .filter(|widget| !widget.is_merged())
+            .count();
         assert!(fields.len() + widgets <= limits.fields);
         for (index, field) in fields.iter().enumerate() {
             assert_eq!(format!("{field:?}"), format!("{:?}", told.fields()[index]));
@@ -384,13 +388,16 @@ pub fn check_appearance(data: &[u8]) {
 #[cfg(all(feature = "text-layout", feature = "embed"))]
 fn check_fallback(cut: &Cut<'_>) {
     use pdf_content_streams::Res;
-    use pdf_fonts::embed::Program;
-    use pdf_gfx::LayoutFont;
+    use pdf_fonts::embed::{Glyphs, Program};
+    use pdf_gfx::{LayoutFont, ProgramFont, WithFallback};
     use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
     use unicode_segmentation::UnicodeSegmentation;
 
     use crate::FieldFlags;
-    use crate::appearance::{Fallback, Unmade, text, text_with_fallback};
+    use crate::appearance::{
+        ComboBox, Fallback, ListBox, PushButton, Unmade, combo_box, list_box, push_button, text,
+        text_with_fallback,
+    };
 
     let Some(bytes) = cut.program else {
         return;
@@ -522,6 +529,84 @@ fn check_fallback(cut: &Cut<'_>) {
                 "text the font draws whole drawn as in it alone"
             );
             assert!(made.glyphs.is_empty(), "no glyph of the fallback drawn");
+        }
+
+        // Push button, combo box, and list box over `WithFallback` + recording
+        // `ProgramFont`.
+        let check_recorded = |recorded: &Glyphs, ap: &crate::appearance::Appearance| {
+            let needs = &ap.needs.0;
+            assert!(
+                needs.len() <= 2
+                    && needs
+                        .iter()
+                        .all(|need| need.res == font_res || need.res == res)
+            );
+            assert_eq!(
+                needs.iter().any(|need| need.res == res),
+                !recorded.is_empty()
+            );
+            for (glyph, drawn) in recorded {
+                let ch = drawn.chars().next().expect("a glyph's text");
+                assert_eq!(program.glyph(ch), Some(glyph));
+                assert!(drawable(ch));
+            }
+        };
+
+        let rec_push = std::sync::Mutex::new(Glyphs::new());
+        let prog_push = ProgramFont::new(&program, &rec_push);
+        let set_push = WithFallback::new(&layout, &prog_push, res.clone());
+        let btn = PushButton::new(given);
+        let push_made = push_button(&btn, &look, &cut.da, font_res.clone(), &set_push, &limits);
+        let push_alone = push_button(&btn, &look, &cut.da, font_res.clone(), &layout, &limits);
+        if let Ok(push_made) = &push_made {
+            button_content_holds(&push_made.normal.content);
+            check_recorded(&rec_push.into_inner().unwrap(), &push_made.normal);
+            if let Ok(push_alone) = push_alone
+                && composed
+            {
+                assert_eq!(*push_made, push_alone);
+            }
+        }
+
+        let rec_combo = std::sync::Mutex::new(Glyphs::new());
+        let prog_combo = ProgramFont::new(&program, &rec_combo);
+        let set_combo = WithFallback::new(&layout, &prog_combo, res.clone());
+        let mut combo = ComboBox::new(given);
+        combo.drop_button = field.flags.bits() & 1 == 0;
+        let combo_made = combo_box(
+            &combo,
+            &look,
+            &cut.da,
+            font_res.clone(),
+            &set_combo,
+            &limits,
+        );
+        let combo_alone = combo_box(&combo, &look, &cut.da, font_res.clone(), &layout, &limits);
+        if let Ok(combo_made) = &combo_made {
+            content_holds(&combo_made.content, None);
+            check_recorded(&rec_combo.into_inner().unwrap(), combo_made);
+            if let Ok(combo_alone) = combo_alone
+                && composed
+            {
+                assert_eq!(*combo_made, combo_alone);
+            }
+        }
+
+        let rec_list = std::sync::Mutex::new(Glyphs::new());
+        let prog_list = ProgramFont::new(&program, &rec_list);
+        let set_list = WithFallback::new(&layout, &prog_list, res.clone());
+        let labels: Vec<&str> = given.split('\n').collect();
+        let lb = ListBox::new(&labels);
+        let list_made = list_box(&lb, &look, &cut.da, font_res.clone(), &set_list, &limits);
+        let list_alone = list_box(&lb, &look, &cut.da, font_res.clone(), &layout, &limits);
+        if let Ok(list_made) = &list_made {
+            content_holds(&list_made.content, None);
+            check_recorded(&rec_list.into_inner().unwrap(), list_made);
+            if let Ok(list_alone) = list_alone
+                && composed
+            {
+                assert_eq!(*list_made, list_alone);
+            }
         }
     }
 }

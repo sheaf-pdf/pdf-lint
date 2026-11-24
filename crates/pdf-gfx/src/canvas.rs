@@ -986,10 +986,10 @@ fn one_face(line: &crate::wrap::LaidOutLine) -> Option<usize> {
 /// face, or the runs of a line in several.
 #[cfg(feature = "text-layout")]
 fn strings(line: &crate::wrap::LaidOutLine) -> impl Iterator<Item = (usize, Point, &[u8])> {
-    let cells = line.cells.iter().enumerate().map(|(i, (at, codes))| {
-        let face = line.cell_faces.get(i).copied().unwrap_or(0);
-        (face, *at, codes.as_slice())
-    });
+    let cells = line
+        .cells
+        .iter()
+        .map(|cell| (cell.face, cell.origin, cell.codes.as_slice()));
     let one = one_face(line).filter(|_| line.cells.is_empty());
     let codes = one.map(|face| (face, line.origin, line.codes.as_slice()));
     let runs = (line.runs.iter())

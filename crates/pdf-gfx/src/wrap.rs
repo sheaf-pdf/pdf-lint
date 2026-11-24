@@ -756,16 +756,14 @@ pub struct LaidOutLine {
     pub codes: Vec<u8>,
     /// Extra word spacing (`Tw`) in text-space points (`0.0` unless justified).
     pub word_space: f32,
-    /// Individual `(origin, codes)` placements when laid out into `comb` cells.
-    pub cells: Vec<(Point, Vec<u8>)>,
+    /// Individual [`LaidOutCell`] placements when laid out into `comb` cells.
+    pub cells: Vec<LaidOutCell>,
     /// The runs of `codes` drawn in one face each, in order: one for a line
     /// in one face, none for an empty line or a comb line. Where a line is
     /// in several faces its runs are what's drawn, so a caller that changes
     /// `codes` there changes them with it: a run that names bytes `codes`
     /// hasn't keeps the whole layout undrawn.
     pub runs: Vec<LaidOutRun>,
-    /// The face each of `cells` is drawn in, beside it.
-    pub cell_faces: Vec<usize>,
     /// The line's ascent in points: the largest of the faces drawn on it (an
     /// empty line's the first face's), as the heights
     /// [`TextBoxStyle::font_heights_as_given`] says.
@@ -783,11 +781,39 @@ impl fmt::Debug for LaidOutLine {
             .field("width", &self.width)
             .field("codes_len", &self.codes.len())
             .field("word_space", &self.word_space)
-            .field("cells_len", &self.cells.len())
+            .field("cells", &self.cells)
             .field("runs", &self.runs)
-            .field("cell_faces", &self.cell_faces)
             .field("ascent", &self.ascent)
             .field("descent", &self.descent)
+            .finish()
+    }
+}
+
+/// One placed cell of a comb [`LaidOutLine`] ([`TextBoxStyle::comb`]), drawn in
+/// one face of the [`FontSet`] it was laid out in.
+///
+/// Its `Debug` implementation prints the byte length of `codes` rather than raw
+/// encoded string bytes.
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub struct LaidOutCell {
+    /// Baseline origin of this cell's glyph(s) in PageSpace.
+    pub origin: Point,
+    /// Encoded character-code bytes for `Tj`.
+    pub codes: Vec<u8>,
+    /// The face of the [`FontSet`] this cell is drawn in.
+    pub face: usize,
+    /// The UTF-8 byte range in the source text this cell draws.
+    pub text: Range<usize>,
+}
+
+impl fmt::Debug for LaidOutCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LaidOutCell")
+            .field("origin", &self.origin)
+            .field("codes_len", &self.codes.len())
+            .field("face", &self.face)
+            .field("text", &self.text)
             .finish()
     }
 }
@@ -1183,7 +1209,6 @@ fn layout_comb(
         descent_em,
     );
     let mut cells = Vec::with_capacity(count);
-    let mut cell_faces = Vec::with_capacity(count);
     for (i, unit) in units.iter().take(count).enumerate() {
         let unit = &glyphs[unit.clone()];
         let cell_idx = start_cell + i;
@@ -1194,14 +1219,19 @@ fn layout_comb(
             [g] => g.codes().to_vec(),
             _ => unit.iter().flat_map(|g| g.codes()).copied().collect(),
         };
-        cells.push((Point::new(cx, baseline_y), codes));
-        cell_faces.push(unit[0].face);
+        let text = unit[0].byte_start..unit.last().unwrap().byte_end;
+        cells.push(LaidOutCell {
+            origin: Point::new(cx, baseline_y),
+            codes,
+            face: unit[0].face,
+            text,
+        });
     }
 
     let lines = if cells.is_empty() {
         Vec::new()
     } else {
-        let origin = cells[0].0;
+        let origin = cells[0].origin;
         vec![LaidOutLine {
             text_range: 0..total_bytes,
             origin,
@@ -1210,7 +1240,6 @@ fn layout_comb(
             word_space: 0.0,
             cells,
             runs: Vec::new(),
-            cell_faces,
             ascent: ascent_em * font_size,
             descent: descent_em * font_size,
         }]
@@ -1746,7 +1775,6 @@ fn build_lines_at_size(
             word_space,
             cells: Vec::new(),
             runs,
-            cell_faces: Vec::new(),
             ascent: heights.ascent * font_size,
             descent: heights.descent * font_size,
         });

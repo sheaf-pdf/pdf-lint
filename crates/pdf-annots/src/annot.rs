@@ -19,7 +19,7 @@ use crate::limits::{Cap, Limits};
 use crate::phases::phase;
 use crate::replies::ReplyKind;
 use crate::resolve::Reader;
-use crate::style::{AnnotColor, Border, read_border, read_color, read_legacy_border};
+use crate::style::{AnnotColor, Border, read_borders, read_color};
 use crate::subtypes::{AnnotSubtype, TypedAnnot, read_typed};
 
 /// Page tabbing order (`/Tabs` on a `/Page` dictionary, ISO 32000-2 §7.7.3.3
@@ -491,8 +491,7 @@ fn read_one<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         .int_entry(dict, id, "F")?
         .map_or(AnnotFlags::NONE, AnnotFlags::from_pdf_int);
     let color = read_color(reader, dict, id, "C")?;
-    let legacy_border = read_legacy_border(reader, dict, id)?.map(|lb| [lb.hr, lb.vr, lb.bw]);
-    let border = read_border(reader, dict, id)?;
+    let (legacy_border, border) = read_borders(reader, dict, id)?;
     let appearances = read_appearances(reader, dict, id)?;
     let struct_parent = reader
         .int_entry(dict, id, "StructParent")?

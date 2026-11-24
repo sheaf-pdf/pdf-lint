@@ -293,10 +293,11 @@ impl Border {
     /// As [`Self::read`], reporting recoverable ISO 32000-2 departures in
     /// `/BS`, `/Border`, and `/BE` to `sink`: those that
     /// [`Annot::from_dict_with`](crate::Annot::from_dict_with) tells while it
-    /// reads the border. `/Border` isn't read where `/BS` is there, since it's
-    /// then ignored (ISO 32000-2 §12.5.2 Table 166). `Annot` also reads
-    /// `/Border` for [`Annot::legacy_border`](crate::Annot::legacy_border),
-    /// whatever `/BS` says, and tells its faults for that too.
+    /// reads the border. `/Border` isn't read where `/BS` is a dictionary,
+    /// since it's then ignored (ISO 32000-2 §12.5.2 Table 166); `Annot` reads
+    /// `/Border` once in that case too, for
+    /// [`Annot::legacy_border`](crate::Annot::legacy_border), and without
+    /// `/BS` both read `/Border` once.
     ///
     /// # Errors
     ///
@@ -439,6 +440,23 @@ pub(crate) fn read_border<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     dict: &'o Dict,
     within: Option<ObjectId>,
 ) -> Result<Border, Error> {
+    Ok(read_borders_inner(reader, dict, within, false)?.1)
+}
+
+pub(crate) fn read_borders<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &mut Reader<'_, R, S>,
+    dict: &'o Dict,
+    within: Option<ObjectId>,
+) -> Result<(Option<[f32; 3]>, Border), Error> {
+    read_borders_inner(reader, dict, within, true)
+}
+
+fn read_borders_inner<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &mut Reader<'_, R, S>,
+    dict: &'o Dict,
+    within: Option<ObjectId>,
+    keep_legacy: bool,
+) -> Result<(Option<[f32; 3]>, Border), Error> {
     let cloudy_intensity = if let Some((be, be_id)) = reader.dict_entry(dict, within, "BE")? {
         if reader.name_entry(be, be_id, "S")? == Some(b"C") {
             Some(reader.float_entry(be, be_id, "I")?.unwrap_or(0.0))
@@ -474,17 +492,26 @@ pub(crate) fn read_border<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         if style == BorderStyle::Dashed && dash.is_empty() {
             dash.push(3.0);
         }
-        return Ok(Border {
-            width,
-            style,
-            dash,
-            horizontal_radius: 0.0,
-            vertical_radius: 0.0,
-            cloudy_intensity,
-        });
+        let legacy = if keep_legacy {
+            read_legacy_border(reader, dict, within)?.map(|lb| [lb.hr, lb.vr, lb.bw])
+        } else {
+            None
+        };
+        return Ok((
+            legacy,
+            Border {
+                width,
+                style,
+                dash,
+                horizontal_radius: 0.0,
+                vertical_radius: 0.0,
+                cloudy_intensity,
+            },
+        ));
     }
 
     if let Some(lb) = read_legacy_border(reader, dict, within)? {
+        let legacy = Some([lb.hr, lb.vr, lb.bw]);
         let (style, dash) = match lb.dash {
             Some(d) => (
                 BorderStyle::Dashed,
@@ -492,20 +519,26 @@ pub(crate) fn read_border<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
             ),
             None => (BorderStyle::Solid, Vec::new()),
         };
-        return Ok(Border {
-            width: lb.bw.max(0.0),
-            style,
-            dash,
-            horizontal_radius: lb.hr.max(0.0),
-            vertical_radius: lb.vr.max(0.0),
-            cloudy_intensity,
-        });
+        return Ok((
+            legacy,
+            Border {
+                width: lb.bw.max(0.0),
+                style,
+                dash,
+                horizontal_radius: lb.hr.max(0.0),
+                vertical_radius: lb.vr.max(0.0),
+                cloudy_intensity,
+            },
+        ));
     }
 
-    Ok(Border {
-        cloudy_intensity,
-        ..Border::default()
-    })
+    Ok((
+        None,
+        Border {
+            cloudy_intensity,
+            ..Border::default()
+        },
+    ))
 }
 
 /// Line-ending style for `/Line`, `/PolyLine`, and `/FreeText` callouts

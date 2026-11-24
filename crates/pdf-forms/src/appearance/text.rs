@@ -497,12 +497,8 @@ impl Made {
                     line.codes.get(run.codes.clone()),
                 );
             }
-            // A comb line's cells, each a cluster of the text in order.
-            let cells = line.cells.iter().zip(&line.cell_faces);
-            for ((_, unit), ((_, codes), &drawn)) in clusters(&self.shown.text).zip(cells) {
-                if drawn == face {
-                    keep(Some(unit), Some(codes));
-                }
+            for cell in line.cells.iter().filter(|cell| cell.face == face) {
+                keep(self.shown.text.get(cell.text.clone()), Some(&cell.codes));
             }
         }
         glyphs
@@ -514,14 +510,14 @@ impl Made {
 /// (`pdf_gfx::FontSet::face_resource`), [`Unmade::FontNotBindable`] where
 /// it has none. A face below the last drawn in that draws nothing stands
 /// under `font_res`, which no string drawn names.
-fn resources<F: FontSet + ?Sized>(
+pub(super) fn resources<F: FontSet + ?Sized>(
     laid: &LaidOutText,
     font_res: Res,
     font: &F,
 ) -> Result<Vec<Res>, Unmade> {
     let drawn = || {
         (laid.lines.iter()).flat_map(|line| {
-            (line.runs.iter().map(|run| run.face)).chain(line.cell_faces.iter().copied())
+            (line.runs.iter().map(|run| run.face)).chain(line.cells.iter().map(|cell| cell.face))
         })
     };
     let last = drawn().max().unwrap_or(0);
@@ -741,7 +737,7 @@ fn placeable(laid: &LaidOutText) -> bool {
             };
             within(line.origin, &line.codes, line.word_space)
                 && line.runs.iter().all(run)
-                && (line.cells.iter()).all(|(at, codes)| within(*at, codes, 0.0))
+                && (line.cells.iter()).all(|cell| within(cell.origin, &cell.codes, 0.0))
         })
 }
 
@@ -782,49 +778,129 @@ fn auto_size<F: FontSet + ?Sized>(
         }
     }
 
-    let multiline = field.flags.contains(FieldFlags::MULTILINE);
-    let sizes = match multiline {
-        true => &AUTO_SIZES[..MULTILINE_SIZES],
-        false => &AUTO_SIZES[..],
+    if !(field.flags.contains(FieldFlags::MULTILINE) && shown.cells.is_none()) {
+        return Ok(single_auto_size(&advances, &faces, client, font));
+    }
+
+    let sizes = &AUTO_SIZES[..MULTILINE_SIZES];
+    let (ascent, descent) = faces_heights(&faces, font);
+    let line = |size: f32| ascent * size * 0.001 - descent * size * 0.001;
+    // Every line's in the field's font: its heights, a line each.
+    let one = faces.iter().all(|&face| face == 0);
+    Ok(search_sizes(sizes, |size| {
+        let trial = TextBoxStyle {
+            size: Some(size),
+            ..*style
+        };
+        let (wide, tall) = match layout_text(font, &shown.text, client, &trial) {
+            Ok(laid) => (
+                laid.lines.iter().map(|l| l.width).fold(0.0, f32::max),
+                match one {
+                    true => line(size) * laid.lines.len() as f32,
+                    false => (laid.lines.iter()).fold(0.0, |h, l| h + (l.ascent - l.descent)),
+                },
+            ),
+            Err(_) => (0.0, 0.0),
+        };
+        is_bigger(wide, client.width()) || is_bigger(tall, client.height())
+    }))
+}
+
+/// `text` on one line in `box_`, set at its middle by the faces' ascent and
+/// descent as given (`pdf_gfx::TextBoxStyle::font_heights_as_given`) and
+/// across by `align`, as PDFium as of chromium/8152 sets a push button's
+/// caption, a combo box's text, and each line of a list box
+/// (`fpdfsdk/cpdfsdk_appstream.cpp`, `GetPushButtonAppStream`,
+/// `SetAsComboBox`, `SetAsListBox`, over `fpdfsdk/pwl/cpwl_edit_impl.cpp`);
+/// none where there's nothing to draw: no text once its line breaks are
+/// dropped, or a box with no width.
+///
+/// Line breaks are dropped and grapheme clusters composed where `font` has
+/// them so, as [`text`] prepares a single line. The size is `size` where it's
+/// `0.0001` or more; otherwise (none, `0`, or below) the largest of
+/// [`AUTO_SIZES`] at which the line fits `box_` ([`single_auto_size`]).
+pub(super) fn one_line<F: FontSet + ?Sized>(
+    text: &str,
+    box_: Rect,
+    size: Option<f32>,
+    align: TextAlign,
+    font: &F,
+) -> Result<Option<LaidOutText>, Unmade> {
+    if size.is_some_and(|s| !s.is_finite()) {
+        return Err(Unmade::NotFinite);
+    }
+    let shown = Shown::of(&TextField::new(text), None, font);
+    let (advances, faces) = advances(&shown, font, text)?;
+    if shown.text.is_empty() || box_.width() <= 0.0 {
+        return Ok(None);
+    }
+    let mut style = TextBoxStyle {
+        align,
+        vertical_align: VerticalAlign::Middle,
+        wrap: WrapMode::NoWrap,
+        leading_factor: 1.0,
+        clip: false,
+        line_end_spaces: true,
+        font_heights_as_given: true,
+        clusters: !shown.text.is_ascii(),
+        ..TextBoxStyle::default()
     };
-    // The heights a single line is set by: its font's, or from the baseline
-    // the largest and smallest of the fonts drawn on it.
-    let (ascent, descent) = match faces[..] {
-        [] => heights(metrics),
+    let size = match size.filter(|s| *s >= NO_SIZE) {
+        Some(size) => size,
+        None => single_auto_size(&advances, &faces, box_, font),
+    };
+    style.size = Some(size);
+    let laid =
+        layout_text(font, &shown.text, box_, &style).map_err(|err| shown.unencodable(err, text))?;
+    if !placeable(&laid) {
+        return Err(Unmade::NotFinite);
+    }
+    Ok(Some(laid))
+}
+
+/// The height of a line in `font`'s first face at `size`: its ascent less its
+/// descent, as the layout sets lines by them ([`heights`]), as PDFium as of
+/// chromium/8152 steps a list box's lines down (`SetAsListBox`).
+pub(super) fn line_height<F: FontSet + ?Sized>(font: &F, size: f32) -> f32 {
+    let (ascent, descent) = heights(font.face_metrics(0));
+    ascent * size * 0.001 - descent * size * 0.001
+}
+
+/// The size an automatic size comes to for a single line of `advances` drawn
+/// in `faces` of `font` inside `box_`.
+fn single_auto_size<F: FontSet + ?Sized>(
+    advances: &[f32],
+    faces: &[usize],
+    box_: Rect,
+    font: &F,
+) -> f32 {
+    let (ascent, descent) = faces_heights(faces, font);
+    search_sizes(&AUTO_SIZES, |size| {
+        let wide = advances.iter().fold(0.0, |w, a| w + a * size * 0.001);
+        let tall = ascent * size * 0.001 - descent * size * 0.001;
+        is_bigger(wide, box_.width()) || is_bigger(tall, box_.height())
+    })
+}
+
+/// The ascent and descent, in glyph units, a single line drawn in `faces` of
+/// `font` is set by: the first face's when empty, a sole face's, or from `0`
+/// the largest ascent and smallest descent of the faces drawn on it.
+fn faces_heights<F: FontSet + ?Sized>(faces: &[usize], font: &F) -> (f32, f32) {
+    match *faces {
+        [] => heights(font.face_metrics(0)),
         [face] => heights(font.face_metrics(face)),
         _ => (faces.iter()).fold((0.0f32, 0.0f32), |(a, d), &face| {
             let (ascent, descent) = heights(font.face_metrics(face));
             (a.max(ascent), d.min(descent))
         }),
-    };
-    let line = |size: f32| ascent * size * 0.001 - descent * size * 0.001;
-    // Every line's in the field's font: its heights, a line each.
-    let one = faces.iter().all(|&face| face == 0);
-    let bigger = |size: f32| {
-        let (wide, tall) = if multiline && shown.cells.is_none() {
-            let trial = TextBoxStyle {
-                size: Some(size),
-                ..*style
-            };
-            match layout_text(font, &shown.text, client, &trial) {
-                Ok(laid) => (
-                    laid.lines.iter().map(|l| l.width).fold(0.0, f32::max),
-                    match one {
-                        true => line(size) * laid.lines.len() as f32,
-                        false => (laid.lines.iter()).fold(0.0, |h, l| h + (l.ascent - l.descent)),
-                    },
-                ),
-                Err(_) => (0.0, 0.0),
-            }
-        } else {
-            let wide = advances.iter().fold(0.0, |w, a| w + a * size * 0.001);
-            (wide, line(size))
-        };
-        is_bigger(wide, client.width()) || is_bigger(tall, client.height())
-    };
+    }
+}
 
-    // The first size at which the text is bigger, by a binary search over
-    // the sizes as `std::lower_bound` makes it, so the same sizes are tried.
+/// The largest of `sizes` before the first at which `bigger` holds (or the
+/// first where even that is bigger, the last where none is), by a binary
+/// search over `sizes` as `std::lower_bound` makes it, so the same sizes are
+/// tried as PDFium tries.
+fn search_sizes(sizes: &[f32], mut bigger: impl FnMut(f32) -> bool) -> f32 {
     let (mut first, mut count) = (0, sizes.len());
     while count > 0 {
         let step = count / 2;
@@ -835,10 +911,10 @@ fn auto_size<F: FontSet + ?Sized>(
             count -= step + 1;
         }
     }
-    Ok(match first {
+    match first {
         0 => sizes[0],
         n => sizes[n - 1],
-    })
+    }
 }
 
 /// The heights, in glyph units, the layout sets a line in a font of

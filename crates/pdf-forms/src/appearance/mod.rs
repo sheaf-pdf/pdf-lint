@@ -18,7 +18,8 @@
 //!   `Off` ([`ToggleAppearances`]), its mark the ZapfDingbats glyph its
 //!   caption names ([`Mark`]), and no `Off` where it would paint nothing;
 //!   [`push_button`] makes a push button's normal, rollover, and down
-//!   appearances ([`PushAppearances`]) from a [`PushButton`] in a font.
+//!   appearances ([`PushAppearances`]) from a [`PushButton`] in a font or
+//!   [`pdf_gfx::FontSet`].
 //!   [`widget_toggle`] and [`widget_push`] read a widget of a
 //!   [`Form`](crate::Form)'s buttons into that data, and
 //!   [`toggle_for_widget`] and [`push_for_widget`] make one widget's.
@@ -26,7 +27,7 @@
 //!   from plain data: a [`ComboBox`] (the text it shows, and whether its
 //!   drop button is drawn) or a [`ListBox`] (its options' labels, those
 //!   selected, and the one at its top), a [`WidgetLook`], the parsed default
-//!   appearance, and a font; [`field_choice`] reads what a
+//!   appearance, and a font or [`pdf_gfx::FontSet`]; [`field_choice`] reads what a
 //!   [`Form`](crate::Form)'s choice field shows into that data, once for
 //!   all its widgets ([`FieldChoice`]), [`widget_choice`] reads a widget's
 //!   box beside it, and [`choice_for_widget`] makes one widget's.
@@ -116,7 +117,6 @@ mod button;
 mod choice;
 mod font;
 mod frame;
-mod line;
 mod read;
 #[cfg(test)]
 mod tests;

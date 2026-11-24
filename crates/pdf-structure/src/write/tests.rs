@@ -11836,3 +11836,152 @@ fn streaming_writers_bound_memory_and_propagate_write_io_errors() {
         "{nl_err:?}"
     );
 }
+
+/// Preserving an existing file's encryption (`Encryptor::of`) under a
+/// renumbering that leaves `/Encrypt` unmapped (`None`) allocates a new
+/// `/Encrypt` object number without treating the encryption as newly created,
+/// so a `/Metadata` stream carrying its own `/Identity` `/Crypt` filter keeps
+/// that filter intact through both `write::full` and `write::Parts`.
+#[test]
+fn renumbering_away_encrypt_preserves_metadata_identity_crypt_filter() {
+    let methods = methods();
+    let trailer = dict! { "Root" => Object::reference(1) };
+    for method in standard(&methods) {
+        if !method.filters {
+            continue;
+        }
+        let name = method.name;
+        let identity = Object::from(dict! {
+            "Type" => Object::name("CryptFilterDecodeParms"),
+            "Name" => Object::name("Identity"),
+        });
+        let meta_dict = dict! {
+            "Type" => Object::name("Metadata"),
+            "Subtype" => Object::name("XML"),
+            "Filter" => vec![Object::name("Crypt")],
+            "DecodeParms" => vec![identity],
+        };
+        let objects = [
+            (
+                1,
+                Object::from(dict! {
+                    "Type" => Object::name("Catalog"),
+                    "Metadata" => Object::reference(2),
+                }),
+            ),
+            (2, Object::from(Stream::new(meta_dict, XMP.to_vec()))),
+        ];
+        let src_bytes = encrypted_by(&method.encryptor, &objects, &trailer, XrefKind::Table);
+        let reading = opened(&src_bytes, "user");
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        assert!(!own.writes_metadata_anew(), "{name}");
+        let doc = reading.to_document().unwrap();
+
+        // Map catalog `1 -> 10` and metadata `2 -> 20`, leaving `/Encrypt` (`ENCRYPT`) unmapped.
+        let map = |id: ObjectId| match (id.number, id.generation) {
+            (1, 0) => Some(ObjectId::new(10, 0)),
+            (2, 0) => Some(ObjectId::new(20, 0)),
+            _ => None,
+        };
+        let renumbered_own = own.renumbered(&map);
+        assert!(!renumbered_own.writes_metadata_anew(), "{name}");
+
+        let mut opts = write::Options::DEFAULT;
+        opts.renumber = Some(&map);
+        let mut out = Vec::new();
+        write::document(&mut out, &doc, Some(&own), Some(&reading), &opts).unwrap();
+        assert!(
+            holds(&out, XMP),
+            "{name}: XMP stays in the clear under /Crypt Identity"
+        );
+        let reopened = opened(&out, "user");
+        assert_eq!(
+            reopened
+                .decoded_within(ObjectId::new(20, 0), usize::MAX)
+                .unwrap(),
+            XMP,
+            "{name}"
+        );
+
+        let resolve = &doc;
+        let encrypting = own
+            .laid_out(Some(&map), None, doc.trailer.dict(), &resolve)
+            .unwrap();
+        let parts = write::Parts::new(&encrypting, Some(&reading)).unwrap();
+        let mut part_out = Vec::new();
+        let body = write::Body::Read {
+            object: Cow::Borrowed(doc.get(ObjectId::new(2, 0)).unwrap()),
+            record: Cow::Borrowed(doc.record(ObjectId::new(2, 0)).unwrap()),
+        };
+        parts
+            .body(
+                &mut part_out,
+                ObjectId::new(2, 0),
+                ObjectId::new(20, 0),
+                &body,
+            )
+            .unwrap();
+        assert!(holds(&part_out, XMP), "{name}");
+    }
+}
+
+#[test]
+fn copy_inspection_helpers_report_per_object_keys_offsets_and_refusals() {
+    let methods = methods();
+    for method in standard(&methods) {
+        let want_per_object = !method.name.starts_with("AES-256");
+        assert_eq!(
+            method.encryptor.per_object(),
+            want_per_object,
+            "{}",
+            method.name
+        );
+    }
+
+    let plain = spelled();
+    let reading = open(&plain);
+    let doc = reading.to_document().unwrap();
+    let id3 = ObjectId::new(3, 0);
+    let rec3 = doc.record(id3).unwrap();
+    assert!(rec3.copies_at_offset());
+    let body_read = write::Body::Read {
+        object: Cow::Borrowed(doc.get(id3).unwrap()),
+        record: Cow::Borrowed(rec3),
+    };
+    let body_new = write::Body::from(doc.get(id3).unwrap());
+    let parts = write::Parts::plain(Some(&reading), None).unwrap();
+    assert!(parts.copies(id3, id3, &body_read).unwrap());
+    assert!(!parts.copies(id3, id3, &body_new).unwrap());
+    let parts_none = write::Parts::plain(None, None).unwrap();
+    assert!(!parts_none.copies(id3, id3, &body_read).unwrap());
+
+    let packed = members_spelled();
+    let packed_doc = open(&packed).to_document().unwrap();
+    assert!(
+        !packed_doc
+            .record(ObjectId::new(4, 0))
+            .unwrap()
+            .copies_at_offset()
+    );
+
+    assert!(Error::Elsewhere(id3).is_copy_refusal());
+    assert!(Error::Changed(Some(id3)).is_copy_refusal());
+    assert!(
+        Error::Gone {
+            id: id3,
+            at: rec3.at,
+        }
+        .is_copy_refusal()
+    );
+    assert!(Error::Placed(id3).is_copy_refusal());
+    assert!(
+        Error::Data {
+            id: id3,
+            why: "damaged".into(),
+        }
+        .is_copy_refusal()
+    );
+    assert!(!Error::Locked.is_copy_refusal());
+    assert!(!Error::Rootless.is_copy_refusal());
+    assert!(!Error::Stopped.is_copy_refusal());
+}

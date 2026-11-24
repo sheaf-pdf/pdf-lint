@@ -7,11 +7,10 @@ use std::fmt;
 
 use pdf_content_streams::{Color, Res, Reserved, ResourceNeeds};
 use pdf_fonts::{Encoding, GlyphBox, Std14};
-use pdf_gfx::{Canvas, DefaultAppearance, LaidOutText, LayoutFont, Point, Rect, TextAlign};
+use pdf_gfx::{Canvas, DefaultAppearance, FontSet, LaidOutText, Point, Rect, TextAlign};
 
 use super::frame::{self, Appearance, Unmade, WidgetLook};
-use super::line;
-use super::text::{NO_SIZE, REACH};
+use super::text::{self, NO_SIZE, REACH};
 use crate::limits::{Cap, Limits};
 
 /// The mark a check box or radio button shows when it's on: a glyph of
@@ -524,12 +523,14 @@ pub struct PushAppearances {
 /// [`Limits::text`] bytes; [`Unmade::NoBox`] for a box with no width or no
 /// height; [`Unmade::NotFinite`] where a number of `look` or `da`'s size or
 /// color isn't finite, or a caption laid out isn't, or reaches past `1e35`
-/// from the box's origin; [`Unmade::Unencodable`] for a character `font`
-/// has no code for, at its offset in the first caption made that has it, in
-/// the order normal, rollover, down. Never [`Unmade::NotButton`],
-/// [`Unmade::Icon`], [`Unmade::FontNotBindable`], or [`Unmade::Unreadable`],
-/// which are the read layer's.
-pub fn push_button<F: LayoutFont + ?Sized>(
+/// from the box's origin; [`Unmade::Unencodable`] for a grapheme cluster no
+/// font of `font` has the whole of, as given or composed, at the offset of
+/// the first character the first font lacks in the first caption made that has
+/// it, in the order normal, rollover, down; [`Unmade::FontNotBindable`] where
+/// a font of a set past the first, which some of a caption is drawn in, has no
+/// resource. Never [`Unmade::NotButton`], [`Unmade::Icon`], or
+/// [`Unmade::Unreadable`], which are the read layer's.
+pub fn push_button<F: FontSet + ?Sized>(
     button: &PushButton<'_>,
     look: &WidgetLook<'_>,
     da: &DefaultAppearance,
@@ -554,10 +555,24 @@ pub fn push_button<F: LayoutFont + ?Sized>(
     let look = &frame::in_range(look);
     let client = frame::client(look, bbox)?;
     let color = da.color.map_or(Color::Gray(0.0), frame::clamped);
-    let lay = |caption: &str| line::one_line(caption, client, da.size(), TextAlign::Center, font);
+    let lay = |caption: &str| text::one_line(caption, client, da.size(), TextAlign::Center, font);
 
     let normal = lay(button.caption)?;
-    let made = |down: bool, laid: &Option<LaidOutText>| {
+    let (rollover_laid, down_laid) = match button.pressed_states {
+        true => {
+            let again = |caption: &str| match caption == button.caption {
+                true => Ok(normal.clone()),
+                false => lay(caption),
+            };
+            (Some(again(rollover)?), Some(again(down)?))
+        }
+        false => (None, None),
+    };
+    let made = |down: bool, laid: &Option<LaidOutText>| -> Result<Appearance, Unmade> {
+        let fonts = match laid {
+            Some(laid) => text::resources(laid, font_res.clone(), font)?,
+            None => Vec::new(),
+        };
         let mut canvas = Canvas::new();
         match down {
             true => frame::down_frame(&mut canvas, look, bbox),
@@ -567,33 +582,24 @@ pub fn push_button<F: LayoutFont + ?Sized>(
             canvas.with_state(|c| {
                 c.clip_rect(client);
                 c.fill_color(color);
-                c.draw_layout(font_res.clone(), laid);
+                c.draw_layout_in(&fonts, laid);
             });
         }
         let (content, needs) = canvas.finish(&Reserved::default());
-        Appearance {
+        Ok(Appearance {
             bbox,
             matrix,
             content,
             needs,
             font_size: laid.as_ref().map_or(0.0, |laid| laid.font_size),
             overflowed: laid.as_ref().is_some_and(|laid| laid.overflowed),
-        }
+        })
     };
-    let (rollover, down) = match button.pressed_states {
-        true => {
-            let again = |caption: &str| match caption == button.caption {
-                true => Ok(normal.clone()),
-                false => lay(caption),
-            };
-            let rollover = again(rollover)?;
-            let down = again(down)?;
-            (Some(made(false, &rollover)), Some(made(true, &down)))
-        }
-        false => (None, None),
-    };
+    let normal = made(false, &normal)?;
+    let rollover = rollover_laid.as_ref().map(|l| made(false, l)).transpose()?;
+    let down = down_laid.as_ref().map(|l| made(true, l)).transpose()?;
     Ok(PushAppearances {
-        normal: made(false, &normal),
+        normal,
         rollover,
         down,
     })

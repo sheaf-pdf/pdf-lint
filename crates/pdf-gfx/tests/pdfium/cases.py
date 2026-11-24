@@ -198,6 +198,11 @@ def text_cases():
         resources=font_res,
     )
     add_gfx(
+        "text-show-boolean-operands",
+        b"BT true 10 Tf 14 TL 10 160 Td true Tj false ' 1 2 true \" [(A) true (B) false] TJ ET",
+        resources=b"<< /Font << /true " + COURIER + b" >> >>",
+    )
+    add_gfx(
         "text-missing-font-uses-stock-helvetica",
         b"BT /Missing 10 Tf 10 50 Td (Hello) Tj ET",
         resources=b"<< >>",
