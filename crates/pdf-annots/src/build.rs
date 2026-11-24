@@ -1,6 +1,7 @@
 //! In-place annotation dictionary mutators (`AnnotMut`), pure typed annotation
 //! builders (`BuiltAnnot`), and page `/Annots` array helpers.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use pdf_content_streams::Res;
@@ -498,28 +499,31 @@ impl fmt::Debug for BuiltAnnot {
 }
 
 impl BuiltAnnot {
-    /// Allocates any synthesized `/AP /N` and `/RO` streams via `alloc`, wires
-    /// their indirect `ObjectId`s into `self.dict`, and allocates and returns
-    /// the annotation's own `ObjectId`.
+    /// Allocates any synthesized `/AP /N` and `/RO` streams (and any
+    /// multi-object, stream, or reference-bearing resources in their
+    /// [`SynthesizedAp::needs`], deduplicated across both streams) via `alloc`,
+    /// wires their indirect `ObjectId`s into `self.dict`, and allocates and
+    /// returns the annotation's own `ObjectId`.
     ///
     /// A redaction's overlay is also bound as `/AP /R` beside `/N`, so a
     /// viewer shows what applying the mark leaves while the pointer is over
     /// it.
     ///
-    /// [`da_font`](Self::da_font) isn't written: `alloc` reaches no catalog,
-    /// so `/DA` is left as given and the form's default resources as they
-    /// are. A caller that wants the font found by `/DA` puts it in
-    /// `/AcroForm /DR /Font` itself, as pdfs' `Document::add_annot` does
+    /// [`da_font`](Self::da_font) isn't registered in a catalog: `alloc`
+    /// reaches none, so `/DA` is left as given and the form's default
+    /// resources as they are. A caller that wants the font found by `/DA` puts
+    /// it in `/AcroForm /DR /Font` itself, as pdfs' `Document::add_annot` does
     /// (pdf-forms' `default_resources::font_name` gives a name no other font
     /// holds), and names it in `/DA`.
     pub fn write_into(mut self, mut alloc: impl FnMut(Object) -> ObjectId) -> ObjectId {
+        let mut written = HashMap::new();
         let ro_id = self.redact_overlay.map(|ro| {
-            let ro_id = alloc(Object::from(ro.to_stream()));
+            let ro_id = ro.write_into_with(&mut written, &mut alloc);
             AnnotMut::new(&mut self.dict).set_redact_overlay(ro_id);
             ro_id
         });
         if let Some(ap) = self.normal_ap {
-            let ap_id = alloc(Object::from(ap.to_stream()));
+            let ap_id = ap.write_into_with(&mut written, &mut alloc);
             let mut m = AnnotMut::new(&mut self.dict);
             m.set_normal_appearance(ap_id);
             if let Some(ro_id) = ro_id {

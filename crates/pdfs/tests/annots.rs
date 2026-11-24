@@ -417,14 +417,21 @@ fn helvetica_of_objects() -> Res {
     .unwrap()
 }
 
-/// A `/FreeText` in Helvetica with the `/DA` `da`, its font for the form
-/// [`helvetica_of_objects`].
+/// A `/FreeText` in Helvetica with the `/DA` `da`, drawn in and keeping
+/// [`helvetica_of_objects`] for the form.
 fn in_helvetica_of_objects(da: &DefaultAppearance) -> BuiltAnnot {
     let rect = Rect::new(72.0, 500.0, 372.0, 560.0);
     let style = PaintStyle::default();
-    let mut built = BuiltAnnot::free_text(rect, "Helvetica", da, Quadding::Left, &style);
-    built.da_font = Some(helvetica_of_objects());
-    built
+    BuiltAnnot::free_text_with_font(
+        rect,
+        "Helvetica",
+        da,
+        Quadding::Left,
+        &style,
+        helvetica_of_objects(),
+        &Std14::Helvetica,
+    )
+    .unwrap()
 }
 
 /// The `/DA` annotation `annot` of `doc` holds.
@@ -465,7 +472,7 @@ fn a_font_of_objects_is_written_with_its_references_its_own() {
     let fonts = form.get("DR").unwrap().as_dict().unwrap();
     let fonts = fonts.get("Font").unwrap().as_dict().unwrap();
     let mut encodings = Vec::new();
-    for name in ["Helv", "Helv1"] {
+    for (name, &annot_id) in ["Helv", "Helv1"].into_iter().zip(&annots) {
         let font = fonts.get(name).and_then(Object::as_reference).unwrap();
         let encoding = doc.get_dict(font).unwrap().get("Encoding").unwrap();
         let encoding = encoding.as_reference().unwrap();
@@ -474,6 +481,34 @@ fn a_font_of_objects_is_written_with_its_references_its_own() {
             doc.get_dict(encoding).unwrap().get("BaseEncoding"),
             Some(&Object::name("WinAnsiEncoding"))
         );
+        // The `/AP /N` stream binds the exact same indirect font object in its `/Resources`.
+        let ap_id = doc
+            .get_dict(annot_id)
+            .unwrap()
+            .get("AP")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("N")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let ap_fonts = (&doc)
+            .resolve(ap_id)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .dict
+            .get("Resources")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("Font")
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        let (_, ap_font) = ap_fonts.iter().next().unwrap();
+        assert_eq!(ap_font.as_reference(), Some(font));
         encodings.push((font, encoding));
     }
     assert_ne!(encodings[0], encodings[1]);

@@ -378,9 +378,9 @@ fn told_by_annot(objects: &Objects, dict: &Dict, id: Option<ObjectId>, rules: Ru
 
 /// `Border::read` gives `Annot::border`'s answer, with a sink and without,
 /// and tells what `Annot` tells of the border: `Annot` tells, in its order
-/// of reading, what's told of the dictionary's other entries, then of
-/// `/Border` alone (for `Annot::legacy_border`, whatever `/BS` says), then
-/// what `Border::read` tells.
+/// of reading, what's told of the dictionary's other entries, then what
+/// `Border::read` tells, and where `/BS` is a dictionary what's told of
+/// `/Border` once for `Annot::legacy_border`.
 #[test]
 fn a_border_read_alone_is_the_annotations() {
     let objects = objects();
@@ -411,17 +411,21 @@ fn a_border_read_alone_is_the_annotations() {
                     rest.remove(key);
                 }
                 let rest = told_by_annot(&objects, &rest, id, rules);
-                let mut of_border = match dict.get(b"Border") {
-                    Some(legacy) => {
-                        let legacy = dict! { "Border" => legacy.clone() };
-                        let mut told = Vec::new();
-                        Border::read_with(&objects, &legacy, id, rules, &limits, &mut told)
-                            .unwrap();
-                        told
-                    }
-                    None => Vec::new(),
-                };
-                of_border.extend(told);
+                let has_bs_dict = crate::resolve::Reader {
+                    objects: &objects,
+                    rules,
+                    limits: &limits,
+                    sink: &mut (),
+                }
+                .dict_entry(&dict, id, "BS")
+                .unwrap()
+                .is_some();
+                let mut of_border = told;
+                if has_bs_dict && let Some(legacy) = dict.get(b"Border") {
+                    let legacy = dict! { "Border" => legacy.clone() };
+                    Border::read_with(&objects, &legacy, id, rules, &limits, &mut of_border)
+                        .unwrap();
+                }
                 let whole = told_by_annot(&objects, &dict, id, rules);
                 assert!(
                     (0..=rest.len())
@@ -431,6 +435,38 @@ fn a_border_read_alone_is_the_annotations() {
             }
         }
     }
+
+    // Without `/BS`, a malformed `/Border` is reported once, not twice.
+    let without_bs = dict! {
+        "Subtype" => Object::name("Square"),
+        "Rect" => rect(),
+        "Border" => vec![Object::from(0), Object::from(0), Object::text("x")],
+    };
+    let mut annot_faults = Vec::new();
+    let annot = Annot::from_dict_with(
+        &objects,
+        &without_bs,
+        None,
+        Rules::Iso,
+        &limits,
+        &mut annot_faults,
+    )
+    .unwrap();
+    assert_eq!(annot.legacy_border(), Some([0.0, 0.0, 0.0]));
+    assert_eq!(annot.border().width, 0.0);
+    assert_eq!(annot_faults.len(), 1, "{annot_faults:?}");
+    assert_eq!(annot_faults[0].1, Fault::WrongType { key: "Border" });
+    let mut border_faults = Vec::new();
+    Border::read_with(
+        &objects,
+        &without_bs,
+        None,
+        Rules::Iso,
+        &limits,
+        &mut border_faults,
+    )
+    .unwrap();
+    assert_eq!(annot_faults, border_faults);
 }
 
 /// The border of an annotation that `Annot::from_dict` refuses under a cap

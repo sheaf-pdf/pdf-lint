@@ -1,6 +1,7 @@
 //! Deterministic `/AP /N` appearance Form XObject synthesis over
 //! [`pdf_gfx::Canvas`] (ISO 32000-2 §12.5.5).
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 
@@ -11,7 +12,7 @@ use pdf_fonts::{Encoding, Std14};
 use pdf_gfx::{Canvas, Matrix, Point, Quad, Rect, Seg};
 #[cfg(feature = "text-layout")]
 use pdf_gfx::{LayoutFont, UnencodableChar};
-use pdf_objects::{Dict, Object, Stream, dict};
+use pdf_objects::{Dict, Object, ObjectId, Stream, Value, dict};
 
 use crate::annot::Annot;
 use crate::geometry::{
@@ -124,14 +125,18 @@ pub struct SynthesizedAp {
     /// Uncompressed Form content-stream bytes.
     pub content: Vec<u8>,
     /// What `content` draws with, each under the name it gives it, by what
-    /// it is: the resources [`resources`](Self::resources) binds.
+    /// it is: the resources [`resources`](Self::resources) and
+    /// [`write_into`](Self::write_into) bind.
     pub needs: ResourceNeeds,
-    /// Form `/Resources` dictionary binding [`needs`](Self::needs): each
-    /// resource by its first object (a generated `/ExtGState` or `/Font`), or
-    /// by its number where the caller had already written it
-    /// ([`ResBody::Written`]). A resource of more objects than one (a font
-    /// with its program, say) is bound by its first alone, so a writer of one
-    /// binds `needs` itself.
+    /// Form `/Resources` dictionary binding the self-contained entries of
+    /// [`needs`](Self::needs): a single object holding neither a stream nor an
+    /// internal `(i, 0)` reference (a generated `/ExtGState` or standard 14
+    /// `/Font`), or an object the caller had already written
+    /// ([`ResBody::Written`]). A resource of more objects than one, or one
+    /// holding a stream or internal reference, can't be placed inline without
+    /// allocating objects and renumbering its references: [`write_into`](Self::write_into)
+    /// (and [`BuiltAnnot::write_into`](crate::BuiltAnnot::write_into))
+    /// allocates and binds those, or a writer binds `needs` itself.
     pub resources: Dict,
 }
 
@@ -177,9 +182,48 @@ impl SynthesizedAp {
 
     /// Converts this appearance into an uncompressed [`Stream`] with
     /// `/Type /XObject`, `/Subtype /Form`, `/BBox`, `/Matrix` where it isn't
-    /// the identity, and `/Resources` where it binds any.
+    /// the identity, and [`resources`](Self::resources) where it isn't empty.
+    ///
+    /// Resources in [`needs`](Self::needs) that require indirect allocation
+    /// (multiple objects, streams, or internal `(i, 0)` references) are omitted
+    /// from `resources`; use [`write_into`](Self::write_into) to allocate and
+    /// bind them, or bind `needs` into the returned stream's `/Resources`
+    /// dictionary directly.
     #[must_use]
     pub fn to_stream(&self) -> Stream {
+        self.stream_with_resources(self.resources.clone())
+    }
+
+    /// Allocates any multi-object, stream, or reference-bearing resources in
+    /// [`needs`](Self::needs) via `alloc` (renumbering internal `(i, 0)`
+    /// references among each resource's objects and deduplicating identical
+    /// [`Res`] entries within this appearance), then allocates and returns the
+    /// appearance Form XObject stream's own [`ObjectId`].
+    pub fn write_into(&self, mut alloc: impl FnMut(Object) -> ObjectId) -> ObjectId {
+        self.write_into_with(&mut HashMap::new(), &mut alloc)
+    }
+
+    pub(crate) fn write_into_with(
+        &self,
+        written: &mut HashMap<Res, ObjectId>,
+        alloc: &mut impl FnMut(Object) -> ObjectId,
+    ) -> ObjectId {
+        let mut res = Dict::new();
+        for need in &self.needs.0 {
+            let entry_obj = match need.res.body() {
+                ResBody::Written(id) => Object::from(*id),
+                ResBody::Objects(objs) => match inline_resource(objs) {
+                    Some(first) => first.clone(),
+                    None => Object::from(alloc_resource(written, &need.res, objs, alloc)),
+                },
+                _ => continue,
+            };
+            insert_resource(&mut res, need.kind.key(), &need.name, entry_obj);
+        }
+        alloc(Object::from(self.stream_with_resources(res)))
+    }
+
+    fn stream_with_resources(&self, resources: Dict) -> Stream {
         let mut d = dict! {
             "Type" => Object::name("XObject"),
             "Subtype" => Object::name("Form"),
@@ -193,32 +237,104 @@ impl SynthesizedAp {
         if self.matrix != Matrix::IDENTITY {
             d.set("Matrix", self.matrix.to_pdf_array());
         }
-        if !self.resources.is_empty() {
-            d.set("Resources", self.resources.clone());
+        if !resources.is_empty() {
+            d.set("Resources", resources);
         }
         Stream::new(d, self.content.clone())
+    }
+}
+
+fn inline_resource(objs: &[Object]) -> Option<&Object> {
+    let [first] = objs else {
+        return None;
+    };
+    let mut stack = vec![first];
+    while let Some(obj) = stack.pop() {
+        match obj.value() {
+            Value::Ref(_) | Value::Stream(_) => return None,
+            Value::Array(items) => stack.extend(items.iter()),
+            Value::Dict(dict) => stack.extend(dict.iter().map(|(_, v)| v)),
+            _ => {}
+        }
+    }
+    Some(first)
+}
+
+fn alloc_resource(
+    written: &mut HashMap<Res, ObjectId>,
+    res: &Res,
+    objs: &[Object],
+    alloc: &mut impl FnMut(Object) -> ObjectId,
+) -> ObjectId {
+    if let Some(&id) = written.get(res) {
+        return id;
+    }
+    let mut state = vec![0u8; objs.len()];
+    let mut order = Vec::with_capacity(objs.len());
+    for start in 0..objs.len() {
+        visit_resource_obj(objs, start, &mut state, &mut order);
+    }
+    let mut ids: Vec<Option<ObjectId>> = vec![None; objs.len()];
+    for i in order {
+        let mut obj = objs[i].clone();
+        obj.renumber(|to| match to.generation {
+            0 => ids.get(to.number as usize).copied().flatten(),
+            _ => None,
+        });
+        ids[i] = Some(alloc(obj));
+    }
+    let root = ids[0].expect("Res::of guarantees at least one object");
+    written.insert(res.clone(), root);
+    root
+}
+
+fn visit_resource_obj(objs: &[Object], idx: usize, state: &mut [u8], order: &mut Vec<usize>) {
+    if state[idx] != 0 {
+        return;
+    }
+    state[idx] = 1;
+    let mut stack = vec![&objs[idx]];
+    while let Some(obj) = stack.pop() {
+        match obj.value() {
+            Value::Ref(to) if to.generation == 0 => {
+                if let Ok(target) = usize::try_from(to.number)
+                    && target < objs.len()
+                {
+                    visit_resource_obj(objs, target, state, order);
+                }
+            }
+            Value::Array(items) => stack.extend(items.iter()),
+            Value::Dict(dict) => stack.extend(dict.iter().map(|(_, v)| v)),
+            Value::Stream(s) => stack.extend(s.dict.iter().map(|(_, v)| v)),
+            _ => {}
+        }
+    }
+    state[idx] = 2;
+    order.push(idx);
+}
+
+fn insert_resource(res: &mut Dict, cat_key: &[u8], name: &[u8], entry_obj: Object) {
+    if let Some(cat_dict) = res.get_mut(cat_key).and_then(Object::as_dict_mut) {
+        cat_dict.set(name.to_vec(), entry_obj);
+    } else {
+        let mut cat_dict = Dict::new();
+        cat_dict.set(name.to_vec(), entry_obj);
+        res.set(cat_key.to_vec(), cat_dict);
     }
 }
 
 fn build_resources_dict(needs: &ResourceNeeds) -> Dict {
     let mut res = Dict::new();
     for need in &needs.0 {
-        let cat_key = need.kind.key();
         let entry_obj = match need.res.body() {
-            ResBody::Objects(objs) => match objs.first() {
+            ResBody::Objects(objs) => match inline_resource(objs) {
                 Some(first) => first.clone(),
                 None => continue,
             },
             ResBody::Written(id) => Object::from(*id),
             _ => continue,
         };
-        if let Some(cat_dict) = res.get_mut(cat_key).and_then(Object::as_dict_mut) {
-            cat_dict.set(need.name.clone(), entry_obj);
-        } else {
-            let mut cat_dict = Dict::new();
-            cat_dict.set(need.name.clone(), entry_obj);
-            res.set(cat_key, cat_dict);
-        }
+        insert_resource(&mut res, need.kind.key(), &need.name, entry_obj);
     }
     res
 }

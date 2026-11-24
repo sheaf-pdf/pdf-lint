@@ -437,8 +437,8 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) {
 /// read for it, with a sink and without, and tells what
 /// `Annot::from_dict_with` tells while it reads the border: `Annot` tells, in
 /// its order of reading, what's told of the dictionary's other entries, then
-/// of `/Border` alone (for `Annot::legacy_border`, whatever `/BS` says), then
-/// what `Border::read_with` tells.
+/// what `Border::read_with` tells, and where `/BS` is a dictionary what's told
+/// of `/Border` once for `Annot::legacy_border`.
 fn border_read_alone(
     map: &BTreeMap<ObjectId, Object>,
     annot: &Annot<'_>,
@@ -462,12 +462,21 @@ fn border_read_alone(
     }
     let mut rest = Vec::new();
     assert!(Annot::from_dict_with(map, &others, id, rules, limits, &mut rest).is_ok());
-    let mut of_border = Vec::new();
-    if let Some(legacy) = dict.get(b"Border") {
+    let has_bs_dict = crate::resolve::Reader {
+        objects: map,
+        rules,
+        limits,
+        sink: &mut (),
+    }
+    .dict_entry(dict, id, "BS")
+    .ok()
+    .flatten()
+    .is_some();
+    let mut of_border = told;
+    if has_bs_dict && let Some(legacy) = dict.get(b"Border") {
         let legacy = dict! { "Border" => legacy.clone() };
         assert!(Border::read_with(map, &legacy, id, rules, limits, &mut of_border).is_ok());
     }
-    of_border.extend(told);
     assert!(
         (0..=rest.len()).any(|at| whole == [&rest[..at], &of_border[..], &rest[at..]].concat())
     );

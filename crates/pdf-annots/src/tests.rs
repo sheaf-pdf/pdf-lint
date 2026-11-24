@@ -3014,6 +3014,88 @@ fn a_font_given_to_a_builder_is_kept_for_the_form() {
         dict.get(b"DA").and_then(Object::as_bytes),
         Some(&b"/Helv 10 Tf 0 g"[..])
     );
+
+    // Multi-object `Res::of`: internal `(1, 0)` references are never leaked into
+    // `SynthesizedAp::resources` / `to_stream()`, and `SynthesizedAp::write_into`
+    // and `BuiltAnnot::write_into` allocate and renumber them cleanly.
+    let multi_font = Res::of(vec![
+        Object::from(dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type1"),
+            "BaseFont" => Object::name("Helvetica"),
+            "Encoding" => Object::reference(1),
+        }),
+        Object::from(dict! {
+            "Type" => Object::name("Encoding"),
+            "BaseEncoding" => Object::name("WinAnsiEncoding"),
+        }),
+    ])
+    .unwrap();
+    let multi_note = BuiltAnnot::free_text_with_font(
+        rect,
+        "\u{3B1}",
+        &da,
+        Quadding::Left,
+        &style,
+        multi_font.clone(),
+        &greek,
+    )
+    .unwrap();
+    let multi_ap = multi_note.normal_ap.as_ref().unwrap();
+    assert!(multi_ap.resources.is_empty(), "{:?}", multi_ap.resources);
+    assert!(!multi_ap.to_stream().dict.has(b"Resources"));
+
+    let mut store: std::collections::BTreeMap<ObjectId, Object> = std::collections::BTreeMap::new();
+    // Occupy object 1 with a catalog so any un-renumbered `(1, 0)` reference is caught.
+    store.insert(
+        ObjectId::new(1, 0),
+        Object::from(dict! { "Type" => Object::name("Catalog") }),
+    );
+    let mut next_no = 10u32;
+    let ap_id = multi_ap.write_into(|obj| {
+        let oid = ObjectId::new(next_no, 0);
+        next_no += 1;
+        store.insert(oid, obj);
+        oid
+    });
+    let ap_stream = store[&ap_id].as_stream().unwrap();
+    let ap_fonts = ap_stream
+        .dict
+        .get(b"Resources")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"Font")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let (_, font_ref) = ap_fonts.iter().next().unwrap();
+    let font_oid = font_ref.as_reference().unwrap();
+    let enc_oid = store[&font_oid]
+        .as_dict()
+        .unwrap()
+        .get(b"Encoding")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    assert_ne!(enc_oid, ObjectId::new(1, 0));
+    assert_eq!(
+        store[&enc_oid].as_dict().unwrap().get(b"BaseEncoding"),
+        Some(&Object::name("WinAnsiEncoding"))
+    );
+
+    let mut store2: std::collections::BTreeMap<ObjectId, Object> =
+        std::collections::BTreeMap::new();
+    let mut next2 = 20u32;
+    let annot_id = multi_note.write_into(|obj| {
+        let oid = ObjectId::new(next2, 0);
+        next2 += 1;
+        store2.insert(oid, obj);
+        oid
+    });
+    // Encoding + Font + AP stream + Annot = 4 objects.
+    assert_eq!(store2.len(), 4);
+    assert!(store2.contains_key(&annot_id));
 }
 
 /// The size a FreeText's first line is drawn at.

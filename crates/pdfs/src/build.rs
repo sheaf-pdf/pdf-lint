@@ -499,16 +499,12 @@ pub(crate) fn add_annot_in(
     }
     let mut ro_id = None;
     if let Some(ro) = built.redact_overlay.take() {
-        let mut s = ro.to_stream();
-        deflated(&mut s, deflate)?;
-        let id = doc.add(Object::from(s));
+        let id = annot_stream(doc, written, &ro, deflate)?;
         pdf_annots::AnnotMut::new(&mut built.dict).set_redact_overlay(id);
         ro_id = Some(id);
     }
     if let Some(ap) = built.normal_ap.take() {
-        let mut s = ap.to_stream();
-        deflated(&mut s, deflate)?;
-        let ap_id = doc.add(Object::from(s));
+        let ap_id = annot_stream(doc, written, &ap, deflate)?;
         let mut m = pdf_annots::AnnotMut::new(&mut built.dict);
         m.set_normal_appearance(ap_id);
         if let Some(ro_id) = ro_id {
@@ -528,6 +524,22 @@ pub(crate) fn add_annot_in(
         page_mut.set("Annots", items);
     }
     Ok(annot_id)
+}
+
+fn annot_stream(
+    doc: &mut Document,
+    written: &mut HashMap<Res, ObjectId>,
+    ap: &pdf_annots::SynthesizedAp,
+    deflate: Deflate,
+) -> Result<ObjectId, Error> {
+    let mut s = ap.to_stream();
+    if !ap.needs.0.is_empty() {
+        let mut res = Object::from(Dict::new());
+        bind(doc, written, &ap.needs, &mut res, deflate)?;
+        s.dict.set("Resources", res);
+    }
+    deflated(&mut s, deflate)?;
+    Ok(doc.add(Object::from(s)))
 }
 
 /// `font` put in `doc`'s form's default resources under the name the
