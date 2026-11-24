@@ -108,8 +108,11 @@ impl fmt::Debug for Appearance {
 /// Why an appearance couldn't be made. Nothing is drawn: no `?` stands in
 /// for a character, and no box is guessed.
 ///
-/// The maker of plain data ([`text`](super::text)) gives the first four,
-/// and [`FontNotBindable`](Self::FontNotBindable) for a font of a set it's
+/// The makers of plain data ([`text`](super::text),
+/// [`push_button`](super::push_button), [`combo_box`](super::combo_box),
+/// [`list_box`](super::list_box)) give the first four,
+/// [`UnencodableOption`](Self::UnencodableOption), and
+/// [`FontNotBindable`](Self::FontNotBindable) for a font of a set they're
 /// given with no resource; [`NotText`](Self::NotText),
 /// [`FontNotBindable`](Self::FontNotBindable) for a field's font, and
 /// [`Unreadable`](Self::Unreadable) come from reading a widget for it

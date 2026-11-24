@@ -7,7 +7,7 @@ use std::fmt;
 use pdf_annots::{Annot, AppearanceChars, BorderStyle, HighlightMode, TypedAnnot};
 use pdf_content_streams::{Color, Res};
 use pdf_fonts::Std14;
-use pdf_gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance, LayoutFont};
+use pdf_gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance};
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Value};
@@ -472,7 +472,7 @@ impl WidgetPush {
     /// # Errors
     ///
     /// As [`push_button`](super::push_button).
-    pub fn make<F: LayoutFont + ?Sized>(
+    pub fn make<F: pdf_gfx::FontSet + ?Sized>(
         &self,
         font_res: Res,
         font: &F,
@@ -900,7 +900,7 @@ impl<'c> WidgetChoice<'c> {
     /// # Errors
     ///
     /// As [`combo_box`](super::combo_box) or [`list_box`](super::list_box).
-    pub fn make<F: LayoutFont + ?Sized>(
+    pub fn make<F: pdf_gfx::FontSet + ?Sized>(
         &self,
         font_res: Res,
         font: &F,

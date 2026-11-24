@@ -6,13 +6,11 @@ use std::fmt;
 
 use pdf_content_streams::{Color, Paint, Res, Reserved};
 use pdf_gfx::{
-    BoxBorder, BoxBorderStyle, Canvas, DefaultAppearance, LaidOutText, LayoutFont, Point, Rect,
-    TextAlign,
+    BoxBorder, BoxBorderStyle, Canvas, DefaultAppearance, FontSet, Point, Rect, TextAlign,
 };
 
 use super::frame::{self, Appearance, Unmade, WidgetLook};
-use super::line;
-use super::text::{NO_SIZE, is_bigger};
+use super::text::{self, NO_SIZE, is_bigger};
 use crate::limits::{Cap, Limits};
 
 /// What a combo box shows, as plain data: the text in its box, and whether
@@ -186,11 +184,13 @@ const HIGHLIGHT: Color = Color::Rgb([0.0, 51.0 / 255.0, 113.0 / 255.0]);
 /// [`Limits::text`] bytes; [`Unmade::NoBox`] for a box with no width or no
 /// height; [`Unmade::NotFinite`] where a number of `look` or `da`'s size or
 /// color isn't finite, or the text laid out isn't, or reaches past `1e35`
-/// from the box's origin; [`Unmade::Unencodable`] for a character `font`
-/// has no code for, at its byte offset in the text. Never
-/// [`Unmade::NotChoice`], [`Unmade::FontNotBindable`], or
-/// [`Unmade::Unreadable`], which are the read layer's.
-pub fn combo_box<F: LayoutFont + ?Sized>(
+/// from the box's origin; [`Unmade::Unencodable`] for a grapheme cluster no
+/// font of `font` has the whole of, as given or composed, at the offset of the
+/// first character the first font lacks in the text;
+/// [`Unmade::FontNotBindable`] where a font of a set past the first, which
+/// some of the text is drawn in, has no resource. Never [`Unmade::NotChoice`]
+/// or [`Unmade::Unreadable`], which are the read layer's.
+pub fn combo_box<F: FontSet + ?Sized>(
     field: &ComboBox<'_>,
     look: &WidgetLook<'_>,
     da: &DefaultAppearance,
@@ -220,7 +220,11 @@ pub fn combo_box<F: LayoutFont + ?Sized>(
         }
         false => (client, None),
     };
-    let laid = line::one_line(field.text, edit, da.size(), TextAlign::Left, font)?;
+    let laid = text::one_line(field.text, edit, da.size(), TextAlign::Left, font)?;
+    let fonts = match &laid {
+        Some(laid) => text::resources(laid, font_res, font)?,
+        None => Vec::new(),
+    };
 
     let mut canvas = Canvas::new();
     frame::frame(&mut canvas, look, bbox);
@@ -229,7 +233,7 @@ pub fn combo_box<F: LayoutFont + ?Sized>(
             c.with_state(|c| {
                 c.clip_rect(edit);
                 c.fill_color(da.color.map_or(Color::Gray(0.0), frame::clamped));
-                c.draw_layout(font_res, laid);
+                c.draw_layout_in(&fonts, laid);
             });
         }),
         None => canvas.with_tagged("Tx", |_| {}),
@@ -353,12 +357,15 @@ fn drop_button(canvas: &mut Canvas, rect: Rect) {
 /// anything is laid out; [`Unmade::NoBox`] for a box with no width or no
 /// height; [`Unmade::NotFinite`] where a number of `look` or `da`'s size or
 /// color isn't finite, or a line laid out isn't, or reaches past `1e35`
-/// from the box's origin; [`Unmade::UnencodableOption`] for a character
-/// `font` has no code for in a line that's written: the label's index in
-/// [`labels`](ListBox::labels), and the character and its byte offset in
-/// that label. Never [`Unmade::NotChoice`], [`Unmade::FontNotBindable`],
-/// or [`Unmade::Unreadable`], which are the read layer's.
-pub fn list_box<S: AsRef<str>, F: LayoutFont + ?Sized>(
+/// from the box's origin; [`Unmade::UnencodableOption`] for a grapheme
+/// cluster no font of `font` has the whole of in a line that's written: the
+/// label's index in [`labels`](ListBox::labels), and the first character the
+/// first font lacks and its byte offset in that label;
+/// [`Unmade::FontNotBindable`] where a font of a set past the first, which
+/// some of a written line is drawn in, has no resource. Never
+/// [`Unmade::NotChoice`] or [`Unmade::Unreadable`], which are the read
+/// layer's.
+pub fn list_box<S: AsRef<str>, F: FontSet + ?Sized>(
     field: &ListBox<'_, S>,
     look: &WidgetLook<'_>,
     da: &DefaultAppearance,
@@ -384,7 +391,7 @@ pub fn list_box<S: AsRef<str>, F: LayoutFont + ?Sized>(
     let look = &frame::in_range(look);
     let client = frame::client(look, bbox)?;
     let size = da.size().filter(|s| *s >= NO_SIZE).unwrap_or(12.0);
-    let height = line::line_height(font, size);
+    let height = text::line_height(font, size);
     if !height.is_finite() {
         return Err(Unmade::NotFinite);
     }
@@ -399,7 +406,7 @@ pub fn list_box<S: AsRef<str>, F: LayoutFont + ?Sized>(
             *mark = true;
         }
     }
-    let mut lines: Vec<(bool, Rect, Option<LaidOutText>)> = Vec::new();
+    let mut lines = Vec::new();
     let mut overflowed = false;
     let mut top = client.y1;
     if client.width() > 0.0 {
@@ -409,7 +416,7 @@ pub fn list_box<S: AsRef<str>, F: LayoutFont + ?Sized>(
                 break;
             }
             let rect = Rect::new(client.x0, top - height, client.x1, top);
-            let laid = line::one_line(label.as_ref(), rect, Some(size), TextAlign::Left, font)
+            let laid = text::one_line(label.as_ref(), rect, Some(size), TextAlign::Left, font)
                 .map_err(|err| match err {
                     Unmade::Unencodable(character) => Unmade::UnencodableOption {
                         option: field.top + at,
@@ -419,6 +426,13 @@ pub fn list_box<S: AsRef<str>, F: LayoutFont + ?Sized>(
                 })?;
             overflowed |=
                 is_bigger(client.y0, rect.y0) || laid.as_ref().is_some_and(|l| l.overflowed);
+            let laid = match laid {
+                Some(laid) => {
+                    let fonts = text::resources(&laid, font_res.clone(), font)?;
+                    Some((laid, fonts))
+                }
+                None => None,
+            };
             lines.push((selected[at], rect, laid));
             top -= height;
         }
@@ -442,9 +456,9 @@ pub fn list_box<S: AsRef<str>, F: LayoutFont + ?Sized>(
                         c.fill_rect(*rect);
                     });
                 }
-                if let Some(laid) = laid {
+                if let Some((laid, fonts)) = laid {
                     c.fill_color(if *selected { Color::Gray(1.0) } else { color });
-                    c.draw_layout(font_res.clone(), laid);
+                    c.draw_layout_in(fonts, laid);
                 }
             }
         });
