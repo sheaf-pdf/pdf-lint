@@ -16,8 +16,9 @@
 //!    text drawn in a font given (the `*_with_font` synthesizers and
 //!    builders) never panic; in Helvetica they give what the defaults give
 //!    wherever the font can draw the text, a builder builds exactly where its
-//!    synthesizer succeeds, and in a font that can't draw the text the error
-//!    leaves nothing built.
+//!    synthesizer succeeds, keeping the font for the form's default resources
+//!    (`BuiltAnnot::da_font`) where the defaults keep none, and in a font that
+//!    can't draw the text the error leaves nothing built.
 
 use std::collections::BTreeMap;
 
@@ -261,12 +262,15 @@ fn redact_in_fonts(
             continue;
         };
         let drawn = synth_redact_with_font(rect, mark, res.clone(), &font);
-        let built = BuiltAnnot::redact_with_font(rect, mark, res, &font);
+        let built = BuiltAnnot::redact_with_font(rect, mark, res.clone(), &font);
         match (&drawn, &built) {
             (Ok(forms), Ok(built)) => {
                 assert_eq!(forms.as_ref().map(|f| &f.0), built.normal_ap.as_ref());
                 assert_eq!(forms.as_ref().map(|f| &f.1), built.redact_overlay.as_ref());
                 assert_eq!(built.dict, BuiltAnnot::redact_mark(rect, mark).dict);
+                // The font is kept for the form's default resources.
+                assert_eq!(built.da_font.as_ref(), Some(&res));
+                assert_eq!(BuiltAnnot::redact_mark(rect, mark).da_font, None);
                 // The mark never depends on the font; in the defaults' own
                 // font, neither does the overlay.
                 assert_eq!(
@@ -316,15 +320,23 @@ fn free_text_in_fonts(
             Err(_) => assert!(!contents.is_empty()),
         }
         if let Some(da) = da {
-            let built =
-                BuiltAnnot::free_text_with_font(rect, contents, da, quadding, &style, res, &font);
+            let built = BuiltAnnot::free_text_with_font(
+                rect,
+                contents,
+                da,
+                quadding,
+                &style,
+                res.clone(),
+                &font,
+            );
             match (&drawn, &built) {
                 (Ok(ap), Ok(built)) => {
                     assert_eq!(ap, &built.normal_ap);
-                    assert_eq!(
-                        built.dict,
-                        BuiltAnnot::free_text(rect, contents, da, quadding, &style).dict
-                    );
+                    let default = BuiltAnnot::free_text(rect, contents, da, quadding, &style);
+                    assert_eq!(built.dict, default.dict);
+                    // The font is kept for the form's default resources.
+                    assert_eq!(built.da_font.as_ref(), Some(&res));
+                    assert_eq!(default.da_font, None);
                 }
                 (Err(a), Err(b)) => assert_eq!(a, b),
                 _ => panic!("the builder and the synthesizer disagree"),

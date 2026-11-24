@@ -1155,6 +1155,65 @@ fn heights_by_each_fallback() {
     assert_eq!(heights("Foo", Some(one)), (5.0, 5.0, true));
 }
 
+/// The descriptor's heights as given, past its `/FontBBox` or not, a positive
+/// `Descent` read as below, where its box isn't all 0 and it gives either: as
+/// PDFium takes a font's ascent and descent, where [`Font::metrics`] holds them
+/// within the box. None with no box, a box all 0, or neither height, where PDFium
+/// takes them from the face it draws in; and for a Type 3 font.
+#[test]
+fn descriptor_heights_are_as_given_past_the_box() {
+    let mut pdf = Pdf::default();
+    let mut read = |subtype: &str, descriptor: Option<Dictionary>| {
+        let mut font = dict! {
+            "Type" => Object::name("Font"), "Subtype" => Object::name(subtype),
+            "BaseFont" => Object::name("Foo"),
+        };
+        if let Some(d) = descriptor {
+            font.set("FontDescriptor", pdf.add_object(d));
+        }
+        let font = font_of(&pdf, font);
+        let m = font.metrics();
+        ((m.ascent, m.descent), font.descriptor_heights())
+    };
+    let bbox = |l: i64, b: i64, r: i64, t: i64| -> Object {
+        vec![l.into(), b.into(), r.into(), t.into()].into()
+    };
+    let past =
+        dict! { "Ascent" => 1079, "Descent" => -250, "FontBBox" => bbox(-431, -230, 1483, 1050) };
+    assert_eq!(
+        read("TrueType", Some(past.clone())),
+        ((1050.0, -230.0), Some((1079.0, -250.0)))
+    );
+    assert_eq!(read("Type1", Some(past)).1, Some((1079.0, -250.0)));
+    let positive =
+        dict! { "Ascent" => 700, "Descent" => 250, "FontBBox" => bbox(0, -300, 1000, 900) };
+    assert_eq!(read("Type1", Some(positive)).1, Some((700.0, -250.0)));
+    let one = dict! { "Descent" => -120, "FontBBox" => bbox(0, -200, 1000, 800) };
+    assert_eq!(read("Type1", Some(one)).1, Some((0.0, -120.0)));
+    let unboxed = dict! { "Ascent" => 700, "Descent" => -250 };
+    assert_eq!(read("Type1", Some(unboxed)).1, None);
+    let zeros = dict! { "Ascent" => 700, "Descent" => -250, "FontBBox" => bbox(0, 0, 0, 0) };
+    assert_eq!(read("Type1", Some(zeros)).1, None);
+    let neither = dict! { "Ascent" => 0, "Descent" => 0, "FontBBox" => bbox(0, -200, 1000, 800) };
+    assert_eq!(read("Type1", Some(neither)).1, None);
+    assert_eq!(read("Type1", None).1, None);
+    let past =
+        || dict! { "Ascent" => 940, "Descent" => -234, "FontBBox" => bbox(-227, -223, 1306, 1151) };
+    assert_eq!(read("Type3", Some(past())).1, None);
+
+    // A CIDFont's descriptor, in its Type 0 font.
+    let descriptor = pdf.add_object(past());
+    let cid_font = dict! {
+        "Type" => Object::name("Font"), "Subtype" => Object::name("CIDFontType2"),
+        "FontDescriptor" => descriptor,
+    };
+    let font = type0(&mut pdf, Object::name("Identity-H"), cid_font);
+    let font = font_of(&pdf, font);
+    let m = font.metrics();
+    assert_eq!((m.ascent, m.descent), (940.0, -223.0));
+    assert_eq!(font.descriptor_heights(), Some((940.0, -234.0)));
+}
+
 /// Arrays a font is read from never expand past their own length: a
 /// `/W` range of 2³¹ CIDs is one range, a hundred thousand of them over
 /// each other the first, and `/Widths` far longer than 256 codes, 256.

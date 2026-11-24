@@ -623,6 +623,240 @@ fn a_real_for_an_integer_is_taken_only_under_pdfiums_rules() {
     assert_eq!(iso.fields()[0].flags(), FieldFlags::default());
 }
 
+/// Under PDFium's rules a field with no `/MaxLen` of its own or an
+/// ancestor's takes the first of its widgets' own: the first widget whose
+/// dictionary has the entry, whatever it holds. An entry the field or an
+/// ancestor holds keeps the widgets unread, `null` included, as PDFium finds
+/// it; a reference to no object is none. Under ISO 32000-2's rules the entry
+/// is a field's alone, and a widget's is never read.
+#[test]
+fn a_widgets_own_max_len_is_read_under_pdfiums_rules_alone() {
+    let mut store = Store::default();
+    let missing = store.reserve();
+    let null = store.put(Object::from(Value::Null));
+    // A field of widget kids, each with the `/MaxLen` given or none, under
+    // `parent`, holding `own` itself.
+    let field = |store: &mut Store,
+                 name: &str,
+                 own: Option<Object>,
+                 parent: Option<ObjectId>,
+                 widgets: Vec<Option<Object>>| {
+        let id = store.reserve();
+        let kids: Vec<_> = (widgets.into_iter())
+            .map(|max_len| {
+                let mut kid = dict! {
+                    "Parent" => id,
+                    "Subtype" => Object::name("Widget"),
+                    "Rect" => rect(),
+                };
+                if let Some(max_len) = max_len {
+                    kid.push("MaxLen", max_len);
+                }
+                store.put(kid)
+            })
+            .collect();
+        let mut dict = dict! { "T" => Object::text(name), "FT" => Object::name("Tx") };
+        if let Some(own) = own {
+            dict.push("MaxLen", own);
+        }
+        if let Some(parent) = parent {
+            dict.push("Parent", parent);
+        }
+        (id, dict, kids)
+    };
+    let n = |n: i64| Some(Object::from(n));
+    let mut roots = Vec::new();
+    let mut fields = Vec::new();
+    for (name, own, widgets) in [
+        ("second", None, vec![None, n(4)]),
+        ("first", None, vec![n(7), n(4)]),
+        ("own", n(6), vec![None, n(4)]),
+        ("zero", None, vec![n(0), n(4)]),
+        ("real", None, vec![Some(Object::from(3.7)), None]),
+        ("text", None, vec![Some(Object::text("4")), n(4)]),
+        ("negative", None, vec![n(-2), n(4)]),
+        ("dangling", None, vec![Some(Object::from(missing)), n(4)]),
+        ("own-text", Some(Object::text("x")), vec![n(4)]),
+        ("none", None, vec![None, None]),
+        ("own-null", Some(Object::from(Value::Null)), vec![n(4)]),
+        ("own-to-null", Some(Object::from(null)), vec![n(4)]),
+        ("own-dangling", Some(Object::from(missing)), vec![n(4)]),
+        (
+            "first-null",
+            None,
+            vec![Some(Object::from(Value::Null)), n(4)],
+        ),
+    ] {
+        let (id, mut dict, kids) = field(&mut store, name, own, None, widgets);
+        dict.push("Kids", refs(&kids));
+        store.set(id, dict);
+        roots.push(id);
+        fields.push(name);
+    }
+    // A field's own merged widget, and fields under a parent that has a
+    // `/MaxLen`, under one that has none, and under one whose is `null`.
+    roots.push(store.put(dict! {
+        "T" => Object::text("merged"),
+        "FT" => Object::name("Tx"),
+        "Subtype" => Object::name("Widget"),
+        "Rect" => rect(),
+    }));
+    for (name, own) in [
+        ("held", n(5)),
+        ("bare", None),
+        ("held-null", Some(Object::from(Value::Null))),
+    ] {
+        let (parent, mut dict, _) = field(&mut store, name, own, None, Vec::new());
+        let (kid, mut kid_dict, kids) = field(&mut store, "kid", None, Some(parent), vec![n(4)]);
+        kid_dict.push("Kids", refs(&kids));
+        store.set(kid, kid_dict);
+        dict.push("Kids", refs(&[kid]));
+        store.set(parent, dict);
+        roots.push(parent);
+    }
+    let catalog = catalog_of(refs(&roots));
+
+    let read = |rules| {
+        let mut sink: Vec<(Place, Fault)> = Vec::new();
+        let form = Form::read_with(&store.objects, &catalog, rules, &Limits::DEFAULT, &mut sink)
+            .unwrap()
+            .unwrap();
+        let max_lens: Vec<_> = [
+            "merged",
+            "held",
+            "held.kid",
+            "bare",
+            "bare.kid",
+            "held-null",
+            "held-null.kid",
+        ]
+        .iter()
+        .chain(&fields)
+        .map(|name| (*name, form.fields()[form.find(name).unwrap()].max_len()))
+        .collect();
+        let faults: Vec<_> = sink.into_iter().map(|(_, fault)| fault).collect();
+        // The same form read without a sink.
+        let quiet = Form::read(&store.objects, &catalog, rules, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let quiet: Vec<_> = quiet.fields().iter().map(Field::max_len).collect();
+        assert_eq!(
+            quiet,
+            form.fields().iter().map(Field::max_len).collect::<Vec<_>>()
+        );
+        (max_lens, faults)
+    };
+
+    let (pdfium, faults) = read(Rules::Pdfium);
+    assert_eq!(
+        pdfium,
+        [
+            ("merged", None),
+            ("held", Some(5)),
+            ("held.kid", Some(5)),
+            ("bare", None),
+            ("bare.kid", Some(4)),
+            ("held-null", None),
+            ("held-null.kid", None),
+            ("second", Some(4)),
+            ("first", Some(7)),
+            ("own", Some(6)),
+            ("zero", Some(0)),
+            ("real", Some(3)),
+            ("text", None),
+            ("negative", None),
+            ("dangling", None),
+            ("own-text", None),
+            ("none", None),
+            ("own-null", None),
+            ("own-to-null", None),
+            ("own-dangling", Some(4)),
+            ("first-null", None),
+        ]
+    );
+    // The widgets' entries read are told as any field's are: the real, the
+    // text, and the field's own text.
+    assert_eq!(faults, vec![Fault::WrongType { key: "MaxLen" }; 3]);
+
+    // Under ISO 32000-2's rules, the field's own or an ancestor's alone.
+    let (iso, faults) = read(Rules::Iso);
+    let own = |name: &str| match name {
+        "own" => Some(6),
+        "held" | "held.kid" => Some(5),
+        _ => None,
+    };
+    assert_eq!(
+        iso,
+        iso.iter()
+            .map(|&(name, _)| (name, own(name)))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(faults, [Fault::WrongType { key: "MaxLen" }]);
+}
+
+/// A field that is its own widget has one dictionary and one `/MaxLen`: an
+/// entry that reaches no object is told once under either rules, not again
+/// as the widget's.
+#[test]
+fn a_merged_widgets_max_len_is_read_once() {
+    /// A store one of whose objects is damaged.
+    struct Damaged<'o>(&'o BTreeMap<ObjectId, Object>, ObjectId);
+    impl<'o> pdf_objects::Resolve<'o> for Damaged<'o> {
+        fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+            self.0.get(&id)
+        }
+        fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, pdf_objects::Unreadable> {
+            if id == self.1 {
+                return Err(pdf_objects::Unreadable::new(id, Why::Damaged, "damaged"));
+            }
+            Ok(self.0.get(&id))
+        }
+    }
+
+    let mut store = Store::default();
+    let looping = store.reserve();
+    store.set(looping, Object::from(looping));
+    let damaged = store.reserve();
+    let missing = store.reserve();
+    let merged = |store: &mut Store, name: &str, max_len: ObjectId| {
+        store.put(dict! {
+            "T" => Object::text(name),
+            "FT" => Object::name("Tx"),
+            "Subtype" => Object::name("Widget"),
+            "Rect" => rect(),
+            "MaxLen" => max_len,
+        })
+    };
+    let roots = [
+        merged(&mut store, "looping", looping),
+        merged(&mut store, "damaged", damaged),
+        merged(&mut store, "missing", missing),
+    ];
+    let catalog = catalog_of(refs(&roots));
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let mut sink: Vec<(Place, Fault)> = Vec::new();
+        let form = Form::read_with(
+            Damaged(&store.objects, damaged),
+            &catalog,
+            rules,
+            &Limits::DEFAULT,
+            &mut sink,
+        )
+        .unwrap()
+        .unwrap();
+        for field in form.fields() {
+            assert_eq!(field.max_len(), None, "{rules:?}");
+            assert_eq!(field.widgets().len(), 1, "{rules:?}");
+        }
+        let faults: Vec<_> = sink.into_iter().map(|(_, fault)| fault).collect();
+        assert_eq!(
+            faults,
+            [Fault::ReferenceLoop, Fault::DamagedObject(damaged)],
+            "{rules:?}"
+        );
+    }
+}
+
 #[test]
 fn the_caps_hold() {
     let mut store = Store::default();
@@ -738,6 +972,74 @@ fn default_resources_fonts_are_found_by_name() {
     assert_eq!(font(b"Direct").unwrap().1, None);
     assert!(font(b"Wrong").is_none());
     assert!(font(b"Absent").is_none());
+}
+
+/// The name a font is put under in the default resources' fonts: the one
+/// wanted where it's free, `null` or the font's own, else the first number
+/// after it that is, never another font's; a key written twice taken by its
+/// last value, as a lookup reads it; and found within a number past every
+/// key the dictionary has.
+#[test]
+fn a_fonts_name_in_the_default_resources_is_no_other_fonts() {
+    use std::borrow::Cow;
+
+    use crate::default_resources::font_name;
+
+    let font = ObjectId::new(12, 0);
+    let other = Object::reference(7);
+    let named = |fonts: &Dict, wanted: &[u8]| font_name(Some(fonts), wanted, font).into_owned();
+
+    // Free, or the font's own: as wanted, borrowed.
+    let fonts = dict! { "Helv" => other.clone(), "Mine" => font, "Gone" => Object::null() };
+    for wanted in [&b"F1"[..], b"Mine", b"Gone"] {
+        assert!(matches!(
+            font_name(Some(&fonts), wanted, font),
+            Cow::Borrowed(name) if name == wanted
+        ));
+    }
+    assert_eq!(font_name(None, b"Helv", font), &b"Helv"[..]);
+    assert_eq!(font_name(Some(&Dict::new()), b"Helv", font), &b"Helv"[..]);
+
+    // Another font's: the first number after it that's free, null, or the
+    // font's own.
+    assert_eq!(named(&fonts, b"Helv"), b"Helv1");
+    let mut fonts = dict! {
+        "Helv" => other.clone(),
+        "Helv1" => other.clone(),
+        "Helv2" => Object::null(),
+        "Helv3" => font,
+    };
+    assert_eq!(named(&fonts, b"Helv"), b"Helv2");
+    fonts.set("Helv2", other.clone());
+    assert_eq!(named(&fonts, b"Helv"), b"Helv3");
+    // A font held directly, the font's number at another generation,
+    // anything else: another's.
+    let fonts = dict! {
+        "Helv" => dict! { "Type" => Object::name("Font") },
+        "Helv1" => ObjectId::new(12, 1),
+        "Helv2" => 4,
+    };
+    assert_eq!(named(&fonts, b"Helv"), b"Helv3");
+    // A key written twice is its last value's.
+    let mut twice = dict! { "Helv" => other.clone() };
+    twice.push("Helv1", font);
+    twice.push("Helv1", other.clone());
+    assert_eq!(named(&twice, b"Helv"), b"Helv2");
+    let mut twice = dict! { "Helv" => other.clone() };
+    twice.push("Helv1", other.clone());
+    twice.push("Helv1", font);
+    assert_eq!(named(&twice, b"Helv"), b"Helv1");
+    // An empty name, numbered as any other.
+    let fonts = dict! { "" => other.clone() };
+    assert_eq!(named(&fonts, b""), b"1");
+
+    // Every number up to the dictionary's length taken: the next.
+    let mut full = dict! { "F" => other.clone() };
+    for n in 1..1000 {
+        full.set(format!("F{n}").into_bytes(), other.clone());
+    }
+    assert_eq!(full.len(), 1000);
+    assert_eq!(named(&full, b"F"), b"F1000");
 }
 
 #[test]

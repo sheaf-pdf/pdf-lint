@@ -5,7 +5,12 @@ Written using Python's standard library alone; `oracle/pdfium.py cases --write`
 materializes `cases/*.pdf` and `cases.tsv`, and `oracle/pdfium.py record`
 records `chromium-8152.txt`. The embedded TrueType cases read pdf-fonts' own
 program, `../../../pdf-fonts/tests/pdfium/programs/truetype` from here (which
-pdf-fonts' `the_programs_are_the_builders` holds to its builder)."""
+pdf-fonts' `the_programs_are_the_builders` holds to its builder). `written()`
+reads the files the crate's tests write into written/, of fonts pdf-fonts
+embeds: `the_written_cases_are_written` writes them, and
+`the_written_cases_are_the_maker` holds them to what makes them; `ap-*` are
+`forms-ap` cases, and `back-*` appearances made in Helvetica and a fallback
+program, drawn on their page, which PDFium's text page reads back (`fonts`)."""
 
 import os
 import re
@@ -256,6 +261,7 @@ def cases():
     ))
 
     ap_cases()
+    written()
     return list(ROWS)
 
 
@@ -300,6 +306,17 @@ def truetype(ascent, descent):
     return number
 
 
+def described_truetype(ascent, descent, box):
+    """A TrueType font that isn't embedded, its descriptor's heights as given
+    and its box `box`, which they may pass."""
+    def number(base):
+        return (b"<< /Type /Font /Subtype /TrueType /BaseFont /Foo /FirstChar 32 /LastChar 126 /Widths ["
+                + b" ".join([b"500"] * 95) + b"] /Encoding /WinAnsiEncoding /FontDescriptor %d 0 R >>" % (base + 1),
+                {base + 1: b"<< /Type /FontDescriptor /FontName /Foo /Flags 32 /FontBBox " + box
+                           + b" /ItalicAngle 0 /Ascent %d /Descent %d /CapHeight 700 /StemV 80 >>" % (ascent, descent)})
+    return number
+
+
 def described(ascent, descent):
     """A font that isn't one of the standard 14 and isn't embedded: its
     /Widths and its descriptor's heights are all PDFium measures it by."""
@@ -338,6 +355,7 @@ FONTS = {
     b"DeLo": (119, described(600, -150)),
     b"TT": (122, truetype(800, -200)),
     b"TTZero": (126, truetype(0, 0)),
+    b"TTBox": (130, described_truetype(1079, -250, b"[-431 -250 1483 1050]")),
 }
 
 
@@ -543,6 +561,17 @@ def ap_cases():
     ap("ap-multiline-inset-centre", [tx(MULTILINE + b" /Q 1 " + bs(b"2", b"I") + b" /MK << /BC [0] >>",
                                         value=b"The quick brown fox jumps over the lazy dog",
                                         da=b"/Helv 10 Tf 0 g", rect=b"[10 10 110 60]")])
+    # A line its glyphs fill exactly: ten of Courier's 600 across the text's
+    # box at each size, whose sum in f32 passes the box at some (10 points:
+    # nine fit) and not at others (12 points: ten); then words, broken before
+    # the one that passes it at every size; and a password's stars, seven
+    # across at 10 points, which six fill.
+    sizes = (4, 5, 6, 7, 8, 9, 10, 11, 12, 14)
+    ap("ap-multiline-full-line",
+       [tx(MULTILINE, value=value, da=b"/Cour %d Tf 0 g" % size,
+           rect=b"[%d %d %d %d]" % (x, 10 + 70 * i, x + 2 + 6 * size, 70 + 70 * i))
+        for x, value in ((10, b"AAAAAAAAAAAA"), (300, b"AAAAA AAAA AAAA")) for i, size in enumerate(sizes)]
+       + [tx(b"/Ff 12288", value=b"passwords", da=b"/Cour 10 Tf 0 g", rect=b"[150 10 194 70]")])
 
     # A single line: line ends in the value, past the box at a fixed size in
     # each alignment, DoNotScroll, a password, /MaxLen without comb, no
@@ -586,6 +615,36 @@ def ap_cases():
        fonts=[b"Helv"], fields=b"50 0 R",
        objs={50: b"<< /T (top) /FT /Tx /MaxLen 5 /DA (/Helv 12 Tf 0 g) /Q 2 /Kids [51 0 R 6 0 R] >>",
              51: b"<< /T (mid) /Parent 50 0 R /Kids [5 0 R] >>"})
+    # A comb field with no /MaxLen of its own takes its first widget's that
+    # has one, for each of its widgets (PDFium's GetMaxLen): the second's
+    # where the first has none, the first's before the second's, the
+    # field's own before either, a real cut to an integer.
+    kids = [(b"", b" /MaxLen 4"), (b" /MaxLen 7", b" /MaxLen 4"), (b"", b" /MaxLen 4"), (b" /MaxLen 3.7", b"")]
+    ap("ap-max-len-from-a-widget",
+       [b"<< /Parent %d 0 R " % (50 + i // 2) + WIDGET + b" /Rect [10 %d 210 %d]" % (10 + 30 * i, 30 + 30 * i)
+        + kids[i // 2][i % 2] + b" >>" for i in range(8)],
+       fonts=[b"Helv"], fields=b"50 0 R 51 0 R 52 0 R 53 0 R",
+       objs={50 + f: b"<< /T (f%d) /FT /Tx " % f + COMB + (b" /MaxLen 6" if f == 2 else b"")
+             + b" /V (123456789) /DA (/Helv 12 Tf 0 g) /Kids [%d 0 R %d 0 R] >>" % (5 + 2 * f, 6 + 2 * f)
+             for f in range(4)})
+    # A /MaxLen held by null, the field's own, through a reference (60, a
+    # null object) or its parent's (56), is found as PDFium keeps a null in a
+    # dictionary, and the widgets' 4 isn't read: no cells. A reference to no
+    # object (61) is no entry, and the widgets' 4 makes the cells. A first
+    # widget's null, or its reference to no object, is that widget's entry
+    # and no number: no cells. The value is one character, which a comb
+    # field with no /MaxLen draws as PDFium does (ap-comb-no-maxlen's
+    # difference is in a line of more).
+    own = [b" /MaxLen null", b" /MaxLen 60 0 R", b" /Parent 56 0 R", b" /MaxLen 61 0 R", b"", b""]
+    first = [b" /MaxLen 4"] * 4 + [b" /MaxLen null", b" /MaxLen 61 0 R"]
+    objs = {50 + f: b"<< /T (f%d) /FT /Tx " % f + COMB + own[f]
+            + b" /V (1) /DA (/Helv 12 Tf 0 g) /Kids [%d 0 R %d 0 R] >>" % (5 + 2 * f, 6 + 2 * f)
+            for f in range(6)}
+    objs.update({56: b"<< /T (p) /MaxLen null /Kids [52 0 R] >>", 60: b"null"})
+    ap("ap-max-len-held-by-null",
+       [b"<< /Parent %d 0 R " % (50 + i // 2) + WIDGET + b" /Rect [10 %d 210 %d]" % (10 + 30 * i, 30 + 30 * i)
+        + (first[i // 2] if i % 2 == 0 else b" /MaxLen 4") + b" >>" for i in range(12)],
+       fonts=[b"Helv"], fields=b"50 0 R 51 0 R 56 0 R 53 0 R 54 0 R 55 0 R", objs=objs)
     ap("ap-value-kinds", [tx(value=b"50 0 R", da=b"/Helv 10 Tf 0 g"), tx(value=b"/Name", da=b"/Helv 10 Tf 0 g"),
                           tx(value=b"[(a) (b)]", da=b"/Helv 10 Tf 0 g"), tx(value=b"51 0 R", da=b"/Helv 10 Tf 0 g")],
        objs={50: stream(b"", b"from a stream"), 51: b"(by reference)"})
@@ -598,3 +657,29 @@ def ap_cases():
     ap("ap-da-size-near-zero", [tx(da=b"/Helv %s Tf 0 g" % size) for size in (b"0.00001", b"0.00009", b"0.0004")])
     ap("ap-da-written-twice", [tx(da=da) for da in (b"/Helv 8 Tf /Helv 20 Tf 0 g", b"/Helv 8 Tf 0 g 1 0 0 rg",
                                                     b"/Helv 8 Tf 0 0 1 rg 1 0 0 rg")])
+
+    # A descriptor's heights as given past its /FontBBox, which PDFium sets
+    # a field's lines by: a TrueType font not embedded, whose ascent is above
+    # its box's top.
+    ap("ap-font-truetype-past-its-box", [tx(value=b"Sample 123", da=b"/TTBox 12 Tf 0 g"),
+                                         tx(MULTILINE, value=b"Sample 123 and more", da=b"/TTBox 10 Tf 0 g",
+                                            rect=b"[10 40 110 90]"),
+                                         tx(value=b"Sample", da=b"/TTBox 0 Tf 0 g", rect=b"[10 100 110 130]")])
+    # Text given decomposed, a letter and a combining accent, which the font
+    # has composed and not apart.
+    ap("ap-nfd-helvetica", [tx(value=utf16("Cafe\u0301"), da=b"/Helv 12 Tf 0 g"),
+                            tx(MULTILINE, value=utf16("Cafe\u0301 au lait"), da=b"/Helv 12 Tf 0 g",
+                               rect=b"[10 40 110 90]")])
+
+
+def written():
+    # Each file the crate's tests write into written/: a `forms-ap` case of
+    # a TrueType program embedded as a Type 0 font in /DR (`ap-*`), or an
+    # appearance made in Helvetica and a fallback program, drawn on the page,
+    # read back by PDFium's text page (`back-*`).
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "written")
+    for name in sorted(os.listdir(folder)):
+        if name.endswith(".pdf"):
+            kind = "forms-ap" if name.startswith("ap-") else "fonts"
+            with open(os.path.join(folder, name), "rb") as f:
+                ROWS.append((name[:-len(".pdf")], kind, {"pdf": f.read()}))

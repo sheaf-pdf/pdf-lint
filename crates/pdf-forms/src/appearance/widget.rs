@@ -7,7 +7,7 @@ use std::fmt;
 use pdf_annots::{BorderStyle, Quadding, TypedAnnot};
 use pdf_content_streams::{Color, Res};
 use pdf_fonts::Std14;
-use pdf_gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance, LayoutFont};
+use pdf_gfx::{BoxBorder, BoxBorderStyle, DefaultAppearance, FontSet};
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{ObjectId, Resolve, Streams, Why, text};
@@ -15,6 +15,8 @@ use pdf_objects::{ObjectId, Resolve, Streams, Why, text};
 use super::font::FieldFont;
 use super::frame::{Appearance, Unmade, WidgetLook};
 use super::text::TextField;
+#[cfg(feature = "embed")]
+use super::text::{Fallback, MadeWithFallback};
 use crate::fault::Fault;
 use crate::field::{Field, FieldFlags, FieldKind, FieldValue, Widget};
 use crate::form::Form;
@@ -94,7 +96,7 @@ impl WidgetText<'_> {
     /// # Errors
     ///
     /// As [`text`](super::text).
-    pub fn make<F: LayoutFont + ?Sized>(
+    pub fn make<F: FontSet + ?Sized>(
         &self,
         font_res: Res,
         font: &F,
@@ -106,6 +108,33 @@ impl WidgetText<'_> {
             &self.da,
             font_res,
             font,
+            limits,
+        )
+    }
+
+    /// Makes the widget's appearance in `font`, named by `font_res`, and
+    /// `fallback` for what `font` can't draw:
+    /// [`text_with_fallback`](super::text_with_fallback) on what was read
+    /// (`embed`).
+    ///
+    /// # Errors
+    ///
+    /// As [`text_with_fallback`](super::text_with_fallback).
+    #[cfg(feature = "embed")]
+    pub fn make_with_fallback<F: FontSet + ?Sized>(
+        &self,
+        font_res: Res,
+        font: &F,
+        fallback: &Fallback<'_>,
+        limits: &Limits,
+    ) -> Result<MadeWithFallback, Unmade> {
+        super::text_with_fallback(
+            &self.field(),
+            &self.look(),
+            &self.da,
+            font_res,
+            font,
+            fallback,
             limits,
         )
     }

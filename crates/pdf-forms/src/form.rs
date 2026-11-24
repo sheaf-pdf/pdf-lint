@@ -328,6 +328,10 @@ struct Inherited<'o> {
     da: Option<&'o [u8]>,
     quadding: Option<Quadding>,
     max_len: Option<u32>,
+    /// Whether a `/MaxLen` was held on the way down, a number or not, `null`
+    /// included: a field below one takes none of its widgets' under PDFium's
+    /// rules.
+    max_len_held: bool,
 }
 
 /// What an entry of `/Fields` or `/Kids` turned out to be.
@@ -505,8 +509,10 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         .int_entry(dict, at, "Q")?
         .map(Quadding::from_pdf_int)
         .or(inherited.quadding);
-    let max_len = reader
-        .int_entry(dict, at, "MaxLen")?
+    let held_max_len = reader.held_int_entry(dict, at, "MaxLen")?;
+    let max_len_held = held_max_len.is_some() || inherited.max_len_held;
+    let max_len = held_max_len
+        .flatten()
         .and_then(|n| u32::try_from(n).ok())
         .or(inherited.max_len);
 
@@ -538,6 +544,7 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                 da,
                 quadding,
                 max_len,
+                max_len_held,
             };
             for raw in entries {
                 match node(
@@ -569,6 +576,26 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                     merged: true,
                 });
             }
+        }
+    }
+    // Under PDFium's rules a field with no `/MaxLen` of its own or an
+    // ancestor's takes the first of its widgets' own, as PDFium as of
+    // chromium/8152 reads a field's (`core/fpdfdoc/cpdf_formfield.cpp`,
+    // `GetMaxLen`): the first widget whose dictionary has the key, whatever
+    // it holds, and none where that's no number of 0 or more. An entry that
+    // holds `null` is one, as PDFium's dictionaries keep it, so the widgets
+    // aren't read below it; one that reaches no object isn't. ISO 32000-2
+    // gives the entry to fields alone (§12.7.5.3). A field that is its own
+    // widget has one dictionary, whose entry was read above: it isn't read
+    // again, which would tell what is wrong with it a second time.
+    if reader.rules == Rules::Pdfium && !max_len_held {
+        let first = (walk.fields[index].widgets.iter())
+            .find(|widget| !widget.merged && widget.dict.get("MaxLen").is_some())
+            .map(|widget| (widget.dict, widget.id.or(at)));
+        if let Some((widget, within)) = first {
+            walk.fields[index].max_len = reader
+                .int_entry(widget, within, "MaxLen")?
+                .and_then(|n| u32::try_from(n).ok());
         }
     }
     if walk.fields[index].is_terminal() && field_type.is_none() {

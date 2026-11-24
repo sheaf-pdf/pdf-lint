@@ -2,7 +2,9 @@
 //! by its rotation and one in a font its default resources lack, bound into
 //! it with `pdf-structure` and written: read back, each widget's text is
 //! where its appearance puts it (`pdf_gfx::TextPage`); and `qpdf --check`
-//! finds it clean when run via `just test-qpdf`.
+//! finds it clean when run via `just test-qpdf`. With `embed`, the same of a
+//! document whose values are drawn in Helvetica and a fallback program, the
+//! one font written of every appearance's glyphs.
 
 #![cfg(feature = "text-layout")]
 
@@ -361,6 +363,241 @@ fn qpdf_checks_made_appearances_clean() {
     let said =
         String::from_utf8_lossy(&ran.stdout).to_string() + &String::from_utf8_lossy(&ran.stderr);
     std::fs::remove_file(&path).unwrap();
+    assert_eq!(ran.code, Some(0), "{said}");
+    assert!(!said.contains("WARNING"), "{said}");
+}
+
+/// The document of [`fallback_document`]'s fields, each value made with
+/// `appearance::text_with_fallback` in Helvetica and a fallback TrueType
+/// program, the program written once (`pdf_fonts::embed::write`) of every
+/// appearance's glyphs joined, under the number its resource gives: the
+/// file, and each widget with the value it shows, composed.
+#[cfg(feature = "embed")]
+fn fallback_document() -> (Vec<u8>, Vec<Placed>) {
+    use pdf_forms::appearance::{Fallback, FieldFont, text_with_fallback};
+    use pdf_forms::pdf_content_streams::Res;
+    use pdf_forms::pdf_fonts::embed::{self, Glyphs, Program};
+
+    let mut doc = Document::new(Version::new(1, 7), dict! {});
+    let (page, pages, font) = (doc.new_id(), doc.new_id(), doc.new_id());
+    let helvetica = doc.add(Std14::Helvetica.dict());
+    let program = Program::open(pdf_fixtures::font::latin(1000).build(), 0).unwrap();
+    let fallback = Fallback::new(Res::written(font), &program);
+    let value = "\u{141}ukasz Nguy\u{1ec5}n \u{d6}l\u{e7}er";
+    let decomposed = "\u{141}ukasz Nguye\u{302}\u{303}n O\u{308}lc\u{327}er";
+    let fields = [
+        ("single", value, [72.0, 700.0, 352.0, 720.0], dict! {}),
+        (
+            "decomposed",
+            decomposed,
+            [72.0, 670.0, 352.0, 690.0],
+            dict! {},
+        ),
+        (
+            "comb",
+            value,
+            [72.0, 640.0, 452.0, 660.0],
+            dict! { "Ff" => 1 << 24, "MaxLen" => 19 },
+        ),
+        (
+            "lines",
+            value,
+            [72.0, 560.0, 152.0, 630.0],
+            dict! { "Ff" => 1 << 12 },
+        ),
+        (
+            "latin",
+            "Zo\u{eb} Caf\u{e9}",
+            [72.0, 530.0, 352.0, 550.0],
+            dict! {},
+        ),
+    ];
+    let mut widgets = Vec::new();
+    for (name, value, rect, more) in &fields {
+        let mut field = text_field(page, name, value, *rect, 0, more.clone());
+        field.set("DA", Object::text("/Helv 12 Tf 0 g"));
+        widgets.push(doc.add(field));
+    }
+    let refs = Object::from(
+        widgets
+            .iter()
+            .map(|&id| Object::from(id))
+            .collect::<Vec<_>>(),
+    );
+    let form = doc.add(dict! {
+        "Fields" => refs.clone(),
+        "DR" => dict! { "Font" => dict! { "Helv" => helvetica } },
+    });
+    doc.set(
+        page,
+        dict! {
+            "Type" => Object::name("Page"),
+            "Parent" => pages,
+            "MediaBox" => numbers(&[0.0, 0.0, 612.0, 792.0]),
+            "Resources" => dict! {},
+            "Annots" => refs,
+        },
+    );
+    doc.set(
+        pages,
+        dict! { "Type" => Object::name("Pages"), "Kids" => vec![Object::from(page)], "Count" => 1 },
+    );
+    let catalog = doc.add(dict! {
+        "Type" => Object::name("Catalog"),
+        "Pages" => pages,
+        "AcroForm" => form,
+    });
+    doc.trailer_mut().dict_mut().set("Root", catalog);
+
+    let limits = Limits::DEFAULT;
+    let helv = FieldFont::standard(Std14::Helvetica);
+    let mut glyphs = Glyphs::new();
+    let mut placed = Vec::new();
+    let mut made_all = Vec::new();
+    {
+        let catalog = doc.get_dict(catalog).unwrap();
+        let form = Form::read(&doc, catalog, Rules::Iso, &limits)
+            .unwrap()
+            .unwrap();
+        for (field, (_, value, ..)) in form.fields().iter().zip(&fields) {
+            let widget = &field.widgets()[0];
+            let read =
+                widget_text(field, widget, &doc, Rules::Iso, None, &limits, &mut ()).unwrap();
+            let made = text_with_fallback(
+                &read.field(),
+                &read.look(),
+                read.default_appearance(),
+                helv.res().unwrap(),
+                &helv.layout(),
+                &fallback,
+                &limits,
+            )
+            .unwrap();
+            glyphs.merge(&made.glyphs);
+            let rect = widget.annot(&doc, Rules::Iso, &limits).unwrap().rect();
+            let id = widget.id().unwrap();
+            let shown = unicode_normalization::UnicodeNormalization::nfc(*value).collect();
+            placed.push(Placed {
+                id,
+                rect,
+                shown,
+                rotation: 0,
+            });
+            made_all.push((id, made.appearance));
+        }
+    }
+    // The program, written once of every appearance's glyphs, at the number
+    // the appearances name it by, its other objects after it.
+    let objects = embed::write(&program, &glyphs, &embed::Options::default()).unwrap();
+    let mut ids = vec![font];
+    ids.extend((1..objects.len()).map(|_| doc.new_id()));
+    for (at, mut object) in objects.into_iter().enumerate() {
+        object.renumber(|to| match to.generation {
+            0 => ids.get(to.number as usize).copied(),
+            _ => Some(to),
+        });
+        doc.set(ids[at], object);
+    }
+    for (id, appearance) in made_all {
+        let mut fonts = Dict::new();
+        for need in &appearance.needs.0 {
+            let bound = match need.res.body() {
+                ResBody::Written(id) => *id,
+                ResBody::Objects(_) => helvetica,
+                other => panic!("a resource the maker doesn't name: {other:?}"),
+            };
+            fonts.set(need.name.clone(), bound);
+        }
+        let bbox = appearance.bbox;
+        let stream = Stream::new(
+            dict! {
+                "Type" => Object::name("XObject"),
+                "Subtype" => Object::name("Form"),
+                "BBox" => numbers(&[bbox.x0, bbox.y0, bbox.x1, bbox.y1]),
+                "Resources" => dict! { "Font" => fonts },
+            },
+            appearance.content,
+        );
+        let ap = doc.add(stream);
+        doc.get_dict_mut(id).unwrap().set("AP", dict! { "N" => ap });
+    }
+
+    let mut bytes = Vec::new();
+    pdf_structure::write::document(
+        &mut bytes,
+        &doc,
+        None,
+        None,
+        &pdf_structure::write::Options::DEFAULT,
+    )
+    .unwrap();
+    (bytes, placed)
+}
+
+/// Each widget of the fallback document, read back from the file written,
+/// shows its value composed, in Helvetica and the one font written of the
+/// glyphs its appearances drew, each character inside its rectangle.
+#[cfg(feature = "embed")]
+#[test]
+fn fallback_appearances_read_back_as_their_values() {
+    let (bytes, placed) = fallback_document();
+    let reading = Reading::open(&bytes[..], &read::Options::DEFAULT).unwrap();
+    for place in &placed {
+        let widget = (&reading)
+            .resolve(place.id)
+            .and_then(Object::as_dict)
+            .unwrap();
+        let ap = widget
+            .get(b"AP")
+            .and_then(Object::as_dict)
+            .and_then(|ap| ap.get(b"N"))
+            .and_then(Object::as_reference)
+            .unwrap();
+        let content = format!("q 1 0 0 1 {} {} cm /Ap Do Q", place.rect.x0, place.rect.y0);
+        let resources = Object::from(dict! { "XObject" => dict! { "Ap" => ap } });
+        let page = TextPage::extract(
+            &reading,
+            &Concat::new(&[content.as_bytes()]),
+            Some(&resources),
+            &pdf_gfx::Limits::DEFAULT,
+            &Fonts::default(),
+            TextPageOpts::default(),
+        )
+        .unwrap();
+        let drawn: Vec<_> = page.chars().iter().filter(|c| !c.generated).collect();
+        let read: String = drawn.iter().map(|c| c.ch).collect();
+        assert_eq!(read, place.shown);
+        for ch in &drawn {
+            let at = ch.origin;
+            let inside = place.rect.x0 - 0.01 <= at.x
+                && at.x <= place.rect.x1 + 0.01
+                && place.rect.y0 - 0.01 <= at.y
+                && at.y <= place.rect.y1 + 0.01;
+            assert!(inside, "{:?} at {at:?} outside {:?}", ch.ch, place.rect);
+        }
+    }
+}
+
+#[cfg(feature = "embed")]
+#[test]
+#[ignore = "needs qpdf: `just test-qpdf`"]
+fn qpdf_checks_fallback_appearances_clean() {
+    let (bytes, _) = fallback_document();
+    let folder = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(folder).unwrap();
+    let path = folder.join("forms-qpdf-fallback.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    let qpdf = Qpdf::new(&path);
+    if let Err(why) = qpdf.version() {
+        panic!("this test needs qpdf ({why}): install it, or name it in PDF_LINT_QPDF");
+    }
+    let ran = qpdf
+        .exec(&["--check".to_string(), path.display().to_string()])
+        .expect("qpdf runs");
+    let said =
+        String::from_utf8_lossy(&ran.stdout).to_string() + &String::from_utf8_lossy(&ran.stderr);
+    std::fs::remove_file(&path).unwrap();
+    println!("{said}");
     assert_eq!(ran.code, Some(0), "{said}");
     assert!(!said.contains("WARNING"), "{said}");
 }

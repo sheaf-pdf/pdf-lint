@@ -2913,6 +2913,109 @@ fn free_text_and_overlay_text_are_drawn_in_the_font_given() {
     assert_eq!(font_resources(&ro), []);
 }
 
+/// The font a builder draws in is kept for the document's form, the
+/// dictionary as given: by the two builders that take one, whatever the
+/// `/DA`, none by any other; `write_into` writes the annotation and its
+/// streams alone, `/DA` unrenamed; and `Debug` says whether there's one,
+/// not which.
+#[cfg(feature = "text-layout")]
+#[test]
+fn a_font_given_to_a_builder_is_kept_for_the_form() {
+    use pdf_content_streams::Res;
+
+    let rect = Rect::new(100.0, 500.0, 300.0, 560.0);
+    let da = DefaultAppearance::new(b"Helv".to_vec(), 10.0, Some(Color::Gray(0.0)));
+    let style = bordered(1.0, BorderStyle::Solid);
+    let greek = Greek { space: true };
+    let font = Res::written(ObjectId::new(9, 0));
+
+    let note = BuiltAnnot::free_text_with_font(
+        rect,
+        "\u{3B1}",
+        &da,
+        Quadding::Left,
+        &style,
+        font.clone(),
+        &greek,
+    )
+    .unwrap();
+    assert_eq!(note.da_font, Some(font.clone()));
+    let mark = RedactMark::new()
+        .with_quads(&MARK_QUADS)
+        .with_overlay_text("\u{3B1}");
+    let redaction = BuiltAnnot::redact_with_font(MARK_RECT, &mark, font.clone(), &greek).unwrap();
+    assert_eq!(redaction.da_font, Some(font.clone()));
+    // With no overlay text and no /DA, the font is kept all the same; the
+    // dictionary has no /DA to name it.
+    let bare =
+        BuiltAnnot::redact_with_font(MARK_RECT, &RedactMark::new(), font.clone(), &greek).unwrap();
+    assert_eq!(bare.da_font, Some(font.clone()));
+    assert!(!bare.dict.has(b"DA"));
+
+    let quads = [QuadPoints::from_rect(rect)];
+    let line = PaintStyle::new(Some(AnnotColor::Gray(0.0)), None);
+    let others = [
+        BuiltAnnot::link_uri(rect, "https://example.com/"),
+        BuiltAnnot::text_markup(
+            TextMarkupKind::Highlight,
+            &quads,
+            AnnotColor::Gray(0.5),
+            1.0,
+        ),
+        BuiltAnnot::shape(ShapeKind::Square, rect, &line),
+        BuiltAnnot::line(
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 10.0),
+            (LineEnding::None, LineEnding::None),
+            &line,
+        ),
+        BuiltAnnot::poly(
+            PolyKind::Polygon,
+            &[
+                Point::new(0.0, 0.0),
+                Point::new(10.0, 0.0),
+                Point::new(5.0, 8.0),
+            ],
+            (LineEnding::None, LineEnding::None),
+            &line,
+        ),
+        BuiltAnnot::ink(
+            &[vec![Point::new(0.0, 0.0), Point::new(4.0, 4.0)]],
+            AnnotColor::Gray(0.0),
+            &Border::default(),
+            1.0,
+        ),
+        BuiltAnnot::stamp(rect, StampName::Approved, None, AnnotColor::Gray(0.0), 1.0),
+        BuiltAnnot::text_note(rect, "a note", TextIcon::Note, AnnotColor::Gray(0.0)),
+        BuiltAnnot::free_text(rect, "text", &da, Quadding::Left, &style),
+        BuiltAnnot::redact_mark(MARK_RECT, &mark),
+        BuiltAnnot::redact_quads(&mark).unwrap(),
+    ];
+    for built in &others {
+        assert_eq!(built.da_font, None);
+        assert!(format!("{built:?}").contains("da_font: false"));
+    }
+
+    // write_into: the streams and the annotation, /DA as given.
+    let debug = format!("{note:?}");
+    assert!(
+        debug.contains("da_font: true") && !debug.contains("Written"),
+        "{debug}"
+    );
+    let mut objects = Vec::new();
+    let id = note.write_into(|object| {
+        objects.push(object);
+        ObjectId::new(objects.len() as u32, 0)
+    });
+    assert_eq!(objects.len(), 2);
+    assert_eq!(id, ObjectId::new(2, 0));
+    let dict = objects[1].as_dict().unwrap();
+    assert_eq!(
+        dict.get(b"DA").and_then(Object::as_bytes),
+        Some(&b"/Helv 10 Tf 0 g"[..])
+    );
+}
+
 /// The size a FreeText's first line is drawn at.
 fn tf_size(ap: &SynthesizedAp) -> f32 {
     let text = content_text(ap);

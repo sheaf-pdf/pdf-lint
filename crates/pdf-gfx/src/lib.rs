@@ -44,7 +44,13 @@
 //!   `unicode-bidi` visual-to-logical reordering, soft-hyphen detection,
 //!   selection quads, hit-testing, and search; `layout_text` and
 //!   `Canvas::text_box` wrap, align, justify, auto-size, and comb-place UTF-8
-//!   text over `Std14`, `Font`, or `FontEncoder`.
+//!   text over `Std14`, `Font`, `FontEncoder`, or, with `embed`, an embedded
+//!   TrueType program (`pdf_fonts::embed::Program`, or `ProgramFont`, which
+//!   records the glyphs it encodes); in one font or a `FontSet` of several
+//!   (`WithFallback`), each character, or grapheme cluster through
+//!   `unicode-segmentation`, drawn in the first face that has all of it
+//!   (`face_for`), and each line's runs in each face drawn under its own
+//!   resource (`Canvas::draw_layout_in`, `Canvas::text_box_in`).
 //!
 //! # Cargo Features
 //!
@@ -53,9 +59,15 @@
 //!   boxes.
 //! - **`text-layout`** *(default)*: Enables `TextPage` reading-order assembly,
 //!   `unicode-bidi` reordering, selection quads, search, and multiline/box
-//!   `layout_text` / `Canvas::text_box` drawing.
+//!   `layout_text` / `Canvas::text_box` / `Canvas::text_box_in` drawing, in
+//!   one font or several, a character or a `unicode-segmentation` grapheme
+//!   cluster at a time.
 //! - **`predefined-cmaps`** *(optional)*: Forwards `pdf-fonts/predefined-cmaps`
 //!   for bundled Adobe CJK CMaps and UCS-2 collections.
+//! - **`embed`** *(optional)*: Forwards `pdf-fonts/embed`; with `text-layout`,
+//!   a TrueType program embedded in a document (`pdf_fonts::embed::Program`)
+//!   is a `LayoutFont`, and `ProgramFont` lays text out in one, recording each
+//!   glyph it encodes for the font written of them.
 //! - **`tracing`** *(optional)*: Emits numeric `tracing` spans (byte lengths
 //!   only; never file plaintext or names).
 //!
@@ -146,6 +158,8 @@ mod limits;
 mod marked;
 mod path;
 mod phases;
+#[cfg(all(feature = "embed", feature = "text-layout"))]
+mod program;
 mod reader;
 mod state;
 #[cfg(test)]
@@ -168,6 +182,8 @@ pub use layout::{PageChar, SearchOpts, TextLine, TextMatch, TextPage, TextPageOp
 pub use limits::{Cap, Limits};
 pub use marked::{Mark, MarkProps, Marks, MarksIter};
 pub use path::{PathDrawn, Seg};
+#[cfg(all(feature = "embed", feature = "text-layout"))]
+pub use program::ProgramFont;
 pub use state::{
     ActiveColorSpace, BlendState, ColorValues, DashPattern, RenderingIntent, SoftMask,
     SoftMaskKind, State, TextState,
@@ -175,8 +191,9 @@ pub use state::{
 pub use text::{Glyph, Glyphs, TextShow};
 #[cfg(feature = "text-layout")]
 pub use wrap::{
-    FontEncoder, LaidOutLine, LaidOutText, LayoutFont, TextAlign, TextBoxStyle, UnencodableChar,
-    VerticalAlign, WrapMode, layout_text,
+    FontEncoder, FontSet, LaidOutLine, LaidOutRun, LaidOutText, LayoutFont, TextAlign,
+    TextBoxError, TextBoxStyle, UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for,
+    layout_text,
 };
 pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, UseId};
 

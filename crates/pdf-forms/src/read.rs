@@ -37,6 +37,19 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'_, R, S> {
         value: &'o Object,
         within: Option<ObjectId>,
     ) -> Result<Option<(&'o Object, Option<ObjectId>)>, Error> {
+        Ok(self
+            .followed(value, within)?
+            .filter(|(object, _)| !object.is_null()))
+    }
+
+    /// Follows `value` as [`reached`](Self::reached) does, but gives a `null`
+    /// it comes to as the object it is: `None` for a dangling reference, a
+    /// damaged object, or a chain past [`Limits::hops`] alone.
+    fn followed(
+        &mut self,
+        value: &'o Object,
+        within: Option<ObjectId>,
+    ) -> Result<Option<(&'o Object, Option<ObjectId>)>, Error> {
         let (mut at, mut last) = (value, None);
         for _ in 0..self.limits.hops {
             match at.value() {
@@ -52,7 +65,6 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'_, R, S> {
                         Err(unreadable) => return Err(Error::Unreadable(unreadable)),
                     }
                 }
-                Value::Null => return Ok(None),
                 _ => return Ok(Some((at, last.or(within)))),
             }
         }
@@ -189,16 +201,37 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'_, R, S> {
         within: Option<ObjectId>,
         key: &'static str,
     ) -> Result<Option<i64>, Error> {
-        let Some((obj, id)) = self.entry(dict, within, key)? else {
+        Ok(self.held_int_entry(dict, within, key)?.flatten())
+    }
+
+    /// An integer entry as [`int_entry`](Self::int_entry) reads it, told
+    /// apart from one that reaches no object: `None` where the entry is
+    /// absent or reaches no object (a reference to none, or to a damaged one,
+    /// or a chain past [`Limits::hops`]), `Some(None)` where it reaches
+    /// `null`, held directly or by the object a reference names, or an object
+    /// that gives no integer.
+    pub(crate) fn held_int_entry(
+        &mut self,
+        dict: &'o Dict,
+        within: Option<ObjectId>,
+        key: &'static str,
+    ) -> Result<Option<Option<i64>>, Error> {
+        let Some(raw) = dict.get(key.as_bytes()) else {
             return Ok(None);
         };
+        let Some((obj, id)) = self.followed(raw, within)? else {
+            return Ok(None);
+        };
+        if obj.is_null() {
+            return Ok(Some(None));
+        }
         if let Some(n) = obj.as_integer() {
-            return Ok(Some(n));
+            return Ok(Some(Some(n)));
         }
         self.say(id, obj.at(), Fault::WrongType { key });
         match obj.as_number() {
-            Some(v) if self.rules == Rules::Pdfium && v.is_finite() => Ok(Some(v as i64)),
-            _ => Ok(None),
+            Some(v) if self.rules == Rules::Pdfium && v.is_finite() => Ok(Some(Some(v as i64))),
+            _ => Ok(Some(None)),
         }
     }
 }

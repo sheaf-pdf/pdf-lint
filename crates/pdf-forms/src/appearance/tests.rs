@@ -1920,6 +1920,11 @@ fn appearances_are_send_and_sync() {
     check::<Unmade>();
     check::<super::MadeText>();
     check::<super::WidgetText<'static>>();
+    #[cfg(feature = "embed")]
+    {
+        check::<super::Fallback<'static>>();
+        check::<super::MadeWithFallback>();
+    }
 }
 
 /// `field` made in Helvetica at 10 points in black in `look`: its content.
@@ -2202,5 +2207,642 @@ fn rotation_turns_the_box_and_its_matrix_places_it() {
             content.contains(frame) && content.contains(clip),
             "{rotation}: {content}"
         );
+    }
+}
+
+/// Each string `content` shows: its font's resource name, where it's shown
+/// (`Tm`'s `e` and `f`), and its codes.
+fn shows(content: &[u8]) -> Vec<(Vec<u8>, [f32; 2], Vec<u8>)> {
+    use pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
+
+    let limits = ContentLimits::DEFAULT;
+    let (mut font, mut at, mut out) = (Vec::new(), [0.0; 2], Vec::new());
+    let number = |op: &pdf_content_streams::Operation<'_>, i: usize| {
+        op.arg(i).map_or(f32::NAN, |n| n.number())
+    };
+    for op in operations(content, &ResCx::none(), &limits) {
+        let op = op.unwrap();
+        match op.name() {
+            b"Tf" => font = op.arg(1).and_then(|n| n.name()).unwrap().into_owned(),
+            b"Tm" => at = [number(&op, 1), number(&op, 0)],
+            b"Tj" => {
+                let codes = op.arg(0).and_then(|s| s.object(&limits)).unwrap();
+                out.push((font.clone(), at, codes.as_bytes().unwrap().to_vec()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A font of the characters given alone, each 500 wide, its code its place
+/// among them, measured by Helvetica's heights.
+struct Only(&'static [char]);
+
+impl LayoutFont for Only {
+    fn font_metrics(&self) -> pdf_fonts::FontMetrics {
+        Std14::Helvetica.metrics()
+    }
+
+    fn char_advance(&self, ch: char) -> Option<f32> {
+        self.0.contains(&ch).then_some(500.0)
+    }
+
+    fn encode_char(&self, ch: char, out: &mut Vec<u8>) -> bool {
+        let Some(at) = self.0.iter().position(|&c| c == ch) else {
+            return false;
+        };
+        out.push(at as u8);
+        true
+    }
+}
+
+/// A cluster is drawn composed where a font has it so, else as given where
+/// it has that: so `e` and a combining acute are Helvetica's `é`, text
+/// already composed draws as it is, and a font that has a character's given
+/// form and not its composed one (U+2126, whose composed form is U+03A9)
+/// draws it as before. A comb cell is a cluster.
+#[test]
+fn clusters_are_drawn_composed_where_a_font_has_them_so() {
+    let bytes = |text: &str| made(&TextField::new(text)).unwrap().content;
+    assert_eq!(bytes("Cafe\u{301}"), bytes("Caf\u{e9}"));
+    assert_eq!(shows(&bytes("Cafe\u{301}"))[0].2, b"Caf\xe9");
+
+    let only = |font: &'static [char], value: &str| {
+        let made = text(
+            &TextField::new(value),
+            &bare(100.0, 20.0),
+            &DefaultAppearance::new("F", 10.0, None),
+            Res::written(id(9)),
+            &Only(font),
+            &Limits::DEFAULT,
+        );
+        made.map(|made| shows(&made.content).concat_codes())
+    };
+    // The ohm sign's composed form is omega: where the font has the sign
+    // alone, the sign; where it has both, omega.
+    assert_eq!(only(&['\u{2126}'], "\u{2126}"), Ok(vec![0]));
+    assert_eq!(only(&['\u{2126}', '\u{3a9}'], "\u{2126}"), Ok(vec![1]));
+    assert_eq!(only(&['\u{3a9}'], "\u{2126}"), Ok(vec![0]));
+    // A font with `e` and the accent, and no `é`, draws them as given.
+    assert_eq!(only(&['e', '\u{301}'], "e\u{301}"), Ok(vec![0, 1]));
+    assert_eq!(only(&['e', '\u{301}', '\u{e9}'], "e\u{301}"), Ok(vec![2]));
+    // Neither form: refused at the character as given.
+    assert_eq!(
+        only(&['x'], "x\u{2126}"),
+        Err(Unmade::Unencodable(UnencodableChar {
+            at: 1,
+            character: '\u{2126}'
+        }))
+    );
+
+    // A comb field's cells hold a cluster each, counted as clusters.
+    let mut comb = TextField::new("e\u{301}e\u{301}ab");
+    comb.flags = FieldFlags::COMB;
+    comb.max_len = Some(6);
+    let ap = made(&comb).unwrap();
+    let cells: Vec<Vec<u8>> = shows(&ap.content).into_iter().map(|s| s.2).collect();
+    assert_eq!(
+        cells,
+        [
+            b"\xe9".to_vec(),
+            b"\xe9".to_vec(),
+            b"a".to_vec(),
+            b"b".to_vec()
+        ]
+    );
+    assert!(!ap.overflowed);
+    comb.text = "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}";
+    comb.max_len = Some(5);
+    let ap = made(&comb).unwrap();
+    assert_eq!(shows(&ap.content).len(), 5);
+    assert!(ap.overflowed);
+    // Past the cells, a cluster no font has is cut, not refused.
+    comb.text = "e\u{301}bcde\u{1F600}";
+    assert!(made(&comb).unwrap().overflowed);
+    // Composed text's clusters are counted too: a letter and a joiner are
+    // one cell.
+    let mut joined = TextField::new("a\u{200d}bc");
+    joined.flags = FieldFlags::COMB;
+    joined.max_len = Some(2);
+    let ap = text(
+        &joined,
+        &bare(100.0, 20.0),
+        &DefaultAppearance::new("F", 10.0, None),
+        Res::written(id(9)),
+        &Only(&['a', '\u{200d}', 'b', 'c']),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    let cells: Vec<Vec<u8>> = shows(&ap.content).into_iter().map(|s| s.2).collect();
+    assert_eq!(cells, [vec![0, 1], vec![2]]);
+    assert!(ap.overflowed);
+    // A cluster drawn as given is refused at its own character the font
+    // lacks.
+    assert_eq!(
+        made(&TextField::new("aq\u{301}")),
+        Err(Unmade::Unencodable(UnencodableChar {
+            at: 2,
+            character: '\u{301}'
+        }))
+    );
+}
+
+/// The codes of each string, one after the other.
+trait Codes {
+    fn concat_codes(&self) -> Vec<u8>;
+}
+
+impl Codes for Vec<(Vec<u8>, [f32; 2], Vec<u8>)> {
+    fn concat_codes(&self) -> Vec<u8> {
+        self.iter().flat_map(|s| s.2.iter().copied()).collect()
+    }
+}
+
+/// A font whose descriptor gives its ascent and descent with a `/FontBBox`
+/// measures a field's lines by them as given, past the box, as PDFium does;
+/// `pdf-fonts`' own metrics hold them within it.
+#[test]
+fn a_descriptors_heights_are_taken_as_given() {
+    let (font, descriptor) = described(1079, -250, id(2));
+    let mut objects = Objects::new();
+    objects.insert(id(1), Object::from(font));
+    objects.insert(id(2), Object::from(descriptor));
+    let fonts = dict! { "Desc" => id(1) };
+    let (found, _) = find_told(Some((&fonts, None)), b"Desc", &objects, &Limits::DEFAULT);
+    let font = found.unwrap();
+    let metrics = font.layout().font_metrics();
+    assert_eq!((metrics.ascent, metrics.descent), (1079.0, -250.0));
+    let own = font.font().metrics();
+    assert_eq!((own.ascent, own.descent), (800.0, -200.0));
+    assert_eq!(metrics.bbox, own.bbox);
+}
+
+#[cfg(feature = "embed")]
+mod fallback {
+    use pdf_content_streams::Res;
+    use pdf_fonts::Std14;
+    use pdf_fonts::embed::{self, Glyphs, Program};
+    use pdf_gfx::{DefaultAppearance, FontSet, LayoutFont, UnencodableChar};
+    use unicode_normalization::UnicodeNormalization;
+
+    use super::super::{Fallback, FieldFont, TextField, Unmade, text, text_with_fallback};
+    use super::{Only, bare, helvetica, id, shows};
+    use crate::{FieldFlags, Limits};
+
+    const VALUE: &str = "\u{141}ukasz Nguy\u{1ec5}n \u{d6}l\u{e7}er";
+
+    fn program() -> Program {
+        Program::open(pdf_fixtures::font::latin(1000).build(), 0).unwrap()
+    }
+
+    fn da(size: f32) -> DefaultAppearance {
+        DefaultAppearance::new("Helv", size, None)
+    }
+
+    /// `field` made in `font` and the program, named `20 0 R`, in a box 200
+    /// by 40 with no border.
+    fn drawn(
+        field: &TextField<'_>,
+        font: &FieldFont,
+        program: &Program,
+        size: f32,
+    ) -> Result<super::super::MadeWithFallback, Unmade> {
+        let fallback = Fallback::new(Res::written(id(20)), program);
+        text_with_fallback(
+            field,
+            &bare(200.0, 40.0),
+            &da(size),
+            font.res().unwrap(),
+            &font.layout(),
+            &fallback,
+            &Limits::DEFAULT,
+        )
+    }
+
+    fn glyphs(glyphs: &Glyphs) -> Vec<(u16, String)> {
+        glyphs.iter().map(|(g, t)| (g, t.to_owned())).collect()
+    }
+
+    /// A name WinAnsiEncoding has all but two characters of (`Ł` and `ễ`),
+    /// which the program has, draws in Helvetica and the program, a run each
+    /// where the font changes, each run where the advances before it end,
+    /// and the program's glyphs it draws are returned, with their text: one
+    /// font written of them draws it.
+    #[test]
+    fn a_value_is_drawn_in_its_font_and_the_fallback() {
+        let program = program();
+        let font = helvetica();
+        let made = drawn(&TextField::new(VALUE), &font, &program, 12.0).unwrap();
+        let needs = &made.appearance.needs.0;
+        assert_eq!(needs.len(), 2);
+        let fallback = needs
+            .iter()
+            .find(|n| n.res == Res::written(id(20)))
+            .unwrap();
+        let shown = shows(&made.appearance.content);
+        let fonts: Vec<bool> = shown.iter().map(|s| s.0 == fallback.name).collect();
+        assert_eq!(fonts, [true, false, true, false]);
+        assert_eq!(shown[0].2, program.codes("\u{141}").unwrap());
+        assert_eq!(shown[1].2, b"ukasz Nguy");
+        assert_eq!(shown[2].2, program.codes("\u{1ec5}").unwrap());
+        assert_eq!(shown[3].2, b"n \xd6l\xe7er");
+        // Each run starts where the one before it ends, on one baseline.
+        let layout = font.layout();
+        let width = |s: &str| {
+            s.chars()
+                .map(|c| layout.char_advance(c).unwrap())
+                .sum::<f32>()
+        };
+        let ends = [590.0, width("ukasz Nguy"), 560.0];
+        let mut x = shown[0].1[0];
+        for (i, end) in ends.iter().enumerate() {
+            x += end * 12.0 / 1000.0;
+            assert!((shown[i + 1].1[0] - x).abs() < 1e-3, "{shown:?}");
+            assert_eq!(shown[i + 1].1[1], shown[0].1[1]);
+        }
+        let mut expected = vec![
+            (program.glyph('\u{141}').unwrap(), "\u{141}".to_owned()),
+            (program.glyph('\u{1ec5}').unwrap(), "\u{1ec5}".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(glyphs(&made.glyphs), expected);
+        let written = embed::write(&program, &made.glyphs, &embed::Options::default()).unwrap();
+        assert!(!written.is_empty());
+
+        // At an automatic size, the same glyphs.
+        let at_auto = drawn(&TextField::new(VALUE), &font, &program, 0.0).unwrap();
+        assert_eq!(glyphs(&at_auto.glyphs), expected);
+    }
+
+    /// Text given decomposed draws as composed: the same bytes and glyphs.
+    #[test]
+    fn nfd_input_is_drawn_as_nfc() {
+        let program = program();
+        let font = helvetica();
+        let nfd: String = VALUE.nfd().collect();
+        assert_ne!(nfd, VALUE);
+        for flags in [
+            FieldFlags::from_bits(0),
+            FieldFlags::MULTILINE,
+            FieldFlags::COMB,
+        ] {
+            let field = |text| {
+                let mut field = TextField::new(text);
+                field.flags = flags;
+                field.max_len = Some(24);
+                field
+            };
+            let composed = drawn(&field(VALUE), &font, &program, 10.0).unwrap();
+            let given = drawn(&field(&nfd), &font, &program, 10.0).unwrap();
+            assert_eq!(composed.appearance, given.appearance, "{flags:?}");
+            assert_eq!(glyphs(&composed.glyphs), glyphs(&given.glyphs), "{flags:?}");
+        }
+    }
+
+    /// A cluster no font has, as given or composed, is refused at the
+    /// first of its characters as given that the field's font lacks, at its
+    /// offset in the caller's text: a CJK ideograph, an emoji, an emoji
+    /// sequence with a joiner, a control character, a sign whose composed
+    /// form neither has. Nothing is drawn in its place.
+    #[test]
+    fn a_cluster_neither_font_has_is_refused_where_it_is() {
+        let program = program();
+        let font = helvetica();
+        let nfd_cjk = format!("{}\u{4e2d}", "\u{d6}l\u{e7}er".nfd().collect::<String>());
+        let cases: [(&str, usize, char); 7] = [
+            ("\u{141}ukasz \u{4e2d}", 8, '\u{4e2d}'),
+            ("\u{d6}l\u{e7}er \u{1f600}", 8, '\u{1f600}'),
+            ("a\u{1f469}\u{200d}\u{1f4bb}", 1, '\u{1f469}'),
+            ("ab\u{1}", 2, '\u{1}'),
+            (&nfd_cjk, nfd_cjk.find('\u{4e2d}').unwrap(), '\u{4e2d}'),
+            ("x\u{2126}", 1, '\u{2126}'),
+            ("\u{141}\u{fe0f}", 0, '\u{141}'),
+        ];
+        for (value, at, character) in cases {
+            let made = drawn(&TextField::new(value), &font, &program, 12.0);
+            let told = Unmade::Unencodable(UnencodableChar { at, character });
+            assert_eq!(made.map(|m| m.glyphs.len()), Err(told.clone()), "{value:?}");
+            assert!(value[at..].starts_with(character));
+            let mut multiline = TextField::new(value);
+            multiline.flags = FieldFlags::MULTILINE;
+            let made = drawn(&multiline, &font, &program, 0.0);
+            assert_eq!(made.map(|m| m.glyphs.len()), Err(told), "{value:?}");
+        }
+        // Helvetica alone refuses `Ł`, as it always has.
+        let alone = super::made(&TextField::new(VALUE));
+        assert_eq!(
+            alone,
+            Err(Unmade::Unencodable(UnencodableChar {
+                at: 0,
+                character: '\u{141}'
+            }))
+        );
+    }
+
+    /// A value Helvetica draws whole embeds nothing: its appearance is
+    /// `text`'s byte for byte, its resources Helvetica's alone, its glyphs
+    /// none, in any layout and decomposed too.
+    #[test]
+    fn a_winansi_value_embeds_nothing() {
+        let program = program();
+        let font = helvetica();
+        let fallback = Res::written(id(20));
+        for value in [
+            "Zo\u{eb} Caf\u{e9}",
+            "Zoe\u{308} Cafe\u{301}",
+            "a b\nc d",
+            "",
+        ] {
+            for (flags, size) in [
+                (FieldFlags::from_bits(0), 12.0),
+                (FieldFlags::from_bits(0), 0.0),
+                (FieldFlags::MULTILINE, 0.0),
+                (FieldFlags::COMB, 0.0),
+                (FieldFlags::PASSWORD, 12.0),
+            ] {
+                let mut field = TextField::new(value);
+                field.flags = flags;
+                field.max_len = Some(10);
+                let made = drawn(&field, &font, &program, size).unwrap();
+                let alone = text(
+                    &field,
+                    &bare(200.0, 40.0),
+                    &da(size),
+                    font.res().unwrap(),
+                    &font.layout(),
+                    &Limits::DEFAULT,
+                )
+                .unwrap();
+                assert_eq!(made.appearance, alone, "{value:?} {flags:?}");
+                assert!(made.glyphs.is_empty());
+                assert!(made.appearance.needs.0.iter().all(|n| n.res != fallback));
+            }
+        }
+    }
+
+    /// A password's characters are each `*`, one a character of the text as
+    /// given, in the field's font, or in the fallback where it has no `*`:
+    /// the glyphs returned are the star's alone, and no character of the
+    /// value reaches the content, the glyphs, an error, or a `Debug`.
+    #[test]
+    fn a_passwords_glyphs_are_the_stars_alone() {
+        let program = program();
+        let dingbats = FieldFont::standard(Std14::ZapfDingbats);
+        let mut field = TextField::new("\u{141}ukasz\u{4e2d}\u{1f600}");
+        field.flags = FieldFlags::PASSWORD;
+        let made = drawn(&field, &dingbats, &program, 12.0).unwrap();
+        let star = program.codes("*").unwrap();
+        let shown = shows(&made.appearance.content);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].2, star.repeat(8));
+        let expected = vec![(program.glyph('*').unwrap(), "*".to_owned())];
+        assert_eq!(glyphs(&made.glyphs), expected);
+        let debug = format!("{made:?} {field:?}");
+        assert!(!debug.contains("ukasz"), "{debug}");
+
+        // Decomposed, a star a character as given.
+        let nfd: String = "\u{e9}t\u{e9}".nfd().collect();
+        field.text = &nfd;
+        let made = drawn(&field, &dingbats, &program, 12.0).unwrap();
+        assert_eq!(shows(&made.appearance.content)[0].2, star.repeat(5));
+        let alone = super::made(&field).unwrap();
+        assert_eq!(shows(&alone.content)[0].2, b"*****");
+    }
+
+    /// A comb cell holds a cluster, in the first font that has the whole of
+    /// it; what's past the cells isn't drawn, nor its glyphs returned.
+    #[test]
+    fn a_comb_cell_is_a_cluster_in_one_font() {
+        let program = program();
+        let font = helvetica();
+        let mut comb = TextField::new("q\u{301}ab");
+        comb.flags = FieldFlags::COMB;
+        comb.max_len = Some(3);
+        let made = drawn(&comb, &font, &program, 12.0).unwrap();
+        let cells: Vec<Vec<u8>> = shows(&made.appearance.content)
+            .into_iter()
+            .map(|s| s.2)
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                program.codes("q\u{301}").unwrap(),
+                b"a".to_vec(),
+                b"b".to_vec()
+            ]
+        );
+        let mut expected = vec![
+            (program.glyph('q').unwrap(), "q".to_owned()),
+            (program.glyph('\u{301}').unwrap(), "\u{301}".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(glyphs(&made.glyphs), expected);
+        assert!(!made.appearance.overflowed);
+
+        comb.text = "abcde\u{141}";
+        comb.max_len = Some(5);
+        let made = drawn(&comb, &font, &program, 12.0).unwrap();
+        assert!(made.appearance.overflowed);
+        assert!(made.glyphs.is_empty());
+        assert_eq!(made.appearance.needs.0.len(), 1);
+    }
+
+    /// A line's ascent and descent are the largest and smallest of the fonts
+    /// drawn on it: Helvetica's are PDFium's face's, 945 and -224, the
+    /// program's 850 and -250. Lines of differing heights are a step apart
+    /// from the one's descent to the next one's ascent.
+    #[test]
+    fn a_line_is_as_tall_as_the_fonts_drawn_on_it() {
+        let program = program();
+        let font = helvetica();
+        let baseline = |value: &str, flags| {
+            let mut field = TextField::new(value);
+            field.flags = flags;
+            let made = drawn(&field, &font, &program, 12.0).unwrap();
+            shows(&made.appearance.content)
+                .iter()
+                .map(|s| s.1[1])
+                .collect::<Vec<f32>>()
+        };
+        let single = FieldFlags::from_bits(0);
+        let middle = |ascent: f32, descent: f32| 20.0 - 0.5 * (ascent * 12.0 + descent * 12.0);
+        assert_eq!(baseline("ab", single), [middle(0.945, -0.224)]);
+        assert_eq!(baseline("\u{141}", single), [middle(0.85, -0.25)]);
+        let mixed = middle(0.945, -0.25);
+        assert_eq!(baseline("a\u{141}", single), [mixed, mixed]);
+        // Top-aligned lines: the program's alone, then Helvetica's.
+        let lines = baseline("\u{141}\nab", FieldFlags::MULTILINE);
+        let first = 40.0 - 0.85 * 12.0;
+        assert_eq!(lines[0], first);
+        assert!(
+            (lines[1] - (first - (0.945 + 0.25) * 12.0)).abs() < 1e-4,
+            "{lines:?}"
+        );
+
+        // At an automatic size, a single line is fitted by the heights of
+        // the fonts drawn on it: the program's alone, 1.1 em, fit 18 points
+        // in 20; Helvetica's, 1.169 em, 14. Lines are summed by their own
+        // heights: the program's and Helvetica's, 2.269 em, fit 12 points in
+        // 27.5, where two lines as tall as both fonts' would not.
+        let fallback = Fallback::new(Res::written(id(20)), &program);
+        let size = |value: &str, flags, height: f32| {
+            let mut field = TextField::new(value);
+            field.flags = flags;
+            let made = text_with_fallback(
+                &field,
+                &bare(200.0, height),
+                &da(0.0),
+                font.res().unwrap(),
+                &font.layout(),
+                &fallback,
+                &Limits::DEFAULT,
+            );
+            made.unwrap().appearance.font_size
+        };
+        assert_eq!(size("\u{141}", single, 20.0), 18.0);
+        assert_eq!(size("ab", single, 20.0), 14.0);
+        assert_eq!(size("\u{141}\nab", FieldFlags::MULTILINE, 27.5), 12.0);
+    }
+
+    /// A tab is drawn as a space, in the program where the field's font has
+    /// none, and its glyph is returned for a space.
+    #[test]
+    fn a_tab_is_drawn_as_a_space() {
+        let program = program();
+        let fallback = Fallback::new(Res::written(id(20)), &program);
+        let made = text_with_fallback(
+            &TextField::new("a\tb"),
+            &bare(200.0, 40.0),
+            &da(12.0),
+            Res::written(id(9)),
+            &Only(&['a']),
+            &fallback,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let mut expected = vec![
+            (program.glyph(' ').unwrap(), " ".to_owned()),
+            (program.glyph('b').unwrap(), "b".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(glyphs(&made.glyphs), expected);
+    }
+
+    /// A font of a set past the first that draws some of the text, with no
+    /// resource, can't be named: the appearance is refused.
+    #[test]
+    fn a_font_of_a_set_without_a_resource_is_refused_where_its_drawn() {
+        struct Two<'a>(&'a dyn LayoutFont, Only);
+        impl FontSet for Two<'_> {
+            fn faces(&self) -> usize {
+                2
+            }
+            fn face_metrics(&self, face: usize) -> pdf_fonts::FontMetrics {
+                match face {
+                    0 => self.0.font_metrics(),
+                    _ => self.1.font_metrics(),
+                }
+            }
+            fn face_advance(&self, face: usize, ch: char) -> Option<f32> {
+                match face {
+                    0 => self.0.char_advance(ch),
+                    _ => self.1.char_advance(ch),
+                }
+            }
+            fn face_encode(&self, face: usize, ch: char, out: &mut Vec<u8>) -> bool {
+                match face {
+                    0 => self.0.encode_char(ch, out),
+                    _ => self.1.encode_char(ch, out),
+                }
+            }
+        }
+        let font = helvetica();
+        let layout = font.layout();
+        let set = Two(&layout, Only(&['\u{141}']));
+        let made = |value| {
+            text(
+                &TextField::new(value),
+                &bare(100.0, 20.0),
+                &da(12.0),
+                font.res().unwrap(),
+                &set,
+                &Limits::DEFAULT,
+            )
+        };
+        assert_eq!(made("a\u{141}"), Err(Unmade::FontNotBindable));
+        assert!(made("ab").is_ok());
+    }
+
+    /// The read layer's maker draws what `text_with_fallback` draws of the
+    /// plain data it read.
+    #[test]
+    fn a_widget_is_made_with_a_fallback_as_its_data_is() {
+        use pdf_objects::pdf_tokenizer::Rules;
+        use pdf_objects::{Object, dict};
+
+        use super::super::widget_text;
+        use super::{Objects, reading};
+        use crate::Form;
+
+        let program = program();
+        let mut objects = Objects::new();
+        objects.insert(
+            id(1),
+            Object::from(dict! {
+                "T" => Object::text("name"),
+                "FT" => Object::name("Tx"),
+                "V" => Object::text(VALUE),
+                "DA" => Object::text("/Helv 12 Tf 0 g"),
+                "Subtype" => Object::name("Widget"),
+                "Rect" => vec![Object::from(0), Object::from(0), Object::from(200), Object::from(20)],
+            }),
+        );
+        let catalog = dict! { "AcroForm" => dict! { "Fields" => vec![Object::from(id(1))] } };
+        let form = Form::read(&objects, &catalog, Rules::Pdfium, &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let field = &form.fields()[0];
+        let read = widget_text(
+            field,
+            &field.widgets()[0],
+            reading(&objects),
+            Rules::Pdfium,
+            None,
+            &Limits::DEFAULT,
+            &mut (),
+        )
+        .unwrap();
+        let font = helvetica();
+        let fallback = Fallback::new(Res::written(id(20)), &program);
+        let made = read
+            .make_with_fallback(
+                font.res().unwrap(),
+                &font.layout(),
+                &fallback,
+                &Limits::DEFAULT,
+            )
+            .unwrap();
+        let direct = text_with_fallback(
+            &read.field(),
+            &read.look(),
+            read.default_appearance(),
+            font.res().unwrap(),
+            &font.layout(),
+            &fallback,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        assert_eq!(made.appearance, direct.appearance);
+        assert_eq!(glyphs(&made.glyphs), glyphs(&direct.glyphs));
+        assert_eq!(made.glyphs.len(), 2);
+
+        // `Debug` prints counts: no character of the value, no glyph's text.
+        let debug = format!("{made:?} {fallback:?}");
+        assert!(
+            !debug.contains("ukasz") && !debug.contains('\u{141}'),
+            "{debug}"
+        );
+        assert!(debug.contains("glyphs: 2"), "{debug}");
     }
 }

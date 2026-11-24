@@ -3,7 +3,6 @@
 
 use std::fmt;
 
-#[cfg(feature = "text-layout")]
 use pdf_content_streams::Res;
 #[cfg(feature = "text-layout")]
 use pdf_gfx::{LayoutFont, UnencodableChar};
@@ -313,10 +312,11 @@ impl<'a> AnnotMut<'a> {
 }
 
 /// Constructed annotation dictionary paired with optional synthesized `/AP /N`
-/// and `/RO` Form XObject streams.
+/// and `/RO` Form XObject streams, and the font its `/DA` should name.
 ///
 /// Its `Debug` implementation reports dictionary entry counts and stream byte
-/// lengths rather than raw dictionary values or plaintext.
+/// lengths rather than raw dictionary values or plaintext, and whether there's
+/// a `/DA` font, not which.
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct BuiltAnnot {
@@ -327,6 +327,17 @@ pub struct BuiltAnnot {
     /// Synthesized `/RO` redaction overlay Form XObject stream (for `/Redact`),
     /// if any.
     pub redact_overlay: Option<SynthesizedAp>,
+    /// The font the appearances draw the text in, for the document's form to
+    /// hold under the name `/DA` gives (`/AcroForm /DR /Font`, ISO 32000-2,
+    /// 12.7.4.3), so a viewer that makes the appearance again from `/DA`
+    /// draws in it too: the font given to `free_text_with_font` or
+    /// `redact_with_font` (`text-layout` feature), `None` from every other
+    /// builder. A builder can't reach the document's catalog, so `/DA` is
+    /// written as given: pdfs' `Document::add_annot` puts the font in the
+    /// form's default resources, under another name where that one is
+    /// another font's, and names it in `/DA`; [`write_into`](Self::write_into)
+    /// leaves that to its caller.
+    pub da_font: Option<Res>,
 }
 
 impl fmt::Debug for BuiltAnnot {
@@ -335,6 +346,7 @@ impl fmt::Debug for BuiltAnnot {
             .field("dict_entries", &self.dict.len())
             .field("normal_ap", &self.normal_ap)
             .field("redact_overlay", &self.redact_overlay)
+            .field("da_font", &self.da_font.is_some())
             .finish()
     }
 }
@@ -347,6 +359,13 @@ impl BuiltAnnot {
     /// A redaction's overlay is also bound as `/AP /R` beside `/N`, so a
     /// viewer shows what applying the mark leaves while the pointer is over
     /// it.
+    ///
+    /// [`da_font`](Self::da_font) isn't written: `alloc` reaches no catalog,
+    /// so `/DA` is left as given and the form's default resources as they
+    /// are. A caller that wants the font found by `/DA` puts it in
+    /// `/AcroForm /DR /Font` itself, as pdfs' `Document::add_annot` does
+    /// (pdf-forms' `default_resources::font_name` gives a name no other font
+    /// holds), and names it in `/DA`.
     pub fn write_into(mut self, mut alloc: impl FnMut(Object) -> ObjectId) -> ObjectId {
         let ro_id = self.redact_overlay.map(|ro| {
             let ro_id = alloc(Object::from(ro.to_stream()));
@@ -377,6 +396,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap: None,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -393,6 +413,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap: None,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -419,6 +440,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -446,6 +468,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -499,6 +522,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -547,6 +571,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -578,6 +603,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -601,6 +627,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -619,6 +646,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -641,10 +669,12 @@ impl BuiltAnnot {
     /// ([`synth_free_text_with_font`]): a font embedded in the document, say,
     /// for text beyond Helvetica's characters.
     ///
-    /// `/DA` is written as given: its font name isn't changed to `font`,
-    /// and nothing is added to the document's `/AcroForm /DR`. A viewer
-    /// that draws `/AP /N` shows the text as laid out here; one that makes
-    /// an appearance of its own from `/DA` resolves that name itself.
+    /// `/DA` is written as given, and `font_res` kept as
+    /// [`da_font`](Self::da_font), for the document's form to hold under the
+    /// name `/DA` gives: pdfs' `Document::add_annot` puts it there, and
+    /// renames it in `/DA` where that name is another font's, so a viewer
+    /// that makes an appearance of its own from `/DA` draws in it too.
+    /// [`write_into`](Self::write_into) leaves that to its caller.
     ///
     /// # Errors
     ///
@@ -661,11 +691,19 @@ impl BuiltAnnot {
         font_res: Res,
         font: &F,
     ) -> Result<Self, UnencodableChar> {
-        let normal_ap =
-            synth_free_text_with_font(rect, contents, Some(da), quadding, style, font_res, font)?;
-        Ok(Self::free_text_over(
-            rect, contents, da, quadding, style, normal_ap,
-        ))
+        let normal_ap = synth_free_text_with_font(
+            rect,
+            contents,
+            Some(da),
+            quadding,
+            style,
+            font_res.clone(),
+            font,
+        )?;
+        Ok(Self {
+            da_font: Some(font_res),
+            ..Self::free_text_over(rect, contents, da, quadding, style, normal_ap)
+        })
     }
 
     /// A `/FreeText` annotation's dictionary, with `normal_ap` its `/AP /N`.
@@ -693,6 +731,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay: None,
+            da_font: None,
         }
     }
 
@@ -756,11 +795,13 @@ impl BuiltAnnot {
     ///
     /// The dictionary is [`Self::redact_mark`]'s: a `/DA` is written as
     /// given, or `/Helv 0 Tf 1 g` (`0 g` with no interior color) beside
-    /// overlay text with none given, its
-    /// font name never changed to `font`, and nothing is added to the
-    /// document's `/AcroForm /DR`. A viewer that applies the mark with its
-    /// `/RO` leaves the text as laid out here; one that draws the label
-    /// itself from `/OverlayText` and `/DA` resolves that name itself.
+    /// overlay text with none given. `font_res` is kept as
+    /// [`da_font`](Self::da_font), for the document's form to hold under the
+    /// name that `/DA` gives: pdfs' `Document::add_annot` puts it there, and
+    /// renames it in `/DA` where that name is another font's, so a viewer
+    /// that draws the label itself from `/OverlayText` and `/DA` draws in it
+    /// too, as one that applies the mark with its `/RO` leaves the text laid
+    /// out here. With no `/DA`, nothing names it.
     ///
     /// # Errors
     ///
@@ -774,8 +815,11 @@ impl BuiltAnnot {
         font_res: Res,
         font: &F,
     ) -> Result<Self, UnencodableChar> {
-        let forms = synth_redact_with_font(rect, mark, font_res, font)?;
-        Ok(Self::redact_over(rect, mark, forms))
+        let forms = synth_redact_with_font(rect, mark, font_res.clone(), font)?;
+        Ok(Self {
+            da_font: Some(font_res),
+            ..Self::redact_over(rect, mark, forms)
+        })
     }
 
     /// A `/Redact` annotation's dictionary, with `forms` its `/AP /N` and
@@ -824,6 +868,7 @@ impl BuiltAnnot {
             dict: d,
             normal_ap,
             redact_overlay,
+            da_font: None,
         }
     }
 

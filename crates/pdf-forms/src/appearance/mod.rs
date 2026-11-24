@@ -19,6 +19,11 @@
 //!   into that plain data, and [`WidgetText::make`] draws it in a font the
 //!   caller keeps; [`text_for_widget`] does both and reads the font, for one
 //!   widget.
+//! - With `embed`, `text_with_fallback` draws the text in the field's font
+//!   and a TrueType program the caller gives (`Fallback`), for what that font
+//!   can't draw, and returns the program's glyphs it drew
+//!   (`MadeWithFallback`), which the caller embeds once for every appearance;
+//!   `WidgetText::make_with_fallback` does it for a widget read.
 //!
 //! One widget's appearance made and bound, with [`text_for_widget`]:
 //!
@@ -97,5 +102,7 @@ pub use font::{FieldFont, FieldLayoutFont};
 pub use frame::{Appearance, Unmade, WidgetLook};
 #[cfg(any(test, fuzzing))]
 pub(crate) use text::REACH;
+#[cfg(feature = "embed")]
+pub use text::{Fallback, MadeWithFallback, text_with_fallback};
 pub use text::{TextField, text};
 pub use widget::{MadeText, WidgetText, text_for_widget, widget_text};

@@ -376,7 +376,11 @@ impl<'p> Document<'p> {
     /// `BuiltAnnot::redact_with_font`, with the `embed` and `text-layout`
     /// features) is added the same way: its streams name the font by the
     /// number reserved for it, which a save writes with the glyphs they
-    /// draw.
+    /// draw. The font is put in the form's default resources under the name
+    /// its `/DA` gives, or the first free one after it, which `/DA` is then
+    /// written to name, a form made where the document has none, as
+    /// [`build::add_annot`] says; a font given as a resource of objects is
+    /// written once a document, as a page's resources are.
     ///
     /// ```
     /// # #[cfg(all(feature = "embed", feature = "text-layout"))]
@@ -406,6 +410,12 @@ impl<'p> Document<'p> {
     ///     panic!("a redaction");
     /// };
     /// assert_eq!(read.overlay_text.as_deref(), Some("\u{4E2D}\u{6587}"));
+    /// // Its /DA names the font, which the form's default resources hold.
+    /// let named = read.da.as_ref().and_then(|da| da.font_name.as_deref());
+    /// assert_eq!(named, Some(&b"Helv"[..]));
+    /// let form = pdf.catalog().unwrap().get("AcroForm").unwrap().as_dict().unwrap();
+    /// let resources = form.get("DR").unwrap().as_dict().unwrap();
+    /// assert!(resources.get("Font").unwrap().as_dict().unwrap().has("Helv"));
     /// # }
     /// ```
     ///
@@ -420,7 +430,7 @@ impl<'p> Document<'p> {
         if !self.added.is_empty() {
             self.place_pages(deflate())?;
         }
-        build::add_annot(&mut self.doc, page_id, built, deflate())
+        build::add_annot_in(&mut self.doc, &mut self.written, page_id, built, deflate())
     }
 
     /// Flattens eligible annotations on `page_id` into its page content stream

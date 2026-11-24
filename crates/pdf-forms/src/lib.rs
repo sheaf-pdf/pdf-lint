@@ -9,7 +9,8 @@
 //! - A [`Field`]'s type, flags, value, default value, default appearance,
 //!   quadding, and maximum length are the effective ones: its own, else its
 //!   nearest ancestor's, and for the default appearance and quadding the
-//!   form's after that.
+//!   form's after that; under PDFium's rules, a maximum length neither gives
+//!   is the first of the field's widgets' to hold one ([`Field::max_len`]).
 //! - A [`Widget`] is a kid with no partial name and no kids of its own, or the
 //!   field's own dictionary; [`Widget::annot`] reads it as a
 //!   [`pdf_annots::Annot`].
@@ -21,7 +22,12 @@
 //!   appearances a field without one would show, held to those PDFium makes:
 //!   `appearance::text` makes a text field's from plain data, in the font
 //!   `FieldFont` reads, and `appearance::text_for_widget` makes a `Widget`'s from
-//!   what this crate reads.
+//!   what this crate reads. With `embed` too, `appearance::text_with_fallback`
+//!   draws what the field's font can't in a TrueType program the caller gives,
+//!   and returns the glyphs it drew, for the caller to embed.
+//! - [`default_resources::font_name`] gives the name a writer puts a font under
+//!   in the form's default resources, where no other font holds it, for a
+//!   default appearance string to name it by.
 //!
 //! # Example
 //!
@@ -111,6 +117,7 @@ pub use pdf_semantics;
 
 #[cfg(feature = "text-layout")]
 pub mod appearance;
+pub mod default_resources;
 mod error;
 mod fault;
 mod field;

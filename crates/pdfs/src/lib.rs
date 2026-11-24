@@ -78,7 +78,10 @@
 //!   `Date::now` / `Date::from_unix` in `pdf-semantics`.
 //! - **`embed`** *(enabled by default)*: embed a TrueType program in a
 //!   document, subset to the glyphs its pages draw, and draw Unicode text in
-//!   it (`Document::embed_font`, `EmbeddedFont`), through pdf-fonts' `embed`.
+//!   it (`Document::embed_font`, `EmbeddedFont`), through pdf-fonts' `embed`;
+//!   with pdf-gfx's (`ProgramFont`, which an `EmbeddedFont` lays text out
+//!   through) and pdf-forms' (`appearance::text_with_fallback`), each with
+//!   `text-layout`, which none of them turns on.
 //!   Programs with CFF, CFF2 or bitmap-only outlines are refused, text is
 //!   drawn a character at a time without shaping, and justified text in an
 //!   embedded font is laid out flush left.
@@ -368,6 +371,12 @@ mod tests {
         shared::<crate::Document<'_>>();
         #[cfg(feature = "embed")]
         shared::<crate::EmbeddedFont>();
+        #[cfg(all(feature = "embed", feature = "text-layout"))]
+        {
+            shared::<pdf_forms::appearance::Fallback<'static>>();
+            shared::<pdf_forms::appearance::MadeWithFallback>();
+            shared::<pdf_gfx::WithFallback<'static, pdf_fonts::Std14, crate::EmbeddedFont>>();
+        }
         shared::<crate::Options<'_>>();
         shared::<crate::Limits>();
         shared::<crate::Error>();

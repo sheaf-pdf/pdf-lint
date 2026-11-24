@@ -189,7 +189,7 @@ fn pdfium_recorded_cases_agree() {
     let mut wrong = Vec::new();
     for [name, kind, _files] in &cases {
         assert!(
-            kind == "forms" || kind == "forms-ap",
+            kind == "forms" || kind == "forms-ap" || (kind == "fonts" && name.starts_with("back-")),
             "{name}: unexpected case kind {kind}"
         );
         if kind != "forms" {
@@ -1476,5 +1476,498 @@ mod made_here {
             wrong.len(),
             wrong.join("\n")
         );
+    }
+}
+
+/// The cases a test writes into `tests/pdfium/written` (`embed`), which
+/// `cases.py` lists: `forms-ap` cases (`ap-*`) whose default resources hold a
+/// TrueType program as `pdf_fonts::embed::write` writes it, a Type 0 font of
+/// all its glyphs, under `FX`; and read-back cases (`back-*`, `fonts`), each a
+/// widget whose appearance `appearance::text_with_fallback` makes in
+/// Helvetica and that program, drawn on the page too, so that PDFium's text
+/// page reads it back, the program written of the glyphs returned.
+#[cfg(all(feature = "embed", feature = "text-layout"))]
+mod written {
+    use std::collections::{BTreeMap, HashMap};
+    use std::fs;
+    use std::path::PathBuf;
+
+    use pdf_fixtures::fixture::{self, Body, Xref};
+    use pdf_forms::appearance::{Fallback, FieldFont, TextField, WidgetLook, text_with_fallback};
+    use pdf_forms::pdf_content_streams::{Concat, Res, ResBody};
+    use pdf_forms::pdf_fonts::embed::{self, Glyphs, Program};
+    use pdf_forms::pdf_fonts::{Fonts, Std14};
+    use pdf_forms::pdf_gfx::{self, DefaultAppearance, TextPage, TextPageOpts};
+    use pdf_forms::pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, dict};
+    use pdf_forms::{FieldFlags, Limits};
+    use pdf_structure::{Reading, read};
+    use unicode_normalization::UnicodeNormalization;
+
+    use super::{read_tsv, set};
+
+    /// A name WinAnsiEncoding has all but two characters of (`Ł` and `ễ`),
+    /// which the program has.
+    const VALUE: &str = "\u{141}ukasz Nguy\u{1ec5}n \u{d6}l\u{e7}er";
+
+    const COMB: i64 = 1 << 24;
+    const MULTILINE: i64 = 1 << 12;
+
+    fn program() -> Program {
+        Program::open(pdf_fixtures::font::latin(1000).build(), 0).unwrap()
+    }
+
+    /// `objects`, a font as `embed::write` writes it, from object `first` on,
+    /// each reference `(i, 0)` among them made the `i`th's.
+    fn placed(objects: &[Object], first: u32) -> Vec<(u32, Body)> {
+        (first..)
+            .zip(objects)
+            .map(|(n, object)| {
+                let mut object = object.clone();
+                object.renumber(|to| match to.generation {
+                    0 => Some(ObjectId::new(first + to.number, 0)),
+                    _ => Some(to),
+                });
+                let body = match object.as_stream() {
+                    Some(stream) => Body::stream(stream.dict.clone(), stream.data.bytes().unwrap()),
+                    None => Body::Object(object),
+                };
+                (n, body)
+            })
+            .collect()
+    }
+
+    /// A file of one page whose annotations are `widgets`, each a text field
+    /// that is its own widget, from object 5; its form's default resources
+    /// `fonts`; `more` its other objects, and `page` the page's other
+    /// entries.
+    fn file(widgets: &[Dict], fonts: Dict, more: Vec<(u32, Body)>, page: Dict) -> Vec<u8> {
+        let refs: Vec<Object> = (5..).take(widgets.len()).map(Object::reference).collect();
+        let mut page_dict = dict! {
+            "Type" => Object::name("Page"),
+            "Parent" => Object::reference(2),
+            "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
+            "Annots" => refs.clone(),
+        };
+        for (key, value) in page.iter() {
+            page_dict.set(key.to_vec(), value.clone());
+        }
+        let mut bodies: Vec<(u32, Body)> = vec![
+            (
+                1,
+                dict! {
+                    "Type" => Object::name("Catalog"),
+                    "Pages" => Object::reference(2),
+                    "AcroForm" => dict! { "Fields" => refs, "DR" => dict! { "Font" => fonts } },
+                }
+                .into(),
+            ),
+            (
+                2,
+                dict! {
+                    "Type" => Object::name("Pages"), "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                }
+                .into(),
+            ),
+            (3, page_dict.into()),
+        ];
+        for (i, widget) in widgets.iter().enumerate() {
+            let mut widget = widget.clone();
+            widget.set("T", Object::text(&format!("f{i}")));
+            widget.set("FT", Object::name("Tx"));
+            widget.set("Type", Object::name("Annot"));
+            widget.set("Subtype", Object::name("Widget"));
+            widget.set("P", Object::reference(3));
+            bodies.push((5 + i as u32, widget.into()));
+        }
+        bodies.extend(more);
+        bodies.sort_by_key(|(n, _)| *n);
+        fixture::file(
+            "1.7",
+            &bodies,
+            dict! { "Root" => Object::reference(1) },
+            Xref::Table,
+        )
+    }
+
+    fn rect(x0: i32, y0: i32, x1: i32, y1: i32) -> Object {
+        Object::from([x0, y0, x1, y1].map(Object::from).to_vec())
+    }
+
+    /// A text field's widget: its value, `/DA`, rectangle, and flags and
+    /// `/MaxLen` where they're given.
+    fn tx(value: &str, da: &str, rect: Object, flags: i64, max_len: Option<i64>) -> Dict {
+        let mut widget = dict! {
+            "V" => Object::text(value),
+            "DA" => Object::text(da),
+            "Rect" => rect,
+        };
+        if flags != 0 {
+            widget.set("Ff", flags);
+        }
+        if let Some(n) = max_len {
+            widget.set("MaxLen", n);
+        }
+        widget
+    }
+
+    /// A `forms-ap` case of `widgets` whose default resources hold
+    /// Helvetica at 100 and the program, all its glyphs, as `FX` at 110.
+    fn embedded(widgets: &[Dict]) -> Vec<u8> {
+        let program = program();
+        let mut all = Glyphs::new();
+        let ascii: String = (0x20u8..0x7F).map(char::from).collect();
+        all.add(&program, &ascii).unwrap();
+        all.add(&program, "\u{e9}\u{e7}\u{d6}\u{141}\u{1ec5}\u{301}")
+            .unwrap();
+        let fx = embed::write(&program, &all, &embed::Options::default()).unwrap();
+        let mut more = placed(&fx, 110);
+        more.push((100, Std14::Helvetica.dict().into()));
+        let fonts = dict! { "FX" => Object::reference(110), "Helv" => Object::reference(100) };
+        file(widgets, fonts, more, Dict::new())
+    }
+
+    /// A read-back case: one widget at `[0 100 w 100 + h]`, `value` in
+    /// Helvetica and the program at `size` (`0` automatic), its appearance
+    /// made with `flags` and `max_len`, drawn on the page by its content too;
+    /// the program, where anything's drawn in it, written of its glyphs at
+    /// 110. The file, and what's read back of it: its value composed, and
+    /// the appearance's content.
+    fn read_back(
+        value: &str,
+        (w, h): (f32, f32),
+        size: f32,
+        flags: i64,
+        max_len: Option<u32>,
+    ) -> (Vec<u8>, Option<Back>) {
+        let program = program();
+        let font = FieldFont::standard(Std14::Helvetica);
+        let fallback = Fallback::new(Res::written(ObjectId::new(110, 0)), &program);
+        let mut field = TextField::new(value);
+        field.flags = FieldFlags::from_bits(flags as u32);
+        field.max_len = max_len;
+        let mut look = WidgetLook::new(w, h);
+        look.border_color = Some(pdf_forms::pdf_content_streams::Color::Gray(0.0));
+        let da = DefaultAppearance::new(
+            "Helv",
+            size,
+            Some(pdf_forms::pdf_content_streams::Color::Gray(0.0)),
+        );
+        let made = text_with_fallback(
+            &field,
+            &look,
+            &da,
+            font.res().unwrap(),
+            &font.layout(),
+            &fallback,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        assert!(!made.appearance.overflowed, "{value:?}");
+
+        let mut names = Dict::new();
+        let mut more = Vec::new();
+        for need in &made.appearance.needs.0 {
+            let bound = match need.res.body() {
+                ResBody::Written(id) => Object::from(*id),
+                ResBody::Objects(_) => Object::reference(100),
+                other => panic!("{other:?}"),
+            };
+            names.set(need.name.clone(), bound);
+        }
+        more.push((100, Std14::Helvetica.dict().into()));
+        if !made.glyphs.is_empty() {
+            let fx = embed::write(&program, &made.glyphs, &embed::Options::default()).unwrap();
+            more.extend(placed(&fx, 110));
+        }
+        let appearance = &made.appearance;
+        let [a, b, c, d, e, f] = appearance.matrix.to_array();
+        let bbox = appearance.bbox;
+        let numbers =
+            |v: &[f32]| Object::from(v.iter().map(|&n| Object::from(n)).collect::<Vec<_>>());
+        more.push((
+            50,
+            Body::stream(
+                dict! {
+                    "Type" => Object::name("XObject"),
+                    "Subtype" => Object::name("Form"),
+                    "BBox" => numbers(&[bbox.x0, bbox.y0, bbox.x1, bbox.y1]),
+                    "Matrix" => numbers(&[a, b, c, d, e, f]),
+                    "Resources" => dict! { "Font" => names },
+                },
+                &appearance.content,
+            ),
+        ));
+        more.push((4, Body::stream(Dict::new(), b"q 1 0 0 1 0 100 cm /Ap Do Q")));
+        let mut widget = tx(
+            value,
+            &format!("/Helv {size} Tf 0 g"),
+            Object::from(0),
+            flags,
+            max_len.map(i64::from),
+        );
+        widget.set("Rect", numbers(&[0.0, 100.0, w, 100.0 + h]));
+        widget.set("AP", dict! { "N" => Object::reference(50) });
+        widget.set("MK", dict! { "BC" => vec![Object::from(0)] });
+        let page = dict! {
+            "Contents" => Object::reference(4),
+            "Resources" => dict! { "XObject" => dict! { "Ap" => Object::reference(50) } },
+        };
+        let back = Back {
+            value: value.nfc().collect(),
+            content: made.appearance.content.clone(),
+        };
+        let file = file(
+            &[widget],
+            dict! { "Helv" => Object::reference(100) },
+            more,
+            page,
+        );
+        (file, Some(back))
+    }
+
+    /// What a read-back case shows: its value composed, and its appearance's
+    /// content.
+    struct Back {
+        value: String,
+        content: Vec<u8>,
+    }
+
+    /// Each written case: its name, its file, and for a read-back case what
+    /// it shows.
+    fn written_cases() -> Vec<(&'static str, Vec<u8>, Option<Back>)> {
+        let fx = |size: i32| format!("/FX {size} Tf 0 g");
+        let nfd: String = VALUE.nfd().collect();
+        let long = format!("{VALUE} {VALUE}");
+        let back = |name, value: &str, boxed, flags, max_len| {
+            let (file, back) = read_back(value, boxed, 12.0, flags, max_len);
+            (name, file, back)
+        };
+        let back_sized = |name, value: &str, boxed, size, flags| {
+            let (file, back) = read_back(value, boxed, size, flags, None);
+            (name, file, back)
+        };
+        vec![
+            (
+                "ap-embedded-line",
+                embedded(&[
+                    tx("Hello 123", &fx(12), rect(10, 10, 290, 30), 0, None),
+                    tx(
+                        "\u{d6}l\u{e7}er \u{e9}",
+                        &fx(12),
+                        rect(10, 40, 290, 60),
+                        0,
+                        None,
+                    ),
+                    tx("Hello 123", &fx(0), rect(10, 70, 290, 100), 0, None),
+                    tx("Hg", &fx(100), rect(10, 110, 290, 260), 0, None),
+                ]),
+                None,
+            ),
+            (
+                "ap-embedded-multiline",
+                embedded(&[
+                    tx("Hg", &fx(100), rect(10, 10, 290, 312), MULTILINE, None),
+                    tx(
+                        "Hello 123\nNguyen Olcer",
+                        &fx(0),
+                        rect(10, 320, 290, 380),
+                        MULTILINE,
+                        None,
+                    ),
+                ]),
+                None,
+            ),
+            (
+                "ap-embedded-comb",
+                embedded(&[
+                    tx("Hello", &fx(12), rect(10, 10, 290, 30), COMB, Some(10)),
+                    tx("Hello", &fx(0), rect(10, 40, 290, 60), COMB, Some(10)),
+                ]),
+                None,
+            ),
+            (
+                "ap-comb-cluster",
+                embedded(&[
+                    tx(
+                        "e\u{301}e\u{301}ab",
+                        &fx(12),
+                        rect(10, 10, 290, 30),
+                        COMB,
+                        Some(6),
+                    ),
+                    tx(
+                        "e\u{301}e\u{301}ab",
+                        "/Helv 12 Tf 0 g",
+                        rect(10, 40, 290, 60),
+                        COMB,
+                        Some(6),
+                    ),
+                ]),
+                None,
+            ),
+            back("back-mixed", VALUE, (280.0, 20.0), 0, None),
+            back("back-nfd", &nfd, (280.0, 20.0), 0, None),
+            back("back-comb", VALUE, (380.0, 20.0), COMB, Some(19)),
+            back_sized("back-multiline", &long, (130.0, 60.0), 10.0, MULTILINE),
+            back("back-winansi", "Zo\u{eb} Caf\u{e9}", (280.0, 20.0), 0, None),
+        ]
+    }
+
+    fn written_folder() -> PathBuf {
+        set().join("written")
+    }
+
+    /// Writes `tests/pdfium/written`: run it when the maker or a case
+    /// changes, then `just pdfium-answers`.
+    #[test]
+    #[ignore = "writes into the source tree"]
+    fn the_written_cases_are_written() {
+        let folder = written_folder();
+        fs::create_dir_all(&folder).unwrap();
+        for file in fs::read_dir(&folder).unwrap() {
+            fs::remove_file(file.unwrap().path()).unwrap();
+        }
+        for (name, file, _) in written_cases() {
+            fs::write(folder.join(format!("{name}.pdf")), file).unwrap();
+        }
+    }
+
+    /// The oracle's written files are what the maker makes, and no others; a
+    /// value given decomposed is drawn as its composed form is, the same
+    /// bytes, and one Helvetica draws whole embeds no program.
+    #[test]
+    fn the_written_cases_are_the_maker() {
+        let cases = written_cases();
+        let case = |name: &str| cases.iter().find(|case| case.0 == name).unwrap();
+        let file = |name: &str| &case(name).1;
+        let content = |name: &str| &case(name).2.as_ref().unwrap().content;
+        // The same appearance, and the same font written of the same glyphs.
+        assert_eq!(content("back-mixed"), content("back-nfd"));
+        let font = |name: &str| {
+            let file = file(name);
+            let at = file
+                .windows(12)
+                .position(|w| w == b"110 0 obj\n<<")
+                .unwrap();
+            let to = at + file[at..].windows(5).position(|w| w == b"xref\n").unwrap();
+            file[at..to].to_vec()
+        };
+        assert_eq!(font("back-mixed"), font("back-nfd"));
+        let winansi = file("back-winansi");
+        assert!(!winansi.windows(9).any(|w| w == b"FontFile2"));
+        assert!(file("back-mixed").windows(9).any(|w| w == b"FontFile2"));
+
+        let folder = written_folder();
+        if !folder.exists() {
+            return;
+        }
+        let mut names: Vec<String> = (fs::read_dir(&folder).unwrap())
+            .map(|file| file.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let mut expected: Vec<String> = cases
+            .iter()
+            .map(|(name, ..)| format!("{name}.pdf"))
+            .collect();
+        expected.sort();
+        assert_eq!(names, expected, "run the_written_cases_are_written");
+        for (name, file, _) in &cases {
+            let written = fs::read(folder.join(format!("{name}.pdf"))).unwrap();
+            assert!(
+                written == *file,
+                "{name}: run the_written_cases_are_written"
+            );
+        }
+    }
+
+    /// Where a text page puts a character: within 0.05 pt, the `forms-ap`
+    /// cases' bound for a string's origin.
+    const PLACE: f32 = 0.05;
+
+    /// Each read-back case's characters, as PDFium's text page reads them
+    /// from the page (`fonts`: each one's character and origin), are the
+    /// value composed, each where the appearance draws it: pdf-gfx's text
+    /// page of the same file, every character it reads drawn within 0.05 pt
+    /// of PDFium's, PDFium's spaces and line breaks between them passed over
+    /// where its text page adds them. A space is held by its place in the
+    /// text alone: where it's drawn after a gap (a comb cell's), PDFium's text
+    /// page reads one at the gap's start, where the glyph before it ends.
+    #[test]
+    fn read_back_cases_agree() {
+        let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+            .into_iter()
+            .map(|[k, v]| (k, v))
+            .collect();
+        let values: BTreeMap<&str, String> = written_cases()
+            .into_iter()
+            .filter_map(|(name, _, back)| Some((name, back?.value)))
+            .collect();
+        let cases: Vec<String> = read_tsv::<3>("cases.tsv")
+            .into_iter()
+            .filter(|[_, kind, _]| kind == "fonts")
+            .map(|[name, _, _]| name)
+            .collect();
+        assert_eq!(cases.len(), values.len(), "a case for each read-back file");
+        let mut wrong = Vec::new();
+        for name in &cases {
+            let value = &values[name.as_str()];
+            let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+            let reading = Reading::open(&bytes[..], &read::Options::DEFAULT).unwrap();
+            let page = (&reading)
+                .resolve(ObjectId::new(3, 0))
+                .and_then(Object::as_dict)
+                .unwrap();
+            let content = page
+                .get(b"Contents")
+                .and_then(Object::as_reference)
+                .unwrap();
+            let content = reading.decoded(content, 1 << 20).unwrap();
+            let resources = page.get(b"Resources").unwrap();
+            let text = TextPage::extract(
+                &reading,
+                &Concat::new(&[&content]),
+                Some(resources),
+                &pdf_gfx::Limits::DEFAULT,
+                &Fonts::default(),
+                TextPageOpts::default(),
+            )
+            .unwrap();
+            let ours: Vec<(char, [f32; 2])> = (text.chars().iter())
+                .filter(|c| !c.generated)
+                .map(|c| (c.ch, [c.origin.x, c.origin.y - 100.0]))
+                .collect();
+            let read: String = ours.iter().map(|(ch, _)| ch).collect();
+            if read != *value {
+                wrong.push(format!("{name}: read back here as {read:?}, not {value:?}"));
+                continue;
+            }
+            // PDFium's characters, each its code point and origin.
+            let pdfium: Vec<(char, [f32; 2])> = recorded[name.as_str()]
+                .split(" ; ")
+                .map(|entry| {
+                    let words: Vec<&str> = entry.split(' ').collect();
+                    let ch = char::from_u32(u32::from_str_radix(words[0], 16).unwrap()).unwrap();
+                    (ch, [words[1].parse().unwrap(), words[2].parse().unwrap()])
+                })
+                .collect();
+            let mut theirs = pdfium.iter();
+            for &(ch, at) in &ours {
+                let found = theirs.find(|(c, _)| *c == ch || !matches!(c, ' ' | '\r' | '\n'));
+                match found {
+                    Some(&(c, p)) if c == ch => {
+                        let far = (p[0] - at[0]).abs() > PLACE || (p[1] - at[1]).abs() > PLACE;
+                        if far && ch != ' ' {
+                            wrong.push(format!("{name}: {ch:?} at {at:?} here, {p:?} in PDFium"));
+                        }
+                    }
+                    other => wrong.push(format!("{name}: {ch:?} here, {other:?} in PDFium")),
+                }
+            }
+            if theirs.any(|(c, _)| !matches!(c, ' ' | '\r' | '\n')) {
+                wrong.push(format!("{name}: PDFium reads more than {value:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }

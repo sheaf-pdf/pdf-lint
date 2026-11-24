@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use pdf_annots::DefaultAppearance;
 use pdf_content_streams::{ContentWriter, Res, ResBody, Reserved, ResourceNeeds};
 use pdf_filters::Prediction;
 use pdf_fonts::Std14;
@@ -449,18 +450,52 @@ pub fn add_embedded_file(
 /// A redaction's `/RO` overlay is also bound as `/AP /R` beside `/N`, so a
 /// viewer shows what applying the mark leaves while the pointer is over it.
 ///
+/// The font an annotation was built in
+/// ([`BuiltAnnot::da_font`](pdf_annots::BuiltAnnot::da_font), from
+/// `free_text_with_font` and `redact_with_font`) is put in the form's
+/// default resources (`/AcroForm /DR /Font`) under the name its `/DA` gives,
+/// as a `/DA` font is found there (ISO 32000-2, 12.7.4.3); where that name is
+/// another font's, under the first free one pdf-forms'
+/// [`font_name`](pdf_forms::default_resources::font_name) gives, and `/DA`
+/// is written again to name it: the name its last `Tf` reads alone
+/// replaced, every other byte of the string as it was. The font's
+/// object is the number a resource already written names
+/// ([`Res::written`]), as an embedded font's is; a resource of objects is
+/// written first, as [`resource`] writes one, here for each annotation. The
+/// form, its default resources and their fonts are extended where they are,
+/// directly or in the object a reference names, and made where there are
+/// none: a document with no form gains one with an empty `/Fields` and no
+/// other entry but `/DR`. A `/DA` that names no font registers nothing.
+///
 /// # Errors
 ///
-/// [`Error::Write`] if deflating an appearance stream fails, or
-/// [`Error::NoPageTree`] if `page_id` is not a dictionary in `doc`.
+/// [`Error::Write`] if deflating an appearance stream or a resource's
+/// stream fails; [`Error::NoPageTree`] if `page_id` is not a dictionary in
+/// `doc`; and [`Error::NoCatalog`], with nothing changed, if there's a font
+/// to register and the trailer's `/Root` names no catalog.
 pub fn add_annot(
     doc: &mut Document,
+    page_id: ObjectId,
+    built: pdf_annots::BuiltAnnot,
+    deflate: Deflate,
+) -> Result<ObjectId, Error> {
+    add_annot_in(doc, &mut HashMap::new(), page_id, built, deflate)
+}
+
+/// [`add_annot`], a resource of objects the font is written once through
+/// `written`, as a page's resources are.
+pub(crate) fn add_annot_in(
+    doc: &mut Document,
+    written: &mut HashMap<Res, ObjectId>,
     page_id: ObjectId,
     mut built: pdf_annots::BuiltAnnot,
     deflate: Deflate,
 ) -> Result<ObjectId, Error> {
     if doc.get_dict(page_id).is_none() {
         return Err(Error::NoPageTree);
+    }
+    if let Some(font) = built.da_font.take() {
+        register(doc, written, &mut built.dict, &font, deflate)?;
     }
     let mut ro_id = None;
     if let Some(ro) = built.redact_overlay.take() {
@@ -493,6 +528,122 @@ pub fn add_annot(
         page_mut.set("Annots", items);
     }
     Ok(annot_id)
+}
+
+/// `font` put in `doc`'s form's default resources under the name the
+/// annotation `dict`'s `/DA` gives it, or the first free one after it, and
+/// `/DA` written again where that moved ([`add_annot`]). Nothing where `/DA`
+/// names no font.
+fn register(
+    doc: &mut Document,
+    written: &mut HashMap<Res, ObjectId>,
+    dict: &mut Dict,
+    font: &Res,
+    deflate: Deflate,
+) -> Result<(), Error> {
+    let da = dict.get(b"DA").and_then(Object::as_bytes);
+    let da = da.and_then(|da| DefaultAppearance::parse(da, &pdf_content_streams::Limits::DEFAULT));
+    let Some(mut da) = da else {
+        return Ok(());
+    };
+    let Some(wanted) = da.font_name.take() else {
+        return Ok(());
+    };
+    if doc.catalog().is_none() {
+        return Err(Error::NoCatalog);
+    }
+    let id = resource(doc, written, font, deflate)?;
+
+    // Each of the form, its default resources and their fonts: in the object
+    // a reference names, changed there; else in its entry, put back.
+    let catalog = doc.catalog().ok_or(Error::NoCatalog)?;
+    let (form_at, form) = held(doc, catalog.get(b"AcroForm"));
+    let mut form = form.unwrap_or_else(|| dict! { "Fields" => Vec::<Object>::new() });
+    let (resources_at, resources) = held(doc, form.get(b"DR"));
+    let mut resources = resources.unwrap_or_default();
+    let (fonts_at, fonts) = held(doc, resources.get(b"Font"));
+    let mut fonts = fonts.unwrap_or_default();
+    let name = pdf_forms::default_resources::font_name(Some(&fonts), &wanted, id).into_owned();
+    if fonts.get(&name).and_then(Object::as_reference) != Some(id) {
+        // The innermost held in an object of its own is changed there, which
+        // nothing above it needs to know; each held in its entry is put in
+        // the one above it.
+        fonts.set(name.clone(), id);
+        if let Some(at) = fonts_at {
+            if let Some(held) = doc.get_dict_mut(at) {
+                held.set(name.clone(), id);
+            }
+        } else if let Some(at) = resources_at {
+            if let Some(held) = doc.get_dict_mut(at) {
+                held.set("Font", fonts);
+            }
+        } else {
+            resources.set("Font", fonts);
+            if let Some(at) = form_at {
+                if let Some(held) = doc.get_dict_mut(at) {
+                    held.set("DR", resources);
+                }
+            } else if let Some(catalog) = doc.catalog_mut() {
+                form.set("DR", resources);
+                catalog.set("AcroForm", form);
+            }
+        }
+    }
+    if name != wanted {
+        let written = (dict.get(b"DA").and_then(Object::as_bytes))
+            .and_then(|written| renamed(written, &name));
+        match written {
+            Some(written) => dict.set("DA", Object::bytes(written)),
+            // What was read of it, written anew: for a name that can't be
+            // written alone (one with a NUL byte), as a string that gave a
+            // font's name has a `Tf` to rename.
+            None => {
+                da.font_name = Some(name);
+                pdf_annots::AnnotMut::new(dict).set_default_appearance(&da);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The default appearance string `da` with the font it names made `name`:
+/// the name operand of its last `Tf` that has one, which is the font read
+/// from it, replaced, and every other byte as it was, the operators a
+/// reader of default appearances doesn't model and the numbers as written
+/// among them. `None` where `da` doesn't read as content, no `Tf` names a
+/// font, or `name` can't be written as a name.
+fn renamed(da: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+    use pdf_content_streams::{Operator, ResCx, operations};
+
+    let limits = pdf_content_streams::Limits::DEFAULT;
+    let mut at = None;
+    for step in operations(da, &ResCx::none(), &limits) {
+        let step = step.ok()?;
+        if step.operator() == Operator::Font
+            && let Some(font) = step.arg(1).filter(|font| font.name().is_some())
+        {
+            at = Some(font.range());
+        }
+    }
+    let at = at?;
+    let mut out = Vec::with_capacity(da.len() + name.len());
+    out.extend_from_slice(da.get(..at.start)?);
+    pdf_objects::serialize::name(&mut out, name).ok()?;
+    out.extend_from_slice(da.get(at.end..)?);
+    Some(out)
+}
+
+/// The dictionary `value` is, a copy, and the object it's in where a chain
+/// of references from `value` names one; for anything but a dictionary, or
+/// for none, neither.
+fn held(doc: &Document, value: Option<&Object>) -> (Option<ObjectId>, Option<Dict>) {
+    match value.and_then(|value| doc.dereference(value)) {
+        Some((at, object)) => match object.as_dict() {
+            Some(dict) => (at, Some(dict.clone())),
+            None => (None, None),
+        },
+        None => (None, None),
+    }
 }
 
 /// Flattens eligible annotations on `page_id` in `doc` according to `opts` and

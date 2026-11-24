@@ -20,6 +20,14 @@ pdf-gfx.workspace = true
 pdf-objects.workspace = true
 pdf-semantics.workspace = true
 thiserror = "2"
+# Optional Unicode normalization (Standard Annex #15), so that text given
+# decomposed is drawn composed, as a font without mark positioning draws it
+# right (`text-layout` feature).
+unicode-normalization = { version = "0.1.26", optional = true }
+# Optional extended grapheme clusters (Standard Annex #29), so that a comb
+# field's cell holds a character and its marks, and each is composed a cluster
+# at a time (`text-layout` feature).
+unicode-segmentation = { version = "1.13.3", optional = true }
 # Optional numeric spans for the field tree walk; without proc macros
 # (`default-features = false`) and with `std` for span guards.
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
@@ -30,8 +38,19 @@ default = ["programs", "text-layout"]
 # `pdf-fonts/programs`) for embedded font program metrics.
 programs = ["pdf-annots/programs", "pdf-gfx/programs", "pdf-fonts/programs"]
 # Forwards `pdf-annots/text-layout` and `pdf-gfx/text-layout` for text laid out
-# in a widget's rectangle.
-text-layout = ["pdf-annots/text-layout", "pdf-gfx/text-layout"]
+# in a widget's rectangle, composed and cut into grapheme clusters.
+text-layout = [
+    "pdf-annots/text-layout",
+    "pdf-gfx/text-layout",
+    "dep:unicode-normalization",
+    "dep:unicode-segmentation",
+]
+# Forwards `pdf-fonts/embed` (which brings in `subsetter`) and `pdf-gfx/embed`;
+# with `text-layout`, a text field's value is drawn in its font and a TrueType
+# program the caller gives for what that font can't draw
+# (`appearance::text_with_fallback`). It doesn't turn `text-layout` on, so a
+# dependent that embeds without laying text out builds without it.
+embed = ["pdf-fonts/embed", "pdf-gfx/embed"]
 # Forwards `predefined-cmaps` to `pdf-annots`, `pdf-gfx`, and `pdf-fonts`.
 predefined-cmaps = [
     "pdf-annots/predefined-cmaps",
@@ -50,7 +69,7 @@ tracing = [
 ]
 
 [package.metadata.docs.rs]
-features = ["predefined-cmaps", "tracing"]
+features = ["predefined-cmaps", "tracing", "embed"]
 
 [lib]
 bench = false

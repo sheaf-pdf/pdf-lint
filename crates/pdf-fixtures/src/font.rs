@@ -708,3 +708,61 @@ pub fn sample(units_per_em: u16) -> TrueType {
     font.map('\u{1D11E}', clef);
     font
 }
+
+/// A program of Latin text, without CJK or emoji, its coordinates and advances in
+/// thousandths of an em scaled to `units_per_em`: printable ASCII, the letters `é`
+/// U+00E9, `ç` U+00E7, `Ö` U+00D6, `Ł` U+0141 and `ễ` U+1EC5, and a combining acute
+/// accent U+0301, each glyph its own box, in that order from glyph 1, every one of its
+/// characters on a glyph of its own. A program that draws "Łukasz Nguyễn Ölçer", for a
+/// font a caller falls back to where WinAnsiEncoding has no code. Its `hhea` heights
+/// are 850 and -250, its `OS/2`'s typographic ones 780 and -210, not used, and its
+/// win heights 900 and 260; its box, its glyphs', is -230..950 high.
+///
+/// | character | outline | advance |
+/// |---|---|---|
+/// | space | none | 260 |
+/// | `g`, `j`, `p`, `q`, `y` | box 30..(advance - 30) × -200..480 | 420 + (code × 37 mod 260) |
+/// | other lowercase ASCII | box 30..(advance - 30) × 0..500 | 420 + (code × 37 mod 260) |
+/// | other printable ASCII | box 30..(advance - 30) × 0..700 | 420 + (code × 37 mod 260) |
+/// | `é` U+00E9 | box 40..520 × -10..720 | 560 |
+/// | `ç` U+00E7 | box 40..470 × -230..500 | 520 |
+/// | `Ö` U+00D6 | box 40..680 × 0..880 | 720 |
+/// | `Ł` U+0141 | box 20..560 × 0..700 | 590 |
+/// | `ễ` U+1EC5 | box 40..520 × -10..950 | 560 |
+/// | U+0301 | box 100..300 × 560..720 | 0 |
+pub fn latin(units_per_em: u16) -> TrueType {
+    let em = |v: i32| scaled(v, units_per_em);
+    let mut font = TrueType::new(units_per_em);
+    font.ascender = em(850);
+    font.descender = em(-250);
+    if let Some(os2) = font.os2.as_mut() {
+        os2.typo_ascender = em(780);
+        os2.typo_descender = em(-210);
+        os2.win_ascent = em(900) as u16;
+        os2.win_descent = em(260) as u16;
+    }
+    let boxed = |x0, y0, x1, y1| Glyph::Box(em(x0), em(y0), em(x1), em(y1));
+    let ascii = (0x20u8..0x7F).map(char::from);
+    let letters = [
+        '\u{E9}', '\u{E7}', '\u{D6}', '\u{141}', '\u{1EC5}', '\u{301}',
+    ];
+    for c in ascii.chain(letters) {
+        let advance = 420 + (u32::from(c) * 37) % 260;
+        let right = advance as i32 - 30;
+        let (glyph, advance) = match c {
+            ' ' => (Glyph::Empty, 260),
+            '\u{E9}' => (boxed(40, -10, 520, 720), 560),
+            '\u{E7}' => (boxed(40, -230, 470, 500), 520),
+            '\u{D6}' => (boxed(40, 0, 680, 880), 720),
+            '\u{141}' => (boxed(20, 0, 560, 700), 590),
+            '\u{1EC5}' => (boxed(40, -10, 520, 950), 560),
+            '\u{301}' => (boxed(100, 560, 300, 720), 0),
+            'g' | 'j' | 'p' | 'q' | 'y' => (boxed(30, -200, right, 480), advance),
+            c if c.is_ascii_lowercase() => (boxed(30, 0, right, 500), advance),
+            _ => (boxed(30, 0, right, 700), advance),
+        };
+        let n = font.glyph(glyph, em(advance as i32) as u16);
+        font.map(c, n);
+    }
+    font
+}

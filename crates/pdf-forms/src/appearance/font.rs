@@ -246,13 +246,15 @@ impl FieldFont {
     }
 
     /// What text is laid out in it with: its codes and widths, indexed once,
-    /// and its heights. A standard 14 font whose heights neither a program read
-    /// nor a descriptor with a `/FontBBox` gives has the ascent and
-    /// descent of the face PDFium as of chromium/8152 draws it in, not Adobe's
-    /// metrics', as PDFium measures a field's lines by them (where a
-    /// descriptor with a box gives both as 0, PDFium measures its face's `A`
-    /// and `g`, for which the face's ascent and descent stand in); any other
-    /// font its own (`pdf_fonts::Font::metrics`).
+    /// and its heights. A font whose descriptor gives its ascent and descent
+    /// with a `/FontBBox` that isn't all 0 has them as given, past the box or
+    /// not (`pdf_fonts::Font::descriptor_heights`), as PDFium as of
+    /// chromium/8152 measures a field's lines by them. A standard 14 font
+    /// whose heights neither a program read nor such a descriptor gives has
+    /// the ascent and descent of the face PDFium draws it in, not Adobe's
+    /// metrics' (where a descriptor with a box gives both as 0, PDFium
+    /// measures its face's `A` and `g`, for which the face's ascent and
+    /// descent stand in); any other font its own (`pdf_fonts::Font::metrics`).
     ///
     /// Its box is the font's own, but a standard 14 Type 1 font that embeds
     /// no program has none: the face it's drawn in is the viewer's, and
@@ -305,13 +307,20 @@ impl LayoutFont for FieldLayoutFont<'_> {
 }
 
 /// The heights `font` is measured by, `face` the standard 14 font its name
-/// names: its own, but for a simple font PDFium draws in a standard face of
-/// its own, whose heights `pdf-fonts` guesses: no descriptor gives them with a
-/// `/FontBBox`, and no program read does. PDFium takes those from its face
-/// (`core/fpdfapi/font/cpdf_font.cpp`, `CheckFontMetrics`), so they're its
-/// face's ([`pdfium_heights`]). A Type 3 font draws in no face.
+/// names: its descriptor's as given, where it gives them with a `/FontBBox`
+/// that isn't all 0, as PDFium takes a font's ascent and descent
+/// (`core/fpdfapi/font/cpdf_font.cpp`, `LoadFontDescriptor`), not held within
+/// the box as `pdf-fonts` holds them to bound a character. Else its own, but
+/// for a simple font PDFium draws in a standard face of its own, whose
+/// heights `pdf-fonts` guesses: no descriptor gives them with a `/FontBBox`,
+/// and no program read does. PDFium takes those from its face
+/// (`CheckFontMetrics`), so they're its face's ([`pdfium_heights`]). A Type
+/// 3 font draws in no face.
 fn measured(font: &Font, face: Option<Std14>) -> FontMetrics {
     let metrics = font.metrics();
+    if let Some((ascent, descent)) = font.descriptor_heights() {
+        return FontMetrics::new(ascent, descent, metrics.bbox);
+    }
     let simple = matches!(
         font.kind(),
         FontKind::Type1 | FontKind::MMType1 | FontKind::TrueType

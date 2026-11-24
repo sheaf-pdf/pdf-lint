@@ -289,6 +289,9 @@ pub struct Font {
     /// Where it writes vertically: `/W2` by CID, and `/DW2`.
     vertical: Option<VerticalWidths>,
     metrics: FontMetrics,
+    /// Its descriptor's ascent and descent as given, where PDFium takes them so
+    /// ([`Font::descriptor_heights`]).
+    descriptor_heights: Option<(f32, f32)>,
     /// A simple font's glyphs' outline boxes by code, where they're known: a Type 3
     /// font's, and a standard 14 font's drawn without a program.
     boxes: Option<Box<[Option<GlyphBox>; 256]>>,
@@ -770,6 +773,19 @@ impl Font {
     #[must_use]
     pub const fn metrics(&self) -> FontMetrics {
         self.metrics
+    }
+
+    /// Its ascent and descent as its descriptor gives them, in glyph units, where
+    /// PDFium takes them as given: a descriptor whose `/FontBBox` isn't all 0 and that
+    /// gives either of them, its `Descent` over 10 read as below the baseline. They
+    /// aren't held within the box, as [`Font::metrics`] holds them to bound a
+    /// character: they're the font's own ascent and descent as PDFium reads them as of
+    /// chromium/8152 (`CPDF_Font::GetTypeAscent` and `GetTypeDescent`), which it sets
+    /// a form field's lines by. None where PDFium takes them from the face it draws in
+    /// (a descriptor with no box, or neither height), and for a Type 3 font.
+    #[must_use]
+    pub const fn descriptor_heights(&self) -> Option<(f32, f32)> {
+        self.descriptor_heights
     }
 
     /// The box `code`'s glyph's outline fits in, from its origin, where it's known: a
@@ -1409,7 +1425,8 @@ where
         };
         ProgramHeights::of(face, boxes[usize::from(b'A')], boxes[usize::from(b'g')])
     });
-    let (metrics, guessed) = heights(reader, descriptor, descriptor_id, std14, program_heights);
+    let (metrics, guessed, descriptor_heights) =
+        heights(reader, descriptor, descriptor_id, std14, program_heights);
     approx.heights = guessed;
     Ok(Font {
         id: None,
@@ -1419,6 +1436,7 @@ where
         widths: Widths::Simple(widths),
         vertical: None,
         metrics,
+        descriptor_heights,
         guessed: match (&afm, embedded || has_widths) {
             (Some(afm), false) => bits(afm.iter().map(|(_, bbox)| bbox.is_none())),
             _ => [0; 4],
@@ -1492,7 +1510,8 @@ where
     };
     let descriptor = reader.dict(font, b"FontDescriptor");
     let descriptor_id = referred(font, b"FontDescriptor");
-    let (metrics, guessed) = heights(reader, descriptor, descriptor_id, None, None);
+    let (metrics, guessed, descriptor_heights) =
+        heights(reader, descriptor, descriptor_id, None, None);
     approx.heights = guessed;
     Font {
         id: None,
@@ -1503,6 +1522,7 @@ where
         widths: Widths::Gbk,
         vertical: None,
         metrics,
+        descriptor_heights,
         boxes: None,
         program: FontProgram::None,
         outlines: Outlines::None,
@@ -1676,6 +1696,7 @@ where
         widths: Widths::Simple(widths),
         vertical: None,
         metrics,
+        descriptor_heights: None,
         boxes: Some(Box::new(boxes)),
         program: FontProgram::None,
         outlines: Outlines::None,
@@ -1909,6 +1930,7 @@ where
         widths,
         vertical,
         metrics: GUESSED,
+        descriptor_heights: None,
         boxes: None,
         program,
         outlines,
@@ -1935,7 +1957,7 @@ where
         }
         _ => None,
     };
-    (read.metrics, read.approx.heights) =
+    (read.metrics, read.approx.heights, read.descriptor_heights) =
         heights(reader, descriptor, descriptor_id, None, program_heights);
     Ok(read)
 }
@@ -1950,14 +1972,16 @@ where
 /// was read, that's the face. Else the face is one PDFium substitutes, its own for the
 /// standard 14 or the system's, which varies by OS, and they're guessed: the
 /// descriptor's, else the standard 14 font's AFM's, else the box's top and bottom, else
-/// an em above and a quarter below.
+/// an em above and a quarter below. Third, the descriptor's ascent and descent as
+/// given, where PDFium takes them so ([`Font::descriptor_heights`]): with a box that
+/// isn't all 0, and either height given.
 fn heights<'o, O, S>(
     reader: &Reader<'_, O, S>,
     descriptor: Option<&'o Dict>,
     descriptor_id: Option<ObjectId>,
     std14: Option<Std14>,
     program: Option<ProgramHeights>,
-) -> (FontMetrics, bool)
+) -> (FontMetrics, bool, Option<(f32, f32)>)
 where
     O: Resolve<'o> + Streams,
     S: Sink<Fault> + ?Sized,
@@ -1978,6 +2002,7 @@ where
     };
     let given = ascent != 0 || descent != 0;
     let (ascent, descent) = (ascent as f32, descent as f32);
+    let as_given = (own.is_some() && given).then_some((ascent, descent));
     if let Some(program) = program {
         let (sides, mut ascent, mut descent) = match own {
             Some(sides) => (sides, ascent, descent),
@@ -2007,7 +2032,7 @@ where
             descent,
             bbox: Some(GlyphBox::new(left, bottom, right, top)),
         };
-        return (metrics, guessed || ascent == descent);
+        return (metrics, guessed || ascent == descent, as_given);
     }
     let within = |(ascent, descent): (f32, f32)| match own {
         Some([_, bottom, _, top]) if top > bottom => (ascent.min(top), descent.max(bottom)),
@@ -2031,7 +2056,7 @@ where
         descent,
         bbox,
     };
-    (metrics, !exact || ascent == descent)
+    (metrics, !exact || ascent == descent, as_given)
 }
 
 /// A CIDFont's `/W` or `/W2`, the first range given for a CID winning, as in PDFium,

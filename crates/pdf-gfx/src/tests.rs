@@ -133,6 +133,9 @@ fn public_types_are_send_and_sync() {
         check::<crate::UnencodableChar>();
         check::<crate::LaidOutLine>();
         check::<crate::LaidOutText>();
+        check::<crate::LaidOutRun>();
+        check::<crate::TextBoxError>();
+        check::<crate::WithFallback<'static, pdf_fonts::Std14, pdf_fonts::Std14>>();
     }
 }
 
@@ -3838,6 +3841,57 @@ fn line_end_spaces_keeps_the_spaces_a_line_breaks_at() {
     );
 }
 
+/// A line its glyphs fill exactly: keeping its spaces, it breaks where
+/// PDFium's sum of the advances in `f32` passes the box's width; without
+/// them, it fits by the allowance, as it always has.
+#[cfg(feature = "text-layout")]
+#[test]
+fn line_end_spaces_breaks_a_line_its_glyphs_fill_where_pdfium_does() {
+    let lines = |text: &str, size: f32, keep: bool| -> Vec<String> {
+        let style = crate::TextBoxStyle {
+            size: Some(size),
+            line_end_spaces: keep,
+            ..crate::TextBoxStyle::default()
+        };
+        // Ten of Courier's advances of 600 across.
+        let rect = Rect::new(0.0, 0.0, 6.0 * size, 200.0);
+        let laid = crate::layout_text(&Std14::Courier, text, rect, &style).unwrap();
+        assert!(!laid.overflowed, "{text:?} at {size}");
+        (laid.lines.iter())
+            .map(|line| text[line.text_range.clone()].to_string())
+            .collect()
+    };
+    let a = |n: usize| "A".repeat(n);
+    // How many `A`s PDFium as of chromium/8152 sets on the first line at each
+    // size (pdf-forms' `forms-ap` case of them): where ten advances sum past
+    // the width in `f32` (`6.0000005` each at 10 points), nine.
+    for (size, first) in [
+        (4.0, 10),
+        (5.0, 9),
+        (6.0, 10),
+        (7.0, 9),
+        (8.0, 10),
+        (9.0, 9),
+        (10.0, 9),
+        (11.0, 10),
+        (12.0, 10),
+        (14.0, 9),
+    ] {
+        assert_eq!(
+            lines(&a(12), size, true),
+            [a(first), a(12 - first)],
+            "{size}"
+        );
+        assert_eq!(lines(&a(12), size, false), [a(10), a(2)], "{size}");
+        // Broken before a word, the line's words are where they were.
+        assert_eq!(
+            lines("AAAAA AAAA AAAA", size, true),
+            ["AAAAA ", "AAAA AAAA"],
+            "{size}"
+        );
+    }
+}
+
 /// Where a line that keeps its spaces may break between two characters, by
 /// the classes PDFium's line breaking reads them in.
 #[cfg(feature = "text-layout")]
@@ -4366,5 +4420,965 @@ fn default_appearance_parse_with_gives_what_parse_gives_whatever_the_sink() {
         (Fault::DefaultAppearanceNoFont, "DefaultAppearanceNoFont"),
     ] {
         assert_eq!(format!("{fault:?}"), dbg);
+    }
+}
+
+/// A TrueType program embedded in a document, laid out in as itself and through
+/// `ProgramFont`, which records the glyphs it encodes.
+#[cfg(all(feature = "embed", feature = "text-layout"))]
+mod program {
+    use std::sync::{Arc, Mutex};
+
+    use pdf_fixtures::font;
+    use pdf_fonts::embed::{Glyphs, Program};
+
+    use crate::{LayoutFont, ProgramFont, Rect, TextBoxStyle, UnencodableChar, layout_text};
+
+    fn program() -> Program {
+        let mut fixture = font::sample(1000);
+        fixture.names = vec![(4, "MARKER Full".into()), (6, "MARKER-PostScript".into())];
+        Program::open(fixture.build(), 0).unwrap()
+    }
+
+    fn style() -> TextBoxStyle {
+        TextBoxStyle {
+            size: Some(10.0),
+            ..TextBoxStyle::default()
+        }
+    }
+
+    const BOX: Rect = Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 300.0,
+        y1: 40.0,
+    };
+
+    /// Its metrics, each character's advance its glyph's width and its code its
+    /// glyph's number, two bytes, high first; a character its `cmap` doesn't map
+    /// has neither, and nothing is written for it.
+    #[test]
+    fn a_program_is_laid_out_in_as_its_glyphs() {
+        let program = program();
+        assert_eq!(program.font_metrics(), program.metrics());
+        let a = program.glyph('A').unwrap();
+        assert_eq!(program.char_advance('A'), Some(program.width(a)));
+        assert_eq!(program.char_advance('\u{4E2D}'), Some(1000.0));
+        let mut out = vec![7];
+        assert!(program.encode_char('\u{1D11E}', &mut out));
+        assert_eq!(out, [7, 0x01, 0x40]);
+        assert_eq!(program.char_advance('z'), None);
+        assert!(!program.encode_char('z', &mut out));
+        assert!(!program.encode_char('\n', &mut out));
+        assert_eq!(out, [7, 0x01, 0x40]);
+
+        // A layout in it is the program's codes, through `&dyn LayoutFont` too.
+        let text = "Ag H\u{C4}\u{4E2D}";
+        let laid = layout_text(&program, text, BOX, &style()).unwrap();
+        let codes = program.codes(text).unwrap();
+        assert_eq!(laid.lines.len(), 1);
+        assert_eq!(laid.lines[0].codes, codes);
+        let dynamic: &dyn LayoutFont = &program;
+        let again = layout_text(dynamic, text, BOX, &style()).unwrap();
+        assert_eq!(again.lines[0].codes, codes);
+        let refused = layout_text(&program, "Az", BOX, &style()).unwrap_err();
+        assert_eq!(
+            refused,
+            UnencodableChar {
+                at: 1,
+                character: 'z'
+            }
+        );
+    }
+
+    /// `ProgramFont` lays text out as its program does, and records each glyph it
+    /// encodes once, with the character it was drawn for: a layout refused
+    /// part-way has recorded the glyphs before the refusal, and glyphs recorded by
+    /// two fonts sharing one set are one set.
+    #[test]
+    fn a_program_font_records_each_glyph_it_encodes() {
+        let program = program();
+        let glyphs = Mutex::new(Glyphs::new());
+        let font = ProgramFont::new(&program, &glyphs);
+        assert!(std::ptr::eq(font.program(), &program));
+        assert_eq!(font.font_metrics(), program.metrics());
+        assert_eq!(font.char_advance('g'), program.char_advance('g'));
+        assert_eq!(font.char_advance('z'), None);
+        assert!(glyphs.lock().unwrap().is_empty());
+
+        let text = "AgA gH";
+        let laid = layout_text(&font, text, BOX, &style()).unwrap();
+        let plain = layout_text(&program, text, BOX, &style()).unwrap();
+        assert_eq!(laid.lines[0].codes, plain.lines[0].codes);
+        assert_eq!(laid.lines[0].origin, plain.lines[0].origin);
+        let mut expected = Glyphs::new();
+        expected.add(&program, "Ag H").unwrap();
+        assert_eq!(
+            glyphs.lock().unwrap().iter().collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>()
+        );
+
+        let refused = layout_text(&font, "\u{4E2D}z\u{6587}", BOX, &style()).unwrap_err();
+        assert_eq!(refused.character, 'z');
+        let recorded = glyphs.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 5);
+        assert!(recorded.iter().any(|(_, text)| text == "\u{4E2D}"));
+        assert!(!recorded.iter().any(|(_, text)| text == "\u{6587}"));
+
+        // Two threads, one set.
+        let program = Arc::new(program);
+        let shared = Arc::new(Mutex::new(Glyphs::new()));
+        std::thread::scope(|scope| {
+            for text in ["\u{5E9}\u{5DC}", "\u{633}\u{644}"] {
+                let (program, shared) = (&program, &shared);
+                scope.spawn(move || {
+                    let font = ProgramFont::new(program, shared);
+                    layout_text(&font, text, BOX, &style()).unwrap();
+                });
+            }
+        });
+        assert_eq!(shared.lock().unwrap().len(), 4);
+    }
+
+    /// A lock a thread panicked holding is taken as it is: what's recorded is
+    /// whole at every step, and recording goes on.
+    #[test]
+    fn a_poisoned_lock_is_taken_as_it_is() {
+        let program = program();
+        let glyphs = Mutex::new(Glyphs::new());
+        glyphs.lock().unwrap().add(&program, "A").unwrap();
+        let poisoned = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _held = glyphs.lock().unwrap();
+                    panic!("poisons the lock");
+                })
+                .join()
+        });
+        assert!(poisoned.is_err() && glyphs.is_poisoned());
+        let font = ProgramFont::new(&program, &glyphs);
+        let laid = layout_text(&font, "gH", BOX, &style()).unwrap();
+        assert_eq!(laid.lines[0].codes, program.codes("gH").unwrap());
+        let recorded = glyphs.lock().unwrap_or_else(|p| p.into_inner()).len();
+        assert_eq!(recorded, 3);
+        assert!(format!("{font:?}").contains("glyphs: Some(3)"));
+    }
+
+    /// `Debug` gives the program's counts and how many glyphs are recorded, never
+    /// a name of the program or a text drawn, and doesn't wait for a lock the
+    /// caller holds. The font is `Send` and `Sync`, for threads drawing pages.
+    #[test]
+    fn a_program_font_prints_counts_alone() {
+        let program = program();
+        let glyphs = Mutex::new(Glyphs::new());
+        let font = ProgramFont::new(&program, &glyphs);
+        layout_text(&font, "MARKER", BOX, &style()).unwrap_err();
+        glyphs.lock().unwrap().insert(9, "MARKER");
+        let printed = format!("{font:?}");
+        assert!(!printed.contains("MARKER"), "{printed}");
+        assert!(
+            printed.contains("glyphs: 321") && printed.contains("glyphs: Some(1)"),
+            "{printed}"
+        );
+        let held = glyphs.lock().unwrap();
+        assert!(format!("{font:?}").contains("glyphs: None"));
+        drop(held);
+
+        fn shared<T: Send + Sync>() {}
+        shared::<ProgramFont<'static>>();
+    }
+}
+
+/// Text in more than one font (`FontSet`, `WithFallback`), a character or a
+/// grapheme cluster at a time.
+#[cfg(feature = "text-layout")]
+mod fallback {
+    use pdf_content_streams::{Res, Reserved};
+    use pdf_fonts::{FontMetrics, Std14};
+
+    use super::assert_approx;
+    use crate::{
+        Canvas, FontSet, LaidOutText, LayoutFont, Rect, TextAlign, TextBoxError, TextBoxStyle,
+        UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for, layout_text,
+    };
+
+    /// A font of the characters it's given, each `advance` wide, its code the
+    /// character's place among them after `base`, with the heights given.
+    struct Only {
+        chars: &'static str,
+        advance: f32,
+        base: u8,
+        ascent: f32,
+        descent: f32,
+    }
+
+    impl LayoutFont for Only {
+        fn font_metrics(&self) -> FontMetrics {
+            FontMetrics::new(self.ascent, self.descent, None)
+        }
+
+        fn char_advance(&self, ch: char) -> Option<f32> {
+            self.chars.contains(ch).then_some(self.advance)
+        }
+
+        fn encode_char(&self, ch: char, out: &mut Vec<u8>) -> bool {
+            match self.chars.chars().position(|c| c == ch) {
+                Some(i) => {
+                    out.push(self.base + i as u8);
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+
+    /// Latin letters, a space and a hyphen, without a mark.
+    const LATIN: Only = Only {
+        chars: "abcde -",
+        advance: 500.0,
+        base: 1,
+        ascent: 800.0,
+        descent: -200.0,
+    };
+
+    /// An `e`, a combining acute and an `é`, taller.
+    const MARKS: Only = Only {
+        chars: "e\u{301}\u{E9}",
+        advance: 400.0,
+        base: 101,
+        ascent: 1000.0,
+        descent: -400.0,
+    };
+
+    /// Two more letters, `x` among them, and a hyphen.
+    const LAST: Only = Only {
+        chars: "xyz-",
+        advance: 600.0,
+        base: 201,
+        ascent: 700.0,
+        descent: -300.0,
+    };
+
+    fn res(font: Std14) -> Res {
+        Res::dict(font.dict()).unwrap()
+    }
+
+    fn named(base: u8) -> Res {
+        Res::dict(pdf_objects::dict! { "Base" => i64::from(base) }).unwrap()
+    }
+
+    fn style() -> TextBoxStyle {
+        TextBoxStyle {
+            size: Some(10.0),
+            font_heights_as_given: true,
+            leading_factor: 1.0,
+            ..TextBoxStyle::default()
+        }
+    }
+
+    const BOX: Rect = Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 200.0,
+        y1: 100.0,
+    };
+
+    /// What `draw` writes on a canvas of its own, as text, each resource
+    /// named `F` and its place among the resources it names, which it gives.
+    fn drawn(draw: impl FnOnce(&mut Canvas)) -> (String, Vec<Res>) {
+        let mut canvas = Canvas::new();
+        draw(&mut canvas);
+        let (bytes, needs) = canvas.finish(&Reserved::default());
+        let mut content = String::from_utf8_lossy(&bytes).into_owned();
+        for (i, need) in needs.0.iter().enumerate() {
+            let name = format!("/{} ", String::from_utf8_lossy(&need.name));
+            content = content.replace(&name, &format!("/F{i} "));
+        }
+        let named = needs.0.into_iter().map(|need| need.res).collect();
+        (content, named)
+    }
+
+    /// The first face with an advance and a code for every character of a
+    /// unit draws it; one no face draws whole is refused at the character
+    /// the first face lacks, as a layout in it alone would refuse it.
+    #[test]
+    fn the_first_face_with_the_whole_unit_draws_it() {
+        let set = WithFallback::new(&LATIN, &MARKS, named(101));
+        assert_eq!(set.faces(), 2);
+        assert_eq!(face_for(&set, "a"), Ok(0));
+        assert_eq!(face_for(&set, "e"), Ok(0));
+        assert_eq!(face_for(&set, "\u{E9}"), Ok(1));
+        assert_eq!(face_for(&set, "\u{301}"), Ok(1));
+        // The first face has the `e` but not its mark: the second, whole.
+        assert_eq!(face_for(&set, "e\u{301}"), Ok(1));
+        // A tab is a space; an empty unit the first face's.
+        assert_eq!(face_for(&set, "\t"), Ok(0));
+        assert_eq!(face_for(&set, ""), Ok(0));
+        // Neither has all of it: the character the first face lacks.
+        let refused = |at, character| Err(UnencodableChar { at, character });
+        assert_eq!(face_for(&set, "q"), refused(0, 'q'));
+        assert_eq!(face_for(&set, "a\u{301}"), refused(1, '\u{301}'));
+        assert_eq!(face_for(&set, "\u{301}q"), refused(0, '\u{301}'));
+        // One font is a set of one face.
+        assert_eq!(LATIN.faces(), 1);
+        assert_eq!(face_for(&LATIN, "ab"), Ok(0));
+        assert_eq!(face_for(&LATIN, "\u{301}"), refused(0, '\u{301}'));
+        assert_eq!(LATIN.face_advance(1, 'a'), None);
+        assert!(!LATIN.face_encode(1, 'a', &mut Vec::new()));
+        assert_eq!(LATIN.face_resource(0), None);
+
+        // A set of no faces draws nothing.
+        struct NoFaces;
+        impl FontSet for NoFaces {
+            fn faces(&self) -> usize {
+                0
+            }
+            fn face_metrics(&self, _: usize) -> FontMetrics {
+                FontMetrics::new(0.0, 0.0, None)
+            }
+            fn face_advance(&self, _: usize, _: char) -> Option<f32> {
+                Some(500.0)
+            }
+            fn face_encode(&self, _: usize, _: char, _: &mut Vec<u8>) -> bool {
+                true
+            }
+        }
+        assert_eq!(face_for(&NoFaces, "ab"), refused(0, 'a'));
+        assert_eq!(face_for(&NoFaces, ""), Ok(0));
+
+        // A layout asks the same: a character at a time, the mark falls back
+        // alone; by clusters, `a` and its mark have no face, refused at the
+        // mark, at its offset in the text.
+        let text = "ab a\u{301}";
+        let laid = layout_text(&set, text, BOX, &style()).unwrap();
+        let faces: Vec<_> = laid.lines[0].runs.iter().map(|r| r.face).collect();
+        assert_eq!(faces, [0, 1]);
+        let clusters = TextBoxStyle {
+            clusters: true,
+            ..style()
+        };
+        assert_eq!(
+            layout_text(&set, text, BOX, &clusters).unwrap_err(),
+            UnencodableChar {
+                at: 4,
+                character: '\u{301}'
+            }
+        );
+    }
+
+    /// With clusters, a base and its mark are one comb cell in one face, its
+    /// codes one string centred by their advances together, and the cells
+    /// are counted by clusters; a comb line's heights start from the first
+    /// face's and widen by its cells' faces.
+    #[test]
+    fn a_cluster_is_one_comb_cell() {
+        let set = WithFallback::new(&LATIN, &MARKS, named(101));
+        let comb = |cells, clusters| TextBoxStyle {
+            comb: Some(cells),
+            clusters,
+            ..style()
+        };
+        let text = "ae\u{301}b";
+        let laid = layout_text(&set, text, BOX, &comb(4, true)).unwrap();
+        let line = &laid.lines[0];
+        assert!(!laid.overflowed);
+        assert_eq!(line.cell_faces, [0, 1, 0]);
+        let codes: Vec<&[u8]> = line.cells.iter().map(|(_, c)| c.as_slice()).collect();
+        assert_eq!(codes, [&[1][..], &[101, 102], &[2]]);
+        assert!(line.runs.is_empty() && line.codes.is_empty());
+        // Each cell is 50 wide: the cluster is 8 wide, 400 units twice.
+        assert_approx(line.cells[0].0.x, 22.5);
+        assert_approx(line.cells[1].0.x, 50.0 + 21.0);
+        assert_approx(line.cells[2].0.x, 100.0 + 22.5);
+        // The second face is drawn: its heights, 10 and -4, widen the line.
+        assert_approx(line.ascent, 10.0);
+        assert_approx(line.descent, -4.0);
+
+        // A character at a time, the mark is a cell of its own.
+        let laid = layout_text(&set, text, BOX, &comb(4, false)).unwrap();
+        assert_eq!(laid.lines[0].cell_faces, [0, 0, 1, 0]);
+        // Three clusters past two cells: two drawn, and the text overflows;
+        // in three they fit.
+        let laid = layout_text(&set, text, BOX, &comb(2, true)).unwrap();
+        assert!(laid.overflowed);
+        assert_eq!(laid.lines[0].cells.len(), 2);
+        assert!(
+            !layout_text(&set, text, BOX, &comb(3, true))
+                .unwrap()
+                .overflowed
+        );
+
+        // In the first face alone, its heights; in the second alone, still
+        // from the first face's, widened: `LAST` is shorter above.
+        let laid = layout_text(&set, "ab", BOX, &comb(4, true)).unwrap();
+        assert_approx(laid.lines[0].ascent, 8.0);
+        assert_approx(laid.lines[0].descent, -2.0);
+        let set = WithFallback::new(&LATIN, &LAST, named(201));
+        let laid = layout_text(&set, "z", BOX, &comb(4, true)).unwrap();
+        assert_eq!(laid.lines[0].cell_faces, [1]);
+        assert_approx(laid.lines[0].ascent, 8.0);
+        assert_approx(laid.lines[0].descent, -3.0);
+    }
+
+    /// A comb draws the units its cells hold, but takes a face for every
+    /// unit: one past the cells that only the second face has is laid out,
+    /// where the first font alone refuses it, and one no face has is refused.
+    #[test]
+    fn a_comb_takes_a_face_for_the_units_past_its_cells() {
+        let set = WithFallback::new(&LATIN, &MARKS, named(101));
+        let comb = TextBoxStyle {
+            comb: Some(4),
+            ..style()
+        };
+        let text = "abcd\u{E9}";
+        let laid = layout_text(&set, text, BOX, &comb).unwrap();
+        assert!(laid.overflowed);
+        assert_eq!(laid.lines[0].cell_faces, [0; 4]);
+        // The `é` isn't drawn, so the line has the first face's heights alone.
+        assert_approx(laid.lines[0].ascent, 8.0);
+        assert_approx(laid.lines[0].descent, -2.0);
+        let refused = |at, character| Err(UnencodableChar { at, character });
+        assert_eq!(layout_text(&LATIN, text, BOX, &comb), refused(4, '\u{E9}'));
+        assert_eq!(layout_text(&set, "abcdq", BOX, &comb), refused(4, 'q'));
+    }
+
+    /// Each run's place is the advances before it on the line summed, with
+    /// the word spacing of the spaces among them; it's drawn there, under its
+    /// face's resource, by a `Tf` where the face changes.
+    #[test]
+    fn runs_are_placed_by_the_advances_before_them() {
+        let helvetica = res(Std14::Helvetica);
+        let symbol = res(Std14::Symbol);
+        let set = WithFallback::new(&Std14::Helvetica, &Std14::Symbol, symbol.clone());
+        let text = "ab \u{3B1}\u{3B2} cd";
+        let laid = layout_text(&set, text, BOX, &style()).unwrap();
+        let line = &laid.lines[0];
+        let summed = |text: &str, font: Std14| {
+            (text.chars()).fold(0.0f32, |x, ch| x + font.char_advance(ch).unwrap() * 0.01)
+        };
+        let before_alpha = summed("ab ", Std14::Helvetica);
+        let after_beta = before_alpha + summed("\u{3B1}\u{3B2}", Std14::Symbol);
+        let runs: Vec<_> = (line.runs.iter())
+            .map(|r| (r.face, r.codes.clone(), r.text.clone(), r.x))
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (0, 0..3, 0..3, 0.0),
+                (1, 3..5, 3..7, before_alpha),
+                (0, 5..8, 7..10, after_beta),
+            ]
+        );
+        assert_eq!(line.codes, b"ab ab cd");
+        assert_approx(line.width, after_beta + summed(" cd", Std14::Helvetica));
+
+        let (content, named) =
+            drawn(|c| assert!(c.draw_layout_in(&[helvetica.clone(), symbol.clone()], &laid)));
+        assert_eq!(
+            content,
+            "BT\n/F0 10 Tf\n1 0 0 1 0 89.9 Tm\n(ab ) Tj\n/F1 10 Tf\n1 0 0 1 13.9 89.9 Tm\n\
+             (ab) Tj\n/F0 10 Tf\n1 0 0 1 25.7 89.9 Tm\n( cd) Tj\nET\n"
+        );
+        assert_eq!(named, [helvetica.clone(), symbol.clone()]);
+
+        // Justified, a run past a space `Tw` widens stands that much further.
+        let justified = TextBoxStyle {
+            align: TextAlign::Justify,
+            ..style()
+        };
+        let narrow = Rect::new(0.0, 0.0, 40.0, 100.0);
+        let laid = layout_text(&set, "a \u{3B1} bbbbbbbbbb", narrow, &justified).unwrap();
+        let line = &laid.lines[0];
+        assert_eq!(
+            &"a \u{3B1} bbbbbbbbbb"[line.text_range.clone()],
+            "a \u{3B1}"
+        );
+        assert!(line.word_space > 0.0);
+        let before = summed("a ", Std14::Helvetica) + line.word_space;
+        assert_eq!(line.runs[1].x, before);
+        assert_approx(line.width, 40.0);
+    }
+
+    /// A line's ascent and descent are the largest and smallest of the faces
+    /// on it, from `0`, an empty line's the first face's; a step runs from one
+    /// line's descent to the next one's ascent. Lines all in one face stand as
+    /// in that face alone.
+    #[test]
+    fn heights_of_lines_in_one_face_the_other_and_both() {
+        let set = WithFallback::new(&LATIN, &LAST, named(201));
+        let lines = |text, style: &TextBoxStyle| {
+            let laid = layout_text(&set, text, BOX, style).unwrap();
+            (laid.lines.iter())
+                .map(|l| (l.origin.y, l.ascent, l.descent))
+                .collect::<Vec<_>>()
+        };
+        let near = |got: Vec<(f32, f32, f32)>, want: &[(f32, f32, f32)]| {
+            assert_eq!(got.len(), want.len(), "{got:?}");
+            for (g, w) in got.iter().zip(want) {
+                assert_approx(g.0, w.0);
+                assert_approx(g.1, w.1);
+                assert_approx(g.2, w.2);
+            }
+        };
+        // `LATIN` 8 and -2 at size 10, `LAST` 7 and -3; a line of both 8 and
+        // -3; an empty line `LATIN`'s.
+        near(
+            lines("ab\nxy\naxb\n\nab", &style()),
+            &[
+                (92.0, 8.0, -2.0),
+                (92.0 - 9.0, 7.0, -3.0),
+                (83.0 - 11.0, 8.0, -3.0),
+                (72.0 - 11.0, 8.0, -2.0),
+                (61.0 - 10.0, 8.0, -2.0),
+            ],
+        );
+        // A taller second face: its line starts higher below the first.
+        let tall = WithFallback::new(&LATIN, &MARKS, named(101));
+        let laid = layout_text(&tall, "ab\n\u{E9}\nab", BOX, &style()).unwrap();
+        let ys: Vec<f32> = laid.lines.iter().map(|l| l.origin.y).collect();
+        assert_approx(ys[0], 92.0);
+        assert_approx(ys[1], 92.0 - 12.0);
+        assert_approx(ys[2], 80.0 - 12.0);
+        // With leading, the step is that times the distance.
+        let led = TextBoxStyle {
+            leading_factor: 1.5,
+            ..style()
+        };
+        assert_approx(lines("ab\nxy", &led)[1].0, 92.0 - 13.5);
+        // A step given is every step.
+        let given = TextBoxStyle {
+            line_height: Some(20.0),
+            ..style()
+        };
+        assert_approx(lines("ab\nxy\nab", &given)[2].0, 52.0);
+        // A single line of both about the middle, and lines from the bottom.
+        let middle = TextBoxStyle {
+            vertical_align: VerticalAlign::Middle,
+            ..style()
+        };
+        near(lines("ax", &middle), &[(50.0 - 2.5, 8.0, -3.0)]);
+        let bottom = TextBoxStyle {
+            vertical_align: VerticalAlign::Bottom,
+            ..style()
+        };
+        near(
+            lines("ab\nxy", &bottom),
+            &[(3.0 + 9.0, 8.0, -2.0), (3.0, 7.0, -3.0)],
+        );
+        // A line starts from 0: a face below the baseline whole adds no
+        // ascent above it.
+        let low = Only {
+            chars: "q",
+            advance: 500.0,
+            base: 1,
+            ascent: -100.0,
+            descent: -500.0,
+        };
+        let sunk = WithFallback::new(&LATIN, &low, named(1));
+        let laid = layout_text(&sunk, "ab\nq", BOX, &style()).unwrap();
+        assert_approx(laid.lines[1].ascent, 0.0);
+        assert_approx(laid.lines[1].descent, -5.0);
+        // Lines too tall together overflow: these two are 8 + 9 + 3 high.
+        let fits = |height| {
+            let short = Rect::new(0.0, 0.0, 200.0, height);
+            !layout_text(&set, "ab\nxy", short, &style())
+                .unwrap()
+                .overflowed
+        };
+        assert!(fits(20.0) && !fits(19.9));
+
+        // All in one face, the second or the first: as that face alone lays
+        // them out, the arithmetic and all (at 11 points and a leading of
+        // 1.2, a step taken six times isn't six steps in `f32`).
+        let many = ("xy\nyxz\nzz\nxx\nyy\nzy\nxz", &LAST as &dyn LayoutFont);
+        for (text, alone) in [many, ("ab\nba\nab\nba\nab\nba", &LATIN)] {
+            for valign in [
+                VerticalAlign::Top,
+                VerticalAlign::Middle,
+                VerticalAlign::Bottom,
+            ] {
+                let style = TextBoxStyle {
+                    size: Some(11.0),
+                    vertical_align: valign,
+                    leading_factor: 1.2,
+                    ..style()
+                };
+                let laid = layout_text(&set, text, BOX, &style).unwrap();
+                let one = layout_text(alone, text, BOX, &style).unwrap();
+                assert_eq!(laid.line_height, one.line_height);
+                for (l, o) in laid.lines.iter().zip(&one.lines) {
+                    assert_eq!(
+                        (l.origin, l.width, &l.codes, l.ascent, l.descent),
+                        (o.origin, o.width, &o.codes, o.ascent, o.descent)
+                    );
+                }
+            }
+        }
+        // An empty line among the second face's is the first face's.
+        near(
+            lines("xy\n\nxy", &style()),
+            &[
+                (93.0, 7.0, -3.0),
+                (93.0 - 11.0, 8.0, -2.0),
+                (82.0 - 9.0, 7.0, -3.0),
+            ],
+        );
+    }
+
+    /// A set of one face, and a set whose first face has all of the text, lay
+    /// it out and draw it as that font does, byte for byte, naming no other
+    /// resource.
+    #[test]
+    fn a_set_whose_first_face_has_the_text_is_that_font() {
+        let helvetica = res(Std14::Helvetica);
+        let symbol = res(Std14::Symbol);
+        let set = WithFallback::new(&Std14::Helvetica, &Std14::Symbol, symbol.clone());
+        let one: &dyn FontSet = &Std14::Helvetica;
+        let texts = [
+            "The quick brown fox jumps over the lazy dog.\nSecond line, caf\u{E9}.",
+            "  lead  and\ttrail  \r\n\r\nx",
+            "42",
+            "",
+        ];
+        let styles = [
+            TextBoxStyle::default(),
+            TextBoxStyle {
+                align: TextAlign::Justify,
+                ..TextBoxStyle::default()
+            },
+            TextBoxStyle {
+                size: None,
+                align: TextAlign::Center,
+                vertical_align: VerticalAlign::Middle,
+                ..TextBoxStyle::default()
+            },
+            TextBoxStyle {
+                wrap: WrapMode::Char,
+                align: TextAlign::Right,
+                vertical_align: VerticalAlign::Bottom,
+                line_end_spaces: true,
+                ..TextBoxStyle::default()
+            },
+            TextBoxStyle {
+                comb: Some(6),
+                align: TextAlign::Center,
+                ..TextBoxStyle::default()
+            },
+            TextBoxStyle {
+                clusters: true,
+                font_heights_as_given: true,
+                leading_factor: 1.0,
+                ..TextBoxStyle::default()
+            },
+        ];
+        let rect = Rect::new(10.0, 20.0, 130.0, 80.0);
+        for text in texts {
+            for style in &styles {
+                let alone = layout_text(&Std14::Helvetica, text, rect, style).unwrap();
+                assert_eq!(layout_text(&set, text, rect, style).unwrap(), alone);
+                assert_eq!(layout_text(one, text, rect, style).unwrap(), alone);
+                let (want, names) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &alone)));
+                let fonts = [helvetica.clone(), symbol.clone()];
+                assert_eq!(
+                    drawn(|c| assert!(c.draw_layout_in(&fonts, &alone))),
+                    (want.clone(), names)
+                );
+                let boxed = |font: &dyn FontSet| {
+                    drawn(|c| {
+                        c.text_box_in(helvetica.clone(), font, text, rect, style)
+                            .unwrap();
+                    })
+                };
+                let alone = drawn(|c| {
+                    c.text_box(helvetica.clone(), &Std14::Helvetica, text, rect, style)
+                        .unwrap();
+                });
+                assert_eq!(boxed(&set), alone);
+                assert_eq!(boxed(&Std14::Helvetica), alone);
+                assert!(!boxed(&set).1.contains(&symbol));
+            }
+        }
+        // Clusters of a character each are characters.
+        let text = "caf\u{E9} au lait";
+        let clustered = TextBoxStyle {
+            clusters: true,
+            ..TextBoxStyle::default()
+        };
+        assert_eq!(
+            layout_text(&set, text, rect, &clustered).unwrap(),
+            layout_text(&set, text, rect, &TextBoxStyle::default()).unwrap()
+        );
+        assert!(!TextBoxStyle::default().clusters);
+    }
+
+    /// Sets nest: three fonts, each drawn by `text_box_in` under its own
+    /// resource, the same whichever way they're nested.
+    #[test]
+    fn sets_nest() {
+        let (a, b, c) = (named(1), named(101), named(201));
+        let inner = WithFallback::new(&LATIN, &MARKS, b.clone());
+        let left = WithFallback::new(&inner, &LAST, c.clone());
+        let deeper = WithFallback::new(&MARKS, &LAST, c.clone());
+        let right = WithFallback::new(&LATIN, &deeper, b.clone());
+        let text = "ab \u{E9}z";
+        for set in [&left as &dyn FontSet, &right] {
+            assert_eq!(set.faces(), 3);
+            let faces: Vec<_> = ["a", "\u{E9}", "z"]
+                .map(|u| face_for(set, u).unwrap())
+                .into();
+            assert_eq!(faces, [0, 1, 2]);
+            assert_eq!(
+                [0, 1, 2, 3].map(|f| set.face_resource(f)),
+                [None, Some(b.clone()), Some(c.clone()), None]
+            );
+        }
+        let boxed = |set: &dyn FontSet| {
+            drawn(|canvas| {
+                canvas
+                    .text_box_in(a.clone(), set, text, BOX, &style())
+                    .unwrap();
+            })
+        };
+        let (content, named) = boxed(&left);
+        assert_eq!((content.clone(), named.clone()), boxed(&right));
+        assert_eq!(named, [a.clone(), b.clone(), c.clone()]);
+        assert_eq!(content.matches(" Tf\n").count(), 3);
+        assert!(content.contains("<010206> Tj\n/F1 10 Tf\n"));
+        assert!(content.contains("(g) Tj\n/F2 10 Tf\n"));
+        assert!(content.ends_with("(\u{FFFD}) Tj\nET\nQ\n"), "{content}");
+    }
+
+    /// Two faces, the second with no resource: a caller's own set that
+    /// leaves [`FontSet::face_resource`] at its default.
+    struct Unnamed;
+
+    impl FontSet for Unnamed {
+        fn faces(&self) -> usize {
+            2
+        }
+
+        fn face_metrics(&self, face: usize) -> FontMetrics {
+            [Std14::Helvetica, Std14::Symbol][face.min(1)].metrics()
+        }
+
+        fn face_advance(&self, face: usize, ch: char) -> Option<f32> {
+            [Std14::Helvetica, Std14::Symbol]
+                .get(face)?
+                .char_advance(ch)
+        }
+
+        fn face_encode(&self, face: usize, ch: char, out: &mut Vec<u8>) -> bool {
+            ([Std14::Helvetica, Std14::Symbol].get(face)).is_some_and(|f| f.encode_char(ch, out))
+        }
+    }
+
+    /// A face some of the text is drawn in that has no resource: `text_box_in`
+    /// refuses it with the face, and `draw_layout` and `draw_layout_in` say
+    /// they drew nothing, each leaving the canvas as it was, never a part of
+    /// the text drawn or a panic. Text the faces with a resource draw whole
+    /// is drawn.
+    #[test]
+    fn a_face_with_no_resource_draws_nothing() {
+        let helvetica = res(Std14::Helvetica);
+        let clipped = TextBoxStyle {
+            clip: true,
+            ..style()
+        };
+        for style in [style(), clipped] {
+            let (content, named) = drawn(|c| {
+                assert_eq!(
+                    c.text_box_in(helvetica.clone(), &Unnamed, "a\u{3C0}b", BOX, &style),
+                    Err(TextBoxError::NoResource { face: 1 })
+                );
+                assert_eq!(
+                    c.text_box_in(helvetica.clone(), &Unnamed, "a\u{4E2D}", BOX, &style),
+                    Err(TextBoxError::Unencodable(UnencodableChar {
+                        at: 1,
+                        character: '\u{4E2D}'
+                    }))
+                );
+            });
+            assert_eq!((content.as_str(), named.len()), ("", 0));
+            // The first face's text is drawn as the font alone draws it.
+            let boxed = drawn(|c| {
+                (c.text_box_in(helvetica.clone(), &Unnamed, "ab", BOX, &style)).unwrap();
+            });
+            let alone = drawn(|c| {
+                (c.text_box(helvetica.clone(), &Std14::Helvetica, "ab", BOX, &style)).unwrap();
+            });
+            assert_eq!(boxed, alone);
+            assert!(boxed.0.contains("(ab) Tj"));
+        }
+        assert_eq!(
+            TextBoxError::NoResource { face: 1 }.to_string(),
+            "face 1 of the fonts has no resource to draw text under"
+        );
+        let err = UnencodableChar {
+            at: 1,
+            character: 'x',
+        };
+        assert_eq!(TextBoxError::from(err).to_string(), err.to_string());
+
+        // A layout in two faces, drawn with one resource, in a line and in
+        // comb cells; with both it's drawn.
+        let symbol = res(Std14::Symbol);
+        let fonts = WithFallback::new(&Std14::Helvetica, &Std14::Symbol, symbol.clone());
+        let comb = TextBoxStyle {
+            comb: Some(4),
+            ..style()
+        };
+        for style in [style(), comb] {
+            let laid = layout_text(&fonts, "a\u{3C0}b", BOX, &style).unwrap();
+            let (content, named) = drawn(|c| {
+                assert!(!c.draw_layout(helvetica.clone(), &laid));
+                assert!(!c.draw_layout_in(std::slice::from_ref(&helvetica), &laid));
+                assert!(!c.draw_layout_in(&[], &laid));
+            });
+            assert_eq!((content.as_str(), named.len()), ("", 0));
+            let (content, named) =
+                drawn(|c| assert!(c.draw_layout_in(&[helvetica.clone(), symbol.clone()], &laid)));
+            assert_eq!(named.len(), 2);
+            assert_eq!(content.matches(" Tj\n").count(), 3);
+        }
+        // Nothing to draw is drawn, with no font at all.
+        let empty = layout_text(&fonts, "", BOX, &style()).unwrap();
+        assert_eq!(drawn(|c| assert!(c.draw_layout_in(&[], &empty))).0, "");
+    }
+
+    /// A line all in one face is drawn as its codes whole, as they are when
+    /// it's drawn; a line in several by its runs, and one whose run names
+    /// bytes its codes don't have keeps the layout undrawn.
+    #[test]
+    fn a_line_is_drawn_as_its_codes_or_its_runs() {
+        let helvetica = res(Std14::Helvetica);
+        let symbol = res(Std14::Symbol);
+        let mut laid = layout_text(&Std14::Helvetica, "ab", BOX, &style()).unwrap();
+        laid.lines[0].codes = b"abcd".to_vec();
+        let (content, _) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &laid)));
+        assert!(content.contains("(abcd) Tj"), "{content}");
+        laid.lines[0].codes = b"a".to_vec();
+        let (content, _) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &laid)));
+        assert!(content.contains("(a) Tj"), "{content}");
+        laid.lines[0].runs.clear();
+        let (content, _) = drawn(|c| assert!(c.draw_layout(helvetica.clone(), &laid)));
+        assert!(content.contains("(a) Tj"), "{content}");
+
+        // A line all in a set's second face is its codes whole too.
+        let fonts = WithFallback::new(&Std14::Helvetica, &Std14::Symbol, symbol.clone());
+        let both = [helvetica.clone(), symbol.clone()];
+        let mut laid = layout_text(&fonts, "\u{3C0}", BOX, &style()).unwrap();
+        assert_eq!(laid.lines[0].runs.len(), 1);
+        laid.lines[0].codes.push(b'p');
+        let (content, named) = drawn(|c| assert!(c.draw_layout_in(&both, &laid)));
+        assert!(content.contains("(pp) Tj"), "{content}");
+        assert_eq!(named.as_slice(), std::slice::from_ref(&symbol));
+
+        // In two faces: the runs' bytes, and none where a run has none.
+        let mut laid = layout_text(&fonts, "a\u{3C0}b", BOX, &style()).unwrap();
+        laid.lines[0].codes.extend_from_slice(b"cd");
+        let (content, _) = drawn(|c| assert!(c.draw_layout_in(&both, &laid)));
+        assert!(content.contains("(b) Tj") && !content.contains("cd"));
+        laid.lines[0].codes.truncate(2);
+        let (content, named) = drawn(|c| assert!(!c.draw_layout_in(&both, &laid)));
+        assert_eq!((content.as_str(), named.len()), ("", 0));
+    }
+
+    /// `layout_text` and `text_box` take a `&dyn LayoutFont`, and
+    /// `layout_text` and `text_box_in` a `&dyn FontSet`, as they take the
+    /// font itself.
+    #[test]
+    fn layout_text_and_text_box_take_a_dyn_layout_font() {
+        let font: &dyn LayoutFont = &Std14::Helvetica;
+        let text = "Hello, world";
+        let laid = layout_text(font, text, BOX, &style()).unwrap();
+        assert_eq!(
+            laid,
+            layout_text(&Std14::Helvetica, text, BOX, &style()).unwrap()
+        );
+        let helvetica = res(Std14::Helvetica);
+        let mut canvas = Canvas::new();
+        let boxed: LaidOutText = canvas
+            .text_box(helvetica.clone(), font, text, BOX, &style())
+            .unwrap();
+        assert_eq!(boxed, laid);
+        let set: &dyn FontSet = &font;
+        assert_eq!(layout_text(set, text, BOX, &style()).unwrap(), laid);
+        assert_eq!(
+            canvas.text_box_in(helvetica, set, text, BOX, &style()),
+            Ok(laid)
+        );
+    }
+
+    /// With clusters, a line breaks between clusters alone, a word too long
+    /// for its line among them; a character at a time, inside one.
+    #[test]
+    fn clusters_break_lines_between_clusters() {
+        let marked = Only {
+            chars: "e\u{301} ",
+            advance: 500.0,
+            base: 1,
+            ascent: 800.0,
+            descent: -200.0,
+        };
+        // Each character 5 wide, each cluster 10, in a box 15 wide.
+        let narrow = Rect::new(0.0, 0.0, 15.0, 100.0);
+        let text = "e\u{301}e\u{301}e\u{301}";
+        let shown = |clusters, wrap| {
+            let style = TextBoxStyle {
+                clusters,
+                wrap,
+                ..style()
+            };
+            let laid = layout_text(&marked, text, narrow, &style).unwrap();
+            (laid.lines.iter())
+                .map(|l| text[l.text_range.clone()].to_string())
+                .collect::<Vec<_>>()
+        };
+        for wrap in [WrapMode::Char, WrapMode::Word] {
+            assert_eq!(shown(false, wrap), ["e\u{301}e", "\u{301}e\u{301}"]);
+            assert_eq!(shown(true, wrap), ["e\u{301}", "e\u{301}", "e\u{301}"]);
+        }
+        // A space a mark is joined to is shown, never trimmed or passed over
+        // where a line begins with it.
+        let style = TextBoxStyle {
+            clusters: true,
+            ..style()
+        };
+        let laid = layout_text(&marked, "e \u{301}", narrow, &style).unwrap();
+        assert_eq!(laid.lines.len(), 1);
+        assert_eq!(laid.lines[0].codes, [1, 3, 2]);
+        let ten = Rect::new(0.0, 0.0, 10.0, 100.0);
+        let laid = layout_text(&marked, "ee \u{301}", ten, &style).unwrap();
+        let codes: Vec<_> = laid.lines.iter().map(|l| l.codes.clone()).collect();
+        assert_eq!(codes, [vec![1, 1], vec![3, 2]]);
+        // Keeping spaces, a word begins after a cluster a space begins, as
+        // after the space: the line breaks before it.
+        let kept = TextBoxStyle {
+            line_end_spaces: true,
+            ..style
+        };
+        let text = "e \u{301}eee";
+        let twenty = Rect::new(0.0, 0.0, 20.0, 100.0);
+        let laid = layout_text(&marked, text, twenty, &kept).unwrap();
+        let lines: Vec<_> = laid
+            .lines
+            .iter()
+            .map(|l| &text[l.text_range.clone()])
+            .collect();
+        assert_eq!(lines, ["e \u{301}", "eee"]);
+    }
+
+    /// `Debug` gives counts and places, never a code or a resource.
+    #[test]
+    fn debug_gives_counts_alone() {
+        let set = WithFallback::new(&LATIN, &MARKS, named(101));
+        assert_eq!(format!("{set:?}"), "WithFallback { faces: 2 }");
+        let laid = layout_text(&set, "ab\u{E9}", BOX, &style()).unwrap();
+        let printed = format!("{:?}", laid.lines[0]);
+        assert!(
+            printed.contains("runs: [LaidOutRun { face: 0, codes: 0..2"),
+            "{printed}"
+        );
+        assert!(!printed.contains("101"), "{printed}");
     }
 }

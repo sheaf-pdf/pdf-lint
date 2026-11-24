@@ -210,7 +210,9 @@ impl fmt::Debug for FieldValue<'_> {
 /// The type, flags, value, default value, default appearance, quadding, and
 /// maximum length are the effective ones: the field's own, else the nearest
 /// ancestor's, and for the default appearance and quadding the form's after
-/// that. [`dict`](Self::dict) has what the field itself holds.
+/// that; under PDFium's rules, a maximum length neither gives is the first
+/// of the field's widgets' to hold one ([`max_len`](Self::max_len)).
+/// [`dict`](Self::dict) has what the field itself holds.
 ///
 /// `Debug` prints numbers and counts, never the field's name or value.
 #[derive(Clone)]
@@ -324,7 +326,18 @@ impl<'o> Field<'o> {
         self.quadding.unwrap_or_default()
     }
 
-    /// The most characters a text field takes (`/MaxLen`).
+    /// The most characters a text field takes (`/MaxLen`): the field's own,
+    /// else the nearest ancestor's.
+    ///
+    /// Under [`Rules::Iso`] that's all: the entry is a field's (ISO 32000-2,
+    /// §12.7.5.3), and a widget's own is no field's. Under [`Rules::Pdfium`]
+    /// a field with no `/MaxLen` of its own or an ancestor's takes the first
+    /// of its widgets' own, as PDFium as of chromium/8152 reads it: the first
+    /// widget, in `/Kids` order, whose dictionary has the entry, whatever it
+    /// holds, so a `0` there, or no number, gives no limit though a later
+    /// widget has one. A `/MaxLen` the field or an ancestor holds keeps the
+    /// widgets unread though it's no number or `null`, as PDFium finds it;
+    /// one that's a reference to no object is none.
     #[must_use]
     pub const fn max_len(&self) -> Option<u32> {
         self.max_len

@@ -83,9 +83,39 @@ impl EmbeddedFont {
 
     /// The program it embeds: its metrics, each glyph's advance, and what its
     /// licence allows ([`Program::embedding`]).
+    ///
+    /// The program itself records nothing: codes made through it
+    /// ([`Program::codes`]), or text laid out in it, draw glyphs the font is
+    /// written without, unless they're given to [`record`](Self::record).
     #[must_use]
     pub fn program(&self) -> &Program {
         &self.program
+    }
+
+    /// Records `glyphs`, drawn in its program by something that didn't
+    /// record them here, so that the font written at the next save has
+    /// them: each joined to those recorded as [`Glyphs::merge`] joins them,
+    /// in any order. pdf-forms' `appearance::text_with_fallback`, given
+    /// [`res`](Self::res) and [`program`](Self::program) as its fallback,
+    /// returns the glyphs an appearance draws (`MadeWithFallback::glyphs`),
+    /// which are recorded this way; codes of a caller's own making by glyph
+    /// number are too ([`Glyphs::insert`]).
+    ///
+    /// A glyph is a number in this font's program: one of another program's
+    /// records whatever glyph has its number here.
+    ///
+    /// # Errors
+    ///
+    /// [`embed::Error::Glyph`] for the first of `glyphs` at or past the
+    /// program's count, as [`embed::write`] refuses it; then none of
+    /// `glyphs` is recorded, so the font is still written at the next save.
+    pub fn record(&self, glyphs: &Glyphs) -> Result<(), embed::Error> {
+        let count = self.program.glyph_count();
+        if let Some((glyph, _)) = glyphs.iter().find(|&(glyph, _)| glyph >= count) {
+            return Err(embed::Error::Glyph { glyph, count });
+        }
+        self.recorded().merge(glyphs);
+        Ok(())
     }
 
     /// The glyphs drawn in it, to record more: its lock, taken as it is where
@@ -109,11 +139,12 @@ impl fmt::Debug for EmbeddedFont {
 }
 
 /// What [`Canvas::text_box`](pdf_gfx::Canvas::text_box) and
-/// [`layout_text`](pdf_gfx::layout_text) lay text out in: its program's
-/// metrics ([`Program::metrics`]), each character's advance its glyph's
-/// ([`Program::width`], what every reader draws it at), and each character's
-/// code, its glyph recorded as it's encoded, as [`EmbeddedFont::codes`]
-/// records it.
+/// [`layout_text`](pdf_gfx::layout_text) lay text out in: pdf-gfx's
+/// [`ProgramFont`](pdf_gfx::ProgramFont) over its program and the glyphs its
+/// document records. Its program's metrics ([`Program::metrics`]), each
+/// character's advance its glyph's ([`Program::width`], what every reader
+/// draws it at), and each character's code, its glyph recorded as it's
+/// encoded, as [`EmbeddedFont::codes`] records it.
 ///
 /// A layout encodes every character before it draws: one refused for a
 /// character the program has no glyph for has recorded the glyphs of the
@@ -122,26 +153,33 @@ impl fmt::Debug for EmbeddedFont {
 /// spacing (`Tw`) applies to a single-byte code 32 alone (ISO 32000-2,
 /// 9.3.3), which none of its two-byte codes is: so its lines aren't spread to
 /// the box, and nothing else of the layout changes.
+///
+/// It's a font to fall back to as well: after another in a
+/// [`WithFallback`](pdf_gfx::WithFallback) (`WithFallback::new(&first,
+/// &font, font.res())`), it draws what the first can't and records the
+/// glyphs it draws, in [`Canvas::text_box_in`](pdf_gfx::Canvas::text_box_in)
+/// and in pdf-forms' `appearance::text`, which take such a set.
 #[cfg(feature = "text-layout")]
 impl pdf_gfx::LayoutFont for EmbeddedFont {
     fn font_metrics(&self) -> pdf_fonts::FontMetrics {
-        self.program.metrics()
+        pdf_gfx::LayoutFont::font_metrics(&self.laid_out())
     }
 
     fn char_advance(&self, ch: char) -> Option<f32> {
-        let glyph = self.program.glyph(ch)?;
-        Some(self.program.width(glyph))
+        pdf_gfx::LayoutFont::char_advance(&self.laid_out(), ch)
     }
 
     fn encode_char(&self, ch: char, out: &mut Vec<u8>) -> bool {
-        let mut character = [0; 4];
-        match self.codes(ch.encode_utf8(&mut character)) {
-            Ok(codes) => {
-                out.extend(codes);
-                true
-            }
-            Err(_) => false,
-        }
+        pdf_gfx::LayoutFont::encode_char(&self.laid_out(), ch, out)
+    }
+}
+
+#[cfg(feature = "text-layout")]
+impl EmbeddedFont {
+    /// Its program as pdf-gfx lays text out in it, recording into the glyphs
+    /// its document writes the font of.
+    fn laid_out(&self) -> pdf_gfx::ProgramFont<'_> {
+        pdf_gfx::ProgramFont::new(&self.program, &self.glyphs)
     }
 }
 

@@ -351,8 +351,10 @@ pub enum Level {
 ///
 /// Text is kept a glyph, not a character: two characters a program draws with one
 /// glyph (a no-break space and a space, in some fonts) show one code, and read back as
-/// the smaller of their texts, as `str` orders them, whichever was drawn first.
-#[derive(Clone, Default)]
+/// the smaller of their texts, as `str` orders them, whichever was drawn first. So
+/// glyphs gathered apart join to the same whatever order they're joined in
+/// ([`Glyphs::merge`]).
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Glyphs {
     pub(crate) texts: BTreeMap<u16, String>,
 }
@@ -392,6 +394,25 @@ impl Glyphs {
                 self.texts.insert(glyph, text.to_owned());
             }
         }
+    }
+
+    /// Keeps every glyph `other` keeps, each with its text as [`Glyphs::insert`]
+    /// keeps it: where both keep a glyph, the smaller of their texts. So glyphs
+    /// gathered apart (each appearance's, each thread's) join to the same whatever
+    /// order they're joined in, and one font written of them serves every one.
+    pub fn merge(&mut self, other: &Glyphs) {
+        for (&glyph, text) in &other.texts {
+            self.insert(glyph, text);
+        }
+    }
+
+    /// Each glyph it keeps and its text, in the order of their numbers in the
+    /// program: for a caller that cuts the program itself and writes its own
+    /// `/ToUnicode`.
+    pub fn iter(&self) -> impl Iterator<Item = (u16, &str)> {
+        self.texts
+            .iter()
+            .map(|(&glyph, text)| (glyph, text.as_str()))
     }
 
     /// How many glyphs it keeps.
